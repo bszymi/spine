@@ -106,7 +106,7 @@ To create an ADR:
 - **IDs are permanent** — once assigned, an ID must never change or be reused
 - **File names** for tasks follow: `TASK-XXX-<slug>.md`
 
-See [Naming Conventions](/governance/naming-conventions.md) for full details (when available).
+See [Naming Conventions](/governance/naming-conventions.md) for full details.
 
 ---
 
