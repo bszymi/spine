@@ -2,7 +2,7 @@
 
 **Epic:** EPIC-001 — Governance Baseline
 **Initiative:** INIT-001 — Foundations
-**Status:** Pending
+**Status:** Complete
 
 ---
 
