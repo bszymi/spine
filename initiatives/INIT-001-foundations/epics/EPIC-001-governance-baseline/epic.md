@@ -1,8 +1,8 @@
 # EPIC-001 — Governance Baseline
 
 **Initiative:** INIT-001 Foundations
-**Status:** Draft
-**Owner:** _TBD_
+**Status:** Complete
+**Owner:** bszymi
 **Created:** 2026-03-04
 **Last updated:** 2026-03-04
 
