@@ -14,33 +14,45 @@ It serves as a filter for evaluating feature requests, architectural proposals, 
 
 ---
 
-## 2. Non-Goals
+## 2. Core Boundary
 
-### 2.1 Spine is not a ticketing system
+Spine operates at the coordination layer — governing intent, artifacts, and execution — not at the tool layer.
 
-Spine does not aim to replace Jira, Linear, GitHub Issues, or any issue tracker.
+The system is structured in three layers, as defined in the [Charter](/governance/Charter.md):
 
-Ticketing systems are actor-centric — they organize work around people and status boards. Spine is artifact-centric — it organizes work around versioned intent and governed execution.
+- **Artifact Layer** — versioned truth in Git
+- **Execution Layer** — governed workflows
+- **Actor Layer** — humans and AI agents
 
-Spine may integrate with ticketing systems, but it does not replicate their features (assignment boards, sprint planning, velocity tracking, notifications).
-
-**Filter:** If a feature request looks like "add a Kanban board" or "track story points," it is out of scope.
+Spine coordinates between these layers. It does not attempt to become the tools that operate within them.
 
 ---
 
-### 2.2 Spine is not a CI/CD system
+## 3. Non-Goals
 
-Spine does not build, test, or deploy code.
+### 3.1 Spine does not require replacing development tools
 
-CI/CD systems (GitHub Actions, Jenkins, GitLab CI) are execution engines for build and deployment pipelines. Spine governs the structural integrity of work — it does not execute builds or manage deployment environments.
+Spine integrates with existing tools (GitHub, Jira, CI/CD systems, messaging platforms) rather than replacing them.
 
-Spine may trigger or be triggered by CI/CD systems, but it does not replace them.
+In some environments, Spine may reduce the need for certain tools — its artifact-centric model can make external ticketing systems redundant. But replacing them is not a design goal and Spine does not depend on doing so.
+
+Spine is the center of gravity that tools orbit around.
+
+**Filter:** If a feature request replicates an existing tool's UI (Kanban boards, sprint planning, velocity tracking), evaluate whether integration is sufficient before building it.
+
+---
+
+### 3.2 Spine is not a CI/CD system
+
+Spine governs execution workflows but relies on existing CI/CD systems for build, test, and deployment automation.
+
+CI/CD systems (GitHub Actions, Jenkins, GitLab CI) are execution engines for build and deployment pipelines. Spine may trigger or be triggered by CI/CD systems, but it does not execute builds or manage deployment environments.
 
 **Filter:** If a feature request looks like "run tests on PR" or "deploy to staging," it is out of scope.
 
 ---
 
-### 2.3 Spine is not a project management tool
+### 3.3 Spine is not a project management tool
 
 Spine does not provide Gantt charts, resource allocation, timeline estimation, capacity planning, or burndown tracking.
 
@@ -50,7 +62,7 @@ Project management tools optimize for scheduling and resource utilization. Spine
 
 ---
 
-### 2.4 Spine is not a documentation platform
+### 3.4 Spine is not a documentation platform
 
 Spine uses Markdown artifacts as the medium of truth, but it is not a wiki, knowledge base, or documentation hosting system.
 
@@ -60,7 +72,7 @@ It does not provide rich editing, search indexing, or publishing features. Spine
 
 ---
 
-### 2.5 Spine is not an AI orchestration framework
+### 3.5 Spine is not an AI orchestration framework
 
 Spine governs AI agents as execution actors, but it is not LangChain, CrewAI, or an agent orchestration platform.
 
@@ -70,7 +82,27 @@ Spine does not manage prompts, chain LLM calls, or provide agent memory. It defi
 
 ---
 
-### 2.6 Spine does not prioritize speed over integrity
+### 3.6 Spine is not an AI model platform
+
+Spine orchestrates AI agents as actors but does not train, host, or provide large language models.
+
+Spine has no opinion on which models agents use. It governs what agents may do and what they produce, not how they reason internally.
+
+**Filter:** If a feature request looks like "fine-tune a model" or "host an inference endpoint," it is out of scope.
+
+---
+
+### 3.7 Spine is not a personal productivity tool
+
+Spine is designed for structured execution in professional teams and organizations, not for casual individual workflows.
+
+Solo developers who value speed and minimal process over governance are better served by lightweight tools. See the [anti-persona](/product/users-and-use-cases.md#31-casual-solo-hacker) in the users and use cases document.
+
+**Filter:** If a feature request begins with "make it easier for someone who doesn't want governance," it conflicts with Spine's core purpose.
+
+---
+
+### 3.8 Spine does not prioritize speed over integrity
 
 Spine will not sacrifice traceability, reproducibility, or auditability for faster execution.
 
@@ -80,7 +112,7 @@ Features that bypass governance (skip validation, auto-approve, disable audit) a
 
 ---
 
-### 2.7 Spine does not enable uncontrolled AI autonomy
+### 3.9 Spine does not enable uncontrolled AI autonomy
 
 AI agents in Spine operate under the same governance as human actors. Spine will not provide features that allow AI agents to self-assign work, escalate their own permissions, or bypass workflow constraints.
 
@@ -88,42 +120,34 @@ AI agents in Spine operate under the same governance as human actors. Spine will
 
 ---
 
-### 2.8 Spine does not aim for universal adoption
-
-Spine is designed for teams that need structural integrity between product intent and execution — particularly hybrid teams of humans and AI agents.
-
-It is not designed for solo developers, casual projects, or teams that prefer minimal process. See the [anti-persona](/product/users-and-use-cases.md#31-casual-solo-hacker) in the users and use cases document.
-
-**Filter:** If a feature request begins with "make it easier for someone who doesn't want governance," it conflicts with Spine's core purpose.
-
----
-
-## 3. Common Misconceptions
+## 4. Common Misconceptions
 
 | Misconception | Reality |
 |---------------|---------|
-| Spine is a better Jira | Spine is not a ticketing system. It governs execution through versioned artifacts, not boards and sprints. |
+| Spine is a better Jira | Spine governs execution through versioned artifacts. It may reduce the need for ticketing tools but does not aim to replace them. |
 | Spine replaces GitHub | Spine depends on Git. It adds a governance and execution layer on top of Git, not a replacement for it. |
 | Spine is an AI agent framework | Spine governs AI agents as actors within workflows. It does not orchestrate LLM calls or manage agent internals. |
 | Spine makes teams faster | Spine makes teams more structurally sound. Speed is a secondary effect of clarity, not a primary goal. |
 | Spine is only for large teams | Spine is for any team where structural integrity between intent and execution matters — size is not the determining factor. |
+| Spine hosts or trains AI models | Spine orchestrates agents as actors. It has no opinion on model infrastructure. |
 
 ---
 
-## 4. Boundary Summary
+## 5. Boundary Summary
 
 | Adjacent Category | Spine's Relationship | Spine Does Not |
 |-------------------|---------------------|----------------|
-| Issue trackers (Jira, Linear) | May integrate as external input/output | Replace boards, sprints, or assignment UI |
+| Issue trackers (Jira, Linear) | May integrate; may reduce need in some environments | Aim to replace boards, sprints, or assignment UI |
 | CI/CD (GitHub Actions, Jenkins) | May trigger or be triggered by pipelines | Build, test, or deploy code |
 | Project management (Asana, MS Project) | Operates on a different axis (integrity vs. scheduling) | Estimate timelines or track capacity |
 | Documentation (Confluence, Notion) | Uses Markdown artifacts as truth | Host, render, or index documentation |
 | AI frameworks (LangChain, CrewAI) | Governs agents as workflow actors | Orchestrate prompts or manage agent memory |
+| AI model platforms | Agnostic to model infrastructure | Train, host, or provide models |
 | Version control (Git, GitHub) | Depends on Git as foundational infrastructure | Replace Git or repository hosting |
 
 ---
 
-## 5. Using This Document
+## 6. Using This Document
 
 When evaluating a feature request or scope change:
 
@@ -134,7 +158,7 @@ When evaluating a feature request or scope change:
 
 ---
 
-## 6. Evolution Policy
+## 7. Evolution Policy
 
 This document is expected to evolve as the product matures and new boundary questions arise.
 
