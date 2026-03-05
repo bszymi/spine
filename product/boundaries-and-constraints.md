@@ -24,7 +24,7 @@ Spine is responsible for:
 - **Workflow execution** — interpreting workflow definitions and enforcing state transitions
 - **Actor coordination** — assigning work to humans and AI agents under governed constraints
 - **Intent-to-execution traceability** — maintaining structural links from product intent through to outcome
-- **Drift detection** — identifying when execution diverges from intent
+- **Drift detection** — identifying divergence between intent artifacts and execution artifacts
 - **Audit trail** — recording what was done, by whom, and under what governance
 
 ### 2.2 What Spine Delegates
@@ -47,6 +47,8 @@ When deciding whether Spine should own a capability or delegate it:
 2. If the capability is about **operating tools within a layer** — Spine delegates it
 3. When in doubt, prefer integration over consolidation
 
+Capabilities outside Spine's core responsibilities may be implemented as plugins or integrations without expanding the responsibilities of the core system.
+
 ---
 
 ## 3. Operational Constraints
@@ -59,7 +61,7 @@ Spine is fundamentally dependent on Git.
 
 - All durable execution artifacts must be versioned in Git
 - The repository is the authoritative source of truth
-- If runtime state conflicts with repository artifacts, the repository wins
+- Repository artifacts are authoritative over runtime state
 - Spine must not require any storage system as a source of truth other than Git
 
 **Architecture implication:** Any database, cache, or queue is an operational accelerator — not a source of truth. The system must be reconstructible from Git alone.
