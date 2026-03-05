@@ -14,6 +14,10 @@ It transforms explicit product intent into governed, observable, and reproducibl
 
 Spine is the structural backbone that connects what a team intends to build with how that work is executed, by whom, and under what constraints.
 
+Spine does not manage work — it governs the structural integrity between intent and execution.
+
+Spine maintains a small, strict core responsible for governance and coordination. Additional capabilities may be implemented through integrations or extensions without expanding the responsibilities of the core system.
+
 ---
 
 ## 2. The Problem
@@ -34,7 +38,7 @@ The result is chaos disguised as productivity. Teams ship output without structu
 
 Spine introduces structural integrity between intent and execution by treating work as versioned artifacts governed by explicit workflows.
 
-Instead of managing work through tickets scattered across tools, Spine stores product intent, execution definitions, and outcomes as versioned Markdown artifacts in a Git repository.
+Instead of managing work through tickets scattered across tools, Spine treats work as versioned artifacts governed by explicit workflows and stored in a Git repository.
 
 Instead of relying on implicit processes and tribal knowledge, Spine defines explicit workflows that govern how work progresses — including what actors may do, what validation is required, and what happens when execution diverges.
 
@@ -55,7 +59,7 @@ Artifacts define:
 - Execution definitions (tasks, workflow definitions)
 - Outcomes (deliverables, ADRs, audit records)
 
-Git is the source of truth. Change is explicit. History is immutable. Truth is diffable.
+Git repositories are the authoritative source of truth. Runtime systems and databases exist only as projections of repository artifacts. Change is explicit. History is immutable. Truth is diffable.
 
 ### 4.2 Execution Layer — Workflow Governance
 
