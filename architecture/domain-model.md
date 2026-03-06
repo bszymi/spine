@@ -74,13 +74,13 @@ A versioned artifact that describes how a type of work progresses through states
 
 ---
 
-### 3.3 Step
+### 3.3 Step Definition
 
-A single unit of work within a workflow. Steps define what must happen at each stage of execution.
+A configuration element within a Workflow Definition that specifies what must happen at a particular stage of execution. Step Definitions describe the intended structure of work, not the runtime execution itself.
 
 **Attributes:**
 
-- `id` — identifier within the workflow
+- `id` — identifier within the workflow definition
 - `name` — human-readable step name
 - `type` — classification (manual, automated, review, convergence)
 - `actor_type` — who may execute this step (human, AI, automated, any)
@@ -93,6 +93,7 @@ A single unit of work within a workflow. Steps define what must happen at each s
 
 **Rules:**
 
+- Step Definitions belong to a Workflow Definition and are not independent top-level entities
 - Every step must produce or reference a versioned artifact
 - Steps cannot be skipped unless the workflow definition permits it
 - Automated steps must declare retry limits
@@ -123,6 +124,8 @@ An entity that executes workflow steps. Actors are interchangeable — the syste
 ### 3.5 Run
 
 A single execution instance of a workflow. A Run tracks the progress of work through a workflow from start to completion.
+
+A Run represents the runtime execution governed by a specific version of a Workflow Definition. During execution, Step Definitions manifest as runtime step executions tracked within the Run.
 
 **Attributes:**
 
@@ -163,6 +166,7 @@ A runtime representation of repository artifact state, stored in a database for 
 - If projections are lost, they must be fully reconstructible from Git
 - Projections may be stale — consumers must understand eventual consistency
 - Projections must never be written back to Git as truth
+- Projections should record the repository commit or revision they reflect so consumers can reason about freshness and reconstruction.
 
 ---
 
@@ -187,6 +191,8 @@ A record of something that happened within the system — a state change, an act
 - Durable events must be reconstructible from Git artifact history
 - Runtime events may exist ephemerally in queues for operational purposes
 
+Future refinement: the system may distinguish between durable domain events (which must be reconstructible from Git artifact history) and operational runtime events (which may exist only in transient messaging or telemetry systems). If adopted, this distinction should be formalized in a later revision of the domain model.
+
 ---
 
 ## 4. Entity Relationships
@@ -198,7 +204,7 @@ Initiative (Artifact)
         └── Run
             ├── governed by → Workflow Definition (Artifact)
             ├── executed by → Actor
-            ├── follows → Step sequence
+            ├── follows → Step Definition sequence (from Workflow Definition)
             ├── produces → Artifact(s)
             └── emits → Event(s)
 
@@ -215,7 +221,7 @@ ADR (Artifact) — standalone, linked to related artifacts
 | Epic | Task | contains (1:many) |
 | Task | Run | triggers (1:many) |
 | Run | Workflow Definition | governed by (many:1) |
-| Run | Step | progresses through (1:many) |
+| Run | Step Definition | executes according to (1:many, via workflow definition) |
 | Run | Actor | executed by (many:many) |
 | Run | Artifact | produces (1:many) |
 | Run | Event | emits (1:many) |
@@ -265,6 +271,8 @@ Step A → Divergence Point → Step B1 (Actor 1)
 - Each path produces its own artifacts
 - Convergence evaluates all outcomes and selects or synthesizes a result
 - All outcomes — selected and rejected — are preserved as artifacts
+
+Note: The precise runtime representation of divergence (for example, parallel Runs vs. parallel step executions within a single Run) is an architectural decision that may evolve. If the choice affects core execution semantics, it should be captured as an ADR.
 
 ---
 
