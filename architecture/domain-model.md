@@ -71,6 +71,7 @@ A versioned artifact that describes how a type of work progresses through states
 - All execution must conform to a workflow definition
 - Execution paths not defined by a workflow are prohibited
 - Workflow changes are versioned and auditable
+- Runtime systems may maintain database projections of workflow definitions for execution efficiency, but Git remains the authoritative source.
 
 ---
 
@@ -97,6 +98,8 @@ A configuration element within a Workflow Definition that specifies what must ha
 - Every step must produce or reference a versioned artifact
 - Steps cannot be skipped unless the workflow definition permits it
 - Automated steps must declare retry limits
+
+At runtime, Step Definitions manifest as step executions within a Run. A step execution may occur multiple times due to retries or reassignment, but only its durable outcome (such as produced artifacts or governance decisions) must be persisted in Git.
 
 ---
 
@@ -143,9 +146,12 @@ A Run represents the runtime execution governed by a specific version of a Workf
 **Rules:**
 
 - Every Run is governed by a Workflow Definition
-- Runs produce audit records as versioned artifacts
+- Runs record durable execution outcomes as versioned artifacts in Git
+- Not every runtime step transition must produce a Git commit; only durable outcomes are committed
 - A Run's execution path must be reconstructible from its artifact trail
 - Failed Runs preserve their state for diagnosis
+
+Runtime execution may generate many operational events (step start, retries, assignments, telemetry). These events are not required to be persisted in Git. However, any durable outcome that affects artifact state, workflow governance, or execution traceability must be represented directly in Git artifacts or be derivable from Git history.
 
 ---
 
@@ -187,9 +193,11 @@ A record of something that happened within the system — a state change, an act
 **Rules:**
 
 - Events are immutable once recorded
-- Events provide the audit trail for reproducibility
+- Durable events contribute to the audit trail required for reproducibility
 - Durable events must be reconstructible from Git artifact history
 - Runtime events may exist ephemerally in queues for operational purposes
+
+Operational runtime events (such as step_started, retry_attempted, or worker_heartbeat) may exist only in runtime systems such as queues, logs, or telemetry streams. These events support execution observability but are not considered durable system state.
 
 Future refinement: the system may distinguish between durable domain events (which must be reconstructible from Git artifact history) and operational runtime events (which may exist only in transient messaging or telemetry systems). If adopted, this distinction should be formalized in a later revision of the domain model.
 
@@ -282,7 +290,7 @@ Note: The precise runtime representation of divergence (for example, parallel Ru
 |--------|------------------------|---------------|
 | Artifact | Source of Truth (§2) | All truth lives in Git as artifacts |
 | Workflow Definition | Governed Execution (§4) | Execution paths are explicit and enforceable |
-| Step | Explicit Intent (§3) | Every action requires a governing definition |
+| Step Definition | Explicit Intent (§3) | Every action requires a governing definition |
 | Actor | Actor Neutrality (§5) | Uniform interface, no implicit authority |
 | Run | Reproducibility (§7) | Execution paths reconstructible from artifacts |
 | Projection | Disposable Database (§8) | Runtime state is derived, not authoritative |
