@@ -39,7 +39,7 @@ The fundamental unit of truth in Spine. A versioned Markdown document stored in 
 - `type` — artifact classification (Initiative, Epic, Task, ADR, Governance, etc.)
 - `status` — lifecycle state (Pending, In Progress, Complete, Superseded)
 - `path` — repository location
-- `metadata` — structured fields (parent references, owner, version, dates)
+- `metadata` — structured fields (parent references, owner, version, dates, linkage data)
 - `content` — the body of the artifact
 
 **Rules:**
@@ -48,6 +48,8 @@ The fundamental unit of truth in Spine. A versioned Markdown document stored in 
 - Artifact IDs are immutable and never reused
 - Artifacts are self-describing — they contain their own metadata
 - Changes to artifacts produce Git commits (explicit, diffable history)
+
+Artifacts may include structured linkage information describing relationships to other artifacts. Linkage is intentionally general rather than limited to parent/child hierarchy so the model can express dependencies, follow-up work, related scope, blocking relationships, and other governed connections.
 
 ---
 
@@ -95,7 +97,7 @@ A configuration element within a Workflow Definition that specifies what must ha
 **Rules:**
 
 - Step Definitions belong to a Workflow Definition and are not independent top-level entities
-- Every step must produce or reference a versioned artifact
+- Steps must either produce/reference a versioned artifact or produce a runtime step outcome that controls workflow progression
 - Steps cannot be skipped unless the workflow definition permits it
 - Automated steps must declare retry limits
 
@@ -153,6 +155,8 @@ A Run represents the runtime execution governed by a specific version of a Workf
 
 Runtime execution may generate many operational events (step start, retries, assignments, telemetry). These events are not required to be persisted in Git. However, any durable outcome that affects artifact state, workflow governance, or execution traceability must be represented directly in Git artifacts or be derivable from Git history.
 
+Step executions within a Run produce runtime step outcomes that determine workflow progression (for example: accepted_to_continue, needs_rework, failed). These outcomes are part of execution state rather than standalone domain entities. Only outcomes that produce or modify artifacts create durable Git history.
+
 ---
 
 ### 3.6 Projection
@@ -178,7 +182,9 @@ A runtime representation of repository artifact state, stored in a database for 
 
 ### 3.7 Event
 
-A record of something that happened within the system — a state change, an action taken, or a decision made.
+A derived signal representing something that happened within the system. Events describe changes or runtime activity but are not the authoritative source of system truth.
+
+Events are produced from either Git artifact changes or runtime execution activity. They exist primarily for observability, integration, and automation. Durable system state must always be represented in Git artifacts rather than relying on events themselves.
 
 **Attributes:**
 
@@ -193,13 +199,16 @@ A record of something that happened within the system — a state change, an act
 **Rules:**
 
 - Events are immutable once recorded
-- Durable events contribute to the audit trail required for reproducibility
+- Events may contribute to the audit trail for observability and integration, but authoritative history comes from Git artifact changes
 - Durable events must be reconstructible from Git artifact history
 - Runtime events may exist ephemerally in queues for operational purposes
+- Events do not represent governed decisions such as approvals or rejections; those must be recorded as durable artifact changes
 
 Operational runtime events (such as step_started, retry_attempted, or worker_heartbeat) may exist only in runtime systems such as queues, logs, or telemetry streams. These events support execution observability but are not considered durable system state.
 
-Future refinement: the system may distinguish between durable domain events (which must be reconstructible from Git artifact history) and operational runtime events (which may exist only in transient messaging or telemetry systems). If adopted, this distinction should be formalized in a later revision of the domain model.
+Events may be categorized into two conceptual groups: durable domain events derived from artifact history (e.g., artifact_updated, run_completed) and operational runtime events generated during execution (e.g., step_started, retry_attempted). Both categories are derived signals rather than primary records of truth.
+
+Events must not be used to represent approval or rejection decisions; such outcomes are represented either as runtime step outcomes within Runs or as durable acceptance state within Task artifacts.
 
 ---
 
@@ -235,6 +244,7 @@ ADR (Artifact) — standalone, linked to related artifacts
 | Run | Event | emits (1:many) |
 | Projection | Artifact | derived from (many:1) |
 | Artifact | Artifact | references (many:many) |
+| Task | Task | linked_to (many:many, typed relationship) |
 
 ---
 
@@ -244,8 +254,10 @@ ADR (Artifact) — standalone, linked to related artifacts
 
 ```
 Pending → In Progress → Complete
-                      → Superseded (links to successor)
+                      → Superseded (may link to related successor or replacement work)
 ```
+
+For Task artifacts, the lifecycle may also include a governed acceptance outcome recorded in the artifact itself, along with typed links to related tasks when follow-up, replacement, dependency, or other governed relationships need to be tracked. Task-level outcomes represent whether the deliverable was approved, rejected with follow-up required, or rejected and closed. These outcomes are durable artifact state rather than workflow step results.
 
 ### 5.2 Run Lifecycle
 
@@ -292,9 +304,9 @@ Note: The precise runtime representation of divergence (for example, parallel Ru
 | Workflow Definition | Governed Execution (§4) | Execution paths are explicit and enforceable |
 | Step Definition | Explicit Intent (§3) | Every action requires a governing definition |
 | Actor | Actor Neutrality (§5) | Uniform interface, no implicit authority |
-| Run | Reproducibility (§7) | Execution paths reconstructible from artifacts |
+| Run | Reproducibility (§7) | Execution paths and final outcomes reconstructible from artifacts |
 | Projection | Disposable Database (§8) | Runtime state is derived, not authoritative |
-| Event | Reproducibility (§7) | Audit trail supports reconstruction |
+| Event | Observability Support | Derived signals allow systems to react to artifact and execution changes |
 
 ---
 
@@ -303,5 +315,7 @@ Note: The precise runtime representation of divergence (for example, parallel Ru
 This domain model is expected to evolve as architecture decisions are made and implementation begins.
 
 New entities may be introduced. Existing entities may gain attributes. Changes must be versioned in Git and must not violate constitutional principles.
+
+The exact taxonomy of typed artifact links (for example: blocks, blocked_by, follow_up_to, related_to, supersedes, replaced_by) may evolve over time. The model requires only that links are explicit, typed, and stored durably in the governing artifact.
 
 Changes that alter fundamental entity relationships should be captured as ADRs.
