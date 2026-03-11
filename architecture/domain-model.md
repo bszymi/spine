@@ -29,17 +29,24 @@ The domain model is shaped by constitutional constraints:
 
 ## 3. Core Entities
 
+All durable domain objects in Spine are represented as Artifacts or as runtime entities that operate on Artifacts.
+
 ### 3.1 Artifact
 
 The fundamental unit of truth in Spine. A versioned Markdown document stored in Git that represents intent, definition, or outcome.
 
+
+Artifact is the abstract root entity for all durable Spine records. Specific artifact types (such as Initiative, Epic, Task, ADR, Governance, etc.) are classifications of Artifact that may introduce additional conventions, metadata, or workflow behavior. Unless explicitly defined otherwise, capabilities described for Artifact apply to all artifact types.
+
+Each artifact type is expected to define or inherit a schema/template that constrains its metadata and content structure. These schemas may be introduced incrementally over time, but the model assumes that artifact type is not merely a label — it is the basis for validation, rendering, and governed evolution.
+
 **Attributes:**
 
-- `id` — stable, unique identifier (e.g. `INIT-001`, `EPIC-002`, `TASK-003`)
+- `id` — stable identifier unique within its governed scope (e.g. `INIT-001`, `EPIC-002`, `TASK-003`)
 - `type` — artifact classification (Initiative, Epic, Task, ADR, Governance, etc.)
 - `status` — lifecycle state (Pending, In Progress, Complete, Superseded)
 - `path` — repository location
-- `metadata` — structured fields (parent references, owner, version, dates, linkage data)
+- `metadata` — structured fields stored in Markdown front matter (for example YAML) containing parent references, owner, version, dates, linkage data, and other machine-readable artifact attributes
 - `content` — the body of the artifact
 
 **Rules:**
@@ -50,6 +57,14 @@ The fundamental unit of truth in Spine. A versioned Markdown document stored in 
 - Changes to artifacts produce Git commits (explicit, diffable history)
 
 Artifacts may include structured linkage information describing relationships to other artifacts. Linkage is intentionally general rather than limited to parent/child hierarchy so the model can express dependencies, follow-up work, related scope, blocking relationships, and other governed connections.
+
+Artifact linkage is stored explicitly in artifact metadata (typically the Markdown front-matter block) so that both humans and automated agents can reliably discover relationships. All structured links for an artifact should appear together in this metadata block.
+
+Linkage is defined at the Artifact level so that any artifact may relate to any other artifact when appropriate. Specific artifact types may define conventions for particular link types (for example: Epic contains Tasks, Task blocks Task, ADR relates_to Architecture Document), but the core model does not restrict linkage to specific artifact types.
+
+For relationships that have meaningful inverse semantics (for example blocked_by ↔ blocks or supersedes ↔ superseded_by), both artifacts may store the corresponding link entries so that each artifact remains self-describing when read directly. Tooling should validate that such bidirectional relationships remain consistent.
+
+Link targets must use globally unambiguous references rather than relying on locally scoped identifiers alone. In practice, this means linkage should point to a full artifact reference (for example via canonical path, fully qualified hierarchical identifier, or another globally resolvable reference) rather than only a short local ID such as TASK-042.
 
 ---
 
@@ -244,7 +259,7 @@ ADR (Artifact) — standalone, linked to related artifacts
 | Run | Event | emits (1:many) |
 | Projection | Artifact | derived from (many:1) |
 | Artifact | Artifact | references (many:many) |
-| Task | Task | linked_to (many:many, typed relationship) |
+| Artifact | Artifact | linked_to (many:many, typed relationship) |
 
 ---
 
@@ -257,7 +272,9 @@ Pending → In Progress → Complete
                       → Superseded (may link to related successor or replacement work)
 ```
 
-For Task artifacts, the lifecycle may also include a governed acceptance outcome recorded in the artifact itself, along with typed links to related tasks when follow-up, replacement, dependency, or other governed relationships need to be tracked. Task-level outcomes represent whether the deliverable was approved, rejected with follow-up required, or rejected and closed. These outcomes are durable artifact state rather than workflow step results.
+Artifacts may optionally include governed acceptance or sign-off information recorded in the artifact itself.
+
+For Task artifacts, this commonly represents whether the deliverable was approved, rejected with follow-up required, or rejected and closed. Other artifact types (such as ADRs or governance documents) may also record acceptance or approval metadata when appropriate. These outcomes are durable artifact state rather than workflow step results.
 
 ### 5.2 Run Lifecycle
 
@@ -317,5 +334,9 @@ This domain model is expected to evolve as architecture decisions are made and i
 New entities may be introduced. Existing entities may gain attributes. Changes must be versioned in Git and must not violate constitutional principles.
 
 The exact taxonomy of typed artifact links (for example: blocks, blocked_by, follow_up_to, related_to, supersedes, replaced_by) may evolve over time. The model requires only that links are explicit, typed, and stored durably in the governing artifact.
+
+Artifacts should remain self-describing when viewed directly in their Markdown form. Structured metadata such as links should therefore be stored in the artifact itself rather than relying solely on derived projections. Tooling may validate and assist with maintaining bidirectional link consistency across artifacts.
+
+The exact representation of artifact references and link targets may also evolve. Whatever representation is chosen, it must remain stable, globally resolvable, and suitable for durable storage inside artifacts.
 
 Changes that alter fundamental entity relationships should be captured as ADRs.
