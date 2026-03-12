@@ -122,7 +122,99 @@ New governance documents must explicitly state their relationship to the Charter
 
 ---
 
-## 8. Evolution Policy
+## 8. Cross-Artifact Validation
+
+The Constitution (§11) requires that artifacts are validated against the broader governed system context. This section provides practical guidance for how that validation should be performed.
+
+### 8.1 Foundation Phase vs Evolution Phase
+
+Spine recognizes two distinct phases of work:
+
+**Foundation phase** — used when the project is first established:
+
+```
+Charter → Product → Architecture → Tasks → Code
+```
+
+In this phase, each layer is created in sequence and validated primarily against the layers above it.
+
+**Evolution phase** — used once the system already exists:
+
+When a new or changed artifact is proposed, it must be validated against the current governed state of all relevant layers — not only the layer directly above it.
+
+Example flow:
+
+```
+Change proposed to an artifact
+→ validate against current Charter / Constitution
+→ validate against current Architecture
+→ validate against current Product definition
+→ validate against current implementation reality
+→ decide whether to accept, revise, or create follow-up work
+```
+
+### 8.2 Validation Context per Artifact Type
+
+Each artifact type should be validated against specific upstream layers:
+
+| Artifact Type | Validate Against |
+|---------------|-----------------|
+| Product artifacts | Charter, Constitution, Architecture constraints |
+| Architecture artifacts | Charter, Constitution, Product definition |
+| ADRs | Charter, Constitution, Product definition, existing Architecture |
+| Epics | Parent Initiative, Product definition, Architecture |
+| Tasks | Parent Epic, Architecture, existing implementation |
+| Governance documents | Charter, Constitution |
+
+This table describes the primary validation context. Additional validation may be appropriate depending on the nature of the change.
+
+### 8.3 When Validation Should Occur
+
+Validation should occur at governed points in workflow progression:
+
+- **Before approval** — when an artifact is submitted for review or acceptance
+- **Before completion** — when a task or epic is marked complete
+- **When upstream changes** — when a governing artifact (Charter, Constitution, Architecture, Product) is modified, downstream artifacts that depend on it may need re-evaluation
+
+Validation does not need to occur on every minor edit. It is most important at transition points where artifacts move between lifecycle states.
+
+### 8.4 Types of Mismatches
+
+When validation detects an inconsistency, it should be classified:
+
+**Scope conflict** — the artifact introduces work or capabilities outside the boundaries defined by the Charter, Product definition, or parent artifacts.
+
+**Architectural conflict** — the artifact assumes system capabilities, components, or patterns that contradict or are not supported by the current architecture.
+
+**Implementation drift** — the actual codebase or system state does not match what the architecture or product artifacts describe.
+
+**Missing prerequisite work** — the artifact depends on work that has not yet been completed or on infrastructure that does not yet exist.
+
+### 8.5 Handling Mismatches
+
+When a mismatch is detected:
+
+1. **Surface it explicitly** — document the inconsistency in the artifact, discussion thread, or review
+2. **Classify it** — determine which type of mismatch it is
+3. **Decide on resolution** — possible outcomes include:
+   - Revise the proposed artifact to align with existing governed state
+   - Update the upstream artifact if the change is justified (e.g., update architecture to support a new product requirement)
+   - Create follow-up tasks to resolve the gap
+   - Reject the change with rationale
+4. **Never ignore it** — contradictions must not be silently accepted (Constitution §11)
+
+### 8.6 Creating Follow-Up Work
+
+When validation reveals a gap that cannot be resolved immediately:
+
+- Create a new task describing the gap and required resolution
+- Link the new task to the artifact that revealed the gap
+- Ensure the follow-up task is placed under the appropriate epic
+- Do not block the current work unless the gap makes the artifact invalid
+
+---
+
+## 9. Evolution Policy
 
 These Guidelines are a living document and are expected to evolve as the system matures.
 
@@ -130,4 +222,6 @@ Changes to this document must:
 
 - Be versioned in Git
 - Follow the standards defined in the [Style Guide](/governance/style-guide.md)
-- Not contradict the Charter or Constitution
+- Not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md)
+
+New sections may be added as architectural decisions, product changes, or governance refinements introduce new practical requirements. When new guidance is added, it should reference the constitutional or charter principle it supports.
