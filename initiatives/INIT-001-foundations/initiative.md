@@ -1,6 +1,6 @@
 # INIT-001 — Foundations
 
-**Status:** Draft
+**Status:** In Progress
 **Owner:** _TBD_
 **Created:** 2026-03-04
 **Last updated:** 2026-03-04
