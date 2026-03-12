@@ -2,7 +2,7 @@
 # Spine Constitution
 
 **Project:** Spine
-**Version:** 0.1
+**Version:** 0.1.1
 **Status:** Foundational (Pre‑Engine)
 
 ---
@@ -163,12 +163,44 @@ The Constitution enters a stabilization phase.
 
 ---
 
-## 11. Structural Integrity
+## 11. Cross-Artifact Validation
+
+Artifacts must be interpreted within the governed system context.
+
+When an artifact's meaning depends on other governed artifacts or the current system state, it must be validated against that context.
+
+Therefore:
+
+1. Workflow steps may require cross-artifact consistency checks before approval or completion.
+2. Artifact approval must consider governed context — not isolated content alone.
+3. When inconsistencies are detected between artifacts, they must be surfaced explicitly and resolved through governed action.
+4. Contradictions must not be silently ignored. They must produce follow-up work, artifact updates, or governed decisions.
+5. All actors — human, AI, and automated — participate equally in validation-governed workflows.
+
+Validation is a governed activity embedded in workflows, not an ad-hoc responsibility.
+
+---
+
+## 12. Structural Integrity
 
 The primary responsibility of the Spine system is maintaining structural integrity between:
 
-- product intent
+- strategic intent
+- system architecture
+- product definition
 - execution governance
-- system outcomes
+- implementation reality
+
+Spine must ensure that all layers remain logically consistent as the system evolves.
 
 Any implementation that compromises this integrity violates the Constitution.
+
+---
+
+## Amendment Log
+
+### v0.1.1 — 2026-03-12
+
+- Added §11 Cross-Artifact Validation
+- Expanded §12 Structural Integrity to include all knowledge layers
+- Reason: Governance documents did not explicitly require that artifacts are validated against broader system context during workflow progression
