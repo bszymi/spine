@@ -17,6 +17,8 @@ AI produces output without structural alignment.
 
 Spine establishes a backbone where intent, execution, and contribution are structurally connected.
 
+Beyond storing artifacts, Spine exists to maintain alignment between strategic intent, system architecture, product definition, execution, and implementation. When these layers fragment across disconnected tools and undocumented knowledge, both humans and AI agents lose the ability to reason about the system as a whole.
+
 ## 2. Vision
 
 Spine aims to become a Git-native Product-to-Execution System — a structural center of gravity around which tools orbit.
@@ -25,6 +27,8 @@ It is not a productivity enhancer.
 It is an execution integrity system.
 
 Spine treats execution as engineering, not improvisation.
+
+The repository is a shared cognitive model — a single contextual source of truth that enables humans and AI agents to reason about the system as a whole. Spine supports continuous evolution, not static documentation. As the project changes, Spine ensures that all layers remain logically consistent rather than silently diverging.
 
 ## 3. Foundational Principles
 
