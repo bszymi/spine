@@ -60,6 +60,8 @@ Artifacts may include structured linkage information describing relationships to
 
 Artifact linkage is stored explicitly in artifact metadata (typically the Markdown front-matter block) so that both humans and automated agents can reliably discover relationships. All structured links for an artifact should appear together in this metadata block.
 
+Artifacts may also include simple references to other artifacts. References are informational pointers intended to help readers navigate related material and do not represent governed relationships. Unlike typed links, references are not required to maintain bidirectional consistency and are not interpreted as workflow or dependency semantics.
+
 Linkage is defined at the Artifact level so that any artifact may relate to any other artifact when appropriate. Specific artifact types may define conventions for particular link types (for example: Epic contains Tasks, Task blocks Task, ADR relates_to Architecture Document), but the core model does not restrict linkage to specific artifact types.
 
 For relationships that have meaningful inverse semantics (for example blocked_by ↔ blocks or supersedes ↔ superseded_by), both artifacts may store the corresponding link entries so that each artifact remains self-describing when read directly. Tooling should validate that such bidirectional relationships remain consistent.
@@ -143,9 +145,11 @@ An entity that executes workflow steps. Actors are interchangeable — the syste
 
 ### 3.5 Run
 
-A single execution instance of a workflow. A Run tracks the progress of work through a workflow from start to completion.
+A single execution instance of a workflow associated with a Task artifact. A Run tracks the progress of work through a workflow from start to completion.
 
 A Run represents the runtime execution governed by a specific version of a Workflow Definition. During execution, Step Definitions manifest as runtime step executions tracked within the Run.
+
+Runs are initiated by Tasks and represent the execution of work required to complete that Task.
 
 **Attributes:**
 
@@ -170,7 +174,7 @@ A Run represents the runtime execution governed by a specific version of a Workf
 
 Runtime execution may generate many operational events (step start, retries, assignments, telemetry). These events are not required to be persisted in Git. However, any durable outcome that affects artifact state, workflow governance, or execution traceability must be represented directly in Git artifacts or be derivable from Git history.
 
-Step executions within a Run produce runtime step outcomes that determine workflow progression (for example: accepted_to_continue, needs_rework, failed). These outcomes are part of execution state rather than standalone domain entities. Only outcomes that produce or modify artifacts create durable Git history.
+Step executions within a Run produce runtime step outcomes that determine workflow progression. The set of possible outcomes is defined by the governing Workflow Definition rather than fixed globally. These outcomes are part of execution state rather than standalone domain entities. Only outcomes that produce or modify artifacts create durable Git history.
 
 ---
 
@@ -228,6 +232,8 @@ Events must not be used to represent approval or rejection decisions; such outco
 ---
 
 ## 4. Entity Relationships
+
+The following hierarchy represents a common organizational convention rather than a mandatory structure.
 
 ```
 Initiative (Artifact)
@@ -304,12 +310,12 @@ Step A → Divergence Point → Step B1 (Actor 1)
                           → Convergence Point → Step C (Reviewer)
 ```
 
-- Divergence creates parallel Runs or parallel Steps within a Run
+- Divergence typically creates parallel Steps within a single Run
 - Each path produces its own artifacts
 - Convergence evaluates all outcomes and selects or synthesizes a result
 - All outcomes — selected and rejected — are preserved as artifacts
 
-Note: The precise runtime representation of divergence (for example, parallel Runs vs. parallel step executions within a single Run) is an architectural decision that may evolve. If the choice affects core execution semantics, it should be captured as an ADR.
+Note: In most cases divergence occurs as parallel step executions within a single Run. Creating multiple Runs for the same Task generally represents retrying or restarting execution after failure rather than planned divergence. If future architectural decisions require alternative representations, they should be captured as ADRs.
 
 ---
 
