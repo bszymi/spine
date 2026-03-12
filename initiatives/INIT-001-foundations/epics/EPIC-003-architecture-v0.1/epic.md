@@ -1,7 +1,7 @@
 # EPIC-003 — Architecture v0.1
 
 **Initiative:** INIT-001 — Foundations
-**Status:** Pending
+**Status:** In Progress
 
 ---
 
