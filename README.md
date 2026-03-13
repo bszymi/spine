@@ -116,6 +116,7 @@ All actors operate under the same governance rules. AI is treated as an executio
 │
 ├── architecture/
 │   ├── domain-model.md
+│   ├── components.md
 │   └── adr/
 │       ├── ADR-001-workflow-definition-storage-and-execution-recording.md
 │       ├── ADR-002-events.md
@@ -163,6 +164,7 @@ All actors operate under the same governance rules. AI is treated as an executio
 ### Architecture
 
 - [Domain Model](/architecture/domain-model.md) — Core entities and relationships
+- [System Components](/architecture/components.md) — Runtime components, boundaries, and interaction flows
 - [ADR-001](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md) — Workflow definition storage and execution recording
 - [ADR-002](/architecture/adr/ADR-002-events.md) — Event model (derived domain events and operational events)
 - [ADR-003](/architecture/adr/ADR-003-discussion-and-comment-model.md) — Discussion and comment model
@@ -196,11 +198,12 @@ Foundations phase (INIT-001).
 - Product definition — users, use cases, non-goals, success metrics, boundaries, product concept
 - Domain model — core entities, relationships, lifecycles, constitutional alignment
 - Architectural decision records — workflow storage, event model, discussion model, evaluation model
+- System components — Access Gateway, Artifact Service, Workflow Engine, Projection Service, Actor Gateway, Event Router, Validation Service
 - Governance refinement — artifact schema, Charter alignment, Constitution validation rules, Guidelines validation guidance
 
 ### In Progress
 
-- Architecture v0.1 — system components, data model, API surface, observability model
+- Architecture v0.1 — data model, API surface, observability model
 
 ### Next
 
