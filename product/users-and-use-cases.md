@@ -1,8 +1,11 @@
-# Target Users and Use Cases
+---
+type: Product
+title: Target Users and Use Cases
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Target Users and Use Cases
 
 ---
 

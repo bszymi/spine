@@ -1,8 +1,11 @@
-# Contributing to Spine
+---
+type: Governance
+title: Contributing to Spine
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Contributing to Spine
 
 ---
 

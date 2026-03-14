@@ -1,10 +1,18 @@
-# EPIC-001 — Governance Baseline
+---
+id: EPIC-001
+type: Epic
+title: Governance Baseline
+status: Completed
+initiative: /initiatives/INIT-001-foundations/initiative.md
+owner: bszymi
+created: 2026-03-04
+last_updated: 2026-03-04
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/initiative.md
+---
 
-**Initiative:** INIT-001 Foundations
-**Status:** Complete
-**Owner:** bszymi
-**Created:** 2026-03-04
-**Last updated:** 2026-03-04
+# EPIC-001 — Governance Baseline
 
 ---
 

@@ -1,8 +1,11 @@
-# Repository Structure & Artifact Taxonomy
+---
+type: Governance
+title: Repository Structure & Artifact Taxonomy
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Repository Structure & Artifact Taxonomy
 
 ---
 

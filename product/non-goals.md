@@ -1,8 +1,11 @@
-# Non-Goals and Anti-Requirements
+---
+type: Product
+title: Non-Goals and Anti-Requirements
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Non-Goals and Anti-Requirements
 
 ---
 

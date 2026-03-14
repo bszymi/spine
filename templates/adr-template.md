@@ -1,8 +1,13 @@
-# ADR-XXXX — [Decision Title]
+---
+id: ADR-XXXX
+type: ADR
+title: "[Decision Title]"
+status: Proposed
+date: YYYY-MM-DD
+decision_makers: "[Who made or participated in this decision]"
+---
 
-**Status:** Proposed | Accepted | Deprecated | Superseded
-**Date:** YYYY-MM-DD
-**Deciders:** [Who made or participated in this decision]
+# ADR-XXXX — [Decision Title]
 
 ---
 

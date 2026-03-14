@@ -1,8 +1,16 @@
-# TASK-005 — Observability and Audit Model
+---
+id: TASK-005
+type: Task
+title: Observability and Audit Model
+status: Pending
+epic: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+---
 
-**Epic:** EPIC-003 — Architecture v0.1
-**Initiative:** INIT-001 — Foundations
-**Status:** Pending
+# TASK-005 — Observability and Audit Model
 
 ---
 

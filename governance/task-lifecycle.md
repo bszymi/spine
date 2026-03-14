@@ -1,8 +1,11 @@
-# Task Lifecycle and Terminal Outcomes
+---
+type: Governance
+title: Task Lifecycle and Terminal Outcomes
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Task Lifecycle and Terminal Outcomes
 
 ---
 
@@ -48,7 +51,7 @@ These states are recorded in the task artifact's front matter and committed to t
 |-------|---------|
 | `Draft` | Task is being defined; not yet ready for execution |
 | `Pending` | Task is fully defined and ready to be picked up |
-| `Complete` | Terminal: deliverable accepted, work finished |
+| `Completed` | Terminal: deliverable accepted, work finished |
 | `Cancelled` | Terminal: task withdrawn before completion |
 | `Rejected` | Terminal: deliverable evaluated and not accepted |
 | `Superseded` | Terminal: task replaced by successor work |
@@ -82,14 +85,14 @@ Draft → Pending
 Task definition is complete and ready for execution. This is the only non-terminal transition that modifies Git — it represents a governance decision that the task is ready.
 
 ```
-Pending → Complete
+Pending → Completed
 Pending → Cancelled
 Pending → Superseded
 ```
 Terminal outcomes from a task that was never started or whose execution was decided without running.
 
 ```
-[After Runtime Execution] → Complete
+[After Runtime Execution] → Completed
 [After Runtime Execution] → Rejected
 [After Runtime Execution] → Cancelled
 [After Runtime Execution] → Superseded
@@ -120,12 +123,12 @@ Starting a Run, assigning actors, progressing through steps, submitting for revi
 
 Terminal outcomes are the governed decisions that end a task's lifecycle and are committed to the main branch.
 
-### 5.1 Complete
+### 5.1 Completed
 
 The task deliverable has been accepted and the work is finished.
 
 **Effect on artifact:**
-- Status updated to `Complete`
+- Status updated to `Completed`
 - Acceptance recorded (per [ADR-004](/architecture/adr/ADR-004-evaluation-and-acceptance-model.md))
 
 **When used:**
@@ -243,7 +246,7 @@ Run history exists in the Runtime Store for operational purposes. If the Runtime
 5. Work in progress (Runtime Store only)
 6. Deliverable submitted for review (Runtime Store only)
 7. Review outcome: accepted (Runtime Store → triggers Git commit)
-8. Task marked Complete (Git commit: status updated, acceptance recorded)
+8. Task marked Completed (Git commit: status updated, acceptance recorded)
 ```
 
 Steps 3–6 do not touch the main branch. Only steps 1, 2, and 8 produce Git commits.

@@ -1,9 +1,14 @@
-# INIT-XXX — [Initiative Title]
+---
+id: INIT-XXX
+type: Initiative
+title: "[Initiative Title]"
+status: Draft
+owner: _TBD_
+created: YYYY-MM-DD
+last_updated: YYYY-MM-DD
+---
 
-**Status:** Draft
-**Owner:** _TBD_
-**Created:** YYYY-MM-DD
-**Last updated:** YYYY-MM-DD
+# INIT-XXX — [Initiative Title]
 
 ---
 

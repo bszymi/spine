@@ -1,8 +1,16 @@
-# TASK-001 — Governance Guidelines
+---
+id: TASK-001
+type: Task
+title: Governance Guidelines
+status: Completed
+epic: /initiatives/INIT-001-foundations/epics/EPIC-001-governance-baseline/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-001-governance-baseline/epic.md
+---
 
-**Epic:** EPIC-001 — Governance Baseline
-**Initiative:** INIT-001 — Foundations
-**Status:** Complete
+# TASK-001 — Governance Guidelines
 
 ---
 

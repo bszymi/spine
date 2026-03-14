@@ -1,8 +1,13 @@
-# ADR-004: Evaluation and Acceptance Model
+---
+id: ADR-004
+type: ADR
+title: Evaluation and Acceptance Model
+status: Accepted
+date: 2026-03-11
+decision_makers: Spine Architecture
+---
 
-**Status:** Accepted
-**Date:** 2026-03-11
-**Decision Makers:** Spine Architecture
+# ADR-004: Evaluation and Acceptance Model
 
 ---
 

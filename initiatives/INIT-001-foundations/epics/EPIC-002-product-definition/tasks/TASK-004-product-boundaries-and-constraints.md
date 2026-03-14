@@ -1,8 +1,16 @@
-# TASK-004 — Product Boundaries and Constraints
+---
+id: TASK-004
+type: Task
+title: Product Boundaries and Constraints
+status: Completed
+epic: /initiatives/INIT-001-foundations/epics/EPIC-002-product-definition/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-002-product-definition/epic.md
+---
 
-**Epic:** EPIC-002 — Product Definition
-**Initiative:** INIT-001 — Foundations
-**Status:** Complete
+# TASK-004 — Product Boundaries and Constraints
 
 ---
 

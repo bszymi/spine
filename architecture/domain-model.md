@@ -1,8 +1,11 @@
-# Spine Domain Model
+---
+type: Architecture
+title: Spine Domain Model
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Spine Domain Model
 
 ---
 
@@ -44,7 +47,7 @@ Each artifact type is expected to define or inherit a schema/template that const
 
 - `id` — stable identifier unique within its governed scope (e.g. `INIT-001`, `EPIC-002`, `TASK-003`)
 - `type` — artifact classification (Initiative, Epic, Task, ADR, Governance, etc.)
-- `status` — lifecycle state (Pending, In Progress, Complete, Superseded)
+- `status` — lifecycle state (Pending, In Progress, Completed, Superseded)
 - `path` — repository location
 - `metadata` — structured fields stored in Markdown front matter (for example YAML) containing parent references, owner, version, dates, linkage data, and other machine-readable artifact attributes
 - `content` — the body of the artifact
@@ -274,7 +277,7 @@ ADR (Artifact) — standalone, linked to related artifacts
 ### 5.1 Artifact Lifecycle
 
 ```
-Pending → In Progress → Complete
+Pending → In Progress → Completed
                       → Superseded (may link to related successor or replacement work)
 ```
 

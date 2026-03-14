@@ -1,8 +1,16 @@
-# TASK-005 — Define Task Lifecycle and Terminal Outcomes
+---
+id: TASK-005
+type: Task
+title: Define Task Lifecycle and Terminal Outcomes
+status: Completed
+epic: /initiatives/INIT-001-foundations/epics/EPIC-004-governance-refinement/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-004-governance-refinement/epic.md
+---
 
-**Epic:** EPIC-004 — Governance Refinement
-**Initiative:** INIT-001 — Foundations
-**Status:** Complete
+# TASK-005 — Define Task Lifecycle and Terminal Outcomes
 
 ---
 

@@ -1,8 +1,11 @@
-# Spine Product Definition
+---
+type: Product
+title: Spine Product Definition
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Spine Product Definition
 
 ---
 
