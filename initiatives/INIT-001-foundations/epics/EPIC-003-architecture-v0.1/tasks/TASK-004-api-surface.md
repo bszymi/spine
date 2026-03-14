@@ -2,7 +2,7 @@
 
 **Epic:** EPIC-003 — Architecture v0.1
 **Initiative:** INIT-001 — Foundations
-**Status:** Pending
+**Status:** Cancelled
 
 ---
 
@@ -26,3 +26,11 @@ Content should define:
 - API surface is minimal and justified
 - resource model aligns with the domain model
 - security model for actors is defined at v0.x level
+
+---
+
+## Cancellation Note
+
+Closed because the architecture no longer defines a single API surface. Spine exposes multiple access patterns (CLI, API, GUI). A new task will define the full external access surface instead of only an HTTP API.
+
+**Successor:** [TASK-008 — Access Surface v0.x](/initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/tasks/TASK-008-access-surface.md)
