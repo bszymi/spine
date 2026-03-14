@@ -1,7 +1,7 @@
 # EPIC-004 — Governance Refinement
 
 **Initiative:** INIT-001 — Foundations
-**Status:** Pending
+**Status:** In Progress
 
 ---
 
@@ -24,6 +24,7 @@ This epic bridges the gap between architectural intent and enforceable governanc
 - Update Charter with mission-level alignment language
 - Update Constitution with cross-artifact validation rules
 - Update Guidelines with practical validation guidance
+- Define task lifecycle and terminal outcomes (runtime vs durable state boundary)
 
 ---
 
@@ -35,6 +36,7 @@ This epic bridges the gap between architectural intent and enforceable governanc
 - Updated `/governance/guidelines.md` — practical validation guidance per artifact type
 - Updated templates in `/templates/`
 - Migrated existing artifacts with YAML front matter
+- `/governance/task-lifecycle.md` — task lifecycle states and terminal outcome definitions
 
 ---
 
@@ -48,3 +50,5 @@ This epic bridges the gap between architectural intent and enforceable governanc
 - Charter expresses Spine's mission as maintaining cross-layer alignment, not only storing artifacts
 - Constitution encodes structural rules requiring cross-artifact validation during workflows
 - Guidelines provide actionable validation guidance distinguishing initial creation from ongoing evolution
+- Task lifecycle clearly distinguishes runtime-only transitions from durable governance outcomes
+- Terminal outcomes are defined with their effect on artifact state in the main branch
