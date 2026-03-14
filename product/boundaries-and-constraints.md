@@ -1,8 +1,11 @@
-# Product Boundaries and Constraints
+---
+type: Product
+title: Product Boundaries and Constraints
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Product Boundaries and Constraints
 
 ---
 

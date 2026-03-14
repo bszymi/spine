@@ -1,9 +1,11 @@
+---
+type: Governance
+title: Spine Constitution
+status: Foundational
+version: "0.1.1"
+---
 
 # Spine Constitution
-
-**Project:** Spine
-**Version:** 0.1.1
-**Status:** Foundational (Pre‑Engine)
 
 ---
 

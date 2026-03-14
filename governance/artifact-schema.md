@@ -1,8 +1,11 @@
-# Artifact Front Matter Schema
+---
+type: Governance
+title: Artifact Front Matter Schema
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Artifact Front Matter Schema
 
 ---
 
@@ -38,7 +41,7 @@ The front matter block must be the first content in the file. The Markdown title
 - **Optional fields** may be omitted when not applicable
 - Field names use `snake_case`
 - Date values use ISO 8601 format: `YYYY-MM-DD`
-- Status values use Title Case: `Pending`, `In Progress`, `Complete`, `Superseded`
+- Status values use Title Case: `Pending`, `In Progress`, `Completed`, `Superseded`
 - String values do not require quotes unless they contain special YAML characters
 
 ### 2.3 ID Scope and Uniqueness
@@ -145,7 +148,7 @@ Not all artifact mentions are governed links. The `links` section is for governe
 | `id` | yes | string | Initiative ID (e.g., `INIT-001`) |
 | `type` | yes | string | Always `Initiative` |
 | `title` | yes | string | Human-readable title |
-| `status` | yes | enum | `Draft`, `Pending`, `In Progress`, `Complete`, `Superseded` |
+| `status` | yes | enum | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
 | `owner` | optional | string | Responsible person or team |
 | `created` | yes | date | Creation date |
 | `last_updated` | optional | date | Last modification date |
@@ -177,7 +180,7 @@ links:
 | `id` | yes | string | Epic ID (e.g., `EPIC-003`) |
 | `type` | yes | string | Always `Epic` |
 | `title` | yes | string | Human-readable title |
-| `status` | yes | enum | `Draft`, `Pending`, `In Progress`, `Complete`, `Superseded` |
+| `status` | yes | enum | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
 | `initiative` | yes | path | Canonical path to parent initiative |
 | `owner` | optional | string | Responsible person or team |
 | `created` | optional | date | Creation date |
@@ -208,7 +211,7 @@ links:
 | `id` | yes | string | Task ID (e.g., `TASK-001`) |
 | `type` | yes | string | Always `Task` |
 | `title` | yes | string | Human-readable title |
-| `status` | yes | enum | `Draft`, `Pending`, `In Progress`, `Complete`, `Superseded` |
+| `status` | yes | enum | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
 | `epic` | yes | path | Canonical path to parent epic |
 | `initiative` | yes | path | Canonical path to parent initiative |
 | `acceptance` | optional | enum | `Approved`, `Rejected With Followup`, `Rejected Closed` |
@@ -355,9 +358,9 @@ Different artifact types use different status values:
 
 | Artifact Type | Allowed Status Values |
 |---------------|----------------------|
-| Initiative | `Draft`, `Pending`, `In Progress`, `Complete`, `Superseded` |
-| Epic | `Draft`, `Pending`, `In Progress`, `Complete`, `Superseded` |
-| Task | `Draft`, `Pending`, `In Progress`, `Complete`, `Superseded` |
+| Initiative | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
+| Epic | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
+| Task | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
 | ADR | `Proposed`, `Accepted`, `Deprecated`, `Superseded` |
 | Governance | `Living Document`, `Foundational`, `Superseded` |
 | Architecture | `Living Document`, `Stable`, `Superseded` |

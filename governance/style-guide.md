@@ -1,8 +1,11 @@
-# Spine Style Guide
+---
+type: Governance
+title: Spine Style Guide
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Spine Style Guide
 
 ---
 
@@ -28,27 +31,32 @@ It is a companion to the [Guidelines](/governance/guidelines.md), which define t
 
 ## 3. Metadata
 
-All artifacts should include a metadata block immediately after the title.
+All artifacts should include a YAML front matter block at the top of the file, before the Markdown title.
 
-Metadata fields should appear in a consistent order to make documents predictable for both humans and automated tooling.
+Metadata fields should appear in a consistent order to make documents predictable for both humans and automated tooling. See [Artifact Schema](/governance/artifact-schema.md) for full field definitions.
 
 Governance artifacts:
 
-```
-**Project:** Spine
-**Artifact:** [TYPE‑XXX]
-**Version:** 0.1
-**Status:** [Status]
+```yaml
+---
+type: Governance
+title: "[Document Title]"
+status: Living Document
+version: "0.1"
+---
 ```
 
 Execution artifacts (initiatives, epics, tasks):
 
-```
-**Project:** Spine
-**Artifact:** TASK-001
-**Initiative:** INIT-001 — [Title]
-**Epic:** EPIC-001 — [Title]
-**Status:** [Pending | In Progress | Complete]
+```yaml
+---
+id: TASK-001
+type: Task
+title: "[Task Title]"
+status: Pending
+epic: /initiatives/INIT-XXX/epics/EPIC-XXX/epic.md
+initiative: /initiatives/INIT-XXX/initiative.md
+---
 ```
 
 ---

@@ -1,8 +1,11 @@
-# Success Metrics
+---
+type: Product
+title: Success Metrics
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Success Metrics
 
 ---
 

@@ -1,8 +1,16 @@
-# TASK-006 — Migrate Artifacts to Front Matter and Align Statuses
+---
+id: TASK-006
+type: Task
+title: Migrate Artifacts to Front Matter and Align Statuses
+status: In Progress
+epic: /initiatives/INIT-001-foundations/epics/EPIC-004-governance-refinement/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-004-governance-refinement/epic.md
+---
 
-**Epic:** EPIC-004 — Governance Refinement
-**Initiative:** INIT-001 — Foundations
-**Status:** Pending
+# TASK-006 — Migrate Artifacts to Front Matter and Align Statuses
 
 ---
 

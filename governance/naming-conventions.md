@@ -1,8 +1,11 @@
-# Naming and ID Conventions
+---
+type: Governance
+title: Naming and ID Conventions
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Naming and ID Conventions
 
 ---
 

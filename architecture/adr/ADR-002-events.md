@@ -1,8 +1,13 @@
-# ADR-002: Event Model — Derived Domain Events and Operational Events
+---
+id: ADR-002
+type: ADR
+title: "Event Model \u2014 Derived Domain Events and Operational Events"
+status: Accepted
+date: 2026-03-09
+decision_makers: Spine Architecture
+---
 
-**Status:** Accepted
-**Date:** 2026-03-09
-**Decision Makers:** Spine Architecture
+# ADR-002: Event Model — Derived Domain Events and Operational Events
 
 ---
 

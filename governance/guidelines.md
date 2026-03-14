@@ -1,8 +1,11 @@
-# Spine Guidelines
+---
+type: Governance
+title: Spine Guidelines
+status: Living Document
+version: "0.1"
+---
 
-**Project:** Spine
-**Version:** 0.1
-**Status:** Living Document
+# Spine Guidelines
 
 ---
 
@@ -102,7 +105,7 @@ Artifacts progress through defined statuses:
 
 - **Pending** — Defined but not yet started
 - **In Progress** — Actively being worked on
-- **Complete** — Deliverables met and acceptance criteria satisfied
+- **Completed** — Deliverables met and acceptance criteria satisfied
 - **Superseded** — Replaced by a newer artifact (must link to successor)
 
 Status changes must be reflected in the artifact's metadata block.

@@ -1,8 +1,13 @@
-# ADR-003: Discussion and Comment Model — Runtime Collaboration with Durable Resolution Artifacts
+---
+id: ADR-003
+type: ADR
+title: "Discussion and Comment Model \u2014 Runtime Collaboration with Durable Resolution Artifacts"
+status: Accepted
+date: 2026-03-09
+decision_makers: Spine Architecture
+---
 
-**Status:** Accepted
-**Date:** 2026-03-09
-**Decision Makers:** Spine Architecture
+# ADR-003: Discussion and Comment Model — Runtime Collaboration with Durable Resolution Artifacts
 
 ---
 

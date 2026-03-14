@@ -1,8 +1,13 @@
-# ADR-001: Workflow Definition Storage and Execution Recording Model
+---
+id: ADR-001
+type: ADR
+title: Workflow Definition Storage and Execution Recording Model
+status: Accepted
+date: 2026-03-06
+decision_makers: Spine Architecture
+---
 
-**Status:** Accepted
-**Date:** 2026-03-06
-**Decision Makers:** Spine Architecture
+# ADR-001: Workflow Definition Storage and Execution Recording Model
 
 ---
 

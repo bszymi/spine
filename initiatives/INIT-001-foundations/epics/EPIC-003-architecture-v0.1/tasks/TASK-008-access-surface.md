@@ -1,8 +1,18 @@
-# TASK-008 — Access Surface v0.x
+---
+id: TASK-008
+type: Task
+title: Access Surface v0.x
+status: Pending
+epic: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+  - type: supersedes
+    target: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/tasks/TASK-004-api-surface.md
+---
 
-**Epic:** EPIC-003 — Architecture v0.1
-**Initiative:** INIT-001 — Foundations
-**Status:** Pending
+# TASK-008 — Access Surface v0.x
 
 ---
 

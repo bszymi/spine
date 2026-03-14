@@ -1,7 +1,15 @@
-# EPIC-XXX — [Epic Title]
+---
+id: EPIC-XXX
+type: Epic
+title: "[Epic Title]"
+status: Pending
+initiative: /initiatives/INIT-XXX-<slug>/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-XXX-<slug>/initiative.md
+---
 
-**Initiative:** INIT-XXX — [Initiative Title]
-**Status:** Pending
+# EPIC-XXX — [Epic Title]
 
 ---
 

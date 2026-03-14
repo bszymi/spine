@@ -1,8 +1,16 @@
-# TASK-XXX — [Task Title]
+---
+id: TASK-XXX
+type: Task
+title: "[Task Title]"
+status: Pending
+epic: /initiatives/INIT-XXX-<slug>/epics/EPIC-XXX-<slug>/epic.md
+initiative: /initiatives/INIT-XXX-<slug>/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-XXX-<slug>/epics/EPIC-XXX-<slug>/epic.md
+---
 
-**Epic:** EPIC-XXX — [Epic Title]
-**Initiative:** INIT-XXX — [Initiative Title]
-**Status:** Pending
+# TASK-XXX — [Task Title]
 
 ---
 

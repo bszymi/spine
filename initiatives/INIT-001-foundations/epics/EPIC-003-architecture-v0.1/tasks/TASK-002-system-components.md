@@ -1,8 +1,16 @@
-# TASK-002 — System Components
+---
+id: TASK-002
+type: Task
+title: System Components
+status: Completed
+epic: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+---
 
-**Epic:** EPIC-003 — Architecture v0.1
-**Initiative:** INIT-001 — Foundations
-**Status:** Complete
+# TASK-002 — System Components
 
 ---
 

@@ -1,9 +1,14 @@
-# INIT-001 — Foundations
+---
+id: INIT-001
+type: Initiative
+title: Foundations
+status: In Progress
+owner: bszymi
+created: 2026-03-04
+last_updated: 2026-03-14
+---
 
-**Status:** In Progress
-**Owner:** _TBD_
-**Created:** 2026-03-04
-**Last updated:** 2026-03-04
+# INIT-001 — Foundations
 
 ---
 

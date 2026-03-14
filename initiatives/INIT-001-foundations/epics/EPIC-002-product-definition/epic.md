@@ -1,8 +1,16 @@
-# EPIC-002 — Product Definition
+---
+id: EPIC-002
+type: Epic
+title: Product Definition
+status: Completed
+initiative: /initiatives/INIT-001-foundations/initiative.md
+owner: bszymi
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/initiative.md
+---
 
-**Initiative:** INIT-001 — Foundations
-**Status:** Complete
-**Owner:** bszymi
+# EPIC-002 — Product Definition
 
 ---
 

@@ -1,8 +1,18 @@
-# TASK-004 — API Surface
+---
+id: TASK-004
+type: Task
+title: API Surface
+status: Cancelled
+epic: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+initiative: /initiatives/INIT-001-foundations/initiative.md
+links:
+  - type: parent
+    target: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/epic.md
+  - type: superseded_by
+    target: /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/tasks/TASK-008-access-surface.md
+---
 
-**Epic:** EPIC-003 — Architecture v0.1
-**Initiative:** INIT-001 — Foundations
-**Status:** Cancelled
+# TASK-004 — API Surface
 
 ---
 
