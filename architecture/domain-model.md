@@ -75,14 +75,17 @@ Link targets must use globally unambiguous references rather than relying on loc
 
 ### 3.2 Workflow Definition
 
-A versioned artifact that describes how a type of work progresses through states.
+A versioned artifact that describes how a type of work progresses through steps toward a terminal outcome.
 
 **Attributes:**
 
 - `id` — stable identifier
 - `name` — human-readable workflow name
-- `states` — ordered set of valid states
-- `transitions` — rules governing movement between states
+- `version` — semantic version of this definition
+- `status` — lifecycle status (Active, Deprecated, Superseded)
+- `description` — what this workflow governs
+- `applies_to` — artifact types this workflow governs
+- `entry_step` — step where execution begins
 - `steps` — ordered sequence of workflow steps
 - `divergence_points` — where parallel execution may begin
 - `convergence_points` — where parallel results are evaluated
@@ -106,13 +109,15 @@ A configuration element within a Workflow Definition that specifies what must ha
 - `id` — identifier within the workflow definition
 - `name` — human-readable step name
 - `type` — classification (manual, automated, review, convergence)
-- `actor_type` — who may execute this step (human, AI, automated, any)
+- `execution` — execution constraints (mode, eligible actor types, required capabilities)
 - `preconditions` — what must be true before the step can begin
 - `required_inputs` — artifacts or data required to execute
 - `required_outputs` — artifacts or data that must be produced
-- `validation` — conditions that must be met for the step to succeed
-- `retry_limit` — maximum attempts for automated steps
+- `validation` — conditions checked before accepting result
+- `outcomes` — possible results, each routing to a next step or terminating the Run, with optional durable artifact mutations
+- `retry` — retry configuration (limit and backoff strategy)
 - `timeout` — maximum duration before escalation
+- `timeout_outcome` — which outcome to apply on timeout
 
 **Rules:**
 
