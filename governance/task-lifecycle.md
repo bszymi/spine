@@ -261,6 +261,7 @@ Steps 3–6 do not touch the main branch. Only steps 1, 2, and 8 produce Git com
 - [ADR-004](/architecture/adr/ADR-004-evaluation-and-acceptance-model.md) — Evaluation and acceptance outcomes, rejection types
 - [Constitution](/governance/Constitution.md) — Source of Truth (§2), Governed Execution (§4)
 - [Artifact Schema](/governance/artifact-schema.md) — Task status enums and acceptance fields
+- [Task-to-Workflow Binding](/architecture/task-workflow-binding.md) — How tasks are bound to workflows, `work_type` mutability rules
 
 ---
 

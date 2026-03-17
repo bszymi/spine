@@ -132,6 +132,7 @@ Interprets workflow definitions and governs execution.
 **Responsibilities:**
 
 - Load workflow definitions from Git (via Artifact Service or Projection Store)
+- Resolve workflow binding for artifacts using `(type, work_type)` resolution (per [Binding Model](/architecture/task-workflow-binding.md))
 - Create and manage Runs
 - Enforce state transitions, preconditions, and validation rules
 - Assign steps to actors based on workflow definitions
