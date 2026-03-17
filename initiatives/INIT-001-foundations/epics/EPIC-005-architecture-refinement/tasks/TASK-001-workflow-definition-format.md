@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Workflow Definition Format
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-001-foundations/epics/EPIC-005-architecture-refinement/epic.md
 initiative: /initiatives/INIT-001-foundations/initiative.md
 links:
