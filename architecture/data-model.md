@@ -113,6 +113,7 @@ runs
 ├── task_path          (string, path to governing Task artifact)
 ├── workflow_path      (string, path to governing Workflow Definition)
 ├── workflow_version   (string, Git commit SHA of workflow definition)
+├── workflow_version_label (string, semantic version from workflow YAML, informational)
 ├── status             (enum: pending, active, completed, failed, cancelled)
 ├── current_step_id    (string, active step within workflow)
 ├── started_at         (timestamp)

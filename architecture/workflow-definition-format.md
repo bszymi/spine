@@ -170,13 +170,27 @@ The detailed execution semantics for divergence and convergence are defined in t
 
 The `applies_to` field declares which artifact types this workflow applies to. The Workflow Engine uses this to determine which workflow definition to activate when a Run is started for a given artifact.
 
+The clause accepts either a simple string (matches all artifacts of that type) or a structured object with a `work_type` filter:
+
 ```yaml
+# Governs all Tasks regardless of work_type
 applies_to:
   - Task
-  - ADR
+
+# Governs only Tasks with work_type: spike
+applies_to:
+  - type: Task
+    work_type: spike
+
+# Governs Tasks with work_type: implementation or bugfix
+applies_to:
+  - type: Task
+    work_type: [implementation, bugfix]
 ```
 
-An artifact type may be governed by at most one active workflow definition at a time. If multiple workflows declare governance over the same type, the conflict must be resolved before either can be activated.
+An artifact type may be governed by at most one active workflow definition at a time per `work_type` value. A general workflow (no `work_type` filter) and a specific workflow (with `work_type` filter) may coexist for the same artifact type, as long as they do not overlap on the same `work_type` value.
+
+The full resolution algorithm and precedence rules are defined in the [Task-to-Workflow Binding Model](/architecture/task-workflow-binding.md).
 
 ---
 

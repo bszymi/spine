@@ -214,6 +214,7 @@ links:
 | `status` | yes | enum | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
 | `epic` | yes | path | Canonical path to parent epic |
 | `initiative` | yes | path | Canonical path to parent initiative |
+| `work_type` | optional | string | Workflow classification (e.g., `implementation`, `spike`, `bugfix`). Used by the Workflow Engine for [binding resolution](/architecture/task-workflow-binding.md). |
 | `acceptance` | optional | enum | `Approved`, `Rejected With Followup`, `Rejected Closed` |
 | `acceptance_rationale` | optional | string | Reason for acceptance outcome |
 | `created` | optional | date | Creation date |
