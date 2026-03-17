@@ -29,6 +29,7 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Define the divergence and convergence execution model
 - Define error handling and recovery patterns for the workflow engine
 - Define concrete event schemas for domain and operational events
+- Define the task-to-workflow binding model
 
 ---
 
@@ -38,6 +39,7 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - `/architecture/divergence-and-convergence.md` — parallel execution model
 - `/architecture/error-handling-and-recovery.md` — failure and recovery patterns
 - `/architecture/event-schemas.md` — event type specifications
+- `/architecture/task-workflow-binding.md` — workflow assignment and resolution semantics
 
 ---
 
@@ -47,4 +49,5 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Divergence and convergence execution model is defined with clear rules
 - Error handling patterns cover failure, timeout, retry, and recovery scenarios
 - Event schemas are specified for all domain event types
+- Task-to-workflow binding model defines resolution, versioning, and mutability rules
 - All documents are consistent with the domain model, data model, and existing ADRs
