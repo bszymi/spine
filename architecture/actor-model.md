@@ -48,6 +48,10 @@ status: <enum>                  # active, suspended, deactivated
 created_at: <timestamp>
 ```
 
+Capabilities are defined at the system level (not per actor) and represent a shared vocabulary used by workflow definitions and actor configuration.
+
+Actors declare which capabilities they possess; workflows declare which capabilities are required. The Workflow Engine performs matching based on these values.
+
 ### 3.2 Registration Rules
 
 - Every actor must be registered before interacting with the system
@@ -93,6 +97,8 @@ The Workflow Engine selects an actor through the following process:
 4. **Filter by availability** — restrict candidates to actors with `active` status
 5. **Select** — from the eligible set, select an actor using the configured selection strategy
 
+When multiple eligible actors are available, the selection strategy may consider operational factors such as cost, latency, reliability, or historical performance. These factors are not part of workflow definitions and are configured at the Workflow Engine level.
+
 ### 4.3 Selection Strategies
 
 | Strategy | Behavior | Use Case |
@@ -111,6 +117,8 @@ If no eligible actor exists for a step:
 - An operational event (`step_assignment_failed`) is emitted
 - The Workflow Engine retries assignment periodically or when actor availability changes
 - If the step has a timeout, the timeout applies from when the step became ready, not from when assignment succeeds
+
+If assignment to a selected actor fails repeatedly, the Workflow Engine may attempt reassignment to another eligible actor before failing the step.
 
 ---
 
@@ -172,6 +180,7 @@ All actor responses are untrusted input (per [Security Model](/architecture/secu
 - `outcome_id` is one of the declared `expected_outcomes`
 - Any artifacts referenced in `artifacts_produced` exist and conform to the artifact schema
 - The response arrives within the step timeout
+- Duplicate or replayed responses for the same assignment must be detected and handled idempotently
 
 Invalid responses are rejected. The step may be retried or failed based on error classification (per [Error Handling](/architecture/error-handling-and-recovery.md)).
 
@@ -268,6 +277,8 @@ Actor availability is tracked at the operational level:
 - **Automated systems** — available when the endpoint is reachable; the Actor Gateway may perform periodic health checks
 
 Availability affects actor selection (§4.2) but does not change actor status. An unreachable AI agent remains `active` — the assignment simply fails and is retried or reassigned.
+
+Availability may include additional operational signals such as error rates, latency, or rate limiting status. These signals may influence actor selection but do not change actor status.
 
 ### 7.3 Concurrent Assignments
 
