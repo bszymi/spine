@@ -33,6 +33,12 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Define the security model
 - Define the actor model
 - Define workflow authoring and validation rules
+- Define validation service specification (cross-artifact validation rules)
+- Define production runtime store schema
+- Define Git integration contract
+- Define detailed API operation schemas
+- Define workflow engine state machine
+- Define discussion and comment runtime model
 
 ---
 
@@ -46,6 +52,12 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - `/architecture/security-model.md` — permission boundaries, credentials, authorization
 - `/architecture/actor-model.md` — actor registration, selection, and gateway protocol
 - `/architecture/workflow-validation.md` — validation rules and lifecycle
+- `/architecture/validation-service.md` — cross-artifact validation rules and contract
+- `/architecture/runtime-schema.md` — production database schema
+- `/architecture/git-integration.md` — Git authentication, branch strategy, commit format
+- `/architecture/api-operations.md` — detailed request/response schemas
+- `/architecture/engine-state-machine.md` — formal state machines for Run, Step, Divergence
+- `/architecture/discussion-model.md` — discussion/comment runtime storage and lifecycle
 
 ---
 
@@ -59,4 +71,10 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Security model defines permission boundaries, credential handling, and authorization enforcement
 - Actor model defines registration, selection, AI integration, and gateway protocol
 - Workflow validation rules cover schema, structural, and semantic checks
+- Validation service rules are concrete and aligned with Constitution §11
+- Runtime schema is production-ready with indexes, constraints, and migration policy
+- Git integration contract covers authentication, branch strategy, and change detection
+- API operations have detailed request/response schemas
+- Engine state machines are formally defined with transition matrices
+- Discussion model implements ADR-003 governance decisions
 - All documents are consistent with the domain model, data model, and existing ADRs
