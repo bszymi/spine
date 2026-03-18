@@ -38,6 +38,14 @@ payload: <object>               # Event-type-specific data (defined per schema b
 
 The `schema_version` field is added to support event versioning (see §5).
 
+### Canonical Artifact Reference
+
+`artifact_path` is the authoritative reference to an artifact within Spine. It is globally unique and stable across the system.
+
+Fields such as `artifact_id` included in payloads are convenience identifiers only and must not be treated as globally unique or authoritative by consumers.
+
+Consumers should always use `artifact_path` when correlating events with artifacts.
+
 ---
 
 ## 3. Domain Event Schemas
@@ -45,6 +53,12 @@ The `schema_version` field is added to support event versioning (see §5).
 Domain events represent meaningful system state transitions. They are derived from Git artifact changes and must be reconstructible from Git commit history.
 
 **Delivery guarantee:** at-least-once.
+
+### Status and Lifecycle Consistency
+
+Any status values or lifecycle transitions included in event payloads must align with the canonical lifecycle definitions defined in the Domain Model and Artifact Schema.
+
+Event payloads must not introduce new status values. They are a reflection of artifact state, not a source of lifecycle truth.
 
 ### 3.1 `artifact_created`
 
@@ -81,6 +95,8 @@ payload:
 ```
 
 **Reconstruction:** diff the source commit to find modified artifact files; compare front matter before and after.
+
+**Note on relationships:** If artifact relationships (links) change, they must be included in `changed_fields`. Consumers should treat relationship updates the same as other metadata changes.
 
 ### 3.3 `artifact_superseded`
 
@@ -363,6 +379,17 @@ When a schema changes:
 
 Old schema versions are never removed from this document — they are marked as deprecated with a pointer to the successor.
 
+### Event Ordering and Causality
+
+Spine does not guarantee global ordering of events.
+
+The following assumptions apply:
+- Ordering is only reliable within the context of a single artifact (via Git commit history)
+- Ordering is not guaranteed across artifacts
+- Operational events may be out of order or delayed
+
+Consumers must not rely on strict ordering across event streams and should use timestamps and artifact context for reconciliation where necessary.
+
 ---
 
 ## 6. Reconstruction Path
@@ -385,7 +412,13 @@ Git commit log
     → Emit reconstructed event
 ```
 
-**Run lifecycle events** (`run_started`, `run_completed`, `run_failed`, `run_cancelled`) can be partially reconstructed from Git when the Run produced durable outcomes (e.g., a task status change to `Completed` implies a `run_completed` occurred). However, Runs that failed without producing Git commits cannot be reconstructed — these events exist only in the Runtime Store and operational logs.
+**Run lifecycle events** (`run_started`, `run_completed`, `run_failed`, `run_cancelled`) are only partially reconstructible from Git.
+
+- Runs that produce durable outcomes (e.g., a task status change to `Completed`) may imply that a corresponding lifecycle event occurred
+- Runs that fail or are cancelled without producing Git commits are not reconstructible from Git history
+- Operational aspects of execution (step-level activity, retries, timing) are never reconstructible
+
+These events should be treated as runtime signals with limited durability rather than a complete historical source of truth.
 
 ---
 
@@ -401,6 +434,7 @@ Git commit log
 - Consumers must be idempotent — receiving the same event twice must not cause incorrect state
 - The Event Router should support deduplication where feasible (e.g., by `event_id`)
 - Domain events should include enough context for consumers to detect duplicates (e.g., `source_commit` + `artifact_path`)
+  - For domain events derived from Git, a recommended idempotency key is the combination of `source_commit` and `artifact_path`
 
 ---
 
@@ -421,6 +455,16 @@ Git commit log
 | External integrations | All domain events | Webhooks, notifications |
 | Observability systems | All events | Monitoring, alerting, dashboards |
 | Workflow Engine | `artifact_updated` | Detect external artifact changes that may affect running Runs |
+
+### Events vs Source of Truth
+
+Events in Spine are signals, not the source of truth.
+
+- Artifact state is defined exclusively by Git (artifact files and their history)
+- Events reflect and notify about those changes
+- Consumers must not treat events as authoritative state
+
+In particular, decisions such as approval, rejection, or completion are only valid when reflected in artifact state, not when observed as events alone.
 
 ---
 
