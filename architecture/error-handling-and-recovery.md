@@ -60,6 +60,15 @@ The component that encounters the error is responsible for classifying it:
 
 When classification is ambiguous, the error should be treated as transient for the first occurrence and permanent if it persists after retries.
 
+### 2.4 Failure Semantics (Core Guarantees)
+
+The system provides the following guarantees:
+
+- **No duplicate durable outcomes** — Git commits are the single boundary of durable state
+- **Step execution may be repeated** — retries and recovery may re-run steps
+- **External side effects must be idempotent or compensatable** — steps must tolerate re-execution
+- **Runtime state loss may cause re-execution** — correctness is prioritized over continuity
+
 ---
 
 ## 3. Step Failure Handling
@@ -105,6 +114,21 @@ Base delay and maximum delay are determined by the Workflow Engine's configurati
 - Manual steps may also be retried (e.g., reassigned to a different human actor after timeout)
 - Retrying does not modify Git — retries are operational, not durable
 
+### 3.2.1 Side-Effect Safety
+
+Steps fall into two categories:
+
+- **Pure steps** — no external side effects; safe to retry freely
+- **Side-effect steps** — interact with external systems or produce non-idempotent outputs
+
+Side-effect steps must ensure one of the following:
+
+- Idempotent execution (same input produces the same result without duplication)
+- Deduplication via identifiers (e.g., idempotency keys)
+- Explicit compensation logic defined outside the workflow (operator or system-driven)
+
+The Workflow Engine assumes steps are safe to retry. Responsibility for side-effect safety lies with step design and actor implementation.
+
 ### 3.3 Timeout Handling
 
 When a step exceeds its declared `timeout`:
@@ -114,6 +138,9 @@ When a step exceeds its declared `timeout`:
 3. If no `timeout_outcome` is declared, the timeout is treated as a step failure and follows the retry/escalation path
 
 Timeout outcomes allow workflows to handle timeouts gracefully. For example, a review step that times out might route to an automatic approval or to cancellation, rather than failing the entire Run.
+
+**Guidance:**
+Timeout outcomes should be used cautiously. A timeout does not imply successful completion of the step. Workflows should avoid treating timeouts as implicit success unless explicitly intended.
 
 ### 3.4 Actor Failure
 
@@ -130,6 +157,7 @@ When an actor becomes unresponsive or returns invalid results:
 - The step execution is marked as failed with error classification `invalid_result`
 - Classified as transient if the actor might produce a valid result on retry (e.g., AI agent)
 - Classified as permanent if the validation failure indicates a structural problem
+- Classification is performed by the component detecting the failure, but may be influenced by workflow validation rules
 
 ---
 
@@ -194,6 +222,9 @@ If a durable outcome commit results in a Git conflict:
 3. Operator intervention is required to resolve the conflict
 4. After resolution, the Run may be resumed or a new Run started
 
+**Note (v0.x scope):**
+Git conflicts are treated as permanent errors requiring operator intervention. Future versions may introduce assisted resolution (e.g., rebase-and-retry or workflow-driven merge steps), but these are explicitly out of scope for v0.x.
+
 ### 5.3 Partial Commit Failure
 
 If a step produces multiple artifact changes that must be committed atomically:
@@ -229,7 +260,7 @@ A Run is orphaned when no Workflow Engine instance is actively managing it. This
 
 **Detection:**
 
-- The Workflow Engine periodically scans for Runs that have been `active` for longer than expected (based on step timeouts and workflow structure)
+- The Workflow Engine periodically scans for Runs that have been `active` for longer than expected (based on step timeouts, workflow structure, and absence of recent execution activity or heartbeat signals)
 - Runs without recent step execution activity are flagged as potentially orphaned
 - Operators may also manually flag orphaned Runs
 
@@ -324,6 +355,19 @@ Errors in supporting components (Projection Service, Event Router) do not fail R
 - **Projection Service failure** — queries return stale data; writes to Git succeed. The system operates in degraded mode.
 - **Event Router failure** — events are not delivered. Domain events can be reconstructed from Git. Operational events are lost but non-authoritative.
 - **Actor Gateway failure** — step assignments cannot be delivered. Steps time out and follow normal timeout handling.
+
+### 8.5 Responsibility Boundaries
+
+Error handling responsibilities are distributed as follows:
+
+| Concern | Responsible Component |
+|--------|----------------------|
+| Error classification | Component detecting the error |
+| Retry and escalation decisions | Workflow Engine |
+| Validation of results | Workflow Engine / Validation Service |
+| Side-effect safety | Step design and actor implementation |
+
+The Workflow Engine orchestrates recovery, but correctness depends on proper step and actor design.
 
 ---
 
