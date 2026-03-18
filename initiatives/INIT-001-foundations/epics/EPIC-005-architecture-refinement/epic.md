@@ -39,6 +39,7 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Define detailed API operation schemas
 - Define workflow engine state machine
 - Define discussion and comment runtime model
+- Select technology stack for v0.x implementation
 
 ---
 
@@ -58,6 +59,7 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - `/architecture/api-operations.md` — detailed request/response schemas
 - `/architecture/engine-state-machine.md` — formal state machines for Run, Step, Divergence
 - `/architecture/discussion-model.md` — discussion/comment runtime storage and lifecycle
+- `/architecture/adr/ADR-005-technology-selection.md` — technology stack decisions
 
 ---
 
