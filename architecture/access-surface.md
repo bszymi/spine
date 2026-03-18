@@ -220,16 +220,19 @@ Authorization determines what an authenticated actor may do. Spine v0.x uses a r
 
 | Role | Permissions |
 |------|------------|
-| `reader` | Read artifacts, query state, view runs |
-| `contributor` | Reader permissions + create/update artifacts, submit step results |
-| `reviewer` | Contributor permissions + approve/reject tasks, governance actions |
-| `admin` | Full access including system operations and projection rebuilds |
+| `reader` | Read artifacts, query projected state, view Runs and execution history |
+| `contributor` | Reader + create/update artifacts, submit step results, start Runs |
+| `reviewer` | Contributor + approve/reject tasks, execute governance steps |
+| `operator` | Reviewer + system operations (projection rebuild, health checks, Run cancellation) |
+| `admin` | Full access including actor management, token management, and configuration |
+
+For the full authorization model including role hierarchy, capabilities, and enforcement points, see [Security Model](/architecture/security-model.md) §4.
 
 **Authorization rules:**
 
 - Roles are assigned to actors, not to access modes
 - An actor has the same permissions regardless of whether they access via CLI, API, or GUI
-- Workflow definitions may impose additional step-level constraints (e.g., "only reviewers may execute this step")
+- Workflow definitions may impose additional step-level constraints via capabilities (e.g., "only actors with `architecture_review` capability may execute this step")
 - Authorization is enforced at the Access Gateway before requests reach internal components
 
 ### 4.4 Secrets and Credentials
@@ -312,6 +315,7 @@ Operations executed through this model represent governed domain transitions rat
 - [Data Model](/architecture/data-model.md) — Runtime state vs Git truth boundary
 - [Product Boundaries](/product/boundaries-and-constraints.md) — System boundaries and integration model
 - [Constitution](/governance/Constitution.md) — Actor Neutrality (§5), Governed Execution (§4)
+- [Security Model](/architecture/security-model.md) — Full authorization model, credential management, trust boundaries
 - [Task Lifecycle](/governance/task-lifecycle.md) — Which operations modify Git vs runtime only
 
 ---

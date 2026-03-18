@@ -334,7 +334,24 @@ payload:
   branch_ids: [<string>]         # List of branch identifiers
 ```
 
-### 4.9 `convergence_completed`
+### 4.9 `step_assignment_failed`
+
+Emitted when no eligible actor can be found for a step (per [Actor Model](/architecture/actor-model.md) §4.4).
+
+**Source:** Workflow Engine
+
+```yaml
+payload:
+  step_id: <string>             # Step that could not be assigned
+  step_name: <string>
+  reason: <string>              # Why assignment failed (no_eligible_actors, actor_unreachable, capability_mismatch)
+  required_capabilities: [<string>] # Capabilities the step requires
+  eligible_actor_types: [<string>]  # Actor types the step accepts
+  attempt: <integer>            # Assignment attempt number
+  branch_id: <string|null>
+```
+
+### 4.10 `convergence_completed`
 
 Emitted when a convergence point resolves.
 
@@ -445,7 +462,7 @@ These events should be treated as runtime signals with limited durability rather
 | Component | Events Produced |
 |-----------|----------------|
 | Artifact Service | `artifact_created`, `artifact_updated`, `artifact_superseded`, `workflow_definition_changed` |
-| Workflow Engine | `run_started`, `run_completed`, `run_failed`, `run_cancelled`, `step_started`, `step_completed`, `step_failed`, `step_assigned`, `step_timeout`, `retry_attempted`, `engine_recovered`, `divergence_started`, `convergence_completed` |
+| Workflow Engine | `run_started`, `run_completed`, `run_failed`, `run_cancelled`, `step_started`, `step_completed`, `step_failed`, `step_assigned`, `step_assignment_failed`, `step_timeout`, `retry_attempted`, `engine_recovered`, `divergence_started`, `convergence_completed` |
 
 ### 8.2 Consumers
 

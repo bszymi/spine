@@ -139,6 +139,7 @@ The Runtime Store provides a supplementary audit trail for execution details:
 - Step execution records with actor assignments, attempt counts, durations, and error details
 - Run history with status transitions and timing
 - Divergence context with branch status and convergence results
+- Security audit events (authentication attempts, authorization decisions, token lifecycle) — see [Security Model](/architecture/security-model.md) §8.3
 
 This audit trail has limited durability — if the Runtime Store is lost, execution details are lost (per [Data Model](/architecture/data-model.md) §5.2). However, all governed outcomes remain in Git.
 
@@ -304,6 +305,7 @@ This means a metrics consumer can be implemented as an event consumer without ad
 - [ADR-002](/architecture/adr/ADR-002-events.md) — Event model (domain vs operational, derived signals)
 - [System Components](/architecture/components.md) §4.7 — Event Router
 - [Error Handling](/architecture/error-handling-and-recovery.md) §9 — Operator visibility and alerting
+- [Security Model](/architecture/security-model.md) §8.3 — Security audit logging
 
 ---
 

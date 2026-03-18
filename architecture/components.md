@@ -247,6 +247,8 @@ Provides a uniform interface for assigning and receiving work from actors.
 - Returns step results to the Workflow Engine
 - May integrate with external systems (LLM providers, CI/CD, human task interfaces)
 
+For the concrete gateway protocol (assignment request/response schemas, delivery mechanisms, and response validation), see [Actor Model](/architecture/actor-model.md) §5.
+
 **Constitutional alignment:**
 
 - Actor Neutrality (§5) — uniform interface for all actor types
