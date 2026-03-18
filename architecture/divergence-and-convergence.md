@@ -106,7 +106,7 @@ When divergence is triggered, the Workflow Engine:
 1. Records the divergence event in the Run's runtime state
 2. Creates a **branch execution context** for each declared branch (for structured divergence) or initializes a dynamic branch set (for exploratory divergence)
 3. Each branch context tracks:
-   - `branch_id` — reference to the declared branch
+   - `branch_id` — unique identifier for the branch; references a declared branch in structured divergence, or a runtime-created branch in exploratory divergence
    - `status` — pending, in_progress, completed, failed
    - `current_step` — the step currently executing in this branch
    - `artifacts` — artifacts produced by this branch
@@ -128,8 +128,8 @@ Two forms of divergence are supported:
 
 Examples:
 - A/B testing with fixed variants
-- parallel implementations with known approaches
-- required parallel work streams with distinct responsibilities
+- fixed competing alternatives with known identities
+- parallel implementations where each branch is an alternative solution
 
 #### Exploratory Divergence (Dynamic)
 
@@ -156,6 +156,8 @@ This mode is used for:
 - design exploration (e.g., generating multiple UI concepts)
 - AI-driven variant generation
 - open-ended problem solving where the number of approaches is unknown
+
+> **Note:** `min_branches` constrains branch creation in exploratory divergence, while `minimum_completed_branches` (see §4.1.1) controls when convergence may begin.
 
 ### 3.2.2 Divergence Window (Dynamic Only)
 
@@ -264,7 +266,7 @@ entry_policy: manual_trigger
 |--------|---------|
 | `all_branches_terminal` (default) | All branches must complete or fail |
 | `minimum_completed_branches` | Convergence may begin after `min` branches complete; remaining branches continue but their results are optional |
-| `deadline_reached` | Convergence begins after `deadline` elapses; completed branches are evaluated, in-progress branches are cancelled |
+| `deadline_reached` | Convergence begins after `deadline` elapses; completed branches are evaluated, and in-progress branches are handled according to workflow policy (e.g., cancelled, excluded, or allowed to continue asynchronously) |
 | `manual_trigger` | An authorized actor explicitly starts convergence |
 
 For exploratory divergence, convergence also requires that the divergence window is closed before evaluation begins, unless the policy explicitly allows partial evaluation.
@@ -427,7 +429,9 @@ Run
 ├── divergence_contexts[]
 │   ├── divergence_id
 │   ├── status: pending | active | converging | resolved | failed
+│   ├── divergence_mode: structured | exploratory
 │   ├── triggered_at
+│   ├── divergence_window: open | closed   # for exploratory divergence
 │   ├── branches[]
 │   │   ├── branch_id
 │   │   ├── status: pending | in_progress | completed | failed
@@ -439,7 +443,10 @@ Run
 │   ├── convergence_result
 │   │   ├── strategy_applied
 │   │   ├── selected_branch (for select_one)
+│   │   ├── selected_branches[] (for select_subset)
 │   │   ├── merged_artifact (for merge)
+│   │   ├── experiment_artifact (for experiment)
+│   │   ├── entry_policy_applied
 │   │   └── evaluation_record
 │   └── resolved_at
 └── ...
