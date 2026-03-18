@@ -139,20 +139,40 @@ steps:
 
 Divergence and convergence points are declared as named constructs referenced by steps.
 
+**Structured divergence** (static branches declared upfront):
+
 ```yaml
 divergence_points:
   - id: <string>                   # Unique divergence identifier
     name: <string>
+    mode: structured               # Default; branches are predefined
     branches:                      # Parallel branches to create
       - id: <string>
         name: <string>
         start_step: <step_id>      # Which step each branch starts at
+```
 
+**Exploratory divergence** (dynamic branches created at runtime):
+
+```yaml
+divergence_points:
+  - id: <string>                   # Unique divergence identifier
+    name: <string>
+    mode: exploratory              # Branches created at runtime
+    branch_step: <step_id>         # Step template each new branch starts at
+    min_branches: <integer>        # Minimum branches before convergence is allowed
+    max_branches: <integer>        # Optional cap on branch count
+```
+
+**Convergence points:**
+
+```yaml
 convergence_points:
   - id: <string>                   # Unique convergence identifier
     name: <string>
-    branches: [<branch_id>, ...]   # Which branches converge here
-    strategy: <enum>               # select_one, merge, require_all
+    branches: [<branch_id>, ...]   # For structured; omit for exploratory
+    strategy: <enum>               # select_one, select_subset, merge, require_all, experiment
+    entry_policy: <policy>         # When convergence may begin (default: all_branches_terminal)
     evaluation_step: <step_id>     # Step that performs the evaluation
 ```
 
@@ -161,8 +181,19 @@ convergence_points:
 | Strategy | Meaning |
 |----------|---------|
 | `select_one` | One branch outcome is selected; others are preserved but not applied |
+| `select_subset` | A subset of branch outcomes is selected for further processing |
 | `merge` | Multiple branch outcomes are combined into a single result |
 | `require_all` | All branches must complete successfully before proceeding |
+| `experiment` | Branch outcomes are packaged into a controlled experiment for data-driven evaluation |
+
+**Convergence entry policies:**
+
+| Policy | Meaning |
+|--------|---------|
+| `all_branches_terminal` | Default — all branches must complete or fail |
+| `minimum_completed_branches` | Convergence may begin after a minimum number of branches complete |
+| `deadline_reached` | Convergence begins after a defined time threshold |
+| `manual_trigger` | An authorized actor explicitly starts convergence |
 
 The detailed execution semantics for divergence and convergence are defined in the [Divergence and Convergence](/architecture/divergence-and-convergence.md) architecture document.
 
