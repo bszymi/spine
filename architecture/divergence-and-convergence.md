@@ -15,7 +15,45 @@ This document defines how controlled divergence and convergence execute within t
 
 The [Constitution](/governance/constitution.md) (§6) mandates that parallel execution must be explicit, all outcomes must be preserved, and convergence must occur through explicit evaluation steps. The [Domain Model](/architecture/domain-model.md) (§6) establishes that divergence creates parallel steps within a single Run. The [Workflow Definition Format](/architecture/workflow-definition-format.md) (§3.3) defines the declarative structure for divergence and convergence points.
 
+
 This document specifies the runtime execution semantics — what happens when a Run reaches a divergence point, how parallel branches execute, and how convergence evaluates and commits results.
+
+---
+
+## 1.1 Parallel Execution vs Divergence
+
+Parallel execution does not always imply divergence.
+
+Two distinct forms of parallelism exist in the Spine execution model:
+
+### Parallel Execution (Non-Divergent)
+
+- Multiple steps execute concurrently
+- All steps operate on the same artifact state
+- Outputs are additive (e.g., validations, approvals, reports)
+- No Git branching occurs
+- No convergence step is required
+
+This model is used for:
+- approvals and validation workflows
+- independent checks (e.g., QA, security, compliance)
+- multi-role execution where outputs are not competing
+
+### Divergence (Branching Execution)
+
+- Multiple branches represent alternative approaches or outputs
+- Each branch operates in isolation
+- Git branches may be created for durable artifacts
+- Convergence is required to evaluate outcomes
+
+This model is used for:
+- exploratory work (e.g., multiple design variants)
+- competing implementations
+- alternative solutions to the same problem
+
+Workflows must explicitly choose between these models. Divergence must not be used for parallel validation or approval steps.
+
+> **Note:** Non-divergent parallel execution is not yet supported by the Workflow Definition Format. The step-graph model routes through `next_step` sequentially. A future format extension (e.g., a `parallel` step type or `concurrent_steps` block) is needed to express non-divergent parallelism. Until then, workflows requiring concurrent non-competing steps should model them as sequential steps or use divergence with `require_all` as an approximation.
 
 ---
 
@@ -66,7 +104,7 @@ When the `plan` step completes with the `approaches_identified` outcome, the Wor
 When divergence is triggered, the Workflow Engine:
 
 1. Records the divergence event in the Run's runtime state
-2. Creates a **branch execution context** for each declared branch
+2. Creates a **branch execution context** for each declared branch (for structured divergence) or initializes a dynamic branch set (for exploratory divergence)
 3. Each branch context tracks:
    - `branch_id` — reference to the declared branch
    - `status` — pending, in_progress, completed, failed
@@ -76,6 +114,65 @@ When divergence is triggered, the Workflow Engine:
 4. Activates each branch's `start_step` for execution
 
 All branches belong to the same Run. Divergence does not create new Runs.
+
+### 3.2.1 Static vs Dynamic Divergence
+
+Two forms of divergence are supported:
+
+#### Structured Divergence (Static)
+
+- Branches are explicitly declared in the workflow definition
+- Each branch represents a distinct role, responsibility, or predefined alternative
+- The number and identity of branches are fixed before execution
+- Used when structure, guarantees, or governance constraints are required
+
+Examples:
+- A/B testing with fixed variants
+- parallel implementations with known approaches
+- required parallel work streams with distinct responsibilities
+
+#### Exploratory Divergence (Dynamic)
+
+- Branches may be created at runtime
+- The number of branches is not fixed in advance
+- Branches represent interchangeable variants of the same task
+- Additional branches may be added during execution
+
+This mode is declared in the workflow definition with `mode: exploratory` on the divergence point:
+
+```yaml
+divergence_points:
+  - id: diverge-explorations
+    name: Design Explorations
+    mode: exploratory
+    branch_step: explore          # step template each new branch starts at
+    min_branches: 1               # minimum branches before convergence is allowed
+    max_branches: 10              # optional cap on branch count
+```
+
+Unlike static divergence, exploratory divergence does not list branches upfront. Instead, it declares a `branch_step` that each dynamically created branch will start at, and optional constraints on branch count.
+
+This mode is used for:
+- design exploration (e.g., generating multiple UI concepts)
+- AI-driven variant generation
+- open-ended problem solving where the number of approaches is unknown
+
+### 3.2.2 Divergence Window (Dynamic Only)
+
+In exploratory divergence, the system enters a divergence window:
+
+- The branch set remains open for expansion
+- Authorized actors may create additional branches
+- Each new branch is recorded with:
+  - creator
+  - timestamp
+  - rationale (optional but recommended)
+
+The divergence window must be explicitly closed before convergence begins, unless the convergence policy allows partial evaluation.
+
+Branch expansion must be governed:
+- Only actors permitted by the workflow may add branches
+- Branch creation is an explicit action, not automatic or implicit
 
 ### 3.3 Branch Execution
 
@@ -125,18 +222,52 @@ A branch fails when:
 
 ### 4.1 When Convergence Occurs
 
-Convergence begins when all branches listed in the convergence point have reached a terminal state (completed or failed). The convergence point declares which branches it expects:
+Convergence begins based on the convergence entry policy defined by the workflow.
+
+By default, convergence begins when all branches listed in the convergence point have reached a terminal state (completed or failed). However, alternative entry policies may be defined.
 
 ```yaml
 convergence_points:
   - id: converge-implementations
     name: Evaluate Implementations
-    branches: [branch-a, branch-b]
+    branches: [branch-a, branch-b]      # for static; omit for exploratory
     strategy: select_one
+    entry_policy: all_branches_terminal  # default
     evaluation_step: evaluate
 ```
 
-The Workflow Engine activates the convergence point's evaluation step when all listed branches have terminated. Convergence does not begin while any branch is still in progress.
+The Workflow Engine activates the convergence point's evaluation step according to the entry policy. Convergence does not begin while any branch is still in progress, unless the policy allows it.
+
+### 4.1.1 Convergence Entry Policies
+
+The `entry_policy` field on a convergence point defines when convergence is allowed to begin:
+
+```yaml
+# Default — wait for all branches
+entry_policy: all_branches_terminal
+
+# Begin after at least N branches complete
+entry_policy:
+  type: minimum_completed_branches
+  min: 3
+
+# Begin after a time threshold
+entry_policy:
+  type: deadline_reached
+  deadline: "7d"
+
+# An authorized actor explicitly triggers convergence
+entry_policy: manual_trigger
+```
+
+| Policy | Meaning |
+|--------|---------|
+| `all_branches_terminal` (default) | All branches must complete or fail |
+| `minimum_completed_branches` | Convergence may begin after `min` branches complete; remaining branches continue but their results are optional |
+| `deadline_reached` | Convergence begins after `deadline` elapses; completed branches are evaluated, in-progress branches are cancelled |
+| `manual_trigger` | An authorized actor explicitly starts convergence |
+
+For exploratory divergence, convergence also requires that the divergence window is closed before evaluation begins, unless the policy explicitly allows partial evaluation.
 
 ### 4.2 Convergence Strategies
 
@@ -174,6 +305,41 @@ All branches must complete successfully before proceeding.
 
 This strategy is used when all parallel work streams must succeed — for example, parallel validation checks that must all pass.
 
+#### `select_subset`
+
+A subset of branch outcomes is selected for further processing.
+
+- The evaluation step reviews all branch outcomes
+- The evaluator selects one or more branches as candidates
+- Selected branches continue to the next stage
+- Non-selected branches are preserved with status `not_selected`
+
+This strategy is used for:
+- shortlisting candidates from a larger exploration set
+- reducing the solution space before further evaluation
+- preparing variants for downstream processes such as experimentation
+
+#### `experiment`
+
+Multiple branch outcomes are packaged into a controlled experiment.
+
+- The evaluation step selects one or more eligible branches
+- A new experiment artifact is created containing:
+  - selected variants
+  - feature flag or routing configuration
+  - traffic allocation rules
+  - evaluation metrics and success criteria
+  - evaluation window and decision owner
+- Selected variants are deployed under controlled conditions (e.g., feature flags)
+- Original branch artifacts remain preserved
+
+This strategy is used for:
+- A/B or multi-variant testing in production
+- data-driven evaluation using real user behavior
+- staged rollout of competing alternatives
+
+Experimentation introduces deferred convergence: a later evaluation step determines the final outcome based on collected evidence.
+
 ### 4.3 Handling Partial Branch Completion
 
 When some branches complete but others fail:
@@ -181,8 +347,10 @@ When some branches complete but others fail:
 | Strategy | Behavior |
 |----------|----------|
 | `select_one` | Convergence may proceed if at least one branch completed successfully. The evaluation step can only select from completed branches. |
+| `select_subset` | Same as `select_one` — at least one completed branch is required. The evaluator selects from completed branches only. |
 | `merge` | Convergence may proceed at the evaluation step's discretion. The evaluator decides whether a partial merge is acceptable. |
 | `require_all` | Convergence fails. The Run follows the evaluation step's failure outcome. |
+| `experiment` | Convergence may proceed if at least one branch completed successfully. The evaluator selects eligible branches for the experiment. |
 
 The evaluation step always has visibility into which branches completed and which failed, along with any partial artifacts from failed branches.
 
@@ -234,7 +402,7 @@ The evaluation step receives a structured summary of all branch outcomes:
 
 After the evaluation step completes, durable outcomes are committed to Git per ADR-001:
 
-1. **Selected branch artifacts** — the winning branch's artifacts (or merged result) are committed to the main artifact path
+1. **Selected artifacts** — the chosen result (selected branch, subset, merged artifact, or experiment package) is committed to the main artifact path
 2. **Non-selected branch artifacts** — preserved in their branch paths with metadata indicating they were evaluated and not selected
 3. **Convergence record** — a record of the evaluation decision is committed, including:
    - Which branches were evaluated
@@ -484,6 +652,8 @@ Areas expected to require refinement:
 
 - Cancellation semantics — how to cancel individual branches or the entire divergence
 - Timeout handling — what happens when a branch exceeds time limits during active divergence
-- Dynamic branching — whether the number of branches can be determined at runtime rather than statically declared
+- Dynamic branching — runtime creation and expansion of branches during exploratory divergence
+- Multi-stage convergence — supporting workflows with multiple evaluation and convergence phases
+- Experimentation support — integration of feature flags, traffic routing, and external metrics into the `experiment` convergence strategy
 
 Changes should be captured as ADRs when they alter the foundational constraints from §2.
