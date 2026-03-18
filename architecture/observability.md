@@ -70,7 +70,15 @@ Run created (trace_id generated)
 - All operational events emitted during a Run must include the `run_id`, which maps to the `trace_id`
 - All step execution records include `run_id` as a foreign key
 - Actor Gateway requests must include the trace ID so that external actor systems (LLM providers, CI/CD) can correlate their own logs
-- Git commits for durable outcomes should include the trace ID in the commit message or a structured trailer
+- Git commits for durable outcomes must include the trace ID in a structured commit trailer:
+
+Trace-ID: <uuid>
+
+This ensures reliable correlation between Git history and runtime execution.
+
+All external access modes (CLI, API, GUI) must propagate `trace_id` when initiating operations. If not provided, the Access Gateway generates one and returns it to the caller.
+
+This ensures consistent traceability across all interaction modes.
 
 ### 3.4 Cross-Run Tracing
 
@@ -83,6 +91,13 @@ Task artifact path → all Runs for this task → each Run's trace_id → all ac
 ### 3.5 Divergence Tracing
 
 During divergence, the trace ID applies to the entire Run. Branch-specific tracing uses the `branch_id` field on events and step executions. The combination of `trace_id` + `branch_id` uniquely identifies activity within a specific branch of a specific Run.
+
+### 3.6 Relationship Between `run_id` and `trace_id`
+
+- `run_id` is the internal primary identifier for a Run (used in runtime storage and events)
+- `trace_id` is the external correlation identifier used for cross-system tracing
+
+In v0.x, `trace_id` is generated at Run creation and mapped 1:1 to `run_id`. Systems may use either field, but `trace_id` is the canonical identifier for observability and cross-system correlation.
 
 ---
 
@@ -126,6 +141,14 @@ The Runtime Store provides a supplementary audit trail for execution details:
 - Divergence context with branch status and convergence results
 
 This audit trail has limited durability — if the Runtime Store is lost, execution details are lost (per [Data Model](/architecture/data-model.md) §5.2). However, all governed outcomes remain in Git.
+
+If the Runtime Store is lost:
+
+- In-progress Runs should be considered orphaned
+- Operators may:
+  - restart the Run from the current artifact state
+  - cancel the Run and initiate a new one
+- The system must not assume continuation of lost runtime state
 
 ### 4.5 Audit Reconstruction
 
