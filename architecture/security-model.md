@@ -49,10 +49,23 @@ Every request to Spine must carry a verified actor identity. The Access Gateway 
 
 | Access Mode | Method | Identity Source |
 |-------------|--------|-----------------|
-| CLI | API token or local identity | Token maps to actor record; local identity derived from Git config |
+| CLI | API token | Token maps to actor record |
 | API | Bearer token (Authorization header) | Token maps to actor record |
 | GUI | Session-based (login with credentials) | Credentials verified against actor record |
 | Actor Gateway (inbound) | Service token | Pre-registered service identity for AI agents and automated systems |
+
+**Note:** Local identity derived from Git configuration must not be used for authentication in shared or production environments. All access must be authenticated through the Access Gateway using valid credentials (e.g., API tokens or sessions).
+
+### 3.2.1 Authentication by Actor Type
+
+Spine supports different authentication mechanisms depending on actor type while maintaining a unified internal identity model.
+
+- **Human actors** authenticate using interactive mechanisms (e.g., session-based login with credentials).
+- **AI agents and automated systems** authenticate using service accounts and non-interactive credentials (API tokens).
+
+Regardless of authentication method, all actors are normalized into the same internal identity model (`actor_id`, `actor_type`, `actor_role`) and are subject to the same authorization and workflow governance rules (Actor Neutrality).
+
+Future versions may support stronger machine authentication mechanisms such as asymmetric key-based authentication or signed requests.
 
 ### 3.3 API Tokens
 
@@ -73,6 +86,8 @@ API tokens are the primary authentication mechanism for programmatic access.
 - Expired tokens are rejected immediately
 - Revoked tokens are rejected immediately
 
+**Security note:** API tokens are bearer credentials and must be treated as secrets with the same sensitivity as passwords.
+
 ### 3.4 Service Accounts
 
 AI agents and automated systems authenticate via service accounts.
@@ -80,9 +95,18 @@ AI agents and automated systems authenticate via service accounts.
 **Service account properties:**
 
 - Each service account has a stable `actor_id` and `actor_type`
-- Service accounts authenticate using API tokens (same mechanism as human actors)
-- Service accounts may have restricted token scopes based on their intended function
+- Service accounts authenticate using API tokens (non-interactive credentials)
+- Each service account may have multiple tokens for different environments or runtimes
+- Tokens may be scoped and have expiration policies
 - Service accounts are subject to the same authorization rules as human actors (Actor Neutrality §5)
+
+**Best practices:**
+
+- Do not share tokens across multiple agents or systems
+- Use separate service accounts for distinct responsibilities (e.g., `ci-system`, `ai-reviewer`, `integration-webhook`)
+- Rotate tokens regularly and revoke unused tokens
+
+Service accounts provide identity for non-human actors but do not grant additional privileges beyond assigned roles and capabilities.
 
 ### 3.5 Session Management
 
@@ -118,7 +142,7 @@ admin > operator > reviewer > contributor > reader
 
 ### 4.3 Enforcement Points
 
-Authorization is enforced at two levels:
+Authorization is enforced at multiple layers to ensure both coarse-grained and fine-grained control:
 
 **Access Gateway (primary):**
 
@@ -153,6 +177,22 @@ When the Artifact Service commits to Git on behalf of an actor:
 - The commit author is set to the authenticated actor's identity
 - The actor must have sufficient role permissions for the operation that triggered the commit
 - The Artifact Service does not perform additional authorization checks — it trusts the authorization established by the Access Gateway and Workflow Engine
+
+
+### 4.6 Capabilities (Execution-Level Permissions)
+
+In addition to role-based access control, workflows may require specific capabilities for step execution.
+
+Capabilities are fine-grained, domain-specific permissions (e.g., `architecture_review`, `security_approval`, `deployment_access`).
+
+**Properties:**
+
+- Capabilities are assigned to actors alongside roles
+- Capabilities are evaluated by the Workflow Engine (not the Access Gateway)
+- Capabilities do not grant access to operations — they constrain who may execute specific workflow steps
+- Roles define *what an actor can do*; capabilities define *which actor is eligible to perform a specific step*
+
+Capabilities extend the authorization model at execution time but do not replace role-based access control.
 
 ---
 
@@ -289,6 +329,20 @@ The authoritative branch (typically `main`) should be protected:
 - Event payloads must not contain sensitive data
 - Error messages should not leak internal system details to external actors
 - Trace IDs and run IDs are safe to include in all contexts
+
+
+### 8.3 Audit Logging
+
+The system must record audit-relevant security events, including:
+
+- Authentication attempts (success and failure)
+- Authorization decisions (allow/deny)
+- Token creation, usage, and revocation
+- Actor-initiated operations affecting durable state (e.g., Git commits)
+
+Audit logs are append-only and must not contain sensitive data such as credentials or tokens.
+
+Audit logging is required for governance visibility but may be implemented incrementally in v0.x.
 
 ---
 
