@@ -369,6 +369,23 @@ payload:
   selected_branches: [<string>]  # Selected branches (for select_subset/experiment; empty otherwise)
 ```
 
+### 4.11 `workflow_validation_completed`
+
+Emitted when workflow validation completes (per [Workflow Validation](/architecture/workflow-validation.md) §7.3).
+
+**Source:** Workflow Engine
+
+```yaml
+payload:
+  workflow_id: <string>          # Workflow that was validated
+  workflow_version: <string>     # Version that was validated
+  trigger: <string>              # What triggered validation (commit, activation, on_demand)
+  status: <string>               # passed, failed, warnings
+  error_count: <integer>         # Number of blocking errors
+  warning_count: <integer>       # Number of non-blocking warnings
+  errors: [<string>]             # Summary of error messages (truncated if excessive)
+```
+
 ---
 
 ## 5. Event Versioning
@@ -462,7 +479,7 @@ These events should be treated as runtime signals with limited durability rather
 | Component | Events Produced |
 |-----------|----------------|
 | Artifact Service | `artifact_created`, `artifact_updated`, `artifact_superseded`, `workflow_definition_changed` |
-| Workflow Engine | `run_started`, `run_completed`, `run_failed`, `run_cancelled`, `step_started`, `step_completed`, `step_failed`, `step_assigned`, `step_assignment_failed`, `step_timeout`, `retry_attempted`, `engine_recovered`, `divergence_started`, `convergence_completed` |
+| Workflow Engine | `run_started`, `run_completed`, `run_failed`, `run_cancelled`, `step_started`, `step_completed`, `step_failed`, `step_assigned`, `step_assignment_failed`, `step_timeout`, `retry_attempted`, `engine_recovered`, `divergence_started`, `convergence_completed`, `workflow_validation_completed` |
 
 ### 8.2 Consumers
 

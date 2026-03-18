@@ -419,6 +419,7 @@ new execution attempt for that step while preserving the Run history.
 - [System Components](/architecture/components.md) — Workflow Engine (§4.3)
 - [Task Lifecycle](/governance/task-lifecycle.md) — Governed states vs runtime states
 - [Divergence and Convergence](/architecture/divergence-and-convergence.md) — Parallel execution model
+- [Workflow Validation](/architecture/workflow-validation.md) — Validation rules and lifecycle
 
 ---
 
