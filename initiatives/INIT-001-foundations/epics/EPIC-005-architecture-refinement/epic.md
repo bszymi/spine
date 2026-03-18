@@ -30,6 +30,9 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Define error handling and recovery patterns for the workflow engine
 - Define concrete event schemas for domain and operational events
 - Define the task-to-workflow binding model
+- Define the security model
+- Define the actor model
+- Define workflow authoring and validation rules
 
 ---
 
@@ -40,6 +43,9 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - `/architecture/error-handling-and-recovery.md` — failure and recovery patterns
 - `/architecture/event-schemas.md` — event type specifications
 - `/architecture/task-workflow-binding.md` — workflow assignment and resolution semantics
+- `/architecture/security-model.md` — permission boundaries, credentials, authorization
+- `/architecture/actor-model.md` — actor registration, selection, and gateway protocol
+- `/architecture/workflow-validation.md` — validation rules and lifecycle
 
 ---
 
@@ -50,4 +56,7 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Error handling patterns cover failure, timeout, retry, and recovery scenarios
 - Event schemas are specified for all domain event types
 - Task-to-workflow binding model defines resolution, versioning, and mutability rules
+- Security model defines permission boundaries, credential handling, and authorization enforcement
+- Actor model defines registration, selection, AI integration, and gateway protocol
+- Workflow validation rules cover schema, structural, and semantic checks
 - All documents are consistent with the domain model, data model, and existing ADRs
