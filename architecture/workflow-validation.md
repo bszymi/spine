@@ -163,6 +163,15 @@ A cycle with no exit creates an infinite loop where execution can never terminat
 - Every `timeout_outcome` must reference a valid outcome `id` within the same step
 - Convergence point `evaluation_step` must reference a step with `type: convergence`
 
+### 4.7 Deterministic Entry Guarantees
+
+The workflow must ensure that execution from `entry_step` is deterministic in terms of initial step activation:
+
+- `entry_step` must not depend on conditional routing
+- No divergence may occur before the first step execution begins
+
+This ensures predictable Run initialization.
+
 ---
 
 ## 5. Semantic Validation
@@ -189,6 +198,8 @@ Every step should cover its expected execution paths:
 - Review steps should have at least an accept and reject outcome (warning, not error)
 - Convergence steps should have outcomes that handle both successful and failed convergence
 
+- Steps with loops (cycles) should include at least one outcome that progresses toward termination (warning if missing)
+
 ### 5.3 Convergence Strategy Consistency
 
 - `select_one` convergence must lead to an evaluation step that can select a single branch
@@ -200,6 +211,9 @@ Every step should cover its expected execution paths:
 - Steps with `mode: human_only` should not have `type: automated`
 - Steps with `mode: automated_only` should have `eligible_actor_types` limited to `ai_agent` and/or `automated_system`
 - Steps with `type: convergence` should use `mode: automated_only` (convergence evaluation is a system operation)
+
+- Steps with `mode: ai_only` should have `eligible_actor_types` including `ai_agent` and must not include `human` actors
+- Steps with `mode: hybrid` must define `eligible_actor_types` including at least two actor types
 
 ### 5.5 Version Consistency
 
@@ -228,6 +242,8 @@ When a workflow file is committed to Git, validation runs as a best-effort check
 - **Commits are not blocked** — workflow files may be committed in `Draft` or `Deprecated` status without passing all checks
 
 This allows workflow authors to iterate on definitions without being blocked by validation during development.
+
+Validation tooling may provide fast feedback but is not considered authoritative until activation validation completes.
 
 ### 6.3 Validation at Activation
 
@@ -299,6 +315,7 @@ Validation results are surfaced through:
 - **CLI output** when validating via the CLI
 - **API response** when activating via the API
 - **CI integration** when validating on commit (if configured)
+- **Access Gateway responses** when validation is triggered through external requests
 
 ---
 
