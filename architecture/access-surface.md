@@ -151,6 +151,7 @@ Artifact creation operations such as `artifact.create` are therefore helpers rat
 |-----------|-------------|-------------|
 | `run.start` | Start a new Run for a task | No (runtime only) |
 | `run.status` | Query Run execution state | No |
+| `run.cancel` | Cancel an in-progress Run | No (runtime only) |
 | `step.submit` | Submit step result for evaluation | Depends on outcome |
 | `step.assign` | Assign actor to a step | No (runtime only) |
 | `task.accept` | Record task-level acceptance | Yes |
