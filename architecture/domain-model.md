@@ -139,8 +139,8 @@ An entity that executes workflow steps. Actors are interchangeable — the syste
 - `id` — stable identifier
 - `type` — classification (human, ai_agent, automated_system)
 - `name` — human-readable name
-- `capabilities` — what types of steps this actor can perform
-- `permissions` — what artifacts and workflows the actor may access
+- `capabilities` — what types of steps this actor can perform (see [Security Model](/architecture/security-model.md) §4.6)
+- `permissions` — what artifacts and workflows the actor may access (derived from role, see [Security Model](/architecture/security-model.md) §4.1)
 
 **Rules:**
 
