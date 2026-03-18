@@ -168,6 +168,7 @@ Domain events must always be reconstructible from Git history, because Git is th
 event
 ├── event_id           (string, unique identifier)
 ├── event_type         (string, e.g., artifact_updated, step_started)
+├── schema_version     (string, schema version for this event type, e.g., "1.0")
 ├── timestamp          (ISO 8601 datetime)
 ├── source_component   (string, which component produced the event)
 ├── actor_id           (string, nullable, who caused it)

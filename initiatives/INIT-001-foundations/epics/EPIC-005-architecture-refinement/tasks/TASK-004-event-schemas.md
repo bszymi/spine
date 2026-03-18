@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Event Schema Specification
-status: Pending
+status: Completed
 epic: /initiatives/INIT-001-foundations/epics/EPIC-005-architecture-refinement/epic.md
 initiative: /initiatives/INIT-001-foundations/initiative.md
 links:
