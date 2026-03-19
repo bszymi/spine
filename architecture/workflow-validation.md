@@ -19,15 +19,17 @@ The [Workflow Definition Format](/architecture/workflow-definition-format.md) de
 
 ## 2. Validation Categories
 
-Workflow validation is organized into three categories, applied in order:
+Workflow validation is organized into five categories, applied in order:
 
 | Category | What It Checks | When Failure Is Detected |
 |----------|---------------|--------------------------|
 | Schema validation | Required fields, types, value constraints | Immediately on parse |
 | Structural validation | Graph properties (reachability, cycles, dead steps) | After schema is valid |
 | Semantic validation | Domain-level consistency (outcome coverage, binding uniqueness) | After structure is valid |
+| Runtime safety validation | Execution risk (deadlocks, unbounded retries, unsatisfiable convergence) | After semantics are valid |
+| Cross-artifact validation | Alignment with task lifecycle, actor model, capability model | After all internal checks pass |
 
-All three categories must pass before a workflow may become `Active`.
+All five categories must pass before a workflow may become `Active`.
 
 ---
 
@@ -157,6 +159,18 @@ A cycle with no exit creates an infinite loop where execution can never terminat
 - The convergence point's `evaluation_step` must exist and have `type: convergence`
 - For structured divergence, every branch's `start_step` must be reachable only through the divergence (not from the main step graph)
 
+### 4.5.1 Branch Isolation
+
+- Steps within a divergence branch must not have outcomes that route to steps in other branches or in the main step graph before convergence
+- A branch may only exit through the convergence point or through `end` (if the branch terminates independently)
+- No step outside a divergence branch may route into a branch step (except via the divergence point itself)
+
+### 4.5.2 Convergence Completeness
+
+- For structured divergence, all declared branches must have a path to the convergence point (unless the convergence entry policy allows partial completion)
+- For `require_all` strategy, every branch must have at least one path that reaches the convergence point
+- The convergence evaluation step must have outcomes that handle both successful and failed convergence
+
 ### 4.6 Outcome Reference Integrity
 
 - Every `next_step` value must reference either a valid step `id` or the literal `end`
@@ -195,10 +209,9 @@ At most one `Active` workflow may govern a given `(type, work_type)` pair at any
 Every step should cover its expected execution paths:
 
 - Steps with `timeout` must have a `timeout_outcome` that maps to a declared outcome
-- Review steps should have at least an accept and reject outcome (warning, not error)
-- Convergence steps should have outcomes that handle both successful and failed convergence
-
-- Steps with loops (cycles) should include at least one outcome that progresses toward termination (warning if missing)
+- Review steps must have at least an accept and reject outcome
+- Convergence steps must have outcomes that handle both successful and failed convergence
+- Steps in cycles must include at least one outcome that progresses toward termination
 
 ### 5.3 Convergence Strategy Consistency
 
@@ -215,16 +228,84 @@ Every step should cover its expected execution paths:
 - Steps with `mode: ai_only` should have `eligible_actor_types` including `ai_agent` and must not include `human` actors
 - Steps with `mode: hybrid` must define `eligible_actor_types` including at least two actor types
 
-### 5.5 Version Consistency
+### 5.5 Status Transition Validity
+
+Outcomes with `commit` effects produce durable artifact status changes. These must align with the governed lifecycle:
+
+- Every `commit.status` value must be a valid status for the artifact type governed by `applies_to` (per [Artifact Schema](/governance/artifact-schema.md) §6)
+- The workflow must not produce status transitions that skip required intermediate states (e.g., `Pending` directly to `Completed` without `In Progress`)
+- Terminal statuses (`Completed`, `Superseded`) should only appear on outcomes that route to `end`
+
+### 5.6 Version Consistency
 
 - A workflow transitioning from `Deprecated` to `Active` should have a higher version than the previously active version
 - A workflow transitioning to `Superseded` should reference or be accompanied by a successor workflow
 
 ---
 
-## 6. Validation Lifecycle
+## 6. Runtime Safety Validation
 
-### 6.1 When Validation Runs
+Runtime safety validation detects workflow patterns that are structurally valid but could cause execution failures at runtime.
+
+### 6.1 Retry-Cycle Interaction
+
+When a step with retry configuration exists inside a cycle (rework loop), the total retry budget across cycle iterations is unbounded. The Workflow Engine must track cumulative retries.
+
+- Steps with `retry.limit` inside a cycle should declare a maximum cycle iteration count (warning if missing)
+- Alternatively, the workflow should use a timeout on the cycle's enclosing step to bound total execution time
+
+### 6.2 Timeout Exit Path Validity
+
+- Every step with a `timeout` must have a `timeout_outcome` that leads to a valid exit (another step or `end`)
+- The timeout exit path must not re-enter the same step (which would create a timeout loop)
+- Steps without timeouts in cycles must be bounded by an enclosing timeout or a cycle iteration limit
+
+### 6.3 Convergence Satisfiability
+
+The convergence entry policy must be satisfiable given the divergence configuration:
+
+- `minimum_completed_branches` policy: `min_branches` must be <= the number of declared branches (structured) or `max_branches` (exploratory)
+- `all_branches_terminal` policy: all branches must have at least one path to terminal status
+- `deadline_reached` policy: a deadline duration must be specified
+
+### 6.4 Deadlock Detection
+
+Detect patterns where execution cannot proceed:
+
+- A step that waits for convergence of branches that cannot complete (e.g., all branches lead to failed states with no retry)
+- Circular dependencies between divergence and convergence points (divergence A waits on convergence B, which waits on divergence A)
+
+---
+
+## 7. Cross-Artifact Validation
+
+Cross-artifact validation checks that the workflow definition is consistent with the broader system context.
+
+### 7.1 Artifact Type Alignment
+
+- Every `applies_to` type must be a recognized artifact type in the system (per [Artifact Schema](/governance/artifact-schema.md) §5)
+- Every `commit.status` value must be valid for the governed artifact type
+
+### 7.2 Task Lifecycle Alignment
+
+- Workflows governing Tasks must produce outcomes consistent with the [Task Lifecycle](/governance/task-lifecycle.md)
+- The workflow should cover all governed terminal states (or explicitly document which terminal states are handled outside the workflow, e.g., `Superseded`, `Abandoned`)
+
+### 7.3 Capability Alignment
+
+- `required_capabilities` referenced in step execution blocks should correspond to capabilities registered in the system (per [Actor Model](/architecture/actor-model.md) §3.1)
+- This is a warning (not error) because capabilities may be registered after workflow creation
+
+### 7.4 Actor Type Alignment
+
+- `eligible_actor_types` values must be valid actor types (`human`, `ai_agent`, `automated_system`)
+- If the system has no registered actors matching a step's requirements, a warning is emitted
+
+---
+
+## 8. Validation Lifecycle
+
+### 8.1 When Validation Runs
 
 | Trigger | Validation Scope | Failure Behavior |
 |---------|-----------------|-----------------|
@@ -232,7 +313,7 @@ Every step should cover its expected execution paths:
 | Status change to `Active` | Schema + structural + semantic | Blocks activation; workflow remains in previous status |
 | Run creation | Lightweight schema check (already validated) | Fails Run creation with error |
 
-### 6.2 Validation at Commit Time
+### 8.2 Validation at Commit Time
 
 When a workflow file is committed to Git, validation runs as a best-effort check:
 
@@ -245,7 +326,7 @@ This allows workflow authors to iterate on definitions without being blocked by 
 
 Validation tooling may provide fast feedback but is not considered authoritative until activation validation completes.
 
-### 6.3 Validation at Activation
+### 8.3 Validation at Activation
 
 When a workflow's status changes to `Active`, full validation is mandatory:
 
@@ -254,7 +335,7 @@ When a workflow's status changes to `Active`, full validation is mandatory:
 - If validation fails, the status change is rejected and the workflow remains in its previous status
 - Validation failures produce an operational event with details
 
-### 6.4 Validation at Run Creation
+### 8.4 Validation at Run Creation
 
 When a Run is created, the Workflow Engine performs a lightweight validation:
 
@@ -266,9 +347,9 @@ This is a safeguard against race conditions (e.g., a workflow deactivated betwee
 
 ---
 
-## 7. Error Reporting
+## 9. Error Reporting
 
-### 7.1 Validation Result Format
+### 9.1 Validation Result Format
 
 Validation produces a structured result:
 
@@ -278,7 +359,7 @@ validation_result:
   workflow_version: <string>
   status: <enum>                 # passed, failed, warnings
   errors:                        # Blocking issues (must fix before activation)
-    - category: <string>         # schema, structural, semantic
+    - category: <string>         # schema, structural, semantic, runtime_safety, cross_artifact
       rule: <string>             # e.g., "reachability", "applies_to_uniqueness"
       message: <string>          # Human-readable description
       location: <string|null>    # Step ID or field path where the issue was found
@@ -287,27 +368,45 @@ validation_result:
       rule: <string>
       message: <string>
       location: <string|null>
+  advisories:                    # Best practice recommendations
+    - category: <string>
+      rule: <string>
+      message: <string>
+      location: <string|null>
 ```
 
-### 7.2 Error vs Warning
+### 9.2 Severity Levels
 
 | Severity | Meaning | Blocks Activation |
 |----------|---------|-------------------|
-| Error | The workflow cannot execute correctly | Yes |
-| Warning | The workflow may execute but has potential issues | No |
+| Error | The workflow cannot execute correctly or violates governance rules | Yes |
+| Warning | The workflow may execute but has potential issues or risks | No |
+| Advisory | Best practice recommendation; no execution risk | No |
 
 **Examples of errors:**
 - Unreachable step
 - Missing required field
 - Cycle with no exit
 - `applies_to` conflict with another Active workflow
+- Review step without reject outcome
+- Convergence step without failure outcome
+- Step in cycle without termination outcome
+- Invalid `commit.status` for the governed artifact type
+- Branch step routing outside its branch before convergence
 
 **Examples of warnings:**
-- Review step with only one outcome (no reject path)
 - Step with no timeout configured
 - Unused divergence or convergence point definition
+- `required_capabilities` not found in registered capabilities
+- Retry inside a cycle without iteration limit
+- No registered actors matching step requirements
 
-### 7.3 Surfacing Results
+**Examples of advisories:**
+- Step name could be more descriptive
+- Workflow has high step count (complexity warning)
+- Step has many outcomes (readability concern)
+
+### 9.3 Surfacing Results
 
 Validation results are surfaced through:
 
@@ -319,15 +418,15 @@ Validation results are surfaced through:
 
 ---
 
-## 8. Relationship to Workflow Lifecycle
+## 10. Relationship to Workflow Lifecycle
 
-### 8.1 Draft Workflows
+### 10.1 Draft Workflows
 
 Workflow files committed to Git without `Active` status are effectively drafts. They may fail validation without consequence — the system does not attempt to use them for execution.
 
 Authors may use the CLI or API to validate draft workflows on demand without changing their status.
 
-### 8.2 Activation Gate
+### 10.2 Activation Gate
 
 The transition to `Active` status is the primary validation gate:
 
@@ -341,7 +440,7 @@ This means:
 - Only validated workflows can govern execution
 - The system never executes against a workflow that hasn't passed full validation
 
-### 8.3 Deprecation and Supersession
+### 10.3 Deprecation and Supersession
 
 When a workflow is `Deprecated` or `Superseded`:
 
@@ -351,7 +450,7 @@ When a workflow is `Deprecated` or `Superseded`:
 
 ---
 
-## 9. Constitutional Alignment
+## 11. Constitutional Alignment
 
 | Principle | How Validation Supports It |
 |-----------|---------------------------|
@@ -362,18 +461,22 @@ When a workflow is `Deprecated` or `Superseded`:
 
 ---
 
-## 10. Cross-References
+## 12. Cross-References
 
 - [Workflow Definition Format](/architecture/workflow-definition-format.md) — Schema being validated
 - [Task-to-Workflow Binding](/architecture/task-workflow-binding.md) — `applies_to` resolution and uniqueness rules
 - [Divergence and Convergence](/architecture/divergence-and-convergence.md) — Divergence/convergence structural rules
 - [Error Handling](/architecture/error-handling-and-recovery.md) — Run creation failure handling
 - [System Components](/architecture/components.md) §4.3 — Workflow Engine, §4.8 — Validation Service
-- [Constitution](/governance/constitution.md) §4 — Governed Execution
+- [Constitution](/governance/constitution.md) §4 — Governed Execution, §11 — Cross-Artifact Validation
+- [Artifact Schema](/governance/artifact-schema.md) §5, §6 — Artifact type schemas and status enums
+- [Actor Model](/architecture/actor-model.md) §3 — Actor registration and capabilities
+- [Task Lifecycle](/governance/task-lifecycle.md) — Governed terminal states
+- [Validation Service](/architecture/validation-service.md) — Cross-artifact validation rules and extensibility
 
 ---
 
-## 11. Evolution Policy
+## 13. Evolution Policy
 
 This validation specification is expected to evolve as workflows are implemented and authoring patterns emerge.
 
