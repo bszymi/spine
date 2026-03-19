@@ -44,7 +44,8 @@ Spine requires a Git hosting platform that supports:
 - API access for programmatic operations (for Artifact Service)
 - Merge operations (for incorporating task branch work)
 
-Compatible platforms include GitHub, GitLab, Bitbucket, and self-hosted alternatives with equivalent capabilities.
+
+Spine is the authority for merge decisions. Git hosting platforms provide storage, APIs, and optional collaboration features, but they are not the governance authority for accepting or merging governed work.
 
 ---
 
@@ -76,6 +77,16 @@ Actors do not interact with Git directly. All Git operations are mediated throug
 
 The commit author is set to the actor's identity (see §5.2), but the Git authentication credential belongs to the Artifact Service, not the actor.
 
+### 3.4 Authorization Model
+
+Authentication to Git is performed by the Artifact Service, but authorization is enforced at the Spine layer.
+
+- Actors are authorized based on workflow roles and permissions
+- The Artifact Service validates whether an actor is allowed to perform a given operation
+- Git itself is not used as the source of authorization
+
+This ensures consistent enforcement of governance rules across human and AI actors.
+
 ---
 
 ## 4. Change Detection
@@ -105,6 +116,8 @@ The webhook endpoint is exposed by the Access Gateway and forwarded to the Proje
 2. Extract the commit SHA and changed file paths
 3. Trigger incremental projection sync for affected artifacts
 4. Emit domain events for detected artifact changes
+
+Note: Pull request events may be received for visibility, but they are not the source of truth for merge decisions. Spine determines merge eligibility via workflow completion and validation.
 
 ### 4.3 Polling Fallback
 
@@ -181,6 +194,27 @@ Each governed operation produces exactly one Git commit:
 
 Multiple file changes within a single operation are grouped into a single commit. Operations must not produce partial commits — if any file in the operation fails validation, the entire commit is aborted.
 
+### 5.5 Operational vs Governed Commits
+
+Spine distinguishes between two categories of commits:
+
+| Commit Type | Location | Meaning |
+|-------------|----------|---------|
+| Operational commit | Task or divergence branch | Represents intermediate execution state within a Run |
+| Governed commit | Authoritative branch | Represents a durable governance decision (artifact state change) |
+
+Operational commits:
+- Occur during workflow execution on task or divergence branches
+- May include intermediate changes, drafts, or partial outputs
+- Are not considered governed system state
+
+Governed commits:
+- Occur only when merging into the authoritative branch
+- Represent accepted outcomes, terminal task states, or approved artifact changes
+- Are the only commits that define the durable system state
+
+This distinction ensures alignment with the Task Lifecycle model, where only terminal governance outcomes modify the authoritative branch.
+
 ### 5.4 Commit Examples
 
 **Task status change:**
@@ -202,6 +236,16 @@ Actor-ID: architect-bob
 Run-ID: none
 Operation: artifact.create
 ```
+
+### 5.6 Idempotency
+
+All operations that produce commits must be idempotent.
+
+- The `Trace-ID` uniquely identifies an operation
+- If an operation is retried, the system must detect existing commits with the same Trace-ID and avoid duplication
+- Commit creation must be safe under retry conditions
+
+This is required for reliability in distributed and asynchronous execution environments.
 
 ---
 
@@ -227,6 +271,13 @@ spine/run-abc123/implement-auth-service
 3. When a durable outcome is committed (e.g., task accepted), the branch is merged to the authoritative branch
 4. The task branch is deleted after successful merge
 
+**Important:**
+Task branches represent *proposed state*, not governed state.
+
+- Commits on task branches are operational and may be revised or discarded
+- Only the merge into the authoritative branch establishes governed truth
+- Systems reading governed state must ignore task branches unless explicitly operating in execution context
+
 ### 6.2 Divergence Branches
 
 During divergence, each branch gets its own Git branch (per [Divergence and Convergence](/architecture/divergence-and-convergence.md) §3.4):
@@ -250,11 +301,42 @@ spine/run-abc123/explore-designs/branch-b
 
 ### 6.3 Merge Strategy
 
-Spine uses **fast-forward merges** when possible (no merge commits for linear history). When fast-forward is not possible:
+Merges into the authoritative branch are governed operations and must only occur after workflow completion.
+
+- The Artifact Service performs merges — not human actors directly
+- A merge represents a governance decision, not a technical operation
+
+**Authority model:**
+
+- Spine owns all merges into the authoritative branch
+- Only the Artifact Service is allowed to perform merges for Spine-managed branches (`spine/*`)
+- Manual merges by humans directly in the Git hosting platform for Spine-managed branches are prohibited
+
+**Pull requests (optional):**
+
+- Pull requests may be created for visibility or collaboration
+- Pull requests do not determine merge eligibility
+- Approval in Git hosting platforms does not override Spine governance
+
+**Merge conditions:**
+
+- Workflow execution for the Run has reached a terminal or accepted outcome
+- All required validation steps have passed
+- No policy violations are present
+ - All required Spine validations and tests have passed within the workflow execution
+
+Spine uses **fast-forward merges** when possible to preserve linear history.
+
+When fast-forward is not possible:
 
 - The Artifact Service creates a merge commit
-- The merge commit includes the standard trailers (Trace-ID, Actor-ID, etc.)
-- If the merge results in conflicts, it is treated as a permanent error (per [Error Handling](/architecture/error-handling-and-recovery.md) §5.2)
+- The merge commit includes standard commit trailers (Trace-ID, Actor-ID, Run-ID, Operation)
+
+**Conflict handling:**
+
+- If a merge results in conflicts, the merge is aborted
+- The step execution is marked as failed with classification `git_conflict`
+- An operator must resolve the conflict before the workflow can proceed
 
 ### 6.4 Branch Naming Convention
 
@@ -266,6 +348,8 @@ All Spine-managed branches use the `spine/` prefix to distinguish them from huma
 | Divergence branch | `spine/<run-id>/<divergence-id>/<branch-id>` | `spine/run-abc123/explore/branch-a` |
 
 Human-managed branches (per [Naming Conventions](/governance/naming-conventions.md) §6) use the `INIT-XXX/EPIC-XXX/TASK-XXX-<slug>` pattern. These are not managed by the Artifact Service.
+
+Spine-managed branches (`spine/*`) are governed exclusively by the Artifact Service. Direct manipulation (including manual merges) via Git hosting platforms is not allowed for these branches.
 
 ---
 
@@ -279,6 +363,8 @@ Conflicts are minimized by:
 - Divergence branches are isolated from each other
 - The Artifact Service uses atomic commits — partial writes don't occur
 - Fast-forward merges are preferred
+
+- Centralized merge authority (Artifact Service) ensures consistent conflict detection and prevents uncontrolled merges
 
 ### 7.2 Detection
 
@@ -297,7 +383,11 @@ Git conflicts are treated as permanent errors in v0.x (per [Error Handling](/arc
 - An operator must manually resolve the conflict
 - After resolution, the Run may be restarted or the step retried
 
-Future versions may introduce assisted resolution (rebase-and-retry, workflow-driven merge steps).
+Future versions may introduce assisted resolution strategies, such as:
+
+- Rebase-and-retry mechanisms
+- Workflow-defined merge resolution steps
+- Automated conflict classification and guidance
 
 ---
 
