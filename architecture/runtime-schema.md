@@ -15,7 +15,7 @@ This document defines the production-ready database schema for Spine's runtime a
 
 The [Data Model](/architecture/data-model.md) defines the conceptual schema for storage layers. This document converts those conceptual schemas into concrete table definitions with types, constraints, indexes, and operational guidance.
 
-All runtime data is disposable and reconstructible (per Constitution §8). The schema is designed for PostgreSQL, as recommended in [Data Model](/architecture/data-model.md) §7.2.
+Runtime data is disposable as a source of truth, but only partially reconstructible. Durable outcomes remain reconstructible from Git, while in-progress operational state may be lost and require restart (per Constitution §8). The schema is designed for PostgreSQL, as recommended in [Data Model](/architecture/data-model.md) §7.2.
 
 ---
 
@@ -89,6 +89,10 @@ CREATE TABLE projection.artifact_links (
 );
 ```
 
+-- NOTE: This table is intentionally minimal. Additional link validation
+-- (e.g., inverse consistency, target existence) is handled by the validation service
+-- and may be extended in future schema versions if required.
+
 **Indexes:**
 
 ```sql
@@ -125,7 +129,7 @@ CREATE INDEX idx_workflows_applies_to ON projection.workflows USING gin (applies
 
 ### 3.4 `projection.sync_state`
 
-Tracks the overall projection sync progress.
+Tracks the overall projection sync progress. Current design assumes a single repository and projection pipeline (v0.x).
 
 ```sql
 CREATE TABLE projection.sync_state (
@@ -141,6 +145,16 @@ CREATE TABLE projection.sync_state (
 
 ## 4. Runtime Schema
 
+### 4.0 Status Authority
+
+Runtime tables represent execution state only and are not the source of truth for governed artifact lifecycle.
+
+- Task lifecycle status (e.g., Completed, Cancelled, Rejected, Superseded, Abandoned) is defined and persisted in Git artifacts
+- Run status (`runtime.runs.status`) represents execution lifecycle only
+- Step execution status (`runtime.step_executions.status`) represents execution progress only
+
+Runtime statuses MUST NOT be interpreted as artifact lifecycle state.
+
 ### 4.1 `runtime.runs`
 
 One row per workflow Run.
@@ -150,6 +164,7 @@ CREATE TABLE runtime.runs (
     run_id              text        PRIMARY KEY,
     task_path           text        NOT NULL,       -- path to governed Task artifact
     workflow_path       text        NOT NULL,       -- path to governing Workflow Definition
+    workflow_id         text        NOT NULL,       -- stable identifier of workflow
     workflow_version    text        NOT NULL,       -- Git commit SHA of pinned workflow
     workflow_version_label text,                     -- semantic version (informational)
     status              text        NOT NULL DEFAULT 'pending',
@@ -242,7 +257,7 @@ CREATE TABLE runtime.branches (
     status              text        NOT NULL DEFAULT 'pending',
                                                     -- pending, in_progress, completed, failed
     current_step_id     text,
-    outcome             jsonb,                      -- branch result summary
+    outcome             jsonb,                      -- branch result summary (not a workflow outcome)
     artifacts_produced  jsonb       DEFAULT '[]',   -- paths of artifacts created by this branch
     created_at          timestamptz NOT NULL DEFAULT now(),
     completed_at        timestamptz,
@@ -261,6 +276,7 @@ Records the outcome of convergence evaluation.
 CREATE TABLE runtime.convergence_results (
     run_id              text        NOT NULL,
     divergence_id       text        NOT NULL,
+    convergence_id      text,                       -- explicit convergence identifier (if defined)
     strategy_applied    text        NOT NULL,       -- select_one, select_subset, merge, require_all, experiment
     entry_policy_applied text       NOT NULL,       -- which entry policy triggered convergence
     selected_branch     text,                       -- for select_one
@@ -283,7 +299,7 @@ Pending work items for step assignments and event delivery.
 ```sql
 CREATE TABLE runtime.queue_entries (
     entry_id            text        PRIMARY KEY,
-    entry_type          text        NOT NULL,       -- step_assignment, event_delivery
+    entry_type          text        NOT NULL,       -- step_assignment, event_delivery, retry, recovery_check (extensible)
     payload             jsonb       NOT NULL,       -- entry-specific data
     status              text        NOT NULL DEFAULT 'pending',
                                                     -- pending, processing, completed, failed, dead_letter
@@ -330,6 +346,11 @@ CREATE TABLE runtime.actor_assignments (
 );
 ```
 
+-- Ensure only one active assignment per execution
+CREATE UNIQUE INDEX idx_assignments_active_execution
+    ON runtime.actor_assignments (execution_id)
+    WHERE status = 'active';
+
 **Indexes:**
 
 ```sql
@@ -338,6 +359,21 @@ CREATE INDEX idx_assignments_run ON runtime.actor_assignments (run_id);
 CREATE INDEX idx_assignments_timeout ON runtime.actor_assignments (timeout_at)
     WHERE status = 'active';
 ```
+
+### 4.8 JSONB Field Semantics
+
+The following JSONB fields are used for flexible or evolving data structures:
+
+- `projection.artifacts.metadata` — schema-governed front matter
+- `projection.artifacts.links` — parsed link structures
+- `projection.workflows.definition` — canonical parsed workflow definition
+- `runtime.step_executions.error_detail` — structured failure data (implementation-defined)
+- `runtime.queue_entries.payload` — entry-specific data (type-dependent)
+- `runtime.queue_entries.error_detail` — structured failure data
+- `runtime.branches.outcome` — branch result summary
+- `runtime.branches.artifacts_produced` — list of artifact paths
+
+Fields marked as implementation-defined may evolve without requiring SQL schema changes but must remain backward-compatible at the application level.
 
 ---
 
