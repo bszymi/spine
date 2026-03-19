@@ -2,7 +2,7 @@
 id: TASK-012
 type: Task
 title: API Operation Schemas
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-001-foundations/epics/EPIC-005-architecture-refinement/epic.md
 initiative: /initiatives/INIT-001-foundations/initiative.md
 links:
