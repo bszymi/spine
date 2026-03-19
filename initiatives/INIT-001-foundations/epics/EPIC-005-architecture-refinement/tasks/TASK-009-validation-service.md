@@ -2,7 +2,7 @@
 id: TASK-009
 type: Task
 title: Validation Service Specification
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-001-foundations/epics/EPIC-005-architecture-refinement/epic.md
 initiative: /initiatives/INIT-001-foundations/initiative.md
 links:
