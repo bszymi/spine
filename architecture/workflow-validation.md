@@ -15,6 +15,8 @@ This document defines how workflow definitions are validated before activation a
 
 The [Workflow Definition Format](/architecture/workflow-definition-format.md) defines the structure of workflows. The [Task-to-Workflow Binding Model](/architecture/task-workflow-binding.md) defines how workflows are resolved at runtime. This document specifies the rules that ensure workflow definitions are well-formed, structurally sound, and semantically consistent before they govern execution.
 
+This document validates workflow definitions as step graphs and outcome routing rules. It does not define a separate declared workflow state machine. Runtime execution state lives in the runtime store, while durable artifact lifecycle changes occur only through explicit outcome commit effects such as \`commit.status\`.
+
 ---
 
 ## 2. Validation Categories
@@ -114,8 +116,16 @@ Schema validation ensures the workflow YAML conforms to the expected structure.
 | `id` | string | Unique across divergence and convergence points |
 | `name` | string | Non-empty |
 | `strategy` | enum | One of: `select_one`, `select_subset`, `merge`, `require_all`, `experiment` |
-| `entry_policy` | string (optional) | One of: `all_branches_terminal`, `minimum_completed_branches`, `deadline_reached`, `manual_trigger` (default: `all_branches_terminal`) |
+| `entry_policy` | string or object (optional) | Either a simple policy name or a structured policy object (default: `all_branches_terminal`) |
 | `evaluation_step` | string | Must reference a valid step `id` with `type: convergence` |
+
+**Entry policy forms:**
+
+- Simple string form: `all_branches_terminal`, `manual_trigger`
+- Structured object form:
+  - `type: minimum_completed_branches` requires `min >= 1`
+  - `type: deadline_reached` requires a non-empty `deadline` value
+  - Additional policy-specific fields must match the policy type
 
 ---
 
@@ -217,13 +227,16 @@ Every step should cover its expected execution paths:
 
 - `select_one` convergence must lead to an evaluation step that can select a single branch
 - `require_all` convergence should consider what happens when branches fail (the evaluation step should handle partial failure)
-- `minimum_completed_branches` entry policy requires a `min_branches` parameter on the convergence point
+- `minimum_completed_branches` entry policy requires a structured `entry_policy` object with `type: minimum_completed_branches` and `min >= 1`
+- `deadline_reached` entry policy requires a structured `entry_policy` object with `type: deadline_reached` and a non-empty `deadline`
 
 ### 5.4 Execution Mode Consistency
 
 - Steps with `mode: human_only` should not have `type: automated`
 - Steps with `mode: automated_only` should have `eligible_actor_types` limited to `ai_agent` and/or `automated_system`
-- Steps with `type: convergence` should use `mode: automated_only` (convergence evaluation is a system operation)
+- Steps with `type: convergence` may use `mode: automated_only`, `ai_only`, `human_only`, or `hybrid`, depending on how convergence evaluation is performed
+- A convergence step using `mode: human_only` must include `human` in `eligible_actor_types`
+- A convergence step using `mode: automated_only` must limit `eligible_actor_types` to `ai_agent` and/or `automated_system`
 
 - Steps with `mode: ai_only` should have `eligible_actor_types` including `ai_agent` and must not include `human` actors
 - Steps with `mode: hybrid` must define `eligible_actor_types` including at least two actor types
@@ -233,7 +246,7 @@ Every step should cover its expected execution paths:
 Outcomes with `commit` effects produce durable artifact status changes. These must align with the governed lifecycle:
 
 - Every `commit.status` value must be a valid status for the artifact type governed by `applies_to` (per [Artifact Schema](/governance/artifact-schema.md) §6)
-- The workflow must not produce status transitions that skip required intermediate states (e.g., `Pending` directly to `Completed` without `In Progress`)
+- The workflow must not produce durable status transitions that skip required intermediate governed states defined for the artifact type; runtime-only execution states are not considered durable intermediate states for this rule
 - Terminal statuses (`Completed`, `Superseded`) should only appear on outcomes that route to `end`
 
 ### 5.6 Version Consistency
@@ -289,7 +302,8 @@ Cross-artifact validation checks that the workflow definition is consistent with
 ### 7.2 Task Lifecycle Alignment
 
 - Workflows governing Tasks must produce outcomes consistent with the [Task Lifecycle](/governance/task-lifecycle.md)
-- The workflow should cover all governed terminal states (or explicitly document which terminal states are handled outside the workflow, e.g., `Superseded`, `Abandoned`)
+- Execution workflows for Tasks should cover the terminal states they are responsible for producing during normal execution
+- Administrative terminal states such as `Superseded` or `Abandoned` may be governed outside the execution workflow and therefore do not need to appear as workflow step outcomes, but this must be documented explicitly
 
 ### 7.3 Capability Alignment
 
@@ -388,9 +402,6 @@ validation_result:
 - Missing required field
 - Cycle with no exit
 - `applies_to` conflict with another Active workflow
-- Review step without reject outcome
-- Convergence step without failure outcome
-- Step in cycle without termination outcome
 - Invalid `commit.status` for the governed artifact type
 - Branch step routing outside its branch before convergence
 
@@ -400,6 +411,9 @@ validation_result:
 - `required_capabilities` not found in registered capabilities
 - Retry inside a cycle without iteration limit
 - No registered actors matching step requirements
+- Review step without reject outcome
+- Convergence step without failure outcome
+- Step in cycle without an explicit progression path toward termination
 
 **Examples of advisories:**
 - Step name could be more descriptive
