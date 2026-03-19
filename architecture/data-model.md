@@ -85,6 +85,8 @@ projections
 └── content_hash       (string, hash of raw file content for change detection)
 ```
 
+For the production-ready table definitions with indexes and constraints, see [Runtime Store Schema](/architecture/runtime-schema.md) §3.
+
 ---
 
 ### 2.3 Runtime Layer — Operational State
@@ -141,6 +143,8 @@ queue_entries
 ├── created_at         (timestamp)
 └── processed_at       (timestamp, nullable)
 ```
+
+For the production-ready table definitions with indexes, constraints, idempotency strategy, and archival policy, see [Runtime Store Schema](/architecture/runtime-schema.md) §4.
 
 ---
 
