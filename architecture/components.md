@@ -103,7 +103,11 @@ Manages all read and write operations on Git-backed artifacts.
 - Validate artifact structure against schemas defined in [Artifact Schema](/governance/artifact-schema.md)
 - Validate artifact front matter and linkage
 - Enforce immutability rules (IDs never reused, history never rewritten)
+- Manage task and divergence branches during workflow execution
+- Perform all merges into the authoritative branch (sole merge authority for governed work)
 - Emit domain events when artifacts change (artifact_created, artifact_updated, etc.)
+
+For the full Git operational contract (authentication, commit format, branch strategy, merge rules), see [Git Integration](/architecture/git-integration.md).
 
 **Does not own:**
 
