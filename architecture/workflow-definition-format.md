@@ -188,12 +188,28 @@ convergence_points:
 
 **Convergence entry policies:**
 
-| Policy | Meaning |
-|--------|---------|
-| `all_branches_terminal` | Default — all branches must complete or fail |
-| `minimum_completed_branches` | Convergence may begin after a minimum number of branches complete |
-| `deadline_reached` | Convergence begins after a defined time threshold |
-| `manual_trigger` | An authorized actor explicitly starts convergence |
+Entry policies may be specified as a simple string or a structured object:
+
+```yaml
+# Simple form
+entry_policy: all_branches_terminal
+
+# Structured form
+entry_policy:
+  type: minimum_completed_branches
+  min: 2
+
+entry_policy:
+  type: deadline_reached
+  deadline: "48h"
+```
+
+| Policy | Form | Parameters | Meaning |
+|--------|------|------------|---------|
+| `all_branches_terminal` | string | — | Default — all branches must complete or fail |
+| `minimum_completed_branches` | object | `min` (integer >= 1) | Convergence may begin after a minimum number of branches complete |
+| `deadline_reached` | object | `deadline` (duration) | Convergence begins after a defined time threshold |
+| `manual_trigger` | string | — | An authorized actor explicitly starts convergence |
 
 The detailed execution semantics for divergence and convergence are defined in the [Divergence and Convergence](/architecture/divergence-and-convergence.md) architecture document.
 

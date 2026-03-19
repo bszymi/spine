@@ -303,6 +303,8 @@ Performs cross-artifact validation during workflow progression.
 - Reads artifacts from the Projection Store or Artifact Service
 - Returns validation results (pass, fail with classification)
 
+For concrete validation rules, mismatch classifications, and the validation contract, see [Validation Service Specification](/architecture/validation-service.md).
+
 **Constitutional alignment:**
 
 - Cross-Artifact Validation (§11) — validation is a governed workflow activity
