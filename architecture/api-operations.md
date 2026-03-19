@@ -1,893 +1,248 @@
 ---
 type: Architecture
-title: API Operation Schemas
+title: API Design and Operation Semantics
 status: Living Document
 version: "0.1"
 ---
 
-# API Operation Schemas
+# API Design and Operation Semantics
 
 ---
 
 ## 1. Purpose
 
-This document defines the detailed request/response schemas for all operations exposed through the Spine access surface.
+This document defines the API design philosophy, operation semantics, and domain-level rules for Spine's external interface.
 
-The [Access Surface](/architecture/access-surface.md) defines operation categories and the internal operation model. This document specifies the concrete JSON schemas, error codes, and authorization requirements for each operation, enabling CLI and API implementation.
-
----
-
-## 2. Common Conventions
-
-### 2.1 Request Envelope
-
-All API requests use JSON and follow this structure:
-
-```json
-{
-  "operation": "<operation_name>",
-  "params": { ... },
-  "trace_id": "<uuid or null>"
-}
-```
-
-- `operation` — required, identifies the operation
-- `params` — required, operation-specific parameters
-- `trace_id` — optional; if omitted, the Access Gateway generates one
-
-CLI and GUI adapters translate their native input into this format before forwarding to the Access Gateway.
-
-### 2.2 Response Envelope
-
-All responses follow this structure:
-
-```json
-{
-  "status": "ok | error",
-  "data": { ... },
-  "trace_id": "<uuid>",
-  "errors": [ ... ]
-}
-```
-
-- `status` — `ok` for success, `error` for failure
-- `data` — operation-specific response (null on error)
-- `trace_id` — always present (generated if not provided in request)
-- `errors` — array of error objects (empty on success)
-
-### 2.3 Error Format
-
-```json
-{
-  "code": "<error_code>",
-  "message": "<human-readable description>",
-  "detail": { ... }
-}
-```
-
-### 2.4 Pagination
-
-List operations support cursor-based pagination:
-
-```json
-{
-  "params": {
-    "limit": 50,
-    "cursor": "<opaque_cursor_string or null>"
-  }
-}
-```
-
-Paginated responses include:
-
-```json
-{
-  "data": {
-    "items": [ ... ],
-    "next_cursor": "<cursor or null>",
-    "has_more": true
-  }
-}
-```
-
-### 2.5 Authorization Shorthand
-
-Each operation specifies the minimum required role using the hierarchy: `reader < contributor < reviewer < operator < admin` (per [Security Model](/architecture/security-model.md) §4.2).
+The [Access Surface](/architecture/access-surface.md) defines operation categories and the internal operation model. The [OpenAPI specification](/architecture/api-spec.yaml) defines the concrete HTTP endpoints, request/response schemas, and error payloads. This document bridges the gap — it explains what the operations mean, when to use them, and what governance rules apply.
 
 ---
 
-## 3. Error Codes
+## 2. API Philosophy
 
-| Code | HTTP Status | Meaning |
-|------|-------------|---------|
-| `not_found` | 404 | Artifact or resource does not exist |
-| `already_exists` | 409 | Artifact with this ID or path already exists |
-| `validation_failed` | 422 | Artifact or request failed schema or cross-artifact validation |
-| `unauthorized` | 401 | Authentication required or invalid |
-| `forbidden` | 403 | Actor lacks required role or capabilities |
-| `conflict` | 409 | Operation conflicts with current state (e.g., Run already active) |
-| `precondition_failed` | 412 | Workflow precondition not met |
-| `invalid_params` | 400 | Request parameters are malformed or missing |
-| `internal_error` | 500 | Unexpected system error |
-| `service_unavailable` | 503 | System not ready (e.g., projection rebuild in progress) |
-| `git_error` | 502 | Git operation failed |
-| `workflow_not_found` | 404 | No active workflow matches the artifact for binding resolution |
+### 2.1 Operations, Not Resources
 
----
+The Spine API exposes **governed domain operations**, not a generic REST resource model. While HTTP is used as transport and read-heavy endpoints may resemble REST resources, state-changing actions are modeled as explicit operations with governance semantics.
 
-## 4. Artifact Operations
+This means:
+- `artifact.create` is not `POST /artifacts` — it's a governed action that validates schemas, checks cross-artifact rules, and produces a Git commit
+- `task.accept` is not `PATCH /tasks/:id` — it's a governance decision that requires reviewer authorization and records rationale
+- Operations may have side effects beyond the obvious (emit events, trigger projection sync, advance workflow state)
 
-### 4.1 `artifact.create`
+### 2.2 Unified Operation Model
 
-Create a new artifact with validated front matter.
+All access modes (CLI, API, GUI) converge on the same operations. The internal operation model (per [Access Surface](/architecture/access-surface.md) §5.3) is:
 
-**Min role:** `contributor`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Repository-relative path for the new artifact |
-| `content` | string | yes | Full artifact content (front matter + markdown body) |
-
-**Response data:**
-
-```json
-{
-  "artifact_path": "/initiatives/INIT-002/initiative.md",
-  "artifact_id": "INIT-002",
-  "artifact_type": "Initiative",
-  "commit_sha": "abc123..."
-}
+```
+InternalRequest
+├── operation     (string, e.g., "artifact.create", "run.start")
+├── actor_id      (string, authenticated actor)
+├── actor_role    (string, authorization role)
+├── params        (map, operation-specific parameters)
+└── trace_id      (string, observability correlation)
 ```
 
-**Errors:** `already_exists`, `validation_failed`, `forbidden`, `git_error`
+CLI commands, HTTP requests, and GUI actions all translate into this model. The API specification defines the HTTP mapping; this document defines the semantics that apply regardless of access mode.
+
+### 2.3 Authoritative vs Proposed Writes
+
+Not all writes are equal:
+
+| Write Type | Where It Lands | Governance Status |
+|------------|---------------|-------------------|
+| Governed write | Authoritative branch (via merge) | Durable, governed truth |
+| Operational write | Task/divergence branch | Proposed, revisable |
+| Runtime write | Runtime Store only | Ephemeral execution state |
+
+Callers should understand which category their operation falls into:
+
+- `artifact.create` and `artifact.update` produce governed writes (direct to authoritative branch) when called outside a Run
+- `step.submit` may produce an operational write (to the task branch) that becomes governed only after workflow completion and merge
+- `run.start`, `run.cancel`, `step.assign` produce runtime writes only
 
 ---
 
-### 4.2 `artifact.read`
+## 3. Operation Categories
 
-Read artifact content and metadata.
+### 3.1 Artifact Operations
 
-**Min role:** `reader`
+Artifact operations create, read, and modify governed artifacts in Git.
 
-**Request params:**
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `artifact.create` | Creates a new artifact file and commits to Git | When creating a new initiative, epic, task, ADR, or document |
+| `artifact.read` | Reads artifact content from Git (or projection) | When viewing artifact details; supports reading from non-default refs |
+| `artifact.update` | Updates artifact content and commits to Git | When modifying artifact metadata or content outside a Run |
+| `artifact.validate` | Validates without persisting | When checking an artifact before creation/update, or validating drafts |
+| `artifact.list` | Queries projected artifacts | When browsing or filtering the artifact inventory |
+| `artifact.links` | Queries artifact relationships | When exploring dependency graphs or parent/child hierarchies |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Repository-relative path of the artifact |
-| `ref` | string | no | Git ref to read from (default: authoritative branch HEAD) |
+**Domain rules:**
+- `artifact.create` rejects duplicates (same path or same ID within scope)
+- `artifact.update` validates the full artifact (schema + cross-artifact) before committing
+- All write operations produce a single atomic Git commit with structured trailers (per [Git Integration](/architecture/git-integration.md) §5)
 
-**Response data:**
+### 3.2 Workflow Operations
 
-```json
-{
-  "artifact_path": "/initiatives/INIT-001/initiative.md",
-  "artifact_id": "INIT-001",
-  "artifact_type": "Initiative",
-  "status": "In Progress",
-  "title": "Foundations",
-  "metadata": { ... },
-  "content": "# INIT-001 — Foundations\n...",
-  "source_commit": "def456..."
-}
-```
+Workflow operations control Run execution and task governance decisions.
 
-**Errors:** `not_found`
+**Run lifecycle:**
 
----
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `run.start` | Creates a Run, resolves workflow binding, pins version | When a task is ready for execution |
+| `run.status` | Queries Run state and step history | When monitoring execution progress |
+| `run.cancel` | Cancels an active Run | When execution should be abandoned (operator decision) |
 
-### 4.3 `artifact.update`
+**Step execution:**
 
-Update artifact content or metadata.
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `step.submit` | Submits a step result, may produce a Git commit | When an actor completes assigned work |
+| `step.assign` | Assigns an actor to a step | When overriding automatic actor selection |
 
-**Min role:** `contributor`
+**Task governance:**
 
-**Request params:**
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `task.accept` | Records `Approved` acceptance on the task artifact | When deliverable meets acceptance criteria |
+| `task.reject` | Records rejection with classification and rationale | When deliverable does not meet criteria |
+| `task.cancel` | Sets task status to `Cancelled` | When the task is no longer needed |
+| `task.abandon` | Sets task status to `Abandoned` | When the task is abandoned by governance decision |
+| `task.supersede` | Sets task status to `Superseded` with successor link | When the task is replaced by new work |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Repository-relative path of the artifact |
-| `content` | string | yes | Updated full artifact content |
+**Domain rules:**
+- `run.start` fails if an active Run already exists for the task, or if no active workflow matches the task's `(type, work_type)` pair
+- `step.submit` validates the outcome against the workflow definition and checks actor assignment
+- Task governance operations (`accept`, `reject`, `cancel`, `abandon`, `supersede`) are Git writes — they produce durable commits that change the task artifact's front matter
+- `task.reject` requires a rationale; the `acceptance` field must be one of `Rejected With Followup` or `Rejected Closed` (per [Task Lifecycle](/governance/task-lifecycle.md))
 
-**Response data:**
+### 3.3 Query Operations
 
-```json
-{
-  "artifact_path": "/initiatives/INIT-001/initiative.md",
-  "commit_sha": "ghi789..."
-}
-```
+Query operations read from the Projection Store for fast access.
 
-**Errors:** `not_found`, `validation_failed`, `forbidden`, `git_error`
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `query.artifacts` | Searches by type, status, metadata, full-text | When searching the artifact inventory |
+| `query.graph` | Traverses relationship links with configurable depth | When exploring artifact relationships |
+| `query.history` | Reads Git commit history for an artifact | When reviewing change history |
+| `query.runs` | Lists Runs for a task | When reviewing execution history |
 
----
+**Domain rules:**
+- Queries read from projections, which are eventually consistent with Git
+- Consumers must tolerate staleness (per [Data Model](/architecture/data-model.md) §4.3)
+- `query.history` reads from Git directly, not projections — it always returns authoritative history
 
-### 4.4 `artifact.validate`
+### 3.4 System Operations
 
-Validate an artifact against schema and cross-artifact rules without persisting.
+System operations are administrative and require elevated authorization.
 
-**Min role:** `reader`
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `system.health` | Returns component health status | Monitoring, readiness checks |
+| `system.rebuild` | Triggers full projection rebuild from Git | After projection corruption or drift |
+| `system.validate_all` | Runs validation across all artifacts | Periodic governance audits |
 
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Repository-relative path of the artifact |
-| `content` | string | no | Content to validate (if omitted, validates the current artifact in Git) |
-
-**Response data:**
-
-```json
-{
-  "artifact_path": "/tasks/TASK-001.md",
-  "status": "passed | failed | warnings",
-  "errors": [ ... ],
-  "warnings": [ ... ]
-}
-```
-
-**Errors:** `not_found` (if path given without content and artifact doesn't exist)
-
----
-
-### 4.5 `artifact.list`
-
-List artifacts by type, status, or parent.
-
-**Min role:** `reader`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | no | Filter by artifact type |
-| `status` | string | no | Filter by status |
-| `parent_path` | string | no | Filter by parent artifact path |
-| `limit` | integer | no | Max results (default: 50, max: 200) |
-| `cursor` | string | no | Pagination cursor |
-
-**Response data:**
-
-```json
-{
-  "items": [
-    {
-      "artifact_path": "...",
-      "artifact_id": "...",
-      "artifact_type": "...",
-      "status": "...",
-      "title": "..."
-    }
-  ],
-  "next_cursor": "...",
-  "has_more": false
-}
-```
+**Domain rules:**
+- `system.rebuild` is asynchronous — the response confirms the rebuild was started, not completed
+- `system.validate_all` may be slow on large repositories; it runs against the Projection Store
 
 ---
 
-### 4.6 `artifact.links`
+## 4. Error Model
 
-Query artifact relationships.
+### 4.1 Error Codes
 
-**Min role:** `reader`
+| Code | Meaning |
+|------|---------|
+| `not_found` | Artifact or resource does not exist |
+| `already_exists` | Artifact with this ID or path already exists |
+| `validation_failed` | Failed schema or cross-artifact validation |
+| `unauthorized` | Authentication required or invalid |
+| `forbidden` | Actor lacks required role or capabilities |
+| `conflict` | Operation conflicts with current state |
+| `precondition_failed` | Workflow precondition not met |
+| `invalid_params` | Request parameters malformed or missing |
+| `internal_error` | Unexpected system error |
+| `service_unavailable` | System not ready |
+| `git_error` | Git operation failed |
+| `workflow_not_found` | No active workflow matches for binding resolution |
 
-**Request params:**
+### 4.2 Error Semantics
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Artifact to query links for |
-| `link_type` | string | no | Filter by link type (parent, blocks, etc.) |
-| `direction` | string | no | `outgoing` (default), `incoming`, or `both` |
-
-**Response data:**
-
-```json
-{
-  "artifact_path": "...",
-  "links": [
-    {
-      "direction": "outgoing",
-      "link_type": "parent",
-      "target_path": "..."
-    }
-  ]
-}
-```
+- **Validation errors** include structured details about which rules failed and where
+- **Conflict errors** indicate the operation cannot proceed because of current state (e.g., active Run exists, task already completed) — the caller should inspect state and decide how to proceed
+- **Git errors** indicate the durable write failed — the operation was not persisted and may be retried
+- Errors never produce partial state — either the full operation succeeds or nothing changes
 
 ---
 
-## 5. Workflow Operations
+## 5. Asynchronous Behavior
 
-### 5.1 `run.start`
+Most operations are synchronous — the response confirms the operation completed (including Git commit if applicable).
 
-Start a new Run for a task.
+Exceptions:
 
-**Min role:** `contributor`
+| Operation | Async Behavior |
+|-----------|---------------|
+| `system.rebuild` | Returns immediately; rebuild runs in background |
+| `run.start` | Synchronous (Run created), but execution proceeds asynchronously after |
+| `step.submit` | Synchronous (result recorded), but next step assignment is asynchronous |
 
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `task_path` | string | yes | Path to the Task artifact |
-
-The Workflow Engine resolves the workflow binding, pins the version, and creates the Run.
-
-**Response data:**
-
-```json
-{
-  "run_id": "run-abc123",
-  "task_path": "...",
-  "workflow_id": "task-execution",
-  "workflow_version": "abc123...",
-  "trace_id": "...",
-  "status": "pending"
-}
-```
-
-**Errors:** `not_found`, `workflow_not_found`, `conflict` (active Run already exists), `validation_failed` (task not in valid state for Run)
+For `run.start`, the response confirms the Run was created and the first step is ready. The caller does not wait for the Run to complete — they poll `run.status` or consume events.
 
 ---
 
-### 5.2 `run.status`
+## 6. Authorization Model
 
-Query Run execution state.
+Authorization is role-based (per [Security Model](/architecture/security-model.md) §4):
 
-**Min role:** `reader`
+| Role | Can Do |
+|------|--------|
+| `reader` | All read and query operations |
+| `contributor` | Reader + create/update artifacts, start Runs, submit step results |
+| `reviewer` | Contributor + task governance decisions (accept, reject, cancel, abandon, supersede) |
+| `operator` | Reviewer + system operations, Run cancellation, manual step assignment |
+| `admin` | Full access including actor and token management |
 
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `run_id` | string | yes | Run identifier |
-
-**Response data:**
-
-```json
-{
-  "run_id": "run-abc123",
-  "task_path": "...",
-  "workflow_id": "...",
-  "status": "active",
-  "current_step_id": "execute",
-  "trace_id": "...",
-  "started_at": "...",
-  "step_executions": [
-    {
-      "execution_id": "...",
-      "step_id": "assign",
-      "status": "completed",
-      "actor_id": "...",
-      "outcome_id": "assigned",
-      "attempt": 1
-    }
-  ]
-}
-```
-
-**Errors:** `not_found`
+Additionally, individual workflow steps may require specific **capabilities** — the Workflow Engine checks these at assignment time, not the Access Gateway.
 
 ---
 
-### 5.3 `run.cancel`
+## 7. Conventions
 
-Cancel an in-progress Run.
+### 7.1 Pagination
 
-**Min role:** `operator`
+List operations use cursor-based pagination. Callers provide `limit` and `cursor`; responses include `next_cursor` and `has_more`.
 
-**Request params:**
+### 7.2 Trace ID Propagation
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `run_id` | string | yes | Run identifier |
-| `reason` | string | no | Cancellation rationale |
+All requests may include a `trace_id`. If omitted, the Access Gateway generates one. The `trace_id` appears in all responses, events, and Git commits produced by the operation.
 
-**Response data:**
+### 7.3 Idempotency
 
-```json
-{
-  "run_id": "run-abc123",
-  "status": "cancelled"
-}
-```
-
-**Errors:** `not_found`, `conflict` (Run not in cancellable state)
+Write operations are idempotent via `trace_id` — retrying a request with the same trace ID does not produce duplicate effects (per [Git Integration](/architecture/git-integration.md) §5.6).
 
 ---
 
-### 5.4 `step.submit`
-
-Submit step result for evaluation.
-
-**Min role:** `contributor`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `assignment_id` | string | yes | Active assignment identifier |
-| `outcome_id` | string | yes | One of the step's declared outcomes |
-| `output` | object | no | Step-specific output data |
-| `output.artifacts_produced` | string[] | no | Paths of artifacts created or modified |
-| `output.data` | object | no | Structured data output |
-| `output.summary` | string | no | Human-readable summary |
-
-**Response data:**
-
-```json
-{
-  "execution_id": "...",
-  "step_id": "execute",
-  "outcome_id": "submitted",
-  "next_step": "review",
-  "commit_sha": "abc123..."
-}
-```
-
-`commit_sha` is present only if the outcome has a `commit` effect.
-
-**Errors:** `not_found`, `invalid_params` (outcome_id not valid), `conflict` (assignment not active), `validation_failed` (artifacts don't conform), `git_error`
-
----
-
-### 5.5 `step.assign`
-
-Assign an actor to a step.
-
-**Min role:** `operator`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `run_id` | string | yes | Run identifier |
-| `step_id` | string | yes | Step to assign |
-| `actor_id` | string | yes | Actor to assign |
-
-**Response data:**
-
-```json
-{
-  "assignment_id": "...",
-  "run_id": "...",
-  "step_id": "...",
-  "actor_id": "...",
-  "status": "active"
-}
-```
-
-**Errors:** `not_found`, `forbidden` (actor not eligible), `conflict` (step not in assignable state)
-
----
-
-### 5.6 `task.accept`
-
-Record task-level acceptance.
-
-**Min role:** `reviewer`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `task_path` | string | yes | Path to the Task artifact |
-| `rationale` | string | no | Acceptance rationale |
-
-**Response data:**
-
-```json
-{
-  "task_path": "...",
-  "acceptance": "Approved",
-  "commit_sha": "..."
-}
-```
-
-**Errors:** `not_found`, `forbidden`, `conflict` (task not in acceptable state), `git_error`
-
----
-
-### 5.7 `task.reject`
-
-Record task-level rejection.
-
-**Min role:** `reviewer`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `task_path` | string | yes | Path to the Task artifact |
-| `acceptance` | string | yes | `Rejected With Followup` or `Rejected Closed` |
-| `rationale` | string | yes | Rejection rationale (required) |
-| `followup_path` | string | no | Path to follow-up task (for `Rejected With Followup`) |
-
-**Response data:**
-
-```json
-{
-  "task_path": "...",
-  "acceptance": "Rejected With Followup",
-  "commit_sha": "..."
-}
-```
-
-**Errors:** `not_found`, `forbidden`, `invalid_params`, `conflict`, `git_error`
-
----
-
-### 5.8 `task.cancel`
-
-Cancel a task with rationale.
-
-**Min role:** `reviewer`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `task_path` | string | yes | Path to the Task artifact |
-| `rationale` | string | yes | Cancellation rationale |
-
-**Response data:**
-
-```json
-{
-  "task_path": "...",
-  "status": "Cancelled",
-  "commit_sha": "..."
-}
-```
-
-**Errors:** `not_found`, `forbidden`, `conflict`, `git_error`
-
----
-
-### 5.9 `task.abandon`
-
-Abandon a task by governance decision.
-
-**Min role:** `reviewer`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `task_path` | string | yes | Path to the Task artifact |
-| `rationale` | string | yes | Abandonment rationale |
-
-**Response data:**
-
-```json
-{
-  "task_path": "...",
-  "status": "Abandoned",
-  "commit_sha": "..."
-}
-```
-
-**Errors:** `not_found`, `forbidden`, `conflict`, `git_error`
-
----
-
-### 5.10 `task.supersede`
-
-Supersede a task with successor work.
-
-**Min role:** `reviewer`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `task_path` | string | yes | Path to the Task artifact |
-| `successor_path` | string | yes | Path to the successor artifact |
-| `rationale` | string | no | Supersession rationale |
-
-**Response data:**
-
-```json
-{
-  "task_path": "...",
-  "status": "Superseded",
-  "successor_path": "...",
-  "commit_sha": "..."
-}
-```
-
-**Errors:** `not_found`, `forbidden`, `invalid_params` (successor doesn't exist), `conflict`, `git_error`
-
----
-
-## 6. Query Operations
-
-### 6.1 `query.artifacts`
-
-Search artifacts by type, status, and metadata fields.
-
-**Min role:** `reader`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | no | Filter by artifact type |
-| `status` | string | no | Filter by status |
-| `metadata` | object | no | Filter by metadata field values (e.g., `{"work_type": "spike"}`) |
-| `search` | string | no | Full-text search across title and content |
-| `limit` | integer | no | Max results (default: 50, max: 200) |
-| `cursor` | string | no | Pagination cursor |
-
-**Response data:**
-
-```json
-{
-  "items": [
-    {
-      "artifact_path": "...",
-      "artifact_id": "...",
-      "artifact_type": "...",
-      "status": "...",
-      "title": "...",
-      "metadata": { ... }
-    }
-  ],
-  "next_cursor": "...",
-  "has_more": false
-}
-```
-
----
-
-### 6.2 `query.graph`
-
-Retrieve relationship graph for an artifact.
-
-**Min role:** `reader`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Root artifact path |
-| `depth` | integer | no | Max traversal depth (default: 2, max: 5) |
-| `link_types` | string[] | no | Filter to specific link types |
-
-**Response data:**
-
-```json
-{
-  "root": "...",
-  "nodes": [
-    {
-      "artifact_path": "...",
-      "artifact_type": "...",
-      "status": "...",
-      "title": "..."
-    }
-  ],
-  "edges": [
-    {
-      "source": "...",
-      "target": "...",
-      "link_type": "parent"
-    }
-  ]
-}
-```
-
----
-
-### 6.3 `query.history`
-
-View artifact change history from Git.
-
-**Min role:** `reader`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Artifact path |
-| `limit` | integer | no | Max commits (default: 20) |
-| `cursor` | string | no | Pagination cursor |
-
-**Response data:**
-
-```json
-{
-  "items": [
-    {
-      "commit_sha": "...",
-      "timestamp": "...",
-      "author": "...",
-      "message": "...",
-      "trace_id": "...",
-      "operation": "..."
-    }
-  ],
-  "next_cursor": "...",
-  "has_more": false
-}
-```
-
----
-
-### 6.4 `query.runs`
-
-List Runs for a task with execution state.
-
-**Min role:** `reader`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `task_path` | string | yes | Path to the Task artifact |
-| `status` | string | no | Filter by Run status |
-| `limit` | integer | no | Max results (default: 20) |
-| `cursor` | string | no | Pagination cursor |
-
-**Response data:**
-
-```json
-{
-  "items": [
-    {
-      "run_id": "...",
-      "workflow_id": "...",
-      "status": "completed",
-      "trace_id": "...",
-      "started_at": "...",
-      "completed_at": "..."
-    }
-  ],
-  "next_cursor": "...",
-  "has_more": false
-}
-```
-
----
-
-## 7. System Operations
-
-### 7.1 `system.health`
-
-Runtime health check.
-
-**Min role:** `reader`
-
-**Request params:** none
-
-**Response data:**
-
-```json
-{
-  "status": "healthy | degraded | unhealthy",
-  "components": {
-    "artifact_service": "healthy",
-    "workflow_engine": "healthy",
-    "projection_service": "healthy",
-    "event_router": "healthy"
-  },
-  "projection_lag_ms": 150,
-  "active_runs": 3
-}
-```
-
----
-
-### 7.2 `system.rebuild`
-
-Trigger full projection rebuild from Git.
-
-**Min role:** `operator`
-
-**Request params:** none
-
-**Response data:**
-
-```json
-{
-  "status": "started",
-  "rebuild_id": "rebuild-xyz"
-}
-```
-
-This is an asynchronous operation. Use `system.health` to monitor progress.
-
-**Errors:** `conflict` (rebuild already in progress)
-
----
-
-### 7.3 `system.validate_all`
-
-Run schema and cross-artifact validation across all artifacts.
-
-**Min role:** `operator`
-
-**Request params:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `categories` | string[] | no | Restrict to specific rule categories |
-
-**Response data:**
-
-```json
-{
-  "status": "passed | failed | warnings",
-  "total_artifacts": 42,
-  "passed": 38,
-  "warnings": 3,
-  "failed": 1,
-  "results": [
-    {
-      "artifact_path": "...",
-      "status": "failed",
-      "errors": [ ... ],
-      "warnings": [ ... ]
-    }
-  ]
-}
-```
-
----
-
-## 8. Authorization Summary
-
-| Operation | Min Role |
-|-----------|----------|
-| `artifact.create` | `contributor` |
-| `artifact.read` | `reader` |
-| `artifact.update` | `contributor` |
-| `artifact.validate` | `reader` |
-| `artifact.list` | `reader` |
-| `artifact.links` | `reader` |
-| `run.start` | `contributor` |
-| `run.status` | `reader` |
-| `run.cancel` | `operator` |
-| `step.submit` | `contributor` |
-| `step.assign` | `operator` |
-| `task.accept` | `reviewer` |
-| `task.reject` | `reviewer` |
-| `task.cancel` | `reviewer` |
-| `task.abandon` | `reviewer` |
-| `task.supersede` | `reviewer` |
-| `query.artifacts` | `reader` |
-| `query.graph` | `reader` |
-| `query.history` | `reader` |
-| `query.runs` | `reader` |
-| `system.health` | `reader` |
-| `system.rebuild` | `operator` |
-| `system.validate_all` | `operator` |
-
----
-
-## 9. Cross-References
+## 8. Cross-References
 
 - [Access Surface](/architecture/access-surface.md) — Operation categories and internal operation model
-- [Security Model](/architecture/security-model.md) §4 — Role hierarchy and authorization enforcement
-- [Artifact Schema](/governance/artifact-schema.md) — Front matter validation rules
+- [OpenAPI Specification](/architecture/api-spec.yaml) — Concrete HTTP endpoints and JSON schemas
+- [Security Model](/architecture/security-model.md) §4 — Role hierarchy and authorization
+- [Git Integration](/architecture/git-integration.md) §5 — Commit format for write operations
 - [Task Lifecycle](/governance/task-lifecycle.md) — Task terminal states and acceptance model
 - [Validation Service](/architecture/validation-service.md) — Cross-artifact validation rules
 - [Actor Model](/architecture/actor-model.md) §5 — Step assignment protocol
-- [Git Integration](/architecture/git-integration.md) §5 — Commit format for operations that modify Git
+- [Data Model](/architecture/data-model.md) §4.3 — Projection consistency model
 
 ---
 
-## 10. Evolution Policy
+## 9. Evolution Policy
 
-This API specification is expected to evolve as the system is implemented.
+This document evolves alongside the API specification. When new operations are added:
 
-Areas expected to require refinement:
+1. Define the semantics and domain rules in this document
+2. Define the concrete endpoint in the OpenAPI specification
+3. Specify the authorization requirement
 
-- Webhook registration and management operations
-- Batch operations for bulk artifact updates
-- Streaming endpoints for real-time event consumption
-- Workflow definition management operations (create, activate, deprecate)
-- Actor management operations (register, suspend, deactivate)
-
-New operations should be added to this document with request/response schemas and authorization requirements before implementation.
+Changes that alter operation semantics or the error model should be captured as ADRs.

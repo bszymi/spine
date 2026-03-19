@@ -1,0 +1,965 @@
+openapi: 3.1.0
+info:
+  title: Spine API
+  version: 0.1.0
+  description: |
+    Spine v0.x API specification. See /architecture/api-operations.md for
+    operation semantics, domain rules, and governance model.
+
+servers:
+  - url: /api/v1
+    description: Spine API v1
+
+security:
+  - BearerToken: []
+
+# ─── Paths ──────────────────────────────────────────────────────────────────
+
+paths:
+
+  # ── Artifact Operations ──
+
+  /artifacts:
+    post:
+      operationId: artifact.create
+      summary: Create a new artifact
+      tags: [Artifacts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactCreateRequest'
+      responses:
+        '201':
+          description: Artifact created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactCreateResponse'
+        '409':
+          $ref: '#/components/responses/AlreadyExists'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+    get:
+      operationId: artifact.list
+      summary: List artifacts
+      tags: [Artifacts]
+      parameters:
+        - name: type
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: parent_path
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Artifact list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactListResponse'
+
+  /artifacts/{path}:
+    get:
+      operationId: artifact.read
+      summary: Read an artifact
+      tags: [Artifacts]
+      parameters:
+        - $ref: '#/components/parameters/ArtifactPath'
+        - name: ref
+          in: query
+          schema: { type: string }
+          description: Git ref to read from (default authoritative branch HEAD)
+      responses:
+        '200':
+          description: Artifact details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactReadResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      operationId: artifact.update
+      summary: Update an artifact
+      tags: [Artifacts]
+      parameters:
+        - $ref: '#/components/parameters/ArtifactPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactUpdateRequest'
+      responses:
+        '200':
+          description: Artifact updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactUpdateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /artifacts/{path}/validate:
+    post:
+      operationId: artifact.validate
+      summary: Validate an artifact
+      tags: [Artifacts]
+      parameters:
+        - $ref: '#/components/parameters/ArtifactPath'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+                  description: Content to validate (if omitted, validates current artifact)
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationResult'
+
+  /artifacts/{path}/links:
+    get:
+      operationId: artifact.links
+      summary: Query artifact relationships
+      tags: [Artifacts]
+      parameters:
+        - $ref: '#/components/parameters/ArtifactPath'
+        - name: link_type
+          in: query
+          schema: { type: string }
+        - name: direction
+          in: query
+          schema:
+            type: string
+            enum: [outgoing, incoming, both]
+            default: outgoing
+      responses:
+        '200':
+          description: Artifact links
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactLinksResponse'
+
+  # ── Workflow Operations ──
+
+  /runs:
+    post:
+      operationId: run.start
+      summary: Start a new Run for a task
+      tags: [Workflow]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task_path]
+              properties:
+                task_path:
+                  type: string
+      responses:
+        '201':
+          description: Run created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /runs/{run_id}:
+    get:
+      operationId: run.status
+      summary: Query Run execution state
+      tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Run status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /runs/{run_id}/cancel:
+    post:
+      operationId: run.cancel
+      summary: Cancel an in-progress Run
+      tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Run cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunCancelResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /steps/{assignment_id}/submit:
+    post:
+      operationId: step.submit
+      summary: Submit step result
+      tags: [Workflow]
+      parameters:
+        - name: assignment_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StepSubmitRequest'
+      responses:
+        '200':
+          description: Step result accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StepSubmitResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /runs/{run_id}/steps/{step_id}/assign:
+    post:
+      operationId: step.assign
+      summary: Assign actor to a step
+      tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: step_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor_id]
+              properties:
+                actor_id:
+                  type: string
+      responses:
+        '200':
+          description: Actor assigned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ── Task Governance Operations ──
+
+  /tasks/{path}/accept:
+    post:
+      operationId: task.accept
+      summary: Record task acceptance
+      tags: [Task Governance]
+      parameters:
+        - $ref: '#/components/parameters/TaskPath'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rationale:
+                  type: string
+      responses:
+        '200':
+          description: Task accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGovernanceResponse'
+
+  /tasks/{path}/reject:
+    post:
+      operationId: task.reject
+      summary: Record task rejection
+      tags: [Task Governance]
+      parameters:
+        - $ref: '#/components/parameters/TaskPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [acceptance, rationale]
+              properties:
+                acceptance:
+                  type: string
+                  enum: [Rejected With Followup, Rejected Closed]
+                rationale:
+                  type: string
+                followup_path:
+                  type: string
+      responses:
+        '200':
+          description: Task rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGovernanceResponse'
+
+  /tasks/{path}/cancel:
+    post:
+      operationId: task.cancel
+      summary: Cancel a task
+      tags: [Task Governance]
+      parameters:
+        - $ref: '#/components/parameters/TaskPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rationale]
+              properties:
+                rationale:
+                  type: string
+      responses:
+        '200':
+          description: Task cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGovernanceResponse'
+
+  /tasks/{path}/abandon:
+    post:
+      operationId: task.abandon
+      summary: Abandon a task
+      tags: [Task Governance]
+      parameters:
+        - $ref: '#/components/parameters/TaskPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rationale]
+              properties:
+                rationale:
+                  type: string
+      responses:
+        '200':
+          description: Task abandoned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGovernanceResponse'
+
+  /tasks/{path}/supersede:
+    post:
+      operationId: task.supersede
+      summary: Supersede a task
+      tags: [Task Governance]
+      parameters:
+        - $ref: '#/components/parameters/TaskPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [successor_path]
+              properties:
+                successor_path:
+                  type: string
+                rationale:
+                  type: string
+      responses:
+        '200':
+          description: Task superseded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGovernanceResponse'
+
+  # ── Query Operations ──
+
+  /query/artifacts:
+    get:
+      operationId: query.artifacts
+      summary: Search artifacts
+      tags: [Query]
+      parameters:
+        - name: type
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: search
+          in: query
+          schema: { type: string }
+          description: Full-text search across title and content
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactListResponse'
+
+  /query/graph:
+    get:
+      operationId: query.graph
+      summary: Retrieve artifact relationship graph
+      tags: [Query]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: depth
+          in: query
+          schema:
+            type: integer
+            default: 2
+            maximum: 5
+        - name: link_types
+          in: query
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: false
+      responses:
+        '200':
+          description: Relationship graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphResponse'
+
+  /query/history:
+    get:
+      operationId: query.history
+      summary: View artifact change history
+      tags: [Query]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Commit history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryResponse'
+
+  /query/runs:
+    get:
+      operationId: query.runs
+      summary: List Runs for a task
+      tags: [Query]
+      parameters:
+        - name: task_path
+          in: query
+          required: true
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Run list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunListResponse'
+
+  # ── System Operations ──
+
+  /system/health:
+    get:
+      operationId: system.health
+      summary: Runtime health check
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /system/rebuild:
+    post:
+      operationId: system.rebuild
+      summary: Trigger full projection rebuild
+      tags: [System]
+      responses:
+        '202':
+          description: Rebuild started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [started] }
+                  rebuild_id: { type: string }
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /system/validate:
+    post:
+      operationId: system.validate_all
+      summary: Validate all artifacts
+      tags: [System]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                categories:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Validation results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemValidationResponse'
+
+# ─── Components ─────────────────────────────────────────────────────────────
+
+components:
+
+  securitySchemes:
+    BearerToken:
+      type: http
+      scheme: bearer
+      description: API token (per Security Model §3.3)
+
+  parameters:
+    ArtifactPath:
+      name: path
+      in: path
+      required: true
+      schema: { type: string }
+      description: Repository-relative artifact path
+
+    TaskPath:
+      name: path
+      in: path
+      required: true
+      schema: { type: string }
+      description: Repository-relative task artifact path
+
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string }
+
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 50
+        maximum: 200
+
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque pagination cursor
+
+  schemas:
+
+    # ── Common ──
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        detail: { type: object }
+
+    PaginationMeta:
+      type: object
+      properties:
+        next_cursor: { type: string, nullable: true }
+        has_more: { type: boolean }
+
+    # ── Artifact Schemas ──
+
+    ArtifactSummary:
+      type: object
+      properties:
+        artifact_path: { type: string }
+        artifact_id: { type: string }
+        artifact_type: { type: string }
+        status: { type: string }
+        title: { type: string }
+
+    ArtifactCreateRequest:
+      type: object
+      required: [path, content]
+      properties:
+        path: { type: string }
+        content: { type: string }
+
+    ArtifactCreateResponse:
+      type: object
+      properties:
+        artifact_path: { type: string }
+        artifact_id: { type: string }
+        artifact_type: { type: string }
+        commit_sha: { type: string }
+        trace_id: { type: string }
+
+    ArtifactReadResponse:
+      type: object
+      properties:
+        artifact_path: { type: string }
+        artifact_id: { type: string }
+        artifact_type: { type: string }
+        status: { type: string }
+        title: { type: string }
+        metadata: { type: object }
+        content: { type: string }
+        source_commit: { type: string }
+
+    ArtifactUpdateRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+
+    ArtifactUpdateResponse:
+      type: object
+      properties:
+        artifact_path: { type: string }
+        commit_sha: { type: string }
+        trace_id: { type: string }
+
+    ArtifactListResponse:
+      allOf:
+        - $ref: '#/components/schemas/PaginationMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/ArtifactSummary'
+
+    ArtifactLinksResponse:
+      type: object
+      properties:
+        artifact_path: { type: string }
+        links:
+          type: array
+          items:
+            type: object
+            properties:
+              direction: { type: string, enum: [outgoing, incoming] }
+              link_type: { type: string }
+              target_path: { type: string }
+
+    ValidationResult:
+      type: object
+      properties:
+        artifact_path: { type: string }
+        status: { type: string, enum: [passed, failed, warnings] }
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/Error'
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Error'
+
+    # ── Run Schemas ──
+
+    RunResponse:
+      type: object
+      properties:
+        run_id: { type: string }
+        task_path: { type: string }
+        workflow_id: { type: string }
+        workflow_version: { type: string }
+        trace_id: { type: string }
+        status: { type: string }
+
+    StepExecution:
+      type: object
+      properties:
+        execution_id: { type: string }
+        step_id: { type: string }
+        status: { type: string }
+        actor_id: { type: string, nullable: true }
+        outcome_id: { type: string, nullable: true }
+        attempt: { type: integer }
+        started_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+
+    RunStatusResponse:
+      type: object
+      properties:
+        run_id: { type: string }
+        task_path: { type: string }
+        workflow_id: { type: string }
+        status: { type: string }
+        current_step_id: { type: string, nullable: true }
+        trace_id: { type: string }
+        started_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        step_executions:
+          type: array
+          items:
+            $ref: '#/components/schemas/StepExecution'
+
+    RunCancelResponse:
+      type: object
+      properties:
+        run_id: { type: string }
+        status: { type: string, enum: [cancelled] }
+
+    RunListResponse:
+      allOf:
+        - $ref: '#/components/schemas/PaginationMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/RunResponse'
+
+    # ── Step Schemas ──
+
+    StepSubmitRequest:
+      type: object
+      required: [outcome_id]
+      properties:
+        outcome_id: { type: string }
+        output:
+          type: object
+          properties:
+            artifacts_produced:
+              type: array
+              items: { type: string }
+            data: { type: object }
+            summary: { type: string }
+
+    StepSubmitResponse:
+      type: object
+      properties:
+        execution_id: { type: string }
+        step_id: { type: string }
+        outcome_id: { type: string }
+        next_step: { type: string, nullable: true }
+        commit_sha: { type: string, nullable: true }
+
+    AssignmentResponse:
+      type: object
+      properties:
+        assignment_id: { type: string }
+        run_id: { type: string }
+        step_id: { type: string }
+        actor_id: { type: string }
+        status: { type: string, enum: [active] }
+
+    # ── Task Governance Schemas ──
+
+    TaskGovernanceResponse:
+      type: object
+      properties:
+        task_path: { type: string }
+        status: { type: string }
+        acceptance: { type: string, nullable: true }
+        commit_sha: { type: string }
+        trace_id: { type: string }
+
+    # ── Query Schemas ──
+
+    GraphResponse:
+      type: object
+      properties:
+        root: { type: string }
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactSummary'
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              source: { type: string }
+              target: { type: string }
+              link_type: { type: string }
+
+    HistoryEntry:
+      type: object
+      properties:
+        commit_sha: { type: string }
+        timestamp: { type: string, format: date-time }
+        author: { type: string }
+        message: { type: string }
+        trace_id: { type: string, nullable: true }
+        operation: { type: string, nullable: true }
+
+    HistoryResponse:
+      allOf:
+        - $ref: '#/components/schemas/PaginationMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/HistoryEntry'
+
+    # ── System Schemas ──
+
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [healthy, degraded, unhealthy] }
+        components:
+          type: object
+          additionalProperties: { type: string }
+        projection_lag_ms: { type: integer }
+        active_runs: { type: integer }
+
+    SystemValidationResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [passed, failed, warnings] }
+        total_artifacts: { type: integer }
+        passed: { type: integer }
+        warnings: { type: integer }
+        failed: { type: integer }
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationResult'
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [error] }
+              errors:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Error'
+
+    AlreadyExists:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [error] }
+              errors:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Error'
+
+    ValidationFailed:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [error] }
+              errors:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Error'
+
+    Conflict:
+      description: Operation conflicts with current state
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [error] }
+              errors:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Error'
+
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [error] }
+              errors:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Error'
