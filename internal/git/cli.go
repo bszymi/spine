@@ -20,9 +20,18 @@ func NewCLIClient(repoPath string) *CLIClient {
 }
 
 // Clone clones a remote repository to a local path.
+// Unlike other operations, Clone does not run inside repoPath since the
+// target directory may not exist yet.
 func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
-	_, err := c.run(ctx, "clone", "clone", url, path)
-	return err
+	cmd := exec.CommandContext(ctx, "git", "clone", url, path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		gitErr := classifyGitError("clone", strings.TrimSpace(stderr.String()))
+		gitErr.Err = err
+		return gitErr
+	}
+	return nil
 }
 
 // Commit creates a new commit with the staged changes.
@@ -115,26 +124,34 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
 			continue
 		}
 
-		var status string
-		switch parts[0] {
-		case "A":
-			status = "added"
-		case "M":
-			status = "modified"
-		case "D":
-			status = "deleted"
-		case "R", "R100":
+		statusCode := parts[0]
+		var status, path string
+
+		switch {
+		case statusCode == "A":
+			status, path = "added", parts[1]
+		case statusCode == "M":
+			status, path = "modified", parts[1]
+		case statusCode == "D":
+			status, path = "deleted", parts[1]
+		case strings.HasPrefix(statusCode, "R"):
+			// Rename: R<score>\t<old>\t<new> — use the new path
 			status = "renamed"
+			if len(parts) >= 3 {
+				path = parts[2]
+			} else {
+				path = parts[1]
+			}
 		default:
-			status = "modified"
+			status, path = "modified", parts[1]
 		}
 
-		diffs = append(diffs, FileDiff{Path: parts[1], Status: status})
+		diffs = append(diffs, FileDiff{Path: path, Status: status})
 	}
 	return diffs, nil
 }
