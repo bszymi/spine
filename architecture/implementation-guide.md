@@ -84,9 +84,12 @@ Each architecture component maps to one or more Go packages:
 ### 2.4 Package Dependency Rules
 
 - Packages in `internal/` may import `internal/domain` and `internal/store`
-- Component packages should not import each other directly — they communicate through interfaces or the event system
-- `internal/gateway` is the only package that imports component packages to wire them together
+- Component packages do not wire each other together through concrete implementations — they depend on interfaces defined locally or in a shared contract package
+- Runtime composition (binding interfaces to implementations) happens in the application entry point (`cmd/spine/main.go`), not in component packages
+- The Access Gateway (`internal/gateway`) may depend on service interfaces it needs to expose over HTTP
 - No package imports `cmd/` — dependency flows inward
+
+**Go dependency pattern:** Each component package defines the interfaces it needs from other components. The `main.go` entry point creates concrete implementations and injects them. For example, `internal/workflow` defines an `ArtifactCommitter` interface; `main.go` passes the Artifact Service implementation that satisfies it. This keeps packages decoupled while allowing direct method calls at runtime.
 
 ---
 
@@ -114,6 +117,7 @@ The v0.x implementation (`internal/git/cli.go`) shells out to the `git` CLI. The
 ### 3.2 Queue Interface
 
 ```go
+// Portability interface — implementations must satisfy this
 type Queue interface {
     Publish(ctx context.Context, entry QueueEntry) error
     Subscribe(ctx context.Context, entryType string, handler EntryHandler) error
@@ -123,7 +127,7 @@ type Queue interface {
 type EntryHandler func(ctx context.Context, entry QueueEntry) error
 ```
 
-The v0.x implementation (`internal/queue/memory.go`) uses Go channels. The interface allows future extraction to Redis, NATS, or RabbitMQ.
+The v0.x implementation (`internal/queue/memory.go`) uses Go channels. It additionally exposes lifecycle methods (`Start`, `Stop`) that are not part of the portability interface — these are implementation-specific and called directly in `main.go` during boot. The portability interface allows future extraction to Redis, NATS, or RabbitMQ.
 
 ### 3.3 EventRouter Interface
 
@@ -327,8 +331,9 @@ func main() {
     accessGw := gateway.NewAccessGateway(artifactSvc, workflowEngine, projectionSvc, db)
 
     // Start background services
+    // Note: Start/Stop are implementation-specific lifecycle methods, not part of portability interfaces
     go projectionSvc.StartSyncLoop(ctx)
-    go queue.StartConsumers(ctx)
+    go queue.Start(ctx)  // in-memory implementation lifecycle
     go workflowEngine.StartScheduler(ctx)
 
     // Start HTTP server
@@ -359,16 +364,25 @@ Every governed write follows this sequence:
 ```
 1. Access Gateway receives request
 2. Authentication + authorization check
-3. Workflow Engine validates governance (preconditions, step state, actor eligibility)
-4. Artifact Service validates artifact schema + cross-artifact rules
-5. Artifact Service commits to Git (atomic commit with trailers)
-6. Runtime Store updated (Run/Step status) — in same DB transaction where possible
-7. Event emitted (domain event for artifact change)
-8. Projection Service notified (via event or polling)
-9. Response returned to caller
+3. Workflow Engine validates governance conditions (preconditions, step state, actor eligibility)
+4. Validation Service validates cross-artifact rules and policy (if step requires cross_artifact_valid)
+5. Artifact Service enforces artifact-level constraints (schema, front matter, linkage) before commit
+6. Artifact Service commits to Git (atomic commit with trailers)
+7. Runtime Store updated (Run/Step status) — in same DB transaction where possible
+8. Event emitted (domain event for artifact change)
+9. Projection Service notified (via event or polling)
+10. Response returned to caller
 ```
 
-**Critical invariant:** Step 5 (Git commit) must succeed before step 6 (runtime update) is considered final. If Git fails, the operation fails — runtime state is not updated.
+**Validation responsibility boundaries:**
+
+| Component | Validates | When |
+|-----------|-----------|------|
+| Workflow Engine | Governance conditions (preconditions, step state, actor eligibility) | Before step execution |
+| Validation Service | Cross-artifact rules and policy (structural integrity, link consistency) | When `cross_artifact_valid` precondition is present |
+| Artifact Service | Artifact-level constraints (schema, front matter, required fields) | Before every Git commit |
+
+**Critical invariant:** Step 6 (Git commit) must succeed before step 7 (runtime update) is considered final. If Git fails, the operation fails — runtime state is not updated.
 
 ### 8.2 Git Commit as Durable Boundary
 
@@ -559,7 +573,18 @@ observability:
   metrics_enabled: false                    # v0.x: optional
 ```
 
-### 12.3 Secrets
+### 12.3 Configuration Categories
+
+| Category | Examples | Mutable at Runtime | Safety Impact |
+|----------|---------|-------------------|---------------|
+| Governance-sensitive | `authoritative_branch`, `merge_strategy` | No (immutable after boot) | Changing these affects system truth boundary |
+| Deployment | `server.port`, `database.url`, `git.repository_path` | No (immutable after boot) | Infrastructure-specific |
+| Operational | `projection.polling_interval`, `observability.log_level` | Yes (may be reloaded) | Affects performance/observability, not correctness |
+| Provider | `actor_gateway.providers.*` | Yes (may be reloaded) | Affects actor availability, not governance |
+
+Governance-sensitive configuration must not be changed without understanding the impact on running Runs and system correctness.
+
+### 12.4 Secrets
 
 Secrets (database password, API tokens, Git credentials) are provided via environment variables, never in config files or Git (per [Security Model](/architecture/security-model.md) §5).
 
