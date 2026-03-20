@@ -361,7 +361,7 @@ Different artifact types use different status values:
 |---------------|----------------------|
 | Initiative | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
 | Epic | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
-| Task | `Draft`, `Pending`, `In Progress`, `Completed`, `Cancelled`, `Rejected`, `Superseded`, `Abandoned` |
+| Task | `Draft`, `Pending`, `Completed`, `Cancelled`, `Rejected`, `Superseded`, `Abandoned` |
 | ADR | `Proposed`, `Accepted`, `Deprecated`, `Superseded` |
 | Governance | `Living Document`, `Foundational`, `Superseded` |
 | Architecture | `Living Document`, `Stable`, `Superseded` |
