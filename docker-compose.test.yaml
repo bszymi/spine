@@ -1,6 +1,6 @@
 services:
   spine-test-db:
-    image: postgres:17-bookworm
+    image: postgres:18-bookworm
     ports:
       - "5433:5432"
     environment:
