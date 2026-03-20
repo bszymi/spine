@@ -40,6 +40,7 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Define workflow engine state machine
 - Define discussion and comment runtime model
 - Select technology stack for v0.x implementation
+- Full architecture consistency review
 
 ---
 
