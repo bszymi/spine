@@ -106,7 +106,7 @@ See [Non-Goals](/product/non-goals.md) for explicit boundaries.
 
 ## 6. Key Principles
 
-These principles are drawn from the [Charter](/governance/Charter.md) and enforced by the [Constitution](/governance/Constitution.md):
+These principles are drawn from the [Charter](/governance/charter.md) and enforced by the [Constitution](/governance/constitution.md):
 
 1. **Explicit intent before action** — no execution without versioned, reviewable intent
 2. **Artifact-centric truth** — the repository is the source of truth, not runtime state
@@ -145,7 +145,7 @@ Spine operates under a layered governance model:
 
 The Constitution must align with the Charter. Guidelines must align with both. No rule may contradict foundational principles.
 
-See [Charter](/governance/Charter.md), [Constitution](/governance/Constitution.md), [Guidelines](/governance/guidelines.md).
+See [Charter](/governance/charter.md), [Constitution](/governance/constitution.md), [Guidelines](/governance/guidelines.md).
 
 ---
 
@@ -164,4 +164,4 @@ This document is the authoritative product definition. It is supported by:
 
 This document is expected to evolve as the product matures.
 
-Changes must be versioned in Git and must not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md).
+Changes must be versioned in Git and must not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md).

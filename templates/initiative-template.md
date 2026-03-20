@@ -101,5 +101,5 @@ INIT-XXX may be marked complete when:
 
 ## 9. Links
 
-- Charter: `/governance/Charter.md`
-- Constitution: `/governance/Constitution.md`
+- Charter: `/governance/charter.md`
+- Constitution: `/governance/constitution.md`

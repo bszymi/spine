@@ -13,7 +13,7 @@ version: "0.1"
 
 This document defines the structural and operational boundaries within which Spine operates, and the constraints that shape its design.
 
-It serves as a bridge between the [Constitution](/governance/Constitution.md) (which defines invariants) and architecture (which must operate within them). Architecture decisions that violate boundaries or constraints defined here require formal amendment.
+It serves as a bridge between the [Constitution](/governance/constitution.md) (which defines invariants) and architecture (which must operate within them). Architecture decisions that violate boundaries or constraints defined here require formal amendment.
 
 ---
 
@@ -56,7 +56,7 @@ Capabilities outside Spine's core responsibilities may be implemented as plugins
 
 ## 3. Operational Constraints
 
-These constraints are derived from the [Constitution](/governance/Constitution.md) and shape every architectural and product decision.
+These constraints are derived from the [Constitution](/governance/constitution.md) and shape every architectural and product decision.
 
 ### 3.1 Git-Native (Constitution Section 2)
 
@@ -172,4 +172,4 @@ Spine integrates with external systems through defined boundaries:
 
 This document is expected to evolve as architecture decisions are made and integration patterns are established.
 
-Changes must be versioned in Git and must not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md).
+Changes must be versioned in Git and must not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md).

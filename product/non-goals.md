@@ -21,7 +21,7 @@ It serves as a filter for evaluating feature requests, architectural proposals, 
 
 Spine operates at the coordination layer — governing intent, artifacts, and execution — not at the tool layer.
 
-The system is structured in three layers, as defined in the [Charter](/governance/Charter.md):
+The system is structured in three layers, as defined in the [Charter](/governance/charter.md):
 
 - **Artifact Layer** — versioned truth in Git
 - **Execution Layer** — governed workflows
@@ -178,4 +178,4 @@ When evaluating a feature request or scope change:
 
 This document is expected to evolve as the product matures and new boundary questions arise.
 
-Changes must be versioned in Git and must not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md).
+Changes must be versioned in Git and must not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md).

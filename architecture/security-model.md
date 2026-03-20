@@ -15,7 +15,7 @@ This document defines the security model for Spine at v0.x — how the system au
 
 The [Access Surface](/architecture/access-surface.md) defines the external interface and introduces authentication and authorization at a high level. This document makes those concepts concrete and extends them with credential management, component trust boundaries, and Git-level security guarantees.
 
-All security decisions must comply with the [Constitution](/governance/Constitution.md), particularly Actor Neutrality (§5) and Governed Execution (§4).
+All security decisions must comply with the [Constitution](/governance/constitution.md), particularly Actor Neutrality (§5) and Governed Execution (§4).
 
 ---
 
@@ -364,7 +364,7 @@ Audit logging is required for governance visibility but may be implemented incre
 - [Domain Model](/architecture/domain-model.md) §3.4 — Actor entity
 - [Observability](/architecture/observability.md) §3 — Trace ID propagation, §4 — Audit trail
 - [Error Handling](/architecture/error-handling-and-recovery.md) §9 — Operator visibility
-- [Constitution](/governance/Constitution.md) §4 — Governed Execution, §5 — Actor Neutrality
+- [Constitution](/governance/constitution.md) §4 — Governed Execution, §5 — Actor Neutrality
 
 ---
 

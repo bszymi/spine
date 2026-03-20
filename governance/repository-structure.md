@@ -194,5 +194,5 @@ This document is expected to evolve as the repository grows.
 Changes must:
 
 - Be versioned in Git
-- Not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md)
+- Not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md)
 - Be reflected in the [Guidelines](/governance/guidelines.md) if they affect artifact structure expectations

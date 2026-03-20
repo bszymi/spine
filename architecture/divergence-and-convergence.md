@@ -13,7 +13,7 @@ version: "0.1"
 
 This document defines how controlled divergence and convergence execute within the Spine runtime.
 
-The [Constitution](/governance/Constitution.md) (§6) mandates that parallel execution must be explicit, all outcomes must be preserved, and convergence must occur through explicit evaluation steps. The [Domain Model](/architecture/domain-model.md) (§6) establishes that divergence creates parallel steps within a single Run. The [Workflow Definition Format](/architecture/workflow-definition-format.md) (§3.3) defines the declarative structure for divergence and convergence points.
+The [Constitution](/governance/constitution.md) (§6) mandates that parallel execution must be explicit, all outcomes must be preserved, and convergence must occur through explicit evaluation steps. The [Domain Model](/architecture/domain-model.md) (§6) establishes that divergence creates parallel steps within a single Run. The [Workflow Definition Format](/architecture/workflow-definition-format.md) (§3.3) defines the declarative structure for divergence and convergence points.
 
 
 This document specifies the runtime execution semantics — what happens when a Run reaches a divergence point, how parallel branches execute, and how convergence evaluates and commits results.
@@ -641,7 +641,7 @@ convergence_points:
 
 ## 9. Cross-References
 
-- [Constitution](/governance/Constitution.md) §6 — Controlled Divergence mandate
+- [Constitution](/governance/constitution.md) §6 — Controlled Divergence mandate
 - [Domain Model](/architecture/domain-model.md) §6 — Divergence and Convergence entity model
 - [Workflow Definition Format](/architecture/workflow-definition-format.md) §3.3 — Declarative format for divergence and convergence points
 - [System Components](/architecture/components.md) §4.3 — Workflow Engine responsibilities

@@ -308,7 +308,7 @@ Availability may include additional operational signals such as error rates, lat
 - [Error Handling](/architecture/error-handling-and-recovery.md) — Step failure and retry handling
 - [Observability](/architecture/observability.md) §3 — Trace ID propagation through actor requests
 - [Event Schemas](/architecture/event-schemas.md) §4.4 — `step_assigned` event
-- [Constitution](/governance/Constitution.md) §5 — Actor Neutrality
+- [Constitution](/governance/constitution.md) §5 — Actor Neutrality
 
 ---
 

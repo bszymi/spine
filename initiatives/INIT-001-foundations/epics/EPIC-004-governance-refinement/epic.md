@@ -39,8 +39,8 @@ This epic bridges the gap between architectural intent and enforceable governanc
 ## Primary Outputs
 
 - `/governance/artifact-schema.md` — front matter schema specification per artifact type
-- Updated `/governance/Charter.md` — alignment language expressing Spine's role beyond artifact storage
-- Updated `/governance/Constitution.md` — governing rules for workflow-embedded cross-artifact validation
+- Updated `/governance/charter.md` — alignment language expressing Spine's role beyond artifact storage
+- Updated `/governance/constitution.md` — governing rules for workflow-embedded cross-artifact validation
 - Updated `/governance/guidelines.md` — practical validation guidance per artifact type
 - Updated templates in `/templates/`
 - Migrated existing artifacts with YAML front matter

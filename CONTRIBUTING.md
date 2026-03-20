@@ -17,8 +17,8 @@ This document defines how contributors — human and AI — should interact with
 
 Before contributing, familiarize yourself with:
 
-- [Charter](/governance/Charter.md) — philosophy and structural model
-- [Constitution](/governance/Constitution.md) — non-negotiable constraints
+- [Charter](/governance/charter.md) — philosophy and structural model
+- [Constitution](/governance/constitution.md) — non-negotiable constraints
 - [Guidelines](/governance/guidelines.md) — recommended practices
 - [Style Guide](/governance/style-guide.md) — formatting and metadata conventions
 - [Repository Structure](/governance/repository-structure.md) — folder layout and artifact taxonomy
@@ -176,4 +176,4 @@ The standard contribution workflow:
 
 This document is expected to evolve as the project matures.
 
-Changes must be versioned in Git and must not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md).
+Changes must be versioned in Git and must not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md).

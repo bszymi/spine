@@ -14,7 +14,7 @@ The repository is a shared cognitive model — a single contextual source of tru
 
 If you're new to the project:
 
-1. Read the [Charter](/governance/Charter.md) to understand the philosophy
+1. Read the [Charter](/governance/charter.md) to understand the philosophy
 2. Review the [Product Definition](/product/product-definition.md)
 3. Explore the [Architecture](/architecture/domain-model.md)
 
@@ -145,8 +145,8 @@ All actors operate under the same governance rules. AI is treated as an executio
 
 ### Governance
 
-- [Charter](/governance/Charter.md) — Purpose, philosophy, and structural model
-- [Constitution](/governance/Constitution.md) — Non-negotiable system constraints and invariants
+- [Charter](/governance/charter.md) — Purpose, philosophy, and structural model
+- [Constitution](/governance/constitution.md) — Non-negotiable system constraints and invariants
 - [Guidelines](/governance/guidelines.md) — Recommended practices and evolving standards
 - [Artifact Schema](/governance/artifact-schema.md) — YAML front matter schema per artifact type
 - [Repository Structure](/governance/repository-structure.md) — Folder layout and artifact taxonomy
