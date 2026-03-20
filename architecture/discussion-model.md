@@ -53,6 +53,7 @@ CREATE TABLE runtime.discussion_threads (
     thread_id           text        PRIMARY KEY,
     anchor_type         text        NOT NULL,       -- artifact, run, step_execution, divergence_context
     anchor_id           text        NOT NULL,       -- path or ID of the anchored entity
+    topic_key           text,                       -- optional semantic identity (e.g., "TASK-123:acceptance-criteria")
     title               text,                       -- optional thread title
     status              text        NOT NULL DEFAULT 'open',
                                                     -- open, resolved, archived
@@ -60,7 +61,7 @@ CREATE TABLE runtime.discussion_threads (
     created_at          timestamptz NOT NULL DEFAULT now(),
     resolved_at         timestamptz,
     resolution_type     text,                       -- artifact_updated, artifact_created, adr_created, decision_recorded, no_action
-    resolution_ref      text,                       -- path to the artifact or commit that resolved this thread
+    resolution_refs     jsonb       DEFAULT '[]',   -- paths to artifacts or commits that resolved this thread (supports partial resolution)
 
     CONSTRAINT thread_status_check CHECK (status IN ('open', 'resolved', 'archived')),
     CONSTRAINT thread_anchor_check CHECK (anchor_type IN ('artifact', 'run', 'step_execution', 'divergence_context'))
@@ -73,6 +74,8 @@ CREATE TABLE runtime.discussion_threads (
 CREATE INDEX idx_threads_anchor ON runtime.discussion_threads (anchor_type, anchor_id);
 CREATE INDEX idx_threads_status ON runtime.discussion_threads (status);
 CREATE INDEX idx_threads_created_by ON runtime.discussion_threads (created_by);
+CREATE UNIQUE INDEX idx_threads_topic_key ON runtime.discussion_threads (anchor_type, anchor_id, topic_key)
+    WHERE topic_key IS NOT NULL;
 ```
 
 ### 3.2 Comment Schema
@@ -118,7 +121,8 @@ CREATE INDEX idx_comments_parent ON runtime.comments (parent_comment_id);
 
 | From | To | Trigger | Effects |
 |------|-----|---------|---------|
-| `open` | `resolved` | Actor resolves thread with a durable artifact reference | Set `resolved_at`, `resolution_type`, `resolution_ref` |
+| `open` | `resolved` | Actor resolves thread with durable artifact reference(s) | Set `resolved_at`, `resolution_type`, append to `resolution_refs` |
+| `open` | `open` | Actor adds a partial resolution | Append to `resolution_refs` (thread remains open for remaining topics) |
 | `open` | `archived` | Actor or system archives thread (no outcome needed) | — |
 | `resolved` | `open` | Actor reopens thread (outcome disputed or incomplete) | Clear resolution fields |
 | `archived` | `open` | Actor reopens archived thread | — |
@@ -169,6 +173,21 @@ AI agents may assist with conversion by:
 - Proposing artifact updates based on review comments
 
 AI-generated content follows the same governance rules — it must be submitted through workflow steps and validated before becoming durable.
+
+### 5.4 Conversion Validation
+
+All conversions from discussion to durable artifacts must:
+
+- **Preserve key arguments and alternatives** — the durable artifact should reflect the substance of the discussion, not just the conclusion
+- **Reference the source thread** — the resulting Git commit should include the `thread_id` in its metadata or commit message for traceability
+- **Be reviewable before commit** — conversion produces a draft that the actor reviews and confirms before it becomes durable
+- **Include source comment references** — when specific comments informed the outcome, the conversion should reference them (stored in the artifact's content or metadata)
+
+For AI-assisted conversions specifically:
+
+- The AI-generated draft must be presented to the actor for review before committing
+- The actor is responsible for the accuracy of the durable artifact, not the AI
+- If the conversion misrepresents the discussion, the actor must correct it before committing
 
 ---
 
@@ -224,11 +243,41 @@ Retention is operator-configured. Spine does not enforce retention — operators
 - Resolution references in Git commits provide traceability even after threads are deleted
 - The fact that a discussion occurred is traceable through commit messages and audit trail
 
+### 7.4 Reasoning Preservation Rule
+
+Discussion is not required for reproducibility (Constitution §7) — durable outcomes in Git are sufficient. However, if reasoning behind a decision is important for future understanding, it **must** be captured in a durable form before the thread is deleted:
+
+- In the artifact itself (rationale field, decision context)
+- In an ADR (for architectural decisions)
+- In a commit message (for simple clarifications)
+
+This is the actor's responsibility at conversion time. The system does not automatically extract reasoning from threads.
+
 ---
 
 ## 8. Integration with Workflow Execution
 
-### 8.1 Review Step Discussions
+### 8.1 Workflow Binding Rules
+
+Workflow definitions may declare discussion requirements on steps:
+
+```yaml
+steps:
+  - id: review
+    discussion:
+      required: true              # A thread must exist before step can complete
+      resolution_required: false  # Thread does not need to be resolved (comments suffice)
+```
+
+| Setting | Meaning |
+|---------|---------|
+| `discussion.required: true` | At least one thread must be anchored to this step execution before the step outcome can be submitted |
+| `discussion.resolution_required: true` | All open threads on this step must be resolved before the step can complete |
+| Both omitted | Discussion is optional; the step may complete without any threads |
+
+This allows workflows to enforce discussion where governance requires it (e.g., review steps) while keeping it optional elsewhere.
+
+### 8.3 Review Step Discussions
 
 Review steps naturally produce discussion. When an actor reviews a deliverable:
 
@@ -237,7 +286,7 @@ Review steps naturally produce discussion. When an actor reviews a deliverable:
 3. The review outcome (`accepted`, `needs_rework`, `rejected`) is submitted as a step result
 4. If resolved, the thread links to the step outcome
 
-### 8.2 Convergence Discussions
+### 8.4 Convergence Discussions
 
 During convergence evaluation, the evaluator may discuss branch outcomes:
 
@@ -246,7 +295,7 @@ During convergence evaluation, the evaluator may discuss branch outcomes:
 3. The convergence decision is submitted as a step result
 4. The thread is resolved with the convergence result as the resolution reference
 
-### 8.3 Artifact Discussions
+### 8.5 Artifact Discussions
 
 Standalone discussions about artifacts (outside of workflow execution):
 
@@ -257,7 +306,23 @@ Standalone discussions about artifacts (outside of workflow execution):
 
 ---
 
-## 9. Constitutional Alignment
+## 9. Event Model
+
+Discussion activity emits operational events for observability and integration:
+
+| Event | Trigger | Payload |
+|-------|---------|---------|
+| `thread_created` | New thread opened | `thread_id`, `anchor_type`, `anchor_id`, `created_by` |
+| `comment_added` | New comment posted | `thread_id`, `comment_id`, `author_id`, `author_type` |
+| `thread_resolved` | Thread resolved with durable outcome | `thread_id`, `resolution_type`, `resolution_refs` |
+| `thread_reopened` | Resolved or archived thread reopened | `thread_id`, `reopened_by` |
+| `thread_archived` | Thread archived | `thread_id` |
+
+These are operational events (not domain events) — they are not reconstructible from Git and may be transient. They follow the same delivery model as other operational events (per [Event Schemas](/architecture/event-schemas.md) §4).
+
+---
+
+## 10. Constitutional Alignment
 
 | Principle | How the Discussion Model Supports It |
 |-----------|-------------------------------------|
@@ -268,7 +333,7 @@ Standalone discussions about artifacts (outside of workflow execution):
 
 ---
 
-## 10. Cross-References
+## 11. Cross-References
 
 - [ADR-003](/architecture/adr/ADR-003-discussion-and-comment-model.md) — Governance decision for discussion model
 - [ADR-004](/architecture/adr/ADR-004-evaluation-and-acceptance-model.md) — Evaluation and acceptance model
@@ -280,7 +345,7 @@ Standalone discussions about artifacts (outside of workflow execution):
 
 ---
 
-## 11. Evolution Policy
+## 12. Evolution Policy
 
 This discussion model is expected to evolve as the system is implemented and collaboration patterns emerge.
 
