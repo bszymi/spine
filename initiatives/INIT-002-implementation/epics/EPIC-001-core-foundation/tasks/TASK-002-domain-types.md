@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Domain Types
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-001-core-foundation/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
