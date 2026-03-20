@@ -56,8 +56,11 @@ Not all writes are equal:
 Callers should understand which category their operation falls into:
 
 - `artifact.create` and `artifact.update` produce governed writes (direct to authoritative branch) when called outside a Run
+- When called within a Run context (by providing `run_id`), artifact writes target the task branch instead — these are proposed writes that become governed only after workflow completion and merge
 - `step.submit` may produce an operational write (to the task branch) that becomes governed only after workflow completion and merge
 - `run.start`, `run.cancel`, `step.assign` produce runtime writes only
+
+Write context is expressed explicitly in artifact write requests via `write_context` (see the OpenAPI specification for details). When `write_context` is omitted, the write targets the authoritative branch directly.
 
 ---
 
@@ -79,7 +82,8 @@ Artifact operations create, read, and modify governed artifacts in Git.
 **Domain rules:**
 - `artifact.create` rejects duplicates (same path or same ID within scope)
 - `artifact.update` validates the full artifact (schema + cross-artifact) before committing
-- All write operations produce a single atomic Git commit with structured trailers (per [Git Integration](/architecture/git-integration.md) §5)
+- Write operations target the authoritative branch by default; when a `write_context` with `run_id` is provided, they target the task branch instead
+- Write operations are designed to produce a single atomic Git commit with structured trailers (per [Git Integration](/architecture/git-integration.md) §5). This is a target architectural invariant — implementations must treat partial commits as bugs
 
 ### 3.2 Workflow Operations
 
@@ -114,7 +118,7 @@ Workflow operations control Run execution and task governance decisions.
 - `run.start` fails if an active Run already exists for the task, or if no active workflow matches the task's `(type, work_type)` pair
 - `step.submit` validates the outcome against the workflow definition and checks actor assignment
 - Task governance operations (`accept`, `reject`, `cancel`, `abandon`, `supersede`) are Git writes — they produce durable commits that change the task artifact's front matter
-- `task.reject` requires a rationale; the `acceptance` field must be one of `Rejected With Followup` or `Rejected Closed` (per [Task Lifecycle](/governance/task-lifecycle.md))
+- `task.reject` requires a rationale; the `acceptance` field must be one of `rejected_with_followup` or `rejected_closed` (per [Task Lifecycle](/governance/task-lifecycle.md))
 
 ### 3.3 Query Operations
 
@@ -169,10 +173,11 @@ System operations are administrative and require elevated authorization.
 
 ### 4.2 Error Semantics
 
-- **Validation errors** include structured details about which rules failed and where
+- **Validation errors** include structured details (rule_id, artifact_path, field, severity) about which rules failed and where
 - **Conflict errors** indicate the operation cannot proceed because of current state (e.g., active Run exists, task already completed) — the caller should inspect state and decide how to proceed
 - **Git errors** indicate the durable write failed — the operation was not persisted and may be retried
-- Errors never produce partial state — either the full operation succeeds or nothing changes
+- **Permission errors** include which role or capability was required vs what the actor has
+- Errors are designed to never produce partial state — either the full operation succeeds or nothing changes. This is a target architectural invariant
 
 ---
 
@@ -214,20 +219,20 @@ Additionally, individual workflow steps may require specific **capabilities** �
 
 List operations use cursor-based pagination. Callers provide `limit` and `cursor`; responses include `next_cursor` and `has_more`.
 
-### 7.2 Trace ID Propagation
+### 7.2 Trace ID and Idempotency
 
-All requests may include a `trace_id`. If omitted, the Access Gateway generates one. The `trace_id` appears in all responses, events, and Git commits produced by the operation.
+All requests may include an `X-Trace-Id` header. If omitted, the Access Gateway generates one. The trace ID appears in all responses (via `X-Trace-Id` response header), events, and Git commits produced by the operation.
 
-### 7.3 Idempotency
+Write operations additionally accept an `Idempotency-Key` header. When provided, retrying a request with the same key does not produce duplicate effects (per [Git Integration](/architecture/git-integration.md) §5.6). If `Idempotency-Key` is omitted, `X-Trace-Id` is used as the fallback idempotency key.
 
-Write operations are idempotent via `trace_id` — retrying a request with the same trace ID does not produce duplicate effects (per [Git Integration](/architecture/git-integration.md) §5.6).
+Both headers are defined as reusable components in the OpenAPI specification.
 
 ---
 
 ## 8. Cross-References
 
 - [Access Surface](/architecture/access-surface.md) — Operation categories and internal operation model
-- [OpenAPI Specification](/architecture/api-spec.yaml) — Concrete HTTP endpoints and JSON schemas
+- [OpenAPI Specification](/api/spec.yaml) — Concrete HTTP endpoints and JSON schemas
 - [Security Model](/architecture/security-model.md) §4 — Role hierarchy and authorization
 - [Git Integration](/architecture/git-integration.md) §5 — Commit format for write operations
 - [Task Lifecycle](/governance/task-lifecycle.md) — Task terminal states and acceptance model

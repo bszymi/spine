@@ -24,6 +24,9 @@ paths:
       operationId: artifact.create
       summary: Create a new artifact
       tags: [Artifacts]
+      parameters:
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -33,6 +36,8 @@ paths:
       responses:
         '201':
           description: Artifact created
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -93,6 +98,8 @@ paths:
       tags: [Artifacts]
       parameters:
         - $ref: '#/components/parameters/ArtifactPath'
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -102,6 +109,8 @@ paths:
       responses:
         '200':
           description: Artifact updated
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -166,6 +175,9 @@ paths:
       operationId: run.start
       summary: Start a new Run for a task
       tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -179,6 +191,8 @@ paths:
       responses:
         '201':
           description: Run created
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -212,6 +226,7 @@ paths:
       tags: [Workflow]
       parameters:
         - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/XTraceId'
       requestBody:
         content:
           application/json:
@@ -240,6 +255,8 @@ paths:
           in: path
           required: true
           schema: { type: string }
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -249,6 +266,8 @@ paths:
       responses:
         '200':
           description: Step result accepted
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -269,6 +288,7 @@ paths:
           in: path
           required: true
           schema: { type: string }
+        - $ref: '#/components/parameters/XTraceId'
       requestBody:
         required: true
         content:
@@ -300,6 +320,8 @@ paths:
       tags: [Task Governance]
       parameters:
         - $ref: '#/components/parameters/TaskPath'
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         content:
           application/json:
@@ -311,6 +333,8 @@ paths:
       responses:
         '200':
           description: Task accepted
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -323,6 +347,8 @@ paths:
       tags: [Task Governance]
       parameters:
         - $ref: '#/components/parameters/TaskPath'
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -333,7 +359,7 @@ paths:
               properties:
                 acceptance:
                   type: string
-                  enum: [Rejected With Followup, Rejected Closed]
+                  enum: [rejected_with_followup, rejected_closed]
                 rationale:
                   type: string
                 followup_path:
@@ -341,6 +367,8 @@ paths:
       responses:
         '200':
           description: Task rejected
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -353,6 +381,8 @@ paths:
       tags: [Task Governance]
       parameters:
         - $ref: '#/components/parameters/TaskPath'
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -366,6 +396,8 @@ paths:
       responses:
         '200':
           description: Task cancelled
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -378,6 +410,8 @@ paths:
       tags: [Task Governance]
       parameters:
         - $ref: '#/components/parameters/TaskPath'
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -391,6 +425,8 @@ paths:
       responses:
         '200':
           description: Task abandoned
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -403,6 +439,8 @@ paths:
       tags: [Task Governance]
       parameters:
         - $ref: '#/components/parameters/TaskPath'
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -418,6 +456,8 @@ paths:
       responses:
         '200':
           description: Task superseded
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
@@ -546,24 +586,45 @@ paths:
       operationId: system.rebuild
       summary: Trigger full projection rebuild
       tags: [System]
+      parameters:
+        - $ref: '#/components/parameters/XTraceId'
       responses:
         '202':
           description: Rebuild started
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status: { type: string, enum: [started] }
-                  rebuild_id: { type: string }
+                $ref: '#/components/schemas/RebuildStartedResponse'
         '409':
           $ref: '#/components/responses/Conflict'
+
+  /system/rebuild/{rebuild_id}:
+    get:
+      operationId: system.rebuild_status
+      summary: Query rebuild status
+      tags: [System]
+      parameters:
+        - name: rebuild_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Rebuild status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RebuildStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /system/validate:
     post:
       operationId: system.validate_all
       summary: Validate all artifacts
       tags: [System]
+      parameters:
+        - $ref: '#/components/parameters/XTraceId'
       requestBody:
         content:
           application/json:
@@ -590,6 +651,11 @@ components:
       type: http
       scheme: bearer
       description: API token (per Security Model §3.3)
+
+  headers:
+    XTraceId:
+      description: Observability trace ID for correlation across systems
+      schema: { type: string, format: uuid }
 
   parameters:
     ArtifactPath:
@@ -626,6 +692,18 @@ components:
       schema: { type: string }
       description: Opaque pagination cursor
 
+    XTraceId:
+      name: X-Trace-Id
+      in: header
+      schema: { type: string, format: uuid }
+      description: Observability trace ID. Generated by server if omitted.
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string }
+      description: Idempotency key for write operations. Falls back to X-Trace-Id if omitted.
+
   schemas:
 
     # ── Common ──
@@ -636,7 +714,17 @@ components:
       properties:
         code: { type: string }
         message: { type: string }
-        detail: { type: object }
+        detail:
+          type: object
+          description: Error-specific structured detail
+          properties:
+            rule_id: { type: string }
+            artifact_path: { type: string }
+            field: { type: string }
+            severity: { type: string }
+            required_role: { type: string }
+            actor_role: { type: string }
+            required_capability: { type: string }
 
     PaginationMeta:
       type: object
@@ -644,10 +732,22 @@ components:
         next_cursor: { type: string, nullable: true }
         has_more: { type: boolean }
 
+    WriteContext:
+      type: object
+      description: Controls where artifact writes land (authoritative branch vs task branch)
+      properties:
+        run_id:
+          type: string
+          description: If provided, write targets the task branch for this Run
+        task_path:
+          type: string
+          description: Task context for the write (required when run_id is provided)
+
     # ── Artifact Schemas ──
 
     ArtifactSummary:
       type: object
+      required: [artifact_path, artifact_type]
       properties:
         artifact_path: { type: string }
         artifact_id: { type: string }
@@ -661,18 +761,23 @@ components:
       properties:
         path: { type: string }
         content: { type: string }
+        write_context:
+          $ref: '#/components/schemas/WriteContext'
 
     ArtifactCreateResponse:
       type: object
+      required: [artifact_path, artifact_type, commit_sha, trace_id]
       properties:
         artifact_path: { type: string }
         artifact_id: { type: string }
         artifact_type: { type: string }
         commit_sha: { type: string }
         trace_id: { type: string }
+        write_mode: { type: string, enum: [authoritative, proposed] }
 
     ArtifactReadResponse:
       type: object
+      required: [artifact_path, artifact_type, source_commit]
       properties:
         artifact_path: { type: string }
         artifact_id: { type: string }
@@ -688,13 +793,17 @@ components:
       required: [content]
       properties:
         content: { type: string }
+        write_context:
+          $ref: '#/components/schemas/WriteContext'
 
     ArtifactUpdateResponse:
       type: object
+      required: [artifact_path, commit_sha, trace_id]
       properties:
         artifact_path: { type: string }
         commit_sha: { type: string }
         trace_id: { type: string }
+        write_mode: { type: string, enum: [authoritative, proposed] }
 
     ArtifactListResponse:
       allOf:
@@ -708,12 +817,14 @@ components:
 
     ArtifactLinksResponse:
       type: object
+      required: [artifact_path, links]
       properties:
         artifact_path: { type: string }
         links:
           type: array
           items:
             type: object
+            required: [direction, link_type, target_path]
             properties:
               direction: { type: string, enum: [outgoing, incoming] }
               link_type: { type: string }
@@ -721,6 +832,7 @@ components:
 
     ValidationResult:
       type: object
+      required: [artifact_path, status]
       properties:
         artifact_path: { type: string }
         status: { type: string, enum: [passed, failed, warnings] }
@@ -737,6 +849,7 @@ components:
 
     RunResponse:
       type: object
+      required: [run_id, task_path, workflow_id, status, trace_id]
       properties:
         run_id: { type: string }
         task_path: { type: string }
@@ -747,6 +860,7 @@ components:
 
     StepExecution:
       type: object
+      required: [execution_id, step_id, status, attempt]
       properties:
         execution_id: { type: string }
         step_id: { type: string }
@@ -759,6 +873,7 @@ components:
 
     RunStatusResponse:
       type: object
+      required: [run_id, task_path, workflow_id, status, trace_id]
       properties:
         run_id: { type: string }
         task_path: { type: string }
@@ -775,6 +890,7 @@ components:
 
     RunCancelResponse:
       type: object
+      required: [run_id, status]
       properties:
         run_id: { type: string }
         status: { type: string, enum: [cancelled] }
@@ -795,27 +911,49 @@ components:
       type: object
       required: [outcome_id]
       properties:
-        outcome_id: { type: string }
+        outcome_id:
+          type: string
+          description: One of the step's declared outcomes
         output:
           type: object
           properties:
             artifacts_produced:
               type: array
-              items: { type: string }
+              items:
+                type: object
+                required: [path]
+                properties:
+                  path: { type: string }
+                  artifact_type: { type: string }
+                  status: { type: string, enum: [proposed, final] }
             data: { type: object }
             summary: { type: string }
+        rationale:
+          type: string
+          description: Actor's notes or reasoning for this outcome
+        validation_status:
+          type: string
+          enum: [passed, failed, skipped, not_run]
+          description: Self-reported validation status of produced artifacts
 
     StepSubmitResponse:
       type: object
+      required: [execution_id, step_id, outcome_id]
       properties:
         execution_id: { type: string }
         step_id: { type: string }
         outcome_id: { type: string }
         next_step: { type: string, nullable: true }
         commit_sha: { type: string, nullable: true }
+        write_mode: { type: string, enum: [authoritative, proposed], nullable: true }
+        validation_result:
+          $ref: '#/components/schemas/ValidationResult'
+        run_advanced: { type: boolean, description: Whether the Run moved to the next step }
+        requires_review: { type: boolean, description: Whether the next step is a review step }
 
     AssignmentResponse:
       type: object
+      required: [assignment_id, run_id, step_id, actor_id, status]
       properties:
         assignment_id: { type: string }
         run_id: { type: string }
@@ -827,6 +965,7 @@ components:
 
     TaskGovernanceResponse:
       type: object
+      required: [task_path, status, commit_sha, trace_id]
       properties:
         task_path: { type: string }
         status: { type: string }
@@ -838,6 +977,7 @@ components:
 
     GraphResponse:
       type: object
+      required: [root, nodes, edges]
       properties:
         root: { type: string }
         nodes:
@@ -848,6 +988,7 @@ components:
           type: array
           items:
             type: object
+            required: [source, target, link_type]
             properties:
               source: { type: string }
               target: { type: string }
@@ -855,6 +996,7 @@ components:
 
     HistoryEntry:
       type: object
+      required: [commit_sha, timestamp, author, message]
       properties:
         commit_sha: { type: string }
         timestamp: { type: string, format: date-time }
@@ -877,6 +1019,7 @@ components:
 
     HealthResponse:
       type: object
+      required: [status, components]
       properties:
         status: { type: string, enum: [healthy, degraded, unhealthy] }
         components:
@@ -885,8 +1028,27 @@ components:
         projection_lag_ms: { type: integer }
         active_runs: { type: integer }
 
+    RebuildStartedResponse:
+      type: object
+      required: [status, rebuild_id]
+      properties:
+        status: { type: string, enum: [started] }
+        rebuild_id: { type: string }
+
+    RebuildStatusResponse:
+      type: object
+      required: [rebuild_id, status]
+      properties:
+        rebuild_id: { type: string }
+        status: { type: string, enum: [in_progress, completed, failed] }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+        artifacts_processed: { type: integer, nullable: true }
+        error_detail: { type: string, nullable: true }
+
     SystemValidationResponse:
       type: object
+      required: [status, total_artifacts]
       properties:
         status: { type: string, enum: [passed, failed, warnings] }
         total_artifacts: { type: integer }
