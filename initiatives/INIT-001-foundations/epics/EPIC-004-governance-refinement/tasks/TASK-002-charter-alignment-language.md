@@ -22,7 +22,7 @@ The Charter currently describes Spine as a governance and artifact system but do
 
 ## Deliverable
 
-Updated `/governance/Charter.md`
+Updated `/governance/charter.md`
 
 Content should add or strengthen language around:
 

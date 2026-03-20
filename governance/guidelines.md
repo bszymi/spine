@@ -13,7 +13,7 @@ version: "0.1"
 
 This document defines recommended practices and evolving standards for creating, structuring, and maintaining artifacts within the Spine repository.
 
-Guidelines are the third tier of the governance hierarchy, as defined in the [Charter](/governance/Charter.md) (Section 6) and the [Constitution](/governance/Constitution.md) (Section 9).
+Guidelines are the third tier of the governance hierarchy, as defined in the [Charter](/governance/charter.md) (Section 6) and the [Constitution](/governance/constitution.md) (Section 9).
 
 They must align with both the Charter and Constitution. In case of conflict, the Constitution overrides Guidelines, and the Charter defines interpretive intent.
 
@@ -87,7 +87,7 @@ Artifact identifiers must remain stable for the lifetime of the artifact and mus
 
 Artifacts should reference related documents using relative paths from the repository root:
 
-- Reference governance documents: `/governance/Charter.md`
+- Reference governance documents: `/governance/charter.md`
 - Reference tasks: `/initiatives/INIT-XXX/.../tasks/TASK-XXX-name.md`
 - Reference templates: `/templates/template-name.md`
 
@@ -225,6 +225,6 @@ Changes to this document must:
 
 - Be versioned in Git
 - Follow the standards defined in the [Style Guide](/governance/style-guide.md)
-- Not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md)
+- Not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md)
 
 New sections may be added as architectural decisions, product changes, or governance refinements introduce new practical requirements. When new guidance is added, it should reference the constitutional or charter principle it supports.

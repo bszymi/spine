@@ -255,4 +255,4 @@ Spine does not aim to be universal. It trades convenience for integrity.
 
 This document is expected to evolve as the product matures and real users provide feedback.
 
-Changes must be versioned in Git and must not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md).
+Changes must be versioned in Git and must not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md).

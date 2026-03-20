@@ -143,4 +143,4 @@ Example:
 
 This document is expected to evolve as new artifact types are introduced.
 
-Changes must be versioned in Git and must not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md).
+Changes must be versioned in Git and must not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md).

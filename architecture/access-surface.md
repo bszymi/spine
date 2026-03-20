@@ -314,7 +314,7 @@ Operations executed through this model represent governed domain transitions rat
 - [Domain Model](/architecture/domain-model.md) — Actor entity (§3.4)
 - [Data Model](/architecture/data-model.md) — Runtime state vs Git truth boundary
 - [Product Boundaries](/product/boundaries-and-constraints.md) — System boundaries and integration model
-- [Constitution](/governance/Constitution.md) — Actor Neutrality (§5), Governed Execution (§4)
+- [Constitution](/governance/constitution.md) — Actor Neutrality (§5), Governed Execution (§4)
 - [Security Model](/architecture/security-model.md) — Full authorization model, credential management, trust boundaries
 - [Task Lifecycle](/governance/task-lifecycle.md) — Which operations modify Git vs runtime only
 

@@ -15,7 +15,7 @@ This document defines the data model for Spine — where data lives, what form i
 
 Spine operates across two fundamentally different storage layers: Git (durable truth) and runtime systems (operational state). This document makes the boundary between them concrete and defines how they interact.
 
-All data model decisions must comply with the [Constitution](/governance/Constitution.md), particularly the Source of Truth (§2), Disposable Database (§8), and Reproducibility (§7) principles.
+All data model decisions must comply with the [Constitution](/governance/constitution.md), particularly the Source of Truth (§2), Disposable Database (§8), and Reproducibility (§7) principles.
 
 ---
 

@@ -14,7 +14,7 @@ The repository is a shared cognitive model — a single contextual source of tru
 
 If you're new to the project:
 
-1. Read the [Charter](/governance/Charter.md) to understand the philosophy
+1. Read the [Charter](/governance/charter.md) to understand the philosophy
 2. Review the [Product Definition](/product/product-definition.md)
 3. Explore the [Architecture](/architecture/domain-model.md)
 
@@ -67,7 +67,7 @@ A workflow engine governs how work progresses.
 
 Workflows define:
 
-- Valid state transitions
+- Valid step transitions and outcome routing
 - Preconditions and required outputs
 - Validation conditions
 - Retry limits for automated steps
@@ -99,13 +99,15 @@ All actors operate under the same governance rules. AI is treated as an executio
 ├── CONTRIBUTING.md
 │
 ├── governance/
-│   ├── Charter.md
-│   ├── Constitution.md
+│   ├── charter.md
+│   ├── constitution.md
 │   ├── guidelines.md
 │   ├── style-guide.md
 │   ├── repository-structure.md
 │   ├── naming-conventions.md
-│   └── artifact-schema.md
+│   ├── contribution-conventions.md
+│   ├── artifact-schema.md
+│   └── task-lifecycle.md
 │
 ├── product/
 │   ├── product-definition.md
@@ -117,11 +119,29 @@ All actors operate under the same governance rules. AI is treated as an executio
 ├── architecture/
 │   ├── domain-model.md
 │   ├── components.md
+│   ├── data-model.md
+│   ├── access-surface.md
+│   ├── workflow-definition-format.md
+│   ├── task-workflow-binding.md
+│   ├── divergence-and-convergence.md
+│   ├── error-handling-and-recovery.md
+│   ├── event-schemas.md
+│   ├── observability.md
+│   ├── security-model.md
+│   ├── actor-model.md
+│   ├── workflow-validation.md
+│   ├── validation-service.md
+│   ├── runtime-schema.md
+│   ├── git-integration.md
+│   ├── api-operations.md
 │   └── adr/
 │       ├── ADR-001-workflow-definition-storage-and-execution-recording.md
 │       ├── ADR-002-events.md
 │       ├── ADR-003-discussion-and-comment-model.md
 │       └── ADR-004-evaluation-and-acceptance-model.md
+│
+├── api/
+│   └── spec.yaml
 │
 ├── initiatives/
 │   └── INIT-001-foundations/
@@ -130,7 +150,8 @@ All actors operate under the same governance rules. AI is treated as an executio
 │           ├── EPIC-001-governance-baseline/
 │           ├── EPIC-002-product-definition/
 │           ├── EPIC-003-architecture-v0.1/
-│           └── EPIC-004-governance-refinement/
+│           ├── EPIC-004-governance-refinement/
+│           └── EPIC-005-architecture-refinement/
 │
 └── templates/
     ├── initiative-template.md
@@ -145,10 +166,11 @@ All actors operate under the same governance rules. AI is treated as an executio
 
 ### Governance
 
-- [Charter](/governance/Charter.md) — Purpose, philosophy, and structural model
-- [Constitution](/governance/Constitution.md) — Non-negotiable system constraints and invariants
+- [Charter](/governance/charter.md) — Purpose, philosophy, and structural model
+- [Constitution](/governance/constitution.md) — Non-negotiable system constraints and invariants
 - [Guidelines](/governance/guidelines.md) — Recommended practices and evolving standards
 - [Artifact Schema](/governance/artifact-schema.md) — YAML front matter schema per artifact type
+- [Task Lifecycle](/governance/task-lifecycle.md) — Governed vs runtime states, terminal outcomes
 - [Repository Structure](/governance/repository-structure.md) — Folder layout and artifact taxonomy
 - [Naming Conventions](/governance/naming-conventions.md) — Artifact ID and naming rules
 - [Style Guide](/governance/style-guide.md) — Markdown formatting and metadata conventions
@@ -165,6 +187,25 @@ All actors operate under the same governance rules. AI is treated as an executio
 
 - [Domain Model](/architecture/domain-model.md) — Core entities and relationships
 - [System Components](/architecture/components.md) — Runtime components, boundaries, and interaction flows
+- [Data Model](/architecture/data-model.md) — Storage layers, schemas, and data flow
+- [Access Surface](/architecture/access-surface.md) — CLI, API, GUI access modes and operations
+- [Workflow Definition Format](/architecture/workflow-definition-format.md) — Step-graph execution model
+- [Task-to-Workflow Binding](/architecture/task-workflow-binding.md) — Workflow resolution and assignment
+- [Divergence and Convergence](/architecture/divergence-and-convergence.md) — Parallel execution model
+- [Error Handling](/architecture/error-handling-and-recovery.md) — Failure classification, retry, recovery
+- [Event Schemas](/architecture/event-schemas.md) — Domain and operational event types
+- [Observability](/architecture/observability.md) — Tracing, logging, metrics, audit trail
+- [Security Model](/architecture/security-model.md) — Authentication, authorization, credentials
+- [Actor Model](/architecture/actor-model.md) — Registration, selection, gateway protocol
+- [Workflow Validation](/architecture/workflow-validation.md) — Schema, structural, semantic checks
+- [Validation Service](/architecture/validation-service.md) — Cross-artifact validation rules
+- [Runtime Schema](/architecture/runtime-schema.md) — Production database tables
+- [Git Integration](/architecture/git-integration.md) — Authentication, branches, commits, conflict handling
+- [API Operations](/architecture/api-operations.md) — Operation semantics and governance rules
+- [OpenAPI Specification](/api/spec.yaml) — Machine-readable API contract
+
+### ADRs
+
 - [ADR-001](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md) — Workflow definition storage and execution recording
 - [ADR-002](/architecture/adr/ADR-002-events.md) — Event model (derived domain events and operational events)
 - [ADR-003](/architecture/adr/ADR-003-discussion-and-comment-model.md) — Discussion and comment model
@@ -196,15 +237,16 @@ Foundations phase (INIT-001).
 
 - Governance baseline — Charter, Constitution, Guidelines, repository conventions, artifact templates
 - Product definition — users, use cases, non-goals, success metrics, boundaries, product concept
-- Domain model — core entities, relationships, lifecycles, constitutional alignment
-- Architectural decision records — workflow storage, event model, discussion model, evaluation model
-- System components — Access Gateway, Artifact Service, Workflow Engine, Projection Service, Actor Gateway, Event Router, Validation Service
-- Governance refinement — artifact schema, Charter alignment, Constitution validation rules, Guidelines validation guidance
+- Governance refinement — artifact schema, task lifecycle, Charter alignment, Constitution validation rules
+- Architecture v0.1 — domain model, system components, data model, access surface, observability, ADRs
+- Architecture refinement (Phase 1) — workflow definition format, divergence/convergence, error handling, event schemas, task-workflow binding, security model, actor model, workflow validation, validation service, runtime schema, Git integration, API operations
 
 ### In Progress
 
-- Architecture v0.1 — data model, API surface, observability model
+- Architecture consistency review
+- Architecture refinement (Phase 2) — workflow engine state machine, discussion model, technology selection
 
 ### Next
 
-- Implementation planning based on completed architecture
+- Technology selection (ADR-005)
+- Implementation planning

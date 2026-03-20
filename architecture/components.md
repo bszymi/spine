@@ -13,7 +13,7 @@ version: "0.1"
 
 This document defines the system components and services that make up the Spine runtime. It describes what each component does, what it owns, and how components interact.
 
-All components must operate within the constraints defined by the [Constitution](/governance/Constitution.md) and the boundaries defined in [Product Boundaries](/product/boundaries-and-constraints.md).
+All components must operate within the constraints defined by the [Constitution](/governance/constitution.md) and the boundaries defined in [Product Boundaries](/product/boundaries-and-constraints.md).
 
 ---
 

@@ -69,7 +69,7 @@ Artifact references use the repository-relative path to the artifact file:
 /initiatives/INIT-001-foundations/initiative.md
 /initiatives/INIT-001-foundations/epics/EPIC-003-architecture-v0.1/tasks/TASK-001-domain-model.md
 /architecture/adr/ADR-002-events.md
-/governance/Constitution.md
+/governance/constitution.md
 ```
 
 This format is:
@@ -167,7 +167,7 @@ created: 2026-03-04
 last_updated: 2026-03-12
 links:
   - type: related_to
-    target: /governance/Charter.md
+    target: /governance/charter.md
 ---
 ```
 
@@ -289,7 +289,7 @@ status: Foundational
 version: "0.1"
 links:
   - type: related_to
-    target: /governance/Charter.md
+    target: /governance/charter.md
 ---
 ```
 
@@ -317,7 +317,7 @@ status: Living Document
 version: "0.1"
 links:
   - type: related_to
-    target: /governance/Constitution.md
+    target: /governance/constitution.md
 ---
 ```
 
@@ -345,7 +345,7 @@ status: Living Document
 version: "0.1"
 links:
   - type: related_to
-    target: /governance/Charter.md
+    target: /governance/charter.md
 ---
 ```
 
@@ -361,7 +361,7 @@ Different artifact types use different status values:
 |---------------|----------------------|
 | Initiative | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
 | Epic | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
-| Task | `Draft`, `Pending`, `In Progress`, `Completed`, `Superseded` |
+| Task | `Draft`, `Pending`, `Completed`, `Cancelled`, `Rejected`, `Superseded`, `Abandoned` |
 | ADR | `Proposed`, `Accepted`, `Deprecated`, `Superseded` |
 | Governance | `Living Document`, `Foundational`, `Superseded` |
 | Architecture | `Living Document`, `Stable`, `Superseded` |
@@ -386,6 +386,6 @@ This schema is expected to evolve as new artifact types are introduced or existi
 Changes must:
 
 - Be versioned in Git
-- Not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md)
+- Not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md)
 - Be reflected in the artifact templates if they affect expected structure
 - Maintain backward compatibility where possible — new required fields should be introduced with a migration plan

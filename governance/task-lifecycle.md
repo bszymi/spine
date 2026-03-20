@@ -259,7 +259,7 @@ Steps 3–6 do not touch the main branch. Only steps 1, 2, and 8 produce Git com
 - [Data Model](/architecture/data-model.md) — Git truth vs runtime state boundary (§2, §3)
 - [System Components](/architecture/components.md) — Workflow Engine and Runtime Store behavior (§4.3)
 - [ADR-004](/architecture/adr/ADR-004-evaluation-and-acceptance-model.md) — Evaluation and acceptance outcomes, rejection types
-- [Constitution](/governance/Constitution.md) — Source of Truth (§2), Governed Execution (§4)
+- [Constitution](/governance/constitution.md) — Source of Truth (§2), Governed Execution (§4)
 - [Artifact Schema](/governance/artifact-schema.md) — Task status enums and acceptance fields
 - [Task-to-Workflow Binding](/architecture/task-workflow-binding.md) — How tasks are bound to workflows, `work_type` mutability rules
 
@@ -269,6 +269,6 @@ Steps 3–6 do not touch the main branch. Only steps 1, 2, and 8 produce Git com
 
 This document is expected to evolve as workflow definitions are implemented and operational experience is gained.
 
-Changes must be versioned in Git and must not contradict the [Charter](/governance/Charter.md) or [Constitution](/governance/Constitution.md).
+Changes must be versioned in Git and must not contradict the [Charter](/governance/charter.md) or [Constitution](/governance/constitution.md).
 
 Changes that alter the boundary between runtime state and durable governance outcomes should be captured as ADRs.

@@ -53,7 +53,7 @@ Content should define:
    - [System Components](/architecture/components.md) — Workflow Engine and Runtime Store behavior
    - [Domain Model](/architecture/domain-model.md) — Entity lifecycles
    - [ADR-004](/architecture/adr/ADR-004-evaluation-and-acceptance-model.md) — Evaluation and acceptance outcomes
-   - [Constitution](/governance/Constitution.md) — Source of Truth (§2), Governed Execution (§4)
+   - [Constitution](/governance/constitution.md) — Source of Truth (§2), Governed Execution (§4)
 
 ## Acceptance Criteria
 

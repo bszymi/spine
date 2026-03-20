@@ -88,4 +88,4 @@ This convention keeps filenames readable while preserving the canonical artifact
 
 This Style Guide is a living document and may evolve as the system matures.
 
-Changes must not contradict the [Charter](/governance/Charter.md), [Constitution](/governance/Constitution.md), or [Guidelines](/governance/guidelines.md).
+Changes must not contradict the [Charter](/governance/charter.md), [Constitution](/governance/constitution.md), or [Guidelines](/governance/guidelines.md).

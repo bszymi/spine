@@ -22,7 +22,7 @@ The Constitution currently defines structural constraints (Git truth, governed e
 
 ## Deliverable
 
-Updated `/governance/Constitution.md`
+Updated `/governance/constitution.md`
 
 Content should add explicit rules around:
 

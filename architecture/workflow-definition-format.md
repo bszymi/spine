@@ -349,8 +349,6 @@ steps:
       - id: assigned
         name: Actor Assigned
         next_step: execute
-        commit:
-          status: In Progress
       - id: assignment_timeout
         name: Assignment Timed Out
         next_step: end
