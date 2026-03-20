@@ -13,7 +13,7 @@ version: "0.1"
 
 This document defines the API design philosophy, operation semantics, and domain-level rules for Spine's external interface.
 
-The [Access Surface](/architecture/access-surface.md) defines operation categories and the internal operation model. The [OpenAPI specification](/architecture/api-spec.yaml) defines the concrete HTTP endpoints, request/response schemas, and error payloads. This document bridges the gap — it explains what the operations mean, when to use them, and what governance rules apply.
+The [Access Surface](/architecture/access-surface.md) defines operation categories and the internal operation model. The [OpenAPI specification](/api/spec.yaml) defines the concrete HTTP endpoints, request/response schemas, and error payloads. This document bridges the gap — it explains what the operations mean, when to use them, and what governance rules apply.
 
 ---
 
