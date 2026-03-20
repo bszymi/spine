@@ -25,6 +25,8 @@ The [Domain Model](/architecture/domain-model.md) §5 provides informal lifecycl
 |-------|-------------|
 | `pending` | Run created, workflow resolved and pinned, awaiting activation |
 | `active` | At least one step is executing or ready for assignment |
+| `paused` | Execution suspended — waiting for external dependency, human input, or operator action |
+| `committing` | Terminal step completed; durable outcome is being committed to Git |
 | `completed` | All steps reached terminal outcomes; durable results committed to Git |
 | `failed` | A step failed permanently and the Run cannot proceed |
 | `cancelled` | Explicitly cancelled by an operator |
@@ -35,12 +37,17 @@ The [Domain Model](/architecture/domain-model.md) §5 provides informal lifecycl
 |------|-----|---------|-------|---------|
 | `pending` | `active` | `run.activate` | Entry step exists and is assignable | Set `started_at`; create first StepExecution in `waiting`; emit `run_started` |
 | `active` | `active` | `step.completed` | Next step exists (not `end`) | Create next StepExecution; update `current_step_id` |
-| `active` | `completed` | `step.completed` | Next step is `end` and outcome has `commit` effect | Commit durable outcome to Git; merge task branch; set `completed_at`; emit `run_completed` |
+| `active` | `paused` | `step.blocked` | Step is waiting for external dependency or long-running human action | Record pause reason; emit `run_paused` |
+| `active` | `committing` | `step.completed` | Next step is `end` and outcome has `commit` effect | Begin Git commit (durable outcome + merge) |
 | `active` | `completed` | `step.completed` | Next step is `end` and outcome has no `commit` effect | Set `completed_at`; emit `run_completed` |
 | `active` | `failed` | `step.failed_permanently` | Step exhausted retries or permanent error | Preserve runtime state; emit `run_failed` |
 | `active` | `failed` | `divergence.failed` | Convergence failed (e.g., `require_all` with branch failure) | Preserve runtime state; emit `run_failed` |
-| `active` | `failed` | `git.commit_failed` | Git commit failed permanently after retries | Preserve runtime state; emit `run_failed` |
 | `active` | `cancelled` | `run.cancel` | Operator issues cancellation | Terminate in-progress steps; set `completed_at`; emit `run_cancelled` |
+| `paused` | `active` | `run.resume` | Blocking condition resolved | Resume from current step; emit `run_resumed` |
+| `paused` | `cancelled` | `run.cancel` | Operator issues cancellation | Set `completed_at`; emit `run_cancelled` |
+| `committing` | `completed` | `git.commit_succeeded` | Git commit and merge confirmed | Set `completed_at`; emit `run_completed` |
+| `committing` | `committing` | `git.commit_failed_transient` | Transient Git failure, retries remain | Retry commit |
+| `committing` | `failed` | `git.commit_failed_permanent` | Git commit failed permanently after retries | Preserve runtime state; emit `run_failed` |
 
 ### 2.3 Invalid Transitions
 
@@ -50,6 +57,7 @@ The [Domain Model](/architecture/domain-model.md) §5 provides informal lifecycl
 | Any transition | `failed` | Reject — failed Runs are immutable (start a new Run instead) |
 | Any transition | `cancelled` | Reject — cancelled Runs are immutable |
 | `active` → `pending` | `active` | Reject — Runs do not revert to pending |
+| `paused` → `pending` | `paused` | Reject — paused Runs resume to active, not pending |
 
 ### 2.4 Recovery Transitions
 
@@ -59,6 +67,8 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 |----------------|----------------|
 | `pending` | Re-activate (transition to `active`) |
 | `active` | Inspect current step; resume, retry, or timeout as appropriate |
+| `paused` | Remain paused; operator may resume or cancel |
+| `committing` | Re-attempt Git commit (idempotent) |
 | `completed` | No action (terminal) |
 | `failed` | No action (terminal) |
 | `cancelled` | No action (terminal) |
@@ -74,6 +84,7 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 | `waiting` | Step is ready but no actor has been assigned |
 | `assigned` | An actor has been assigned; awaiting the actor to begin work |
 | `in_progress` | Actor has acknowledged the assignment and is actively working |
+| `blocked` | Execution paused — waiting for external dependency, precondition, or resource |
 | `completed` | Actor submitted a result with a valid outcome |
 | `failed` | Step failed (invalid result, timeout, actor failure) |
 | `skipped` | Step was bypassed per workflow rules |
@@ -92,6 +103,9 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 | `in_progress` | `failed` | `step.submit_invalid` | Outcome invalid or artifacts fail validation | Classify error; emit `step_failed` |
 | `in_progress` | `failed` | `step.timeout` | Step timeout reached during execution | Apply `timeout_outcome`; emit `step_timeout` |
 | `in_progress` | `failed` | `actor.unavailable` | Actor became unavailable during execution | Classify as `actor_unavailable`; emit `step_failed` |
+| `in_progress` | `blocked` | `step.blocked` | Step waiting for external dependency or precondition | Record block reason; may trigger Run `paused` |
+| `blocked` | `in_progress` | `step.unblocked` | Blocking condition resolved | Resume execution |
+| `blocked` | `failed` | `step.timeout` | Step timeout reached while blocked | Apply `timeout_outcome`; emit `step_timeout` |
 
 ### 3.3 Retry Behavior
 
@@ -103,6 +117,21 @@ When a StepExecution transitions to `failed`:
 | `attempt >= retry.limit` or error is permanent | Escalate to Run failure (`step.failed_permanently` trigger on Run) |
 
 Each retry creates a **new StepExecution record** — the failed record is preserved for diagnosis. The new execution starts in `waiting` state.
+
+### 3.3.1 Failure Classification
+
+Every `failed` StepExecution records a `failure_classification` to distinguish failure types:
+
+| Classification | Meaning | Retryable |
+|---------------|---------|-----------|
+| `transient_error` | Temporary failure (network, timeout, actor busy) | Yes |
+| `permanent_error` | Unrecoverable failure (schema violation, logic error) | No |
+| `actor_unavailable` | Actor became unreachable or unresponsive | Yes (with different actor) |
+| `invalid_result` | Actor returned invalid outcome or artifacts | Yes (if actor might correct) |
+| `git_conflict` | Git commit conflict during durable outcome | No (operator intervention) |
+| `timeout` | Step exceeded its configured timeout | Depends on `timeout_outcome` |
+
+The classification determines whether retry is attempted and informs operator diagnostics. It is stored in the `error_detail` JSONB field alongside the error message.
 
 ### 3.4 Invalid Transitions
 
@@ -120,6 +149,7 @@ Each retry creates a **new StepExecution record** — the failed record is prese
 | `waiting` | Re-attempt assignment |
 | `assigned` | Check actor availability; if still reachable, wait; if not, transition to `waiting` for reassignment |
 | `in_progress` | Check for pending result; if none, apply timeout logic |
+| `blocked` | Remain blocked; check if blocking condition resolved |
 | `completed` | No action (terminal) |
 | `failed` | Check retry eligibility; if eligible, create new execution |
 | `skipped` | No action (terminal) |
@@ -212,7 +242,44 @@ The `divergence_window` must be `closed` before transitioning to `converging` (e
 
 ---
 
-## 6. State Persistence and Atomicity
+## 6. Engine Responsibility
+
+### 6.1 Who Drives Transitions
+
+The Workflow Engine is the sole authority for state transitions. No other component may directly modify runtime state.
+
+| Responsibility | Owner | Description |
+|---------------|-------|-------------|
+| Transition evaluation | Workflow Engine | Evaluates triggers and guards; applies state changes |
+| Timeout detection | Workflow Engine (scheduler) | Periodically scans for steps exceeding their timeout |
+| Retry initiation | Workflow Engine | Creates new StepExecution after transient failure |
+| Assignment orchestration | Workflow Engine → Actor Gateway | Engine decides when to assign; Actor Gateway delivers |
+| Git commit execution | Workflow Engine → Artifact Service | Engine triggers commit; Artifact Service executes |
+| Event emission | Workflow Engine → Event Router | Engine emits events as transition effects |
+| Orphan detection | Workflow Engine (scheduler) | Scans for Runs without recent activity |
+
+### 6.2 Actor vs Engine Boundaries
+
+Actors do **not** drive state transitions directly. Actors submit results through the Actor Gateway, which delivers them to the Workflow Engine. The engine then evaluates the result and decides the transition.
+
+- An actor submitting a step result does not automatically complete the step — the engine validates the result first
+- An actor cannot cancel a Run or skip a step — those are engine or operator actions
+- An actor cannot assign themselves to a step — the engine performs selection (per [Actor Model](/architecture/actor-model.md) §4)
+
+### 6.3 Scheduler Functions
+
+The Workflow Engine includes a scheduler component responsible for time-based triggers:
+
+- **Timeout scanning** — periodically checks active steps against their timeout configuration
+- **Orphan detection** — periodically scans for Runs without recent step activity
+- **Retry scheduling** — schedules retry attempts with appropriate backoff delays
+- **Convergence deadline** — monitors `deadline_reached` entry policies
+
+The scheduler operates on the persisted state in the Runtime Store. It does not maintain in-memory timers that would be lost on crash.
+
+---
+
+## 7. State Persistence and Atomicity
 
 ### 6.1 Persistence Rules
 
@@ -240,7 +307,7 @@ State transitions within a single entity are atomic:
 
 ---
 
-## 7. Constitutional Alignment
+## 8. Constitutional Alignment
 
 | Principle | How the State Machine Supports It |
 |-----------|----------------------------------|
@@ -251,7 +318,7 @@ State transitions within a single entity are atomic:
 
 ---
 
-## 8. Cross-References
+## 9. Cross-References
 
 - [Domain Model](/architecture/domain-model.md) §5 — Informal lifecycle diagrams
 - [Error Handling](/architecture/error-handling-and-recovery.md) §3–§6 — Failure, retry, timeout, and recovery semantics
@@ -264,16 +331,16 @@ State transitions within a single entity are atomic:
 
 ---
 
-## 9. Evolution Policy
+## 10. Evolution Policy
 
 This state machine specification is expected to evolve as the system is implemented.
 
 Areas expected to require refinement:
 
-- Suspended/paused Run state (for long-running manual workflows)
 - Run resumption after failure (currently requires a new Run)
 - Nested divergence state machine interactions
 - State machine visualization tooling
 - Performance optimization for high-concurrency divergence
+- Machine-readable state machine DSL for code generation and test derivation
 
 Changes that alter state transitions, add new states, or change recovery behavior should be captured as ADRs.
