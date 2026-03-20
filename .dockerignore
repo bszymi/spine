@@ -1,0 +1,26 @@
+# Git
+.git
+
+# Architecture and documentation (not needed in build)
+architecture/
+governance/
+product/
+initiatives/
+templates/
+api/
+
+# Docker files
+Dockerfile
+docker-compose*.yaml
+docker-compose*.yml
+
+# Build artifacts
+bin/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

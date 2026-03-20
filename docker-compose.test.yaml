@@ -1,0 +1,16 @@
+services:
+  spine-test-db:
+    image: postgres:16-bookworm
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=spine_test
+      - POSTGRES_PASSWORD=spine_test
+      - POSTGRES_DB=spine_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spine_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 10

@@ -1,1 +1,3 @@
 /tmp/
+/bin/
+docker-compose.override.yaml

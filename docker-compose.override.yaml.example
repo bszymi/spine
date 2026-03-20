@@ -1,0 +1,16 @@
+# Copy this file to docker-compose.override.yaml to use local bind mounts.
+#
+# This mounts the current directory as the Spine repository, allowing you
+# to edit artifacts locally while Spine detects changes via polling.
+#
+# The bind mount must be read-write — Spine needs write access for commits,
+# branch creation, and merges.
+#
+# Caution: Both you and Spine can modify the repository simultaneously.
+# Avoid editing files involved in active Runs.
+
+services:
+  spine:
+    volumes:
+      - ./:/repo
+      - worktrees:/var/spine/worktrees

@@ -1,0 +1,72 @@
+services:
+  spine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SPINE_DATABASE_URL=postgres://spine:spine@spine-db:5432/spine?sslmode=disable
+      - SPINE_GIT_REPOSITORY_PATH=/repo
+      - SPINE_GIT_AUTHORITATIVE_BRANCH=main
+      - SPINE_GIT_WORKTREE_PATH=/var/spine/worktrees
+      - SPINE_SERVER_PORT=8080
+      - SPINE_PROJECTION_POLLING_INTERVAL=5s
+      - SPINE_LOG_LEVEL=debug
+    volumes:
+      - repo:/repo
+      - worktrees:/var/spine/worktrees
+    depends_on:
+      spine-db:
+        condition: service_healthy
+    command: ["serve"]
+    healthcheck:
+      test: ["CMD", "spine", "health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  spine-db:
+    image: postgres:16-bookworm
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=spine
+      - POSTGRES_PASSWORD=spine
+      - POSTGRES_DB=spine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spine"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  spine-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - SPINE_DATABASE_URL=postgres://spine:spine@spine-db:5432/spine?sslmode=disable
+    depends_on:
+      spine-db:
+        condition: service_healthy
+    command: ["migrate"]
+    profiles: ["setup"]
+
+  spine-init-repo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - SPINE_GIT_REPOSITORY_PATH=/repo
+    volumes:
+      - repo:/repo
+    command: ["init-repo"]
+    profiles: ["setup"]
+
+volumes:
+  pgdata:
+  repo:
+  worktrees:
