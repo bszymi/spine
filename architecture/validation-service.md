@@ -13,7 +13,7 @@ version: "0.1"
 
 This document defines the concrete validation rules and operational contract for the Validation Service in Spine v0.x.
 
-The [Constitution](/governance/constitution.md) §11 mandates that artifacts must be validated against their governed context — not in isolation. The [System Components](/architecture/components.md) §4.8 defines the Validation Service as the component responsible for executing these checks. The [Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2 defines the `cross_artifact_valid` condition that triggers validation during workflow execution.
+The [Constitution](/governance/Constitution.md) §11 mandates that artifacts must be validated against their governed context — not in isolation. The [System Components](/architecture/components.md) §4.8 defines the Validation Service as the component responsible for executing these checks. The [Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2 defines the `cross_artifact_valid` condition that triggers validation during workflow execution.
 
 This document specifies what the Validation Service checks, how it classifies results, and how it integrates with the Workflow Engine.
 
@@ -38,7 +38,7 @@ The governed context for an artifact includes:
 | Context Layer | Examples | Defined In |
 |---------------|----------|------------|
 | Strategic intent | Charter philosophy, initiative goals | `/governance/charter.md`, initiative artifacts |
-| Governance rules | Constitution constraints, guidelines | `/governance/constitution.md`, `/governance/guidelines.md` |
+| Governance rules | Constitution constraints, guidelines | `/governance/Constitution.md`, `/governance/guidelines.md` |
 | Architecture | Domain model, component design, data model | `/architecture/*.md` |
 | Product definition | Boundaries, non-goals, success metrics | `/product/*.md` |
 | Parent artifacts | Parent initiative, parent epic | Linked via `parent` links |
@@ -303,7 +303,7 @@ This is out of scope for v0.x but the validation contract is designed to support
 
 ## 9. Cross-References
 
-- [Constitution](/governance/constitution.md) §11 — Cross-Artifact Validation, §12 — Structural Integrity
+- [Constitution](/governance/Constitution.md) §11 — Cross-Artifact Validation, §12 — Structural Integrity
 - [System Components](/architecture/components.md) §4.8 — Validation Service component
 - [Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2 — `cross_artifact_valid` and `custom` conditions
 - [Artifact Schema](/governance/artifact-schema.md) — Front matter schemas and link model

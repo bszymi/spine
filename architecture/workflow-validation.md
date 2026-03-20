@@ -482,7 +482,7 @@ When a workflow is `Deprecated` or `Superseded`:
 - [Divergence and Convergence](/architecture/divergence-and-convergence.md) — Divergence/convergence structural rules
 - [Error Handling](/architecture/error-handling-and-recovery.md) — Run creation failure handling
 - [System Components](/architecture/components.md) §4.3 — Workflow Engine, §4.8 — Validation Service
-- [Constitution](/governance/constitution.md) §4 — Governed Execution, §11 — Cross-Artifact Validation
+- [Constitution](/governance/Constitution.md) §4 — Governed Execution, §11 — Cross-Artifact Validation
 - [Artifact Schema](/governance/artifact-schema.md) §5, §6 — Artifact type schemas and status enums
 - [Actor Model](/architecture/actor-model.md) §3 — Actor registration and capabilities
 - [Task Lifecycle](/governance/task-lifecycle.md) — Governed terminal states

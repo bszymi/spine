@@ -13,7 +13,7 @@ version: "0.1"
 
 This document defines the minimum observability and audit model for Spine at v0.x.
 
-The [Constitution](/governance/constitution.md) (§7) mandates that execution paths must be reconstructible from repository state, outcomes must be traceable to governing artifacts, and reproducibility is mandatory. This document specifies how the system achieves traceability, how operators monitor execution, and how the audit trail is constructed.
+The [Constitution](/governance/Constitution.md) (§7) mandates that execution paths must be reconstructible from repository state, outcomes must be traceable to governing artifacts, and reproducibility is mandatory. This document specifies how the system achieves traceability, how operators monitor execution, and how the audit trail is constructed.
 
 Spine's observability model builds on existing architectural primitives:
 
@@ -298,7 +298,7 @@ This means a metrics consumer can be implemented as an event consumer without ad
 
 ## 9. Cross-References
 
-- [Constitution](/governance/constitution.md) §7 — Reproducibility mandate
+- [Constitution](/governance/Constitution.md) §7 — Reproducibility mandate
 - [Domain Model](/architecture/domain-model.md) §3.5 — Run entity with `trace_id`, §3.7 — Event entity
 - [Data Model](/architecture/data-model.md) §2.3 — Runtime Store schema, §2.4 — Event layer, §5 — Reconciliation
 - [Event Schemas](/architecture/event-schemas.md) — Concrete event type definitions
