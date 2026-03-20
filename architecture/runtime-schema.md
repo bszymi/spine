@@ -168,14 +168,14 @@ CREATE TABLE runtime.runs (
     workflow_version    text        NOT NULL,       -- Git commit SHA of pinned workflow
     workflow_version_label text,                     -- semantic version (informational)
     status              text        NOT NULL DEFAULT 'pending',
-                                                    -- pending, active, completed, failed, cancelled
+                                                    -- pending, active, paused, committing, completed, failed, cancelled
     current_step_id     text,                       -- active step; null during divergence
     trace_id            text        NOT NULL,       -- observability correlation ID
     started_at          timestamptz,
     completed_at        timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
 
-    CONSTRAINT runs_status_check CHECK (status IN ('pending', 'active', 'completed', 'failed', 'cancelled'))
+    CONSTRAINT runs_status_check CHECK (status IN ('pending', 'active', 'paused', 'committing', 'completed', 'failed', 'cancelled'))
 );
 ```
 
@@ -201,7 +201,7 @@ CREATE TABLE runtime.step_executions (
     branch_id           text,                       -- null for main graph; set for divergence branches
     actor_id            text,                       -- assigned actor; null while waiting
     status              text        NOT NULL DEFAULT 'waiting',
-                                                    -- waiting, assigned, in_progress, completed, failed, skipped
+                                                    -- waiting, assigned, in_progress, blocked, completed, failed, skipped
     attempt             integer     NOT NULL DEFAULT 1,  -- retry count
     outcome_id          text,                       -- workflow-defined outcome value
     started_at          timestamptz,
@@ -209,7 +209,7 @@ CREATE TABLE runtime.step_executions (
     error_detail        jsonb,                      -- structured failure information
     created_at          timestamptz NOT NULL DEFAULT now(),
 
-    CONSTRAINT step_status_check CHECK (status IN ('waiting', 'assigned', 'in_progress', 'completed', 'failed', 'skipped'))
+    CONSTRAINT step_status_check CHECK (status IN ('waiting', 'assigned', 'in_progress', 'blocked', 'completed', 'failed', 'skipped'))
 );
 ```
 
