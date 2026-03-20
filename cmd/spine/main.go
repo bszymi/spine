@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -28,7 +31,14 @@ func serveCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the Spine runtime server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("spine: serve not yet implemented")
+			slog.Info("spine server starting", "status", "placeholder")
+			fmt.Println("spine: serve not yet implemented — waiting for signal to exit")
+
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+			<-sig
+
+			slog.Info("spine server shutting down")
 			return nil
 		},
 	}
