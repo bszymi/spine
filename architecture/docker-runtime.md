@@ -75,13 +75,63 @@ CMD ["serve"]
 - **Non-root user** — the `spine` user owns the process for security
 - **Git + ca-certificates** — Git CLI for repository operations; ca-certificates for HTTPS Git remotes
 - **Migrations bundled** — migration files are included so `spine migrate` works inside the container
-- **Health check built-in** — Docker health check uses the `spine health` CLI command (which calls `system.health`)
+- **Health check built-in** — Docker health check uses `spine health`, which performs an internal check (database connectivity + Git access) without depending on the HTTP server being ready. This avoids circular dependency during startup.
 
 ---
 
-## 4. Docker Compose
+## 4. Git Repository Model (Containerized)
 
-### 4.1 Development Compose File
+### 4.1 Repository Type
+
+Spine operates against a **non-bare working repository** (not a bare repo). This is required because:
+
+- The Artifact Service reads file content directly from the working tree
+- Worktrees are created from the working repository for task/divergence branches
+- Git CLI operations (commit, merge) require a working tree
+
+### 4.2 Repository Structure
+
+```
+/repo/                          # SPINE_GIT_REPOSITORY_PATH
+├── .git/                       # Git metadata
+├── governance/                 # Governed artifacts
+├── architecture/
+├── product/
+├── workflows/
+├── initiatives/
+└── ...
+
+/var/spine/worktrees/           # SPINE_GIT_WORKTREE_PATH
+├── run-abc123/                 # Worktree for active Run
+│   └── implement-auth/        # Task branch checkout
+└── run-def456/
+    └── explore-designs/
+        ├── branch-a/          # Divergence branch checkout
+        └── branch-b/
+```
+
+### 4.3 Repository Initialization
+
+The `spine init-repo` command:
+
+1. Initializes a Git repository at `SPINE_GIT_REPOSITORY_PATH` (if not already initialized)
+2. Creates the authoritative branch (`main`)
+3. Sets Git config for the Spine system user (`Spine System <system@spine.local>`)
+4. Creates an initial empty commit
+
+If the repository already exists (e.g., cloned from a remote), `init-repo` is skipped.
+
+### 4.4 Repository Ownership
+
+- The `spine` user (non-root) must have read/write access to both `/repo` and `/var/spine/worktrees`
+- Worktrees are created and deleted by the Artifact Service during Run lifecycle
+- Worktrees are ephemeral — if lost, they can be recreated from the repository
+
+---
+
+## 5. Docker Compose
+
+### 5.1 Development Compose File
 
 ```yaml
 # docker-compose.yaml
@@ -161,7 +211,7 @@ volumes:
   worktrees:
 ```
 
-### 4.2 Service Roles
+### 5.2 Service Roles
 
 | Service | Role | Lifecycle |
 |---------|------|-----------|
@@ -172,9 +222,9 @@ volumes:
 
 ---
 
-## 5. Environment Variable Mapping
+## 6. Environment Variable Mapping
 
-### 5.1 Convention
+### 6.1 Convention
 
 Environment variables follow the pattern `SPINE_<SECTION>_<KEY>`:
 
@@ -192,7 +242,7 @@ Environment variables follow the pattern `SPINE_<SECTION>_<KEY>`:
 | `SPINE_LOG_LEVEL` | `observability.log_level` | No (default: `info`) |
 | `SPINE_LOG_FORMAT` | `observability.log_format` | No (default: `json`) |
 
-### 5.2 Precedence
+### 6.2 Precedence
 
 Environment variables override config file values (per [Implementation Guide](/architecture/implementation-guide.md) §12.1):
 
@@ -200,7 +250,7 @@ Environment variables override config file values (per [Implementation Guide](/a
 Environment variable > Config file (spine.yaml) > Default value
 ```
 
-### 5.3 Secrets
+### 6.3 Secrets
 
 Secrets are always provided via environment variables and never written to config files or container images (per [Security Model](/architecture/security-model.md) §5):
 
@@ -212,9 +262,9 @@ Secrets are always provided via environment variables and never written to confi
 
 ---
 
-## 6. Startup Flow
+## 7. Startup Flow
 
-### 6.1 First-Time Setup
+### 7.1 First-Time Setup
 
 ```bash
 # 1. Build containers
@@ -241,7 +291,7 @@ docker compose --profile setup up -d
 docker compose up -d spine
 ```
 
-### 6.2 Application Boot Sequence (Inside Container)
+### 7.2 Application Boot Sequence (Inside Container)
 
 When `spine serve` starts:
 
@@ -260,7 +310,7 @@ When `spine serve` starts:
 
 If any step fails during boot, the process exits with a non-zero code and a structured error log.
 
-### 6.3 Subsequent Starts
+### 7.3 Subsequent Starts
 
 ```bash
 docker compose up -d
@@ -270,9 +320,9 @@ No setup needed — database is persisted in the `pgdata` volume, Git repository
 
 ---
 
-## 7. Health Checks
+## 8. Health Checks
 
-### 7.1 Application Health
+### 8.1 Application Health
 
 The `spine health` command (and `GET /api/v1/system/health` endpoint) checks:
 
@@ -283,7 +333,7 @@ The `spine health` command (and `GET /api/v1/system/health` endpoint) checks:
 | Projection freshness | Projection sync lag is within acceptable threshold | `degraded` |
 | Workflow engine | Engine scheduler is running | `degraded` |
 
-### 7.2 Container Health
+### 8.2 Container Health
 
 Docker health checks use the `spine health` CLI command:
 
@@ -292,15 +342,15 @@ Docker health checks use the `spine health` CLI command:
 - **Start period:** 15 seconds (allows time for boot)
 - **Retries:** 3 (container marked unhealthy after 3 consecutive failures)
 
-### 7.3 Dependency Health
+### 8.3 Dependency Health
 
 The `spine-db` container has its own health check (`pg_isready`). The `spine` service uses `depends_on: condition: service_healthy` to wait for the database before starting.
 
 ---
 
-## 8. Volume Strategy
+## 9. Volume Strategy
 
-### 8.1 Named Volumes
+### 9.1 Named Volumes
 
 | Volume | Mount Point | Purpose | Persistent |
 |--------|-------------|---------|-----------|
@@ -308,7 +358,7 @@ The `spine-db` container has its own health check (`pg_isready`). The `spine` se
 | `repo` | `/repo` | Git repository (authoritative) | Yes |
 | `worktrees` | `/var/spine/worktrees` | Git worktrees for task/divergence branches | Ephemeral (can be recreated) |
 
-### 8.2 Development Overrides
+### 9.2 Development Overrides
 
 For development, the repository volume can be replaced with a bind mount to the host filesystem:
 
@@ -317,13 +367,15 @@ For development, the repository volume can be replaced with a bind mount to the 
 services:
   spine:
     volumes:
-      - ./:/repo:ro          # Mount current directory as read-only repo
+      - ./:/repo              # Mount current directory as read-write repo
       - worktrees:/var/spine/worktrees
 ```
 
-This allows developers to edit artifacts locally and have Spine detect changes via polling.
+The bind mount must be **read-write** — Spine needs write access for commits, branch creation, and merges. This allows developers to edit artifacts locally and have Spine detect changes via polling, while Spine's commits are also visible on the host.
 
-### 8.3 Git Credentials
+**Caution:** With a bind mount, both the developer and Spine can modify the repository simultaneously. Developers should avoid modifying files that Spine is actively committing to (e.g., artifacts involved in an active Run).
+
+### 9.3 Git Credentials
 
 For Git operations requiring authentication (push to remote):
 
@@ -347,9 +399,9 @@ services:
 
 ---
 
-## 9. Integration Testing
+## 10. Integration Testing
 
-### 9.1 Test Compose File
+### 10.1 Test Compose File
 
 ```yaml
 # docker-compose.test.yaml
@@ -371,7 +423,7 @@ services:
       retries: 10
 ```
 
-### 9.2 Running Integration Tests
+### 10.2 Running Integration Tests
 
 ```bash
 # Start test database
@@ -385,7 +437,7 @@ SPINE_DATABASE_URL=postgres://spine_test:spine_test@localhost:5432/spine_test \
 docker compose -f docker-compose.test.yaml down
 ```
 
-### 9.3 CI Environment
+### 10.3 CI Environment
 
 In CI, the same compose file provides infrastructure:
 
@@ -402,9 +454,9 @@ In CI, the same compose file provides infrastructure:
 
 ---
 
-## 10. Developer Workflow
+## 11. Developer Workflow
 
-### 10.1 Common Commands
+### 11.1 Common Commands
 
 | Command | What It Does |
 |---------|-------------|
@@ -416,7 +468,7 @@ In CI, the same compose file provides infrastructure:
 | `docker compose down -v` | Stop and delete all data (full reset) |
 | `docker compose exec spine spine cli <cmd>` | Run CLI commands inside the container |
 
-### 10.2 Development Cycle
+### 11.2 Development Cycle
 
 ```bash
 # 1. Make code changes locally
@@ -431,7 +483,7 @@ make test
 make test-integration
 ```
 
-### 10.3 Full Reset
+### 11.3 Full Reset
 
 To start from scratch (wipe database, repository, and all state):
 
@@ -444,15 +496,84 @@ docker compose up -d spine
 
 ---
 
-## 11. Scope Boundary
+## 12. Async Execution
 
-### 11.1 What This Document Covers
+Spine v0.x uses an **in-process queue** for all asynchronous work (step assignment delivery, event routing, workflow scheduling). No external message broker (Kafka, RabbitMQ, Redis) is required.
+
+This means:
+
+- All async processing happens within the `spine` container
+- No additional infrastructure services in Docker Compose
+- Queue state is lost on container restart (by design — per [ADR-005](/architecture/adr/ADR-005-technology-selection.md), the queue is not a durable system of record)
+- Recovery after restart reconstructs pending work from the Runtime Store
+
+---
+
+## 13. Migration Responsibility
+
+### 13.1 Migration Rule
+
+**Spine will not start if the database schema is outdated.** The boot sequence (§7.2) verifies that all migrations have been applied. If the schema is behind, the process exits with an error.
+
+Migrations are **not auto-applied** on startup. They must be run explicitly:
+
+```bash
+docker compose run --rm spine-migrate
+# or
+spine migrate
+```
+
+This prevents accidental schema changes in shared environments and ensures migrations are a deliberate operator action.
+
+### 13.2 Migration Source of Truth
+
+Migration files in `/migrations/` (bundled in the container image) are the source of truth for the database schema. The `spine migrate` command applies them sequentially using version tracking in the database.
+
+---
+
+## 14. Logging
+
+All logs are written to **stdout** in structured JSON format by default. This is the standard container-native logging pattern.
+
+```json
+{"timestamp":"2026-03-20T10:00:00Z","level":"info","component":"workflow_engine","message":"Run started","run_id":"run-abc123","trace_id":"..."}
+```
+
+- **stdout** is the only log destination — no log files inside the container
+- Docker and container orchestrators capture stdout natively
+- `SPINE_LOG_LEVEL` controls verbosity (`debug`, `info`, `warn`, `error`)
+- `SPINE_LOG_FORMAT` can be set to `text` for human-readable output during local development
+
+---
+
+## 15. Document Boundary
+
+This document and the [Implementation Guide](/architecture/implementation-guide.md) have complementary but distinct scopes:
+
+| Concern | Implementation Guide | Docker Runtime |
+|---------|---------------------|---------------|
+| Package layout and code structure | Yes | No |
+| Internal interfaces and dependency rules | Yes | No |
+| Boot sequence (internal service wiring) | Yes (§7) | References it |
+| Configuration schema and categories | Yes (§12) | Env var mapping to it |
+| Dockerfile and container image | No | Yes |
+| Docker Compose and service topology | No | Yes |
+| Volume strategy and Git operational model | No | Yes |
+| Developer workflow (containerized) | No | Yes |
+
+When both documents describe the same concept (e.g., startup flow), the Implementation Guide defines the internal logic and this document defines the container-level execution.
+
+---
+
+## 16. Scope Boundary
+
+### 16.1 What This Document Covers
 
 - Local development environment
 - Integration test infrastructure
 - Simple single-host deployment (Docker Compose)
 
-### 11.2 What This Document Does NOT Cover (Deferred)
+### 16.2 What This Document Does NOT Cover (Deferred)
 
 - Production deployment (Kubernetes, cloud infrastructure)
 - High availability and scaling
@@ -465,7 +586,7 @@ These concerns are deferred until the system is functionally complete and operat
 
 ---
 
-## 12. Cross-References
+## 17. Cross-References
 
 - [Implementation Guide](/architecture/implementation-guide.md) §4 — Build and distribution, §12 — Configuration
 - [Security Model](/architecture/security-model.md) §5 — Secret management
@@ -476,7 +597,7 @@ These concerns are deferred until the system is functionally complete and operat
 
 ---
 
-## 13. Evolution Policy
+## 18. Evolution Policy
 
 This document evolves as deployment patterns emerge.
 
