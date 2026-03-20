@@ -41,6 +41,7 @@ This epic produces the missing architecture documents that bridge conceptual mod
 - Define discussion and comment runtime model
 - Select technology stack for v0.x implementation
 - Full architecture consistency review
+- Define implementation guide (package layout, interfaces, build, testing)
 
 ---
 
