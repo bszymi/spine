@@ -2,7 +2,7 @@
 id: TASK-006
 type: Task
 title: Docker Development Environment
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-001-core-foundation/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
