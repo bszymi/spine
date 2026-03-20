@@ -36,7 +36,7 @@ services:
       - POSTGRES_PASSWORD=spine
       - POSTGRES_DB=spine
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U spine"]
       interval: 5s
