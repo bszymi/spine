@@ -506,7 +506,7 @@ These rules are non-negotiable in the implementation. Violating any of them is a
 
 ## 12. Configuration
 
-### 7.1 Configuration Sources
+### 12.1 Configuration Sources
 
 | Source | Priority | Use |
 |--------|----------|-----|
@@ -514,7 +514,7 @@ These rules are non-negotiable in the implementation. Violating any of them is a
 | Config file (YAML) | Medium | Server settings, feature flags |
 | Defaults | Lowest | Sensible defaults for all settings |
 
-### 7.2 Core Configuration
+### 12.2 Core Configuration
 
 ```yaml
 # spine.yaml
@@ -559,7 +559,7 @@ observability:
   metrics_enabled: false                    # v0.x: optional
 ```
 
-### 7.3 Secrets
+### 12.3 Secrets
 
 Secrets (database password, API tokens, Git credentials) are provided via environment variables, never in config files or Git (per [Security Model](/architecture/security-model.md) §5).
 
@@ -567,7 +567,7 @@ Secrets (database password, API tokens, Git credentials) are provided via enviro
 
 ## 13. Development Workflow
 
-### 8.1 Local Development
+### 13.1 Local Development
 
 ```bash
 # Setup
@@ -585,7 +585,7 @@ make lint           # Run linter
 ./bin/spine serve    # Start server
 ```
 
-### 8.2 Code Organization Conventions
+### 13.2 Code Organization Conventions
 
 - Each component package has a `service.go` with the main service struct and constructor
 - Interfaces are defined in the package that uses them, not the package that implements them
