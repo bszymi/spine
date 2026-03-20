@@ -1,0 +1,50 @@
+package domain
+
+import (
+	"encoding/json"
+	"time"
+)
+
+// EventType represents the type of a domain or operational event.
+type EventType string
+
+// Domain events (reconstructible from Git).
+const (
+	EventArtifactCreated EventType = "artifact_created"
+	EventArtifactUpdated EventType = "artifact_updated"
+	EventRunStarted      EventType = "run_started"
+	EventRunCompleted    EventType = "run_completed"
+	EventRunFailed       EventType = "run_failed"
+	EventRunCancelled    EventType = "run_cancelled"
+	EventRunPaused       EventType = "run_paused"
+	EventRunResumed      EventType = "run_resumed"
+	EventStepAssigned    EventType = "step_assigned"
+	EventStepStarted     EventType = "step_started"
+	EventStepCompleted   EventType = "step_completed"
+	EventStepFailed      EventType = "step_failed"
+	EventStepTimeout     EventType = "step_timeout"
+	EventRetryAttempted  EventType = "retry_attempted"
+)
+
+// Operational events (not reconstructible from Git).
+const (
+	EventDivergenceStarted    EventType = "divergence_started"
+	EventConvergenceCompleted EventType = "convergence_completed"
+	EventEngineRecovered      EventType = "engine_recovered"
+	EventProjectionSynced     EventType = "projection_synced"
+	EventThreadCreated        EventType = "thread_created"
+	EventCommentAdded         EventType = "comment_added"
+	EventThreadResolved       EventType = "thread_resolved"
+)
+
+// Event represents a domain or operational event emitted by the system.
+type Event struct {
+	EventID      string          `json:"event_id"`
+	Type         EventType       `json:"type"`
+	Timestamp    time.Time       `json:"timestamp"`
+	ActorID      string          `json:"actor_id,omitempty"`
+	RunID        string          `json:"run_id,omitempty"`
+	ArtifactPath string          `json:"artifact_path,omitempty"`
+	TraceID      string          `json:"trace_id,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+}
