@@ -123,6 +123,10 @@ Spine will interact with Git by invoking the Git CLI as a subprocess, wrapped be
 - Git CLI is available in all deployment environments
 - Subprocess execution is natural in Go
 
+**Reliability:**
+
+Git subprocess execution must be treated as an unreliable boundary. All Git operations must include explicit error handling, retries where appropriate, and idempotent behavior to support recovery (per [Git Integration](/architecture/git-integration.md) §7 and [Error Handling](/architecture/error-handling-and-recovery.md) §5).
+
 **Abstraction contract:**
 
 The Artifact Service accesses Git through an internal `GitClient` interface. The v0.x implementation shells out to `git` CLI. The interface is designed so that alternative implementations (libgit2, GitHub API) can be substituted without changing callers.
@@ -138,25 +142,35 @@ Event handling and step assignment queuing will be in-process for v0.x.
 - Sufficient for v0.x scale (single process, moderate throughput)
 - The queue interface is designed for future extraction to an external broker (Redis, RabbitMQ, NATS) when scaling requires it
 
+The in-process queue is **not a durable system of record**. All critical state transitions are persisted to the Runtime Store and Git. If the process crashes, queue state is lost but can be reconstructed from persisted state (per [Error Handling](/architecture/error-handling-and-recovery.md) §6).
+
 ### API Framework: Standard Library + Lightweight Router
 
 The HTTP API will use Go's standard `net/http` package with a lightweight router (e.g., `chi` or `gorilla/mux`).
 
 **Rationale:**
 
-- Spine's API is operation-oriented, not REST-resource-heavy — a full framework is unnecessary
+- Spine's API is operation-oriented rather than REST-resource-centric — the system exposes governed commands (e.g., execute workflow, approve step) rather than CRUD endpoints, making a full web framework unnecessary
 - Standard library provides sufficient HTTP handling
 - Lightweight router adds path parameters and middleware without framework lock-in
 
-### CLI: Go (Cobra or similar)
+### CLI: Go (default) or TypeScript (future alternative)
 
-The CLI will be implemented in Go as part of the same codebase.
+The CLI may initially be implemented in Go and shipped as part of the same binary for simplicity (using `cobra` or similar).
 
-**Rationale:**
+However, the CLI is considered an **adapter** (per [Access Surface](/architecture/access-surface.md) §5.2) and may be reimplemented in TypeScript or another language to optimize for developer experience and rapid iteration.
+
+**Rationale for Go default:**
 
 - Shares domain types and validation logic with the core
 - Single binary distribution includes both server and CLI modes
-- `cobra` is the standard Go CLI framework with mature tooling
+- Simplest path for v0.x
+
+**Why the door stays open:**
+
+- CLI and core runtime have different optimization goals (UX vs execution)
+- TypeScript is stronger for CLI ergonomics, integrations, and agent tooling
+- The core runtime must not depend on CLI implementation details
 
 ---
 
@@ -182,15 +196,17 @@ The CLI will be implemented in Go as part of the same codebase.
 - **Learning curve** — if the team is primarily experienced in Ruby/TypeScript, Go adoption adds friction. Mitigated by Go's simplicity and strong tooling.
 - **Ecosystem gaps** — Go has fewer high-level workflow/orchestration libraries than Node.js or Ruby. Mitigated by Spine building its own engine (which is the core product).
 - **Over-engineering risk** — Go's explicitness can lead to premature abstraction. Mitigated by keeping v0.x focused on the modular monolith with minimal interfaces.
+- **Reduced developer fluency** — if the team lacks Go experience, reliance on AI-generated code may reduce the ability to reason about, debug, and evolve the system. Mitigated by investing in Go literacy and maintaining strict code clarity standards.
 
 ---
 
 ## Future Evolution
 
-- **CLI could be reimplemented in TypeScript** if a separate lightweight CLI distribution is needed — but Go CLI is the default for v0.x
+- **CLI reimplementation** — TypeScript or another language may replace the Go CLI if developer experience or integration needs require it. The CLI is an adapter, not core infrastructure.
 - **External queue extraction** when scaling requires it (the in-process queue interface is designed for this)
 - **Service extraction** when individual components need independent scaling (Go's package boundaries make this straightforward)
 - **libgit2 or platform API** may replace Git CLI if subprocess overhead becomes a bottleneck
+- **Core language re-evaluation** — while Go is selected for v0.x, future evaluation may occur if architectural constraints change or if developer productivity is significantly impacted. Good ADRs allow reconsideration.
 
 ---
 
