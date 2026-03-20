@@ -16,7 +16,7 @@ func NewTempRepo(t *testing.T) string {
 	dir := t.TempDir()
 
 	commands := [][]string{
-		{"git", "init"},
+		{"git", "init", "-b", "main"},
 		{"git", "config", "user.email", "test@spine.local"},
 		{"git", "config", "user.name", "Spine Test"},
 		{"git", "commit", "--allow-empty", "-m", "initial commit"},
