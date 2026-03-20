@@ -8,6 +8,12 @@ links:
   - type: parent
     target: /initiatives/INIT-002-implementation/initiative.md
   - type: blocked_by
+    target: /initiatives/INIT-002-implementation/epics/EPIC-001-core-foundation/epic.md
+  - type: blocked_by
+    target: /initiatives/INIT-002-implementation/epics/EPIC-002-artifact-service/epic.md
+  - type: blocked_by
+    target: /initiatives/INIT-002-implementation/epics/EPIC-003-projection-service/epic.md
+  - type: blocked_by
     target: /initiatives/INIT-002-implementation/epics/EPIC-004-workflow-engine-core/epic.md
 ---
 
