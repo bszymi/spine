@@ -55,9 +55,9 @@ type ArtifactProjection struct {
 	ArtifactType string `json:"artifact_type"`
 	Title        string `json:"title"`
 	Status       string `json:"status"`
-	Metadata     []byte `json:"metadata"`     // JSONB
+	Metadata     []byte `json:"metadata"` // JSONB
 	Content      string `json:"content"`
-	Links        []byte `json:"links"`        // JSONB
+	Links        []byte `json:"links"` // JSONB
 	SourceCommit string `json:"source_commit"`
 	ContentHash  string `json:"content_hash"`
 }

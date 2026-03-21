@@ -10,22 +10,22 @@ import (
 
 // frontMatter represents the raw YAML front matter before mapping to domain types.
 type frontMatter struct {
-	ID                  string        `yaml:"id"`
-	Type                string        `yaml:"type"`
-	Title               string        `yaml:"title"`
-	Status              string        `yaml:"status"`
-	Owner               string        `yaml:"owner"`
-	Created             string        `yaml:"created"`
-	LastUpdated         string        `yaml:"last_updated"`
-	Version             string        `yaml:"version"`
-	Initiative          string        `yaml:"initiative"`
-	Epic                string        `yaml:"epic"`
-	WorkType            string        `yaml:"work_type"`
-	Acceptance          string        `yaml:"acceptance"`
-	AcceptanceRationale string        `yaml:"acceptance_rationale"`
-	Date                string        `yaml:"date"`
-	DecisionMakers      string        `yaml:"decision_makers"`
-	Links               []rawLink     `yaml:"links"`
+	ID                  string         `yaml:"id"`
+	Type                string         `yaml:"type"`
+	Title               string         `yaml:"title"`
+	Status              string         `yaml:"status"`
+	Owner               string         `yaml:"owner"`
+	Created             string         `yaml:"created"`
+	LastUpdated         string         `yaml:"last_updated"`
+	Version             string         `yaml:"version"`
+	Initiative          string         `yaml:"initiative"`
+	Epic                string         `yaml:"epic"`
+	WorkType            string         `yaml:"work_type"`
+	Acceptance          string         `yaml:"acceptance"`
+	AcceptanceRationale string         `yaml:"acceptance_rationale"`
+	Date                string         `yaml:"date"`
+	DecisionMakers      string         `yaml:"decision_makers"`
+	Links               []rawLink      `yaml:"links"`
 	Extra               map[string]any `yaml:"-"` // captured separately
 }
 

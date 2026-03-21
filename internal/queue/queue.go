@@ -19,9 +19,9 @@ type EntryHandler func(ctx context.Context, entry Entry) error
 // Entry represents a work item in the queue.
 type Entry struct {
 	EntryID        string    `json:"entry_id"`
-	EntryType      string    `json:"entry_type"`       // e.g., "step_assignment", "event_delivery"
-	Payload        []byte    `json:"payload"`           // JSON-encoded payload
-	IdempotencyKey string    `json:"idempotency_key"`   // Prevents duplicate processing
-	Priority       int       `json:"priority"`          // Higher = more urgent
+	EntryType      string    `json:"entry_type"`      // e.g., "step_assignment", "event_delivery"
+	Payload        []byte    `json:"payload"`         // JSON-encoded payload
+	IdempotencyKey string    `json:"idempotency_key"` // Prevents duplicate processing
+	Priority       int       `json:"priority"`        // Higher = more urgent
 	CreatedAt      time.Time `json:"created_at"`
 }

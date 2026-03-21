@@ -8,9 +8,9 @@ import (
 
 func TestValidStatusesForType(t *testing.T) {
 	tests := []struct {
-		artifactType  domain.ArtifactType
-		expectCount   int
-		mustContain   domain.ArtifactStatus
+		artifactType   domain.ArtifactType
+		expectCount    int
+		mustContain    domain.ArtifactStatus
 		mustNotContain domain.ArtifactStatus
 	}{
 		{domain.ArtifactTypeInitiative, 5, domain.StatusInProgress, domain.StatusCancelled},

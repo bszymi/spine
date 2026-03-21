@@ -102,12 +102,12 @@ type Link struct {
 
 // Artifact represents a governed artifact parsed from a Git-backed Markdown file.
 type Artifact struct {
-	Path     string            `json:"path"`      // repository-relative path
-	ID       string            `json:"id"`        // artifact ID from front matter
-	Type     ArtifactType      `json:"type"`      // artifact type
-	Title    string            `json:"title"`     // artifact title
-	Status   ArtifactStatus    `json:"status"`    // lifecycle status
-	Links    []Link            `json:"links"`     // relationships to other artifacts
-	Metadata map[string]string `json:"metadata"`  // additional front matter fields
-	Content  string            `json:"content"`   // markdown body (after front matter)
+	Path     string            `json:"path"`     // repository-relative path
+	ID       string            `json:"id"`       // artifact ID from front matter
+	Type     ArtifactType      `json:"type"`     // artifact type
+	Title    string            `json:"title"`    // artifact title
+	Status   ArtifactStatus    `json:"status"`   // lifecycle status
+	Links    []Link            `json:"links"`    // relationships to other artifacts
+	Metadata map[string]string `json:"metadata"` // additional front matter fields
+	Content  string            `json:"content"`  // markdown body (after front matter)
 }

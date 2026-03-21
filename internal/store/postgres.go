@@ -291,7 +291,6 @@ func (s *PostgresStore) QueryArtifacts(ctx context.Context, query ArtifactQuery)
 	if query.Cursor != "" {
 		conditions = append(conditions, fmt.Sprintf("artifact_path > $%d", argIdx))
 		args = append(args, query.Cursor)
-		argIdx++
 	}
 
 	where := ""
