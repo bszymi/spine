@@ -52,6 +52,23 @@ func WriteFile(t *testing.T, dir, relPath, content string) {
 	}
 }
 
+// GitRm removes and commits a file deletion in the given repository.
+func GitRm(t *testing.T, repoDir, relPath, message string) {
+	t.Helper()
+
+	run := func(args ...string) {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run("git", "rm", relPath)
+	run("git", "commit", "-m", message)
+}
+
 // GitAdd stages and commits a file in the given repository.
 func GitAdd(t *testing.T, repoDir, relPath, message string) {
 	t.Helper()

@@ -46,7 +46,7 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string) (*Dis
 
 	for _, file := range files {
 		// Workflow definitions
-		if isWorkflowFile(file) {
+		if IsWorkflowPath(file) {
 			result.Workflows = append(result.Workflows, file)
 			continue
 		}
@@ -219,8 +219,9 @@ func ClassifyByType(artifacts []*domain.Artifact) map[domain.ArtifactType][]*dom
 	return result
 }
 
-// isWorkflowFile returns true if the path is a workflow definition YAML file.
-func isWorkflowFile(path string) bool {
+// IsWorkflowPath returns true if the path is a workflow definition YAML file.
+// Exported for use by Projection Service.
+func IsWorkflowPath(path string) bool {
 	return strings.HasPrefix(path, "workflows/") &&
 		(strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml"))
 }
@@ -238,7 +239,7 @@ func DiscoverWorkflows(ctx context.Context, gitClient git.GitClient, ref string)
 
 	var workflows []string
 	for _, file := range files {
-		if isWorkflowFile(file) {
+		if IsWorkflowPath(file) {
 			workflows = append(workflows, file)
 		}
 	}

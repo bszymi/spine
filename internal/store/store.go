@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 )
@@ -29,8 +30,22 @@ type Store interface {
 
 	// Projections
 	UpsertArtifactProjection(ctx context.Context, proj *ArtifactProjection) error
+	DeleteArtifactProjection(ctx context.Context, artifactPath string) error
 	GetArtifactProjection(ctx context.Context, artifactPath string) (*ArtifactProjection, error)
 	QueryArtifacts(ctx context.Context, query ArtifactQuery) (*ArtifactQueryResult, error)
+	DeleteAllProjections(ctx context.Context) error
+
+	// Links
+	UpsertArtifactLinks(ctx context.Context, sourcePath string, links []ArtifactLink, sourceCommit string) error
+	DeleteArtifactLinks(ctx context.Context, sourcePath string) error
+
+	// Workflows
+	UpsertWorkflowProjection(ctx context.Context, proj *WorkflowProjection) error
+	DeleteWorkflowProjection(ctx context.Context, workflowPath string) error
+
+	// Sync State
+	GetSyncState(ctx context.Context) (*SyncState, error)
+	UpdateSyncState(ctx context.Context, state *SyncState) error
 
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error
@@ -60,6 +75,33 @@ type ArtifactProjection struct {
 	Links        []byte `json:"links"` // JSONB
 	SourceCommit string `json:"source_commit"`
 	ContentHash  string `json:"content_hash"`
+}
+
+// ArtifactLink represents a denormalized link in the projection store.
+type ArtifactLink struct {
+	SourcePath string `json:"source_path"`
+	TargetPath string `json:"target_path"`
+	LinkType   string `json:"link_type"`
+}
+
+// WorkflowProjection represents a projected workflow definition in the database.
+type WorkflowProjection struct {
+	WorkflowPath string `json:"workflow_path"`
+	WorkflowID   string `json:"workflow_id"`
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	Status       string `json:"status"`
+	AppliesTo    []byte `json:"applies_to"` // JSONB
+	Definition   []byte `json:"definition"` // JSONB
+	SourceCommit string `json:"source_commit"`
+}
+
+// SyncState tracks projection sync progress.
+type SyncState struct {
+	LastSyncedCommit string     `json:"last_synced_commit"`
+	LastSyncedAt     *time.Time `json:"last_synced_at,omitempty"`
+	Status           string     `json:"status"` // idle, syncing, rebuilding, error
+	ErrorDetail      string     `json:"error_detail,omitempty"`
 }
 
 // ArtifactQuery defines parameters for querying projected artifacts.

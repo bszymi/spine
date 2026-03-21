@@ -342,6 +342,108 @@ func (s *PostgresStore) QueryArtifacts(ctx context.Context, query ArtifactQuery)
 	return result, nil
 }
 
+func (s *PostgresStore) DeleteArtifactProjection(ctx context.Context, artifactPath string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM projection.artifacts WHERE artifact_path = $1`, artifactPath)
+	return err
+}
+
+func (s *PostgresStore) DeleteAllProjections(ctx context.Context) error {
+	tables := []string{
+		"projection.artifact_links",
+		"projection.artifacts",
+		"projection.workflows",
+	}
+	for _, table := range tables {
+		if _, err := s.pool.Exec(ctx, "DELETE FROM "+table); err != nil {
+			return fmt.Errorf("delete %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// ── Links ──
+
+func (s *PostgresStore) UpsertArtifactLinks(ctx context.Context, sourcePath string, links []ArtifactLink, sourceCommit string) error {
+	// Delete existing links for this source, then insert new ones
+	if _, err := s.pool.Exec(ctx, `DELETE FROM projection.artifact_links WHERE source_path = $1`, sourcePath); err != nil {
+		return err
+	}
+	for _, link := range links {
+		if _, err := s.pool.Exec(ctx, `
+			INSERT INTO projection.artifact_links (source_path, target_path, link_type, source_commit)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (source_path, target_path, link_type) DO UPDATE SET source_commit = EXCLUDED.source_commit`,
+			link.SourcePath, link.TargetPath, link.LinkType, sourceCommit,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteArtifactLinks(ctx context.Context, sourcePath string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM projection.artifact_links WHERE source_path = $1`, sourcePath)
+	return err
+}
+
+// ── Workflows ──
+
+func (s *PostgresStore) UpsertWorkflowProjection(ctx context.Context, proj *WorkflowProjection) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO projection.workflows (workflow_path, workflow_id, name, version, status, applies_to, definition, source_commit)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (workflow_path) DO UPDATE SET
+			workflow_id = EXCLUDED.workflow_id,
+			name = EXCLUDED.name,
+			version = EXCLUDED.version,
+			status = EXCLUDED.status,
+			applies_to = EXCLUDED.applies_to,
+			definition = EXCLUDED.definition,
+			source_commit = EXCLUDED.source_commit,
+			synced_at = now()`,
+		proj.WorkflowPath, proj.WorkflowID, proj.Name, proj.Version,
+		proj.Status, proj.AppliesTo, proj.Definition, proj.SourceCommit,
+	)
+	return err
+}
+
+func (s *PostgresStore) DeleteWorkflowProjection(ctx context.Context, workflowPath string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM projection.workflows WHERE workflow_path = $1`, workflowPath)
+	return err
+}
+
+// ── Sync State ──
+
+func (s *PostgresStore) GetSyncState(ctx context.Context) (*SyncState, error) {
+	var state SyncState
+	err := s.pool.QueryRow(ctx, `
+		SELECT last_synced_commit, last_synced_at, status, COALESCE(error_detail, '')
+		FROM projection.sync_state WHERE id = 'global'`,
+	).Scan(&state.LastSyncedCommit, &state.LastSyncedAt, &state.Status, &state.ErrorDetail)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil // no sync state yet
+		}
+		return nil, err
+	}
+	return &state, nil
+}
+
+func (s *PostgresStore) UpdateSyncState(ctx context.Context, state *SyncState) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO projection.sync_state (id, last_synced_commit, last_synced_at, status, error_detail)
+		VALUES ('global', $1, now(), $2, $3)
+		ON CONFLICT (id) DO UPDATE SET
+			last_synced_commit = EXCLUDED.last_synced_commit,
+			last_synced_at = now(),
+			status = EXCLUDED.status,
+			error_detail = EXCLUDED.error_detail`,
+		state.LastSyncedCommit, state.Status, nilIfEmpty(state.ErrorDetail),
+	)
+	return err
+}
+
 // ── Migrations ──
 
 func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir string) error {
