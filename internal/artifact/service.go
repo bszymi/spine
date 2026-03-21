@@ -273,40 +273,72 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 	return artifacts, nil
 }
 
-// stageAndCommit stages a file and creates a Git commit.
+// stageAndCommit stages a file and creates a scoped Git commit (only this file).
 func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.CommitOpts) (git.CommitResult, error) {
-	// Stage the file using git add via the CLI
-	stageClient, ok := s.git.(*git.CLIClient)
-	if !ok {
-		return git.CommitResult{}, domain.NewError(domain.ErrInternal, "git client does not support staging")
+	// Build the full commit message with trailers
+	msg := opts.Message
+	if len(opts.Trailers) > 0 {
+		msg += "\n"
+		for _, key := range []string{"Trace-ID", "Actor-ID", "Run-ID", "Operation"} {
+			if val, ok := opts.Trailers[key]; ok {
+				msg += "\n" + key + ": " + val
+			}
+		}
 	}
 
 	// Stage the file
-	_ = stageClient // use the same client for commit
 	if err := gitAdd(ctx, s.repo, path); err != nil {
 		return git.CommitResult{}, domain.NewError(domain.ErrGit,
 			fmt.Sprintf("stage file %s: %v", path, err))
 	}
 
-	// Commit — use the GitClient interface
-	result, err := s.git.Commit(ctx, opts)
+	// Commit only this specific file (scoped via pathspec)
+	sha, err := gitCommitPath(ctx, s.repo, path, msg, opts.Author)
 	if err != nil {
 		// Unstage the file to leave a clean index on failure
 		_ = gitReset(ctx, s.repo, path)
-		return git.CommitResult{}, err
+		return git.CommitResult{}, domain.NewError(domain.ErrGit, err.Error())
 	}
-	return result, nil
+
+	return git.CommitResult{SHA: sha}, nil
 }
 
 // gitAdd stages a file using the git CLI directly.
+// Uses -- separator to prevent path injection.
 func gitAdd(ctx context.Context, repoDir, path string) error {
-	cmd := execCommand(ctx, "git", "add", path)
+	cmd := execCommand(ctx, "git", "add", "--", path)
 	cmd.Dir = repoDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git add %s: %s", path, string(out))
 	}
 	return nil
+}
+
+// gitCommitPath commits only the specified file, not the entire index.
+// Uses -- separator and pathspec to scope the commit.
+func gitCommitPath(ctx context.Context, repoDir, path, message string, author git.Author) (string, error) {
+	args := []string{"commit", "-m", message}
+	if author.Name != "" && author.Email != "" {
+		args = append(args, "--author", fmt.Sprintf("%s <%s>", author.Name, author.Email))
+	}
+	args = append(args, "--", path)
+
+	cmd := execCommand(ctx, "git", args...)
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git commit %s: %s", path, string(out))
+	}
+
+	// Get the commit SHA
+	shaCmd := execCommand(ctx, "git", "rev-parse", "HEAD")
+	shaCmd.Dir = repoDir
+	shaOut, err := shaCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse: %s", string(shaOut))
+	}
+	return strings.TrimSpace(string(shaOut)), nil
 }
 
 // gitReset unstages a file from the Git index.
