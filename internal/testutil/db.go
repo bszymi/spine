@@ -33,7 +33,7 @@ func NewTestConn(t *testing.T) *pgx.Conn {
 	}
 
 	t.Cleanup(func() {
-		conn.Close(ctx)
+		_ = conn.Close(ctx)
 	})
 
 	return conn
@@ -51,7 +51,7 @@ func WithTestTx(t *testing.T, conn *pgx.Conn, fn func(tx pgx.Tx)) {
 	}
 
 	t.Cleanup(func() {
-		tx.Rollback(ctx)
+		_ = tx.Rollback(ctx)
 	})
 
 	fn(tx)

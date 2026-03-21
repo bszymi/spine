@@ -10,6 +10,8 @@ import (
 	"github.com/bszymi/spine/internal/testutil"
 )
 
+// Helpers from cli_test.go are available since same package.
+
 func TestClone(t *testing.T) {
 	// Create a source repo to clone from
 	source := testutil.NewTempRepo(t)
@@ -238,6 +240,63 @@ func TestLogWithPath(t *testing.T) {
 	}
 	if len(commits) != 1 {
 		t.Errorf("expected 1 commit for a.md, got %d", len(commits))
+	}
+}
+
+func TestDiffModifiedAndDeleted(t *testing.T) {
+	client, repo := newTestClient(t)
+	ctx := context.Background()
+
+	// Create two files
+	testutil.WriteFile(t, repo, "a.md", "# Original A")
+	testutil.WriteFile(t, repo, "b.md", "# Original B")
+	stageFile(t, repo, ".")
+	client.Commit(ctx, git.CommitOpts{Message: "add files"})
+
+	before, _ := client.Head(ctx)
+
+	// Modify a.md, delete b.md
+	testutil.WriteFile(t, repo, "a.md", "# Modified A")
+	os.Remove(filepath.Join(repo, "b.md"))
+	stageFile(t, repo, ".")
+	client.Commit(ctx, git.CommitOpts{Message: "modify and delete"})
+
+	after, _ := client.Head(ctx)
+
+	diffs, err := client.Diff(ctx, before, after)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	if len(diffs) != 2 {
+		t.Fatalf("expected 2 diffs, got %d: %+v", len(diffs), diffs)
+	}
+
+	statuses := map[string]string{}
+	for _, d := range diffs {
+		statuses[d.Path] = d.Status
+	}
+	if statuses["a.md"] != "modified" {
+		t.Errorf("expected a.md modified, got %s", statuses["a.md"])
+	}
+	if statuses["b.md"] != "deleted" {
+		t.Errorf("expected b.md deleted, got %s", statuses["b.md"])
+	}
+}
+
+func TestDiffEmptyResult(t *testing.T) {
+	client, _ := newTestClient(t)
+	ctx := context.Background()
+
+	head, _ := client.Head(ctx)
+
+	// Diff between same commit — should be empty
+	diffs, err := client.Diff(ctx, head, head)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if len(diffs) != 0 {
+		t.Errorf("expected 0 diffs for same commit, got %d", len(diffs))
 	}
 }
 

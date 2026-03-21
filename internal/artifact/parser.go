@@ -10,22 +10,22 @@ import (
 
 // frontMatter represents the raw YAML front matter before mapping to domain types.
 type frontMatter struct {
-	ID                  string        `yaml:"id"`
-	Type                string        `yaml:"type"`
-	Title               string        `yaml:"title"`
-	Status              string        `yaml:"status"`
-	Owner               string        `yaml:"owner"`
-	Created             string        `yaml:"created"`
-	LastUpdated         string        `yaml:"last_updated"`
-	Version             string        `yaml:"version"`
-	Initiative          string        `yaml:"initiative"`
-	Epic                string        `yaml:"epic"`
-	WorkType            string        `yaml:"work_type"`
-	Acceptance          string        `yaml:"acceptance"`
-	AcceptanceRationale string        `yaml:"acceptance_rationale"`
-	Date                string        `yaml:"date"`
-	DecisionMakers      string        `yaml:"decision_makers"`
-	Links               []rawLink     `yaml:"links"`
+	ID                  string         `yaml:"id"`
+	Type                string         `yaml:"type"`
+	Title               string         `yaml:"title"`
+	Status              string         `yaml:"status"`
+	Owner               string         `yaml:"owner"`
+	Created             string         `yaml:"created"`
+	LastUpdated         string         `yaml:"last_updated"`
+	Version             string         `yaml:"version"`
+	Initiative          string         `yaml:"initiative"`
+	Epic                string         `yaml:"epic"`
+	WorkType            string         `yaml:"work_type"`
+	Acceptance          string         `yaml:"acceptance"`
+	AcceptanceRationale string         `yaml:"acceptance_rationale"`
+	Date                string         `yaml:"date"`
+	DecisionMakers      string         `yaml:"decision_makers"`
+	Links               []rawLink      `yaml:"links"`
 	Extra               map[string]any `yaml:"-"` // captured separately
 }
 
@@ -47,9 +47,13 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		return nil, &ParseError{Path: path, Message: fmt.Sprintf("invalid YAML: %v", err)}
 	}
 
-	// Also unmarshal into a map to capture extra fields as metadata
+	// Also unmarshal into a map to capture extra fields as metadata.
+	// This second unmarshal should not fail since the first succeeded,
+	// but we handle the error defensively.
 	var metadata map[string]any
-	yaml.Unmarshal(fm, &metadata)
+	if err := yaml.Unmarshal(fm, &metadata); err != nil {
+		metadata = make(map[string]any)
+	}
 
 	// Remove known fields from metadata map
 	for _, key := range []string{"id", "type", "title", "status", "owner", "created",

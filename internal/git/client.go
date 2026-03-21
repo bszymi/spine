@@ -23,11 +23,11 @@ type GitClient interface {
 
 // CommitOpts defines options for creating a Git commit.
 type CommitOpts struct {
-	Message   string            // Commit summary line
-	Body      string            // Optional commit body
-	Trailers  map[string]string // Structured trailers (Trace-ID, Actor-ID, Run-ID, Operation)
-	Author    Author            // Commit author identity
-	AllowEmpty bool             // Allow creating empty commits
+	Message    string            // Commit summary line
+	Body       string            // Optional commit body
+	Trailers   map[string]string // Structured trailers (Trace-ID, Actor-ID, Run-ID, Operation)
+	Author     Author            // Commit author identity
+	AllowEmpty bool              // Allow creating empty commits
 }
 
 // Author represents a Git commit author.
@@ -52,15 +52,15 @@ type MergeOpts struct {
 
 // MergeResult contains the result of a successful merge.
 type MergeResult struct {
-	SHA        string // Resulting commit SHA
-	FastForward bool  // True if merge was fast-forward
+	SHA         string // Resulting commit SHA
+	FastForward bool   // True if merge was fast-forward
 }
 
 // LogOpts defines options for querying Git log.
 type LogOpts struct {
-	Path    string // Filter by file path (optional)
-	Limit   int    // Max number of commits (0 = unlimited)
-	Since   string // Commit SHA to start from (exclusive)
+	Path  string // Filter by file path (optional)
+	Limit int    // Max number of commits (0 = unlimited)
+	Since string // Commit SHA to start from (exclusive)
 }
 
 // CommitInfo represents a Git commit from the log.

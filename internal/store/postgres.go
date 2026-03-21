@@ -51,7 +51,9 @@ func (s *PostgresStore) WithTx(ctx context.Context, fn func(tx Tx) error) error 
 
 	tx := &postgresTx{tx: pgxTx}
 	if err := fn(tx); err != nil {
-		pgxTx.Rollback(ctx)
+		if rbErr := pgxTx.Rollback(ctx); rbErr != nil {
+			return fmt.Errorf("%w (rollback also failed: %v)", err, rbErr)
+		}
 		return err
 	}
 
@@ -289,7 +291,6 @@ func (s *PostgresStore) QueryArtifacts(ctx context.Context, query ArtifactQuery)
 	if query.Cursor != "" {
 		conditions = append(conditions, fmt.Sprintf("artifact_path > $%d", argIdx))
 		args = append(args, query.Cursor)
-		argIdx++
 	}
 
 	where := ""
@@ -385,7 +386,10 @@ func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir strin
 		}
 
 		// Record migration if the file didn't self-record
-		alreadyApplied, _ := s.IsMigrationApplied(ctx, version)
+		alreadyApplied, checkErr := s.IsMigrationApplied(ctx, version)
+		if checkErr != nil {
+			return fmt.Errorf("check migration %s: %w", version, checkErr)
+		}
 		if !alreadyApplied {
 			if _, err := s.pool.Exec(ctx, `INSERT INTO public.schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING`, version); err != nil {
 				return fmt.Errorf("record migration %s: %w", version, err)

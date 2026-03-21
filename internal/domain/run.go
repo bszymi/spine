@@ -32,15 +32,15 @@ func (s RunStatus) IsTerminal() bool {
 
 // Run represents a workflow execution instance.
 type Run struct {
-	RunID                string    `json:"run_id"`
-	TaskPath             string    `json:"task_path"`
-	WorkflowPath         string    `json:"workflow_path"`
-	WorkflowID           string    `json:"workflow_id"`
-	WorkflowVersion      string    `json:"workflow_version"`       // Git commit SHA
-	WorkflowVersionLabel string    `json:"workflow_version_label"` // semantic version
-	Status               RunStatus `json:"status"`
-	CurrentStepID        string    `json:"current_step_id,omitempty"`
-	TraceID              string    `json:"trace_id"`
+	RunID                string     `json:"run_id"`
+	TaskPath             string     `json:"task_path"`
+	WorkflowPath         string     `json:"workflow_path"`
+	WorkflowID           string     `json:"workflow_id"`
+	WorkflowVersion      string     `json:"workflow_version"`       // Git commit SHA
+	WorkflowVersionLabel string     `json:"workflow_version_label"` // semantic version
+	Status               RunStatus  `json:"status"`
+	CurrentStepID        string     `json:"current_step_id,omitempty"`
+	TraceID              string     `json:"trace_id"`
 	StartedAt            *time.Time `json:"started_at,omitempty"`
 	CompletedAt          *time.Time `json:"completed_at,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
