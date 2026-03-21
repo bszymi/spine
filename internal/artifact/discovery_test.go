@@ -210,6 +210,198 @@ func TestDiscoverChangesSkipsNonArtifacts(t *testing.T) {
 	}
 }
 
+func TestDiscoverChangesNonArtifactBecomesArtifact(t *testing.T) {
+	client, repo := setupDiscoveryRepo(t)
+	ctx := context.Background()
+
+	beforeSHA, _ := client.Head(ctx)
+
+	// Edit README.md to have valid front matter (non-artifact → artifact)
+	testutil.WriteFile(t, repo, "README.md", `---
+type: Product
+title: README as Product
+status: Living Document
+---
+
+# Product README
+`)
+	testutil.GitAdd(t, repo, "README.md", "convert readme to artifact")
+
+	afterSHA, _ := client.Head(ctx)
+
+	changeset, err := artifact.DiscoverChanges(ctx, client, beforeSHA, afterSHA)
+	if err != nil {
+		t.Fatalf("DiscoverChanges: %v", err)
+	}
+
+	if len(changeset.Created) != 1 {
+		t.Errorf("expected 1 created (non-artifact→artifact), got %d", len(changeset.Created))
+	}
+	if len(changeset.Modified) != 0 {
+		t.Errorf("expected 0 modified, got %d", len(changeset.Modified))
+	}
+}
+
+func TestDiscoverChangesArtifactBecomesNonArtifact(t *testing.T) {
+	client, repo := setupDiscoveryRepo(t)
+	ctx := context.Background()
+
+	beforeSHA, _ := client.Head(ctx)
+
+	// Edit governance/charter.md to remove front matter (artifact → non-artifact)
+	testutil.WriteFile(t, repo, "governance/charter.md", "# Just plain markdown now\n")
+	testutil.GitAdd(t, repo, "governance/charter.md", "remove artifact front matter")
+
+	afterSHA, _ := client.Head(ctx)
+
+	changeset, err := artifact.DiscoverChanges(ctx, client, beforeSHA, afterSHA)
+	if err != nil {
+		t.Fatalf("DiscoverChanges: %v", err)
+	}
+
+	if len(changeset.Deleted) != 1 {
+		t.Errorf("expected 1 deleted (artifact→non-artifact), got %d: %v", len(changeset.Deleted), changeset.Deleted)
+	}
+}
+
+func TestDiscoverChangesDeletedNonArtifactSkipped(t *testing.T) {
+	client, repo := setupDiscoveryRepo(t)
+	ctx := context.Background()
+
+	beforeSHA, _ := client.Head(ctx)
+
+	// Delete README.md (non-artifact) — should not appear in Deleted
+	cmd := execCmd(t, repo, "git", "rm", "README.md")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git rm: %v\n%s", err, out)
+	}
+	cmd = execCmd(t, repo, "git", "commit", "-m", "delete readme")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	afterSHA, _ := client.Head(ctx)
+
+	changeset, err := artifact.DiscoverChanges(ctx, client, beforeSHA, afterSHA)
+	if err != nil {
+		t.Fatalf("DiscoverChanges: %v", err)
+	}
+
+	if len(changeset.Deleted) != 0 {
+		t.Errorf("expected 0 deleted (non-artifact deletion), got %d: %v", len(changeset.Deleted), changeset.Deleted)
+	}
+}
+
+func TestDiscoverChangesRenameArtifact(t *testing.T) {
+	client, repo := setupDiscoveryRepo(t)
+	ctx := context.Background()
+
+	beforeSHA, _ := client.Head(ctx)
+
+	// Rename governance/charter.md → governance/charter-v2.md
+	cmd := execCmd(t, repo, "git", "mv", "governance/charter.md", "governance/charter-v2.md")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git mv: %v\n%s", err, out)
+	}
+	cmd = execCmd(t, repo, "git", "commit", "-m", "rename charter")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	afterSHA, _ := client.Head(ctx)
+
+	changeset, err := artifact.DiscoverChanges(ctx, client, beforeSHA, afterSHA)
+	if err != nil {
+		t.Fatalf("DiscoverChanges: %v", err)
+	}
+
+	// Rename should produce: delete old path + create new path
+	if len(changeset.Deleted) != 1 {
+		t.Errorf("expected 1 deleted (old rename path), got %d: %v", len(changeset.Deleted), changeset.Deleted)
+	}
+	if len(changeset.Created) != 1 {
+		t.Errorf("expected 1 created (new rename path), got %d", len(changeset.Created))
+	}
+}
+
+func TestDiscoverChangesRenameMdToNonMd(t *testing.T) {
+	client, repo := setupDiscoveryRepo(t)
+	ctx := context.Background()
+
+	beforeSHA, _ := client.Head(ctx)
+
+	// Rename governance/charter.md → governance/charter.txt
+	cmd := execCmd(t, repo, "git", "mv", "governance/charter.md", "governance/charter.txt")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git mv: %v\n%s", err, out)
+	}
+	cmd = execCmd(t, repo, "git", "commit", "-m", "rename to txt")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	afterSHA, _ := client.Head(ctx)
+
+	changeset, err := artifact.DiscoverChanges(ctx, client, beforeSHA, afterSHA)
+	if err != nil {
+		t.Fatalf("DiscoverChanges: %v", err)
+	}
+
+	// Should have deleted the old artifact path
+	if len(changeset.Deleted) != 1 {
+		t.Errorf("expected 1 deleted (.md→.txt rename), got %d: %v", len(changeset.Deleted), changeset.Deleted)
+	}
+	// Should not have created anything (new path is .txt, not artifact)
+	if len(changeset.Created) != 0 {
+		t.Errorf("expected 0 created (.txt not artifact), got %d", len(changeset.Created))
+	}
+}
+
+func TestDiscoverChangesAddedNonArtifactMdSkipped(t *testing.T) {
+	client, repo := setupDiscoveryRepo(t)
+	ctx := context.Background()
+
+	beforeSHA, _ := client.Head(ctx)
+
+	// Add a new .md file that is NOT an artifact
+	testutil.WriteFile(t, repo, "docs/notes.md", "# Just notes\nNo front matter.\n")
+	testutil.GitAdd(t, repo, "docs/notes.md", "add notes")
+
+	afterSHA, _ := client.Head(ctx)
+
+	changeset, err := artifact.DiscoverChanges(ctx, client, beforeSHA, afterSHA)
+	if err != nil {
+		t.Fatalf("DiscoverChanges: %v", err)
+	}
+
+	if len(changeset.Created) != 0 {
+		t.Errorf("expected 0 created (non-artifact .md), got %d", len(changeset.Created))
+	}
+}
+
+func TestDiscoverChangesNonMdSkipped(t *testing.T) {
+	client, repo := setupDiscoveryRepo(t)
+	ctx := context.Background()
+
+	beforeSHA, _ := client.Head(ctx)
+
+	// Modify go.mod (non-.md file)
+	testutil.WriteFile(t, repo, "go.mod", "module test\ngo 1.26\n")
+	testutil.GitAdd(t, repo, "go.mod", "update go.mod")
+
+	afterSHA, _ := client.Head(ctx)
+
+	changeset, err := artifact.DiscoverChanges(ctx, client, beforeSHA, afterSHA)
+	if err != nil {
+		t.Fatalf("DiscoverChanges: %v", err)
+	}
+
+	total := len(changeset.Created) + len(changeset.Modified) + len(changeset.Deleted)
+	if total != 0 {
+		t.Errorf("expected 0 changes for non-.md file, got %d", total)
+	}
+}
+
 func TestClassifyByType(t *testing.T) {
 	artifacts := []*domain.Artifact{
 		{Path: "a.md", Type: domain.ArtifactTypeGovernance},

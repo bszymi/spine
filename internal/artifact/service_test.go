@@ -293,6 +293,50 @@ func TestCreateEmitsEvent(t *testing.T) {
 	}
 }
 
+func TestListMixedContent(t *testing.T) {
+	svc, _, repo, _ := newTestService(t)
+	ctx := testCtx()
+
+	// Create an artifact
+	_, err := svc.Create(ctx, "governance/test.md", governanceContent)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Add a non-artifact .md file directly
+	testutil.WriteFile(t, repo, "README.md", "# Just a readme\n")
+	testutil.GitAdd(t, repo, "README.md", "add readme")
+
+	// Add a non-.md file
+	testutil.WriteFile(t, repo, "config.yaml", "key: value\n")
+	testutil.GitAdd(t, repo, "config.yaml", "add config")
+
+	artifacts, err := svc.List(ctx, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// Should only return the governance artifact, not README or config
+	if len(artifacts) != 1 {
+		t.Errorf("expected 1 artifact, got %d", len(artifacts))
+	}
+}
+
+func TestCreateWithNilEvents(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+	// Service with nil event router
+	svc := artifact.NewService(client, nil, repo)
+	ctx := testCtx()
+
+	a, err := svc.Create(ctx, "governance/no-events.md", governanceContent)
+	if err != nil {
+		t.Fatalf("Create with nil events: %v", err)
+	}
+	if a.Title != "Test Document" {
+		t.Errorf("expected title, got %s", a.Title)
+	}
+}
+
 func TestCreatePathTraversal(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	ctx := testCtx()
