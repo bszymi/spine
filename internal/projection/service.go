@@ -43,16 +43,16 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	log := observe.Logger(ctx)
 	log.Info("starting full projection rebuild")
 
-	// Update sync state to rebuilding
-	_ = s.store.UpdateSyncState(ctx, &store.SyncState{
-		LastSyncedCommit: "",
-		Status:           "rebuilding",
-	})
-
 	head, err := s.git.Head(ctx)
 	if err != nil {
 		return fmt.Errorf("get HEAD: %w", err)
 	}
+
+	// Update sync state to rebuilding (use head so recovery works)
+	_ = s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: head,
+		Status:           "rebuilding",
+	})
 
 	// Clear existing projections
 	if err := s.store.DeleteAllProjections(ctx); err != nil {
@@ -66,12 +66,14 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	}
 
 	// Project artifacts
+	var projErrors int
 	for _, a := range result.Artifacts {
 		if err := s.projectArtifact(ctx, a, head); err != nil {
 			log.Warn("failed to project artifact",
 				"path", a.Path,
 				"error", err,
 			)
+			projErrors++
 			continue
 		}
 	}
@@ -83,13 +85,22 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 				"path", wfPath,
 				"error", err,
 			)
+			projErrors++
 		}
 	}
 
-	// Update sync state
+	// Update sync state — only mark idle if no errors
+	syncStatus := "idle"
+	errorDetail := ""
+	if projErrors > 0 {
+		syncStatus = "error"
+		errorDetail = fmt.Sprintf("%d projection errors during rebuild", projErrors)
+	}
+
 	if err := s.store.UpdateSyncState(ctx, &store.SyncState{
 		LastSyncedCommit: head,
-		Status:           "idle",
+		Status:           syncStatus,
+		ErrorDetail:      errorDetail,
 	}); err != nil {
 		return fmt.Errorf("update sync state: %w", err)
 	}
@@ -141,6 +152,8 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		return fmt.Errorf("discover changes: %w", err)
 	}
 
+	var syncErrors int
+
 	// Process created artifacts
 	for _, a := range changeset.Created {
 		if err := s.projectArtifact(ctx, a, head); err != nil {
@@ -148,6 +161,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 				"path", a.Path,
 				"error", err,
 			)
+			syncErrors++
 		}
 	}
 
@@ -158,6 +172,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 				"path", a.Path,
 				"error", err,
 			)
+			syncErrors++
 		}
 	}
 
@@ -168,6 +183,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 				"path", path,
 				"error", err,
 			)
+			syncErrors++
 		}
 		if err := s.store.DeleteArtifactLinks(ctx, path); err != nil {
 			log.Warn("failed to delete links",
@@ -177,10 +193,47 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		}
 	}
 
-	// Update sync state
+	// Sync workflow changes
+	diffs, _ := s.git.Diff(ctx, state.LastSyncedCommit, head)
+	for _, diff := range diffs {
+		if !artifact.IsWorkflowPath(diff.Path) && (diff.OldPath == "" || !artifact.IsWorkflowPath(diff.OldPath)) {
+			continue
+		}
+		switch diff.Status {
+		case "added", "modified":
+			if err := s.projectWorkflow(ctx, diff.Path, head); err != nil {
+				log.Warn("failed to project workflow", "path", diff.Path, "error", err)
+				syncErrors++
+			}
+		case "deleted":
+			if err := s.store.DeleteWorkflowProjection(ctx, diff.Path); err != nil {
+				log.Warn("failed to delete workflow", "path", diff.Path, "error", err)
+			}
+		case "renamed":
+			if diff.OldPath != "" {
+				_ = s.store.DeleteWorkflowProjection(ctx, diff.OldPath)
+			}
+			if artifact.IsWorkflowPath(diff.Path) {
+				if err := s.projectWorkflow(ctx, diff.Path, head); err != nil {
+					log.Warn("failed to project renamed workflow", "path", diff.Path, "error", err)
+					syncErrors++
+				}
+			}
+		}
+	}
+
+	// Update sync state — only advance if no errors
+	syncStatus := "idle"
+	errorDetail := ""
+	if syncErrors > 0 {
+		syncStatus = "error"
+		errorDetail = fmt.Sprintf("%d sync errors", syncErrors)
+	}
+
 	if err := s.store.UpdateSyncState(ctx, &store.SyncState{
 		LastSyncedCommit: head,
-		Status:           "idle",
+		Status:           syncStatus,
+		ErrorDetail:      errorDetail,
 	}); err != nil {
 		return fmt.Errorf("update sync state: %w", err)
 	}
@@ -189,6 +242,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		"created", len(changeset.Created),
 		"modified", len(changeset.Modified),
 		"deleted", len(changeset.Deleted),
+		"errors", syncErrors,
 		"from", state.LastSyncedCommit[:8],
 		"to", head[:8],
 	)
