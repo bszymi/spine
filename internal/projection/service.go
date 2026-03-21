@@ -48,9 +48,14 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		return fmt.Errorf("get HEAD: %w", err)
 	}
 
-	// Update sync state to rebuilding (use head so recovery works)
+	// Mark as rebuilding but keep previous commit until rebuild succeeds
+	existingState, _ := s.store.GetSyncState(ctx)
+	prevCommit := ""
+	if existingState != nil {
+		prevCommit = existingState.LastSyncedCommit
+	}
 	_ = s.store.UpdateSyncState(ctx, &store.SyncState{
-		LastSyncedCommit: head,
+		LastSyncedCommit: prevCommit,
 		Status:           "rebuilding",
 	})
 
@@ -65,8 +70,11 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		return fmt.Errorf("discover artifacts: %w", err)
 	}
 
-	// Project artifacts
+	// Count discovery errors as projection failures
 	var projErrors int
+	projErrors += len(result.Errors)
+
+	// Project artifacts
 	for _, a := range result.Artifacts {
 		if err := s.projectArtifact(ctx, a, head); err != nil {
 			log.Warn("failed to project artifact",
@@ -193,6 +201,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 				"path", path,
 				"error", err,
 			)
+			syncErrors++
 		}
 	}
 
@@ -211,6 +220,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		case "deleted":
 			if err := s.store.DeleteWorkflowProjection(ctx, diff.Path); err != nil {
 				log.Warn("failed to delete workflow", "path", diff.Path, "error", err)
+				syncErrors++
 			}
 		case "renamed":
 			if diff.OldPath != "" {
