@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -30,13 +31,34 @@ func NewService(gitClient git.GitClient, events event.EventRouter, repoPath stri
 	}
 }
 
+// safePath validates and resolves a path, ensuring it stays within the repo root.
+func (s *Service) safePath(path string) (string, error) {
+	fullPath := filepath.Join(s.repo, path)
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("invalid path: %s", path))
+	}
+	absRepo, _ := filepath.Abs(s.repo)
+	if !strings.HasPrefix(absPath, absRepo+string(filepath.Separator)) && absPath != absRepo {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("path escapes repository: %s", path))
+	}
+	return absPath, nil
+}
+
 // Create creates a new artifact, validates it, writes the file, commits to Git,
 // and emits an artifact_created event.
 func (s *Service) Create(ctx context.Context, path, content string) (*domain.Artifact, error) {
 	log := observe.Logger(ctx)
 
+	// Validate path stays within repo
+	fullPath, err := s.safePath(path)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check for duplicate path
-	fullPath := filepath.Join(s.repo, path)
 	if _, err := os.Stat(fullPath); err == nil {
 		return nil, domain.NewError(domain.ErrAlreadyExists,
 			fmt.Sprintf("artifact already exists at path: %s", path))
@@ -78,7 +100,7 @@ func (s *Service) Create(ctx context.Context, path, content string) (*domain.Art
 	})
 	if err != nil {
 		// Clean up the file on commit failure
-		os.Remove(fullPath)
+		_ = os.Remove(fullPath)
 		return nil, err
 	}
 
@@ -123,8 +145,13 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 func (s *Service) Update(ctx context.Context, path, content string) (*domain.Artifact, error) {
 	log := observe.Logger(ctx)
 
+	// Validate path stays within repo
+	fullPath, err := s.safePath(path)
+	if err != nil {
+		return nil, err
+	}
+
 	// Verify artifact exists
-	fullPath := filepath.Join(s.repo, path)
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 		return nil, domain.NewError(domain.ErrNotFound,
 			fmt.Sprintf("artifact not found: %s", path))
@@ -140,6 +167,13 @@ func (s *Service) Update(ctx context.Context, path, content string) (*domain.Art
 	if result.Status == "failed" {
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"artifact validation failed", result.Errors)
+	}
+
+	// Save original content for rollback
+	originalContent, readErr := os.ReadFile(fullPath)
+	if readErr != nil {
+		return nil, domain.NewError(domain.ErrInternal,
+			fmt.Sprintf("read original %s: %v", path, readErr))
 	}
 
 	// Write updated file
@@ -160,6 +194,8 @@ func (s *Service) Update(ctx context.Context, path, content string) (*domain.Art
 		},
 	})
 	if err != nil {
+		// Rollback: restore original content
+		_ = os.WriteFile(fullPath, originalContent, 0o644)
 		return nil, err
 	}
 
@@ -263,7 +299,7 @@ func (s *Service) emitEvent(ctx context.Context, eventType domain.EventType, art
 	}
 
 	// Fire and forget — event delivery is async
-	s.events.Emit(ctx, evt)
+	_ = s.events.Emit(ctx, evt)
 }
 
 func mustJSON(v any) json.RawMessage {

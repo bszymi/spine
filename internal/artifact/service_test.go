@@ -45,20 +45,6 @@ version: "0.1"
 This is a test governance document.
 `
 
-const taskContent = `---
-id: TASK-001
-type: Task
-title: Test Task
-status: Pending
-epic: /path/to/epic.md
-initiative: /path/to/initiative.md
----
-
-# Test Task
-
-Task content here.
-`
-
 func TestCreateAndRead(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	ctx := testCtx()
@@ -304,6 +290,36 @@ func TestCreateEmitsEvent(t *testing.T) {
 
 	if eventCount.Load() < 1 {
 		t.Error("expected at least 1 event emitted on create")
+	}
+}
+
+func TestCreatePathTraversal(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	ctx := testCtx()
+
+	_, err := svc.Create(ctx, "../../../etc/passwd", governanceContent)
+	if err == nil {
+		t.Fatal("expected error for path traversal")
+	}
+}
+
+func TestCreateAbsolutePath(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	ctx := testCtx()
+
+	_, err := svc.Create(ctx, "/etc/passwd", governanceContent)
+	if err == nil {
+		t.Fatal("expected error for absolute path")
+	}
+}
+
+func TestUpdatePathTraversal(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	ctx := testCtx()
+
+	_, err := svc.Update(ctx, "../../../etc/passwd", governanceContent)
+	if err == nil {
+		t.Fatal("expected error for path traversal on update")
 	}
 }
 
