@@ -32,15 +32,43 @@ func NewService(gitClient git.GitClient, events event.EventRouter, repoPath stri
 }
 
 // safePath validates and resolves a path, ensuring it stays within the repo root.
+// Resolves symlinks to prevent escaping via symlinked directories.
 func (s *Service) safePath(path string) (string, error) {
 	fullPath := filepath.Join(s.repo, path)
+	absRepo, err := filepath.Abs(s.repo)
+	if err != nil {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("invalid repo path: %v", err))
+	}
+
+	// Resolve symlinks on the repo root
+	realRepo, err := filepath.EvalSymlinks(absRepo)
+	if err != nil {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("resolve repo path: %v", err))
+	}
+
+	// Resolve the target path — for new files, resolve the parent directory
 	absPath, err := filepath.Abs(fullPath)
 	if err != nil {
 		return "", domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("invalid path: %s", path))
 	}
-	absRepo, _ := filepath.Abs(s.repo)
-	if !strings.HasPrefix(absPath, absRepo+string(filepath.Separator)) && absPath != absRepo {
+
+	// Try to resolve symlinks; if the file doesn't exist yet, resolve the parent
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// File doesn't exist yet — resolve parent directory instead
+		parentReal, parentErr := filepath.EvalSymlinks(filepath.Dir(absPath))
+		if parentErr != nil {
+			// Parent also doesn't exist — use the abs path (will be created)
+			realPath = absPath
+		} else {
+			realPath = filepath.Join(parentReal, filepath.Base(absPath))
+		}
+	}
+
+	if !strings.HasPrefix(realPath, realRepo+string(filepath.Separator)) && realPath != realRepo {
 		return "", domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("path escapes repository: %s", path))
 	}
@@ -99,8 +127,9 @@ func (s *Service) Create(ctx context.Context, path, content string) (*domain.Art
 		},
 	})
 	if err != nil {
-		// Clean up the file on commit failure
+		// Clean up the file and unstage on commit failure
 		_ = os.Remove(fullPath)
+		_ = gitReset(ctx, s.repo, path)
 		return nil, err
 	}
 
@@ -252,15 +281,21 @@ func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.Comm
 		return git.CommitResult{}, domain.NewError(domain.ErrInternal, "git client does not support staging")
 	}
 
-	// We need to run git add directly
+	// Stage the file
 	_ = stageClient // use the same client for commit
-	// For now, stage via exec since GitClient interface doesn't have Add
 	if err := gitAdd(ctx, s.repo, path); err != nil {
 		return git.CommitResult{}, domain.NewError(domain.ErrGit,
 			fmt.Sprintf("stage file %s: %v", path, err))
 	}
 
-	return s.git.Commit(ctx, opts)
+	// Commit — use the GitClient interface
+	result, err := s.git.Commit(ctx, opts)
+	if err != nil {
+		// Unstage the file to leave a clean index on failure
+		_ = gitReset(ctx, s.repo, path)
+		return git.CommitResult{}, err
+	}
+	return result, nil
 }
 
 // gitAdd stages a file using the git CLI directly.
@@ -270,6 +305,17 @@ func gitAdd(ctx context.Context, repoDir, path string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git add %s: %s", path, string(out))
+	}
+	return nil
+}
+
+// gitReset unstages a file from the Git index.
+func gitReset(ctx context.Context, repoDir, path string) error {
+	cmd := execCommand(ctx, "git", "reset", "HEAD", "--", path)
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git reset %s: %s", path, string(out))
 	}
 	return nil
 }
