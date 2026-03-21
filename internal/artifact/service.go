@@ -135,7 +135,7 @@ func (s *Service) Create(ctx context.Context, path, content string) (*domain.Art
 	)
 
 	// Emit event
-	s.emitEvent(ctx, domain.EventArtifactCreated, path, commitResult.SHA)
+	s.emitEvent(ctx, domain.EventArtifactCreated, artifact, commitResult.SHA)
 
 	return artifact, nil
 }
@@ -230,7 +230,7 @@ func (s *Service) Update(ctx context.Context, path, content string) (*domain.Art
 	)
 
 	// Emit event
-	s.emitEvent(ctx, domain.EventArtifactUpdated, path, commitResult.SHA)
+	s.emitEvent(ctx, domain.EventArtifactUpdated, artifact, commitResult.SHA)
 
 	return artifact, nil
 }
@@ -331,10 +331,11 @@ func resolveToExistingAncestor(absPath string) (string, error) {
 }
 
 // gitAdd stages a file using the git CLI directly.
-// Uses -- separator to prevent path injection.
+// Uses -- separator and GIT_LITERAL_PATHSPECS to prevent path injection.
 func gitAdd(ctx context.Context, repoDir, path string) error {
 	cmd := execCommand(ctx, "git", "add", "--", path)
 	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git add %s: %s", path, string(out))
@@ -353,6 +354,7 @@ func gitCommitPath(ctx context.Context, repoDir, path, message string, author gi
 
 	cmd := execCommand(ctx, "git", args...)
 	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git commit %s: %s", path, string(out))
@@ -372,6 +374,7 @@ func gitCommitPath(ctx context.Context, repoDir, path, message string, author gi
 func gitReset(ctx context.Context, repoDir, path string) error {
 	cmd := execCommand(ctx, "git", "reset", "HEAD", "--", path)
 	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git reset %s: %s", path, string(out))
@@ -387,24 +390,37 @@ func execCommandDefault(ctx context.Context, name string, args ...string) *execC
 }
 
 // emitEvent publishes a domain event for artifact changes.
-func (s *Service) emitEvent(ctx context.Context, eventType domain.EventType, artifactPath, commitSHA string) {
+func (s *Service) emitEvent(ctx context.Context, eventType domain.EventType, a *domain.Artifact, commitSHA string) {
 	if s.events == nil {
 		return
 	}
 
-	traceID, _ := observe.GenerateTraceID()
+	eventID, _ := observe.GenerateTraceID()
 	evt := domain.Event{
-		EventID:      traceID,
+		EventID:      eventID,
 		Type:         eventType,
 		Timestamp:    time.Now(),
 		ActorID:      observe.ActorID(ctx),
-		ArtifactPath: artifactPath,
+		RunID:        observe.RunID(ctx),
+		ArtifactPath: a.Path,
 		TraceID:      observe.TraceID(ctx),
-		Payload:      mustJSON(map[string]string{"commit_sha": commitSHA}),
+		Payload: mustJSON(map[string]string{
+			"commit_sha":    commitSHA,
+			"artifact_id":   a.ID,
+			"artifact_type": string(a.Type),
+			"status":        string(a.Status),
+		}),
 	}
 
-	// Fire and forget — event delivery is async
-	_ = s.events.Emit(ctx, evt)
+	// Fire and forget — event delivery is async, but log failures
+	if err := s.events.Emit(ctx, evt); err != nil {
+		log := observe.Logger(ctx)
+		log.Warn("failed to emit event",
+			"event_type", eventType,
+			"artifact_path", a.Path,
+			"error", err,
+		)
+	}
 }
 
 func mustJSON(v any) json.RawMessage {
