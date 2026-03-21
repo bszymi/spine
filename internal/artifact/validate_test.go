@@ -1,6 +1,7 @@
 package artifact_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/internal/artifact"
@@ -383,6 +384,68 @@ func TestValidateFieldTitle(t *testing.T) {
 	}
 }
 
+// ── Canonical path validation for initiative/epic ──
+
+func TestValidateEpicNonCanonicalInitiative(t *testing.T) {
+	a := &domain.Artifact{
+		Path:     "epics/EPIC-001/epic.md",
+		ID:       "EPIC-001",
+		Type:     domain.ArtifactTypeEpic,
+		Title:    "Epic",
+		Status:   domain.StatusPending,
+		Metadata: map[string]string{"initiative": "relative/path.md"},
+	}
+	r := artifact.Validate(a)
+	assertHasError(t, r, "initiative", "canonical path starting with /")
+}
+
+func TestValidateTaskNonCanonicalEpic(t *testing.T) {
+	a := validTask()
+	a.Metadata["epic"] = "relative/epic.md"
+	r := artifact.Validate(a)
+	assertHasError(t, r, "epic", "canonical path starting with /")
+}
+
+func TestValidateTaskNonCanonicalInitiative(t *testing.T) {
+	a := validTask()
+	a.Metadata["initiative"] = "../init.md"
+	r := artifact.Validate(a)
+	assertHasError(t, r, "initiative", "canonical path starting with /")
+}
+
+// ── Date format validation ──
+
+func TestValidateInitiativeInvalidDateFormat(t *testing.T) {
+	a := validInitiative()
+	a.Metadata["created"] = "03/04/2026"
+	r := artifact.Validate(a)
+	assertHasError(t, r, "created", "invalid date format")
+}
+
+func TestValidateADRInvalidDateFormat(t *testing.T) {
+	a := validADR()
+	a.Metadata["date"] = "yesterday"
+	r := artifact.Validate(a)
+	assertHasError(t, r, "date", "invalid date format")
+}
+
+// ── ValidateField ID required ──
+
+func TestValidateFieldIDRequiredForTask(t *testing.T) {
+	a := validTask()
+	a.ID = ""
+	if err := artifact.ValidateField(a, "id"); err == nil {
+		t.Error("expected error for missing ID on Task")
+	}
+}
+
+func TestValidateFieldIDNotRequiredForGovernance(t *testing.T) {
+	a := validGovernance()
+	if err := artifact.ValidateField(a, "id"); err != nil {
+		t.Errorf("governance should not require ID, got: %v", err)
+	}
+}
+
 // ── Multiple errors ──
 
 func TestValidateMultipleErrors(t *testing.T) {
@@ -418,14 +481,5 @@ func assertHasError(t *testing.T, r domain.ValidationResult, field, msgSubstring
 }
 
 func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstring(s, sub))
-}
-
-func containsSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, sub)
 }

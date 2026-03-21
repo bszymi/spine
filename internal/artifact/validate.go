@@ -123,6 +123,14 @@ func ValidateField(a *domain.Artifact, field string) *domain.ValidationError {
 			return &e
 		}
 	case "id":
+		// Check if ID is required for this type
+		switch a.Type {
+		case domain.ArtifactTypeInitiative, domain.ArtifactTypeEpic, domain.ArtifactTypeTask, domain.ArtifactTypeADR:
+			if a.ID == "" {
+				e := fieldError(a.Path, "id", fmt.Sprintf("required for %s", a.Type))
+				return &e
+			}
+		}
 		if pattern, ok := idPatterns[a.Type]; ok && a.ID != "" {
 			if !pattern.MatchString(a.ID) {
 				e := fieldError(a.Path, "id", fmt.Sprintf("invalid ID format %q", a.ID))
@@ -148,6 +156,8 @@ func validateTypeSpecificFields(a *domain.Artifact) []domain.ValidationError {
 		}
 		if a.Metadata["created"] == "" {
 			errors = append(errors, fieldError(a.Path, "created", "required for Initiative"))
+		} else if !isValidDate(a.Metadata["created"]) {
+			errors = append(errors, fieldError(a.Path, "created", fmt.Sprintf("invalid date format %q (expected YYYY-MM-DD)", a.Metadata["created"])))
 		}
 	case domain.ArtifactTypeEpic:
 		if a.ID == "" {
@@ -155,6 +165,8 @@ func validateTypeSpecificFields(a *domain.Artifact) []domain.ValidationError {
 		}
 		if a.Metadata["initiative"] == "" {
 			errors = append(errors, fieldError(a.Path, "initiative", "required for Epic"))
+		} else if !strings.HasPrefix(a.Metadata["initiative"], "/") {
+			errors = append(errors, fieldError(a.Path, "initiative", "must be a canonical path starting with /"))
 		}
 	case domain.ArtifactTypeTask:
 		if a.ID == "" {
@@ -162,9 +174,13 @@ func validateTypeSpecificFields(a *domain.Artifact) []domain.ValidationError {
 		}
 		if a.Metadata["epic"] == "" {
 			errors = append(errors, fieldError(a.Path, "epic", "required for Task"))
+		} else if !strings.HasPrefix(a.Metadata["epic"], "/") {
+			errors = append(errors, fieldError(a.Path, "epic", "must be a canonical path starting with /"))
 		}
 		if a.Metadata["initiative"] == "" {
 			errors = append(errors, fieldError(a.Path, "initiative", "required for Task"))
+		} else if !strings.HasPrefix(a.Metadata["initiative"], "/") {
+			errors = append(errors, fieldError(a.Path, "initiative", "must be a canonical path starting with /"))
 		}
 	case domain.ArtifactTypeADR:
 		if a.ID == "" {
@@ -172,6 +188,8 @@ func validateTypeSpecificFields(a *domain.Artifact) []domain.ValidationError {
 		}
 		if a.Metadata["date"] == "" {
 			errors = append(errors, fieldError(a.Path, "date", "required for ADR"))
+		} else if !isValidDate(a.Metadata["date"]) {
+			errors = append(errors, fieldError(a.Path, "date", fmt.Sprintf("invalid date format %q (expected YYYY-MM-DD)", a.Metadata["date"])))
 		}
 		if a.Metadata["decision_makers"] == "" {
 			errors = append(errors, fieldError(a.Path, "decision_makers", "required for ADR"))
@@ -202,6 +220,13 @@ func result(errors, warnings []domain.ValidationError) domain.ValidationResult {
 		Errors:   errors,
 		Warnings: warnings,
 	}
+}
+
+// datePattern validates ISO-8601 date format (YYYY-MM-DD).
+var datePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+func isValidDate(s string) bool {
+	return datePattern.MatchString(s)
 }
 
 func isValidArtifactType(t domain.ArtifactType) bool {
