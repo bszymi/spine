@@ -96,8 +96,11 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 	changeset := &ChangeSet{}
 
 	for _, diff := range diffs {
-		// Only process .md files that could be artifacts
-		if !strings.HasSuffix(diff.Path, ".md") {
+		isMdNew := strings.HasSuffix(diff.Path, ".md")
+		isMdOld := diff.OldPath != "" && strings.HasSuffix(diff.OldPath, ".md")
+
+		// Skip if neither old nor new path is a .md file
+		if !isMdNew && !isMdOld {
 			continue
 		}
 
@@ -129,11 +132,18 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 		case "renamed":
 			// Renames are modeled as delete old path + create new path
 			// This ensures path-keyed projections are updated correctly
-			if diff.OldPath != "" {
+
+			// Delete old path if it was an artifact
+			if diff.OldPath != "" && isMdOld {
 				oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.OldPath)
 				if err == nil && IsArtifact(oldContent) {
 					changeset.Deleted = append(changeset.Deleted, diff.OldPath)
 				}
+			}
+
+			// Create new path if it's a .md artifact
+			if !isMdNew {
+				continue
 			}
 			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
 			if err != nil {
@@ -149,28 +159,51 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 			changeset.Created = append(changeset.Created, a)
 
 		case "modified":
+			if !isMdNew {
+				continue
+			}
+
+			// Check if file was an artifact at fromRef
+			wasArtifact := false
+			oldContent, oldErr := gitClient.ReadFile(ctx, fromRef, diff.Path)
+			if oldErr == nil && IsArtifact(oldContent) {
+				wasArtifact = true
+			}
+
 			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
 			if err != nil {
 				continue
 			}
-			// If the modified file is no longer a valid artifact, treat as deletion
-			if !IsArtifact(content) {
-				oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.Path)
-				if err == nil && IsArtifact(oldContent) {
-					changeset.Deleted = append(changeset.Deleted, diff.Path)
+
+			isArtifactNow := IsArtifact(content)
+
+			// Determine the correct change type
+			switch {
+			case !wasArtifact && isArtifactNow:
+				// Non-artifact became an artifact → Created
+				a, err := Parse(diff.Path, content)
+				if err != nil {
+					continue
 				}
+				changeset.Created = append(changeset.Created, a)
+
+			case wasArtifact && !isArtifactNow:
+				// Artifact became non-artifact → Deleted
+				changeset.Deleted = append(changeset.Deleted, diff.Path)
+
+			case wasArtifact && isArtifactNow:
+				// Artifact modified → Modified (or Deleted if parse fails)
+				a, err := Parse(diff.Path, content)
+				if err != nil {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+					continue
+				}
+				changeset.Modified = append(changeset.Modified, a)
+
+			default:
+				// Was not artifact, still not artifact → skip
 				continue
 			}
-			a, err := Parse(diff.Path, content)
-			if err != nil {
-				// Parse failure on a previously valid artifact → treat as deletion
-				oldContent, readErr := gitClient.ReadFile(ctx, fromRef, diff.Path)
-				if readErr == nil && IsArtifact(oldContent) {
-					changeset.Deleted = append(changeset.Deleted, diff.Path)
-				}
-				continue
-			}
-			changeset.Modified = append(changeset.Modified, a)
 		}
 	}
 
