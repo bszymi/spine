@@ -49,7 +49,6 @@ func (q *MemoryQueue) Publish(ctx context.Context, entry Entry) error {
 			q.mu.Unlock()
 			return nil // duplicate, silently skip
 		}
-		q.idempotencySet[entry.IdempotencyKey] = true
 	}
 	q.mu.Unlock()
 
@@ -59,6 +58,12 @@ func (q *MemoryQueue) Publish(ctx context.Context, entry Entry) error {
 
 	select {
 	case q.entries <- entry:
+		// Record idempotency key only after successful enqueue
+		if entry.IdempotencyKey != "" {
+			q.mu.Lock()
+			q.idempotencySet[entry.IdempotencyKey] = true
+			q.mu.Unlock()
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -115,10 +120,28 @@ func (q *MemoryQueue) IsAcknowledged(entryID string) bool {
 }
 
 // dispatch sends an entry to all registered handlers for its type.
+// If no handlers are registered yet, the entry is requeued after a short delay.
 func (q *MemoryQueue) dispatch(ctx context.Context, entry Entry) {
 	q.mu.RLock()
 	handlers := q.handlers[entry.EntryType]
 	q.mu.RUnlock()
+
+	if len(handlers) == 0 {
+		// No subscriber yet — requeue with a small delay to avoid busy loop.
+		go func() {
+			select {
+			case <-time.After(50 * time.Millisecond):
+				select {
+				case q.entries <- entry:
+				case <-ctx.Done():
+				case <-q.done:
+				}
+			case <-ctx.Done():
+			case <-q.done:
+			}
+		}()
+		return
+	}
 
 	for _, handler := range handlers {
 		if err := handler(ctx, entry); err != nil {
