@@ -352,6 +352,81 @@ func TestIsArtifact(t *testing.T) {
 	}
 }
 
+func TestParseMissingType(t *testing.T) {
+	content := []byte("---\ntitle: Test\nstatus: Draft\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for missing type")
+	}
+}
+
+func TestParseMissingTitle(t *testing.T) {
+	content := []byte("---\ntype: Governance\nstatus: Living Document\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for missing title")
+	}
+}
+
+func TestParseMissingStatus(t *testing.T) {
+	content := []byte("---\ntype: Governance\ntitle: Test\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for missing status")
+	}
+}
+
+func TestParseTaskMissingEpic(t *testing.T) {
+	content := []byte("---\nid: TASK-001\ntype: Task\ntitle: Test\nstatus: Pending\ninitiative: /init.md\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for Task missing epic")
+	}
+}
+
+func TestParseTaskMissingInitiative(t *testing.T) {
+	content := []byte("---\nid: TASK-001\ntype: Task\ntitle: Test\nstatus: Pending\nepic: /epic.md\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for Task missing initiative")
+	}
+}
+
+func TestParseEpicMissingInitiative(t *testing.T) {
+	content := []byte("---\nid: EPIC-001\ntype: Epic\ntitle: Test\nstatus: Pending\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for Epic missing initiative")
+	}
+}
+
+func TestParseADRMissingDate(t *testing.T) {
+	content := []byte("---\nid: ADR-001\ntype: ADR\ntitle: Test\nstatus: Proposed\ndecision_makers: Team\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for ADR missing date")
+	}
+}
+
+func TestParseADRMissingDecisionMakers(t *testing.T) {
+	content := []byte("---\nid: ADR-001\ntype: ADR\ntitle: Test\nstatus: Proposed\ndate: 2026-01-01\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for ADR missing decision_makers")
+	}
+}
+
+func TestParseCRLFLineEndings(t *testing.T) {
+	content := []byte("---\r\ntype: Governance\r\ntitle: Test\r\nstatus: Living Document\r\n---\r\n# Content\r\n")
+	a, err := artifact.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse CRLF: %v", err)
+	}
+	if a.Content[0] == '\r' {
+		t.Error("body should not start with \\r")
+	}
+}
+
 func TestParseExtraFields(t *testing.T) {
 	content := []byte(`---
 type: Task

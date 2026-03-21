@@ -107,6 +107,52 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		meta[k] = fmt.Sprintf("%v", v)
 	}
 
+	// Validate required fields per artifact-schema.md §5
+	if parsed.Type == "" {
+		return nil, &ParseError{Path: path, Message: "missing required field: type"}
+	}
+	if parsed.Title == "" {
+		return nil, &ParseError{Path: path, Message: "missing required field: title"}
+	}
+	if parsed.Status == "" {
+		return nil, &ParseError{Path: path, Message: "missing required field: status"}
+	}
+
+	// Type-specific required fields
+	switch artifactType {
+	case domain.ArtifactTypeInitiative:
+		if parsed.ID == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: id (Initiative)"}
+		}
+	case domain.ArtifactTypeEpic:
+		if parsed.ID == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: id (Epic)"}
+		}
+		if parsed.Initiative == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: initiative (Epic)"}
+		}
+	case domain.ArtifactTypeTask:
+		if parsed.ID == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: id (Task)"}
+		}
+		if parsed.Epic == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: epic (Task)"}
+		}
+		if parsed.Initiative == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: initiative (Task)"}
+		}
+	case domain.ArtifactTypeADR:
+		if parsed.ID == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: id (ADR)"}
+		}
+		if parsed.Date == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: date (ADR)"}
+		}
+		if parsed.DecisionMakers == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: decision_makers (ADR)"}
+		}
+	}
+
 	return &domain.Artifact{
 		Path:     path,
 		ID:       parsed.ID,
@@ -137,7 +183,7 @@ func splitFrontMatter(content []byte) ([]byte, string, error) {
 	}
 
 	fm := rest[:idx]
-	body := strings.TrimLeft(rest[idx+4:], "\n")
+	body := strings.TrimLeft(rest[idx+4:], "\r\n")
 
 	return []byte(fm), body, nil
 }
