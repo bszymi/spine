@@ -90,19 +90,21 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	}
 
 	// Update sync state — only mark idle if no errors
-	syncStatus := "idle"
-	errorDetail := ""
 	if projErrors > 0 {
-		syncStatus = "error"
-		errorDetail = fmt.Sprintf("%d projection errors during rebuild", projErrors)
-	}
-
-	if err := s.store.UpdateSyncState(ctx, &store.SyncState{
-		LastSyncedCommit: head,
-		Status:           syncStatus,
-		ErrorDetail:      errorDetail,
-	}); err != nil {
-		return fmt.Errorf("update sync state: %w", err)
+		if err := s.store.UpdateSyncState(ctx, &store.SyncState{
+			LastSyncedCommit: head, // for rebuild, keep HEAD to allow retry at same commit
+			Status:           "error",
+			ErrorDetail:      fmt.Sprintf("%d projection errors during rebuild", projErrors),
+		}); err != nil {
+			return fmt.Errorf("update sync state: %w", err)
+		}
+	} else {
+		if err := s.store.UpdateSyncState(ctx, &store.SyncState{
+			LastSyncedCommit: head,
+			Status:           "idle",
+		}); err != nil {
+			return fmt.Errorf("update sync state: %w", err)
+		}
 	}
 
 	log.Info("full rebuild complete",
@@ -137,8 +139,9 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		return fmt.Errorf("get HEAD: %w", err)
 	}
 
-	if head == state.LastSyncedCommit {
-		return nil // already up to date
+	// Retry if previous sync failed, even at the same commit
+	if head == state.LastSyncedCommit && state.Status == "idle" {
+		return nil // already up to date and healthy
 	}
 
 	// Update sync state to syncing
@@ -222,20 +225,22 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		}
 	}
 
-	// Update sync state — only advance if no errors
-	syncStatus := "idle"
-	errorDetail := ""
+	// Update sync state — only advance commit if no errors
 	if syncErrors > 0 {
-		syncStatus = "error"
-		errorDetail = fmt.Sprintf("%d sync errors", syncErrors)
-	}
-
-	if err := s.store.UpdateSyncState(ctx, &store.SyncState{
-		LastSyncedCommit: head,
-		Status:           syncStatus,
-		ErrorDetail:      errorDetail,
-	}); err != nil {
-		return fmt.Errorf("update sync state: %w", err)
+		if err := s.store.UpdateSyncState(ctx, &store.SyncState{
+			LastSyncedCommit: state.LastSyncedCommit, // don't advance
+			Status:           "error",
+			ErrorDetail:      fmt.Sprintf("%d sync errors", syncErrors),
+		}); err != nil {
+			return fmt.Errorf("update sync state: %w", err)
+		}
+	} else {
+		if err := s.store.UpdateSyncState(ctx, &store.SyncState{
+			LastSyncedCommit: head,
+			Status:           "idle",
+		}); err != nil {
+			return fmt.Errorf("update sync state: %w", err)
+		}
 	}
 
 	log.Info("incremental sync complete",
