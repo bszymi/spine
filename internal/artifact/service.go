@@ -55,17 +55,12 @@ func (s *Service) safePath(path string) (string, error) {
 			fmt.Sprintf("invalid path: %s", path))
 	}
 
-	// Try to resolve symlinks; if the file doesn't exist yet, resolve the parent
-	realPath, err := filepath.EvalSymlinks(absPath)
+	// Resolve symlinks by walking up to the nearest existing ancestor.
+	// This prevents escaping via symlinked directories with missing descendants.
+	realPath, err := resolveToExistingAncestor(absPath)
 	if err != nil {
-		// File doesn't exist yet — resolve parent directory instead
-		parentReal, parentErr := filepath.EvalSymlinks(filepath.Dir(absPath))
-		if parentErr != nil {
-			// Parent also doesn't exist — use the abs path (will be created)
-			realPath = absPath
-		} else {
-			realPath = filepath.Join(parentReal, filepath.Base(absPath))
-		}
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("resolve path: %v", err))
 	}
 
 	if !strings.HasPrefix(realPath, realRepo+string(filepath.Separator)) && realPath != realRepo {
@@ -301,6 +296,38 @@ func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.Comm
 	}
 
 	return git.CommitResult{SHA: sha}, nil
+}
+
+// resolveToExistingAncestor resolves symlinks by walking up the path
+// to the nearest existing ancestor, then appending the remaining components.
+// This prevents symlink escapes via missing subdirectories.
+func resolveToExistingAncestor(absPath string) (string, error) {
+	// Try the full path first
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		return resolved, nil
+	}
+
+	// Walk up to find the nearest existing ancestor
+	current := absPath
+	var remainder []string
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached root without finding an existing path
+			return absPath, nil
+		}
+		remainder = append([]string{filepath.Base(current)}, remainder...)
+		current = parent
+
+		if ancestorReal, err := filepath.EvalSymlinks(current); err == nil {
+			// Found an existing ancestor — reconstruct the path
+			resolved := ancestorReal
+			for _, part := range remainder {
+				resolved = filepath.Join(resolved, part)
+			}
+			return resolved, nil
+		}
+	}
 }
 
 // gitAdd stages a file using the git CLI directly.
