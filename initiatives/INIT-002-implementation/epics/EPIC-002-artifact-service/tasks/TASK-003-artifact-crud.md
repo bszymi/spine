@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Artifact CRUD Operations
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-002-artifact-service/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
