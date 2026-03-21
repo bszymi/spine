@@ -103,7 +103,14 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 
 		switch diff.Status {
 		case "deleted":
-			changeset.Deleted = append(changeset.Deleted, diff.Path)
+			// Only include if the deleted file was actually an artifact at fromRef
+			oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.Path)
+			if err != nil {
+				continue
+			}
+			if IsArtifact(oldContent) {
+				changeset.Deleted = append(changeset.Deleted, diff.Path)
+			}
 
 		case "added":
 			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
@@ -119,7 +126,15 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 			}
 			changeset.Created = append(changeset.Created, a)
 
-		case "modified", "renamed":
+		case "renamed":
+			// Renames are modeled as delete old path + create new path
+			// This ensures path-keyed projections are updated correctly
+			if diff.OldPath != "" {
+				oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.OldPath)
+				if err == nil && IsArtifact(oldContent) {
+					changeset.Deleted = append(changeset.Deleted, diff.OldPath)
+				}
+			}
 			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
 			if err != nil {
 				continue
@@ -129,6 +144,30 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 			}
 			a, err := Parse(diff.Path, content)
 			if err != nil {
+				continue
+			}
+			changeset.Created = append(changeset.Created, a)
+
+		case "modified":
+			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
+			if err != nil {
+				continue
+			}
+			// If the modified file is no longer a valid artifact, treat as deletion
+			if !IsArtifact(content) {
+				oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.Path)
+				if err == nil && IsArtifact(oldContent) {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+				}
+				continue
+			}
+			a, err := Parse(diff.Path, content)
+			if err != nil {
+				// Parse failure on a previously valid artifact → treat as deletion
+				oldContent, readErr := gitClient.ReadFile(ctx, fromRef, diff.Path)
+				if readErr == nil && IsArtifact(oldContent) {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+				}
 				continue
 			}
 			changeset.Modified = append(changeset.Modified, a)
