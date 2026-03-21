@@ -130,28 +130,29 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 		}
 
 		statusCode := parts[0]
-		var status, path string
+		var fd FileDiff
 
 		switch {
 		case statusCode == "A":
-			status, path = "added", parts[1]
+			fd = FileDiff{Path: parts[1], Status: "added"}
 		case statusCode == "M":
-			status, path = "modified", parts[1]
+			fd = FileDiff{Path: parts[1], Status: "modified"}
 		case statusCode == "D":
-			status, path = "deleted", parts[1]
+			fd = FileDiff{Path: parts[1], Status: "deleted"}
 		case strings.HasPrefix(statusCode, "R"):
-			// Rename: R<score>\t<old>\t<new> — use the new path
-			status = "renamed"
+			// Rename: R<score>\t<old>\t<new>
+			fd = FileDiff{Status: "renamed"}
 			if len(parts) >= 3 {
-				path = parts[2]
+				fd.OldPath = parts[1]
+				fd.Path = parts[2]
 			} else {
-				path = parts[1]
+				fd.Path = parts[1]
 			}
 		default:
-			status, path = "modified", parts[1]
+			fd = FileDiff{Path: parts[1], Status: "modified"}
 		}
 
-		diffs = append(diffs, FileDiff{Path: path, Status: status})
+		diffs = append(diffs, fd)
 	}
 	return diffs, nil
 }

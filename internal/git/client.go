@@ -74,6 +74,7 @@ type CommitInfo struct {
 
 // FileDiff represents a file change between two Git refs.
 type FileDiff struct {
-	Path   string
-	Status string // "added", "modified", "deleted", "renamed"
+	Path    string
+	OldPath string // set for renames (the previous path)
+	Status  string // "added", "modified", "deleted", "renamed"
 }
