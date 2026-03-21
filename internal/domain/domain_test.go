@@ -141,6 +141,41 @@ func TestSpineError(t *testing.T) {
 	}
 }
 
+func TestValidArtifactTypes(t *testing.T) {
+	types := domain.ValidArtifactTypes()
+	if len(types) != 7 {
+		t.Errorf("expected 7 artifact types, got %d", len(types))
+	}
+}
+
+func TestErrorDetailScan(t *testing.T) {
+	ed := &domain.ErrorDetail{}
+
+	// Scan nil
+	if err := ed.Scan(nil); err != nil {
+		t.Fatalf("Scan(nil): %v", err)
+	}
+
+	// Scan valid JSON
+	data := []byte(`{"classification":"transient_error","message":"timeout"}`)
+	if err := ed.Scan(data); err != nil {
+		t.Fatalf("Scan(json): %v", err)
+	}
+	if ed.Classification != domain.FailureTransient {
+		t.Errorf("expected transient_error, got %s", ed.Classification)
+	}
+	if ed.Message != "timeout" {
+		t.Errorf("expected 'timeout', got %s", ed.Message)
+	}
+}
+
+func TestRoleLevelUnknown(t *testing.T) {
+	var unknown domain.ActorRole = "unknown_role"
+	if unknown.RoleLevel() != 0 {
+		t.Errorf("expected 0 for unknown role, got %d", unknown.RoleLevel())
+	}
+}
+
 func TestValidRunStatuses(t *testing.T) {
 	statuses := domain.ValidRunStatuses()
 	if len(statuses) != 7 {
