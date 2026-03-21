@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Artifact Discovery
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-002-artifact-service/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
