@@ -1,0 +1,323 @@
+package projection
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
+	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/store"
+	"gopkg.in/yaml.v3"
+)
+
+// Service implements the Projection Service — syncs Git state to PostgreSQL.
+type Service struct {
+	git          git.GitClient
+	store        store.Store
+	events       event.EventRouter
+	pollInterval time.Duration
+}
+
+// NewService creates a new Projection Service.
+func NewService(gitClient git.GitClient, s store.Store, events event.EventRouter, pollInterval time.Duration) *Service {
+	if pollInterval <= 0 {
+		pollInterval = 30 * time.Second
+	}
+	return &Service{
+		git:          gitClient,
+		store:        s,
+		events:       events,
+		pollInterval: pollInterval,
+	}
+}
+
+// FullRebuild scans the entire repository at HEAD and rebuilds all projections.
+// Per Data Model §4.1.
+func (s *Service) FullRebuild(ctx context.Context) error {
+	log := observe.Logger(ctx)
+	log.Info("starting full projection rebuild")
+
+	// Update sync state to rebuilding
+	_ = s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: "",
+		Status:           "rebuilding",
+	})
+
+	head, err := s.git.Head(ctx)
+	if err != nil {
+		return fmt.Errorf("get HEAD: %w", err)
+	}
+
+	// Clear existing projections
+	if err := s.store.DeleteAllProjections(ctx); err != nil {
+		return fmt.Errorf("delete projections: %w", err)
+	}
+
+	// Discover all artifacts
+	result, err := artifact.DiscoverAll(ctx, s.git, head)
+	if err != nil {
+		return fmt.Errorf("discover artifacts: %w", err)
+	}
+
+	// Project artifacts
+	for _, a := range result.Artifacts {
+		if err := s.projectArtifact(ctx, a, head); err != nil {
+			log.Warn("failed to project artifact",
+				"path", a.Path,
+				"error", err,
+			)
+			continue
+		}
+	}
+
+	// Project workflows
+	for _, wfPath := range result.Workflows {
+		if err := s.projectWorkflow(ctx, wfPath, head); err != nil {
+			log.Warn("failed to project workflow",
+				"path", wfPath,
+				"error", err,
+			)
+		}
+	}
+
+	// Update sync state
+	if err := s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: head,
+		Status:           "idle",
+	}); err != nil {
+		return fmt.Errorf("update sync state: %w", err)
+	}
+
+	log.Info("full rebuild complete",
+		"artifacts", len(result.Artifacts),
+		"workflows", len(result.Workflows),
+		"skipped", len(result.Skipped),
+		"errors", len(result.Errors),
+		"commit", head,
+	)
+
+	observe.GlobalMetrics.ProjectionSyncs.Inc()
+	return nil
+}
+
+// IncrementalSync updates projections based on changes since the last sync.
+// Per Data Model §4.2.
+func (s *Service) IncrementalSync(ctx context.Context) error {
+	log := observe.Logger(ctx)
+
+	state, err := s.store.GetSyncState(ctx)
+	if err != nil {
+		return fmt.Errorf("get sync state: %w", err)
+	}
+
+	if state == nil {
+		// No sync state — do a full rebuild
+		return s.FullRebuild(ctx)
+	}
+
+	head, err := s.git.Head(ctx)
+	if err != nil {
+		return fmt.Errorf("get HEAD: %w", err)
+	}
+
+	if head == state.LastSyncedCommit {
+		return nil // already up to date
+	}
+
+	// Update sync state to syncing
+	_ = s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: state.LastSyncedCommit,
+		Status:           "syncing",
+	})
+
+	changeset, err := artifact.DiscoverChanges(ctx, s.git, state.LastSyncedCommit, head)
+	if err != nil {
+		return fmt.Errorf("discover changes: %w", err)
+	}
+
+	// Process created artifacts
+	for _, a := range changeset.Created {
+		if err := s.projectArtifact(ctx, a, head); err != nil {
+			log.Warn("failed to project created artifact",
+				"path", a.Path,
+				"error", err,
+			)
+		}
+	}
+
+	// Process modified artifacts
+	for _, a := range changeset.Modified {
+		if err := s.projectArtifact(ctx, a, head); err != nil {
+			log.Warn("failed to project modified artifact",
+				"path", a.Path,
+				"error", err,
+			)
+		}
+	}
+
+	// Process deleted artifacts
+	for _, path := range changeset.Deleted {
+		if err := s.store.DeleteArtifactProjection(ctx, path); err != nil {
+			log.Warn("failed to delete projection",
+				"path", path,
+				"error", err,
+			)
+		}
+		if err := s.store.DeleteArtifactLinks(ctx, path); err != nil {
+			log.Warn("failed to delete links",
+				"path", path,
+				"error", err,
+			)
+		}
+	}
+
+	// Update sync state
+	if err := s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: head,
+		Status:           "idle",
+	}); err != nil {
+		return fmt.Errorf("update sync state: %w", err)
+	}
+
+	log.Info("incremental sync complete",
+		"created", len(changeset.Created),
+		"modified", len(changeset.Modified),
+		"deleted", len(changeset.Deleted),
+		"from", state.LastSyncedCommit[:8],
+		"to", head[:8],
+	)
+
+	observe.GlobalMetrics.ProjectionSyncs.Inc()
+	return nil
+}
+
+// StartSyncLoop runs incremental sync on a polling interval.
+// Stops when the context is cancelled.
+func (s *Service) StartSyncLoop(ctx context.Context) {
+	log := observe.Logger(ctx)
+	log.Info("starting projection sync loop", "interval", s.pollInterval)
+
+	ticker := time.NewTicker(s.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.IncrementalSync(ctx); err != nil {
+				log.Error("incremental sync failed", "error", err)
+			}
+		case <-ctx.Done():
+			log.Info("projection sync loop stopped")
+			return
+		}
+	}
+}
+
+// RegisterEventHandlers subscribes to artifact events for real-time sync.
+func (s *Service) RegisterEventHandlers(ctx context.Context) error {
+	if s.events == nil {
+		return nil
+	}
+
+	// React to artifact changes by triggering incremental sync
+	handler := func(ctx context.Context, evt domain.Event) error {
+		return s.IncrementalSync(ctx)
+	}
+
+	if err := s.events.Subscribe(ctx, domain.EventArtifactCreated, handler); err != nil {
+		return err
+	}
+	return s.events.Subscribe(ctx, domain.EventArtifactUpdated, handler)
+}
+
+// projectArtifact upserts an artifact projection and its links.
+func (s *Service) projectArtifact(ctx context.Context, a *domain.Artifact, commitSHA string) error {
+	metadata, _ := json.Marshal(a.Metadata)
+	linksJSON, _ := json.Marshal(a.Links)
+	contentHash := hashContent(a.Content)
+
+	proj := &store.ArtifactProjection{
+		ArtifactPath: a.Path,
+		ArtifactID:   a.ID,
+		ArtifactType: string(a.Type),
+		Title:        a.Title,
+		Status:       string(a.Status),
+		Metadata:     metadata,
+		Content:      a.Content,
+		Links:        linksJSON,
+		SourceCommit: commitSHA,
+		ContentHash:  contentHash,
+	}
+
+	if err := s.store.UpsertArtifactProjection(ctx, proj); err != nil {
+		return fmt.Errorf("upsert artifact %s: %w", a.Path, err)
+	}
+
+	// Denormalize links
+	var links []store.ArtifactLink
+	for _, link := range a.Links {
+		links = append(links, store.ArtifactLink{
+			SourcePath: a.Path,
+			TargetPath: link.Target,
+			LinkType:   string(link.Type),
+		})
+	}
+
+	if err := s.store.UpsertArtifactLinks(ctx, a.Path, links, commitSHA); err != nil {
+		return fmt.Errorf("upsert links for %s: %w", a.Path, err)
+	}
+
+	return nil
+}
+
+// projectWorkflow reads and projects a workflow YAML file.
+func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string) error {
+	content, err := s.git.ReadFile(ctx, commitSHA, wfPath)
+	if err != nil {
+		return fmt.Errorf("read workflow %s: %w", wfPath, err)
+	}
+
+	// Parse minimal fields for projection
+	var wf struct {
+		ID        string   `yaml:"id" json:"id"`
+		Name      string   `yaml:"name" json:"name"`
+		Version   string   `yaml:"version" json:"version"`
+		Status    string   `yaml:"status" json:"status"`
+		AppliesTo []string `yaml:"applies_to" json:"applies_to"`
+	}
+
+	if err := yaml.Unmarshal(content, &wf); err != nil {
+		return fmt.Errorf("parse workflow %s: %w", wfPath, err)
+	}
+
+	appliesTo, _ := json.Marshal(wf.AppliesTo)
+
+	// Convert YAML to JSON for the JSONB definition column
+	var rawDef any
+	_ = yaml.Unmarshal(content, &rawDef)
+	definition, _ := json.Marshal(rawDef)
+
+	proj := &store.WorkflowProjection{
+		WorkflowPath: wfPath,
+		WorkflowID:   wf.ID,
+		Name:         wf.Name,
+		Version:      wf.Version,
+		Status:       wf.Status,
+		AppliesTo:    appliesTo,
+		Definition:   definition,
+		SourceCommit: commitSHA,
+	}
+
+	return s.store.UpsertWorkflowProjection(ctx, proj)
+}
+
+func hashContent(content string) string {
+	h := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", h)
+}
