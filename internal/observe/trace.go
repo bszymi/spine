@@ -18,10 +18,13 @@ const (
 )
 
 // GenerateTraceID creates a new random trace ID.
-func GenerateTraceID() string {
+// Returns an error if the OS random number generator fails.
+func GenerateTraceID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate trace ID: %w", err)
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
 }
 
 // WithTraceID adds a trace ID to the context.

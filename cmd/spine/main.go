@@ -3,16 +3,27 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/spf13/cobra"
 )
 
 func main() {
+	// Initialize observability before anything else
+	logLevel := os.Getenv("SPINE_LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	logFormat := os.Getenv("SPINE_LOG_FORMAT")
+	if logFormat == "" {
+		logFormat = "json"
+	}
+	observe.SetupLogger(logLevel, logFormat)
+
 	root := &cobra.Command{
 		Use:   "spine",
 		Short: "Spine — Git-native Product-to-Execution System",
@@ -33,14 +44,18 @@ func serveCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the Spine runtime server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			slog.Info("spine server starting", "status", "placeholder")
+			ctx := context.Background()
+			ctx = observe.WithComponent(ctx, "server")
+
+			log := observe.Logger(ctx)
+			log.Info("spine server starting", "status", "placeholder")
 			fmt.Println("spine: serve not yet implemented — waiting for signal to exit")
 
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 			<-sig
 
-			slog.Info("spine server shutting down")
+			log.Info("spine server shutting down")
 			return nil
 		},
 	}
@@ -73,18 +88,21 @@ func migrateCmd() *cobra.Command {
 			}
 
 			ctx := context.Background()
+			ctx = observe.WithComponent(ctx, "migrate")
+			log := observe.Logger(ctx)
+
 			s, err := store.NewPostgresStore(ctx, dbURL)
 			if err != nil {
 				return fmt.Errorf("connect to database: %w", err)
 			}
 			defer s.Close()
 
-			slog.Info("applying migrations", "dir", migrationsDir)
+			log.Info("applying migrations", "dir", migrationsDir)
 			if err := s.ApplyMigrations(ctx, migrationsDir); err != nil {
 				return fmt.Errorf("apply migrations: %w", err)
 			}
 
-			slog.Info("migrations applied successfully")
+			log.Info("migrations applied successfully")
 			return nil
 		},
 	}

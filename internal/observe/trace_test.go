@@ -8,8 +8,14 @@ import (
 )
 
 func TestGenerateTraceID(t *testing.T) {
-	id1 := observe.GenerateTraceID()
-	id2 := observe.GenerateTraceID()
+	id1, err := observe.GenerateTraceID()
+	if err != nil {
+		t.Fatalf("GenerateTraceID: %v", err)
+	}
+	id2, err := observe.GenerateTraceID()
+	if err != nil {
+		t.Fatalf("GenerateTraceID: %v", err)
+	}
 
 	if id1 == "" {
 		t.Fatal("trace ID should not be empty")
