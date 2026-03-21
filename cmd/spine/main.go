@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/bszymi/spine/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -60,7 +62,29 @@ func migrateCmd() *cobra.Command {
 		Use:   "migrate",
 		Short: "Run database migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("spine: migrate not yet implemented")
+			dbURL := os.Getenv("SPINE_DATABASE_URL")
+			if dbURL == "" {
+				return fmt.Errorf("SPINE_DATABASE_URL is required")
+			}
+
+			migrationsDir := os.Getenv("SPINE_MIGRATIONS_DIR")
+			if migrationsDir == "" {
+				migrationsDir = "migrations"
+			}
+
+			ctx := context.Background()
+			s, err := store.NewPostgresStore(ctx, dbURL)
+			if err != nil {
+				return fmt.Errorf("connect to database: %w", err)
+			}
+			defer s.Close()
+
+			slog.Info("applying migrations", "dir", migrationsDir)
+			if err := s.ApplyMigrations(ctx, migrationsDir); err != nil {
+				return fmt.Errorf("apply migrations: %w", err)
+			}
+
+			slog.Info("migrations applied successfully")
 			return nil
 		},
 	}
