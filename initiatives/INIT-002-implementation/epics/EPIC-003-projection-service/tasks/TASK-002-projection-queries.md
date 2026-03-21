@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Projection Query Layer
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-003-projection-service/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:

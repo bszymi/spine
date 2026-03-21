@@ -288,6 +288,16 @@ func (s *PostgresStore) QueryArtifacts(ctx context.Context, query ArtifactQuery)
 		args = append(args, query.Status)
 		argIdx++
 	}
+	if query.ParentPath != "" {
+		conditions = append(conditions, fmt.Sprintf("artifact_path LIKE $%d", argIdx))
+		args = append(args, query.ParentPath+"%")
+		argIdx++
+	}
+	if query.Search != "" {
+		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d OR content ILIKE $%d)", argIdx, argIdx))
+		args = append(args, "%"+query.Search+"%")
+		argIdx++
+	}
 	if query.Cursor != "" {
 		conditions = append(conditions, fmt.Sprintf("artifact_path > $%d", argIdx))
 		args = append(args, query.Cursor)
@@ -379,6 +389,26 @@ func (s *PostgresStore) UpsertArtifactLinks(ctx context.Context, sourcePath stri
 		}
 	}
 	return nil
+}
+
+func (s *PostgresStore) QueryArtifactLinks(ctx context.Context, sourcePath string) ([]ArtifactLink, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT source_path, target_path, link_type
+		FROM projection.artifact_links WHERE source_path = $1`, sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var links []ArtifactLink
+	for rows.Next() {
+		var link ArtifactLink
+		if err := rows.Scan(&link.SourcePath, &link.TargetPath, &link.LinkType); err != nil {
+			return nil, err
+		}
+		links = append(links, link)
+	}
+	return links, rows.Err()
 }
 
 func (s *PostgresStore) DeleteArtifactLinks(ctx context.Context, sourcePath string) error {
