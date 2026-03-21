@@ -1,0 +1,176 @@
+package artifact
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/bszymi/spine/internal/domain"
+	"gopkg.in/yaml.v3"
+)
+
+// frontMatter represents the raw YAML front matter before mapping to domain types.
+type frontMatter struct {
+	ID                  string        `yaml:"id"`
+	Type                string        `yaml:"type"`
+	Title               string        `yaml:"title"`
+	Status              string        `yaml:"status"`
+	Owner               string        `yaml:"owner"`
+	Created             string        `yaml:"created"`
+	LastUpdated         string        `yaml:"last_updated"`
+	Version             string        `yaml:"version"`
+	Initiative          string        `yaml:"initiative"`
+	Epic                string        `yaml:"epic"`
+	WorkType            string        `yaml:"work_type"`
+	Acceptance          string        `yaml:"acceptance"`
+	AcceptanceRationale string        `yaml:"acceptance_rationale"`
+	Date                string        `yaml:"date"`
+	DecisionMakers      string        `yaml:"decision_makers"`
+	Links               []rawLink     `yaml:"links"`
+	Extra               map[string]any `yaml:"-"` // captured separately
+}
+
+type rawLink struct {
+	Type   string `yaml:"type"`
+	Target string `yaml:"target"`
+}
+
+// Parse parses a Markdown file with YAML front matter into a domain Artifact.
+// The path parameter is the repository-relative path of the file.
+func Parse(path string, content []byte) (*domain.Artifact, error) {
+	fm, body, err := splitFrontMatter(content)
+	if err != nil {
+		return nil, &ParseError{Path: path, Message: err.Error()}
+	}
+
+	var parsed frontMatter
+	if err := yaml.Unmarshal(fm, &parsed); err != nil {
+		return nil, &ParseError{Path: path, Message: fmt.Sprintf("invalid YAML: %v", err)}
+	}
+
+	// Also unmarshal into a map to capture extra fields as metadata
+	var metadata map[string]any
+	yaml.Unmarshal(fm, &metadata)
+
+	// Remove known fields from metadata map
+	for _, key := range []string{"id", "type", "title", "status", "owner", "created",
+		"last_updated", "version", "initiative", "epic", "work_type", "acceptance",
+		"acceptance_rationale", "date", "decision_makers", "links"} {
+		delete(metadata, key)
+	}
+
+	artifactType := domain.ArtifactType(parsed.Type)
+
+	links := make([]domain.Link, 0, len(parsed.Links))
+	for _, rl := range parsed.Links {
+		links = append(links, domain.Link{
+			Type:   domain.LinkType(rl.Type),
+			Target: rl.Target,
+		})
+	}
+
+	// Build metadata string map from remaining fields + known optional fields
+	meta := make(map[string]string)
+	if parsed.Owner != "" {
+		meta["owner"] = parsed.Owner
+	}
+	if parsed.Created != "" {
+		meta["created"] = parsed.Created
+	}
+	if parsed.LastUpdated != "" {
+		meta["last_updated"] = parsed.LastUpdated
+	}
+	if parsed.Version != "" {
+		meta["version"] = parsed.Version
+	}
+	if parsed.Initiative != "" {
+		meta["initiative"] = parsed.Initiative
+	}
+	if parsed.Epic != "" {
+		meta["epic"] = parsed.Epic
+	}
+	if parsed.WorkType != "" {
+		meta["work_type"] = parsed.WorkType
+	}
+	if parsed.Acceptance != "" {
+		meta["acceptance"] = parsed.Acceptance
+	}
+	if parsed.AcceptanceRationale != "" {
+		meta["acceptance_rationale"] = parsed.AcceptanceRationale
+	}
+	if parsed.Date != "" {
+		meta["date"] = parsed.Date
+	}
+	if parsed.DecisionMakers != "" {
+		meta["decision_makers"] = parsed.DecisionMakers
+	}
+	for k, v := range metadata {
+		meta[k] = fmt.Sprintf("%v", v)
+	}
+
+	return &domain.Artifact{
+		Path:     path,
+		ID:       parsed.ID,
+		Type:     artifactType,
+		Title:    parsed.Title,
+		Status:   domain.ArtifactStatus(parsed.Status),
+		Links:    links,
+		Metadata: meta,
+		Content:  body,
+	}, nil
+}
+
+// splitFrontMatter separates YAML front matter from Markdown body.
+// Front matter is delimited by --- on its own line.
+func splitFrontMatter(content []byte) ([]byte, string, error) {
+	s := string(content)
+
+	// Must start with ---
+	if !strings.HasPrefix(s, "---") {
+		return nil, "", fmt.Errorf("file does not start with YAML front matter delimiter (---)")
+	}
+
+	// Find closing ---
+	rest := s[3:]
+	idx := strings.Index(rest, "\n---")
+	if idx < 0 {
+		return nil, "", fmt.Errorf("YAML front matter closing delimiter (---) not found")
+	}
+
+	fm := rest[:idx]
+	body := strings.TrimLeft(rest[idx+4:], "\n")
+
+	return []byte(fm), body, nil
+}
+
+// IsArtifact returns true if the content looks like a Spine artifact
+// (starts with YAML front matter containing a type field).
+func IsArtifact(content []byte) bool {
+	fm, _, err := splitFrontMatter(content)
+	if err != nil {
+		return false
+	}
+
+	var check struct {
+		Type string `yaml:"type"`
+	}
+	if err := yaml.Unmarshal(fm, &check); err != nil {
+		return false
+	}
+
+	for _, t := range domain.ValidArtifactTypes() {
+		if domain.ArtifactType(check.Type) == t {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseError represents a failure to parse an artifact file.
+type ParseError struct {
+	Path    string
+	Message string
+}
+
+func (e *ParseError) Error() string {
+	return fmt.Sprintf("parse %s: %s", e.Path, e.Message)
+}
