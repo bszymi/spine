@@ -53,6 +53,8 @@ func (r *QueueRouter) Emit(ctx context.Context, event domain.Event) error {
 
 // Subscribe registers a handler for a specific event type.
 // The handler is also registered with the underlying queue to receive deliveries.
+// Note: Each call registers a new queue handler. Call Subscribe once per event type
+// during application setup to avoid duplicate processing.
 func (r *QueueRouter) Subscribe(ctx context.Context, eventType domain.EventType, handler EventHandler) error {
 	r.handlers[eventType] = append(r.handlers[eventType], handler)
 

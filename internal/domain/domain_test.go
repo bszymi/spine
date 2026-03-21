@@ -167,6 +167,11 @@ func TestErrorDetailScan(t *testing.T) {
 	if ed.Message != "timeout" {
 		t.Errorf("expected 'timeout', got %s", ed.Message)
 	}
+
+	// Scan unexpected type
+	if err := ed.Scan("not bytes"); err == nil {
+		t.Fatal("expected error for non-[]byte type")
+	}
 }
 
 func TestRoleLevelUnknown(t *testing.T) {

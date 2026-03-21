@@ -47,9 +47,13 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		return nil, &ParseError{Path: path, Message: fmt.Sprintf("invalid YAML: %v", err)}
 	}
 
-	// Also unmarshal into a map to capture extra fields as metadata
+	// Also unmarshal into a map to capture extra fields as metadata.
+	// This second unmarshal should not fail since the first succeeded,
+	// but we handle the error defensively.
 	var metadata map[string]any
-	yaml.Unmarshal(fm, &metadata)
+	if err := yaml.Unmarshal(fm, &metadata); err != nil {
+		metadata = make(map[string]any)
+	}
 
 	// Remove known fields from metadata map
 	for _, key := range []string{"id", "type", "title", "status", "owner", "created",

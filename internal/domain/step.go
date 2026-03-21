@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -70,7 +71,11 @@ func (e *ErrorDetail) Scan(src any) error {
 	if src == nil {
 		return nil
 	}
-	return json.Unmarshal(src.([]byte), e)
+	b, ok := src.([]byte)
+	if !ok {
+		return fmt.Errorf("ErrorDetail.Scan: unexpected type %T", src)
+	}
+	return json.Unmarshal(b, e)
 }
 
 // StepExecution represents a single execution attempt of a workflow step.
