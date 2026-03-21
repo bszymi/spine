@@ -83,7 +83,11 @@ func (q *QueryService) traverseGraph(ctx context.Context, path string, depth int
 	// Get the artifact node
 	proj, err := q.store.GetArtifactProjection(ctx, path)
 	if err != nil {
-		return nil // skip missing artifacts
+		// Not found is OK (broken link) — other errors should propagate
+		if spineErr, ok := err.(*domain.SpineError); ok && spineErr.Code == domain.ErrNotFound {
+			return nil
+		}
+		return err
 	}
 
 	result.Nodes = append(result.Nodes, GraphNode{
@@ -92,6 +96,11 @@ func (q *QueryService) traverseGraph(ctx context.Context, path string, depth int
 		Title:        proj.Title,
 		Status:       proj.Status,
 	})
+
+	// Only traverse links if we have depth remaining
+	if depth <= 0 {
+		return nil
+	}
 
 	// Get outgoing links
 	links, err := q.store.QueryArtifactLinks(ctx, path)
@@ -105,17 +114,17 @@ func (q *QueryService) traverseGraph(ctx context.Context, path string, depth int
 			continue
 		}
 
-		result.Edges = append(result.Edges, GraphEdge{
-			Source:   link.SourcePath,
-			Target:   link.TargetPath,
-			LinkType: link.LinkType,
-		})
-
 		// Normalize target path: canonical paths start with / but projection paths don't
 		targetPath := link.TargetPath
 		if targetPath != "" && targetPath[0] == '/' {
 			targetPath = targetPath[1:]
 		}
+
+		result.Edges = append(result.Edges, GraphEdge{
+			Source:   link.SourcePath,
+			Target:   targetPath, // normalized to match node paths
+			LinkType: link.LinkType,
+		})
 
 		// Recurse into the target
 		if err := q.traverseGraph(ctx, targetPath, depth-1, linkTypes, visited, result); err != nil {
@@ -155,7 +164,7 @@ func (q *QueryService) QueryHistory(ctx context.Context, path string, limit int)
 	for _, c := range commits {
 		entries = append(entries, HistoryEntry{
 			CommitSHA: c.SHA,
-			Timestamp: c.Timestamp.Format("2006-01-02T15:04:05Z"),
+			Timestamp: c.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 			Author:    c.Author.Name,
 			Message:   c.Message,
 			TraceID:   c.Trailers["Trace-ID"],
