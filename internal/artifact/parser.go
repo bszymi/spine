@@ -111,6 +111,19 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 	if parsed.Type == "" {
 		return nil, &ParseError{Path: path, Message: "missing required field: type"}
 	}
+
+	// Validate artifact type is known
+	validType := false
+	for _, t := range domain.ValidArtifactTypes() {
+		if artifactType == t {
+			validType = true
+			break
+		}
+	}
+	if !validType {
+		return nil, &ParseError{Path: path, Message: fmt.Sprintf("unknown artifact type: %s", parsed.Type)}
+	}
+
 	if parsed.Title == "" {
 		return nil, &ParseError{Path: path, Message: "missing required field: title"}
 	}
@@ -123,6 +136,9 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 	case domain.ArtifactTypeInitiative:
 		if parsed.ID == "" {
 			return nil, &ParseError{Path: path, Message: "missing required field: id (Initiative)"}
+		}
+		if parsed.Created == "" {
+			return nil, &ParseError{Path: path, Message: "missing required field: created (Initiative)"}
 		}
 	case domain.ArtifactTypeEpic:
 		if parsed.ID == "" {

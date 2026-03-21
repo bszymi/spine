@@ -352,6 +352,26 @@ func TestIsArtifact(t *testing.T) {
 	}
 }
 
+func TestParseUnknownType(t *testing.T) {
+	content := []byte("---\ntype: Goverance\ntitle: Test\nstatus: Draft\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for unknown artifact type")
+	}
+	parseErr := err.(*artifact.ParseError)
+	if parseErr.Message != "unknown artifact type: Goverance" {
+		t.Errorf("unexpected error message: %s", parseErr.Message)
+	}
+}
+
+func TestParseInitiativeMissingCreated(t *testing.T) {
+	content := []byte("---\nid: INIT-001\ntype: Initiative\ntitle: Test\nstatus: Pending\n---\n# Test\n")
+	_, err := artifact.Parse("test.md", content)
+	if err == nil {
+		t.Fatal("expected error for Initiative missing created")
+	}
+}
+
 func TestParseMissingType(t *testing.T) {
 	content := []byte("---\ntitle: Test\nstatus: Draft\n---\n# Test\n")
 	_, err := artifact.Parse("test.md", content)
