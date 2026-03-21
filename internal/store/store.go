@@ -38,6 +38,7 @@ type Store interface {
 	// Links
 	UpsertArtifactLinks(ctx context.Context, sourcePath string, links []ArtifactLink, sourceCommit string) error
 	DeleteArtifactLinks(ctx context.Context, sourcePath string) error
+	QueryArtifactLinks(ctx context.Context, sourcePath string) ([]ArtifactLink, error)
 
 	// Workflows
 	UpsertWorkflowProjection(ctx context.Context, proj *WorkflowProjection) error
