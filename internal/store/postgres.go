@@ -379,8 +379,17 @@ func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir strin
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
 
+		// Use simple protocol (Exec with no parameters) to allow multi-statement SQL
 		if _, err := s.pool.Exec(ctx, string(content)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
+		}
+
+		// Record migration if the file didn't self-record
+		alreadyApplied, _ := s.IsMigrationApplied(ctx, version)
+		if !alreadyApplied {
+			if _, err := s.pool.Exec(ctx, `INSERT INTO public.schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING`, version); err != nil {
+				return fmt.Errorf("record migration %s: %w", version, err)
+			}
 		}
 	}
 
