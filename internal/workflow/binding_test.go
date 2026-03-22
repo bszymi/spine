@@ -32,7 +32,8 @@ func activeWorkflow(id string, appliesTo ...string) *domain.WorkflowDefinition {
 			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
 			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
 		}},
-		Path: "workflows/" + id + ".yaml",
+		Path:      "workflows/" + id + ".yaml",
+		CommitSHA: "abcdef1234567890abcdef1234567890abcdef12", // mock SHA for tests without gitClient
 	}
 }
 

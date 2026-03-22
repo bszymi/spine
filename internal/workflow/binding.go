@@ -79,8 +79,9 @@ func ResolveBinding(ctx context.Context, provider WorkflowProvider, gitClient gi
 	// Step 7-9: Single match — pin to Git SHA
 	resolved := candidates[0]
 
-	// Use the workflow's existing CommitSHA if set (from projection/provider),
-	// otherwise fall back to HEAD
+	// Pin to the workflow's source commit.
+	// Prefer the CommitSHA already set by the provider (from projection/discovery),
+	// fall back to HEAD if not set. In production, gitClient is always provided.
 	commitSHA := resolved.CommitSHA
 	if commitSHA == "" && gitClient != nil {
 		sha, err := gitClient.Head(ctx)
@@ -88,6 +89,10 @@ func ResolveBinding(ctx context.Context, provider WorkflowProvider, gitClient gi
 			return nil, fmt.Errorf("get HEAD for workflow pinning: %w", err)
 		}
 		commitSHA = sha
+	}
+	if commitSHA == "" {
+		return nil, domain.NewError(domain.ErrInternal,
+			"cannot pin workflow: no commit SHA available")
 	}
 
 	return &BindingResult{
