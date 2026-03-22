@@ -39,6 +39,7 @@ type Store interface {
 	UpsertArtifactLinks(ctx context.Context, sourcePath string, links []ArtifactLink, sourceCommit string) error
 	DeleteArtifactLinks(ctx context.Context, sourcePath string) error
 	QueryArtifactLinks(ctx context.Context, sourcePath string) ([]ArtifactLink, error)
+	QueryArtifactLinksByTarget(ctx context.Context, targetPath string) ([]ArtifactLink, error)
 
 	// Actors
 	GetActor(ctx context.Context, actorID string) (*domain.Actor, error)

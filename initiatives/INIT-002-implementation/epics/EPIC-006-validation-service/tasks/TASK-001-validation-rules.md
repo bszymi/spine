@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Cross-Artifact Validation Rules
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-006-validation-service/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
