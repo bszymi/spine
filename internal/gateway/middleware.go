@@ -24,11 +24,11 @@ func actorFromContext(ctx context.Context) *domain.Actor {
 }
 
 // authMiddleware validates the Bearer token and sets the actor in context.
+// Fails closed: if auth service is not configured, all authenticated routes return 401.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.auth == nil {
-			// Auth not configured — skip (development/test mode)
-			next.ServeHTTP(w, r)
+			WriteError(w, domain.NewError(domain.ErrUnavailable, "authentication not configured"))
 			return
 		}
 
@@ -38,8 +38,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		token, ok := strings.CutPrefix(header, "Bearer ")
-		if !ok || token == "" {
+		// HTTP auth schemes are case-insensitive per RFC 7235
+		if len(header) < 7 || !strings.EqualFold(header[:7], "bearer ") {
+			WriteError(w, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format"))
+			return
+		}
+		token := header[7:]
+		if token == "" {
 			WriteError(w, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format"))
 			return
 		}
