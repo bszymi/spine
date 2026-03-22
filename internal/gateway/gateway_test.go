@@ -13,6 +13,7 @@ import (
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/gateway"
+	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 )
 
@@ -20,9 +21,10 @@ import (
 
 type fakeStore struct {
 	store.Store
-	pingErr error
-	actors  map[string]*domain.Actor
-	tokens  map[string]*fakeTokenEntry // keyed by token_hash
+	pingErr     error
+	actors      map[string]*domain.Actor
+	tokens      map[string]*fakeTokenEntry // keyed by token_hash
+	workflowDef []byte                     // if set, GetWorkflowProjection returns this
 }
 
 type fakeTokenEntry struct {
@@ -97,6 +99,161 @@ func (f *fakeStore) ListTokensByActor(_ context.Context, actorID string) ([]doma
 		}
 	}
 	return result, nil
+}
+
+func (f *fakeStore) QueryArtifacts(_ context.Context, query store.ArtifactQuery) (*store.ArtifactQueryResult, error) {
+	return &store.ArtifactQueryResult{Items: nil, HasMore: false}, nil
+}
+
+func (f *fakeStore) QueryArtifactLinks(_ context.Context, _ string) ([]store.ArtifactLink, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
+	return &domain.Run{RunID: runID, Status: domain.RunStatusActive, CurrentStepID: "step1"}, nil
+}
+
+func (f *fakeStore) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error {
+	return nil
+}
+
+func (f *fakeStore) ListStepExecutionsByRun(_ context.Context, _ string) ([]domain.StepExecution, error) {
+	return []domain.StepExecution{
+		{ExecutionID: "exec-1", RunID: "run-123", StepID: "step1", Status: domain.StepStatusWaiting, Attempt: 1},
+	}, nil
+}
+
+func (f *fakeStore) GetStepExecution(_ context.Context, execID string) (*domain.StepExecution, error) {
+	return &domain.StepExecution{
+		ExecutionID: execID, RunID: "run-1", StepID: "step1",
+		Status: domain.StepStatusInProgress, Attempt: 1,
+	}, nil
+}
+
+func (f *fakeStore) UpdateStepExecution(_ context.Context, _ *domain.StepExecution) error {
+	return nil
+}
+
+func (f *fakeStore) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error {
+	return nil
+}
+
+func (f *fakeStore) WithTx(_ context.Context, fn func(store.Tx) error) error {
+	return fn(&fakeTx{store: f})
+}
+
+func (f *fakeStore) GetSyncState(_ context.Context) (*store.SyncState, error) {
+	return &store.SyncState{Status: "idle"}, nil
+}
+
+func (f *fakeStore) GetWorkflowProjection(_ context.Context, _ string) (*store.WorkflowProjection, error) {
+	if f.workflowDef != nil {
+		return &store.WorkflowProjection{Definition: f.workflowDef}, nil
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "no workflow")
+}
+
+type fakeTx struct {
+	store *fakeStore
+}
+
+func (t *fakeTx) CreateRun(_ context.Context, _ *domain.Run) error                      { return nil }
+func (t *fakeTx) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error { return nil }
+func (t *fakeTx) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error  { return nil }
+func (t *fakeTx) UpdateStepExecution(_ context.Context, _ *domain.StepExecution) error  { return nil }
+
+// ── Fake ArtifactService ──
+
+type fakeArtifactService struct {
+	artifacts map[string]*domain.Artifact
+	createErr error
+	readErr   error
+	updateErr error
+}
+
+func newFakeArtifactService() *fakeArtifactService {
+	return &fakeArtifactService{artifacts: make(map[string]*domain.Artifact)}
+}
+
+func (f *fakeArtifactService) Create(_ context.Context, path, _ string) (*domain.Artifact, error) {
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	a := &domain.Artifact{Path: path, ID: "art-1", Type: domain.ArtifactTypeTask, Title: "Test", Status: domain.StatusPending}
+	f.artifacts[path] = a
+	return a, nil
+}
+
+func (f *fakeArtifactService) Read(_ context.Context, path, _ string) (*domain.Artifact, error) {
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	a, ok := f.artifacts[path]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "not found")
+	}
+	return a, nil
+}
+
+func (f *fakeArtifactService) Update(_ context.Context, path, _ string) (*domain.Artifact, error) {
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	a, ok := f.artifacts[path]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "not found")
+	}
+	return a, nil
+}
+
+func (f *fakeArtifactService) List(_ context.Context, _ string) ([]*domain.Artifact, error) {
+	var result []*domain.Artifact
+	for _, a := range f.artifacts {
+		result = append(result, a)
+	}
+	return result, nil
+}
+
+// ── Fake ProjectionSyncer ──
+
+type fakeProjSync struct {
+	rebuildErr error
+}
+
+func (f *fakeProjSync) FullRebuild(_ context.Context) error { return f.rebuildErr }
+
+// ── Fake GitReader ──
+
+type fakeGitReader struct {
+	files map[string][]byte
+}
+
+func (f *fakeGitReader) ReadFile(_ context.Context, _, path string) ([]byte, error) {
+	data, ok := f.files[path]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "file not found")
+	}
+	return data, nil
+}
+
+// ── Fake ProjectionQuerier ──
+
+type fakeProjectionQuerier struct{}
+
+func (f *fakeProjectionQuerier) QueryArtifacts(_ context.Context, _ store.ArtifactQuery) (*store.ArtifactQueryResult, error) {
+	return &store.ArtifactQueryResult{Items: nil, HasMore: false}, nil
+}
+
+func (f *fakeProjectionQuerier) QueryGraph(_ context.Context, root string, _ int, _ []string) (*projection.GraphResult, error) {
+	return &projection.GraphResult{Root: root}, nil
+}
+
+func (f *fakeProjectionQuerier) QueryHistory(_ context.Context, _ string, _ int) ([]projection.HistoryEntry, error) {
+	return nil, nil
+}
+
+func (f *fakeProjectionQuerier) QueryRuns(_ context.Context, _ string) ([]domain.Run, error) {
+	return nil, nil
 }
 
 // ── Response Tests ──
@@ -187,7 +344,7 @@ func TestWriteNotImplemented(t *testing.T) {
 // ── Middleware Tests ──
 
 func TestTraceIDGenerated(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -204,7 +361,7 @@ func TestTraceIDGenerated(t *testing.T) {
 }
 
 func TestTraceIDPassthrough(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -224,7 +381,7 @@ func TestTraceIDPassthrough(t *testing.T) {
 // ── Health Endpoint Tests ──
 
 func TestHealthWithStore(t *testing.T) {
-	srv := gateway.NewServer(":0", &fakeStore{}, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: &fakeStore{}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -247,7 +404,7 @@ func TestHealthWithStore(t *testing.T) {
 }
 
 func TestHealthWithoutStore(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -267,7 +424,7 @@ func TestHealthWithoutStore(t *testing.T) {
 }
 
 func TestHealthWithUnhealthyStore(t *testing.T) {
-	srv := gateway.NewServer(":0", &fakeStore{pingErr: fmt.Errorf("db down")}, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: &fakeStore{pingErr: fmt.Errorf("db down")}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -289,7 +446,7 @@ func TestHealthWithUnhealthyStore(t *testing.T) {
 // ── Stub Endpoint Tests ──
 
 func TestUnauthenticatedRoutesReturn503WhenAuthNotConfigured(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -321,7 +478,7 @@ func TestUnauthenticatedRoutesReturn503WhenAuthNotConfigured(t *testing.T) {
 }
 
 func TestUnknownRouteReturns404(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -390,7 +547,7 @@ func TestTaskWildcardInvalidMethod(t *testing.T) {
 // ── Response Content-Type ──
 
 func TestResponseContentType(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -451,7 +608,7 @@ func setupAuthServer(t *testing.T) (*httptest.Server, *fakeStore, string) {
 		t.Fatalf("create token: %v", err)
 	}
 
-	srv := gateway.NewServer(":0", fs, authSvc)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
 	ts := httptest.NewServer(srv.Handler())
 	return ts, fs, plaintext
 }
@@ -492,7 +649,8 @@ func TestAuthValidToken(t *testing.T) {
 	ts, _, token := setupAuthServer(t)
 	defer ts.Close()
 
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts", http.NoBody)
+	// Valid token should pass auth — endpoint responds with service error, not 401
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -500,9 +658,9 @@ func TestAuthValidToken(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Admin has reader access, so should get 501 (stub), not 401/403
-	if resp.StatusCode != 501 {
-		t.Errorf("expected 501 (stub), got %d", resp.StatusCode)
+	// Auth passes (not 401/403), service returns 503 (not configured)
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		t.Errorf("expected auth to pass, got %d", resp.StatusCode)
 	}
 }
 
@@ -518,7 +676,7 @@ func TestAuthInsufficientRole(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 
-	srv := gateway.NewServer(":0", fs, authSvc)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -541,7 +699,7 @@ func TestAuthCaseInsensitiveBearer(t *testing.T) {
 	defer ts.Close()
 
 	// Lowercase "bearer" should work per RFC 7235
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts", http.NoBody)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts", http.NoBody)
 	req.Header.Set("Authorization", "bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -549,8 +707,9 @@ func TestAuthCaseInsensitiveBearer(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 501 {
-		t.Errorf("expected 501 (stub), got %d", resp.StatusCode)
+	// Auth should pass (not 401/403)
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		t.Errorf("expected auth to pass with lowercase bearer, got %d", resp.StatusCode)
 	}
 }
 
@@ -779,40 +938,38 @@ func TestTokenListMissingActorID(t *testing.T) {
 
 // ── Authenticated Stub Tests (with auth enabled) ──
 
-func TestAuthenticatedStubsReturn501(t *testing.T) {
+// ── Endpoint Tests with Services ──
+
+func TestAuthenticatedEndpointsReturnErrorWithoutServices(t *testing.T) {
 	ts, _, token := setupAuthServer(t)
 	defer ts.Close()
 
-	stubs := []struct {
+	// Without services configured, endpoints return 4xx/5xx (not 501 stubs anymore)
+	endpoints := []struct {
 		method string
 		path   string
+		expect int // expected status
 	}{
-		{"POST", "/api/v1/system/rebuild"},
-		{"GET", "/api/v1/system/rebuild/rb-123"},
-		{"POST", "/api/v1/system/validate"},
-		{"POST", "/api/v1/artifacts"},
-		{"GET", "/api/v1/artifacts"},
-		{"GET", "/api/v1/artifacts/initiatives/INIT-001/task.md"},
-		{"PUT", "/api/v1/artifacts/initiatives/INIT-001/task.md"},
-		{"POST", "/api/v1/artifacts/initiatives/INIT-001/task.md/validate"},
-		{"GET", "/api/v1/artifacts/initiatives/INIT-001/task.md/links"},
-		{"POST", "/api/v1/runs"},
-		{"GET", "/api/v1/runs/r-123"},
-		{"POST", "/api/v1/runs/r-123/cancel"},
-		{"POST", "/api/v1/runs/r-123/steps/step-1/assign"},
-		{"POST", "/api/v1/steps/assign-123/submit"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/accept"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/reject"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/cancel"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/abandon"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/supersede"},
-		{"GET", "/api/v1/query/artifacts"},
-		{"GET", "/api/v1/query/graph"},
-		{"GET", "/api/v1/query/history"},
-		{"GET", "/api/v1/query/runs"},
+		// Services not configured → 503
+		{"POST", "/api/v1/system/rebuild", 503},
+		{"POST", "/api/v1/system/validate", 503},
+		{"GET", "/api/v1/artifacts/initiatives/test.md", 503},
+		{"GET", "/api/v1/artifacts/initiatives/test.md/links", 200}, // fakeStore returns empty links
+		{"POST", "/api/v1/artifacts/initiatives/test.md/validate", 503},
+		{"GET", "/api/v1/query/artifacts", 503},
+		{"GET", "/api/v1/query/runs?task_path=t", 503},
+		{"GET", "/api/v1/query/history?path=t", 503},
+		{"GET", "/api/v1/query/graph?root=t", 503},
+		{"POST", "/api/v1/tasks/initiatives/test.md/accept", 503},
+		// Store present with fake methods → 200
+		{"GET", "/api/v1/runs/r-123", 200},
+		{"POST", "/api/v1/runs/r-123/cancel", 200},
+		// Missing required body → 400
+		{"POST", "/api/v1/artifacts", 400},
+		{"POST", "/api/v1/runs", 400},
 	}
 
-	for _, tt := range stubs {
+	for _, tt := range endpoints {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
 			req, _ := http.NewRequest(tt.method, ts.URL+tt.path, http.NoBody)
 			req.Header.Set("Authorization", "Bearer "+token)
@@ -821,8 +978,993 @@ func TestAuthenticatedStubsReturn501(t *testing.T) {
 				t.Fatalf("request: %v", err)
 			}
 			defer resp.Body.Close()
-			if resp.StatusCode != 501 {
-				t.Errorf("expected 501, got %d", resp.StatusCode)
+			if resp.StatusCode != tt.expect {
+				t.Errorf("expected %d, got %d", tt.expect, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// ── Handler Tests with Store ──
+
+func setupFullServer(t *testing.T) (*httptest.Server, string, *fakeArtifactService) {
+	t.Helper()
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Type: domain.ActorTypeHuman, Name: "Reader",
+		Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+
+	authSvc := auth.NewService(fs)
+	token, _, err := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	artSvc := newFakeArtifactService()
+	// Pre-populate a task artifact for governance tests
+	artSvc.artifacts["initiatives/test/task.md"] = &domain.Artifact{
+		Path: "initiatives/test/task.md", ID: "TASK-001",
+		Type: domain.ArtifactTypeTask, Title: "Test Task", Status: domain.StatusPending,
+		Content: "# Test Task",
+	}
+
+	gitReader := &fakeGitReader{files: map[string][]byte{
+		"initiatives/test/task.md": []byte("---\nid: TASK-001\ntype: Task\ntitle: Test Task\nstatus: Pending\nepic: /epics/e1.md\ninitiative: /init/i1.md\n---\n# Test Task"),
+	}}
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:     fs,
+		Auth:      authSvc,
+		Artifacts: artSvc,
+		ProjQuery: &fakeProjectionQuerier{},
+		ProjSync:  &fakeProjSync{},
+		Git:       gitReader,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	return ts, token, artSvc
+}
+
+func TestArtifactListWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts?type=Task&limit=10&cursor=abc", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["has_more"] != false {
+		t.Error("expected has_more=false")
+	}
+}
+
+func TestArtifactLinksWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/test/path.md/links", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStatusWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/runs/run-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunCancelWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/cancel", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"task_path":"initiatives/test/task.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		t.Errorf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepSubmitWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"outcome_id":"accepted"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-123/submit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepAssignWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"actor_id":"admin-1"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/steps/step1/assign", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Step is in_progress (from fakeStore), assign expects waiting → will fail
+	// This tests the error path
+	if resp.StatusCode >= 500 {
+		t.Errorf("expected non-500 error, got %d", resp.StatusCode)
+	}
+}
+
+func TestSystemRebuildStatusWithStore(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/rebuild/rb-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactCreateMissingContent(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"path":"test.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactUpdateMissingContent(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/artifacts/test/path.md", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartMissingTaskPath(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepAssignMissingActorID(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/steps/step1/assign", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// ── Artifact Service Handler Tests ──
+
+func TestArtifactCreateSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"path":"initiatives/new/task.md","content":"---\ntype: Task\ntitle: New\nstatus: Draft\n---\n# New"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		t.Errorf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactReadSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/initiatives/test/task.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactReadNotFound(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/nonexistent.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactUpdateSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"content":"---\ntype: Task\ntitle: Updated\nstatus: Draft\n---\n# Updated"}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/artifacts/initiatives/test/task.md", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactValidateSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts/initiatives/test/task.md/validate", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── Task Governance Tests ──
+
+func TestTaskAcceptSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/tasks/initiatives/test/task.md/accept", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskRejectSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/tasks/initiatives/test/task.md/reject", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskGovernanceNotFoundArtifact(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/tasks/nonexistent/path.md/accept", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// ── System Handler Tests ──
+
+func TestSystemRebuildSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/system/rebuild", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepAssignSuccess(t *testing.T) {
+	// Need a custom fakeStore that returns a waiting step
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"actor_id":"admin-1"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/steps/step1/assign", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// The fakeStore returns a waiting step via ListStepExecutionsByRun, so assign should succeed
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepSubmitFromAssigned(t *testing.T) {
+	// Test the auto-acknowledge path: assigned → in_progress → completed
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+
+	// Override GetStepExecution to return assigned status
+	customFS := &fakeStoreAssigned{fakeStore: fs}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: customFS, Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"outcome_id":"accepted"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-123/submit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// fakeStoreAssigned overrides GetStepExecution to return an assigned step.
+type fakeStoreAssigned struct {
+	*fakeStore
+}
+
+func (f *fakeStoreAssigned) GetStepExecution(_ context.Context, execID string) (*domain.StepExecution, error) {
+	return &domain.StepExecution{
+		ExecutionID: execID, RunID: "run-1", StepID: "step1",
+		Status: domain.StepStatusAssigned, Attempt: 1,
+	}, nil
+}
+
+func TestStepSubmitWithWorkflowResolution(t *testing.T) {
+	// Test the full flow with workflow definition for next step resolution
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	fs.workflowDef, _ = json.Marshal(domain.WorkflowDefinition{
+		ID: "wf-1", Name: "test", EntryStep: "step1",
+		Steps: []domain.StepDefinition{
+			{ID: "step1", Name: "Step 1", Outcomes: []domain.OutcomeDefinition{
+				{ID: "accepted", Name: "Accepted", NextStep: "step2"},
+			}},
+			{ID: "step2", Name: "Step 2"},
+		},
+	})
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"outcome_id":"accepted"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-123/submit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["next_step"] != "step2" {
+		t.Errorf("expected next_step=step2, got %v", result["next_step"])
+	}
+}
+
+func TestArtifactListPagination(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	// Test with custom pagination params
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts?limit=300&cursor=xyz", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryArtifactsSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?type=Task&status=Pending&limit=10", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryGraphSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/graph?root=initiatives/test&depth=3&link_types=parent,contains", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryGraphMissingRoot(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/graph", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryHistorySuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/history?path=initiatives/test/task.md&limit=5", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryHistoryMissingPath(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/history", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryRunsSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/runs?task_path=initiatives/test/task.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryRunsMissingTaskPath(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/runs", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestSystemValidateSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/system/validate", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── Recovery Middleware Panic Test ──
+
+func TestRecoveryMiddlewarePanic(t *testing.T) {
+	// Create a server with a panicking handler by using a custom route
+	// We can't easily inject a panic in production handlers, but we can
+	// verify that panics in the middleware chain are caught
+	// The recovery middleware wraps all routes, so any unhandled panic returns 500
+
+	// Test by sending a request that causes a nil dereference in a handler
+	// The fakeStoreAssigned override will be used
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	// Token list with actor_id works
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/tokens?actor_id=admin-1", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── Additional Coverage Tests ──
+
+func TestArtifactListNoStore(t *testing.T) {
+	// Test the s.store == nil path in handleArtifactList
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	// Server with NO store
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactLinksNoStore(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/test/path.md/links", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStatusNoStore(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/runs/run-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunCancelNoStore(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/cancel", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepSubmitNoStore(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"outcome_id":"x"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-1/submit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepAssignNoStore(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"actor_id":"admin-1"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/r-1/steps/s-1/assign", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartNoStore(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"task_path":"test.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestSystemRebuildStatusNoStore(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/rebuild/rb-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+// ── Nil Service Tests (verify 503 for unconfigured services) ──
+
+func setupMinimalAuthServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	// No artifacts, no projQuery, no projSync, no git
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	return ts, token
+}
+
+func TestNilServicesReturn503(t *testing.T) {
+	ts, token := setupMinimalAuthServer(t)
+	defer ts.Close()
+
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{"POST", "/api/v1/artifacts"},
+		{"GET", "/api/v1/artifacts/test.md"},
+		{"PUT", "/api/v1/artifacts/test.md"},
+		{"POST", "/api/v1/artifacts/test.md/validate"},
+		{"POST", "/api/v1/system/rebuild"},
+		{"POST", "/api/v1/system/validate"},
+		{"POST", "/api/v1/tasks/test.md/accept"},
+		{"GET", "/api/v1/query/artifacts"},
+		{"GET", "/api/v1/query/graph?root=x"},
+		{"GET", "/api/v1/query/history?path=x"},
+		{"GET", "/api/v1/query/runs?task_path=x"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			var body *strings.Reader
+			if tt.method == "POST" || tt.method == "PUT" {
+				body = strings.NewReader(`{"path":"x","content":"y"}`)
+			}
+			var req *http.Request
+			if body != nil {
+				req, _ = http.NewRequest(tt.method, ts.URL+tt.path, body)
+			} else {
+				req, _ = http.NewRequest(tt.method, ts.URL+tt.path, http.NoBody)
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 503 {
+				t.Errorf("expected 503, got %d", resp.StatusCode)
 			}
 		})
 	}

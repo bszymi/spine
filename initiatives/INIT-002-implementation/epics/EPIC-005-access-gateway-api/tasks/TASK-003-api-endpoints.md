@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: API Endpoint Handlers
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-005-access-gateway-api/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:

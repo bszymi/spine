@@ -10,9 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/gateway"
+	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/projection"
+	"github.com/bszymi/spine/internal/queue"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -76,7 +81,35 @@ func serveCmd() *cobra.Command {
 				authSvc = auth.NewService(st)
 			}
 
-			srv := gateway.NewServer(":"+port, st, authSvc)
+			// Set up Git client and services
+			repoPath := os.Getenv("SPINE_REPO_PATH")
+			if repoPath == "" {
+				repoPath = "."
+			}
+
+			gitClient := git.NewCLIClient(repoPath)
+			q := queue.NewMemoryQueue(100)
+			go q.Start(ctx)
+			eventRouter := event.NewQueueRouter(q)
+
+			var artifactSvc *artifact.Service
+			var projQuery *projection.QueryService
+			var projSync *projection.Service
+
+			artifactSvc = artifact.NewService(gitClient, eventRouter, repoPath)
+			if st != nil {
+				projQuery = projection.NewQueryService(st, gitClient)
+				projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)
+			}
+
+			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
+				Store:     st,
+				Auth:      authSvc,
+				Artifacts: artifactSvc,
+				ProjQuery: projQuery,
+				ProjSync:  projSync,
+				Git:       gitClient,
+			})
 
 			listenErr := make(chan error, 1)
 			go func() {
