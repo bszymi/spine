@@ -304,6 +304,116 @@ func TestValidateSemanticValidTypes(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaInvalidStepType(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: "invalid_type",
+			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasTypeError := false
+	for _, e := range errors {
+		if contains(e.Message, "invalid step type") {
+			hasTypeError = true
+		}
+	}
+	if !hasTypeError {
+		t.Error("expected invalid step type error")
+	}
+}
+
+func TestValidateSchemaInvalidExecutionMode(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Execution: &domain.ExecutionConfig{Mode: "bad_mode"},
+			Outcomes:  []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasModeError := false
+	for _, e := range errors {
+		if contains(e.Message, "invalid execution mode") {
+			hasModeError = true
+		}
+	}
+	if !hasModeError {
+		t.Error("expected invalid execution mode error")
+	}
+}
+
+func TestValidateSchemaDivergeReference(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Diverge:  "nonexistent_div",
+			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasDivError := false
+	for _, e := range errors {
+		if contains(e.Message, "unknown divergence point") {
+			hasDivError = true
+		}
+	}
+	if !hasDivError {
+		t.Error("expected unknown divergence point error")
+	}
+}
+
+func TestValidateSchemaConvergeReference(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Converge: "nonexistent_conv",
+			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasConvError := false
+	for _, e := range errors {
+		if contains(e.Message, "unknown convergence point") {
+			hasConvError = true
+		}
+	}
+	if !hasConvError {
+		t.Error("expected unknown convergence point error")
+	}
+}
+
+func TestValidateSchemaTimeoutOutcomeReference(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Timeout:        "1h",
+			TimeoutOutcome: "nonexistent_outcome",
+			Outcomes:       []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasRefError := false
+	for _, e := range errors {
+		if contains(e.Message, "references unknown outcome") {
+			hasRefError = true
+		}
+	}
+	if !hasRefError {
+		t.Error("expected unknown outcome reference error")
+	}
+}
+
 func TestParseInvalidYAML(t *testing.T) {
 	_, err := workflow.Parse("bad.yaml", []byte("invalid: yaml: [broken"))
 	if err == nil {
