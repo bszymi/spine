@@ -67,13 +67,13 @@ func ValidateSchema(wf *domain.WorkflowDefinition) []domain.ValidationError {
 	// §3.2-3.5 Step validation
 	for i := range wf.Steps {
 		prefix := fmt.Sprintf("steps[%d]", i)
-		errors = append(errors, validateStep(&wf.Steps[i], prefix, stepIDs)...)
+		errors = append(errors, validateStep(&wf.Steps[i], prefix, stepIDs, wf)...)
 	}
 
 	return errors
 }
 
-func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string]bool) []domain.ValidationError {
+func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string]bool, wf *domain.WorkflowDefinition) []domain.ValidationError {
 	var errors []domain.ValidationError
 
 	if step.ID == "" {
@@ -128,6 +128,32 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 	// Verify timeout_outcome references a valid outcome
 	if step.TimeoutOutcome != "" && !outcomeIDs[step.TimeoutOutcome] {
 		errors = append(errors, schemaError(prefix+".timeout_outcome", fmt.Sprintf("references unknown outcome %q", step.TimeoutOutcome)))
+	}
+
+	// Validate diverge/converge references
+	if step.Diverge != "" {
+		divFound := false
+		for i := range wf.DivergencePoints {
+			if wf.DivergencePoints[i].ID == step.Diverge {
+				divFound = true
+				break
+			}
+		}
+		if !divFound {
+			errors = append(errors, schemaError(prefix+".diverge", fmt.Sprintf("references unknown divergence point %q", step.Diverge)))
+		}
+	}
+	if step.Converge != "" {
+		convFound := false
+		for i := range wf.ConvergencePoints {
+			if wf.ConvergencePoints[i].ID == step.Converge {
+				convFound = true
+				break
+			}
+		}
+		if !convFound {
+			errors = append(errors, schemaError(prefix+".converge", fmt.Sprintf("references unknown convergence point %q", step.Converge)))
+		}
 	}
 
 	// §3.5 Execution block validation
@@ -199,6 +225,30 @@ func computeReachable(wf *domain.WorkflowDefinition) map[string]bool {
 		for j := range step.Outcomes {
 			if !reachable[step.Outcomes[j].NextStep] {
 				queue = append(queue, step.Outcomes[j].NextStep)
+			}
+		}
+
+		// Follow divergence edges
+		if step.Diverge != "" {
+			for i := range wf.DivergencePoints {
+				if wf.DivergencePoints[i].ID == step.Diverge {
+					for j := range wf.DivergencePoints[i].Branches {
+						if !reachable[wf.DivergencePoints[i].Branches[j].StartStep] {
+							queue = append(queue, wf.DivergencePoints[i].Branches[j].StartStep)
+						}
+					}
+				}
+			}
+		}
+
+		// Follow convergence edges
+		if step.Converge != "" {
+			for i := range wf.ConvergencePoints {
+				if wf.ConvergencePoints[i].ID == step.Converge {
+					if !reachable[wf.ConvergencePoints[i].EvaluationStep] {
+						queue = append(queue, wf.ConvergencePoints[i].EvaluationStep)
+					}
+				}
 			}
 		}
 	}
