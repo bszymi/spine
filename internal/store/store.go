@@ -44,6 +44,9 @@ type Store interface {
 	// Actors
 	GetActor(ctx context.Context, actorID string) (*domain.Actor, error)
 	CreateActor(ctx context.Context, actor *domain.Actor) error
+	UpdateActor(ctx context.Context, actor *domain.Actor) error
+	ListActors(ctx context.Context) ([]domain.Actor, error)
+	ListActorsByStatus(ctx context.Context, status domain.ActorStatus) ([]domain.Actor, error)
 
 	// Tokens
 	GetActorByTokenHash(ctx context.Context, tokenHash string) (*domain.Actor, *domain.Token, error)
