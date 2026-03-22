@@ -266,6 +266,59 @@ func (s *PostgresStore) CreateActor(ctx context.Context, actor *domain.Actor) er
 	return err
 }
 
+func (s *PostgresStore) UpdateActor(ctx context.Context, actor *domain.Actor) error {
+	capabilities, err := json.Marshal(actor.Capabilities)
+	if err != nil {
+		return fmt.Errorf("marshal capabilities: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE auth.actors SET name = $1, role = $2, capabilities = $3, status = $4, updated_at = now()
+		WHERE actor_id = $5`,
+		actor.Name, actor.Role, capabilities, actor.Status, actor.ActorID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "actor not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListActors(ctx context.Context) ([]domain.Actor, error) {
+	return s.listActorsQuery(ctx, `
+		SELECT actor_id, actor_type, name, role, capabilities, status
+		FROM auth.actors ORDER BY actor_id`)
+}
+
+func (s *PostgresStore) ListActorsByStatus(ctx context.Context, status domain.ActorStatus) ([]domain.Actor, error) {
+	return s.listActorsQuery(ctx, `
+		SELECT actor_id, actor_type, name, role, capabilities, status
+		FROM auth.actors WHERE status = $1 ORDER BY actor_id`, status)
+}
+
+func (s *PostgresStore) listActorsQuery(ctx context.Context, query string, args ...any) ([]domain.Actor, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var actors []domain.Actor
+	for rows.Next() {
+		var actor domain.Actor
+		var capabilities []byte
+		if err := rows.Scan(&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &capabilities, &actor.Status); err != nil {
+			return nil, err
+		}
+		if capabilities != nil {
+			_ = json.Unmarshal(capabilities, &actor.Capabilities)
+		}
+		actors = append(actors, actor)
+	}
+	return actors, rows.Err()
+}
+
 // ── Tokens ──
 
 func (s *PostgresStore) GetActorByTokenHash(ctx context.Context, tokenHash string) (*domain.Actor, *domain.Token, error) {

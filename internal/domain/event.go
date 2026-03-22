@@ -37,6 +37,7 @@ const (
 	EventThreadResolved       EventType = "thread_resolved"
 	EventValidationPassed     EventType = "validation_passed"
 	EventValidationFailed     EventType = "validation_failed"
+	EventAssignmentFailed     EventType = "step_assignment_failed"
 )
 
 // Event represents a domain or operational event emitted by the system.
