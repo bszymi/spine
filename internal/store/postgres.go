@@ -389,6 +389,105 @@ func (s *PostgresStore) ListTokensByActor(ctx context.Context, actorID string) (
 	return tokens, rows.Err()
 }
 
+// ── Divergence ──
+
+func (s *PostgresStore) CreateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.divergence_contexts (divergence_id, run_id, status, divergence_mode, divergence_window, convergence_id, triggered_at, resolved_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		div.DivergenceID, div.RunID, div.Status, div.DivergenceMode, div.DivergenceWindow,
+		nilIfEmpty(div.ConvergenceID), div.TriggeredAt, div.ResolvedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) UpdateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.divergence_contexts SET status = $1, divergence_window = $2, triggered_at = $3, resolved_at = $4
+		WHERE divergence_id = $5`,
+		div.Status, div.DivergenceWindow, div.TriggeredAt, div.ResolvedAt, div.DivergenceID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "divergence context not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetDivergenceContext(ctx context.Context, divergenceID string) (*domain.DivergenceContext, error) {
+	var div domain.DivergenceContext
+	var convergenceID *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT divergence_id, run_id, status, divergence_mode, divergence_window, convergence_id, triggered_at, resolved_at
+		FROM runtime.divergence_contexts WHERE divergence_id = $1`, divergenceID,
+	).Scan(&div.DivergenceID, &div.RunID, &div.Status, &div.DivergenceMode, &div.DivergenceWindow,
+		&convergenceID, &div.TriggeredAt, &div.ResolvedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "divergence context not found")
+		}
+		return nil, err
+	}
+	if convergenceID != nil {
+		div.ConvergenceID = *convergenceID
+	}
+	return &div, nil
+}
+
+func (s *PostgresStore) CreateBranch(ctx context.Context, branch *domain.Branch) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.branches (branch_id, run_id, divergence_id, status, current_step_id, outcome, artifacts_produced, completed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		branch.BranchID, branch.RunID, branch.DivergenceID, branch.Status,
+		nilIfEmpty(branch.CurrentStepID), branch.Outcome, branch.ArtifactsProduced, branch.CompletedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) UpdateBranch(ctx context.Context, branch *domain.Branch) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.branches SET status = $1, current_step_id = $2, outcome = $3, artifacts_produced = $4, completed_at = $5
+		WHERE branch_id = $6`,
+		branch.Status, nilIfEmpty(branch.CurrentStepID), branch.Outcome, branch.ArtifactsProduced,
+		branch.CompletedAt, branch.BranchID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "branch not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT branch_id, run_id, divergence_id, status, current_step_id, outcome, artifacts_produced, created_at, completed_at
+		FROM runtime.branches WHERE divergence_id = $1 ORDER BY created_at`, divergenceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var branches []domain.Branch
+	for rows.Next() {
+		var b domain.Branch
+		var currentStepID *string
+		if err := rows.Scan(&b.BranchID, &b.RunID, &b.DivergenceID, &b.Status,
+			&currentStepID, &b.Outcome, &b.ArtifactsProduced, &b.CreatedAt, &b.CompletedAt); err != nil {
+			return nil, err
+		}
+		if currentStepID != nil {
+			b.CurrentStepID = *currentStepID
+		}
+		branches = append(branches, b)
+	}
+	return branches, rows.Err()
+}
+
 // ── Scheduler Queries ──
 
 func (s *PostgresStore) ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error) {
