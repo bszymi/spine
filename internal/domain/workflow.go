@@ -63,71 +63,71 @@ const (
 // WorkflowDefinition represents a parsed workflow YAML file.
 // Per workflow-definition-format.md §3.1.
 type WorkflowDefinition struct {
-	ID                string                  `json:"id"`
-	Name              string                  `json:"name"`
-	Version           string                  `json:"version"`
-	Status            WorkflowStatus          `json:"status"`
-	Description       string                  `json:"description"`
-	AppliesTo         []string                `json:"applies_to"`
-	EntryStep         string                  `json:"entry_step"`
-	Steps             []StepDefinition        `json:"steps"`
-	DivergencePoints  []DivergenceDefinition  `json:"divergence_points,omitempty"`
-	ConvergencePoints []ConvergenceDefinition `json:"convergence_points,omitempty"`
-	Path              string                  `json:"path"`       // repository-relative path to workflow YAML
-	CommitSHA         string                  `json:"commit_sha"` // pinned Git version
+	ID                string                  `json:"id" yaml:"id"`
+	Name              string                  `json:"name" yaml:"name"`
+	Version           string                  `json:"version" yaml:"version"`
+	Status            WorkflowStatus          `json:"status" yaml:"status"`
+	Description       string                  `json:"description" yaml:"description"`
+	AppliesTo         []string                `json:"applies_to" yaml:"applies_to"`
+	EntryStep         string                  `json:"entry_step" yaml:"entry_step"`
+	Steps             []StepDefinition        `json:"steps" yaml:"steps"`
+	DivergencePoints  []DivergenceDefinition  `json:"divergence_points,omitempty" yaml:"divergence_points,omitempty"`
+	ConvergencePoints []ConvergenceDefinition `json:"convergence_points,omitempty" yaml:"convergence_points,omitempty"`
+	Path              string                  `json:"path" yaml:"-"`       // set by parser, not from YAML
+	CommitSHA         string                  `json:"commit_sha" yaml:"-"` // set at binding time
 }
 
 // StepDefinition represents a single step within a workflow.
 // Per workflow-definition-format.md §3.2.
 type StepDefinition struct {
-	ID              string              `json:"id"`
-	Name            string              `json:"name"`
-	Type            StepType            `json:"type"`
-	Execution       *ExecutionConfig    `json:"execution,omitempty"`
-	Preconditions   []Precondition      `json:"preconditions,omitempty"`
-	RequiredInputs  []string            `json:"required_inputs,omitempty"`
-	RequiredOutputs []string            `json:"required_outputs,omitempty"`
-	Validation      []ValidationRule    `json:"validation,omitempty"`
-	Outcomes        []OutcomeDefinition `json:"outcomes"`
-	Retry           *RetryConfig        `json:"retry,omitempty"`
-	Timeout         string              `json:"timeout,omitempty"`
-	TimeoutOutcome  string              `json:"timeout_outcome,omitempty"`
-	Diverge         string              `json:"diverge,omitempty"`  // reference to divergence point ID
-	Converge        string              `json:"converge,omitempty"` // reference to convergence point ID
+	ID              string              `json:"id" yaml:"id"`
+	Name            string              `json:"name" yaml:"name"`
+	Type            StepType            `json:"type" yaml:"type"`
+	Execution       *ExecutionConfig    `json:"execution,omitempty" yaml:"execution,omitempty"`
+	Preconditions   []Precondition      `json:"preconditions,omitempty" yaml:"preconditions,omitempty"`
+	RequiredInputs  []string            `json:"required_inputs,omitempty" yaml:"required_inputs,omitempty"`
+	RequiredOutputs []string            `json:"required_outputs,omitempty" yaml:"required_outputs,omitempty"`
+	Validation      []ValidationRule    `json:"validation,omitempty" yaml:"validation,omitempty"`
+	Outcomes        []OutcomeDefinition `json:"outcomes" yaml:"outcomes"`
+	Retry           *RetryConfig        `json:"retry,omitempty" yaml:"retry,omitempty"`
+	Timeout         string              `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	TimeoutOutcome  string              `json:"timeout_outcome,omitempty" yaml:"timeout_outcome,omitempty"`
+	Diverge         string              `json:"diverge,omitempty" yaml:"diverge,omitempty"`
+	Converge        string              `json:"converge,omitempty" yaml:"converge,omitempty"`
 }
 
 // ExecutionConfig represents execution configuration for a step.
 // Per workflow-definition-format.md §3.2 execution block.
 type ExecutionConfig struct {
-	Mode                 ExecutionMode `json:"mode"`
-	EligibleActorTypes   []string      `json:"eligible_actor_types,omitempty"`
-	RequiredCapabilities []string      `json:"required_capabilities,omitempty"`
+	Mode                 ExecutionMode `json:"mode" yaml:"mode"`
+	EligibleActorTypes   []string      `json:"eligible_actor_types,omitempty" yaml:"eligible_actor_types,omitempty"`
+	RequiredCapabilities []string      `json:"required_capabilities,omitempty" yaml:"required_capabilities,omitempty"`
 }
 
 // ValidationRule represents a validation check applied before accepting a step result.
 type ValidationRule struct {
-	Type   string            `json:"type"`
-	Config map[string]string `json:"config,omitempty"`
+	Type   string            `json:"type" yaml:"type"`
+	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
 // OutcomeDefinition represents a possible outcome of a step.
 type OutcomeDefinition struct {
-	ID       string            `json:"id"`
-	Name     string            `json:"name"`
-	NextStep string            `json:"next_step,omitempty"` // step ID or "end" for terminal
-	Commit   map[string]string `json:"commit,omitempty"`    // fields to commit on this outcome
+	ID       string            `json:"id" yaml:"id"`
+	Name     string            `json:"name" yaml:"name"`
+	NextStep string            `json:"next_step,omitempty" yaml:"next_step,omitempty"`
+	Commit   map[string]string `json:"commit,omitempty" yaml:"commit,omitempty"`
 }
 
 // RetryConfig represents retry behavior for a step.
 type RetryConfig struct {
-	Limit   int    `json:"limit"`
-	Backoff string `json:"backoff"` // "fixed", "linear", "exponential"
+	Limit   int    `json:"limit" yaml:"limit"`
+	Backoff string `json:"backoff" yaml:"backoff"`
 }
 
 // Precondition represents a condition that must be met before a step executes.
 type Precondition struct {
-	Type   string            `json:"type"` // "cross_artifact_valid", "custom"
-	Config map[string]string `json:"config,omitempty"`
+	Type   string            `json:"type" yaml:"type"`
+	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
 // DivergenceDefinition represents a divergence point in a workflow.
