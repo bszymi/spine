@@ -10,13 +10,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	if s.store != nil {
 		if err := s.store.Ping(r.Context()); err != nil {
-			status = "degraded"
+			status = "unhealthy"
 			components["database"] = "unhealthy"
 		} else {
 			components["database"] = "healthy"
 		}
 	} else {
-		status = "degraded"
+		status = "unhealthy"
 		components["database"] = "not_configured"
 	}
 

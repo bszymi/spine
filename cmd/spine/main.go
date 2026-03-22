@@ -52,7 +52,7 @@ func serveCmd() *cobra.Command {
 			ctx = observe.WithComponent(ctx, "server")
 			log := observe.Logger(ctx)
 
-			port := os.Getenv("SPINE_PORT")
+			port := os.Getenv("SPINE_SERVER_PORT")
 			if port == "" {
 				port = "8080"
 			}
@@ -72,16 +72,22 @@ func serveCmd() *cobra.Command {
 
 			srv := gateway.NewServer(":"+port, st)
 
+			listenErr := make(chan error, 1)
 			go func() {
 				log.Info("spine server starting", "port", port)
 				if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					log.Error("server error", "error", err)
+					listenErr <- err
 				}
 			}()
 
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-			<-sig
+
+			select {
+			case err := <-listenErr:
+				return fmt.Errorf("server failed to start: %w", err)
+			case <-sig:
+			}
 
 			log.Info("spine server shutting down")
 			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

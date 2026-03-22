@@ -184,8 +184,8 @@ func TestHealthWithoutStore(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["status"] != "degraded" {
-		t.Errorf("expected degraded, got %v", body["status"])
+	if body["status"] != "unhealthy" {
+		t.Errorf("expected unhealthy, got %v", body["status"])
 	}
 }
 
@@ -204,8 +204,8 @@ func TestHealthWithUnhealthyStore(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["status"] != "degraded" {
-		t.Errorf("expected degraded, got %v", body["status"])
+	if body["status"] != "unhealthy" {
+		t.Errorf("expected unhealthy, got %v", body["status"])
 	}
 }
 
