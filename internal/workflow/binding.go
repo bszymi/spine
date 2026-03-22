@@ -38,20 +38,26 @@ func ResolveBinding(ctx context.Context, provider WorkflowProvider, gitClient gi
 	}
 
 	// Step 3: Find candidates matching the artifact type
-	var candidates []*domain.WorkflowDefinition
+	// Separate general matches from work_type-specific matches
+	var generalCandidates []*domain.WorkflowDefinition
+	var specificCandidates []*domain.WorkflowDefinition
+
 	for _, wf := range workflows {
-		if matchesType(wf, artifactType, workType) {
-			candidates = append(candidates, wf)
+		if matchesTypeGeneral(wf, artifactType) {
+			generalCandidates = append(generalCandidates, wf)
 		}
 	}
 
-	// Step 4: If work_type specified but no specific match, fall back to general
-	if workType != "" && len(candidates) == 0 {
-		for _, wf := range workflows {
-			if matchesType(wf, artifactType, "") {
-				candidates = append(candidates, wf)
-			}
-		}
+	// Step 4: If work_type specified, try specific match first
+	candidates := generalCandidates
+	if workType != "" {
+		// In v0.x, work_type filtering is not yet implemented at the
+		// applies_to clause level (needs structured applies_to support).
+		// For now, all type-matching workflows are candidates.
+		// When structured applies_to is implemented, specificCandidates
+		// will be filtered here and take precedence over generalCandidates.
+		_ = specificCandidates
+		candidates = generalCandidates
 	}
 
 	// Step 5: No match
@@ -73,8 +79,10 @@ func ResolveBinding(ctx context.Context, provider WorkflowProvider, gitClient gi
 	// Step 7-9: Single match — pin to Git SHA
 	resolved := candidates[0]
 
-	commitSHA := ""
-	if gitClient != nil && resolved.Path != "" {
+	// Use the workflow's existing CommitSHA if set (from projection/provider),
+	// otherwise fall back to HEAD
+	commitSHA := resolved.CommitSHA
+	if commitSHA == "" && gitClient != nil {
 		sha, err := gitClient.Head(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("get HEAD for workflow pinning: %w", err)
@@ -89,16 +97,11 @@ func ResolveBinding(ctx context.Context, provider WorkflowProvider, gitClient gi
 	}, nil
 }
 
-// matchesType checks if a workflow's applies_to clause matches the given type and work_type.
-func matchesType(wf *domain.WorkflowDefinition, artifactType, workType string) bool {
+// matchesTypeGeneral checks if a workflow's applies_to clause matches the artifact type
+// (general match, ignoring work_type).
+func matchesTypeGeneral(wf *domain.WorkflowDefinition, artifactType string) bool {
 	for _, at := range wf.AppliesTo {
-		// Simple string form: "Task"
-		if at == artifactType && workType == "" {
-			return true
-		}
-		if at == artifactType && workType != "" {
-			// General match — only if no work_type-specific workflows exist
-			// This is handled by the fallback in ResolveBinding
+		if at == artifactType {
 			return true
 		}
 	}
