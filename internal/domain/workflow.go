@@ -133,26 +133,26 @@ type Precondition struct {
 // DivergenceDefinition represents a divergence point in a workflow.
 // Per workflow-definition-format.md §3.3.
 type DivergenceDefinition struct {
-	ID          string             `json:"id"`
-	Mode        DivergenceMode     `json:"mode"`
-	Branches    []BranchDefinition `json:"branches,omitempty"`     // for structured mode
-	MaxBranches int                `json:"max_branches,omitempty"` // for exploratory mode
+	ID          string             `json:"id" yaml:"id"`
+	Mode        DivergenceMode     `json:"mode" yaml:"mode"`
+	Branches    []BranchDefinition `json:"branches,omitempty" yaml:"branches,omitempty"`
+	MaxBranches int                `json:"max_branches,omitempty" yaml:"max_branches,omitempty"`
 }
 
 // BranchDefinition represents a predefined branch in structured divergence.
 type BranchDefinition struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	EntryStep string `json:"entry_step"`
+	ID        string `json:"id" yaml:"id"`
+	Name      string `json:"name" yaml:"name"`
+	StartStep string `json:"start_step" yaml:"start_step"` // per workflow-validation.md §3.6
 }
 
 // ConvergenceDefinition represents convergence configuration.
 // Per workflow-definition-format.md §3.3.
 type ConvergenceDefinition struct {
-	ID          string              `json:"id"`
-	Strategy    ConvergenceStrategy `json:"strategy"`
-	EntryPolicy EntryPolicy         `json:"entry_policy"`
-	EvalStep    string              `json:"eval_step"`
-	MinBranches int                 `json:"min_branches,omitempty"` // for minimum_completed_branches
-	Deadline    string              `json:"deadline,omitempty"`     // for deadline_reached
+	ID             string              `json:"id" yaml:"id"`
+	Strategy       ConvergenceStrategy `json:"strategy" yaml:"strategy"`
+	EntryPolicy    EntryPolicy         `json:"entry_policy" yaml:"entry_policy"`
+	EvaluationStep string              `json:"evaluation_step" yaml:"evaluation_step"` // per workflow-validation.md §3.7
+	MinBranches    int                 `json:"min_branches,omitempty" yaml:"min_branches,omitempty"`
+	Deadline       string              `json:"deadline,omitempty" yaml:"deadline,omitempty"`
 }

@@ -49,10 +49,14 @@ func ValidateSchema(wf *domain.WorkflowDefinition) []domain.ValidationError {
 		errors = append(errors, schemaError("steps", "must have at least one step"))
 	}
 
-	// Collect step IDs for cross-reference
+	// Collect step IDs for cross-reference and detect duplicates
 	stepIDs := make(map[string]bool)
 	for i := range wf.Steps {
-		stepIDs[wf.Steps[i].ID] = true
+		id := wf.Steps[i].ID
+		if id != "" && stepIDs[id] {
+			errors = append(errors, schemaError(fmt.Sprintf("steps[%d].id", i), fmt.Sprintf("duplicate step id %q", id)))
+		}
+		stepIDs[id] = true
 	}
 
 	// Verify entry_step references a valid step
