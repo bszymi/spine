@@ -54,6 +54,14 @@ type Store interface {
 	RevokeToken(ctx context.Context, tokenID string) error
 	ListTokensByActor(ctx context.Context, actorID string) ([]domain.Token, error)
 
+	// Divergence
+	CreateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error
+	UpdateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error
+	GetDivergenceContext(ctx context.Context, divergenceID string) (*domain.DivergenceContext, error)
+	CreateBranch(ctx context.Context, branch *domain.Branch) error
+	UpdateBranch(ctx context.Context, branch *domain.Branch) error
+	ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error)
+
 	// Scheduler queries
 	ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error)
 	ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error)
