@@ -4,32 +4,57 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
-	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 )
+
+// ArtifactService defines the artifact operations the gateway needs.
+type ArtifactService interface {
+	Create(ctx context.Context, path, content string) (*domain.Artifact, error)
+	Read(ctx context.Context, path, ref string) (*domain.Artifact, error)
+	Update(ctx context.Context, path, content string) (*domain.Artifact, error)
+	List(ctx context.Context, ref string) ([]*domain.Artifact, error)
+}
+
+// ProjectionQuerier defines the projection query operations the gateway needs.
+type ProjectionQuerier interface {
+	QueryArtifacts(ctx context.Context, query store.ArtifactQuery) (*store.ArtifactQueryResult, error)
+	QueryGraph(ctx context.Context, rootPath string, depth int, linkTypes []string) (*projection.GraphResult, error)
+	QueryHistory(ctx context.Context, path string, limit int) ([]projection.HistoryEntry, error)
+	QueryRuns(ctx context.Context, taskPath string) ([]domain.Run, error)
+}
+
+// ProjectionSyncer defines the projection sync operations the gateway needs.
+type ProjectionSyncer interface {
+	FullRebuild(ctx context.Context) error
+}
+
+// GitReader defines the Git read operations the gateway needs.
+type GitReader interface {
+	ReadFile(ctx context.Context, ref, path string) ([]byte, error)
+}
 
 // Server is the HTTP Access Gateway for Spine.
 type Server struct {
 	httpServer *http.Server
 	store      store.Store
 	auth       *auth.Service
-	artifacts  *artifact.Service
-	projQuery  *projection.QueryService
-	projSync   *projection.Service
-	git        git.GitClient
+	artifacts  ArtifactService
+	projQuery  ProjectionQuerier
+	projSync   ProjectionSyncer
+	git        GitReader
 }
 
 // ServerConfig holds optional service dependencies for the server.
 type ServerConfig struct {
 	Store     store.Store
 	Auth      *auth.Service
-	Artifacts *artifact.Service
-	ProjQuery *projection.QueryService
-	ProjSync  *projection.Service
-	Git       git.GitClient
+	Artifacts ArtifactService
+	ProjQuery ProjectionQuerier
+	ProjSync  ProjectionSyncer
+	Git       GitReader
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
