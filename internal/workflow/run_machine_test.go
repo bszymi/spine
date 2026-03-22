@@ -75,16 +75,13 @@ func TestActiveToCompletedNoCommit(t *testing.T) {
 	}
 }
 
-func TestActiveToCompletedEmptyNextStep(t *testing.T) {
-	result, err := workflow.EvaluateRunTransition(domain.RunStatusActive, workflow.TransitionRequest{
+func TestActiveRejectsEmptyNextStep(t *testing.T) {
+	_, err := workflow.EvaluateRunTransition(domain.RunStatusActive, workflow.TransitionRequest{
 		Trigger:    workflow.TriggerStepCompleted,
 		NextStepID: "",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.ToStatus != domain.RunStatusCompleted {
-		t.Errorf("expected completed for empty next_step, got %s", result.ToStatus)
+	if err == nil {
+		t.Fatal("expected error for empty NextStepID on step.completed")
 	}
 }
 

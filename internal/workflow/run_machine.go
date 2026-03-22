@@ -81,7 +81,11 @@ func evaluatePendingTransition(result *TransitionResult, req TransitionRequest) 
 func evaluateActiveTransition(result *TransitionResult, req TransitionRequest) (*TransitionResult, error) {
 	switch req.Trigger {
 	case TriggerStepCompleted:
-		if req.NextStepID == "end" || req.NextStepID == "" {
+		if req.NextStepID == "" {
+			return nil, domain.NewError(domain.ErrInvalidParams,
+				"step.completed requires NextStepID (use 'end' for terminal)")
+		}
+		if req.NextStepID == "end" {
 			// Terminal step
 			if req.HasCommit {
 				result.ToStatus = domain.RunStatusCommitting
