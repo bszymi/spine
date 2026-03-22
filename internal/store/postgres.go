@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -230,6 +231,110 @@ func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID strin
 	return execs, rows.Err()
 }
 
+// ── Scheduler Queries ──
+
+func (s *PostgresStore) ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, trace_id, started_at, completed_at, created_at
+		FROM runtime.runs WHERE status = $1 ORDER BY created_at`, status,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.Run
+	for rows.Next() {
+		var run domain.Run
+		var currentStepID *string
+		if err := rows.Scan(
+			&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
+			&run.WorkflowVersionLabel, &run.Status, &currentStepID, &run.TraceID,
+			&run.StartedAt, &run.CompletedAt, &run.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if currentStepID != nil {
+			run.CurrentStepID = *currentStepID
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *PostgresStore) ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, started_at, completed_at, error_detail, created_at
+		FROM runtime.step_executions
+		WHERE status NOT IN ('completed', 'failed', 'skipped')
+		ORDER BY created_at`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var execs []domain.StepExecution
+	for rows.Next() {
+		var exec domain.StepExecution
+		var branchID, actorID, outcomeID *string
+		if err := rows.Scan(
+			&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
+			&exec.Status, &exec.Attempt, &outcomeID,
+			&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if branchID != nil {
+			exec.BranchID = *branchID
+		}
+		if actorID != nil {
+			exec.ActorID = *actorID
+		}
+		if outcomeID != nil {
+			exec.OutcomeID = *outcomeID
+		}
+		execs = append(execs, exec)
+	}
+	return execs, rows.Err()
+}
+
+func (s *PostgresStore) ListStaleActiveRuns(ctx context.Context, noActivitySince time.Time) ([]domain.Run, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT r.run_id, r.task_path, r.workflow_path, r.workflow_id, r.workflow_version, r.workflow_version_label, r.status, r.current_step_id, r.trace_id, r.started_at, r.completed_at, r.created_at
+		FROM runtime.runs r
+		WHERE r.status = 'active'
+		AND NOT EXISTS (
+			SELECT 1 FROM runtime.step_executions se
+			WHERE se.run_id = r.run_id AND se.created_at > $1
+		)
+		AND r.created_at < $1
+		ORDER BY r.created_at`, noActivitySince,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.Run
+	for rows.Next() {
+		var run domain.Run
+		var currentStepID *string
+		if err := rows.Scan(
+			&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
+			&run.WorkflowVersionLabel, &run.Status, &currentStepID, &run.TraceID,
+			&run.StartedAt, &run.CompletedAt, &run.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if currentStepID != nil {
+			run.CurrentStepID = *currentStepID
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 // ── Projections ──
 
 func (s *PostgresStore) UpsertArtifactProjection(ctx context.Context, proj *ArtifactProjection) error {
@@ -435,6 +540,24 @@ func (s *PostgresStore) UpsertWorkflowProjection(ctx context.Context, proj *Work
 		proj.Status, proj.AppliesTo, proj.Definition, proj.SourceCommit,
 	)
 	return err
+}
+
+func (s *PostgresStore) GetWorkflowProjection(ctx context.Context, workflowPath string) (*WorkflowProjection, error) {
+	var proj WorkflowProjection
+	err := s.pool.QueryRow(ctx, `
+		SELECT workflow_path, workflow_id, name, version, status, applies_to, definition, source_commit
+		FROM projection.workflows WHERE workflow_path = $1`, workflowPath,
+	).Scan(
+		&proj.WorkflowPath, &proj.WorkflowID, &proj.Name, &proj.Version,
+		&proj.Status, &proj.AppliesTo, &proj.Definition, &proj.SourceCommit,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "workflow not found")
+		}
+		return nil, err
+	}
+	return &proj, nil
 }
 
 func (s *PostgresStore) DeleteWorkflowProjection(ctx context.Context, workflowPath string) error {

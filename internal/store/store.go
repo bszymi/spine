@@ -40,9 +40,15 @@ type Store interface {
 	DeleteArtifactLinks(ctx context.Context, sourcePath string) error
 	QueryArtifactLinks(ctx context.Context, sourcePath string) ([]ArtifactLink, error)
 
+	// Scheduler queries
+	ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error)
+	ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error)
+	ListStaleActiveRuns(ctx context.Context, noActivitySince time.Time) ([]domain.Run, error)
+
 	// Workflows
 	UpsertWorkflowProjection(ctx context.Context, proj *WorkflowProjection) error
 	DeleteWorkflowProjection(ctx context.Context, workflowPath string) error
+	GetWorkflowProjection(ctx context.Context, workflowPath string) (*WorkflowProjection, error)
 
 	// Sync State
 	GetSyncState(ctx context.Context) (*SyncState, error)

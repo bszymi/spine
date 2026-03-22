@@ -27,18 +27,22 @@ func (c *Counter) Value() int64 {
 // Metrics holds all Spine runtime metrics counters.
 // These are in-process only (not exported to external systems in v0.x).
 type Metrics struct {
-	RunsStarted      Counter
-	RunsCompleted    Counter
-	RunsFailed       Counter
-	StepsCompleted   Counter
-	StepsFailed      Counter
-	StepsRetried     Counter
-	ArtifactsCreated Counter
-	ArtifactsUpdated Counter
-	GitCommits       Counter
-	GitCommitRetries Counter
-	EventsEmitted    Counter
-	ProjectionSyncs  Counter
+	RunsStarted        Counter
+	RunsCompleted      Counter
+	RunsFailed         Counter
+	StepsCompleted     Counter
+	StepsFailed        Counter
+	StepsRetried       Counter
+	ArtifactsCreated   Counter
+	ArtifactsUpdated   Counter
+	GitCommits         Counter
+	GitCommitRetries   Counter
+	EventsEmitted      Counter
+	ProjectionSyncs    Counter
+	SchedulerScans     Counter
+	TimeoutsDetected   Counter
+	OrphansDetected    Counter
+	RecoveriesExecuted Counter
 }
 
 // GlobalMetrics is the singleton metrics instance.
