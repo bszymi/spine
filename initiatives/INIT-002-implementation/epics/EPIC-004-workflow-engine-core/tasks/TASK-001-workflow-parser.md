@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Workflow Definition Parser
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-004-workflow-engine-core/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
