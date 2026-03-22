@@ -99,6 +99,64 @@ func (f *fakeStore) ListTokensByActor(_ context.Context, actorID string) ([]doma
 	return result, nil
 }
 
+func (f *fakeStore) QueryArtifacts(_ context.Context, query store.ArtifactQuery) (*store.ArtifactQueryResult, error) {
+	return &store.ArtifactQueryResult{Items: nil, HasMore: false}, nil
+}
+
+func (f *fakeStore) QueryArtifactLinks(_ context.Context, _ string) ([]store.ArtifactLink, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
+	return &domain.Run{RunID: runID, Status: domain.RunStatusActive, CurrentStepID: "step1"}, nil
+}
+
+func (f *fakeStore) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error {
+	return nil
+}
+
+func (f *fakeStore) ListStepExecutionsByRun(_ context.Context, _ string) ([]domain.StepExecution, error) {
+	return []domain.StepExecution{
+		{ExecutionID: "exec-1", RunID: "run-123", StepID: "step1", Status: domain.StepStatusWaiting, Attempt: 1},
+	}, nil
+}
+
+func (f *fakeStore) GetStepExecution(_ context.Context, execID string) (*domain.StepExecution, error) {
+	return &domain.StepExecution{
+		ExecutionID: execID, RunID: "run-1", StepID: "step1",
+		Status: domain.StepStatusInProgress, Attempt: 1,
+	}, nil
+}
+
+func (f *fakeStore) UpdateStepExecution(_ context.Context, _ *domain.StepExecution) error {
+	return nil
+}
+
+func (f *fakeStore) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error {
+	return nil
+}
+
+func (f *fakeStore) WithTx(_ context.Context, fn func(store.Tx) error) error {
+	return fn(&fakeTx{store: f})
+}
+
+func (f *fakeStore) GetSyncState(_ context.Context) (*store.SyncState, error) {
+	return &store.SyncState{Status: "idle"}, nil
+}
+
+func (f *fakeStore) GetWorkflowProjection(_ context.Context, _ string) (*store.WorkflowProjection, error) {
+	return nil, domain.NewError(domain.ErrNotFound, "no workflow")
+}
+
+type fakeTx struct {
+	store *fakeStore
+}
+
+func (t *fakeTx) CreateRun(_ context.Context, _ *domain.Run) error                      { return nil }
+func (t *fakeTx) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error { return nil }
+func (t *fakeTx) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error  { return nil }
+func (t *fakeTx) UpdateStepExecution(_ context.Context, _ *domain.StepExecution) error  { return nil }
+
 // ── Response Tests ──
 
 func TestHTTPStatusForErrorCodes(t *testing.T) {
@@ -797,16 +855,16 @@ func TestAuthenticatedEndpointsReturnErrorWithoutServices(t *testing.T) {
 		{"POST", "/api/v1/system/rebuild", 503},
 		{"POST", "/api/v1/system/validate", 503},
 		{"GET", "/api/v1/artifacts/initiatives/test.md", 503},
-		{"GET", "/api/v1/artifacts/initiatives/test.md/links", 500}, // store method not implemented in fake
+		{"GET", "/api/v1/artifacts/initiatives/test.md/links", 200}, // fakeStore returns empty links
 		{"POST", "/api/v1/artifacts/initiatives/test.md/validate", 503},
 		{"GET", "/api/v1/query/artifacts", 503},
 		{"GET", "/api/v1/query/runs?task_path=t", 503},
 		{"GET", "/api/v1/query/history?path=t", 503},
 		{"GET", "/api/v1/query/graph?root=t", 503},
 		{"POST", "/api/v1/tasks/initiatives/test.md/accept", 503},
-		// Store present but method not implemented in fake → 500
-		{"GET", "/api/v1/runs/r-123", 500},
-		{"POST", "/api/v1/runs/r-123/cancel", 500},
+		// Store present with fake methods → 200
+		{"GET", "/api/v1/runs/r-123", 200},
+		{"POST", "/api/v1/runs/r-123/cancel", 200},
 		// Missing required body → 400
 		{"POST", "/api/v1/artifacts", 400},
 		{"POST", "/api/v1/runs", 400},
@@ -825,5 +883,258 @@ func TestAuthenticatedEndpointsReturnErrorWithoutServices(t *testing.T) {
 				t.Errorf("expected %d, got %d", tt.expect, resp.StatusCode)
 			}
 		})
+	}
+}
+
+// ── Handler Tests with Store ──
+
+func setupFullServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Type: domain.ActorTypeHuman, Name: "Reader",
+		Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+
+	authSvc := auth.NewService(fs)
+	token, _, err := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	return ts, token
+}
+
+func TestArtifactListWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts?type=Task&limit=10&cursor=abc", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["has_more"] != false {
+		t.Error("expected has_more=false")
+	}
+}
+
+func TestArtifactLinksWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/test/path.md/links", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStatusWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/runs/run-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunCancelWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/cancel", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"task_path":"initiatives/test/task.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		t.Errorf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepSubmitWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"outcome_id":"accepted"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-123/submit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepAssignWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"actor_id":"admin-1"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/steps/step1/assign", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Step is in_progress (from fakeStore), assign expects waiting → will fail
+	// This tests the error path
+	if resp.StatusCode >= 500 {
+		t.Errorf("expected non-500 error, got %d", resp.StatusCode)
+	}
+}
+
+func TestSystemRebuildStatusWithStore(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/rebuild/rb-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactCreateMissingContent(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"path":"test.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactUpdateMissingContent(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/artifacts/test/path.md", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartMissingTaskPath(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestStepAssignMissingActorID(t *testing.T) {
+	ts, token := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/steps/step1/assign", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
 }
