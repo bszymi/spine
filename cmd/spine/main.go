@@ -39,6 +39,8 @@ func main() {
 		Short: "Spine — Git-native Product-to-Execution System",
 	}
 
+	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "json", "Output format: json or table")
+
 	root.AddCommand(serveCmd())
 	root.AddCommand(healthCmd())
 	root.AddCommand(migrateCmd())

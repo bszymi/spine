@@ -27,7 +27,7 @@ func taskActionCmd(action string) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newAPIClient()
-			data, err := c.Post(context.Background(), "/api/v1/tasks/"+args[0]+"/"+action, nil)
+			data, err := c.Post(context.Background(), "/api/v1/tasks/"+normalizePath(args[0])+"/"+action, nil)
 			if err != nil {
 				return err
 			}

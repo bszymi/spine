@@ -73,7 +73,7 @@ func artifactReadCmd() *cobra.Command {
 			}
 
 			c := newAPIClient()
-			data, err := c.Get(context.Background(), "/api/v1/artifacts/"+args[0], params)
+			data, err := c.Get(context.Background(), "/api/v1/artifacts/"+normalizePath(args[0]), params)
 			if err != nil {
 				return err
 			}
@@ -102,7 +102,7 @@ func artifactUpdateCmd() *cobra.Command {
 			}
 
 			c := newAPIClient()
-			data, err := c.Put(context.Background(), "/api/v1/artifacts/"+path, map[string]string{
+			data, err := c.Put(context.Background(), "/api/v1/artifacts/"+normalizePath(path), map[string]string{
 				"content": string(content),
 			})
 			if err != nil {
@@ -158,7 +158,7 @@ func artifactValidateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newAPIClient()
-			data, err := c.Post(context.Background(), "/api/v1/artifacts/"+args[0]+"/validate", nil)
+			data, err := c.Post(context.Background(), "/api/v1/artifacts/"+normalizePath(args[0])+"/validate", nil)
 			if err != nil {
 				return err
 			}
@@ -166,6 +166,9 @@ func artifactValidateCmd() *cobra.Command {
 		},
 	}
 }
+
+// outputFormat holds the global output format flag.
+var outputFormat string
 
 func newAPIClient() *cli.Client {
 	baseURL := os.Getenv("SPINE_SERVER_URL")
@@ -176,11 +179,19 @@ func newAPIClient() *cli.Client {
 	return cli.NewClient(baseURL, token)
 }
 
+// normalizePath strips a leading slash from canonical artifact paths.
+func normalizePath(path string) string {
+	if path != "" && path[0] == '/' {
+		return path[1:]
+	}
+	return path
+}
+
 func printResponse(data []byte) error {
 	var parsed any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		fmt.Println(string(data))
 		return nil
 	}
-	return cli.PrintJSON(parsed)
+	return cli.PrintResult(cli.OutputFormat(outputFormat), parsed)
 }
