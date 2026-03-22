@@ -34,6 +34,15 @@ func (r *ruleLinkReciprocal) Evaluate(ctx context.Context, proj *store.ArtifactP
 			continue
 		}
 
+		// For parent↔contains, the relationship may be inferred from file hierarchy
+		// per the spec: "the relationship must be inferable from file hierarchy"
+		if r.sourceType == "parent" && r.reciprocalType == "contains" {
+			targetPath := strings.TrimPrefix(link.Target, "/")
+			if isInferredParentChild(proj.ArtifactPath, targetPath) {
+				continue // hierarchy implies the relationship
+			}
+		}
+
 		targetPath := strings.TrimPrefix(link.Target, "/")
 		targetLinks, err := st.QueryArtifactLinks(ctx, targetPath)
 		if err != nil {
@@ -57,6 +66,19 @@ func (r *ruleLinkReciprocal) Evaluate(ctx context.Context, proj *store.ArtifactP
 		}
 	}
 	return errors
+}
+
+// isInferredParentChild returns true if the child path is within the parent path's
+// directory hierarchy, indicating an implicit parent-child relationship.
+func isInferredParentChild(childPath, parentPath string) bool {
+	// Parent is typically at initiatives/INIT-XXX/epics/EPIC-XXX/epic.md
+	// Child is at initiatives/INIT-XXX/epics/EPIC-XXX/tasks/TASK-XXX.md
+	// Or parent is initiatives/INIT-XXX/initiative.md and child is under that dir
+	parentDir := parentPath
+	if idx := strings.LastIndex(parentPath, "/"); idx > 0 {
+		parentDir = parentPath[:idx]
+	}
+	return strings.HasPrefix(childPath, parentDir+"/")
 }
 
 // LC-004: Link targets must resolve to existing artifacts.
