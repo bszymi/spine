@@ -55,12 +55,14 @@ func (s *Scheduler) RecoverOnStartup(ctx context.Context) (*RecoveryResult, erro
 		"committing_found":  result.CommittingFound,
 		"steps_recovered":   result.StepsRecovered,
 	})
-	_ = s.events.Emit(ctx, domain.Event{
+	if err := s.events.Emit(ctx, domain.Event{
 		EventID:   fmt.Sprintf("recovery-%d", time.Now().UnixNano()),
 		Type:      domain.EventEngineRecovered,
 		Timestamp: time.Now(),
 		Payload:   payload,
-	})
+	}); err != nil {
+		log.Warn("failed to emit engine_recovered event", "error", err)
+	}
 
 	return result, nil
 }

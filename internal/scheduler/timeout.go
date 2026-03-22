@@ -101,13 +101,15 @@ func (s *Scheduler) handleStepTimeout(ctx context.Context, exec *domain.StepExec
 		"execution_id": exec.ExecutionID,
 		"timeout":      stepDef.Timeout,
 	})
-	_ = s.events.Emit(ctx, domain.Event{
+	if err := s.events.Emit(ctx, domain.Event{
 		EventID:   fmt.Sprintf("timeout-%s", exec.ExecutionID),
 		Type:      domain.EventStepTimeout,
 		Timestamp: now,
 		RunID:     exec.RunID,
 		Payload:   payload,
-	})
+	}); err != nil {
+		log.Warn("failed to emit step_timeout event", "execution_id", exec.ExecutionID, "error", err)
+	}
 
 	return nil
 }
