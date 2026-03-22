@@ -863,6 +863,54 @@ func TestRecoverFailedStepNoErrorDetail(t *testing.T) {
 	}
 }
 
+func TestScanTimeoutsAssignedStepTimedOut(t *testing.T) {
+	// Assigned steps use CreatedAt for timeout since StartedAt is nil
+	fs := newFakeStore()
+	fs.runs = []domain.Run{
+		{RunID: "r1", Status: domain.RunStatusActive, WorkflowPath: "wf/test.yaml"},
+	}
+	fs.stepExecs = []domain.StepExecution{
+		{ExecutionID: "e1", RunID: "r1", StepID: "step1", Status: domain.StepStatusAssigned, CreatedAt: time.Now().Add(-2 * time.Hour)},
+	}
+	fs.workflows["wf/test.yaml"] = &store.WorkflowProjection{
+		Definition: workflowWithStep("step1", "1h", "", 0),
+	}
+
+	events := &fakeEventRouter{}
+	sched := scheduler.New(fs, events)
+
+	if err := sched.ScanTimeouts(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := fs.updatedSteps["e1"]
+	if updated == nil {
+		t.Fatal("expected assigned step to be timed out")
+	}
+	if updated.Status != domain.StepStatusFailed {
+		t.Errorf("expected failed, got %s", updated.Status)
+	}
+}
+
+func TestRecoverPendingRunMissingWorkflow(t *testing.T) {
+	// Test recovery when workflow lookup fails (no projection)
+	fs := newFakeStore()
+	fs.runs = []domain.Run{
+		{RunID: "r1", Status: domain.RunStatusPending, WorkflowPath: "wf/missing.yaml"},
+	}
+	// No workflow in store → lookupEntryStep should handle gracefully
+
+	events := &fakeEventRouter{}
+	sched := scheduler.New(fs, events)
+
+	result, err := sched.RecoverOnStartup(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should skip (can't resolve entry step) but not crash
+	_ = result
+}
+
 // ── Backoff Tests ──
 
 func TestCalculateBackoffExponential(t *testing.T) {

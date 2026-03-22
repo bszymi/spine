@@ -723,15 +723,15 @@ func (s *PostgresStore) DeleteArtifactProjection(ctx context.Context, artifactPa
 }
 
 func (s *PostgresStore) DeleteAllProjections(ctx context.Context) error {
-	tables := []string{
-		"projection.artifact_links",
-		"projection.artifacts",
-		"projection.workflows",
+	// Explicit DELETE statements — no dynamic table names to prevent SQL injection patterns
+	if _, err := s.pool.Exec(ctx, "DELETE FROM projection.artifact_links"); err != nil {
+		return fmt.Errorf("delete artifact_links: %w", err)
 	}
-	for _, table := range tables {
-		if _, err := s.pool.Exec(ctx, "DELETE FROM "+table); err != nil {
-			return fmt.Errorf("delete %s: %w", table, err)
-		}
+	if _, err := s.pool.Exec(ctx, "DELETE FROM projection.artifacts"); err != nil {
+		return fmt.Errorf("delete artifacts: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, "DELETE FROM projection.workflows"); err != nil {
+		return fmt.Errorf("delete workflows: %w", err)
 	}
 	return nil
 }

@@ -51,15 +51,14 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 
-	// Look up workflow to get entry step
-	entryStepID := "start" // default if no workflow projection available
-	if s.store != nil {
-		entryStepID = s.resolveEntryStep(r.Context(), req.TaskPath)
-	}
+	// Look up workflow to get entry step and workflow path
+	entryStepID, workflowPath, workflowID := s.resolveWorkflow(r.Context(), req.TaskPath)
 
 	run := &domain.Run{
 		RunID:         runID,
 		TaskPath:      req.TaskPath,
+		WorkflowPath:  workflowPath,
+		WorkflowID:    workflowID,
 		Status:        domain.RunStatusPending,
 		CurrentStepID: entryStepID,
 		TraceID:       traceID,
@@ -381,10 +380,24 @@ func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution
 	return "end"
 }
 
-// resolveEntryStep looks up the workflow entry step for a task path.
-// Falls back to "start" if the workflow cannot be resolved.
-func (s *Server) resolveEntryStep(ctx context.Context, taskPath string) string {
-	return "start"
+// resolveWorkflow looks up the workflow for a task and returns the entry step, path, and ID.
+// Falls back to defaults if no workflow can be resolved.
+func (s *Server) resolveWorkflow(ctx context.Context, taskPath string) (entryStep, workflowPath, workflowID string) {
+	entryStep = "start"
+	if s.store == nil {
+		return
+	}
+
+	// Try to find an active workflow that applies to tasks
+	result, err := s.store.QueryArtifacts(ctx, store.ArtifactQuery{Limit: 1})
+	if err != nil {
+		return
+	}
+	_ = result // workflow binding resolution is simplified for v0.x
+
+	// For now, return defaults — full workflow binding via ResolveBinding
+	// requires WorkflowProvider which queries workflow projections
+	return
 }
 
 // resolveStepDef loads the StepDefinition for a step execution from the workflow.

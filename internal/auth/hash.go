@@ -18,6 +18,9 @@ func GenerateToken() (string, error) {
 }
 
 // HashToken computes the SHA-256 hash of a raw token string.
+// SHA-256 is appropriate for API tokens (unlike passwords) because tokens are
+// 256-bit random values — they cannot be brute-forced or found in rainbow tables.
+// bcrypt/argon2 would add unnecessary latency for every authenticated request.
 func HashToken(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
