@@ -185,10 +185,10 @@ func TestDivergenceConvergingRejectsInvalid(t *testing.T) {
 
 func TestEntryPolicyMinCompleted(t *testing.T) {
 	r, err := workflow.EvaluateDivergenceTransition(domain.DivergenceStatusActive, workflow.DivergenceTransitionRequest{
-		Trigger:          workflow.DivergenceTriggerBranchDone,
-		EntryPolicy:      domain.EntryPolicyMinCompleted,
-		BranchesTerminal: 2,
-		MinBranches:      2,
+		Trigger:           workflow.DivergenceTriggerBranchDone,
+		EntryPolicy:       domain.EntryPolicyMinCompleted,
+		BranchesCompleted: 2,
+		MinBranches:       2,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -200,10 +200,10 @@ func TestEntryPolicyMinCompleted(t *testing.T) {
 
 func TestEntryPolicyMinCompletedNotMet(t *testing.T) {
 	r, err := workflow.EvaluateDivergenceTransition(domain.DivergenceStatusActive, workflow.DivergenceTransitionRequest{
-		Trigger:          workflow.DivergenceTriggerBranchDone,
-		EntryPolicy:      domain.EntryPolicyMinCompleted,
-		BranchesTerminal: 1,
-		MinBranches:      2,
+		Trigger:           workflow.DivergenceTriggerBranchDone,
+		EntryPolicy:       domain.EntryPolicyMinCompleted,
+		BranchesCompleted: 1,
+		MinBranches:       2,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

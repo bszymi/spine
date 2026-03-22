@@ -20,16 +20,17 @@ const (
 
 // DivergenceTransitionRequest describes a requested divergence state transition.
 type DivergenceTransitionRequest struct {
-	Trigger          DivergenceTrigger
-	EntryPolicy      domain.EntryPolicy
-	BranchesTotal    int
-	BranchesTerminal int
-	MinBranches      int
-	Strategy         domain.ConvergenceStrategy
-	BranchFailed     bool
-	WindowOpen       bool
-	BranchCount      int
-	MaxBranches      int
+	Trigger           DivergenceTrigger
+	EntryPolicy       domain.EntryPolicy
+	BranchesTotal     int
+	BranchesTerminal  int
+	BranchesCompleted int // completed (not failed)
+	MinBranches       int
+	Strategy          domain.ConvergenceStrategy
+	BranchFailed      bool
+	WindowOpen        bool
+	BranchCount       int
+	MaxBranches       int
 }
 
 // DivergenceTransitionResult describes the outcome of a divergence state transition.
@@ -133,7 +134,7 @@ func isEntryPolicySatisfied(req DivergenceTransitionRequest) bool {
 	case domain.EntryPolicyAllTerminal:
 		return req.BranchesTerminal >= req.BranchesTotal && req.BranchesTotal > 0
 	case domain.EntryPolicyMinCompleted:
-		return req.BranchesTerminal >= req.MinBranches
+		return req.BranchesCompleted >= req.MinBranches
 	case domain.EntryPolicyManualTrigger:
 		return false // requires explicit trigger, not evaluated here
 	case domain.EntryPolicyDeadlineReached:

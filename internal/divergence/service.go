@@ -155,7 +155,7 @@ func (s *Service) createBranchRecord(ctx context.Context, run *domain.Run, divCt
 	// Create Git branch for isolation
 	gitBranchName := fmt.Sprintf("spine/%s/%s/%s", run.RunID, divCtx.DivergenceID, branchID)
 	if err := s.git.CreateBranch(ctx, gitBranchName, "HEAD"); err != nil {
-		observe.Logger(ctx).Warn("failed to create git branch", "branch", gitBranchName, "error", err)
+		return nil, fmt.Errorf("create git branch %s: %w", gitBranchName, err)
 	}
 
 	return branch, nil
