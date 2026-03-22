@@ -37,12 +37,16 @@ func (s *Service) CheckEntryPolicy(ctx context.Context, divCtx *domain.Divergenc
 	total := len(branches)
 	terminal := 0
 	completed := 0
+	hasFailed := false
 	for i := range branches {
 		if branches[i].Status == domain.BranchStatusCompleted || branches[i].Status == domain.BranchStatusFailed {
 			terminal++
 		}
 		if branches[i].Status == domain.BranchStatusCompleted {
 			completed++
+		}
+		if branches[i].Status == domain.BranchStatusFailed {
+			hasFailed = true
 		}
 	}
 
@@ -54,6 +58,7 @@ func (s *Service) CheckEntryPolicy(ctx context.Context, divCtx *domain.Divergenc
 		BranchesCompleted: completed,
 		MinBranches:       convDef.MinBranches,
 		Strategy:          convDef.Strategy,
+		BranchFailed:      hasFailed,
 	}
 
 	result, err := workflow.EvaluateDivergenceTransition(divCtx.Status, req)
@@ -114,11 +119,15 @@ func (s *Service) EvaluateConvergence(ctx context.Context, input ConvergenceInpu
 		output.Result.SelectedBranches = selectedIDs
 
 	case domain.ConvergenceRequireAll:
-		// All branches must be completed (no failures)
+		// All branches must be completed — no failures or unfinished
 		for i := range input.Branches {
 			if input.Branches[i].Status == domain.BranchStatusFailed {
 				return nil, domain.NewError(domain.ErrConflict,
 					fmt.Sprintf("require_all: branch %s failed", input.Branches[i].BranchID))
+			}
+			if input.Branches[i].Status != domain.BranchStatusCompleted {
+				return nil, domain.NewError(domain.ErrConflict,
+					fmt.Sprintf("require_all: branch %s is %s (not completed)", input.Branches[i].BranchID, input.Branches[i].Status))
 			}
 		}
 		var selectedIDs []string
@@ -162,8 +171,7 @@ func (s *Service) CommitConvergence(ctx context.Context, divCtx *domain.Divergen
 			Strategy: "merge-commit",
 			Message:  fmt.Sprintf("Converge branch %s", branchID),
 		}); err != nil {
-			log.Warn("merge failed for branch", "branch", branchID, "error", err)
-			// Continue — non-selected branches are preserved, merge failures are logged
+			return fmt.Errorf("merge branch %s failed: %w", branchID, err)
 		}
 	}
 
