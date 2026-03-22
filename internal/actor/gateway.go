@@ -88,14 +88,26 @@ func (g *Gateway) ProcessResult(ctx context.Context, req AssignmentRequest, resu
 		return err
 	}
 
-	// Check for duplicate submission (idempotent)
+	// Look up step execution by execution ID (which is the assignment ID for the current attempt)
+	// The execution_id format is "{run_id}-{step_id}-{attempt}" per the run start handler
 	exec, err := g.store.GetStepExecution(ctx, req.AssignmentID)
 	if err != nil {
 		return fmt.Errorf("get step execution: %w", err)
 	}
+
+	// Idempotent: if already completed, no-op
 	if exec.Status == domain.StepStatusCompleted {
 		log.Info("duplicate result submission (idempotent)", "assignment_id", req.AssignmentID)
 		return nil
+	}
+
+	// Update step execution with result
+	now := time.Now()
+	exec.Status = domain.StepStatusCompleted
+	exec.OutcomeID = result.OutcomeID
+	exec.CompletedAt = &now
+	if err := g.store.UpdateStepExecution(ctx, exec); err != nil {
+		return fmt.Errorf("update step execution: %w", err)
 	}
 
 	// Emit step_completed event

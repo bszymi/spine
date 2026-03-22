@@ -64,6 +64,14 @@ func (f *gatewayFakeStore) GetStepExecution(_ context.Context, execID string) (*
 	return exec, nil
 }
 
+func (f *gatewayFakeStore) UpdateStepExecution(_ context.Context, exec *domain.StepExecution) error {
+	if _, ok := f.stepExecs[exec.ExecutionID]; !ok {
+		return domain.NewError(domain.ErrNotFound, "not found")
+	}
+	f.stepExecs[exec.ExecutionID] = exec
+	return nil
+}
+
 // ── ValidateResult Tests ──
 
 func sampleRequest() actor.AssignmentRequest {
