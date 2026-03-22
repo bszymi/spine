@@ -11,7 +11,36 @@ version: "0.1"
 
 ## 1. Purpose
 
-This document defines coding standards for the Spine Go codebase. These guidelines are derived from patterns that emerged during EPIC-001 through EPIC-004 development and from recurring findings in code reviews. Following these standards ensures new code passes spine-validate-task on the first attempt.
+This document defines coding standards for the Spine Go codebase. These guidelines reflect enduring architectural principles, governance constraints, and implementation patterns established during early Spine development.
+
+The goal of this document is to ensure that code behaves correctly within the Spine model — including safety, determinism, observability, and compatibility with governed workflows. These standards are intended to remain stable across iterations of the platform, even as tooling, validation mechanisms, and execution models evolve.
+
+Following these guidelines helps ensure compatibility with:
+- Current validation and linting mechanisms
+- Code review expectations
+- Future Spine-native validation, workflow checks, and runtime enforcement
+
+This document distinguishes between:
+- Enduring rules derived from Spine architecture and governance
+- Default implementation conventions based on current patterns
+- Examples illustrating recommended approaches
+
+Following these standards helps ensure code aligns with Spine governance expectations and passes current validation mechanisms, while remaining compatible with future Spine-native enforcement.
+
+---
+
+## 1.1 Relationship to Spine Enforcement
+
+Spine enforces correctness through multiple layers that evolve over time:
+
+- Development-time validation (linting, validation tools, CI checks)
+- Code review practices
+- Runtime workflow execution and step-level validation
+- Future Spine-native enforcement embedded in workflow orchestration
+
+This document is not tied to any single enforcement mechanism. Instead, it defines the coding behaviors expected for all Spine-compliant implementations, regardless of how enforcement is performed.
+
+As Spine evolves, specific tools (such as validation commands or CI checks) may change or be replaced. However, the principles and patterns defined in this document are intended to remain stable and authoritative.
 
 ---
 
