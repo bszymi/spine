@@ -111,6 +111,46 @@ func (f *fakeStore) GetWorkflowProjection(_ context.Context, workflowPath string
 	return proj, nil
 }
 
+func (f *fakeStore) WithTx(_ context.Context, fn func(tx store.Tx) error) error {
+	return fn(&fakeTx{store: f})
+}
+
+type fakeTx struct {
+	store *fakeStore
+}
+
+func (t *fakeTx) CreateRun(_ context.Context, run *domain.Run) error {
+	t.store.runs = append(t.store.runs, *run)
+	return nil
+}
+
+func (t *fakeTx) UpdateRunStatus(_ context.Context, runID string, status domain.RunStatus) error {
+	t.store.updatedRuns[runID] = status
+	for i := range t.store.runs {
+		if t.store.runs[i].RunID == runID {
+			t.store.runs[i].Status = status
+			return nil
+		}
+	}
+	return domain.NewError(domain.ErrNotFound, "run not found")
+}
+
+func (t *fakeTx) CreateStepExecution(_ context.Context, exec *domain.StepExecution) error {
+	t.store.stepExecs = append(t.store.stepExecs, *exec)
+	return nil
+}
+
+func (t *fakeTx) UpdateStepExecution(_ context.Context, exec *domain.StepExecution) error {
+	t.store.updatedSteps[exec.ExecutionID] = exec
+	for i := range t.store.stepExecs {
+		if t.store.stepExecs[i].ExecutionID == exec.ExecutionID {
+			t.store.stepExecs[i] = *exec
+			return nil
+		}
+	}
+	return domain.NewError(domain.ErrNotFound, "step execution not found")
+}
+
 // ── Fake Event Router ──
 
 type fakeEventRouter struct {
@@ -130,8 +170,9 @@ func (f *fakeEventRouter) Subscribe(_ context.Context, _ domain.EventType, _ eve
 
 func workflowWithStep(stepID, timeout, timeoutOutcome string, retryLimit int) []byte {
 	wf := domain.WorkflowDefinition{
-		ID:   "wf-1",
-		Name: "test-workflow",
+		ID:        "wf-1",
+		Name:      "test-workflow",
+		EntryStep: stepID,
 		Steps: []domain.StepDefinition{
 			{
 				ID:             stepID,
@@ -289,13 +330,46 @@ func TestScanTimeoutsIdempotent(t *testing.T) {
 	}
 }
 
-func TestScanTimeoutsNoStartedAt(t *testing.T) {
+func TestScanTimeoutsWaitingStepExpired(t *testing.T) {
+	// Waiting steps don't have StartedAt but can time out via CreatedAt.
 	fs := newFakeStore()
 	fs.runs = []domain.Run{
 		{RunID: "r1", Status: domain.RunStatusActive, WorkflowPath: "wf/test.yaml"},
 	}
 	fs.stepExecs = []domain.StepExecution{
-		{ExecutionID: "e1", RunID: "r1", StepID: "step1", Status: domain.StepStatusWaiting}, // no StartedAt
+		{ExecutionID: "e1", RunID: "r1", StepID: "step1", Status: domain.StepStatusWaiting, CreatedAt: time.Now().Add(-2 * time.Hour)},
+	}
+	fs.workflows["wf/test.yaml"] = &store.WorkflowProjection{
+		Definition: workflowWithStep("step1", "1h", "", 0),
+	}
+
+	events := &fakeEventRouter{}
+	sched := scheduler.New(fs, events)
+
+	if err := sched.ScanTimeouts(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated, ok := fs.updatedSteps["e1"]
+	if !ok {
+		t.Fatal("expected waiting step to be timed out")
+	}
+	if updated.Status != domain.StepStatusFailed {
+		t.Errorf("expected failed, got %s", updated.Status)
+	}
+}
+
+func TestScanTimeoutsWaitingStepNotExpired(t *testing.T) {
+	// Waiting step created recently — should not time out.
+	fs := newFakeStore()
+	fs.runs = []domain.Run{
+		{RunID: "r1", Status: domain.RunStatusActive, WorkflowPath: "wf/test.yaml"},
+	}
+	fs.stepExecs = []domain.StepExecution{
+		{ExecutionID: "e1", RunID: "r1", StepID: "step1", Status: domain.StepStatusWaiting, CreatedAt: time.Now().Add(-10 * time.Minute)},
+	}
+	fs.workflows["wf/test.yaml"] = &store.WorkflowProjection{
+		Definition: workflowWithStep("step1", "1h", "", 0),
 	}
 
 	events := &fakeEventRouter{}
@@ -305,7 +379,7 @@ func TestScanTimeoutsNoStartedAt(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(fs.updatedSteps) != 0 {
-		t.Error("expected no updates for step without started_at")
+		t.Error("expected no updates for non-expired waiting step")
 	}
 }
 
@@ -356,7 +430,10 @@ func TestScanOrphansIgnoresRecentRun(t *testing.T) {
 func TestRecoverPendingRuns(t *testing.T) {
 	fs := newFakeStore()
 	fs.runs = []domain.Run{
-		{RunID: "r1", Status: domain.RunStatusPending},
+		{RunID: "r1", Status: domain.RunStatusPending, WorkflowPath: "wf/test.yaml"},
+	}
+	fs.workflows["wf/test.yaml"] = &store.WorkflowProjection{
+		Definition: workflowWithStep("step1", "1h", "", 0),
 	}
 
 	events := &fakeEventRouter{}
@@ -371,6 +448,16 @@ func TestRecoverPendingRuns(t *testing.T) {
 	}
 	if fs.updatedRuns["r1"] != domain.RunStatusActive {
 		t.Errorf("expected active, got %s", fs.updatedRuns["r1"])
+	}
+	// Verify entry step execution was created
+	if len(fs.stepExecs) != 1 {
+		t.Fatalf("expected 1 step execution, got %d", len(fs.stepExecs))
+	}
+	if fs.stepExecs[0].StepID != "step1" {
+		t.Errorf("expected step1, got %s", fs.stepExecs[0].StepID)
+	}
+	if fs.stepExecs[0].Status != domain.StepStatusWaiting {
+		t.Errorf("expected waiting, got %s", fs.stepExecs[0].Status)
 	}
 }
 
@@ -677,9 +764,12 @@ func TestRecoverActiveRunNoCurrentStep(t *testing.T) {
 func TestRecoverMultipleRuns(t *testing.T) {
 	fs := newFakeStore()
 	fs.runs = []domain.Run{
-		{RunID: "r1", Status: domain.RunStatusPending},
-		{RunID: "r2", Status: domain.RunStatusPending},
+		{RunID: "r1", Status: domain.RunStatusPending, WorkflowPath: "wf/test.yaml"},
+		{RunID: "r2", Status: domain.RunStatusPending, WorkflowPath: "wf/test.yaml"},
 		{RunID: "r3", Status: domain.RunStatusCommitting},
+	}
+	fs.workflows["wf/test.yaml"] = &store.WorkflowProjection{
+		Definition: workflowWithStep("step1", "1h", "", 0),
 	}
 
 	events := &fakeEventRouter{}

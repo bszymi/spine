@@ -24,8 +24,12 @@ func (s *Scheduler) ScanTimeouts(ctx context.Context) error {
 
 	for i := range execs {
 		exec := &execs[i]
-		if exec.StartedAt == nil {
-			continue // no start time — cannot determine timeout
+
+		// Use StartedAt if available, otherwise CreatedAt.
+		// Waiting/assigned steps don't have StartedAt but can still time out per §3.2.
+		refTime := exec.CreatedAt
+		if exec.StartedAt != nil {
+			refTime = *exec.StartedAt
 		}
 
 		stepDef, err := s.lookupStepDefinition(ctx, exec)
@@ -43,7 +47,7 @@ func (s *Scheduler) ScanTimeouts(ctx context.Context) error {
 			continue
 		}
 
-		if time.Since(*exec.StartedAt) <= timeout {
+		if time.Since(refTime) <= timeout {
 			continue // not yet expired
 		}
 

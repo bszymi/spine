@@ -300,13 +300,16 @@ func (s *PostgresStore) ListActiveStepExecutions(ctx context.Context) ([]domain.
 }
 
 func (s *PostgresStore) ListStaleActiveRuns(ctx context.Context, noActivitySince time.Time) ([]domain.Run, error) {
+	// A run is stale if no step execution has recent activity.
+	// Activity includes creation, start, or completion — not just row creation.
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.run_id, r.task_path, r.workflow_path, r.workflow_id, r.workflow_version, r.workflow_version_label, r.status, r.current_step_id, r.trace_id, r.started_at, r.completed_at, r.created_at
 		FROM runtime.runs r
 		WHERE r.status = 'active'
 		AND NOT EXISTS (
 			SELECT 1 FROM runtime.step_executions se
-			WHERE se.run_id = r.run_id AND se.created_at > $1
+			WHERE se.run_id = r.run_id
+			AND GREATEST(se.created_at, COALESCE(se.started_at, se.created_at), COALESCE(se.completed_at, se.created_at)) > $1
 		)
 		AND r.created_at < $1
 		ORDER BY r.created_at`, noActivitySince,

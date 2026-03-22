@@ -8,6 +8,7 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/workflow"
 )
 
@@ -65,6 +66,7 @@ func (s *Scheduler) RecoverOnStartup(ctx context.Context) (*RecoveryResult, erro
 }
 
 // recoverPendingRuns activates runs stuck in pending state.
+// Per §2.2: pending→active requires creating the entry StepExecution and setting current_step_id.
 func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResult) error {
 	log := observe.Logger(ctx)
 
@@ -82,13 +84,33 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 			continue
 		}
 
-		if err := s.store.UpdateRunStatus(ctx, runs[i].RunID, tr.ToStatus); err != nil {
-			log.Error("update pending run failed", "run_id", runs[i].RunID, "error", err)
+		// Look up the workflow's entry step to create the initial StepExecution.
+		entryStepID, err := s.lookupEntryStep(ctx, &runs[i])
+		if err != nil {
+			log.Error("lookup entry step failed", "run_id", runs[i].RunID, "error", err)
+			continue
+		}
+
+		now := time.Now()
+		if err := s.store.WithTx(ctx, func(tx store.Tx) error {
+			if err := tx.UpdateRunStatus(ctx, runs[i].RunID, tr.ToStatus); err != nil {
+				return err
+			}
+			return tx.CreateStepExecution(ctx, &domain.StepExecution{
+				ExecutionID: fmt.Sprintf("%s-%s-1", runs[i].RunID, entryStepID),
+				RunID:       runs[i].RunID,
+				StepID:      entryStepID,
+				Status:      domain.StepStatusWaiting,
+				Attempt:     1,
+				CreatedAt:   now,
+			})
+		}); err != nil {
+			log.Error("activate pending run failed", "run_id", runs[i].RunID, "error", err)
 			continue
 		}
 
 		result.PendingActivated++
-		log.Info("recovered pending run", "run_id", runs[i].RunID)
+		log.Info("recovered pending run", "run_id", runs[i].RunID, "entry_step", entryStepID)
 	}
 	return nil
 }
@@ -164,11 +186,16 @@ func (s *Scheduler) recoverStep(ctx context.Context, run *domain.Run, exec *doma
 		log.Info("blocked step unchanged", "run_id", run.RunID, "step_id", exec.StepID)
 
 	case domain.StepStatusCompleted:
-		// Step completed but run didn't advance — advance now.
-		log.Info("advancing run past completed step", "run_id", run.RunID, "step_id", exec.StepID)
+		// Step completed but run didn't advance — requires engine orchestrator to
+		// look up the outcome's next_step and create the next StepExecution.
+		// Recovery identifies the situation; the engine run loop will process it.
+		log.Warn("completed step needs run advancement (requires engine orchestrator)",
+			"run_id", run.RunID, "step_id", exec.StepID, "outcome_id", exec.OutcomeID)
 
 	case domain.StepStatusFailed:
-		// Check retry eligibility
+		// Check retry eligibility and log the assessment.
+		// Creating a new StepExecution for retry or transitioning the run to failed
+		// requires the engine orchestrator — recovery identifies the situation.
 		stepDef, err := s.lookupStepDefinition(ctx, exec)
 		if err != nil {
 			return fmt.Errorf("lookup step definition: %w", err)
@@ -182,9 +209,11 @@ func (s *Scheduler) recoverStep(ctx context.Context, run *domain.Run, exec *doma
 			classification = exec.ErrorDetail.Classification
 		}
 		if workflow.ShouldRetry(exec.Attempt, retryLimit, classification) {
-			log.Info("failed step eligible for retry", "run_id", run.RunID, "step_id", exec.StepID, "attempt", exec.Attempt)
+			log.Warn("failed step eligible for retry (requires engine orchestrator)",
+				"run_id", run.RunID, "step_id", exec.StepID, "attempt", exec.Attempt)
 		} else {
-			log.Info("failed step not retryable", "run_id", run.RunID, "step_id", exec.StepID)
+			log.Warn("failed step not retryable, run should be failed (requires engine orchestrator)",
+				"run_id", run.RunID, "step_id", exec.StepID)
 		}
 
 	case domain.StepStatusSkipped:
@@ -223,4 +252,22 @@ func findCurrentExecution(execs []domain.StepExecution, stepID string) *domain.S
 		}
 	}
 	return latest
+}
+
+// lookupEntryStep returns the workflow's entry_step ID for a given run.
+func (s *Scheduler) lookupEntryStep(ctx context.Context, run *domain.Run) (string, error) {
+	proj, err := s.store.GetWorkflowProjection(ctx, run.WorkflowPath)
+	if err != nil {
+		return "", fmt.Errorf("get workflow projection: %w", err)
+	}
+
+	var wfDef domain.WorkflowDefinition
+	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
+		return "", fmt.Errorf("unmarshal workflow definition: %w", err)
+	}
+
+	if wfDef.EntryStep == "" {
+		return "", fmt.Errorf("workflow %s has no entry_step", run.WorkflowPath)
+	}
+	return wfDef.EntryStep, nil
 }
