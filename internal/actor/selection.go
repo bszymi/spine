@@ -2,6 +2,7 @@ package actor
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -25,10 +26,10 @@ type SelectionRequest struct {
 	ExplicitActorID      string // for explicit strategy
 }
 
-// roundRobinState tracks assignment rotation for round-robin selection.
+// roundRobinState tracks assignment rotation per eligible pool key.
 var (
-	rrMu    sync.Mutex
-	rrIndex int
+	rrMu      sync.Mutex
+	rrIndices = make(map[string]int)
 )
 
 // SelectActor chooses an actor based on the selection criteria.
@@ -53,9 +54,11 @@ func (s *Service) SelectActor(ctx context.Context, req SelectionRequest) (*domai
 
 	switch req.Strategy {
 	case StrategyRoundRobin:
-		return selectRoundRobin(eligible), nil
-	default: // any_eligible
+		return selectRoundRobin(eligible, req), nil
+	case StrategyAnyEligible, "":
 		return &eligible[0], nil
+	default:
+		return nil, domain.NewError(domain.ErrInvalidParams, "unknown selection strategy: "+string(req.Strategy))
 	}
 }
 
@@ -109,12 +112,15 @@ func filterActors(actors []domain.Actor, req SelectionRequest) []domain.Actor {
 	return result
 }
 
-func selectRoundRobin(actors []domain.Actor) *domain.Actor {
+func selectRoundRobin(actors []domain.Actor, req SelectionRequest) *domain.Actor {
+	// Build a pool key from the selection criteria to keep rotation per-pool
+	key := strings.Join(req.EligibleActorTypes, ",") + "|" + strings.Join(req.RequiredCapabilities, ",") + "|" + string(req.MinRole)
+
 	rrMu.Lock()
 	defer rrMu.Unlock()
 
-	idx := rrIndex % len(actors)
-	rrIndex++
+	idx := rrIndices[key] % len(actors)
+	rrIndices[key]++
 	return &actors[idx]
 }
 

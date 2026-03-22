@@ -24,9 +24,7 @@ func (s *Service) Register(ctx context.Context, actor *domain.Actor) error {
 	if actor.ActorID == "" {
 		return domain.NewError(domain.ErrInvalidParams, "actor_id required")
 	}
-	if actor.Status == "" {
-		actor.Status = domain.ActorStatusActive
-	}
+	actor.Status = domain.ActorStatusActive
 	return s.store.CreateActor(ctx, actor)
 }
 
