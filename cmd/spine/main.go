@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
@@ -70,7 +71,12 @@ func serveCmd() *cobra.Command {
 				}
 			}
 
-			srv := gateway.NewServer(":"+port, st)
+			var authSvc *auth.Service
+			if st != nil {
+				authSvc = auth.NewService(st)
+			}
+
+			srv := gateway.NewServer(":"+port, st, authSvc)
 
 			listenErr := make(chan error, 1)
 			go func() {

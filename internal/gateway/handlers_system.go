@@ -26,14 +26,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleSystemRebuild(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "system.rebuild") {
+		return
+	}
 	WriteNotImplemented(w)
 }
 
-func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "system.rebuild") {
+		return
+	}
 	WriteNotImplemented(w)
 }
 
-func (s *Server) handleSystemValidate(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "system.validate") {
+		return
+	}
 	WriteNotImplemented(w)
 }
