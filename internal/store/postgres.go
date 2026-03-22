@@ -624,6 +624,26 @@ func (s *PostgresStore) QueryArtifactLinks(ctx context.Context, sourcePath strin
 	return links, rows.Err()
 }
 
+func (s *PostgresStore) QueryArtifactLinksByTarget(ctx context.Context, targetPath string) ([]ArtifactLink, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT source_path, target_path, link_type
+		FROM projection.artifact_links WHERE target_path = $1`, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var links []ArtifactLink
+	for rows.Next() {
+		var link ArtifactLink
+		if err := rows.Scan(&link.SourcePath, &link.TargetPath, &link.LinkType); err != nil {
+			return nil, err
+		}
+		links = append(links, link)
+	}
+	return links, rows.Err()
+}
+
 func (s *PostgresStore) DeleteArtifactLinks(ctx context.Context, sourcePath string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM projection.artifact_links WHERE source_path = $1`, sourcePath)
 	return err
