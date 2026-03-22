@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/spf13/cobra"
@@ -46,17 +50,49 @@ func serveCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			ctx = observe.WithComponent(ctx, "server")
-
 			log := observe.Logger(ctx)
-			log.Info("spine server starting", "status", "placeholder")
-			fmt.Println("spine: serve not yet implemented — waiting for signal to exit")
+
+			port := os.Getenv("SPINE_SERVER_PORT")
+			if port == "" {
+				port = "8080"
+			}
+
+			// Connect to database (optional — server starts without it)
+			var st store.Store
+			dbURL := os.Getenv("SPINE_DATABASE_URL")
+			if dbURL != "" {
+				pgStore, err := store.NewPostgresStore(ctx, dbURL)
+				if err != nil {
+					log.Error("database connection failed, starting without store", "error", err)
+				} else {
+					st = pgStore
+					defer pgStore.Close()
+				}
+			}
+
+			srv := gateway.NewServer(":"+port, st)
+
+			listenErr := make(chan error, 1)
+			go func() {
+				log.Info("spine server starting", "port", port)
+				if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					listenErr <- err
+				}
+			}()
 
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-			<-sig
+
+			select {
+			case err := <-listenErr:
+				return fmt.Errorf("server failed to start: %w", err)
+			case <-sig:
+			}
 
 			log.Info("spine server shutting down")
-			return nil
+			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return srv.Shutdown(shutdownCtx)
 		},
 	}
 }
