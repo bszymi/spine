@@ -10,6 +10,7 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
+	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
 	"github.com/go-chi/chi/v5"
 )
@@ -306,6 +307,24 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Evaluate preconditions if validation engine is available
+	if s.validator != nil {
+		stepDef := s.resolveStepDef(r.Context(), exec)
+		if stepDef != nil {
+			run, _ := s.store.GetRun(r.Context(), runID)
+			taskPath := ""
+			if run != nil {
+				taskPath = run.TaskPath
+			}
+			precondResult := validation.EvaluatePreconditions(r.Context(), s.validator, *stepDef, taskPath)
+			if precondResult.Status == "failed" {
+				WriteError(w, domain.NewErrorWithDetail(domain.ErrPrecondition,
+					"step precondition failed", precondResult))
+				return
+			}
+		}
+	}
+
 	result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAssign,
 	})
@@ -365,8 +384,30 @@ func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution
 // resolveEntryStep looks up the workflow entry step for a task path.
 // Falls back to "start" if the workflow cannot be resolved.
 func (s *Server) resolveEntryStep(ctx context.Context, taskPath string) string {
-	// Try to find a workflow that applies to tasks
-	// For now, use a simple approach: look for any active workflow projection
-	// Full workflow binding resolution is deferred to the engine
 	return "start"
+}
+
+// resolveStepDef loads the StepDefinition for a step execution from the workflow.
+func (s *Server) resolveStepDef(ctx context.Context, exec *domain.StepExecution) *domain.StepDefinition {
+	run, err := s.store.GetRun(ctx, exec.RunID)
+	if err != nil || run.WorkflowPath == "" {
+		return nil
+	}
+
+	proj, err := s.store.GetWorkflowProjection(ctx, run.WorkflowPath)
+	if err != nil {
+		return nil
+	}
+
+	var wfDef domain.WorkflowDefinition
+	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
+		return nil
+	}
+
+	for i := range wfDef.Steps {
+		if wfDef.Steps[i].ID == exec.StepID {
+			return &wfDef.Steps[i]
+		}
+	}
+	return nil
 }
