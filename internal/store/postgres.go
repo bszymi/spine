@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -229,6 +230,110 @@ func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID strin
 		execs = append(execs, exec)
 	}
 	return execs, rows.Err()
+}
+
+// ── Actors ──
+
+func (s *PostgresStore) GetActor(ctx context.Context, actorID string) (*domain.Actor, error) {
+	var actor domain.Actor
+	var capabilities []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT actor_id, actor_type, name, role, capabilities, status
+		FROM auth.actors WHERE actor_id = $1`, actorID,
+	).Scan(&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &capabilities, &actor.Status)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "actor not found")
+		}
+		return nil, err
+	}
+	if capabilities != nil {
+		_ = json.Unmarshal(capabilities, &actor.Capabilities)
+	}
+	return &actor, nil
+}
+
+func (s *PostgresStore) CreateActor(ctx context.Context, actor *domain.Actor) error {
+	capabilities, err := json.Marshal(actor.Capabilities)
+	if err != nil {
+		return fmt.Errorf("marshal capabilities: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO auth.actors (actor_id, actor_type, name, role, capabilities, status)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		actor.ActorID, actor.Type, actor.Name, actor.Role, capabilities, actor.Status,
+	)
+	return err
+}
+
+// ── Tokens ──
+
+func (s *PostgresStore) GetActorByTokenHash(ctx context.Context, tokenHash string) (*domain.Actor, *domain.Token, error) {
+	var actor domain.Actor
+	var token domain.Token
+	var capabilities []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT a.actor_id, a.actor_type, a.name, a.role, a.capabilities, a.status,
+		       t.token_id, t.actor_id, t.name, t.expires_at, t.revoked_at, t.created_at
+		FROM auth.tokens t
+		JOIN auth.actors a ON t.actor_id = a.actor_id
+		WHERE t.token_hash = $1`, tokenHash,
+	).Scan(
+		&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &capabilities, &actor.Status,
+		&token.TokenID, &token.ActorID, &token.Name, &token.ExpiresAt, &token.RevokedAt, &token.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil, domain.NewError(domain.ErrUnauthorized, "invalid token")
+		}
+		return nil, nil, err
+	}
+	if capabilities != nil {
+		_ = json.Unmarshal(capabilities, &actor.Capabilities)
+	}
+	return &actor, &token, nil
+}
+
+func (s *PostgresStore) CreateToken(ctx context.Context, record *TokenRecord) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO auth.tokens (token_id, actor_id, token_hash, name, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		record.TokenID, record.ActorID, record.TokenHash, record.Name, record.ExpiresAt, record.CreatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) RevokeToken(ctx context.Context, tokenID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE auth.tokens SET revoked_at = now() WHERE token_id = $1 AND revoked_at IS NULL`, tokenID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "token not found or already revoked")
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListTokensByActor(ctx context.Context, actorID string) ([]domain.Token, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT token_id, actor_id, name, expires_at, revoked_at, created_at
+		FROM auth.tokens WHERE actor_id = $1 ORDER BY created_at DESC`, actorID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []domain.Token
+	for rows.Next() {
+		var t domain.Token
+		if err := rows.Scan(&t.TokenID, &t.ActorID, &t.Name, &t.ExpiresAt, &t.RevokedAt, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
 }
 
 // ── Scheduler Queries ──

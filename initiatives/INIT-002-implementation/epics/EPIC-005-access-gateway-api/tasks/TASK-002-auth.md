@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Authentication and Authorization
-status: Pending
+status: Completed
 epic: /initiatives/INIT-002-implementation/epics/EPIC-005-access-gateway-api/epic.md
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:

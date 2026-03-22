@@ -40,6 +40,16 @@ type Store interface {
 	DeleteArtifactLinks(ctx context.Context, sourcePath string) error
 	QueryArtifactLinks(ctx context.Context, sourcePath string) ([]ArtifactLink, error)
 
+	// Actors
+	GetActor(ctx context.Context, actorID string) (*domain.Actor, error)
+	CreateActor(ctx context.Context, actor *domain.Actor) error
+
+	// Tokens
+	GetActorByTokenHash(ctx context.Context, tokenHash string) (*domain.Actor, *domain.Token, error)
+	CreateToken(ctx context.Context, record *TokenRecord) error
+	RevokeToken(ctx context.Context, tokenID string) error
+	ListTokensByActor(ctx context.Context, actorID string) ([]domain.Token, error)
+
 	// Scheduler queries
 	ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error)
 	ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error)
@@ -126,4 +136,15 @@ type ArtifactQueryResult struct {
 	Items      []ArtifactProjection
 	NextCursor string
 	HasMore    bool
+}
+
+// TokenRecord represents a token in the database (includes hash).
+type TokenRecord struct {
+	TokenID   string
+	ActorID   string
+	TokenHash string
+	Name      string
+	ExpiresAt *time.Time
+	RevokedAt *time.Time
+	CreatedAt time.Time
 }

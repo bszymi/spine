@@ -1,14 +1,80 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
+	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
 )
+
+type contextKey string
+
+const actorContextKey contextKey = "actor"
+
+// actorFromContext returns the authenticated actor from the request context.
+func actorFromContext(ctx context.Context) *domain.Actor {
+	actor, _ := ctx.Value(actorContextKey).(*domain.Actor)
+	return actor
+}
+
+// authMiddleware validates the Bearer token and sets the actor in context.
+// Fails closed: if auth service is not configured, all authenticated routes return 401.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.auth == nil {
+			WriteError(w, domain.NewError(domain.ErrUnavailable, "authentication not configured"))
+			return
+		}
+
+		header := r.Header.Get("Authorization")
+		if header == "" {
+			WriteError(w, domain.NewError(domain.ErrUnauthorized, "authorization header required"))
+			return
+		}
+
+		// HTTP auth schemes are case-insensitive per RFC 7235
+		if len(header) < 7 || !strings.EqualFold(header[:7], "bearer ") {
+			WriteError(w, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format"))
+			return
+		}
+		token := header[7:]
+		if token == "" {
+			WriteError(w, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format"))
+			return
+		}
+
+		actor, err := s.auth.ValidateToken(r.Context(), token)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), actorContextKey, actor)
+		ctx = observe.WithActorID(ctx, actor.ActorID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// authorize checks if the authenticated actor has permission for the operation.
+// Returns false and writes an error response if not authorized.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, op auth.Operation) bool {
+	actor := actorFromContext(r.Context())
+	if actor == nil {
+		// No auth middleware configured — allow in dev/test mode
+		return true
+	}
+	if err := auth.Authorize(actor, op); err != nil {
+		WriteError(w, err)
+		return false
+	}
+	return true
+}
 
 // traceIDMiddleware extracts or generates a trace ID and propagates it
 // through the request context and response header.

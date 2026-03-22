@@ -17,34 +17,46 @@ func (s *Server) routes() http.Handler {
 	r.Use(loggingMiddleware)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// System
+		// Unauthenticated
 		r.Get("/system/health", s.handleHealth)
-		r.Post("/system/rebuild", s.handleSystemRebuild)
-		r.Get("/system/rebuild/{rebuild_id}", s.handleSystemRebuildStatus)
-		r.Post("/system/validate", s.handleSystemValidate)
 
-		// Artifacts — wildcard routing for slash-containing paths
-		r.Post("/artifacts", s.handleArtifactCreate)
-		r.Get("/artifacts", s.handleArtifactList)
-		r.HandleFunc("/artifacts/*", s.handleArtifactWildcard)
+		// Authenticated routes
+		r.Group(func(r chi.Router) {
+			r.Use(s.authMiddleware)
 
-		// Runs
-		r.Post("/runs", s.handleRunStart)
-		r.Get("/runs/{run_id}", s.handleRunStatus)
-		r.Post("/runs/{run_id}/cancel", s.handleRunCancel)
-		r.Post("/runs/{run_id}/steps/{step_id}/assign", s.handleStepAssign)
+			// System (operator)
+			r.Post("/system/rebuild", s.handleSystemRebuild)
+			r.Get("/system/rebuild/{rebuild_id}", s.handleSystemRebuildStatus)
+			r.Post("/system/validate", s.handleSystemValidate)
 
-		// Steps
-		r.Post("/steps/{assignment_id}/submit", s.handleStepSubmit)
+			// Artifacts — wildcard routing for slash-containing paths
+			r.Post("/artifacts", s.handleArtifactCreate)
+			r.Get("/artifacts", s.handleArtifactList)
+			r.HandleFunc("/artifacts/*", s.handleArtifactWildcard)
 
-		// Tasks — wildcard routing for slash-containing paths
-		r.HandleFunc("/tasks/*", s.handleTaskWildcard)
+			// Runs
+			r.Post("/runs", s.handleRunStart)
+			r.Get("/runs/{run_id}", s.handleRunStatus)
+			r.Post("/runs/{run_id}/cancel", s.handleRunCancel)
+			r.Post("/runs/{run_id}/steps/{step_id}/assign", s.handleStepAssign)
 
-		// Query
-		r.Get("/query/artifacts", s.handleQueryArtifacts)
-		r.Get("/query/graph", s.handleQueryGraph)
-		r.Get("/query/history", s.handleQueryHistory)
-		r.Get("/query/runs", s.handleQueryRuns)
+			// Steps
+			r.Post("/steps/{assignment_id}/submit", s.handleStepSubmit)
+
+			// Tasks — wildcard routing for slash-containing paths
+			r.HandleFunc("/tasks/*", s.handleTaskWildcard)
+
+			// Query
+			r.Get("/query/artifacts", s.handleQueryArtifacts)
+			r.Get("/query/graph", s.handleQueryGraph)
+			r.Get("/query/history", s.handleQueryHistory)
+			r.Get("/query/runs", s.handleQueryRuns)
+
+			// Tokens (admin)
+			r.Post("/tokens", s.handleTokenCreate)
+			r.Delete("/tokens/{token_id}", s.handleTokenRevoke)
+			r.Get("/tokens", s.handleTokenList)
+		})
 	})
 
 	return r
