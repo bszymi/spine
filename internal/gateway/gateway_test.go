@@ -187,7 +187,7 @@ func TestWriteNotImplemented(t *testing.T) {
 // ── Middleware Tests ──
 
 func TestTraceIDGenerated(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -204,7 +204,7 @@ func TestTraceIDGenerated(t *testing.T) {
 }
 
 func TestTraceIDPassthrough(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -224,7 +224,7 @@ func TestTraceIDPassthrough(t *testing.T) {
 // ── Health Endpoint Tests ──
 
 func TestHealthWithStore(t *testing.T) {
-	srv := gateway.NewServer(":0", &fakeStore{}, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: &fakeStore{}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -247,7 +247,7 @@ func TestHealthWithStore(t *testing.T) {
 }
 
 func TestHealthWithoutStore(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -267,7 +267,7 @@ func TestHealthWithoutStore(t *testing.T) {
 }
 
 func TestHealthWithUnhealthyStore(t *testing.T) {
-	srv := gateway.NewServer(":0", &fakeStore{pingErr: fmt.Errorf("db down")}, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: &fakeStore{pingErr: fmt.Errorf("db down")}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -289,7 +289,7 @@ func TestHealthWithUnhealthyStore(t *testing.T) {
 // ── Stub Endpoint Tests ──
 
 func TestUnauthenticatedRoutesReturn503WhenAuthNotConfigured(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -321,7 +321,7 @@ func TestUnauthenticatedRoutesReturn503WhenAuthNotConfigured(t *testing.T) {
 }
 
 func TestUnknownRouteReturns404(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -390,7 +390,7 @@ func TestTaskWildcardInvalidMethod(t *testing.T) {
 // ── Response Content-Type ──
 
 func TestResponseContentType(t *testing.T) {
-	srv := gateway.NewServer(":0", nil, nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -451,7 +451,7 @@ func setupAuthServer(t *testing.T) (*httptest.Server, *fakeStore, string) {
 		t.Fatalf("create token: %v", err)
 	}
 
-	srv := gateway.NewServer(":0", fs, authSvc)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
 	ts := httptest.NewServer(srv.Handler())
 	return ts, fs, plaintext
 }
@@ -492,7 +492,8 @@ func TestAuthValidToken(t *testing.T) {
 	ts, _, token := setupAuthServer(t)
 	defer ts.Close()
 
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts", http.NoBody)
+	// Valid token should pass auth — endpoint responds with service error, not 401
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -500,9 +501,9 @@ func TestAuthValidToken(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Admin has reader access, so should get 501 (stub), not 401/403
-	if resp.StatusCode != 501 {
-		t.Errorf("expected 501 (stub), got %d", resp.StatusCode)
+	// Auth passes (not 401/403), service returns 503 (not configured)
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		t.Errorf("expected auth to pass, got %d", resp.StatusCode)
 	}
 }
 
@@ -518,7 +519,7 @@ func TestAuthInsufficientRole(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 
-	srv := gateway.NewServer(":0", fs, authSvc)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -541,7 +542,7 @@ func TestAuthCaseInsensitiveBearer(t *testing.T) {
 	defer ts.Close()
 
 	// Lowercase "bearer" should work per RFC 7235
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts", http.NoBody)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts", http.NoBody)
 	req.Header.Set("Authorization", "bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -549,8 +550,9 @@ func TestAuthCaseInsensitiveBearer(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 501 {
-		t.Errorf("expected 501 (stub), got %d", resp.StatusCode)
+	// Auth should pass (not 401/403)
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		t.Errorf("expected auth to pass with lowercase bearer, got %d", resp.StatusCode)
 	}
 }
 
@@ -779,40 +781,38 @@ func TestTokenListMissingActorID(t *testing.T) {
 
 // ── Authenticated Stub Tests (with auth enabled) ──
 
-func TestAuthenticatedStubsReturn501(t *testing.T) {
+// ── Endpoint Tests with Services ──
+
+func TestAuthenticatedEndpointsReturnErrorWithoutServices(t *testing.T) {
 	ts, _, token := setupAuthServer(t)
 	defer ts.Close()
 
-	stubs := []struct {
+	// Without services configured, endpoints return 4xx/5xx (not 501 stubs anymore)
+	endpoints := []struct {
 		method string
 		path   string
+		expect int // expected status
 	}{
-		{"POST", "/api/v1/system/rebuild"},
-		{"GET", "/api/v1/system/rebuild/rb-123"},
-		{"POST", "/api/v1/system/validate"},
-		{"POST", "/api/v1/artifacts"},
-		{"GET", "/api/v1/artifacts"},
-		{"GET", "/api/v1/artifacts/initiatives/INIT-001/task.md"},
-		{"PUT", "/api/v1/artifacts/initiatives/INIT-001/task.md"},
-		{"POST", "/api/v1/artifacts/initiatives/INIT-001/task.md/validate"},
-		{"GET", "/api/v1/artifacts/initiatives/INIT-001/task.md/links"},
-		{"POST", "/api/v1/runs"},
-		{"GET", "/api/v1/runs/r-123"},
-		{"POST", "/api/v1/runs/r-123/cancel"},
-		{"POST", "/api/v1/runs/r-123/steps/step-1/assign"},
-		{"POST", "/api/v1/steps/assign-123/submit"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/accept"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/reject"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/cancel"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/abandon"},
-		{"POST", "/api/v1/tasks/initiatives/INIT-001/task.md/supersede"},
-		{"GET", "/api/v1/query/artifacts"},
-		{"GET", "/api/v1/query/graph"},
-		{"GET", "/api/v1/query/history"},
-		{"GET", "/api/v1/query/runs"},
+		// Services not configured → 503
+		{"POST", "/api/v1/system/rebuild", 503},
+		{"POST", "/api/v1/system/validate", 503},
+		{"GET", "/api/v1/artifacts/initiatives/test.md", 503},
+		{"GET", "/api/v1/artifacts/initiatives/test.md/links", 500}, // store method not implemented in fake
+		{"POST", "/api/v1/artifacts/initiatives/test.md/validate", 503},
+		{"GET", "/api/v1/query/artifacts", 503},
+		{"GET", "/api/v1/query/runs?task_path=t", 503},
+		{"GET", "/api/v1/query/history?path=t", 503},
+		{"GET", "/api/v1/query/graph?root=t", 503},
+		{"POST", "/api/v1/tasks/initiatives/test.md/accept", 503},
+		// Store present but method not implemented in fake → 500
+		{"GET", "/api/v1/runs/r-123", 500},
+		{"POST", "/api/v1/runs/r-123/cancel", 500},
+		// Missing required body → 400
+		{"POST", "/api/v1/artifacts", 400},
+		{"POST", "/api/v1/runs", 400},
 	}
 
-	for _, tt := range stubs {
+	for _, tt := range endpoints {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
 			req, _ := http.NewRequest(tt.method, ts.URL+tt.path, http.NoBody)
 			req.Header.Set("Authorization", "Bearer "+token)
@@ -821,8 +821,8 @@ func TestAuthenticatedStubsReturn501(t *testing.T) {
 				t.Fatalf("request: %v", err)
 			}
 			defer resp.Body.Close()
-			if resp.StatusCode != 501 {
-				t.Errorf("expected 501, got %d", resp.StatusCode)
+			if resp.StatusCode != tt.expect {
+				t.Errorf("expected %d, got %d", tt.expect, resp.StatusCode)
 			}
 		})
 	}

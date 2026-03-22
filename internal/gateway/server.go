@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 )
 
@@ -13,14 +16,31 @@ type Server struct {
 	httpServer *http.Server
 	store      store.Store
 	auth       *auth.Service
+	artifacts  *artifact.Service
+	projQuery  *projection.QueryService
+	projSync   *projection.Service
+	git        git.GitClient
+}
+
+// ServerConfig holds optional service dependencies for the server.
+type ServerConfig struct {
+	Store     store.Store
+	Auth      *auth.Service
+	Artifacts *artifact.Service
+	ProjQuery *projection.QueryService
+	ProjSync  *projection.Service
+	Git       git.GitClient
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
-// If authSvc is nil, authentication is disabled (development/test mode).
-func NewServer(addr string, st store.Store, authSvc *auth.Service) *Server {
+func NewServer(addr string, cfg ServerConfig) *Server {
 	s := &Server{
-		store: st,
-		auth:  authSvc,
+		store:     cfg.Store,
+		auth:      cfg.Auth,
+		artifacts: cfg.Artifacts,
+		projQuery: cfg.ProjQuery,
+		projSync:  cfg.ProjSync,
+		git:       cfg.Git,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,
