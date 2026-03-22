@@ -8,6 +8,7 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
+	"github.com/bszymi/spine/internal/validation"
 )
 
 // ArtifactService defines the artifact operations the gateway needs.
@@ -45,6 +46,7 @@ type Server struct {
 	projQuery  ProjectionQuerier
 	projSync   ProjectionSyncer
 	git        GitReader
+	validator  *validation.Engine
 }
 
 // ServerConfig holds optional service dependencies for the server.
@@ -55,6 +57,7 @@ type ServerConfig struct {
 	ProjQuery ProjectionQuerier
 	ProjSync  ProjectionSyncer
 	Git       GitReader
+	Validator *validation.Engine
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -66,6 +69,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		projQuery: cfg.ProjQuery,
 		projSync:  cfg.ProjSync,
 		git:       cfg.Git,
+		validator: cfg.Validator,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,

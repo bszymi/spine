@@ -81,8 +81,29 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Use validation engine if available (cross-artifact rules)
+	if s.validator != nil {
+		results := s.validator.ValidateAll(r.Context())
+		var issues []map[string]any
+		for i := range results {
+			if results[i].Status != "passed" {
+				issues = append(issues, map[string]any{
+					"path":   results[i].Errors[0].ArtifactPath,
+					"result": results[i],
+				})
+			}
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"total_artifacts": len(results),
+			"issues":          issues,
+			"trace_id":        observe.TraceID(r.Context()),
+		})
+		return
+	}
+
+	// Fallback to schema-only validation
 	if s.artifacts == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "validation not configured"))
 		return
 	}
 
@@ -92,11 +113,11 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var results []map[string]any
+	var issues []map[string]any
 	for _, a := range artifacts {
 		result := artifact.Validate(a)
 		if result.Status != "passed" {
-			results = append(results, map[string]any{
+			issues = append(issues, map[string]any{
 				"path":   a.Path,
 				"result": result,
 			})
@@ -105,7 +126,7 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"total_artifacts": len(artifacts),
-		"issues":          results,
+		"issues":          issues,
 		"trace_id":        observe.TraceID(r.Context()),
 	})
 }

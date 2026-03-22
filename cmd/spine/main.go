@@ -19,6 +19,7 @@ import (
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
 	"github.com/bszymi/spine/internal/store"
+	"github.com/bszymi/spine/internal/validation"
 	"github.com/spf13/cobra"
 )
 
@@ -107,6 +108,11 @@ func serveCmd() *cobra.Command {
 				projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)
 			}
 
+			var validator *validation.Engine
+			if st != nil {
+				validator = validation.NewEngine(st)
+			}
+
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
 				Store:     st,
 				Auth:      authSvc,
@@ -114,6 +120,7 @@ func serveCmd() *cobra.Command {
 				ProjQuery: projQuery,
 				ProjSync:  projSync,
 				Git:       gitClient,
+				Validator: validator,
 			})
 
 			listenErr := make(chan error, 1)
