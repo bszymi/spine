@@ -26,6 +26,7 @@ type StepTransitionRequest struct {
 	Trigger               StepTrigger
 	FailureClassification domain.FailureClassification // for failed transitions
 	OutcomeID             string                       // for step.submit
+	HasTimeoutOutcome     bool                         // if true, timeout routes to configured outcome (completed, not failed)
 }
 
 // StepTransitionResult describes the outcome of a step state transition.
@@ -39,7 +40,15 @@ type StepTransitionResult struct {
 // Per Engine State Machine §3.2 and §3.4.
 func EvaluateStepTransition(currentStatus domain.StepExecutionStatus, req StepTransitionRequest) (*StepTransitionResult, error) {
 	// §3.4: Terminal states are immutable
+	// Exception: duplicate step.submit on completed is idempotent (no-op)
 	if currentStatus.IsTerminal() {
+		if currentStatus == domain.StepStatusCompleted && req.Trigger == StepTriggerSubmit {
+			return &StepTransitionResult{
+				FromStatus: currentStatus,
+				ToStatus:   currentStatus,
+				Trigger:    req.Trigger,
+			}, nil // idempotent no-op
+		}
 		return nil, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("cannot transition from terminal step state %q", currentStatus))
 	}
@@ -70,7 +79,11 @@ func evaluateWaitingTransition(result *StepTransitionResult, req StepTransitionR
 		result.ToStatus = domain.StepStatusAssigned
 		return result, nil
 	case StepTriggerTimeout:
-		result.ToStatus = domain.StepStatusFailed
+		if req.HasTimeoutOutcome {
+			result.ToStatus = domain.StepStatusCompleted
+		} else {
+			result.ToStatus = domain.StepStatusFailed
+		}
 		return result, nil
 	case StepTriggerSkip:
 		result.ToStatus = domain.StepStatusSkipped
@@ -87,7 +100,11 @@ func evaluateAssignedTransition(result *StepTransitionResult, req StepTransition
 		result.ToStatus = domain.StepStatusInProgress
 		return result, nil
 	case StepTriggerTimeout:
-		result.ToStatus = domain.StepStatusFailed
+		if req.HasTimeoutOutcome {
+			result.ToStatus = domain.StepStatusCompleted
+		} else {
+			result.ToStatus = domain.StepStatusFailed
+		}
 		return result, nil
 	case StepTriggerActorUnavail:
 		result.ToStatus = domain.StepStatusWaiting
@@ -101,13 +118,22 @@ func evaluateAssignedTransition(result *StepTransitionResult, req StepTransition
 func evaluateInProgressTransition(result *StepTransitionResult, req StepTransitionRequest) (*StepTransitionResult, error) {
 	switch req.Trigger {
 	case StepTriggerSubmit:
+		if req.OutcomeID == "" {
+			return nil, domain.NewError(domain.ErrInvalidParams,
+				"step.submit requires OutcomeID")
+		}
 		result.ToStatus = domain.StepStatusCompleted
 		return result, nil
 	case StepTriggerSubmitInvalid:
 		result.ToStatus = domain.StepStatusFailed
 		return result, nil
 	case StepTriggerTimeout:
-		result.ToStatus = domain.StepStatusFailed
+		if req.HasTimeoutOutcome {
+			// Timeout with configured outcome → completed (routes to timeout_outcome)
+			result.ToStatus = domain.StepStatusCompleted
+		} else {
+			result.ToStatus = domain.StepStatusFailed
+		}
 		return result, nil
 	case StepTriggerActorUnavail:
 		result.ToStatus = domain.StepStatusFailed
@@ -127,7 +153,11 @@ func evaluateBlockedTransition(result *StepTransitionResult, req StepTransitionR
 		result.ToStatus = domain.StepStatusInProgress
 		return result, nil
 	case StepTriggerTimeout:
-		result.ToStatus = domain.StepStatusFailed
+		if req.HasTimeoutOutcome {
+			result.ToStatus = domain.StepStatusCompleted
+		} else {
+			result.ToStatus = domain.StepStatusFailed
+		}
 		return result, nil
 	default:
 		return nil, domain.NewError(domain.ErrConflict,

@@ -111,16 +111,29 @@ func TestTerminalStepStatesImmutable(t *testing.T) {
 	}
 	triggers := []workflow.StepTrigger{
 		workflow.StepTriggerAssign,
-		workflow.StepTriggerSubmit,
 		workflow.StepTriggerTimeout,
 		workflow.StepTriggerUnblocked,
 	}
 	for _, state := range terminals {
 		for _, trigger := range triggers {
+			// Skip idempotent case: completed + submit is a no-op
+			if state == domain.StepStatusCompleted && trigger == workflow.StepTriggerSubmit {
+				continue
+			}
 			_, err := workflow.EvaluateStepTransition(state, workflow.StepTransitionRequest{Trigger: trigger})
 			if err == nil {
 				t.Errorf("expected error for %s + %s", state, trigger)
 			}
+		}
+	}
+	// Verify non-completed terminals still reject submit
+	for _, state := range []domain.StepExecutionStatus{domain.StepStatusFailed, domain.StepStatusSkipped} {
+		_, err := workflow.EvaluateStepTransition(state, workflow.StepTransitionRequest{
+			Trigger:   workflow.StepTriggerSubmit,
+			OutcomeID: "test",
+		})
+		if err == nil {
+			t.Errorf("expected error for %s + step.submit", state)
 		}
 	}
 }
@@ -216,6 +229,51 @@ func TestShouldNotRetryExhausted(t *testing.T) {
 func TestShouldNotRetryNoLimit(t *testing.T) {
 	if workflow.ShouldRetry(1, 0, domain.FailureTransient) {
 		t.Error("should not retry with zero retry limit")
+	}
+}
+
+// ── Timeout with configured outcome ──
+
+func TestWaitingTimeoutWithOutcome(t *testing.T) {
+	r, err := workflow.EvaluateStepTransition(domain.StepStatusWaiting, workflow.StepTransitionRequest{
+		Trigger:           workflow.StepTriggerTimeout,
+		HasTimeoutOutcome: true,
+	})
+	assertStepTransition(t, r, err, domain.StepStatusCompleted)
+}
+
+func TestInProgressTimeoutWithOutcome(t *testing.T) {
+	r, err := workflow.EvaluateStepTransition(domain.StepStatusInProgress, workflow.StepTransitionRequest{
+		Trigger:           workflow.StepTriggerTimeout,
+		HasTimeoutOutcome: true,
+	})
+	assertStepTransition(t, r, err, domain.StepStatusCompleted)
+}
+
+// ── Idempotent submit on completed ──
+
+func TestCompletedSubmitIdempotent(t *testing.T) {
+	r, err := workflow.EvaluateStepTransition(domain.StepStatusCompleted, workflow.StepTransitionRequest{
+		Trigger:   workflow.StepTriggerSubmit,
+		OutcomeID: "accepted",
+	})
+	if err != nil {
+		t.Fatalf("expected idempotent no-op, got error: %v", err)
+	}
+	if r.ToStatus != domain.StepStatusCompleted {
+		t.Errorf("expected completed (no-op), got %s", r.ToStatus)
+	}
+}
+
+// ── Empty OutcomeID rejected ──
+
+func TestSubmitRejectsEmptyOutcomeID(t *testing.T) {
+	_, err := workflow.EvaluateStepTransition(domain.StepStatusInProgress, workflow.StepTransitionRequest{
+		Trigger:   workflow.StepTriggerSubmit,
+		OutcomeID: "",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty OutcomeID on step.submit")
 	}
 }
 
