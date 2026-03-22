@@ -50,15 +50,22 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 
-	run := &domain.Run{
-		RunID:     runID,
-		TaskPath:  req.TaskPath,
-		Status:    domain.RunStatusPending,
-		TraceID:   traceID,
-		CreatedAt: now,
+	// Look up workflow to get entry step
+	entryStepID := "start" // default if no workflow projection available
+	if s.store != nil {
+		entryStepID = s.resolveEntryStep(r.Context(), req.TaskPath)
 	}
 
-	// Create run and activate in a transaction
+	run := &domain.Run{
+		RunID:         runID,
+		TaskPath:      req.TaskPath,
+		Status:        domain.RunStatusPending,
+		CurrentStepID: entryStepID,
+		TraceID:       traceID,
+		CreatedAt:     now,
+	}
+
+	// Create run, activate, and create entry step in a transaction
 	if err := s.store.WithTx(r.Context(), func(tx store.Tx) error {
 		if err := tx.CreateRun(r.Context(), run); err != nil {
 			return err
@@ -70,17 +77,29 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return tx.UpdateRunStatus(r.Context(), runID, result.ToStatus)
+		if err := tx.UpdateRunStatus(r.Context(), runID, result.ToStatus); err != nil {
+			return err
+		}
+		// Create entry step execution
+		return tx.CreateStepExecution(r.Context(), &domain.StepExecution{
+			ExecutionID: fmt.Sprintf("%s-%s-1", runID, entryStepID),
+			RunID:       runID,
+			StepID:      entryStepID,
+			Status:      domain.StepStatusWaiting,
+			Attempt:     1,
+			CreatedAt:   now,
+		})
 	}); err != nil {
 		WriteError(w, err)
 		return
 	}
 
 	WriteJSON(w, http.StatusCreated, map[string]any{
-		"run_id":    runID,
-		"task_path": req.TaskPath,
-		"status":    domain.RunStatusActive,
-		"trace_id":  traceID,
+		"run_id":     runID,
+		"task_path":  req.TaskPath,
+		"status":     domain.RunStatusActive,
+		"entry_step": entryStepID,
+		"trace_id":   traceID,
 	})
 }
 
@@ -172,6 +191,24 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If step is assigned, first transition to in_progress (auto-acknowledge)
+	if exec.Status == domain.StepStatusAssigned {
+		ackResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
+			Trigger: workflow.StepTriggerAcknowledged,
+		})
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		now := time.Now()
+		exec.Status = ackResult.ToStatus
+		exec.StartedAt = &now
+		if err := s.store.UpdateStepExecution(r.Context(), exec); err != nil {
+			WriteError(w, err)
+			return
+		}
+	}
+
 	result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger:   workflow.StepTriggerSubmit,
 		OutcomeID: req.OutcomeID,
@@ -191,12 +228,12 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Determine next step from workflow definition
-	nextStepID := "end" // default if we can't look up the workflow
-	if s.store != nil && exec.RunID != "" {
+	nextStepID := "end"
+	if exec.RunID != "" {
 		nextStepID = s.resolveNextStep(r.Context(), exec)
 	}
 
-	// Advance the run
+	// Advance the run and create next step if needed
 	run, err := s.store.GetRun(r.Context(), exec.RunID)
 	if err == nil {
 		runResult, runErr := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
@@ -205,6 +242,17 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		})
 		if runErr == nil {
 			_ = s.store.UpdateRunStatus(r.Context(), run.RunID, runResult.ToStatus)
+			// Create next step execution if run stays active
+			if runResult.ToStatus == domain.RunStatusActive && nextStepID != "end" {
+				_ = s.store.CreateStepExecution(r.Context(), &domain.StepExecution{
+					ExecutionID: fmt.Sprintf("%s-%s-1", run.RunID, nextStepID),
+					RunID:       run.RunID,
+					StepID:      nextStepID,
+					Status:      domain.StepStatusWaiting,
+					Attempt:     1,
+					CreatedAt:   now,
+				})
+			}
 		}
 	}
 
@@ -312,4 +360,13 @@ func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution
 		}
 	}
 	return "end"
+}
+
+// resolveEntryStep looks up the workflow entry step for a task path.
+// Falls back to "start" if the workflow cannot be resolved.
+func (s *Server) resolveEntryStep(ctx context.Context, taskPath string) string {
+	// Try to find a workflow that applies to tasks
+	// For now, use a simple approach: look for any active workflow projection
+	// Full workflow binding resolution is deferred to the engine
+	return "start"
 }

@@ -42,7 +42,7 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read current task
+	// Read current task — need raw content with front matter for status update
 	a, err := s.artifacts.Read(r.Context(), taskPath, "")
 	if err != nil {
 		WriteError(w, err)
@@ -54,8 +54,19 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update the status in content
-	updatedContent := updateFrontMatterStatus(a.Content, string(targetStatus))
+	// Read raw file content (with front matter) via Git
+	if s.git == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "git client not configured"))
+		return
+	}
+	rawContent, err := s.git.ReadFile(r.Context(), "HEAD", taskPath)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	// Update the status in the raw content
+	updatedContent := updateFrontMatterStatus(string(rawContent), string(targetStatus))
 
 	updated, err := s.artifacts.Update(r.Context(), taskPath, updatedContent)
 	if err != nil {
