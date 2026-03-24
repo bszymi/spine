@@ -210,7 +210,7 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 			return fmt.Errorf("complete run: %w", err)
 		}
 	} else {
-		// Non-terminal — create next step and activate it.
+		// Non-terminal — create next step, update current_step_id, and activate.
 		nextExec := &domain.StepExecution{
 			ExecutionID: fmt.Sprintf("%s-%s-1", exec.RunID, nextStepID),
 			RunID:       exec.RunID,
@@ -223,9 +223,9 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 			return fmt.Errorf("create next step: %w", err)
 		}
 
-		// Update run's current step.
-		if err := o.store.UpdateRunStatus(ctx, exec.RunID, domain.RunStatusActive); err != nil {
-			return fmt.Errorf("update run status: %w", err)
+		// Persist current_step_id so the scheduler can resume after restart.
+		if err := o.store.UpdateCurrentStep(ctx, exec.RunID, nextStepID); err != nil {
+			return fmt.Errorf("update current step: %w", err)
 		}
 
 		log.Info("step progressed",
@@ -233,6 +233,11 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 			"completed_step", exec.StepID,
 			"next_step", nextStepID,
 		)
+
+		// Activate the next step (deliver actor assignment).
+		if err := o.ActivateStep(ctx, exec.RunID, nextStepID); err != nil {
+			log.Warn("next step activation failed", "step_id", nextStepID, "error", err)
+		}
 	}
 
 	return nil

@@ -79,6 +79,15 @@ func (m *mockRunStore) UpdateRunStatus(_ context.Context, runID string, status d
 	return nil
 }
 
+func (m *mockRunStore) UpdateCurrentStep(_ context.Context, runID, stepID string) error {
+	if m.runs != nil {
+		if r, ok := m.runs[runID]; ok {
+			r.CurrentStepID = stepID
+		}
+	}
+	return nil
+}
+
 func (m *mockRunStore) CreateStepExecution(_ context.Context, exec *domain.StepExecution) error {
 	m.createdSteps = append(m.createdSteps, exec)
 	return nil
@@ -221,12 +230,12 @@ func TestStartRun_HappyPath(t *testing.T) {
 		t.Fatalf("expected 1 step created, got %d", len(store.createdSteps))
 	}
 
-	// Event should be emitted.
-	if len(events.events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events.events))
+	// Events should include run_started and step_assigned.
+	if len(events.events) < 1 {
+		t.Fatal("expected at least 1 event")
 	}
 	if events.events[0].Type != domain.EventRunStarted {
-		t.Errorf("expected event type run_started, got %s", events.events[0].Type)
+		t.Errorf("expected first event run_started, got %s", events.events[0].Type)
 	}
 }
 

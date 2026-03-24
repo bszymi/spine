@@ -109,6 +109,17 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, runID string, statu
 	return nil
 }
 
+func (s *PostgresStore) UpdateCurrentStep(ctx context.Context, runID, stepID string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE runtime.runs SET current_step_id = $1 WHERE run_id = $2`, stepID, runID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "run not found")
+	}
+	return nil
+}
+
 func (s *PostgresStore) ListRunsByTask(ctx context.Context, taskPath string) ([]domain.Run, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, trace_id, started_at, completed_at, created_at
