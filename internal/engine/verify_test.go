@@ -23,7 +23,7 @@ var _ engine.EventEmitter = (*event.QueueRouter)(nil)
 var _ engine.GitOperator = (*git.CLIClient)(nil)
 
 // store.Store satisfies RunStore.
-var _ engine.RunStore = (store.Store)(nil)
+var _ engine.RunStore = store.Store(nil)
 
 // actor.Gateway satisfies ActorAssigner.
 var _ engine.ActorAssigner = (*actor.Gateway)(nil)
