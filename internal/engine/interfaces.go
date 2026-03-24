@@ -52,6 +52,11 @@ type EventEmitter interface {
 	Emit(ctx context.Context, event domain.Event) error
 }
 
+// WorkflowLoader loads a workflow definition from Git at a specific version.
+type WorkflowLoader interface {
+	LoadWorkflow(ctx context.Context, path, ref string) (*domain.WorkflowDefinition, error)
+}
+
 // GitOperator provides Git operations needed for run-level branching and commits.
 type GitOperator interface {
 	Commit(ctx context.Context, opts git.CommitOpts) (git.CommitResult, error)

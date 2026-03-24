@@ -84,6 +84,35 @@ func (m *mockRunStore) CreateStepExecution(_ context.Context, exec *domain.StepE
 	return nil
 }
 
+func (m *mockRunStore) GetStepExecution(_ context.Context, executionID string) (*domain.StepExecution, error) {
+	for _, s := range m.createdSteps {
+		if s.ExecutionID == executionID {
+			return s, nil
+		}
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
+}
+
+func (m *mockRunStore) UpdateStepExecution(_ context.Context, exec *domain.StepExecution) error {
+	for i, s := range m.createdSteps {
+		if s.ExecutionID == exec.ExecutionID {
+			m.createdSteps[i] = exec
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *mockRunStore) ListStepExecutionsByRun(_ context.Context, runID string) ([]domain.StepExecution, error) {
+	var result []domain.StepExecution
+	for _, s := range m.createdSteps {
+		if s.RunID == runID {
+			result = append(result, *s)
+		}
+	}
+	return result, nil
+}
+
 type mockEventEmitter struct {
 	events []domain.Event
 }
@@ -108,6 +137,7 @@ func testOrchestrator(
 		artifacts: artifacts,
 		events:    events,
 		git:       &stubGitOperator{},
+		wfLoader:  &stubWorkflowLoader{},
 	}
 }
 

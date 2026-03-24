@@ -6,12 +6,13 @@ import "fmt"
 // event router, and Git client into a single execution coordinator. It manages
 // run lifecycle, step progression, and outcome routing.
 type Orchestrator struct {
-	workflows WorkflowResolver
-	store     RunStore
-	actors    ActorAssigner
-	artifacts ArtifactReader
-	events    EventEmitter
-	git       GitOperator
+	workflows    WorkflowResolver
+	store        RunStore
+	actors       ActorAssigner
+	artifacts    ArtifactReader
+	events       EventEmitter
+	git          GitOperator
+	wfLoader     WorkflowLoader
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -22,6 +23,7 @@ func New(
 	artifacts ArtifactReader,
 	events EventEmitter,
 	gitOp GitOperator,
+	wfLoader WorkflowLoader,
 ) (*Orchestrator, error) {
 	if workflows == nil {
 		return nil, fmt.Errorf("engine: workflows resolver is required")
@@ -41,13 +43,17 @@ func New(
 	if gitOp == nil {
 		return nil, fmt.Errorf("engine: git operator is required")
 	}
+	if wfLoader == nil {
+		return nil, fmt.Errorf("engine: workflow loader is required")
+	}
 
 	return &Orchestrator{
-		workflows: workflows,
-		store:     store,
-		actors:    actors,
-		artifacts: artifacts,
-		events:    events,
-		git:       gitOp,
+		workflows:    workflows,
+		store:        store,
+		actors:       actors,
+		artifacts:    artifacts,
+		events:       events,
+		git:          gitOp,
+		wfLoader:     wfLoader,
 	}, nil
 }
