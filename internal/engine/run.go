@@ -69,6 +69,21 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		return nil, fmt.Errorf("create run: %w", err)
 	}
 
+	// Create entry step execution BEFORE activation so that a failure here
+	// leaves the run in pending (recoverable by scheduler) rather than
+	// active with no step (unrecoverable).
+	entryStep := &domain.StepExecution{
+		ExecutionID: fmt.Sprintf("%s-%s-1", runID, wfDef.EntryStep),
+		RunID:       runID,
+		StepID:      wfDef.EntryStep,
+		Status:      domain.StepStatusWaiting,
+		Attempt:     1,
+		CreatedAt:   now,
+	}
+	if err := o.store.CreateStepExecution(ctx, entryStep); err != nil {
+		return nil, fmt.Errorf("create entry step: %w", err)
+	}
+
 	// Activate: pending → active.
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerActivate,
@@ -84,27 +99,16 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	startedAt := now
 	run.StartedAt = &startedAt
 
-	// Create entry step execution.
-	entryStep := &domain.StepExecution{
-		ExecutionID: fmt.Sprintf("%s-%s-1", runID, wfDef.EntryStep),
-		RunID:       runID,
-		StepID:      wfDef.EntryStep,
-		Status:      domain.StepStatusWaiting,
-		Attempt:     1,
-		CreatedAt:   now,
-	}
-	if err := o.store.CreateStepExecution(ctx, entryStep); err != nil {
-		return nil, fmt.Errorf("create entry step: %w", err)
-	}
-
-	// Emit run_started event.
-	_ = o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s", traceID[:12]),
+	// Emit run_started event (fire-and-forget per §6.1).
+	if err := o.events.Emit(ctx, domain.Event{
+		EventID:   fmt.Sprintf("evt-%s-started", traceID[:12]),
 		Type:      domain.EventRunStarted,
 		Timestamp: now,
 		RunID:     runID,
 		TraceID:   traceID,
-	})
+	}); err != nil {
+		log.Warn("failed to emit event", "event_type", domain.EventRunStarted, "error", err)
+	}
 
 	log.Info("run started",
 		"run_id", runID,
@@ -116,9 +120,11 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	return &StartRunResult{Run: run, EntryStep: entryStep}, nil
 }
 
-// CompleteRun transitions an active run to completed when the terminal step
-// has been reached. Uses the run state machine to validate the transition.
-func (o *Orchestrator) CompleteRun(ctx context.Context, runID string) error {
+// CompleteRun transitions an active run to completed (or committing if
+// hasCommit is true) when the terminal step has been reached.
+// When hasCommit is true, the run enters the committing state for Git
+// persistence before completing. Uses the run state machine to validate.
+func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit bool) error {
 	run, err := o.store.GetRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("get run: %w", err)
@@ -127,7 +133,7 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string) error {
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger:    workflow.TriggerStepCompleted,
 		NextStepID: "end",
-		HasCommit:  false,
+		HasCommit:  hasCommit,
 	})
 	if err != nil {
 		return err
@@ -137,20 +143,23 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string) error {
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	_ = o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s", run.TraceID[:12]),
+	log := observe.Logger(ctx)
+	if err := o.events.Emit(ctx, domain.Event{
+		EventID:   fmt.Sprintf("evt-%s-completed", run.TraceID[:12]),
 		Type:      domain.EventRunCompleted,
 		Timestamp: time.Now(),
 		RunID:     runID,
 		TraceID:   run.TraceID,
-	})
+	}); err != nil {
+		log.Warn("failed to emit event", "event_type", domain.EventRunCompleted, "error", err)
+	}
 
-	observe.Logger(ctx).Info("run completed", "run_id", runID)
+	log.Info("run completed", "run_id", runID)
 	return nil
 }
 
 // FailRun transitions an active run to failed due to a permanent failure.
-func (o *Orchestrator) FailRun(ctx context.Context, runID string, reason string) error {
+func (o *Orchestrator) FailRun(ctx context.Context, runID, reason string) error {
 	run, err := o.store.GetRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("get run: %w", err)
@@ -167,17 +176,20 @@ func (o *Orchestrator) FailRun(ctx context.Context, runID string, reason string)
 		return fmt.Errorf("update run status: %w", err)
 	}
 
+	log := observe.Logger(ctx)
 	payload, _ := json.Marshal(map[string]string{"reason": reason})
-	_ = o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s", run.TraceID[:12]),
+	if err := o.events.Emit(ctx, domain.Event{
+		EventID:   fmt.Sprintf("evt-%s-failed", run.TraceID[:12]),
 		Type:      domain.EventRunFailed,
 		Timestamp: time.Now(),
 		RunID:     runID,
 		TraceID:   run.TraceID,
 		Payload:   payload,
-	})
+	}); err != nil {
+		log.Warn("failed to emit event", "event_type", domain.EventRunFailed, "error", err)
+	}
 
-	observe.Logger(ctx).Info("run failed", "run_id", runID, "reason", reason)
+	log.Info("run failed", "run_id", runID, "reason", reason)
 	return nil
 }
 
@@ -199,15 +211,18 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	_ = o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s", run.TraceID[:12]),
+	log := observe.Logger(ctx)
+	if err := o.events.Emit(ctx, domain.Event{
+		EventID:   fmt.Sprintf("evt-%s-cancelled", run.TraceID[:12]),
 		Type:      domain.EventRunCancelled,
 		Timestamp: time.Now(),
 		RunID:     runID,
 		TraceID:   run.TraceID,
-	})
+	}); err != nil {
+		log.Warn("failed to emit event", "event_type", domain.EventRunCancelled, "error", err)
+	}
 
-	observe.Logger(ctx).Info("run cancelled", "run_id", runID)
+	log.Info("run cancelled", "run_id", runID)
 	return nil
 }
 

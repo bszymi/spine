@@ -313,7 +313,7 @@ func TestCompleteRun_HappyPath(t *testing.T) {
 	events := &mockEventEmitter{}
 	orch := testOrchestrator(&mockArtifactReader{}, &mockWorkflowResolver{}, store, events)
 
-	err := orch.CompleteRun(context.Background(), "run-1")
+	err := orch.CompleteRun(context.Background(), "run-1", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestCompleteRun_InvalidState(t *testing.T) {
 	}
 	orch := testOrchestrator(&mockArtifactReader{}, &mockWorkflowResolver{}, store, &mockEventEmitter{})
 
-	err := orch.CompleteRun(context.Background(), "run-1")
+	err := orch.CompleteRun(context.Background(), "run-1", false)
 	if err == nil {
 		t.Fatal("expected error for already-completed run")
 	}
@@ -355,9 +355,32 @@ func TestCompleteRun_NotFound(t *testing.T) {
 	store := &mockRunStore{}
 	orch := testOrchestrator(&mockArtifactReader{}, &mockWorkflowResolver{}, store, &mockEventEmitter{})
 
-	err := orch.CompleteRun(context.Background(), "run-missing")
+	err := orch.CompleteRun(context.Background(), "run-missing", false)
 	if err == nil {
 		t.Fatal("expected error for missing run")
+	}
+}
+
+func TestCompleteRun_WithCommit(t *testing.T) {
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {
+				RunID:   "run-1",
+				Status:  domain.RunStatusActive,
+				TraceID: "trace-1234567890ab",
+			},
+		},
+	}
+	events := &mockEventEmitter{}
+	orch := testOrchestrator(&mockArtifactReader{}, &mockWorkflowResolver{}, store, events)
+
+	err := orch.CompleteRun(context.Background(), "run-1", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if store.statusCalls[0].status != domain.RunStatusCommitting {
+		t.Errorf("expected committing, got %s", store.statusCalls[0].status)
 	}
 }
 
