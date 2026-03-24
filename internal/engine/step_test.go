@@ -411,6 +411,154 @@ func TestCheckLinksExist(t *testing.T) {
 	}
 }
 
+func TestEvaluatePreconditions_NoPreconditions(t *testing.T) {
+	orch := &Orchestrator{artifacts: &mockArtifactReader{}}
+	step := &domain.StepDefinition{}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	if !orch.evaluatePreconditions(context.Background(), step, run) {
+		t.Error("expected pass with no preconditions")
+	}
+}
+
+func TestEvaluatePreconditions_UnknownType(t *testing.T) {
+	orch := &Orchestrator{artifacts: &mockArtifactReader{}}
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "future_type", Config: map[string]string{}},
+		},
+	}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	// Unknown types are skipped — should pass.
+	if !orch.evaluatePreconditions(context.Background(), step, run) {
+		t.Error("expected pass with unknown precondition type")
+	}
+}
+
+func TestEvaluatePreconditions_AllTypes(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{
+			Status:   "Completed",
+			Metadata: map[string]string{"owner": "alice", "priority": "high"},
+			Links:    []domain.Link{{Type: domain.LinkTypeParent, Target: "/epics/e1.md"}},
+		},
+	}
+	orch := &Orchestrator{artifacts: artifacts}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "artifact_status", Config: map[string]string{"status": "Completed"}},
+			{Type: "field_present", Config: map[string]string{"field": "owner"}},
+			{Type: "field_value", Config: map[string]string{"field": "priority", "value": "high"}},
+			{Type: "links_exist", Config: map[string]string{"link_type": "parent"}},
+		},
+	}
+
+	if !orch.evaluatePreconditions(context.Background(), step, run) {
+		t.Error("expected all preconditions to pass")
+	}
+}
+
+func TestEvaluatePreconditions_FieldPresentFails(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{Metadata: map[string]string{}},
+	}
+	orch := &Orchestrator{artifacts: artifacts}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "field_present", Config: map[string]string{"field": "missing"}},
+		},
+	}
+
+	if orch.evaluatePreconditions(context.Background(), step, run) {
+		t.Error("expected field_present precondition to fail")
+	}
+}
+
+func TestEvaluatePreconditions_FieldValueFails(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{Metadata: map[string]string{"priority": "low"}},
+	}
+	orch := &Orchestrator{artifacts: artifacts}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "field_value", Config: map[string]string{"field": "priority", "value": "high"}},
+		},
+	}
+
+	if orch.evaluatePreconditions(context.Background(), step, run) {
+		t.Error("expected field_value precondition to fail")
+	}
+}
+
+func TestEvaluatePreconditions_LinksExistFails(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{Links: []domain.Link{}},
+	}
+	orch := &Orchestrator{artifacts: artifacts}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "links_exist", Config: map[string]string{"link_type": "parent"}},
+		},
+	}
+
+	if orch.evaluatePreconditions(context.Background(), step, run) {
+		t.Error("expected links_exist precondition to fail")
+	}
+}
+
+func TestCheckArtifactStatus_WithExplicitPath(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{Status: "Active"},
+	}
+	orch := &Orchestrator{artifacts: artifacts}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	if !orch.checkArtifactStatus(context.Background(), map[string]string{"path": "other.md", "status": "Active"}, run) {
+		t.Error("expected pass with explicit path")
+	}
+}
+
+func TestCheckArtifactStatus_ReadError(t *testing.T) {
+	artifacts := &mockArtifactReader{err: errors.New("not found")}
+	orch := &Orchestrator{artifacts: artifacts}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	if orch.checkArtifactStatus(context.Background(), map[string]string{"status": "Active"}, run) {
+		t.Error("expected fail on read error")
+	}
+}
+
+func TestFindStepExecution_NoMatch(t *testing.T) {
+	store := &mockRunStore{
+		createdSteps: []*domain.StepExecution{
+			{ExecutionID: "e1", RunID: "run-1", StepID: "start", Status: domain.StepStatusCompleted},
+		},
+	}
+	orch := &Orchestrator{store: store}
+
+	_, err := orch.findStepExecution(context.Background(), "run-1", "start")
+	if err == nil {
+		t.Fatal("expected error for no active execution")
+	}
+}
+
+func TestNewGitWorkflowLoader(t *testing.T) {
+	gc := &stubGitClient{headSHA: "abc"}
+	loader := NewGitWorkflowLoader(gc)
+	if loader.gitClient != gc {
+		t.Error("expected gitClient to be stored")
+	}
+}
+
 func TestFindOutcome(t *testing.T) {
 	step := &domain.StepDefinition{
 		Outcomes: []domain.OutcomeDefinition{
