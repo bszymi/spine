@@ -20,6 +20,7 @@ type Store interface {
 	CreateRun(ctx context.Context, run *domain.Run) error
 	GetRun(ctx context.Context, runID string) (*domain.Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error
+	UpdateCurrentStep(ctx context.Context, runID, stepID string) error
 	ListRunsByTask(ctx context.Context, taskPath string) ([]domain.Run, error)
 
 	// Step Executions

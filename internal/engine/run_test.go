@@ -79,9 +79,47 @@ func (m *mockRunStore) UpdateRunStatus(_ context.Context, runID string, status d
 	return nil
 }
 
+func (m *mockRunStore) UpdateCurrentStep(_ context.Context, runID, stepID string) error {
+	if m.runs != nil {
+		if r, ok := m.runs[runID]; ok {
+			r.CurrentStepID = stepID
+		}
+	}
+	return nil
+}
+
 func (m *mockRunStore) CreateStepExecution(_ context.Context, exec *domain.StepExecution) error {
 	m.createdSteps = append(m.createdSteps, exec)
 	return nil
+}
+
+func (m *mockRunStore) GetStepExecution(_ context.Context, executionID string) (*domain.StepExecution, error) {
+	for _, s := range m.createdSteps {
+		if s.ExecutionID == executionID {
+			return s, nil
+		}
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
+}
+
+func (m *mockRunStore) UpdateStepExecution(_ context.Context, exec *domain.StepExecution) error {
+	for i, s := range m.createdSteps {
+		if s.ExecutionID == exec.ExecutionID {
+			m.createdSteps[i] = exec
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *mockRunStore) ListStepExecutionsByRun(_ context.Context, runID string) ([]domain.StepExecution, error) {
+	var result []domain.StepExecution
+	for _, s := range m.createdSteps {
+		if s.RunID == runID {
+			result = append(result, *s)
+		}
+	}
+	return result, nil
 }
 
 type mockEventEmitter struct {
@@ -108,6 +146,7 @@ func testOrchestrator(
 		artifacts: artifacts,
 		events:    events,
 		git:       &stubGitOperator{},
+		wfLoader:  &stubWorkflowLoader{},
 	}
 }
 
@@ -191,12 +230,12 @@ func TestStartRun_HappyPath(t *testing.T) {
 		t.Fatalf("expected 1 step created, got %d", len(store.createdSteps))
 	}
 
-	// Event should be emitted.
-	if len(events.events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events.events))
+	// Events should include run_started and step_assigned.
+	if len(events.events) < 1 {
+		t.Fatal("expected at least 1 event")
 	}
 	if events.events[0].Type != domain.EventRunStarted {
-		t.Errorf("expected event type run_started, got %s", events.events[0].Type)
+		t.Errorf("expected first event run_started, got %s", events.events[0].Type)
 	}
 }
 

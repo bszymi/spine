@@ -117,6 +117,14 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		"entry_step", wfDef.EntryStep,
 	)
 
+	// Activate the entry step so it gets an actor assignment.
+	if err := o.ActivateStep(ctx, runID, wfDef.EntryStep); err != nil {
+		// Activation failure is non-fatal for run creation; the step
+		// remains in waiting and can be activated later (e.g. by scheduler
+		// or retry). Log but don't fail StartRun.
+		log.Warn("entry step activation failed", "step_id", wfDef.EntryStep, "error", err)
+	}
+
 	return &StartRunResult{Run: run, EntryStep: entryStep}, nil
 }
 

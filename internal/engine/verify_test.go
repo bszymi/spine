@@ -30,3 +30,6 @@ var _ engine.ActorAssigner = (*actor.Gateway)(nil)
 
 // engine.BindingResolver satisfies WorkflowResolver.
 var _ engine.WorkflowResolver = (*engine.BindingResolver)(nil)
+
+// engine.GitWorkflowLoader satisfies WorkflowLoader.
+var _ engine.WorkflowLoader = (*engine.GitWorkflowLoader)(nil)

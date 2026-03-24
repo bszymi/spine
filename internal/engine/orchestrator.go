@@ -12,6 +12,7 @@ type Orchestrator struct {
 	artifacts ArtifactReader
 	events    EventEmitter
 	git       GitOperator
+	wfLoader  WorkflowLoader
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -22,6 +23,7 @@ func New(
 	artifacts ArtifactReader,
 	events EventEmitter,
 	gitOp GitOperator,
+	wfLoader WorkflowLoader,
 ) (*Orchestrator, error) {
 	if workflows == nil {
 		return nil, fmt.Errorf("engine: workflows resolver is required")
@@ -41,6 +43,9 @@ func New(
 	if gitOp == nil {
 		return nil, fmt.Errorf("engine: git operator is required")
 	}
+	if wfLoader == nil {
+		return nil, fmt.Errorf("engine: workflow loader is required")
+	}
 
 	return &Orchestrator{
 		workflows: workflows,
@@ -49,5 +54,6 @@ func New(
 		artifacts: artifacts,
 		events:    events,
 		git:       gitOp,
+		wfLoader:  wfLoader,
 	}, nil
 }

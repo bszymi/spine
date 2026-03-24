@@ -27,6 +27,7 @@ func (s *stubRunStore) GetRun(_ context.Context, _ string) (*domain.Run, error) 
 func (s *stubRunStore) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error {
 	return nil
 }
+func (s *stubRunStore) UpdateCurrentStep(_ context.Context, _, _ string) error { return nil }
 func (s *stubRunStore) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error {
 	return nil
 }
@@ -85,6 +86,18 @@ func (s *stubGitOperator) CreateBranch(_ context.Context, _, _ string) error { r
 func (s *stubGitOperator) DeleteBranch(_ context.Context, _ string) error    { return nil }
 func (s *stubGitOperator) Head(_ context.Context) (string, error)            { return "abc123", nil }
 
+type stubWorkflowLoader struct{}
+
+func (s *stubWorkflowLoader) LoadWorkflow(_ context.Context, _, _ string) (*domain.WorkflowDefinition, error) {
+	return &domain.WorkflowDefinition{
+		ID:        "wf-stub",
+		EntryStep: "start",
+		Steps: []domain.StepDefinition{
+			{ID: "start", Name: "Start", Outcomes: []domain.OutcomeDefinition{{ID: "done", Name: "Done"}}},
+		},
+	}, nil
+}
+
 type deps struct {
 	wf  WorkflowResolver
 	st  RunStore
@@ -92,6 +105,7 @@ type deps struct {
 	art ArtifactReader
 	ev  EventEmitter
 	g   GitOperator
+	wfl WorkflowLoader
 }
 
 func validDeps() deps {
@@ -102,12 +116,13 @@ func validDeps() deps {
 		art: &stubArtifactReader{},
 		ev:  &stubEventEmitter{},
 		g:   &stubGitOperator{},
+		wfl: &stubWorkflowLoader{},
 	}
 }
 
 func TestNew_AllDependencies(t *testing.T) {
 	d := validDeps()
-	o, err := New(d.wf, d.st, d.act, d.art, d.ev, d.g)
+	o, err := New(d.wf, d.st, d.act, d.art, d.ev, d.g, d.wfl)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +133,7 @@ func TestNew_AllDependencies(t *testing.T) {
 
 func TestNew_NilWorkflows(t *testing.T) {
 	d := validDeps()
-	_, err := New(nil, d.st, d.act, d.art, d.ev, d.g)
+	_, err := New(nil, d.st, d.act, d.art, d.ev, d.g, d.wfl)
 	if err == nil {
 		t.Fatal("expected error for nil workflows")
 	}
@@ -126,7 +141,7 @@ func TestNew_NilWorkflows(t *testing.T) {
 
 func TestNew_NilStore(t *testing.T) {
 	d := validDeps()
-	_, err := New(d.wf, nil, d.act, d.art, d.ev, d.g)
+	_, err := New(d.wf, nil, d.act, d.art, d.ev, d.g, d.wfl)
 	if err == nil {
 		t.Fatal("expected error for nil store")
 	}
@@ -134,7 +149,7 @@ func TestNew_NilStore(t *testing.T) {
 
 func TestNew_NilActors(t *testing.T) {
 	d := validDeps()
-	_, err := New(d.wf, d.st, nil, d.art, d.ev, d.g)
+	_, err := New(d.wf, d.st, nil, d.art, d.ev, d.g, d.wfl)
 	if err == nil {
 		t.Fatal("expected error for nil actors")
 	}
@@ -142,7 +157,7 @@ func TestNew_NilActors(t *testing.T) {
 
 func TestNew_NilArtifacts(t *testing.T) {
 	d := validDeps()
-	_, err := New(d.wf, d.st, d.act, nil, d.ev, d.g)
+	_, err := New(d.wf, d.st, d.act, nil, d.ev, d.g, d.wfl)
 	if err == nil {
 		t.Fatal("expected error for nil artifacts")
 	}
@@ -150,7 +165,7 @@ func TestNew_NilArtifacts(t *testing.T) {
 
 func TestNew_NilEvents(t *testing.T) {
 	d := validDeps()
-	_, err := New(d.wf, d.st, d.act, d.art, nil, d.g)
+	_, err := New(d.wf, d.st, d.act, d.art, nil, d.g, d.wfl)
 	if err == nil {
 		t.Fatal("expected error for nil events")
 	}
@@ -158,9 +173,17 @@ func TestNew_NilEvents(t *testing.T) {
 
 func TestNew_NilGit(t *testing.T) {
 	d := validDeps()
-	_, err := New(d.wf, d.st, d.act, d.art, d.ev, nil)
+	_, err := New(d.wf, d.st, d.act, d.art, d.ev, nil, d.wfl)
 	if err == nil {
 		t.Fatal("expected error for nil git")
+	}
+}
+
+func TestNew_NilWorkflowLoader(t *testing.T) {
+	d := validDeps()
+	_, err := New(d.wf, d.st, d.act, d.art, d.ev, d.g, nil)
+	if err == nil {
+		t.Fatal("expected error for nil workflow loader")
 	}
 }
 
