@@ -1,0 +1,62 @@
+package engine
+
+import (
+	"context"
+
+	"github.com/bszymi/spine/internal/actor"
+	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/workflow"
+)
+
+// WorkflowResolver resolves the governing workflow for a given artifact type.
+type WorkflowResolver interface {
+	ResolveWorkflow(ctx context.Context, artifactType, workType string) (*workflow.BindingResult, error)
+}
+
+// RunStore provides run and step execution persistence required by the orchestrator.
+type RunStore interface {
+	// Runs
+	CreateRun(ctx context.Context, run *domain.Run) error
+	GetRun(ctx context.Context, runID string) (*domain.Run, error)
+	UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error
+
+	// Step Executions
+	CreateStepExecution(ctx context.Context, exec *domain.StepExecution) error
+	GetStepExecution(ctx context.Context, executionID string) (*domain.StepExecution, error)
+	UpdateStepExecution(ctx context.Context, exec *domain.StepExecution) error
+	ListStepExecutionsByRun(ctx context.Context, runID string) ([]domain.StepExecution, error)
+
+	// Divergence
+	CreateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error
+	UpdateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error
+	GetDivergenceContext(ctx context.Context, divergenceID string) (*domain.DivergenceContext, error)
+	CreateBranch(ctx context.Context, branch *domain.Branch) error
+	UpdateBranch(ctx context.Context, branch *domain.Branch) error
+	ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error)
+}
+
+// ActorAssigner assigns work to actors and processes their results.
+type ActorAssigner interface {
+	DeliverAssignment(ctx context.Context, req actor.AssignmentRequest) error
+	ProcessResult(ctx context.Context, req actor.AssignmentRequest, result actor.AssignmentResult) error
+}
+
+// ArtifactReader reads artifacts from the repository.
+type ArtifactReader interface {
+	Read(ctx context.Context, path, ref string) (*domain.Artifact, error)
+}
+
+// EventEmitter emits domain events during orchestration.
+type EventEmitter interface {
+	Emit(ctx context.Context, event domain.Event) error
+}
+
+// GitOperator provides Git operations needed for run-level branching and commits.
+type GitOperator interface {
+	Commit(ctx context.Context, opts git.CommitOpts) (git.CommitResult, error)
+	Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error)
+	CreateBranch(ctx context.Context, name, base string) error
+	DeleteBranch(ctx context.Context, name string) error
+	Head(ctx context.Context) (string, error)
+}
