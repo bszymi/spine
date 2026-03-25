@@ -20,6 +20,8 @@ type Scheduler struct {
 	commitRetryFn    CommitRetryFunc
 	commitMaxRetries int
 	commitThreshold  time.Duration
+	stepRecoveryFn   StepRecoveryFunc
+	runFailFn        RunFailFunc
 	done             chan struct{}
 }
 

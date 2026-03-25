@@ -11,6 +11,13 @@ type Option func(*Scheduler)
 // CommitRetryFunc is called by the scheduler to retry merge for committing runs.
 type CommitRetryFunc func(ctx context.Context, runID string) error
 
+// StepRecoveryFunc is called by recovery to resume a step through the engine.
+// For completed steps it advances the run; for failed steps it evaluates retry.
+type StepRecoveryFunc func(ctx context.Context, executionID string) error
+
+// RunFailFunc is called by recovery to fail a run that cannot be recovered.
+type RunFailFunc func(ctx context.Context, runID, reason string) error
+
 // WithTimeoutScanInterval sets how often the timeout scanner runs.
 func WithTimeoutScanInterval(d time.Duration) Option {
 	return func(s *Scheduler) { s.timeoutInterval = d }
@@ -33,4 +40,14 @@ func WithCommitRetry(fn CommitRetryFunc, maxRetries int, threshold time.Duration
 		s.commitMaxRetries = maxRetries
 		s.commitThreshold = threshold
 	}
+}
+
+// WithStepRecovery sets the function used to recover completed/failed steps.
+func WithStepRecovery(fn StepRecoveryFunc) Option {
+	return func(s *Scheduler) { s.stepRecoveryFn = fn }
+}
+
+// WithRunFail sets the function used to fail unrecoverable runs.
+func WithRunFail(fn RunFailFunc) Option {
+	return func(s *Scheduler) { s.runFailFn = fn }
 }

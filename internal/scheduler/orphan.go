@@ -28,6 +28,18 @@ func (s *Scheduler) ScanOrphans(ctx context.Context) error {
 			"created_at", runs[i].CreatedAt,
 			"current_step_id", runs[i].CurrentStepID,
 		)
+
+		// Only fail runs that have been stale for 3x the orphan threshold.
+		// Single-threshold orphans are logged as warnings but may just be slow;
+		// persistent orphans are truly stuck and should be failed.
+		if s.runFailFn != nil && time.Since(runs[i].CreatedAt) > 3*s.orphanThreshold {
+			if err := s.runFailFn(ctx, runs[i].RunID,
+				fmt.Sprintf("orphaned: no activity for %s", s.orphanThreshold)); err != nil {
+				log.Error("failed to fail orphaned run", "run_id", runs[i].RunID, "error", err)
+			} else {
+				log.Info("orphaned run failed", "run_id", runs[i].RunID)
+			}
+		}
 	}
 
 	return nil
