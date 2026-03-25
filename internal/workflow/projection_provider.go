@@ -35,6 +35,21 @@ func NewProjectionWorkflowProvider(store ProjectionStore) *ProjectionWorkflowPro
 	return &ProjectionWorkflowProvider{store: store}
 }
 
+// NewProjectionProviderFromListFn creates a provider from a function that lists
+// active workflow projections. This avoids circular imports between store and
+// workflow packages by accepting a closure that adapts the store's return type.
+func NewProjectionProviderFromListFn(listFn func(ctx context.Context) ([]WorkflowProjection, error)) *ProjectionWorkflowProvider {
+	return &ProjectionWorkflowProvider{store: &fnAdapter{listFn: listFn}}
+}
+
+type fnAdapter struct {
+	listFn func(ctx context.Context) ([]WorkflowProjection, error)
+}
+
+func (a *fnAdapter) ListActiveWorkflowProjections(ctx context.Context) ([]WorkflowProjection, error) {
+	return a.listFn(ctx)
+}
+
 func (p *ProjectionWorkflowProvider) ListActiveWorkflows(ctx context.Context) ([]*domain.WorkflowDefinition, error) {
 	projections, err := p.store.ListActiveWorkflowProjections(ctx)
 	if err != nil {

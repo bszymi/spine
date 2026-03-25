@@ -53,7 +53,11 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 
 	// Look up workflow to get entry step and workflow path
-	resolved := s.resolveWorkflowBinding(r.Context(), req.TaskPath)
+	resolved, err := s.resolveWorkflowBinding(r.Context(), req.TaskPath)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
 
 	run := &domain.Run{
 		RunID:                runID,
@@ -403,27 +407,24 @@ func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution
 // resolveWorkflow looks up the workflow for a task and returns the entry step, path, and ID.
 // When a WorkflowResolver is configured, it uses ResolveBinding to find the correct
 // workflow based on artifact type. Falls back to defaults if no resolver is available.
-func (s *Server) resolveWorkflowBinding(ctx context.Context, taskPath string) *ResolvedWorkflow {
-	defaults := &ResolvedWorkflow{EntryStep: "start"}
-
+func (s *Server) resolveWorkflowBinding(ctx context.Context, taskPath string) (*ResolvedWorkflow, error) {
 	if s.workflowResolver == nil || s.artifacts == nil {
-		return defaults
+		// No resolver configured — return defaults for backwards compatibility.
+		return &ResolvedWorkflow{EntryStep: "start"}, nil
 	}
 
 	// Read the task to determine its type.
 	art, err := s.artifacts.Read(ctx, taskPath, "HEAD")
 	if err != nil {
-		observe.Logger(ctx).Warn("failed to read task for workflow binding", "path", taskPath, "error", err)
-		return defaults
+		return nil, fmt.Errorf("read task for workflow binding: %w", err)
 	}
 
 	resolved, err := s.workflowResolver(ctx, string(art.Type), "")
 	if err != nil {
-		observe.Logger(ctx).Warn("workflow binding failed", "artifact_type", art.Type, "error", err)
-		return defaults
+		return nil, err
 	}
 
-	return resolved
+	return resolved, nil
 }
 
 // resolveStepDef loads the StepDefinition for a step execution from the workflow.
