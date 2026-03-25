@@ -150,8 +150,12 @@ func validateRequiredOutputs(required, produced []string) error {
 	return nil
 }
 
-// failStepWithClassification transitions a step to failed with error detail.
+// failStepWithClassification transitions a step to failed with error detail,
+// then evaluates retry eligibility. If retryable, a new execution is scheduled
+// with backoff delay. If not, the run is failed.
 func (o *Orchestrator) failStepWithClassification(ctx context.Context, exec *domain.StepExecution, classification domain.FailureClassification, message string) {
+	log := observe.Logger(ctx)
+
 	exec.Status = domain.StepStatusFailed
 	exec.ErrorDetail = &domain.ErrorDetail{
 		Classification: classification,
@@ -159,6 +163,12 @@ func (o *Orchestrator) failStepWithClassification(ctx context.Context, exec *dom
 		StepID:         exec.StepID,
 	}
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
-		observe.Logger(ctx).Error("failed to update step execution", "error", err)
+		log.Error("failed to update step execution", "error", err)
+		return
+	}
+
+	// Evaluate retry — creates new execution or fails the run.
+	if err := o.RetryStep(ctx, exec); err != nil {
+		log.Warn("retry evaluation failed", "error", err)
 	}
 }

@@ -40,11 +40,11 @@ func (t *postgresTx) UpdateRunStatus(ctx context.Context, runID string, status d
 
 func (t *postgresTx) CreateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
 	_, err := t.tx.Exec(ctx, `
-		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, started_at, completed_at, error_detail, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		exec.ExecutionID, exec.RunID, exec.StepID, nilIfEmpty(exec.BranchID),
 		nilIfEmpty(exec.ActorID), exec.Status, exec.Attempt, nilIfEmpty(exec.OutcomeID),
-		exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.CreatedAt,
+		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create step execution in tx: %w", err)
@@ -55,10 +55,10 @@ func (t *postgresTx) CreateStepExecution(ctx context.Context, exec *domain.StepE
 func (t *postgresTx) UpdateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE runtime.step_executions
-		SET status = $1, actor_id = $2, outcome_id = $3, started_at = $4, completed_at = $5, error_detail = $6
-		WHERE execution_id = $7`,
+		SET status = $1, actor_id = $2, outcome_id = $3, retry_after = $4, started_at = $5, completed_at = $6, error_detail = $7
+		WHERE execution_id = $8`,
 		exec.Status, nilIfEmpty(exec.ActorID), nilIfEmpty(exec.OutcomeID),
-		exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.ExecutionID,
+		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.ExecutionID,
 	)
 	if err != nil {
 		return fmt.Errorf("update step execution in tx: %w", err)
