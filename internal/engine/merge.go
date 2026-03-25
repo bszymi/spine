@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 
 // MergeRunBranch merges the run's branch to the authoritative branch (main)
 // and transitions the run from committing to completed. If the merge fails,
-// the run transitions to failed with error detail.
+// the run transitions to failed (permanent) or stays in committing (transient).
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	log := observe.Logger(ctx)
 
@@ -32,7 +33,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		return o.completeAfterMerge(ctx, run)
 	}
 
-	// Perform the merge.
+	// Perform the merge into the authoritative branch explicitly.
 	trailers := map[string]string{
 		"Run-ID":   runID,
 		"Trace-ID": run.TraceID,
@@ -40,14 +41,27 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 
 	mergeResult, err := o.git.Merge(ctx, git.MergeOpts{
 		Source:   run.BranchName,
+		Target:   "main",
 		Strategy: "merge-commit",
 		Message:  fmt.Sprintf("Merge run %s: %s", runID, run.TaskPath),
 		Trailers: trailers,
 	})
 
 	if err != nil {
-		// Merge failed — classify and fail the run.
-		log.Error("merge failed", "run_id", runID, "branch", run.BranchName, "error", err)
+		// Abort any in-progress merge to leave the repo clean.
+		o.abortMerge(ctx)
+
+		// Classify: transient errors stay in committing for retry,
+		// permanent errors fail the run.
+		var gitErr *git.GitError
+		if errors.As(err, &gitErr) && gitErr.IsRetryable() {
+			log.Warn("transient merge failure, will retry",
+				"run_id", runID, "branch", run.BranchName, "error", err)
+			return o.retryMerge(ctx, run)
+		}
+
+		log.Error("permanent merge failure",
+			"run_id", runID, "branch", run.BranchName, "error", err)
 		return o.failRunOnMergeError(ctx, run, err)
 	}
 
@@ -60,6 +74,18 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 
 	// Transition committing → completed.
 	return o.completeAfterMerge(ctx, run)
+}
+
+// abortMerge cleans up a failed merge so the repo is not left dirty.
+func (o *Orchestrator) abortMerge(ctx context.Context) {
+	// git merge --abort to clean up conflicted state.
+	// This is best-effort — if it fails, the repo may need manual cleanup.
+	if _, err := o.git.Merge(ctx, git.MergeOpts{
+		Source:   "--abort",
+		Strategy: "abort",
+	}); err != nil {
+		observe.Logger(ctx).Warn("failed to abort merge", "error", err)
+	}
 }
 
 // completeAfterMerge transitions a run from committing to completed
@@ -94,7 +120,20 @@ func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run) 
 	return nil
 }
 
-// failRunOnMergeError transitions a run to failed due to a merge error.
+// retryMerge keeps the run in committing state for transient failures
+// via the git.commit_failed_transient trigger.
+func (o *Orchestrator) retryMerge(ctx context.Context, run *domain.Run) error {
+	_, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+		Trigger: workflow.TriggerGitCommitFailedTrans,
+	})
+	if err != nil {
+		return err
+	}
+	// Status stays committing — scheduler will retry.
+	return nil
+}
+
+// failRunOnMergeError transitions a run to failed due to a permanent merge error.
 func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run, mergeErr error) error {
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerGitCommitFailedPerm,

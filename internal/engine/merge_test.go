@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -73,7 +72,7 @@ func TestMergeRunBranch_HappyPath(t *testing.T) {
 	}
 }
 
-func TestMergeRunBranch_MergeFails(t *testing.T) {
+func TestMergeRunBranch_PermanentFailure(t *testing.T) {
 	store := &mockRunStore{
 		runs: map[string]*domain.Run{
 			"run-1": {
@@ -84,7 +83,9 @@ func TestMergeRunBranch_MergeFails(t *testing.T) {
 			},
 		},
 	}
-	gitOp := &mockGitOperator{mergeErr: errors.New("merge conflict")}
+	gitOp := &mockGitOperator{
+		mergeErr: &git.GitError{Kind: git.ErrKindPermanent, Op: "merge", Message: "conflict"},
+	}
 	events := &mockEventEmitter{}
 
 	orch := &Orchestrator{
@@ -107,6 +108,39 @@ func TestMergeRunBranch_MergeFails(t *testing.T) {
 	// Branch preserved for debugging — NOT cleaned up.
 	if len(gitOp.deleted) != 0 {
 		t.Errorf("expected no branch cleanup on failure, got %v", gitOp.deleted)
+	}
+}
+
+func TestMergeRunBranch_TransientFailure(t *testing.T) {
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {
+				RunID:      "run-1",
+				Status:     domain.RunStatusCommitting,
+				BranchName: "spine/run/run-1",
+				TraceID:    "trace-1234567890ab",
+			},
+		},
+	}
+	gitOp := &mockGitOperator{
+		mergeErr: &git.GitError{Kind: git.ErrKindTransient, Op: "merge", Message: "locked"},
+	}
+
+	orch := &Orchestrator{
+		store:    store,
+		git:      gitOp,
+		events:   &mockEventEmitter{},
+		wfLoader: &stubWorkflowLoader{},
+	}
+
+	err := orch.MergeRunBranch(context.Background(), "run-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Run should stay committing for retry.
+	if store.runs["run-1"].Status != domain.RunStatusCommitting {
+		t.Errorf("expected committing (retry), got %s", store.runs["run-1"].Status)
 	}
 }
 
