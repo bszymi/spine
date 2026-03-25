@@ -29,6 +29,7 @@ type AssignmentContext struct {
 type AssignmentConstraints struct {
 	Timeout          string   `json:"timeout,omitempty"`
 	ExpectedOutcomes []string `json:"expected_outcomes"`
+	ExcludeActors    []string `json:"exclude_actors,omitempty"` // actors to skip on reassignment
 }
 
 // AssignmentResult is the actor's response to a step assignment.

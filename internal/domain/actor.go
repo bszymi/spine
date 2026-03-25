@@ -57,10 +57,10 @@ const (
 
 // Actor represents a registered actor in the system.
 type Actor struct {
-	ActorID      string      `json:"actor_id"`
-	Type         ActorType   `json:"type"`
-	Name         string      `json:"name"`
-	Role         ActorRole   `json:"role"`
-	Capabilities []string    `json:"capabilities"`
-	Status       ActorStatus `json:"status"`
+	ActorID      string      `json:"actor_id" yaml:"actor_id"`
+	Type         ActorType   `json:"type" yaml:"type"`
+	Name         string      `json:"name" yaml:"name"`
+	Role         ActorRole   `json:"role" yaml:"role"`
+	Capabilities []string    `json:"capabilities" yaml:"capabilities"`
+	Status       ActorStatus `json:"status" yaml:"status"`
 }

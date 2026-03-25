@@ -23,9 +23,9 @@ const (
 
 // SpineError is the standard error type for Spine operations.
 type SpineError struct {
-	Code    ErrorCode `json:"code"`
-	Message string    `json:"message"`
-	Detail  any       `json:"detail,omitempty"`
+	Code    ErrorCode `json:"code" yaml:"code"`
+	Message string    `json:"message" yaml:"message"`
+	Detail  any       `json:"detail,omitempty" yaml:"detail,omitempty"`
 }
 
 func (e *SpineError) Error() string {
@@ -56,17 +56,17 @@ const (
 
 // ValidationError represents a single validation failure.
 type ValidationError struct {
-	RuleID         string                  `json:"rule_id,omitempty"`
+	RuleID         string                  `json:"rule_id,omitempty" yaml:"rule_id,omitempty"`
 	Classification ViolationClassification `json:"classification,omitempty" yaml:"classification,omitempty"`
-	ArtifactPath   string                  `json:"artifact_path,omitempty"`
-	Field          string                  `json:"field,omitempty"`
-	Severity       string                  `json:"severity"` // "error" or "warning"
-	Message        string                  `json:"message"`
+	ArtifactPath   string                  `json:"artifact_path,omitempty" yaml:"artifact_path,omitempty"`
+	Field          string                  `json:"field,omitempty" yaml:"field,omitempty"`
+	Severity       string                  `json:"severity" yaml:"severity"` // "error" or "warning"
+	Message        string                  `json:"message" yaml:"message"`
 }
 
 // ValidationResult represents the outcome of a validation check.
 type ValidationResult struct {
-	Status   string            `json:"status"` // "passed", "failed", "warnings"
-	Errors   []ValidationError `json:"errors,omitempty"`
-	Warnings []ValidationError `json:"warnings,omitempty"`
+	Status   string            `json:"status" yaml:"status"` // "passed", "failed", "warnings"
+	Errors   []ValidationError `json:"errors,omitempty" yaml:"errors,omitempty"`
+	Warnings []ValidationError `json:"warnings,omitempty" yaml:"warnings,omitempty"`
 }

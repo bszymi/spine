@@ -43,12 +43,12 @@ const (
 
 // Event represents a domain or operational event emitted by the system.
 type Event struct {
-	EventID      string          `json:"event_id"`
-	Type         EventType       `json:"type"`
-	Timestamp    time.Time       `json:"timestamp"`
-	ActorID      string          `json:"actor_id,omitempty"`
-	RunID        string          `json:"run_id,omitempty"`
-	ArtifactPath string          `json:"artifact_path,omitempty"`
-	TraceID      string          `json:"trace_id,omitempty"`
-	Payload      json.RawMessage `json:"payload,omitempty"`
+	EventID      string          `json:"event_id" yaml:"event_id"`
+	Type         EventType       `json:"type" yaml:"type"`
+	Timestamp    time.Time       `json:"timestamp" yaml:"timestamp"`
+	ActorID      string          `json:"actor_id,omitempty" yaml:"actor_id,omitempty"`
+	RunID        string          `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	ArtifactPath string          `json:"artifact_path,omitempty" yaml:"artifact_path,omitempty"`
+	TraceID      string          `json:"trace_id,omitempty" yaml:"trace_id,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty" yaml:"payload,omitempty"`
 }

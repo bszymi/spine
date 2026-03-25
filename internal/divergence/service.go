@@ -72,11 +72,14 @@ func (s *Service) StartDivergence(ctx context.Context, run *domain.Run, divDef d
 	}
 
 	// Emit divergence_started event
-	payload, _ := json.Marshal(map[string]any{
+	payload, err := json.Marshal(map[string]any{
 		"divergence_id": divCtx.DivergenceID,
 		"mode":          divDef.Mode,
 		"branch_count":  len(divDef.Branches),
 	})
+	if err != nil {
+		log.Warn("failed to marshal divergence event payload", "error", err)
+	}
 	if err := s.events.Emit(ctx, domain.Event{
 		EventID:   fmt.Sprintf("div-started-%s", divCtx.DivergenceID),
 		Type:      domain.EventDivergenceStarted,

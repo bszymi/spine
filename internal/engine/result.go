@@ -150,6 +150,20 @@ func validateRequiredOutputs(required, produced []string) error {
 	return nil
 }
 
+// FailStep transitions a step to failed with a classification and message.
+// This is the public entry point for external callers (scheduler, gateway).
+func (o *Orchestrator) FailStep(ctx context.Context, executionID string, classification domain.FailureClassification, message string) error {
+	exec, err := o.store.GetStepExecution(ctx, executionID)
+	if err != nil {
+		return err
+	}
+	if exec.Status.IsTerminal() {
+		return nil // already terminal, nothing to do
+	}
+	o.failStepWithClassification(ctx, exec, classification, message)
+	return nil
+}
+
 // failStepWithClassification transitions a step to failed with error detail,
 // then evaluates retry eligibility. If retryable, a new execution is scheduled
 // with backoff delay. If not, the run is failed.

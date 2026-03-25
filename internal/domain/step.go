@@ -60,12 +60,12 @@ func (f FailureClassification) IsRetryable() bool {
 
 // ErrorDetail represents structured failure information stored as JSONB.
 type ErrorDetail struct {
-	Classification FailureClassification `json:"classification"`
-	Message        string                `json:"message"`
-	StepID         string                `json:"step_id,omitempty"`
-	ActorID        string                `json:"actor_id,omitempty"`
-	RuleID         string                `json:"rule_id,omitempty"`
-	Violations     []ValidationError     `json:"violations,omitempty"`
+	Classification FailureClassification `json:"classification" yaml:"classification"`
+	Message        string                `json:"message" yaml:"message"`
+	StepID         string                `json:"step_id,omitempty" yaml:"step_id,omitempty"`
+	ActorID        string                `json:"actor_id,omitempty" yaml:"actor_id,omitempty"`
+	RuleID         string                `json:"rule_id,omitempty" yaml:"rule_id,omitempty"`
+	Violations     []ValidationError     `json:"violations,omitempty" yaml:"violations,omitempty"`
 }
 
 // Scan implements the sql.Scanner interface for reading JSONB from PostgreSQL.
@@ -82,17 +82,17 @@ func (e *ErrorDetail) Scan(src any) error {
 
 // StepExecution represents a single execution attempt of a workflow step.
 type StepExecution struct {
-	ExecutionID string              `json:"execution_id"`
-	RunID       string              `json:"run_id"`
-	StepID      string              `json:"step_id"`
-	BranchID    string              `json:"branch_id,omitempty"`
-	ActorID     string              `json:"actor_id,omitempty"`
-	Status      StepExecutionStatus `json:"status"`
-	Attempt     int                 `json:"attempt"`
-	OutcomeID   string              `json:"outcome_id,omitempty"`
-	ErrorDetail *ErrorDetail        `json:"error_detail,omitempty"`
-	RetryAfter  *time.Time          `json:"retry_after,omitempty"`
-	StartedAt   *time.Time          `json:"started_at,omitempty"`
-	CompletedAt *time.Time          `json:"completed_at,omitempty"`
-	CreatedAt   time.Time           `json:"created_at"`
+	ExecutionID string              `json:"execution_id" yaml:"execution_id"`
+	RunID       string              `json:"run_id" yaml:"run_id"`
+	StepID      string              `json:"step_id" yaml:"step_id"`
+	BranchID    string              `json:"branch_id,omitempty" yaml:"branch_id,omitempty"`
+	ActorID     string              `json:"actor_id,omitempty" yaml:"actor_id,omitempty"`
+	Status      StepExecutionStatus `json:"status" yaml:"status"`
+	Attempt     int                 `json:"attempt" yaml:"attempt"`
+	OutcomeID   string              `json:"outcome_id,omitempty" yaml:"outcome_id,omitempty"`
+	ErrorDetail *ErrorDetail        `json:"error_detail,omitempty" yaml:"error_detail,omitempty"`
+	RetryAfter  *time.Time          `json:"retry_after,omitempty" yaml:"retry_after,omitempty"`
+	StartedAt   *time.Time          `json:"started_at,omitempty" yaml:"started_at,omitempty"`
+	CompletedAt *time.Time          `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	CreatedAt   time.Time           `json:"created_at" yaml:"created_at"`
 }

@@ -307,8 +307,14 @@ func (s *Service) RegisterEventHandlers(ctx context.Context) error {
 
 // projectArtifact upserts an artifact projection and its links.
 func (s *Service) projectArtifact(ctx context.Context, a *domain.Artifact, commitSHA string) error {
-	metadata, _ := json.Marshal(a.Metadata)
-	linksJSON, _ := json.Marshal(a.Links)
+	metadata, err := json.Marshal(a.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal artifact metadata: %w", err)
+	}
+	linksJSON, err := json.Marshal(a.Links)
+	if err != nil {
+		return fmt.Errorf("marshal artifact links: %w", err)
+	}
 	contentHash := hashContent(a.Content)
 
 	proj := &store.ArtifactProjection{
@@ -365,12 +371,20 @@ func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string)
 		return fmt.Errorf("parse workflow %s: %w", wfPath, err)
 	}
 
-	appliesTo, _ := json.Marshal(wf.AppliesTo)
+	appliesTo, err := json.Marshal(wf.AppliesTo)
+	if err != nil {
+		return fmt.Errorf("marshal workflow applies_to: %w", err)
+	}
 
 	// Convert YAML to JSON for the JSONB definition column
 	var rawDef any
-	_ = yaml.Unmarshal(content, &rawDef)
-	definition, _ := json.Marshal(rawDef)
+	if err := yaml.Unmarshal(content, &rawDef); err != nil {
+		return fmt.Errorf("parse workflow raw definition: %w", err)
+	}
+	definition, err := json.Marshal(rawDef)
+	if err != nil {
+		return fmt.Errorf("marshal workflow definition: %w", err)
+	}
 
 	proj := &store.WorkflowProjection{
 		WorkflowPath: wfPath,

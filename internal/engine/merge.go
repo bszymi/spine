@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -134,7 +135,14 @@ func (o *Orchestrator) retryMerge(ctx context.Context, run *domain.Run) error {
 }
 
 // failRunOnMergeError transitions a run to failed due to a permanent merge error.
+// Persists git_conflict classification on the last completed step for visibility.
 func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run, mergeErr error) error {
+	log := observe.Logger(ctx)
+
+	// Persist git_conflict detail on the last completed step so actors
+	// can see why the run failed via the step execution record.
+	o.recordGitConflictOnStep(ctx, run, mergeErr)
+
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerGitCommitFailedPerm,
 	})
@@ -146,7 +154,6 @@ func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run,
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	log := observe.Logger(ctx)
 	if err := o.events.Emit(ctx, domain.Event{
 		EventID:   fmt.Sprintf("evt-%s-failed", run.TraceID[:12]),
 		Type:      domain.EventRunFailed,
@@ -160,4 +167,43 @@ func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run,
 	log.Info("run failed on merge", "run_id", run.RunID, "error", mergeErr)
 	// Branch preserved for debugging — not cleaned up on failure.
 	return nil
+}
+
+// recordGitConflictOnStep finds the last completed step execution for a run
+// and attaches git_conflict error detail so actors can see the merge failure.
+func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.Run, mergeErr error) {
+	log := observe.Logger(ctx)
+
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		log.Warn("failed to list step executions for git conflict recording", "run_id", run.RunID, "error", err)
+		return
+	}
+	// Find the last completed step (the one whose output triggered the merge).
+	var lastCompleted *domain.StepExecution
+	for i := range execs {
+		if execs[i].Status == domain.StepStatusCompleted {
+			lastCompleted = &execs[i]
+		}
+	}
+	if lastCompleted == nil {
+		return
+	}
+
+	// Classify based on error type: merge conflicts get git_conflict,
+	// other permanent merge errors get permanent_error.
+	classification := domain.FailurePermanent
+	var gitErr *git.GitError
+	if errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict") {
+		classification = domain.FailureGitConflict
+	}
+
+	lastCompleted.ErrorDetail = &domain.ErrorDetail{
+		Classification: classification,
+		Message:        fmt.Sprintf("merge failed: %s", mergeErr.Error()),
+		StepID:         lastCompleted.StepID,
+	}
+	if updateErr := o.store.UpdateStepExecution(ctx, lastCompleted); updateErr != nil {
+		observe.Logger(ctx).Warn("failed to record git conflict on step", "error", updateErr)
+	}
 }
