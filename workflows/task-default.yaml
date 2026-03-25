@@ -39,7 +39,7 @@ steps:
 
   - id: execute
     name: Execute Task
-    type: automated
+    type: manual
     execution:
       mode: hybrid
       eligible_actor_types:
@@ -97,6 +97,7 @@ steps:
     outcomes:
       - id: committed
         name: Changes Committed
+        next_step: end
         commit:
           status: Completed
     retry:

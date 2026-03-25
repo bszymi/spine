@@ -45,7 +45,10 @@ func TestTaskDefaultWorkflow_Parses(t *testing.T) {
 
 	// Verify step types.
 	if wf.Steps[0].Type != domain.StepTypeAutomated {
-		t.Errorf("draft step: expected automated, got %s", wf.Steps[0].Type)
+		t.Errorf("draft: expected automated, got %s", wf.Steps[0].Type)
+	}
+	if wf.Steps[1].Type != domain.StepTypeManual {
+		t.Errorf("execute: expected manual, got %s", wf.Steps[1].Type)
 	}
 	if wf.Steps[2].Type != domain.StepTypeReview {
 		t.Errorf("review step: expected review, got %s", wf.Steps[2].Type)
@@ -83,6 +86,9 @@ func TestTaskDefaultWorkflow_Parses(t *testing.T) {
 	commit := wf.Steps[3]
 	if len(commit.Outcomes) != 1 {
 		t.Fatalf("commit: expected 1 outcome, got %d", len(commit.Outcomes))
+	}
+	if commit.Outcomes[0].NextStep != "end" {
+		t.Errorf("expected committed → end, got %s", commit.Outcomes[0].NextStep)
 	}
 	if commit.Outcomes[0].Commit["status"] != "Completed" {
 		t.Errorf("expected commit status=Completed, got %v", commit.Outcomes[0].Commit)
