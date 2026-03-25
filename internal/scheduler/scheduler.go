@@ -64,6 +64,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 			if err := s.ScanTimeouts(ctx); err != nil {
 				log.Error("timeout scan failed", "error", err)
 			}
+			if err := s.ScanRunTimeouts(ctx); err != nil {
+				log.Error("run timeout scan failed", "error", err)
+			}
 		case <-orphanTicker.C:
 			if err := s.ScanOrphans(ctx); err != nil {
 				log.Error("orphan scan failed", "error", err)

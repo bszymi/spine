@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/workflow"
@@ -236,6 +237,79 @@ func TestStartRun_HappyPath(t *testing.T) {
 	}
 	if events.events[0].Type != domain.EventRunStarted {
 		t.Errorf("expected first event run_started, got %s", events.events[0].Type)
+	}
+}
+
+func TestStartRun_SetsRunTimeout(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{Type: "task", Path: "tasks/my-task.md"},
+	}
+	resolver := &mockWorkflowResolver{
+		result: &workflow.BindingResult{
+			Workflow: &domain.WorkflowDefinition{
+				ID:        "wf-task",
+				Path:      "workflows/task.yaml",
+				Version:   "1.0.0",
+				EntryStep: "start",
+				Timeout:   "24h",
+				Steps: []domain.StepDefinition{
+					{ID: "start", Name: "Start"},
+				},
+			},
+			CommitSHA:    "abc123",
+			VersionLabel: "1.0.0",
+		},
+	}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := testOrchestrator(artifacts, resolver, store, events)
+
+	result, err := orch.StartRun(context.Background(), "tasks/my-task.md")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Run.TimeoutAt == nil {
+		t.Fatal("expected timeout_at to be set")
+	}
+	// TimeoutAt should be approximately 24h from now.
+	expected := time.Now().Add(24 * time.Hour)
+	diff := result.Run.TimeoutAt.Sub(expected)
+	if diff < -5*time.Second || diff > 5*time.Second {
+		t.Errorf("expected timeout_at ~24h from now, got diff %v", diff)
+	}
+}
+
+func TestStartRun_NoTimeoutWithoutConfig(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{Type: "task", Path: "tasks/my-task.md"},
+	}
+	resolver := &mockWorkflowResolver{
+		result: &workflow.BindingResult{
+			Workflow: &domain.WorkflowDefinition{
+				ID:        "wf-task",
+				Path:      "workflows/task.yaml",
+				Version:   "1.0.0",
+				EntryStep: "start",
+				Steps: []domain.StepDefinition{
+					{ID: "start", Name: "Start"},
+				},
+			},
+			CommitSHA:    "abc123",
+			VersionLabel: "1.0.0",
+		},
+	}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := testOrchestrator(artifacts, resolver, store, events)
+
+	result, err := orch.StartRun(context.Background(), "tasks/my-task.md")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Run.TimeoutAt != nil {
+		t.Error("expected timeout_at to be nil when no timeout configured")
 	}
 }
 

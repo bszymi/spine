@@ -42,6 +42,7 @@ type Run struct {
 	CurrentStepID        string     `json:"current_step_id,omitempty"`
 	BranchName           string     `json:"branch_name,omitempty"`
 	TraceID              string     `json:"trace_id"`
+	TimeoutAt            *time.Time `json:"timeout_at,omitempty"`
 	StartedAt            *time.Time `json:"started_at,omitempty"`
 	CompletedAt          *time.Time `json:"completed_at,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`

@@ -72,6 +72,14 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:            now,
 	}
 
+	// Set run-level timeout if configured on the workflow.
+	if resolved.Timeout != "" {
+		if d, err := time.ParseDuration(resolved.Timeout); err == nil {
+			t := now.Add(d)
+			run.TimeoutAt = &t
+		}
+	}
+
 	// Create run, activate, and create entry step in a transaction
 	if err := s.store.WithTx(r.Context(), func(tx store.Tx) error {
 		if err := tx.CreateRun(r.Context(), run); err != nil {
