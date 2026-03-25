@@ -17,6 +17,8 @@ type ArtifactService interface {
 	Read(ctx context.Context, path, ref string) (*domain.Artifact, error)
 	Update(ctx context.Context, path, content string) (*domain.Artifact, error)
 	List(ctx context.Context, ref string) ([]*domain.Artifact, error)
+	AcceptTask(ctx context.Context, path, rationale string) (*domain.Artifact, error)
+	RejectTask(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*domain.Artifact, error)
 }
 
 // ProjectionQuerier defines the projection query operations the gateway needs.
