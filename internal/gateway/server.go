@@ -40,6 +40,12 @@ type GitReader interface {
 }
 
 // Server is the HTTP Access Gateway for Spine.
+// BranchCreator creates exploratory branches and manages divergence windows.
+type BranchCreator interface {
+	CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
+	CloseWindow(ctx context.Context, divCtx *domain.DivergenceContext) error
+}
+
 type Server struct {
 	httpServer       *http.Server
 	store            store.Store
@@ -51,6 +57,7 @@ type Server struct {
 	validator        *validation.Engine
 	resultHandler    ResultHandler
 	workflowResolver WorkflowResolverFn
+	branchCreator    BranchCreator // optional, nil if not configured
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -97,6 +104,7 @@ type ServerConfig struct {
 	Validator        *validation.Engine
 	ResultHandler    ResultHandler
 	WorkflowResolver WorkflowResolverFn
+	BranchCreator    BranchCreator
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -110,6 +118,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		git:              cfg.Git,
 		validator:        cfg.Validator,
 		resultHandler:    cfg.ResultHandler,
+		branchCreator:    cfg.BranchCreator,
 		workflowResolver: cfg.WorkflowResolver,
 	}
 	s.httpServer = &http.Server{

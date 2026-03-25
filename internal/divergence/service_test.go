@@ -248,3 +248,67 @@ func TestCloseWindow(t *testing.T) {
 		t.Errorf("expected closed, got %s", divCtx.DivergenceWindow)
 	}
 }
+
+func TestCreateExploratoryBranch_AutoClosesOnMax(t *testing.T) {
+	fs := newFakeStore()
+	gitClient := &fakeGitClient{}
+	events := &fakeEventRouter{}
+	svc := divergence.NewService(fs, gitClient, events)
+
+	run := &domain.Run{RunID: "run-1"}
+	divDef := domain.DivergenceDefinition{
+		ID:          "div-1",
+		Mode:        domain.DivergenceModeExploratory,
+		MaxBranches: 2,
+	}
+
+	divCtx, _ := svc.StartDivergence(context.Background(), run, divDef, "")
+
+	// Create first branch — window should remain open.
+	_, err := svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-1", "step-1")
+	if err != nil {
+		t.Fatalf("create branch 1: %v", err)
+	}
+	if divCtx.DivergenceWindow != "open" {
+		t.Errorf("expected window open after 1 branch, got %s", divCtx.DivergenceWindow)
+	}
+
+	// Create second branch — should auto-close window (max=2 reached).
+	_, err = svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-2", "step-2")
+	if err != nil {
+		t.Fatalf("create branch 2: %v", err)
+	}
+	if divCtx.DivergenceWindow != "closed" {
+		t.Errorf("expected window closed after max reached, got %s", divCtx.DivergenceWindow)
+	}
+
+	// Third branch should be rejected.
+	_, err = svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-3", "step-3")
+	if err == nil {
+		t.Error("expected error creating branch after window closed")
+	}
+}
+
+func TestCreateExploratoryBranch_PersistsMinMax(t *testing.T) {
+	fs := newFakeStore()
+	gitClient := &fakeGitClient{}
+	events := &fakeEventRouter{}
+	svc := divergence.NewService(fs, gitClient, events)
+
+	run := &domain.Run{RunID: "run-1"}
+	divDef := domain.DivergenceDefinition{
+		ID:          "div-1",
+		Mode:        domain.DivergenceModeExploratory,
+		MinBranches: 2,
+		MaxBranches: 5,
+	}
+
+	divCtx, _ := svc.StartDivergence(context.Background(), run, divDef, "")
+
+	if divCtx.MinBranches != 2 {
+		t.Errorf("expected min_branches 2, got %d", divCtx.MinBranches)
+	}
+	if divCtx.MaxBranches != 5 {
+		t.Errorf("expected max_branches 5, got %d", divCtx.MaxBranches)
+	}
+}

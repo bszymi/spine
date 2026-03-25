@@ -40,6 +40,10 @@ func (s *Server) routes() http.Handler {
 			r.Post("/runs/{run_id}/cancel", s.handleRunCancel)
 			r.Post("/runs/{run_id}/steps/{step_id}/assign", s.handleStepAssign)
 
+			// Divergence
+			r.Post("/runs/{run_id}/divergences/{divergence_id}/branches", s.handleCreateBranch)
+			r.Post("/runs/{run_id}/divergences/{divergence_id}/close-window", s.handleCloseWindow)
+
 			// Steps
 			r.Post("/steps/{assignment_id}/submit", s.handleStepSubmit)
 

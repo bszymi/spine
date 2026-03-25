@@ -410,19 +410,19 @@ func (s *PostgresStore) ListTokensByActor(ctx context.Context, actorID string) (
 
 func (s *PostgresStore) CreateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO runtime.divergence_contexts (divergence_id, run_id, status, divergence_mode, divergence_window, convergence_id, triggered_at, resolved_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		INSERT INTO runtime.divergence_contexts (divergence_id, run_id, status, divergence_mode, divergence_window, min_branches, max_branches, convergence_id, triggered_at, resolved_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		div.DivergenceID, div.RunID, div.Status, div.DivergenceMode, div.DivergenceWindow,
-		nilIfEmpty(div.ConvergenceID), div.TriggeredAt, div.ResolvedAt,
+		div.MinBranches, div.MaxBranches, nilIfEmpty(div.ConvergenceID), div.TriggeredAt, div.ResolvedAt,
 	)
 	return err
 }
 
 func (s *PostgresStore) UpdateDivergenceContext(ctx context.Context, div *domain.DivergenceContext) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE runtime.divergence_contexts SET status = $1, divergence_window = $2, triggered_at = $3, resolved_at = $4
-		WHERE divergence_id = $5`,
-		div.Status, div.DivergenceWindow, div.TriggeredAt, div.ResolvedAt, div.DivergenceID,
+		UPDATE runtime.divergence_contexts SET status = $1, divergence_window = $2, min_branches = $3, max_branches = $4, triggered_at = $5, resolved_at = $6
+		WHERE divergence_id = $7`,
+		div.Status, div.DivergenceWindow, div.MinBranches, div.MaxBranches, div.TriggeredAt, div.ResolvedAt, div.DivergenceID,
 	)
 	if err != nil {
 		return err
@@ -437,10 +437,10 @@ func (s *PostgresStore) GetDivergenceContext(ctx context.Context, divergenceID s
 	var div domain.DivergenceContext
 	var convergenceID *string
 	err := s.pool.QueryRow(ctx, `
-		SELECT divergence_id, run_id, status, divergence_mode, divergence_window, convergence_id, triggered_at, resolved_at
+		SELECT divergence_id, run_id, status, divergence_mode, divergence_window, min_branches, max_branches, convergence_id, triggered_at, resolved_at
 		FROM runtime.divergence_contexts WHERE divergence_id = $1`, divergenceID,
 	).Scan(&div.DivergenceID, &div.RunID, &div.Status, &div.DivergenceMode, &div.DivergenceWindow,
-		&convergenceID, &div.TriggeredAt, &div.ResolvedAt)
+		&div.MinBranches, &div.MaxBranches, &convergenceID, &div.TriggeredAt, &div.ResolvedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, domain.NewError(domain.ErrNotFound, "divergence context not found")
