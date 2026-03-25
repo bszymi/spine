@@ -34,9 +34,17 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 		return nil, err
 	}
 
-	// Idempotency: if already completed with the same outcome, return success.
-	if exec.Status == domain.StepStatusCompleted && exec.OutcomeID == req.OutcomeID {
-		log.Info("duplicate result submission (idempotent)", "execution_id", req.ExecutionID)
+	// Idempotency: if already in a terminal state, return current state.
+	// This prevents corrupting completed/failed steps on resubmission.
+	if exec.Status.IsTerminal() {
+		if exec.Status == domain.StepStatusCompleted && exec.OutcomeID == req.OutcomeID {
+			log.Info("duplicate result submission (idempotent)", "execution_id", req.ExecutionID)
+		} else {
+			log.Info("step already terminal, rejecting submission",
+				"execution_id", req.ExecutionID,
+				"status", exec.Status,
+			)
+		}
 		return &IngestResponse{
 			ExecutionID: req.ExecutionID,
 			StepID:      exec.StepID,
@@ -95,7 +103,10 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 	}
 
 	// Re-read to get final state.
-	exec, _ = o.store.GetStepExecution(ctx, req.ExecutionID)
+	exec, err = o.store.GetStepExecution(ctx, req.ExecutionID)
+	if err != nil {
+		return nil, fmt.Errorf("re-read step execution: %w", err)
+	}
 
 	return &IngestResponse{
 		ExecutionID: req.ExecutionID,
