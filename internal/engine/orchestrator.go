@@ -6,13 +6,14 @@ import "fmt"
 // event router, and Git client into a single execution coordinator. It manages
 // run lifecycle, step progression, and outcome routing.
 type Orchestrator struct {
-	workflows WorkflowResolver
-	store     RunStore
-	actors    ActorAssigner
-	artifacts ArtifactReader
-	events    EventEmitter
-	git       GitOperator
-	wfLoader  WorkflowLoader
+	workflows   WorkflowResolver
+	store       RunStore
+	actors      ActorAssigner
+	artifacts   ArtifactReader
+	events      EventEmitter
+	git         GitOperator
+	wfLoader    WorkflowLoader
+	assignments AssignmentStore // optional, nil if not configured
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -56,4 +57,9 @@ func New(
 		git:       gitOp,
 		wfLoader:  wfLoader,
 	}, nil
+}
+
+// WithAssignmentStore enables assignment tracking on the orchestrator.
+func (o *Orchestrator) WithAssignmentStore(s AssignmentStore) {
+	o.assignments = s
 }

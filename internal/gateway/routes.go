@@ -43,6 +43,9 @@ func (s *Server) routes() http.Handler {
 			// Steps
 			r.Post("/steps/{assignment_id}/submit", s.handleStepSubmit)
 
+			// Assignments
+			r.Get("/assignments", s.handleListAssignments)
+
 			// Tasks — wildcard routing for slash-containing paths
 			r.HandleFunc("/tasks/*", s.handleTaskWildcard)
 
