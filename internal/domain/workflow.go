@@ -137,6 +137,7 @@ type DivergenceDefinition struct {
 	ID          string             `json:"id" yaml:"id"`
 	Mode        DivergenceMode     `json:"mode" yaml:"mode"`
 	Branches    []BranchDefinition `json:"branches,omitempty" yaml:"branches,omitempty"`
+	MinBranches int                `json:"min_branches,omitempty" yaml:"min_branches,omitempty"`
 	MaxBranches int                `json:"max_branches,omitempty" yaml:"max_branches,omitempty"`
 }
 

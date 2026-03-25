@@ -36,6 +36,8 @@ func (s *Service) StartDivergence(ctx context.Context, run *domain.Run, divDef d
 		RunID:          run.RunID,
 		Status:         domain.DivergenceStatusPending,
 		DivergenceMode: divDef.Mode,
+		MinBranches:    divDef.MinBranches,
+		MaxBranches:    divDef.MaxBranches,
 		ConvergenceID:  convergenceID,
 	}
 
@@ -114,13 +116,29 @@ func (s *Service) CreateExploratoryBranch(ctx context.Context, divCtx *domain.Di
 		Trigger:     workflow.DivergenceTriggerCreateBranch,
 		WindowOpen:  divCtx.DivergenceWindow == "open",
 		BranchCount: len(branches),
-		MaxBranches: 0, // no limit from here; workflow def would provide this
+		MaxBranches: divCtx.MaxBranches,
 	}); err != nil {
 		return nil, err
 	}
 
 	run := &domain.Run{RunID: divCtx.RunID}
-	return s.createBranchRecord(ctx, run, divCtx, branchID, startStep)
+	branch, err := s.createBranchRecord(ctx, run, divCtx, branchID, startStep)
+	if err != nil {
+		return nil, err
+	}
+
+	// Auto-close window when max branches reached.
+	if divCtx.MaxBranches > 0 && len(branches)+1 >= divCtx.MaxBranches {
+		divCtx.DivergenceWindow = "closed"
+		if err := s.store.UpdateDivergenceContext(ctx, divCtx); err != nil {
+			observe.Logger(ctx).Warn("failed to auto-close window", "error", err)
+		} else {
+			observe.Logger(ctx).Info("divergence window auto-closed",
+				"divergence_id", divCtx.DivergenceID, "branch_count", len(branches)+1)
+		}
+	}
+
+	return branch, nil
 }
 
 // CloseWindow closes the exploratory divergence window.

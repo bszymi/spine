@@ -393,3 +393,44 @@ func TestCommitConvergenceMultipleBranches(t *testing.T) {
 		t.Errorf("expected 2 merges, got %d", len(gitClient.merges))
 	}
 }
+
+func TestEvaluateAndCommit_EndToEnd(t *testing.T) {
+	fs := newFakeStore()
+	gitClient := &fakeGitClientWithMerge{}
+	events := &fakeEventRouter{}
+	svc := divergence.NewService(fs, gitClient, events)
+
+	run := &domain.Run{RunID: "run-1"}
+	divDef := domain.DivergenceDefinition{
+		ID:       "div-1",
+		Mode:     domain.DivergenceModeStructured,
+		Branches: []domain.BranchDefinition{{ID: "a", StartStep: "s1"}, {ID: "b", StartStep: "s2"}},
+	}
+	convDef := domain.ConvergenceDefinition{
+		ID:          "conv-1",
+		Strategy:    domain.ConvergenceSelectOne,
+		EntryPolicy: domain.EntryPolicyAllTerminal,
+	}
+
+	divCtx, err := svc.StartDivergence(context.Background(), run, divDef, "conv-1")
+	if err != nil {
+		t.Fatalf("start divergence: %v", err)
+	}
+
+	// Complete both branches.
+	branches, _ := fs.ListBranchesByDivergence(context.Background(), divCtx.DivergenceID)
+	for i := range branches {
+		branches[i].Status = domain.BranchStatusCompleted
+		branches[i].ArtifactsProduced = []string{"artifact-" + branches[i].BranchID}
+		_ = fs.UpdateBranch(context.Background(), &branches[i])
+	}
+
+	err = svc.EvaluateAndCommit(context.Background(), divCtx, convDef)
+	if err != nil {
+		t.Fatalf("evaluate and commit: %v", err)
+	}
+
+	if divCtx.Status != domain.DivergenceStatusResolved {
+		t.Errorf("expected resolved, got %s", divCtx.Status)
+	}
+}

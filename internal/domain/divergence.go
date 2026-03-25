@@ -35,6 +35,8 @@ type DivergenceContext struct {
 	Status           DivergenceStatus `json:"status" yaml:"status"`
 	DivergenceMode   DivergenceMode   `json:"divergence_mode" yaml:"divergence_mode"`
 	DivergenceWindow string           `json:"divergence_window,omitempty" yaml:"divergence_window,omitempty"`
+	MinBranches      int              `json:"min_branches,omitempty" yaml:"min_branches,omitempty"`
+	MaxBranches      int              `json:"max_branches,omitempty" yaml:"max_branches,omitempty"`
 	ConvergenceID    string           `json:"convergence_id,omitempty" yaml:"convergence_id,omitempty"`
 	TriggeredAt      *time.Time       `json:"triggered_at,omitempty" yaml:"triggered_at,omitempty"`
 	ResolvedAt       *time.Time       `json:"resolved_at,omitempty" yaml:"resolved_at,omitempty"`

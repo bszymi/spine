@@ -18,6 +18,14 @@ func (m *mockDivergenceHandler) StartDivergence(_ context.Context, _ *domain.Run
 	return m.divCtx, m.err
 }
 
+func (m *mockDivergenceHandler) CreateExploratoryBranch(_ context.Context, _ *domain.DivergenceContext, _, _ string) (*domain.Branch, error) {
+	return nil, nil
+}
+
+func (m *mockDivergenceHandler) CloseWindow(_ context.Context, _ *domain.DivergenceContext) error {
+	return nil
+}
+
 func TestSubmitStepResult_TriggersDivergence(t *testing.T) {
 	store, runID := testRunWithStep()
 	events := &mockEventEmitter{}

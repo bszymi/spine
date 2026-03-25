@@ -67,6 +67,8 @@ type CrossArtifactValidator interface {
 // DivergenceHandler manages divergence lifecycle for the orchestrator.
 type DivergenceHandler interface {
 	StartDivergence(ctx context.Context, run *domain.Run, divDef domain.DivergenceDefinition, convergenceID string) (*domain.DivergenceContext, error)
+	CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
+	CloseWindow(ctx context.Context, divCtx *domain.DivergenceContext) error
 }
 
 // ConvergenceHandler manages convergence lifecycle for the orchestrator.
