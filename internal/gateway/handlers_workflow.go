@@ -53,17 +53,19 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 
 	// Look up workflow to get entry step and workflow path
-	entryStepID, workflowPath, workflowID := s.resolveWorkflow(r.Context(), req.TaskPath)
+	resolved := s.resolveWorkflowBinding(r.Context(), req.TaskPath)
 
 	run := &domain.Run{
-		RunID:         runID,
-		TaskPath:      req.TaskPath,
-		WorkflowPath:  workflowPath,
-		WorkflowID:    workflowID,
-		Status:        domain.RunStatusPending,
-		CurrentStepID: entryStepID,
-		TraceID:       traceID,
-		CreatedAt:     now,
+		RunID:                runID,
+		TaskPath:             req.TaskPath,
+		WorkflowPath:         resolved.WorkflowPath,
+		WorkflowID:           resolved.WorkflowID,
+		WorkflowVersion:      resolved.CommitSHA,
+		WorkflowVersionLabel: resolved.VersionLabel,
+		Status:               domain.RunStatusPending,
+		CurrentStepID:        resolved.EntryStep,
+		TraceID:              traceID,
+		CreatedAt:            now,
 	}
 
 	// Create run, activate, and create entry step in a transaction
@@ -83,9 +85,9 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		}
 		// Create entry step execution
 		return tx.CreateStepExecution(r.Context(), &domain.StepExecution{
-			ExecutionID: fmt.Sprintf("%s-%s-1", runID, entryStepID),
+			ExecutionID: fmt.Sprintf("%s-%s-1", runID, resolved.EntryStep),
 			RunID:       runID,
-			StepID:      entryStepID,
+			StepID:      resolved.EntryStep,
 			Status:      domain.StepStatusWaiting,
 			Attempt:     1,
 			CreatedAt:   now,
@@ -99,7 +101,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		"run_id":     runID,
 		"task_path":  req.TaskPath,
 		"status":     domain.RunStatusActive,
-		"entry_step": entryStepID,
+		"entry_step": resolved.EntryStep,
 		"trace_id":   traceID,
 	})
 }
@@ -399,23 +401,29 @@ func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution
 }
 
 // resolveWorkflow looks up the workflow for a task and returns the entry step, path, and ID.
-// Falls back to defaults if no workflow can be resolved.
-func (s *Server) resolveWorkflow(ctx context.Context, taskPath string) (entryStep, workflowPath, workflowID string) {
-	entryStep = "start"
-	if s.store == nil {
-		return
+// When a WorkflowResolver is configured, it uses ResolveBinding to find the correct
+// workflow based on artifact type. Falls back to defaults if no resolver is available.
+func (s *Server) resolveWorkflowBinding(ctx context.Context, taskPath string) *ResolvedWorkflow {
+	defaults := &ResolvedWorkflow{EntryStep: "start"}
+
+	if s.workflowResolver == nil || s.artifacts == nil {
+		return defaults
 	}
 
-	// Try to find an active workflow that applies to tasks
-	result, err := s.store.QueryArtifacts(ctx, store.ArtifactQuery{Limit: 1})
+	// Read the task to determine its type.
+	art, err := s.artifacts.Read(ctx, taskPath, "HEAD")
 	if err != nil {
-		return
+		observe.Logger(ctx).Warn("failed to read task for workflow binding", "path", taskPath, "error", err)
+		return defaults
 	}
-	_ = result // workflow binding resolution is simplified for v0.x
 
-	// For now, return defaults — full workflow binding via ResolveBinding
-	// requires WorkflowProvider which queries workflow projections
-	return
+	resolved, err := s.workflowResolver(ctx, string(art.Type), "")
+	if err != nil {
+		observe.Logger(ctx).Warn("workflow binding failed", "artifact_type", art.Type, "error", err)
+		return defaults
+	}
+
+	return resolved
 }
 
 // resolveStepDef loads the StepDefinition for a step execution from the workflow.

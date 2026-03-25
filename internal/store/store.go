@@ -79,6 +79,7 @@ type Store interface {
 	UpsertWorkflowProjection(ctx context.Context, proj *WorkflowProjection) error
 	DeleteWorkflowProjection(ctx context.Context, workflowPath string) error
 	GetWorkflowProjection(ctx context.Context, workflowPath string) (*WorkflowProjection, error)
+	ListActiveWorkflowProjections(ctx context.Context) ([]WorkflowProjection, error)
 
 	// Sync State
 	GetSyncState(ctx context.Context) (*SyncState, error)
