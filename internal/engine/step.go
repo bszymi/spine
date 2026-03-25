@@ -204,6 +204,17 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 			return fmt.Errorf("update step execution: %w", err)
 		}
+
+		// Emit step_started event.
+		if err := o.events.Emit(ctx, domain.Event{
+			EventID:   fmt.Sprintf("evt-%s-%s-started", run.TraceID[:12], exec.StepID),
+			Type:      domain.EventStepStarted,
+			Timestamp: now,
+			RunID:     exec.RunID,
+			TraceID:   run.TraceID,
+		}); err != nil {
+			log.Warn("failed to emit event", "event_type", domain.EventStepStarted, "error", err)
+		}
 	}
 
 	// Submit: transition to completed.
