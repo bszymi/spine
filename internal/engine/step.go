@@ -105,6 +105,13 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		return fmt.Errorf("deliver assignment: %w", err)
 	}
 
+	// Track assignment for polling and expiry.
+	var timeout time.Duration
+	if stepDef.Timeout != "" {
+		timeout, _ = time.ParseDuration(stepDef.Timeout)
+	}
+	o.TrackAssignment(ctx, exec.ExecutionID, runID, exec.ExecutionID, assignReq.ActorID, timeout)
+
 	if err := o.events.Emit(ctx, domain.Event{
 		EventID:   fmt.Sprintf("evt-%s-%s-assigned", run.TraceID[:12], stepID),
 		Type:      domain.EventStepAssigned,
@@ -185,6 +192,9 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
+
+	// Mark assignment as completed.
+	o.CompleteAssignment(ctx, executionID)
 
 	if err := o.events.Emit(ctx, domain.Event{
 		EventID:   fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID),

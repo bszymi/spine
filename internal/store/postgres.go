@@ -512,7 +512,8 @@ func (s *PostgresStore) CreateAssignment(ctx context.Context, a *domain.Assignme
 
 func (s *PostgresStore) UpdateAssignmentStatus(ctx context.Context, assignmentID string, status domain.AssignmentStatus, respondedAt *time.Time) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE runtime.actor_assignments SET status = $1, responded_at = $2 WHERE assignment_id = $3`,
+		UPDATE runtime.actor_assignments SET status = $1, responded_at = $2
+		WHERE assignment_id = $3 AND status = 'active'`,
 		status, respondedAt, assignmentID,
 	)
 	if err != nil {
