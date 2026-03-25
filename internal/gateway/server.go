@@ -39,37 +39,60 @@ type GitReader interface {
 
 // Server is the HTTP Access Gateway for Spine.
 type Server struct {
-	httpServer *http.Server
-	store      store.Store
-	auth       *auth.Service
-	artifacts  ArtifactService
-	projQuery  ProjectionQuerier
-	projSync   ProjectionSyncer
-	git        GitReader
-	validator  *validation.Engine
+	httpServer    *http.Server
+	store         store.Store
+	auth          *auth.Service
+	artifacts     ArtifactService
+	projQuery     ProjectionQuerier
+	projSync      ProjectionSyncer
+	git           GitReader
+	validator     *validation.Engine
+	resultHandler ResultHandler
+}
+
+// ResultHandler processes step result submissions through the engine pipeline.
+type ResultHandler interface {
+	IngestResult(ctx context.Context, req ResultSubmission) (*ResultResponse, error)
+}
+
+// ResultSubmission is the gateway-facing result submission.
+type ResultSubmission struct {
+	ExecutionID       string
+	OutcomeID         string
+	ArtifactsProduced []string
+}
+
+// ResultResponse is returned after result ingestion.
+type ResultResponse struct {
+	ExecutionID string `json:"execution_id"`
+	StepID      string `json:"step_id"`
+	Status      string `json:"status"`
+	OutcomeID   string `json:"outcome_id"`
 }
 
 // ServerConfig holds optional service dependencies for the server.
 type ServerConfig struct {
-	Store     store.Store
-	Auth      *auth.Service
-	Artifacts ArtifactService
-	ProjQuery ProjectionQuerier
-	ProjSync  ProjectionSyncer
-	Git       GitReader
-	Validator *validation.Engine
+	Store         store.Store
+	Auth          *auth.Service
+	Artifacts     ArtifactService
+	ProjQuery     ProjectionQuerier
+	ProjSync      ProjectionSyncer
+	Git           GitReader
+	Validator     *validation.Engine
+	ResultHandler ResultHandler
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
 func NewServer(addr string, cfg ServerConfig) *Server {
 	s := &Server{
-		store:     cfg.Store,
-		auth:      cfg.Auth,
-		artifacts: cfg.Artifacts,
-		projQuery: cfg.ProjQuery,
-		projSync:  cfg.ProjSync,
-		git:       cfg.Git,
-		validator: cfg.Validator,
+		store:         cfg.Store,
+		auth:          cfg.Auth,
+		artifacts:     cfg.Artifacts,
+		projQuery:     cfg.ProjQuery,
+		projSync:      cfg.ProjSync,
+		git:           cfg.Git,
+		validator:     cfg.Validator,
+		resultHandler: cfg.ResultHandler,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,

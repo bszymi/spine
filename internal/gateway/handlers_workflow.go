@@ -20,7 +20,8 @@ type runStartRequest struct {
 }
 
 type stepSubmitRequest struct {
-	OutcomeID string `json:"outcome_id"`
+	OutcomeID         string   `json:"outcome_id"`
+	ArtifactsProduced []string `json:"artifacts_produced,omitempty"`
 }
 
 type stepAssignRequest struct {
@@ -179,12 +180,30 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	executionID := chi.URLParam(r, "assignment_id")
+
+	// When engine result handler is configured, delegate to the full
+	// ingestion pipeline with required_outputs validation and orchestrator routing.
+	if s.resultHandler != nil {
+		resp, err := s.resultHandler.IngestResult(r.Context(), ResultSubmission{
+			ExecutionID:       executionID,
+			OutcomeID:         req.OutcomeID,
+			ArtifactsProduced: req.ArtifactsProduced,
+		})
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// Fallback: legacy inline handling when no engine is configured.
 	if s.store == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
-	executionID := chi.URLParam(r, "assignment_id")
 	exec, err := s.store.GetStepExecution(r.Context(), executionID)
 	if err != nil {
 		WriteError(w, err)
@@ -242,7 +261,6 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		})
 		if runErr == nil {
 			_ = s.store.UpdateRunStatus(r.Context(), run.RunID, runResult.ToStatus)
-			// Create next step execution if run stays active
 			if runResult.ToStatus == domain.RunStatusActive && nextStepID != "end" {
 				_ = s.store.CreateStepExecution(r.Context(), &domain.StepExecution{
 					ExecutionID: fmt.Sprintf("%s-%s-1", run.RunID, nextStepID),
