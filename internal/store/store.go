@@ -74,6 +74,7 @@ type Store interface {
 	ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error)
 	ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error)
 	ListStaleActiveRuns(ctx context.Context, noActivitySince time.Time) ([]domain.Run, error)
+	ListTimedOutRuns(ctx context.Context, now time.Time) ([]domain.Run, error)
 
 	// Workflows
 	UpsertWorkflowProjection(ctx context.Context, proj *WorkflowProjection) error

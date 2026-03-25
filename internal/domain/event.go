@@ -24,6 +24,7 @@ const (
 	EventStepFailed      EventType = "step_failed"
 	EventStepTimeout     EventType = "step_timeout"
 	EventRetryAttempted  EventType = "retry_attempted"
+	EventRunTimeout      EventType = "run_timeout"
 )
 
 // Operational events (not reconstructible from Git).

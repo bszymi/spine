@@ -63,6 +63,7 @@ type ResolvedWorkflow struct {
 	EntryStep    string
 	CommitSHA    string
 	VersionLabel string
+	Timeout      string // max run duration (e.g. "24h")
 }
 
 // ResultHandler processes step result submissions through the engine pipeline.

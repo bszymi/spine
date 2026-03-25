@@ -52,6 +52,18 @@ func (f *fakeStore) ListActiveStepExecutions(_ context.Context) ([]domain.StepEx
 	return result, nil
 }
 
+func (f *fakeStore) ListTimedOutRuns(_ context.Context, now time.Time) ([]domain.Run, error) {
+	var result []domain.Run
+	for i := range f.runs {
+		r := &f.runs[i]
+		if (r.Status == domain.RunStatusActive || r.Status == domain.RunStatusPaused) &&
+			r.TimeoutAt != nil && !r.TimeoutAt.After(now) {
+			result = append(result, *r)
+		}
+	}
+	return result, nil
+}
+
 func (f *fakeStore) ListStaleActiveRuns(_ context.Context, noActivitySince time.Time) ([]domain.Run, error) {
 	var result []domain.Run
 	for i := range f.runs {

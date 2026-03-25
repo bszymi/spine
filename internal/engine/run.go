@@ -69,6 +69,16 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		CreatedAt:            now,
 	}
 
+	// Set run-level timeout if configured on the workflow.
+	if wfDef.Timeout != "" {
+		if d, err := time.ParseDuration(wfDef.Timeout); err == nil {
+			t := now.Add(d)
+			run.TimeoutAt = &t
+		} else {
+			log.Warn("invalid workflow timeout duration", "timeout", wfDef.Timeout, "error", err)
+		}
+	}
+
 	if err := o.store.CreateRun(ctx, run); err != nil {
 		return nil, fmt.Errorf("create run: %w", err)
 	}

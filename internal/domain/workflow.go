@@ -73,8 +73,9 @@ type WorkflowDefinition struct {
 	Steps             []StepDefinition        `json:"steps" yaml:"steps"`
 	DivergencePoints  []DivergenceDefinition  `json:"divergence_points,omitempty" yaml:"divergence_points,omitempty"`
 	ConvergencePoints []ConvergenceDefinition `json:"convergence_points,omitempty" yaml:"convergence_points,omitempty"`
-	Path              string                  `json:"path" yaml:"-"`       // set by parser, not from YAML
-	CommitSHA         string                  `json:"commit_sha" yaml:"-"` // set at binding time
+	Timeout           string                  `json:"timeout,omitempty" yaml:"timeout,omitempty"` // max run duration (e.g. "24h")
+	Path              string                  `json:"path" yaml:"-"`                              // set by parser, not from YAML
+	CommitSHA         string                  `json:"commit_sha" yaml:"-"`                        // set at binding time
 }
 
 // StepDefinition represents a single step within a workflow.
