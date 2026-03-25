@@ -1,0 +1,107 @@
+id: task-default
+name: Default Task Workflow
+version: "1.0"
+status: Active
+description: >
+  Standard workflow for implementation tasks. Covers the full lifecycle:
+  draft setup, execution by an actor, peer review, and Git commit of outcomes.
+
+applies_to:
+  - Task
+
+entry_step: draft
+
+steps:
+  - id: draft
+    name: Draft Setup
+    type: automated
+    execution:
+      mode: ai_only
+      eligible_actor_types:
+        - ai_agent
+    preconditions:
+      - type: artifact_status
+        config:
+          status: Pending
+    required_inputs:
+      - task_artifact
+    outcomes:
+      - id: ready
+        name: Ready for Execution
+        next_step: execute
+        commit:
+          status: In Progress
+    retry:
+      limit: 2
+      backoff: fixed
+    timeout: "30m"
+    timeout_outcome: ready
+
+  - id: execute
+    name: Execute Task
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - ai_agent
+        - human
+    preconditions:
+      - type: field_value
+        config:
+          field: status
+          value: In Progress
+    required_outputs:
+      - deliverable
+    outcomes:
+      - id: completed
+        name: Implementation Complete
+        next_step: review
+      - id: blocked
+        name: Blocked on Dependency
+        next_step: draft
+    retry:
+      limit: 3
+      backoff: exponential
+    timeout: "4h"
+
+  - id: review
+    name: Review Deliverable
+    type: review
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+    preconditions:
+      - type: links_exist
+        config:
+          link_type: parent
+    required_inputs:
+      - deliverable
+    outcomes:
+      - id: accepted
+        name: Accepted
+        next_step: commit
+      - id: needs_rework
+        name: Needs Rework
+        next_step: execute
+    timeout: "24h"
+
+  - id: commit
+    name: Commit Outcomes
+    type: automated
+    execution:
+      mode: automated_only
+      eligible_actor_types:
+        - automated_system
+    outcomes:
+      - id: committed
+        name: Changes Committed
+        next_step: end
+        commit:
+          status: Completed
+    retry:
+      limit: 3
+      backoff: exponential
+    timeout: "10m"
+    timeout_outcome: committed
