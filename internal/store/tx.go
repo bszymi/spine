@@ -15,10 +15,10 @@ type postgresTx struct {
 
 func (t *postgresTx) CreateRun(ctx context.Context, run *domain.Run) error {
 	_, err := t.tx.Exec(ctx, `
-		INSERT INTO runtime.runs (run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, trace_id, started_at, completed_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		INSERT INTO runtime.runs (run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, started_at, completed_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		run.RunID, run.TaskPath, run.WorkflowPath, run.WorkflowID, run.WorkflowVersion,
-		run.WorkflowVersionLabel, run.Status, nilIfEmpty(run.CurrentStepID), run.TraceID,
+		run.WorkflowVersionLabel, run.Status, nilIfEmpty(run.CurrentStepID), nilIfEmpty(run.BranchName), run.TraceID,
 		run.StartedAt, run.CompletedAt, run.CreatedAt,
 	)
 	if err != nil {

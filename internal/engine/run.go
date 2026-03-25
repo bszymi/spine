@@ -51,7 +51,10 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 	now := time.Now()
 
-	// Create run in pending status.
+	// Create run in pending status first, then create branch.
+	// This avoids orphan branches if run persistence fails.
+	branchName := fmt.Sprintf("spine/run/%s", runID)
+
 	run := &domain.Run{
 		RunID:                runID,
 		TaskPath:             taskPath,
@@ -61,12 +64,19 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		WorkflowVersionLabel: binding.VersionLabel,
 		Status:               domain.RunStatusPending,
 		CurrentStepID:        wfDef.EntryStep,
+		BranchName:           branchName,
 		TraceID:              traceID,
 		CreatedAt:            now,
 	}
 
 	if err := o.store.CreateRun(ctx, run); err != nil {
 		return nil, fmt.Errorf("create run: %w", err)
+	}
+
+	// Create the Git branch after the run is persisted.
+	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
+		log.Warn("failed to create run branch", "branch", branchName, "error", err)
+		run.BranchName = ""
 	}
 
 	// Create entry step execution BEFORE activation so that a failure here
@@ -166,6 +176,8 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 			log.Warn("failed to emit event", "event_type", domain.EventRunCompleted, "error", err)
 		}
 		log.Info("run completed", "run_id", runID)
+		// Clean up the run branch after successful completion.
+		_ = o.CleanupRunBranch(ctx, runID)
 	} else {
 		log.Info("run entering commit phase", "run_id", runID)
 	}
@@ -205,6 +217,7 @@ func (o *Orchestrator) FailRun(ctx context.Context, runID, reason string) error 
 	}
 
 	log.Info("run failed", "run_id", runID, "reason", reason)
+	_ = o.CleanupRunBranch(ctx, runID)
 	return nil
 }
 
@@ -238,6 +251,7 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
 	}
 
 	log.Info("run cancelled", "run_id", runID)
+	_ = o.CleanupRunBranch(ctx, runID)
 	return nil
 }
 
