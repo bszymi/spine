@@ -12,12 +12,15 @@ import (
 // Scheduler implements time-based triggers and crash recovery.
 // Per Engine State Machine §6.3.
 type Scheduler struct {
-	store           store.Store
-	events          event.EventRouter
-	timeoutInterval time.Duration
-	orphanInterval  time.Duration
-	orphanThreshold time.Duration
-	done            chan struct{}
+	store            store.Store
+	events           event.EventRouter
+	timeoutInterval  time.Duration
+	orphanInterval   time.Duration
+	orphanThreshold  time.Duration
+	commitRetryFn    CommitRetryFunc
+	commitMaxRetries int
+	commitThreshold  time.Duration
+	done             chan struct{}
 }
 
 // New creates a Scheduler with the given options.
@@ -51,6 +54,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 	orphanTicker := time.NewTicker(s.orphanInterval)
 	defer orphanTicker.Stop()
 
+	// Commit retry interval matches orphan scan (reasonable frequency).
+	commitTicker := time.NewTicker(s.orphanInterval)
+	defer commitTicker.Stop()
+
 	for {
 		select {
 		case <-timeoutTicker.C:
@@ -60,6 +67,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 		case <-orphanTicker.C:
 			if err := s.ScanOrphans(ctx); err != nil {
 				log.Error("orphan scan failed", "error", err)
+			}
+		case <-commitTicker.C:
+			if s.commitRetryFn != nil {
+				s.retryCommittingRuns(ctx)
 			}
 		case <-ctx.Done():
 			return
