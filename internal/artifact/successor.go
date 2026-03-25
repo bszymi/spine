@@ -28,8 +28,9 @@ func (s *Service) CreateSuccessorTask(ctx context.Context, rejectedPath, rationa
 			fmt.Sprintf("successor creation only applies to Task artifacts, got %s", original.Type))
 	}
 
-	// Generate successor path in the same directory.
-	successorID := original.ID + "-followup"
+	// Generate successor ID and path in the same directory.
+	// Use a numeric suffix to maintain valid TASK-XXX format.
+	successorID := nextFollowupID(original.ID)
 	dir := filepath.Dir(rejectedPath)
 	successorPath := filepath.Join(dir, strings.ToLower(successorID)+".md")
 
@@ -56,6 +57,33 @@ func (s *Service) CreateSuccessorTask(ctx context.Context, rejectedPath, rationa
 	return successor, nil
 }
 
+// nextFollowupID generates a valid successor task ID.
+// For TASK-001, returns TASK-901 (900-series for follow-ups).
+// For TASK-901, returns TASK-902, etc.
+func nextFollowupID(originalID string) string {
+	// Extract numeric part.
+	parts := strings.SplitN(originalID, "-", 2)
+	if len(parts) != 2 {
+		return originalID + "-F01"
+	}
+	prefix := parts[0]
+
+	// Parse the number.
+	var num int
+	if _, err := fmt.Sscanf(parts[1], "%d", &num); err != nil {
+		return originalID + "-F01"
+	}
+
+	// Follow-ups use 900-series to avoid collision with regular tasks.
+	if num < 900 {
+		num = 900 + (num % 100)
+	} else {
+		num++
+	}
+
+	return fmt.Sprintf("%s-%03d", prefix, num)
+}
+
 func buildSuccessorContent(original *domain.Artifact, successorID, rejectedPath, rationale string) string {
 	epic := original.Metadata["epic"]
 	initiative := original.Metadata["initiative"]
@@ -72,8 +100,9 @@ func buildSuccessorContent(original *domain.Artifact, successorID, rejectedPath,
 	if initiative != "" {
 		b.WriteString(fmt.Sprintf("initiative: %s\n", initiative))
 	}
+	canonicalTarget := "/" + rejectedPath
 	b.WriteString("links:\n")
-	b.WriteString(fmt.Sprintf("  - type: follow_up_to\n    target: %s\n", rejectedPath))
+	b.WriteString(fmt.Sprintf("  - type: follow_up_to\n    target: %s\n", canonicalTarget))
 	b.WriteString("---\n\n")
 	b.WriteString(fmt.Sprintf("# %s — Follow-up: %s\n\n", successorID, original.Title))
 	if rationale != "" {
@@ -102,12 +131,27 @@ func (s *Service) addLinkToArtifact(ctx context.Context, path, linkType, target 
 	return updateErr
 }
 
-// insertLink adds a link entry before the closing --- of YAML front matter.
+// insertLink adds a link entry to YAML front matter.
+// If no links: key exists, it adds one before the closing ---.
 func insertLink(content, linkType, target string) string {
+	canonicalTarget := target
+	if !strings.HasPrefix(canonicalTarget, "/") {
+		canonicalTarget = "/" + canonicalTarget
+	}
+
 	lines := strings.Split(content, "\n")
 	var result []string
 	inFrontMatter := false
+	hasLinks := false
 	inserted := false
+
+	// Check if links: key already exists.
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "links:") {
+			hasLinks = true
+			break
+		}
+	}
 
 	for _, line := range lines {
 		if line == "---" {
@@ -118,8 +162,11 @@ func insertLink(content, linkType, target string) string {
 			}
 			// Closing ---: insert link before it.
 			if !inserted {
+				if !hasLinks {
+					result = append(result, "links:")
+				}
 				result = append(result, fmt.Sprintf("  - type: %s", linkType))
-				result = append(result, fmt.Sprintf("    target: %s", target))
+				result = append(result, fmt.Sprintf("    target: %s", canonicalTarget))
 				inserted = true
 			}
 			inFrontMatter = false
