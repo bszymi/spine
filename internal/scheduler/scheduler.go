@@ -12,12 +12,15 @@ import (
 // Scheduler implements time-based triggers and crash recovery.
 // Per Engine State Machine §6.3.
 type Scheduler struct {
-	store           store.Store
-	events          event.EventRouter
-	timeoutInterval time.Duration
-	orphanInterval  time.Duration
-	orphanThreshold time.Duration
-	done            chan struct{}
+	store            store.Store
+	events           event.EventRouter
+	timeoutInterval  time.Duration
+	orphanInterval   time.Duration
+	orphanThreshold  time.Duration
+	commitRetryFn    CommitRetryFunc
+	commitMaxRetries int
+	commitThreshold  time.Duration
+	done             chan struct{}
 }
 
 // New creates a Scheduler with the given options.

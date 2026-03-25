@@ -225,7 +225,8 @@ func (s *Scheduler) recoverStep(ctx context.Context, run *domain.Run, exec *doma
 	return nil
 }
 
-// recoverCommittingRuns handles runs stuck in committing state.
+// recoverCommittingRuns retries merge for runs stuck in committing state.
+// Uses the CommitRetryFunc when configured; otherwise logs and skips.
 func (s *Scheduler) recoverCommittingRuns(ctx context.Context, result *RecoveryResult) error {
 	log := observe.Logger(ctx)
 
@@ -235,10 +236,22 @@ func (s *Scheduler) recoverCommittingRuns(ctx context.Context, result *RecoveryR
 	}
 
 	for i := range runs {
-		// Git commit retry service not yet implemented.
-		// Leave in committing state; will be handled when Git integration is complete.
-		log.Warn("committing run requires Git commit retry (not yet implemented)", "run_id", runs[i].RunID)
 		result.CommittingFound++
+
+		if s.commitRetryFn == nil {
+			log.Warn("committing run found but no retry function configured", "run_id", runs[i].RunID)
+			continue
+		}
+
+		// Check threshold: only retry if the run has been committing long enough.
+		if s.commitThreshold > 0 && time.Since(runs[i].CreatedAt) < s.commitThreshold {
+			continue
+		}
+
+		log.Info("retrying commit for stuck run", "run_id", runs[i].RunID)
+		if err := s.commitRetryFn(ctx, runs[i].RunID); err != nil {
+			log.Error("commit retry failed", "run_id", runs[i].RunID, "error", err)
+		}
 	}
 	return nil
 }
