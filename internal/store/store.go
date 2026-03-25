@@ -63,6 +63,13 @@ type Store interface {
 	UpdateBranch(ctx context.Context, branch *domain.Branch) error
 	ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error)
 
+	// Assignments
+	CreateAssignment(ctx context.Context, a *domain.Assignment) error
+	UpdateAssignmentStatus(ctx context.Context, assignmentID string, status domain.AssignmentStatus, respondedAt *time.Time) error
+	GetAssignment(ctx context.Context, assignmentID string) (*domain.Assignment, error)
+	ListAssignmentsByActor(ctx context.Context, actorID string, status *domain.AssignmentStatus) ([]domain.Assignment, error)
+	ListExpiredAssignments(ctx context.Context, before time.Time) ([]domain.Assignment, error)
+
 	// Scheduler queries
 	ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error)
 	ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error)
