@@ -1,0 +1,58 @@
+id: adr-review
+name: ADR Review Workflow
+version: "1.0"
+status: Active
+description: >
+  Workflow for Architectural Decision Records. An ADR is proposed,
+  evaluated by reviewers, and either accepted or rejected.
+
+applies_to:
+  - ADR
+
+entry_step: propose
+
+steps:
+  - id: propose
+    name: Propose Decision
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+    preconditions:
+      - type: artifact_status
+        config:
+          status: Proposed
+    required_outputs:
+      - decision_document
+    outcomes:
+      - id: proposed
+        name: Proposal Ready
+        next_step: evaluate
+    timeout: "48h"
+
+  - id: evaluate
+    name: Evaluate Decision
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types:
+        - human
+    required_inputs:
+      - decision_document
+    outcomes:
+      - id: accepted
+        name: Decision Accepted
+        next_step: end
+        commit:
+          status: Accepted
+      - id: deprecated
+        name: Decision Deprecated
+        next_step: end
+        commit:
+          status: Deprecated
+      - id: needs_revision
+        name: Needs Revision
+        next_step: propose
+    timeout: "72h"
