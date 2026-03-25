@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: Artifact Service
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
   - type: parent

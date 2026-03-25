@@ -2,7 +2,7 @@
 id: INIT-001
 type: Initiative
 title: Foundations
-status: In Progress
+status: Completed
 owner: bszymi
 created: 2026-03-04
 last_updated: 2026-03-14

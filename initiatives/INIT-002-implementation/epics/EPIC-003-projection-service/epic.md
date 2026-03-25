@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: Projection Service
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
   - type: parent

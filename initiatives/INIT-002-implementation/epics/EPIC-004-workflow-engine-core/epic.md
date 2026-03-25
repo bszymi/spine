@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: Workflow Engine Core
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
   - type: parent

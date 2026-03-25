@@ -165,8 +165,9 @@ func insertLink(content, linkType, target string) string {
 				if !hasLinks {
 					result = append(result, "links:")
 				}
-				result = append(result, fmt.Sprintf("  - type: %s", linkType))
-				result = append(result, fmt.Sprintf("    target: %s", canonicalTarget))
+				result = append(result,
+					fmt.Sprintf("  - type: %s", linkType),
+					fmt.Sprintf("    target: %s", canonicalTarget))
 				inserted = true
 			}
 			inFrontMatter = false
