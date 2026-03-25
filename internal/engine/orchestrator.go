@@ -13,7 +13,8 @@ type Orchestrator struct {
 	events      EventEmitter
 	git         GitOperator
 	wfLoader    WorkflowLoader
-	assignments AssignmentStore // optional, nil if not configured
+	assignments AssignmentStore        // optional, nil if not configured
+	validator   CrossArtifactValidator // optional, nil if not configured
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -62,4 +63,9 @@ func New(
 // WithAssignmentStore enables assignment tracking on the orchestrator.
 func (o *Orchestrator) WithAssignmentStore(s AssignmentStore) {
 	o.assignments = s
+}
+
+// WithValidator enables cross-artifact validation for step preconditions.
+func (o *Orchestrator) WithValidator(v CrossArtifactValidator) {
+	o.validator = v
 }

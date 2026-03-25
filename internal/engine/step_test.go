@@ -9,6 +9,16 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 )
 
+// ── Validator mock ──
+
+type mockValidator struct {
+	result domain.ValidationResult
+}
+
+func (m *mockValidator) Validate(_ context.Context, _ string) domain.ValidationResult {
+	return m.result
+}
+
 // ── Step-specific mocks ──
 
 type mockWorkflowLoader struct {
@@ -416,7 +426,8 @@ func TestEvaluatePreconditions_NoPreconditions(t *testing.T) {
 	step := &domain.StepDefinition{}
 	run := &domain.Run{TaskPath: "tasks/task.md"}
 
-	if !orch.evaluatePreconditions(context.Background(), step, run) {
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if !passed {
 		t.Error("expected pass with no preconditions")
 	}
 }
@@ -431,7 +442,8 @@ func TestEvaluatePreconditions_UnknownType(t *testing.T) {
 	run := &domain.Run{TaskPath: "tasks/task.md"}
 
 	// Unknown types are skipped — should pass.
-	if !orch.evaluatePreconditions(context.Background(), step, run) {
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if !passed {
 		t.Error("expected pass with unknown precondition type")
 	}
 }
@@ -456,7 +468,8 @@ func TestEvaluatePreconditions_AllTypes(t *testing.T) {
 		},
 	}
 
-	if !orch.evaluatePreconditions(context.Background(), step, run) {
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if !passed {
 		t.Error("expected all preconditions to pass")
 	}
 }
@@ -474,7 +487,8 @@ func TestEvaluatePreconditions_FieldPresentFails(t *testing.T) {
 		},
 	}
 
-	if orch.evaluatePreconditions(context.Background(), step, run) {
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if passed {
 		t.Error("expected field_present precondition to fail")
 	}
 }
@@ -492,7 +506,8 @@ func TestEvaluatePreconditions_FieldValueFails(t *testing.T) {
 		},
 	}
 
-	if orch.evaluatePreconditions(context.Background(), step, run) {
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if passed {
 		t.Error("expected field_value precondition to fail")
 	}
 }
@@ -510,7 +525,8 @@ func TestEvaluatePreconditions_LinksExistFails(t *testing.T) {
 		},
 	}
 
-	if orch.evaluatePreconditions(context.Background(), step, run) {
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if passed {
 		t.Error("expected links_exist precondition to fail")
 	}
 }
@@ -535,6 +551,301 @@ func TestCheckArtifactStatus_ReadError(t *testing.T) {
 	if orch.checkArtifactStatus(context.Background(), map[string]string{"status": "Active"}, run) {
 		t.Error("expected fail on read error")
 	}
+}
+
+// ── Cross-artifact validation precondition tests ──
+
+func TestActivateStep_CrossArtifactValid_Passes(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+
+	wf := testWorkflow()
+	wf.Steps[0].Preconditions = []domain.Precondition{
+		{Type: "cross_artifact_valid", Config: map[string]string{}},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	validator := &mockValidator{
+		result: domain.ValidationResult{Status: "passed"},
+	}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+	orch.WithValidator(validator)
+
+	err := orch.ActivateStep(context.Background(), runID, "start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Step should be assigned (precondition passed).
+	if store.createdSteps[0].Status != domain.StepStatusAssigned {
+		t.Errorf("expected assigned, got %s", store.createdSteps[0].Status)
+	}
+}
+
+func TestActivateStep_CrossArtifactValid_Fails(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+
+	wf := testWorkflow()
+	wf.Steps[0].Preconditions = []domain.Precondition{
+		{Type: "cross_artifact_valid", Config: map[string]string{}},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	validator := &mockValidator{
+		result: domain.ValidationResult{
+			Status: "failed",
+			Errors: []domain.ValidationError{
+				{RuleID: "LC-001", ArtifactPath: "tasks/task.md", Severity: "error", Message: "broken parent link"},
+			},
+		},
+	}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, nil)
+	orch.WithValidator(validator)
+
+	err := orch.ActivateStep(context.Background(), runID, "start")
+	if err == nil {
+		t.Fatal("expected precondition error")
+	}
+
+	var spineErr *domain.SpineError
+	if !errors.As(err, &spineErr) {
+		t.Fatalf("expected SpineError, got %T", err)
+	}
+	if spineErr.Code != domain.ErrPrecondition {
+		t.Errorf("expected precondition_failed, got %s", spineErr.Code)
+	}
+
+	// Error detail should include validation result.
+	if spineErr.Detail == nil {
+		t.Fatal("expected error detail with validation result")
+	}
+
+	// Step should remain waiting.
+	if store.createdSteps[0].Status != domain.StepStatusWaiting {
+		t.Errorf("expected step to remain waiting, got %s", store.createdSteps[0].Status)
+	}
+
+	// Validation errors should be persisted on step execution.
+	if store.createdSteps[0].ErrorDetail == nil {
+		t.Fatal("expected error detail on step execution")
+	}
+	if store.createdSteps[0].ErrorDetail.Classification != domain.FailureValidation {
+		t.Errorf("expected validation_failed classification, got %s", store.createdSteps[0].ErrorDetail.Classification)
+	}
+	if store.createdSteps[0].ErrorDetail.Message != "broken parent link" {
+		t.Errorf("expected error message, got %s", store.createdSteps[0].ErrorDetail.Message)
+	}
+}
+
+func TestActivateStep_CrossArtifactValid_NoValidator(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+
+	wf := testWorkflow()
+	wf.Steps[0].Preconditions = []domain.Precondition{
+		{Type: "cross_artifact_valid", Config: map[string]string{}},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	// No validator configured — should skip the precondition.
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+
+	err := orch.ActivateStep(context.Background(), runID, "start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if store.createdSteps[0].Status != domain.StepStatusAssigned {
+		t.Errorf("expected assigned (skipped validation), got %s", store.createdSteps[0].Status)
+	}
+}
+
+func TestActivateStep_CrossArtifactValid_CustomPath(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+
+	wf := testWorkflow()
+	wf.Steps[0].Preconditions = []domain.Precondition{
+		{Type: "cross_artifact_valid", Config: map[string]string{"artifact_path": "epics/epic.md"}},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	var validatedPath string
+	validator := &pathCapturingValidator{
+		result: domain.ValidationResult{Status: "passed"},
+		capture: func(path string) {
+			validatedPath = path
+		},
+	}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+	orch.WithValidator(validator)
+
+	err := orch.ActivateStep(context.Background(), runID, "start")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if validatedPath != "epics/epic.md" {
+		t.Errorf("expected validation on epics/epic.md, got %s", validatedPath)
+	}
+}
+
+func TestActivateStep_CrossArtifactValid_WarningsPass(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+
+	wf := testWorkflow()
+	wf.Steps[0].Preconditions = []domain.Precondition{
+		{Type: "cross_artifact_valid", Config: map[string]string{}},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	validator := &mockValidator{
+		result: domain.ValidationResult{
+			Status: "warnings",
+			Warnings: []domain.ValidationError{
+				{RuleID: "SC-003", Severity: "warning", Message: "recommended field missing"},
+			},
+		},
+	}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+	orch.WithValidator(validator)
+
+	err := orch.ActivateStep(context.Background(), runID, "start")
+	if err != nil {
+		t.Fatalf("unexpected error: warnings should not block: %v", err)
+	}
+
+	if store.createdSteps[0].Status != domain.StepStatusAssigned {
+		t.Errorf("expected assigned (warnings don't block), got %s", store.createdSteps[0].Status)
+	}
+}
+
+func TestActivateStep_CrossArtifactValid_ClearsErrorOnRetry(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+
+	wf := testWorkflow()
+	wf.Steps[0].Preconditions = []domain.Precondition{
+		{Type: "cross_artifact_valid", Config: map[string]string{}},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	// First attempt: validation fails, ErrorDetail is set.
+	failValidator := &mockValidator{
+		result: domain.ValidationResult{
+			Status: "failed",
+			Errors: []domain.ValidationError{
+				{RuleID: "LC-001", Message: "broken parent link"},
+			},
+		},
+	}
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+	orch.WithValidator(failValidator)
+
+	err := orch.ActivateStep(context.Background(), runID, "start")
+	if err == nil {
+		t.Fatal("expected precondition error on first attempt")
+	}
+	if store.createdSteps[0].ErrorDetail == nil {
+		t.Fatal("expected error detail after failed validation")
+	}
+
+	// Second attempt: validation passes, ErrorDetail should be cleared.
+	passValidator := &mockValidator{
+		result: domain.ValidationResult{Status: "passed"},
+	}
+	orch.WithValidator(passValidator)
+
+	err = orch.ActivateStep(context.Background(), runID, "start")
+	if err != nil {
+		t.Fatalf("unexpected error on retry: %v", err)
+	}
+	if store.createdSteps[0].ErrorDetail != nil {
+		t.Error("expected ErrorDetail to be cleared after successful activation")
+	}
+	if store.createdSteps[0].Status != domain.StepStatusAssigned {
+		t.Errorf("expected assigned, got %s", store.createdSteps[0].Status)
+	}
+}
+
+func TestEvaluatePreconditions_CrossArtifactValid_MultipleErrors(t *testing.T) {
+	validator := &mockValidator{
+		result: domain.ValidationResult{
+			Status: "failed",
+			Errors: []domain.ValidationError{
+				{RuleID: "LC-001", Message: "broken parent link"},
+				{RuleID: "SI-002", Message: "invalid path structure"},
+			},
+		},
+	}
+	orch := &Orchestrator{artifacts: &mockArtifactReader{}, validator: validator}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "cross_artifact_valid", Config: map[string]string{}},
+		},
+	}
+
+	passed, result := orch.evaluatePreconditions(context.Background(), step, run)
+	if passed {
+		t.Error("expected precondition to fail")
+	}
+	if result == nil {
+		t.Fatal("expected validation result")
+	}
+	if len(result.Errors) != 2 {
+		t.Errorf("expected 2 errors, got %d", len(result.Errors))
+	}
+}
+
+func TestSummarizeValidationErrors(t *testing.T) {
+	// Single error.
+	single := summarizeValidationErrors([]domain.ValidationError{
+		{Message: "broken link"},
+	})
+	if single != "broken link" {
+		t.Errorf("expected single error message, got %s", single)
+	}
+
+	// Multiple errors.
+	multi := summarizeValidationErrors([]domain.ValidationError{
+		{Message: "broken link"},
+		{Message: "invalid path"},
+	})
+	if multi != "2 validation errors: broken link; invalid path" {
+		t.Errorf("unexpected summary: %s", multi)
+	}
+
+	// Empty.
+	empty := summarizeValidationErrors(nil)
+	if empty != "validation failed" {
+		t.Errorf("expected default message, got %s", empty)
+	}
+}
+
+// pathCapturingValidator records which path was validated.
+type pathCapturingValidator struct {
+	result  domain.ValidationResult
+	capture func(string)
+}
+
+func (v *pathCapturingValidator) Validate(_ context.Context, path string) domain.ValidationResult {
+	if v.capture != nil {
+		v.capture(path)
+	}
+	return v.result
 }
 
 func TestFindStepExecution_NoMatch(t *testing.T) {

@@ -58,6 +58,11 @@ type WorkflowLoader interface {
 	LoadWorkflow(ctx context.Context, path, ref string) (*domain.WorkflowDefinition, error)
 }
 
+// CrossArtifactValidator runs cross-artifact validation rules against a single artifact.
+type CrossArtifactValidator interface {
+	Validate(ctx context.Context, artifactPath string) domain.ValidationResult
+}
+
 // GitOperator provides Git operations needed for run-level branching and commits.
 type GitOperator interface {
 	Commit(ctx context.Context, opts git.CommitOpts) (git.CommitResult, error)
