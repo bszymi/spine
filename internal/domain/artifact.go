@@ -96,20 +96,20 @@ const (
 
 // Link represents a relationship between two artifacts.
 type Link struct {
-	Type   LinkType `json:"type"`
-	Target string   `json:"target"` // canonical artifact path
+	Type   LinkType `json:"type" yaml:"type"`
+	Target string   `json:"target" yaml:"target"` // canonical artifact path
 }
 
 // Artifact represents a governed artifact parsed from a Git-backed Markdown file.
 type Artifact struct {
-	Path                string            `json:"path"`                           // repository-relative path
-	ID                  string            `json:"id"`                             // artifact ID from front matter
-	Type                ArtifactType      `json:"type"`                           // artifact type
-	Title               string            `json:"title"`                          // artifact title
-	Status              ArtifactStatus    `json:"status"`                         // lifecycle status
-	Acceptance          TaskAcceptance    `json:"acceptance,omitempty"`           // task acceptance outcome
-	AcceptanceRationale string            `json:"acceptance_rationale,omitempty"` // rationale for acceptance decision
-	Links               []Link            `json:"links"`                          // relationships to other artifacts
-	Metadata            map[string]string `json:"metadata"`                       // additional front matter fields
-	Content             string            `json:"content"`                        // markdown body (after front matter)
+	Path                string            `json:"path" yaml:"path"`                                                     // repository-relative path
+	ID                  string            `json:"id" yaml:"id"`                                                         // artifact ID from front matter
+	Type                ArtifactType      `json:"type" yaml:"type"`                                                     // artifact type
+	Title               string            `json:"title" yaml:"title"`                                                   // artifact title
+	Status              ArtifactStatus    `json:"status" yaml:"status"`                                                 // lifecycle status
+	Acceptance          TaskAcceptance    `json:"acceptance,omitempty" yaml:"acceptance,omitempty"`                     // task acceptance outcome
+	AcceptanceRationale string            `json:"acceptance_rationale,omitempty" yaml:"acceptance_rationale,omitempty"` // rationale
+	Links               []Link            `json:"links" yaml:"links"`                                                   // relationships to other artifacts
+	Metadata            map[string]string `json:"metadata" yaml:"metadata"`                                             // additional front matter fields
+	Content             string            `json:"content" yaml:"content"`                                               // markdown body (after front matter)
 }

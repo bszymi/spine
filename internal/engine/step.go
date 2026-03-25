@@ -93,6 +93,9 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		outcomeIDs[i] = o.ID
 	}
 
+	// Build exclusion list from prior failed executions where actor was unavailable.
+	excludeActors := o.unavailableActorsForStep(ctx, runID, stepID)
+
 	assignReq := actor.AssignmentRequest{
 		AssignmentID: exec.ExecutionID,
 		RunID:        runID,
@@ -109,6 +112,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		Constraints: actor.AssignmentConstraints{
 			Timeout:          stepDef.Timeout,
 			ExpectedOutcomes: outcomeIDs,
+			ExcludeActors:    excludeActors,
 		},
 	}
 
@@ -129,7 +133,12 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	// Track assignment for polling and expiry.
 	var timeout time.Duration
 	if stepDef.Timeout != "" {
-		timeout, _ = time.ParseDuration(stepDef.Timeout)
+		d, err := time.ParseDuration(stepDef.Timeout)
+		if err != nil {
+			log.Warn("invalid step timeout duration", "step_id", stepID, "timeout", stepDef.Timeout, "error", err)
+		} else {
+			timeout = d
+		}
 	}
 	o.TrackAssignment(ctx, exec.ExecutionID, runID, exec.ExecutionID, assignReq.ActorID, timeout)
 
@@ -464,6 +473,26 @@ func (o *Orchestrator) nextAttempt(ctx context.Context, runID, stepID string) in
 		}
 	}
 	return highest + 1
+}
+
+// unavailableActorsForStep returns actor IDs from prior failed executions
+// classified as actor_unavailable. Used to exclude them from reassignment.
+func (o *Orchestrator) unavailableActorsForStep(ctx context.Context, runID, stepID string) []string {
+	execs, err := o.store.ListStepExecutionsByRun(ctx, runID)
+	if err != nil {
+		observe.Logger(ctx).Warn("failed to list step executions for actor exclusion", "run_id", runID, "error", err)
+		return nil
+	}
+	var excluded []string
+	for i := range execs {
+		e := &execs[i]
+		if e.StepID == stepID && e.Status == domain.StepStatusFailed &&
+			e.ErrorDetail != nil && e.ErrorDetail.Classification == domain.FailureActorUnavailable &&
+			e.ActorID != "" {
+			excluded = append(excluded, e.ActorID)
+		}
+	}
+	return excluded
 }
 
 // findOutcome looks up an outcome by ID within a step definition.

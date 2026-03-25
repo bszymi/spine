@@ -32,18 +32,18 @@ func (s RunStatus) IsTerminal() bool {
 
 // Run represents a workflow execution instance.
 type Run struct {
-	RunID                string     `json:"run_id"`
-	TaskPath             string     `json:"task_path"`
-	WorkflowPath         string     `json:"workflow_path"`
-	WorkflowID           string     `json:"workflow_id"`
-	WorkflowVersion      string     `json:"workflow_version"`       // Git commit SHA
-	WorkflowVersionLabel string     `json:"workflow_version_label"` // semantic version
-	Status               RunStatus  `json:"status"`
-	CurrentStepID        string     `json:"current_step_id,omitempty"`
-	BranchName           string     `json:"branch_name,omitempty"`
-	TraceID              string     `json:"trace_id"`
-	TimeoutAt            *time.Time `json:"timeout_at,omitempty"`
-	StartedAt            *time.Time `json:"started_at,omitempty"`
-	CompletedAt          *time.Time `json:"completed_at,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
+	RunID                string     `json:"run_id" yaml:"run_id"`
+	TaskPath             string     `json:"task_path" yaml:"task_path"`
+	WorkflowPath         string     `json:"workflow_path" yaml:"workflow_path"`
+	WorkflowID           string     `json:"workflow_id" yaml:"workflow_id"`
+	WorkflowVersion      string     `json:"workflow_version" yaml:"workflow_version"`             // Git commit SHA
+	WorkflowVersionLabel string     `json:"workflow_version_label" yaml:"workflow_version_label"` // semantic version
+	Status               RunStatus  `json:"status" yaml:"status"`
+	CurrentStepID        string     `json:"current_step_id,omitempty" yaml:"current_step_id,omitempty"`
+	BranchName           string     `json:"branch_name,omitempty" yaml:"branch_name,omitempty"`
+	TraceID              string     `json:"trace_id" yaml:"trace_id"`
+	TimeoutAt            *time.Time `json:"timeout_at,omitempty" yaml:"timeout_at,omitempty"`
+	StartedAt            *time.Time `json:"started_at,omitempty" yaml:"started_at,omitempty"`
+	CompletedAt          *time.Time `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at" yaml:"created_at"`
 }
