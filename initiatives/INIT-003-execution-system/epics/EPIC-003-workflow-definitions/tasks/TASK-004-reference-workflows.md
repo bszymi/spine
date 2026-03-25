@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Reference Workflows
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-003-workflow-definitions/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

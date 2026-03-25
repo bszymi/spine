@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Task Acceptance and Rejection Recording
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-005-evaluation-outcomes/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

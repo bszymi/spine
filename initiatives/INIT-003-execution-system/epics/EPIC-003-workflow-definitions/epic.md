@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: Workflow Definitions
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
   - type: parent

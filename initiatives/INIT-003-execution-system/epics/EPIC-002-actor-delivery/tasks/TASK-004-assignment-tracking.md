@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Assignment Tracking and Polling
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-002-actor-delivery/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

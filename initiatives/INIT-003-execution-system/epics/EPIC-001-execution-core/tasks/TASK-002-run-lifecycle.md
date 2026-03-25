@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Run Lifecycle Management
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-001-execution-core/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
