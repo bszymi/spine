@@ -51,6 +51,14 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 	now := time.Now()
 
+	// Create run branch for isolated writes.
+	branchName := fmt.Sprintf("spine/run/%s", runID)
+	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
+		log.Warn("failed to create run branch", "branch", branchName, "error", err)
+		// Non-fatal: run can still proceed on the current branch.
+		branchName = ""
+	}
+
 	// Create run in pending status.
 	run := &domain.Run{
 		RunID:                runID,
@@ -61,6 +69,7 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		WorkflowVersionLabel: binding.VersionLabel,
 		Status:               domain.RunStatusPending,
 		CurrentStepID:        wfDef.EntryStep,
+		BranchName:           branchName,
 		TraceID:              traceID,
 		CreatedAt:            now,
 	}
