@@ -51,6 +51,9 @@ func (s *stubRunStore) GetDivergenceContext(_ context.Context, _ string) (*domai
 }
 func (s *stubRunStore) CreateBranch(_ context.Context, _ *domain.Branch) error { return nil }
 func (s *stubRunStore) UpdateBranch(_ context.Context, _ *domain.Branch) error { return nil }
+func (s *stubRunStore) GetBranch(_ context.Context, _ string) (*domain.Branch, error) {
+	return nil, domain.NewError(domain.ErrNotFound, "branch not found")
+}
 func (s *stubRunStore) ListBranchesByDivergence(_ context.Context, _ string) ([]domain.Branch, error) {
 	return nil, nil
 }

@@ -36,6 +36,7 @@ type mockRunStore struct {
 	createdRun   *domain.Run
 	createdSteps []*domain.StepExecution
 	runs         map[string]*domain.Run
+	branches     []*domain.Branch
 	statusCalls  []statusCall
 	createRunErr error
 	updateErr    error
@@ -121,6 +122,35 @@ func (m *mockRunStore) ListStepExecutionsByRun(_ context.Context, runID string) 
 		}
 	}
 	return result, nil
+}
+
+func (m *mockRunStore) GetBranch(_ context.Context, branchID string) (*domain.Branch, error) {
+	for _, b := range m.branches {
+		if b.BranchID == branchID {
+			return b, nil
+		}
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "branch not found")
+}
+
+func (m *mockRunStore) ListBranchesByDivergence(_ context.Context, divergenceID string) ([]domain.Branch, error) {
+	var result []domain.Branch
+	for _, b := range m.branches {
+		if b.DivergenceID == divergenceID {
+			result = append(result, *b)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockRunStore) UpdateBranch(_ context.Context, branch *domain.Branch) error {
+	for i, b := range m.branches {
+		if b.BranchID == branch.BranchID {
+			m.branches[i] = branch
+			return nil
+		}
+	}
+	return domain.NewError(domain.ErrNotFound, "branch not found")
 }
 
 type mockEventEmitter struct {

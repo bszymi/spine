@@ -479,6 +479,29 @@ func (s *PostgresStore) UpdateBranch(ctx context.Context, branch *domain.Branch)
 	return nil
 }
 
+func (s *PostgresStore) GetBranch(ctx context.Context, branchID string) (*domain.Branch, error) {
+	var branch domain.Branch
+	var currentStepID *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT branch_id, run_id, divergence_id, status, current_step_id, outcome, artifacts_produced, created_at, completed_at
+		FROM runtime.branches WHERE branch_id = $1`, branchID,
+	).Scan(
+		&branch.BranchID, &branch.RunID, &branch.DivergenceID, &branch.Status,
+		&currentStepID, &branch.Outcome, &branch.ArtifactsProduced,
+		&branch.CreatedAt, &branch.CompletedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "branch not found")
+		}
+		return nil, err
+	}
+	if currentStepID != nil {
+		branch.CurrentStepID = *currentStepID
+	}
+	return &branch, nil
+}
+
 func (s *PostgresStore) ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT branch_id, run_id, divergence_id, status, current_step_id, outcome, artifacts_produced, created_at, completed_at

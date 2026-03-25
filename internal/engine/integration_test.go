@@ -98,6 +98,9 @@ func (s *memStore) GetDivergenceContext(_ context.Context, _ string) (*domain.Di
 }
 func (s *memStore) CreateBranch(_ context.Context, _ *domain.Branch) error { return nil }
 func (s *memStore) UpdateBranch(_ context.Context, _ *domain.Branch) error { return nil }
+func (s *memStore) GetBranch(_ context.Context, _ string) (*domain.Branch, error) {
+	return nil, domain.NewError(domain.ErrNotFound, "branch not found")
+}
 func (s *memStore) ListBranchesByDivergence(_ context.Context, _ string) ([]domain.Branch, error) {
 	return nil, nil
 }

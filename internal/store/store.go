@@ -61,6 +61,7 @@ type Store interface {
 	GetDivergenceContext(ctx context.Context, divergenceID string) (*domain.DivergenceContext, error)
 	CreateBranch(ctx context.Context, branch *domain.Branch) error
 	UpdateBranch(ctx context.Context, branch *domain.Branch) error
+	GetBranch(ctx context.Context, branchID string) (*domain.Branch, error)
 	ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error)
 
 	// Assignments

@@ -15,6 +15,7 @@ type Orchestrator struct {
 	wfLoader    WorkflowLoader
 	assignments AssignmentStore        // optional, nil if not configured
 	validator   CrossArtifactValidator // optional, nil if not configured
+	divergence  DivergenceHandler      // optional, nil if not configured
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -68,4 +69,9 @@ func (o *Orchestrator) WithAssignmentStore(s AssignmentStore) {
 // WithValidator enables cross-artifact validation for step preconditions.
 func (o *Orchestrator) WithValidator(v CrossArtifactValidator) {
 	o.validator = v
+}
+
+// WithDivergence enables divergence handling for workflow branching.
+func (o *Orchestrator) WithDivergence(d DivergenceHandler) {
+	o.divergence = d
 }
