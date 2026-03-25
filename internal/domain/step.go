@@ -65,6 +65,7 @@ type ErrorDetail struct {
 	StepID         string                `json:"step_id,omitempty"`
 	ActorID        string                `json:"actor_id,omitempty"`
 	RuleID         string                `json:"rule_id,omitempty"`
+	Violations     []ValidationError     `json:"violations,omitempty"`
 }
 
 // Scan implements the sql.Scanner interface for reading JSONB from PostgreSQL.

@@ -15,6 +15,9 @@ func scopeRules() []Rule {
 type ruleSA001 struct{}
 
 func (r *ruleSA001) ID() string { return "SA-001" }
+func (r *ruleSA001) Classification() domain.ViolationClassification {
+	return domain.ViolationScopeConflict
+}
 func (r *ruleSA001) Evaluate(_ context.Context, proj *store.ArtifactProjection, _ store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeTask {
 		return nil
@@ -35,6 +38,9 @@ func (r *ruleSA001) Evaluate(_ context.Context, proj *store.ArtifactProjection, 
 type ruleSA002 struct{}
 
 func (r *ruleSA002) ID() string { return "SA-002" }
+func (r *ruleSA002) Classification() domain.ViolationClassification {
+	return domain.ViolationScopeConflict
+}
 func (r *ruleSA002) Evaluate(_ context.Context, proj *store.ArtifactProjection, _ store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeADR {
 		return nil

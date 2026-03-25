@@ -598,7 +598,7 @@ func TestActivateStep_CrossArtifactValid_Fails(t *testing.T) {
 		result: domain.ValidationResult{
 			Status: "failed",
 			Errors: []domain.ValidationError{
-				{RuleID: "LC-001", ArtifactPath: "tasks/task.md", Severity: "error", Message: "broken parent link"},
+				{RuleID: "LC-001", Classification: domain.ViolationStructuralError, ArtifactPath: "tasks/task.md", Severity: "error", Message: "broken parent link"},
 			},
 		},
 	}
@@ -638,6 +638,18 @@ func TestActivateStep_CrossArtifactValid_Fails(t *testing.T) {
 	}
 	if store.createdSteps[0].ErrorDetail.Message != "broken parent link" {
 		t.Errorf("expected error message, got %s", store.createdSteps[0].ErrorDetail.Message)
+	}
+
+	// Violations should be persisted with category classification.
+	if len(store.createdSteps[0].ErrorDetail.Violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(store.createdSteps[0].ErrorDetail.Violations))
+	}
+	v := store.createdSteps[0].ErrorDetail.Violations[0]
+	if v.Classification != domain.ViolationStructuralError {
+		t.Errorf("expected classification %s, got %s", domain.ViolationStructuralError, v.Classification)
+	}
+	if v.RuleID != "LC-001" {
+		t.Errorf("expected rule_id LC-001, got %s", v.RuleID)
 	}
 }
 

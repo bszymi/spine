@@ -25,6 +25,9 @@ type ruleLinkReciprocal struct {
 }
 
 func (r *ruleLinkReciprocal) ID() string { return r.id }
+func (r *ruleLinkReciprocal) Classification() domain.ViolationClassification {
+	return domain.ViolationLinkInconsistency
+}
 func (r *ruleLinkReciprocal) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	links := parseLinks(proj)
 	var errors []domain.ValidationError
@@ -85,6 +88,9 @@ func isInferredParentChild(childPath, parentPath string) bool {
 type ruleLC004 struct{}
 
 func (r *ruleLC004) ID() string { return "LC-004" }
+func (r *ruleLC004) Classification() domain.ViolationClassification {
+	return domain.ViolationLinkInconsistency
+}
 func (r *ruleLC004) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	links := parseLinks(proj)
 	var errors []domain.ValidationError
@@ -106,6 +112,9 @@ func (r *ruleLC004) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type ruleLC005 struct{}
 
 func (r *ruleLC005) ID() string { return "LC-005" }
+func (r *ruleLC005) Classification() domain.ViolationClassification {
+	return domain.ViolationLinkInconsistency
+}
 func (r *ruleLC005) Evaluate(_ context.Context, proj *store.ArtifactProjection, _ store.Store) []domain.ValidationError {
 	links := parseLinks(proj)
 	var errors []domain.ValidationError
