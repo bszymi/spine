@@ -256,6 +256,24 @@ func (s *Scheduler) recoverCommittingRuns(ctx context.Context, result *RecoveryR
 	return nil
 }
 
+// retryCommittingRuns is called periodically to retry stuck committing runs.
+func (s *Scheduler) retryCommittingRuns(ctx context.Context) {
+	log := observe.Logger(ctx)
+
+	runs, err := s.store.ListRunsByStatus(ctx, domain.RunStatusCommitting)
+	if err != nil {
+		log.Error("list committing runs failed", "error", err)
+		return
+	}
+
+	for i := range runs {
+		log.Info("retrying commit for committing run", "run_id", runs[i].RunID)
+		if err := s.commitRetryFn(ctx, runs[i].RunID); err != nil {
+			log.Error("commit retry failed", "run_id", runs[i].RunID, "error", err)
+		}
+	}
+}
+
 // findCurrentExecution returns the most recent execution for the given step ID.
 func findCurrentExecution(execs []domain.StepExecution, stepID string) *domain.StepExecution {
 	var latest *domain.StepExecution

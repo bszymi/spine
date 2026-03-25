@@ -54,6 +54,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 	orphanTicker := time.NewTicker(s.orphanInterval)
 	defer orphanTicker.Stop()
 
+	// Commit retry interval matches orphan scan (reasonable frequency).
+	commitTicker := time.NewTicker(s.orphanInterval)
+	defer commitTicker.Stop()
+
 	for {
 		select {
 		case <-timeoutTicker.C:
@@ -63,6 +67,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 		case <-orphanTicker.C:
 			if err := s.ScanOrphans(ctx); err != nil {
 				log.Error("orphan scan failed", "error", err)
+			}
+		case <-commitTicker.C:
+			if s.commitRetryFn != nil {
+				s.retryCommittingRuns(ctx)
 			}
 		case <-ctx.Done():
 			return
