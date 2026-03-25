@@ -1,0 +1,79 @@
+id: task-spike
+name: Spike Investigation Workflow
+version: "1.0"
+status: Active
+description: >
+  Simplified workflow for spike and investigation tasks. Focuses on
+  exploring a question and summarizing findings rather than producing
+  a deliverable artifact.
+
+applies_to:
+  - Task
+
+entry_step: investigate
+
+steps:
+  - id: investigate
+    name: Investigate
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - ai_agent
+        - human
+    required_outputs:
+      - findings
+    outcomes:
+      - id: findings_ready
+        name: Findings Ready
+        next_step: summarize
+      - id: inconclusive
+        name: Inconclusive
+        next_step: end
+        commit:
+          status: Completed
+    retry:
+      limit: 2
+      backoff: fixed
+    timeout: "8h"
+
+  - id: summarize
+    name: Summarize Findings
+    type: automated
+    execution:
+      mode: ai_only
+      eligible_actor_types:
+        - ai_agent
+    required_inputs:
+      - findings
+    required_outputs:
+      - summary
+    outcomes:
+      - id: summarized
+        name: Summary Complete
+        next_step: review
+    retry:
+      limit: 2
+      backoff: fixed
+    timeout: "1h"
+
+  - id: review
+    name: Review Summary
+    type: review
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+    required_inputs:
+      - summary
+    outcomes:
+      - id: accepted
+        name: Accepted
+        next_step: end
+        commit:
+          status: Completed
+      - id: needs_more_investigation
+        name: Needs More Investigation
+        next_step: investigate
+    timeout: "24h"

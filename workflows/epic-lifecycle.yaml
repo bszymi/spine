@@ -1,0 +1,75 @@
+id: epic-lifecycle
+name: Epic Lifecycle Workflow
+version: "1.0"
+status: Active
+description: >
+  Workflow for epic progression. An epic is planned, tasks are
+  executed under it, and the epic is reviewed for completion.
+
+applies_to:
+  - Epic
+
+entry_step: plan
+
+steps:
+  - id: plan
+    name: Plan Epic
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+    preconditions:
+      - type: artifact_status
+        config:
+          status: Pending
+    required_outputs:
+      - task_breakdown
+    outcomes:
+      - id: planned
+        name: Epic Planned
+        next_step: execute
+        commit:
+          status: In Progress
+    timeout: "72h"
+
+  - id: execute
+    name: Execute Tasks
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+    preconditions:
+      - type: field_value
+        config:
+          field: status
+          value: In Progress
+    outcomes:
+      - id: tasks_complete
+        name: All Tasks Complete
+        next_step: review
+      - id: blocked
+        name: Blocked
+        next_step: plan
+    timeout: "168h"
+
+  - id: review
+    name: Review Epic
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types:
+        - human
+    outcomes:
+      - id: completed
+        name: Epic Complete
+        next_step: end
+        commit:
+          status: Completed
+      - id: needs_more_work
+        name: Needs More Work
+        next_step: execute
+    timeout: "48h"
