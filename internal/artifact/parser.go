@@ -174,14 +174,16 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 	}
 
 	return &domain.Artifact{
-		Path:     path,
-		ID:       parsed.ID,
-		Type:     artifactType,
-		Title:    parsed.Title,
-		Status:   domain.ArtifactStatus(parsed.Status),
-		Links:    links,
-		Metadata: meta,
-		Content:  body,
+		Path:                path,
+		ID:                  parsed.ID,
+		Type:                artifactType,
+		Title:               parsed.Title,
+		Status:              domain.ArtifactStatus(parsed.Status),
+		Acceptance:          domain.TaskAcceptance(parsed.Acceptance),
+		AcceptanceRationale: parsed.AcceptanceRationale,
+		Links:               links,
+		Metadata:            meta,
+		Content:             body,
 	}, nil
 }
 

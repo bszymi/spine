@@ -42,6 +42,58 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// For accept/reject, delegate to the acceptance pipeline which records
+	// acceptance fields in addition to status changes.
+	if action == "accept" {
+		var req struct {
+			Rationale string `json:"rationale"`
+		}
+		_ = decodeJSON(r, &req) // rationale is optional
+
+		art, err := s.artifacts.AcceptTask(r.Context(), taskPath, req.Rationale)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"artifact_path": art.Path,
+			"artifact_id":   art.ID,
+			"status":        art.Status,
+			"acceptance":    art.Acceptance,
+			"action":        action,
+			"trace_id":      observe.TraceID(r.Context()),
+		})
+		return
+	}
+
+	if action == "reject" {
+		var req struct {
+			Acceptance string `json:"acceptance"`
+			Rationale  string `json:"rationale"`
+		}
+		_ = decodeJSON(r, &req) // body is optional for reject
+		acceptance := domain.TaskAcceptance(req.Acceptance)
+		if acceptance == "" {
+			acceptance = domain.AcceptanceRejectedClosed
+		}
+		art, err := s.artifacts.RejectTask(r.Context(), taskPath, acceptance, req.Rationale)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"artifact_path": art.Path,
+			"artifact_id":   art.ID,
+			"status":        art.Status,
+			"acceptance":    art.Acceptance,
+			"action":        action,
+			"trace_id":      observe.TraceID(r.Context()),
+		})
+		return
+	}
+
+	// Other actions (cancel, abandon, supersede) — status-only transition.
+
 	// Read current task — need raw content with front matter for status update
 	a, err := s.artifacts.Read(r.Context(), taskPath, "")
 	if err != nil {

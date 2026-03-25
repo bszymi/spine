@@ -214,6 +214,24 @@ func (f *fakeArtifactService) List(_ context.Context, _ string) ([]*domain.Artif
 	return result, nil
 }
 
+func (f *fakeArtifactService) AcceptTask(_ context.Context, path, _ string) (*domain.Artifact, error) {
+	a, ok := f.artifacts[path]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "not found")
+	}
+	a.Acceptance = domain.AcceptanceApproved
+	return a, nil
+}
+
+func (f *fakeArtifactService) RejectTask(_ context.Context, path string, acceptance domain.TaskAcceptance, _ string) (*domain.Artifact, error) {
+	a, ok := f.artifacts[path]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "not found")
+	}
+	a.Acceptance = acceptance
+	return a, nil
+}
+
 // ── Fake ProjectionSyncer ──
 
 type fakeProjSync struct {
