@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -20,6 +21,7 @@ type Service struct {
 	git    git.GitClient
 	events event.EventRouter
 	repo   string // repository root path
+	branchMu sync.Mutex // serializes branch-scoped writes to prevent checkout races
 }
 
 // NewService creates a new Artifact Service.
@@ -98,6 +100,13 @@ func (s *Service) Create(ctx context.Context, path, content string) (*domain.Art
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"artifact validation failed", result.Errors)
 	}
+
+	// Switch to target branch before any file writes.
+	cleanup, err := s.enterBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 
 	// Write file
 	dir := filepath.Dir(fullPath)
@@ -193,6 +202,13 @@ func (s *Service) Update(ctx context.Context, path, content string) (*domain.Art
 			"artifact validation failed", result.Errors)
 	}
 
+	// Switch to target branch before any file writes.
+	cleanup, err := s.enterBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
 	// Save original content for rollback
 	originalContent, readErr := os.ReadFile(fullPath)
 	if readErr != nil {
@@ -268,22 +284,32 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 	return artifacts, nil
 }
 
-// stageAndCommit stages a file and creates a scoped Git commit (only this file).
-// If a WriteContext is present in ctx, the commit is made on the specified branch.
-func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.CommitOpts) (git.CommitResult, error) {
-	// Check for branch-scoped writes.
+// enterBranch acquires the branch mutex and checks out the target branch
+// if a WriteContext is present. Must be called before any file writes.
+// Returns a cleanup function that switches back and releases the mutex.
+func (s *Service) enterBranch(ctx context.Context) (func(), error) {
 	wc := GetWriteContext(ctx)
-	if wc != nil && wc.Branch != "" {
-		if err := gitCheckout(ctx, s.repo, wc.Branch); err != nil {
-			return git.CommitResult{}, domain.NewError(domain.ErrGit,
-				fmt.Sprintf("checkout branch %s: %v", wc.Branch, err))
-		}
-		// Ensure we return to the previous branch after commit.
-		defer func() {
-			_ = gitCheckout(ctx, s.repo, "-")
-		}()
+	if wc == nil || wc.Branch == "" {
+		return func() {}, nil
 	}
 
+	s.branchMu.Lock()
+	if err := gitCheckout(ctx, s.repo, wc.Branch); err != nil {
+		s.branchMu.Unlock()
+		return nil, domain.NewError(domain.ErrGit,
+			fmt.Sprintf("checkout branch %s: %v", wc.Branch, err))
+	}
+
+	return func() {
+		_ = gitCheckout(ctx, s.repo, "-")
+		s.branchMu.Unlock()
+	}, nil
+}
+
+// stageAndCommit stages a file and creates a scoped Git commit (only this file).
+// The caller must call enterBranch before any file writes if branch-scoped
+// writes are needed.
+func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.CommitOpts) (git.CommitResult, error) {
 	// Build the full commit message with trailers
 	msg := opts.Message
 	if len(opts.Trailers) > 0 {
