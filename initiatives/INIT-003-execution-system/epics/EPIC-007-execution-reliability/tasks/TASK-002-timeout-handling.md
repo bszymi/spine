@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Timeout Handling
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-007-execution-reliability/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
