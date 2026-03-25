@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Queue Consumer Framework
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-002-actor-delivery/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

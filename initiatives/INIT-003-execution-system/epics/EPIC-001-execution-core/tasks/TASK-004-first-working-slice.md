@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: First Working Slice — End-to-End Execution
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-001-execution-core/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

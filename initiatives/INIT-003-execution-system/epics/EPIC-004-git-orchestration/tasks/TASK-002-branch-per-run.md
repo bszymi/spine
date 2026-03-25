@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Branch-Per-Run Strategy
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-004-git-orchestration/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
