@@ -269,7 +269,21 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 }
 
 // stageAndCommit stages a file and creates a scoped Git commit (only this file).
+// If a WriteContext is present in ctx, the commit is made on the specified branch.
 func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.CommitOpts) (git.CommitResult, error) {
+	// Check for branch-scoped writes.
+	wc := GetWriteContext(ctx)
+	if wc != nil && wc.Branch != "" {
+		if err := gitCheckout(ctx, s.repo, wc.Branch); err != nil {
+			return git.CommitResult{}, domain.NewError(domain.ErrGit,
+				fmt.Sprintf("checkout branch %s: %v", wc.Branch, err))
+		}
+		// Ensure we return to the previous branch after commit.
+		defer func() {
+			_ = gitCheckout(ctx, s.repo, "-")
+		}()
+	}
+
 	// Build the full commit message with trailers
 	msg := opts.Message
 	if len(opts.Trailers) > 0 {
@@ -332,6 +346,16 @@ func resolveToExistingAncestor(absPath string) (string, error) {
 
 // gitAdd stages a file using the git CLI directly.
 // Uses -- separator and GIT_LITERAL_PATHSPECS to prevent path injection.
+func gitCheckout(ctx context.Context, repoDir, branch string) error {
+	cmd := execCommand(ctx, "git", "checkout", branch)
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git checkout %s: %s", branch, string(out))
+	}
+	return nil
+}
+
 func gitAdd(ctx context.Context, repoDir, path string) error {
 	cmd := execCommand(ctx, "git", "add", "--", path)
 	cmd.Dir = repoDir
