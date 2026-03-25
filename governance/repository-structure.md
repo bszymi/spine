@@ -30,6 +30,7 @@ This document aligns with the [Guidelines](/governance/guidelines.md) and [Style
 ├── initiatives/
 ├── architecture/
 ├── product/
+├── workflows/
 ├── templates/
 └── tmp/
 ```
@@ -104,7 +105,26 @@ architecture/
 - **components.md** — Services and responsibilities
 - **adrs/** — Architectural Decision Records
 
-### 3.4 `/product/`
+### 3.4 `/workflows/`
+
+Contains workflow definitions that govern how work progresses through states. Workflow files are pure YAML (not Markdown with front matter). They are discovered by the projection service and used by the engine to drive execution.
+
+```
+workflows/
+├── task-default.yaml
+├── task-spike.yaml
+└── adr-review.yaml
+```
+
+Per [Workflow Definition Format](/architecture/workflow-definition-format.md):
+
+- **Naming**: `<artifact-type>-<variant>.yaml` (e.g., `task-default.yaml`)
+- **Versioning**: Each file has a `version` field; changes are tracked via Git history
+- **Status**: `Active`, `Deprecated`, or `Draft`
+- **Binding**: The `applies_to` field lists artifact types governed by the workflow
+- **Discovery**: Files matching `workflows/*.yaml` are automatically discovered by the projection service
+
+### 3.5 `/product/`
 
 Contains product definition artifacts produced by product-focused epics.
 
@@ -117,7 +137,7 @@ product/
 └── boundaries-and-constraints.md
 ```
 
-### 3.5 `/templates/`
+### 3.6 `/templates/`
 
 Contains reusable templates for artifact types.
 
@@ -131,7 +151,7 @@ templates/
 
 Templates define the expected sections and metadata for each artifact type. New artifact types must have a corresponding template.
 
-### 3.6 `/tmp/`
+### 3.7 `/tmp/`
 
 Scratch space for working documents, drafts, and notes that are not yet formal artifacts. Contents of `tmp/` are not governed and should not be relied upon as durable truth.
 
