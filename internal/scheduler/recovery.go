@@ -93,10 +93,27 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 			continue
 		}
 
+		// Idempotency guard: check if entry step execution already exists.
+		execs, err := s.store.ListStepExecutionsByRun(ctx, runs[i].RunID)
+		if err != nil {
+			log.Error("list step executions failed", "run_id", runs[i].RunID, "error", err)
+			continue
+		}
+		hasEntryStep := false
+		for j := range execs {
+			if execs[j].StepID == entryStepID {
+				hasEntryStep = true
+				break
+			}
+		}
+
 		now := time.Now()
 		if err := s.store.WithTx(ctx, func(tx store.Tx) error {
 			if err := tx.UpdateRunStatus(ctx, runs[i].RunID, tr.ToStatus); err != nil {
 				return err
+			}
+			if hasEntryStep {
+				return nil // entry step already exists, skip creation
 			}
 			return tx.CreateStepExecution(ctx, &domain.StepExecution{
 				ExecutionID: fmt.Sprintf("%s-%s-1", runs[i].RunID, entryStepID),
@@ -188,34 +205,47 @@ func (s *Scheduler) recoverStep(ctx context.Context, run *domain.Run, exec *doma
 		log.Info("blocked step unchanged", "run_id", run.RunID, "step_id", exec.StepID)
 
 	case domain.StepStatusCompleted:
-		// Step completed but run didn't advance — requires engine orchestrator to
-		// look up the outcome's next_step and create the next StepExecution.
-		// Recovery identifies the situation; the engine run loop will process it.
-		log.Warn("completed step needs run advancement (requires engine orchestrator)",
-			"run_id", run.RunID, "step_id", exec.StepID, "outcome_id", exec.OutcomeID)
+		// Step completed but run didn't advance — use engine to route to next step.
+		if s.stepRecoveryFn != nil {
+			log.Info("recovering completed step via engine",
+				"run_id", run.RunID, "step_id", exec.StepID, "outcome_id", exec.OutcomeID)
+			if err := s.stepRecoveryFn(ctx, exec.ExecutionID); err != nil {
+				log.Error("completed step recovery failed", "execution_id", exec.ExecutionID, "error", err)
+			}
+		} else {
+			log.Warn("completed step needs run advancement (no recovery function configured)",
+				"run_id", run.RunID, "step_id", exec.StepID, "outcome_id", exec.OutcomeID)
+		}
 
 	case domain.StepStatusFailed:
-		// Check retry eligibility and log the assessment.
-		// Creating a new StepExecution for retry or transitioning the run to failed
-		// requires the engine orchestrator — recovery identifies the situation.
-		stepDef, err := s.lookupStepDefinition(ctx, exec)
-		if err != nil {
-			return fmt.Errorf("lookup step definition: %w", err)
-		}
-		retryLimit := 0
-		if stepDef != nil && stepDef.Retry != nil {
-			retryLimit = stepDef.Retry.Limit
-		}
-		classification := domain.FailureTransient
-		if exec.ErrorDetail != nil {
-			classification = exec.ErrorDetail.Classification
-		}
-		if workflow.ShouldRetry(exec.Attempt, retryLimit, classification) {
-			log.Warn("failed step eligible for retry (requires engine orchestrator)",
+		// Use engine to evaluate retry or fail the run.
+		if s.stepRecoveryFn != nil {
+			log.Info("recovering failed step via engine",
 				"run_id", run.RunID, "step_id", exec.StepID, "attempt", exec.Attempt)
+			if err := s.stepRecoveryFn(ctx, exec.ExecutionID); err != nil {
+				log.Error("failed step recovery failed", "execution_id", exec.ExecutionID, "error", err)
+			}
 		} else {
-			log.Warn("failed step not retryable, run should be failed (requires engine orchestrator)",
-				"run_id", run.RunID, "step_id", exec.StepID)
+			// Fallback: log assessment without acting.
+			stepDef, err := s.lookupStepDefinition(ctx, exec)
+			if err != nil {
+				return fmt.Errorf("lookup step definition: %w", err)
+			}
+			retryLimit := 0
+			if stepDef != nil && stepDef.Retry != nil {
+				retryLimit = stepDef.Retry.Limit
+			}
+			classification := domain.FailureTransient
+			if exec.ErrorDetail != nil {
+				classification = exec.ErrorDetail.Classification
+			}
+			if workflow.ShouldRetry(exec.Attempt, retryLimit, classification) {
+				log.Warn("failed step eligible for retry (no recovery function configured)",
+					"run_id", run.RunID, "step_id", exec.StepID, "attempt", exec.Attempt)
+			} else {
+				log.Warn("failed step not retryable (no recovery function configured)",
+					"run_id", run.RunID, "step_id", exec.StepID)
+			}
 		}
 
 	case domain.StepStatusSkipped:

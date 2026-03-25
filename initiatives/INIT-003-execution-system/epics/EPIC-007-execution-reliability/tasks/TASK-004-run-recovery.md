@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Run Recovery from Crashes
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-007-execution-reliability/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
