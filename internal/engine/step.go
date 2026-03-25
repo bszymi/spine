@@ -403,6 +403,13 @@ func (o *Orchestrator) completeBranchStep(ctx context.Context, run *domain.Run, 
 		}
 
 		log.Info("branch completed", "run_id", exec.RunID, "branch_id", exec.BranchID)
+
+		// Check if convergence should trigger now that a branch is done.
+		if o.convergence != nil {
+			if err := o.tryConvergence(ctx, run, branch.DivergenceID); err != nil {
+				log.Warn("convergence check failed", "divergence_id", branch.DivergenceID, "error", err)
+			}
+		}
 		return nil
 	}
 
@@ -414,6 +421,105 @@ func (o *Orchestrator) completeBranchStep(ctx context.Context, run *domain.Run, 
 
 	// Non-terminal — advance within the branch (skip run-level current_step_id update).
 	return o.advanceBranchStep(ctx, exec, nextStepID, exec.BranchID, now)
+}
+
+// tryConvergence checks if all branches are ready and triggers convergence evaluation.
+func (o *Orchestrator) tryConvergence(ctx context.Context, run *domain.Run, divergenceID string) error {
+	log := observe.Logger(ctx)
+
+	divCtx, err := o.store.GetDivergenceContext(ctx, divergenceID)
+	if err != nil {
+		return fmt.Errorf("get divergence context: %w", err)
+	}
+
+	// Load the workflow to find the convergence definition.
+	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+	if err != nil {
+		return fmt.Errorf("load workflow for convergence: %w", err)
+	}
+
+	convDef := findConvergenceForDivergence(wfDef, divergenceID, divCtx)
+	if convDef == nil {
+		log.Info("no convergence definition found", "divergence_id", divergenceID)
+		return nil
+	}
+
+	ready, err := o.convergence.CheckEntryPolicy(ctx, divCtx, *convDef)
+	if err != nil {
+		return fmt.Errorf("check entry policy: %w", err)
+	}
+	if !ready {
+		log.Info("convergence entry policy not yet satisfied", "divergence_id", divergenceID)
+		return nil
+	}
+
+	log.Info("convergence triggered", "divergence_id", divergenceID, "strategy", convDef.Strategy)
+
+	if err := o.convergence.EvaluateAndCommit(ctx, divCtx, *convDef); err != nil {
+		return fmt.Errorf("evaluate and commit convergence: %w", err)
+	}
+
+	// Resume the run after convergence.
+	// Prefer evaluation_step from convergence definition; fall back to step with converge field.
+	convergeStepID := convDef.EvaluationStep
+	if convergeStepID == "" {
+		convergeStepID = findConvergeStep(wfDef, convDef.ID)
+	}
+	if convergeStepID != "" {
+		now := time.Now()
+		if err := o.store.UpdateCurrentStep(ctx, run.RunID, convergeStepID); err != nil {
+			return fmt.Errorf("update current step after convergence: %w", err)
+		}
+
+		attempt := o.nextAttempt(ctx, run.RunID, convergeStepID)
+		nextExec := &domain.StepExecution{
+			ExecutionID: fmt.Sprintf("%s-%s-%d", run.RunID, convergeStepID, attempt),
+			RunID:       run.RunID,
+			StepID:      convergeStepID,
+			Status:      domain.StepStatusWaiting,
+			Attempt:     attempt,
+			CreatedAt:   now,
+		}
+		if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
+			return fmt.Errorf("create post-convergence step: %w", err)
+		}
+
+		if err := o.ActivateStep(ctx, run.RunID, convergeStepID); err != nil {
+			log.Warn("post-convergence step activation failed", "step_id", convergeStepID, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// findConvergeStep finds the step in the workflow whose converge field references a convergence point.
+func findConvergeStep(wfDef *domain.WorkflowDefinition, convergenceID string) string {
+	for i := range wfDef.Steps {
+		if wfDef.Steps[i].Converge == convergenceID {
+			return wfDef.Steps[i].ID
+		}
+	}
+	return ""
+}
+
+// findConvergenceForDivergence looks up the convergence definition associated with a divergence.
+// Checks ConvergenceID on divCtx first, then scans steps for a converge field referencing
+// any convergence point (handles workflows where the divergence step sets diverge but not converge).
+func findConvergenceForDivergence(wfDef *domain.WorkflowDefinition, divergenceID string, divCtx *domain.DivergenceContext) *domain.ConvergenceDefinition {
+	// Direct lookup via ConvergenceID.
+	if divCtx.ConvergenceID != "" {
+		for i := range wfDef.ConvergencePoints {
+			if wfDef.ConvergencePoints[i].ID == divCtx.ConvergenceID {
+				return &wfDef.ConvergencePoints[i]
+			}
+		}
+	}
+
+	// Fallback: if there's only one convergence point, use it.
+	if len(wfDef.ConvergencePoints) == 1 {
+		return &wfDef.ConvergencePoints[0]
+	}
+	return nil
 }
 
 // advanceBranchStep creates the next step execution within a branch without updating
