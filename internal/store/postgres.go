@@ -947,6 +947,27 @@ func (s *PostgresStore) DeleteWorkflowProjection(ctx context.Context, workflowPa
 	return err
 }
 
+func (s *PostgresStore) ListActiveWorkflowProjections(ctx context.Context) ([]WorkflowProjection, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT workflow_path, workflow_id, name, version, status, applies_to, definition, source_commit
+		FROM projection.workflows WHERE status = 'Active' ORDER BY workflow_id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projections []WorkflowProjection
+	for rows.Next() {
+		var p WorkflowProjection
+		if err := rows.Scan(&p.WorkflowPath, &p.WorkflowID, &p.Name, &p.Version,
+			&p.Status, &p.AppliesTo, &p.Definition, &p.SourceCommit); err != nil {
+			return nil, err
+		}
+		projections = append(projections, p)
+	}
+	return projections, rows.Err()
+}
+
 // ── Sync State ──
 
 func (s *PostgresStore) GetSyncState(ctx context.Context) (*SyncState, error) {

@@ -39,15 +39,28 @@ type GitReader interface {
 
 // Server is the HTTP Access Gateway for Spine.
 type Server struct {
-	httpServer    *http.Server
-	store         store.Store
-	auth          *auth.Service
-	artifacts     ArtifactService
-	projQuery     ProjectionQuerier
-	projSync      ProjectionSyncer
-	git           GitReader
-	validator     *validation.Engine
-	resultHandler ResultHandler
+	httpServer       *http.Server
+	store            store.Store
+	auth             *auth.Service
+	artifacts        ArtifactService
+	projQuery        ProjectionQuerier
+	projSync         ProjectionSyncer
+	git              GitReader
+	validator        *validation.Engine
+	resultHandler    ResultHandler
+	workflowResolver WorkflowResolverFn
+}
+
+// WorkflowResolverFn resolves the governing workflow for an artifact type.
+type WorkflowResolverFn func(ctx context.Context, artifactType, workType string) (*ResolvedWorkflow, error)
+
+// ResolvedWorkflow contains the resolved workflow binding result.
+type ResolvedWorkflow struct {
+	WorkflowID   string
+	WorkflowPath string
+	EntryStep    string
+	CommitSHA    string
+	VersionLabel string
 }
 
 // ResultHandler processes step result submissions through the engine pipeline.
@@ -72,27 +85,29 @@ type ResultResponse struct {
 
 // ServerConfig holds optional service dependencies for the server.
 type ServerConfig struct {
-	Store         store.Store
-	Auth          *auth.Service
-	Artifacts     ArtifactService
-	ProjQuery     ProjectionQuerier
-	ProjSync      ProjectionSyncer
-	Git           GitReader
-	Validator     *validation.Engine
-	ResultHandler ResultHandler
+	Store            store.Store
+	Auth             *auth.Service
+	Artifacts        ArtifactService
+	ProjQuery        ProjectionQuerier
+	ProjSync         ProjectionSyncer
+	Git              GitReader
+	Validator        *validation.Engine
+	ResultHandler    ResultHandler
+	WorkflowResolver WorkflowResolverFn
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
 func NewServer(addr string, cfg ServerConfig) *Server {
 	s := &Server{
-		store:         cfg.Store,
-		auth:          cfg.Auth,
-		artifacts:     cfg.Artifacts,
-		projQuery:     cfg.ProjQuery,
-		projSync:      cfg.ProjSync,
-		git:           cfg.Git,
-		validator:     cfg.Validator,
-		resultHandler: cfg.ResultHandler,
+		store:            cfg.Store,
+		auth:             cfg.Auth,
+		artifacts:        cfg.Artifacts,
+		projQuery:        cfg.ProjQuery,
+		projSync:         cfg.ProjSync,
+		git:              cfg.Git,
+		validator:        cfg.Validator,
+		resultHandler:    cfg.ResultHandler,
+		workflowResolver: cfg.WorkflowResolver,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,
