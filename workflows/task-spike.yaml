@@ -1,7 +1,7 @@
 id: task-spike
 name: Spike Investigation Workflow
 version: "1.0"
-status: Active
+status: Draft
 description: >
   Simplified workflow for spike and investigation tasks. Focuses on
   exploring a question and summarizing findings rather than producing

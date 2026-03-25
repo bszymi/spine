@@ -22,8 +22,8 @@ func TestTaskSpikeWorkflow_Parses(t *testing.T) {
 	if wf.ID != "task-spike" {
 		t.Errorf("expected id task-spike, got %s", wf.ID)
 	}
-	if wf.Status != domain.WorkflowStatusActive {
-		t.Errorf("expected Active, got %s", wf.Status)
+	if wf.Status != domain.WorkflowStatusDraft {
+		t.Errorf("expected Draft, got %s", wf.Status)
 	}
 	if len(wf.AppliesTo) != 1 || wf.AppliesTo[0] != "Task" {
 		t.Errorf("expected applies_to [Task], got %v", wf.AppliesTo)
@@ -74,8 +74,8 @@ func TestADRWorkflow_Parses(t *testing.T) {
 	if evaluate.Outcomes[0].ID != "accepted" {
 		t.Errorf("expected accepted, got %s", evaluate.Outcomes[0].ID)
 	}
-	if evaluate.Outcomes[1].ID != "rejected" {
-		t.Errorf("expected rejected, got %s", evaluate.Outcomes[1].ID)
+	if evaluate.Outcomes[1].ID != "deprecated" {
+		t.Errorf("expected deprecated, got %s", evaluate.Outcomes[1].ID)
 	}
 	if evaluate.Outcomes[2].NextStep != "propose" {
 		t.Errorf("expected needs_revision → propose, got %s", evaluate.Outcomes[2].NextStep)

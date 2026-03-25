@@ -43,10 +43,9 @@ steps:
         - human
         - ai_agent
     preconditions:
-      - type: field_value
+      - type: artifact_status
         config:
-          field: status
-          value: In Progress
+          status: In Progress
     outcomes:
       - id: tasks_complete
         name: All Tasks Complete

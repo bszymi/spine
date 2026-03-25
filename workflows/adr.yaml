@@ -23,15 +23,13 @@ steps:
     preconditions:
       - type: artifact_status
         config:
-          status: Pending
+          status: Proposed
     required_outputs:
       - decision_document
     outcomes:
       - id: proposed
         name: Proposal Ready
         next_step: evaluate
-        commit:
-          status: In Review
     timeout: "48h"
 
   - id: evaluate
@@ -49,11 +47,11 @@ steps:
         next_step: end
         commit:
           status: Accepted
-      - id: rejected
-        name: Decision Rejected
+      - id: deprecated
+        name: Decision Deprecated
         next_step: end
         commit:
-          status: Rejected
+          status: Deprecated
       - id: needs_revision
         name: Needs Revision
         next_step: propose
