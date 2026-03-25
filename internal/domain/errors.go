@@ -42,13 +42,26 @@ func NewErrorWithDetail(code ErrorCode, message string, detail any) *SpineError 
 	return &SpineError{Code: code, Message: message, Detail: detail}
 }
 
+// ViolationClassification classifies a validation failure for resolution guidance.
+// Per validation-service.md §4.
+type ViolationClassification string
+
+const (
+	ViolationStructuralError   ViolationClassification = "structural_error"
+	ViolationLinkInconsistency ViolationClassification = "link_inconsistency"
+	ViolationStatusConflict    ViolationClassification = "status_conflict"
+	ViolationScopeConflict     ViolationClassification = "scope_conflict"
+	ViolationMissingPrereq     ViolationClassification = "missing_prerequisite"
+)
+
 // ValidationError represents a single validation failure.
 type ValidationError struct {
-	RuleID       string `json:"rule_id,omitempty"`
-	ArtifactPath string `json:"artifact_path,omitempty"`
-	Field        string `json:"field,omitempty"`
-	Severity     string `json:"severity"` // "error" or "warning"
-	Message      string `json:"message"`
+	RuleID         string                  `json:"rule_id,omitempty"`
+	Classification ViolationClassification `json:"classification,omitempty" yaml:"classification,omitempty"`
+	ArtifactPath   string                  `json:"artifact_path,omitempty"`
+	Field          string                  `json:"field,omitempty"`
+	Severity       string                  `json:"severity"` // "error" or "warning"
+	Message        string                  `json:"message"`
 }
 
 // ValidationResult represents the outcome of a validation check.

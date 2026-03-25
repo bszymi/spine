@@ -17,6 +17,9 @@ func statusRules() []Rule {
 type ruleSC001 struct{}
 
 func (r *ruleSC001) ID() string { return "SC-001" }
+func (r *ruleSC001) Classification() domain.ViolationClassification {
+	return domain.ViolationStatusConflict
+}
 func (r *ruleSC001) Evaluate(_ context.Context, proj *store.ArtifactProjection, _ store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeTask {
 		return nil
@@ -39,6 +42,9 @@ func (r *ruleSC001) Evaluate(_ context.Context, proj *store.ArtifactProjection, 
 type ruleSC002 struct{}
 
 func (r *ruleSC002) ID() string { return "SC-002" }
+func (r *ruleSC002) Classification() domain.ViolationClassification {
+	return domain.ViolationStatusConflict
+}
 func (r *ruleSC002) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeEpic {
 		return nil
@@ -54,6 +60,9 @@ func (r *ruleSC002) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type ruleSC003 struct{}
 
 func (r *ruleSC003) ID() string { return "SC-003" }
+func (r *ruleSC003) Classification() domain.ViolationClassification {
+	return domain.ViolationStatusConflict
+}
 func (r *ruleSC003) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeInitiative {
 		return nil
@@ -105,6 +114,9 @@ func checkChildrenTerminal(ctx context.Context, st store.Store, parent *store.Ar
 type ruleSC004 struct{}
 
 func (r *ruleSC004) ID() string { return "SC-004" }
+func (r *ruleSC004) Classification() domain.ViolationClassification {
+	return domain.ViolationStatusConflict
+}
 func (r *ruleSC004) Evaluate(_ context.Context, proj *store.ArtifactProjection, _ store.Store) []domain.ValidationError {
 	if proj.Status != string(domain.StatusSuperseded) {
 		return nil
@@ -127,6 +139,9 @@ func (r *ruleSC004) Evaluate(_ context.Context, proj *store.ArtifactProjection, 
 type ruleSC005 struct{}
 
 func (r *ruleSC005) ID() string { return "SC-005" }
+func (r *ruleSC005) Classification() domain.ViolationClassification {
+	return domain.ViolationStatusConflict
+}
 func (r *ruleSC005) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeTask {
 		return nil

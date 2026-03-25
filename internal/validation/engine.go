@@ -11,6 +11,7 @@ import (
 // Rule evaluates a validation check against an artifact.
 type Rule interface {
 	ID() string
+	Classification() domain.ViolationClassification
 	Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError
 }
 
@@ -38,7 +39,7 @@ func (e *Engine) Validate(ctx context.Context, artifactPath string) domain.Valid
 		return domain.ValidationResult{
 			Status: "failed",
 			Errors: []domain.ValidationError{
-				{RuleID: "engine", ArtifactPath: artifactPath, Severity: "error", Message: err.Error()},
+				{RuleID: "engine", Classification: domain.ViolationStructuralError, ArtifactPath: artifactPath, Severity: "error", Message: err.Error()},
 			},
 		}
 	}
@@ -50,6 +51,7 @@ func (e *Engine) Validate(ctx context.Context, artifactPath string) domain.Valid
 		results := rule.Evaluate(ctx, proj, e.store)
 		for i := range results {
 			results[i].ArtifactPath = artifactPath
+			results[i].Classification = rule.Classification()
 			if results[i].Severity == "warning" {
 				warnings = append(warnings, results[i])
 			} else {

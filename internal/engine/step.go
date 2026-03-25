@@ -57,6 +57,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 				Classification: domain.FailureValidation,
 				Message:        summarizeValidationErrors(valResult.Errors),
 				StepID:         stepID,
+				Violations:     valResult.Errors,
 			}
 			if updateErr := o.store.UpdateStepExecution(ctx, exec); updateErr != nil {
 				log.Warn("failed to persist validation errors", "error", updateErr)

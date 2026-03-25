@@ -374,6 +374,10 @@ func TestValidateNonExistent(t *testing.T) {
 	if result.Status != "failed" {
 		t.Errorf("expected failed, got %s", result.Status)
 	}
+	// Engine errors should also have classification.
+	if len(result.Errors) > 0 && result.Errors[0].Classification != domain.ViolationStructuralError {
+		t.Errorf("expected structural_error classification on engine error, got %s", result.Errors[0].Classification)
+	}
 }
 
 func TestValidateCleanArtifact(t *testing.T) {
@@ -384,6 +388,83 @@ func TestValidateCleanArtifact(t *testing.T) {
 	result := e.Validate(context.Background(), "initiatives/test/initiative.md")
 	if result.Status == "failed" {
 		t.Errorf("expected passed or warnings, got failed: %v", result.Errors)
+	}
+}
+
+// ── Violation Classification Tests ──
+
+func TestValidationErrors_HaveClassification(t *testing.T) {
+	fs := newFakeStore()
+	// SI-001 (structural_error): task with missing parent
+	addArtifact(fs, "initiatives/test/tasks/t1.md", "Task", "Pending",
+		map[string]string{"epic": "/nonexistent/epic.md", "initiative": "/nonexistent/init.md"}, nil)
+
+	e := validation.NewEngine(fs)
+	result := e.Validate(context.Background(), "initiatives/test/tasks/t1.md")
+
+	for _, err := range result.Errors {
+		if err.Classification == "" {
+			t.Errorf("error %s missing classification", err.RuleID)
+		}
+	}
+}
+
+func TestValidationErrors_StructuralClassification(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "initiatives/test/tasks/t1.md", "Task", "Pending",
+		map[string]string{"epic": "/nonexistent/epic.md", "initiative": "/nonexistent/init.md"}, nil)
+
+	e := validation.NewEngine(fs)
+	result := e.Validate(context.Background(), "initiatives/test/tasks/t1.md")
+
+	for _, err := range result.Errors {
+		if err.RuleID == "SI-001" && err.Classification != domain.ViolationStructuralError {
+			t.Errorf("SI-001 expected classification %s, got %s", domain.ViolationStructuralError, err.Classification)
+		}
+	}
+}
+
+func TestValidationErrors_LinkClassification(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "initiatives/test/tasks/t1.md", "Task", "Pending", nil,
+		[]domain.Link{{Type: "related_to", Target: "/nonexistent.md"}})
+
+	e := validation.NewEngine(fs)
+	result := e.Validate(context.Background(), "initiatives/test/tasks/t1.md")
+
+	for _, err := range result.Errors {
+		if err.RuleID == "LC-004" && err.Classification != domain.ViolationLinkInconsistency {
+			t.Errorf("LC-004 expected classification %s, got %s", domain.ViolationLinkInconsistency, err.Classification)
+		}
+	}
+}
+
+func TestValidationErrors_PrereqClassification(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "initiatives/test/tasks/t1.md", "Task", "Pending", nil,
+		[]domain.Link{{Type: "blocked_by", Target: "/initiatives/test/tasks/missing.md"}})
+
+	e := validation.NewEngine(fs)
+	result := e.Validate(context.Background(), "initiatives/test/tasks/t1.md")
+
+	for _, err := range result.Errors {
+		if err.RuleID == "PC-001" && err.Classification != domain.ViolationMissingPrereq {
+			t.Errorf("PC-001 expected classification %s, got %s", domain.ViolationMissingPrereq, err.Classification)
+		}
+	}
+}
+
+func TestValidationWarnings_HaveClassification(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "initiatives/test/tasks/t1.md", "Task", "Completed", nil, nil)
+
+	e := validation.NewEngine(fs)
+	result := e.Validate(context.Background(), "initiatives/test/tasks/t1.md")
+
+	for _, w := range result.Warnings {
+		if w.Classification == "" {
+			t.Errorf("warning %s missing classification", w.RuleID)
+		}
 	}
 }
 

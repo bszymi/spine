@@ -17,6 +17,9 @@ func structuralRules() []Rule {
 type ruleSI001 struct{}
 
 func (r *ruleSI001) ID() string { return "SI-001" }
+func (r *ruleSI001) Classification() domain.ViolationClassification {
+	return domain.ViolationStructuralError
+}
 func (r *ruleSI001) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	meta := parseMetadata(proj)
 	var parentPath string
@@ -49,6 +52,9 @@ func (r *ruleSI001) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type ruleSI002 struct{}
 
 func (r *ruleSI002) ID() string { return "SI-002" }
+func (r *ruleSI002) Classification() domain.ViolationClassification {
+	return domain.ViolationStructuralError
+}
 func (r *ruleSI002) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	meta := parseMetadata(proj)
 	var parentPath, expectedType string
@@ -87,6 +93,9 @@ func (r *ruleSI002) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type ruleSI003 struct{}
 
 func (r *ruleSI003) ID() string { return "SI-003" }
+func (r *ruleSI003) Classification() domain.ViolationClassification {
+	return domain.ViolationStructuralError
+}
 func (r *ruleSI003) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	if proj.Status != string(domain.StatusInProgress) {
 		return nil
@@ -126,6 +135,9 @@ func (r *ruleSI003) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type ruleSI004 struct{}
 
 func (r *ruleSI004) ID() string { return "SI-004" }
+func (r *ruleSI004) Classification() domain.ViolationClassification {
+	return domain.ViolationStructuralError
+}
 func (r *ruleSI004) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeTask {
 		return nil
@@ -158,6 +170,9 @@ func (r *ruleSI004) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type ruleSI005 struct{}
 
 func (r *ruleSI005) ID() string { return "SI-005" }
+func (r *ruleSI005) Classification() domain.ViolationClassification {
+	return domain.ViolationStructuralError
+}
 func (r *ruleSI005) Evaluate(_ context.Context, proj *store.ArtifactProjection, _ store.Store) []domain.ValidationError {
 	path := proj.ArtifactPath
 	artType := domain.ArtifactType(proj.ArtifactType)

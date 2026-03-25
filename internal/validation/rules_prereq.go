@@ -17,6 +17,9 @@ func prereqRules() []Rule {
 type rulePC001 struct{}
 
 func (r *rulePC001) ID() string { return "PC-001" }
+func (r *rulePC001) Classification() domain.ViolationClassification {
+	return domain.ViolationMissingPrereq
+}
 func (r *rulePC001) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	links := parseLinks(proj)
 	var errors []domain.ValidationError
@@ -41,6 +44,9 @@ func (r *rulePC001) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type rulePC002 struct{}
 
 func (r *rulePC002) ID() string { return "PC-002" }
+func (r *rulePC002) Classification() domain.ViolationClassification {
+	return domain.ViolationMissingPrereq
+}
 func (r *rulePC002) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeTask {
 		return nil
@@ -75,6 +81,9 @@ func (r *rulePC002) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 type rulePC003 struct{}
 
 func (r *rulePC003) ID() string { return "PC-003" }
+func (r *rulePC003) Classification() domain.ViolationClassification {
+	return domain.ViolationMissingPrereq
+}
 func (r *rulePC003) Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError {
 	if domain.ArtifactType(proj.ArtifactType) != domain.ArtifactTypeEpic {
 		return nil
