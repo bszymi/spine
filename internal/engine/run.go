@@ -152,17 +152,24 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 	}
 
 	log := observe.Logger(ctx)
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-completed", run.TraceID[:12]),
-		Type:      domain.EventRunCompleted,
-		Timestamp: time.Now(),
-		RunID:     runID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunCompleted, "error", err)
+
+	// Only emit run_completed when the run actually reached completed state,
+	// not when it moved to committing (which still needs Git commit).
+	if result.ToStatus == domain.RunStatusCompleted {
+		if err := o.events.Emit(ctx, domain.Event{
+			EventID:   fmt.Sprintf("evt-%s-completed", run.TraceID[:12]),
+			Type:      domain.EventRunCompleted,
+			Timestamp: time.Now(),
+			RunID:     runID,
+			TraceID:   run.TraceID,
+		}); err != nil {
+			log.Warn("failed to emit event", "event_type", domain.EventRunCompleted, "error", err)
+		}
+		log.Info("run completed", "run_id", runID)
+	} else {
+		log.Info("run entering commit phase", "run_id", runID)
 	}
 
-	log.Info("run completed", "run_id", runID)
 	return nil
 }
 

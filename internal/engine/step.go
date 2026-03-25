@@ -211,12 +211,14 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		}
 	} else {
 		// Non-terminal — create next step, update current_step_id, and activate.
+		// Use next attempt number to handle cyclic workflows that revisit steps.
+		attempt := o.nextAttempt(ctx, exec.RunID, nextStepID)
 		nextExec := &domain.StepExecution{
-			ExecutionID: fmt.Sprintf("%s-%s-1", exec.RunID, nextStepID),
+			ExecutionID: fmt.Sprintf("%s-%s-%d", exec.RunID, nextStepID, attempt),
 			RunID:       exec.RunID,
 			StepID:      nextStepID,
 			Status:      domain.StepStatusWaiting,
-			Attempt:     1,
+			Attempt:     attempt,
 			CreatedAt:   now,
 		}
 		if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
@@ -362,6 +364,22 @@ func (o *Orchestrator) checkLinksExist(ctx context.Context, config map[string]st
 		}
 	}
 	return false
+}
+
+// nextAttempt returns the next attempt number for a step in a run.
+// This handles cyclic workflows where a step may be visited multiple times.
+func (o *Orchestrator) nextAttempt(ctx context.Context, runID, stepID string) int {
+	execs, err := o.store.ListStepExecutionsByRun(ctx, runID)
+	if err != nil {
+		return 1
+	}
+	highest := 0
+	for i := range execs {
+		if execs[i].StepID == stepID && execs[i].Attempt > highest {
+			highest = execs[i].Attempt
+		}
+	}
+	return highest + 1
 }
 
 // findOutcome looks up an outcome by ID within a step definition.
