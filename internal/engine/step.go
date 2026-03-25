@@ -223,6 +223,18 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		// Non-terminal — create next step, update current_step_id, and activate.
 		// Use next attempt number to handle cyclic workflows that revisit steps.
 		attempt := o.nextAttempt(ctx, exec.RunID, nextStepID)
+
+		// Bound rework loops to prevent infinite cycles.
+		if attempt > domain.MaxReworkCycles {
+			log.Warn("rework cycle limit exceeded",
+				"run_id", exec.RunID,
+				"step_id", nextStepID,
+				"attempt", attempt,
+				"max", domain.MaxReworkCycles,
+			)
+			return o.FailRun(ctx, exec.RunID,
+				fmt.Sprintf("rework cycle limit exceeded for step %s (attempt %d)", nextStepID, attempt))
+		}
 		nextExec := &domain.StepExecution{
 			ExecutionID: fmt.Sprintf("%s-%s-%d", exec.RunID, nextStepID, attempt),
 			RunID:       exec.RunID,
