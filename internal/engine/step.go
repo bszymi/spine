@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bszymi/spine/internal/actor"
@@ -48,13 +49,32 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	// Evaluate preconditions. If they fail, the step stays in waiting and
 	// the caller receives a precondition error. The step is not transitioned
 	// because waiting→blocked is not valid in the step state machine.
-	if !o.evaluatePreconditions(ctx, stepDef, run) {
+	passed, valResult := o.evaluatePreconditions(ctx, stepDef, run)
+	if !passed {
+		// If validation produced detailed errors, persist them on the step execution.
+		if valResult != nil && len(valResult.Errors) > 0 {
+			exec.ErrorDetail = &domain.ErrorDetail{
+				Classification: domain.FailureValidation,
+				Message:        summarizeValidationErrors(valResult.Errors),
+				StepID:         stepID,
+			}
+			if updateErr := o.store.UpdateStepExecution(ctx, exec); updateErr != nil {
+				log.Warn("failed to persist validation errors", "error", updateErr)
+			}
+		}
 		log.Info("step preconditions not met", "run_id", runID, "step_id", stepID)
+		if valResult != nil {
+			return domain.NewErrorWithDetail(domain.ErrPrecondition,
+				fmt.Sprintf("preconditions not met for step %s", stepID), valResult)
+		}
 		return domain.NewError(domain.ErrPrecondition,
 			fmt.Sprintf("preconditions not met for step %s", stepID))
 	}
 
 	// Preconditions pass — transition to assigned via step.assign.
+	// Clear any stale validation errors from a prior failed attempt.
+	exec.ErrorDetail = nil
+
 	stepResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAssign,
 	})
@@ -284,10 +304,11 @@ func (o *Orchestrator) findStepExecution(ctx context.Context, runID, stepID stri
 }
 
 // evaluatePreconditions checks all preconditions on a step definition.
-// Returns true if all pass, false if any fail.
-func (o *Orchestrator) evaluatePreconditions(ctx context.Context, step *domain.StepDefinition, run *domain.Run) bool {
+// Returns (true, nil) if all pass. On failure, returns (false, result) where
+// result is non-nil only for cross_artifact_valid failures (with detailed errors).
+func (o *Orchestrator) evaluatePreconditions(ctx context.Context, step *domain.StepDefinition, run *domain.Run) (bool, *domain.ValidationResult) {
 	if len(step.Preconditions) == 0 {
-		return true
+		return true, nil
 	}
 
 	log := observe.Logger(ctx)
@@ -297,29 +318,69 @@ func (o *Orchestrator) evaluatePreconditions(ctx context.Context, step *domain.S
 		case "artifact_status":
 			if !o.checkArtifactStatus(ctx, precond.Config, run) {
 				log.Info("precondition failed", "type", precond.Type, "config", precond.Config)
-				return false
+				return false, nil
 			}
 		case "field_present":
 			if !o.checkFieldPresent(ctx, precond.Config, run) {
 				log.Info("precondition failed", "type", precond.Type, "config", precond.Config)
-				return false
+				return false, nil
 			}
 		case "field_value":
 			if !o.checkFieldValue(ctx, precond.Config, run) {
 				log.Info("precondition failed", "type", precond.Type, "config", precond.Config)
-				return false
+				return false, nil
 			}
 		case "links_exist":
 			if !o.checkLinksExist(ctx, precond.Config, run) {
 				log.Info("precondition failed", "type", precond.Type, "config", precond.Config)
-				return false
+				return false, nil
+			}
+		case "cross_artifact_valid":
+			if o.validator == nil {
+				log.Info("cross_artifact_valid precondition skipped (no validator configured)")
+				continue
+			}
+			artifactPath := run.TaskPath
+			if p := precond.Config["artifact_path"]; p != "" {
+				artifactPath = p
+			}
+			result := o.validator.Validate(ctx, artifactPath)
+			// Log warnings but don't block on them.
+			for i := range result.Warnings {
+				log.Warn("validation warning",
+					"rule_id", result.Warnings[i].RuleID,
+					"message", result.Warnings[i].Message,
+					"artifact_path", result.Warnings[i].ArtifactPath,
+				)
+			}
+			if result.Status == "failed" {
+				log.Info("cross_artifact_valid precondition failed",
+					"artifact_path", artifactPath,
+					"error_count", len(result.Errors),
+				)
+				return false, &result
 			}
 		default:
 			// Unknown precondition types are skipped (forward-compatible).
 			log.Info("unknown precondition type skipped", "type", precond.Type)
 		}
 	}
-	return true
+	return true, nil
+}
+
+// summarizeValidationErrors produces a human-readable summary of validation errors.
+func summarizeValidationErrors(errs []domain.ValidationError) string {
+	if len(errs) == 0 {
+		return "validation failed"
+	}
+	if len(errs) == 1 {
+		return errs[0].Message
+	}
+	var msgs []string
+	for i := range errs {
+		msgs = append(msgs, errs[i].Message)
+	}
+	return fmt.Sprintf("%d validation errors: %s", len(errs), strings.Join(msgs, "; "))
 }
 
 // checkArtifactStatus verifies an artifact at config["path"] has config["status"].

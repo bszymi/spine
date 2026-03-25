@@ -45,6 +45,7 @@ const (
 	FailureInvalidResult    FailureClassification = "invalid_result"
 	FailureGitConflict      FailureClassification = "git_conflict"
 	FailureTimeout          FailureClassification = "timeout"
+	FailureValidation       FailureClassification = "validation_failed"
 )
 
 // IsRetryable returns true if this failure classification allows retry.

@@ -86,7 +86,7 @@ func TestStepExecutionStatusIsTerminal(t *testing.T) {
 
 func TestFailureClassificationIsRetryable(t *testing.T) {
 	retryable := []domain.FailureClassification{domain.FailureTransient, domain.FailureActorUnavailable, domain.FailureInvalidResult}
-	notRetryable := []domain.FailureClassification{domain.FailurePermanent, domain.FailureGitConflict, domain.FailureTimeout}
+	notRetryable := []domain.FailureClassification{domain.FailurePermanent, domain.FailureGitConflict, domain.FailureTimeout, domain.FailureValidation}
 
 	for _, f := range retryable {
 		if !f.IsRetryable() {
