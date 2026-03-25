@@ -33,13 +33,14 @@ func (m *mockWorkflowResolver) ResolveWorkflow(_ context.Context, _, _ string) (
 type mockRunStore struct {
 	stubRunStore // embed for default no-op implementations
 
-	createdRun   *domain.Run
-	createdSteps []*domain.StepExecution
-	runs         map[string]*domain.Run
-	branches     []*domain.Branch
-	statusCalls  []statusCall
-	createRunErr error
-	updateErr    error
+	createdRun         *domain.Run
+	createdSteps       []*domain.StepExecution
+	runs               map[string]*domain.Run
+	branches           []*domain.Branch
+	divergenceContexts map[string]*domain.DivergenceContext
+	statusCalls        []statusCall
+	createRunErr       error
+	updateErr          error
 }
 
 type statusCall struct {
@@ -141,6 +142,15 @@ func (m *mockRunStore) ListBranchesByDivergence(_ context.Context, divergenceID 
 		}
 	}
 	return result, nil
+}
+
+func (m *mockRunStore) GetDivergenceContext(_ context.Context, divergenceID string) (*domain.DivergenceContext, error) {
+	if m.divergenceContexts != nil {
+		if d, ok := m.divergenceContexts[divergenceID]; ok {
+			return d, nil
+		}
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "divergence context not found")
 }
 
 func (m *mockRunStore) UpdateBranch(_ context.Context, branch *domain.Branch) error {

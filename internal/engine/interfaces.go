@@ -69,6 +69,12 @@ type DivergenceHandler interface {
 	StartDivergence(ctx context.Context, run *domain.Run, divDef domain.DivergenceDefinition, convergenceID string) (*domain.DivergenceContext, error)
 }
 
+// ConvergenceHandler manages convergence lifecycle for the orchestrator.
+type ConvergenceHandler interface {
+	CheckEntryPolicy(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) (bool, error)
+	EvaluateAndCommit(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error
+}
+
 // GitOperator provides Git operations needed for run-level branching and commits.
 type GitOperator interface {
 	Commit(ctx context.Context, opts git.CommitOpts) (git.CommitResult, error)

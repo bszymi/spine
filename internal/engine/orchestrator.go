@@ -16,6 +16,7 @@ type Orchestrator struct {
 	assignments AssignmentStore        // optional, nil if not configured
 	validator   CrossArtifactValidator // optional, nil if not configured
 	divergence  DivergenceHandler      // optional, nil if not configured
+	convergence ConvergenceHandler     // optional, nil if not configured
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -74,4 +75,9 @@ func (o *Orchestrator) WithValidator(v CrossArtifactValidator) {
 // WithDivergence enables divergence handling for workflow branching.
 func (o *Orchestrator) WithDivergence(d DivergenceHandler) {
 	o.divergence = d
+}
+
+// WithConvergence enables convergence handling for branch merging.
+func (o *Orchestrator) WithConvergence(c ConvergenceHandler) {
+	o.convergence = c
 }
