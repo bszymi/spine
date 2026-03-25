@@ -236,6 +236,16 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		log.Warn("failed to emit event", "event_type", domain.EventStepCompleted, "error", err)
 	}
 
+	// Check if this step triggers divergence.
+	if stepDef.Diverge != "" && o.divergence != nil {
+		return o.startDivergence(ctx, run, wfDef, stepDef, exec)
+	}
+
+	// Check if this step is inside a branch and is terminal for the branch.
+	if exec.BranchID != "" {
+		return o.completeBranchStep(ctx, run, exec, outcome, now)
+	}
+
 	// Determine next step from outcome.
 	nextStepID := outcome.NextStep
 	if nextStepID == "" {
@@ -250,50 +260,187 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 			return fmt.Errorf("complete run: %w", err)
 		}
 	} else {
-		// Non-terminal — create next step, update current_step_id, and activate.
-		// Use next attempt number to handle cyclic workflows that revisit steps.
-		attempt := o.nextAttempt(ctx, exec.RunID, nextStepID)
-
-		// Bound rework loops to prevent infinite cycles.
-		if attempt > domain.MaxReworkCycles {
-			log.Warn("rework cycle limit exceeded",
-				"run_id", exec.RunID,
-				"step_id", nextStepID,
-				"attempt", attempt,
-				"max", domain.MaxReworkCycles,
-			)
-			return o.FailRun(ctx, exec.RunID,
-				fmt.Sprintf("rework cycle limit exceeded for step %s (attempt %d)", nextStepID, attempt))
-		}
-		nextExec := &domain.StepExecution{
-			ExecutionID: fmt.Sprintf("%s-%s-%d", exec.RunID, nextStepID, attempt),
-			RunID:       exec.RunID,
-			StepID:      nextStepID,
-			Status:      domain.StepStatusWaiting,
-			Attempt:     attempt,
-			CreatedAt:   now,
-		}
-		if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
-			return fmt.Errorf("create next step: %w", err)
-		}
-
-		// Persist current_step_id so the scheduler can resume after restart.
-		if err := o.store.UpdateCurrentStep(ctx, exec.RunID, nextStepID); err != nil {
-			return fmt.Errorf("update current step: %w", err)
-		}
-
-		log.Info("step progressed",
-			"run_id", exec.RunID,
-			"completed_step", exec.StepID,
-			"next_step", nextStepID,
-		)
-
-		// Activate the next step (deliver actor assignment).
-		if err := o.ActivateStep(ctx, exec.RunID, nextStepID); err != nil {
-			log.Warn("next step activation failed", "step_id", nextStepID, "error", err)
+		if err := o.advanceToNextStep(ctx, exec, nextStepID, "", now); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// advanceToNextStep creates the next step execution, updates current_step_id, and activates.
+func (o *Orchestrator) advanceToNextStep(ctx context.Context, exec *domain.StepExecution, nextStepID, branchID string, now time.Time) error {
+	log := observe.Logger(ctx)
+
+	attempt := o.nextAttempt(ctx, exec.RunID, nextStepID)
+	if attempt > domain.MaxReworkCycles {
+		log.Warn("rework cycle limit exceeded",
+			"run_id", exec.RunID, "step_id", nextStepID, "attempt", attempt, "max", domain.MaxReworkCycles)
+		return o.FailRun(ctx, exec.RunID,
+			fmt.Sprintf("rework cycle limit exceeded for step %s (attempt %d)", nextStepID, attempt))
+	}
+
+	nextExec := &domain.StepExecution{
+		ExecutionID: fmt.Sprintf("%s-%s-%d", exec.RunID, nextStepID, attempt),
+		RunID:       exec.RunID,
+		StepID:      nextStepID,
+		BranchID:    branchID,
+		Status:      domain.StepStatusWaiting,
+		Attempt:     attempt,
+		CreatedAt:   now,
+	}
+	if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
+		return fmt.Errorf("create next step: %w", err)
+	}
+
+	if err := o.store.UpdateCurrentStep(ctx, exec.RunID, nextStepID); err != nil {
+		return fmt.Errorf("update current step: %w", err)
+	}
+
+	log.Info("step progressed",
+		"run_id", exec.RunID, "completed_step", exec.StepID, "next_step", nextStepID, "branch_id", branchID)
+
+	if err := o.ActivateStep(ctx, exec.RunID, nextStepID); err != nil {
+		log.Warn("next step activation failed", "step_id", nextStepID, "error", err)
+	}
+	return nil
+}
+
+// startDivergence triggers divergence for a step and creates branch step executions.
+func (o *Orchestrator) startDivergence(ctx context.Context, run *domain.Run, wfDef *domain.WorkflowDefinition, stepDef *domain.StepDefinition, exec *domain.StepExecution) error {
+	log := observe.Logger(ctx)
+
+	// Find the divergence definition in the workflow.
+	var divDef *domain.DivergenceDefinition
+	for i := range wfDef.DivergencePoints {
+		if wfDef.DivergencePoints[i].ID == stepDef.Diverge {
+			divDef = &wfDef.DivergencePoints[i]
+			break
+		}
+	}
+	if divDef == nil {
+		return domain.NewError(domain.ErrNotFound,
+			fmt.Sprintf("divergence point %q not found in workflow", stepDef.Diverge))
+	}
+
+	// Find the convergence point referenced by this divergence.
+	convergenceID := ""
+	if stepDef.Converge != "" {
+		convergenceID = stepDef.Converge
+	}
+
+	divCtx, err := o.divergence.StartDivergence(ctx, run, *divDef, convergenceID)
+	if err != nil {
+		return fmt.Errorf("start divergence: %w", err)
+	}
+
+	// Update run cursor to the divergence context ID so recovery knows
+	// the run is in divergence and doesn't try to resume the completed step.
+	if err := o.store.UpdateCurrentStep(ctx, exec.RunID, "divergence:"+divCtx.DivergenceID); err != nil {
+		return fmt.Errorf("update current step for divergence: %w", err)
+	}
+
+	// Create entry step executions for each branch.
+	now := time.Now()
+	branches, err := o.store.ListBranchesByDivergence(ctx, divCtx.DivergenceID)
+	if err != nil {
+		return fmt.Errorf("list branches: %w", err)
+	}
+
+	for i := range branches {
+		branch := &branches[i]
+		if branch.CurrentStepID == "" {
+			continue
+		}
+		branchExec := &domain.StepExecution{
+			ExecutionID: fmt.Sprintf("%s-%s-%s-1", exec.RunID, branch.BranchID, branch.CurrentStepID),
+			RunID:       exec.RunID,
+			StepID:      branch.CurrentStepID,
+			BranchID:    branch.BranchID,
+			Status:      domain.StepStatusWaiting,
+			Attempt:     1,
+			CreatedAt:   now,
+		}
+		if err := o.store.CreateStepExecution(ctx, branchExec); err != nil {
+			return fmt.Errorf("create branch step %s: %w", branch.BranchID, err)
+		}
+
+		log.Info("branch step created",
+			"run_id", exec.RunID, "branch_id", branch.BranchID, "step_id", branch.CurrentStepID)
+
+		if err := o.ActivateStep(ctx, exec.RunID, branch.CurrentStepID); err != nil {
+			log.Warn("branch step activation failed", "branch_id", branch.BranchID, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// completeBranchStep handles step completion within a divergence branch.
+// If the outcome is terminal (next_step == "end"), marks the branch as completed.
+// Otherwise advances to the next step within the branch and updates branch.CurrentStepID.
+func (o *Orchestrator) completeBranchStep(ctx context.Context, run *domain.Run, exec *domain.StepExecution, outcome *domain.OutcomeDefinition, now time.Time) error {
+	log := observe.Logger(ctx)
+
+	nextStepID := outcome.NextStep
+	if nextStepID == "" {
+		nextStepID = "end"
+	}
+
+	branch, err := o.store.GetBranch(ctx, exec.BranchID)
+	if err != nil {
+		log.Warn("failed to get branch", "branch_id", exec.BranchID, "error", err)
+		return nil
+	}
+
+	if nextStepID == "end" {
+		// Branch terminal — mark branch as completed.
+		branch.Status = domain.BranchStatusCompleted
+		completedAt := now
+		branch.CompletedAt = &completedAt
+		if err := o.store.UpdateBranch(ctx, branch); err != nil {
+			return fmt.Errorf("update branch status: %w", err)
+		}
+
+		log.Info("branch completed", "run_id", exec.RunID, "branch_id", exec.BranchID)
+		return nil
+	}
+
+	// Update branch cursor before advancing.
+	branch.CurrentStepID = nextStepID
+	if err := o.store.UpdateBranch(ctx, branch); err != nil {
+		return fmt.Errorf("update branch current step: %w", err)
+	}
+
+	// Non-terminal — advance within the branch (skip run-level current_step_id update).
+	return o.advanceBranchStep(ctx, exec, nextStepID, exec.BranchID, now)
+}
+
+// advanceBranchStep creates the next step execution within a branch without updating
+// run.CurrentStepID (branch steps don't own the run cursor).
+func (o *Orchestrator) advanceBranchStep(ctx context.Context, exec *domain.StepExecution, nextStepID, branchID string, now time.Time) error {
+	log := observe.Logger(ctx)
+
+	attempt := o.nextAttempt(ctx, exec.RunID, nextStepID)
+	nextExec := &domain.StepExecution{
+		ExecutionID: fmt.Sprintf("%s-%s-%s-%d", exec.RunID, branchID, nextStepID, attempt),
+		RunID:       exec.RunID,
+		StepID:      nextStepID,
+		BranchID:    branchID,
+		Status:      domain.StepStatusWaiting,
+		Attempt:     attempt,
+		CreatedAt:   now,
+	}
+	if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
+		return fmt.Errorf("create branch step: %w", err)
+	}
+
+	log.Info("branch step progressed",
+		"run_id", exec.RunID, "branch_id", branchID, "completed_step", exec.StepID, "next_step", nextStepID)
+
+	if err := o.ActivateStep(ctx, exec.RunID, nextStepID); err != nil {
+		log.Warn("branch step activation failed", "step_id", nextStepID, "error", err)
+	}
 	return nil
 }
 

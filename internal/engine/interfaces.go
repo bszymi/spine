@@ -34,6 +34,7 @@ type RunStore interface {
 	GetDivergenceContext(ctx context.Context, divergenceID string) (*domain.DivergenceContext, error)
 	CreateBranch(ctx context.Context, branch *domain.Branch) error
 	UpdateBranch(ctx context.Context, branch *domain.Branch) error
+	GetBranch(ctx context.Context, branchID string) (*domain.Branch, error)
 	ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error)
 }
 
@@ -61,6 +62,11 @@ type WorkflowLoader interface {
 // CrossArtifactValidator runs cross-artifact validation rules against a single artifact.
 type CrossArtifactValidator interface {
 	Validate(ctx context.Context, artifactPath string) domain.ValidationResult
+}
+
+// DivergenceHandler manages divergence lifecycle for the orchestrator.
+type DivergenceHandler interface {
+	StartDivergence(ctx context.Context, run *domain.Run, divDef domain.DivergenceDefinition, convergenceID string) (*domain.DivergenceContext, error)
 }
 
 // GitOperator provides Git operations needed for run-level branching and commits.
