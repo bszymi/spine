@@ -190,7 +190,7 @@ func TestConsumer_FindProvider_NoMatch(t *testing.T) {
 }
 
 func TestConsumer_HandleAssignment_InvalidPayload(t *testing.T) {
-	c := &Consumer{providers: []ActorProvider{&testProvider{canHandle: true}}}
+	c := NewConsumer(queue.NewMemoryQueue(1), &Orchestrator{}, &testProvider{canHandle: true})
 
 	err := c.handleAssignment(context.Background(), queue.Entry{
 		EntryID:   "bad-1",
@@ -203,7 +203,7 @@ func TestConsumer_HandleAssignment_InvalidPayload(t *testing.T) {
 }
 
 func TestConsumer_HandleAssignment_NoProvider(t *testing.T) {
-	c := &Consumer{providers: []ActorProvider{&testProvider{canHandle: false}}}
+	c := NewConsumer(queue.NewMemoryQueue(1), &Orchestrator{}, &testProvider{canHandle: false})
 
 	payload, _ := json.Marshal(actor.AssignmentRequest{
 		AssignmentID: "a-1",
