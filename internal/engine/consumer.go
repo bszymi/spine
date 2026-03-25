@@ -36,6 +36,8 @@ type Consumer struct {
 	wg           sync.WaitGroup
 	cancel       context.CancelFunc
 	ctx          context.Context
+	stopped      bool
+	mu           sync.Mutex
 }
 
 // NewConsumer creates a queue consumer wired to the orchestrator.
@@ -61,18 +63,31 @@ func (c *Consumer) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop signals the consumer to stop and waits for in-flight work to drain.
+// Stop signals the consumer to stop, waits for in-flight work to finish,
+// then cancels the context. This ensures providers complete with a live
+// context before cleanup.
 func (c *Consumer) Stop() {
+	c.mu.Lock()
+	c.stopped = true
+	c.mu.Unlock()
+
+	c.wg.Wait()
 	if c.cancel != nil {
 		c.cancel()
 	}
-	c.wg.Wait()
 }
 
 // handleAssignment processes a single step_assignment queue entry.
 // It runs the provider synchronously so the queue only acknowledges
 // the entry after execution completes — preventing message loss on crash.
 func (c *Consumer) handleAssignment(_ context.Context, entry queue.Entry) error {
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return fmt.Errorf("consumer stopped, rejecting assignment %s", entry.EntryID)
+	}
+	c.mu.Unlock()
+
 	log := observe.Logger(c.ctx)
 
 	var req actor.AssignmentRequest
