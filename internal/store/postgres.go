@@ -159,11 +159,11 @@ func (s *PostgresStore) ListRunsByTask(ctx context.Context, taskPath string) ([]
 
 func (s *PostgresStore) CreateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, started_at, completed_at, error_detail, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		exec.ExecutionID, exec.RunID, exec.StepID, nilIfEmpty(exec.BranchID),
 		nilIfEmpty(exec.ActorID), exec.Status, exec.Attempt, nilIfEmpty(exec.OutcomeID),
-		exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.CreatedAt,
+		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.CreatedAt,
 	)
 	return err
 }
@@ -172,11 +172,11 @@ func (s *PostgresStore) GetStepExecution(ctx context.Context, executionID string
 	var exec domain.StepExecution
 	var branchID, actorID, outcomeID *string
 	err := s.pool.QueryRow(ctx, `
-		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, started_at, completed_at, error_detail, created_at
+		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at
 		FROM runtime.step_executions WHERE execution_id = $1`, executionID,
 	).Scan(
 		&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
-		&exec.Status, &exec.Attempt, &outcomeID,
+		&exec.Status, &exec.Attempt, &outcomeID, &exec.RetryAfter,
 		&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
 	)
 	if err != nil {
@@ -200,10 +200,10 @@ func (s *PostgresStore) GetStepExecution(ctx context.Context, executionID string
 func (s *PostgresStore) UpdateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE runtime.step_executions
-		SET status = $1, actor_id = $2, outcome_id = $3, started_at = $4, completed_at = $5, error_detail = $6
-		WHERE execution_id = $7`,
+		SET status = $1, actor_id = $2, outcome_id = $3, retry_after = $4, started_at = $5, completed_at = $6, error_detail = $7
+		WHERE execution_id = $8`,
 		exec.Status, nilIfEmpty(exec.ActorID), nilIfEmpty(exec.OutcomeID),
-		exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.ExecutionID,
+		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.ExecutionID,
 	)
 	if err != nil {
 		return err
@@ -216,7 +216,7 @@ func (s *PostgresStore) UpdateStepExecution(ctx context.Context, exec *domain.St
 
 func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID string) ([]domain.StepExecution, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, started_at, completed_at, error_detail, created_at
+		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at
 		FROM runtime.step_executions WHERE run_id = $1 ORDER BY created_at`, runID,
 	)
 	if err != nil {
@@ -230,7 +230,7 @@ func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID strin
 		var branchID, actorID, outcomeID *string
 		if err := rows.Scan(
 			&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
-			&exec.Status, &exec.Attempt, &outcomeID,
+			&exec.Status, &exec.Attempt, &outcomeID, &exec.RetryAfter,
 			&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -632,7 +632,7 @@ func (s *PostgresStore) ListRunsByStatus(ctx context.Context, status domain.RunS
 
 func (s *PostgresStore) ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, started_at, completed_at, error_detail, created_at
+		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at
 		FROM runtime.step_executions
 		WHERE status NOT IN ('completed', 'failed', 'skipped')
 		ORDER BY created_at`,
@@ -648,7 +648,7 @@ func (s *PostgresStore) ListActiveStepExecutions(ctx context.Context) ([]domain.
 		var branchID, actorID, outcomeID *string
 		if err := rows.Scan(
 			&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
-			&exec.Status, &exec.Attempt, &outcomeID,
+			&exec.Status, &exec.Attempt, &outcomeID, &exec.RetryAfter,
 			&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
 		); err != nil {
 			return nil, err

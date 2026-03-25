@@ -91,6 +91,7 @@ type StepExecution struct {
 	Attempt     int                 `json:"attempt"`
 	OutcomeID   string              `json:"outcome_id,omitempty"`
 	ErrorDetail *ErrorDetail        `json:"error_detail,omitempty"`
+	RetryAfter  *time.Time          `json:"retry_after,omitempty"`
 	StartedAt   *time.Time          `json:"started_at,omitempty"`
 	CompletedAt *time.Time          `json:"completed_at,omitempty"`
 	CreatedAt   time.Time           `json:"created_at"`
