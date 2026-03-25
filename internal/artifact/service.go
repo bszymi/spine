@@ -18,9 +18,9 @@ import (
 
 // Service implements artifact CRUD operations backed by Git.
 type Service struct {
-	git    git.GitClient
-	events event.EventRouter
-	repo   string // repository root path
+	git      git.GitClient
+	events   event.EventRouter
+	repo     string     // repository root path
 	branchMu sync.Mutex // serializes branch-scoped writes to prevent checkout races
 }
 

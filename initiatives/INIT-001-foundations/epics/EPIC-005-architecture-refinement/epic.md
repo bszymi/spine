@@ -2,7 +2,7 @@
 id: EPIC-005
 type: Epic
 title: Architecture Refinement
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-001-foundations/initiative.md
 links:
   - type: parent

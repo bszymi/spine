@@ -2,7 +2,7 @@
 id: EPIC-007
 type: Epic
 title: Actor Gateway
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
   - type: parent

@@ -2,7 +2,7 @@
 id: EPIC-008
 type: Epic
 title: Divergence and Convergence
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
   - type: parent

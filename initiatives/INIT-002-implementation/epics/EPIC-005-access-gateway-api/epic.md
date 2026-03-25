@@ -2,7 +2,7 @@
 id: EPIC-005
 type: Epic
 title: Access Gateway and API
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-002-implementation/initiative.md
 links:
   - type: parent
