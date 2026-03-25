@@ -19,13 +19,28 @@ func (s *Service) AcceptTask(ctx context.Context, path, rationale string) (*doma
 }
 
 // RejectTask records a rejection outcome on a task artifact.
-// acceptance must be AcceptanceRejectedWithFollowup or AcceptanceRejectedClosed.
+// When acceptance is AcceptanceRejectedWithFollowup, a successor task
+// is automatically created and linked bidirectionally.
 func (s *Service) RejectTask(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*domain.Artifact, error) {
 	if acceptance != domain.AcceptanceRejectedWithFollowup && acceptance != domain.AcceptanceRejectedClosed {
 		return nil, domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("invalid rejection type: %s", acceptance))
 	}
-	return s.setAcceptance(ctx, path, acceptance, rationale)
+
+	art, err := s.setAcceptance(ctx, path, acceptance, rationale)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create successor task for rejection with follow-up.
+	if acceptance == domain.AcceptanceRejectedWithFollowup {
+		if _, err := s.CreateSuccessorTask(ctx, path, rationale); err != nil {
+			observe.Logger(ctx).Warn("failed to create successor task",
+				"rejected_path", path, "error", err)
+		}
+	}
+
+	return art, nil
 }
 
 func (s *Service) setAcceptance(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*domain.Artifact, error) {
