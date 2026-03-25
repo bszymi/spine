@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -60,8 +61,17 @@ func (s *Service) setAcceptance(ctx context.Context, path string, acceptance dom
 			fmt.Sprintf("read file %s: %v", path, err))
 	}
 
-	// Insert acceptance fields into front matter.
-	updated := insertAcceptanceFields(string(raw), string(acceptance), rationale)
+	// Determine target status based on acceptance type.
+	var targetStatus domain.ArtifactStatus
+	switch acceptance {
+	case domain.AcceptanceApproved:
+		targetStatus = domain.StatusCompleted
+	case domain.AcceptanceRejectedWithFollowup, domain.AcceptanceRejectedClosed:
+		targetStatus = domain.StatusRejected
+	}
+
+	// Insert acceptance fields and update status in front matter.
+	updated := insertAcceptanceFields(string(raw), string(acceptance), rationale, string(targetStatus))
 
 	log.Info("recording task acceptance",
 		"path", path,
@@ -72,8 +82,14 @@ func (s *Service) setAcceptance(ctx context.Context, path string, acceptance dom
 	return s.Update(ctx, path, updated)
 }
 
-// insertAcceptanceFields adds acceptance and acceptance_rationale to YAML front matter.
-func insertAcceptanceFields(content, acceptance, rationale string) string {
+// insertAcceptanceFields adds acceptance, acceptance_rationale, and updates
+// the status field in YAML front matter.
+func insertAcceptanceFields(content, acceptance, rationale, targetStatus string) string {
+	// First update the status.
+	if targetStatus != "" {
+		content = statusRegexp.ReplaceAllString(content, "status: "+targetStatus)
+	}
+
 	lines := strings.Split(content, "\n")
 	var result []string
 	inFrontMatter := false
@@ -90,7 +106,7 @@ func insertAcceptanceFields(content, acceptance, rationale string) string {
 			if !inserted {
 				result = append(result, fmt.Sprintf("acceptance: %s", acceptance))
 				if rationale != "" {
-					result = append(result, fmt.Sprintf("acceptance_rationale: \"%s\"", rationale))
+					result = append(result, fmt.Sprintf("acceptance_rationale: %s", escapeYAMLString(rationale)))
 				}
 				inserted = true
 			}
@@ -100,4 +116,15 @@ func insertAcceptanceFields(content, acceptance, rationale string) string {
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// statusRegexp matches the status field in YAML front matter.
+var statusRegexp = regexp.MustCompile(`(?m)^status:\s*.*$`)
+
+// escapeYAMLString wraps a string in quotes and escapes special characters.
+func escapeYAMLString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return `"` + s + `"`
 }
