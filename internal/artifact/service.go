@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -20,6 +21,7 @@ type Service struct {
 	git    git.GitClient
 	events event.EventRouter
 	repo   string // repository root path
+	branchMu sync.Mutex // serializes branch-scoped writes to prevent checkout races
 }
 
 // NewService creates a new Artifact Service.
@@ -98,6 +100,13 @@ func (s *Service) Create(ctx context.Context, path, content string) (*domain.Art
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"artifact validation failed", result.Errors)
 	}
+
+	// Switch to target branch before any file writes.
+	cleanup, err := s.enterBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 
 	// Write file
 	dir := filepath.Dir(fullPath)
@@ -193,6 +202,13 @@ func (s *Service) Update(ctx context.Context, path, content string) (*domain.Art
 			"artifact validation failed", result.Errors)
 	}
 
+	// Switch to target branch before any file writes.
+	cleanup, err := s.enterBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
 	// Save original content for rollback
 	originalContent, readErr := os.ReadFile(fullPath)
 	if readErr != nil {
@@ -268,7 +284,31 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 	return artifacts, nil
 }
 
+// enterBranch acquires the branch mutex and checks out the target branch
+// if a WriteContext is present. Must be called before any file writes.
+// Returns a cleanup function that switches back and releases the mutex.
+func (s *Service) enterBranch(ctx context.Context) (func(), error) {
+	wc := GetWriteContext(ctx)
+	if wc == nil || wc.Branch == "" {
+		return func() {}, nil
+	}
+
+	s.branchMu.Lock()
+	if err := gitCheckout(ctx, s.repo, wc.Branch); err != nil {
+		s.branchMu.Unlock()
+		return nil, domain.NewError(domain.ErrGit,
+			fmt.Sprintf("checkout branch %s: %v", wc.Branch, err))
+	}
+
+	return func() {
+		_ = gitCheckout(ctx, s.repo, "-")
+		s.branchMu.Unlock()
+	}, nil
+}
+
 // stageAndCommit stages a file and creates a scoped Git commit (only this file).
+// The caller must call enterBranch before any file writes if branch-scoped
+// writes are needed.
 func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.CommitOpts) (git.CommitResult, error) {
 	// Build the full commit message with trailers
 	msg := opts.Message
@@ -332,6 +372,16 @@ func resolveToExistingAncestor(absPath string) (string, error) {
 
 // gitAdd stages a file using the git CLI directly.
 // Uses -- separator and GIT_LITERAL_PATHSPECS to prevent path injection.
+func gitCheckout(ctx context.Context, repoDir, branch string) error {
+	cmd := execCommand(ctx, "git", "checkout", branch)
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git checkout %s: %s", branch, string(out))
+	}
+	return nil
+}
+
 func gitAdd(ctx context.Context, repoDir, path string) error {
 	cmd := execCommand(ctx, "git", "add", "--", path)
 	cmd.Dir = repoDir
