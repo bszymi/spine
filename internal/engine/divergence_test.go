@@ -274,6 +274,65 @@ func TestCompleteBranchStep_SkipsConvergenceWhenPolicyNotReady(t *testing.T) {
 	}
 }
 
+func TestCompleteBranchStep_AdvancesWithinBranch(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+
+	wf := &domain.WorkflowDefinition{
+		ID:        "wf-test",
+		EntryStep: "start",
+		Steps: []domain.StepDefinition{
+			{ID: "start", Name: "Start", Outcomes: []domain.OutcomeDefinition{{ID: "done", NextStep: "end"}}},
+			{ID: "review-a", Name: "Review A", Outcomes: []domain.OutcomeDefinition{{ID: "approve", NextStep: "finalize-a"}}},
+			{ID: "finalize-a", Name: "Finalize A", Outcomes: []domain.OutcomeDefinition{{ID: "done", NextStep: "end"}}},
+		},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	branch := &domain.Branch{
+		BranchID: "branch-a", RunID: runID, DivergenceID: "div-1",
+		Status: domain.BranchStatusInProgress, CurrentStepID: "review-a",
+	}
+	store.branches = []*domain.Branch{branch}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+
+	branchExec := &domain.StepExecution{
+		ExecutionID: runID + "-branch-a-review-a-1",
+		RunID:       runID,
+		StepID:      "review-a",
+		BranchID:    "branch-a",
+		Status:      domain.StepStatusInProgress,
+		Attempt:     1,
+	}
+	store.createdSteps = append(store.createdSteps, branchExec)
+
+	err := orch.SubmitStepResult(context.Background(), branchExec.ExecutionID, StepResult{OutcomeID: "approve"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Branch should advance to finalize-a, not complete.
+	if store.branches[0].CurrentStepID != "finalize-a" {
+		t.Errorf("expected branch current step finalize-a, got %s", store.branches[0].CurrentStepID)
+	}
+	if store.branches[0].Status != domain.BranchStatusInProgress {
+		t.Errorf("expected branch still in progress, got %s", store.branches[0].Status)
+	}
+
+	// New branch step execution should have BranchID set.
+	found := false
+	for _, s := range store.createdSteps {
+		if s.StepID == "finalize-a" && s.BranchID == "branch-a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected finalize-a step execution with branch-a BranchID")
+	}
+}
+
 func TestCompleteBranchStep_MarksBranchCompleted(t *testing.T) {
 	store, runID := testRunWithStep()
 	events := &mockEventEmitter{}

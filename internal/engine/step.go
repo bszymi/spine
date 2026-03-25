@@ -459,8 +459,12 @@ func (o *Orchestrator) tryConvergence(ctx context.Context, run *domain.Run, dive
 		return fmt.Errorf("evaluate and commit convergence: %w", err)
 	}
 
-	// Resume the run after convergence — find the step with converge == convergenceID.
-	convergeStepID := findConvergeStep(wfDef, convDef.ID)
+	// Resume the run after convergence.
+	// Prefer evaluation_step from convergence definition; fall back to step with converge field.
+	convergeStepID := convDef.EvaluationStep
+	if convergeStepID == "" {
+		convergeStepID = findConvergeStep(wfDef, convDef.ID)
+	}
 	if convergeStepID != "" {
 		now := time.Now()
 		if err := o.store.UpdateCurrentStep(ctx, run.RunID, convergeStepID); err != nil {
@@ -499,14 +503,21 @@ func findConvergeStep(wfDef *domain.WorkflowDefinition, convergenceID string) st
 }
 
 // findConvergenceForDivergence looks up the convergence definition associated with a divergence.
+// Checks ConvergenceID on divCtx first, then scans steps for a converge field referencing
+// any convergence point (handles workflows where the divergence step sets diverge but not converge).
 func findConvergenceForDivergence(wfDef *domain.WorkflowDefinition, divergenceID string, divCtx *domain.DivergenceContext) *domain.ConvergenceDefinition {
-	// If divergence has a convergenceID, look it up directly.
+	// Direct lookup via ConvergenceID.
 	if divCtx.ConvergenceID != "" {
 		for i := range wfDef.ConvergencePoints {
 			if wfDef.ConvergencePoints[i].ID == divCtx.ConvergenceID {
 				return &wfDef.ConvergencePoints[i]
 			}
 		}
+	}
+
+	// Fallback: if there's only one convergence point, use it.
+	if len(wfDef.ConvergencePoints) == 1 {
+		return &wfDef.ConvergencePoints[0]
 	}
 	return nil
 }
