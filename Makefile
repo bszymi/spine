@@ -1,4 +1,4 @@
-.PHONY: build test test-integration lint clean docker-build docker-up docker-down docker-reset docker-test docker-lint docker-vet
+.PHONY: build test test-integration test-scenario lint clean docker-build docker-up docker-down docker-reset docker-test docker-lint docker-vet
 
 # ── Build ──
 
@@ -15,6 +15,9 @@ test:
 
 test-integration:
 	go test -tags integration ./...
+
+test-scenario:
+	go test -tags scenario ./internal/scenariotest/...
 
 # ── Lint ──
 
