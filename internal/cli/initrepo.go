@@ -63,7 +63,7 @@ func InitRepo(repoPath string) error {
 	// Initialize Git if not already a repository.
 	gitDir := filepath.Join(absPath, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		cmd := exec.Command("git", "init", absPath)
+		cmd := exec.Command("git", "init", "-b", "main", absPath)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git init: %s: %w", string(out), err)
 		}
@@ -188,6 +188,7 @@ type: Initiative
 title: "[Initiative Title]"
 status: Pending
 owner: "[owner]"
+created: "YYYY-MM-DD"
 ---
 
 # INIT-XXX — [Initiative Title]
@@ -210,6 +211,8 @@ id: ADR-XXX
 type: ADR
 title: "[Decision Title]"
 status: Proposed
+date: "YYYY-MM-DD"
+decision_makers: "[names]"
 ---
 
 # ADR-XXX — [Decision Title]
