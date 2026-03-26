@@ -2,7 +2,7 @@
 id: TASK-008
 type: Task
 title: Production Binary Wiring
-status: In Progress
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-010-developer-experience/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

@@ -10,17 +10,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bszymi/spine/internal/actor"
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/cli"
+	"github.com/bszymi/spine/internal/divergence"
+	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
+	"github.com/bszymi/spine/internal/scheduler"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
+	"github.com/bszymi/spine/internal/workflow"
 	"github.com/spf13/cobra"
 )
 
@@ -117,15 +123,140 @@ func serveCmd() *cobra.Command {
 				validator = validation.NewEngine(st)
 			}
 
+			// Set up workflow provider and resolver.
+			var wfResolver gateway.WorkflowResolverFn
+			var wfProvider *workflow.ProjectionWorkflowProvider
+			if st != nil {
+				wfProvider = workflow.NewProjectionProviderFromListFn(func(ctx context.Context) ([]workflow.WorkflowProjection, error) {
+					projs, err := st.ListActiveWorkflowProjections(ctx)
+					if err != nil {
+						return nil, err
+					}
+					result := make([]workflow.WorkflowProjection, len(projs))
+					for i := range projs {
+						result[i] = workflow.WorkflowProjection{
+							WorkflowPath: projs[i].WorkflowPath,
+							WorkflowID:   projs[i].WorkflowID,
+							Name:         projs[i].Name,
+							Version:      projs[i].Version,
+							Status:       projs[i].Status,
+							AppliesTo:    projs[i].AppliesTo,
+							Definition:   projs[i].Definition,
+							SourceCommit: projs[i].SourceCommit,
+						}
+					}
+					return result, nil
+				})
+				bindingResolver := engine.NewBindingResolver(wfProvider, gitClient)
+				wfResolver = func(ctx context.Context, artifactType, _ string) (*gateway.ResolvedWorkflow, error) {
+					result, err := bindingResolver.ResolveWorkflow(ctx, artifactType, "")
+					if err != nil {
+						return nil, err
+					}
+					timeout := ""
+					if result.Workflow != nil {
+						timeout = result.Workflow.Timeout
+					}
+					return &gateway.ResolvedWorkflow{
+						WorkflowID:   result.Workflow.ID,
+						WorkflowPath: result.Workflow.Path,
+						EntryStep:    result.Workflow.EntryStep,
+						CommitSHA:    result.CommitSHA,
+						VersionLabel: result.VersionLabel,
+						Timeout:      timeout,
+					}, nil
+				}
+			}
+
+			// Set up engine orchestrator.
+			var orch *engine.Orchestrator
+			if st != nil && wfProvider != nil {
+				actorSvc := actor.NewService(st)
+				actorGw := actor.NewGateway(st, eventRouter, q, actorSvc)
+				wfLoader := engine.NewGitWorkflowLoader(gitClient)
+				bindingResolver := engine.NewBindingResolver(wfProvider, gitClient)
+
+				var err error
+				orch, err = engine.New(
+					bindingResolver,
+					st, actorGw, artifactSvc, eventRouter, gitClient, wfLoader,
+				)
+				if err != nil {
+					log.Error("engine orchestrator init failed", "error", err)
+				} else {
+					orch.WithAssignmentStore(st)
+					if validator != nil {
+						orch.WithValidator(validator)
+					}
+
+					// Wire divergence and convergence.
+					divSvc := divergence.NewService(st, gitClient, eventRouter)
+					orch.WithDivergence(divSvc)
+					orch.WithConvergence(divSvc)
+				}
+			}
+
+			// Set up scheduler.
+			var sched *scheduler.Scheduler
+			if st != nil {
+				opts := []scheduler.Option{}
+				if orch != nil {
+					opts = append(opts,
+						scheduler.WithStepRecovery(func(ctx context.Context, execID string) error {
+							exec, err := st.GetStepExecution(ctx, execID)
+							if err != nil {
+								return err
+							}
+							if exec.Status == domain.StepStatusCompleted {
+								return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
+							}
+							return orch.RetryStep(ctx, exec)
+						}),
+						scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
+							return orch.FailRun(ctx, runID, reason)
+						}),
+						scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
+							return orch.MergeRunBranch(ctx, runID)
+						}, 3, 2*time.Minute),
+					)
+				}
+				sched = scheduler.New(st, eventRouter, opts...)
+			}
+
+			// Set up gateway with all services.
+			var divSvcForGateway gateway.BranchCreator
+			if st != nil {
+				divSvcForGateway = divergence.NewService(st, gitClient, eventRouter)
+			}
+
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
-				Store:     st,
-				Auth:      authSvc,
-				Artifacts: artifactSvc,
-				ProjQuery: projQuery,
-				ProjSync:  projSync,
-				Git:       gitClient,
-				Validator: validator,
+				Store:            st,
+				Auth:             authSvc,
+				Artifacts:        artifactSvc,
+				ProjQuery:        projQuery,
+				ProjSync:         projSync,
+				Git:              gitClient,
+				Validator:        validator,
+				WorkflowResolver: wfResolver,
+				BranchCreator:    divSvcForGateway,
+				Events:           eventRouter,
 			})
+
+			// Run startup recovery and start background services.
+			if sched != nil {
+				if result, err := sched.RecoverOnStartup(ctx); err != nil {
+					log.Error("startup recovery failed", "error", err)
+				} else {
+					log.Info("startup recovery complete",
+						"pending_activated", result.PendingActivated,
+						"active_resumed", result.ActiveResumed,
+					)
+				}
+				go sched.Start(ctx)
+			}
+			if projSync != nil {
+				go projSync.StartSyncLoop(ctx)
+			}
 
 			listenErr := make(chan error, 1)
 			go func() {
@@ -145,6 +276,9 @@ func serveCmd() *cobra.Command {
 			}
 
 			log.Info("spine server shutting down")
+			if sched != nil {
+				sched.Stop()
+			}
 			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 			return srv.Shutdown(shutdownCtx)
