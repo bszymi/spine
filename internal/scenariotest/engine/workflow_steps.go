@@ -37,7 +37,8 @@ func StartRun(taskPath string) Step {
 // SubmitStepResult returns a step that submits a result for the current
 // step execution with the given outcome ID. Uses IngestResult which validates
 // required outputs before routing, matching the production API path.
-func SubmitStepResult(outcomeID string) Step {
+// Optional outputs can be provided for steps with required_outputs.
+func SubmitStepResult(outcomeID string, outputs ...string) Step {
 	return Step{
 		Name: "submit-step-result-" + outcomeID,
 		Action: func(sc *ScenarioContext) error {
@@ -47,8 +48,9 @@ func SubmitStepResult(outcomeID string) Step {
 			execID := sc.MustGet("current_execution_id").(string)
 
 			_, err := sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
-				ExecutionID: execID,
-				OutcomeID:   outcomeID,
+				ExecutionID:       execID,
+				OutcomeID:         outcomeID,
+				ArtifactsProduced: outputs,
 			})
 			if err != nil {
 				return fmt.Errorf("submit step result %s: %w", outcomeID, err)
