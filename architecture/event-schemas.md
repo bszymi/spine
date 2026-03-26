@@ -525,3 +525,39 @@ Areas expected to require refinement:
 - Batch event emission for commits that change multiple artifacts
 
 New event types should be added to this document with schemas before producers begin emitting them. Changes to existing schemas must follow the versioning rules in §5.
+
+---
+
+## Appendix: Implementation Emission Map
+
+All event types are emitted from the following code paths:
+
+### Domain Events
+
+| Event Type | Emitted By | File |
+|-----------|-----------|------|
+| `run_started` | `Orchestrator.StartRun` | engine/run.go |
+| `run_completed` | `Orchestrator.CompleteRun` | engine/run.go |
+| `run_failed` | `Orchestrator.FailRun` | engine/run.go |
+| `run_cancelled` | `Orchestrator.CancelRun` | engine/run.go |
+| `run_paused` | `Orchestrator.PauseRun` | engine/run.go |
+| `run_resumed` | `Orchestrator.ResumeRun` | engine/run.go |
+| `step_assigned` | `Orchestrator.ActivateStep` | engine/step.go |
+| `step_started` | `Orchestrator.SubmitStepResult` (auto-acknowledge) | engine/step.go |
+| `step_completed` | `Orchestrator.SubmitStepResult` | engine/step.go |
+| `step_failed` | `Orchestrator.RetryStep` (non-retryable only) | engine/retry.go |
+| `step_timeout` | `Scheduler.handleStepTimeout` | scheduler/timeout.go |
+| `retry_attempted` | `Orchestrator.RetryStep` | engine/retry.go |
+| `run_timeout` | `Scheduler.handleRunTimeout` | scheduler/run_timeout.go |
+
+### Operational Events
+
+| Event Type | Emitted By | File |
+|-----------|-----------|------|
+| `divergence_started` | `divergence.Service.StartDivergence` | divergence/service.go |
+| `convergence_completed` | `divergence.Service.CommitConvergence` | divergence/convergence.go |
+| `engine_recovered` | `Scheduler.RecoverOnStartup` | scheduler/recovery.go |
+| `projection_synced` | `projection.Service.IncrementalSync` | projection/service.go |
+| `validation_passed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
+| `validation_failed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
+| `step_assignment_failed` | `Orchestrator.ActivateStep` | engine/step.go |

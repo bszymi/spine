@@ -143,8 +143,20 @@ System operations are administrative and require elevated authorization.
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
 | `system.health` | Returns component health status | Monitoring, readiness checks |
+| `system.metrics` | Returns Prometheus-compatible metrics | Monitoring, alerting |
 | `system.rebuild` | Triggers full projection rebuild from Git | After projection corruption or drift |
 | `system.validate_all` | Runs validation across all artifacts | Periodic governance audits |
+
+### 3.6 Divergence Operations
+
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `divergence.create_branch` | Creates a new exploratory branch within an active divergence | Actor-driven branch creation during exploratory divergence |
+| `divergence.close_window` | Closes the exploratory divergence window | When enough branches have been created |
+
+**Endpoints:**
+- `POST /runs/{run_id}/divergences/{divergence_id}/branches` — create branch (body: `branch_id`, `start_step`)
+- `POST /runs/{run_id}/divergences/{divergence_id}/close-window` — close window
 
 **Domain rules:**
 - `system.rebuild` is asynchronous — the response confirms the rebuild was started, not completed
