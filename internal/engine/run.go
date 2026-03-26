@@ -265,6 +265,73 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
 	return nil
 }
 
+// PauseRun transitions an active run to paused.
+func (o *Orchestrator) PauseRun(ctx context.Context, runID, reason string) error {
+	run, err := o.store.GetRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("get run: %w", err)
+	}
+
+	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+		Trigger:     workflow.TriggerStepBlocked,
+		PauseReason: reason,
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
+		return fmt.Errorf("update run status: %w", err)
+	}
+
+	log := observe.Logger(ctx)
+	if err := o.events.Emit(ctx, domain.Event{
+		EventID:   fmt.Sprintf("evt-%s-paused-%d", run.TraceID[:12], time.Now().UnixMilli()),
+		Type:      domain.EventRunPaused,
+		Timestamp: time.Now(),
+		RunID:     runID,
+		TraceID:   run.TraceID,
+	}); err != nil {
+		log.Warn("failed to emit event", "event_type", domain.EventRunPaused, "error", err)
+	}
+
+	log.Info("run paused", "run_id", runID, "reason", reason)
+	return nil
+}
+
+// ResumeRun transitions a paused run back to active.
+func (o *Orchestrator) ResumeRun(ctx context.Context, runID string) error {
+	run, err := o.store.GetRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("get run: %w", err)
+	}
+
+	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+		Trigger: workflow.TriggerResume,
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
+		return fmt.Errorf("update run status: %w", err)
+	}
+
+	log := observe.Logger(ctx)
+	if err := o.events.Emit(ctx, domain.Event{
+		EventID:   fmt.Sprintf("evt-%s-resumed-%d", run.TraceID[:12], time.Now().UnixMilli()),
+		Type:      domain.EventRunResumed,
+		Timestamp: time.Now(),
+		RunID:     runID,
+		TraceID:   run.TraceID,
+	}); err != nil {
+		log.Warn("failed to emit event", "event_type", domain.EventRunResumed, "error", err)
+	}
+
+	log.Info("run resumed", "run_id", runID)
+	return nil
+}
+
 // findStepDef looks up a step definition by ID within a workflow.
 func findStepDef(wf *domain.WorkflowDefinition, stepID string) *domain.StepDefinition {
 	for i := range wf.Steps {
