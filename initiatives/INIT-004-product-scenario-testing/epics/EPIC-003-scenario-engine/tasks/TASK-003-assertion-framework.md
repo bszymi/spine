@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: "Assertion Framework"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-004-product-scenario-testing/epics/EPIC-003-scenario-engine/epic.md
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
