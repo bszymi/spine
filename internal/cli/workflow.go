@@ -140,6 +140,10 @@ func ResolveWorkflow(repoPath, artifactPath string, format OutputFormat) error {
 		if err != nil {
 			continue
 		}
+		// Only consider Active workflows for binding resolution.
+		if wf.Status != "Active" {
+			continue
+		}
 		for _, at := range wf.AppliesTo {
 			if strings.EqualFold(at, artMeta.Type) {
 				wf.Path = "workflows/" + entry.Name()
