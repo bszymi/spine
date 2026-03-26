@@ -668,3 +668,111 @@ func TestDiscussionReopenNotFound(t *testing.T) {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
 }
+
+// ── Event Emission Tests ──
+
+type fakeEventEmitter struct {
+	events []domain.Event
+}
+
+func (f *fakeEventEmitter) Emit(_ context.Context, event domain.Event) error {
+	f.events = append(f.events, event)
+	return nil
+}
+
+func setupDiscussionServerWithEvents(t *testing.T) (*httptest.Server, *discussionStore, string, string, *fakeEventEmitter) {
+	t.Helper()
+	ds := newDiscussionStore()
+
+	ds.actors["contributor-1"] = &domain.Actor{
+		ActorID: "contributor-1", Type: domain.ActorTypeHuman, Name: "Contributor",
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	ds.actors["reviewer-1"] = &domain.Actor{
+		ActorID: "reviewer-1", Type: domain.ActorTypeHuman, Name: "Reviewer",
+		Role: domain.RoleReviewer, Status: domain.ActorStatusActive,
+	}
+	ds.projections["tasks/TASK-001.md"] = &store.ArtifactProjection{
+		ArtifactPath: "tasks/TASK-001.md", ArtifactID: "TASK-001",
+		ArtifactType: "Task", Title: "Test Task", Status: "Pending",
+	}
+
+	events := &fakeEventEmitter{}
+	authSvc := auth.NewService(ds)
+	contributorToken, _, err := authSvc.CreateToken(context.Background(), "contributor-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create contributor token: %v", err)
+	}
+	reviewerToken, _, err := authSvc.CreateToken(context.Background(), "reviewer-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create reviewer token: %v", err)
+	}
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: ds, Auth: authSvc, Events: events})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	return ts, ds, contributorToken, reviewerToken, events
+}
+
+func TestDiscussionCreateEmitsEvent(t *testing.T) {
+	ts, _, token, _, events := setupDiscussionServerWithEvents(t)
+
+	body := `{"anchor_type":"artifact","anchor_id":"tasks/TASK-001.md","title":"Test"}`
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions", token, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	if len(events.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events.events))
+	}
+	if events.events[0].Type != domain.EventThreadCreated {
+		t.Errorf("expected event type thread_created, got %s", events.events[0].Type)
+	}
+}
+
+func TestDiscussionCommentEmitsEvent(t *testing.T) {
+	ts, ds, token, _, events := setupDiscussionServerWithEvents(t)
+
+	ds.threads["t1"] = &domain.DiscussionThread{
+		ThreadID: "t1", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusOpen, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions/t1/comments", token, `{"content":"hello"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+	if len(events.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events.events))
+	}
+	if events.events[0].Type != domain.EventCommentAdded {
+		t.Errorf("expected event type comment_added, got %s", events.events[0].Type)
+	}
+}
+
+func TestDiscussionResolveEmitsEvent(t *testing.T) {
+	ts, ds, _, reviewerToken, events := setupDiscussionServerWithEvents(t)
+
+	ds.threads["t1"] = &domain.DiscussionThread{
+		ThreadID: "t1", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusOpen, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions/t1/resolve", reviewerToken, `{"resolution_type":"no_action"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if len(events.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events.events))
+	}
+	if events.events[0].Type != domain.EventThreadResolved {
+		t.Errorf("expected event type thread_resolved, got %s", events.events[0].Type)
+	}
+}
