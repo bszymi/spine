@@ -16,9 +16,9 @@ func TestQueryArtifacts_SendsFilters(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		receivedParams = map[string]string{
-			"type":   r.URL.Query().Get("type"),
-			"status": r.URL.Query().Get("status"),
-			"parent": r.URL.Query().Get("parent"),
+			"type":        r.URL.Query().Get("type"),
+			"status":      r.URL.Query().Get("status"),
+			"parent_path": r.URL.Query().Get("parent_path"),
 		}
 		json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
 	}))
@@ -45,8 +45,8 @@ func TestQueryRuns_SendsFilters(t *testing.T) {
 	var receivedParams map[string]string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedParams = map[string]string{
-			"task":   r.URL.Query().Get("task"),
-			"status": r.URL.Query().Get("status"),
+			"task_path": r.URL.Query().Get("task_path"),
+			"status":    r.URL.Query().Get("status"),
 		}
 		json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
 	}))
@@ -58,8 +58,8 @@ func TestQueryRuns_SendsFilters(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if receivedParams["task"] != "tasks/task.md" {
-		t.Errorf("expected task=tasks/task.md, got %s", receivedParams["task"])
+	if receivedParams["task_path"] != "tasks/task.md" {
+		t.Errorf("expected task_path=tasks/task.md, got %s", receivedParams["task_path"])
 	}
 	if receivedParams["status"] != "active" {
 		t.Errorf("expected status=active, got %s", receivedParams["status"])
@@ -70,7 +70,7 @@ func TestQueryGraph_SendsPathAndDepth(t *testing.T) {
 	var receivedParams map[string]string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedParams = map[string]string{
-			"path":  r.URL.Query().Get("path"),
+			"root":  r.URL.Query().Get("root"),
 			"depth": r.URL.Query().Get("depth"),
 		}
 		json.NewEncoder(w).Encode(map[string]any{})
@@ -83,8 +83,8 @@ func TestQueryGraph_SendsPathAndDepth(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if receivedParams["path"] != "initiatives/init.md" {
-		t.Errorf("expected path=initiatives/init.md, got %s", receivedParams["path"])
+	if receivedParams["root"] != "initiatives/init.md" {
+		t.Errorf("expected root=initiatives/init.md, got %s", receivedParams["root"])
 	}
 	if receivedParams["depth"] != "3" {
 		t.Errorf("expected depth=3, got %s", receivedParams["depth"])

@@ -17,7 +17,7 @@ func QueryArtifacts(ctx context.Context, client *Client, artType, status, parent
 		params.Set("status", status)
 	}
 	if parent != "" {
-		params.Set("parent", parent)
+		params.Set("parent_path", parent)
 	}
 
 	data, err := client.Get(ctx, "/api/v1/query/artifacts", params)
@@ -37,7 +37,7 @@ func QueryArtifacts(ctx context.Context, client *Client, artType, status, parent
 func QueryGraph(ctx context.Context, client *Client, artifactPath string, depth int, format OutputFormat) error {
 	params := url.Values{}
 	if artifactPath != "" {
-		params.Set("path", artifactPath)
+		params.Set("root", artifactPath)
 	}
 	if depth > 0 {
 		params.Set("depth", fmt.Sprintf("%d", depth))
@@ -80,7 +80,7 @@ func QueryHistory(ctx context.Context, client *Client, artifactPath string, form
 func QueryRuns(ctx context.Context, client *Client, taskPath, status string, format OutputFormat) error {
 	params := url.Values{}
 	if taskPath != "" {
-		params.Set("task", taskPath)
+		params.Set("task_path", taskPath)
 	}
 	if status != "" {
 		params.Set("status", status)
