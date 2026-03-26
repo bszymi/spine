@@ -12,6 +12,7 @@ import (
 type Scenario struct {
 	Name        string
 	Description string
+	EnvOpts     []harness.EnvOption // environment configuration; defaults to empty (bare repo)
 	Steps       []Step
 }
 
@@ -53,26 +54,21 @@ func (sc *ScenarioContext) MustGet(key string) any {
 
 // RunScenario creates an isolated test environment and executes the scenario's
 // steps sequentially. Execution stops on the first step failure.
+// Environment configuration is taken from scenario.EnvOpts.
 func RunScenario(t *testing.T, scenario Scenario) {
 	t.Helper()
 
-	repo := harness.NewTestRepo(t)
-	db := harness.NewTestDB(t)
-	rt := harness.NewTestRuntime(t, repo, db)
+	env := harness.NewTestEnvironment(t, scenario.EnvOpts...)
 
 	ctx := context.Background()
 	ctx = observe.WithTraceID(ctx, "scenario-"+scenario.Name)
 	ctx = observe.WithActorID(ctx, "scenario-actor")
 
-	t.Cleanup(func() {
-		db.Cleanup(context.Background(), t)
-	})
-
 	sc := &ScenarioContext{
 		T:       t,
-		Repo:    repo,
-		DB:      db,
-		Runtime: rt,
+		Repo:    env.Repo,
+		DB:      env.DB,
+		Runtime: env.Runtime,
 		Ctx:     ctx,
 		State:   make(map[string]any),
 	}

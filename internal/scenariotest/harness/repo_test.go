@@ -65,7 +65,7 @@ func TestSeedGovernance(t *testing.T) {
 		t.Fatalf("read charter: %v", err)
 	}
 	content := string(data)
-	if len(content) == 0 {
+	if content == "" {
 		t.Fatal("expected non-empty charter content")
 	}
 
