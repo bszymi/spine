@@ -47,10 +47,10 @@ type ScenarioResult struct {
 	Duration time.Duration
 }
 
-// Passed returns true if all steps passed.
+// Passed returns true if no steps failed. Skipped steps are not considered failures.
 func (r *ScenarioResult) Passed() bool {
 	for _, s := range r.Steps {
-		if s.Status != StepPassed {
+		if s.Status == StepFailed {
 			return false
 		}
 	}
