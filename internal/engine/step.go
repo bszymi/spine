@@ -614,6 +614,11 @@ func (o *Orchestrator) evaluatePreconditions(ctx context.Context, step *domain.S
 				log.Info("precondition failed", "type", precond.Type, "config", precond.Config)
 				return false, nil
 			}
+		case "discussions_resolved":
+			if !o.checkDiscussionsResolved(ctx, precond.Config, run) {
+				log.Info("precondition failed", "type", precond.Type, "config", precond.Config)
+				return false, nil
+			}
 		case "cross_artifact_valid":
 			if o.validator == nil {
 				log.Info("cross_artifact_valid precondition skipped (no validator configured)")
@@ -726,6 +731,35 @@ func (o *Orchestrator) checkLinksExist(ctx context.Context, config map[string]st
 		}
 	}
 	return false
+}
+
+// checkDiscussionsResolved verifies no open discussion threads exist on the artifact.
+// Config supports optional "anchor_type" (defaults to "artifact") and "path" (defaults to run.TaskPath).
+func (o *Orchestrator) checkDiscussionsResolved(ctx context.Context, config map[string]string, run *domain.Run) bool {
+	if o.discussions == nil {
+		observe.Logger(ctx).Info("discussions_resolved precondition skipped (no discussion checker configured)")
+		return true
+	}
+
+	anchorType := domain.AnchorType(config["anchor_type"])
+	if anchorType == "" {
+		anchorType = domain.AnchorTypeArtifact
+	}
+	anchorID := config["path"]
+	if anchorID == "" {
+		if anchorType == domain.AnchorTypeRun {
+			anchorID = run.RunID
+		} else {
+			anchorID = run.TaskPath
+		}
+	}
+
+	hasOpen, err := o.discussions.HasOpenThreads(ctx, anchorType, anchorID)
+	if err != nil {
+		observe.Logger(ctx).Warn("discussions_resolved precondition check failed", "error", err)
+		return false
+	}
+	return !hasOpen
 }
 
 // nextAttempt returns the next attempt number for a step in a run.

@@ -900,3 +900,109 @@ func TestFindOutcome(t *testing.T) {
 		t.Error("expected nil for missing outcome")
 	}
 }
+
+// ── Discussion precondition tests ──
+
+type mockDiscussionChecker struct {
+	hasOpen bool
+	err     error
+}
+
+func (m *mockDiscussionChecker) HasOpenThreads(_ context.Context, _ domain.AnchorType, _ string) (bool, error) {
+	return m.hasOpen, m.err
+}
+
+func TestEvaluatePreconditions_DiscussionsResolved_Pass(t *testing.T) {
+	orch := &Orchestrator{
+		artifacts:   &mockArtifactReader{},
+		discussions: &mockDiscussionChecker{hasOpen: false},
+	}
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "discussions_resolved", Config: map[string]string{}},
+		},
+	}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if !passed {
+		t.Error("expected discussions_resolved to pass when no open threads")
+	}
+}
+
+func TestEvaluatePreconditions_DiscussionsResolved_Fail(t *testing.T) {
+	orch := &Orchestrator{
+		artifacts:   &mockArtifactReader{},
+		discussions: &mockDiscussionChecker{hasOpen: true},
+	}
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "discussions_resolved", Config: map[string]string{}},
+		},
+	}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if passed {
+		t.Error("expected discussions_resolved to fail when open threads exist")
+	}
+}
+
+func TestEvaluatePreconditions_DiscussionsResolved_NoChecker(t *testing.T) {
+	orch := &Orchestrator{
+		artifacts: &mockArtifactReader{},
+		// discussions is nil
+	}
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "discussions_resolved", Config: map[string]string{}},
+		},
+	}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	// Should pass (skip) when no checker configured
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if !passed {
+		t.Error("expected discussions_resolved to pass when no checker configured")
+	}
+}
+
+func TestEvaluatePreconditions_DiscussionsResolved_Error(t *testing.T) {
+	orch := &Orchestrator{
+		artifacts:   &mockArtifactReader{},
+		discussions: &mockDiscussionChecker{err: errors.New("db error")},
+	}
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "discussions_resolved", Config: map[string]string{}},
+		},
+	}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if passed {
+		t.Error("expected discussions_resolved to fail on error")
+	}
+}
+
+func TestEvaluatePreconditions_DiscussionsResolved_CustomAnchor(t *testing.T) {
+	checker := &mockDiscussionChecker{hasOpen: false}
+	orch := &Orchestrator{
+		artifacts:   &mockArtifactReader{},
+		discussions: checker,
+	}
+	step := &domain.StepDefinition{
+		Preconditions: []domain.Precondition{
+			{Type: "discussions_resolved", Config: map[string]string{
+				"anchor_type": "run",
+				"path":        "run-001",
+			}},
+		},
+	}
+	run := &domain.Run{TaskPath: "tasks/task.md"}
+
+	passed, _ := orch.evaluatePreconditions(context.Background(), step, run)
+	if !passed {
+		t.Error("expected discussions_resolved to pass with custom anchor")
+	}
+}

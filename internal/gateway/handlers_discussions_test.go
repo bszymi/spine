@@ -104,6 +104,15 @@ func (d *discussionStore) GetDivergenceContext(_ context.Context, divID string) 
 	return dc, nil
 }
 
+func (d *discussionStore) HasOpenThreads(_ context.Context, anchorType domain.AnchorType, anchorID string) (bool, error) {
+	for _, t := range d.threads {
+		if t.AnchorType == anchorType && t.AnchorID == anchorID && t.Status == domain.ThreadStatusOpen {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (d *discussionStore) CreateThread(_ context.Context, thread *domain.DiscussionThread) error {
 	d.threads[thread.ThreadID] = thread
 	return nil
@@ -774,5 +783,90 @@ func TestDiscussionResolveEmitsEvent(t *testing.T) {
 	}
 	if events.events[0].Type != domain.EventThreadResolved {
 		t.Errorf("expected event type thread_resolved, got %s", events.events[0].Type)
+	}
+}
+
+// ── Query Discussions Tests ──
+
+func TestQueryDiscussions(t *testing.T) {
+	ts, ds, token, _ := setupDiscussionServer(t)
+
+	ds.runs["run-001"] = &domain.Run{RunID: "run-001", TaskPath: "tasks/TASK-001.md", Status: domain.RunStatusActive}
+	ds.threads["t1"] = &domain.DiscussionThread{
+		ThreadID: "t1", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusOpen, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+	ds.threads["t2"] = &domain.DiscussionThread{
+		ThreadID: "t2", AnchorType: domain.AnchorTypeRun, AnchorID: "run-001",
+		Status: domain.ThreadStatusOpen, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+	ds.threads["t3"] = &domain.DiscussionThread{
+		ThreadID: "t3", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusResolved, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+
+	resp := doRequest(t, "GET", ts.URL+"/api/v1/query/discussions?run_id=run-001", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	items := result["items"].([]any)
+	// Should return t1 (artifact, open) and t2 (run, open) but not t3 (resolved)
+	if len(items) != 2 {
+		t.Errorf("expected 2 open threads, got %d", len(items))
+	}
+}
+
+func TestQueryDiscussionsMissingRunID(t *testing.T) {
+	ts, _, token, _ := setupDiscussionServer(t)
+
+	resp := doRequest(t, "GET", ts.URL+"/api/v1/query/discussions", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryDiscussionsRunNotFound(t *testing.T) {
+	ts, _, token, _ := setupDiscussionServer(t)
+
+	resp := doRequest(t, "GET", ts.URL+"/api/v1/query/discussions?run_id=nonexistent", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestQueryDiscussionsAllStatus(t *testing.T) {
+	ts, ds, token, _ := setupDiscussionServer(t)
+
+	ds.runs["run-001"] = &domain.Run{RunID: "run-001", TaskPath: "tasks/TASK-001.md", Status: domain.RunStatusActive}
+	ds.threads["t1"] = &domain.DiscussionThread{
+		ThreadID: "t1", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusOpen, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+	ds.threads["t2"] = &domain.DiscussionThread{
+		ThreadID: "t2", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusResolved, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+
+	resp := doRequest(t, "GET", ts.URL+"/api/v1/query/discussions?run_id=run-001&status=all", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	items := result["items"].([]any)
+	if len(items) != 2 {
+		t.Errorf("expected 2 threads (all statuses), got %d", len(items))
 	}
 }

@@ -46,11 +46,17 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 	// acceptance fields in addition to status changes.
 	if action == "accept" {
 		var req struct {
-			Rationale string `json:"rationale"`
+			Rationale  string   `json:"rationale"`
+			ThreadRefs []string `json:"thread_refs,omitempty"`
 		}
 		_ = decodeJSON(r, &req) // rationale is optional
 
-		art, err := s.artifacts.AcceptTask(r.Context(), taskPath, req.Rationale)
+		rationale := req.Rationale
+		if len(req.ThreadRefs) > 0 {
+			rationale = appendThreadRefs(rationale, req.ThreadRefs)
+		}
+
+		art, err := s.artifacts.AcceptTask(r.Context(), taskPath, rationale)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -68,15 +74,20 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 
 	if action == "reject" {
 		var req struct {
-			Acceptance string `json:"acceptance"`
-			Rationale  string `json:"rationale"`
+			Acceptance string   `json:"acceptance"`
+			Rationale  string   `json:"rationale"`
+			ThreadRefs []string `json:"thread_refs,omitempty"`
 		}
 		_ = decodeJSON(r, &req) // body is optional for reject
 		acceptance := domain.TaskAcceptance(req.Acceptance)
 		if acceptance == "" {
 			acceptance = domain.AcceptanceRejectedClosed
 		}
-		art, err := s.artifacts.RejectTask(r.Context(), taskPath, acceptance, req.Rationale)
+		rationale := req.Rationale
+		if len(req.ThreadRefs) > 0 {
+			rationale = appendThreadRefs(rationale, req.ThreadRefs)
+		}
+		art, err := s.artifacts.RejectTask(r.Context(), taskPath, acceptance, rationale)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -137,6 +148,12 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 
 // statusRegexp matches the status field in YAML front matter.
 var statusRegexp = regexp.MustCompile(`(?m)^status:\s*.*$`)
+
+// appendThreadRefs appends discussion thread references to a rationale string.
+func appendThreadRefs(rationale string, refs []string) string {
+	suffix := "\n\nDiscussion threads: " + strings.Join(refs, ", ")
+	return rationale + suffix
+}
 
 // updateFrontMatterStatus replaces the status field in markdown front matter content.
 func updateFrontMatterStatus(content, newStatus string) string {
