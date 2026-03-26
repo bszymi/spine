@@ -28,7 +28,7 @@ type LinkOpt struct {
 // Returns the artifact path.
 func FixtureGovernance(sc *ScenarioContext, path string, opts ArtifactOpts) string {
 	sc.T.Helper()
-	defaults(&opts, "Governance Doc", "Draft")
+	defaults(&opts, "Governance Doc", "Living Document")
 	content := buildFrontmatter("Governance", "", opts) + buildBody(opts, "Governance Document")
 	return createFixture(sc, path, content)
 }
@@ -56,6 +56,8 @@ func FixtureInitiative(sc *ScenarioContext, path string, opts ArtifactOpts) stri
 }
 
 // FixtureEpic creates a valid Epic artifact linked to a parent Initiative.
+// If opts.Init is empty, it is derived from the path (expects the path to
+// contain "initiatives/<slug>/epics/").
 func FixtureEpic(sc *ScenarioContext, path string, opts ArtifactOpts) string {
 	sc.T.Helper()
 	defaults(&opts, "Test Epic", "Pending")
@@ -63,7 +65,7 @@ func FixtureEpic(sc *ScenarioContext, path string, opts ArtifactOpts) string {
 		opts.ID = "EPIC-001"
 	}
 	if opts.Init == "" {
-		opts.Init = "/initiatives/INIT-001/initiative.md"
+		opts.Init = deriveInitiativePath(path)
 	}
 	// Ensure parent link exists.
 	if !hasLinkType(opts.Links, "parent") {
@@ -74,6 +76,8 @@ func FixtureEpic(sc *ScenarioContext, path string, opts ArtifactOpts) string {
 }
 
 // FixtureTask creates a valid Task artifact linked to a parent Epic and Initiative.
+// If opts.Epic or opts.Init are empty, they are derived from the path
+// (expects the path to contain "initiatives/<slug>/epics/<slug>/tasks/").
 func FixtureTask(sc *ScenarioContext, path string, opts ArtifactOpts) string {
 	sc.T.Helper()
 	defaults(&opts, "Test Task", "Pending")
@@ -81,10 +85,10 @@ func FixtureTask(sc *ScenarioContext, path string, opts ArtifactOpts) string {
 		opts.ID = "TASK-001"
 	}
 	if opts.Epic == "" {
-		opts.Epic = "/initiatives/INIT-001/epics/EPIC-001/epic.md"
+		opts.Epic = deriveEpicPath(path)
 	}
 	if opts.Init == "" {
-		opts.Init = "/initiatives/INIT-001/initiative.md"
+		opts.Init = deriveInitiativePath(path)
 	}
 	// Ensure parent link exists.
 	if !hasLinkType(opts.Links, "parent") {
@@ -200,6 +204,31 @@ func buildBody(opts ArtifactOpts, defaultHeading string) string {
 		return opts.Body
 	}
 	return fmt.Sprintf("# %s\n", defaultHeading)
+}
+
+// deriveInitiativePath extracts the initiative path from an artifact path.
+// Expects paths like "initiatives/<slug>/..." and returns "/<slug>/initiative.md".
+func deriveInitiativePath(artifactPath string) string {
+	parts := strings.Split(artifactPath, "/")
+	for i, p := range parts {
+		if p == "initiatives" && i+1 < len(parts) {
+			return "/" + strings.Join(parts[:i+2], "/") + "/initiative.md"
+		}
+	}
+	return "/initiatives/INIT-001/initiative.md" // fallback
+}
+
+// deriveEpicPath extracts the epic path from a task artifact path.
+// Expects paths like "initiatives/<slug>/epics/<slug>/tasks/..." and returns
+// the canonical path to the epic.
+func deriveEpicPath(artifactPath string) string {
+	parts := strings.Split(artifactPath, "/")
+	for i, p := range parts {
+		if p == "epics" && i+1 < len(parts) {
+			return "/" + strings.Join(parts[:i+2], "/") + "/epic.md"
+		}
+	}
+	return "/initiatives/INIT-001/epics/EPIC-001/epic.md" // fallback
 }
 
 func hasLinkType(links []LinkOpt, linkType string) bool {
