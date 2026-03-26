@@ -2,12 +2,14 @@
 id: TASK-007
 type: Task
 title: Discussion and Comments Runtime
-status: Pending
+status: Superseded
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-010-developer-experience/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
   - type: parent
     target: /initiatives/INIT-003-execution-system/epics/EPIC-010-developer-experience/epic.md
+  - type: superseded_by
+    target: /initiatives/INIT-003-execution-system/epics/EPIC-011-discussion-system/epic.md
 ---
 
 # TASK-007 — Discussion and Comments Runtime
