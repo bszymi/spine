@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/scenariotest/harness"
@@ -20,6 +21,40 @@ type Scenario struct {
 type Step struct {
 	Name   string
 	Action func(ctx *ScenarioContext) error
+}
+
+// StepStatus represents the outcome of a single step execution.
+type StepStatus string
+
+const (
+	StepPassed  StepStatus = "passed"
+	StepFailed  StepStatus = "failed"
+	StepSkipped StepStatus = "skipped"
+)
+
+// StepResult records the outcome of a single step execution.
+type StepResult struct {
+	Name     string
+	Status   StepStatus
+	Duration time.Duration
+	Error    string // non-empty when Status is StepFailed
+}
+
+// ScenarioResult records the outcome of a full scenario execution.
+type ScenarioResult struct {
+	Name     string
+	Steps    []StepResult
+	Duration time.Duration
+}
+
+// Passed returns true if all steps passed.
+func (r *ScenarioResult) Passed() bool {
+	for _, s := range r.Steps {
+		if s.Status != StepPassed {
+			return false
+		}
+	}
+	return len(r.Steps) > 0
 }
 
 // ScenarioContext carries the test environment and accumulated state between steps.
@@ -53,11 +88,13 @@ func (sc *ScenarioContext) MustGet(key string) any {
 }
 
 // RunScenario creates an isolated test environment and executes the scenario's
-// steps sequentially. Execution stops on the first step failure.
+// steps sequentially. Execution stops on the first step failure (fail-fast).
 // Environment configuration is taken from scenario.EnvOpts.
-func RunScenario(t *testing.T, scenario Scenario) {
+// Returns a ScenarioResult with per-step outcomes.
+func RunScenario(t *testing.T, scenario Scenario) *ScenarioResult {
 	t.Helper()
 
+	scenarioStart := time.Now()
 	env := harness.NewTestEnvironment(t, scenario.EnvOpts...)
 
 	ctx := context.Background()
@@ -73,16 +110,49 @@ func RunScenario(t *testing.T, scenario Scenario) {
 		State:   make(map[string]any),
 	}
 
-	for _, step := range scenario.Steps {
+	result := &ScenarioResult{
+		Name: scenario.Name,
+	}
+
+	for i, step := range scenario.Steps {
+		stepStart := time.Now()
+		sr := StepResult{Name: step.Name}
+
+		var skipped bool
 		passed := t.Run(step.Name, func(st *testing.T) {
 			sc.T = st
 			if err := step.Action(sc); err != nil {
 				st.Fatalf("step %q failed: %v", step.Name, err)
 			}
+			skipped = st.Skipped()
 		})
+
+		sr.Duration = time.Since(stepStart)
+		switch {
+		case !passed:
+			sr.Status = StepFailed
+			sr.Error = "step failed (see subtest output)"
+		case skipped:
+			sr.Status = StepSkipped
+		default:
+			sr.Status = StepPassed
+		}
+		result.Steps = append(result.Steps, sr)
+
 		if !passed {
-			t.Fatalf("scenario aborted: step %q failed", step.Name)
-			return
+			// Mark remaining steps as skipped.
+			for _, remaining := range scenario.Steps[i+1:] {
+				result.Steps = append(result.Steps, StepResult{
+					Name:   remaining.Name,
+					Status: StepSkipped,
+				})
+			}
+			result.Duration = time.Since(scenarioStart)
+			t.Errorf("scenario aborted: step %q failed", step.Name)
+			return result
 		}
 	}
+
+	result.Duration = time.Since(scenarioStart)
+	return result
 }
