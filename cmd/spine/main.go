@@ -51,6 +51,7 @@ func main() {
 	root.AddCommand(runCmd())
 	root.AddCommand(taskCmd())
 	root.AddCommand(queryCmd())
+	root.AddCommand(workflowCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -293,5 +294,46 @@ func queryCmd() *cobra.Command {
 	runsCmd.Flags().String("status", "", "Filter by run status")
 
 	cmd.AddCommand(artifactsCmd, graphCmd, historyCmd, runsCmd)
+	return cmd
+}
+
+func workflowCmd() *cobra.Command {
+	repoPath := "."
+	outputFmt := "table"
+
+	cmd := &cobra.Command{
+		Use:   "workflow",
+		Short: "Manage workflow definitions",
+	}
+	cmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "table", "Output format: table or json")
+	cmd.PersistentFlags().StringVar(&repoPath, "repo", ".", "Repository path")
+
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all available workflow definitions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.ListWorkflows(repoPath, cli.OutputFormat(outputFmt))
+		},
+	}
+
+	showCmd := &cobra.Command{
+		Use:   "show [workflow-path]",
+		Short: "Display workflow definition details",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.ShowWorkflow(repoPath, args[0], cli.OutputFormat(outputFmt))
+		},
+	}
+
+	resolveCmd := &cobra.Command{
+		Use:   "resolve [artifact-path]",
+		Short: "Show which workflow would bind to the given artifact",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.ResolveWorkflow(repoPath, args[0], cli.OutputFormat(outputFmt))
+		},
+	}
+
+	cmd.AddCommand(listCmd, showCmd, resolveCmd)
 	return cmd
 }
