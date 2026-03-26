@@ -286,7 +286,7 @@ func (o *Orchestrator) PauseRun(ctx context.Context, runID, reason string) error
 
 	log := observe.Logger(ctx)
 	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-paused", run.TraceID[:12]),
+		EventID:   fmt.Sprintf("evt-%s-paused-%d", run.TraceID[:12], time.Now().UnixMilli()),
 		Type:      domain.EventRunPaused,
 		Timestamp: time.Now(),
 		RunID:     runID,
@@ -319,7 +319,7 @@ func (o *Orchestrator) ResumeRun(ctx context.Context, runID string) error {
 
 	log := observe.Logger(ctx)
 	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-resumed", run.TraceID[:12]),
+		EventID:   fmt.Sprintf("evt-%s-resumed-%d", run.TraceID[:12], time.Now().UnixMilli()),
 		Type:      domain.EventRunResumed,
 		Timestamp: time.Now(),
 		RunID:     runID,

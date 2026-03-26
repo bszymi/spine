@@ -60,6 +60,18 @@ func (o *Orchestrator) RetryStep(ctx context.Context, exec *domain.StepExecution
 			"retry_limit", retryLimit,
 			"classification", classification,
 		)
+
+		// Emit step_failed only for permanent failures (not retried).
+		if err := o.events.Emit(ctx, domain.Event{
+			EventID:   fmt.Sprintf("evt-%s-failed", exec.ExecutionID),
+			Type:      domain.EventStepFailed,
+			Timestamp: time.Now(),
+			RunID:     exec.RunID,
+			TraceID:   run.TraceID,
+		}); err != nil {
+			log.Warn("failed to emit event", "event_type", domain.EventStepFailed, "error", err)
+		}
+
 		return o.FailRun(ctx, exec.RunID,
 			fmt.Sprintf("step %s failed after %d attempt(s): %s",
 				exec.StepID, exec.Attempt, classification))

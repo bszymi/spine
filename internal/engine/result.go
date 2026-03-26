@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
@@ -180,20 +179,6 @@ func (o *Orchestrator) failStepWithClassification(ctx context.Context, exec *dom
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		log.Error("failed to update step execution", "error", err)
 		return
-	}
-
-	// Emit step_failed event.
-	run, runErr := o.store.GetRun(ctx, exec.RunID)
-	if runErr == nil {
-		if err := o.events.Emit(ctx, domain.Event{
-			EventID:   fmt.Sprintf("evt-%s-%s-failed", run.TraceID[:12], exec.StepID),
-			Type:      domain.EventStepFailed,
-			Timestamp: time.Now(),
-			RunID:     exec.RunID,
-			TraceID:   run.TraceID,
-		}); err != nil {
-			log.Warn("failed to emit event", "event_type", domain.EventStepFailed, "error", err)
-		}
 	}
 
 	// Evaluate retry — creates new execution or fails the run.

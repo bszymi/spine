@@ -207,7 +207,7 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 
 		// Emit step_started event.
 		if err := o.events.Emit(ctx, domain.Event{
-			EventID:   fmt.Sprintf("evt-%s-%s-started", run.TraceID[:12], exec.StepID),
+			EventID:   fmt.Sprintf("evt-%s-started", exec.ExecutionID),
 			Type:      domain.EventStepStarted,
 			Timestamp: now,
 			RunID:     exec.RunID,
