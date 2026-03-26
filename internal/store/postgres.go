@@ -102,7 +102,13 @@ func (s *PostgresStore) GetRun(ctx context.Context, runID string) (*domain.Run, 
 }
 
 func (s *PostgresStore) UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE runtime.runs SET status = $1 WHERE run_id = $2`, status, runID)
+	// Set started_at on first activation (pending→active), completed_at on terminal states.
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.runs
+		SET status = $1,
+			started_at = CASE WHEN $1 = 'active' AND started_at IS NULL THEN now() ELSE started_at END,
+			completed_at = CASE WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN now() ELSE completed_at END
+		WHERE run_id = $2`, status, runID)
 	if err != nil {
 		return err
 	}

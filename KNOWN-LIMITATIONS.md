@@ -5,33 +5,28 @@ This document tracks known gaps and deferred functionality.
 ## Remaining Limitations
 
 ### WriteContext / Branch Writes
-- Artifact writes always go to the authoritative branch (main/HEAD)
-- `write_context` field in API requests is accepted but ignored
-- Task-branch scoped writes require Git branch integration not yet wired
+- `write_context` field is now parsed from API requests and attached to context
+- Artifact service `enterBranch()` method uses write context for Git branch operations
+- **Remaining gap:** Automatic write context injection for step execution (actor writes within a run don't automatically get the run branch as write context)
 
 ### Idempotency-Key
 - Header is accepted on write operations
-- No deduplication store — duplicate requests are not detected
-- Idempotency is achieved via Git commit detection (Trace-ID trailer) for artifact operations
+- In-memory queue deduplicates via idempotency key set
+- **Remaining gap:** No persistent deduplication store — duplicate requests survive restarts
 
 ### Queue Consumer Delivery
-- Step assignment messages are published to queue but no consumer delivers them to external actors
-- Human actors: no notification mechanism (email, webhook)
-- AI agents: provider interface defined but no real provider (Anthropic/OpenAI) integrated
-- Mock provider exists for testing
+- Consumer framework exists and delivers to registered ActorProviders
+- Mock provider works for testing
+- **Remaining gap:** No production providers for human (email/webhook) or AI (Anthropic/OpenAI) actors
 
 ### Discussion and Comments
 - Architecture fully designed (discussion-model.md)
 - Zero implementation — planned feature
 - Thread creation, comments, resolution not yet built
 
-### Run StartedAt Persistence
-- `started_at` is set in memory during `StartRun` but not persisted via `UpdateRunStatus`
-- Run duration metrics may show 0 when reading from database after restart
-
 ## Resolved (Previously Listed)
 
-The following limitations from INIT-002 have been resolved:
+The following limitations have been resolved:
 
 | Limitation | Resolution | PR |
 |---|---|---|
@@ -43,6 +38,9 @@ The following limitations from INIT-002 have been resolved:
 | Engine orchestrator not wired | Full production wiring in serve command | #131 |
 | Metrics not exportable | Prometheus /system/metrics endpoint | #125 |
 | No audit logging | Audit entries for acceptance, rejection, convergence | #125 |
+| Run StartedAt not persisted | UpdateRunStatus now sets started_at on activation | This PR |
+| WriteContext ignored in API | Handlers parse write_context and attach to context | This PR |
+| Divergence permissions missing | Added to operationRoles map | This PR |
 
 ## Test Coverage
 

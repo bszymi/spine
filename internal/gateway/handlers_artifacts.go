@@ -10,12 +10,14 @@ import (
 )
 
 type artifactCreateRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path         string `json:"path"`
+	Content      string `json:"content"`
+	WriteContext string `json:"write_context,omitempty"`
 }
 
 type artifactUpdateRequest struct {
-	Content string `json:"content"`
+	Content      string `json:"content"`
+	WriteContext string `json:"write_context,omitempty"`
 }
 
 func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +40,11 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a, err := s.artifacts.Create(r.Context(), req.Path, req.Content)
+	ctx := r.Context()
+	if req.WriteContext != "" {
+		ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: req.WriteContext})
+	}
+	a, err := s.artifacts.Create(ctx, req.Path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -145,7 +151,11 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 
-	a, err := s.artifacts.Update(r.Context(), path, req.Content)
+	ctx := r.Context()
+	if req.WriteContext != "" {
+		ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: req.WriteContext})
+	}
+	a, err := s.artifacts.Update(ctx, path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
