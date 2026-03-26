@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: CLI Query Subcommands
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-010-developer-experience/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
