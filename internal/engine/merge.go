@@ -115,6 +115,9 @@ func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run) 
 	}
 
 	log.Info("run completed after merge", "run_id", run.RunID)
+	if run.StartedAt != nil {
+		observe.GlobalMetrics.RunDuration.ObserveDuration(time.Since(*run.StartedAt))
+	}
 
 	// Clean up the branch.
 	_ = o.CleanupRunBranch(ctx, run.RunID)

@@ -15,8 +15,11 @@ import (
 // The acceptance and rationale are written into the YAML front matter
 // and committed to Git as a governed outcome.
 func (s *Service) AcceptTask(ctx context.Context, path, rationale string) (*domain.Artifact, error) {
-	observe.AuditLog(ctx, "task_accepted", "path", path, "rationale", rationale)
-	return s.setAcceptance(ctx, path, domain.AcceptanceApproved, rationale)
+	art, err := s.setAcceptance(ctx, path, domain.AcceptanceApproved, rationale)
+	if err == nil {
+		observe.AuditLog(ctx, "task_accepted", "path", path, "rationale", rationale)
+	}
+	return art, err
 }
 
 // RejectTask records a rejection outcome on a task artifact.
@@ -28,7 +31,6 @@ func (s *Service) RejectTask(ctx context.Context, path string, acceptance domain
 			fmt.Sprintf("invalid rejection type: %s", acceptance))
 	}
 
-	observe.AuditLog(ctx, "task_rejected", "path", path, "acceptance", string(acceptance), "rationale", rationale)
 	art, err := s.setAcceptance(ctx, path, acceptance, rationale)
 	if err != nil {
 		return nil, err
@@ -42,6 +44,7 @@ func (s *Service) RejectTask(ctx context.Context, path string, acceptance domain
 		}
 	}
 
+	observe.AuditLog(ctx, "task_rejected", "path", path, "acceptance", string(acceptance), "rationale", rationale)
 	return art, nil
 }
 
