@@ -26,6 +26,7 @@ type discussionStore struct {
 	projections map[string]*store.ArtifactProjection
 	runs        map[string]*domain.Run
 	executions  map[string]*domain.StepExecution
+	divergences map[string]*domain.DivergenceContext
 }
 
 func newDiscussionStore() *discussionStore {
@@ -37,6 +38,7 @@ func newDiscussionStore() *discussionStore {
 		projections: make(map[string]*store.ArtifactProjection),
 		runs:        make(map[string]*domain.Run),
 		executions:  make(map[string]*domain.StepExecution),
+		divergences: make(map[string]*domain.DivergenceContext),
 	}
 }
 
@@ -92,6 +94,14 @@ func (d *discussionStore) GetStepExecution(_ context.Context, execID string) (*d
 		return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
 	}
 	return e, nil
+}
+
+func (d *discussionStore) GetDivergenceContext(_ context.Context, divID string) (*domain.DivergenceContext, error) {
+	dc, ok := d.divergences[divID]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "divergence context not found")
+	}
+	return dc, nil
 }
 
 func (d *discussionStore) CreateThread(_ context.Context, thread *domain.DiscussionThread) error {
@@ -257,6 +267,81 @@ func TestDiscussionCreateAnchorNotFound(t *testing.T) {
 	}
 }
 
+func TestDiscussionCreateRunAnchor(t *testing.T) {
+	ts, ds, token, _ := setupDiscussionServer(t)
+
+	ds.runs["run-001"] = &domain.Run{RunID: "run-001", Status: domain.RunStatusActive}
+
+	body := `{"anchor_type":"run","anchor_id":"run-001","title":"Run discussion"}`
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions", token, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestDiscussionCreateRunAnchorNotFound(t *testing.T) {
+	ts, _, token, _ := setupDiscussionServer(t)
+
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions", token, `{"anchor_type":"run","anchor_id":"nonexistent"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestDiscussionCreateStepExecutionAnchor(t *testing.T) {
+	ts, ds, token, _ := setupDiscussionServer(t)
+
+	ds.executions["exec-001"] = &domain.StepExecution{ExecutionID: "exec-001", RunID: "run-001", StepID: "step1", Status: domain.StepStatusInProgress}
+
+	body := `{"anchor_type":"step_execution","anchor_id":"exec-001"}`
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions", token, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestDiscussionCreateStepExecutionNotFound(t *testing.T) {
+	ts, _, token, _ := setupDiscussionServer(t)
+
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions", token, `{"anchor_type":"step_execution","anchor_id":"nonexistent"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestDiscussionCreateDivergenceAnchor(t *testing.T) {
+	ts, ds, token, _ := setupDiscussionServer(t)
+
+	ds.divergences["div-001"] = &domain.DivergenceContext{DivergenceID: "div-001", RunID: "run-001", Status: domain.DivergenceStatusActive}
+
+	body := `{"anchor_type":"divergence_context","anchor_id":"div-001"}`
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions", token, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+}
+
+func TestDiscussionCreateDivergenceNotFound(t *testing.T) {
+	ts, _, token, _ := setupDiscussionServer(t)
+
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions", token, `{"anchor_type":"divergence_context","anchor_id":"nonexistent"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
 func TestDiscussionList(t *testing.T) {
 	ts, ds, token, _ := setupDiscussionServer(t)
 
@@ -278,6 +363,34 @@ func TestDiscussionList(t *testing.T) {
 	items := result["items"].([]any)
 	if len(items) != 1 {
 		t.Errorf("expected 1 thread, got %d", len(items))
+	}
+}
+
+func TestDiscussionListStatusFilter(t *testing.T) {
+	ts, ds, token, _ := setupDiscussionServer(t)
+
+	ds.threads["t1"] = &domain.DiscussionThread{
+		ThreadID: "t1", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusOpen, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+	ds.threads["t2"] = &domain.DiscussionThread{
+		ThreadID: "t2", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusResolved, CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+
+	// Filter by status=open
+	resp := doRequest(t, "GET", ts.URL+"/api/v1/discussions?anchor_type=artifact&anchor_id=tasks/TASK-001.md&status=open", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	items := result["items"].([]any)
+	if len(items) != 1 {
+		t.Errorf("expected 1 open thread, got %d", len(items))
 	}
 }
 
@@ -378,6 +491,24 @@ func TestDiscussionCommentWithParent(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result["parent_comment_id"] != "c1" {
 		t.Errorf("expected parent_comment_id c1, got %v", result["parent_comment_id"])
+	}
+}
+
+func TestDiscussionCommentOnResolvedThread(t *testing.T) {
+	ts, ds, token, _ := setupDiscussionServer(t)
+
+	resolved := time.Now().UTC()
+	ds.threads["t1"] = &domain.DiscussionThread{
+		ThreadID: "t1", AnchorType: domain.AnchorTypeArtifact, AnchorID: "tasks/TASK-001.md",
+		Status: domain.ThreadStatusResolved, ResolvedAt: &resolved,
+		CreatedBy: "contributor-1", CreatedAt: time.Now().UTC(),
+	}
+
+	resp := doRequest(t, "POST", ts.URL+"/api/v1/discussions/t1/comments", token, `{"content":"test"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Errorf("expected 412, got %d", resp.StatusCode)
 	}
 }
 

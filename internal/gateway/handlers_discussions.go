@@ -106,7 +106,11 @@ func (s *Server) handleDiscussionCreate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	traceID := observe.TraceID(r.Context())
-	threadID := fmt.Sprintf("thread-%s", traceID[:8])
+	threadID, err := generateID("thread")
+	if err != nil {
+		WriteError(w, domain.NewError(domain.ErrInternal, "failed to generate thread ID"))
+		return
+	}
 
 	thread := &domain.DiscussionThread{
 		ThreadID:   threadID,
@@ -156,6 +160,17 @@ func (s *Server) handleDiscussionList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional status filter
+	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {
+		filtered := threads[:0]
+		for i := range threads {
+			if string(threads[i].Status) == statusFilter {
+				filtered = append(filtered, threads[i])
+			}
+		}
+		threads = filtered
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]any{"items": threads})
 }
 
@@ -200,9 +215,14 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 
 	threadID := chi.URLParam(r, "thread_id")
 
-	// Verify thread exists
-	if _, err := s.store.GetThread(r.Context(), threadID); err != nil {
+	// Verify thread exists and is open
+	thread, err := s.store.GetThread(r.Context(), threadID)
+	if err != nil {
 		WriteError(w, err)
+		return
+	}
+	if thread.Status != domain.ThreadStatusOpen {
+		WriteError(w, domain.NewError(domain.ErrPrecondition, fmt.Sprintf("thread is %s, must be open to comment", thread.Status)))
 		return
 	}
 
@@ -224,8 +244,11 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 		authorType = string(actor.Type)
 	}
 
-	traceID := observe.TraceID(r.Context())
-	commentID := fmt.Sprintf("comment-%s", traceID[:8])
+	commentID, err := generateID("comment")
+	if err != nil {
+		WriteError(w, domain.NewError(domain.ErrInternal, "failed to generate comment ID"))
+		return
+	}
 
 	comment := &domain.Comment{
 		CommentID:       commentID,
@@ -279,7 +302,11 @@ func (s *Server) handleDiscussionResolve(w http.ResponseWriter, r *http.Request)
 	thread.ResolvedAt = &now
 	thread.ResolutionType = domain.ResolutionType(req.ResolutionType)
 	if len(req.ResolutionRefs) > 0 {
-		refs, _ := json.Marshal(req.ResolutionRefs)
+		refs, err := json.Marshal(req.ResolutionRefs)
+		if err != nil {
+			WriteError(w, domain.NewError(domain.ErrInvalidParams, "invalid resolution_refs"))
+			return
+		}
 		thread.ResolutionRefs = refs
 	}
 
@@ -330,6 +357,14 @@ func (s *Server) handleDiscussionReopen(w http.ResponseWriter, r *http.Request) 
 
 // ── Helpers ──
 
+func generateID(prefix string) (string, error) {
+	id, err := observe.GenerateTraceID()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-%s", prefix, id[:8]), nil
+}
+
 func isValidAnchorType(t domain.AnchorType) bool {
 	for _, valid := range domain.ValidAnchorTypes() {
 		if t == valid {
@@ -340,23 +375,16 @@ func isValidAnchorType(t domain.AnchorType) bool {
 }
 
 func (s *Server) validateAnchorExists(ctx context.Context, anchorType domain.AnchorType, anchorID string) error {
+	var err error
 	switch anchorType {
 	case domain.AnchorTypeArtifact:
-		if _, err := s.store.GetArtifactProjection(ctx, anchorID); err != nil {
-			return domain.NewError(domain.ErrNotFound, fmt.Sprintf("artifact %s not found", anchorID))
-		}
+		_, err = s.store.GetArtifactProjection(ctx, anchorID)
 	case domain.AnchorTypeRun:
-		if _, err := s.store.GetRun(ctx, anchorID); err != nil {
-			return domain.NewError(domain.ErrNotFound, fmt.Sprintf("run %s not found", anchorID))
-		}
+		_, err = s.store.GetRun(ctx, anchorID)
 	case domain.AnchorTypeStepExecution:
-		if _, err := s.store.GetStepExecution(ctx, anchorID); err != nil {
-			return domain.NewError(domain.ErrNotFound, fmt.Sprintf("step execution %s not found", anchorID))
-		}
+		_, err = s.store.GetStepExecution(ctx, anchorID)
 	case domain.AnchorTypeDivergenceContext:
-		if _, err := s.store.GetDivergenceContext(ctx, anchorID); err != nil {
-			return domain.NewError(domain.ErrNotFound, fmt.Sprintf("divergence context %s not found", anchorID))
-		}
+		_, err = s.store.GetDivergenceContext(ctx, anchorID)
 	}
-	return nil
+	return err
 }
