@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Execution Metrics and Tracing
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-009-event-observability/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
