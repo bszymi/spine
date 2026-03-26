@@ -54,6 +54,14 @@ func (s *Server) routes() http.Handler {
 			// Tasks — wildcard routing for slash-containing paths
 			r.HandleFunc("/tasks/*", s.handleTaskWildcard)
 
+			// Discussions
+			r.Post("/discussions", s.handleDiscussionCreate)
+			r.Get("/discussions", s.handleDiscussionList)
+			r.Get("/discussions/{thread_id}", s.handleDiscussionGet)
+			r.Post("/discussions/{thread_id}/comments", s.handleDiscussionComment)
+			r.Post("/discussions/{thread_id}/resolve", s.handleDiscussionResolve)
+			r.Post("/discussions/{thread_id}/reopen", s.handleDiscussionReopen)
+
 			// Query
 			r.Get("/query/artifacts", s.handleQueryArtifacts)
 			r.Get("/query/graph", s.handleQueryGraph)
