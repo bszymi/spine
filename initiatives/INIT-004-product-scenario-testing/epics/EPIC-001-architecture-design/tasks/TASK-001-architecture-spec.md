@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Scenario Testing Architecture Spec"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-004-product-scenario-testing/epics/EPIC-001-architecture-design/epic.md
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
