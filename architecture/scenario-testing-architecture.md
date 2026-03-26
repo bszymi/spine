@@ -39,7 +39,7 @@ The scenario testing system consists of four layers:
 └─────────────────────────────────────────────────────┘
 ```
 
-Each layer has a single responsibility and communicates only with adjacent layers. Scenario suites use the engine, the engine uses assertions, and assertions use the harness.
+Each layer has a single responsibility. Scenario suites compose the engine, assertion framework, and test context. Lower layers must not depend on higher layers.
 
 ---
 
@@ -117,9 +117,9 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB) *TestRuntime
 
 The runtime is constructed from the same packages used in production, ensuring test fidelity. Optional components (divergence, convergence) can be enabled per scenario.
 
-#### 3.2.4 API Client
+#### 3.2.4 Optional Gateway Test Server
 
-For scenarios that need to validate the HTTP layer, an optional test server can be started:
+For scenarios that need to validate the HTTP gateway layer, an optional test server can be started:
 
 ```go
 type TestServer struct {
@@ -151,6 +151,8 @@ All setup uses `t.Cleanup()` for automatic teardown. No manual cleanup is requir
 Each scenario creates its own Git repository. Database isolation is achieved through scenario-scoped ID prefixes — each scenario generates a unique prefix (e.g., `scn-{random}`) used for all entity IDs, ensuring no cross-scenario data collision. Cleanup runs at the end of each scenario using the prefix to delete only that scenario's data.
 
 This enables `t.Parallel()` on all scenarios without interference. Table-wide `DELETE` (as used in current integration tests) is not suitable for parallel scenarios — prefix-scoped cleanup is required instead.
+
+Scenario-scoped isolation requires that all persisted runtime and projection records are directly or indirectly attributable to a scenario-owned root identifier. Tables that cannot be partitioned this way must not be used in parallel scenarios.
 
 ---
 
@@ -197,6 +199,8 @@ func (sc *ScenarioContext) Get(key string) any
 func (sc *ScenarioContext) Set(key string, value any)
 func (sc *ScenarioContext) MustGet(key string) any  // fails test if missing
 ```
+
+Note: The `State` map is intentionally flexible for v0.1. Common keys should be standardized via helper functions or constants as the library evolves. Heavily reused scenarios may transition to typed fixtures for stronger guarantees.
 
 ### 4.4 Execution Model
 
@@ -417,10 +421,13 @@ internal/
 ### 7.1 Dependency Direction
 
 ```
-scenarios/ ──→ engine/ ──→ assert/ ──→ harness/
+scenarios/ ──→ engine/
+scenarios/ ──→ assert/
+engine/ ──→ harness/
+assert/ ──→ harness/
 ```
 
-No reverse dependencies. Each layer imports only from layers below it. The harness has no Spine-specific assertions — it only provides environment setup.
+No reverse dependencies. Lower layers must not depend on higher layers. The harness has no Spine-specific assertions — it only provides environment setup.
 
 ---
 
@@ -454,7 +461,7 @@ A Gherkin layer is an extension point for future iterations if non-developer sce
 
 ### 8.4 Shared Database Instance
 
-A single PostgreSQL instance is shared across parallel test runs. Data isolation is achieved through cleanup, not per-test databases. This balances speed (no per-test DB creation) with isolation (cleanup between scenarios).
+A single PostgreSQL instance is shared across parallel test runs. Data isolation is achieved through scenario-scoped identifiers (e.g., `scn-{id}` prefixes) and scoped cleanup that removes only data belonging to a given scenario. Table-wide cleanup is not permitted in parallel execution. This balances speed (no per-test DB creation) with safe isolation.
 
 ---
 
