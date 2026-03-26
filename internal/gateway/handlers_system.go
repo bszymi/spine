@@ -79,6 +79,12 @@ func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, state)
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(observe.ExportPrometheus()))
+}
+
 func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "system.validate") {
 		return

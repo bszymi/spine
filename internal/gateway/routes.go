@@ -19,6 +19,7 @@ func (s *Server) routes() http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		// Unauthenticated
 		r.Get("/system/health", s.handleHealth)
+		r.Get("/system/metrics", s.handleMetrics)
 
 		// Authenticated routes
 		r.Group(func(r chi.Router) {

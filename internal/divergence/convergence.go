@@ -155,6 +155,14 @@ func (s *Service) EvaluateConvergence(ctx context.Context, input ConvergenceInpu
 		"strategy", input.Strategy,
 		"completed_branches", len(completedBranches),
 	)
+
+	observe.AuditLog(ctx, "convergence_evaluated",
+		"divergence_id", input.DivergenceID,
+		"strategy", string(input.Strategy),
+		"selected_branch", output.Result.SelectedBranch,
+		"selected_branches_count", len(output.Result.SelectedBranches),
+	)
+
 	return output, nil
 }
 

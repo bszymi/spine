@@ -186,6 +186,9 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 			log.Warn("failed to emit event", "event_type", domain.EventRunCompleted, "error", err)
 		}
 		log.Info("run completed", "run_id", runID)
+		if run.StartedAt != nil {
+			observe.GlobalMetrics.RunDuration.ObserveDuration(time.Since(*run.StartedAt))
+		}
 		// Clean up the run branch after successful completion.
 		_ = o.CleanupRunBranch(ctx, runID)
 	} else {
