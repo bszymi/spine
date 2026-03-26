@@ -66,7 +66,7 @@ func runStatusCmd() *cobra.Command {
 
 func runInspectCmd() *cobra.Command {
 	outputFmt := "table"
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "inspect <run_id>",
 		Short: "Detailed view of run state, step history, errors, and timeline",
 		Args:  cobra.ExactArgs(1),
@@ -75,6 +75,8 @@ func runInspectCmd() *cobra.Command {
 			return cli.InspectRun(cmd.Context(), c, args[0], cli.OutputFormat(outputFmt))
 		},
 	}
+	cmd.Flags().StringVarP(&outputFmt, "output", "o", "table", "Output format: table or json")
+	return cmd
 }
 
 func runCancelCmd() *cobra.Command {

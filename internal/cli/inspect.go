@@ -73,6 +73,10 @@ func InspectRun(ctx context.Context, client *Client, runID string, format Output
 
 // ValidateArtifact runs cross-artifact validation from the CLI.
 func ValidateArtifact(ctx context.Context, client *Client, artifactPath string, format OutputFormat) error {
+	// Strip leading slash for canonical paths.
+	if artifactPath != "" && artifactPath[0] == '/' {
+		artifactPath = artifactPath[1:]
+	}
 	data, err := client.Post(ctx, "/api/v1/artifacts/"+artifactPath+"/validate", nil)
 	if err != nil {
 		return fmt.Errorf("validate artifact: %w", err)
