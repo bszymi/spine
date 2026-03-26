@@ -24,9 +24,9 @@ func (c *Counter) Value() int64 {
 	return c.value.Load()
 }
 
-// Metrics holds all Spine runtime metrics counters.
-// These are in-process only (not exported to external systems in v0.x).
+// Metrics holds all Spine runtime metrics.
 type Metrics struct {
+	// Counters
 	RunsStarted        Counter
 	RunsCompleted      Counter
 	RunsFailed         Counter
@@ -43,7 +43,18 @@ type Metrics struct {
 	TimeoutsDetected   Counter
 	OrphansDetected    Counter
 	RecoveriesExecuted Counter
+
+	// Gauges
+	ActiveRuns  Gauge
+	ActiveSteps Gauge
+
+	// Histograms (duration tracking)
+	RunDuration  *Histogram
+	StepDuration *Histogram
 }
 
 // GlobalMetrics is the singleton metrics instance.
-var GlobalMetrics = &Metrics{}
+var GlobalMetrics = &Metrics{
+	RunDuration:  NewHistogram(1, 5, 10, 30, 60, 300, 600, 1800, 3600),
+	StepDuration: NewHistogram(0.1, 0.5, 1, 5, 10, 30, 60, 300, 600),
+}

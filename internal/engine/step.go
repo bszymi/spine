@@ -247,6 +247,11 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		log.Warn("failed to emit event", "event_type", domain.EventStepCompleted, "error", err)
 	}
 
+	// Record step duration metric.
+	if exec.StartedAt != nil {
+		observe.GlobalMetrics.StepDuration.ObserveDuration(time.Since(*exec.StartedAt))
+	}
+
 	// Check if this step triggers divergence.
 	if stepDef.Diverge != "" && o.divergence != nil {
 		return o.startDivergence(ctx, run, wfDef, stepDef, exec)
