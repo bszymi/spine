@@ -56,6 +56,7 @@ func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 		"projection.artifact_links",
 		"projection.artifacts",
 		"projection.workflows",
+		"projection.sync_state",
 	}
 	for _, table := range tables {
 		if _, err := s.pool.Exec(ctx, "DELETE FROM "+table); err != nil {
