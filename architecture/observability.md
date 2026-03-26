@@ -322,3 +322,97 @@ Areas expected to require refinement:
 - SLO definitions and error budget tracking
 
 Changes that alter the audit trail guarantees or traceability model should be captured as ADRs.
+
+---
+
+## Appendix: Implementation Reference
+
+### A.1 Prometheus Metrics
+
+Available at `GET /api/v1/system/metrics` (unauthenticated).
+
+**Counters:**
+
+| Metric | Description |
+|--------|-------------|
+| `spine_runs_started_total` | Total workflow runs started |
+| `spine_runs_completed_total` | Total runs completed successfully |
+| `spine_runs_failed_total` | Total runs that failed |
+| `spine_steps_completed_total` | Total step executions completed |
+| `spine_steps_failed_total` | Total step executions failed |
+| `spine_steps_retried_total` | Total step retry attempts |
+| `spine_artifacts_created_total` | Total artifacts created |
+| `spine_artifacts_updated_total` | Total artifact updates |
+| `spine_git_commits_total` | Total Git commits |
+| `spine_git_commit_retries_total` | Total Git commit retry attempts |
+| `spine_events_emitted_total` | Total events emitted |
+| `spine_projection_syncs_total` | Total projection sync cycles |
+| `spine_scheduler_scans_total` | Total scheduler scan cycles |
+| `spine_timeouts_detected_total` | Total step/run timeouts detected |
+| `spine_orphans_detected_total` | Total orphaned runs detected |
+| `spine_recoveries_executed_total` | Total crash recoveries executed |
+
+**Gauges:**
+
+| Metric | Description |
+|--------|-------------|
+| `spine_active_runs` | Currently active runs |
+| `spine_active_steps` | Currently active step executions |
+
+**Histograms:**
+
+| Metric | Buckets (seconds) | Description |
+|--------|-------------------|-------------|
+| `spine_run_duration_seconds` | 1, 5, 10, 30, 60, 300, 600, 1800, 3600 | Run wall-clock duration |
+| `spine_step_duration_seconds` | 0.1, 0.5, 1, 5, 10, 30, 60, 300, 600 | Step execution duration |
+
+### A.2 Audit Log Entries
+
+Governance-significant operations produce structured audit log entries via `observe.AuditLog()`.
+
+| Operation | Fields | Emitted By |
+|-----------|--------|------------|
+| `task_accepted` | path, rationale | artifact/acceptance.go |
+| `task_rejected` | path, acceptance, rationale | artifact/acceptance.go |
+| `convergence_evaluated` | divergence_id, strategy, selected_branch, selected_branches_count | divergence/convergence.go |
+
+### A.3 Trace Context Propagation
+
+Trace IDs propagate through the execution loop via context values:
+
+| Key | Set By | Used By |
+|-----|--------|---------|
+| `trace_id` | Gateway middleware, StartRun | All engine methods, event emission, Git trailers |
+| `run_id` | StartRun, recovery | Step execution, event emission |
+| `step_id` | ActivateStep | Actor assignment, result ingestion |
+| `actor_id` | Assignment delivery | Result processing |
+| `component` | Service entry points | Log enrichment |
+
+### A.4 Permission Matrix
+
+| Permission | Required Role | Operation |
+|-----------|---------------|-----------|
+| `artifact.create` | contributor | Create artifact |
+| `artifact.read` | reader | Read artifact |
+| `artifact.update` | contributor | Update artifact |
+| `artifact.validate` | reader | Validate artifact |
+| `artifact.list` | reader | List artifacts |
+| `artifact.links` | reader | View artifact links |
+| `run.start` | contributor | Start workflow run |
+| `run.status` | reader | View run status |
+| `run.cancel` | operator | Cancel a run |
+| `step.assign` | operator | Assign step to actor |
+| `step.submit` | contributor | Submit step result |
+| `task.accept` | reviewer | Accept a task |
+| `task.reject` | reviewer | Reject a task |
+| `task.cancel` | operator | Cancel a task |
+| `task.abandon` | operator | Abandon a task |
+| `task.supersede` | operator | Supersede a task |
+| `system.rebuild` | operator | Rebuild projections |
+| `system.validate` | operator | Validate all artifacts |
+| `divergence.create_branch` | contributor | Create exploratory branch |
+| `divergence.close_window` | operator | Close divergence window |
+| `token.create` | admin | Create API token |
+| `token.revoke` | admin | Revoke API token |
+| `token.list` | admin | List API tokens |
+
