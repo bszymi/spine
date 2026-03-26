@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Test Strategy Document"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-004-product-scenario-testing/epics/EPIC-001-architecture-design/epic.md
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
