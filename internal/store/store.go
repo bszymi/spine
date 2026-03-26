@@ -87,6 +87,14 @@ type Store interface {
 	GetSyncState(ctx context.Context) (*SyncState, error)
 	UpdateSyncState(ctx context.Context, state *SyncState) error
 
+	// Discussions
+	CreateThread(ctx context.Context, thread *domain.DiscussionThread) error
+	GetThread(ctx context.Context, threadID string) (*domain.DiscussionThread, error)
+	ListThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) ([]domain.DiscussionThread, error)
+	UpdateThread(ctx context.Context, thread *domain.DiscussionThread) error
+	CreateComment(ctx context.Context, comment *domain.Comment) error
+	ListComments(ctx context.Context, threadID string) ([]domain.Comment, error)
+
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error
 	IsMigrationApplied(ctx context.Context, version string) (bool, error)

@@ -243,6 +243,236 @@ func TestWithTx(t *testing.T) {
 	s.CleanupTestData(ctx, t)
 }
 
+func TestDiscussionThreadCRUD(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	thread := &domain.DiscussionThread{
+		ThreadID:   "thread-test-001",
+		AnchorType: domain.AnchorTypeArtifact,
+		AnchorID:   "initiatives/INIT-001/tasks/TASK-001.md",
+		TopicKey:   "acceptance-criteria",
+		Title:      "Clarify acceptance criteria",
+		Status:     domain.ThreadStatusOpen,
+		CreatedBy:  "actor-001",
+		CreatedAt:  now,
+	}
+
+	// Create
+	if err := s.CreateThread(ctx, thread); err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	// Read
+	got, err := s.GetThread(ctx, "thread-test-001")
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if got.ThreadID != thread.ThreadID {
+		t.Errorf("expected thread_id %s, got %s", thread.ThreadID, got.ThreadID)
+	}
+	if got.AnchorType != domain.AnchorTypeArtifact {
+		t.Errorf("expected anchor_type artifact, got %s", got.AnchorType)
+	}
+	if got.TopicKey != "acceptance-criteria" {
+		t.Errorf("expected topic_key acceptance-criteria, got %s", got.TopicKey)
+	}
+	if got.Status != domain.ThreadStatusOpen {
+		t.Errorf("expected status open, got %s", got.Status)
+	}
+
+	// Update — resolve thread
+	resolved := time.Now().UTC().Truncate(time.Microsecond)
+	got.Status = domain.ThreadStatusResolved
+	got.ResolvedAt = &resolved
+	got.ResolutionType = domain.ResolutionArtifactUpdated
+	got.ResolutionRefs = []byte(`["commit-abc123"]`)
+	if err := s.UpdateThread(ctx, got); err != nil {
+		t.Fatalf("UpdateThread: %v", err)
+	}
+
+	got2, _ := s.GetThread(ctx, "thread-test-001")
+	if got2.Status != domain.ThreadStatusResolved {
+		t.Errorf("expected status resolved, got %s", got2.Status)
+	}
+	if got2.ResolutionType != domain.ResolutionArtifactUpdated {
+		t.Errorf("expected resolution_type artifact_updated, got %s", got2.ResolutionType)
+	}
+	if got2.ResolvedAt == nil {
+		t.Error("expected resolved_at to be set")
+	}
+
+	// Update — reopen thread
+	got2.Status = domain.ThreadStatusOpen
+	got2.ResolvedAt = nil
+	got2.ResolutionType = ""
+	got2.ResolutionRefs = nil
+	if err := s.UpdateThread(ctx, got2); err != nil {
+		t.Fatalf("UpdateThread (reopen): %v", err)
+	}
+
+	got3, _ := s.GetThread(ctx, "thread-test-001")
+	if got3.Status != domain.ThreadStatusOpen {
+		t.Errorf("expected status open after reopen, got %s", got3.Status)
+	}
+
+	// List by anchor
+	threads, err := s.ListThreads(ctx, domain.AnchorTypeArtifact, "initiatives/INIT-001/tasks/TASK-001.md")
+	if err != nil {
+		t.Fatalf("ListThreads: %v", err)
+	}
+	if len(threads) != 1 {
+		t.Errorf("expected 1 thread, got %d", len(threads))
+	}
+
+	// Not found
+	_, err = s.GetThread(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent thread")
+	}
+
+	// Update not found
+	err = s.UpdateThread(ctx, &domain.DiscussionThread{ThreadID: "nonexistent", Status: domain.ThreadStatusArchived})
+	if err == nil {
+		t.Fatal("expected error for updating nonexistent thread")
+	}
+
+	// Cleanup
+	s.CleanupTestData(ctx, t)
+}
+
+func TestCommentCRUD(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// Create parent thread
+	thread := &domain.DiscussionThread{
+		ThreadID:   "thread-comment-test",
+		AnchorType: domain.AnchorTypeStepExecution,
+		AnchorID:   "exec-001",
+		Status:     domain.ThreadStatusOpen,
+		CreatedBy:  "actor-001",
+		CreatedAt:  now,
+	}
+	if err := s.CreateThread(ctx, thread); err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	// Create root comment
+	comment1 := &domain.Comment{
+		CommentID:  "comment-001",
+		ThreadID:   "thread-comment-test",
+		AuthorID:   "actor-001",
+		AuthorType: "human",
+		Content:    "First comment",
+		Metadata:   []byte(`{"source":"cli"}`),
+		CreatedAt:  now,
+	}
+	if err := s.CreateComment(ctx, comment1); err != nil {
+		t.Fatalf("CreateComment: %v", err)
+	}
+
+	// Create reply comment (nested)
+	comment2 := &domain.Comment{
+		CommentID:       "comment-002",
+		ThreadID:        "thread-comment-test",
+		ParentCommentID: "comment-001",
+		AuthorID:        "actor-002",
+		AuthorType:      "ai_agent",
+		Content:         "Reply to first comment",
+		CreatedAt:       now.Add(time.Second),
+	}
+	if err := s.CreateComment(ctx, comment2); err != nil {
+		t.Fatalf("CreateComment (reply): %v", err)
+	}
+
+	// List comments
+	comments, err := s.ListComments(ctx, "thread-comment-test")
+	if err != nil {
+		t.Fatalf("ListComments: %v", err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(comments))
+	}
+
+	// Verify ordering (ASC by created_at)
+	if comments[0].CommentID != "comment-001" {
+		t.Errorf("expected first comment comment-001, got %s", comments[0].CommentID)
+	}
+	if comments[1].CommentID != "comment-002" {
+		t.Errorf("expected second comment comment-002, got %s", comments[1].CommentID)
+	}
+
+	// Verify nested reply
+	if comments[1].ParentCommentID != "comment-001" {
+		t.Errorf("expected parent_comment_id comment-001, got %s", comments[1].ParentCommentID)
+	}
+
+	// Verify author types
+	if comments[0].AuthorType != "human" {
+		t.Errorf("expected author_type human, got %s", comments[0].AuthorType)
+	}
+	if comments[1].AuthorType != "ai_agent" {
+		t.Errorf("expected author_type ai_agent, got %s", comments[1].AuthorType)
+	}
+
+	// Empty thread returns no comments
+	emptyComments, err := s.ListComments(ctx, "nonexistent-thread")
+	if err != nil {
+		t.Fatalf("ListComments (empty): %v", err)
+	}
+	if len(emptyComments) != 0 {
+		t.Errorf("expected 0 comments for nonexistent thread, got %d", len(emptyComments))
+	}
+
+	// Cleanup
+	s.CleanupTestData(ctx, t)
+}
+
+func TestThreadWithoutOptionalFields(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// Create thread with no optional fields
+	thread := &domain.DiscussionThread{
+		ThreadID:   "thread-minimal",
+		AnchorType: domain.AnchorTypeRun,
+		AnchorID:   "run-001",
+		Status:     domain.ThreadStatusOpen,
+		CreatedBy:  "actor-001",
+		CreatedAt:  now,
+	}
+	if err := s.CreateThread(ctx, thread); err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	got, err := s.GetThread(ctx, "thread-minimal")
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if got.TopicKey != "" {
+		t.Errorf("expected empty topic_key, got %s", got.TopicKey)
+	}
+	if got.Title != "" {
+		t.Errorf("expected empty title, got %s", got.Title)
+	}
+	if got.ResolvedAt != nil {
+		t.Error("expected nil resolved_at")
+	}
+	if got.ResolutionType != "" {
+		t.Errorf("expected empty resolution_type, got %s", got.ResolutionType)
+	}
+
+	// Cleanup
+	s.CleanupTestData(ctx, t)
+}
+
 func TestMigrationApplied(t *testing.T) {
 	s := store.NewTestStore(t)
 	ctx := context.Background()

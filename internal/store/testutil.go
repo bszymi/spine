@@ -44,6 +44,8 @@ func NewTestStore(t *testing.T) *PostgresStore {
 func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 	t.Helper()
 	tables := []string{
+		"runtime.comments",
+		"runtime.discussion_threads",
 		"runtime.actor_assignments",
 		"runtime.convergence_results",
 		"runtime.branches",
