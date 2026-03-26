@@ -1,7 +1,10 @@
 package gateway
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
@@ -117,6 +120,28 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 							"result": schemaResult,
 						})
 					}
+				}
+			}
+		}
+
+		// Emit validation event.
+		if s.store != nil {
+			evtType := domain.EventValidationPassed
+			if len(issues) > 0 {
+				evtType = domain.EventValidationFailed
+			}
+			payload, _ := json.Marshal(map[string]any{
+				"total_artifacts": len(results),
+				"issues_count":    len(issues),
+			})
+			if s.events != nil {
+				if err := s.events.Emit(r.Context(), domain.Event{
+					EventID:   fmt.Sprintf("validate-%s", observe.TraceID(r.Context())[:12]),
+					Type:      evtType,
+					Timestamp: time.Now(),
+					Payload:   payload,
+				}); err != nil {
+					observe.Logger(r.Context()).Warn("failed to emit validation event", "error", err)
 				}
 			}
 		}

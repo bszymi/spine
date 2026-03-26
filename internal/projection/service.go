@@ -263,6 +263,25 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	)
 
 	observe.GlobalMetrics.ProjectionSyncs.Inc()
+
+	// Emit projection_synced event.
+	payload, _ := json.Marshal(map[string]any{
+		"from_commit": state.LastSyncedCommit[:8],
+		"to_commit":   head[:8],
+		"created":     len(changeset.Created),
+		"modified":    len(changeset.Modified),
+		"deleted":     len(changeset.Deleted),
+		"errors":      syncErrors,
+	})
+	if err := s.events.Emit(ctx, domain.Event{
+		EventID:   fmt.Sprintf("sync-%s", head[:12]),
+		Type:      domain.EventProjectionSynced,
+		Timestamp: time.Now(),
+		Payload:   payload,
+	}); err != nil {
+		log.Warn("failed to emit projection_synced event", "error", err)
+	}
+
 	return nil
 }
 
