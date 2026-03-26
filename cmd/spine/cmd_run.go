@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bszymi/spine/internal/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -16,6 +17,7 @@ func runCmd() *cobra.Command {
 	cmd.AddCommand(runStartCmd())
 	cmd.AddCommand(runStatusCmd())
 	cmd.AddCommand(runCancelCmd())
+	cmd.AddCommand(runInspectCmd())
 
 	return cmd
 }
@@ -60,6 +62,21 @@ func runStatusCmd() *cobra.Command {
 			return printResponse(data)
 		},
 	}
+}
+
+func runInspectCmd() *cobra.Command {
+	outputFmt := "table"
+	cmd := &cobra.Command{
+		Use:   "inspect <run_id>",
+		Short: "Detailed view of run state, step history, errors, and timeline",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newAPIClient()
+			return cli.InspectRun(cmd.Context(), c, args[0], cli.OutputFormat(outputFmt))
+		},
+	}
+	cmd.Flags().StringVarP(&outputFmt, "output", "o", "table", "Output format: table or json")
+	return cmd
 }
 
 func runCancelCmd() *cobra.Command {
