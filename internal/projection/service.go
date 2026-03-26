@@ -264,7 +264,10 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 
 	observe.GlobalMetrics.ProjectionSyncs.Inc()
 
-	// Emit projection_synced event.
+	// Emit projection_synced event (if event router configured).
+	if s.events == nil {
+		return nil
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"from_commit": state.LastSyncedCommit[:8],
 		"to_commit":   head[:8],

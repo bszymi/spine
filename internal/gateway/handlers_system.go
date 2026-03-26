@@ -136,7 +136,7 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 			})
 			if s.events != nil {
 				if err := s.events.Emit(r.Context(), domain.Event{
-					EventID:   fmt.Sprintf("validate-%s", observe.TraceID(r.Context())[:12]),
+					EventID:   fmt.Sprintf("validate-%s", observe.TraceID(r.Context())),
 					Type:      evtType,
 					Timestamp: time.Now(),
 					Payload:   payload,
