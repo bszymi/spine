@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Discussion CLI Commands and Events
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-011-discussion-system/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

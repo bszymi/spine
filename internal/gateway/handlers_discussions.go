@@ -128,6 +128,12 @@ func (s *Server) handleDiscussionCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	s.emitDiscussionEvent(r.Context(), domain.EventThreadCreated, thread.ThreadID, map[string]any{
+		"anchor_type": thread.AnchorType,
+		"anchor_id":   thread.AnchorID,
+		"created_by":  thread.CreatedBy,
+	})
+
 	WriteJSON(w, http.StatusCreated, threadToResponse(thread, traceID))
 }
 
@@ -266,6 +272,12 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.emitDiscussionEvent(r.Context(), domain.EventCommentAdded, threadID, map[string]any{
+		"comment_id":  comment.CommentID,
+		"author_id":   comment.AuthorID,
+		"author_type": comment.AuthorType,
+	})
+
 	WriteJSON(w, http.StatusCreated, comment)
 }
 
@@ -314,6 +326,11 @@ func (s *Server) handleDiscussionResolve(w http.ResponseWriter, r *http.Request)
 		WriteError(w, err)
 		return
 	}
+
+	s.emitDiscussionEvent(r.Context(), domain.EventThreadResolved, thread.ThreadID, map[string]any{
+		"resolution_type": string(thread.ResolutionType),
+		"resolution_refs": thread.ResolutionRefs,
+	})
 
 	traceID := observe.TraceID(r.Context())
 	WriteJSON(w, http.StatusOK, threadToResponse(thread, traceID))
@@ -372,6 +389,28 @@ func isValidAnchorType(t domain.AnchorType) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) emitDiscussionEvent(ctx context.Context, eventType domain.EventType, threadID string, extra map[string]any) {
+	if s.events == nil {
+		return
+	}
+	extra["thread_id"] = threadID
+	payload, _ := json.Marshal(extra)
+	evtID, _ := generateID("evt")
+	if err := s.events.Emit(ctx, domain.Event{
+		EventID:   evtID,
+		Type:      eventType,
+		Timestamp: time.Now(),
+		TraceID:   observe.TraceID(ctx),
+		Payload:   payload,
+	}); err != nil {
+		observe.Logger(ctx).Warn("failed to emit discussion event",
+			"event_type", eventType,
+			"thread_id", threadID,
+			"error", err,
+		)
+	}
 }
 
 func (s *Server) validateAnchorExists(ctx context.Context, anchorType domain.AnchorType, anchorID string) error {

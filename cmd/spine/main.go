@@ -59,6 +59,7 @@ func main() {
 	root.AddCommand(queryCmd())
 	root.AddCommand(workflowCmd())
 	root.AddCommand(validateCmd())
+	root.AddCommand(discussionCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
