@@ -148,9 +148,9 @@ All setup uses `t.Cleanup()` for automatic teardown. No manual cleanup is requir
 
 ### 3.4 Parallel Execution
 
-Each scenario creates its own Git repository and cleans its own database state. No shared mutable state exists between scenarios. This enables `t.Parallel()` on all scenarios without interference.
+Each scenario creates its own Git repository. Database isolation is achieved through scenario-scoped ID prefixes — each scenario generates a unique prefix (e.g., `scn-{random}`) used for all entity IDs, ensuring no cross-scenario data collision. Cleanup runs at the end of each scenario using the prefix to delete only that scenario's data.
 
-The test database is shared at the PostgreSQL instance level, but data isolation is achieved through cleanup between tests and unique IDs per scenario.
+This enables `t.Parallel()` on all scenarios without interference. Table-wide `DELETE` (as used in current integration tests) is not suitable for parallel scenarios — prefix-scoped cleanup is required instead.
 
 ---
 
@@ -212,21 +212,25 @@ func RunScenario(t *testing.T, scenario Scenario) {
         State: make(map[string]any),
     }
 
-    // 2. Execute steps sequentially
+    // 2. Execute steps sequentially — stop on first failure
     for _, step := range scenario.Steps {
-        t.Run(step.Name, func(t *testing.T) {
+        passed := t.Run(step.Name, func(st *testing.T) {
+            ctx.T = st // swap to subtest's T for correct failure reporting
             if err := step.Action(ctx); err != nil {
-                t.Fatalf("step %q failed: %v", step.Name, err)
+                st.Fatalf("step %q failed: %v", step.Name, err)
             }
         })
+        if !passed {
+            t.Fatalf("scenario aborted: step %q failed", step.Name)
+        }
     }
 }
 ```
 
 Each step runs as a `t.Run()` subtest, providing:
-- Per-step pass/fail reporting
-- Step-level timeout support
-- Early termination on fatal failures via `t.Fatalf`
+- Per-step pass/fail reporting with correct call-site attribution
+- Early termination — later steps do not execute after a failure
+- Step-level timeout support via subtest context
 
 ### 4.5 Step Composition
 
