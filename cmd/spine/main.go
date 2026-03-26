@@ -12,6 +12,7 @@ import (
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/cli"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/git"
@@ -197,10 +198,18 @@ func migrateCmd() *cobra.Command {
 
 func initRepoCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "init-repo",
-		Short: "Initialize Git repository for Spine",
+		Use:   "init-repo [path]",
+		Short: "Initialize a new Spine repository with directory structure and seed documents",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("spine: init-repo not yet implemented")
+			path := "."
+			if len(args) > 0 {
+				path = args[0]
+			}
+			if err := cli.InitRepo(path); err != nil {
+				return err
+			}
+			fmt.Printf("Spine repository initialized at %s\n", path)
 			return nil
 		},
 	}
