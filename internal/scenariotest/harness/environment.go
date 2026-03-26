@@ -54,6 +54,13 @@ func WithRuntimeValidation() EnvOption {
 	}
 }
 
+// WithRuntimeOrchestrator enables the workflow engine orchestrator in the runtime.
+func WithRuntimeOrchestrator() EnvOption {
+	return func(c *envConfig) {
+		c.runtimeOpts = append(c.runtimeOpts, WithOrchestrator())
+	}
+}
+
 // Seeded returns options that seed the repository with governance documents
 // and workflow definitions. Use WithRuntimeEvents() and WithRuntimeValidation()
 // additionally if the scenario needs event delivery or cross-artifact validation.
