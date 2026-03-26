@@ -38,6 +38,10 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"query.history":   domain.RoleReader,
 	"query.runs":      domain.RoleReader,
 
+	// Divergence
+	"divergence.create_branch": domain.RoleContributor,
+	"divergence.close_window":  domain.RoleOperator,
+
 	// System
 	"system.rebuild":  domain.RoleOperator,
 	"system.validate": domain.RoleOperator,

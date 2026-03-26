@@ -28,7 +28,12 @@ func (t *postgresTx) CreateRun(ctx context.Context, run *domain.Run) error {
 }
 
 func (t *postgresTx) UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error {
-	tag, err := t.tx.Exec(ctx, `UPDATE runtime.runs SET status = $1 WHERE run_id = $2`, status, runID)
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE runtime.runs
+		SET status = $1,
+			started_at = CASE WHEN $1 = 'active' AND started_at IS NULL THEN now() ELSE started_at END,
+			completed_at = CASE WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN now() ELSE completed_at END
+		WHERE run_id = $2`, status, runID)
 	if err != nil {
 		return fmt.Errorf("update run status in tx: %w", err)
 	}
