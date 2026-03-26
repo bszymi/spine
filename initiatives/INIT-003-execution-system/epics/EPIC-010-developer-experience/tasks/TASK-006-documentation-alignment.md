@@ -2,7 +2,7 @@
 id: TASK-006
 type: Task
 title: Documentation Alignment
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-010-developer-experience/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
