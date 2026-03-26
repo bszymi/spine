@@ -90,6 +90,18 @@ func TestScenarioResult_FailedSteps(t *testing.T) {
 	}
 }
 
+func TestScenarioResult_Passed_WithSkipped(t *testing.T) {
+	result := &engine.ScenarioResult{
+		Steps: []engine.StepResult{
+			{Status: engine.StepPassed},
+			{Status: engine.StepSkipped},
+		},
+	}
+	if !result.Passed() {
+		t.Error("expected Passed() = true when steps are passed+skipped (no failures)")
+	}
+}
+
 func TestScenarioResult_Report(t *testing.T) {
 	result := &engine.ScenarioResult{
 		Name:     "report-test",
