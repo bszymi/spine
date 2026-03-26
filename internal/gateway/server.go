@@ -40,6 +40,11 @@ type GitReader interface {
 }
 
 // Server is the HTTP Access Gateway for Spine.
+// EventEmitterGW emits events from the gateway.
+type EventEmitterGW interface {
+	Emit(ctx context.Context, event domain.Event) error
+}
+
 // BranchCreator creates exploratory branches and manages divergence windows.
 type BranchCreator interface {
 	CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
@@ -57,7 +62,8 @@ type Server struct {
 	validator        *validation.Engine
 	resultHandler    ResultHandler
 	workflowResolver WorkflowResolverFn
-	branchCreator    BranchCreator // optional, nil if not configured
+	branchCreator    BranchCreator  // optional, nil if not configured
+	events           EventEmitterGW // optional, nil if not configured
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -105,6 +111,7 @@ type ServerConfig struct {
 	ResultHandler    ResultHandler
 	WorkflowResolver WorkflowResolverFn
 	BranchCreator    BranchCreator
+	Events           EventEmitterGW
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -119,6 +126,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		validator:        cfg.Validator,
 		resultHandler:    cfg.ResultHandler,
 		branchCreator:    cfg.BranchCreator,
+		events:           cfg.Events,
 		workflowResolver: cfg.WorkflowResolver,
 	}
 	s.httpServer = &http.Server{

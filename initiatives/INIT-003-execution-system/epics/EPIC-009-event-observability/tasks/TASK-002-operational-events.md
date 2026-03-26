@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Operational Event Emission
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-009-event-observability/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
