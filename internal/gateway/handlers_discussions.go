@@ -372,6 +372,66 @@ func (s *Server) handleDiscussionReopen(w http.ResponseWriter, r *http.Request) 
 	WriteJSON(w, http.StatusOK, threadToResponse(thread, traceID))
 }
 
+// GET /api/v1/query/discussions — list open discussions for a run's artifacts
+func (s *Server) handleQueryDiscussions(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "discussion.list") {
+		return
+	}
+	if s.store == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+		return
+	}
+
+	runID := r.URL.Query().Get("run_id")
+	if runID == "" {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "run_id query parameter required"))
+		return
+	}
+
+	run, err := s.store.GetRun(r.Context(), runID)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	// List threads anchored to the run's task artifact
+	artifactThreads, err := s.store.ListThreads(r.Context(), domain.AnchorTypeArtifact, run.TaskPath)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	// List threads anchored directly to the run
+	runThreads, err := s.store.ListThreads(r.Context(), domain.AnchorTypeRun, runID)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	artifactThreads = append(artifactThreads, runThreads...)
+	allThreads := artifactThreads
+
+	// Optional status filter (default: open)
+	statusFilter := r.URL.Query().Get("status")
+	if statusFilter == "" {
+		statusFilter = "open"
+	}
+	if statusFilter != "all" {
+		filtered := allThreads[:0]
+		for i := range allThreads {
+			if string(allThreads[i].Status) == statusFilter {
+				filtered = append(filtered, allThreads[i])
+			}
+		}
+		allThreads = filtered
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"items":  allThreads,
+		"run_id": runID,
+	})
+}
+
 // ── Helpers ──
 
 func generateID(prefix string) (string, error) {

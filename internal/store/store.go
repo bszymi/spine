@@ -94,6 +94,7 @@ type Store interface {
 	UpdateThread(ctx context.Context, thread *domain.DiscussionThread) error
 	CreateComment(ctx context.Context, comment *domain.Comment) error
 	ListComments(ctx context.Context, threadID string) ([]domain.Comment, error)
+	HasOpenThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) (bool, error)
 
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error

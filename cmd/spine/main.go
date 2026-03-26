@@ -190,6 +190,9 @@ func serveCmd() *cobra.Command {
 						orch.WithValidator(validator)
 					}
 
+					// Wire discussion preconditions.
+					orch.WithDiscussions(st)
+
 					// Wire divergence and convergence.
 					divSvc := divergence.NewService(st, gitClient, eventRouter)
 					orch.WithDivergence(divSvc)

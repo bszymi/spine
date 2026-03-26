@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Discussion Workflow Integration
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-011-discussion-system/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:

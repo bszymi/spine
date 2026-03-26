@@ -77,6 +77,11 @@ type ConvergenceHandler interface {
 	EvaluateAndCommit(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error
 }
 
+// DiscussionChecker checks discussion thread state for precondition evaluation.
+type DiscussionChecker interface {
+	HasOpenThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) (bool, error)
+}
+
 // GitOperator provides Git operations needed for run-level branching and commits.
 type GitOperator interface {
 	Commit(ctx context.Context, opts git.CommitOpts) (git.CommitResult, error)

@@ -1281,6 +1281,19 @@ func (s *PostgresStore) ListComments(ctx context.Context, threadID string) ([]do
 	return comments, rows.Err()
 }
 
+func (s *PostgresStore) HasOpenThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) (bool, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM runtime.discussion_threads
+		WHERE anchor_type = $1 AND anchor_id = $2 AND status = 'open'`,
+		anchorType, anchorID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // ── Helpers ──
 
 func nilIfEmpty(s string) *string {
