@@ -2,7 +2,7 @@
 id: TASK-007
 type: Task
 title: "Fix run.start response to include workflow_id and workflow_version"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
