@@ -359,7 +359,7 @@ func TestConstitution_CrossArtifactValidation(t *testing.T) {
 				Name: "validate-valid-task",
 				Action: func(sc *engine.ScenarioContext) error {
 					taskPath := sc.MustGet("task_path").(string)
-					assert.ArtifactValidationPasses(sc.T, sc.Runtime.Validator, sc.Ctx, taskPath)
+					assert.ArtifactValidationPasses(sc.T, sc.Runtime, sc.Ctx, taskPath)
 					return nil
 				},
 			},

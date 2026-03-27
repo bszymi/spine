@@ -248,7 +248,7 @@ func TestDivergence_EntryPolicyMinimumCompleted(t *testing.T) {
 					// Only 1 of 2 minimum completed — should not trigger.
 					notEnough := workflow.DivergenceTransitionRequest{
 						Trigger:           workflow.DivergenceTriggerBranchDone,
-						EntryPolicy:       domain.EntryPolicyMinBranches,
+						EntryPolicy:       domain.EntryPolicyMinCompleted,
 						BranchesTotal:     3,
 						BranchesTerminal:  1,
 						BranchesCompleted: 1,

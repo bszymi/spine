@@ -68,8 +68,6 @@ steps:
       - id: committed
         name: Changes Committed
         next_step: end
-        commit:
-          status: Completed
     timeout: "10m"
 `
 
@@ -114,8 +112,6 @@ steps:
       - id: accepted
         name: Accepted
         next_step: end
-        commit:
-          status: Completed
       - id: needs_more_investigation
         name: Needs More Investigation
         next_step: investigate
@@ -161,8 +157,6 @@ steps:
       - id: completed
         name: Epic Complete
         next_step: end
-        commit:
-          status: Completed
       - id: needs_more_work
         name: Needs More Work
         next_step: execute
