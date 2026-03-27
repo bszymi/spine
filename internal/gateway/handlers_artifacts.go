@@ -256,13 +256,70 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 		return
 	}
 
-	links, err := s.store.QueryArtifactLinks(r.Context(), path)
-	if err != nil {
-		WriteError(w, err)
+	linkTypeFilter := r.URL.Query().Get("link_type")
+	direction := r.URL.Query().Get("direction")
+	if direction == "" {
+		direction = "outgoing"
+	}
+	if direction != "outgoing" && direction != "incoming" && direction != "both" {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "direction must be outgoing, incoming, or both"))
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{"items": links})
+	type linkEntry struct {
+		Direction  string `json:"direction"`
+		LinkType   string `json:"link_type"`
+		TargetPath string `json:"target_path"`
+	}
+
+	var entries []linkEntry
+
+	// Outgoing links (source = this artifact)
+	if direction == "outgoing" || direction == "both" {
+		outgoing, err := s.store.QueryArtifactLinks(r.Context(), path)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		for _, l := range outgoing {
+			if linkTypeFilter != "" && l.LinkType != linkTypeFilter {
+				continue
+			}
+			entries = append(entries, linkEntry{
+				Direction:  "outgoing",
+				LinkType:   l.LinkType,
+				TargetPath: l.TargetPath,
+			})
+		}
+	}
+
+	// Incoming links (target = this artifact)
+	if direction == "incoming" || direction == "both" {
+		incoming, err := s.store.QueryArtifactLinksByTarget(r.Context(), path)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		for _, l := range incoming {
+			if linkTypeFilter != "" && l.LinkType != linkTypeFilter {
+				continue
+			}
+			entries = append(entries, linkEntry{
+				Direction:  "incoming",
+				LinkType:   l.LinkType,
+				TargetPath: l.SourcePath,
+			})
+		}
+	}
+
+	if entries == nil {
+		entries = []linkEntry{}
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"artifact_path": path,
+		"links":         entries,
+	})
 }
 
 // resolveWriteContext resolves a WriteContext request (run_id + task_path) to a branch name.
