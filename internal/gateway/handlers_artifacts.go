@@ -149,7 +149,26 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, a)
+	// Resolve source_commit from the ref used for reading.
+	var sourceCommit string
+	if ref != "" {
+		sourceCommit = ref
+	} else if s.git != nil {
+		if sha, err := s.git.Head(r.Context()); err == nil {
+			sourceCommit = sha
+		}
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"artifact_path": a.Path,
+		"artifact_id":   a.ID,
+		"artifact_type": a.Type,
+		"status":        a.Status,
+		"title":         a.Title,
+		"metadata":      a.Metadata,
+		"content":       a.Content,
+		"source_commit": sourceCommit,
+	})
 }
 
 func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, path string) {

@@ -255,6 +255,10 @@ func (f *fakeGitReader) ReadFile(_ context.Context, _, path string) ([]byte, err
 	return data, nil
 }
 
+func (f *fakeGitReader) Head(_ context.Context) (string, error) {
+	return "fake-head-sha", nil
+}
+
 // ── Fake ProjectionQuerier ──
 
 type fakeProjectionQuerier struct{}
