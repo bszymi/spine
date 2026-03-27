@@ -14,41 +14,49 @@ import (
 // AcceptTask records an acceptance outcome on a task artifact.
 // The acceptance and rationale are written into the YAML front matter
 // and committed to Git as a governed outcome.
-func (s *Service) AcceptTask(ctx context.Context, path, rationale string) (*domain.Artifact, error) {
-	art, err := s.setAcceptance(ctx, path, domain.AcceptanceApproved, rationale)
+func (s *Service) AcceptTask(ctx context.Context, path, rationale string) (*WriteResult, error) {
+	result, err := s.setAcceptance(ctx, path, domain.AcceptanceApproved, rationale)
 	if err == nil {
 		observe.AuditLog(ctx, "task_accepted", "path", path, "rationale", rationale)
 	}
-	return art, err
+	return result, err
 }
 
 // RejectTask records a rejection outcome on a task artifact.
 // When acceptance is AcceptanceRejectedWithFollowup, a successor task
 // is automatically created and linked bidirectionally.
-func (s *Service) RejectTask(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*domain.Artifact, error) {
+func (s *Service) RejectTask(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*WriteResult, error) {
 	if acceptance != domain.AcceptanceRejectedWithFollowup && acceptance != domain.AcceptanceRejectedClosed {
 		return nil, domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("invalid rejection type: %s", acceptance))
 	}
 
-	art, err := s.setAcceptance(ctx, path, acceptance, rationale)
+	result, err := s.setAcceptance(ctx, path, acceptance, rationale)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create successor task for rejection with follow-up.
+	// This may add a follow_up_from link to the rejected task, producing
+	// additional commits — so we must capture the final commit SHA.
 	if acceptance == domain.AcceptanceRejectedWithFollowup {
 		if _, err := s.CreateSuccessorTask(ctx, path, rationale); err != nil {
 			observe.Logger(ctx).Warn("failed to create successor task",
 				"rejected_path", path, "error", err)
+		} else {
+			// Re-read to get the commit SHA that includes the follow_up_from link.
+			latestSHA, shaErr := s.git.Head(ctx)
+			if shaErr == nil {
+				result.CommitSHA = latestSHA
+			}
 		}
 	}
 
 	observe.AuditLog(ctx, "task_rejected", "path", path, "acceptance", string(acceptance), "rationale", rationale)
-	return art, nil
+	return result, nil
 }
 
-func (s *Service) setAcceptance(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*domain.Artifact, error) {
+func (s *Service) setAcceptance(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*WriteResult, error) {
 	log := observe.Logger(ctx)
 
 	// Read the current artifact.

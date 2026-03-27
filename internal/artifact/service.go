@@ -16,6 +16,12 @@ import (
 	"github.com/bszymi/spine/internal/observe"
 )
 
+// WriteResult contains the result of an artifact write operation.
+type WriteResult struct {
+	Artifact  *domain.Artifact
+	CommitSHA string
+}
+
 // Service implements artifact CRUD operations backed by Git.
 type Service struct {
 	git      git.GitClient
@@ -74,7 +80,7 @@ func (s *Service) safePath(path string) (string, error) {
 
 // Create creates a new artifact, validates it, writes the file, commits to Git,
 // and emits an artifact_created event.
-func (s *Service) Create(ctx context.Context, path, content string) (*domain.Artifact, error) {
+func (s *Service) Create(ctx context.Context, path, content string) (*WriteResult, error) {
 	log := observe.Logger(ctx)
 
 	// Validate path stays within repo
@@ -146,7 +152,7 @@ func (s *Service) Create(ctx context.Context, path, content string) (*domain.Art
 	// Emit event
 	s.emitEvent(ctx, domain.EventArtifactCreated, artifact, commitResult.SHA)
 
-	return artifact, nil
+	return &WriteResult{Artifact: artifact, CommitSHA: commitResult.SHA}, nil
 }
 
 // Read reads an artifact from Git at the specified ref (or HEAD if empty).
@@ -175,7 +181,7 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 
 // Update updates an existing artifact, validates the new content, commits to Git,
 // and emits an artifact_updated event.
-func (s *Service) Update(ctx context.Context, path, content string) (*domain.Artifact, error) {
+func (s *Service) Update(ctx context.Context, path, content string) (*WriteResult, error) {
 	log := observe.Logger(ctx)
 
 	// Validate path stays within repo
@@ -248,7 +254,7 @@ func (s *Service) Update(ctx context.Context, path, content string) (*domain.Art
 	// Emit event
 	s.emitEvent(ctx, domain.EventArtifactUpdated, artifact, commitResult.SHA)
 
-	return artifact, nil
+	return &WriteResult{Artifact: artifact, CommitSHA: commitResult.SHA}, nil
 }
 
 // List scans the repository for all artifacts.

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/gateway"
@@ -175,13 +176,13 @@ func newFakeArtifactService() *fakeArtifactService {
 	return &fakeArtifactService{artifacts: make(map[string]*domain.Artifact)}
 }
 
-func (f *fakeArtifactService) Create(_ context.Context, path, _ string) (*domain.Artifact, error) {
+func (f *fakeArtifactService) Create(_ context.Context, path, _ string) (*artifact.WriteResult, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
 	a := &domain.Artifact{Path: path, ID: "art-1", Type: domain.ArtifactTypeTask, Title: "Test", Status: domain.StatusPending}
 	f.artifacts[path] = a
-	return a, nil
+	return &artifact.WriteResult{Artifact: a, CommitSHA: "fake-sha-create"}, nil
 }
 
 func (f *fakeArtifactService) Read(_ context.Context, path, _ string) (*domain.Artifact, error) {
@@ -195,7 +196,7 @@ func (f *fakeArtifactService) Read(_ context.Context, path, _ string) (*domain.A
 	return a, nil
 }
 
-func (f *fakeArtifactService) Update(_ context.Context, path, _ string) (*domain.Artifact, error) {
+func (f *fakeArtifactService) Update(_ context.Context, path, _ string) (*artifact.WriteResult, error) {
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
@@ -203,7 +204,7 @@ func (f *fakeArtifactService) Update(_ context.Context, path, _ string) (*domain
 	if !ok {
 		return nil, domain.NewError(domain.ErrNotFound, "not found")
 	}
-	return a, nil
+	return &artifact.WriteResult{Artifact: a, CommitSHA: "fake-sha-update"}, nil
 }
 
 func (f *fakeArtifactService) List(_ context.Context, _ string) ([]*domain.Artifact, error) {
@@ -214,22 +215,22 @@ func (f *fakeArtifactService) List(_ context.Context, _ string) ([]*domain.Artif
 	return result, nil
 }
 
-func (f *fakeArtifactService) AcceptTask(_ context.Context, path, _ string) (*domain.Artifact, error) {
+func (f *fakeArtifactService) AcceptTask(_ context.Context, path, _ string) (*artifact.WriteResult, error) {
 	a, ok := f.artifacts[path]
 	if !ok {
 		return nil, domain.NewError(domain.ErrNotFound, "not found")
 	}
 	a.Acceptance = domain.AcceptanceApproved
-	return a, nil
+	return &artifact.WriteResult{Artifact: a, CommitSHA: "fake-sha-accept"}, nil
 }
 
-func (f *fakeArtifactService) RejectTask(_ context.Context, path string, acceptance domain.TaskAcceptance, _ string) (*domain.Artifact, error) {
+func (f *fakeArtifactService) RejectTask(_ context.Context, path string, acceptance domain.TaskAcceptance, _ string) (*artifact.WriteResult, error) {
 	a, ok := f.artifacts[path]
 	if !ok {
 		return nil, domain.NewError(domain.ErrNotFound, "not found")
 	}
 	a.Acceptance = acceptance
-	return a, nil
+	return &artifact.WriteResult{Artifact: a, CommitSHA: "fake-sha-reject"}, nil
 }
 
 // ── Fake ProjectionSyncer ──

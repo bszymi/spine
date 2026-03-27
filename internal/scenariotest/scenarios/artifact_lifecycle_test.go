@@ -29,11 +29,11 @@ version: "0.1"
 
 This artifact was created by the scenario testing spike.
 `
-					a, err := sc.Runtime.Artifacts.Create(sc.Ctx, "governance/spike-charter.md", content)
+					result, err := sc.Runtime.Artifacts.Create(sc.Ctx, "governance/spike-charter.md", content)
 					if err != nil {
 						return fmt.Errorf("create artifact: %w", err)
 					}
-					sc.Set("artifact_path", a.Path)
+					sc.Set("artifact_path", result.Artifact.Path)
 					return nil
 				},
 			},

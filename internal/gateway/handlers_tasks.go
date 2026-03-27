@@ -56,16 +56,17 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 			rationale = appendThreadRefs(rationale, req.ThreadRefs)
 		}
 
-		art, err := s.artifacts.AcceptTask(r.Context(), taskPath, rationale)
+		result, err := s.artifacts.AcceptTask(r.Context(), taskPath, rationale)
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{
-			"artifact_path": art.Path,
-			"artifact_id":   art.ID,
-			"status":        art.Status,
-			"acceptance":    art.Acceptance,
+			"artifact_path": result.Artifact.Path,
+			"artifact_id":   result.Artifact.ID,
+			"status":        result.Artifact.Status,
+			"acceptance":    result.Artifact.Acceptance,
+			"commit_sha":    result.CommitSHA,
 			"action":        action,
 			"trace_id":      observe.TraceID(r.Context()),
 		})
@@ -87,16 +88,17 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 		if len(req.ThreadRefs) > 0 {
 			rationale = appendThreadRefs(rationale, req.ThreadRefs)
 		}
-		art, err := s.artifacts.RejectTask(r.Context(), taskPath, acceptance, rationale)
+		result, err := s.artifacts.RejectTask(r.Context(), taskPath, acceptance, rationale)
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{
-			"artifact_path": art.Path,
-			"artifact_id":   art.ID,
-			"status":        art.Status,
-			"acceptance":    art.Acceptance,
+			"artifact_path": result.Artifact.Path,
+			"artifact_id":   result.Artifact.ID,
+			"status":        result.Artifact.Status,
+			"acceptance":    result.Artifact.Acceptance,
+			"commit_sha":    result.CommitSHA,
 			"action":        action,
 			"trace_id":      observe.TraceID(r.Context()),
 		})
@@ -131,16 +133,17 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 	// Update the status in the raw content
 	updatedContent := updateFrontMatterStatus(string(rawContent), string(targetStatus))
 
-	updated, err := s.artifacts.Update(r.Context(), taskPath, updatedContent)
+	result, err := s.artifacts.Update(r.Context(), taskPath, updatedContent)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"artifact_path": updated.Path,
-		"artifact_id":   updated.ID,
-		"status":        updated.Status,
+		"artifact_path": result.Artifact.Path,
+		"artifact_id":   result.Artifact.ID,
+		"status":        result.Artifact.Status,
+		"commit_sha":    result.CommitSHA,
 		"action":        action,
 		"trace_id":      observe.TraceID(r.Context()),
 	})

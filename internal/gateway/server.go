@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/projection"
@@ -13,12 +14,12 @@ import (
 
 // ArtifactService defines the artifact operations the gateway needs.
 type ArtifactService interface {
-	Create(ctx context.Context, path, content string) (*domain.Artifact, error)
+	Create(ctx context.Context, path, content string) (*artifact.WriteResult, error)
 	Read(ctx context.Context, path, ref string) (*domain.Artifact, error)
-	Update(ctx context.Context, path, content string) (*domain.Artifact, error)
+	Update(ctx context.Context, path, content string) (*artifact.WriteResult, error)
 	List(ctx context.Context, ref string) ([]*domain.Artifact, error)
-	AcceptTask(ctx context.Context, path, rationale string) (*domain.Artifact, error)
-	RejectTask(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*domain.Artifact, error)
+	AcceptTask(ctx context.Context, path, rationale string) (*artifact.WriteResult, error)
+	RejectTask(ctx context.Context, path string, acceptance domain.TaskAcceptance, rationale string) (*artifact.WriteResult, error)
 }
 
 // ProjectionQuerier defines the projection query operations the gateway needs.

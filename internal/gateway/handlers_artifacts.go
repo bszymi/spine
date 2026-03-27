@@ -58,18 +58,25 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
 		}
 	}
-	a, err := s.artifacts.Create(ctx, req.Path, req.Content)
+	result, err := s.artifacts.Create(ctx, req.Path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
+	writeMode := "authoritative"
+	if req.WriteContext != nil && req.WriteContext.RunID != "" {
+		writeMode = "proposed"
+	}
+
 	WriteJSON(w, http.StatusCreated, map[string]any{
-		"artifact_path": a.Path,
-		"artifact_id":   a.ID,
-		"artifact_type": a.Type,
-		"title":         a.Title,
-		"status":        a.Status,
+		"artifact_path": result.Artifact.Path,
+		"artifact_id":   result.Artifact.ID,
+		"artifact_type": result.Artifact.Type,
+		"title":         result.Artifact.Title,
+		"status":        result.Artifact.Status,
+		"commit_sha":    result.CommitSHA,
+		"write_mode":    writeMode,
 		"trace_id":      observe.TraceID(r.Context()),
 	})
 }
@@ -176,18 +183,25 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
 		}
 	}
-	a, err := s.artifacts.Update(ctx, path, req.Content)
+	result, err := s.artifacts.Update(ctx, path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
+	writeMode := "authoritative"
+	if req.WriteContext != nil && req.WriteContext.RunID != "" {
+		writeMode = "proposed"
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"artifact_path": a.Path,
-		"artifact_id":   a.ID,
-		"artifact_type": a.Type,
-		"title":         a.Title,
-		"status":        a.Status,
+		"artifact_path": result.Artifact.Path,
+		"artifact_id":   result.Artifact.ID,
+		"artifact_type": result.Artifact.Type,
+		"title":         result.Artifact.Title,
+		"status":        result.Artifact.Status,
+		"commit_sha":    result.CommitSHA,
+		"write_mode":    writeMode,
 		"trace_id":      observe.TraceID(r.Context()),
 	})
 }
