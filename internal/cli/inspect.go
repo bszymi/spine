@@ -114,27 +114,31 @@ func ValidateAll(ctx context.Context, client *Client, format OutputFormat) error
 	}
 
 	total := str(result["total_artifacts"])
-	issues, _ := result["issues"].([]any)
+	status := str(result["status"])
+	passed := str(result["passed"])
+	failed := str(result["failed"])
+	warnings := str(result["warnings"])
 
-	if len(issues) == 0 {
+	if status == "passed" {
 		fmt.Printf("Validated %s artifacts: %s\n", total, colorize("ALL PASSED", colorGreen))
 		return nil
 	}
 
-	fmt.Printf("Validated %s artifacts: %s issue(s)\n\n", total, colorize(fmt.Sprintf("%d", len(issues)), colorRed))
+	fmt.Printf("Validated %s artifacts: %s passed, %s failed, %s warnings\n\n",
+		total, passed, colorize(failed, colorRed), colorize(warnings, colorYellow))
 
-	for _, issue := range issues {
-		iss, ok := issue.(map[string]any)
+	results, _ := result["results"].([]any)
+	for _, r := range results {
+		res, ok := r.(map[string]any)
 		if !ok {
 			continue
 		}
-		path := str(iss["path"])
-		fmt.Printf("  %s %s\n", colorize(path, colorBold), colorize("FAILED", colorRed))
-
-		if r, ok := iss["result"].(map[string]any); ok {
-			printValidationIssues("    Errors", r["errors"])
-			printValidationIssues("    Warnings", r["warnings"])
+		resStatus := str(res["status"])
+		if resStatus == "passed" {
+			continue
 		}
+		printValidationIssues("  Errors", res["errors"])
+		printValidationIssues("  Warnings", res["warnings"])
 	}
 
 	return nil

@@ -152,10 +152,32 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		passedCount := len(results) - len(issues)
+		warningCount := 0
+		failedCount := 0
+		for _, iss := range issues {
+			r, _ := iss["result"].(domain.ValidationResult)
+			if r.Status == "failed" {
+				failedCount++
+			} else {
+				warningCount++
+			}
+		}
+
+		overallStatus := "passed"
+		if failedCount > 0 {
+			overallStatus = "failed"
+		} else if warningCount > 0 {
+			overallStatus = "warnings"
+		}
+
 		WriteJSON(w, http.StatusOK, map[string]any{
+			"status":          overallStatus,
 			"total_artifacts": len(results),
-			"issues":          issues,
-			"trace_id":        observe.TraceID(r.Context()),
+			"passed":          passedCount,
+			"warnings":        warningCount,
+			"failed":          failedCount,
+			"results":         results,
 		})
 		return
 	}
@@ -172,20 +194,36 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var issues []map[string]any
+	var allResults []domain.ValidationResult
+	passedCount := 0
+	warningCount := 0
+	failedCount := 0
 	for _, a := range artifacts {
 		result := artifact.Validate(a)
-		if result.Status != "passed" {
-			issues = append(issues, map[string]any{
-				"path":   a.Path,
-				"result": result,
-			})
+		allResults = append(allResults, result)
+		switch result.Status {
+		case "passed":
+			passedCount++
+		case "warnings":
+			warningCount++
+		default:
+			failedCount++
 		}
 	}
 
+	overallStatus := "passed"
+	if failedCount > 0 {
+		overallStatus = "failed"
+	} else if warningCount > 0 {
+		overallStatus = "warnings"
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]any{
+		"status":          overallStatus,
 		"total_artifacts": len(artifacts),
-		"issues":          issues,
-		"trace_id":        observe.TraceID(r.Context()),
+		"passed":          passedCount,
+		"warnings":        warningCount,
+		"failed":          failedCount,
+		"results":         allResults,
 	})
 }

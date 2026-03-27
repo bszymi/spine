@@ -56,8 +56,12 @@ func TestInspectRun_Table(t *testing.T) {
 func TestValidateAll_JSON(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
+			"status":          "passed",
 			"total_artifacts": 5,
-			"issues":          []any{},
+			"passed":          5,
+			"warnings":        0,
+			"failed":          0,
+			"results":         []any{},
 		})
 	}))
 	defer ts.Close()
@@ -72,15 +76,16 @@ func TestValidateAll_JSON(t *testing.T) {
 func TestValidateAll_WithIssues(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
+			"status":          "failed",
 			"total_artifacts": 5,
-			"issues": []any{
+			"passed":          4,
+			"warnings":        0,
+			"failed":          1,
+			"results": []any{
 				map[string]any{
-					"path": "tasks/broken.md",
-					"result": map[string]any{
-						"status": "failed",
-						"errors": []any{
-							map[string]any{"rule_id": "SI-001", "severity": "error", "message": "parent missing", "classification": "structural_error"},
-						},
+					"status": "failed",
+					"errors": []any{
+						map[string]any{"rule_id": "SI-001", "severity": "error", "message": "parent missing", "classification": "structural_error"},
 					},
 				},
 			},
