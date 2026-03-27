@@ -42,10 +42,29 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		components["database"] = "not_configured"
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":     status,
 		"components": components,
-	})
+	}
+
+	// Add optional operational metrics (gracefully handle unavailable services).
+	if s.store != nil {
+		func() {
+			defer func() { _ = recover() }()
+			if syncState, err := s.store.GetSyncState(r.Context()); err == nil && syncState != nil && syncState.LastSyncedAt != nil {
+				lagMs := time.Since(*syncState.LastSyncedAt).Milliseconds()
+				resp["projection_lag_ms"] = lagMs
+			}
+		}()
+		func() {
+			defer func() { _ = recover() }()
+			if activeRuns, err := s.store.ListRunsByStatus(r.Context(), domain.RunStatusActive); err == nil {
+				resp["active_runs"] = len(activeRuns)
+			}
+		}()
+	}
+
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
