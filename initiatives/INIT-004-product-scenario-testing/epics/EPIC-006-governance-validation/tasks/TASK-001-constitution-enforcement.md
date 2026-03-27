@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Constitution Enforcement Scenarios"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-004-product-scenario-testing/epics/EPIC-006-governance-validation/epic.md
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
