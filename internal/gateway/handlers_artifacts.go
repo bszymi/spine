@@ -235,11 +235,37 @@ func (s *Server) handleArtifactValidate(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Read the artifact, validate it
-	a, err := s.artifacts.Read(r.Context(), path, "")
-	if err != nil {
-		WriteError(w, err)
-		return
+	// Check for optional inline content in request body.
+	var req struct {
+		Content string `json:"content"`
+	}
+	_ = decodeJSON(r, &req) // body is optional
+
+	var a *domain.Artifact
+	if req.Content != "" {
+		// Dry-run: parse inline content without saving.
+		parsed, err := artifact.Parse(path, []byte(req.Content))
+		if err != nil {
+			// Return a failed validation result rather than an error.
+			WriteJSON(w, http.StatusOK, domain.ValidationResult{
+				Status: "failed",
+				Errors: []domain.ValidationError{{
+					ArtifactPath: path,
+					Severity:     "error",
+					Message:      err.Error(),
+				}},
+			})
+			return
+		}
+		a = parsed
+	} else {
+		// Default: read the stored artifact.
+		stored, err := s.artifacts.Read(r.Context(), path, "")
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		a = stored
 	}
 
 	result := artifact.Validate(a)
