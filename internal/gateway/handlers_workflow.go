@@ -19,9 +19,21 @@ type runStartRequest struct {
 	TaskPath string `json:"task_path"`
 }
 
+type stepSubmitOutput struct {
+	ArtifactsProduced []struct {
+		Path         string `json:"path"`
+		ArtifactType string `json:"artifact_type,omitempty"`
+		Status       string `json:"status,omitempty"`
+	} `json:"artifacts_produced,omitempty"`
+	Data    map[string]any `json:"data,omitempty"`
+	Summary string         `json:"summary,omitempty"`
+}
+
 type stepSubmitRequest struct {
-	OutcomeID         string   `json:"outcome_id"`
-	ArtifactsProduced []string `json:"artifacts_produced,omitempty"`
+	OutcomeID        string            `json:"outcome_id"`
+	Output           *stepSubmitOutput `json:"output,omitempty"`
+	Rationale        string            `json:"rationale,omitempty"`
+	ValidationStatus string            `json:"validation_status,omitempty"`
 }
 
 type stepAssignRequest struct {
@@ -217,10 +229,16 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 	// When engine result handler is configured, delegate to the full
 	// ingestion pipeline with required_outputs validation and orchestrator routing.
 	if s.resultHandler != nil {
+		var artifactPaths []string
+		if req.Output != nil {
+			for _, a := range req.Output.ArtifactsProduced {
+				artifactPaths = append(artifactPaths, a.Path)
+			}
+		}
 		resp, err := s.resultHandler.IngestResult(r.Context(), ResultSubmission{
 			ExecutionID:       executionID,
 			OutcomeID:         req.OutcomeID,
-			ArtifactsProduced: req.ArtifactsProduced,
+			ArtifactsProduced: artifactPaths,
 		})
 		if err != nil {
 			WriteError(w, err)
@@ -306,12 +324,19 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	runAdvanced := nextStepID != "end" && nextStepID != exec.StepID
+	requiresReview := false
+	if runAdvanced {
+		requiresReview = s.isReviewStep(r.Context(), exec.RunID, nextStepID)
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"execution_id": exec.ExecutionID,
-		"step_id":      exec.StepID,
-		"status":       exec.Status,
-		"outcome_id":   exec.OutcomeID,
-		"next_step":    nextStepID,
+		"execution_id":    exec.ExecutionID,
+		"step_id":         exec.StepID,
+		"outcome_id":      exec.OutcomeID,
+		"next_step":       nextStepID,
+		"run_advanced":    runAdvanced,
+		"requires_review": requiresReview,
 	})
 }
 
@@ -428,6 +453,28 @@ func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution
 		}
 	}
 	return "end"
+}
+
+// isReviewStep checks if a step in the workflow is a review step.
+func (s *Server) isReviewStep(ctx context.Context, runID, stepID string) bool {
+	run, err := s.store.GetRun(ctx, runID)
+	if err != nil {
+		return false
+	}
+	proj, err := s.store.GetWorkflowProjection(ctx, run.WorkflowPath)
+	if err != nil {
+		return false
+	}
+	var wfDef domain.WorkflowDefinition
+	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
+		return false
+	}
+	for i := range wfDef.Steps {
+		if wfDef.Steps[i].ID == stepID {
+			return wfDef.Steps[i].Type == domain.StepTypeReview
+		}
+	}
+	return false
 }
 
 // resolveWorkflow looks up the workflow for a task and returns the entry step, path, and ID.
