@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/bszymi/spine/internal/artifact"
@@ -9,15 +11,20 @@ import (
 	"github.com/bszymi/spine/internal/store"
 )
 
+type writeContextRequest struct {
+	RunID    string `json:"run_id"`
+	TaskPath string `json:"task_path"`
+}
+
 type artifactCreateRequest struct {
-	Path         string `json:"path"`
-	Content      string `json:"content"`
-	WriteContext string `json:"write_context,omitempty"`
+	Path         string               `json:"path"`
+	Content      string               `json:"content"`
+	WriteContext *writeContextRequest `json:"write_context,omitempty"`
 }
 
 type artifactUpdateRequest struct {
-	Content      string `json:"content"`
-	WriteContext string `json:"write_context,omitempty"`
+	Content      string               `json:"content"`
+	WriteContext *writeContextRequest `json:"write_context,omitempty"`
 }
 
 func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
@@ -41,8 +48,15 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	if req.WriteContext != "" {
-		ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: req.WriteContext})
+	if req.WriteContext != nil {
+		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		if branch != "" {
+			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
+		}
 	}
 	a, err := s.artifacts.Create(ctx, req.Path, req.Content)
 	if err != nil {
@@ -152,8 +166,15 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 	}
 
 	ctx := r.Context()
-	if req.WriteContext != "" {
-		ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: req.WriteContext})
+	if req.WriteContext != nil {
+		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		if branch != "" {
+			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
+		}
 	}
 	a, err := s.artifacts.Update(ctx, path, req.Content)
 	if err != nil {
@@ -209,4 +230,31 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{"items": links})
+}
+
+// resolveWriteContext resolves a WriteContext request (run_id + task_path) to a branch name.
+// Returns empty string if no run_id is provided (authoritative branch write).
+func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextRequest) (string, error) {
+	if wc.RunID == "" {
+		return "", nil
+	}
+	if wc.TaskPath == "" {
+		return "", domain.NewError(domain.ErrInvalidParams, "write_context.task_path is required when run_id is provided")
+	}
+	if s.store == nil {
+		return "", domain.NewError(domain.ErrUnavailable, "store not configured")
+	}
+	run, err := s.store.GetRun(ctx, wc.RunID)
+	if err != nil {
+		return "", fmt.Errorf("resolve write context: %w", err)
+	}
+	if run.TaskPath != wc.TaskPath {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("task_path mismatch: run %s belongs to %s, not %s", wc.RunID, run.TaskPath, wc.TaskPath))
+	}
+	if run.BranchName == "" {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("run %s has no branch", wc.RunID))
+	}
+	return run.BranchName, nil
 }

@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Fix WriteContext schema in artifact create/update"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
