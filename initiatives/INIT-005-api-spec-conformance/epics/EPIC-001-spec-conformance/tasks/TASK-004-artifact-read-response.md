@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: "Fix ArtifactReadResponse field names and add source_commit"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
