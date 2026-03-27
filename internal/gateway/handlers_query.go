@@ -106,7 +106,11 @@ func (s *Server) handleQueryHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{"items": history})
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"items":       history,
+		"next_cursor": nil,
+		"has_more":    false,
+	})
 }
 
 func (s *Server) handleQueryRuns(w http.ResponseWriter, r *http.Request) {
@@ -131,5 +135,20 @@ func (s *Server) handleQueryRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{"items": runs})
+	// Filter by status if provided.
+	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {
+		filtered := make([]domain.Run, 0)
+		for i := range runs {
+			if string(runs[i].Status) == statusFilter {
+				filtered = append(filtered, runs[i])
+			}
+		}
+		runs = filtered
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"items":       runs,
+		"next_cursor": nil,
+		"has_more":    false,
+	})
 }
