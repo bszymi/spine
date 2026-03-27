@@ -1191,7 +1191,19 @@ func TestSystemRebuildStatusWithStore(t *testing.T) {
 	ts, token, _ := setupFullServer(t)
 	defer ts.Close()
 
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/rebuild/rb-123", http.NoBody)
+	// First trigger a rebuild to get a rebuild_id.
+	rebuildReq, _ := http.NewRequest("POST", ts.URL+"/api/v1/system/rebuild", http.NoBody)
+	rebuildReq.Header.Set("Authorization", "Bearer "+token)
+	rebuildResp, err := http.DefaultClient.Do(rebuildReq)
+	if err != nil {
+		t.Fatalf("rebuild request: %v", err)
+	}
+	var rebuildBody map[string]any
+	json.NewDecoder(rebuildResp.Body).Decode(&rebuildBody)
+	rebuildResp.Body.Close()
+	rebuildID, _ := rebuildBody["rebuild_id"].(string)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/rebuild/"+rebuildID, http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1438,8 +1450,8 @@ func TestSystemRebuildSuccess(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if resp.StatusCode != 202 {
+		t.Errorf("expected 202, got %d", resp.StatusCode)
 	}
 }
 
@@ -1906,7 +1918,7 @@ func TestRunStartNoStore(t *testing.T) {
 	}
 }
 
-func TestSystemRebuildStatusNoStore(t *testing.T) {
+func TestSystemRebuildStatusNotFound(t *testing.T) {
 	fs := newFakeStore()
 	fs.actors["admin-1"] = &domain.Actor{
 		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
@@ -1917,15 +1929,15 @@ func TestSystemRebuildStatusNoStore(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/rebuild/rb-123", http.NoBody)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/rebuild/rb-nonexistent", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 503 {
-		t.Errorf("expected 503, got %d", resp.StatusCode)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
 }
 

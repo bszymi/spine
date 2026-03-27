@@ -1,15 +1,29 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/go-chi/chi/v5"
 )
+
+type rebuildState struct {
+	RebuildID          string     `json:"rebuild_id"`
+	Status             string     `json:"status"`
+	StartedAt          time.Time  `json:"started_at"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	ArtifactsProcessed int        `json:"artifacts_processed,omitempty"`
+	ErrorDetail        string     `json:"error_detail,omitempty"`
+}
+
+var rebuilds sync.Map
 
 // handleHealth returns system health status (unauthenticated).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -44,14 +58,30 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.projSync.FullRebuild(r.Context()); err != nil {
-		WriteError(w, err)
-		return
+	rebuildID := fmt.Sprintf("rb-%s", observe.TraceID(r.Context())[:8])
+	state := &rebuildState{
+		RebuildID: rebuildID,
+		Status:    "in_progress",
+		StartedAt: time.Now(),
 	}
+	rebuilds.Store(rebuildID, state)
 
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"status":   "completed",
-		"trace_id": observe.TraceID(r.Context()),
+	go func() {
+		if err := s.projSync.FullRebuild(context.Background()); err != nil {
+			now := time.Now()
+			state.Status = "failed"
+			state.CompletedAt = &now
+			state.ErrorDetail = err.Error()
+		} else {
+			now := time.Now()
+			state.Status = "completed"
+			state.CompletedAt = &now
+		}
+	}()
+
+	WriteJSON(w, http.StatusAccepted, map[string]any{
+		"status":     "started",
+		"rebuild_id": rebuildID,
 	})
 }
 
@@ -60,23 +90,14 @@ func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if s.store == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	rebuildID := chi.URLParam(r, "rebuild_id")
+	val, ok := rebuilds.Load(rebuildID)
+	if !ok {
+		WriteError(w, domain.NewError(domain.ErrNotFound, "rebuild not found"))
 		return
 	}
 
-	state, err := s.store.GetSyncState(r.Context())
-	if err != nil {
-		WriteError(w, err)
-		return
-	}
-
-	if state == nil {
-		WriteJSON(w, http.StatusOK, map[string]any{"status": "no_sync_state"})
-		return
-	}
-
-	WriteJSON(w, http.StatusOK, state)
+	WriteJSON(w, http.StatusOK, val)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
