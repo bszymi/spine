@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: "Fix ArtifactLinksResponse and add link_type/direction filters"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
