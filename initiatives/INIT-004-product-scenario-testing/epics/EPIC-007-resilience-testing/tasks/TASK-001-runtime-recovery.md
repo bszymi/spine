@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Runtime Recovery Scenarios"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-004-product-scenario-testing/epics/EPIC-007-resilience-testing/epic.md
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
