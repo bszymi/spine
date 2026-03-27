@@ -2,7 +2,7 @@
 id: EPIC-005
 type: Epic
 title: "Workflow Validation Scenarios"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
   - type: parent
