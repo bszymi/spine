@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: "Add commit_sha and write_mode to artifact create/update responses"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:

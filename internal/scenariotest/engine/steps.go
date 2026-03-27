@@ -15,11 +15,11 @@ func CreateArtifact(path, content, stateKey string) Step {
 	return Step{
 		Name: "create-artifact-" + path,
 		Action: func(sc *ScenarioContext) error {
-			a, err := sc.Runtime.Artifacts.Create(sc.Ctx, path, content)
+			result, err := sc.Runtime.Artifacts.Create(sc.Ctx, path, content)
 			if err != nil {
 				return fmt.Errorf("create artifact %s: %w", path, err)
 			}
-			sc.Set(stateKey, a.Path)
+			sc.Set(stateKey, result.Artifact.Path)
 			return nil
 		},
 	}

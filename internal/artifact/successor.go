@@ -43,7 +43,7 @@ func (s *Service) CreateSuccessorTask(ctx context.Context, rejectedPath, rationa
 	)
 
 	// Create the successor artifact.
-	successor, err := s.Create(ctx, successorPath, content)
+	result, err := s.Create(ctx, successorPath, content)
 	if err != nil {
 		return nil, fmt.Errorf("create successor: %w", err)
 	}
@@ -54,7 +54,7 @@ func (s *Service) CreateSuccessorTask(ctx context.Context, rejectedPath, rationa
 			"rejected", rejectedPath, "successor", successorPath, "error", err)
 	}
 
-	return successor, nil
+	return result.Artifact, nil
 }
 
 // nextFollowupID generates a valid successor task ID.

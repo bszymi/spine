@@ -133,11 +133,11 @@ func defaults(opts *ArtifactOpts, defaultTitle, defaultStatus string) {
 
 func createFixture(sc *ScenarioContext, path, content string) string {
 	sc.T.Helper()
-	a, err := sc.Runtime.Artifacts.Create(sc.Ctx, path, content)
+	result, err := sc.Runtime.Artifacts.Create(sc.Ctx, path, content)
 	if err != nil {
 		sc.T.Fatalf("create fixture %s: %v", path, err)
 	}
-	return a.Path
+	return result.Artifact.Path
 }
 
 func buildFrontmatter(artifactType, id string, opts ArtifactOpts) string {

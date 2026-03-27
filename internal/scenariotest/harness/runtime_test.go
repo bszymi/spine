@@ -76,12 +76,12 @@ status: Draft
 
 # Runtime Test
 `
-	a, err := rt.Artifacts.Create(ctx, "governance/runtime-test.md", content)
+	result, err := rt.Artifacts.Create(ctx, "governance/runtime-test.md", content)
 	if err != nil {
 		t.Fatalf("create artifact: %v", err)
 	}
-	if a.Title != "Runtime Test" {
-		t.Errorf("expected title 'Runtime Test', got %q", a.Title)
+	if result.Artifact.Title != "Runtime Test" {
+		t.Errorf("expected title 'Runtime Test', got %q", result.Artifact.Title)
 	}
 
 	// Sync projections and verify.

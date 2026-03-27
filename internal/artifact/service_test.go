@@ -50,15 +50,18 @@ func TestCreateAndRead(t *testing.T) {
 	ctx := testCtx()
 
 	// Create
-	a, err := svc.Create(ctx, "governance/test.md", governanceContent)
+	result, err := svc.Create(ctx, "governance/test.md", governanceContent)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if a.Type != domain.ArtifactTypeGovernance {
-		t.Errorf("expected Governance, got %s", a.Type)
+	if result.Artifact.Type != domain.ArtifactTypeGovernance {
+		t.Errorf("expected Governance, got %s", result.Artifact.Type)
 	}
-	if a.Title != "Test Document" {
-		t.Errorf("expected 'Test Document', got %s", a.Title)
+	if result.Artifact.Title != "Test Document" {
+		t.Errorf("expected 'Test Document', got %s", result.Artifact.Title)
+	}
+	if result.CommitSHA == "" {
+		t.Error("expected non-empty CommitSHA")
 	}
 
 	// Read back
@@ -210,12 +213,12 @@ func TestUpdate(t *testing.T) {
 	}
 
 	updatedContent := strings.Replace(governanceContent, "Test Document", "Updated Title", 1)
-	a, err := svc.Update(ctx, "governance/update-me.md", updatedContent)
+	result, err := svc.Update(ctx, "governance/update-me.md", updatedContent)
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if a.Title != "Updated Title" {
-		t.Errorf("expected 'Updated Title', got %s", a.Title)
+	if result.Artifact.Title != "Updated Title" {
+		t.Errorf("expected 'Updated Title', got %s", result.Artifact.Title)
 	}
 }
 
@@ -328,12 +331,12 @@ func TestCreateWithNilEvents(t *testing.T) {
 	svc := artifact.NewService(client, nil, repo)
 	ctx := testCtx()
 
-	a, err := svc.Create(ctx, "governance/no-events.md", governanceContent)
+	result, err := svc.Create(ctx, "governance/no-events.md", governanceContent)
 	if err != nil {
 		t.Fatalf("Create with nil events: %v", err)
 	}
-	if a.Title != "Test Document" {
-		t.Errorf("expected title, got %s", a.Title)
+	if result.Artifact.Title != "Test Document" {
+		t.Errorf("expected title, got %s", result.Artifact.Title)
 	}
 }
 
