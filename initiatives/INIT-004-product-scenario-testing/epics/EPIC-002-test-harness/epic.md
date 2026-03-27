@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: "Test Harness"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
   - type: parent

@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: "Artifact Validation Scenarios"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
   - type: parent
