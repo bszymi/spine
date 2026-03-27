@@ -40,8 +40,6 @@ steps:
       - id: approved
         name: Approved
         next_step: end
-        commit:
-          status: Completed
       - id: rejected
         name: Rejected (Closed)
         next_step: end
