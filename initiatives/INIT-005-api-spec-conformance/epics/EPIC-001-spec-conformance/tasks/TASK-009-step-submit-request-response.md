@@ -2,7 +2,7 @@
 id: TASK-009
 type: Task
 title: "Fix StepSubmitRequest/Response to match spec"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
