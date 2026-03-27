@@ -13,12 +13,10 @@ import (
 func TestInspectRun_JSON(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
-			"run": map[string]any{
-				"run_id": "run-abc", "status": "active", "task_path": "tasks/t.md",
-				"workflow_id": "wf-1", "workflow_version_label": "1.0",
-				"current_step_id": "start", "trace_id": "trace-123456789012",
-			},
-			"steps": []any{
+			"run_id": "run-abc", "status": "active", "task_path": "tasks/t.md",
+			"workflow_id": "wf-1", "workflow_version": "1.0",
+			"current_step_id": "start", "trace_id": "trace-123456789012",
+			"step_executions": []any{
 				map[string]any{"execution_id": "run-abc-start-1", "step_id": "start", "status": "completed", "attempt": 1, "outcome_id": "done"},
 			},
 		})
@@ -35,12 +33,10 @@ func TestInspectRun_JSON(t *testing.T) {
 func TestInspectRun_Table(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
-			"run": map[string]any{
-				"run_id": "run-abc", "status": "failed", "task_path": "tasks/t.md",
-				"workflow_id": "wf-1", "workflow_version_label": "1.0",
-				"current_step_id": "review", "trace_id": "trace-123456789012",
-			},
-			"steps": []any{
+			"run_id": "run-abc", "status": "failed", "task_path": "tasks/t.md",
+			"workflow_id": "wf-1", "workflow_version": "1.0",
+			"current_step_id": "review", "trace_id": "trace-123456789012",
+			"step_executions": []any{
 				map[string]any{
 					"execution_id": "run-abc-review-1", "step_id": "review", "status": "failed", "attempt": 1,
 					"error_detail": map[string]any{"classification": "permanent_error", "message": "actor crashed"},
