@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Update spec: query.graph use root param"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:

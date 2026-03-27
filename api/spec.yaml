@@ -497,9 +497,10 @@ paths:
       summary: Retrieve artifact relationship graph
       tags: [Query]
       parameters:
-        - name: path
+        - name: root
           in: query
           required: true
+          description: Root artifact path for graph traversal
           schema: { type: string }
         - name: depth
           in: query
