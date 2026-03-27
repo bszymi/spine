@@ -2,7 +2,7 @@
 id: TASK-013
 type: Task
 title: "Add pagination to query.history and query.runs"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
