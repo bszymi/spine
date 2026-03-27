@@ -62,13 +62,11 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{
-			"artifact_path": result.Artifact.Path,
-			"artifact_id":   result.Artifact.ID,
-			"status":        result.Artifact.Status,
-			"acceptance":    result.Artifact.Acceptance,
-			"commit_sha":    result.CommitSHA,
-			"action":        action,
-			"trace_id":      observe.TraceID(r.Context()),
+			"task_path":  result.Artifact.Path,
+			"status":     result.Artifact.Status,
+			"acceptance": result.Artifact.Acceptance,
+			"commit_sha": result.CommitSHA,
+			"trace_id":   observe.TraceID(r.Context()),
 		})
 		return
 	}
@@ -94,15 +92,21 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{
-			"artifact_path": result.Artifact.Path,
-			"artifact_id":   result.Artifact.ID,
-			"status":        result.Artifact.Status,
-			"acceptance":    result.Artifact.Acceptance,
-			"commit_sha":    result.CommitSHA,
-			"action":        action,
-			"trace_id":      observe.TraceID(r.Context()),
+			"task_path":  result.Artifact.Path,
+			"status":     result.Artifact.Status,
+			"acceptance": result.Artifact.Acceptance,
+			"commit_sha": result.CommitSHA,
+			"trace_id":   observe.TraceID(r.Context()),
 		})
 		return
+	}
+
+	// For supersede, parse successor_path from the body.
+	if action == "supersede" {
+		var req struct {
+			SuccessorPath string `json:"successor_path"`
+		}
+		_ = decodeJSON(r, &req) // successor_path is optional per spec
 	}
 
 	// Other actions (cancel, abandon, supersede) — status-only transition.
@@ -140,12 +144,10 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"artifact_path": result.Artifact.Path,
-		"artifact_id":   result.Artifact.ID,
-		"status":        result.Artifact.Status,
-		"commit_sha":    result.CommitSHA,
-		"action":        action,
-		"trace_id":      observe.TraceID(r.Context()),
+		"task_path":  result.Artifact.Path,
+		"status":     result.Artifact.Status,
+		"commit_sha": result.CommitSHA,
+		"trace_id":   observe.TraceID(r.Context()),
 	})
 }
 
