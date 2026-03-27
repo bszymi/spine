@@ -415,10 +415,11 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"execution_id": exec.ExecutionID,
-		"step_id":      exec.StepID,
-		"actor_id":     exec.ActorID,
-		"status":       exec.Status,
+		"assignment_id": exec.ExecutionID,
+		"run_id":        runID,
+		"step_id":       exec.StepID,
+		"actor_id":      exec.ActorID,
+		"status":        "active",
 	})
 }
 
