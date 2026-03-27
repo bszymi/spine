@@ -147,10 +147,22 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"run":   run,
-		"steps": steps,
-	})
+	resp := map[string]any{
+		"run_id":          run.RunID,
+		"task_path":       run.TaskPath,
+		"workflow_id":     run.WorkflowID,
+		"status":          run.Status,
+		"current_step_id": run.CurrentStepID,
+		"trace_id":        run.TraceID,
+		"step_executions": steps,
+	}
+	if run.StartedAt != nil {
+		resp["started_at"] = run.StartedAt
+	}
+	if run.CompletedAt != nil {
+		resp["completed_at"] = run.CompletedAt
+	}
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {

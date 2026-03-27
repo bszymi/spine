@@ -24,25 +24,22 @@ func InspectRun(ctx context.Context, client *Client, runID string, format Output
 		return PrintJSON(result)
 	}
 
-	// Rich table display.
-	run, _ := result["run"].(map[string]any)
-	if run != nil {
-		fmt.Printf("Run: %s\n", colorize(str(run["run_id"]), colorBold))
-		fmt.Printf("Task: %s\n", str(run["task_path"]))
-		fmt.Printf("Workflow: %s (v%s)\n", str(run["workflow_id"]), str(run["workflow_version_label"]))
-		fmt.Printf("Status: %s\n", ColorStatus(str(run["status"])))
-		fmt.Printf("Step: %s\n", str(run["current_step_id"]))
-		fmt.Printf("Trace: %s\n", str(run["trace_id"]))
-		if run["started_at"] != nil {
-			fmt.Printf("Started: %s\n", str(run["started_at"]))
-		}
-		if run["completed_at"] != nil {
-			fmt.Printf("Completed: %s\n", str(run["completed_at"]))
-		}
-		fmt.Println()
+	// Rich table display — flat response format.
+	fmt.Printf("Run: %s\n", colorize(str(result["run_id"]), colorBold))
+	fmt.Printf("Task: %s\n", str(result["task_path"]))
+	fmt.Printf("Workflow: %s (v%s)\n", str(result["workflow_id"]), str(result["workflow_version"]))
+	fmt.Printf("Status: %s\n", ColorStatus(str(result["status"])))
+	fmt.Printf("Step: %s\n", str(result["current_step_id"]))
+	fmt.Printf("Trace: %s\n", str(result["trace_id"]))
+	if result["started_at"] != nil {
+		fmt.Printf("Started: %s\n", str(result["started_at"]))
 	}
+	if result["completed_at"] != nil {
+		fmt.Printf("Completed: %s\n", str(result["completed_at"]))
+	}
+	fmt.Println()
 
-	steps, _ := result["steps"].([]any)
+	steps, _ := result["step_executions"].([]any)
 	if len(steps) > 0 {
 		fmt.Println("Step Executions:")
 		headers := []string{"EXECUTION", "STEP", "STATUS", "ATTEMPT", "OUTCOME", "ERROR"}
