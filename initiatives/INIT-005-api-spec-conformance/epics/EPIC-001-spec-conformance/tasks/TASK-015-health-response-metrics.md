@@ -2,7 +2,7 @@
 id: TASK-015
 type: Task
 title: "[Low priority] Add projection_lag_ms and active_runs to HealthResponse"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
