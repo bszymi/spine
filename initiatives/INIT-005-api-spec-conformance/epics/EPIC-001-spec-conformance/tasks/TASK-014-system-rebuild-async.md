@@ -2,7 +2,7 @@
 id: TASK-014
 type: Task
 title: "[Low priority] Fix system.rebuild to async 202 with rebuild_id"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
