@@ -2,7 +2,7 @@
 id: TASK-010
 type: Task
 title: "Fix AssignmentResponse to include assignment_id and run_id"
-status: Draft
+status: Completed
 epic: /initiatives/INIT-005-api-spec-conformance/epics/EPIC-001-spec-conformance/epic.md
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
