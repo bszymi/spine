@@ -109,13 +109,19 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusCreated, map[string]any{
-		"run_id":     runID,
-		"task_path":  req.TaskPath,
-		"status":     domain.RunStatusActive,
-		"entry_step": resolved.EntryStep,
-		"trace_id":   traceID,
-	})
+	resp := map[string]any{
+		"run_id":      runID,
+		"task_path":   req.TaskPath,
+		"workflow_id": resolved.WorkflowID,
+		"status":      domain.RunStatusActive,
+		"trace_id":    traceID,
+	}
+	if resolved.VersionLabel != "" {
+		resp["workflow_version"] = resolved.VersionLabel
+	} else if resolved.CommitSHA != "" {
+		resp["workflow_version"] = resolved.CommitSHA
+	}
+	WriteJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
