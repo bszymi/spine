@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/bszymi/spine/internal/cli"
 	"github.com/spf13/cobra"
@@ -24,19 +25,40 @@ func runCmd() *cobra.Command {
 
 func runStartCmd() *cobra.Command {
 	var taskPath string
+	var mode string
+	var contentFile string
 
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start a new workflow run",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if taskPath == "" {
-				return fmt.Errorf("--task is required")
+			body := map[string]string{}
+
+			if mode == "planning" {
+				if contentFile == "" {
+					return fmt.Errorf("--content is required when --mode is planning")
+				}
+				content, err := os.ReadFile(contentFile)
+				if err != nil {
+					return fmt.Errorf("read content file: %w", err)
+				}
+				body["mode"] = "planning"
+				body["artifact_content"] = string(content)
+				if taskPath != "" {
+					body["task_path"] = taskPath
+				}
+			} else {
+				if taskPath == "" {
+					return fmt.Errorf("--task is required")
+				}
+				body["task_path"] = taskPath
+				if mode != "" {
+					body["mode"] = mode
+				}
 			}
 
 			c := newAPIClient()
-			data, err := c.Post(context.Background(), "/api/v1/runs", map[string]string{
-				"task_path": taskPath,
-			})
+			data, err := c.Post(context.Background(), "/api/v1/runs", body)
 			if err != nil {
 				return err
 			}
@@ -45,6 +67,8 @@ func runStartCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&taskPath, "task", "", "Task path to run workflow for")
+	cmd.Flags().StringVar(&mode, "mode", "", "Run mode: standard (default) or planning")
+	cmd.Flags().StringVar(&contentFile, "content", "", "Path to file containing artifact content (required for planning mode)")
 	return cmd
 }
 
