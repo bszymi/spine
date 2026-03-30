@@ -27,13 +27,13 @@ This field allows the workflow binding resolver to distinguish between execution
 
 ## Deliverable
 
-### 1. Workflow definition struct
+### 1. Domain struct
 
-`internal/workflow/` — add `Mode string` field to the workflow definition struct (yaml tag: `mode`)
+`internal/domain/workflow.go` — add `Mode string` field (yaml tag: `mode`, json tag: `mode`) to `WorkflowDefinition`. This is where the field must live because `workflow.Parse()` unmarshals YAML directly into this domain struct. Adding it elsewhere would cause the field to be silently discarded.
 
-### 2. Parser update
+### 2. Parser default
 
-`internal/workflow/parser.go` — read the `mode` field during parsing. Default to `"execution"` if absent.
+`internal/workflow/parser.go` — after parsing, if `Mode` is empty, set it to `"execution"`. Validate that `Mode` is one of `"execution"` or `"creation"`, reject other values.
 
 ### 3. Projection update
 

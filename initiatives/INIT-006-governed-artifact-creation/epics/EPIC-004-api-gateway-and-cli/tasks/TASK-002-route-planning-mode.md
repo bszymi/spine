@@ -31,39 +31,37 @@ Currently `handleRunStart()` creates runs directly via `store.WithTx(...)` — t
 
 `internal/gateway/server.go`
 
-Define a `RunStarter` interface that the gateway can call:
+Define a `PlanningRunStarter` interface that the gateway can call for planning runs only:
 
 ```go
-type RunStarter interface {
-    StartRun(ctx context.Context, artifactPath string) (*engine.StartRunResult, error)
+type PlanningRunStarter interface {
     StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*engine.StartRunResult, error)
 }
 ```
 
-Add `runStarter RunStarter` field to `ServerConfig` and thread it into the `Server` struct.
+Add `planningRunStarter PlanningRunStarter` field to `ServerConfig` and thread it into the `Server` struct.
 
-### 2. Route planning mode through RunStarter
+### 2. Route planning mode only — leave standard path unchanged
 
 `internal/gateway/handlers_workflow.go`
 
 In `handleRunStart()`:
-- If `mode == "planning"`: call `s.runStarter.StartPlanningRun(ctx, taskPath, artifactContent)`
-- If `mode == ""` or `mode == "standard"`: call `s.runStarter.StartRun(ctx, taskPath)` — this replaces the inline `store.WithTx` transaction logic with the engine interface. The observable behavior (run created, step activated) must remain identical; only the internal code path changes.
+- If `mode == "planning"`: call `s.planningRunStarter.StartPlanningRun(ctx, taskPath, artifactContent)`
+- If `mode == ""` or `mode == "standard"`: use the existing inline `store.WithTx(...)` logic unchanged. Do NOT reroute standard runs through the engine — today's handler only persists a run and waiting step, while `engine.StartRun()` also creates branches, emits events, and activates steps. Changing the standard path would alter observable API behavior.
 - Include `mode` in the response JSON
 
-### 3. Wire orchestrator as RunStarter in server setup
+### 3. Wire orchestrator as PlanningRunStarter in server setup
 
 `cmd/spine/main.go`
 
-Pass the orchestrator (which satisfies `RunStarter`) to the gateway's `ServerConfig`.
+Pass the orchestrator (which satisfies `PlanningRunStarter`) to the gateway's `ServerConfig`.
 
 ---
 
 ## Acceptance Criteria
 
-- Gateway server has a `RunStarter` interface field
+- Gateway server has a `PlanningRunStarter` interface field
 - Planning mode requests reach `StartPlanningRun()` via the interface
-- Standard mode requests are routed through `StartRun()` via the same interface (replacing inline transaction logic)
+- Standard mode requests use the existing inline `store.WithTx(...)` path — completely unchanged
 - Response includes `mode` field
 - Handler does not parse the artifact content — delegates to engine
-- Existing standard run behavior is preserved (same result, different code path)

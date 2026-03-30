@@ -36,8 +36,6 @@ applies_to:
   - Initiative
   - Epic
   - Task
-  - Product
-  - ADR
 
 entry_step: draft
 
@@ -76,6 +74,7 @@ steps:
       limit: 2
       backoff: fixed
     timeout: "5m"
+    timeout_outcome: valid
 
   - id: review
     name: Review Artifact
@@ -93,12 +92,13 @@ steps:
         name: Needs Revision
         next_step: draft
     timeout: "72h"
+    timeout_outcome: needs_revision
 ```
 
 Key design points:
 
 - `mode: creation` — distinguishes this from execution workflows. Planning runs resolve to this workflow.
-- `applies_to` — covers all governed artifact types. Adding new types later is a one-line YAML change.
+- `applies_to` — covers Initiative, Epic, and Task. These types share the `Draft → Pending` lifecycle. Product and ADR are excluded because their status models differ (`Living Document`/`Stable` for Product, `Proposed`/`Accepted` for ADR). Type-specific creation workflows for Product and ADR can be added later.
 - **draft** step — author creates/refines the artifact and any child artifacts on the branch.
 - **validate** step — automated cross-artifact validation using the existing validation service. Checks structural integrity, parent references, schema compliance. Fails back to draft on validation errors.
 - **review** step — human reviewer verifies alignment with governance, product definition, and architecture. Approval sets status to `Pending` (ready for execution workflows).
@@ -115,3 +115,5 @@ Key design points:
 - Validate step uses automated execution mode
 - Review step requires human actor
 - Approved outcome sets artifact status to `Pending`
+- All steps with `timeout` also have `timeout_outcome`
+- Product and ADR are excluded (incompatible status models) — documented as future enhancement

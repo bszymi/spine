@@ -20,7 +20,7 @@ links:
 
 Create the generic artifact creation workflow and extend the workflow definition format with a `mode` field to distinguish creation workflows from execution workflows.
 
-One workflow (`artifact-creation.yaml`) governs creation of all artifact types — Initiative, Epic, Task, Product, ADR. This avoids per-type creation workflows and keeps the creation lifecycle consistent across artifact types.
+One workflow (`artifact-creation.yaml`) governs creation of artifact types that share the `Draft → Pending` lifecycle — Initiative, Epic, and Task. Product and ADR are excluded because their status models differ; type-specific creation workflows for those can be added later.
 
 ---
 
@@ -44,7 +44,7 @@ One workflow (`artifact-creation.yaml`) governs creation of all artifact types �
 ## 3. Success Criteria
 
 1. `artifact-creation.yaml` parses and validates correctly
-2. Workflow applies to all governed artifact types (Initiative, Epic, Task, Product, ADR)
+2. Workflow applies to Initiative, Epic, and Task (types sharing the Draft → Pending lifecycle)
 3. The `mode` field is recognized by the workflow parser
 4. Planning runs resolve to the creation workflow, standard runs resolve to execution workflows
 5. No binding conflict between `artifact-creation.yaml` and existing type-specific execution workflows

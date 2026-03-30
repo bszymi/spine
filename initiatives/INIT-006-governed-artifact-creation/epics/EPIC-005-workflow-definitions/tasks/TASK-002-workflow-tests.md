@@ -29,7 +29,7 @@ Tests in `workflows/reference_workflows_test.go` and `internal/workflow/`:
 
 - `artifact-creation.yaml` parses without errors
 - `mode` field is read as `"creation"`
-- `applies_to` includes all expected types (Initiative, Epic, Task, Product, ADR)
+- `applies_to` includes expected types (Initiative, Epic, Task)
 - Step IDs, outcomes, and transitions are valid
 - No binding conflict: `TestNoBindingConflicts` passes — the `mode` field disambiguates `artifact-creation` (mode: creation) from `task-default` (mode: execution) for the `Task` type
 - Existing execution workflows default to `mode: execution` when the field is absent
