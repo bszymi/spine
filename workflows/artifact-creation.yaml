@@ -1,7 +1,7 @@
 id: artifact-creation
 name: Artifact Creation
 version: "1.0"
-status: Active
+status: Draft
 description: >
   Generic workflow for governed artifact creation through planning runs.
   Covers Initiative, Epic, and Task types that share the Draft → Pending
@@ -42,8 +42,6 @@ steps:
       mode: automated_only
       eligible_actor_types:
         - automated_system
-    preconditions:
-      - type: cross_artifact_valid
     outcomes:
       - id: valid
         name: Validation Passed
