@@ -1,5 +1,5 @@
 ---
-id: ADR-0006
+id: ADR-006
 type: ADR
 title: "Planning Runs for Governed Artifact Creation"
 status: Accepted
@@ -7,7 +7,7 @@ date: 2026-03-30
 decision_makers: Spine Architecture
 ---
 
-# ADR-0006 — Planning Runs for Governed Artifact Creation
+# ADR-006 — Planning Runs for Governed Artifact Creation
 
 ---
 

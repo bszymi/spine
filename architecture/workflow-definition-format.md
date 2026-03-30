@@ -216,7 +216,7 @@ The detailed execution semantics for divergence and convergence are defined in t
 
 ### 3.4 Mode Field
 
-Workflow definitions include an optional `mode` field (per [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md)) that distinguishes between execution and creation workflows:
+Workflow definitions include an optional `mode` field (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) that distinguishes between execution and creation workflows:
 
 ```yaml
 mode: <enum>              # Optional: execution (default) or creation
@@ -450,7 +450,7 @@ new execution attempt for that step while preserving the Run history.
 
 - [Domain Model](/architecture/domain-model.md) — Workflow Definition (§3.2), Step Definition (§3.3)
 - [ADR-001](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md) — Workflow definitions stored in Git, durable outcomes only
-- [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md) — Planning runs and workflow `mode` field
+- [ADR-006](/architecture/adr/ADR-006-planning-runs.md) — Planning runs and workflow `mode` field
 - [Data Model](/architecture/data-model.md) — Runtime Store schema for Runs and step executions
 - [System Components](/architecture/components.md) — Workflow Engine (§4.3)
 - [Task Lifecycle](/governance/task-lifecycle.md) — Governed states vs runtime states

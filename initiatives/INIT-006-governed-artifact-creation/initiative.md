@@ -86,7 +86,7 @@ This initiative is successful when:
 
 | Epic | Title | Purpose |
 |------|-------|---------|
-| EPIC-001 | Architecture & ADR | Design the planning run model, write ADR-0006 |
+| EPIC-001 | Architecture & ADR | Design the planning run model, write ADR-006 |
 | EPIC-002 | Domain Model & Storage | `RunMode` type, migration, store layer |
 | EPIC-003 | Engine: Planning Run Support | `StartPlanningRun()`, branch-aware preconditions |
 | EPIC-004 | API, Gateway & CLI | API endpoint, write_context relaxation, CLI flags |
@@ -110,7 +110,7 @@ INIT-006 may be marked complete when:
 - All six epics are complete
 - Planning runs work end-to-end through the API
 - Scenario tests validate golden path, rejection, and cancellation
-- ADR-0006 is accepted
+- ADR-006 is accepted
 - Architecture docs are updated
 
 ---
@@ -119,4 +119,4 @@ INIT-006 may be marked complete when:
 
 - Charter: `/governance/charter.md`
 - Constitution: `/governance/constitution.md`
-- ADR: `/architecture/adr/ADR-0006-planning-runs.md`
+- ADR: `/architecture/adr/ADR-006-planning-runs.md`

@@ -18,7 +18,7 @@ links:
 
 ## 1. Purpose
 
-Design the planning run model and capture the architectural decision in ADR-0006.
+Design the planning run model and capture the architectural decision in ADR-006.
 
 This epic must complete before implementation begins to ensure the design is reviewed and consistent with Spine's existing architecture.
 
@@ -28,7 +28,7 @@ This epic must complete before implementation begins to ensure the design is rev
 
 ### In Scope
 
-- ADR-0006: Planning Runs decision record
+- ADR-006: Planning Runs decision record
 - Updates to `api-operations.md` (authoritative vs proposed writes section)
 - Updates to `engine-state-machine.md` (run mode field)
 - Updates to `git-integration.md` (planning branch semantics)
@@ -43,7 +43,7 @@ This epic must complete before implementation begins to ensure the design is rev
 
 ## 3. Success Criteria
 
-1. ADR-0006 is written and accepted
+1. ADR-006 is written and accepted
 2. Architecture docs are updated and internally consistent
 3. Design is reviewable by a new contributor
 
@@ -51,7 +51,7 @@ This epic must complete before implementation begins to ensure the design is rev
 
 ## 4. Primary Outputs
 
-- `/architecture/adr/ADR-0006-planning-runs.md`
+- `/architecture/adr/ADR-006-planning-runs.md`
 - Updated architecture documents
 
 ---

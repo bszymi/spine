@@ -33,7 +33,7 @@ The [Domain Model](/architecture/domain-model.md) §5 provides informal lifecycl
 
 ### 2.1.1 Run Mode
 
-Runs carry a `mode` field (per [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md)) that determines their purpose:
+Runs carry a `mode` field (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) that determines their purpose:
 
 | Mode | Description |
 |------|-------------|

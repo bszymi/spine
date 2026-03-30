@@ -280,7 +280,7 @@ Task branches represent *proposed state*, not governed state.
 
 ### 6.1.1 Planning Run Branches
 
-Planning runs (per [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md)) use the same branch naming as standard runs (`spine/run/{runID}`) but have distinct branch semantics:
+Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) use the same branch naming as standard runs (`spine/run/{runID}`) but have distinct branch semantics:
 
 **Planning run branch lifecycle:**
 

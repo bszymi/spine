@@ -64,7 +64,7 @@ Write context is expressed explicitly in artifact write requests via `write_cont
 
 **Planning run writes:**
 
-Planning runs (per [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md)) produce proposed writes that include artifact creation on a branch. The `write_context` for planning runs accepts `run_id` without `task_path` validation, since the run owns a constrained creation scope on the branch for multi-artifact writes. Planning run writes are restricted to creating new artifacts only — they may not update, delete, or mutate pre-existing artifacts on the authoritative branch.
+Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) produce proposed writes that include artifact creation on a branch. The `write_context` for planning runs accepts `run_id` without `task_path` validation, since the run owns a constrained creation scope on the branch for multi-artifact writes. Planning run writes are restricted to creating new artifacts only — they may not update, delete, or mutate pre-existing artifacts on the authoritative branch.
 
 ---
 
@@ -98,7 +98,7 @@ Workflow operations control Run execution and task governance decisions.
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
 | `run.start` | Creates a Run, resolves workflow binding, pins version | When a task is ready for execution |
-| `run.start_planning` | Creates a planning Run for artifact creation (per [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md)) | When a new artifact needs governed creation |
+| `run.start_planning` | Creates a planning Run for artifact creation (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) | When a new artifact needs governed creation |
 | `run.status` | Queries Run state and step history | When monitoring execution progress |
 | `run.cancel` | Cancels an active Run | When execution should be abandoned (operator decision) |
 
