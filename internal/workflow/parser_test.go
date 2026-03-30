@@ -474,3 +474,82 @@ func findSubstring(s, sub string) bool {
 	}
 	return false
 }
+
+// ── Mode field tests ──
+
+func TestParseModeField_DefaultsToExecution(t *testing.T) {
+	content := []byte(`id: test
+name: Test
+version: "1.0"
+status: Active
+description: Test workflow
+applies_to: [Task]
+entry_step: start
+steps:
+  - id: start
+    name: Start
+    type: manual
+    outcomes:
+      - id: done
+        name: Done
+        next_step: end
+`)
+	wf, err := workflow.Parse("test.yaml", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wf.Mode != "execution" {
+		t.Errorf("expected mode 'execution', got %q", wf.Mode)
+	}
+}
+
+func TestParseModeField_CreationMode(t *testing.T) {
+	content := []byte(`id: test-creation
+name: Test Creation
+version: "1.0"
+status: Draft
+description: Test creation workflow
+mode: creation
+applies_to: [Initiative]
+entry_step: draft
+steps:
+  - id: draft
+    name: Draft
+    type: manual
+    outcomes:
+      - id: done
+        name: Done
+        next_step: end
+`)
+	wf, err := workflow.Parse("test.yaml", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wf.Mode != "creation" {
+		t.Errorf("expected mode 'creation', got %q", wf.Mode)
+	}
+}
+
+func TestParseModeField_InvalidMode(t *testing.T) {
+	content := []byte(`id: test-bad
+name: Test Bad
+version: "1.0"
+status: Active
+description: Bad mode
+mode: invalid
+applies_to: [Task]
+entry_step: start
+steps:
+  - id: start
+    name: Start
+    type: manual
+    outcomes:
+      - id: done
+        name: Done
+        next_step: end
+`)
+	_, err := workflow.Parse("test.yaml", content)
+	if err == nil {
+		t.Fatal("expected error for invalid mode")
+	}
+}

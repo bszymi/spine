@@ -74,6 +74,7 @@ type WorkflowDefinition struct {
 	DivergencePoints  []DivergenceDefinition  `json:"divergence_points,omitempty" yaml:"divergence_points,omitempty"`
 	ConvergencePoints []ConvergenceDefinition `json:"convergence_points,omitempty" yaml:"convergence_points,omitempty"`
 	Timeout           string                  `json:"timeout,omitempty" yaml:"timeout,omitempty"` // max run duration (e.g. "24h")
+	Mode              string                  `json:"mode,omitempty" yaml:"mode,omitempty"`       // "execution" (default) or "creation"
 	Path              string                  `json:"path" yaml:"-"`                              // set by parser, not from YAML
 	CommitSHA         string                  `json:"commit_sha" yaml:"-"`                        // set at binding time
 }
