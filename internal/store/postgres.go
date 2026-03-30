@@ -66,11 +66,11 @@ func (s *PostgresStore) WithTx(ctx context.Context, fn func(tx Tx) error) error 
 
 func (s *PostgresStore) CreateRun(ctx context.Context, run *domain.Run) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO runtime.runs (run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		INSERT INTO runtime.runs (run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 		run.RunID, run.TaskPath, run.WorkflowPath, run.WorkflowID, run.WorkflowVersion,
 		run.WorkflowVersionLabel, run.Status, nilIfEmpty(run.CurrentStepID), nilIfEmpty(run.BranchName), run.TraceID,
-		run.TimeoutAt, run.StartedAt, run.CompletedAt, run.CreatedAt,
+		run.TimeoutAt, run.StartedAt, run.CompletedAt, run.CreatedAt, modeOrDefault(run.Mode),
 	)
 	return err
 }
@@ -79,12 +79,12 @@ func (s *PostgresStore) GetRun(ctx context.Context, runID string) (*domain.Run, 
 	var run domain.Run
 	var currentStepID, branchName *string
 	err := s.pool.QueryRow(ctx, `
-		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at
+		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode
 		FROM runtime.runs WHERE run_id = $1`, runID,
 	).Scan(
 		&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
 		&run.WorkflowVersionLabel, &run.Status, &currentStepID, &branchName, &run.TraceID,
-		&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt,
+		&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt, &run.Mode,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -629,7 +629,7 @@ func (s *PostgresStore) ListExpiredAssignments(ctx context.Context, before time.
 
 func (s *PostgresStore) ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, started_at, completed_at, created_at
+		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, started_at, completed_at, created_at, mode
 		FROM runtime.runs WHERE status = $1 ORDER BY created_at`, status,
 	)
 	if err != nil {
@@ -644,7 +644,7 @@ func (s *PostgresStore) ListRunsByStatus(ctx context.Context, status domain.RunS
 		if err := rows.Scan(
 			&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
 			&run.WorkflowVersionLabel, &run.Status, &currentStepID, &bn, &run.TraceID,
-			&run.StartedAt, &run.CompletedAt, &run.CreatedAt,
+			&run.StartedAt, &run.CompletedAt, &run.CreatedAt, &run.Mode,
 		); err != nil {
 			return nil, err
 		}
@@ -1295,6 +1295,13 @@ func (s *PostgresStore) HasOpenThreads(ctx context.Context, anchorType domain.An
 }
 
 // ── Helpers ──
+
+func modeOrDefault(m domain.RunMode) string {
+	if m == "" {
+		return string(domain.RunModeStandard)
+	}
+	return string(m)
+}
 
 func nilIfEmpty(s string) *string {
 	if s == "" {
