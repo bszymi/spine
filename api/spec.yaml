@@ -188,6 +188,9 @@ paths:
           application/json:
             schema:
               type: object
+              description: |
+                Conditional requirements: task_path is required when mode is standard or omitted.
+                artifact_content is required when mode is planning.
               properties:
                 task_path:
                   type: string
