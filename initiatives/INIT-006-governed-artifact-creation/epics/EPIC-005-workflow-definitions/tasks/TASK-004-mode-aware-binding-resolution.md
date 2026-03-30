@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Add mode-aware workflow binding resolution
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-005-workflow-definitions/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

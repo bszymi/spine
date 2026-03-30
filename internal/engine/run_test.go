@@ -31,6 +31,10 @@ func (m *mockWorkflowResolver) ResolveWorkflow(_ context.Context, _, _ string) (
 	return m.result, m.err
 }
 
+func (m *mockWorkflowResolver) ResolveWorkflowForMode(_ context.Context, _, _, _ string) (*workflow.BindingResult, error) {
+	return m.result, m.err
+}
+
 type mockRunStore struct {
 	stubRunStore // embed for default no-op implementations
 

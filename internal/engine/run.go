@@ -176,8 +176,8 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	}
 
 	// Resolve the governing workflow for this artifact type.
-	// TODO: EPIC-005/TASK-004 will add mode-aware binding resolution (mode: creation).
-	binding, err := o.workflows.ResolveWorkflow(ctx, string(parsed.Type), "")
+	// Resolve creation workflow for planning runs per ADR-006 §4.
+	binding, err := o.workflows.ResolveWorkflowForMode(ctx, string(parsed.Type), "", "creation")
 	if err != nil {
 		return nil, fmt.Errorf("resolve workflow: %w", err)
 	}

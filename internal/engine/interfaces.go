@@ -13,6 +13,7 @@ import (
 // WorkflowResolver resolves the governing workflow for a given artifact type.
 type WorkflowResolver interface {
 	ResolveWorkflow(ctx context.Context, artifactType, workType string) (*workflow.BindingResult, error)
+	ResolveWorkflowForMode(ctx context.Context, artifactType, workType, mode string) (*workflow.BindingResult, error)
 }
 
 // RunStore provides run and step execution persistence required by the orchestrator.

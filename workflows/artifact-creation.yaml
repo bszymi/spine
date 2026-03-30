@@ -1,7 +1,7 @@
 id: artifact-creation
 name: Artifact Creation
 version: "1.0"
-status: Draft
+status: Active
 description: >
   Generic workflow for governed artifact creation through planning runs.
   Covers Initiative, Epic, and Task types that share the Draft → Pending

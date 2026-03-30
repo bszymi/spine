@@ -22,3 +22,7 @@ func NewBindingResolver(provider workflow.WorkflowProvider, gitClient git.GitCli
 func (r *BindingResolver) ResolveWorkflow(ctx context.Context, artifactType, workType string) (*workflow.BindingResult, error) {
 	return workflow.ResolveBinding(ctx, r.provider, r.gitClient, artifactType, workType)
 }
+
+func (r *BindingResolver) ResolveWorkflowForMode(ctx context.Context, artifactType, workType, mode string) (*workflow.BindingResult, error) {
+	return workflow.ResolveBindingWithMode(ctx, r.provider, r.gitClient, artifactType, workType, mode)
+}
