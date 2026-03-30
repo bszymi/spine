@@ -18,9 +18,9 @@ links:
 
 ## 1. Purpose
 
-Create lifecycle workflows that govern artifact creation through planning runs.
+Create the generic artifact creation workflow and extend the workflow definition format with a `mode` field to distinguish creation workflows from execution workflows.
 
-The first workflow is `initiative-lifecycle.yaml` which provides draft and review steps for initiative creation. This epic can run in parallel with implementation epics since workflows are YAML definitions with no code dependencies.
+One workflow (`artifact-creation.yaml`) governs creation of all artifact types — Initiative, Epic, Task, Product, ADR. This avoids per-type creation workflows and keeps the creation lifecycle consistent across artifact types.
 
 ---
 
@@ -28,32 +28,39 @@ The first workflow is `initiative-lifecycle.yaml` which provides draft and revie
 
 ### In Scope
 
-- `initiative-lifecycle.yaml` — draft → review → merge workflow for initiatives
+- `artifact-creation.yaml` — generic workflow: draft → validate → review → merge
+- Workflow `mode` field (`execution` / `creation`) added to the workflow definition format
+- Workflow parser updated to read the `mode` field
+- Workflow binding resolution updated for planning runs (filter by `mode: creation`)
 - Workflow parse and validation tests
 
 ### Out of Scope
 
-- Epic or task creation workflows (future — can be added later following the same pattern)
-- Code changes
+- Changes to existing execution workflows (task-default, epic-lifecycle, adr)
+- AI-assisted validation (future enhancement)
 
 ---
 
 ## 3. Success Criteria
 
-1. `initiative-lifecycle.yaml` parses and validates correctly
-2. Workflow applies to `Initiative` artifact type
-3. Steps follow Spine workflow conventions (preconditions, outcomes, timeouts)
-4. Added to existing workflow reference test suite
+1. `artifact-creation.yaml` parses and validates correctly
+2. Workflow applies to all governed artifact types (Initiative, Epic, Task, Product, ADR)
+3. The `mode` field is recognized by the workflow parser
+4. Planning runs resolve to the creation workflow, standard runs resolve to execution workflows
+5. No binding conflict between `artifact-creation.yaml` and existing type-specific execution workflows
+6. Added to existing workflow reference test suite
 
 ---
 
 ## 4. Primary Outputs
 
-- `workflows/initiative-lifecycle.yaml`
+- `workflows/artifact-creation.yaml`
+- Updated workflow parser (`internal/workflow/`)
+- Updated workflow binding resolution
 
 ---
 
-## 5. Related Artefacts
+## 5. Related Artifacts
 
 - `workflows/epic-lifecycle.yaml` — pattern reference
 - `workflows/adr.yaml` — pattern reference

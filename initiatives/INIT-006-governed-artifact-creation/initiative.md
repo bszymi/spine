@@ -37,7 +37,9 @@ This initiative introduces **planning runs** — a run mode where the artifact i
 - `StartPlanningRun()` engine method that creates artifacts on a branch
 - Relaxed `write_context` validation for planning runs (multiple artifacts per branch)
 - Branch-aware precondition evaluation for planning runs
-- `initiative-lifecycle.yaml` workflow definition
+- Generic `artifact-creation.yaml` workflow (applies to Initiative, Epic, Task, Product, ADR)
+- Workflow `mode` field (`execution` / `creation`) for binding resolution
+- Automated validation step in the creation workflow
 - Database migration for `mode` column on runs
 - API and CLI support for starting planning runs
 - ADR documenting the design decision
@@ -88,7 +90,7 @@ This initiative is successful when:
 | EPIC-002 | Domain Model & Storage | `RunMode` type, migration, store layer |
 | EPIC-003 | Engine: Planning Run Support | `StartPlanningRun()`, branch-aware preconditions |
 | EPIC-004 | API, Gateway & CLI | API endpoint, write_context relaxation, CLI flags |
-| EPIC-005 | Workflow Definitions | `initiative-lifecycle.yaml` |
+| EPIC-005 | Workflow Definitions | `artifact-creation.yaml`, workflow `mode` field |
 | EPIC-006 | Scenario Tests | End-to-end validation of the full lifecycle |
 
 ---

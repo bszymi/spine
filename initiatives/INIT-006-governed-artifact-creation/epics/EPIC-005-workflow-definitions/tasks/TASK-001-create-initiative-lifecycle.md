@@ -1,7 +1,7 @@
 ---
 id: TASK-001
 type: Task
-title: Create initiative-lifecycle.yaml
+title: Create artifact-creation.yaml workflow
 status: Draft
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-005-workflow-definitions/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
@@ -13,32 +13,105 @@ links:
     target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-005-workflow-definitions/epic.md
 ---
 
-# TASK-001 — Create initiative-lifecycle.yaml
+# TASK-001 — Create artifact-creation.yaml Workflow
 
 ---
 
 ## Purpose
 
-Define the workflow that governs initiative creation through planning runs.
+Define the generic workflow that governs artifact creation through planning runs. One workflow handles creation of all governed artifact types — no per-type creation workflows needed.
 
 ---
 
 ## Deliverable
 
-`workflows/initiative-lifecycle.yaml`
+`workflows/artifact-creation.yaml`
 
 Workflow structure:
-- `applies_to: [Initiative]`
-- `entry_step: draft`
-- Steps:
-  - **draft** (manual, hybrid) — actor drafts the initiative and child artifacts on the branch. Precondition: artifact status is Draft. Outcome: `ready_for_review` → review.
-  - **review** (review, human_only) — reviewer evaluates the initiative plan. Outcomes: `approved` → end (commit status: In Progress), `needs_revision` → draft (commit status: Draft).
+
+```yaml
+id: artifact-creation
+mode: creation
+applies_to:
+  - Initiative
+  - Epic
+  - Task
+  - Product
+  - ADR
+
+entry_step: draft
+
+steps:
+  - id: draft
+    name: Draft Artifact
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types: [human, ai_agent]
+    preconditions:
+      - type: artifact_status
+        config:
+          status: Draft
+    required_outputs:
+      - artifact_content
+    outcomes:
+      - id: ready_for_review
+        name: Ready for Review
+        next_step: validate
+
+  - id: validate
+    name: Validate Artifact
+    type: automated
+    execution:
+      mode: automated_only
+      eligible_actor_types: [automated_system]
+    outcomes:
+      - id: valid
+        name: Validation Passed
+        next_step: review
+      - id: invalid
+        name: Validation Failed
+        next_step: draft
+    retry:
+      limit: 2
+      backoff: fixed
+    timeout: "5m"
+
+  - id: review
+    name: Review Artifact
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types: [human]
+    outcomes:
+      - id: approved
+        name: Approved
+        next_step: end
+        commit:
+          status: Pending
+      - id: needs_revision
+        name: Needs Revision
+        next_step: draft
+    timeout: "72h"
+```
+
+Key design points:
+
+- `mode: creation` — distinguishes this from execution workflows. Planning runs resolve to this workflow.
+- `applies_to` — covers all governed artifact types. Adding new types later is a one-line YAML change.
+- **draft** step — author creates/refines the artifact and any child artifacts on the branch.
+- **validate** step — automated cross-artifact validation using the existing validation service. Checks structural integrity, parent references, schema compliance. Fails back to draft on validation errors.
+- **review** step — human reviewer verifies alignment with governance, product definition, and architecture. Approval sets status to `Pending` (ready for execution workflows).
+- On approval, the branch merges to main via existing `MergeRunBranch()` infrastructure.
 
 ---
 
 ## Acceptance Criteria
 
 - Workflow follows the format in `architecture/workflow-definition-format.md`
+- Workflow includes the `mode: creation` field
 - Workflow parses correctly by Spine's workflow parser
 - Steps have appropriate timeouts
-- Follows the patterns of `epic-lifecycle.yaml` and `adr.yaml`
+- Validate step uses automated execution mode
+- Review step requires human actor
+- Approved outcome sets artifact status to `Pending`

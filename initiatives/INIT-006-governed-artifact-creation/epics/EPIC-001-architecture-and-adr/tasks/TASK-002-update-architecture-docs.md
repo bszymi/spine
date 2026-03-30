@@ -30,7 +30,7 @@ Updates to the following files:
 - `architecture/api-operations.md` — add planning runs to the authoritative vs proposed writes section (§2.3). Document that planning runs produce proposed writes that include artifact creation. Explicitly document the relaxed `write_context` behavior: planning runs accept `run_id` without `task_path` validation, since the run owns the entire branch for multi-artifact writes.
 - `architecture/engine-state-machine.md` — add note that runs have a `mode` field. Planning runs follow the same state machine but artifacts are branch-local until merge.
 - `architecture/git-integration.md` — add section on planning run branch semantics: branch contains the artifact creation commit as its first commit, followed by child artifact writes.
-- `architecture/workflow-definition-format.md` — document `initiative-lifecycle` as a reference workflow. Mention that workflows can govern artifact creation via planning runs.
+- `architecture/workflow-definition-format.md` — document the new `mode` field (`execution` / `creation`) on workflow definitions. Document `artifact-creation.yaml` as a reference creation workflow. Explain that planning runs resolve to `mode: creation` workflows while standard runs resolve to `mode: execution`.
 
 ---
 

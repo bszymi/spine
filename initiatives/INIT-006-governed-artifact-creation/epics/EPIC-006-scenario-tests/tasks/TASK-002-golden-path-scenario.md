@@ -28,11 +28,12 @@ Validate the complete planning run lifecycle from start to merge.
 `internal/scenariotest/scenarios/planning_run_test.go`
 
 Scenario steps:
-1. Seed `initiative-lifecycle.yaml` workflow to repo
+1. Seed `artifact-creation.yaml` workflow to repo
 2. Sync projections
 3. Start planning run with initiative content (Draft status)
 4. Submit "draft" step with `ready_for_review` outcome
-5. Submit "review" step with `approved` outcome
+5. Assert validate step runs automatically (automated cross-artifact validation)
+6. Submit "review" step with `approved` outcome
 6. Assert run status is `committing` (the commit outcome triggers merge, not immediate completion)
 7. Execute `MergeRunBranch()` (or trigger scheduler merge step)
 8. Assert run status is `completed`

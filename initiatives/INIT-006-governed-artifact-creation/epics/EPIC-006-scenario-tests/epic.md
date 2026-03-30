@@ -70,4 +70,4 @@ These tests exercise the complete stack — Git, database, engine, projections �
 ## 5. Dependencies
 
 - EPIC-002, EPIC-003, EPIC-004 — full stack must be implemented
-- EPIC-005 — initiative-lifecycle workflow must exist
+- EPIC-005 — artifact-creation workflow must exist

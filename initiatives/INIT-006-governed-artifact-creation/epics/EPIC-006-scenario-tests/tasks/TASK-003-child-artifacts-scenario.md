@@ -28,7 +28,7 @@ Validate that multiple artifacts (initiative + epics + tasks) created on a plann
 `internal/scenariotest/scenarios/planning_run_test.go`
 
 Scenario steps:
-1. Seed initiative-lifecycle workflow
+1. Seed artifact-creation workflow
 2. Sync projections
 3. Start planning run with initiative content
 4. Create 2 epic artifacts on the run branch via write_context
