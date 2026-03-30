@@ -1,0 +1,79 @@
+id: artifact-creation
+name: Artifact Creation
+version: "1.0"
+status: Active
+description: >
+  Generic workflow for governed artifact creation through planning runs.
+  Covers Initiative, Epic, and Task types that share the Draft → Pending
+  lifecycle. Product and ADR are excluded (incompatible status models).
+mode: creation
+
+applies_to:
+  - Initiative
+  - Epic
+  - Task
+
+entry_step: draft
+
+steps:
+  - id: draft
+    name: Draft Artifact
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+    preconditions:
+      - type: artifact_status
+        config:
+          status: Draft
+    required_outputs:
+      - artifact_content
+    outcomes:
+      - id: ready_for_review
+        name: Ready for Review
+        next_step: validate
+
+  - id: validate
+    name: Validate Artifact
+    type: automated
+    execution:
+      mode: automated_only
+      eligible_actor_types:
+        - automated_system
+    preconditions:
+      - type: cross_artifact_valid
+    outcomes:
+      - id: valid
+        name: Validation Passed
+        next_step: review
+      - id: invalid
+        name: Validation Failed
+        next_step: draft
+    retry:
+      limit: 2
+      backoff: fixed
+    timeout: "5m"
+    timeout_outcome: valid
+
+  - id: review
+    name: Review Artifact
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types:
+        - human
+    required_inputs:
+      - artifact_content
+    outcomes:
+      - id: approved
+        name: Approved
+        next_step: end
+        commit:
+          status: Pending
+      - id: needs_revision
+        name: Needs Revision
+        next_step: draft
+    timeout: "72h"
+    timeout_outcome: needs_revision
