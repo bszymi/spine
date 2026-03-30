@@ -67,7 +67,7 @@ func runStartCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&taskPath, "task", "", "Task path to run workflow for")
+	cmd.Flags().StringVar(&taskPath, "task", "", "Artifact path (required for both standard and planning modes)")
 	cmd.Flags().StringVar(&mode, "mode", "", "Run mode: standard (default) or planning")
 	cmd.Flags().StringVar(&contentFile, "content", "", "Path to file containing artifact content (required for planning mode)")
 	return cmd

@@ -2,7 +2,7 @@
 id: TASK-008
 type: Task
 title: Fix CLI documentation for planning run flags
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-004-api-gateway-and-cli/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation
