@@ -110,10 +110,91 @@ func TestEpicLifecycleWorkflow_Parses(t *testing.T) {
 	// task-default and task-spike apply to Task, adr applies to ADR.
 }
 
+func TestArtifactCreationWorkflow_Parses(t *testing.T) {
+	content, err := os.ReadFile("artifact-creation.yaml")
+	if err != nil {
+		t.Fatalf("failed to read workflow: %v", err)
+	}
+
+	wf, err := workflow.Parse("workflows/artifact-creation.yaml", content)
+	if err != nil {
+		t.Fatalf("failed to parse workflow: %v", err)
+	}
+
+	if wf.ID != "artifact-creation" {
+		t.Errorf("expected id artifact-creation, got %s", wf.ID)
+	}
+	if wf.Status != domain.WorkflowStatusDraft {
+		t.Errorf("expected Draft (until mode-aware binding), got %s", wf.Status)
+	}
+	if len(wf.AppliesTo) != 3 {
+		t.Fatalf("expected 3 applies_to types, got %d", len(wf.AppliesTo))
+	}
+	expectedTypes := map[string]bool{"Initiative": true, "Epic": true, "Task": true}
+	for _, at := range wf.AppliesTo {
+		if !expectedTypes[at] {
+			t.Errorf("unexpected applies_to type: %s", at)
+		}
+	}
+	if wf.EntryStep != "draft" {
+		t.Errorf("expected entry_step draft, got %s", wf.EntryStep)
+	}
+	if len(wf.Steps) != 3 {
+		t.Fatalf("expected 3 steps, got %d", len(wf.Steps))
+	}
+
+	// Verify step IDs and transitions.
+	draft := wf.Steps[0]
+	if draft.ID != "draft" {
+		t.Errorf("expected step 0 id draft, got %s", draft.ID)
+	}
+	if draft.Outcomes[0].NextStep != "validate" {
+		t.Errorf("expected draft → validate, got %s", draft.Outcomes[0].NextStep)
+	}
+
+	validate := wf.Steps[1]
+	if validate.ID != "validate" {
+		t.Errorf("expected step 1 id validate, got %s", validate.ID)
+	}
+	if validate.Type != domain.StepTypeAutomated {
+		t.Errorf("expected validate type automated, got %s", validate.Type)
+	}
+	if len(validate.Outcomes) != 2 {
+		t.Fatalf("expected 2 validate outcomes, got %d", len(validate.Outcomes))
+	}
+	if validate.Outcomes[0].NextStep != "review" {
+		t.Errorf("expected valid → review, got %s", validate.Outcomes[0].NextStep)
+	}
+	if validate.Outcomes[1].NextStep != "draft" {
+		t.Errorf("expected invalid → draft, got %s", validate.Outcomes[1].NextStep)
+	}
+
+	review := wf.Steps[2]
+	if review.ID != "review" {
+		t.Errorf("expected step 2 id review, got %s", review.ID)
+	}
+	if review.Type != domain.StepTypeReview {
+		t.Errorf("expected review type review, got %s", review.Type)
+	}
+	if review.Outcomes[0].ID != "approved" {
+		t.Errorf("expected first outcome approved, got %s", review.Outcomes[0].ID)
+	}
+	if review.Outcomes[0].NextStep != "end" {
+		t.Errorf("expected approved → end, got %s", review.Outcomes[0].NextStep)
+	}
+	if review.Outcomes[0].Commit["status"] != "Pending" {
+		t.Errorf("expected approved commit status Pending, got %s", review.Outcomes[0].Commit["status"])
+	}
+	if review.Outcomes[1].NextStep != "draft" {
+		t.Errorf("expected needs_revision → draft, got %s", review.Outcomes[1].NextStep)
+	}
+}
+
 func TestNoBindingConflicts(t *testing.T) {
 	// Load all workflows and verify no two Active workflows share
 	// the same applies_to type (which would cause ambiguous binding).
-	files := []string{"task-default.yaml", "task-spike.yaml", "adr.yaml", "epic-lifecycle.yaml"}
+	// artifact-creation.yaml is Draft, so it should not cause conflicts.
+	files := []string{"task-default.yaml", "task-spike.yaml", "adr.yaml", "epic-lifecycle.yaml", "artifact-creation.yaml"}
 
 	typeMap := make(map[string]string) // artifact type → workflow ID
 	for _, f := range files {
@@ -145,5 +226,10 @@ func TestNoBindingConflicts(t *testing.T) {
 	}
 	if id, ok := typeMap["Epic"]; !ok || id != "epic-lifecycle" {
 		t.Errorf("expected Epic → epic-lifecycle")
+	}
+
+	// artifact-creation is Draft, so Initiative should NOT appear.
+	if _, ok := typeMap["Initiative"]; ok {
+		t.Error("expected Initiative not in active bindings (artifact-creation is Draft)")
 	}
 }
