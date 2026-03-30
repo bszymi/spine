@@ -232,7 +232,7 @@ The workflow resolver uses the mode to select the correct workflow binding:
 - `StartRun()` resolves to workflows with `mode: execution` (or absent mode)
 - `StartPlanningRun()` resolves to workflows with `mode: creation`
 
-A single `artifact-creation.yaml` workflow with `mode: creation` serves as the reference creation workflow for all artifact types. Its step sequence is: draft, validate, review, merge — where the validate step runs automated cross-artifact validation before human review.
+A single `artifact-creation.yaml` workflow with `mode: creation` serves as the reference creation workflow for artifact types that share the Draft → Pending lifecycle (Initiative, Epic, and Task). Product and ADR have different status models and require type-specific creation workflows if planning run support is added for them later. The step sequence is: draft, validate, review, merge — where the validate step runs automated cross-artifact validation before human review.
 
 ### 3.5 Applies-To Clause
 

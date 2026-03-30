@@ -54,7 +54,7 @@ The method:
 
 ### 3. Generic `artifact-creation.yaml` Workflow
 
-A single `artifact-creation.yaml` workflow definition governs creation of all artifact types. The workflow applies to all creatable artifact types (Initiative, Epic, Task, Product, ADR) and defines the following steps:
+A single `artifact-creation.yaml` workflow definition governs creation of artifact types that share the Draft → Pending lifecycle: Initiative, Epic, and Task. Product and ADR have different status models and require type-specific creation workflows if planning run support is added for them later. The workflow defines the following steps:
 
 - **draft** — the actor elaborates the artifact content on the branch. For initiatives and epics, this includes creating child artifacts on the same branch.
 - **validate** — an automated step that runs cross-artifact validation (Constitution §11) to verify the new artifact is consistent with the existing governed context.
