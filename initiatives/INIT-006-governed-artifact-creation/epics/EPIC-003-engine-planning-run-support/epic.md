@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: "Engine: Planning Run Support"
-status: Pending
+status: In Progress
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 owner: bszymi
 created: 2026-03-30
