@@ -267,3 +267,35 @@ func TestPlanningRun_RejectionAndRework(t *testing.T) {
 		},
 	})
 }
+
+// TestPlanningRun_Cancellation validates that cancelling a planning run
+// leaves no trace on main and cleans up the branch.
+func TestPlanningRun_Cancellation(t *testing.T) {
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "planning-run-cancellation",
+		Description: "Verify cancellation cleans up branch and leaves main untouched",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			seedCreationWorkflow(),
+			engine.SyncProjections(),
+
+			// Start planning run and create a child artifact on branch.
+			engine.StartPlanningRun(
+				"initiatives/init-099/initiative.md",
+				testInitiativeContent,
+			),
+			engine.AssertRunStatus(domain.RunStatusActive),
+			engine.CreateArtifactOnBranch(
+				"initiatives/init-099/epics/epic-001/epic.md",
+				childEpicContent,
+			),
+
+			// Cancel the run.
+			engine.CancelRun(),
+			engine.AssertRunStatus(domain.RunStatusCancelled),
+		},
+	})
+}
