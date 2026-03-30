@@ -2,7 +2,7 @@
 id: EPIC-006
 type: Epic
 title: Scenario Tests
-status: Pending
+status: In Progress
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 owner: bszymi
 created: 2026-03-30
