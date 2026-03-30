@@ -976,3 +976,52 @@ func TestStartPlanningRun_ArtifactWriteFailure_CleansBranch(t *testing.T) {
 		t.Errorf("expected 1 branch deleted for cleanup, got %d", len(gitOp.deletedBranches))
 	}
 }
+
+func TestStartPlanningRun_WithTimeout(t *testing.T) {
+	resolver := &mockWorkflowResolver{
+		result: &workflow.BindingResult{
+			Workflow: &domain.WorkflowDefinition{
+				ID:        "artifact-creation",
+				Path:      "workflows/artifact-creation.yaml",
+				Version:   "1.0.0",
+				EntryStep: "draft",
+				Timeout:   "24h",
+				Steps:     []domain.StepDefinition{{ID: "draft", Name: "Draft"}},
+			},
+			CommitSHA:    "def456",
+			VersionLabel: "1.0.0",
+		},
+	}
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := planningOrchestrator(writer, resolver, store, events, &stubGitOperator{})
+
+	result, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", validArtifactContent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Run.TimeoutAt == nil {
+		t.Fatal("expected timeout_at to be set")
+	}
+	expected := time.Now().Add(24 * time.Hour)
+	diff := result.Run.TimeoutAt.Sub(expected)
+	if diff < -5*time.Second || diff > 5*time.Second {
+		t.Errorf("expected timeout_at ~24h from now, got diff %v", diff)
+	}
+}
+
+func TestStartPlanningRun_StoreCreateRunFailure(t *testing.T) {
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{createRunErr: errors.New("store unavailable")}
+	events := &mockEventEmitter{}
+	orch := planningOrchestrator(writer, defaultPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", validArtifactContent)
+	if err == nil {
+		t.Fatal("expected error for store failure")
+	}
+	if writer.createdPath != "" {
+		t.Error("artifact should not have been written on store failure")
+	}
+}
