@@ -111,6 +111,51 @@ func SubmitStepResult(outcomeID string, outputs ...string) Step {
 	}
 }
 
+// MergeRunBranch returns a step that merges the run branch to main.
+// Used after a run enters committing state from a step with commit metadata.
+func MergeRunBranch() Step {
+	return Step{
+		Name: "merge-run-branch",
+		Action: func(sc *ScenarioContext) error {
+			if sc.Runtime.Orchestrator == nil {
+				return fmt.Errorf("MergeRunBranch requires WithOrchestrator() on the runtime")
+			}
+			runID := sc.MustGet("run_id").(string)
+			if err := sc.Runtime.Orchestrator.MergeRunBranch(sc.Ctx, runID); err != nil {
+				return fmt.Errorf("merge run branch: %w", err)
+			}
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run after merge: %w", err)
+			}
+			sc.Set("run_status", string(run.Status))
+			return nil
+		},
+	}
+}
+
+// CancelRun returns a step that cancels the current run.
+func CancelRun() Step {
+	return Step{
+		Name: "cancel-run",
+		Action: func(sc *ScenarioContext) error {
+			if sc.Runtime.Orchestrator == nil {
+				return fmt.Errorf("CancelRun requires WithOrchestrator() on the runtime")
+			}
+			runID := sc.MustGet("run_id").(string)
+			if err := sc.Runtime.Orchestrator.CancelRun(sc.Ctx, runID); err != nil {
+				return fmt.Errorf("cancel run: %w", err)
+			}
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run after cancel: %w", err)
+			}
+			sc.Set("run_status", string(run.Status))
+			return nil
+		},
+	}
+}
+
 // AssertRunStatus returns a step that asserts the current run status.
 func AssertRunStatus(expected domain.RunStatus) Step {
 	return Step{
