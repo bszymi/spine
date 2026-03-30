@@ -27,6 +27,7 @@ spine query artifacts --type Task --status Pending
 spine workflow list
 spine workflow resolve initiatives/INIT-001/tasks/TASK-001.md
 spine run start --task initiatives/INIT-001/tasks/TASK-001.md
+spine run start --task initiatives/INIT-099/initiative.md --mode planning --content ./initiative.md
 spine run inspect <run-id>
 spine validate --all
 ```
@@ -145,7 +146,8 @@ spine migrate            Run database migrations
 spine init-repo [path]   Initialize Spine repository
 
 spine artifact create|read|update|list|validate|links
-spine run start|status|cancel|inspect
+spine run start [--task PATH] [--mode standard|planning] [--content FILE]
+spine run status|cancel|inspect
 spine task accept|reject|cancel|abandon|supersede
 spine query artifacts|graph|history|runs
 spine workflow list|show|resolve
