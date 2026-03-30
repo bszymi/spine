@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Write ADR-0006: Planning Runs"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-001-architecture-and-adr/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation
