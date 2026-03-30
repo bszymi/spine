@@ -173,7 +173,11 @@ paths:
   /runs:
     post:
       operationId: run.start
-      summary: Start a new Run for a task
+      summary: Start a new Run for a task or planning run for artifact creation
+      description: |
+        Starts a standard run (default) or a planning run for governed artifact creation.
+        Standard mode requires task_path. Planning mode requires artifact_content and
+        creates the artifact on a branch via StartPlanningRun (per ADR-006).
       tags: [Workflow]
       parameters:
         - $ref: '#/components/parameters/XTraceId'
@@ -184,10 +188,18 @@ paths:
           application/json:
             schema:
               type: object
-              required: [task_path]
               properties:
                 task_path:
                   type: string
+                  description: Path to the task artifact. Required when mode is standard or omitted.
+                mode:
+                  type: string
+                  enum: [standard, planning]
+                  default: standard
+                  description: Run mode. Standard executes against existing artifacts. Planning creates new artifacts on a branch.
+                artifact_content:
+                  type: string
+                  description: Full artifact content (frontmatter + body). Required when mode is planning.
       responses:
         '201':
           description: Run created
@@ -858,6 +870,7 @@ components:
         workflow_version: { type: string }
         trace_id: { type: string }
         status: { type: string }
+        mode: { type: string, enum: [standard, planning], description: "Run mode — standard or planning" }
 
     StepExecution:
       type: object
@@ -880,6 +893,7 @@ components:
         task_path: { type: string }
         workflow_id: { type: string }
         status: { type: string }
+        mode: { type: string, enum: [standard, planning], description: "Run mode — standard or planning" }
         current_step_id: { type: string, nullable: true }
         trace_id: { type: string }
         started_at: { type: string, format: date-time, nullable: true }
