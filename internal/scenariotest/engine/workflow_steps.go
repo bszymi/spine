@@ -34,6 +34,33 @@ func StartRun(taskPath string) Step {
 	}
 }
 
+// StartPlanningRun returns a step that starts a planning run for artifact creation.
+// Stores the run ID and entry step execution ID in scenario state.
+// Requires projections to be synced first (SyncProjections step) so that
+// the workflow resolver can find the workflow definitions.
+func StartPlanningRun(artifactPath, artifactContent string) Step {
+	return Step{
+		Name: "start-planning-run-" + artifactPath,
+		Action: func(sc *ScenarioContext) error {
+			if sc.Runtime.Orchestrator == nil {
+				return fmt.Errorf("StartPlanningRun requires WithOrchestrator() on the runtime")
+			}
+			result, err := sc.Runtime.Orchestrator.StartPlanningRun(sc.Ctx, artifactPath, artifactContent)
+			if err != nil {
+				return fmt.Errorf("start planning run for %s: %w", artifactPath, err)
+			}
+			sc.Set("run_id", result.Run.RunID)
+			sc.Set("run_status", string(result.Run.Status))
+			sc.Set("run_mode", string(result.Run.Mode))
+			if result.EntryStep != nil {
+				sc.Set("current_execution_id", result.EntryStep.ExecutionID)
+				sc.Set("current_step_id", result.EntryStep.StepID)
+			}
+			return nil
+		},
+	}
+}
+
 // SubmitStepResult returns a step that submits a result for the current
 // step execution with the given outcome ID. Uses IngestResult which validates
 // required outputs before routing, matching the production API path.
