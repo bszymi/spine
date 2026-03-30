@@ -2004,3 +2004,156 @@ func TestNilServicesReturn503(t *testing.T) {
 		})
 	}
 }
+
+// ── Planning Run Tests ──
+
+type fakePlanningRunStarter struct {
+	called          bool
+	artifactPath    string
+	artifactContent string
+	result          *gateway.PlanningRunResult
+	err             error
+}
+
+func (f *fakePlanningRunStarter) StartPlanningRun(_ context.Context, artifactPath, artifactContent string) (*gateway.PlanningRunResult, error) {
+	f.called = true
+	f.artifactPath = artifactPath
+	f.artifactContent = artifactContent
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.result, nil
+}
+
+func setupPlanningServer(t *testing.T, starter gateway.PlanningRunStarter) (*httptest.Server, string) {
+	t.Helper()
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, err := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:              fs,
+		Auth:               authSvc,
+		PlanningRunStarter: starter,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	return ts, token
+}
+
+func TestRunStartPlanningMode_InvalidMode(t *testing.T) {
+	ts, token := setupPlanningServer(t, nil)
+	defer ts.Close()
+
+	body := `{"mode":"invalid","task_path":"x"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for invalid mode, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartPlanningMode_MissingContent(t *testing.T) {
+	ts, token := setupPlanningServer(t, nil)
+	defer ts.Close()
+
+	body := `{"mode":"planning","task_path":"x"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for missing content, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartPlanningMode_NoStarter(t *testing.T) {
+	ts, token := setupPlanningServer(t, nil)
+	defer ts.Close()
+
+	body := `{"mode":"planning","artifact_content":"---\ntype: Initiative\n---","task_path":"x"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Errorf("expected 503 for no starter, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartPlanningMode_Success(t *testing.T) {
+	starter := &fakePlanningRunStarter{
+		result: &gateway.PlanningRunResult{
+			RunID:        "run-plan-1",
+			TaskPath:     "initiatives/INIT-099/initiative.md",
+			WorkflowID:   "artifact-creation",
+			Status:       "active",
+			Mode:         "planning",
+			TraceID:      "trace-plan-1",
+			VersionLabel: "1.0.0",
+		},
+	}
+	ts, token := setupPlanningServer(t, starter)
+	defer ts.Close()
+
+	body := `{"mode":"planning","artifact_content":"test content","task_path":"initiatives/INIT-099/initiative.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		t.Errorf("expected 201, got %d", resp.StatusCode)
+	}
+	if !starter.called {
+		t.Error("expected StartPlanningRun to be called")
+	}
+	if starter.artifactContent != "test content" {
+		t.Errorf("expected content 'test content', got %q", starter.artifactContent)
+	}
+}
+
+func TestRunStartStandardMode_Unchanged(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"task_path":"initiatives/test/task.md","mode":"standard"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		t.Errorf("expected 201 for standard mode, got %d", resp.StatusCode)
+	}
+}
