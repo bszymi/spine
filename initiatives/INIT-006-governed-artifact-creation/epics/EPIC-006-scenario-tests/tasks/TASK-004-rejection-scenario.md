@@ -34,7 +34,9 @@ Scenario steps:
 4. Assert run loops back to draft step
 5. Submit draft step again (ready_for_review)
 6. Submit review step with `approved` outcome
-7. Assert run completed and artifacts on main
+7. Assert run status is `committing`
+8. Execute `MergeRunBranch()`
+9. Assert run status is `completed` and artifacts on main
 
 ---
 

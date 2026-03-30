@@ -19,24 +19,51 @@ links:
 
 ## Purpose
 
-Update `handleRunStart()` to route planning mode requests to the orchestrator's `StartPlanningRun()` method.
+Wire an engine-facing interface into the gateway server and update `handleRunStart()` to route planning mode requests through it.
+
+Currently `handleRunStart()` creates runs directly via `store.WithTx(...)` — there is no orchestrator or engine dependency on the gateway server. Planning runs require calling `StartPlanningRun()` on the engine, so the gateway must first gain an engine interface before routing can work.
 
 ---
 
 ## Deliverable
 
+### 1. Add RunStarter interface to gateway
+
+`internal/gateway/server.go`
+
+Define a `RunStarter` interface that the gateway can call:
+
+```go
+type RunStarter interface {
+    StartRun(ctx context.Context, artifactPath string) (*engine.StartRunResult, error)
+    StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*engine.StartRunResult, error)
+}
+```
+
+Add `runStarter RunStarter` field to `ServerConfig` and thread it into the `Server` struct.
+
+### 2. Route planning mode through RunStarter
+
 `internal/gateway/handlers_workflow.go`
 
 In `handleRunStart()`:
-- If `mode == "planning"`: call `orchestrator.StartPlanningRun(ctx, taskPath, artifactContent)`
-- If `mode == ""` or `mode == "standard"`: use existing `StartRun()` path (no changes)
+- If `mode == "planning"`: call `s.runStarter.StartPlanningRun(ctx, taskPath, artifactContent)`
+- If `mode == ""` or `mode == "standard"`: call `s.runStarter.StartRun(ctx, taskPath)` (replacing the inline `store.WithTx` logic)
 - Include `mode` in the response JSON
+
+### 3. Wire orchestrator as RunStarter in server setup
+
+`cmd/spine/main.go`
+
+Pass the orchestrator (which satisfies `RunStarter`) to the gateway's `ServerConfig`.
 
 ---
 
 ## Acceptance Criteria
 
-- Planning mode requests reach `StartPlanningRun()`
-- Standard mode requests follow existing path unchanged
+- Gateway server has a `RunStarter` interface field
+- Planning mode requests reach `StartPlanningRun()` via the interface
+- Standard mode requests are routed through `StartRun()` via the same interface (replacing inline transaction logic)
 - Response includes `mode` field
 - Handler does not parse the artifact content — delegates to engine
+- Existing standard run behavior is preserved (same result, different code path)

@@ -35,9 +35,12 @@ Scenario steps:
 5. Create a task artifact under one epic via write_context
 6. Submit draft step (ready_for_review)
 7. Submit review step (approved)
-8. Assert run completed
-9. Assert initiative, both epics, and the task all exist on main
-10. Assert artifact links and parent references are correct after projection sync
+8. Assert run status is `committing`
+9. Execute `MergeRunBranch()`
+10. Assert run status is `completed`
+11. Assert initiative, both epics, and the task all exist on main
+12. Sync projections (post-merge)
+13. Assert artifact links and parent references are correct in projection
 
 ---
 

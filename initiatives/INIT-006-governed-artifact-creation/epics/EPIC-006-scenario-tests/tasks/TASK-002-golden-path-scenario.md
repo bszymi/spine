@@ -33,10 +33,16 @@ Scenario steps:
 3. Start planning run with initiative content (Draft status)
 4. Submit "draft" step with `ready_for_review` outcome
 5. Submit "review" step with `approved` outcome
-6. Assert run status is `completed`
-7. Assert initiative artifact exists on main
-8. Assert initiative status is `In Progress` (set by commit on approval)
-9. Assert planning branch is cleaned up
+6. Assert run status is `committing` (the commit outcome triggers merge, not immediate completion)
+7. Execute `MergeRunBranch()` (or trigger scheduler merge step)
+8. Assert run status is `completed`
+9. Assert initiative artifact exists on main
+10. Assert initiative status is `In Progress` (set by commit on approval)
+11. Sync projections (post-merge)
+12. Assert initiative appears in projection with correct status
+13. Assert planning branch is cleaned up
+
+Note: The engine moves runs to `committing` when a step outcome has `commit` metadata. The run only transitions to `completed` after `MergeRunBranch()` succeeds. The scenario must include this merge step explicitly.
 
 ---
 

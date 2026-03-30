@@ -25,10 +25,21 @@ Connect the `ArtifactWriter` dependency to the orchestrator during server startu
 
 ## Deliverable
 
+### 1. Server startup
+
 `cmd/spine/main.go`
 
 In the `serve` command setup:
 - Pass the existing `artifactSvc` (which implements `ArtifactWriter`) to the orchestrator via `WithArtifactWriter()`
+
+### 2. Scenario test harness
+
+`internal/scenariotest/harness/runtime.go`
+
+In `WithRuntimeOrchestrator()` (or wherever the test orchestrator is constructed):
+- Pass the test artifact service to the orchestrator via `WithArtifactWriter()`
+
+Without this, EPIC-006 scenario tests will hit the `artifactWriter == nil` guard in `StartPlanningRun()` and fail with `ErrUnavailable`.
 
 ---
 
@@ -36,4 +47,5 @@ In the `serve` command setup:
 
 - `artifact.Service` satisfies the `ArtifactWriter` interface
 - Orchestrator receives the writer during server startup
+- Orchestrator receives the writer in the scenario test harness
 - No changes needed if `artifact.Service` isn't available (graceful degradation)
