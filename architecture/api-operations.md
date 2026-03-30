@@ -62,6 +62,10 @@ Callers should understand which category their operation falls into:
 
 Write context is expressed explicitly in artifact write requests via `write_context` (see the OpenAPI specification for details). When `write_context` is omitted, the write targets the authoritative branch directly.
 
+**Planning run writes:**
+
+Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) produce proposed writes that include artifact creation on a branch. The `write_context` for planning runs accepts `run_id` without `task_path` validation, since the run owns a constrained creation scope on the branch for multi-artifact writes. Planning run writes are restricted to creating new artifacts only — they may not update, delete, or mutate pre-existing artifacts on the authoritative branch.
+
 ---
 
 ## 3. Operation Categories
@@ -94,6 +98,7 @@ Workflow operations control Run execution and task governance decisions.
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
 | `run.start` | Creates a Run, resolves workflow binding, pins version | When a task is ready for execution |
+| `run.start_planning` | Creates a planning Run for artifact creation (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) | When a new artifact needs governed creation |
 | `run.status` | Queries Run state and step history | When monitoring execution progress |
 | `run.cancel` | Cancels an active Run | When execution should be abandoned (operator decision) |
 
@@ -116,6 +121,7 @@ Workflow operations control Run execution and task governance decisions.
 
 **Domain rules:**
 - `run.start` fails if an active Run already exists for the task, or if no active workflow matches the task's `(type, work_type)` pair
+- `run.start_planning` resolves to workflows with `mode: creation` and accepts artifact type, initial content, and optional parent path — the target artifact does not need to exist on the authoritative branch
 - `step.submit` validates the outcome against the workflow definition and checks actor assignment
 - Task governance operations (`accept`, `reject`, `cancel`, `abandon`, `supersede`) are Git writes — they produce durable commits that change the task artifact's front matter
 - `task.reject` requires a rationale; the `acceptance` field must be one of `rejected_with_followup` or `rejected_closed` (per [Task Lifecycle](/governance/task-lifecycle.md))

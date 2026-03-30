@@ -1,7 +1,7 @@
 ---
 id: TASK-001
 type: Task
-title: "Write ADR-0006: Planning Runs"
+title: "Write ADR-006: Planning Runs"
 status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-001-architecture-and-adr/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
@@ -13,7 +13,7 @@ links:
     target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-001-architecture-and-adr/epic.md
 ---
 
-# TASK-001 — Write ADR-0006: Planning Runs
+# TASK-001 — Write ADR-006: Planning Runs
 
 ---
 
@@ -27,7 +27,7 @@ The ADR must document the problem (chicken-and-egg: artifacts must exist on main
 
 ## Deliverable
 
-`/architecture/adr/ADR-0006-planning-runs.md`
+`/architecture/adr/ADR-006-planning-runs.md`
 
 Content should cover:
 

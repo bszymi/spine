@@ -63,6 +63,7 @@ name: <string>            # Human-readable workflow name
 version: <string>         # Semantic version of this definition
 status: <enum>            # Active, Deprecated, Superseded
 description: <string>     # What this workflow governs
+mode: <enum>              # Optional: execution (default) or creation (see §3.4)
 
 applies_to:               # What artifact types this workflow applies to
   - <artifact_type>
@@ -213,7 +214,27 @@ entry_policy:
 
 The detailed execution semantics for divergence and convergence are defined in the [Divergence and Convergence](/architecture/divergence-and-convergence.md) architecture document.
 
-### 3.4 Applies-To Clause
+### 3.4 Mode Field
+
+Workflow definitions include an optional `mode` field (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) that distinguishes between execution and creation workflows:
+
+```yaml
+mode: <enum>              # Optional: execution (default) or creation
+```
+
+| Mode | Meaning |
+|------|---------|
+| `execution` | Governs execution against existing artifacts on `main`. This is the default when `mode` is absent. |
+| `creation` | Governs the creation of new artifacts via planning runs. |
+
+The workflow resolver uses the mode to select the correct workflow binding:
+
+- `StartRun()` resolves to workflows with `mode: execution` (or absent mode)
+- `StartPlanningRun()` resolves to workflows with `mode: creation`
+
+A single `artifact-creation.yaml` workflow with `mode: creation` serves as the reference creation workflow for artifact types that share the Draft → Pending lifecycle (Initiative, Epic, and Task). Product and ADR have different status models and require type-specific creation workflows if planning run support is added for them later. The step sequence is: draft, validate, review, merge — where the validate step runs automated cross-artifact validation before human review.
+
+### 3.5 Applies-To Clause
 
 The `applies_to` field declares which artifact types this workflow applies to. The Workflow Engine uses this to determine which workflow definition to activate when a Run is started for a given artifact.
 
@@ -429,6 +450,7 @@ new execution attempt for that step while preserving the Run history.
 
 - [Domain Model](/architecture/domain-model.md) — Workflow Definition (§3.2), Step Definition (§3.3)
 - [ADR-001](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md) — Workflow definitions stored in Git, durable outcomes only
+- [ADR-006](/architecture/adr/ADR-006-planning-runs.md) — Planning runs and workflow `mode` field
 - [Data Model](/architecture/data-model.md) — Runtime Store schema for Runs and step executions
 - [System Components](/architecture/components.md) — Workflow Engine (§4.3)
 - [Task Lifecycle](/governance/task-lifecycle.md) — Governed states vs runtime states
