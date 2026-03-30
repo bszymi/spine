@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Engine unit tests for planning runs
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-003-engine-planning-run-support/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

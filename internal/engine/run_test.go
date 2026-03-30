@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/workflow"
 )
@@ -711,5 +712,223 @@ func TestFindStepDef(t *testing.T) {
 	missing := findStepDef(wf, "nonexistent")
 	if missing != nil {
 		t.Error("expected nil for missing step")
+	}
+}
+
+// ── ArtifactWriter mock ──
+
+type mockArtifactWriter struct {
+	createdPath    string
+	createdContent string
+	err            error
+}
+
+func (m *mockArtifactWriter) Create(_ context.Context, path, content string) (*artifact.WriteResult, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	m.createdPath = path
+	m.createdContent = content
+	return &artifact.WriteResult{}, nil
+}
+
+// ── planningGitOperator with configurable errors ──
+
+type planningGitOperator struct {
+	stubGitOperator
+	createBranchErr error
+	deletedBranches []string
+}
+
+func (m *planningGitOperator) CreateBranch(_ context.Context, _, _ string) error {
+	return m.createBranchErr
+}
+
+func (m *planningGitOperator) DeleteBranch(_ context.Context, name string) error {
+	m.deletedBranches = append(m.deletedBranches, name)
+	return nil
+}
+
+// ── StartPlanningRun tests ──
+
+var validArtifactContent = "---\nid: INIT-099\ntype: Initiative\ntitle: Test Initiative\nstatus: Draft\nowner: test\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-099 — Test Initiative\n"
+
+func planningOrchestrator(writer ArtifactWriter, resolver WorkflowResolver, store *mockRunStore, events *mockEventEmitter, gitOp GitOperator) *Orchestrator {
+	o := &Orchestrator{
+		workflows: resolver,
+		store:     store,
+		actors:    &stubActorAssigner{},
+		artifacts: &mockArtifactReader{},
+		events:    events,
+		git:       gitOp,
+		wfLoader:  &stubWorkflowLoader{},
+	}
+	if writer != nil {
+		o.artifactWriter = writer
+	}
+	return o
+}
+
+func defaultPlanningResolver() *mockWorkflowResolver {
+	return &mockWorkflowResolver{
+		result: &workflow.BindingResult{
+			Workflow: &domain.WorkflowDefinition{
+				ID:        "artifact-creation",
+				Path:      "workflows/artifact-creation.yaml",
+				Version:   "1.0.0",
+				EntryStep: "draft",
+				Steps:     []domain.StepDefinition{{ID: "draft", Name: "Draft"}},
+			},
+			CommitSHA:    "def456",
+			VersionLabel: "1.0.0",
+		},
+	}
+}
+
+func TestStartPlanningRun_HappyPath(t *testing.T) {
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := planningOrchestrator(writer, defaultPlanningResolver(), store, events, &stubGitOperator{})
+
+	result, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", validArtifactContent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Run.Status != domain.RunStatusActive {
+		t.Errorf("expected status active, got %s", result.Run.Status)
+	}
+	if result.Run.Mode != domain.RunModePlanning {
+		t.Errorf("expected mode planning, got %s", result.Run.Mode)
+	}
+	if result.Run.TaskPath != "initiatives/INIT-099/initiative.md" {
+		t.Errorf("expected task path initiatives/INIT-099/initiative.md, got %s", result.Run.TaskPath)
+	}
+	if result.Run.WorkflowID != "artifact-creation" {
+		t.Errorf("expected workflow ID artifact-creation, got %s", result.Run.WorkflowID)
+	}
+	if result.Run.BranchName == "" {
+		t.Error("expected non-empty branch name")
+	}
+	if result.EntryStep == nil {
+		t.Fatal("expected non-nil entry step")
+	}
+	if result.EntryStep.StepID != "draft" {
+		t.Errorf("expected step ID draft, got %s", result.EntryStep.StepID)
+	}
+	if writer.createdPath != "initiatives/INIT-099/initiative.md" {
+		t.Errorf("expected artifact written to initiatives/INIT-099/initiative.md, got %s", writer.createdPath)
+	}
+	if len(events.events) < 1 || events.events[0].Type != domain.EventRunStarted {
+		t.Error("expected run_started event")
+	}
+}
+
+func TestStartPlanningRun_MissingArtifactWriter(t *testing.T) {
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := planningOrchestrator(nil, defaultPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", validArtifactContent)
+	if err == nil {
+		t.Fatal("expected error for missing artifact writer")
+	}
+	var domErr *domain.SpineError
+	if !errors.As(err, &domErr) || domErr.Code != domain.ErrUnavailable {
+		t.Errorf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestStartPlanningRun_EmptyContent(t *testing.T) {
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := planningOrchestrator(writer, defaultPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", "")
+	if err == nil {
+		t.Fatal("expected error for empty content")
+	}
+	var domErr *domain.SpineError
+	if !errors.As(err, &domErr) || domErr.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestStartPlanningRun_EmptyPath(t *testing.T) {
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := planningOrchestrator(writer, defaultPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartPlanningRun(context.Background(), "", validArtifactContent)
+	if err == nil {
+		t.Fatal("expected error for empty path")
+	}
+	var domErr *domain.SpineError
+	if !errors.As(err, &domErr) || domErr.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestStartPlanningRun_InvalidContent(t *testing.T) {
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := planningOrchestrator(writer, defaultPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartPlanningRun(context.Background(), "initiatives/bad.md", "not valid yaml frontmatter")
+	if err == nil {
+		t.Fatal("expected error for invalid content")
+	}
+	var domErr *domain.SpineError
+	if !errors.As(err, &domErr) || domErr.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestStartPlanningRun_NoWorkflow(t *testing.T) {
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	resolver := &mockWorkflowResolver{err: domain.NewError(domain.ErrNotFound, "no workflow")}
+	orch := planningOrchestrator(writer, resolver, store, events, &stubGitOperator{})
+
+	_, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", validArtifactContent)
+	if err == nil {
+		t.Fatal("expected error for missing workflow")
+	}
+}
+
+func TestStartPlanningRun_BranchCreationFailure(t *testing.T) {
+	writer := &mockArtifactWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	gitOp := &planningGitOperator{createBranchErr: errors.New("git error")}
+	orch := planningOrchestrator(writer, defaultPlanningResolver(), store, events, gitOp)
+
+	_, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", validArtifactContent)
+	if err == nil {
+		t.Fatal("expected error for branch creation failure")
+	}
+	if writer.createdPath != "" {
+		t.Error("artifact should not have been written on branch failure")
+	}
+}
+
+func TestStartPlanningRun_ArtifactWriteFailure_CleansBranch(t *testing.T) {
+	writer := &mockArtifactWriter{err: errors.New("write failed")}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	gitOp := &planningGitOperator{}
+	orch := planningOrchestrator(writer, defaultPlanningResolver(), store, events, gitOp)
+
+	_, err := orch.StartPlanningRun(context.Background(), "initiatives/INIT-099/initiative.md", validArtifactContent)
+	if err == nil {
+		t.Fatal("expected error for artifact write failure")
+	}
+	if len(gitOp.deletedBranches) != 1 {
+		t.Errorf("expected 1 branch deleted for cleanup, got %d", len(gitOp.deletedBranches))
 	}
 }
