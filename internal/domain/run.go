@@ -30,10 +30,20 @@ func (s RunStatus) IsTerminal() bool {
 	return s == RunStatusCompleted || s == RunStatusFailed || s == RunStatusCancelled
 }
 
+// RunMode distinguishes standard execution runs from planning creation runs.
+// Per ADR-006 §1.
+type RunMode string
+
+const (
+	RunModeStandard RunMode = "standard"
+	RunModePlanning RunMode = "planning"
+)
+
 // Run represents a workflow execution instance.
 type Run struct {
 	RunID                string     `json:"run_id" yaml:"run_id"`
 	TaskPath             string     `json:"task_path" yaml:"task_path"`
+	Mode                 RunMode    `json:"mode,omitempty" yaml:"mode,omitempty"`
 	WorkflowPath         string     `json:"workflow_path" yaml:"workflow_path"`
 	WorkflowID           string     `json:"workflow_id" yaml:"workflow_id"`
 	WorkflowVersion      string     `json:"workflow_version" yaml:"workflow_version"`             // Git commit SHA

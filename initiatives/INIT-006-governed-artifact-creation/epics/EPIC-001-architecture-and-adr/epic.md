@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: Architecture & ADR
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 owner: bszymi
 created: 2026-03-30
