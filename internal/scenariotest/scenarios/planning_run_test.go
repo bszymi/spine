@@ -299,3 +299,58 @@ func TestPlanningRun_Cancellation(t *testing.T) {
 		},
 	})
 }
+
+const taskCreationContent = `---
+id: TASK-099
+type: Task
+title: Test Task via Planning Run
+status: Draft
+epic: /initiatives/init-001/epics/epic-001/epic.md
+initiative: /initiatives/init-001/initiative.md
+created: 2026-01-01
+last_updated: 2026-01-01
+links:
+  - type: parent
+    target: /initiatives/init-001/epics/epic-001/epic.md
+---
+# TASK-099 — Test Task via Planning Run
+`
+
+// TestPlanningRun_TaskCreation validates that the generic artifact-creation
+// workflow works for creating individual tasks, proving it is type-agnostic.
+func TestPlanningRun_TaskCreation(t *testing.T) {
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "task-creation-through-planning-run",
+		Description: "Verify artifact-creation workflow works for Task type with existing parent artifacts",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			// Seed creation workflow and parent artifacts.
+			seedCreationWorkflow(),
+			engine.SeedHierarchy("INIT-001", "EPIC-001", ""),
+			engine.SyncProjections(),
+
+			// Start planning run with a Task artifact.
+			engine.StartPlanningRun(
+				"initiatives/init-001/epics/epic-001/tasks/task-099.md",
+				taskCreationContent,
+			),
+			engine.AssertRunStatus(domain.RunStatusActive),
+			engine.AssertCurrentStep("draft"),
+
+			// Draft → validate → review → approved.
+			engine.SubmitStepResult("ready_for_review", "artifact_content"),
+			engine.AssertCurrentStep("validate"),
+			engine.SubmitStepResult("valid"),
+			engine.AssertCurrentStep("review"),
+			engine.SubmitStepResult("approved"),
+			engine.AssertRunStatus(domain.RunStatusCommitting),
+
+			// Merge and complete.
+			engine.MergeRunBranch(),
+			engine.AssertRunCompleted(),
+		},
+	})
+}
