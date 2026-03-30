@@ -15,6 +15,7 @@ type WorkflowSummary struct {
 	Name      string   `json:"name" yaml:"name"`
 	Version   string   `json:"version" yaml:"version"`
 	Status    string   `json:"status" yaml:"status"`
+	Mode      string   `json:"mode" yaml:"mode,omitempty"`
 	AppliesTo []string `json:"applies_to" yaml:"applies_to"`
 	Path      string   `json:"path" yaml:"-"`
 }
@@ -53,6 +54,7 @@ func ListWorkflows(repoPath string, format OutputFormat) error {
 			continue // skip unparseable files
 		}
 		wf.Path = "workflows/" + entry.Name()
+		normalizeMode(wf)
 		workflows = append(workflows, *wf)
 	}
 
@@ -60,11 +62,11 @@ func ListWorkflows(repoPath string, format OutputFormat) error {
 		return PrintJSON(workflows)
 	}
 
-	headers := []string{"ID", "NAME", "VERSION", "STATUS", "APPLIES_TO", "PATH"}
+	headers := []string{"ID", "NAME", "VERSION", "STATUS", "MODE", "APPLIES_TO", "PATH"}
 	var rows [][]string
 	for _, wf := range workflows {
 		rows = append(rows, []string{
-			wf.ID, wf.Name, wf.Version, wf.Status,
+			wf.ID, wf.Name, wf.Version, wf.Status, wf.Mode,
 			strings.Join(wf.AppliesTo, ", "), wf.Path,
 		})
 	}
@@ -80,6 +82,7 @@ func ShowWorkflow(repoPath, workflowPath string, format OutputFormat) error {
 		return err
 	}
 	detail.Path = workflowPath
+	normalizeMode(&detail.WorkflowSummary)
 
 	if format == FormatJSON {
 		return PrintJSON(detail)
@@ -88,6 +91,7 @@ func ShowWorkflow(repoPath, workflowPath string, format OutputFormat) error {
 	fmt.Printf("Workflow: %s (%s)\n", detail.Name, detail.ID)
 	fmt.Printf("Version:  %s\n", detail.Version)
 	fmt.Printf("Status:   %s\n", detail.Status)
+	fmt.Printf("Mode:     %s\n", detail.Mode)
 	fmt.Printf("Applies:  %s\n", strings.Join(detail.AppliesTo, ", "))
 	fmt.Printf("Entry:    %s\n\n", detail.EntryStep)
 	fmt.Println("Steps:")
@@ -147,6 +151,7 @@ func ResolveWorkflow(repoPath, artifactPath string, format OutputFormat) error {
 		for _, at := range wf.AppliesTo {
 			if strings.EqualFold(at, artMeta.Type) {
 				wf.Path = "workflows/" + entry.Name()
+				normalizeMode(wf)
 				matches = append(matches, *wf)
 			}
 		}
@@ -169,9 +174,16 @@ func ResolveWorkflow(repoPath, artifactPath string, format OutputFormat) error {
 	fmt.Printf("Artifact: %s (type: %s)\n\n", artifactPath, artMeta.Type)
 	fmt.Println("Matching workflows:")
 	for _, m := range matches {
-		fmt.Printf("  %s (%s) — %s\n", m.ID, m.Version, m.Path)
+		fmt.Printf("  %s (%s) [%s] — %s\n", m.ID, m.Version, m.Mode, m.Path)
 	}
 	return nil
+}
+
+// normalizeMode sets the default mode for workflows that omit it.
+func normalizeMode(wf *WorkflowSummary) {
+	if wf.Mode == "" {
+		wf.Mode = "execution"
+	}
 }
 
 func parseWorkflowSummary(path string) (*WorkflowSummary, error) {

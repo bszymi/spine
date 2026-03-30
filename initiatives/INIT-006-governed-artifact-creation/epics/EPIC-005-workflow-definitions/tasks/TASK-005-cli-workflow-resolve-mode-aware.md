@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Make CLI workflow resolve mode-aware
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-005-workflow-definitions/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation
