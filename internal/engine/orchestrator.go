@@ -6,18 +6,19 @@ import "fmt"
 // event router, and Git client into a single execution coordinator. It manages
 // run lifecycle, step progression, and outcome routing.
 type Orchestrator struct {
-	workflows   WorkflowResolver
-	store       RunStore
-	actors      ActorAssigner
-	artifacts   ArtifactReader
-	events      EventEmitter
-	git         GitOperator
-	wfLoader    WorkflowLoader
-	assignments AssignmentStore        // optional, nil if not configured
-	validator   CrossArtifactValidator // optional, nil if not configured
-	discussions DiscussionChecker      // optional, nil if not configured
-	divergence  DivergenceHandler      // optional, nil if not configured
-	convergence ConvergenceHandler     // optional, nil if not configured
+	workflows      WorkflowResolver
+	store          RunStore
+	actors         ActorAssigner
+	artifacts      ArtifactReader
+	events         EventEmitter
+	git            GitOperator
+	wfLoader       WorkflowLoader
+	assignments    AssignmentStore        // optional, nil if not configured
+	validator      CrossArtifactValidator // optional, nil if not configured
+	discussions    DiscussionChecker      // optional, nil if not configured
+	divergence     DivergenceHandler      // optional, nil if not configured
+	convergence    ConvergenceHandler     // optional, nil if not configured
+	artifactWriter ArtifactWriter         // optional, required for planning runs
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -86,4 +87,9 @@ func (o *Orchestrator) WithDivergence(d DivergenceHandler) {
 // WithConvergence enables convergence handling for branch merging.
 func (o *Orchestrator) WithConvergence(c ConvergenceHandler) {
 	o.convergence = c
+}
+
+// WithArtifactWriter enables artifact creation for planning runs.
+func (o *Orchestrator) WithArtifactWriter(w ArtifactWriter) {
+	o.artifactWriter = w
 }
