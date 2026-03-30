@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Wire ArtifactWriter in server setup
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-004-api-gateway-and-cli/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

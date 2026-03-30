@@ -141,6 +141,7 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 		if rt.Validator != nil {
 			orch.WithValidator(rt.Validator)
 		}
+		orch.WithArtifactWriter(rt.Artifacts)
 		rt.Orchestrator = orch
 	}
 
