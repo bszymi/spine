@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Relax resolveWriteContext for planning runs
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-004-api-gateway-and-cli/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

@@ -193,6 +193,10 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 
 	ctx := r.Context()
 	if req.WriteContext != nil {
+		// NOTE: Planning runs may update artifacts they created on their own branch
+		// (e.g., during draft/rework). Full ADR-006 §8 enforcement (blocking updates
+		// to pre-existing artifacts from main) requires distinguishing branch-local
+		// vs inherited files, which is deferred to a future task.
 		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
 		if err != nil {
 			WriteError(w, err)
@@ -350,12 +354,10 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 
 // resolveWriteContext resolves a WriteContext request (run_id + task_path) to a branch name.
 // Returns empty string if no run_id is provided (authoritative branch write).
+// Planning runs skip task_path validation per ADR-006 §7.
 func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextRequest) (string, error) {
 	if wc.RunID == "" {
 		return "", nil
-	}
-	if wc.TaskPath == "" {
-		return "", domain.NewError(domain.ErrInvalidParams, "write_context.task_path is required when run_id is provided")
 	}
 	if s.store == nil {
 		return "", domain.NewError(domain.ErrUnavailable, "store not configured")
@@ -364,13 +366,28 @@ func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextReques
 	if err != nil {
 		return "", fmt.Errorf("resolve write context: %w", err)
 	}
-	if run.TaskPath != wc.TaskPath {
+	if run.Status != domain.RunStatusActive {
 		return "", domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("task_path mismatch: run %s belongs to %s, not %s", wc.RunID, run.TaskPath, wc.TaskPath))
+			fmt.Sprintf("run %s is not active (status: %s)", wc.RunID, run.Status))
 	}
 	if run.BranchName == "" {
 		return "", domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("run %s has no branch", wc.RunID))
+	}
+
+	// Planning runs: skip task_path validation. The run owns a constrained
+	// creation scope on the branch for multi-artifact writes.
+	if run.Mode == domain.RunModePlanning {
+		return run.BranchName, nil
+	}
+
+	// Standard runs: require task_path and validate it matches the run.
+	if wc.TaskPath == "" {
+		return "", domain.NewError(domain.ErrInvalidParams, "write_context.task_path is required when run_id is provided")
+	}
+	if run.TaskPath != wc.TaskPath {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("task_path mismatch: run %s belongs to %s, not %s", wc.RunID, run.TaskPath, wc.TaskPath))
 	}
 	return run.BranchName, nil
 }
