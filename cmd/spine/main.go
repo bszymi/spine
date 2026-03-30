@@ -30,6 +30,30 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// planningRunAdapter adapts engine.Orchestrator to gateway.PlanningRunStarter.
+type planningRunAdapter struct {
+	orch *engine.Orchestrator
+}
+
+func (a *planningRunAdapter) StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*gateway.PlanningRunResult, error) {
+	result, err := a.orch.StartPlanningRun(ctx, artifactPath, artifactContent)
+	if err != nil {
+		return nil, err
+	}
+	return &gateway.PlanningRunResult{
+		RunID:        result.Run.RunID,
+		TaskPath:     result.Run.TaskPath,
+		WorkflowID:   result.Run.WorkflowID,
+		Status:       string(result.Run.Status),
+		Mode:         string(result.Run.Mode),
+		BranchName:   result.Run.BranchName,
+		TraceID:      result.Run.TraceID,
+		EntryStepID:  result.EntryStep.StepID,
+		VersionLabel: result.Run.WorkflowVersionLabel,
+		CommitSHA:    result.Run.WorkflowVersion,
+	}, nil
+}
+
 func main() {
 	// Initialize observability before anything else
 	logLevel := os.Getenv("SPINE_LOG_LEVEL")
@@ -233,17 +257,24 @@ func serveCmd() *cobra.Command {
 				divSvcForGateway = divergence.NewService(st, gitClient, eventRouter)
 			}
 
+			var planningStarter gateway.PlanningRunStarter
+			if orch != nil {
+				orch.WithArtifactWriter(artifactSvc)
+				planningStarter = &planningRunAdapter{orch: orch}
+			}
+
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
-				Store:            st,
-				Auth:             authSvc,
-				Artifacts:        artifactSvc,
-				ProjQuery:        projQuery,
-				ProjSync:         projSync,
-				Git:              gitClient,
-				Validator:        validator,
-				WorkflowResolver: wfResolver,
-				BranchCreator:    divSvcForGateway,
-				Events:           eventRouter,
+				Store:              st,
+				Auth:               authSvc,
+				Artifacts:          artifactSvc,
+				ProjQuery:          projQuery,
+				ProjSync:           projSync,
+				Git:                gitClient,
+				Validator:          validator,
+				WorkflowResolver:   wfResolver,
+				BranchCreator:      divSvcForGateway,
+				Events:             eventRouter,
+				PlanningRunStarter: planningStarter,
 			})
 
 			// Run startup recovery and start background services.
