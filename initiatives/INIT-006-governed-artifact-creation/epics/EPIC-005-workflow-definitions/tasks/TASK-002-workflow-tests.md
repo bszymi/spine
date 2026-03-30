@@ -1,7 +1,7 @@
 ---
 id: TASK-002
 type: Task
-title: Workflow parse and validation tests
+title: Add workflow parse and validation tests
 status: Draft
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-005-workflow-definitions/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
@@ -13,7 +13,7 @@ links:
     target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-005-workflow-definitions/epic.md
 ---
 
-# TASK-002 — Workflow Parse and Validation Tests
+# TASK-002 — Add Workflow Parse and Validation Tests
 
 ---
 

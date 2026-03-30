@@ -30,7 +30,7 @@ Implement the core method that enables governed artifact creation. This is the c
 The method should:
 
 1. Validate inputs: `artifactWriter` must be configured, `artifactContent` must be non-empty
-2. Parse the artifact content to extract type (using `artifact.Parse()`)
+2. Parse and validate the artifact content using `artifact.Parse()` — this performs schema validation (front matter fields, required metadata) before any branch or run is created. Invalid content is rejected with `ErrInvalidParams` before side effects occur.
 3. Resolve the governing workflow from the artifact type
 4. Generate run ID, trace ID, branch name (`spine/run/{runID}`)
 5. Create the Git branch from HEAD

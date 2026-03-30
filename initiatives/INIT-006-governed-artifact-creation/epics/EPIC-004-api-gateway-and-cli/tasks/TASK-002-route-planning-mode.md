@@ -48,7 +48,7 @@ Add `runStarter RunStarter` field to `ServerConfig` and thread it into the `Serv
 
 In `handleRunStart()`:
 - If `mode == "planning"`: call `s.runStarter.StartPlanningRun(ctx, taskPath, artifactContent)`
-- If `mode == ""` or `mode == "standard"`: call `s.runStarter.StartRun(ctx, taskPath)` (replacing the inline `store.WithTx` logic)
+- If `mode == ""` or `mode == "standard"`: call `s.runStarter.StartRun(ctx, taskPath)` — this replaces the inline `store.WithTx` transaction logic with the engine interface. The observable behavior (run created, step activated) must remain identical; only the internal code path changes.
 - Include `mode` in the response JSON
 
 ### 3. Wire orchestrator as RunStarter in server setup

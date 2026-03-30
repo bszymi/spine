@@ -56,7 +56,7 @@ This epic must complete before implementation begins to ensure the design is rev
 
 ---
 
-## 5. Related Artefacts
+## 5. Related Artifacts
 
 - `/governance/constitution.md` — §4, §6, §7
 - `/architecture/api-operations.md`

@@ -10,6 +10,8 @@ last_updated: 2026-03-30
 links:
   - type: parent
     target: /initiatives/INIT-006-governed-artifact-creation/initiative.md
+  - type: blocked_by
+    target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-001-architecture-and-adr/epic.md
 ---
 
 # EPIC-002 — Domain Model & Storage

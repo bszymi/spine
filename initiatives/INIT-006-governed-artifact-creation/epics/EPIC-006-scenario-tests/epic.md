@@ -10,6 +10,14 @@ last_updated: 2026-03-30
 links:
   - type: parent
     target: /initiatives/INIT-006-governed-artifact-creation/initiative.md
+  - type: blocked_by
+    target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-002-domain-model-and-storage/epic.md
+  - type: blocked_by
+    target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-003-engine-planning-run-support/epic.md
+  - type: blocked_by
+    target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-004-api-gateway-and-cli/epic.md
+  - type: blocked_by
+    target: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-005-workflow-definitions/epic.md
 ---
 
 # EPIC-006 — Scenario Tests

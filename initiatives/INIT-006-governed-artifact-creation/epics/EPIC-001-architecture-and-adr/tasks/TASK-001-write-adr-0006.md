@@ -33,6 +33,8 @@ Content should cover:
 
 - Context: why artifact creation currently bypasses governance
 - Decision: introduce `RunMode` with `planning` variant and `StartPlanningRun()` method
+- Merge trigger model: clarify that planning runs follow the existing `committing` → `MergeRunBranch()` → `completed` path. The scheduler handles merge retries. This is not a new mechanism — it reuses the existing merge infrastructure.
+- Write context relaxation: planning runs allow `write_context` with `run_id` only (no `task_path` required), since the run owns the entire branch
 - Alternatives considered: raw branch writes, modified StartRun(), new artifact-request entity
 - Consequences: positive (governed creation), negative (added complexity), neutral (existing runs unchanged)
 

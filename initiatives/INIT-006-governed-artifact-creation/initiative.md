@@ -6,6 +6,13 @@ status: Draft
 owner: bszymi
 created: 2026-03-30
 last_updated: 2026-03-30
+links:
+  - type: related_to
+    target: /governance/constitution.md
+  - type: related_to
+    target: /governance/charter.md
+  - type: related_to
+    target: /product/product-definition.md
 ---
 
 # INIT-006 — Governed Artifact Creation
