@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
 	spineEngine "github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/scenariotest/assert"
@@ -55,6 +56,30 @@ func StartPlanningRun(artifactPath, artifactContent string) Step {
 			if result.EntryStep != nil {
 				sc.Set("current_execution_id", result.EntryStep.ExecutionID)
 				sc.Set("current_step_id", result.EntryStep.StepID)
+			}
+			return nil
+		},
+	}
+}
+
+// CreateArtifactOnBranch returns a step that creates an artifact on the current
+// run's branch using WriteContext. Used for adding child artifacts during the
+// draft step of a planning run.
+func CreateArtifactOnBranch(path, content string) Step {
+	return Step{
+		Name: "create-on-branch-" + path,
+		Action: func(sc *ScenarioContext) error {
+			runID := sc.MustGet("run_id").(string)
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run: %w", err)
+			}
+			if run.BranchName == "" {
+				return fmt.Errorf("run %s has no branch", runID)
+			}
+			ctx := artifact.WithWriteContext(sc.Ctx, artifact.WriteContext{Branch: run.BranchName})
+			if _, err := sc.Runtime.Artifacts.Create(ctx, path, content); err != nil {
+				return fmt.Errorf("create artifact %s on branch: %w", path, err)
 			}
 			return nil
 		},
