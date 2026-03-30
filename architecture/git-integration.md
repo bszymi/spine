@@ -278,6 +278,29 @@ Task branches represent *proposed state*, not governed state.
 - Only the merge into the authoritative branch establishes governed truth
 - Systems reading governed state must ignore task branches unless explicitly operating in execution context
 
+### 6.1.1 Planning Run Branches
+
+Planning runs (per [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md)) use the same branch naming as standard runs (`spine/run/{runID}`) but have distinct branch semantics:
+
+**Planning run branch lifecycle:**
+
+1. Branch is created when `StartPlanningRun()` initializes the run
+2. The initial artifact is written to the branch as the first commit — this is the artifact being created
+3. During the draft step, child artifacts may be created on the same branch (e.g., epics and tasks under a new initiative)
+4. The validate step runs cross-artifact validation against the branch content
+5. On review approval, the branch is merged to the authoritative branch via the standard `MergeRunBranch()` path
+6. The branch is deleted after successful merge
+
+**Constraints:**
+
+- Planning run branches may only contain new artifact files — no modifications to files that exist on the authoritative branch
+- Only artifact types declared at run creation may be written to the branch
+- Writes are restricted to allowed repository root paths for the declared artifact types
+
+**Distinction from task branches:**
+
+Standard task branches contain modifications to an existing governed artifact. Planning run branches contain the creation of one or more new artifacts that do not yet exist on `main`. Once merged, the created artifacts become fully governed and all subsequent work occurs through standard runs on task branches.
+
 ### 6.2 Divergence Branches
 
 During divergence, each branch gets its own Git branch (per [Divergence and Convergence](/architecture/divergence-and-convergence.md) §3.4):

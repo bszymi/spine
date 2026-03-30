@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Update architecture documentation
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-001-architecture-and-adr/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

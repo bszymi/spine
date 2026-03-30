@@ -31,6 +31,17 @@ The [Domain Model](/architecture/domain-model.md) §5 provides informal lifecycl
 | `failed` | A step failed permanently and the Run cannot proceed |
 | `cancelled` | Explicitly cancelled by an operator |
 
+### 2.1.1 Run Mode
+
+Runs carry a `mode` field (per [ADR-0006](/architecture/adr/ADR-0006-planning-runs.md)) that determines their purpose:
+
+| Mode | Description |
+|------|-------------|
+| `standard` | Default. Run executes against an existing artifact on `main`. Created via `StartRun()`. |
+| `planning` | Run creates new artifacts on a branch. Artifacts are branch-local until merge. Created via `StartPlanningRun()`. |
+
+Both modes follow the same state machine. The mode does not introduce new states or transitions — it affects only how the run is initialized (workflow resolution uses `mode: creation` bindings) and how write context is validated (planning runs allow `run_id` without `task_path`).
+
 ### 2.2 Transition Matrix
 
 | From | To | Trigger | Guard | Effects |
