@@ -573,6 +573,31 @@ func TestListRunsByStatusIncludesMode(t *testing.T) {
 	s.CleanupTestData(ctx, t)
 }
 
+func TestRunModeDatabaseDefault(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	// Insert a run via raw SQL without the mode column to test the database DEFAULT.
+	err := s.ExecRaw(ctx, `
+		INSERT INTO runtime.runs (run_id, task_path, workflow_path, workflow_id, workflow_version, status, trace_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+		"run-db-default", "tasks/test.md", "workflows/test.yaml", "test", "abc", "pending", "trace-db-default",
+	)
+	if err != nil {
+		t.Fatalf("raw insert: %v", err)
+	}
+
+	got, err := s.GetRun(ctx, "run-db-default")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Mode != domain.RunModeStandard {
+		t.Errorf("expected database DEFAULT mode %q, got %q", domain.RunModeStandard, got.Mode)
+	}
+
+	s.CleanupTestData(ctx, t)
+}
+
 func TestMigrationApplied(t *testing.T) {
 	s := store.NewTestStore(t)
 	ctx := context.Background()

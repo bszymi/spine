@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Add integration test for database-level mode default
-status: Pending
+status: Completed
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-002-domain-model-and-storage/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation
