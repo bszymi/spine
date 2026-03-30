@@ -663,6 +663,46 @@ func TestCancelRun_FromPaused(t *testing.T) {
 	}
 }
 
+func TestCancelRun_PlanningRunDeletesBranch(t *testing.T) {
+	gitOp := &planningGitOperator{}
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-plan-1": {
+				RunID:      "run-plan-1",
+				Status:     domain.RunStatusActive,
+				Mode:       domain.RunModePlanning,
+				BranchName: "spine/run/run-plan-1",
+				TraceID:    "trace-1234567890ab",
+			},
+		},
+	}
+	events := &mockEventEmitter{}
+	orch := &Orchestrator{
+		workflows: &mockWorkflowResolver{},
+		store:     store,
+		actors:    &stubActorAssigner{},
+		artifacts: &mockArtifactReader{},
+		events:    events,
+		git:       gitOp,
+		wfLoader:  &stubWorkflowLoader{},
+	}
+
+	err := orch.CancelRun(context.Background(), "run-plan-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if store.statusCalls[0].status != domain.RunStatusCancelled {
+		t.Errorf("expected cancelled, got %s", store.statusCalls[0].status)
+	}
+	if len(gitOp.deletedBranches) != 1 {
+		t.Fatalf("expected 1 branch deleted, got %d", len(gitOp.deletedBranches))
+	}
+	if gitOp.deletedBranches[0] != "spine/run/run-plan-1" {
+		t.Errorf("expected branch spine/run/run-plan-1 deleted, got %s", gitOp.deletedBranches[0])
+	}
+}
+
 func TestCancelRun_InvalidState(t *testing.T) {
 	store := &mockRunStore{
 		runs: map[string]*domain.Run{
