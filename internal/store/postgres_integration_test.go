@@ -473,6 +473,106 @@ func TestThreadWithoutOptionalFields(t *testing.T) {
 	s.CleanupTestData(ctx, t)
 }
 
+func TestRunModePlanningPersistence(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	run := &domain.Run{
+		RunID:           "run-mode-planning",
+		TaskPath:        "tasks/test.md",
+		WorkflowPath:    "workflows/test.yaml",
+		WorkflowID:      "test",
+		WorkflowVersion: "abc",
+		Status:          domain.RunStatusPending,
+		Mode:            domain.RunModePlanning,
+		TraceID:         "trace-mode-planning",
+		CreatedAt:       now,
+	}
+
+	if err := s.CreateRun(ctx, run); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	got, err := s.GetRun(ctx, "run-mode-planning")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Mode != domain.RunModePlanning {
+		t.Errorf("expected mode %q, got %q", domain.RunModePlanning, got.Mode)
+	}
+
+	s.CleanupTestData(ctx, t)
+}
+
+func TestRunModeDefaultStandard(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	run := &domain.Run{
+		RunID:           "run-mode-default",
+		TaskPath:        "tasks/test.md",
+		WorkflowPath:    "workflows/test.yaml",
+		WorkflowID:      "test",
+		WorkflowVersion: "abc",
+		Status:          domain.RunStatusPending,
+		TraceID:         "trace-mode-default",
+		CreatedAt:       now,
+	}
+
+	if err := s.CreateRun(ctx, run); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	got, err := s.GetRun(ctx, "run-mode-default")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Mode != domain.RunModeStandard {
+		t.Errorf("expected mode %q, got %q", domain.RunModeStandard, got.Mode)
+	}
+
+	s.CleanupTestData(ctx, t)
+}
+
+func TestListRunsByStatusIncludesMode(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	for _, r := range []*domain.Run{
+		{RunID: "run-list-std", TaskPath: "tasks/a.md", WorkflowPath: "workflows/test.yaml", WorkflowID: "test", WorkflowVersion: "abc", Status: domain.RunStatusPending, Mode: domain.RunModeStandard, TraceID: "t1", CreatedAt: now},
+		{RunID: "run-list-plan", TaskPath: "tasks/b.md", WorkflowPath: "workflows/test.yaml", WorkflowID: "test", WorkflowVersion: "abc", Status: domain.RunStatusPending, Mode: domain.RunModePlanning, TraceID: "t2", CreatedAt: now.Add(time.Second)},
+	} {
+		if err := s.CreateRun(ctx, r); err != nil {
+			t.Fatalf("CreateRun %s: %v", r.RunID, err)
+		}
+	}
+
+	runs, err := s.ListRunsByStatus(ctx, domain.RunStatusPending)
+	if err != nil {
+		t.Fatalf("ListRunsByStatus: %v", err)
+	}
+
+	modes := map[string]domain.RunMode{}
+	for _, r := range runs {
+		if r.RunID == "run-list-std" || r.RunID == "run-list-plan" {
+			modes[r.RunID] = r.Mode
+		}
+	}
+
+	if modes["run-list-std"] != domain.RunModeStandard {
+		t.Errorf("expected standard mode for run-list-std, got %q", modes["run-list-std"])
+	}
+	if modes["run-list-plan"] != domain.RunModePlanning {
+		t.Errorf("expected planning mode for run-list-plan, got %q", modes["run-list-plan"])
+	}
+
+	s.CleanupTestData(ctx, t)
+}
+
 func TestMigrationApplied(t *testing.T) {
 	s := store.NewTestStore(t)
 	ctx := context.Background()
