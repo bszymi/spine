@@ -125,3 +125,97 @@ func TestPlanningRun_InitiativeCreationGoldenPath(t *testing.T) {
 		},
 	})
 }
+
+const childEpicContent = `---
+id: EPIC-001
+type: Epic
+title: Test Epic
+status: Draft
+initiative: /initiatives/init-099/initiative.md
+created: 2026-01-01
+last_updated: 2026-01-01
+links:
+  - type: parent
+    target: /initiatives/init-099/initiative.md
+---
+# EPIC-001 — Test Epic
+`
+
+const childEpic2Content = `---
+id: EPIC-002
+type: Epic
+title: Test Epic 2
+status: Draft
+initiative: /initiatives/init-099/initiative.md
+created: 2026-01-01
+last_updated: 2026-01-01
+links:
+  - type: parent
+    target: /initiatives/init-099/initiative.md
+---
+# EPIC-002 — Test Epic 2
+`
+
+const childTaskContent = `---
+id: TASK-001
+type: Task
+title: Test Task
+status: Pending
+epic: /initiatives/init-099/epics/epic-001/epic.md
+initiative: /initiatives/init-099/initiative.md
+created: 2026-01-01
+last_updated: 2026-01-01
+links:
+  - type: parent
+    target: /initiatives/init-099/epics/epic-001/epic.md
+---
+# TASK-001 — Test Task
+`
+
+// TestPlanningRun_InitiativeWithChildArtifacts validates that multiple artifacts
+// created on a planning run branch all merge to main on approval.
+func TestPlanningRun_InitiativeWithChildArtifacts(t *testing.T) {
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "initiative-with-child-artifacts",
+		Description: "Verify planning run with initiative + epics + task all merge to main",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			seedCreationWorkflow(),
+			engine.SyncProjections(),
+
+			// Start planning run with initiative.
+			engine.StartPlanningRun(
+				"initiatives/init-099/initiative.md",
+				testInitiativeContent,
+			),
+			engine.AssertRunStatus(domain.RunStatusActive),
+
+			// Create child artifacts on the run branch.
+			engine.CreateArtifactOnBranch(
+				"initiatives/init-099/epics/epic-001/epic.md",
+				childEpicContent,
+			),
+			engine.CreateArtifactOnBranch(
+				"initiatives/init-099/epics/epic-002/epic.md",
+				childEpic2Content,
+			),
+			engine.CreateArtifactOnBranch(
+				"initiatives/init-099/epics/epic-001/tasks/task-001.md",
+				childTaskContent,
+			),
+
+			// Progress through workflow.
+			engine.SubmitStepResult("ready_for_review", "artifact_content"),
+			engine.SubmitStepResult("valid"),
+			engine.SubmitStepResult("approved"),
+			engine.AssertRunStatus(domain.RunStatusCommitting),
+
+			// Merge to main.
+			engine.MergeRunBranch(),
+			engine.AssertRunCompleted(),
+		},
+	})
+}
