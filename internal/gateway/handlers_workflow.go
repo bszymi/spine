@@ -16,7 +16,9 @@ import (
 )
 
 type runStartRequest struct {
-	TaskPath string `json:"task_path"`
+	TaskPath        string `json:"task_path"`
+	Mode            string `json:"mode,omitempty"`
+	ArtifactContent string `json:"artifact_content,omitempty"`
 }
 
 type stepSubmitOutput struct {
@@ -50,7 +52,15 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
-	if req.TaskPath == "" {
+	if req.Mode != "" && req.Mode != "standard" && req.Mode != "planning" {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "mode must be 'standard' or 'planning'"))
+		return
+	}
+	if req.Mode == "planning" && req.ArtifactContent == "" {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "artifact_content required when mode is 'planning'"))
+		return
+	}
+	if req.Mode != "planning" && req.TaskPath == "" {
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "task_path required"))
 		return
 	}
