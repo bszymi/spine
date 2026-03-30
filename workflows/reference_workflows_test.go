@@ -124,8 +124,11 @@ func TestArtifactCreationWorkflow_Parses(t *testing.T) {
 	if wf.ID != "artifact-creation" {
 		t.Errorf("expected id artifact-creation, got %s", wf.ID)
 	}
-	if wf.Status != domain.WorkflowStatusDraft {
-		t.Errorf("expected Draft (until mode-aware binding), got %s", wf.Status)
+	if wf.Status != domain.WorkflowStatusActive {
+		t.Errorf("expected Active, got %s", wf.Status)
+	}
+	if wf.Mode != "creation" {
+		t.Errorf("expected mode creation, got %s", wf.Mode)
 	}
 	if len(wf.AppliesTo) != 3 {
 		t.Fatalf("expected 3 applies_to types, got %d", len(wf.AppliesTo))
@@ -192,11 +195,12 @@ func TestArtifactCreationWorkflow_Parses(t *testing.T) {
 
 func TestNoBindingConflicts(t *testing.T) {
 	// Load all workflows and verify no two Active workflows share
-	// the same applies_to type (which would cause ambiguous binding).
-	// artifact-creation.yaml is Draft, so it should not cause conflicts.
+	// the same (applies_to type, mode) pair — mode disambiguates
+	// execution workflows from creation workflows.
 	files := []string{"task-default.yaml", "task-spike.yaml", "adr.yaml", "epic-lifecycle.yaml", "artifact-creation.yaml"}
 
-	typeMap := make(map[string]string) // artifact type → workflow ID
+	// key: "type:mode" → workflow ID
+	bindingMap := make(map[string]string)
 	for _, f := range files {
 		content, err := os.ReadFile(f)
 		if err != nil {
@@ -210,26 +214,32 @@ func TestNoBindingConflicts(t *testing.T) {
 			continue
 		}
 		for _, at := range wf.AppliesTo {
-			if existing, ok := typeMap[at]; ok {
-				// Both task-default and task-spike apply to Task.
+			key := at + ":" + wf.Mode
+			if existing, ok := bindingMap[key]; ok {
+				// task-default and task-spike both match Task:execution.
 				// This is expected — work_type filtering will disambiguate.
-				// For now, document the known overlap.
-				t.Logf("NOTE: type %q matched by both %s and %s (disambiguated by work_type)", at, existing, wf.ID)
+				t.Logf("NOTE: binding %q matched by both %s and %s (disambiguated by work_type)", key, existing, wf.ID)
 			}
-			typeMap[at] = wf.ID
+			bindingMap[key] = wf.ID
 		}
 	}
 
-	// ADR and Epic should be unique.
-	if id, ok := typeMap["ADR"]; !ok || id != "adr-review" {
-		t.Errorf("expected ADR → adr-review")
+	// Execution bindings.
+	if id := bindingMap["ADR:execution"]; id != "adr-review" {
+		t.Errorf("expected ADR:execution → adr-review, got %s", id)
 	}
-	if id, ok := typeMap["Epic"]; !ok || id != "epic-lifecycle" {
-		t.Errorf("expected Epic → epic-lifecycle")
+	if id := bindingMap["Epic:execution"]; id != "epic-lifecycle" {
+		t.Errorf("expected Epic:execution → epic-lifecycle, got %s", id)
 	}
 
-	// artifact-creation is Draft, so Initiative should NOT appear.
-	if _, ok := typeMap["Initiative"]; ok {
-		t.Error("expected Initiative not in active bindings (artifact-creation is Draft)")
+	// Creation bindings from artifact-creation.yaml.
+	if id := bindingMap["Initiative:creation"]; id != "artifact-creation" {
+		t.Errorf("expected Initiative:creation → artifact-creation, got %s", id)
+	}
+	if id := bindingMap["Task:creation"]; id != "artifact-creation" {
+		t.Errorf("expected Task:creation → artifact-creation, got %s", id)
+	}
+	if id := bindingMap["Epic:creation"]; id != "artifact-creation" {
+		t.Errorf("expected Epic:creation → artifact-creation, got %s", id)
 	}
 }

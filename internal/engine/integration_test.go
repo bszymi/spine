@@ -131,6 +131,14 @@ func (r *memWorkflowResolver) ResolveWorkflow(_ context.Context, _, _ string) (*
 	}, nil
 }
 
+func (r *memWorkflowResolver) ResolveWorkflowForMode(_ context.Context, _, _, _ string) (*workflow.BindingResult, error) {
+	return &workflow.BindingResult{
+		Workflow:     r.wfDef,
+		CommitSHA:    "integration-test-sha",
+		VersionLabel: r.wfDef.Version,
+	}, nil
+}
+
 // memWorkflowLoader returns a fixed workflow definition.
 type memWorkflowLoader struct {
 	wfDef *domain.WorkflowDefinition

@@ -18,6 +18,10 @@ func (s *stubWorkflowResolver) ResolveWorkflow(_ context.Context, _, _ string) (
 	return nil, nil
 }
 
+func (s *stubWorkflowResolver) ResolveWorkflowForMode(_ context.Context, _, _, _ string) (*workflow.BindingResult, error) {
+	return nil, nil
+}
+
 type stubRunStore struct{}
 
 func (s *stubRunStore) CreateRun(_ context.Context, _ *domain.Run) error { return nil }
