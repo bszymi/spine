@@ -65,10 +65,31 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Planning mode routing is wired in TASK-002. Guard against fall-through
-	// to the standard path which would create the wrong run type.
+	// Route planning mode through the engine's StartPlanningRun.
 	if req.Mode == "planning" {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "planning runs not yet wired in gateway"))
+		if s.planningRunStarter == nil {
+			WriteError(w, domain.NewError(domain.ErrUnavailable, "planning run starter not configured"))
+			return
+		}
+		result, err := s.planningRunStarter.StartPlanningRun(r.Context(), req.TaskPath, req.ArtifactContent)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		resp := map[string]any{
+			"run_id":      result.RunID,
+			"task_path":   result.TaskPath,
+			"workflow_id": result.WorkflowID,
+			"status":      result.Status,
+			"mode":        result.Mode,
+			"trace_id":    result.TraceID,
+		}
+		if result.VersionLabel != "" {
+			resp["workflow_version"] = result.VersionLabel
+		} else if result.CommitSHA != "" {
+			resp["workflow_version"] = result.CommitSHA
+		}
+		WriteJSON(w, http.StatusCreated, resp)
 		return
 	}
 
@@ -143,6 +164,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		"task_path":   req.TaskPath,
 		"workflow_id": resolved.WorkflowID,
 		"status":      domain.RunStatusActive,
+		"mode":        "standard",
 		"trace_id":    traceID,
 	}
 	if resolved.VersionLabel != "" {

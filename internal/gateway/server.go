@@ -47,6 +47,26 @@ type EventEmitterGW interface {
 	Emit(ctx context.Context, event domain.Event) error
 }
 
+// PlanningRunStarter starts planning runs for governed artifact creation.
+type PlanningRunStarter interface {
+	StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*PlanningRunResult, error)
+}
+
+// PlanningRunResult contains the result of starting a planning run.
+// Mirrors engine.StartRunResult but avoids gateway importing engine.
+type PlanningRunResult struct {
+	RunID        string
+	TaskPath     string
+	WorkflowID   string
+	Status       string
+	Mode         string
+	BranchName   string
+	TraceID      string
+	EntryStepID  string
+	VersionLabel string
+	CommitSHA    string
+}
+
 // BranchCreator creates exploratory branches and manages divergence windows.
 type BranchCreator interface {
 	CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
@@ -54,18 +74,19 @@ type BranchCreator interface {
 }
 
 type Server struct {
-	httpServer       *http.Server
-	store            store.Store
-	auth             *auth.Service
-	artifacts        ArtifactService
-	projQuery        ProjectionQuerier
-	projSync         ProjectionSyncer
-	git              GitReader
-	validator        *validation.Engine
-	resultHandler    ResultHandler
-	workflowResolver WorkflowResolverFn
-	branchCreator    BranchCreator  // optional, nil if not configured
-	events           EventEmitterGW // optional, nil if not configured
+	httpServer         *http.Server
+	store              store.Store
+	auth               *auth.Service
+	artifacts          ArtifactService
+	projQuery          ProjectionQuerier
+	projSync           ProjectionSyncer
+	git                GitReader
+	validator          *validation.Engine
+	resultHandler      ResultHandler
+	workflowResolver   WorkflowResolverFn
+	branchCreator      BranchCreator      // optional, nil if not configured
+	events             EventEmitterGW     // optional, nil if not configured
+	planningRunStarter PlanningRunStarter // optional, nil if not configured
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -103,33 +124,35 @@ type ResultResponse struct {
 
 // ServerConfig holds optional service dependencies for the server.
 type ServerConfig struct {
-	Store            store.Store
-	Auth             *auth.Service
-	Artifacts        ArtifactService
-	ProjQuery        ProjectionQuerier
-	ProjSync         ProjectionSyncer
-	Git              GitReader
-	Validator        *validation.Engine
-	ResultHandler    ResultHandler
-	WorkflowResolver WorkflowResolverFn
-	BranchCreator    BranchCreator
-	Events           EventEmitterGW
+	Store              store.Store
+	Auth               *auth.Service
+	Artifacts          ArtifactService
+	ProjQuery          ProjectionQuerier
+	ProjSync           ProjectionSyncer
+	Git                GitReader
+	Validator          *validation.Engine
+	ResultHandler      ResultHandler
+	WorkflowResolver   WorkflowResolverFn
+	BranchCreator      BranchCreator
+	Events             EventEmitterGW
+	PlanningRunStarter PlanningRunStarter
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
 func NewServer(addr string, cfg ServerConfig) *Server {
 	s := &Server{
-		store:            cfg.Store,
-		auth:             cfg.Auth,
-		artifacts:        cfg.Artifacts,
-		projQuery:        cfg.ProjQuery,
-		projSync:         cfg.ProjSync,
-		git:              cfg.Git,
-		validator:        cfg.Validator,
-		resultHandler:    cfg.ResultHandler,
-		branchCreator:    cfg.BranchCreator,
-		events:           cfg.Events,
-		workflowResolver: cfg.WorkflowResolver,
+		store:              cfg.Store,
+		auth:               cfg.Auth,
+		artifacts:          cfg.Artifacts,
+		projQuery:          cfg.ProjQuery,
+		projSync:           cfg.ProjSync,
+		git:                cfg.Git,
+		validator:          cfg.Validator,
+		resultHandler:      cfg.ResultHandler,
+		branchCreator:      cfg.BranchCreator,
+		events:             cfg.Events,
+		planningRunStarter: cfg.PlanningRunStarter,
+		workflowResolver:   cfg.WorkflowResolver,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,
