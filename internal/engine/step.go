@@ -667,6 +667,15 @@ func summarizeValidationErrors(errs []domain.ValidationError) string {
 	return fmt.Sprintf("%d validation errors: %s", len(errs), strings.Join(msgs, "; "))
 }
 
+// resolveReadRef returns the Git ref to use when reading artifacts for precondition evaluation.
+// Planning runs read from the run branch (where the artifact exists); standard runs read from HEAD.
+func resolveReadRef(run *domain.Run) string {
+	if run.Mode == domain.RunModePlanning && run.BranchName != "" {
+		return run.BranchName
+	}
+	return "HEAD"
+}
+
 // checkArtifactStatus verifies an artifact at config["path"] has config["status"].
 func (o *Orchestrator) checkArtifactStatus(ctx context.Context, config map[string]string, run *domain.Run) bool {
 	path := config["path"]
@@ -675,7 +684,7 @@ func (o *Orchestrator) checkArtifactStatus(ctx context.Context, config map[strin
 	}
 	expectedStatus := config["status"]
 
-	art, err := o.artifacts.Read(ctx, path, "HEAD")
+	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
 	if err != nil {
 		return false
 	}
@@ -690,7 +699,7 @@ func (o *Orchestrator) checkFieldPresent(ctx context.Context, config map[string]
 	}
 	field := config["field"]
 
-	art, err := o.artifacts.Read(ctx, path, "HEAD")
+	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
 	if err != nil {
 		return false
 	}
@@ -706,7 +715,7 @@ func (o *Orchestrator) checkFieldValue(ctx context.Context, config map[string]st
 	field := config["field"]
 	expected := config["value"]
 
-	art, err := o.artifacts.Read(ctx, path, "HEAD")
+	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
 	if err != nil {
 		return false
 	}
@@ -721,7 +730,7 @@ func (o *Orchestrator) checkLinksExist(ctx context.Context, config map[string]st
 	}
 	linkType := config["link_type"]
 
-	art, err := o.artifacts.Read(ctx, path, "HEAD")
+	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
 	if err != nil {
 		return false
 	}
