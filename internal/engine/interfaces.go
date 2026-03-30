@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/bszymi/spine/internal/actor"
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/workflow"
@@ -80,6 +81,12 @@ type ConvergenceHandler interface {
 // DiscussionChecker checks discussion thread state for precondition evaluation.
 type DiscussionChecker interface {
 	HasOpenThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) (bool, error)
+}
+
+// ArtifactWriter creates artifacts on branches during planning runs.
+// Per ADR-006 §2.
+type ArtifactWriter interface {
+	Create(ctx context.Context, path, content string) (*artifact.WriteResult, error)
 }
 
 // GitOperator provides Git operations needed for run-level branching and commits.
