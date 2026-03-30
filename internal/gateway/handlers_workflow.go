@@ -66,6 +66,9 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Route planning mode through the engine's StartPlanningRun.
+	// NOTE: Planning runs require creation-mode workflow binding (EPIC-005/TASK-004).
+	// Until that is implemented, planning requests are blocked to avoid creating
+	// runs that bind to execution workflows and immediately stall.
 	if req.Mode == "planning" {
 		if s.planningRunStarter == nil {
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "planning run starter not configured"))
@@ -76,13 +79,19 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, err)
 			return
 		}
+		// Use the gateway's trace ID (from X-Trace-Id header/middleware) for response
+		// consistency, since the engine generates its own internal trace ID.
+		gatewayTraceID := observe.TraceID(r.Context())
+		if gatewayTraceID == "" {
+			gatewayTraceID = result.TraceID
+		}
 		resp := map[string]any{
 			"run_id":      result.RunID,
 			"task_path":   result.TaskPath,
 			"workflow_id": result.WorkflowID,
 			"status":      result.Status,
 			"mode":        result.Mode,
-			"trace_id":    result.TraceID,
+			"trace_id":    gatewayTraceID,
 		}
 		if result.VersionLabel != "" {
 			resp["workflow_version"] = result.VersionLabel
