@@ -65,6 +65,13 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Planning mode routing is wired in TASK-002. Guard against fall-through
+	// to the standard path which would create the wrong run type.
+	if req.Mode == "planning" {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "planning runs not yet wired in gateway"))
+		return
+	}
+
 	if s.store == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
