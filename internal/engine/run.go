@@ -196,22 +196,10 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	now := time.Now()
 	branchName := fmt.Sprintf("spine/run/%s", runID)
 
-	// Create Git branch from HEAD.
-	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
-		return nil, fmt.Errorf("create planning branch: %w", err)
-	}
-
-	// Write the artifact to the branch via WriteContext.
-	branchCtx := artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branchName})
-	if _, err := o.artifactWriter.Create(branchCtx, artifactPath, artifactContent); err != nil {
-		// Branch cleanup on failure.
-		if delErr := o.git.DeleteBranch(ctx, branchName); delErr != nil {
-			log.Warn("failed to clean up planning branch", "branch", branchName, "error", delErr)
-		}
-		return nil, fmt.Errorf("create artifact on branch: %w", err)
-	}
-
-	// Create run record with planning mode.
+	// Create run record with planning mode first, before branch or artifact
+	// writes. This ensures the run exists in the store before any events are
+	// emitted by the artifact writer. Per StartRun pattern: persist first,
+	// then create branch to avoid phantom events for runs that never existed.
 	run := &domain.Run{
 		RunID:                runID,
 		TaskPath:             artifactPath,
@@ -237,10 +225,25 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	}
 
 	if err := o.store.CreateRun(ctx, run); err != nil {
+		return nil, fmt.Errorf("create run: %w", err)
+	}
+
+	// Create Git branch from HEAD after run is persisted.
+	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
+		return nil, fmt.Errorf("create planning branch: %w", err)
+	}
+
+	// Write the artifact to the branch via WriteContext.
+	// Propagate run/trace metadata so commit trailers are correct.
+	branchCtx := artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branchName})
+	branchCtx = observe.WithTraceID(branchCtx, traceID)
+	branchCtx = observe.WithRunID(branchCtx, runID)
+	if _, err := o.artifactWriter.Create(branchCtx, artifactPath, artifactContent); err != nil {
+		// Branch cleanup on failure.
 		if delErr := o.git.DeleteBranch(ctx, branchName); delErr != nil {
 			log.Warn("failed to clean up planning branch", "branch", branchName, "error", delErr)
 		}
-		return nil, fmt.Errorf("create run: %w", err)
+		return nil, fmt.Errorf("create artifact on branch: %w", err)
 	}
 
 	// Create entry step execution.
