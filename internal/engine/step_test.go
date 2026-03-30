@@ -1006,3 +1006,33 @@ func TestEvaluatePreconditions_DiscussionsResolved_CustomAnchor(t *testing.T) {
 		t.Error("expected discussions_resolved to pass with custom anchor")
 	}
 }
+
+// ── resolveReadRef tests ──
+
+func TestResolveReadRef_StandardRun(t *testing.T) {
+	run := &domain.Run{Mode: domain.RunModeStandard, BranchName: "spine/run/abc"}
+	if ref := resolveReadRef(run); ref != "HEAD" {
+		t.Errorf("expected HEAD for standard run, got %s", ref)
+	}
+}
+
+func TestResolveReadRef_ZeroMode(t *testing.T) {
+	run := &domain.Run{BranchName: "spine/run/abc"}
+	if ref := resolveReadRef(run); ref != "HEAD" {
+		t.Errorf("expected HEAD for zero mode, got %s", ref)
+	}
+}
+
+func TestResolveReadRef_PlanningRun(t *testing.T) {
+	run := &domain.Run{Mode: domain.RunModePlanning, BranchName: "spine/run/plan-123"}
+	if ref := resolveReadRef(run); ref != "spine/run/plan-123" {
+		t.Errorf("expected branch name, got %s", ref)
+	}
+}
+
+func TestResolveReadRef_PlanningRunNoBranch(t *testing.T) {
+	run := &domain.Run{Mode: domain.RunModePlanning}
+	if ref := resolveReadRef(run); ref != "HEAD" {
+		t.Errorf("expected HEAD when planning run has no branch, got %s", ref)
+	}
+}
