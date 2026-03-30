@@ -14,6 +14,13 @@ func Parse(path string, content []byte) (*domain.WorkflowDefinition, error) {
 		return nil, fmt.Errorf("parse workflow %s: %w", path, err)
 	}
 	wf.Path = path
+	// Default mode to "execution" for backward compatibility.
+	if wf.Mode == "" {
+		wf.Mode = "execution"
+	}
+	if wf.Mode != "execution" && wf.Mode != "creation" {
+		return nil, fmt.Errorf("parse workflow %s: invalid mode %q (expected execution or creation)", path, wf.Mode)
+	}
 	return &wf, nil
 }
 
