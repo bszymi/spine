@@ -219,3 +219,51 @@ func TestPlanningRun_InitiativeWithChildArtifacts(t *testing.T) {
 		},
 	})
 }
+
+// TestPlanningRun_RejectionAndRework validates that review rejection loops
+// back to draft, and approval on retry succeeds.
+func TestPlanningRun_RejectionAndRework(t *testing.T) {
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "planning-run-rejection-rework",
+		Description: "Verify rejection loops to draft and retry approval succeeds",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			seedCreationWorkflow(),
+			engine.SyncProjections(),
+
+			// Start planning run.
+			engine.StartPlanningRun(
+				"initiatives/init-099/initiative.md",
+				testInitiativeContent,
+			),
+			engine.AssertRunStatus(domain.RunStatusActive),
+			engine.AssertCurrentStep("draft"),
+
+			// First pass: draft → validate → review → rejected.
+			engine.SubmitStepResult("ready_for_review", "artifact_content"),
+			engine.AssertCurrentStep("validate"),
+			engine.SubmitStepResult("valid"),
+			engine.AssertCurrentStep("review"),
+			engine.SubmitStepResult("needs_revision"),
+
+			// Should loop back to draft.
+			engine.AssertCurrentStep("draft"),
+			engine.AssertRunStatus(domain.RunStatusActive),
+
+			// Second pass: draft → validate → review → approved.
+			engine.SubmitStepResult("ready_for_review", "artifact_content"),
+			engine.AssertCurrentStep("validate"),
+			engine.SubmitStepResult("valid"),
+			engine.AssertCurrentStep("review"),
+			engine.SubmitStepResult("approved"),
+			engine.AssertRunStatus(domain.RunStatusCommitting),
+
+			// Merge and complete.
+			engine.MergeRunBranch(),
+			engine.AssertRunCompleted(),
+		},
+	})
+}
