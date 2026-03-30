@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: Domain Model & Storage
-status: Draft
+status: Pending
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 owner: bszymi
 created: 2026-03-30

@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: "Scenario: Planning run rejection and rework"
-status: Draft
+status: Pending
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-006-scenario-tests/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

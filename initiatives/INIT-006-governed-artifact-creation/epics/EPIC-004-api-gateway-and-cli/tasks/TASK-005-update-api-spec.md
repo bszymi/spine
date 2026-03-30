@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Update API spec
-status: Draft
+status: Pending
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-004-api-gateway-and-cli/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

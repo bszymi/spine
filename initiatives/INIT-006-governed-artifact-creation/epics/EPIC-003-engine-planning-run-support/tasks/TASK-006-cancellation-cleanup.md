@@ -2,7 +2,7 @@
 id: TASK-006
 type: Task
 title: Implement planning run cancellation cleanup
-status: Draft
+status: Pending
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-003-engine-planning-run-support/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation

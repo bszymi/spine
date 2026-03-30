@@ -2,7 +2,7 @@
 id: INIT-006
 type: Initiative
 title: Governed Artifact Creation
-status: Draft
+status: Pending
 owner: bszymi
 created: 2026-03-30
 last_updated: 2026-03-30

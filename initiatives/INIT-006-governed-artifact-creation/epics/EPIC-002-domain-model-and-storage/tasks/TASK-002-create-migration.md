@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Create migration 008_add_run_mode.sql
-status: Draft
+status: Pending
 epic: /initiatives/INIT-006-governed-artifact-creation/epics/EPIC-002-domain-model-and-storage/epic.md
 initiative: /initiatives/INIT-006-governed-artifact-creation/initiative.md
 work_type: implementation
