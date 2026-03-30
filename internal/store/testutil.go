@@ -40,6 +40,12 @@ func NewTestStore(t *testing.T) *PostgresStore {
 	return s
 }
 
+// ExecRaw executes a raw SQL statement. For testing only.
+func (s *PostgresStore) ExecRaw(ctx context.Context, sql string, args ...any) error {
+	_, err := s.pool.Exec(ctx, sql, args...)
+	return err
+}
+
 // CleanupTestData removes all test data from runtime and projection tables.
 func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 	t.Helper()
