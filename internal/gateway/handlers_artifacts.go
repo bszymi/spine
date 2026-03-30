@@ -193,6 +193,15 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 
 	ctx := r.Context()
 	if req.WriteContext != nil {
+		// Block planning runs from updating artifacts — per ADR-006 §8,
+		// planning runs may only create new artifacts, not modify existing ones.
+		if req.WriteContext.RunID != "" && s.store != nil {
+			run, err := s.store.GetRun(ctx, req.WriteContext.RunID)
+			if err == nil && run.Mode == domain.RunModePlanning {
+				WriteError(w, domain.NewError(domain.ErrInvalidParams, "planning runs may not update existing artifacts"))
+				return
+			}
+		}
 		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
 		if err != nil {
 			WriteError(w, err)
