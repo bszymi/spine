@@ -1893,6 +1893,28 @@ func TestStepAssignNoStore(t *testing.T) {
 	}
 }
 
+func TestRunStartPlanningMode_EngineError(t *testing.T) {
+	starter := &fakePlanningRunStarter{
+		err: domain.NewError(domain.ErrInvalidParams, "invalid artifact content"),
+	}
+	ts, token := setupPlanningServer(t, starter)
+	defer ts.Close()
+
+	body := `{"mode":"planning","artifact_content":"bad","task_path":"x"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for engine error, got %d", resp.StatusCode)
+	}
+}
+
 func TestRunStartNoStore(t *testing.T) {
 	fs := newFakeStore()
 	fs.actors["admin-1"] = &domain.Actor{
@@ -2155,5 +2177,165 @@ func TestRunStartStandardMode_Unchanged(t *testing.T) {
 
 	if resp.StatusCode != 201 {
 		t.Errorf("expected 201 for standard mode, got %d", resp.StatusCode)
+	}
+}
+
+// ── resolveWriteContext tests via artifact create ──
+
+// fakeStoreWithRuns extends fakeStore with configurable run returns.
+type fakeStoreWithRuns struct {
+	*fakeStore
+	runs map[string]*domain.Run
+}
+
+func (f *fakeStoreWithRuns) GetRun(_ context.Context, runID string) (*domain.Run, error) {
+	if r, ok := f.runs[runID]; ok {
+		return r, nil
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "run not found")
+}
+
+func setupWriteContextServer(t *testing.T, runs map[string]*domain.Run) (*httptest.Server, string) {
+	t.Helper()
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, err := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	fsWithRuns := &fakeStoreWithRuns{fakeStore: fs, runs: runs}
+	artSvc := newFakeArtifactService()
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:     fsWithRuns,
+		Auth:      authSvc,
+		Artifacts: artSvc,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	return ts, token
+}
+
+func TestResolveWriteContext_PlanningRunNoTaskPath(t *testing.T) {
+	runs := map[string]*domain.Run{
+		"run-plan-1": {
+			RunID: "run-plan-1", Status: domain.RunStatusActive,
+			Mode: domain.RunModePlanning, BranchName: "spine/run/run-plan-1",
+		},
+	}
+	ts, token := setupWriteContextServer(t, runs)
+	defer ts.Close()
+
+	body := `{"path":"initiatives/new.md","content":"---\nid: NEW-001\ntype: Initiative\ntitle: New\nstatus: Draft\nowner: test\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# New","write_context":{"run_id":"run-plan-1"}}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Should succeed — planning runs don't require task_path.
+	if resp.StatusCode >= 400 {
+		t.Errorf("expected success for planning run write context, got %d", resp.StatusCode)
+	}
+}
+
+func TestResolveWriteContext_StandardRunMissingTaskPath(t *testing.T) {
+	runs := map[string]*domain.Run{
+		"run-std-1": {
+			RunID: "run-std-1", Status: domain.RunStatusActive,
+			Mode: domain.RunModeStandard, BranchName: "spine/run/run-std-1",
+		},
+	}
+	ts, token := setupWriteContextServer(t, runs)
+	defer ts.Close()
+
+	body := `{"path":"test.md","content":"test","write_context":{"run_id":"run-std-1"}}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for standard run without task_path, got %d", resp.StatusCode)
+	}
+}
+
+func TestResolveWriteContext_StandardRunMismatchedTaskPath(t *testing.T) {
+	runs := map[string]*domain.Run{
+		"run-std-2": {
+			RunID: "run-std-2", Status: domain.RunStatusActive,
+			Mode: domain.RunModeStandard, BranchName: "spine/run/run-std-2",
+			TaskPath: "tasks/real.md",
+		},
+	}
+	ts, token := setupWriteContextServer(t, runs)
+	defer ts.Close()
+
+	body := `{"path":"test.md","content":"test","write_context":{"run_id":"run-std-2","task_path":"tasks/wrong.md"}}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for mismatched task_path, got %d", resp.StatusCode)
+	}
+}
+
+func TestResolveWriteContext_NonActiveRun(t *testing.T) {
+	runs := map[string]*domain.Run{
+		"run-done": {
+			RunID: "run-done", Status: domain.RunStatusCompleted,
+			Mode: domain.RunModeStandard, BranchName: "spine/run/run-done",
+			TaskPath: "tasks/done.md",
+		},
+	}
+	ts, token := setupWriteContextServer(t, runs)
+	defer ts.Close()
+
+	body := `{"path":"test.md","content":"test","write_context":{"run_id":"run-done","task_path":"tasks/done.md"}}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for non-active run, got %d", resp.StatusCode)
+	}
+}
+
+func TestResolveWriteContext_InvalidRunID(t *testing.T) {
+	ts, token := setupWriteContextServer(t, map[string]*domain.Run{})
+	defer ts.Close()
+
+	body := `{"path":"test.md","content":"test","write_context":{"run_id":"nonexistent","task_path":"tasks/x.md"}}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 400 {
+		t.Errorf("expected error for invalid run_id, got %d", resp.StatusCode)
 	}
 }
