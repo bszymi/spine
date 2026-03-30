@@ -38,15 +38,16 @@ func runStartCmd() *cobra.Command {
 				if contentFile == "" {
 					return fmt.Errorf("--content is required when --mode is planning")
 				}
+				if taskPath == "" {
+					return fmt.Errorf("--task is required (artifact path for the new artifact)")
+				}
 				content, err := os.ReadFile(contentFile)
 				if err != nil {
 					return fmt.Errorf("read content file: %w", err)
 				}
 				body["mode"] = "planning"
 				body["artifact_content"] = string(content)
-				if taskPath != "" {
-					body["task_path"] = taskPath
-				}
+				body["task_path"] = taskPath
 			} else {
 				if taskPath == "" {
 					return fmt.Errorf("--task is required")
