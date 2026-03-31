@@ -54,7 +54,8 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 
 	// Create run in pending status first, then create branch.
 	// This avoids orphan branches if run persistence fails.
-	branchName := fmt.Sprintf("spine/run/%s", runID)
+	// Always include run ID suffix to guarantee uniqueness.
+	branchName := generateBranchNameWithSuffix(domain.RunModeStandard, artifact.ID, taskPath, runID)
 
 	run := &domain.Run{
 		RunID:                runID,
@@ -198,7 +199,8 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	}
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 	now := time.Now()
-	branchName := fmt.Sprintf("spine/run/%s", runID)
+	// Always include run ID suffix to guarantee uniqueness.
+	branchName := generateBranchNameWithSuffix(domain.RunModePlanning, parsed.ID, artifactPath, runID)
 
 	// Create run record with planning mode first, before branch or artifact
 	// writes. This ensures the run exists in the store before any events are

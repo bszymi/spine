@@ -1,0 +1,107 @@
+package engine
+
+import (
+	"testing"
+
+	"github.com/bszymi/spine/internal/domain"
+)
+
+func TestGenerateBranchName_StandardRun(t *testing.T) {
+	name := generateBranchName(domain.RunModeStandard, "TASK-003", "initiatives/init-001/epics/epic-001/tasks/task-003-git-push.md", "run-0a5d0f6d")
+	want := "spine/run/task-003-task-003-git-push"
+	if name != want {
+		t.Errorf("got %q, want %q", name, want)
+	}
+}
+
+func TestGenerateBranchName_PlanningRun(t *testing.T) {
+	name := generateBranchName(domain.RunModePlanning, "INIT-001", "initiatives/init-001/initiative.md", "run-abcd1234")
+	want := "spine/plan/init-001-initiative"
+	if name != want {
+		t.Errorf("got %q, want %q", name, want)
+	}
+}
+
+func TestGenerateBranchName_LongSlugTruncated(t *testing.T) {
+	name := generateBranchName(domain.RunModeStandard, "TASK-099",
+		"initiatives/init-001/epics/epic-001/tasks/task-099-this-is-a-very-long-task-name-that-exceeds-the-maximum-allowed-length.md",
+		"run-abcd1234")
+	// Should be truncated to maxSlugLength
+	slug := name[len("spine/run/"):]
+	if len(slug) > maxSlugLength {
+		t.Errorf("slug too long: %d chars, max %d: %q", len(slug), maxSlugLength, slug)
+	}
+	// Should not end with a hyphen
+	if slug[len(slug)-1] == '-' {
+		t.Errorf("slug should not end with hyphen: %q", slug)
+	}
+}
+
+func TestGenerateBranchNameWithSuffix(t *testing.T) {
+	name := generateBranchNameWithSuffix(domain.RunModePlanning, "INIT-001", "initiatives/init-001/initiative.md", "run-0a5d0f6d")
+	want := "spine/plan/init-001-initiative-0a5d0f6d"
+	if name != want {
+		t.Errorf("got %q, want %q", name, want)
+	}
+}
+
+func TestSlugFromPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"initiatives/init-001/initiative.md", "initiative"},
+		{"initiatives/init-001/epics/epic-001/tasks/task-003-git-push.md", "task-003-git-push"},
+		{"governance/charter.md", "charter"},
+		{"workflows/task-default.yaml", "task-default"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := slugFromPath(tt.path)
+			if got != tt.want {
+				t.Errorf("slugFromPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitize(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Hello World", "hello-world"},
+		{"INIT-001", "init-001"},
+		{"task_003_git-push", "task-003-git-push"},
+		{"--leading-trailing--", "leading-trailing"},
+		{"Special!@#$%Chars", "special-chars"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := sanitize(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitize(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunIDSuffix(t *testing.T) {
+	if got := runIDSuffix("run-0a5d0f6d"); got != "0a5d0f6d" {
+		t.Errorf("got %q, want 0a5d0f6d", got)
+	}
+	if got := runIDSuffix("custom-id"); got != "custom-id" {
+		t.Errorf("got %q, want custom-id", got)
+	}
+}
+
+func TestGenerateBranchName_NoArtifactID(t *testing.T) {
+	// When artifact has no ID (e.g., Governance), just use the slug
+	name := generateBranchName(domain.RunModeStandard, "", "governance/charter.md", "run-abcd1234")
+	want := "spine/run/charter"
+	if name != want {
+		t.Errorf("got %q, want %q", name, want)
+	}
+}
