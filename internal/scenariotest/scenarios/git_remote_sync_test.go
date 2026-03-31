@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 
+	"strings"
+
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/scenariotest/engine"
@@ -299,6 +301,103 @@ func TestGitRemoteSync_AutoPushDisabled(t *testing.T) {
 					bare := sc.MustGet("bare_dir").(string)
 					if harness.RemoteHeadContains(sc.T, bare, "main", "Create Governance") {
 						sc.T.Errorf("expected no push when SPINE_GIT_AUTO_PUSH=false")
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// --- Scenario 7: Planning run branch name follows convention ---
+
+func TestGitRemoteSync_PlanningRunBranchNaming(t *testing.T) {
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "planning-run-branch-naming",
+		Description: "Planning run branch follows spine/plan/<id>-<slug>-<hex> convention",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			addRemote(),
+			seedCreationWorkflow(),
+			engine.SyncProjections(),
+			engine.StartPlanningRun(
+				"initiatives/init-099/initiative.md",
+				testInitiativeContent,
+			),
+			{
+				Name: "verify-planning-branch-name",
+				Action: func(sc *engine.ScenarioContext) error {
+					runID := sc.MustGet("run_id").(string)
+					run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+					if err != nil {
+						return err
+					}
+					branch := run.BranchName
+					if !strings.HasPrefix(branch, "spine/plan/init-099-") {
+						sc.T.Errorf("expected branch to start with spine/plan/init-099-, got %s", branch)
+					}
+					if !strings.Contains(branch, "initiative") {
+						sc.T.Errorf("expected branch to contain 'initiative' slug, got %s", branch)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// --- Scenario 8: Standard run branch name follows convention ---
+
+const testTaskContent = `---
+id: TASK-001
+type: Task
+title: Test Task for Naming
+status: Pending
+epic: /initiatives/init-099/epics/epic-001/epic.md
+initiative: /initiatives/init-099/initiative.md
+created: 2026-01-01
+last_updated: 2026-01-01
+links:
+  - type: parent
+    target: /initiatives/init-099/epics/epic-001/epic.md
+---
+# TASK-001 — Test Task for Naming
+`
+
+func TestGitRemoteSync_StandardRunBranchNaming(t *testing.T) {
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "standard-run-branch-naming",
+		Description: "Standard run branch follows spine/run/<id>-<slug>-<hex> convention",
+		EnvOpts: []harness.EnvOption{
+			harness.WithWorkflows(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			addRemote(),
+			engine.WriteAndCommit(
+				"initiatives/init-099/epics/epic-001/tasks/task-001-naming-test.md",
+				testTaskContent,
+				"seed task artifact",
+			),
+			engine.SyncProjections(),
+			engine.StartRun("initiatives/init-099/epics/epic-001/tasks/task-001-naming-test.md"),
+			{
+				Name: "verify-standard-branch-name",
+				Action: func(sc *engine.ScenarioContext) error {
+					runID := sc.MustGet("run_id").(string)
+					run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+					if err != nil {
+						return err
+					}
+					branch := run.BranchName
+					if !strings.HasPrefix(branch, "spine/run/task-001-") {
+						sc.T.Errorf("expected branch to start with spine/run/task-001-, got %s", branch)
+					}
+					if !strings.Contains(branch, "naming-test") {
+						sc.T.Errorf("expected branch to contain 'naming-test' slug, got %s", branch)
 					}
 					return nil
 				},

@@ -280,7 +280,7 @@ Task branches represent *proposed state*, not governed state.
 
 ### 6.1.1 Planning Run Branches
 
-Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) use the same branch naming as standard runs (`spine/run/{runID}`) but have distinct branch semantics:
+Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) use the same branch naming convention as standard runs (see §6.4) but have distinct branch semantics:
 
 **Planning run branch lifecycle:**
 
@@ -363,12 +363,19 @@ When fast-forward is not possible:
 
 ### 6.4 Branch Naming Convention
 
-All Spine-managed branches use the `spine/` prefix to distinguish them from human-managed branches:
+All Spine-managed branches use the `spine/` prefix to distinguish them from human-managed branches. Branch names are human-readable, incorporating the artifact identity and a slug derived from the artifact path.
 
 | Branch Type | Pattern | Example |
 |-------------|---------|---------|
-| Task branch | `spine/<run-id>/<task-slug>` | `spine/run-abc123/implement-auth` |
+| Standard run | `spine/run/<artifact-id>-<slug>-<run-hex>` | `spine/run/task-003-git-push-0a5d0f6d` |
+| Planning run | `spine/plan/<artifact-id>-<slug>-<run-hex>` | `spine/plan/init-001-initiative-abcd1234` |
 | Divergence branch | `spine/<run-id>/<divergence-id>/<branch-id>` | `spine/run-abc123/explore/branch-a` |
+
+**Slug rules:**
+- Derived from the artifact filename (without extension)
+- Lowercased, non-alphanumeric characters replaced with hyphens
+- Truncated to 60 characters maximum (excluding prefix)
+- Run ID hex suffix (8 characters) always appended for uniqueness
 
 Human-managed branches (per [Naming Conventions](/governance/naming-conventions.md) §6) use the `INIT-XXX/EPIC-XXX/TASK-XXX-<slug>` pattern. These are not managed by the Artifact Service.
 
