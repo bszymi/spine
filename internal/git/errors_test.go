@@ -77,6 +77,36 @@ func TestClassifyGitErrorCases(t *testing.T) {
 			wantMsg:  "network error",
 		},
 		{
+			name:     "push rejected",
+			stderr:   "! [rejected] main -> main (non-fast-forward)",
+			wantKind: git.ErrKindPermanent,
+			wantMsg:  "push rejected",
+		},
+		{
+			name:     "failed to push",
+			stderr:   "error: failed to push some refs to 'origin'",
+			wantKind: git.ErrKindPermanent,
+			wantMsg:  "push rejected",
+		},
+		{
+			name:     "authentication failed",
+			stderr:   "fatal: Authentication failed for 'https://github.com/repo.git/'",
+			wantKind: git.ErrKindPermanent,
+			wantMsg:  "authentication failed",
+		},
+		{
+			name:     "permission denied publickey",
+			stderr:   "fatal: Permission denied (publickey)",
+			wantKind: git.ErrKindPermanent,
+			wantMsg:  "authentication failed",
+		},
+		{
+			name:     "local permission denied is not auth error",
+			stderr:   "error: Permission denied: /some/path",
+			wantKind: git.ErrKindPermanent,
+			wantMsg:  "error: Permission denied: /some/path",
+		},
+		{
 			name:     "unknown error",
 			stderr:   "fatal: some completely unknown error message",
 			wantKind: git.ErrKindPermanent,
