@@ -119,7 +119,8 @@ func TestScanOrphans_FailsStuckRun(t *testing.T) {
 	fs := newFakeStore()
 	ev := &fakeEventRouter{}
 
-	// Must be older than 3x orphan threshold (default 5min) = 15min.
+	// Use a short threshold for testing. Run must be older than 3x threshold.
+	threshold := 5 * time.Minute
 	old := time.Now().Add(-20 * time.Minute)
 	fs.runs = []domain.Run{
 		{RunID: "run-1", Status: domain.RunStatusActive, TaskPath: "tasks/task.md", CreatedAt: old, TraceID: "trace-abc123456789"},
@@ -138,7 +139,7 @@ func TestScanOrphans_FailsStuckRun(t *testing.T) {
 		return nil
 	}
 
-	s := scheduler.New(fs, ev, scheduler.WithRunFail(failFn))
+	s := scheduler.New(fs, ev, scheduler.WithOrphanThreshold(threshold), scheduler.WithRunFail(failFn))
 	err := s.ScanOrphans(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -156,13 +157,15 @@ func TestScanOrphans_NoFailWithoutCallback(t *testing.T) {
 	fs := newFakeStore()
 	ev := &fakeEventRouter{}
 
+	// Use a short threshold for testing so the run is detected as stale.
+	threshold := 5 * time.Minute
 	old := time.Now().Add(-10 * time.Minute)
 	fs.runs = []domain.Run{
 		{RunID: "run-1", Status: domain.RunStatusActive, TaskPath: "tasks/task.md", CreatedAt: old, TraceID: "trace-abc123456789"},
 	}
 
 	// No runFailFn configured — should only log, not fail.
-	s := scheduler.New(fs, ev)
+	s := scheduler.New(fs, ev, scheduler.WithOrphanThreshold(threshold))
 	err := s.ScanOrphans(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -282,7 +282,7 @@ Actors do **not** drive state transitions directly. Actors submit results throug
 The Workflow Engine includes a scheduler component responsible for time-based triggers:
 
 - **Timeout scanning** — periodically checks active steps against their timeout configuration
-- **Orphan detection** — periodically scans for Runs without recent step activity
+- **Orphan detection** — periodically scans for Runs without recent step activity (default threshold: 30 days, configurable via `SPINE_ORPHAN_THRESHOLD`)
 - **Retry scheduling** — schedules retry attempts with appropriate backoff delays
 - **Convergence deadline** — monitors `deadline_reached` entry policies
 

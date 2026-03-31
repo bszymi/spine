@@ -263,6 +263,9 @@ A Run is orphaned when no Workflow Engine instance is actively managing it. This
 - The Workflow Engine periodically scans for Runs that have been `active` for longer than expected (based on step timeouts, workflow structure, and absence of recent execution activity or heartbeat signals)
 - Runs without recent step execution activity are flagged as potentially orphaned
 - Operators may also manually flag orphaned Runs
+- The default orphan threshold is **30 days** — Spine workflows are human-paced and runs may be active for days or weeks
+- Runs are only auto-failed after **3x the threshold** (90 days by default); single-threshold orphans are logged as warnings
+- The threshold is configurable via `SPINE_ORPHAN_THRESHOLD` environment variable (e.g., `720h` for 30 days)
 
 **Resolution:**
 
