@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Update path resolution across all services
-status: Done
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-003-configurable-artifacts-directory/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 work_type: implementation
