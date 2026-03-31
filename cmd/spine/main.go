@@ -378,7 +378,10 @@ func migrateCmd() *cobra.Command {
 }
 
 func initRepoCmd() *cobra.Command {
-	return &cobra.Command{
+	var artifactsDir string
+	var noBranch bool
+
+	cmd := &cobra.Command{
 		Use:   "init-repo [path]",
 		Short: "Initialize a new Spine repository with directory structure and seed documents",
 		Args:  cobra.MaximumNArgs(1),
@@ -387,13 +390,15 @@ func initRepoCmd() *cobra.Command {
 			if len(args) > 0 {
 				path = args[0]
 			}
-			if err := cli.InitRepo(path); err != nil {
-				return err
-			}
-			fmt.Printf("Spine repository initialized at %s\n", path)
-			return nil
+			return cli.InitRepo(path, cli.InitOpts{
+				ArtifactsDir: artifactsDir,
+				NoBranch:     noBranch,
+			})
 		},
 	}
+	cmd.Flags().StringVar(&artifactsDir, "artifacts-dir", "spine", "Directory for Spine artifacts (use / for repo root)")
+	cmd.Flags().BoolVar(&noBranch, "no-branch", false, "Commit directly to current branch instead of spine/init")
+	return cmd
 }
 
 func queryCmd() *cobra.Command {
