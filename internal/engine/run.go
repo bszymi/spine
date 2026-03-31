@@ -88,6 +88,10 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
 		log.Warn("failed to create run branch", "branch", branchName, "error", err)
 		run.BranchName = ""
+	} else if autoPushEnabled() {
+		if err := o.git.PushBranch(ctx, "origin", branchName); err != nil {
+			log.Warn("auto-push: failed to push run branch", "branch", branchName, "error", err)
+		}
 	}
 
 	// Create entry step execution BEFORE activation so that a failure here
@@ -232,6 +236,11 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
 		return nil, fmt.Errorf("create planning branch: %w", err)
 	}
+	if autoPushEnabled() {
+		if err := o.git.PushBranch(ctx, "origin", branchName); err != nil {
+			log.Warn("auto-push: failed to push planning branch", "branch", branchName, "error", err)
+		}
+	}
 
 	// Write the artifact to the branch via WriteContext.
 	// Propagate run/trace metadata so commit trailers are correct.
@@ -239,9 +248,14 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	branchCtx = observe.WithTraceID(branchCtx, traceID)
 	branchCtx = observe.WithRunID(branchCtx, runID)
 	if _, err := o.artifactWriter.Create(branchCtx, artifactPath, artifactContent); err != nil {
-		// Branch cleanup on failure.
+		// Branch cleanup on failure (local + remote).
 		if delErr := o.git.DeleteBranch(ctx, branchName); delErr != nil {
 			log.Warn("failed to clean up planning branch", "branch", branchName, "error", delErr)
+		}
+		if autoPushEnabled() {
+			if delErr := o.git.DeleteRemoteBranch(ctx, "origin", branchName); delErr != nil {
+				log.Warn("auto-push: failed to clean up remote planning branch", "branch", branchName, "error", delErr)
+			}
 		}
 		return nil, fmt.Errorf("create artifact on branch: %w", err)
 	}

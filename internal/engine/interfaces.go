@@ -97,4 +97,7 @@ type GitOperator interface {
 	CreateBranch(ctx context.Context, name, base string) error
 	DeleteBranch(ctx context.Context, name string) error
 	Head(ctx context.Context) (string, error)
+	Push(ctx context.Context, remote, ref string) error
+	PushBranch(ctx context.Context, remote, branch string) error
+	DeleteRemoteBranch(ctx context.Context, remote, branch string) error
 }

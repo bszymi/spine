@@ -457,5 +457,8 @@ func (g *noopGitOperator) Merge(_ context.Context, _ git.MergeOpts) (git.MergeRe
 func (g *noopGitOperator) CreateBranch(_ context.Context, _, _ string) error { return nil }
 func (g *noopGitOperator) DeleteBranch(_ context.Context, _ string) error    { return nil }
 func (g *noopGitOperator) Head(_ context.Context) (string, error)            { return "integration-test", nil }
+func (g *noopGitOperator) Push(_ context.Context, _, _ string) error             { return nil }
+func (g *noopGitOperator) PushBranch(_ context.Context, _, _ string) error       { return nil }
+func (g *noopGitOperator) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }
 
 var _ = time.Now // used in memStore

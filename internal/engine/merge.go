@@ -31,7 +31,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 
 	if run.BranchName == "" {
 		// No branch to merge — transition directly to completed.
-		return o.completeAfterMerge(ctx, run)
+		return o.completeAfterMerge(ctx, run, false)
 	}
 
 	// Perform the merge into the authoritative branch explicitly.
@@ -73,8 +73,18 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		"fast_forward", mergeResult.FastForward,
 	)
 
-	// Transition committing → completed.
-	return o.completeAfterMerge(ctx, run)
+	// Push the authoritative branch to origin after a successful merge.
+	if autoPushEnabled() {
+		if err := o.git.Push(ctx, "origin", "main"); err != nil {
+			log.Warn("auto-push: failed to push main after merge, staying in committing for retry",
+				"run_id", runID, "error", err)
+			// Stay in committing so the scheduler retries the merge+push cycle.
+			return o.retryMerge(ctx, run)
+		}
+	}
+
+	// Transition committing → completed (with branch cleanup).
+	return o.completeAfterMerge(ctx, run, true)
 }
 
 // abortMerge cleans up a failed merge so the repo is not left dirty.
@@ -90,8 +100,9 @@ func (o *Orchestrator) abortMerge(ctx context.Context) {
 }
 
 // completeAfterMerge transitions a run from committing to completed
-// via the git.commit_succeeded trigger.
-func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run) error {
+// via the git.commit_succeeded trigger. When cleanupBranch is true,
+// the run branch is cleaned up (local + remote).
+func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run, cleanupBranch bool) error {
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerGitCommitSucceeded,
 	})
@@ -119,8 +130,12 @@ func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run) 
 		observe.GlobalMetrics.RunDuration.ObserveDuration(time.Since(*run.StartedAt))
 	}
 
-	// Clean up the branch.
-	_ = o.CleanupRunBranch(ctx, run.RunID)
+	// Clean up the branch only if the main push succeeded (or auto-push is off).
+	// When main push fails, the remote run branch is the only ref containing
+	// the merged commits — preserve it for collaborators.
+	if cleanupBranch {
+		_ = o.CleanupRunBranch(ctx, run.RunID)
+	}
 	return nil
 }
 
