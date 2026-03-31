@@ -7,7 +7,8 @@ import (
 	"github.com/bszymi/spine/internal/observe"
 )
 
-// CleanupRunBranch deletes the Git branch associated with a completed run.
+// CleanupRunBranch deletes the local Git branch associated with a completed run.
+// Remote branch cleanup for the merge path is handled by completeAfterMerge.
 func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error {
 	run, err := o.store.GetRun(ctx, runID)
 	if err != nil {
@@ -25,6 +26,17 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 			"error", err,
 		)
 		return fmt.Errorf("delete branch %s: %w", run.BranchName, err)
+	}
+
+	// Delete the remote branch as well (best-effort — it may already be gone).
+	if autoPushEnabled() {
+		if err := o.git.DeleteRemoteBranch(ctx, "origin", run.BranchName); err != nil {
+			observe.Logger(ctx).Warn("auto-push: failed to delete remote branch",
+				"run_id", runID,
+				"branch", run.BranchName,
+				"error", err,
+			)
+		}
 	}
 
 	observe.Logger(ctx).Info("run branch cleaned up", "run_id", runID, "branch", run.BranchName)

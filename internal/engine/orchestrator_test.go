@@ -92,6 +92,9 @@ func (s *stubGitOperator) Merge(_ context.Context, _ git.MergeOpts) (git.MergeRe
 func (s *stubGitOperator) CreateBranch(_ context.Context, _, _ string) error { return nil }
 func (s *stubGitOperator) DeleteBranch(_ context.Context, _ string) error    { return nil }
 func (s *stubGitOperator) Head(_ context.Context) (string, error)            { return "abc123", nil }
+func (s *stubGitOperator) Push(_ context.Context, _, _ string) error             { return nil }
+func (s *stubGitOperator) PushBranch(_ context.Context, _, _ string) error       { return nil }
+func (s *stubGitOperator) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }
 
 type stubWorkflowLoader struct{}
 
