@@ -325,6 +325,109 @@ func TestHasCommitWithTrailer(t *testing.T) {
 	}
 }
 
+func setupRemote(t *testing.T, repoDir string) string {
+	t.Helper()
+	bare := t.TempDir()
+	cmd := exec.CommandContext(context.Background(), "git", "init", "--bare")
+	cmd.Dir = bare
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	cmd = exec.CommandContext(context.Background(), "git", "remote", "add", "origin", bare)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	return bare
+}
+
+func TestPush(t *testing.T) {
+	client, repo := newTestClient(t)
+	ctx := context.Background()
+	setupRemote(t, repo)
+
+	// Add a commit so there's something to push
+	testutil.WriteFile(t, repo, "push-test.md", "# Push Test")
+	stageFile(t, repo, "push-test.md")
+	if _, err := client.Commit(ctx, git.CommitOpts{Message: "for push"}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := client.Push(ctx, "origin", "main"); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+}
+
+func TestPushBranch(t *testing.T) {
+	client, repo := newTestClient(t)
+	ctx := context.Background()
+	setupRemote(t, repo)
+
+	// Push main first so remote has it
+	if err := client.Push(ctx, "origin", "main"); err != nil {
+		t.Fatalf("initial push: %v", err)
+	}
+
+	// Create and checkout a feature branch
+	head, _ := client.Head(ctx)
+	if err := client.CreateBranch(ctx, "feature-push", head); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	checkout(t, repo, "feature-push")
+
+	testutil.WriteFile(t, repo, "branch-push.md", "# Branch Push")
+	stageFile(t, repo, "branch-push.md")
+	if _, err := client.Commit(ctx, git.CommitOpts{Message: "branch commit"}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := client.PushBranch(ctx, "origin", "feature-push"); err != nil {
+		t.Fatalf("PushBranch: %v", err)
+	}
+}
+
+func TestDeleteRemoteBranch(t *testing.T) {
+	client, repo := newTestClient(t)
+	ctx := context.Background()
+	setupRemote(t, repo)
+
+	// Push main and a feature branch
+	if err := client.Push(ctx, "origin", "main"); err != nil {
+		t.Fatalf("push main: %v", err)
+	}
+
+	head, _ := client.Head(ctx)
+	if err := client.CreateBranch(ctx, "to-delete", head); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := client.Push(ctx, "origin", "to-delete"); err != nil {
+		t.Fatalf("push branch: %v", err)
+	}
+
+	// Delete the remote branch
+	if err := client.DeleteRemoteBranch(ctx, "origin", "to-delete"); err != nil {
+		t.Fatalf("DeleteRemoteBranch: %v", err)
+	}
+}
+
+func TestPushToInvalidRemote(t *testing.T) {
+	client, _ := newTestClient(t)
+	ctx := context.Background()
+
+	// No remote configured — should fail with classified error
+	err := client.Push(ctx, "origin", "main")
+	if err == nil {
+		t.Fatal("expected error pushing to unconfigured remote")
+	}
+	gitErr, ok := err.(*git.GitError)
+	if !ok {
+		t.Fatalf("expected GitError, got %T", err)
+	}
+	if gitErr.Op != "push" {
+		t.Errorf("expected op=push, got %s", gitErr.Op)
+	}
+}
+
 func TestErrorClassification(t *testing.T) {
 	client := git.NewCLIClient("/nonexistent/repo")
 	ctx := context.Background()

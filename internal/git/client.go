@@ -19,6 +19,9 @@ type GitClient interface {
 	ReadFile(ctx context.Context, ref, path string) ([]byte, error)
 	ListFiles(ctx context.Context, ref, pattern string) ([]string, error)
 	Head(ctx context.Context) (string, error)
+	Push(ctx context.Context, remote, ref string) error
+	PushBranch(ctx context.Context, remote, branch string) error
+	DeleteRemoteBranch(ctx context.Context, remote, branch string) error
 }
 
 // CommitOpts defines options for creating a Git commit.

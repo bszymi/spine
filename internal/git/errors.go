@@ -50,6 +50,10 @@ func classifyGitError(op, stderr string) *GitError {
 		return &GitError{Kind: ErrKindNotFound, Op: op, Message: stderr}
 	case containsAny(stderr, "fatal: not a git repository"):
 		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "not a git repository"}
+	case containsAny(stderr, "rejected", "non-fast-forward", "failed to push"):
+		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "push rejected"}
+	case containsAny(stderr, "Authentication failed", "Permission denied (publickey)", "could not read Username"):
+		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "authentication failed"}
 	case containsAny(stderr, "Connection refused", "Could not resolve", "timeout"):
 		return &GitError{Kind: ErrKindTransient, Op: op, Message: "network error"}
 	default:

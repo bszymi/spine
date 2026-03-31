@@ -238,6 +238,24 @@ func (c *CLIClient) HasCommitWithTrailer(ctx context.Context, key, value string)
 	return "", false, nil
 }
 
+// Push pushes a ref to the specified remote.
+func (c *CLIClient) Push(ctx context.Context, remote, ref string) error {
+	_, err := c.run(ctx, "push", "push", remote, ref)
+	return err
+}
+
+// PushBranch pushes a branch to the specified remote with upstream tracking.
+func (c *CLIClient) PushBranch(ctx context.Context, remote, branch string) error {
+	_, err := c.run(ctx, "push", "push", "-u", remote, branch)
+	return err
+}
+
+// DeleteRemoteBranch deletes a branch on the specified remote.
+func (c *CLIClient) DeleteRemoteBranch(ctx context.Context, remote, branch string) error {
+	_, err := c.run(ctx, "push", "push", remote, "--delete", branch)
+	return err
+}
+
 // run executes a git command and returns stdout. On error, classifies the failure.
 func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
