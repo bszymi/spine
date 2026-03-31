@@ -146,6 +146,7 @@ func serveCmd() *cobra.Command {
 			var projSync *projection.Service
 
 			artifactSvc = artifact.NewService(gitClient, eventRouter, repoPath)
+			artifactSvc.WithArtifactsDir(spineCfg.ArtifactsDir)
 			if st != nil {
 				projQuery = projection.NewQueryService(st, gitClient)
 				projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)

@@ -32,9 +32,16 @@ type ChangeSet struct {
 
 // DiscoverAll performs a full repository scan at the given ref.
 // Returns all artifacts, workflow definitions, and skipped files.
-func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string) (*DiscoveryResult, error) {
+// The artifactsDir parameter scopes discovery to a subdirectory
+// (e.g., "spine"). Use "/" or "" for repo root (default behavior).
+func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string, artifactsDir ...string) (*DiscoveryResult, error) {
 	if ref == "" {
 		ref = "HEAD"
+	}
+
+	dir := "/"
+	if len(artifactsDir) > 0 && artifactsDir[0] != "" {
+		dir = artifactsDir[0]
 	}
 
 	files, err := gitClient.ListFiles(ctx, ref, "")
@@ -42,11 +49,27 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string) (*Dis
 		return nil, err
 	}
 
+	prefix := ""
+	if dir != "/" {
+		prefix = dir + "/"
+	}
+
 	result := &DiscoveryResult{}
 
 	for _, file := range files {
+		// Filter to artifacts directory if configured.
+		if prefix != "" && !strings.HasPrefix(file, prefix) {
+			continue
+		}
+
+		// Strip prefix for artifact-relative paths.
+		artifactPath := file
+		if prefix != "" {
+			artifactPath = strings.TrimPrefix(file, prefix)
+		}
+
 		// Workflow definitions
-		if IsWorkflowPath(file) {
+		if IsWorkflowPath(artifactPath) {
 			result.Workflows = append(result.Workflows, file)
 			continue
 		}
@@ -59,21 +82,21 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string) (*Dis
 		content, err := gitClient.ReadFile(ctx, ref, file)
 		if err != nil {
 			result.Errors = append(result.Errors, DiscoveryError{
-				Path:    file,
+				Path:    artifactPath,
 				Message: err.Error(),
 			})
 			continue
 		}
 
 		if !IsArtifact(content) {
-			result.Skipped = append(result.Skipped, file)
+			result.Skipped = append(result.Skipped, artifactPath)
 			continue
 		}
 
-		a, err := Parse(file, content)
+		a, err := Parse(artifactPath, content)
 		if err != nil {
 			result.Errors = append(result.Errors, DiscoveryError{
-				Path:    file,
+				Path:    artifactPath,
 				Message: err.Error(),
 			})
 			continue
@@ -227,9 +250,15 @@ func IsWorkflowPath(path string) bool {
 }
 
 // DiscoverWorkflows returns all workflow definition paths at a given ref.
-func DiscoverWorkflows(ctx context.Context, gitClient git.GitClient, ref string) ([]string, error) {
+// Paths are returned as repo-relative for git operations.
+func DiscoverWorkflows(ctx context.Context, gitClient git.GitClient, ref string, artifactsDir ...string) ([]string, error) {
 	if ref == "" {
 		ref = "HEAD"
+	}
+
+	dir := "/"
+	if len(artifactsDir) > 0 && artifactsDir[0] != "" {
+		dir = artifactsDir[0]
 	}
 
 	files, err := gitClient.ListFiles(ctx, ref, "")
@@ -237,9 +266,22 @@ func DiscoverWorkflows(ctx context.Context, gitClient git.GitClient, ref string)
 		return nil, err
 	}
 
+	prefix := ""
+	if dir != "/" {
+		prefix = dir + "/"
+	}
+
 	var workflows []string
 	for _, file := range files {
-		if IsWorkflowPath(file) {
+		// Filter by artifacts directory.
+		artifactPath := file
+		if prefix != "" {
+			if !strings.HasPrefix(file, prefix) {
+				continue
+			}
+			artifactPath = strings.TrimPrefix(file, prefix)
+		}
+		if IsWorkflowPath(artifactPath) {
 			workflows = append(workflows, file)
 		}
 	}
