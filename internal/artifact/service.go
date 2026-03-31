@@ -24,25 +24,53 @@ type WriteResult struct {
 
 // Service implements artifact CRUD operations backed by Git.
 type Service struct {
-	git      git.GitClient
-	events   event.EventRouter
-	repo     string     // repository root path
-	branchMu sync.Mutex // serializes branch-scoped writes to prevent checkout races
+	git          git.GitClient
+	events       event.EventRouter
+	repo         string     // repository root path
+	artifactsDir string     // artifacts directory relative to repo (empty or "/" means repo root)
+	branchMu     sync.Mutex // serializes branch-scoped writes to prevent checkout races
 }
 
 // NewService creates a new Artifact Service.
 func NewService(gitClient git.GitClient, events event.EventRouter, repoPath string) *Service {
 	return &Service{
-		git:    gitClient,
-		events: events,
-		repo:   repoPath,
+		git:          gitClient,
+		events:       events,
+		repo:         repoPath,
+		artifactsDir: "/",
 	}
 }
 
+// WithArtifactsDir sets the artifacts directory for path resolution.
+// When set to a non-root value (e.g., "spine"), all artifact paths
+// are prefixed with this directory for file I/O and git operations.
+func (s *Service) WithArtifactsDir(dir string) {
+	s.artifactsDir = dir
+}
+
+// repoRelativePath converts an artifact-relative path to a repo-relative path.
+// When artifactsDir is "/" (root), paths pass through unchanged.
+// When artifactsDir is "spine", "governance/charter.md" becomes "spine/governance/charter.md".
+func (s *Service) repoRelativePath(artifactPath string) string {
+	artifactPath = strings.TrimPrefix(artifactPath, "/")
+	if s.artifactsDir == "/" || s.artifactsDir == "" {
+		return artifactPath
+	}
+	return filepath.Join(s.artifactsDir, artifactPath)
+}
+
 // safePath validates and resolves a path, ensuring it stays within the repo root.
-// Resolves symlinks to prevent escaping via symlinked directories.
+// The input path is artifact-relative; it is first converted to a repo-relative
+// path via repoRelativePath before being joined with the repo root.
 func (s *Service) safePath(path string) (string, error) {
-	fullPath := filepath.Join(s.repo, path)
+	// Reject absolute paths before any processing.
+	if filepath.IsAbs(path) {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("path must be relative: %s", path))
+	}
+
+	repoPath := s.repoRelativePath(path)
+	fullPath := filepath.Join(s.repo, repoPath)
 	absRepo, err := filepath.Abs(s.repo)
 	if err != nil {
 		return "", domain.NewError(domain.ErrInvalidParams,
@@ -125,10 +153,11 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 			fmt.Sprintf("write file %s: %v", path, err))
 	}
 
-	// Stage and commit
+	// Stage and commit using repo-relative path for git operations.
+	repoPath := s.repoRelativePath(path)
 	trailers := observe.TrailersFromContext(ctx, "artifact.create")
 
-	commitResult, err := s.stageAndCommit(ctx, path, git.CommitOpts{
+	commitResult, err := s.stageAndCommit(ctx, repoPath, git.CommitOpts{
 		Message:  fmt.Sprintf("Create %s: %s", artifact.Type, artifact.Title),
 		Trailers: trailers,
 		Author: git.Author{
@@ -139,7 +168,7 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 	if err != nil {
 		// Clean up the file and unstage on commit failure
 		_ = os.Remove(fullPath)
-		_ = gitReset(ctx, s.repo, path)
+		_ = gitReset(ctx, s.repo, repoPath)
 		return nil, err
 	}
 
@@ -163,7 +192,8 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 		ref = "HEAD"
 	}
 
-	content, err := s.git.ReadFile(ctx, ref, path)
+	repoPath := s.repoRelativePath(path)
+	content, err := s.git.ReadFile(ctx, ref, repoPath)
 	if err != nil {
 		if gitErr, ok := err.(*git.GitError); ok && gitErr.Kind == git.ErrKindNotFound {
 			return nil, domain.NewError(domain.ErrNotFound,
@@ -230,10 +260,11 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 			fmt.Sprintf("write file %s: %v", path, err))
 	}
 
-	// Stage and commit
+	// Stage and commit using repo-relative path for git operations.
+	repoPath := s.repoRelativePath(path)
 	trailers := observe.TrailersFromContext(ctx, "artifact.update")
 
-	commitResult, err := s.stageAndCommit(ctx, path, git.CommitOpts{
+	commitResult, err := s.stageAndCommit(ctx, repoPath, git.CommitOpts{
 		Message:  fmt.Sprintf("Update %s: %s", artifact.Type, artifact.Title),
 		Trailers: trailers,
 		Author: git.Author{
@@ -267,13 +298,24 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 		ref = "HEAD"
 	}
 
-	files, err := s.git.ListFiles(ctx, ref, "*.md")
+	// Scope listing to the artifacts directory.
+	pattern := "*.md"
+	if s.artifactsDir != "/" && s.artifactsDir != "" {
+		pattern = s.artifactsDir + "/"
+	}
+
+	files, err := s.git.ListFiles(ctx, ref, pattern)
 	if err != nil {
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
 	var artifacts []*domain.Artifact
 	for _, file := range files {
+		// Only include .md files when using directory prefix filter.
+		if !strings.HasSuffix(file, ".md") {
+			continue
+		}
+
 		content, err := s.git.ReadFile(ctx, ref, file)
 		if err != nil {
 			continue // skip unreadable files
@@ -283,7 +325,9 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 			continue
 		}
 
-		a, err := Parse(file, content)
+		// Strip the artifacts_dir prefix so paths remain artifacts-relative.
+		artifactPath := s.stripArtifactsDir(file)
+		a, err := Parse(artifactPath, content)
 		if err != nil {
 			continue // skip unparseable artifacts
 		}
@@ -378,6 +422,15 @@ func resolveToExistingAncestor(absPath string) (string, error) {
 			return resolved, nil
 		}
 	}
+}
+
+// stripArtifactsDir removes the artifacts directory prefix from a repo-relative path.
+func (s *Service) stripArtifactsDir(repoRelPath string) string {
+	if s.artifactsDir == "/" || s.artifactsDir == "" {
+		return repoRelPath
+	}
+	prefix := s.artifactsDir + "/"
+	return strings.TrimPrefix(repoRelPath, prefix)
 }
 
 // autoPush pushes the current branch to origin after a commit.
