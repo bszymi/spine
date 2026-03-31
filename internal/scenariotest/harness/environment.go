@@ -20,6 +20,7 @@ type EnvOption func(*envConfig)
 type envConfig struct {
 	seedGovernance bool
 	seedWorkflows  bool
+	artifactsDir   string // empty means default "/"
 	runtimeOpts    []RuntimeOption
 }
 
@@ -61,6 +62,14 @@ func WithRuntimeOrchestrator() EnvOption {
 	}
 }
 
+// WithArtifactsDir configures the artifacts directory for the test environment.
+// Seeds and artifact service use this directory instead of the repo root.
+func WithArtifactsDir(dir string) EnvOption {
+	return func(c *envConfig) {
+		c.artifactsDir = dir
+	}
+}
+
 // Seeded returns options that seed the repository with governance documents
 // and workflow definitions. Use WithRuntimeEvents() and WithRuntimeValidation()
 // additionally if the scenario needs event delivery or cross-artifact validation.
@@ -98,6 +107,11 @@ func NewTestEnvironment(t *testing.T, opts ...EnvOption) *TestEnvironment {
 
 	db := NewTestDB(t)
 	rt := NewTestRuntime(t, repo, db, cfg.runtimeOpts...)
+
+	// Configure artifacts directory if specified.
+	if cfg.artifactsDir != "" {
+		rt.Artifacts.WithArtifactsDir(cfg.artifactsDir)
+	}
 
 	t.Cleanup(func() {
 		db.Cleanup(context.Background(), t)
