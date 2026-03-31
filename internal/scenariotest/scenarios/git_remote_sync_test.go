@@ -200,8 +200,6 @@ func TestGitRemoteSync_MergeAndCleanup(t *testing.T) {
 			engine.SubmitStepResult("ready_for_review", "artifact_content"),
 			engine.SubmitStepResult("valid"),
 			engine.SubmitStepResult("approved"),
-			engine.AssertRunStatus(domain.RunStatusCommitting),
-			engine.MergeRunBranch(),
 			engine.AssertRunCompleted(),
 			{
 				Name: "verify-main-pushed-and-branch-deleted",

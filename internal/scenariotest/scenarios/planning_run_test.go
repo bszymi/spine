@@ -115,13 +115,12 @@ func TestPlanningRun_InitiativeCreationGoldenPath(t *testing.T) {
 			engine.SubmitStepResult("valid"),
 			engine.AssertCurrentStep("review"),
 
-			// Step 3: Review → approved → end (enters committing due to commit metadata).
+			// Step 3: Review → approved → end (auto-merges branch to main).
 			engine.SubmitStepResult("approved"),
-			engine.AssertRunStatus(domain.RunStatusCommitting),
-
-			// Step 4: Merge the run branch to main.
-			engine.MergeRunBranch(),
 			engine.AssertRunCompleted(),
+
+			// Verify artifact appears on main after auto-merge.
+			engine.AssertFileExists("initiatives/init-099/initiative.md"),
 		},
 	})
 }
@@ -211,11 +210,13 @@ func TestPlanningRun_InitiativeWithChildArtifacts(t *testing.T) {
 			engine.SubmitStepResult("ready_for_review", "artifact_content"),
 			engine.SubmitStepResult("valid"),
 			engine.SubmitStepResult("approved"),
-			engine.AssertRunStatus(domain.RunStatusCommitting),
-
-			// Merge to main.
-			engine.MergeRunBranch(),
 			engine.AssertRunCompleted(),
+
+			// Verify all artifacts appear on main after auto-merge.
+			engine.AssertFileExists("initiatives/init-099/initiative.md"),
+			engine.AssertFileExists("initiatives/init-099/epics/epic-001/epic.md"),
+			engine.AssertFileExists("initiatives/init-099/epics/epic-002/epic.md"),
+			engine.AssertFileExists("initiatives/init-099/epics/epic-001/tasks/task-001.md"),
 		},
 	})
 }
@@ -259,10 +260,6 @@ func TestPlanningRun_RejectionAndRework(t *testing.T) {
 			engine.SubmitStepResult("valid"),
 			engine.AssertCurrentStep("review"),
 			engine.SubmitStepResult("approved"),
-			engine.AssertRunStatus(domain.RunStatusCommitting),
-
-			// Merge and complete.
-			engine.MergeRunBranch(),
 			engine.AssertRunCompleted(),
 		},
 	})
@@ -346,10 +343,6 @@ func TestPlanningRun_TaskCreation(t *testing.T) {
 			engine.SubmitStepResult("valid"),
 			engine.AssertCurrentStep("review"),
 			engine.SubmitStepResult("approved"),
-			engine.AssertRunStatus(domain.RunStatusCommitting),
-
-			// Merge and complete.
-			engine.MergeRunBranch(),
 			engine.AssertRunCompleted(),
 		},
 	})

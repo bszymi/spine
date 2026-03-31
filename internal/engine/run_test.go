@@ -537,8 +537,17 @@ func TestCompleteRun_WithCommit(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// First transition: active → committing
 	if store.statusCalls[0].status != domain.RunStatusCommitting {
-		t.Errorf("expected committing, got %s", store.statusCalls[0].status)
+		t.Errorf("expected first transition to committing, got %s", store.statusCalls[0].status)
+	}
+
+	// Second transition: committing → completed (auto-merge)
+	if len(store.statusCalls) < 2 {
+		t.Fatalf("expected 2 status transitions (committing, completed), got %d", len(store.statusCalls))
+	}
+	if store.statusCalls[1].status != domain.RunStatusCompleted {
+		t.Errorf("expected second transition to completed, got %s", store.statusCalls[1].status)
 	}
 }
 
