@@ -2,6 +2,7 @@ package artifact_test
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,6 +25,28 @@ func newTestService(t *testing.T) (*artifact.Service, *git.CLIClient, string, *q
 	router := event.NewQueueRouter(q)
 	svc := artifact.NewService(client, router, repo)
 	return svc, client, repo, q
+}
+
+func addBareRemote(t *testing.T, repoDir string) string {
+	t.Helper()
+	bare := t.TempDir()
+	cmd := exec.CommandContext(context.Background(), "git", "init", "--bare")
+	cmd.Dir = bare
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	cmd = exec.CommandContext(context.Background(), "git", "remote", "add", "origin", bare)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	// Push initial commit so remote has main
+	cmd = exec.CommandContext(context.Background(), "git", "push", "-u", "origin", "main")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("initial push: %v\n%s", err, out)
+	}
+	return bare
 }
 
 func testCtx() context.Context {
@@ -398,5 +421,79 @@ func TestUpdateEmitsEvent(t *testing.T) {
 
 	if eventCount.Load() < 1 {
 		t.Error("expected at least 1 event emitted on update")
+	}
+}
+
+func TestCreateAutoPushesToRemote(t *testing.T) {
+	svc, _, repo, _ := newTestService(t)
+	bare := addBareRemote(t, repo)
+	ctx := testCtx()
+
+	_, err := svc.Create(ctx, "governance/pushed.md", governanceContent)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Verify the commit was pushed to the bare remote
+	cmd := exec.CommandContext(context.Background(), "git", "log", "--oneline", "-1", "main")
+	cmd.Dir = bare
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log on bare: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Create Governance") {
+		t.Errorf("expected pushed commit on remote, got: %s", out)
+	}
+}
+
+func TestUpdateAutoPushesToRemote(t *testing.T) {
+	svc, _, repo, _ := newTestService(t)
+	bare := addBareRemote(t, repo)
+	ctx := testCtx()
+
+	_, err := svc.Create(ctx, "governance/push-update.md", governanceContent)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	updatedContent := strings.Replace(governanceContent, "Test Document", "Updated Doc", 1)
+	_, err = svc.Update(ctx, "governance/push-update.md", updatedContent)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Verify the update commit was pushed
+	cmd := exec.CommandContext(context.Background(), "git", "log", "--oneline", "-1", "main")
+	cmd.Dir = bare
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log on bare: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Update Governance") {
+		t.Errorf("expected update commit on remote, got: %s", out)
+	}
+}
+
+func TestAutoPushDisabledByEnv(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+
+	svc, _, repo, _ := newTestService(t)
+	bare := addBareRemote(t, repo)
+	ctx := testCtx()
+
+	_, err := svc.Create(ctx, "governance/no-push.md", governanceContent)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Verify the commit was NOT pushed (remote should only have initial commit)
+	cmd := exec.CommandContext(context.Background(), "git", "log", "--oneline", "main")
+	cmd.Dir = bare
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log on bare: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "Create Governance") {
+		t.Error("expected commit NOT to be pushed when SPINE_GIT_AUTO_PUSH=false")
 	}
 }
