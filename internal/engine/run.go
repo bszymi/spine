@@ -359,6 +359,15 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 		_ = o.CleanupRunBranch(ctx, runID)
 	} else {
 		log.Info("run entering commit phase", "run_id", runID)
+
+		// Immediately attempt the merge rather than waiting for the
+		// scheduler poll. This is critical for planning runs where
+		// artifacts live only on the branch until merged. The scheduler
+		// remains as a safety net for transient failures.
+		if err := o.MergeRunBranch(ctx, runID); err != nil {
+			log.Warn("immediate merge attempt failed, scheduler will retry",
+				"run_id", runID, "error", err)
+		}
 	}
 
 	return nil
