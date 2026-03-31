@@ -15,6 +15,8 @@ This document defines the naming and identification conventions for all artifact
 
 Consistent naming ensures artifacts are discoverable, automation-friendly, and resistant to ambiguity.
 
+All path conventions in this document (folder names, file names, ID patterns) apply within the **Spine artifacts directory** configured in `.spine.yaml`. See [Repository Structure §1.1](/governance/repository-structure.md) for details.
+
 ---
 
 ## 2. Artifact ID Format

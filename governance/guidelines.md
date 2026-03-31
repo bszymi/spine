@@ -85,7 +85,7 @@ Artifact identifiers must remain stable for the lifetime of the artifact and mus
 
 ## 5. Linking Conventions
 
-Artifacts should reference related documents using relative paths from the repository root:
+Artifacts should reference related documents using paths relative to the **Spine artifacts directory** (defined by `artifacts_dir` in `.spine.yaml`):
 
 - Reference governance documents: `/governance/charter.md`
 - Reference tasks: `/initiatives/INIT-XXX/.../tasks/TASK-XXX-name.md`

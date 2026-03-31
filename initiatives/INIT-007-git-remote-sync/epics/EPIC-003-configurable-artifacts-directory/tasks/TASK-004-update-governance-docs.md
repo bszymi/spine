@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Update governance and architecture docs for configurable artifacts directory
-status: Pending
+status: Done
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-003-configurable-artifacts-directory/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 work_type: implementation
