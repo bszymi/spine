@@ -143,6 +143,8 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 		return nil, err
 	}
 
+	s.autoPush(ctx)
+
 	log.Info("artifact created",
 		"path", path,
 		"type", artifact.Type,
@@ -244,6 +246,8 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 		_ = os.WriteFile(fullPath, originalContent, 0o644)
 		return nil, err
 	}
+
+	s.autoPush(ctx)
 
 	log.Info("artifact updated",
 		"path", path,
@@ -374,6 +378,38 @@ func resolveToExistingAncestor(absPath string) (string, error) {
 			return resolved, nil
 		}
 	}
+}
+
+// autoPush pushes the current branch to origin after a commit.
+// Push failures are logged as warnings but do not fail the operation.
+// Disabled when SPINE_GIT_AUTO_PUSH is set to "false".
+func (s *Service) autoPush(ctx context.Context) {
+	if strings.EqualFold(os.Getenv("SPINE_GIT_AUTO_PUSH"), "false") {
+		return
+	}
+
+	log := observe.Logger(ctx)
+
+	branch, err := gitCurrentBranch(ctx, s.repo)
+	if err != nil {
+		log.Warn("auto-push: failed to determine current branch", "error", err)
+		return
+	}
+
+	if err := s.git.Push(ctx, "origin", branch); err != nil {
+		log.Warn("auto-push: push failed", "branch", branch, "error", err)
+	}
+}
+
+// gitCurrentBranch returns the name of the currently checked-out branch.
+func gitCurrentBranch(ctx context.Context, repoDir string) (string, error) {
+	cmd := execCommand(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %s", string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // gitAdd stages a file using the git CLI directly.
