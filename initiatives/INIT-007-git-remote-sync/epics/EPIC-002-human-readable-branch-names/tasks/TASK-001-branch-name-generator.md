@@ -37,7 +37,7 @@ Logic:
 - Planning runs: `spine/plan/<artifact-id>-<slug>` (e.g., `spine/plan/INIT-001-build-spine-management-platform`)
 - Standard runs: `spine/run/<artifact-id>-<slug>` (e.g., `spine/run/TASK-003-implement-start-planning-run`)
 - Sanitize slug: lowercase, replace non-alphanumeric with hyphens, trim to reasonable length (max 60 chars for the slug portion)
-- Collision handling: if the branch already exists, append `-<first-8-chars-of-run-id>` (e.g., `spine/plan/INIT-001-slug-0a5d0f6d`)
+- Collision handling: if the branch already exists, append `-<8-char random portion of run-id>`. Run IDs have format `run-XXXXXXXX` — extract the hex portion after `run-` (e.g., run ID `run-0a5d0f6d` → suffix `-0a5d0f6d`, giving `spine/plan/INIT-001-slug-0a5d0f6d`). Do not include the `run-` prefix in the suffix.
 
 Extract artifact ID and slug from:
 - For planning runs: parse from `artifact_content` front matter (`id` field) and derive slug from the artifact path

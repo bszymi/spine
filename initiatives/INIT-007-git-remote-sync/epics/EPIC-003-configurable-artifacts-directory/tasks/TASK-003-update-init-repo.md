@@ -36,10 +36,13 @@ Changes:
 - Seed files (charter, constitution, templates) written inside the artifacts directory
 - If `.spine.yaml` already exists, read it and use the existing `artifacts_dir`
 
+Normalization: `--artifacts-dir .` and `--artifacts-dir /` both normalize to `artifacts_dir: /` in `.spine.yaml`. The literal `.` must never be persisted — it would be treated as a directory component during path resolution. The init-repo flag accepts `.` for convenience but always writes the canonical `/` form.
+
 Example:
 ```bash
-spine init-repo my-project                          # creates my-project/spine/ with .spine.yaml
-spine init-repo my-project --artifacts-dir .         # creates my-project/ with artifacts at root
+spine init-repo my-project                          # creates my-project/spine/ with .spine.yaml (artifacts_dir: spine/)
+spine init-repo my-project --artifacts-dir .         # artifacts at root, writes artifacts_dir: /
+spine init-repo my-project --artifacts-dir /         # same as above
 spine init-repo my-project --artifacts-dir .spine    # creates my-project/.spine/ (hidden)
 ```
 

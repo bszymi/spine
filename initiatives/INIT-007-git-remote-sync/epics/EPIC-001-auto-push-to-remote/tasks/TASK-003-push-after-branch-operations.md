@@ -37,12 +37,15 @@ Push branch lifecycle events to origin so collaborators can see, pull, and work 
 
 `internal/engine/merge.go` — in `MergeRunBranch()`, after successful merge:
 - Push the authoritative branch: `git.Push(ctx, "origin", authoritativeBranch)`
+- Only proceed to branch cleanup if the main push succeeds (see §3)
 
 ### 3. Branch cleanup push
 
 `internal/engine/branch.go` — in `CleanupRunBranch()`, after local branch deletion:
 - Delete the remote branch: `git.DeleteRemoteBranch(ctx, "origin", branchName)`
 - Log errors as warnings — remote branch may already be gone
+
+**Critical ordering:** Remote branch deletion must only happen after the authoritative branch push succeeds. If pushing main to origin fails, the remote run branch is the only remote ref containing the merged commits. Deleting it would make the work unreachable for collaborators. If the main push fails, skip remote branch deletion and let the scheduler retry the push on the next cycle.
 
 All operations respect `SPINE_GIT_AUTO_PUSH` configuration.
 
@@ -52,5 +55,6 @@ All operations respect `SPINE_GIT_AUTO_PUSH` configuration.
 
 - Planning run branch appears on origin immediately after creation
 - After merge to main, main is pushed to origin
-- After branch cleanup, branch is deleted on origin
+- After branch cleanup, branch is deleted on origin — only if the main push succeeded
+- Remote branch deletion is skipped when the authoritative branch push fails
 - All push errors are logged but non-fatal

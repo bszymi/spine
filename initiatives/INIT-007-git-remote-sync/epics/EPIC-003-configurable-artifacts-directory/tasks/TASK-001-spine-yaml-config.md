@@ -39,7 +39,7 @@ Behavior:
 - Reads `.spine.yaml` from the repository root
 - If file doesn't exist, returns defaults (`artifacts_dir: /`)
 - If `artifacts_dir` is empty, defaults to `/`
-- Normalizes the path (strip trailing slash, handle `/` vs `spine/` vs `./spine/`)
+- Normalizes the path: strip trailing slash, handle `/` vs `spine/` vs `./spine/`. Normalize `.` to `/` (repo root sentinel) — `.` must never be stored or used as a literal directory component.
 - Validates the directory exists (or will be created by init-repo)
 
 Wire into `cmd/spine/main.go`:
