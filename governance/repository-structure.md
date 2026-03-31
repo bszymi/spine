@@ -19,6 +19,23 @@ This document aligns with the [Guidelines](/governance/guidelines.md) and [Style
 
 ---
 
+## 1.1 Configurable Artifacts Directory
+
+Spine artifacts live in a configurable directory defined by `.spine.yaml` at the repository root:
+
+```yaml
+# .spine.yaml
+artifacts_dir: spine/    # all Spine artifacts live under spine/
+```
+
+When `artifacts_dir` is set to a subdirectory (e.g., `spine/`), all artifact directories (`governance/`, `initiatives/`, etc.) are created inside that subdirectory. This allows Spine to coexist with existing projects without path collisions.
+
+For Spine's own repository, `artifacts_dir: /` means artifacts live at the repo root (the default when `.spine.yaml` is absent).
+
+All artifact paths in documentation and front matter (e.g., link targets like `/governance/charter.md`) are **relative to the Spine artifacts directory**, not the repository root. This keeps artifact content portable — changing the artifacts directory does not require rewriting links.
+
+---
+
 ## 2. Root Structure
 
 ```
