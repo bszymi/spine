@@ -119,6 +119,55 @@ func (r *TestRepo) HeadSHA(t *testing.T) string {
 	return strings.TrimSpace(string(out))
 }
 
+// AddBareRemote creates a bare Git repository and adds it as "origin".
+// Returns the path to the bare repository for verification.
+// The bare directory is created as a sibling of the repo dir so it shares
+// the same parent temp directory lifecycle.
+func (r *TestRepo) AddBareRemote(t *testing.T) string {
+	t.Helper()
+	bare := filepath.Join(filepath.Dir(r.Dir), "bare")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatalf("create bare dir: %v", err)
+	}
+	run := func(dir string, args ...string) {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(bare, "git", "init", "--bare")
+	run(r.Dir, "git", "remote", "add", "origin", bare)
+	run(r.Dir, "git", "push", "-u", "origin", "main")
+	return bare
+}
+
+// RemoteBranchExists checks if a branch exists on the bare remote.
+func RemoteBranchExists(t *testing.T, bareDir, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "branch", "--list", branch)
+	cmd.Dir = bareDir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git branch --list: %v", err)
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
+// RemoteHeadContains checks if the HEAD commit message on a remote branch
+// contains the given substring.
+func RemoteHeadContains(t *testing.T, bareDir, branch, substring string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "log", "--oneline", "-1", branch)
+	cmd.Dir = bareDir
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), substring)
+}
+
 // FileExists returns true if the file at the given repo-relative path exists.
 func (r *TestRepo) FileExists(path string) bool {
 	_, err := os.Stat(filepath.Join(r.Dir, path))
