@@ -237,6 +237,14 @@ func serveCmd() *cobra.Command {
 			var sched *scheduler.Scheduler
 			if st != nil {
 				opts := []scheduler.Option{}
+				if v := os.Getenv("SPINE_ORPHAN_THRESHOLD"); v != "" {
+					d, err := time.ParseDuration(v)
+					if err != nil {
+						log.Error("invalid SPINE_ORPHAN_THRESHOLD, using default", "value", v, "error", err)
+					} else {
+						opts = append(opts, scheduler.WithOrphanThreshold(d))
+					}
+				}
 				if orch != nil {
 					opts = append(opts,
 						scheduler.WithStepRecovery(func(ctx context.Context, execID string) error {

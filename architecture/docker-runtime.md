@@ -238,6 +238,7 @@ Environment variables follow the pattern `SPINE_<SECTION>_<KEY>`:
 | `SPINE_SERVER_PORT` | `server.port` | No (default: `8080`) |
 | `SPINE_SERVER_HOST` | `server.host` | No (default: `0.0.0.0`) |
 | `SPINE_PROJECTION_POLLING_INTERVAL` | `projection.polling_interval` | No (default: `30s`) |
+| `SPINE_ORPHAN_THRESHOLD` | `scheduler.orphan_threshold` | No (default: `720h` / 30 days) |
 | `SPINE_PROJECTION_WEBHOOK_ENABLED` | `projection.webhook_enabled` | No (default: `false`) |
 | `SPINE_LOG_LEVEL` | `observability.log_level` | No (default: `info`) |
 | `SPINE_LOG_FORMAT` | `observability.log_format` | No (default: `json`) |

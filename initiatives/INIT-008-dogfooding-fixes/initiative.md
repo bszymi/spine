@@ -2,7 +2,7 @@
 id: INIT-008
 type: Initiative
 title: Dogfooding Fixes
-status: Pending
+status: In Progress
 owner: bszymi
 created: 2026-03-31
 last_updated: 2026-03-31

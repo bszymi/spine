@@ -32,7 +32,7 @@ func New(s store.Store, events event.EventRouter, opts ...Option) *Scheduler {
 		events:          events,
 		timeoutInterval: 30 * time.Second,
 		orphanInterval:  60 * time.Second,
-		orphanThreshold: 5 * time.Minute,
+		orphanThreshold: 30 * 24 * time.Hour, // 30 days — Spine workflows are human-paced
 		done:            make(chan struct{}),
 	}
 	for _, opt := range opts {
