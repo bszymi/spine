@@ -14,6 +14,7 @@ import (
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/cli"
+	"github.com/bszymi/spine/internal/config"
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
@@ -127,6 +128,13 @@ func serveCmd() *cobra.Command {
 			if repoPath == "" {
 				repoPath = "."
 			}
+
+			spineCfg, err := config.Load(repoPath)
+			if err != nil {
+				log.Warn("failed to load .spine.yaml, using defaults", "error", err)
+				spineCfg = &config.SpineConfig{ArtifactsDir: "/"}
+			}
+			log.Info("spine config loaded", "artifacts_dir", spineCfg.ArtifactsDir)
 
 			gitClient := git.NewCLIClient(repoPath)
 			q := queue.NewMemoryQueue(100)
