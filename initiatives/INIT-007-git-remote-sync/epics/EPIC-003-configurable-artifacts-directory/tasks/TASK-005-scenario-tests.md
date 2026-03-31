@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Scenario tests for configurable artifacts directory
-status: Done
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-003-configurable-artifacts-directory/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 work_type: implementation

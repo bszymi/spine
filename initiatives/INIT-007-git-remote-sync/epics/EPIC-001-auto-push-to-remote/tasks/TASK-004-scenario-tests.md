@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Scenario tests for auto-push
-status: Done
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-001-auto-push-to-remote/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 work_type: implementation

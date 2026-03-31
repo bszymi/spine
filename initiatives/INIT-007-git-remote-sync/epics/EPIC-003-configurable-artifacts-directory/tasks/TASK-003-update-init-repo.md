@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Update init-repo to create .spine.yaml and use artifacts_dir
-status: Done
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-003-configurable-artifacts-directory/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 work_type: implementation

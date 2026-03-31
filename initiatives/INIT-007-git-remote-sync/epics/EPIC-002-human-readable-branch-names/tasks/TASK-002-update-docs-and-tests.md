@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Update documentation and tests for branch naming
-status: Done
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-002-human-readable-branch-names/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 work_type: implementation

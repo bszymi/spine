@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Planning run should auto-merge branch on approval
-status: Done
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
