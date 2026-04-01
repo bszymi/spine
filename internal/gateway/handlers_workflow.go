@@ -9,7 +9,6 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
-	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
 	"github.com/go-chi/chi/v5"
@@ -102,84 +101,33 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if s.runStarter == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "run starter not configured"))
 		return
 	}
 
-	traceID := observe.TraceID(r.Context())
-	now := time.Now()
-	runID := fmt.Sprintf("run-%s", traceID[:8])
-
-	// Look up workflow to get entry step and workflow path
-	resolved, err := s.resolveWorkflowBinding(r.Context(), req.TaskPath)
+	result, err := s.runStarter.StartRun(r.Context(), req.TaskPath)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	run := &domain.Run{
-		RunID:                runID,
-		TaskPath:             req.TaskPath,
-		WorkflowPath:         resolved.WorkflowPath,
-		WorkflowID:           resolved.WorkflowID,
-		WorkflowVersion:      resolved.CommitSHA,
-		WorkflowVersionLabel: resolved.VersionLabel,
-		Status:               domain.RunStatusPending,
-		CurrentStepID:        resolved.EntryStep,
-		TraceID:              traceID,
-		CreatedAt:            now,
+	gatewayTraceID := observe.TraceID(r.Context())
+	if gatewayTraceID == "" {
+		gatewayTraceID = result.TraceID
 	}
-
-	// Set run-level timeout if configured on the workflow.
-	if resolved.Timeout != "" {
-		if d, err := time.ParseDuration(resolved.Timeout); err == nil {
-			t := now.Add(d)
-			run.TimeoutAt = &t
-		}
-	}
-
-	// Create run, activate, and create entry step in a transaction
-	if err := s.store.WithTx(r.Context(), func(tx store.Tx) error {
-		if err := tx.CreateRun(r.Context(), run); err != nil {
-			return err
-		}
-		// Activate: pending → active
-		result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
-			Trigger: workflow.TriggerActivate,
-		})
-		if err != nil {
-			return err
-		}
-		if err := tx.UpdateRunStatus(r.Context(), runID, result.ToStatus); err != nil {
-			return err
-		}
-		// Create entry step execution
-		return tx.CreateStepExecution(r.Context(), &domain.StepExecution{
-			ExecutionID: fmt.Sprintf("%s-%s-1", runID, resolved.EntryStep),
-			RunID:       runID,
-			StepID:      resolved.EntryStep,
-			Status:      domain.StepStatusWaiting,
-			Attempt:     1,
-			CreatedAt:   now,
-		})
-	}); err != nil {
-		WriteError(w, err)
-		return
-	}
-
 	resp := map[string]any{
-		"run_id":      runID,
-		"task_path":   req.TaskPath,
-		"workflow_id": resolved.WorkflowID,
-		"status":      domain.RunStatusActive,
+		"run_id":      result.RunID,
+		"task_path":   result.TaskPath,
+		"workflow_id": result.WorkflowID,
+		"status":      result.Status,
 		"mode":        "standard",
-		"trace_id":    traceID,
+		"trace_id":    gatewayTraceID,
 	}
-	if resolved.VersionLabel != "" {
-		resp["workflow_version"] = resolved.VersionLabel
-	} else if resolved.CommitSHA != "" {
-		resp["workflow_version"] = resolved.CommitSHA
+	if result.VersionLabel != "" {
+		resp["workflow_version"] = result.VersionLabel
+	} else if result.CommitSHA != "" {
+		resp["workflow_version"] = result.CommitSHA
 	}
 	WriteJSON(w, http.StatusCreated, resp)
 }

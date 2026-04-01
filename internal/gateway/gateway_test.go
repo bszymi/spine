@@ -1041,12 +1041,13 @@ func setupFullServer(t *testing.T) (*httptest.Server, string, *fakeArtifactServi
 	}}
 
 	srv := gateway.NewServer(":0", gateway.ServerConfig{
-		Store:     fs,
-		Auth:      authSvc,
-		Artifacts: artSvc,
-		ProjQuery: &fakeProjectionQuerier{},
-		ProjSync:  &fakeProjSync{},
-		Git:       gitReader,
+		Store:      fs,
+		Auth:       authSvc,
+		Artifacts:  artSvc,
+		ProjQuery:  &fakeProjectionQuerier{},
+		ProjSync:   &fakeProjSync{},
+		Git:        gitReader,
+		RunStarter: &fakeRunStarter{},
 	})
 	ts := httptest.NewServer(srv.Handler())
 	return ts, token, artSvc
@@ -2028,6 +2029,28 @@ func TestNilServicesReturn503(t *testing.T) {
 }
 
 // ── Planning Run Tests ──
+
+type fakeRunStarter struct {
+	result *gateway.RunStartResult
+	err    error
+}
+
+func (f *fakeRunStarter) StartRun(_ context.Context, taskPath string) (*gateway.RunStartResult, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
+	}
+	return &gateway.RunStartResult{
+		RunID:      "run-fake1234",
+		TaskPath:   taskPath,
+		WorkflowID: "wf-task",
+		Status:     "active",
+		BranchName: "spine/run/fake-branch",
+		TraceID:    "trace-fake",
+	}, nil
+}
 
 type fakePlanningRunStarter struct {
 	called          bool

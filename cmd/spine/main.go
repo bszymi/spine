@@ -31,6 +31,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// runAdapter adapts engine.Orchestrator to gateway.RunStarter.
+type runAdapter struct {
+	orch *engine.Orchestrator
+}
+
+func (a *runAdapter) StartRun(ctx context.Context, taskPath string) (*gateway.RunStartResult, error) {
+	result, err := a.orch.StartRun(ctx, taskPath)
+	if err != nil {
+		return nil, err
+	}
+	return &gateway.RunStartResult{
+		RunID:        result.Run.RunID,
+		TaskPath:     result.Run.TaskPath,
+		WorkflowID:   result.Run.WorkflowID,
+		Status:       string(result.Run.Status),
+		BranchName:   result.Run.BranchName,
+		TraceID:      result.Run.TraceID,
+		VersionLabel: result.Run.WorkflowVersionLabel,
+		CommitSHA:    result.Run.WorkflowVersion,
+	}, nil
+}
+
 // planningRunAdapter adapts engine.Orchestrator to gateway.PlanningRunStarter.
 type planningRunAdapter struct {
 	orch *engine.Orchestrator
@@ -274,9 +296,11 @@ func serveCmd() *cobra.Command {
 				divSvcForGateway = divergence.NewService(st, gitClient, eventRouter)
 			}
 
+			var starter gateway.RunStarter
 			var planningStarter gateway.PlanningRunStarter
 			if orch != nil {
 				orch.WithArtifactWriter(artifactSvc)
+				starter = &runAdapter{orch: orch}
 				planningStarter = &planningRunAdapter{orch: orch}
 			}
 
@@ -291,6 +315,7 @@ func serveCmd() *cobra.Command {
 				WorkflowResolver:   wfResolver,
 				BranchCreator:      divSvcForGateway,
 				Events:             eventRouter,
+				RunStarter:         starter,
 				PlanningRunStarter: planningStarter,
 			})
 
