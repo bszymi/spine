@@ -86,10 +86,11 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	}
 
 	// Create the Git branch after the run is persisted.
+	// Branch creation is fatal — a run without a branch cannot be merged.
 	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
-		log.Warn("failed to create run branch", "branch", branchName, "error", err)
-		run.BranchName = ""
-	} else if autoPushEnabled() {
+		return nil, fmt.Errorf("create run branch: %w", err)
+	}
+	if autoPushEnabled() {
 		if err := o.git.PushBranch(ctx, "origin", branchName); err != nil {
 			log.Warn("auto-push: failed to push run branch", "branch", branchName, "error", err)
 		}
