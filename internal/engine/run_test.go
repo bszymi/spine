@@ -456,6 +456,63 @@ func TestStartRun_StoreCreateFails(t *testing.T) {
 	}
 }
 
+func TestStartRun_BranchCreationFails(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{Type: "task", Path: "tasks/my-task.md"},
+	}
+	resolver := &mockWorkflowResolver{
+		result: &workflow.BindingResult{
+			Workflow: &domain.WorkflowDefinition{
+				ID:        "wf-task",
+				Path:      "workflows/task.yaml",
+				Version:   "1.0.0",
+				EntryStep: "start",
+				Steps: []domain.StepDefinition{
+					{ID: "start", Name: "Start"},
+				},
+			},
+			CommitSHA:    "abc123",
+			VersionLabel: "1.0.0",
+		},
+	}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	failGit := &failingBranchGitOperator{err: errors.New("git branch failed")}
+	orch := &Orchestrator{
+		workflows: resolver,
+		store:     store,
+		actors:    &stubActorAssigner{},
+		artifacts: artifacts,
+		events:    events,
+		git:       failGit,
+		wfLoader:  &stubWorkflowLoader{},
+	}
+
+	_, err := orch.StartRun(context.Background(), "tasks/my-task.md")
+	if err == nil {
+		t.Fatal("expected error when branch creation fails")
+	}
+
+	// Run should still be persisted (pending) — orphan recovery will clean it up.
+	if store.createdRun == nil {
+		t.Fatal("expected run to be created in store before branch attempt")
+	}
+	// No status update should have happened (run stays pending).
+	if len(store.statusCalls) != 0 {
+		t.Errorf("expected 0 status updates, got %d", len(store.statusCalls))
+	}
+}
+
+// failingBranchGitOperator returns an error from CreateBranch.
+type failingBranchGitOperator struct {
+	stubGitOperator
+	err error
+}
+
+func (f *failingBranchGitOperator) CreateBranch(_ context.Context, _, _ string) error {
+	return f.err
+}
+
 // ── CompleteRun tests ──
 
 func TestCompleteRun_HappyPath(t *testing.T) {
