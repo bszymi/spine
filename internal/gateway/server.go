@@ -47,6 +47,23 @@ type EventEmitterGW interface {
 	Emit(ctx context.Context, event domain.Event) error
 }
 
+// RunStarter starts standard workflow runs for tasks.
+type RunStarter interface {
+	StartRun(ctx context.Context, taskPath string) (*RunStartResult, error)
+}
+
+// RunStartResult contains the result of starting a standard run.
+type RunStartResult struct {
+	RunID        string
+	TaskPath     string
+	WorkflowID   string
+	Status       string
+	BranchName   string
+	TraceID      string
+	VersionLabel string
+	CommitSHA    string
+}
+
 // PlanningRunStarter starts planning runs for governed artifact creation.
 type PlanningRunStarter interface {
 	StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*PlanningRunResult, error)
@@ -86,6 +103,7 @@ type Server struct {
 	workflowResolver   WorkflowResolverFn
 	branchCreator      BranchCreator      // optional, nil if not configured
 	events             EventEmitterGW     // optional, nil if not configured
+	runStarter         RunStarter         // optional, nil if not configured
 	planningRunStarter PlanningRunStarter // optional, nil if not configured
 }
 
@@ -135,6 +153,7 @@ type ServerConfig struct {
 	WorkflowResolver   WorkflowResolverFn
 	BranchCreator      BranchCreator
 	Events             EventEmitterGW
+	RunStarter         RunStarter
 	PlanningRunStarter PlanningRunStarter
 }
 
@@ -151,6 +170,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		resultHandler:      cfg.ResultHandler,
 		branchCreator:      cfg.BranchCreator,
 		events:             cfg.Events,
+		runStarter:         cfg.RunStarter,
 		planningRunStarter: cfg.PlanningRunStarter,
 		workflowResolver:   cfg.WorkflowResolver,
 	}
