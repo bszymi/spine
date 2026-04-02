@@ -426,6 +426,19 @@ func migrateCmd() *cobra.Command {
 				migrationsDir = "migrations"
 			}
 
+			// In --all-workspaces mode, workspace and registry migrations use
+			// separate directories. SPINE_MIGRATIONS_DIR is for workspace schemas;
+			// SPINE_REGISTRY_MIGRATIONS_DIR is for the registry schema.
+			registryMigrationsDir := os.Getenv("SPINE_REGISTRY_MIGRATIONS_DIR")
+			if registryMigrationsDir == "" {
+				registryMigrationsDir = "migrations/registry"
+			}
+
+			wsMigrationsDir := os.Getenv("SPINE_WORKSPACE_MIGRATIONS_DIR")
+			if wsMigrationsDir == "" {
+				wsMigrationsDir = "migrations"
+			}
+
 			ctx := context.Background()
 			ctx = observe.WithComponent(ctx, "migrate")
 			log := observe.Logger(ctx)
@@ -464,7 +477,7 @@ func migrateCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("connect to registry database: %w", err)
 			}
-			if err := registryStore.ApplyMigrations(ctx, "migrations/registry"); err != nil {
+			if err := registryStore.ApplyMigrations(ctx, registryMigrationsDir); err != nil {
 				registryStore.Close()
 				return fmt.Errorf("apply registry migrations: %w", err)
 			}
@@ -507,7 +520,7 @@ func migrateCmd() *cobra.Command {
 					continue
 				}
 
-				if err := wsStore.ApplyMigrations(wsCtx, migrationsDir); err != nil {
+				if err := wsStore.ApplyMigrations(wsCtx, wsMigrationsDir); err != nil {
 					wsLog.Error("apply workspace migrations failed", "error", err)
 					failed = append(failed, ws.ID)
 					wsStore.Close()
