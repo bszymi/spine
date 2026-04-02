@@ -33,7 +33,7 @@ func NewTestStore(t *testing.T) *PostgresStore {
 	})
 
 	// Apply migrations
-	if err := s.ApplyMigrations(ctx, findMigrationsDir()); err != nil {
+	if err := s.ApplyMigrations(ctx, FindMigrationsDir()); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
@@ -71,8 +71,8 @@ func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 	}
 }
 
-// findMigrationsDir walks up from the working directory to find the migrations/ folder.
-func findMigrationsDir() string {
+// FindMigrationsDir walks up from the working directory to find the migrations/ folder.
+func FindMigrationsDir() string {
 	// Try common paths relative to where tests run
 	candidates := []string{
 		"migrations",
