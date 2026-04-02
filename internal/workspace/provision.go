@@ -3,11 +3,15 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/bszymi/spine/internal/cli"
+	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
 )
@@ -128,4 +132,88 @@ func replaceDatabaseInURL(connURL, newDB string) string {
 
 	// Fallback: append dbname.
 	return connURL + " dbname=" + newDB
+}
+
+// RepoProvisioner initializes Git repositories for workspaces.
+type RepoProvisioner struct {
+	// baseDir is the parent directory for all workspace repos.
+	baseDir string
+}
+
+// NewRepoProvisioner creates a provisioner.
+// baseDir should be SPINE_WORKSPACE_REPOS_DIR.
+func NewRepoProvisioner(baseDir string) *RepoProvisioner {
+	return &RepoProvisioner{baseDir: baseDir}
+}
+
+// ProvisionRepo sets up a Git repository for a workspace.
+// If gitURL is non-empty, clones the remote. Otherwise initializes a fresh repo.
+// Detects existing Spine repos and skips init for those.
+// Returns the repo path. On failure, cleans up the partial directory.
+func (p *RepoProvisioner) ProvisionRepo(ctx context.Context, workspaceID, gitURL string) (string, error) {
+	log := observe.Logger(ctx)
+
+	repoPath := filepath.Join(p.baseDir, workspaceID)
+
+	// Check if directory already exists.
+	if _, err := os.Stat(repoPath); err == nil {
+		return "", fmt.Errorf("repo directory already exists: %s", repoPath)
+	}
+
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		return "", fmt.Errorf("create repo directory: %w", err)
+	}
+
+	// Cleanup on failure.
+	success := false
+	defer func() {
+		if !success {
+			_ = os.RemoveAll(repoPath)
+		}
+	}()
+
+	if gitURL != "" {
+		// Clone mode.
+		log.Info("cloning remote repo", "workspace_id", workspaceID, "git_url", gitURL)
+		gitClient := git.NewCLIClient("")
+		if err := gitClient.Clone(ctx, gitURL, repoPath); err != nil {
+			return "", fmt.Errorf("clone %s: %w", gitURL, err)
+		}
+
+		if isSpineRepo(repoPath) {
+			log.Info("existing Spine repo detected, skipping init", "workspace_id", workspaceID)
+			// Full projection sync will be triggered when workspace is activated.
+		} else {
+			log.Info("non-Spine repo, initializing Spine structure", "workspace_id", workspaceID)
+			if err := cli.InitRepo(repoPath, cli.InitOpts{NoBranch: true}); err != nil {
+				return "", fmt.Errorf("init spine in cloned repo: %w", err)
+			}
+		}
+	} else {
+		// Fresh mode.
+		log.Info("initializing fresh repo", "workspace_id", workspaceID)
+		if err := cli.InitRepo(repoPath, cli.InitOpts{NoBranch: true}); err != nil {
+			return "", fmt.Errorf("init fresh repo: %w", err)
+		}
+	}
+
+	success = true
+	log.Info("workspace repo provisioned", "workspace_id", workspaceID, "path", repoPath)
+	return repoPath, nil
+}
+
+// isSpineRepo checks if a directory is an existing Spine repository
+// by looking for .spine.yaml or governance/ directory.
+func isSpineRepo(repoPath string) bool {
+	indicators := []string{
+		filepath.Join(repoPath, ".spine.yaml"),
+		filepath.Join(repoPath, "governance"),
+		filepath.Join(repoPath, "workflows"),
+	}
+	for _, path := range indicators {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
 }

@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Git repository provisioning
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-007-workspace-provisioning/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
