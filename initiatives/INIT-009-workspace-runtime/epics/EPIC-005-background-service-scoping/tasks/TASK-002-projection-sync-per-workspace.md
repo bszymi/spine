@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Per-workspace projection sync
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-005-background-service-scoping/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
