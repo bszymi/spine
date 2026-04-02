@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Fix planning run scenario tests stuck in committing status
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 links:

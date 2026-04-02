@@ -87,6 +87,7 @@ func seedCreationWorkflow() engine.Step {
 // TestPlanningRun_InitiativeCreationGoldenPath validates the complete
 // planning run lifecycle: start → draft → validate → review → merge → completed.
 func TestPlanningRun_InitiativeCreationGoldenPath(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "initiative-creation-golden-path",
 		Description: "Verify planning run creates an initiative through the full creation workflow",
@@ -174,6 +175,7 @@ links:
 // TestPlanningRun_InitiativeWithChildArtifacts validates that multiple artifacts
 // created on a planning run branch all merge to main on approval.
 func TestPlanningRun_InitiativeWithChildArtifacts(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "initiative-with-child-artifacts",
 		Description: "Verify planning run with initiative + epics + task all merge to main",
@@ -224,6 +226,7 @@ func TestPlanningRun_InitiativeWithChildArtifacts(t *testing.T) {
 // TestPlanningRun_RejectionAndRework validates that review rejection loops
 // back to draft, and approval on retry succeeds.
 func TestPlanningRun_RejectionAndRework(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "planning-run-rejection-rework",
 		Description: "Verify rejection loops to draft and retry approval succeeds",
@@ -268,6 +271,7 @@ func TestPlanningRun_RejectionAndRework(t *testing.T) {
 // TestPlanningRun_Cancellation validates that cancelling a planning run
 // leaves no trace on main and cleans up the branch.
 func TestPlanningRun_Cancellation(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "planning-run-cancellation",
 		Description: "Verify cancellation cleans up branch and leaves main untouched",
@@ -316,6 +320,7 @@ links:
 // TestPlanningRun_TaskCreation validates that the generic artifact-creation
 // workflow works for creating individual tasks, proving it is type-agnostic.
 func TestPlanningRun_TaskCreation(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "task-creation-through-planning-run",
 		Description: "Verify artifact-creation workflow works for Task type with existing parent artifacts",
