@@ -348,6 +348,7 @@ func serveCmd() *cobra.Command {
 				Events:             eventRouter,
 				RunStarter:         starter,
 				PlanningRunStarter: planningStarter,
+				WorkspaceResolver:  wsResolver,
 			})
 
 			// Run startup recovery and start background services.
