@@ -13,9 +13,10 @@ import (
 
 // Client is an HTTP client for the Spine API.
 type Client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL     string
+	token       string
+	workspaceID string
+	http        *http.Client
 }
 
 // NewClient creates a new Spine API client.
@@ -25,6 +26,12 @@ func NewClient(baseURL, token string) *Client {
 		token:   token,
 		http:    &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// WithWorkspace sets the workspace ID sent on every API request.
+func (c *Client) WithWorkspace(workspaceID string) *Client {
+	c.workspaceID = workspaceID
+	return c
 }
 
 // Get performs a GET request with query parameters.
@@ -82,6 +89,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any) ([]b
 func (c *Client) do(req *http.Request) ([]byte, error) {
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if c.workspaceID != "" {
+		req.Header.Set("X-Workspace-ID", c.workspaceID)
 	}
 
 	resp, err := c.http.Do(req)

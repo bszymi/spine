@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: CLI workspace support
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-004-gateway-workspace-routing/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
