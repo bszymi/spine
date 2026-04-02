@@ -88,7 +88,47 @@ All actors operate under identical governance constraints. No actor has implicit
 
 ---
 
-## 5. How Spine Differs from Existing Tools
+## 5. Workspace Model — Isolation Boundary
+
+A **workspace** is Spine's fundamental isolation boundary. Every governed repository, runtime state, projection state, and actor scope exists within exactly one workspace.
+
+### 5.1 What a Workspace Contains
+
+A workspace is a named, isolated context that encapsulates:
+
+- **A governed Git repository** — the authoritative source of truth for all artifacts within the workspace
+- **Runtime state** — run executions, step progress, queue entries, actor assignments
+- **Projection state** — query-optimized views derived from the repository
+- **Actor scope** — the set of actors (human or AI) authorized to operate within the workspace
+
+All existing product concepts — artifacts, workflows, runs, actors — exist within a workspace. A workspace is the boundary within which governance applies.
+
+### 5.2 Isolation Guarantee
+
+Workspaces are isolated from each other:
+
+- One workspace cannot see or query another workspace's artifacts, runs, or projections
+- One workspace's actors cannot operate in or authenticate against another workspace
+- One workspace's Git history is independent of another workspace's history
+- No operation can span multiple workspaces
+
+This isolation is a product invariant, not an implementation detail. It holds regardless of how workspaces are deployed.
+
+### 5.3 Relationship to Other Concepts
+
+| Concept | Relationship to Workspace |
+|---------|--------------------------|
+| Artifacts | Exist within a workspace's governed repository |
+| Workflows | Defined within a workspace; govern execution within that workspace |
+| Runs | Execute within a workspace against that workspace's artifacts and actors |
+| Actors | Registered within a workspace; scoped to that workspace's operations |
+| Projections | Derived from a workspace's repository into that workspace's database |
+
+A workspace is not a team, an organization, or a permission group. It is the structural boundary within which Spine's governance model operates.
+
+---
+
+## 6. How Spine Differs from Existing Tools
 
 | Tool Category | What It Does | How Spine Differs |
 |--------------|-------------|-------------------|
@@ -104,7 +144,7 @@ See [Non-Goals](/product/non-goals.md) for explicit boundaries.
 
 ---
 
-## 6. Key Principles
+## 7. Key Principles
 
 These principles are drawn from the [Charter](/governance/charter.md) and enforced by the [Constitution](/governance/constitution.md):
 
@@ -117,7 +157,7 @@ These principles are drawn from the [Charter](/governance/charter.md) and enforc
 
 ---
 
-## 7. Who Spine Is For
+## 8. Who Spine Is For
 
 Spine is designed for hybrid teams of humans and AI agents that need structural integrity between product intent and execution.
 
@@ -135,7 +175,7 @@ See [Users and Use Cases](/product/users-and-use-cases.md) for full persona defi
 
 ---
 
-## 8. Governance Hierarchy
+## 9. Governance Hierarchy
 
 Spine operates under a layered governance model:
 
@@ -149,7 +189,7 @@ See [Charter](/governance/charter.md), [Constitution](/governance/constitution.m
 
 ---
 
-## 9. Related Documents
+## 10. Related Documents
 
 This document is the authoritative product definition. It is supported by:
 
@@ -160,7 +200,7 @@ This document is the authoritative product definition. It is supported by:
 
 ---
 
-## 10. Evolution Policy
+## 11. Evolution Policy
 
 This document is expected to evolve as the product matures.
 

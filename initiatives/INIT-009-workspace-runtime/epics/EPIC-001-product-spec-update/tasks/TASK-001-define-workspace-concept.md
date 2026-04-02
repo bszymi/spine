@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Define workspace as a product concept
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-001-product-spec-update/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
