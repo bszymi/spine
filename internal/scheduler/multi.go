@@ -115,12 +115,17 @@ func (ms *MultiScheduler) forEachWorkspace(ctx context.Context, scanName string,
 		}
 
 		if ss.Store == nil {
+			ms.pool.Release(ws.ID)
 			continue // no store, skip
 		}
 
 		// Create a per-workspace scheduler for this scan pass.
-		// Note: engine-dependent recovery functions are not wired here —
-		// they require per-workspace orchestrator construction (TODO INIT-009).
+		// TODO(INIT-009): Engine-dependent callbacks (commitRetryFn, runFailFn,
+		// stepRecoveryFn) are not wired here — they require per-workspace
+		// orchestrator construction. Until then:
+		// - Commit-retry pass is skipped (runs stuck in committing won't auto-retry)
+		// - Orphan escalation to failure is skipped (orphaned runs are logged but not failed)
+		// These are handled by the single-workspace Scheduler in main.go for now.
 		sched := New(ss.Store, ss.Events,
 			WithOrphanThreshold(ms.orphanThreshold),
 		)
