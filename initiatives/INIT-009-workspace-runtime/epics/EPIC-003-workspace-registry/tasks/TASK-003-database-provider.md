@@ -37,5 +37,5 @@ Content should define:
 - Implements `WorkspaceResolver` interface
 - Registry table schema is defined and migrated
 - Cache refreshes after configurable TTL
-- Inactive workspaces are not resolved (treated as not found)
+- Inactive workspaces return `ErrWorkspaceInactive` (distinct from `ErrWorkspaceNotFound`) so callers can distinguish disabled vs unknown workspaces
 - Unit tests cover: resolve from DB, resolve from cache, cache expiry, unknown workspace, inactive workspace

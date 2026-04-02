@@ -24,7 +24,7 @@ Define the core types that all workspace-aware runtime behavior builds on. See [
 
 Content should define:
 
-- `WorkspaceConfig` struct: workspace ID, display name, database URL, repo path, status
+- `WorkspaceConfig` struct: workspace ID, display name, database URL, repo path, status, actor/auth scope (so per-workspace actor isolation can be initialized from config)
 - `WorkspaceResolver` interface: `Resolve(ctx, workspaceID) (*WorkspaceConfig, error)` and `List(ctx) ([]WorkspaceConfig, error)`
 - Error types: `ErrWorkspaceNotFound`, `ErrWorkspaceInactive`
 
