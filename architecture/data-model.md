@@ -330,6 +330,21 @@ This section provides guidance, not requirements. Technology choices may evolve.
 - Single database instance acceptable for v0.x
 - Projection tables and runtime tables may share the same database but should use separate schemas for clarity
 
+#### Workspace-Aware Storage
+
+In workspace-aware hosting, each workspace has its own PostgreSQL database containing the runtime and projection schemas. Isolation is at the connection level — there are no shared tables with workspace_id partitioning. This preserves the existing schema unchanged within each workspace database.
+
+A separate **workspace registry database** (or configuration file in single mode) maps workspace IDs to their resource handles:
+
+| Field | Purpose |
+|-------|---------|
+| Workspace ID | Unique identifier for the workspace |
+| Database URL | Connection string for the workspace's database |
+| Repository path | Path to the workspace's Git working directory |
+| Status | Active or inactive |
+
+The registry is a coordination concern, not a data store — it contains no artifacts, runtime state, or projections. In single mode, the registry is replaced by environment variables (`SPINE_DATABASE_URL`, `SPINE_REPO_PATH`), preserving current behavior.
+
 ### 7.3 Queue
 
 - In-process queue acceptable for v0.x (e.g., in-memory channel)

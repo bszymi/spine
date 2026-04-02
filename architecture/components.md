@@ -372,6 +372,25 @@ For v0.x, the system may be deployed as a single process with components running
 
 Components are designed with clear boundaries so they can be extracted into separate services as load requires. The Projection Service and Event Router are the most likely candidates for early extraction.
 
+### 6.5 Workspace-Aware Hosting
+
+Spine supports two deployment modes that share the same component architecture:
+
+**Single mode (default)** — one workspace per Spine instance. One Git repository, one database, one set of in-process components. This is the v0.x baseline described above.
+
+**Shared mode** — multiple workspaces in one Spine instance. A workspace routing layer sits at the request boundary and resolves the target workspace before any component handles the request. Each workspace has its own Git repository and database — isolation is at the resource level.
+
+The routing layer introduces two new runtime concepts:
+
+- **Workspace Resolver** — an interface that maps a workspace ID to its resource configuration (database URL, repository path). Two implementations: a file/env provider for single mode (wraps current environment variables) and a database provider for shared mode (reads from a workspace registry table).
+- **Service Pool** — a cache of per-workspace service sets. Each set contains a fully initialized Git client, store, artifact service, projection service, and engine scoped to one workspace. Sets are lazily created on first request and evicted when idle.
+
+Components themselves are unchanged — they operate against a single logical context as before. The routing layer selects which context a given request executes against.
+
+Background services (scheduler, projection sync, event routing) do not have a request to resolve workspace from. Instead, they iterate over all active workspaces from the resolver's `List()` method and process each workspace using its service set from the pool. Workspace identity is carried through the service set, not through request context.
+
+Global system routes (health checks, metrics, readiness) are not scoped to a workspace and bypass the routing layer.
+
 ---
 
 ## 7. Constitutional Alignment Summary

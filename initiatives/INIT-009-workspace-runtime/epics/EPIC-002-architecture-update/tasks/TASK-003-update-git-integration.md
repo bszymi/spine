@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Update git-integration.md repository scope
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-002-architecture-update/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
