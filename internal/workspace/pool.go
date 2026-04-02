@@ -36,6 +36,7 @@ type poolEntry struct {
 	services   *ServiceSet
 	lastAccess time.Time
 	refCount   int32 // number of active users of this service set
+	evicting   bool  // marked for deferred close on last Release
 }
 
 // ServicePool lazily creates and caches per-workspace service sets.
@@ -96,7 +97,7 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 
 	canonicalID := cfg.ID
 
-	if entry, ok := p.entries[canonicalID]; ok {
+	if entry, ok := p.entries[canonicalID]; ok && !entry.evicting {
 		entry.lastAccess = time.Now()
 		entry.refCount++
 		p.mu.Unlock()
@@ -126,6 +127,8 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 
 // Release decrements the reference count for a workspace service set.
 // Call this when a request or background task is done using the set.
+// If the entry was marked for eviction and this was the last reference,
+// the service set is closed and removed.
 func (p *ServicePool) Release(workspaceID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -134,17 +137,29 @@ func (p *ServicePool) Release(workspaceID string) {
 			entry.refCount--
 		}
 		entry.lastAccess = time.Now()
+
+		if entry.evicting && entry.refCount == 0 {
+			entry.services.close()
+			delete(p.entries, workspaceID)
+		}
 	}
 }
 
-// Evict forcefully removes a specific workspace's service set from the pool,
-// closing its resources. Used during workspace deactivation.
+// Evict removes a specific workspace's service set from the pool.
+// If the set has active references, it is marked for deferred closure —
+// Release will close it when the last reference is dropped. If no
+// active references, it is closed and removed immediately.
 func (p *ServicePool) Evict(workspaceID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry, ok := p.entries[workspaceID]; ok {
-		entry.services.close()
-		delete(p.entries, workspaceID)
+		if entry.refCount > 0 {
+			// Mark for deferred close — Release will handle cleanup.
+			entry.evicting = true
+		} else {
+			entry.services.close()
+			delete(p.entries, workspaceID)
+		}
 	}
 }
 

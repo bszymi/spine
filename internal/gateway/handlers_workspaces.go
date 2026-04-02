@@ -80,13 +80,13 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 
 	// TODO(INIT-009/EPIC-007): Call database provisioning (TASK-002) and
 	// git repo provisioning (TASK-003) here. For now, create the registry
-	// entry with placeholder values that must be configured manually.
+	// entry as inactive — it must be provisioned before it can serve traffic.
 	cfg := workspace.Config{
 		ID:          req.WorkspaceID,
 		DisplayName: displayName,
 		DatabaseURL: "", // Set by provisioning in TASK-002
 		RepoPath:    "", // Set by provisioning in TASK-003
-		Status:      workspace.StatusActive,
+		Status:      workspace.StatusInactive,
 	}
 
 	if err := s.wsDBProvider.CreateWorkspace(r.Context(), cfg); err != nil {
@@ -98,6 +98,7 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 		"workspace_id": cfg.ID,
 		"display_name": cfg.DisplayName,
 		"status":       string(cfg.Status),
+		"message":      "workspace created — run provisioning to activate",
 	})
 }
 
