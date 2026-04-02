@@ -25,7 +25,8 @@ New handlers in `internal/gateway/` and routes in `routes.go`.
 Endpoints:
 
 - `POST /api/v1/workspaces` — create a new workspace (triggers full provisioning)
-  - Request body: `{ "workspace_id": "...", "display_name": "..." }`
+  - Request body: `{ "workspace_id": "...", "display_name": "...", "git_url": "..." }`
+  - `git_url` is optional — if provided, the repo is cloned from this remote; if omitted, a fresh repo is initialized
   - Response: created workspace config with status
 - `GET /api/v1/workspaces` — list all workspaces with status
 - `GET /api/v1/workspaces/{workspace_id}` — get workspace details

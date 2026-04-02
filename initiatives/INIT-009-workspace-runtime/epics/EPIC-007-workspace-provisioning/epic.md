@@ -54,6 +54,7 @@ Provide a complete flow for creating and provisioning workspaces in shared runti
 - `GET /api/v1/workspaces/{id}` returns workspace details
 - `POST /api/v1/workspaces/{id}/deactivate` marks workspace inactive and stops serving requests for it
 - The provisioned database has all Spine schemas (runtime + projection) applied
-- The provisioned Git repository is initialized and ready for artifact creation
+- Fresh repo mode: the provisioned Git repository is initialized with Spine structure
+- Clone repo mode: an existing remote repo is cloned; if it's already a Spine repo, its contents are synced into the projection database; if not, Spine structure is added
 - CLI `spine workspace create/list/deactivate` commands work against the API
 - Provisioning is atomic — if any step fails, partial resources are cleaned up
