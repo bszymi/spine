@@ -126,6 +126,25 @@ This isolation is a product invariant, not an implementation detail. It holds re
 
 A workspace is not a team, an organization, or a permission group. It is the structural boundary within which Spine's governance model operates.
 
+### 5.4 Hosting Modes
+
+Spine supports two hosting modes. Both provide identical workspace isolation guarantees — the difference is operational, not functional.
+
+**Single mode** — one workspace per Spine instance. This is the default. Each workspace runs in its own process with its own database and Git repository. It is the simplest deployment model and provides the strongest operational isolation. A failure or misbehavior in one workspace cannot affect another.
+
+**Shared mode** — multiple workspaces in one Spine instance. A single Spine process serves requests for multiple workspaces, resolving the correct workspace context at the request boundary. Each workspace still has its own database and Git repository — isolation is at the resource level, not the query level. Shared mode reduces operational overhead when workspace count grows.
+
+Hosting mode is an operator decision, not a user-facing distinction. Users interact with workspaces the same way regardless of how they are deployed.
+
+### 5.5 User Interaction with Workspaces
+
+Users address a workspace by its unique identifier:
+
+- **API** — workspace ID is included in each request (e.g., via request header). In single mode, workspace ID is optional — the runtime falls back to the single configured workspace for backward compatibility.
+- **CLI** — workspace ID is set via the `--workspace` flag or persisted through `spine config set workspace <id>`.
+
+System-level operations (health checks, metrics) are not scoped to a workspace and do not require a workspace identifier.
+
 ---
 
 ## 6. How Spine Differs from Existing Tools
