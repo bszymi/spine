@@ -60,6 +60,9 @@ func Logger(ctx context.Context) *slog.Logger {
 	if v := ArtifactPath(ctx); v != "" {
 		logger = logger.With("artifact_path", v)
 	}
+	if v := WorkspaceID(ctx); v != "" {
+		logger = logger.With("workspace_id", v)
+	}
 
 	return logger
 }

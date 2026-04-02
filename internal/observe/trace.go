@@ -15,6 +15,7 @@ const (
 	actorIDKey      contextKey = "actor_id"
 	artifactPathKey contextKey = "artifact_path"
 	componentKey    contextKey = "component"
+	workspaceIDKey  contextKey = "workspace_id"
 )
 
 // GenerateTraceID creates a new random trace ID.
@@ -61,6 +62,19 @@ func WithStepID(ctx context.Context, stepID string) context.Context {
 // StepID extracts the step ID from context.
 func StepID(ctx context.Context) string {
 	if v, ok := ctx.Value(stepIDKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// WithWorkspaceID adds a workspace ID to the context.
+func WithWorkspaceID(ctx context.Context, workspaceID string) context.Context {
+	return context.WithValue(ctx, workspaceIDKey, workspaceID)
+}
+
+// WorkspaceID extracts the workspace ID from context.
+func WorkspaceID(ctx context.Context) string {
+	if v, ok := ctx.Value(workspaceIDKey).(string); ok {
 		return v
 	}
 	return ""
