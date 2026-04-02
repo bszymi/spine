@@ -41,6 +41,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO(INIT-009): branchCreator is still a singleton — needs workspace-scoped construction in ServiceSet.
 	branch, err := s.branchCreator.CreateExploratoryBranch(r.Context(), divCtx, req.BranchID, req.StartStep)
 	if err != nil {
 		WriteError(w, err)
@@ -73,6 +74,7 @@ func (s *Server) handleCloseWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO(INIT-009): branchCreator is still a singleton — needs workspace-scoped construction in ServiceSet.
 	if err := s.branchCreator.CloseWindow(r.Context(), divCtx); err != nil {
 		WriteError(w, err)
 		return

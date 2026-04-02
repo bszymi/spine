@@ -73,6 +73,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "planning run starter not configured"))
 			return
 		}
+		// TODO(INIT-009): planningRunStarter is still a singleton — needs workspace-scoped orchestrator in ServiceSet.
 		result, err := s.planningRunStarter.StartPlanningRun(r.Context(), req.TaskPath, req.ArtifactContent)
 		if err != nil {
 			WriteError(w, err)
@@ -106,6 +107,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO(INIT-009): runStarter is still a singleton — needs workspace-scoped orchestrator in ServiceSet.
 	result, err := s.runStarter.StartRun(r.Context(), req.TaskPath)
 	if err != nil {
 		WriteError(w, err)
