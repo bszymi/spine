@@ -153,6 +153,7 @@ Mitigations:
 | EPIC-005 | Background Service Scoping | EPIC-003, EPIC-004 |
 | EPIC-006 | Observability & Workspace Identity | EPIC-003, EPIC-004 |
 | EPIC-007 | Workspace Provisioning | EPIC-003, EPIC-004 |
+| EPIC-008 | Workspace Scenario Tests | EPIC-003, EPIC-004, EPIC-007 |
 
 ---
 
