@@ -90,7 +90,7 @@ All actors operate under identical governance constraints. No actor has implicit
 
 ## 5. Workspace Model — Isolation Boundary
 
-A **workspace** is Spine's fundamental isolation boundary. Every governed repository, runtime state, projection state, and actor scope exists within exactly one workspace.
+A **workspace** is Spine's fundamental isolation boundary. Every governed repository, runtime state, projection state, and actor scope exists within exactly one workspace. Each workspace has a unique identifier used to address it in API requests and CLI commands.
 
 ### 5.1 What a Workspace Contains
 
@@ -99,7 +99,7 @@ A workspace is a named, isolated context that encapsulates:
 - **A governed Git repository** — the authoritative source of truth for all artifacts within the workspace
 - **Runtime state** — run executions, step progress, queue entries, actor assignments
 - **Projection state** — query-optimized views derived from the repository
-- **Actor scope** — the set of actors (human or AI) authorized to operate within the workspace
+- **Actor scope** — the set of actors (humans, AI agents, and automated systems) authorized to operate within the workspace
 
 All existing product concepts — artifacts, workflows, runs, actors — exist within a workspace. A workspace is the boundary within which governance applies.
 
