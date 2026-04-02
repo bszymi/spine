@@ -226,6 +226,14 @@ func (p *DBProvider) ListAllWorkspaces(ctx context.Context) ([]Config, error) {
 	return configs, rows.Err()
 }
 
+// DeleteWorkspace removes a workspace from the registry entirely.
+// Used for test cleanup only — production should use DeactivateWorkspace.
+func (p *DBProvider) DeleteWorkspace(ctx context.Context, workspaceID string) error {
+	_, err := p.pool.Exec(ctx,
+		`DELETE FROM public.workspace_registry WHERE workspace_id = $1`, workspaceID)
+	return err
+}
+
 // Close closes the database connection pool.
 func (p *DBProvider) Close() {
 	p.pool.Close()
