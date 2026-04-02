@@ -112,6 +112,7 @@ func main() {
 	root.AddCommand(workflowCmd())
 	root.AddCommand(validateCmd())
 	root.AddCommand(discussionCmd())
+	root.AddCommand(workspaceCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

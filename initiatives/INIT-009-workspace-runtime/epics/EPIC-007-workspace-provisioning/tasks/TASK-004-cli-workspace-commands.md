@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: CLI workspace management commands
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-007-workspace-provisioning/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
