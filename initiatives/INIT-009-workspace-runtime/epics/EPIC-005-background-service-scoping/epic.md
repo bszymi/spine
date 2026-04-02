@@ -2,7 +2,7 @@
 id: EPIC-005
 type: Epic
 title: Background Service Scoping
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
   - type: parent
