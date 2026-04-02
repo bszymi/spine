@@ -75,6 +75,7 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 		}
 
 		ctx := context.WithValue(r.Context(), workspaceContextKey, cfg)
+		ctx = observe.WithWorkspaceID(ctx, cfg.ID)
 
 		// If service pool is configured, get the workspace's service set.
 		if s.servicePool != nil {
