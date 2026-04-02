@@ -415,15 +415,12 @@ func healthCmd() *cobra.Command {
 }
 
 func migrateCmd() *cobra.Command {
-	return &cobra.Command{
+	var allWorkspaces bool
+
+	cmd := &cobra.Command{
 		Use:   "migrate",
 		Short: "Run database migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dbURL := os.Getenv("SPINE_DATABASE_URL")
-			if dbURL == "" {
-				return fmt.Errorf("SPINE_DATABASE_URL is required")
-			}
-
 			migrationsDir := os.Getenv("SPINE_MIGRATIONS_DIR")
 			if migrationsDir == "" {
 				migrationsDir = "migrations"
@@ -433,21 +430,109 @@ func migrateCmd() *cobra.Command {
 			ctx = observe.WithComponent(ctx, "migrate")
 			log := observe.Logger(ctx)
 
-			s, err := store.NewPostgresStore(ctx, dbURL)
+			if !allWorkspaces {
+				// Single database migration (existing behavior).
+				dbURL := os.Getenv("SPINE_DATABASE_URL")
+				if dbURL == "" {
+					return fmt.Errorf("SPINE_DATABASE_URL is required")
+				}
+
+				s, err := store.NewPostgresStore(ctx, dbURL)
+				if err != nil {
+					return fmt.Errorf("connect to database: %w", err)
+				}
+				defer s.Close()
+
+				log.Info("applying migrations", "dir", migrationsDir)
+				if err := s.ApplyMigrations(ctx, migrationsDir); err != nil {
+					return fmt.Errorf("apply migrations: %w", err)
+				}
+
+				log.Info("migrations applied successfully")
+				return nil
+			}
+
+			// Batch migration: all workspace databases + registry.
+			registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
+			if registryURL == "" {
+				return fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required for --all-workspaces")
+			}
+
+			// 1. Migrate the registry database itself.
+			log.Info("migrating registry database")
+			registryStore, err := store.NewPostgresStore(ctx, registryURL)
 			if err != nil {
-				return fmt.Errorf("connect to database: %w", err)
+				return fmt.Errorf("connect to registry database: %w", err)
 			}
-			defer s.Close()
+			if err := registryStore.ApplyMigrations(ctx, "migrations/registry"); err != nil {
+				registryStore.Close()
+				return fmt.Errorf("apply registry migrations: %w", err)
+			}
+			registryStore.Close()
+			log.Info("registry migrations applied")
 
-			log.Info("applying migrations", "dir", migrationsDir)
-			if err := s.ApplyMigrations(ctx, migrationsDir); err != nil {
-				return fmt.Errorf("apply migrations: %w", err)
+			// 2. List all active workspaces.
+			dbProvider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
+			if err != nil {
+				return fmt.Errorf("connect to workspace registry: %w", err)
+			}
+			defer dbProvider.Close()
+
+			workspaces, err := dbProvider.List(ctx)
+			if err != nil {
+				return fmt.Errorf("list workspaces: %w", err)
 			}
 
-			log.Info("migrations applied successfully")
+			if len(workspaces) == 0 {
+				log.Info("no active workspaces found")
+				return nil
+			}
+
+			// 3. Migrate each workspace database.
+			var failed []string
+			for _, ws := range workspaces {
+				wsCtx := observe.WithWorkspaceID(ctx, ws.ID)
+				wsLog := observe.Logger(wsCtx)
+
+				if ws.DatabaseURL == "" {
+					wsLog.Warn("workspace has no database URL, skipping")
+					continue
+				}
+
+				wsLog.Info("migrating workspace database")
+				wsStore, err := store.NewPostgresStore(wsCtx, ws.DatabaseURL)
+				if err != nil {
+					wsLog.Error("connect to workspace database failed", "error", err)
+					failed = append(failed, ws.ID)
+					continue
+				}
+
+				if err := wsStore.ApplyMigrations(wsCtx, migrationsDir); err != nil {
+					wsLog.Error("apply workspace migrations failed", "error", err)
+					failed = append(failed, ws.ID)
+					wsStore.Close()
+					continue
+				}
+
+				wsStore.Close()
+				wsLog.Info("workspace migrations applied")
+			}
+
+			log.Info("batch migration complete",
+				"total", len(workspaces),
+				"succeeded", len(workspaces)-len(failed),
+				"failed", len(failed),
+			)
+
+			if len(failed) > 0 {
+				return fmt.Errorf("migration failed for %d workspace(s): %v", len(failed), failed)
+			}
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&allWorkspaces, "all-workspaces", false, "Migrate all workspace databases (shared mode)")
+	return cmd
 }
 
 func initRepoCmd() *cobra.Command {
