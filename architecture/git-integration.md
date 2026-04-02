@@ -21,15 +21,21 @@ Git is Spine's authoritative source of truth (Constitution §2). The [Artifact S
 
 ### 2.1 Repository Scope
 
-Spine v0.x operates against a single Git repository. A `.spine.yaml` file at the repository root configures the **artifacts directory** — the subdirectory where all Spine artifacts live. When absent, artifacts are at the repo root (backward compatible). See [Repository Structure §1.1](/governance/repository-structure.md).
+Each workspace operates against a single Git repository. A `.spine.yaml` file at the repository root configures the **artifacts directory** — the subdirectory where all Spine artifacts live. When absent, artifacts are at the repo root (backward compatible). See [Repository Structure §1.1](/governance/repository-structure.md).
 
-At startup, Spine reads `.spine.yaml` and applies the `artifacts_dir` setting to all path resolution, file discovery, and git operations (commits, pathspecs).
+At startup (or on first request for a workspace in shared mode), Spine reads `.spine.yaml` and applies the `artifacts_dir` setting to all path resolution, file discovery, and git operations (commits, pathspecs).
 
 The repository contains:
 
 - All governed artifacts (initiatives, epics, tasks, ADRs, governance, architecture, product documents)
 - Workflow definitions (`workflows/*.yaml`)
 - Runtime configuration is **not** stored in the repository (per [Security Model](/architecture/security-model.md) §5)
+
+#### Workspace-Scoped Repositories
+
+In single mode (v0.x default), the repository path is set via the `SPINE_REPO_PATH` environment variable — one repository per Spine instance. This is unchanged from the original v0.x model.
+
+In shared mode, each workspace's repository path is resolved from the workspace registry at the request boundary. Each workspace has its own independent Git repository, working directory, and credentials. All Git integration rules defined in this document — branch strategy, commit model, authoritative branch, merge behavior — apply per workspace.
 
 ### 2.2 Authoritative Branch
 
@@ -487,7 +493,7 @@ This Git integration contract is expected to evolve as the system is implemented
 
 Areas expected to require refinement:
 
-- Multi-repository support (artifacts spanning multiple repos)
+- ~~Multi-repository support~~ — addressed by workspace-aware hosting (each workspace has its own repository; see §2.1)
 - Git LFS integration for large binary artifacts
 - Automated conflict resolution strategies
 - Monorepo vs polyrepo guidance
