@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Startup provider selection
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-003-workspace-registry/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
