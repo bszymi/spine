@@ -135,6 +135,7 @@ func serveCmd() *cobra.Command {
 			// Initialize workspace resolver.
 			// SPINE_WORKSPACE_MODE: "single" (default) or "shared".
 			var wsResolver workspace.Resolver
+			var wsDBProvider *workspace.DBProvider
 			wsMode := os.Getenv("SPINE_WORKSPACE_MODE")
 			if wsMode == "" {
 				wsMode = "single"
@@ -149,12 +150,13 @@ func serveCmd() *cobra.Command {
 				if registryURL == "" {
 					return fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required in shared workspace mode")
 				}
-				dbProvider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
+				var err error
+				wsDBProvider, err = workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
 				if err != nil {
 					return fmt.Errorf("connect to workspace registry: %w", err)
 				}
-				defer dbProvider.Close()
-				wsResolver = dbProvider
+				defer wsDBProvider.Close()
+				wsResolver = wsDBProvider
 				log.Info("workspace mode: shared", "registry_url", "***")
 			default:
 				return fmt.Errorf("unknown SPINE_WORKSPACE_MODE: %q (expected \"single\" or \"shared\")", wsMode)
@@ -353,6 +355,7 @@ func serveCmd() *cobra.Command {
 				RunStarter:         starter,
 				PlanningRunStarter: planningStarter,
 				WorkspaceResolver:  wsResolver,
+				WSDBProvider:       wsDBProvider,
 			})
 
 			// Run startup recovery and start background services.

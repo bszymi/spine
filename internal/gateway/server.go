@@ -106,8 +106,9 @@ type Server struct {
 	events             EventEmitterGW     // optional, nil if not configured
 	runStarter         RunStarter           // optional, nil if not configured
 	planningRunStarter PlanningRunStarter   // optional, nil if not configured
-	wsResolver         workspace.Resolver   // optional, nil if not configured
-	servicePool        *workspace.ServicePool // optional, nil if not configured
+	wsResolver         workspace.Resolver       // optional, nil if not configured
+	servicePool        *workspace.ServicePool   // optional, nil if not configured
+	wsDBProvider       *workspace.DBProvider     // optional, nil in single mode
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -160,6 +161,7 @@ type ServerConfig struct {
 	PlanningRunStarter PlanningRunStarter
 	WorkspaceResolver  workspace.Resolver
 	ServicePool        *workspace.ServicePool
+	WSDBProvider       *workspace.DBProvider
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -180,6 +182,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		workflowResolver:   cfg.WorkflowResolver,
 		wsResolver:         cfg.WorkspaceResolver,
 		servicePool:        cfg.ServicePool,
+		wsDBProvider:       cfg.WSDBProvider,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,

@@ -137,6 +137,17 @@ func (p *ServicePool) Release(workspaceID string) {
 	}
 }
 
+// Evict forcefully removes a specific workspace's service set from the pool,
+// closing its resources. Used during workspace deactivation.
+func (p *ServicePool) Evict(workspaceID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry, ok := p.entries[workspaceID]; ok {
+		entry.services.close()
+		delete(p.entries, workspaceID)
+	}
+}
+
 // ActiveCount returns the number of currently cached workspace service sets.
 func (p *ServicePool) ActiveCount() int {
 	p.mu.Lock()
