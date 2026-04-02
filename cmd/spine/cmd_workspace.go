@@ -29,7 +29,7 @@ func workspaceCreateCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "create <workspace_id>",
-		Short: "Create and provision a new workspace",
+		Short: "Register a new workspace (provisioning not yet automated)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			workspaceID := args[0]
@@ -106,7 +106,27 @@ func workspaceGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printResponse(data)
+
+			if outputFormat == "json" {
+				return printResponse(data)
+			}
+
+			var ws struct {
+				WorkspaceID string `json:"workspace_id"`
+				DisplayName string `json:"display_name"`
+				Status      string `json:"status"`
+				DatabaseURL string `json:"database_url"`
+				RepoPath    string `json:"repo_path"`
+			}
+			if err := json.Unmarshal(data, &ws); err != nil {
+				return printResponse(data)
+			}
+			fmt.Printf("Workspace ID:  %s\n", ws.WorkspaceID)
+			fmt.Printf("Display Name:  %s\n", ws.DisplayName)
+			fmt.Printf("Status:        %s\n", ws.Status)
+			fmt.Printf("Database URL:  %s\n", ws.DatabaseURL)
+			fmt.Printf("Repo Path:     %s\n", ws.RepoPath)
+			return nil
 		},
 	}
 }
