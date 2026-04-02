@@ -144,14 +144,14 @@ Mitigations:
 | EPIC-001 | Product Specification Update | None |
 | EPIC-002 | Architecture Update | EPIC-001 |
 
-### Phase 2 — Implementation (to be added after Phase 1)
+### Phase 2 — Implementation
 
-Implementation epics will be defined based on the updated product and architecture documents. Expected areas:
-
-- Workspace registry and resolver
-- Gateway workspace routing and service pool
-- Background service scoping
-- Observability and workspace identity
+| Epic | Title | Dependencies |
+|------|-------|-------------|
+| EPIC-003 | Workspace Registry | None |
+| EPIC-004 | Gateway Workspace Routing | EPIC-003 |
+| EPIC-005 | Background Service Scoping | EPIC-003, EPIC-004 |
+| EPIC-006 | Observability & Workspace Identity | EPIC-003, EPIC-004 |
 
 ---
 
