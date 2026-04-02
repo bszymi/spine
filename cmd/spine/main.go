@@ -28,6 +28,7 @@ import (
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
+	"github.com/bszymi/spine/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -126,6 +127,36 @@ func serveCmd() *cobra.Command {
 			if port == "" {
 				port = "8080"
 			}
+
+			// Initialize workspace resolver.
+			// SPINE_WORKSPACE_MODE: "single" (default) or "shared".
+			var wsResolver workspace.Resolver
+			wsMode := os.Getenv("SPINE_WORKSPACE_MODE")
+			if wsMode == "" {
+				wsMode = "single"
+			}
+
+			switch wsMode {
+			case "single":
+				wsResolver = workspace.NewFileProvider()
+				log.Info("workspace mode: single", "workspace_id", os.Getenv("SPINE_WORKSPACE_ID"))
+			case "shared":
+				registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
+				if registryURL == "" {
+					return fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required in shared workspace mode")
+				}
+				dbProvider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
+				if err != nil {
+					return fmt.Errorf("connect to workspace registry: %w", err)
+				}
+				defer dbProvider.Close()
+				wsResolver = dbProvider
+				log.Info("workspace mode: shared", "registry_url", "***")
+			default:
+				return fmt.Errorf("unknown SPINE_WORKSPACE_MODE: %q (expected \"single\" or \"shared\")", wsMode)
+			}
+
+			_ = wsResolver // Will be used by gateway and background services in future epics.
 
 			// Connect to database (optional — server starts without it)
 			var st store.Store
