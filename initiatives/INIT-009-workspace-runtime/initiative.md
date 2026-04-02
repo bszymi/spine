@@ -2,7 +2,7 @@
 id: INIT-009
 type: Initiative
 title: Workspace Runtime
-status: Draft
+status: Pending
 owner: bszymi
 created: 2026-04-02
 last_updated: 2026-04-02
