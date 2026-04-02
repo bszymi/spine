@@ -2,7 +2,7 @@
 id: EPIC-007
 type: Epic
 title: Workspace Provisioning
-status: Completed
+status: In Progress
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
   - type: parent
