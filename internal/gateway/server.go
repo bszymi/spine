@@ -10,6 +10,7 @@ import (
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
+	"github.com/bszymi/spine/internal/workspace"
 )
 
 // ArtifactService defines the artifact operations the gateway needs.
@@ -105,6 +106,7 @@ type Server struct {
 	events             EventEmitterGW     // optional, nil if not configured
 	runStarter         RunStarter         // optional, nil if not configured
 	planningRunStarter PlanningRunStarter // optional, nil if not configured
+	wsResolver         workspace.Resolver // optional, nil if not configured
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -155,6 +157,7 @@ type ServerConfig struct {
 	Events             EventEmitterGW
 	RunStarter         RunStarter
 	PlanningRunStarter PlanningRunStarter
+	WorkspaceResolver  workspace.Resolver
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -173,6 +176,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		runStarter:         cfg.RunStarter,
 		planningRunStarter: cfg.PlanningRunStarter,
 		workflowResolver:   cfg.WorkflowResolver,
+		wsResolver:         cfg.WorkspaceResolver,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,

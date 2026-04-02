@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -11,16 +12,64 @@ import (
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/workspace"
 )
 
 type contextKey string
 
-const actorContextKey contextKey = "actor"
+const (
+	actorContextKey     contextKey = "actor"
+	workspaceContextKey contextKey = "workspace_config"
+)
+
+// WorkspaceHeader is the HTTP header used to pass workspace ID.
+const WorkspaceHeader = "X-Workspace-ID"
 
 // actorFromContext returns the authenticated actor from the request context.
 func actorFromContext(ctx context.Context) *domain.Actor {
 	actor, _ := ctx.Value(actorContextKey).(*domain.Actor)
 	return actor
+}
+
+// WorkspaceConfigFromContext returns the resolved workspace config from the request context.
+func WorkspaceConfigFromContext(ctx context.Context) *workspace.Config {
+	cfg, _ := ctx.Value(workspaceContextKey).(*workspace.Config)
+	return cfg
+}
+
+// workspaceMiddleware resolves the workspace from the X-Workspace-ID header.
+// In shared mode, the header is required — missing or invalid IDs are rejected.
+// In single mode (FileProvider), an empty header falls back to the default workspace.
+func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.wsResolver == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		workspaceID := r.Header.Get(WorkspaceHeader)
+
+		cfg, err := s.wsResolver.Resolve(r.Context(), workspaceID)
+		if err != nil {
+			if errors.Is(err, workspace.ErrWorkspaceNotFound) {
+				if workspaceID == "" {
+					WriteError(w, domain.NewError(domain.ErrInvalidParams, "X-Workspace-ID header is required"))
+				} else {
+					WriteError(w, domain.NewError(domain.ErrNotFound, fmt.Sprintf("workspace %q not found", workspaceID)))
+				}
+				return
+			}
+			if errors.Is(err, workspace.ErrWorkspaceInactive) {
+				WriteError(w, domain.NewError(domain.ErrForbidden, fmt.Sprintf("workspace %q is inactive", workspaceID)))
+				return
+			}
+			WriteError(w, domain.NewError(domain.ErrInternal, "failed to resolve workspace"))
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), workspaceContextKey, cfg)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // authMiddleware validates the Bearer token and sets the actor in context.

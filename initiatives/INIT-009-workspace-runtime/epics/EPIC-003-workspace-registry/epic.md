@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: Workspace Registry
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
   - type: parent
