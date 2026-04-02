@@ -493,7 +493,7 @@ This Git integration contract is expected to evolve as the system is implemented
 
 Areas expected to require refinement:
 
-- ~~Multi-repository support~~ — addressed by workspace-aware hosting (each workspace has its own repository; see §2.1)
+- Multi-repository support (artifacts spanning multiple repos within a single workspace)
 - Git LFS integration for large binary artifacts
 - Automated conflict resolution strategies
 - Monorepo vs polyrepo guidance

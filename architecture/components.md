@@ -387,6 +387,8 @@ The routing layer introduces two new runtime concepts:
 
 Components themselves are unchanged — they operate against a single logical context as before. The routing layer selects which context a given request executes against.
 
+Background services (scheduler, projection sync, event routing) do not have a request to resolve workspace from. Instead, they iterate over all active workspaces from the resolver's `List()` method and process each workspace using its service set from the pool. Workspace identity is carried through the service set, not through request context.
+
 Global system routes (health checks, metrics, readiness) are not scoped to a workspace and bypass the routing layer.
 
 ---
