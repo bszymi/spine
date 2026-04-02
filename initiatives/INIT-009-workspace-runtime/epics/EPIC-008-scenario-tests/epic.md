@@ -2,7 +2,7 @@
 id: EPIC-008
 type: Epic
 title: Workspace Scenario Tests
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
   - type: parent
