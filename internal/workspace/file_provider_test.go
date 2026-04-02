@@ -73,7 +73,7 @@ func TestFileProvider_Resolve_Defaults(t *testing.T) {
 	p := NewFileProvider()
 	ctx := context.Background()
 
-	cfg, err := p.Resolve(ctx, "anything")
+	cfg, err := p.Resolve(ctx, "")
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
