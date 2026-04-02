@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -180,13 +181,16 @@ func (p *RepoProvisioner) ProvisionRepo(ctx context.Context, workspaceID, gitURL
 			return "", fmt.Errorf("clone %s: %w", gitURL, err)
 		}
 
-		if isSpineRepo(repoPath) {
+		if IsSpineRepo(repoPath) {
 			log.Info("existing Spine repo detected, skipping init", "workspace_id", workspaceID)
 			// Full projection sync will be triggered when workspace is activated.
 		} else {
 			log.Info("non-Spine repo, initializing Spine structure", "workspace_id", workspaceID)
 			if err := cli.InitRepo(repoPath, cli.InitOpts{NoBranch: true}); err != nil {
 				return "", fmt.Errorf("init spine in cloned repo: %w", err)
+			}
+			if err := gitCommitAll(ctx, repoPath, "Initialize Spine structure"); err != nil {
+				return "", fmt.Errorf("commit spine init: %w", err)
 			}
 		}
 	} else {
@@ -195,6 +199,11 @@ func (p *RepoProvisioner) ProvisionRepo(ctx context.Context, workspaceID, gitURL
 		if err := cli.InitRepo(repoPath, cli.InitOpts{NoBranch: true}); err != nil {
 			return "", fmt.Errorf("init fresh repo: %w", err)
 		}
+		// InitRepo with NoBranch writes files but doesn't commit.
+		// Commit them so the repo has a valid HEAD.
+		if err := gitCommitAll(ctx, repoPath, "Initialize Spine workspace"); err != nil {
+			return "", fmt.Errorf("commit initial files: %w", err)
+		}
 	}
 
 	success = true
@@ -202,9 +211,39 @@ func (p *RepoProvisioner) ProvisionRepo(ctx context.Context, workspaceID, gitURL
 	return repoPath, nil
 }
 
-// isSpineRepo checks if a directory is an existing Spine repository
+// gitCommitAll stages all files and creates a commit using raw exec.
+// Also configures git user if not already set.
+func gitCommitAll(_ context.Context, repoPath, message string) error {
+	// Ensure git user is configured for the repo.
+	for _, cfg := range [][]string{
+		{"config", "user.email", "spine@local"},
+		{"config", "user.name", "Spine"},
+	} {
+		cmd := exec.Command("git", cfg...)
+		cmd.Dir = repoPath
+		_ = cmd.Run() // best-effort, may already be set
+	}
+
+	add := exec.Command("git", "add", ".")
+	add.Dir = repoPath
+	if out, err := add.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add: %s: %w", out, err)
+	}
+	commit := exec.Command("git", "commit", "-m", message, "--allow-empty")
+	commit.Dir = repoPath
+	commit.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Spine", "GIT_AUTHOR_EMAIL=spine@local",
+		"GIT_COMMITTER_NAME=Spine", "GIT_COMMITTER_EMAIL=spine@local",
+	)
+	if out, err := commit.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %s: %w", out, err)
+	}
+	return nil
+}
+
+// IsSpineRepo checks if a directory is an existing Spine repository
 // by looking for .spine.yaml or governance/ directory.
-func isSpineRepo(repoPath string) bool {
+func IsSpineRepo(repoPath string) bool {
 	indicators := []string{
 		filepath.Join(repoPath, ".spine.yaml"),
 		filepath.Join(repoPath, "governance"),
