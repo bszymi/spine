@@ -42,11 +42,14 @@ func NewFileProvider() *FileProvider {
 	}
 }
 
-// Resolve returns the single configured workspace. In single mode, any
-// workspace ID is accepted (the provider always returns its one workspace).
-// This preserves backward compatibility — existing clients that don't send
-// a workspace ID will work when the middleware falls back to the default.
-func (p *FileProvider) Resolve(_ context.Context, _ string) (*Config, error) {
+// Resolve returns the single configured workspace. If workspaceID is empty,
+// the provider falls back to the configured workspace (backward compatible).
+// If workspaceID is non-empty but does not match the configured ID,
+// ErrWorkspaceNotFound is returned.
+func (p *FileProvider) Resolve(_ context.Context, workspaceID string) (*Config, error) {
+	if workspaceID != "" && workspaceID != p.config.ID {
+		return nil, ErrWorkspaceNotFound
+	}
 	cfg := p.config
 	return &cfg, nil
 }

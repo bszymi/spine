@@ -32,8 +32,8 @@ func TestFileProvider_Resolve(t *testing.T) {
 	}
 }
 
-func TestFileProvider_Resolve_AnyID(t *testing.T) {
-	// In single mode, any workspace ID returns the configured workspace.
+func TestFileProvider_Resolve_EmptyID_Fallback(t *testing.T) {
+	// Empty workspace ID falls back to the configured workspace.
 	t.Setenv("SPINE_WORKSPACE_ID", "ws-main")
 	t.Setenv("SPINE_DATABASE_URL", "")
 	t.Setenv("SPINE_REPO_PATH", "")
@@ -41,12 +41,27 @@ func TestFileProvider_Resolve_AnyID(t *testing.T) {
 	p := NewFileProvider()
 	ctx := context.Background()
 
-	cfg, err := p.Resolve(ctx, "some-other-id")
+	cfg, err := p.Resolve(ctx, "")
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
 	if cfg.ID != "ws-main" {
 		t.Errorf("expected ID %q, got %q", "ws-main", cfg.ID)
+	}
+}
+
+func TestFileProvider_Resolve_WrongID(t *testing.T) {
+	// Explicit wrong workspace ID returns ErrWorkspaceNotFound.
+	t.Setenv("SPINE_WORKSPACE_ID", "ws-main")
+	t.Setenv("SPINE_DATABASE_URL", "")
+	t.Setenv("SPINE_REPO_PATH", "")
+
+	p := NewFileProvider()
+	ctx := context.Background()
+
+	_, err := p.Resolve(ctx, "wrong-id")
+	if err != ErrWorkspaceNotFound {
+		t.Errorf("expected ErrWorkspaceNotFound, got %v", err)
 	}
 }
 
