@@ -21,6 +21,15 @@ func (s *Server) routes() http.Handler {
 		r.Get("/system/health", s.handleHealth)
 		r.Get("/system/metrics", s.handleMetrics)
 
+		// Workspace management — operator token auth, workspace-exempt
+		r.Group(func(r chi.Router) {
+			r.Use(operatorTokenMiddleware)
+			r.Post("/workspaces", s.handleWorkspaceCreate)
+			r.Get("/workspaces", s.handleWorkspaceList)
+			r.Get("/workspaces/{workspace_id}", s.handleWorkspaceGet)
+			r.Post("/workspaces/{workspace_id}/deactivate", s.handleWorkspaceDeactivate)
+		})
+
 		// Authenticated + workspace-scoped routes
 		r.Group(func(r chi.Router) {
 			r.Use(s.authMiddleware)

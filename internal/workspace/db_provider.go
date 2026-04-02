@@ -150,6 +150,82 @@ func (p *DBProvider) List(ctx context.Context) ([]Config, error) {
 	return configs, nil
 }
 
+// Invalidate removes a workspace from the resolver cache so the next
+// Resolve call reads from the database. Used during deactivation.
+func (p *DBProvider) Invalidate(workspaceID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.cache, workspaceID)
+	p.listCache = nil // force list refresh
+}
+
+// CreateWorkspace inserts a new workspace into the registry.
+func (p *DBProvider) CreateWorkspace(ctx context.Context, cfg Config) error {
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO public.workspace_registry (workspace_id, display_name, database_url, repo_path, actor_scope, status)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		cfg.ID, cfg.DisplayName, cfg.DatabaseURL, cfg.RepoPath, cfg.ActorScope, string(cfg.Status))
+	return err
+}
+
+// DeactivateWorkspace marks a workspace as inactive in the registry.
+func (p *DBProvider) DeactivateWorkspace(ctx context.Context, workspaceID string) error {
+	result, err := p.pool.Exec(ctx,
+		`UPDATE public.workspace_registry SET status = 'inactive', updated_at = now()
+		 WHERE workspace_id = $1 AND status = 'active'`,
+		workspaceID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return ErrWorkspaceNotFound
+	}
+	return nil
+}
+
+// GetWorkspace returns a workspace config regardless of status.
+func (p *DBProvider) GetWorkspace(ctx context.Context, workspaceID string) (*Config, error) {
+	var cfg Config
+	var status string
+	err := p.pool.QueryRow(ctx,
+		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status
+		 FROM public.workspace_registry
+		 WHERE workspace_id = $1`, workspaceID,
+	).Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, ErrWorkspaceNotFound
+		}
+		return nil, err
+	}
+	cfg.Status = WorkspaceStatus(status)
+	return &cfg, nil
+}
+
+// ListAllWorkspaces returns all workspaces (active and inactive).
+func (p *DBProvider) ListAllWorkspaces(ctx context.Context) ([]Config, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status
+		 FROM public.workspace_registry
+		 ORDER BY workspace_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var configs []Config
+	for rows.Next() {
+		var cfg Config
+		var status string
+		if err := rows.Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status); err != nil {
+			return nil, err
+		}
+		cfg.Status = WorkspaceStatus(status)
+		configs = append(configs, cfg)
+	}
+	return configs, rows.Err()
+}
+
 // Close closes the database connection pool.
 func (p *DBProvider) Close() {
 	p.pool.Close()
