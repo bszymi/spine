@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: Gateway Workspace Routing
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
   - type: parent
