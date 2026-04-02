@@ -18,8 +18,9 @@ import (
 type contextKey string
 
 const (
-	actorContextKey     contextKey = "actor"
-	workspaceContextKey contextKey = "workspace_config"
+	actorContextKey      contextKey = "actor"
+	workspaceContextKey  contextKey = "workspace_config"
+	serviceSetContextKey contextKey = "workspace_service_set"
 )
 
 // WorkspaceHeader is the HTTP header used to pass workspace ID.
@@ -35,6 +36,12 @@ func actorFromContext(ctx context.Context) *domain.Actor {
 func WorkspaceConfigFromContext(ctx context.Context) *workspace.Config {
 	cfg, _ := ctx.Value(workspaceContextKey).(*workspace.Config)
 	return cfg
+}
+
+// serviceSetFromContext returns the workspace-scoped service set from the request context.
+func serviceSetFromContext(ctx context.Context) *workspace.ServiceSet {
+	ss, _ := ctx.Value(serviceSetContextKey).(*workspace.ServiceSet)
+	return ss
 }
 
 // workspaceMiddleware resolves the workspace from the X-Workspace-ID header.
@@ -68,6 +75,18 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 		}
 
 		ctx := context.WithValue(r.Context(), workspaceContextKey, cfg)
+
+		// If service pool is configured, get the workspace's service set.
+		if s.servicePool != nil {
+			ss, err := s.servicePool.Get(r.Context(), cfg.ID)
+			if err != nil {
+				WriteError(w, domain.NewError(domain.ErrInternal, "failed to initialize workspace services"))
+				return
+			}
+			ctx = context.WithValue(ctx, serviceSetContextKey, ss)
+			defer s.servicePool.Release(cfg.ID)
+		}
+
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

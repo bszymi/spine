@@ -42,7 +42,7 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.artifacts == nil {
+	if s.artifactsFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
 		return
 	}
@@ -58,7 +58,7 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
 		}
 	}
-	result, err := s.artifacts.Create(ctx, req.Path, req.Content)
+	result, err := s.artifactsFrom(r.Context()).Create(ctx, req.Path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -96,12 +96,12 @@ func (s *Server) handleArtifactList(w http.ResponseWriter, r *http.Request) {
 		Cursor:     cursor,
 	}
 
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
-	result, err := s.store.QueryArtifacts(r.Context(), query)
+	result, err := s.storeFrom(r.Context()).QueryArtifacts(r.Context(), query)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -137,13 +137,13 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 		return
 	}
 
-	if s.artifacts == nil {
+	if s.artifactsFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
 		return
 	}
 
 	ref := r.URL.Query().Get("ref")
-	a, err := s.artifacts.Read(r.Context(), path, ref)
+	a, err := s.artifactsFrom(r.Context()).Read(r.Context(), path, ref)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -153,8 +153,8 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 	var sourceCommit string
 	if ref != "" {
 		sourceCommit = ref
-	} else if s.git != nil {
-		if sha, err := s.git.Head(r.Context()); err == nil {
+	} else if s.gitFrom(r.Context()) != nil {
+		if sha, err := s.gitFrom(r.Context()).Head(r.Context()); err == nil {
 			sourceCommit = sha
 		}
 	}
@@ -186,7 +186,7 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 
-	if s.artifacts == nil {
+	if s.artifactsFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
 		return
 	}
@@ -206,7 +206,7 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
 		}
 	}
-	result, err := s.artifacts.Update(ctx, path, req.Content)
+	result, err := s.artifactsFrom(r.Context()).Update(ctx, path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -234,7 +234,7 @@ func (s *Server) handleArtifactValidate(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if s.artifacts == nil {
+	if s.artifactsFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
 		return
 	}
@@ -264,7 +264,7 @@ func (s *Server) handleArtifactValidate(w http.ResponseWriter, r *http.Request, 
 		a = parsed
 	} else {
 		// Default: read the stored artifact.
-		stored, err := s.artifacts.Read(r.Context(), path, "")
+		stored, err := s.artifactsFrom(r.Context()).Read(r.Context(), path, "")
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -281,7 +281,7 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 		return
 	}
 
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
@@ -306,7 +306,7 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 
 	// Outgoing links (source = this artifact)
 	if direction == "outgoing" || direction == "both" {
-		outgoing, err := s.store.QueryArtifactLinks(r.Context(), path)
+		outgoing, err := s.storeFrom(r.Context()).QueryArtifactLinks(r.Context(), path)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -325,7 +325,7 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 
 	// Incoming links (target = this artifact)
 	if direction == "incoming" || direction == "both" {
-		incoming, err := s.store.QueryArtifactLinksByTarget(r.Context(), path)
+		incoming, err := s.storeFrom(r.Context()).QueryArtifactLinksByTarget(r.Context(), path)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -359,10 +359,10 @@ func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextReques
 	if wc.RunID == "" {
 		return "", nil
 	}
-	if s.store == nil {
+	if s.storeFrom(ctx) == nil {
 		return "", domain.NewError(domain.ErrUnavailable, "store not configured")
 	}
-	run, err := s.store.GetRun(ctx, wc.RunID)
+	run, err := s.storeFrom(ctx).GetRun(ctx, wc.RunID)
 	if err != nil {
 		return "", fmt.Errorf("resolve write context: %w", err)
 	}

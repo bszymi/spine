@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Handler context wiring
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-004-gateway-workspace-routing/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:

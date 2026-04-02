@@ -18,7 +18,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil || s.branchCreator == nil {
+	if s.storeFrom(r.Context()) == nil || s.branchCreator == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "divergence not configured"))
 		return
 	}
@@ -35,12 +35,13 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	divCtx, err := s.store.GetDivergenceContext(r.Context(), divergenceID)
+	divCtx, err := s.storeFrom(r.Context()).GetDivergenceContext(r.Context(), divergenceID)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
+	// TODO(INIT-009): branchCreator is still a singleton — needs workspace-scoped construction in ServiceSet.
 	branch, err := s.branchCreator.CreateExploratoryBranch(r.Context(), divCtx, req.BranchID, req.StartStep)
 	if err != nil {
 		WriteError(w, err)
@@ -60,19 +61,20 @@ func (s *Server) handleCloseWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil || s.branchCreator == nil {
+	if s.storeFrom(r.Context()) == nil || s.branchCreator == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "divergence not configured"))
 		return
 	}
 
 	divergenceID := chi.URLParam(r, "divergence_id")
 
-	divCtx, err := s.store.GetDivergenceContext(r.Context(), divergenceID)
+	divCtx, err := s.storeFrom(r.Context()).GetDivergenceContext(r.Context(), divergenceID)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
+	// TODO(INIT-009): branchCreator is still a singleton — needs workspace-scoped construction in ServiceSet.
 	if err := s.branchCreator.CloseWindow(r.Context(), divCtx); err != nil {
 		WriteError(w, err)
 		return
