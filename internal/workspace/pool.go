@@ -35,6 +35,7 @@ type ServiceSet struct {
 type poolEntry struct {
 	services   *ServiceSet
 	lastAccess time.Time
+	refCount   int32 // number of active users of this service set
 }
 
 // ServicePool lazily creates and caches per-workspace service sets.
@@ -45,6 +46,8 @@ type ServicePool struct {
 	entries     map[string]*poolEntry
 	idleTimeout time.Duration
 	closed      bool
+	ctx         context.Context    // pool-lifetime context for background goroutines
+	cancel      context.CancelFunc // cancels pool-lifetime context on Close
 }
 
 // PoolConfig holds configuration for the service pool.
@@ -55,21 +58,28 @@ type PoolConfig struct {
 }
 
 // NewServicePool creates a service pool backed by the given resolver.
-func NewServicePool(resolver Resolver, cfg PoolConfig) *ServicePool {
+// The provided context is used as the parent for pool-lifetime goroutines
+// (e.g., queue workers). It should not be a request context.
+func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *ServicePool {
 	timeout := cfg.IdleTimeout
 	if timeout == 0 {
 		timeout = 15 * time.Minute
 	}
+	poolCtx, cancel := context.WithCancel(ctx)
 	return &ServicePool{
 		resolver:    resolver,
 		entries:     make(map[string]*poolEntry),
 		idleTimeout: timeout,
+		ctx:         poolCtx,
+		cancel:      cancel,
 	}
 }
 
-// Get returns the service set for the given workspace ID. If no set exists,
-// one is lazily created from the workspace config. Thread-safe — concurrent
-// first requests for the same workspace only initialize once.
+// Get returns the service set for the given workspace ID and increments
+// its reference count. Call Release when done to allow idle eviction.
+// If no set exists, one is lazily created from the workspace config.
+// Thread-safe — concurrent first requests for the same workspace only
+// initialize once.
 func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet, error) {
 	p.mu.Lock()
 	if p.closed {
@@ -77,36 +87,54 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 		return nil, fmt.Errorf("service pool is closed")
 	}
 
-	if entry, ok := p.entries[workspaceID]; ok {
-		entry.lastAccess = time.Now()
-		p.mu.Unlock()
-		return entry.services, nil
-	}
-
-	// Hold the lock during initialization to prevent double-init.
-	// This is acceptable because workspace init is rare (first request only).
+	// Resolve first to canonicalize the workspace ID.
 	cfg, err := p.resolver.Resolve(ctx, workspaceID)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, err
 	}
 
-	ss, err := buildServiceSet(ctx, *cfg)
-	if err != nil {
+	canonicalID := cfg.ID
+
+	if entry, ok := p.entries[canonicalID]; ok {
+		entry.lastAccess = time.Now()
+		entry.refCount++
 		p.mu.Unlock()
-		return nil, fmt.Errorf("init workspace %q services: %w", workspaceID, err)
+		return entry.services, nil
 	}
 
-	p.entries[workspaceID] = &poolEntry{
+	// Hold the lock during initialization to prevent double-init.
+	// This is acceptable because workspace init is rare (first request only).
+	ss, err := buildServiceSet(p.ctx, *cfg)
+	if err != nil {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("init workspace %q services: %w", canonicalID, err)
+	}
+
+	p.entries[canonicalID] = &poolEntry{
 		services:   ss,
 		lastAccess: time.Now(),
+		refCount:   1,
 	}
 	p.mu.Unlock()
 
 	log := observe.Logger(ctx)
-	log.Info("workspace service set initialized", "workspace_id", workspaceID)
+	log.Info("workspace service set initialized", "workspace_id", canonicalID)
 
 	return ss, nil
+}
+
+// Release decrements the reference count for a workspace service set.
+// Call this when a request or background task is done using the set.
+func (p *ServicePool) Release(workspaceID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry, ok := p.entries[workspaceID]; ok {
+		if entry.refCount > 0 {
+			entry.refCount--
+		}
+		entry.lastAccess = time.Now()
+	}
 }
 
 // ActiveCount returns the number of currently cached workspace service sets.
@@ -116,26 +144,28 @@ func (p *ServicePool) ActiveCount() int {
 	return len(p.entries)
 }
 
-// EvictIdle removes service sets that have not been accessed within the idle timeout.
-// Call this periodically (e.g., from a background ticker).
+// EvictIdle removes service sets that have not been accessed within the idle timeout
+// and have no active references. Call this periodically (e.g., from a background ticker).
 func (p *ServicePool) EvictIdle() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := time.Now()
 	for id, entry := range p.entries {
-		if now.Sub(entry.lastAccess) > p.idleTimeout {
+		if entry.refCount == 0 && now.Sub(entry.lastAccess) > p.idleTimeout {
 			entry.services.close()
 			delete(p.entries, id)
 		}
 	}
 }
 
-// Close shuts down all cached service sets and marks the pool as closed.
+// Close shuts down all cached service sets, cancels the pool-lifetime context,
+// and marks the pool as closed.
 func (p *ServicePool) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.cancel()
 	for id, entry := range p.entries {
 		entry.services.close()
 		delete(p.entries, id)

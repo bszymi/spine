@@ -11,11 +11,10 @@ func TestServicePool_Get(t *testing.T) {
 	t.Setenv("SPINE_DATABASE_URL", "")
 	t.Setenv("SPINE_REPO_PATH", ".")
 
-	provider := NewFileProvider()
-	pool := NewServicePool(provider, PoolConfig{IdleTimeout: 5 * time.Second})
-	defer pool.Close()
-
 	ctx := context.Background()
+	provider := NewFileProvider()
+	pool := NewServicePool(ctx, provider, PoolConfig{IdleTimeout: 5 * time.Second})
+	defer pool.Close()
 
 	// First get initializes the service set.
 	ss, err := pool.Get(ctx, "ws-pool")
@@ -54,11 +53,10 @@ func TestServicePool_Get_NotFound(t *testing.T) {
 	t.Setenv("SPINE_DATABASE_URL", "")
 	t.Setenv("SPINE_REPO_PATH", ".")
 
-	provider := NewFileProvider()
-	pool := NewServicePool(provider, PoolConfig{})
-	defer pool.Close()
-
 	ctx := context.Background()
+	provider := NewFileProvider()
+	pool := NewServicePool(ctx, provider, PoolConfig{})
+	defer pool.Close()
 
 	_, err := pool.Get(ctx, "wrong-id")
 	if err == nil {
@@ -71,19 +69,22 @@ func TestServicePool_EvictIdle(t *testing.T) {
 	t.Setenv("SPINE_DATABASE_URL", "")
 	t.Setenv("SPINE_REPO_PATH", ".")
 
+	ctx := context.Background()
 	provider := NewFileProvider()
-	pool := NewServicePool(provider, PoolConfig{IdleTimeout: 1 * time.Millisecond})
+	pool := NewServicePool(ctx, provider, PoolConfig{IdleTimeout: 1 * time.Millisecond})
 	defer pool.Close()
 
-	ctx := context.Background()
-
-	_, err := pool.Get(ctx, "ws-evict")
+	ss, err := pool.Get(ctx, "ws-evict")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
+	_ = ss
 	if pool.ActiveCount() != 1 {
 		t.Fatalf("expected 1 active, got %d", pool.ActiveCount())
 	}
+
+	// Release the reference so eviction can proceed.
+	pool.Release("ws-evict")
 
 	// Wait for idle timeout.
 	time.Sleep(5 * time.Millisecond)
@@ -99,10 +100,9 @@ func TestServicePool_Close(t *testing.T) {
 	t.Setenv("SPINE_DATABASE_URL", "")
 	t.Setenv("SPINE_REPO_PATH", ".")
 
-	provider := NewFileProvider()
-	pool := NewServicePool(provider, PoolConfig{})
-
 	ctx := context.Background()
+	provider := NewFileProvider()
+	pool := NewServicePool(ctx, provider, PoolConfig{})
 
 	_, err := pool.Get(ctx, "ws-close")
 	if err != nil {
