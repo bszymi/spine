@@ -56,6 +56,36 @@ services:
     command: ["migrate"]
     profiles: ["setup"]
 
+  spine-registry-db:
+    image: postgres:18-bookworm
+    ports:
+      - "5434:5432"
+    environment:
+      - POSTGRES_USER=spine_registry
+      - POSTGRES_PASSWORD=spine_registry
+      - POSTGRES_DB=spine_registry
+    volumes:
+      - registrydata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spine_registry"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    profiles: ["shared"]
+
+  spine-registry-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - SPINE_DATABASE_URL=postgres://spine_registry:spine_registry@spine-registry-db:5432/spine_registry?sslmode=disable
+      - SPINE_MIGRATIONS_DIR=migrations/registry
+    depends_on:
+      spine-registry-db:
+        condition: service_healthy
+    command: ["migrate"]
+    profiles: ["shared"]
+
   spine-init-repo:
     build:
       context: .
@@ -69,5 +99,6 @@ services:
 
 volumes:
   pgdata:
+  registrydata:
   repo:
   worktrees:
