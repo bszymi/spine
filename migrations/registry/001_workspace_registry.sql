@@ -1,7 +1,9 @@
 -- Workspace Registry
 -- Per data-model.md §7.2 — workspace registry for shared runtime mode.
--- This table lives in the registry database, which may be separate from
--- workspace databases.
+--
+-- IMPORTANT: This migration runs against the REGISTRY database
+-- (SPINE_REGISTRY_DATABASE_URL), NOT against workspace databases.
+-- Workspace databases use migrations in the parent migrations/ directory.
 
 CREATE TABLE IF NOT EXISTS public.workspace_registry (
     workspace_id  text        PRIMARY KEY,
