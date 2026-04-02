@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Multi-workspace isolation scenario test
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-008-scenario-tests/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
