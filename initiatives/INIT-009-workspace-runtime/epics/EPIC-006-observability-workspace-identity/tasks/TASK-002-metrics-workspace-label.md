@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Workspace label on metrics
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-006-observability-workspace-identity/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:

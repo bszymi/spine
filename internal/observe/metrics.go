@@ -1,6 +1,9 @@
 package observe
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // Counter is a simple thread-safe counter for metrics scaffolding.
 // Per Observability §7 — full metrics implementation is deferred,
@@ -54,7 +57,55 @@ type Metrics struct {
 }
 
 // GlobalMetrics is the singleton metrics instance.
+// Aggregates across all workspaces.
 var GlobalMetrics = &Metrics{
 	RunDuration:  NewHistogram(1, 5, 10, 30, 60, 300, 600, 1800, 3600),
 	StepDuration: NewHistogram(0.1, 0.5, 1, 5, 10, 30, 60, 300, 600),
+}
+
+// workspaceMetrics holds per-workspace metrics instances.
+var workspaceMetrics = struct {
+	mu      sync.RWMutex
+	entries map[string]*Metrics
+}{
+	entries: make(map[string]*Metrics),
+}
+
+// WorkspaceMetrics returns the metrics instance for a given workspace ID.
+// Creates one on first access. These allow per-workspace filtering/grouping
+// in monitoring tools alongside the aggregated GlobalMetrics.
+func WorkspaceMetrics(workspaceID string) *Metrics {
+	workspaceMetrics.mu.RLock()
+	if m, ok := workspaceMetrics.entries[workspaceID]; ok {
+		workspaceMetrics.mu.RUnlock()
+		return m
+	}
+	workspaceMetrics.mu.RUnlock()
+
+	workspaceMetrics.mu.Lock()
+	defer workspaceMetrics.mu.Unlock()
+
+	// Double-check after acquiring write lock.
+	if m, ok := workspaceMetrics.entries[workspaceID]; ok {
+		return m
+	}
+
+	m := &Metrics{
+		RunDuration:  NewHistogram(1, 5, 10, 30, 60, 300, 600, 1800, 3600),
+		StepDuration: NewHistogram(0.1, 0.5, 1, 5, 10, 30, 60, 300, 600),
+	}
+	workspaceMetrics.entries[workspaceID] = m
+	return m
+}
+
+// ListWorkspaceMetrics returns all workspace IDs that have metrics.
+func ListWorkspaceMetrics() []string {
+	workspaceMetrics.mu.RLock()
+	defer workspaceMetrics.mu.RUnlock()
+
+	ids := make([]string, 0, len(workspaceMetrics.entries))
+	for id := range workspaceMetrics.entries {
+		ids = append(ids, id)
+	}
+	return ids
 }

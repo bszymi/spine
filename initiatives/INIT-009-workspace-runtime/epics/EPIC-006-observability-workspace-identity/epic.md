@@ -2,7 +2,7 @@
 id: EPIC-006
 type: Epic
 title: Observability & Workspace Identity
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
   - type: parent
