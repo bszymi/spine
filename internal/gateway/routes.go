@@ -21,9 +21,10 @@ func (s *Server) routes() http.Handler {
 		r.Get("/system/health", s.handleHealth)
 		r.Get("/system/metrics", s.handleMetrics)
 
-		// Authenticated routes
+		// Authenticated + workspace-scoped routes
 		r.Group(func(r chi.Router) {
 			r.Use(s.authMiddleware)
+			r.Use(s.workspaceMiddleware)
 
 			// System (operator)
 			r.Post("/system/rebuild", s.handleSystemRebuild)

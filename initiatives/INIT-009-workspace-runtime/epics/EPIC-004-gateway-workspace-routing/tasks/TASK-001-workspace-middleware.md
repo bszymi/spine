@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Workspace resolution middleware
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-004-gateway-workspace-routing/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 links:
