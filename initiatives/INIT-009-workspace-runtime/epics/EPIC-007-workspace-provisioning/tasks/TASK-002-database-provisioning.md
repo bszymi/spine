@@ -25,10 +25,11 @@ Automate the creation of a new PostgreSQL database for a workspace and run all S
 Content should define:
 
 - A provisioning function that:
-  1. Connects to the PostgreSQL server using a admin/provisioning connection string
-  2. Creates a new database named after the workspace (e.g., `spine_ws_<workspace_id>`)
-  3. Runs all workspace migrations from `migrations/` against the new database
-  4. Returns the database URL for the new workspace
+  1. Connects to the PostgreSQL server using an admin/provisioning connection string
+  2. Derives a safe database name from the workspace ID: replace non-alphanumeric characters with underscores, lowercase, prefix with `spine_ws_` (e.g., workspace `ws-main` → database `spine_ws_ws_main`). Alternatively, store an explicit `database_name` in the registry if sanitization is insufficient.
+  3. Creates the new database
+  4. Runs all workspace migrations from `migrations/` against the new database
+  5. Returns the database URL for the new workspace
 - Rollback: if migration fails, drop the created database
 - The admin connection string comes from `SPINE_PROVISIONING_DATABASE_URL` (a connection with CREATE DATABASE privileges, typically to the `postgres` database)
 

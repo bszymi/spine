@@ -30,16 +30,18 @@ Content should define:
 
 1. Create a directory for the workspace's Git repository (e.g., `<repos_base_dir>/<workspace_id>`)
 2. Clone the remote repository into this directory
-3. Detect if it's already a Spine repo (check for `.spine.yaml`, `governance/`, `workflows/`)
+3. Detect if it's already a Spine repo (check for `.spine.yaml`, `governance/`, `workflows/` on the authoritative branch)
 4. **If already a Spine repo** — skip initialization; run a full projection sync to populate the workspace database with all existing artifacts, workflows, and links from the repo
-5. **If not a Spine repo** — run `spine init-repo` equivalent setup (directory structure, `.spine.yaml`, seed documents, initial commit)
+5. **If not a Spine repo** — run Spine initialization directly on the authoritative branch (`main`), not on a side branch. Commit the Spine directory structure, `.spine.yaml`, and seed documents directly to `main` so the workspace is immediately usable.
 
 **Fresh mode** (when no `git_url` is provided):
 
 1. Create a directory for the workspace's Git repository
-2. Initialize a new Git repository
-3. Run `spine init-repo` equivalent setup
+2. Initialize a new Git repository with `main` as the default branch
+3. Run Spine initialization directly on `main` (use `init-repo --no-branch` semantics — commit directly to `main`, not to `spine/init`)
 4. Return the repository path
+
+**Important:** In both modes, Spine structure must end up on the authoritative branch (`main`) after provisioning completes. The runtime reads workflows and projections from this branch. A workspace where `.spine.yaml` only exists on a side branch is not usable.
 
 ### Shared behavior
 

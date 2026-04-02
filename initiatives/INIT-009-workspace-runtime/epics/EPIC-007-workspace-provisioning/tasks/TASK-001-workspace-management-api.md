@@ -32,13 +32,18 @@ Endpoints:
 - `GET /api/v1/workspaces/{workspace_id}` — get workspace details
 - `POST /api/v1/workspaces/{workspace_id}/deactivate` — deactivate a workspace
 
-These endpoints are workspace-exempt (they manage workspaces, not operate within one). They require operator or admin role.
+These endpoints are workspace-exempt (they manage workspaces, not operate within one).
+
+### Authentication for workspace-exempt routes
+
+Since actors are scoped per workspace, workspace management endpoints cannot authenticate against a workspace store. Authentication for these routes uses a **system operator token** — a static bearer token configured via `SPINE_OPERATOR_TOKEN` env var, validated directly by the management route group without requiring a workspace actor store. This is distinct from per-workspace actor tokens.
 
 ## Acceptance Criteria
 
 - All four endpoints are implemented and return proper JSON responses
 - Create endpoint triggers the provisioning flow (TASK-002, TASK-003)
-- Endpoints require operator role
+- Endpoints authenticate via system operator token (`SPINE_OPERATOR_TOKEN`)
 - Endpoints are exempt from workspace resolution middleware
+- Deactivation explicitly invalidates the DBProvider cache and evicts the ServicePool entry for the workspace, so it stops serving immediately (not after cache TTL)
 - Unknown workspace ID returns 404
 - Duplicate workspace ID returns 409 conflict
