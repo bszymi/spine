@@ -137,19 +137,19 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
 	runID := chi.URLParam(r, "run_id")
-	run, err := s.store.GetRun(r.Context(), runID)
+	run, err := s.storeFrom(r.Context()).GetRun(r.Context(), runID)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	steps, err := s.store.ListStepExecutionsByRun(r.Context(), runID)
+	steps, err := s.storeFrom(r.Context()).ListStepExecutionsByRun(r.Context(), runID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -178,13 +178,13 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
 	runID := chi.URLParam(r, "run_id")
-	run, err := s.store.GetRun(r.Context(), runID)
+	run, err := s.storeFrom(r.Context()).GetRun(r.Context(), runID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -198,7 +198,7 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.UpdateRunStatus(r.Context(), runID, result.ToStatus); err != nil {
+	if err := s.storeFrom(r.Context()).UpdateRunStatus(r.Context(), runID, result.ToStatus); err != nil {
 		WriteError(w, err)
 		return
 	}
@@ -245,12 +245,12 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback: legacy inline handling when no engine is configured.
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
-	exec, err := s.store.GetStepExecution(r.Context(), executionID)
+	exec, err := s.storeFrom(r.Context()).GetStepExecution(r.Context(), executionID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -268,7 +268,7 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		exec.Status = ackResult.ToStatus
 		exec.StartedAt = &now
-		if err := s.store.UpdateStepExecution(r.Context(), exec); err != nil {
+		if err := s.storeFrom(r.Context()).UpdateStepExecution(r.Context(), exec); err != nil {
 			WriteError(w, err)
 			return
 		}
@@ -287,7 +287,7 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 	exec.Status = result.ToStatus
 	exec.OutcomeID = req.OutcomeID
 	exec.CompletedAt = &now
-	if err := s.store.UpdateStepExecution(r.Context(), exec); err != nil {
+	if err := s.storeFrom(r.Context()).UpdateStepExecution(r.Context(), exec); err != nil {
 		WriteError(w, err)
 		return
 	}
@@ -299,16 +299,16 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Advance the run and create next step if needed
-	run, err := s.store.GetRun(r.Context(), exec.RunID)
+	run, err := s.storeFrom(r.Context()).GetRun(r.Context(), exec.RunID)
 	if err == nil {
 		runResult, runErr := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 			Trigger:    workflow.TriggerStepCompleted,
 			NextStepID: nextStepID,
 		})
 		if runErr == nil {
-			_ = s.store.UpdateRunStatus(r.Context(), run.RunID, runResult.ToStatus)
+			_ = s.storeFrom(r.Context()).UpdateRunStatus(r.Context(), run.RunID, runResult.ToStatus)
 			if runResult.ToStatus == domain.RunStatusActive && nextStepID != "end" {
-				_ = s.store.CreateStepExecution(r.Context(), &domain.StepExecution{
+				_ = s.storeFrom(r.Context()).CreateStepExecution(r.Context(), &domain.StepExecution{
 					ExecutionID: fmt.Sprintf("%s-%s-1", run.RunID, nextStepID),
 					RunID:       run.RunID,
 					StepID:      nextStepID,
@@ -351,7 +351,7 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
@@ -360,7 +360,7 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 	stepID := chi.URLParam(r, "step_id")
 
 	// Find the step execution for this run/step
-	execs, err := s.store.ListStepExecutionsByRun(r.Context(), runID)
+	execs, err := s.storeFrom(r.Context()).ListStepExecutionsByRun(r.Context(), runID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -381,7 +381,7 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 	if s.validator != nil {
 		stepDef := s.resolveStepDef(r.Context(), exec)
 		if stepDef != nil {
-			run, _ := s.store.GetRun(r.Context(), runID)
+			run, _ := s.storeFrom(r.Context()).GetRun(r.Context(), runID)
 			taskPath := ""
 			if run != nil {
 				taskPath = run.TaskPath
@@ -405,7 +405,7 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 
 	exec.Status = result.ToStatus
 	exec.ActorID = req.ActorID
-	if err := s.store.UpdateStepExecution(r.Context(), exec); err != nil {
+	if err := s.storeFrom(r.Context()).UpdateStepExecution(r.Context(), exec); err != nil {
 		WriteError(w, err)
 		return
 	}
@@ -422,12 +422,12 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 // resolveNextStep looks up the workflow definition to find the next step
 // after the given outcome.
 func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution) string {
-	run, err := s.store.GetRun(ctx, exec.RunID)
+	run, err := s.storeFrom(ctx).GetRun(ctx, exec.RunID)
 	if err != nil {
 		return "end"
 	}
 
-	proj, err := s.store.GetWorkflowProjection(ctx, run.WorkflowPath)
+	proj, err := s.storeFrom(ctx).GetWorkflowProjection(ctx, run.WorkflowPath)
 	if err != nil {
 		return "end"
 	}
@@ -454,11 +454,11 @@ func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution
 
 // isReviewStep checks if a step in the workflow is a review step.
 func (s *Server) isReviewStep(ctx context.Context, runID, stepID string) bool {
-	run, err := s.store.GetRun(ctx, runID)
+	run, err := s.storeFrom(ctx).GetRun(ctx, runID)
 	if err != nil {
 		return false
 	}
-	proj, err := s.store.GetWorkflowProjection(ctx, run.WorkflowPath)
+	proj, err := s.storeFrom(ctx).GetWorkflowProjection(ctx, run.WorkflowPath)
 	if err != nil {
 		return false
 	}
@@ -478,13 +478,13 @@ func (s *Server) isReviewStep(ctx context.Context, runID, stepID string) bool {
 // When a WorkflowResolver is configured, it uses ResolveBinding to find the correct
 // workflow based on artifact type. Falls back to defaults if no resolver is available.
 func (s *Server) resolveWorkflowBinding(ctx context.Context, taskPath string) (*ResolvedWorkflow, error) {
-	if s.workflowResolver == nil || s.artifacts == nil {
+	if s.workflowResolver == nil || s.artifactsFrom(ctx) == nil {
 		// No resolver configured — return defaults for backwards compatibility.
 		return &ResolvedWorkflow{EntryStep: "start"}, nil
 	}
 
 	// Read the task to determine its type.
-	art, err := s.artifacts.Read(ctx, taskPath, "HEAD")
+	art, err := s.artifactsFrom(ctx).Read(ctx, taskPath, "HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("read task for workflow binding: %w", err)
 	}
@@ -499,12 +499,12 @@ func (s *Server) resolveWorkflowBinding(ctx context.Context, taskPath string) (*
 
 // resolveStepDef loads the StepDefinition for a step execution from the workflow.
 func (s *Server) resolveStepDef(ctx context.Context, exec *domain.StepExecution) *domain.StepDefinition {
-	run, err := s.store.GetRun(ctx, exec.RunID)
+	run, err := s.storeFrom(ctx).GetRun(ctx, exec.RunID)
 	if err != nil || run.WorkflowPath == "" {
 		return nil
 	}
 
-	proj, err := s.store.GetWorkflowProjection(ctx, run.WorkflowPath)
+	proj, err := s.storeFrom(ctx).GetWorkflowProjection(ctx, run.WorkflowPath)
 	if err != nil {
 		return nil
 	}

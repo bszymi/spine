@@ -30,8 +30,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := "healthy"
 	components := map[string]string{}
 
-	if s.store != nil {
-		if err := s.store.Ping(r.Context()); err != nil {
+	if s.storeFrom(r.Context()) != nil {
+		if err := s.storeFrom(r.Context()).Ping(r.Context()); err != nil {
 			status = "unhealthy"
 			components["database"] = "unhealthy"
 		} else {
@@ -48,17 +48,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add optional operational metrics (gracefully handle unavailable services).
-	if s.store != nil {
+	if s.storeFrom(r.Context()) != nil {
 		func() {
 			defer func() { _ = recover() }()
-			if syncState, err := s.store.GetSyncState(r.Context()); err == nil && syncState != nil && syncState.LastSyncedAt != nil {
+			if syncState, err := s.storeFrom(r.Context()).GetSyncState(r.Context()); err == nil && syncState != nil && syncState.LastSyncedAt != nil {
 				lagMs := time.Since(*syncState.LastSyncedAt).Milliseconds()
 				resp["projection_lag_ms"] = lagMs
 			}
 		}()
 		func() {
 			defer func() { _ = recover() }()
-			if activeRuns, err := s.store.ListRunsByStatus(r.Context(), domain.RunStatusActive); err == nil {
+			if activeRuns, err := s.storeFrom(r.Context()).ListRunsByStatus(r.Context(), domain.RunStatusActive); err == nil {
 				resp["active_runs"] = len(activeRuns)
 			}
 		}()
@@ -72,7 +72,7 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.projSync == nil {
+	if s.projSyncFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "projection service not configured"))
 		return
 	}
@@ -86,7 +86,7 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 	rebuilds.Store(rebuildID, state)
 
 	go func() {
-		if err := s.projSync.FullRebuild(context.Background()); err != nil {
+		if err := s.projSyncFrom(r.Context()).FullRebuild(context.Background()); err != nil {
 			now := time.Now()
 			state.Status = "failed"
 			state.CompletedAt = &now
@@ -156,8 +156,8 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Also run schema validation if artifact service is available
-		if s.artifacts != nil {
-			if artifacts, err := s.artifacts.List(r.Context(), ""); err == nil {
+		if s.artifactsFrom(r.Context()) != nil {
+			if artifacts, err := s.artifactsFrom(r.Context()).List(r.Context(), ""); err == nil {
 				for _, a := range artifacts {
 					schemaResult := artifact.Validate(a)
 					if schemaResult.Status != "passed" {
@@ -171,7 +171,7 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Emit validation event.
-		if s.store != nil {
+		if s.storeFrom(r.Context()) != nil {
 			evtType := domain.EventValidationPassed
 			if len(issues) > 0 {
 				evtType = domain.EventValidationFailed
@@ -223,12 +223,12 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback to schema-only validation
-	if s.artifacts == nil {
+	if s.artifactsFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "validation not configured"))
 		return
 	}
 
-	artifacts, err := s.artifacts.List(r.Context(), "")
+	artifacts, err := s.artifactsFrom(r.Context()).List(r.Context(), "")
 	if err != nil {
 		WriteError(w, err)
 		return

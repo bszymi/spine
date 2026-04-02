@@ -72,7 +72,7 @@ func (s *Server) handleDiscussionCreate(w http.ResponseWriter, r *http.Request) 
 	if !s.authorize(w, r, "discussion.create") {
 		return
 	}
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
@@ -123,7 +123,7 @@ func (s *Server) handleDiscussionCreate(w http.ResponseWriter, r *http.Request) 
 		CreatedAt:  time.Now().UTC(),
 	}
 
-	if err := s.store.CreateThread(r.Context(), thread); err != nil {
+	if err := s.storeFrom(r.Context()).CreateThread(r.Context(), thread); err != nil {
 		WriteError(w, err)
 		return
 	}
@@ -142,7 +142,7 @@ func (s *Server) handleDiscussionList(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "discussion.list") {
 		return
 	}
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
@@ -160,7 +160,7 @@ func (s *Server) handleDiscussionList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	threads, err := s.store.ListThreads(r.Context(), at, anchorID)
+	threads, err := s.storeFrom(r.Context()).ListThreads(r.Context(), at, anchorID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -185,19 +185,19 @@ func (s *Server) handleDiscussionGet(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "discussion.get") {
 		return
 	}
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
 	threadID := chi.URLParam(r, "thread_id")
-	thread, err := s.store.GetThread(r.Context(), threadID)
+	thread, err := s.storeFrom(r.Context()).GetThread(r.Context(), threadID)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	comments, err := s.store.ListComments(r.Context(), threadID)
+	comments, err := s.storeFrom(r.Context()).ListComments(r.Context(), threadID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -214,7 +214,7 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 	if !s.authorize(w, r, "discussion.comment") {
 		return
 	}
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
@@ -222,7 +222,7 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 	threadID := chi.URLParam(r, "thread_id")
 
 	// Verify thread exists and is open
-	thread, err := s.store.GetThread(r.Context(), threadID)
+	thread, err := s.storeFrom(r.Context()).GetThread(r.Context(), threadID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -267,7 +267,7 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 		CreatedAt:       time.Now().UTC(),
 	}
 
-	if err := s.store.CreateComment(r.Context(), comment); err != nil {
+	if err := s.storeFrom(r.Context()).CreateComment(r.Context(), comment); err != nil {
 		WriteError(w, err)
 		return
 	}
@@ -286,13 +286,13 @@ func (s *Server) handleDiscussionResolve(w http.ResponseWriter, r *http.Request)
 	if !s.authorize(w, r, "discussion.resolve") {
 		return
 	}
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
 	threadID := chi.URLParam(r, "thread_id")
-	thread, err := s.store.GetThread(r.Context(), threadID)
+	thread, err := s.storeFrom(r.Context()).GetThread(r.Context(), threadID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -322,7 +322,7 @@ func (s *Server) handleDiscussionResolve(w http.ResponseWriter, r *http.Request)
 		thread.ResolutionRefs = refs
 	}
 
-	if err := s.store.UpdateThread(r.Context(), thread); err != nil {
+	if err := s.storeFrom(r.Context()).UpdateThread(r.Context(), thread); err != nil {
 		WriteError(w, err)
 		return
 	}
@@ -341,13 +341,13 @@ func (s *Server) handleDiscussionReopen(w http.ResponseWriter, r *http.Request) 
 	if !s.authorize(w, r, "discussion.reopen") {
 		return
 	}
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
 	threadID := chi.URLParam(r, "thread_id")
-	thread, err := s.store.GetThread(r.Context(), threadID)
+	thread, err := s.storeFrom(r.Context()).GetThread(r.Context(), threadID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -363,7 +363,7 @@ func (s *Server) handleDiscussionReopen(w http.ResponseWriter, r *http.Request) 
 	thread.ResolutionType = ""
 	thread.ResolutionRefs = nil
 
-	if err := s.store.UpdateThread(r.Context(), thread); err != nil {
+	if err := s.storeFrom(r.Context()).UpdateThread(r.Context(), thread); err != nil {
 		WriteError(w, err)
 		return
 	}
@@ -377,7 +377,7 @@ func (s *Server) handleQueryDiscussions(w http.ResponseWriter, r *http.Request) 
 	if !s.authorize(w, r, "discussion.list") {
 		return
 	}
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
@@ -388,21 +388,21 @@ func (s *Server) handleQueryDiscussions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	run, err := s.store.GetRun(r.Context(), runID)
+	run, err := s.storeFrom(r.Context()).GetRun(r.Context(), runID)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
 	// List threads anchored to the run's task artifact
-	artifactThreads, err := s.store.ListThreads(r.Context(), domain.AnchorTypeArtifact, run.TaskPath)
+	artifactThreads, err := s.storeFrom(r.Context()).ListThreads(r.Context(), domain.AnchorTypeArtifact, run.TaskPath)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
 	// List threads anchored directly to the run
-	runThreads, err := s.store.ListThreads(r.Context(), domain.AnchorTypeRun, runID)
+	runThreads, err := s.storeFrom(r.Context()).ListThreads(r.Context(), domain.AnchorTypeRun, runID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -477,13 +477,13 @@ func (s *Server) validateAnchorExists(ctx context.Context, anchorType domain.Anc
 	var err error
 	switch anchorType {
 	case domain.AnchorTypeArtifact:
-		_, err = s.store.GetArtifactProjection(ctx, anchorID)
+		_, err = s.storeFrom(ctx).GetArtifactProjection(ctx, anchorID)
 	case domain.AnchorTypeRun:
-		_, err = s.store.GetRun(ctx, anchorID)
+		_, err = s.storeFrom(ctx).GetRun(ctx, anchorID)
 	case domain.AnchorTypeStepExecution:
-		_, err = s.store.GetStepExecution(ctx, anchorID)
+		_, err = s.storeFrom(ctx).GetStepExecution(ctx, anchorID)
 	case domain.AnchorTypeDivergenceContext:
-		_, err = s.store.GetDivergenceContext(ctx, anchorID)
+		_, err = s.storeFrom(ctx).GetDivergenceContext(ctx, anchorID)
 	}
 	return err
 }

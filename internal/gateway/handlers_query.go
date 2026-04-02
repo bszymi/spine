@@ -14,13 +14,13 @@ func (s *Server) handleQueryArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.projQuery == nil {
+	if s.projQueryFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "query service not configured"))
 		return
 	}
 
 	limit, cursor := parsePagination(r)
-	result, err := s.projQuery.QueryArtifacts(r.Context(), store.ArtifactQuery{
+	result, err := s.projQueryFrom(r.Context()).QueryArtifacts(r.Context(), store.ArtifactQuery{
 		Type:       r.URL.Query().Get("type"),
 		Status:     r.URL.Query().Get("status"),
 		ParentPath: r.URL.Query().Get("parent_path"),
@@ -45,7 +45,7 @@ func (s *Server) handleQueryGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.projQuery == nil {
+	if s.projQueryFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "query service not configured"))
 		return
 	}
@@ -68,7 +68,7 @@ func (s *Server) handleQueryGraph(w http.ResponseWriter, r *http.Request) {
 		linkTypes = strings.Split(lt, ",")
 	}
 
-	graph, err := s.projQuery.QueryGraph(r.Context(), root, depth, linkTypes)
+	graph, err := s.projQueryFrom(r.Context()).QueryGraph(r.Context(), root, depth, linkTypes)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -82,7 +82,7 @@ func (s *Server) handleQueryHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.projQuery == nil {
+	if s.projQueryFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "query service not configured"))
 		return
 	}
@@ -100,7 +100,7 @@ func (s *Server) handleQueryHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	history, err := s.projQuery.QueryHistory(r.Context(), path, limit)
+	history, err := s.projQueryFrom(r.Context()).QueryHistory(r.Context(), path, limit)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -118,7 +118,7 @@ func (s *Server) handleQueryRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.projQuery == nil {
+	if s.projQueryFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "query service not configured"))
 		return
 	}
@@ -129,7 +129,7 @@ func (s *Server) handleQueryRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runs, err := s.projQuery.QueryRuns(r.Context(), taskPath)
+	runs, err := s.projQueryFrom(r.Context()).QueryRuns(r.Context(), taskPath)
 	if err != nil {
 		WriteError(w, err)
 		return

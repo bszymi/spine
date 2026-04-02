@@ -104,9 +104,10 @@ type Server struct {
 	workflowResolver   WorkflowResolverFn
 	branchCreator      BranchCreator      // optional, nil if not configured
 	events             EventEmitterGW     // optional, nil if not configured
-	runStarter         RunStarter         // optional, nil if not configured
-	planningRunStarter PlanningRunStarter // optional, nil if not configured
-	wsResolver         workspace.Resolver // optional, nil if not configured
+	runStarter         RunStarter           // optional, nil if not configured
+	planningRunStarter PlanningRunStarter   // optional, nil if not configured
+	wsResolver         workspace.Resolver   // optional, nil if not configured
+	servicePool        *workspace.ServicePool // optional, nil if not configured
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -158,6 +159,7 @@ type ServerConfig struct {
 	RunStarter         RunStarter
 	PlanningRunStarter PlanningRunStarter
 	WorkspaceResolver  workspace.Resolver
+	ServicePool        *workspace.ServicePool
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -177,12 +179,52 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		planningRunStarter: cfg.PlanningRunStarter,
 		workflowResolver:   cfg.WorkflowResolver,
 		wsResolver:         cfg.WorkspaceResolver,
+		servicePool:        cfg.ServicePool,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,
 		Handler: s.routes(),
 	}
 	return s
+}
+
+// Workspace-scoped service accessors. These check the request context
+// for a workspace ServiceSet first, falling back to the Server's direct
+// fields for backward compatibility and single-workspace mode.
+
+func (s *Server) storeFrom(ctx context.Context) store.Store {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.Store != nil {
+		return ss.Store
+	}
+	return s.store
+}
+
+func (s *Server) artifactsFrom(ctx context.Context) ArtifactService {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.Artifacts != nil {
+		return ss.Artifacts
+	}
+	return s.artifacts
+}
+
+func (s *Server) projQueryFrom(ctx context.Context) ProjectionQuerier {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.ProjQuery != nil {
+		return ss.ProjQuery
+	}
+	return s.projQuery
+}
+
+func (s *Server) projSyncFrom(ctx context.Context) ProjectionSyncer {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.ProjSync != nil {
+		return ss.ProjSync
+	}
+	return s.projSync
+}
+
+func (s *Server) gitFrom(ctx context.Context) GitReader {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.GitClient != nil {
+		return ss.GitClient
+	}
+	return s.git
 }
 
 // ListenAndServe starts the HTTP server.

@@ -18,7 +18,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil || s.branchCreator == nil {
+	if s.storeFrom(r.Context()) == nil || s.branchCreator == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "divergence not configured"))
 		return
 	}
@@ -35,7 +35,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	divCtx, err := s.store.GetDivergenceContext(r.Context(), divergenceID)
+	divCtx, err := s.storeFrom(r.Context()).GetDivergenceContext(r.Context(), divergenceID)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -60,14 +60,14 @@ func (s *Server) handleCloseWindow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil || s.branchCreator == nil {
+	if s.storeFrom(r.Context()) == nil || s.branchCreator == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "divergence not configured"))
 		return
 	}
 
 	divergenceID := chi.URLParam(r, "divergence_id")
 
-	divCtx, err := s.store.GetDivergenceContext(r.Context(), divergenceID)
+	divCtx, err := s.storeFrom(r.Context()).GetDivergenceContext(r.Context(), divergenceID)
 	if err != nil {
 		WriteError(w, err)
 		return

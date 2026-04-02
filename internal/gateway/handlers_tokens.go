@@ -89,7 +89,7 @@ func (s *Server) handleTokenList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.store == nil {
+	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
@@ -100,7 +100,7 @@ func (s *Server) handleTokenList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokens, err := s.store.ListTokensByActor(r.Context(), actorID)
+	tokens, err := s.storeFrom(r.Context()).ListTokensByActor(r.Context(), actorID)
 	if err != nil {
 		WriteError(w, err)
 		return
