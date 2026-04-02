@@ -61,11 +61,11 @@ These decisions were made during design review and are not up for re-evaluation 
 - Background service adaptation (scheduler, projection sync, event routing)
 - Observability with workspace identity
 - CLI workspace support
+- Workspace provisioning: API, database creation, Git repo initialization, CLI commands
 
 ### Out of scope
 
 - Management platform UI
-- Workspace provisioning automation
 - Pricing, tenancy policy, or billing
 - Cross-workspace operations
 - Cloud provider deployment details
@@ -152,6 +152,7 @@ Mitigations:
 | EPIC-004 | Gateway Workspace Routing | EPIC-003 |
 | EPIC-005 | Background Service Scoping | EPIC-003, EPIC-004 |
 | EPIC-006 | Observability & Workspace Identity | EPIC-003, EPIC-004 |
+| EPIC-007 | Workspace Provisioning | EPIC-003, EPIC-004 |
 
 ---
 
@@ -166,6 +167,7 @@ INIT-009 may be marked complete when:
 - Background services operate correctly across multiple workspaces
 - Observability includes workspace identity
 - Single-workspace deployment via file/env provider is backward compatible
+- Workspaces can be created and fully provisioned (database + Git repo) via API and CLI
 
 ---
 
