@@ -14,3 +14,19 @@ services:
       interval: 2s
       timeout: 2s
       retries: 10
+
+  spine-test-registry-db:
+    image: postgres:18-bookworm
+    ports:
+      - "5435:5432"
+    environment:
+      - POSTGRES_USER=spine_registry_test
+      - POSTGRES_PASSWORD=spine_registry_test
+      - POSTGRES_DB=spine_registry_test
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spine_registry_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
