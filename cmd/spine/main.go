@@ -97,6 +97,10 @@ func main() {
 
 	root.PersistentFlags().StringVarP(&outputFormat, "output", "o", "json", "Output format: json or table")
 
+	// Workspace flag — global, defaults to SPINE_WORKSPACE_ID env var.
+	globalWorkspaceID = os.Getenv("SPINE_WORKSPACE_ID")
+	root.PersistentFlags().StringVar(&globalWorkspaceID, "workspace", globalWorkspaceID, "Workspace ID (overrides SPINE_WORKSPACE_ID)")
+
 	root.AddCommand(serveCmd())
 	root.AddCommand(healthCmd())
 	root.AddCommand(migrateCmd())
@@ -472,7 +476,6 @@ func queryCmd() *cobra.Command {
 		apiURL = "http://localhost:8080"
 	}
 	token := os.Getenv("SPINE_TOKEN")
-	workspaceID := os.Getenv("SPINE_WORKSPACE_ID")
 	outputFmt := "table"
 
 	cmd := &cobra.Command{
@@ -480,7 +483,6 @@ func queryCmd() *cobra.Command {
 		Short: "Query artifacts, graph, history, and runs",
 	}
 	cmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "table", "Output format: table or json")
-	cmd.PersistentFlags().StringVar(&workspaceID, "workspace", workspaceID, "Workspace ID (overrides SPINE_WORKSPACE_ID)")
 
 	// spine query artifacts
 	artifactsCmd := &cobra.Command{
@@ -490,7 +492,7 @@ func queryCmd() *cobra.Command {
 			artType, _ := cmd.Flags().GetString("type")
 			status, _ := cmd.Flags().GetString("status")
 			parent, _ := cmd.Flags().GetString("parent")
-			client := cli.NewClient(apiURL, token).WithWorkspace(workspaceID)
+			client := cli.NewClient(apiURL, token).WithWorkspace(globalWorkspaceID)
 			return cli.QueryArtifacts(cmd.Context(), client, artType, status, parent, cli.OutputFormat(outputFmt))
 		},
 	}
@@ -509,7 +511,7 @@ func queryCmd() *cobra.Command {
 				path = args[0]
 			}
 			depth, _ := cmd.Flags().GetInt("depth")
-			client := cli.NewClient(apiURL, token).WithWorkspace(workspaceID)
+			client := cli.NewClient(apiURL, token).WithWorkspace(globalWorkspaceID)
 			return cli.QueryGraph(cmd.Context(), client, path, depth, cli.OutputFormat(outputFmt))
 		},
 	}
@@ -525,7 +527,7 @@ func queryCmd() *cobra.Command {
 			if len(args) > 0 {
 				path = args[0]
 			}
-			client := cli.NewClient(apiURL, token).WithWorkspace(workspaceID)
+			client := cli.NewClient(apiURL, token).WithWorkspace(globalWorkspaceID)
 			return cli.QueryHistory(cmd.Context(), client, path, cli.OutputFormat(outputFmt))
 		},
 	}
@@ -537,7 +539,7 @@ func queryCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			task, _ := cmd.Flags().GetString("task")
 			status, _ := cmd.Flags().GetString("status")
-			client := cli.NewClient(apiURL, token).WithWorkspace(workspaceID)
+			client := cli.NewClient(apiURL, token).WithWorkspace(globalWorkspaceID)
 			return cli.QueryRuns(cmd.Context(), client, task, status, cli.OutputFormat(outputFmt))
 		},
 	}

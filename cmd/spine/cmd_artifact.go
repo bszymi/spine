@@ -170,13 +170,16 @@ func artifactValidateCmd() *cobra.Command {
 // outputFormat holds the global output format flag.
 var outputFormat string
 
+// globalWorkspaceID is set by the root --workspace persistent flag.
+var globalWorkspaceID string
+
 func newAPIClient() *cli.Client {
 	baseURL := os.Getenv("SPINE_SERVER_URL")
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
 	}
 	token := os.Getenv("SPINE_TOKEN")
-	return cli.NewClient(baseURL, token)
+	return cli.NewClient(baseURL, token).WithWorkspace(globalWorkspaceID)
 }
 
 // normalizePath strips a leading slash from canonical artifact paths.
