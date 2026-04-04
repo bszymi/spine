@@ -2,12 +2,13 @@
 id: TASK-001
 type: Task
 title: "Redact database credentials from workspace API response"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-002-security-hardening/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
 created: 2026-04-04
 last_updated: 2026-04-04
+completed: 2026-04-04
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-002-security-hardening/epic.md

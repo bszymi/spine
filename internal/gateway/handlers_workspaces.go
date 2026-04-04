@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -143,13 +144,16 @@ func (s *Server) handleWorkspaceGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"workspace_id": ws.ID,
 		"display_name": ws.DisplayName,
 		"status":       string(ws.Status),
-		"database_url": ws.DatabaseURL,
 		"repo_path":    ws.RepoPath,
-	})
+	}
+	if ws.DatabaseURL != "" {
+		resp["database_host"] = redactDatabaseURL(ws.DatabaseURL)
+	}
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleWorkspaceDeactivate(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +183,17 @@ func (s *Server) handleWorkspaceDeactivate(w http.ResponseWriter, r *http.Reques
 		"workspace_id": workspaceID,
 		"status":       "inactive",
 	})
+}
+
+// redactDatabaseURL strips credentials from a PostgreSQL connection string,
+// returning only host:port/dbname. Returns the original string if parsing fails.
+func redactDatabaseURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "***"
+	}
+	u.User = nil
+	return u.Host + u.Path
 }
 
 func min(a, b int) int {
