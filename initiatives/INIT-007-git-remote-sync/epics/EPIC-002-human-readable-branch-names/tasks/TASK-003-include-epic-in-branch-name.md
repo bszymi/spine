@@ -2,12 +2,13 @@
 id: TASK-003
 type: Task
 title: "Include epic context in task branch names"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-002-human-readable-branch-names/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 work_type: implementation
 created: 2026-04-04
 last_updated: 2026-04-04
+completed: 2026-04-04
 links:
   - type: parent
     target: /initiatives/INIT-007-git-remote-sync/epics/EPIC-002-human-readable-branch-names/epic.md

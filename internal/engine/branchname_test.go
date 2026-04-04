@@ -8,7 +8,7 @@ import (
 
 func TestGenerateBranchName_StandardRun(t *testing.T) {
 	name := generateBranchName(domain.RunModeStandard, "TASK-003", "initiatives/init-001/epics/epic-001/tasks/task-003-git-push.md", "run-0a5d0f6d")
-	want := "spine/run/task-003-task-003-git-push"
+	want := "spine/run/task-003-epic-001-git-push"
 	if name != want {
 		t.Errorf("got %q, want %q", name, want)
 	}
@@ -17,6 +17,25 @@ func TestGenerateBranchName_StandardRun(t *testing.T) {
 func TestGenerateBranchName_PlanningRun(t *testing.T) {
 	name := generateBranchName(domain.RunModePlanning, "INIT-001", "initiatives/init-001/initiative.md", "run-abcd1234")
 	want := "spine/plan/init-001-initiative"
+	if name != want {
+		t.Errorf("got %q, want %q", name, want)
+	}
+}
+
+func TestGenerateBranchName_TaskWithEpicContext(t *testing.T) {
+	name := generateBranchName(domain.RunModeStandard, "TASK-001",
+		"initiatives/init-001/epics/EPIC-009/tasks/TASK-001-credential-schema-and-storage.md",
+		"run-4390cc54")
+	want := "spine/run/task-001-epic-009-credential-schema-and-storage"
+	if name != want {
+		t.Errorf("got %q, want %q", name, want)
+	}
+}
+
+func TestGenerateBranchName_EpicUnchanged(t *testing.T) {
+	name := generateBranchName(domain.RunModeStandard, "EPIC-001",
+		"initiatives/init-001/epics/epic-001/epic.md", "run-abcd1234")
+	want := "spine/run/epic-001-epic"
 	if name != want {
 		t.Errorf("got %q, want %q", name, want)
 	}
@@ -45,15 +64,27 @@ func TestGenerateBranchNameWithSuffix(t *testing.T) {
 	}
 }
 
+func TestGenerateBranchNameWithSuffix_TaskWithEpic(t *testing.T) {
+	name := generateBranchNameWithSuffix(domain.RunModeStandard, "TASK-001",
+		"initiatives/init-001/epics/EPIC-009/tasks/TASK-001-credential-schema.md",
+		"run-4390cc54")
+	want := "spine/run/task-001-epic-009-credential-schema-4390cc54"
+	if name != want {
+		t.Errorf("got %q, want %q", name, want)
+	}
+}
+
 func TestSlugFromPath(t *testing.T) {
 	tests := []struct {
 		path string
 		want string
 	}{
 		{"initiatives/init-001/initiative.md", "initiative"},
-		{"initiatives/init-001/epics/epic-001/tasks/task-003-git-push.md", "task-003-git-push"},
+		{"initiatives/init-001/epics/epic-001/tasks/task-003-git-push.md", "epic-001-task-003-git-push"},
 		{"governance/charter.md", "charter"},
 		{"workflows/task-default.yaml", "task-default"},
+		{"initiatives/init-001/epics/epic-001/epic.md", "epic"},
+		{"initiatives/init-001/epics/EPIC-009/tasks/TASK-001-credential-schema.md", "epic-009-task-001-credential-schema"},
 	}
 
 	for _, tt := range tests {

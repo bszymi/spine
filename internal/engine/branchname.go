@@ -27,11 +27,22 @@ func generateBranchName(mode domain.RunMode, artifactID, artifactPath, runID str
 	slug := slugFromPath(artifactPath)
 	id := strings.ToLower(artifactID)
 
+	// Strip the artifact ID prefix from the slug to avoid duplication.
+	// e.g., id="task-001", slug="epic-009-task-001-credential-schema"
+	// → slug becomes "epic-009-credential-schema"
+	if id != "" && slug != "" {
+		if prefix := id + "-"; strings.Contains(slug, prefix) {
+			slug = strings.Replace(slug, prefix, "", 1)
+		} else if slug == id {
+			slug = ""
+		}
+	}
+
 	var name string
 	switch {
 	case id == "":
 		name = slug
-	case slug == "" || slug == id:
+	case slug == "":
 		name = id
 	default:
 		name = id + "-" + slug
@@ -54,13 +65,35 @@ func generateBranchNameWithSuffix(mode domain.RunMode, artifactID, artifactPath,
 }
 
 // slugFromPath derives a URL-safe slug from an artifact path.
-// Example: "initiatives/init-001/initiative.md" → "initiative"
-// Example: "initiatives/init-001/epics/epic-001/tasks/task-003-git-push.md" → "task-003-git-push"
+// For tasks inside epics, the parent epic directory is prepended for context.
+// The artifact ID prefix is stripped from the filename to avoid duplication
+// with the ID that generateBranchName prepends.
+//
+// Examples:
+//
+//	"initiatives/init-001/epics/epic-009/tasks/TASK-001-credential-schema.md" → "epic-009-credential-schema"
+//	"initiatives/init-001/initiative.md"                                      → "initiative"
+//	"initiatives/init-001/epics/epic-001/epic.md"                             → "epic"
 func slugFromPath(path string) string {
 	base := filepath.Base(path)
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
-	return sanitize(name)
+
+	slug := sanitize(name)
+
+	// For tasks under epics/*/tasks/, prepend the epic directory name.
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] == "epics" && parts[i+2] == "tasks" {
+			epicSlug := sanitize(parts[i+1])
+			if epicSlug != "" {
+				slug = epicSlug + "-" + slug
+			}
+			break
+		}
+	}
+
+	return slug
 }
 
 // sanitize converts a string to a Git-ref-safe slug.
