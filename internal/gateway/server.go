@@ -109,6 +109,7 @@ type Server struct {
 	wsResolver         workspace.Resolver       // optional, nil if not configured
 	servicePool        *workspace.ServicePool   // optional, nil if not configured
 	wsDBProvider       *workspace.DBProvider     // optional, nil in single mode
+	devMode            bool                      // when true, authorize allows unauthenticated requests
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -162,6 +163,7 @@ type ServerConfig struct {
 	WorkspaceResolver  workspace.Resolver
 	ServicePool        *workspace.ServicePool
 	WSDBProvider       *workspace.DBProvider
+	DevMode            bool // when true, authorize allows unauthenticated requests
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -183,6 +185,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		wsResolver:         cfg.WorkspaceResolver,
 		servicePool:        cfg.ServicePool,
 		wsDBProvider:       cfg.WSDBProvider,
+		devMode:            cfg.DevMode,
 	}
 	s.httpServer = &http.Server{
 		Addr:    addr,
