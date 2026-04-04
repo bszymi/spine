@@ -132,11 +132,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 // authorize checks if the authenticated actor has permission for the operation.
 // Returns false and writes an error response if not authorized.
+// In dev mode, unauthenticated requests are allowed (no actor in context).
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request, op auth.Operation) bool {
 	actor := actorFromContext(r.Context())
 	if actor == nil {
-		// No auth middleware configured — allow in dev/test mode
-		return true
+		if s.devMode {
+			return true
+		}
+		WriteError(w, domain.NewError(domain.ErrUnauthorized, "authentication required"))
+		return false
 	}
 	if err := auth.Authorize(actor, op); err != nil {
 		WriteError(w, err)
