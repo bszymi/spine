@@ -2,12 +2,13 @@
 id: TASK-001
 type: Task
 title: "Remove legacy inline step submit fallback from gateway"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: implementation
 created: 2026-04-04
 last_updated: 2026-04-04
+completed: 2026-04-04
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md

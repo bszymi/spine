@@ -3,9 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
@@ -230,118 +228,27 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 
 	executionID := chi.URLParam(r, "assignment_id")
 
-	// When engine result handler is configured, delegate to the full
-	// ingestion pipeline with required_outputs validation and orchestrator routing.
-	if s.resultHandler != nil {
-		var artifactPaths []string
-		if req.Output != nil {
-			for _, a := range req.Output.ArtifactsProduced {
-				artifactPaths = append(artifactPaths, a.Path)
-			}
-		}
-		resp, err := s.resultHandler.IngestResult(r.Context(), ResultSubmission{
-			ExecutionID:       executionID,
-			OutcomeID:         req.OutcomeID,
-			ArtifactsProduced: artifactPaths,
-		})
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-		WriteJSON(w, http.StatusOK, resp)
+	if s.resultHandler == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "result handler not configured"))
 		return
 	}
 
-	// Fallback: legacy inline handling when no engine is configured.
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
-		return
-	}
-
-	exec, err := s.storeFrom(r.Context()).GetStepExecution(r.Context(), executionID)
-	if err != nil {
-		WriteError(w, err)
-		return
-	}
-
-	// If step is assigned, first transition to in_progress (auto-acknowledge)
-	if exec.Status == domain.StepStatusAssigned {
-		ackResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
-			Trigger: workflow.StepTriggerAcknowledged,
-		})
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
-		now := time.Now()
-		exec.Status = ackResult.ToStatus
-		exec.StartedAt = &now
-		if err := s.storeFrom(r.Context()).UpdateStepExecution(r.Context(), exec); err != nil {
-			WriteError(w, err)
-			return
+	var artifactPaths []string
+	if req.Output != nil {
+		for _, a := range req.Output.ArtifactsProduced {
+			artifactPaths = append(artifactPaths, a.Path)
 		}
 	}
-
-	result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
-		Trigger:   workflow.StepTriggerSubmit,
-		OutcomeID: req.OutcomeID,
+	resp, err := s.resultHandler.IngestResult(r.Context(), ResultSubmission{
+		ExecutionID:       executionID,
+		OutcomeID:         req.OutcomeID,
+		ArtifactsProduced: artifactPaths,
 	})
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
-
-	now := time.Now()
-	exec.Status = result.ToStatus
-	exec.OutcomeID = req.OutcomeID
-	exec.CompletedAt = &now
-	if err := s.storeFrom(r.Context()).UpdateStepExecution(r.Context(), exec); err != nil {
-		WriteError(w, err)
-		return
-	}
-
-	// Determine next step from workflow definition
-	nextStepID := "end"
-	if exec.RunID != "" {
-		nextStepID = s.resolveNextStep(r.Context(), exec)
-	}
-
-	// Advance the run and create next step if needed
-	run, err := s.storeFrom(r.Context()).GetRun(r.Context(), exec.RunID)
-	if err == nil {
-		runResult, runErr := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
-			Trigger:    workflow.TriggerStepCompleted,
-			NextStepID: nextStepID,
-		})
-		if runErr == nil {
-			_ = s.storeFrom(r.Context()).UpdateRunStatus(r.Context(), run.RunID, runResult.ToStatus)
-			if runResult.ToStatus == domain.RunStatusActive && nextStepID != "end" {
-				_ = s.storeFrom(r.Context()).CreateStepExecution(r.Context(), &domain.StepExecution{
-					ExecutionID: fmt.Sprintf("%s-%s-1", run.RunID, nextStepID),
-					RunID:       run.RunID,
-					StepID:      nextStepID,
-					Status:      domain.StepStatusWaiting,
-					Attempt:     1,
-					CreatedAt:   now,
-				})
-			}
-		}
-	}
-
-	runAdvanced := nextStepID != "end" && nextStepID != exec.StepID
-	requiresReview := false
-	if runAdvanced {
-		requiresReview = s.isReviewStep(r.Context(), exec.RunID, nextStepID)
-	}
-
-	WriteJSON(w, http.StatusOK, map[string]any{
-		"execution_id":    exec.ExecutionID,
-		"step_id":         exec.StepID,
-		"outcome_id":      exec.OutcomeID,
-		"next_step":       nextStepID,
-		"run_advanced":    runAdvanced,
-		"requires_review": requiresReview,
-	})
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
@@ -425,84 +332,6 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 		"actor_id":      exec.ActorID,
 		"status":        "active",
 	})
-}
-
-// resolveNextStep looks up the workflow definition to find the next step
-// after the given outcome.
-func (s *Server) resolveNextStep(ctx context.Context, exec *domain.StepExecution) string {
-	run, err := s.storeFrom(ctx).GetRun(ctx, exec.RunID)
-	if err != nil {
-		return "end"
-	}
-
-	proj, err := s.storeFrom(ctx).GetWorkflowProjection(ctx, run.WorkflowPath)
-	if err != nil {
-		return "end"
-	}
-
-	var wfDef domain.WorkflowDefinition
-	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
-		return "end"
-	}
-
-	for i := range wfDef.Steps {
-		if wfDef.Steps[i].ID == exec.StepID {
-			for _, outcome := range wfDef.Steps[i].Outcomes {
-				if outcome.ID == exec.OutcomeID {
-					if outcome.NextStep == "" {
-						return "end"
-					}
-					return outcome.NextStep
-				}
-			}
-		}
-	}
-	return "end"
-}
-
-// isReviewStep checks if a step in the workflow is a review step.
-func (s *Server) isReviewStep(ctx context.Context, runID, stepID string) bool {
-	run, err := s.storeFrom(ctx).GetRun(ctx, runID)
-	if err != nil {
-		return false
-	}
-	proj, err := s.storeFrom(ctx).GetWorkflowProjection(ctx, run.WorkflowPath)
-	if err != nil {
-		return false
-	}
-	var wfDef domain.WorkflowDefinition
-	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
-		return false
-	}
-	for i := range wfDef.Steps {
-		if wfDef.Steps[i].ID == stepID {
-			return wfDef.Steps[i].Type == domain.StepTypeReview
-		}
-	}
-	return false
-}
-
-// resolveWorkflow looks up the workflow for a task and returns the entry step, path, and ID.
-// When a WorkflowResolver is configured, it uses ResolveBinding to find the correct
-// workflow based on artifact type. Falls back to defaults if no resolver is available.
-func (s *Server) resolveWorkflowBinding(ctx context.Context, taskPath string) (*ResolvedWorkflow, error) {
-	if s.workflowResolver == nil || s.artifactsFrom(ctx) == nil {
-		// No resolver configured — return defaults for backwards compatibility.
-		return &ResolvedWorkflow{EntryStep: "start"}, nil
-	}
-
-	// Read the task to determine its type.
-	art, err := s.artifactsFrom(ctx).Read(ctx, taskPath, "HEAD")
-	if err != nil {
-		return nil, fmt.Errorf("read task for workflow binding: %w", err)
-	}
-
-	resolved, err := s.workflowResolver(ctx, string(art.Type), "")
-	if err != nil {
-		return nil, err
-	}
-
-	return resolved, nil
 }
 
 // resolveStepDef loads the StepDefinition for a step execution from the workflow.
