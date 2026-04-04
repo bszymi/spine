@@ -15,6 +15,7 @@ import (
 )
 
 type rebuildState struct {
+	mu                 sync.Mutex
 	RebuildID          string     `json:"rebuild_id"`
 	Status             string     `json:"status"`
 	StartedAt          time.Time  `json:"started_at"`
@@ -23,7 +24,27 @@ type rebuildState struct {
 	ErrorDetail        string     `json:"error_detail,omitempty"`
 }
 
-var rebuilds sync.Map
+func (rs *rebuildState) complete(status, errDetail string) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	now := time.Now()
+	rs.Status = status
+	rs.CompletedAt = &now
+	rs.ErrorDetail = errDetail
+}
+
+func (rs *rebuildState) snapshot() rebuildState {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rebuildState{
+		RebuildID:          rs.RebuildID,
+		Status:             rs.Status,
+		StartedAt:          rs.StartedAt,
+		CompletedAt:        rs.CompletedAt,
+		ArtifactsProcessed: rs.ArtifactsProcessed,
+		ErrorDetail:        rs.ErrorDetail,
+	}
+}
 
 // handleHealth returns system health status (unauthenticated).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -83,18 +104,13 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 		Status:    "in_progress",
 		StartedAt: time.Now(),
 	}
-	rebuilds.Store(rebuildID, state)
+	s.rebuilds.Store(rebuildID, state)
 
 	go func() {
 		if err := s.projSyncFrom(r.Context()).FullRebuild(context.Background()); err != nil {
-			now := time.Now()
-			state.Status = "failed"
-			state.CompletedAt = &now
-			state.ErrorDetail = err.Error()
+			state.complete("failed", err.Error())
 		} else {
-			now := time.Now()
-			state.Status = "completed"
-			state.CompletedAt = &now
+			state.complete("completed", "")
 		}
 	}()
 
@@ -110,13 +126,14 @@ func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	rebuildID := chi.URLParam(r, "rebuild_id")
-	val, ok := rebuilds.Load(rebuildID)
+	val, ok := s.rebuilds.Load(rebuildID)
 	if !ok {
 		WriteError(w, domain.NewError(domain.ErrNotFound, "rebuild not found"))
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, val)
+	state := val.(*rebuildState)
+	WriteJSON(w, http.StatusOK, state.snapshot())
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
@@ -111,6 +112,7 @@ type Server struct {
 	servicePool        *workspace.ServicePool   // optional, nil if not configured
 	wsDBProvider       *workspace.DBProvider     // optional, nil in single mode
 	devMode            bool                      // when true, authorize allows unauthenticated requests
+	rebuilds           sync.Map                  // rebuild_id -> *rebuildState
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
