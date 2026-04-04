@@ -126,16 +126,8 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	startedAt := now
 	run.StartedAt = &startedAt
 
-	// Emit run_started event (fire-and-forget per §6.1).
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-started", traceID[:12]),
-		Type:      domain.EventRunStarted,
-		Timestamp: now,
-		RunID:     runID,
-		TraceID:   traceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunStarted, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunStarted, runID, traceID,
+		fmt.Sprintf("evt-%s-started", traceID[:12]), nil)
 
 	log.Info("run started",
 		"run_id", runID,
@@ -291,15 +283,8 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	startedAt := now
 	run.StartedAt = &startedAt
 
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-started", traceID[:12]),
-		Type:      domain.EventRunStarted,
-		Timestamp: now,
-		RunID:     runID,
-		TraceID:   traceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunStarted, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunStarted, runID, traceID,
+		fmt.Sprintf("evt-%s-started", traceID[:12]), nil)
 
 	log.Info("planning run started",
 		"run_id", runID,
@@ -343,15 +328,8 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 	// Only emit run_completed when the run actually reached completed state,
 	// not when it moved to committing (which still needs Git commit).
 	if result.ToStatus == domain.RunStatusCompleted {
-		if err := o.events.Emit(ctx, domain.Event{
-			EventID:   fmt.Sprintf("evt-%s-completed", run.TraceID[:12]),
-			Type:      domain.EventRunCompleted,
-			Timestamp: time.Now(),
-			RunID:     runID,
-			TraceID:   run.TraceID,
-		}); err != nil {
-			log.Warn("failed to emit event", "event_type", domain.EventRunCompleted, "error", err)
-		}
+		o.emitEvent(ctx, domain.EventRunCompleted, runID, run.TraceID,
+			fmt.Sprintf("evt-%s-completed", run.TraceID[:12]), nil)
 		log.Info("run completed", "run_id", runID)
 		if run.StartedAt != nil {
 			observe.GlobalMetrics.RunDuration.ObserveDuration(time.Since(*run.StartedAt))
@@ -392,20 +370,11 @@ func (o *Orchestrator) FailRun(ctx context.Context, runID, reason string) error 
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	log := observe.Logger(ctx)
 	payload, _ := json.Marshal(map[string]string{"reason": reason})
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-failed", run.TraceID[:12]),
-		Type:      domain.EventRunFailed,
-		Timestamp: time.Now(),
-		RunID:     runID,
-		TraceID:   run.TraceID,
-		Payload:   payload,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunFailed, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunFailed, runID, run.TraceID,
+		fmt.Sprintf("evt-%s-failed", run.TraceID[:12]), payload)
 
-	log.Info("run failed", "run_id", runID, "reason", reason)
+	observe.Logger(ctx).Info("run failed", "run_id", runID, "reason", reason)
 	_ = o.CleanupRunBranch(ctx, runID)
 	return nil
 }
@@ -428,18 +397,10 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	log := observe.Logger(ctx)
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-cancelled", run.TraceID[:12]),
-		Type:      domain.EventRunCancelled,
-		Timestamp: time.Now(),
-		RunID:     runID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunCancelled, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunCancelled, runID, run.TraceID,
+		fmt.Sprintf("evt-%s-cancelled", run.TraceID[:12]), nil)
 
-	log.Info("run cancelled", "run_id", runID)
+	observe.Logger(ctx).Info("run cancelled", "run_id", runID)
 	_ = o.CleanupRunBranch(ctx, runID)
 	return nil
 }
@@ -463,18 +424,10 @@ func (o *Orchestrator) PauseRun(ctx context.Context, runID, reason string) error
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	log := observe.Logger(ctx)
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-paused-%d", run.TraceID[:12], time.Now().UnixMilli()),
-		Type:      domain.EventRunPaused,
-		Timestamp: time.Now(),
-		RunID:     runID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunPaused, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunPaused, runID, run.TraceID,
+		fmt.Sprintf("evt-%s-paused-%d", run.TraceID[:12], time.Now().UnixMilli()), nil)
 
-	log.Info("run paused", "run_id", runID, "reason", reason)
+	observe.Logger(ctx).Info("run paused", "run_id", runID, "reason", reason)
 	return nil
 }
 
@@ -496,18 +449,10 @@ func (o *Orchestrator) ResumeRun(ctx context.Context, runID string) error {
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	log := observe.Logger(ctx)
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-resumed-%d", run.TraceID[:12], time.Now().UnixMilli()),
-		Type:      domain.EventRunResumed,
-		Timestamp: time.Now(),
-		RunID:     runID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunResumed, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunResumed, runID, run.TraceID,
+		fmt.Sprintf("evt-%s-resumed-%d", run.TraceID[:12], time.Now().UnixMilli()), nil)
 
-	log.Info("run resumed", "run_id", runID)
+	observe.Logger(ctx).Info("run resumed", "run_id", runID)
 	return nil
 }
 

@@ -118,15 +118,8 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 
 	if err := o.actors.DeliverAssignment(ctx, assignReq); err != nil {
 		log.Warn("failed to deliver assignment", "step_id", stepID, "error", err)
-		if err := o.events.Emit(ctx, domain.Event{
-			EventID:   fmt.Sprintf("evt-%s-assign-failed", run.TraceID[:12]),
-			Type:      domain.EventAssignmentFailed,
-			Timestamp: time.Now(),
-			RunID:     runID,
-			TraceID:   run.TraceID,
-		}); err != nil {
-			log.Warn("failed to emit event", "event_type", domain.EventAssignmentFailed, "error", err)
-		}
+		o.emitEvent(ctx, domain.EventAssignmentFailed, runID, run.TraceID,
+			fmt.Sprintf("evt-%s-assign-failed", run.TraceID[:12]), nil)
 		return fmt.Errorf("deliver assignment: %w", err)
 	}
 
@@ -142,15 +135,8 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	}
 	o.TrackAssignment(ctx, exec.ExecutionID, runID, exec.ExecutionID, assignReq.ActorID, timeout)
 
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-%s-assigned", run.TraceID[:12], stepID),
-		Type:      domain.EventStepAssigned,
-		Timestamp: time.Now(),
-		RunID:     runID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventStepAssigned, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventStepAssigned, runID, run.TraceID,
+		fmt.Sprintf("evt-%s-%s-assigned", run.TraceID[:12], stepID), nil)
 
 	log.Info("step activated", "run_id", runID, "step_id", stepID)
 	return nil
@@ -159,8 +145,6 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 // SubmitStepResult processes an actor's result for a step, validates the outcome,
 // routes to the next step, and advances the run.
 func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string, result StepResult) error {
-	log := observe.Logger(ctx)
-
 	exec, err := o.store.GetStepExecution(ctx, executionID)
 	if err != nil {
 		return fmt.Errorf("get step execution: %w", err)
@@ -205,16 +189,8 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 			return fmt.Errorf("update step execution: %w", err)
 		}
 
-		// Emit step_started event.
-		if err := o.events.Emit(ctx, domain.Event{
-			EventID:   fmt.Sprintf("evt-%s-started", exec.ExecutionID),
-			Type:      domain.EventStepStarted,
-			Timestamp: now,
-			RunID:     exec.RunID,
-			TraceID:   run.TraceID,
-		}); err != nil {
-			log.Warn("failed to emit event", "event_type", domain.EventStepStarted, "error", err)
-		}
+		o.emitEvent(ctx, domain.EventStepStarted, exec.RunID, run.TraceID,
+			fmt.Sprintf("evt-%s-started", exec.ExecutionID), nil)
 	}
 
 	// Submit: transition to completed.
@@ -237,15 +213,8 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	// Mark assignment as completed.
 	o.CompleteAssignment(ctx, executionID)
 
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID),
-		Type:      domain.EventStepCompleted,
-		Timestamp: now,
-		RunID:     exec.RunID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventStepCompleted, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventStepCompleted, exec.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID), nil)
 
 	// Record step duration metric.
 	if exec.StartedAt != nil {
