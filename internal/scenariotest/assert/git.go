@@ -97,3 +97,13 @@ func BranchExists(t *testing.T, repo *harness.TestRepo, branch string) {
 		t.Errorf("expected branch %q to exist", branch)
 	}
 }
+
+// BranchNotExists asserts that a branch does not exist in the repository.
+func BranchNotExists(t *testing.T, repo *harness.TestRepo, branch string) {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", branch)
+	cmd.Dir = repo.Dir
+	if err := cmd.Run(); err == nil {
+		t.Errorf("expected branch %q to not exist, but it does", branch)
+	}
+}
