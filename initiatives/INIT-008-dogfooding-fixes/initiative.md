@@ -61,6 +61,8 @@ Epics are organized by component area. New epics and tasks are added as issues a
 | Epic | Title | Area |
 |------|-------|------|
 | EPIC-001 | Scheduler & Runtime | Timeout defaults, orphan detection, run lifecycle |
+| EPIC-002 | Security Hardening | Credential redaction, auth fallback, HTTP timeouts, input validation |
+| EPIC-003 | Code Quality | Legacy code removal, duplication reduction, data race fixes |
 
 ---
 
