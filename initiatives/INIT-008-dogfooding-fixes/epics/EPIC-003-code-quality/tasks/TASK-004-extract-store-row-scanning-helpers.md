@@ -2,12 +2,13 @@
 id: TASK-004
 type: Task
 title: "Extract store row scanning helpers to eliminate repeated scan boilerplate"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: implementation
 created: 2026-04-04
 last_updated: 2026-04-04
+completed: 2026-04-04
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md

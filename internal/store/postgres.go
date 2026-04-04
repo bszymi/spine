@@ -75,28 +75,53 @@ func (s *PostgresStore) CreateRun(ctx context.Context, run *domain.Run) error {
 	return err
 }
 
-func (s *PostgresStore) GetRun(ctx context.Context, runID string) (*domain.Run, error) {
+// runColumns is the standard column list for runtime.runs queries.
+const runColumns = `run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode`
+
+// scanRun scans a single row into a domain.Run, handling nullable columns.
+func scanRun(scanner interface{ Scan(dest ...any) error }) (domain.Run, error) {
 	var run domain.Run
 	var currentStepID, branchName *string
-	err := s.pool.QueryRow(ctx, `
-		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode
-		FROM runtime.runs WHERE run_id = $1`, runID,
-	).Scan(
+	err := scanner.Scan(
 		&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
 		&run.WorkflowVersionLabel, &run.Status, &currentStepID, &branchName, &run.TraceID,
 		&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt, &run.Mode,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "run not found")
-		}
-		return nil, err
+		return run, err
 	}
 	if currentStepID != nil {
 		run.CurrentStepID = *currentStepID
 	}
 	if branchName != nil {
 		run.BranchName = *branchName
+	}
+	return run, nil
+}
+
+// scanRuns scans multiple rows into a slice of domain.Run.
+func scanRuns(rows pgx.Rows) ([]domain.Run, error) {
+	defer rows.Close()
+	var runs []domain.Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *PostgresStore) GetRun(ctx context.Context, runID string) (*domain.Run, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+runColumns+` FROM runtime.runs WHERE run_id = $1`, runID)
+	run, err := scanRun(row)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "run not found")
+		}
+		return nil, err
 	}
 	return &run, nil
 }
@@ -130,35 +155,12 @@ func (s *PostgresStore) UpdateCurrentStep(ctx context.Context, runID, stepID str
 }
 
 func (s *PostgresStore) ListRunsByTask(ctx context.Context, taskPath string) ([]domain.Run, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, started_at, completed_at, created_at
-		FROM runtime.runs WHERE task_path = $1 ORDER BY created_at DESC`, taskPath,
-	)
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+runColumns+` FROM runtime.runs WHERE task_path = $1 ORDER BY created_at DESC`, taskPath)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var runs []domain.Run
-	for rows.Next() {
-		var run domain.Run
-		var currentStepID, bn *string
-		if err := rows.Scan(
-			&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
-			&run.WorkflowVersionLabel, &run.Status, &currentStepID, &bn, &run.TraceID,
-			&run.StartedAt, &run.CompletedAt, &run.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		if currentStepID != nil {
-			run.CurrentStepID = *currentStepID
-		}
-		if bn != nil {
-			run.BranchName = *bn
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
+	return scanRuns(rows)
 }
 
 // ── Step Executions ──
@@ -174,22 +176,18 @@ func (s *PostgresStore) CreateStepExecution(ctx context.Context, exec *domain.St
 	return err
 }
 
-func (s *PostgresStore) GetStepExecution(ctx context.Context, executionID string) (*domain.StepExecution, error) {
+const stepExecColumns = `execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at`
+
+func scanStepExecution(scanner interface{ Scan(dest ...any) error }) (domain.StepExecution, error) {
 	var exec domain.StepExecution
 	var branchID, actorID, outcomeID *string
-	err := s.pool.QueryRow(ctx, `
-		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at
-		FROM runtime.step_executions WHERE execution_id = $1`, executionID,
-	).Scan(
+	err := scanner.Scan(
 		&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
 		&exec.Status, &exec.Attempt, &outcomeID, &exec.RetryAfter,
 		&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
-		}
-		return nil, err
+		return exec, err
 	}
 	if branchID != nil {
 		exec.BranchID = *branchID
@@ -199,6 +197,32 @@ func (s *PostgresStore) GetStepExecution(ctx context.Context, executionID string
 	}
 	if outcomeID != nil {
 		exec.OutcomeID = *outcomeID
+	}
+	return exec, nil
+}
+
+func scanStepExecutions(rows pgx.Rows) ([]domain.StepExecution, error) {
+	defer rows.Close()
+	var execs []domain.StepExecution
+	for rows.Next() {
+		exec, err := scanStepExecution(rows)
+		if err != nil {
+			return nil, err
+		}
+		execs = append(execs, exec)
+	}
+	return execs, rows.Err()
+}
+
+func (s *PostgresStore) GetStepExecution(ctx context.Context, executionID string) (*domain.StepExecution, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+stepExecColumns+` FROM runtime.step_executions WHERE execution_id = $1`, executionID)
+	exec, err := scanStepExecution(row)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
+		}
+		return nil, err
 	}
 	return &exec, nil
 }
@@ -221,38 +245,12 @@ func (s *PostgresStore) UpdateStepExecution(ctx context.Context, exec *domain.St
 }
 
 func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID string) ([]domain.StepExecution, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at
-		FROM runtime.step_executions WHERE run_id = $1 ORDER BY created_at`, runID,
-	)
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+stepExecColumns+` FROM runtime.step_executions WHERE run_id = $1 ORDER BY created_at`, runID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var execs []domain.StepExecution
-	for rows.Next() {
-		var exec domain.StepExecution
-		var branchID, actorID, outcomeID *string
-		if err := rows.Scan(
-			&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
-			&exec.Status, &exec.Attempt, &outcomeID, &exec.RetryAfter,
-			&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		if branchID != nil {
-			exec.BranchID = *branchID
-		}
-		if actorID != nil {
-			exec.ActorID = *actorID
-		}
-		if outcomeID != nil {
-			exec.OutcomeID = *outcomeID
-		}
-		execs = append(execs, exec)
-	}
-	return execs, rows.Err()
+	return scanStepExecutions(rows)
 }
 
 // ── Actors ──
@@ -628,79 +626,31 @@ func (s *PostgresStore) ListExpiredAssignments(ctx context.Context, before time.
 // ── Scheduler Queries ──
 
 func (s *PostgresStore) ListRunsByStatus(ctx context.Context, status domain.RunStatus) ([]domain.Run, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, started_at, completed_at, created_at, mode
-		FROM runtime.runs WHERE status = $1 ORDER BY created_at`, status,
-	)
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+runColumns+` FROM runtime.runs WHERE status = $1 ORDER BY created_at`, status)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var runs []domain.Run
-	for rows.Next() {
-		var run domain.Run
-		var currentStepID, bn *string
-		if err := rows.Scan(
-			&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
-			&run.WorkflowVersionLabel, &run.Status, &currentStepID, &bn, &run.TraceID,
-			&run.StartedAt, &run.CompletedAt, &run.CreatedAt, &run.Mode,
-		); err != nil {
-			return nil, err
-		}
-		if currentStepID != nil {
-			run.CurrentStepID = *currentStepID
-		}
-		if bn != nil {
-			run.BranchName = *bn
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
+	return scanRuns(rows)
 }
 
 func (s *PostgresStore) ListActiveStepExecutions(ctx context.Context) ([]domain.StepExecution, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at
+		SELECT `+stepExecColumns+`
 		FROM runtime.step_executions
 		WHERE status NOT IN ('completed', 'failed', 'skipped')
-		ORDER BY created_at`,
-	)
+		ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var execs []domain.StepExecution
-	for rows.Next() {
-		var exec domain.StepExecution
-		var branchID, actorID, outcomeID *string
-		if err := rows.Scan(
-			&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
-			&exec.Status, &exec.Attempt, &outcomeID, &exec.RetryAfter,
-			&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		if branchID != nil {
-			exec.BranchID = *branchID
-		}
-		if actorID != nil {
-			exec.ActorID = *actorID
-		}
-		if outcomeID != nil {
-			exec.OutcomeID = *outcomeID
-		}
-		execs = append(execs, exec)
-	}
-	return execs, rows.Err()
+	return scanStepExecutions(rows)
 }
 
 func (s *PostgresStore) ListStaleActiveRuns(ctx context.Context, noActivitySince time.Time) ([]domain.Run, error) {
 	// A run is stale if no step execution has recent activity.
-	// Activity includes creation, start, or completion — not just row creation.
+	// Use column aliases to match runColumns ordering (r.* prefix).
 	rows, err := s.pool.Query(ctx, `
-		SELECT r.run_id, r.task_path, r.workflow_path, r.workflow_id, r.workflow_version, r.workflow_version_label, r.status, r.current_step_id, r.branch_name, r.trace_id, r.timeout_at, r.started_at, r.completed_at, r.created_at
+		SELECT r.run_id, r.task_path, r.workflow_path, r.workflow_id, r.workflow_version, r.workflow_version_label, r.status, r.current_step_id, r.branch_name, r.trace_id, r.timeout_at, r.started_at, r.completed_at, r.created_at, r.mode
 		FROM runtime.runs r
 		WHERE r.status = 'active'
 		AND NOT EXISTS (
@@ -709,69 +659,25 @@ func (s *PostgresStore) ListStaleActiveRuns(ctx context.Context, noActivitySince
 			AND GREATEST(se.created_at, COALESCE(se.started_at, se.created_at), COALESCE(se.completed_at, se.created_at)) > $1
 		)
 		AND r.created_at < $1
-		ORDER BY r.created_at`, noActivitySince,
-	)
+		ORDER BY r.created_at`, noActivitySince)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var runs []domain.Run
-	for rows.Next() {
-		var run domain.Run
-		var currentStepID, bn *string
-		if err := rows.Scan(
-			&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
-			&run.WorkflowVersionLabel, &run.Status, &currentStepID, &bn, &run.TraceID,
-			&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		if currentStepID != nil {
-			run.CurrentStepID = *currentStepID
-		}
-		if bn != nil {
-			run.BranchName = *bn
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
+	return scanRuns(rows)
 }
 
 func (s *PostgresStore) ListTimedOutRuns(ctx context.Context, now time.Time) ([]domain.Run, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at
+		SELECT `+runColumns+`
 		FROM runtime.runs
 		WHERE status IN ('active', 'paused')
 		AND timeout_at IS NOT NULL
 		AND timeout_at <= $1
-		ORDER BY timeout_at`, now,
-	)
+		ORDER BY timeout_at`, now)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var runs []domain.Run
-	for rows.Next() {
-		var run domain.Run
-		var currentStepID, bn *string
-		if err := rows.Scan(
-			&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
-			&run.WorkflowVersionLabel, &run.Status, &currentStepID, &bn, &run.TraceID,
-			&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		if currentStepID != nil {
-			run.CurrentStepID = *currentStepID
-		}
-		if bn != nil {
-			run.BranchName = *bn
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
+	return scanRuns(rows)
 }
 
 // ── Projections ──
