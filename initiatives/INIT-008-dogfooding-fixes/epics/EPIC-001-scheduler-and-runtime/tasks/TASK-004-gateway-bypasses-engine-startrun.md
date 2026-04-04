@@ -2,12 +2,13 @@
 id: TASK-004
 type: Task
 title: "Gateway handler bypasses engine StartRun for standard runs"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
 created: 2026-04-01
-last_updated: 2026-04-01
+last_updated: 2026-04-04
+completed: 2026-04-04
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md

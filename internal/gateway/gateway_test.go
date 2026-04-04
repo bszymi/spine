@@ -111,7 +111,7 @@ func (f *fakeStore) QueryArtifactLinks(_ context.Context, _ string) ([]store.Art
 }
 
 func (f *fakeStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
-	return &domain.Run{RunID: runID, Status: domain.RunStatusActive, CurrentStepID: "step1"}, nil
+	return &domain.Run{RunID: runID, Status: domain.RunStatusActive, CurrentStepID: "step1", BranchName: "spine/run/test-branch"}, nil
 }
 
 func (f *fakeStore) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error {
@@ -2200,6 +2200,66 @@ func TestRunStartStandardMode_Unchanged(t *testing.T) {
 
 	if resp.StatusCode != 201 {
 		t.Errorf("expected 201 for standard mode, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunStartStandardMode_IncludesBranchName(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"task_path":"initiatives/test/task.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+
+	var respBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	branchName, ok := respBody["branch_name"]
+	if !ok {
+		t.Fatal("expected branch_name in response")
+	}
+	if branchName != "spine/run/fake-branch" {
+		t.Errorf("expected branch_name 'spine/run/fake-branch', got %q", branchName)
+	}
+}
+
+func TestRunStatus_IncludesBranchName(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/runs/run-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var respBody map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	branchName, ok := respBody["branch_name"]
+	if !ok {
+		t.Fatal("expected branch_name in run status response")
+	}
+	if branchName != "spine/run/test-branch" {
+		t.Errorf("expected branch_name 'spine/run/test-branch', got %q", branchName)
 	}
 }
 
