@@ -1041,13 +1041,14 @@ func setupFullServer(t *testing.T) (*httptest.Server, string, *fakeArtifactServi
 	}}
 
 	srv := gateway.NewServer(":0", gateway.ServerConfig{
-		Store:      fs,
-		Auth:       authSvc,
-		Artifacts:  artSvc,
-		ProjQuery:  &fakeProjectionQuerier{},
-		ProjSync:   &fakeProjSync{},
-		Git:        gitReader,
-		RunStarter: &fakeRunStarter{},
+		Store:         fs,
+		Auth:          authSvc,
+		Artifacts:     artSvc,
+		ProjQuery:     &fakeProjectionQuerier{},
+		ProjSync:      &fakeProjSync{},
+		Git:           gitReader,
+		RunStarter:    &fakeRunStarter{},
+		ResultHandler: &fakeResultHandler{},
 	})
 	ts := httptest.NewServer(srv.Handler())
 	return ts, token, artSvc
@@ -1498,7 +1499,7 @@ func TestStepSubmitFromAssigned(t *testing.T) {
 
 	// Override GetStepExecution to return assigned status
 	customFS := &fakeStoreAssigned{fakeStore: fs}
-	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: customFS, Auth: authSvc})
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: customFS, Auth: authSvc, ResultHandler: &fakeResultHandler{}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1548,7 +1549,7 @@ func TestStepSubmitWithWorkflowResolution(t *testing.T) {
 	authSvc := auth.NewService(fs)
 	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
 
-	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc, ResultHandler: &fakeResultHandler{}})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1570,8 +1571,8 @@ func TestStepSubmitWithWorkflowResolution(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if result["next_step"] != "step2" {
-		t.Errorf("expected next_step=step2, got %v", result["next_step"])
+	if result["outcome_id"] != "accepted" {
+		t.Errorf("expected outcome_id=accepted, got %v", result["outcome_id"])
 	}
 }
 
@@ -2089,6 +2090,17 @@ func setupPlanningServer(t *testing.T, starter gateway.PlanningRunStarter) (*htt
 	})
 	ts := httptest.NewServer(srv.Handler())
 	return ts, token
+}
+
+type fakeResultHandler struct{}
+
+func (f *fakeResultHandler) IngestResult(_ context.Context, req gateway.ResultSubmission) (*gateway.ResultResponse, error) {
+	return &gateway.ResultResponse{
+		ExecutionID: req.ExecutionID,
+		StepID:      "step1",
+		Status:      "completed",
+		OutcomeID:   req.OutcomeID,
+	}, nil
 }
 
 func TestRunStartPlanningMode_InvalidMode(t *testing.T) {
