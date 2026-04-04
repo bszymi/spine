@@ -1,7 +1,7 @@
 package gateway
 
 import (
-	"encoding/json"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -33,7 +33,7 @@ func operatorTokenMiddleware(next http.Handler) http.Handler {
 		}
 
 		provided := header[7:]
-		if provided != token {
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
 			WriteError(w, domain.NewError(domain.ErrUnauthorized, "invalid operator token"))
 			return
 		}
@@ -53,8 +53,8 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		GitURL      string `json:"git_url,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewError(domain.ErrInvalidParams, "invalid request body"))
+	if err := decodeJSON(r, &req); err != nil {
+		WriteError(w, err)
 		return
 	}
 

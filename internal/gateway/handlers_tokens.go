@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
@@ -32,8 +31,8 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createTokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewError(domain.ErrInvalidParams, "invalid request body"))
+	if err := decodeJSON(r, &req); err != nil {
+		WriteError(w, err)
 		return
 	}
 	if req.ActorID == "" {

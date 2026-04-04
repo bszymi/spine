@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
@@ -163,7 +164,11 @@ type ServerConfig struct {
 	WorkspaceResolver  workspace.Resolver
 	ServicePool        *workspace.ServicePool
 	WSDBProvider       *workspace.DBProvider
-	DevMode            bool // when true, authorize allows unauthenticated requests
+	DevMode            bool          // when true, authorize allows unauthenticated requests
+	ReadHeaderTimeout  time.Duration // defaults to 10s
+	ReadTimeout        time.Duration // defaults to 30s
+	WriteTimeout       time.Duration // defaults to 60s
+	IdleTimeout        time.Duration // defaults to 120s
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -188,8 +193,12 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		devMode:            cfg.DevMode,
 	}
 	s.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: s.routes(),
+		Addr:              addr,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: withDefault(cfg.ReadHeaderTimeout, 10*time.Second),
+		ReadTimeout:       withDefault(cfg.ReadTimeout, 30*time.Second),
+		WriteTimeout:      withDefault(cfg.WriteTimeout, 60*time.Second),
+		IdleTimeout:       withDefault(cfg.IdleTimeout, 120*time.Second),
 	}
 	return s
 }
@@ -246,4 +255,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Handler returns the server's HTTP handler for testing.
 func (s *Server) Handler() http.Handler {
 	return s.httpServer.Handler
+}
+
+func withDefault(d, fallback time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return fallback
 }
