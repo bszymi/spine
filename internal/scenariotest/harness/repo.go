@@ -106,6 +106,17 @@ func (r *TestRepo) deterministicCommit(t *testing.T, path, message string) {
 	run("git", "commit", "-m", message)
 }
 
+// CheckoutBranch switches to the given branch.
+func (r *TestRepo) CheckoutBranch(t *testing.T, branch string) {
+	t.Helper()
+	cmd := exec.Command("git", "checkout", branch)
+	cmd.Dir = r.Dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git checkout %s: %v\n%s", branch, err, out)
+	}
+}
+
 // HeadSHA returns the current HEAD commit SHA.
 func (r *TestRepo) HeadSHA(t *testing.T) string {
 	t.Helper()

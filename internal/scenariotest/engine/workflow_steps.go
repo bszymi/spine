@@ -198,6 +198,63 @@ func AssertRunCompleted() Step {
 	return AssertRunStatus(domain.RunStatusCompleted)
 }
 
+// AssertBranchExists returns a step that asserts the current run's branch exists.
+func AssertBranchExists() Step {
+	return Step{
+		Name: "assert-branch-exists",
+		Action: func(sc *ScenarioContext) error {
+			runID := sc.MustGet("run_id").(string)
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run: %w", err)
+			}
+			if run.BranchName == "" {
+				sc.T.Errorf("expected run %s to have a branch name", runID)
+				return nil
+			}
+			assert.BranchExists(sc.T, sc.Repo, run.BranchName)
+			sc.Set("branch_name", run.BranchName)
+			return nil
+		},
+	}
+}
+
+// AssertBranchNotExists returns a step that asserts the current run's branch
+// has been cleaned up (deleted).
+func AssertBranchNotExists() Step {
+	return Step{
+		Name: "assert-branch-not-exists",
+		Action: func(sc *ScenarioContext) error {
+			branchName := sc.MustGet("branch_name").(string)
+			assert.BranchNotExists(sc.T, sc.Repo, branchName)
+			return nil
+		},
+	}
+}
+
+// WriteOnBranch returns a step that writes a file on the current run's branch
+// and commits it. Used for simulating work during a standard run.
+func WriteOnBranch(path, content, commitMsg string) Step {
+	return Step{
+		Name: "write-on-branch-" + path,
+		Action: func(sc *ScenarioContext) error {
+			runID := sc.MustGet("run_id").(string)
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run: %w", err)
+			}
+			if run.BranchName == "" {
+				return fmt.Errorf("run %s has no branch", runID)
+			}
+			sc.Repo.CheckoutBranch(sc.T, run.BranchName)
+			sc.Repo.WriteArtifact(sc.T, path, content)
+			sc.Repo.CommitAll(sc.T, commitMsg)
+			sc.Repo.CheckoutBranch(sc.T, "main")
+			return nil
+		},
+	}
+}
+
 // AssertCurrentStep returns a step that asserts the run's current step ID.
 func AssertCurrentStep(expectedStepID string) Step {
 	return Step{
