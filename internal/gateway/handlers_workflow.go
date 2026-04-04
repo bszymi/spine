@@ -126,6 +126,9 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		"mode":        "standard",
 		"trace_id":    gatewayTraceID,
 	}
+	if result.BranchName != "" {
+		resp["branch_name"] = result.BranchName
+	}
 	if result.VersionLabel != "" {
 		resp["workflow_version"] = result.VersionLabel
 	} else if result.CommitSHA != "" {
@@ -165,6 +168,9 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 		"current_step_id": run.CurrentStepID,
 		"trace_id":        run.TraceID,
 		"step_executions": steps,
+	}
+	if run.BranchName != "" {
+		resp["branch_name"] = run.BranchName
 	}
 	if run.StartedAt != nil {
 		resp["started_at"] = run.StartedAt
