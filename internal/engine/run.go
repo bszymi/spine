@@ -18,58 +18,21 @@ type StartRunResult struct {
 	EntryStep *domain.StepExecution
 }
 
-// StartRun creates a run for a task, resolves the governing workflow,
-// transitions the run from pending to active, and activates the first step.
-func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRunResult, error) {
-	if taskPath == "" {
-		return nil, domain.NewError(domain.ErrInvalidParams, "task_path is required")
-	}
+// startRunParams holds the pre-configured run and workflow for startRunCommon.
+type startRunParams struct {
+	run      *domain.Run
+	wfDef    *domain.WorkflowDefinition
+	onBranch func(ctx context.Context, branchName string) error // optional: called after branch creation
+}
 
+// startRunCommon handles the shared startup sequence for both standard and planning runs:
+// parse timeout → persist run → create branch → (onBranch callback) → create entry step
+// → activate run → emit event → activate step.
+func (o *Orchestrator) startRunCommon(ctx context.Context, p startRunParams) (*StartRunResult, error) {
 	log := observe.Logger(ctx)
-
-	// Read the task artifact to determine its type.
-	artifact, err := o.artifacts.Read(ctx, taskPath, "HEAD")
-	if err != nil {
-		return nil, fmt.Errorf("read task artifact: %w", err)
-	}
-
-	// Resolve the governing workflow.
-	binding, err := o.workflows.ResolveWorkflow(ctx, string(artifact.Type), "")
-	if err != nil {
-		return nil, fmt.Errorf("resolve workflow: %w", err)
-	}
-
-	wfDef := binding.Workflow
-	if wfDef.EntryStep == "" {
-		return nil, domain.NewError(domain.ErrInvalidParams, "workflow has no entry_step")
-	}
-
-	// Generate identifiers.
-	traceID, err := observe.GenerateTraceID()
-	if err != nil {
-		return nil, fmt.Errorf("generate trace ID: %w", err)
-	}
-	runID := fmt.Sprintf("run-%s", traceID[:8])
-	now := time.Now()
-
-	// Create run in pending status first, then create branch.
-	// This avoids orphan branches if run persistence fails.
-	// Always include run ID suffix to guarantee uniqueness.
-	branchName := generateBranchNameWithSuffix(domain.RunModeStandard, artifact.ID, taskPath, runID)
-
-	run := &domain.Run{
-		RunID:                runID,
-		TaskPath:             taskPath,
-		WorkflowPath:         wfDef.Path,
-		WorkflowID:           wfDef.ID,
-		WorkflowVersion:      binding.CommitSHA,
-		WorkflowVersionLabel: binding.VersionLabel,
-		Status:               domain.RunStatusPending,
-		CurrentStepID:        wfDef.EntryStep,
-		BranchName:           branchName,
-		TraceID:              traceID,
-		CreatedAt:            now,
-	}
+	run := p.run
+	wfDef := p.wfDef
+	now := run.CreatedAt
 
 	// Set run-level timeout if configured on the workflow.
 	if wfDef.Timeout != "" {
@@ -86,13 +49,19 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	}
 
 	// Create the Git branch after the run is persisted.
-	// Branch creation is fatal — a run without a branch cannot be merged.
-	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
+	if err := o.git.CreateBranch(ctx, run.BranchName, "HEAD"); err != nil {
 		return nil, fmt.Errorf("create run branch: %w", err)
 	}
 	if autoPushEnabled() {
-		if err := o.git.PushBranch(ctx, "origin", branchName); err != nil {
-			log.Warn("auto-push: failed to push run branch", "branch", branchName, "error", err)
+		if err := o.git.PushBranch(ctx, "origin", run.BranchName); err != nil {
+			log.Warn("auto-push: failed to push run branch", "branch", run.BranchName, "error", err)
+		}
+	}
+
+	// Optional callback for work on the branch (e.g., writing artifacts in planning runs).
+	if p.onBranch != nil {
+		if err := p.onBranch(ctx, run.BranchName); err != nil {
+			return nil, err
 		}
 	}
 
@@ -100,8 +69,8 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 	// leaves the run in pending (recoverable by scheduler) rather than
 	// active with no step (unrecoverable).
 	entryStep := &domain.StepExecution{
-		ExecutionID: fmt.Sprintf("%s-%s-1", runID, wfDef.EntryStep),
-		RunID:       runID,
+		ExecutionID: fmt.Sprintf("%s-%s-1", run.RunID, wfDef.EntryStep),
+		RunID:       run.RunID,
 		StepID:      wfDef.EntryStep,
 		Status:      domain.StepStatusWaiting,
 		Attempt:     1,
@@ -119,32 +88,74 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		return nil, fmt.Errorf("activate run: %w", err)
 	}
 
-	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
+	if err := o.store.UpdateRunStatus(ctx, run.RunID, result.ToStatus); err != nil {
 		return nil, fmt.Errorf("update run status: %w", err)
 	}
 	run.Status = result.ToStatus
 	startedAt := now
 	run.StartedAt = &startedAt
 
-	o.emitEvent(ctx, domain.EventRunStarted, runID, traceID,
-		fmt.Sprintf("evt-%s-started", traceID[:12]), nil)
+	o.emitEvent(ctx, domain.EventRunStarted, run.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-started", run.TraceID[:12]), nil)
 
 	log.Info("run started",
-		"run_id", runID,
-		"task_path", taskPath,
+		"run_id", run.RunID,
+		"task_path", run.TaskPath,
 		"workflow_id", wfDef.ID,
 		"entry_step", wfDef.EntryStep,
+		"mode", run.Mode,
 	)
 
 	// Activate the entry step so it gets an actor assignment.
-	if err := o.ActivateStep(ctx, runID, wfDef.EntryStep); err != nil {
-		// Activation failure is non-fatal for run creation; the step
-		// remains in waiting and can be activated later (e.g. by scheduler
-		// or retry). Log but don't fail StartRun.
+	if err := o.ActivateStep(ctx, run.RunID, wfDef.EntryStep); err != nil {
 		log.Warn("entry step activation failed", "step_id", wfDef.EntryStep, "error", err)
 	}
 
 	return &StartRunResult{Run: run, EntryStep: entryStep}, nil
+}
+
+// StartRun creates a run for a task, resolves the governing workflow,
+// transitions the run from pending to active, and activates the first step.
+func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRunResult, error) {
+	if taskPath == "" {
+		return nil, domain.NewError(domain.ErrInvalidParams, "task_path is required")
+	}
+
+	art, err := o.artifacts.Read(ctx, taskPath, "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("read task artifact: %w", err)
+	}
+
+	binding, err := o.workflows.ResolveWorkflow(ctx, string(art.Type), "")
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow: %w", err)
+	}
+	if binding.Workflow.EntryStep == "" {
+		return nil, domain.NewError(domain.ErrInvalidParams, "workflow has no entry_step")
+	}
+
+	traceID, err := observe.GenerateTraceID()
+	if err != nil {
+		return nil, fmt.Errorf("generate trace ID: %w", err)
+	}
+	runID := fmt.Sprintf("run-%s", traceID[:8])
+
+	return o.startRunCommon(ctx, startRunParams{
+		run: &domain.Run{
+			RunID:                runID,
+			TaskPath:             taskPath,
+			WorkflowPath:         binding.Workflow.Path,
+			WorkflowID:           binding.Workflow.ID,
+			WorkflowVersion:      binding.CommitSHA,
+			WorkflowVersionLabel: binding.VersionLabel,
+			Status:               domain.RunStatusPending,
+			CurrentStepID:        binding.Workflow.EntryStep,
+			BranchName:           generateBranchNameWithSuffix(domain.RunModeStandard, art.ID, taskPath, runID),
+			TraceID:              traceID,
+			CreatedAt:            time.Now(),
+		},
+		wfDef: binding.Workflow,
+	})
 }
 
 // StartPlanningRun creates a planning run that governs artifact creation on a branch.
@@ -160,144 +171,65 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 		return nil, domain.NewError(domain.ErrInvalidParams, "artifact_path is required")
 	}
 
-	log := observe.Logger(ctx)
-
-	// Parse and validate the artifact content before any side effects.
 	parsed, err := artifact.Parse(artifactPath, []byte(artifactContent))
 	if err != nil {
 		return nil, domain.NewError(domain.ErrInvalidParams, fmt.Sprintf("invalid artifact content: %v", err))
 	}
-
 	vResult := artifact.Validate(parsed)
 	if vResult.Status != "passed" {
 		return nil, domain.NewError(domain.ErrInvalidParams, fmt.Sprintf("artifact validation failed: %v", vResult.Errors))
 	}
 
-	// Resolve the governing workflow for this artifact type.
-	// Resolve creation workflow for planning runs per ADR-006 §4.
 	binding, err := o.workflows.ResolveWorkflowForMode(ctx, string(parsed.Type), "", "creation")
 	if err != nil {
 		return nil, fmt.Errorf("resolve workflow: %w", err)
 	}
-
-	wfDef := binding.Workflow
-	if wfDef.EntryStep == "" {
+	if binding.Workflow.EntryStep == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "workflow has no entry_step")
 	}
 
-	// Generate identifiers.
 	traceID, err := observe.GenerateTraceID()
 	if err != nil {
 		return nil, fmt.Errorf("generate trace ID: %w", err)
 	}
 	runID := fmt.Sprintf("run-%s", traceID[:8])
-	now := time.Now()
-	// Always include run ID suffix to guarantee uniqueness.
 	branchName := generateBranchNameWithSuffix(domain.RunModePlanning, parsed.ID, artifactPath, runID)
 
-	// Create run record with planning mode first, before branch or artifact
-	// writes. This ensures the run exists in the store before any events are
-	// emitted by the artifact writer. Per StartRun pattern: persist first,
-	// then create branch to avoid phantom events for runs that never existed.
-	run := &domain.Run{
-		RunID:                runID,
-		TaskPath:             artifactPath,
-		WorkflowPath:         wfDef.Path,
-		WorkflowID:           wfDef.ID,
-		WorkflowVersion:      binding.CommitSHA,
-		WorkflowVersionLabel: binding.VersionLabel,
-		Status:               domain.RunStatusPending,
-		Mode:                 domain.RunModePlanning,
-		CurrentStepID:        wfDef.EntryStep,
-		BranchName:           branchName,
-		TraceID:              traceID,
-		CreatedAt:            now,
-	}
-
-	if wfDef.Timeout != "" {
-		if d, err := time.ParseDuration(wfDef.Timeout); err == nil {
-			t := now.Add(d)
-			run.TimeoutAt = &t
-		} else {
-			log.Warn("invalid workflow timeout duration", "timeout", wfDef.Timeout, "error", err)
-		}
-	}
-
-	if err := o.store.CreateRun(ctx, run); err != nil {
-		return nil, fmt.Errorf("create run: %w", err)
-	}
-
-	// Create Git branch from HEAD after run is persisted.
-	if err := o.git.CreateBranch(ctx, branchName, "HEAD"); err != nil {
-		return nil, fmt.Errorf("create planning branch: %w", err)
-	}
-	if autoPushEnabled() {
-		if err := o.git.PushBranch(ctx, "origin", branchName); err != nil {
-			log.Warn("auto-push: failed to push planning branch", "branch", branchName, "error", err)
-		}
-	}
-
-	// Write the artifact to the branch via WriteContext.
-	// Propagate run/trace metadata so commit trailers are correct.
-	branchCtx := artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branchName})
-	branchCtx = observe.WithTraceID(branchCtx, traceID)
-	branchCtx = observe.WithRunID(branchCtx, runID)
-	if _, err := o.artifactWriter.Create(branchCtx, artifactPath, artifactContent); err != nil {
-		// Branch cleanup on failure (local + remote).
-		if delErr := o.git.DeleteBranch(ctx, branchName); delErr != nil {
-			log.Warn("failed to clean up planning branch", "branch", branchName, "error", delErr)
-		}
-		if autoPushEnabled() {
-			if delErr := o.git.DeleteRemoteBranch(ctx, "origin", branchName); delErr != nil {
-				log.Warn("auto-push: failed to clean up remote planning branch", "branch", branchName, "error", delErr)
+	return o.startRunCommon(ctx, startRunParams{
+		run: &domain.Run{
+			RunID:                runID,
+			TaskPath:             artifactPath,
+			WorkflowPath:         binding.Workflow.Path,
+			WorkflowID:           binding.Workflow.ID,
+			WorkflowVersion:      binding.CommitSHA,
+			WorkflowVersionLabel: binding.VersionLabel,
+			Status:               domain.RunStatusPending,
+			Mode:                 domain.RunModePlanning,
+			CurrentStepID:        binding.Workflow.EntryStep,
+			BranchName:           branchName,
+			TraceID:              traceID,
+			CreatedAt:            time.Now(),
+		},
+		wfDef: binding.Workflow,
+		onBranch: func(ctx context.Context, branch string) error {
+			log := observe.Logger(ctx)
+			branchCtx := artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
+			branchCtx = observe.WithTraceID(branchCtx, traceID)
+			branchCtx = observe.WithRunID(branchCtx, runID)
+			if _, err := o.artifactWriter.Create(branchCtx, artifactPath, artifactContent); err != nil {
+				if delErr := o.git.DeleteBranch(ctx, branch); delErr != nil {
+					log.Warn("failed to clean up planning branch", "branch", branch, "error", delErr)
+				}
+				if autoPushEnabled() {
+					if delErr := o.git.DeleteRemoteBranch(ctx, "origin", branch); delErr != nil {
+						log.Warn("auto-push: failed to clean up remote planning branch", "branch", branch, "error", delErr)
+					}
+				}
+				return fmt.Errorf("create artifact on branch: %w", err)
 			}
-		}
-		return nil, fmt.Errorf("create artifact on branch: %w", err)
-	}
-
-	// Create entry step execution.
-	entryStep := &domain.StepExecution{
-		ExecutionID: fmt.Sprintf("%s-%s-1", runID, wfDef.EntryStep),
-		RunID:       runID,
-		StepID:      wfDef.EntryStep,
-		Status:      domain.StepStatusWaiting,
-		Attempt:     1,
-		CreatedAt:   now,
-	}
-	if err := o.store.CreateStepExecution(ctx, entryStep); err != nil {
-		return nil, fmt.Errorf("create entry step: %w", err)
-	}
-
-	// Activate: pending → active.
-	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
-		Trigger: workflow.TriggerActivate,
+			return nil
+		},
 	})
-	if err != nil {
-		return nil, fmt.Errorf("activate run: %w", err)
-	}
-
-	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
-		return nil, fmt.Errorf("update run status: %w", err)
-	}
-	run.Status = result.ToStatus
-	startedAt := now
-	run.StartedAt = &startedAt
-
-	o.emitEvent(ctx, domain.EventRunStarted, runID, traceID,
-		fmt.Sprintf("evt-%s-started", traceID[:12]), nil)
-
-	log.Info("planning run started",
-		"run_id", runID,
-		"artifact_path", artifactPath,
-		"workflow_id", wfDef.ID,
-		"entry_step", wfDef.EntryStep,
-	)
-
-	if err := o.ActivateStep(ctx, runID, wfDef.EntryStep); err != nil {
-		log.Warn("entry step activation failed", "step_id", wfDef.EntryStep, "error", err)
-	}
-
-	return &StartRunResult{Run: run, EntryStep: entryStep}, nil
 }
 
 // CompleteRun transitions an active run to completed (or committing if
