@@ -99,6 +99,9 @@ func (s *Server) handleQueryHistory(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
+	if limit > 200 {
+		limit = 200
+	}
 
 	history, err := s.projQueryFrom(r.Context()).QueryHistory(r.Context(), path, limit)
 	if err != nil {

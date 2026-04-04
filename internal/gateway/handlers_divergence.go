@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -26,8 +25,8 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 	divergenceID := chi.URLParam(r, "divergence_id")
 
 	var req createBranchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewError(domain.ErrInvalidParams, "invalid request body"))
+	if err := decodeJSON(r, &req); err != nil {
+		WriteError(w, err)
 		return
 	}
 	if req.BranchID == "" || req.StartStep == "" {
