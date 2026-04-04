@@ -114,18 +114,10 @@ func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run, 
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	log := observe.Logger(ctx)
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-completed", run.TraceID[:12]),
-		Type:      domain.EventRunCompleted,
-		Timestamp: time.Now(),
-		RunID:     run.RunID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunCompleted, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunCompleted, run.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-completed", run.TraceID[:12]), nil)
 
-	log.Info("run completed after merge", "run_id", run.RunID)
+	observe.Logger(ctx).Info("run completed after merge", "run_id", run.RunID)
 	if run.StartedAt != nil {
 		observe.GlobalMetrics.RunDuration.ObserveDuration(time.Since(*run.StartedAt))
 	}
@@ -172,15 +164,8 @@ func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run,
 		return fmt.Errorf("update run status: %w", err)
 	}
 
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-failed", run.TraceID[:12]),
-		Type:      domain.EventRunFailed,
-		Timestamp: time.Now(),
-		RunID:     run.RunID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRunFailed, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRunFailed, run.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-failed", run.TraceID[:12]), nil)
 
 	log.Info("run failed on merge", "run_id", run.RunID, "error", mergeErr)
 	// Branch preserved for debugging — not cleaned up on failure.

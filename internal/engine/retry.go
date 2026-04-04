@@ -61,16 +61,8 @@ func (o *Orchestrator) RetryStep(ctx context.Context, exec *domain.StepExecution
 			"classification", classification,
 		)
 
-		// Emit step_failed only for permanent failures (not retried).
-		if err := o.events.Emit(ctx, domain.Event{
-			EventID:   fmt.Sprintf("evt-%s-failed", exec.ExecutionID),
-			Type:      domain.EventStepFailed,
-			Timestamp: time.Now(),
-			RunID:     exec.RunID,
-			TraceID:   run.TraceID,
-		}); err != nil {
-			log.Warn("failed to emit event", "event_type", domain.EventStepFailed, "error", err)
-		}
+		o.emitEvent(ctx, domain.EventStepFailed, exec.RunID, run.TraceID,
+			fmt.Sprintf("evt-%s-failed", exec.ExecutionID), nil)
 
 		return o.FailRun(ctx, exec.RunID,
 			fmt.Sprintf("step %s failed after %d attempt(s): %s",
@@ -96,16 +88,8 @@ func (o *Orchestrator) RetryStep(ctx context.Context, exec *domain.StepExecution
 		return fmt.Errorf("create retry execution: %w", err)
 	}
 
-	// Emit retry event.
-	if err := o.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("evt-%s-%s-retry-%d", run.TraceID[:12], exec.StepID, nextAttempt),
-		Type:      domain.EventRetryAttempted,
-		Timestamp: time.Now(),
-		RunID:     exec.RunID,
-		TraceID:   run.TraceID,
-	}); err != nil {
-		log.Warn("failed to emit event", "event_type", domain.EventRetryAttempted, "error", err)
-	}
+	o.emitEvent(ctx, domain.EventRetryAttempted, exec.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-%s-retry-%d", run.TraceID[:12], exec.StepID, nextAttempt), nil)
 
 	log.Info("retry scheduled",
 		"run_id", exec.RunID,
