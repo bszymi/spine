@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -118,8 +119,12 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 
 	if err := o.actors.DeliverAssignment(ctx, assignReq); err != nil {
 		log.Warn("failed to deliver assignment", "step_id", stepID, "error", err)
+		failPayload, _ := json.Marshal(map[string]any{
+			"step_id": stepID,
+			"reason":  err.Error(),
+		})
 		o.emitEvent(ctx, domain.EventAssignmentFailed, runID, run.TraceID,
-			fmt.Sprintf("evt-%s-assign-failed", run.TraceID[:12]), nil)
+			fmt.Sprintf("evt-%s-assign-failed", run.TraceID[:12]), failPayload)
 		return fmt.Errorf("deliver assignment: %w", err)
 	}
 

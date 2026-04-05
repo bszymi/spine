@@ -2,6 +2,7 @@ package actor
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -78,13 +79,31 @@ func (s *Service) selectExplicit(ctx context.Context, req SelectionRequest) (*do
 		return nil, domain.NewError(domain.ErrConflict, "actor is not active")
 	}
 
-	// Verify eligibility
-	eligible := s.filterActorsWithSkills(ctx, []domain.Actor{*actor}, req)
-	if len(eligible) == 0 {
-		return nil, domain.NewError(domain.ErrConflict, "actor does not meet selection criteria")
+	// Check actor type eligibility
+	if len(req.EligibleActorTypes) > 0 && !contains(req.EligibleActorTypes, string(actor.Type)) {
+		return nil, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("actor type %q is not eligible (allowed: %v)", actor.Type, req.EligibleActorTypes))
 	}
 
-	return &eligible[0], nil
+	// Check role eligibility
+	if req.MinRole != "" && !actor.Role.HasAtLeast(req.MinRole) {
+		return nil, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("actor role %q does not meet minimum required role %q", actor.Role, req.MinRole))
+	}
+
+	// Check skill eligibility with descriptive error
+	if len(req.RequiredCapabilities) > 0 {
+		result, err := s.ValidateSkillEligibility(ctx, actor.ActorID, req.RequiredCapabilities)
+		if err != nil {
+			return nil, fmt.Errorf("validate skill eligibility: %w", err)
+		}
+		if !result.Eligible {
+			return nil, domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("actor %q missing required skills: %v", actor.ActorID, result.MissingSkills))
+		}
+	}
+
+	return actor, nil
 }
 
 // filterActorsWithSkills applies the selection criteria filters.
