@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: Skill System and Capability Matching
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05

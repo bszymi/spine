@@ -42,11 +42,11 @@ actor_id: <string>              # Stable unique identifier
 name: <string>                  # Human-readable name
 type: <enum>                    # human, ai_agent, automated_system
 role: <enum>                    # reader, contributor, reviewer, operator, admin
-capabilities:                   # Domain-specific execution capabilities
-  - <string>
 status: <enum>                  # active, suspended, deactivated
 created_at: <timestamp>
 ```
+
+Actor capabilities are managed through the Skill Registry (see below) rather than a field on the actor record.
 
 Capabilities are defined at the system level (not per actor) and represent a shared vocabulary used by workflow definitions and actor configuration.
 

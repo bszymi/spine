@@ -212,16 +212,28 @@ func setupActors(t *testing.T) (*actor.Service, *fakeStore) {
 	svc := actor.NewService(fs)
 
 	actors := []*domain.Actor{
-		{ActorID: "human-1", Type: domain.ActorTypeHuman, Name: "Alice", Role: domain.RoleContributor, Capabilities: []string{"code_review"}, Status: domain.ActorStatusActive},
-		{ActorID: "human-2", Type: domain.ActorTypeHuman, Name: "Bob", Role: domain.RoleReviewer, Capabilities: []string{"code_review", "architecture_review"}, Status: domain.ActorStatusActive},
-		{ActorID: "ai-1", Type: domain.ActorTypeAIAgent, Name: "Claude", Role: domain.RoleContributor, Capabilities: []string{"code_generation"}, Status: domain.ActorStatusActive},
-		{ActorID: "bot-1", Type: domain.ActorTypeAutomated, Name: "CI Bot", Role: domain.RoleReader, Capabilities: []string{"testing"}, Status: domain.ActorStatusActive},
+		{ActorID: "human-1", Type: domain.ActorTypeHuman, Name: "Alice", Role: domain.RoleContributor, Status: domain.ActorStatusActive},
+		{ActorID: "human-2", Type: domain.ActorTypeHuman, Name: "Bob", Role: domain.RoleReviewer, Status: domain.ActorStatusActive},
+		{ActorID: "ai-1", Type: domain.ActorTypeAIAgent, Name: "Claude", Role: domain.RoleContributor, Status: domain.ActorStatusActive},
+		{ActorID: "bot-1", Type: domain.ActorTypeAutomated, Name: "CI Bot", Role: domain.RoleReader, Status: domain.ActorStatusActive},
 		{ActorID: "suspended-1", Type: domain.ActorTypeHuman, Name: "Suspended", Role: domain.RoleContributor, Status: domain.ActorStatusSuspended},
 		{ActorID: "deactivated-1", Type: domain.ActorTypeHuman, Name: "Gone", Role: domain.RoleAdmin, Status: domain.ActorStatusDeactivated},
 	}
 	for _, a := range actors {
 		fs.actors[a.ActorID] = a
 	}
+
+	// Register skills and assign to actors (replaces legacy Capabilities field)
+	fs.skills["sk-code-review"] = &domain.Skill{SkillID: "sk-code-review", Name: "code_review"}
+	fs.skills["sk-arch-review"] = &domain.Skill{SkillID: "sk-arch-review", Name: "architecture_review"}
+	fs.skills["sk-code-gen"] = &domain.Skill{SkillID: "sk-code-gen", Name: "code_generation"}
+	fs.skills["sk-testing"] = &domain.Skill{SkillID: "sk-testing", Name: "testing"}
+
+	fs.actorSkills["human-1"] = map[string]bool{"sk-code-review": true}
+	fs.actorSkills["human-2"] = map[string]bool{"sk-code-review": true, "sk-arch-review": true}
+	fs.actorSkills["ai-1"] = map[string]bool{"sk-code-gen": true}
+	fs.actorSkills["bot-1"] = map[string]bool{"sk-testing": true}
+
 	return svc, fs
 }
 
@@ -460,22 +472,20 @@ func TestAddSkillMissingParams(t *testing.T) {
 	}
 }
 
-func TestSelectBySkillsOverCapabilities(t *testing.T) {
+func TestSelectBySkills(t *testing.T) {
 	fs := newFakeStore()
 	svc := actor.NewService(fs)
 
-	// Actor with legacy capabilities but also with skills assigned
 	fs.actors["a1"] = &domain.Actor{
 		ActorID: "a1", Type: domain.ActorTypeHuman, Name: "Alice",
-		Role: domain.RoleContributor, Capabilities: []string{"old_cap"},
-		Status: domain.ActorStatusActive,
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
 	}
-	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "new_skill", Status: domain.SkillStatusActive}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
 	fs.actorSkills["a1"] = map[string]bool{"s1": true}
 
-	// Should match by skill name, not legacy capabilities
+	// Should match by skill name
 	a, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
-		RequiredCapabilities: []string{"new_skill"},
+		RequiredCapabilities: []string{"code_review"},
 		Strategy:             actor.StrategyAnyEligible,
 	})
 	if err != nil {
@@ -485,37 +495,13 @@ func TestSelectBySkillsOverCapabilities(t *testing.T) {
 		t.Errorf("expected a1, got %s", a.ActorID)
 	}
 
-	// Should NOT match old capability when skills are assigned
+	// Should NOT match unassigned skill
 	_, err = svc.SelectActor(context.Background(), actor.SelectionRequest{
-		RequiredCapabilities: []string{"old_cap"},
+		RequiredCapabilities: []string{"deployment"},
 		Strategy:             actor.StrategyAnyEligible,
 	})
 	if err == nil {
-		t.Error("expected no match — skills take precedence over legacy capabilities")
-	}
-}
-
-func TestSelectFallsBackToCapabilities(t *testing.T) {
-	fs := newFakeStore()
-	svc := actor.NewService(fs)
-
-	// Actor with legacy capabilities but NO skills assigned
-	fs.actors["a1"] = &domain.Actor{
-		ActorID: "a1", Type: domain.ActorTypeHuman, Name: "Alice",
-		Role: domain.RoleContributor, Capabilities: []string{"legacy_cap"},
-		Status: domain.ActorStatusActive,
-	}
-
-	// Should match by legacy capabilities
-	a, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
-		RequiredCapabilities: []string{"legacy_cap"},
-		Strategy:             actor.StrategyAnyEligible,
-	})
-	if err != nil {
-		t.Fatalf("select: %v", err)
-	}
-	if a.ActorID != "a1" {
-		t.Errorf("expected a1, got %s", a.ActorID)
+		t.Error("expected no match for unassigned skill")
 	}
 }
 
@@ -574,21 +560,21 @@ func TestValidateSkillEligibility_EmptyRequirements(t *testing.T) {
 	}
 }
 
-func TestValidateSkillEligibility_FallsBackToCapabilities(t *testing.T) {
+func TestValidateSkillEligibility_NoSkillsAssigned(t *testing.T) {
 	fs := newFakeStore()
 	svc := actor.NewService(fs)
 
-	fs.actors["a1"] = &domain.Actor{
-		ActorID: "a1", Status: domain.ActorStatusActive,
-		Capabilities: []string{"legacy_cap"},
-	}
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
 
-	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"legacy_cap"})
+	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"any_skill"})
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if !result.Eligible {
-		t.Error("expected eligible via legacy capabilities fallback")
+	if result.Eligible {
+		t.Error("expected not eligible when no skills assigned")
+	}
+	if len(result.MissingSkills) != 1 || result.MissingSkills[0] != "any_skill" {
+		t.Errorf("expected missing [any_skill], got %v", result.MissingSkills)
 	}
 }
 
