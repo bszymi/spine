@@ -84,7 +84,7 @@ Schema validation ensures the workflow YAML conforms to the expected structure.
 |-------|------|-----------|
 | `mode` | enum | One of: `automated_only`, `ai_only`, `human_only`, `hybrid` |
 | `eligible_actor_types` | list | Each entry one of: `human`, `ai_agent`, `automated_system` |
-| `required_skills` | list (optional) | Each entry is a non-empty string |
+| `required_skills` | list | Required for actor-assigned steps (non `automated_only`); at least one entry. Each entry is a non-empty string. |
 
 ### 3.6 Divergence Point Validation
 
