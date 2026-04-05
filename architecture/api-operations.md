@@ -153,6 +153,14 @@ System operations are administrative and require elevated authorization.
 | `system.rebuild` | Triggers full projection rebuild from Git | After projection corruption or drift |
 | `system.validate_all` | Runs validation across all artifacts | Periodic governance audits |
 
+### 3.5 Skill Operations
+
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `actor.add_skill` | Assigns a skill to an actor | Configuring actor capabilities |
+| `actor.remove_skill` | Removes a skill from an actor | Revoking capabilities |
+| `actor.list_skills` | Lists skills assigned to an actor | Viewing actor capabilities |
+
 ### 3.6 Divergence Operations
 
 | Operation | Effect | When to Use |

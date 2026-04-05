@@ -64,6 +64,16 @@ Capabilities are formalized through the **Skill** entity (`auth.skills` table). 
 
 When `required_capabilities` values on a workflow step match registered skill names, the system resolves them through the skill registry. When no matching skill entity exists, bare string matching against the actor's `capabilities` field is used as a fallback. This provides backward compatibility during migration from opaque capability strings to formal skills.
 
+#### Actor-Skill Associations
+
+Skills are assigned to actors via a many-to-many relationship (`auth.actor_skills` junction table). The actor service provides:
+
+- `AddSkill(actorID, skillID)` — assign a skill to an actor
+- `RemoveSkill(actorID, skillID)` — remove a skill from an actor
+- `ListSkills(actorID)` — list all skills assigned to an actor
+
+During actor selection, if an actor has skills assigned, the skill-based matching takes precedence over the legacy `capabilities` field. If no skills are assigned, the system falls back to the legacy field.
+
 ### 3.2 Registration Rules
 
 - Every actor must be registered before interacting with the system

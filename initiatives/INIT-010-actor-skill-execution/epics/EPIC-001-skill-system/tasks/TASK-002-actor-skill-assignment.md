@@ -2,12 +2,13 @@
 id: TASK-002
 type: Task
 title: "Actor Skill Assignment"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-001-skill-system/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation
 created: 2026-04-05
 last_updated: 2026-04-05
+completed: 2026-04-05
 links:
   - type: parent
     target: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-001-skill-system/epic.md

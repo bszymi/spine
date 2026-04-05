@@ -13,11 +13,17 @@ import (
 
 type fakeStore struct {
 	store.Store
-	actors map[string]*domain.Actor
+	actors      map[string]*domain.Actor
+	actorSkills map[string]map[string]bool // actorID -> set of skillIDs
+	skills      map[string]*domain.Skill
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{actors: make(map[string]*domain.Actor)}
+	return &fakeStore{
+		actors:      make(map[string]*domain.Actor),
+		actorSkills: make(map[string]map[string]bool),
+		skills:      make(map[string]*domain.Skill),
+	}
 }
 
 func (f *fakeStore) CreateActor(_ context.Context, a *domain.Actor) error {
@@ -57,6 +63,35 @@ func (f *fakeStore) ListActorsByStatus(_ context.Context, status domain.ActorSta
 	for _, a := range f.actors {
 		if a.Status == status {
 			result = append(result, *a)
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeStore) AddSkillToActor(_ context.Context, actorID, skillID string) error {
+	if _, ok := f.actorSkills[actorID]; !ok {
+		f.actorSkills[actorID] = make(map[string]bool)
+	}
+	f.actorSkills[actorID][skillID] = true
+	return nil
+}
+
+func (f *fakeStore) RemoveSkillFromActor(_ context.Context, actorID, skillID string) error {
+	if m, ok := f.actorSkills[actorID]; ok {
+		delete(m, skillID)
+	}
+	return nil
+}
+
+func (f *fakeStore) ListActorSkills(_ context.Context, actorID string) ([]domain.Skill, error) {
+	skillIDs, ok := f.actorSkills[actorID]
+	if !ok {
+		return nil, nil
+	}
+	var result []domain.Skill
+	for sid := range skillIDs {
+		if sk, ok := f.skills[sid]; ok {
+			result = append(result, *sk)
 		}
 	}
 	return result, nil
@@ -326,5 +361,121 @@ func TestSelectCombinedFilters(t *testing.T) {
 	}
 	if a.Type != domain.ActorTypeHuman {
 		t.Errorf("expected human, got %s", a.Type)
+	}
+}
+
+// ── Skill Assignment Tests ──
+
+func TestAddAndListSkills(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+	svc.Register(context.Background(), &domain.Actor{ActorID: "a1", Type: domain.ActorTypeHuman, Role: domain.RoleContributor})
+
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
+	fs.skills["s2"] = &domain.Skill{SkillID: "s2", Name: "testing", Status: domain.SkillStatusActive}
+
+	if err := svc.AddSkill(context.Background(), "a1", "s1"); err != nil {
+		t.Fatalf("add skill: %v", err)
+	}
+	if err := svc.AddSkill(context.Background(), "a1", "s2"); err != nil {
+		t.Fatalf("add skill: %v", err)
+	}
+
+	skills, err := svc.ListSkills(context.Background(), "a1")
+	if err != nil {
+		t.Fatalf("list skills: %v", err)
+	}
+	if len(skills) != 2 {
+		t.Errorf("expected 2 skills, got %d", len(skills))
+	}
+}
+
+func TestRemoveSkill(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+	svc.Register(context.Background(), &domain.Actor{ActorID: "a1", Type: domain.ActorTypeHuman, Role: domain.RoleContributor})
+
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
+
+	svc.AddSkill(context.Background(), "a1", "s1")
+	if err := svc.RemoveSkill(context.Background(), "a1", "s1"); err != nil {
+		t.Fatalf("remove skill: %v", err)
+	}
+
+	skills, err := svc.ListSkills(context.Background(), "a1")
+	if err != nil {
+		t.Fatalf("list skills: %v", err)
+	}
+	if len(skills) != 0 {
+		t.Errorf("expected 0 skills after removal, got %d", len(skills))
+	}
+}
+
+func TestAddSkillMissingParams(t *testing.T) {
+	svc := actor.NewService(newFakeStore())
+	if err := svc.AddSkill(context.Background(), "", "s1"); err == nil {
+		t.Error("expected error for missing actor_id")
+	}
+	if err := svc.AddSkill(context.Background(), "a1", ""); err == nil {
+		t.Error("expected error for missing skill_id")
+	}
+}
+
+func TestSelectBySkillsOverCapabilities(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	// Actor with legacy capabilities but also with skills assigned
+	fs.actors["a1"] = &domain.Actor{
+		ActorID: "a1", Type: domain.ActorTypeHuman, Name: "Alice",
+		Role: domain.RoleContributor, Capabilities: []string{"old_cap"},
+		Status: domain.ActorStatusActive,
+	}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "new_skill", Status: domain.SkillStatusActive}
+	fs.actorSkills["a1"] = map[string]bool{"s1": true}
+
+	// Should match by skill name, not legacy capabilities
+	a, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
+		RequiredCapabilities: []string{"new_skill"},
+		Strategy:             actor.StrategyAnyEligible,
+	})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if a.ActorID != "a1" {
+		t.Errorf("expected a1, got %s", a.ActorID)
+	}
+
+	// Should NOT match old capability when skills are assigned
+	_, err = svc.SelectActor(context.Background(), actor.SelectionRequest{
+		RequiredCapabilities: []string{"old_cap"},
+		Strategy:             actor.StrategyAnyEligible,
+	})
+	if err == nil {
+		t.Error("expected no match — skills take precedence over legacy capabilities")
+	}
+}
+
+func TestSelectFallsBackToCapabilities(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	// Actor with legacy capabilities but NO skills assigned
+	fs.actors["a1"] = &domain.Actor{
+		ActorID: "a1", Type: domain.ActorTypeHuman, Name: "Alice",
+		Role: domain.RoleContributor, Capabilities: []string{"legacy_cap"},
+		Status: domain.ActorStatusActive,
+	}
+
+	// Should match by legacy capabilities
+	a, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
+		RequiredCapabilities: []string{"legacy_cap"},
+		Strategy:             actor.StrategyAnyEligible,
+	})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if a.ActorID != "a1" {
+		t.Errorf("expected a1, got %s", a.ActorID)
 	}
 }

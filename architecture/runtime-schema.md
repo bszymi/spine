@@ -387,6 +387,26 @@ CREATE INDEX idx_skills_category ON auth.skills (category);
 CREATE INDEX idx_skills_status ON auth.skills (status);
 ```
 
+### 4.8.1 `auth.actor_skills`
+
+Junction table for the many-to-many relationship between actors and skills.
+
+```sql
+CREATE TABLE auth.actor_skills (
+    actor_id    text        NOT NULL REFERENCES auth.actors(actor_id),
+    skill_id    text        NOT NULL REFERENCES auth.skills(skill_id),
+    assigned_at timestamptz NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (actor_id, skill_id)
+);
+```
+
+**Indexes:**
+
+```sql
+CREATE INDEX idx_actor_skills_skill ON auth.actor_skills (skill_id);
+```
+
 ### 4.9 JSONB Field Semantics
 
 The following JSONB fields are used for flexible or evolving data structures:
