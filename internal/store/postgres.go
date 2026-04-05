@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -257,45 +256,33 @@ func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID strin
 
 func (s *PostgresStore) GetActor(ctx context.Context, actorID string) (*domain.Actor, error) {
 	var actor domain.Actor
-	var capabilities []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT actor_id, actor_type, name, role, capabilities, status
+		SELECT actor_id, actor_type, name, role, status
 		FROM auth.actors WHERE actor_id = $1`, actorID,
-	).Scan(&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &capabilities, &actor.Status)
+	).Scan(&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &actor.Status)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, domain.NewError(domain.ErrNotFound, "actor not found")
 		}
 		return nil, err
 	}
-	if capabilities != nil {
-		_ = json.Unmarshal(capabilities, &actor.Capabilities)
-	}
 	return &actor, nil
 }
 
 func (s *PostgresStore) CreateActor(ctx context.Context, actor *domain.Actor) error {
-	capabilities, err := json.Marshal(actor.Capabilities)
-	if err != nil {
-		return fmt.Errorf("marshal capabilities: %w", err)
-	}
-	_, err = s.pool.Exec(ctx, `
-		INSERT INTO auth.actors (actor_id, actor_type, name, role, capabilities, status)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		actor.ActorID, actor.Type, actor.Name, actor.Role, capabilities, actor.Status,
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO auth.actors (actor_id, actor_type, name, role, status)
+		VALUES ($1, $2, $3, $4, $5)`,
+		actor.ActorID, actor.Type, actor.Name, actor.Role, actor.Status,
 	)
 	return err
 }
 
 func (s *PostgresStore) UpdateActor(ctx context.Context, actor *domain.Actor) error {
-	capabilities, err := json.Marshal(actor.Capabilities)
-	if err != nil {
-		return fmt.Errorf("marshal capabilities: %w", err)
-	}
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE auth.actors SET name = $1, role = $2, capabilities = $3, status = $4, updated_at = now()
-		WHERE actor_id = $5`,
-		actor.Name, actor.Role, capabilities, actor.Status, actor.ActorID,
+		UPDATE auth.actors SET name = $1, role = $2, status = $3, updated_at = now()
+		WHERE actor_id = $4`,
+		actor.Name, actor.Role, actor.Status, actor.ActorID,
 	)
 	if err != nil {
 		return err
@@ -308,13 +295,13 @@ func (s *PostgresStore) UpdateActor(ctx context.Context, actor *domain.Actor) er
 
 func (s *PostgresStore) ListActors(ctx context.Context) ([]domain.Actor, error) {
 	return s.listActorsQuery(ctx, `
-		SELECT actor_id, actor_type, name, role, capabilities, status
+		SELECT actor_id, actor_type, name, role, status
 		FROM auth.actors ORDER BY actor_id`)
 }
 
 func (s *PostgresStore) ListActorsByStatus(ctx context.Context, status domain.ActorStatus) ([]domain.Actor, error) {
 	return s.listActorsQuery(ctx, `
-		SELECT actor_id, actor_type, name, role, capabilities, status
+		SELECT actor_id, actor_type, name, role, status
 		FROM auth.actors WHERE status = $1 ORDER BY actor_id`, status)
 }
 
@@ -328,12 +315,8 @@ func (s *PostgresStore) listActorsQuery(ctx context.Context, query string, args 
 	var actors []domain.Actor
 	for rows.Next() {
 		var actor domain.Actor
-		var capabilities []byte
-		if err := rows.Scan(&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &capabilities, &actor.Status); err != nil {
+		if err := rows.Scan(&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &actor.Status); err != nil {
 			return nil, err
-		}
-		if capabilities != nil {
-			_ = json.Unmarshal(capabilities, &actor.Capabilities)
 		}
 		actors = append(actors, actor)
 	}
@@ -345,15 +328,14 @@ func (s *PostgresStore) listActorsQuery(ctx context.Context, query string, args 
 func (s *PostgresStore) GetActorByTokenHash(ctx context.Context, tokenHash string) (*domain.Actor, *domain.Token, error) {
 	var actor domain.Actor
 	var token domain.Token
-	var capabilities []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT a.actor_id, a.actor_type, a.name, a.role, a.capabilities, a.status,
+		SELECT a.actor_id, a.actor_type, a.name, a.role, a.status,
 		       t.token_id, t.actor_id, t.name, t.expires_at, t.revoked_at, t.created_at
 		FROM auth.tokens t
 		JOIN auth.actors a ON t.actor_id = a.actor_id
 		WHERE t.token_hash = $1`, tokenHash,
 	).Scan(
-		&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &capabilities, &actor.Status,
+		&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &actor.Status,
 		&token.TokenID, &token.ActorID, &token.Name, &token.ExpiresAt, &token.RevokedAt, &token.CreatedAt,
 	)
 	if err != nil {
@@ -361,9 +343,6 @@ func (s *PostgresStore) GetActorByTokenHash(ctx context.Context, tokenHash strin
 			return nil, nil, domain.NewError(domain.ErrUnauthorized, "invalid token")
 		}
 		return nil, nil, err
-	}
-	if capabilities != nil {
-		_ = json.Unmarshal(capabilities, &actor.Capabilities)
 	}
 	return &actor, &token, nil
 }
@@ -1092,13 +1071,13 @@ func (s *PostgresStore) ListActorsBySkills(ctx context.Context, skillNames []str
 	// Find active actors possessing ALL specified skills (AND matching).
 	// Uses a COUNT/HAVING pattern to require all skills are present.
 	return s.listActorsQuery(ctx, `
-		SELECT a.actor_id, a.actor_type, a.name, a.role, a.capabilities, a.status
+		SELECT a.actor_id, a.actor_type, a.name, a.role, a.status
 		FROM auth.actors a
 		JOIN auth.actor_skills as_ ON a.actor_id = as_.actor_id
 		JOIN auth.skills s ON as_.skill_id = s.skill_id
 		WHERE a.status = 'active'
 		  AND s.name = ANY($1)
-		GROUP BY a.actor_id, a.actor_type, a.name, a.role, a.capabilities, a.status
+		GROUP BY a.actor_id, a.actor_type, a.name, a.role, a.status
 		HAVING COUNT(DISTINCT s.name) = $2
 		ORDER BY a.actor_id`, skillNames, len(skillNames))
 }
