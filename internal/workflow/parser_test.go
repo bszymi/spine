@@ -347,6 +347,67 @@ func TestValidateSchemaInvalidExecutionMode(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaRequiredSkillsMissing(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeHybrid},
+			Outcomes:  []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasSkillError := false
+	for _, e := range errors {
+		if contains(e.Message, "at least one required skill") {
+			hasSkillError = true
+		}
+	}
+	if !hasSkillError {
+		t.Error("expected required skill error for actor-assigned step without skills")
+	}
+}
+
+func TestValidateSchemaAutomatedStepNoSkillsOK(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeAutomated,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeAutomatedOnly},
+			Outcomes:  []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	for _, e := range errors {
+		if contains(e.Message, "required skill") {
+			t.Error("automated_only steps should not require skills")
+		}
+	}
+}
+
+func TestValidateSchemaRequiredSkillsPresent(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Execution: &domain.ExecutionConfig{
+				Mode:           domain.ExecModeHybrid,
+				RequiredSkills: []string{"code_review"},
+			},
+			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	for _, e := range errors {
+		if contains(e.Message, "required skill") {
+			t.Error("step with required skills should not produce skill error")
+		}
+	}
+}
+
 func TestValidateSchemaDivergeReference(t *testing.T) {
 	wf := &domain.WorkflowDefinition{
 		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,

@@ -21,6 +21,7 @@ steps:
       eligible_actor_types:
         - ai_agent
         - human
+      required_skills: [execution]
     required_outputs:
       - findings
     outcomes:
@@ -44,6 +45,7 @@ steps:
       mode: ai_only
       eligible_actor_types:
         - ai_agent
+      required_skills: [execution]
     required_inputs:
       - findings
     required_outputs:
@@ -65,6 +67,7 @@ steps:
       eligible_actor_types:
         - human
         - ai_agent
+      required_skills: [review]
     required_inputs:
       - summary
     outcomes:

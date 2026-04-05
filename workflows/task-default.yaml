@@ -19,6 +19,7 @@ steps:
       mode: ai_only
       eligible_actor_types:
         - ai_agent
+      required_skills: [execution]
     preconditions:
       - type: artifact_status
         config:
@@ -45,6 +46,7 @@ steps:
       eligible_actor_types:
         - ai_agent
         - human
+      required_skills: [execution]
     preconditions:
       - type: field_value
         config:
@@ -72,6 +74,7 @@ steps:
       eligible_actor_types:
         - human
         - ai_agent
+      required_skills: [review]
     preconditions:
       - type: links_exist
         config:

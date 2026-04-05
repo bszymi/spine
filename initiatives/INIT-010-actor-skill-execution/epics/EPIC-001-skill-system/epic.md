@@ -58,3 +58,4 @@ Currently, actors declare `Capabilities: []string` and workflows declare `requir
 | TASK-008 | Propagate Skill Lookup Failures in Actor Selection | None |
 | TASK-009 | Filter Deprecated Skills from Eligibility and Fix Stale Docs | None |
 | TASK-010 | Rename All Capabilities References to Skills | TASK-009 |
+| TASK-011 | Require At Least One Skill on Actor-Assigned Steps | TASK-010 |

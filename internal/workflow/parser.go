@@ -177,6 +177,12 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 				errors = append(errors, schemaError(ePrefix+".mode", fmt.Sprintf("invalid execution mode %q", step.Execution.Mode)))
 			}
 		}
+
+		// Steps that involve actor selection must declare at least one required skill.
+		// Automated-only steps are exempt since they don't require actor assignment.
+		if step.Execution.Mode != domain.ExecModeAutomatedOnly && len(step.Execution.RequiredSkills) == 0 {
+			errors = append(errors, schemaError(ePrefix+".required_skills", "at least one required skill must be declared for actor-assigned steps"))
+		}
 	}
 
 	return errors

@@ -20,6 +20,7 @@ steps:
       eligible_actor_types:
         - human
         - ai_agent
+      required_skills: [planning]
     preconditions:
       - type: artifact_status
         config:
@@ -39,6 +40,7 @@ steps:
       mode: human_only
       eligible_actor_types:
         - human
+      required_skills: [review]
     required_inputs:
       - decision_document
     outcomes:
