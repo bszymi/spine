@@ -95,7 +95,7 @@ steps:
       eligible_actor_types:
         - <enum>                   # human, ai_agent, automated_system
       required_capabilities:       # Optional: capabilities needed to execute
-        - <string>
+        - <string>               # Resolves against skill registry; warns if unregistered
 
     preconditions:                 # Optional: must be true before step starts
       - <condition>

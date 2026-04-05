@@ -307,8 +307,12 @@ Cross-artifact validation checks that the workflow definition is consistent with
 
 ### 7.3 Capability Alignment
 
-- `required_capabilities` referenced in step execution blocks should correspond to capabilities registered in the system (per [Actor Model](/architecture/actor-model.md) §3.1)
-- This is a warning (not error) because capabilities may be registered after workflow creation
+- `required_capabilities` referenced in step execution blocks are validated against the skill registry (per [Actor Model](/architecture/actor-model.md) §3.1 Skill Registry)
+- When skills are registered in the workspace, each `required_capabilities` value is checked against active skill names
+- Unregistered capability names produce a **warning** (not error) because capabilities may be registered after workflow creation, and the system falls back to legacy string matching
+- If no skills are registered at all, this validation is skipped (the system is still using legacy capabilities)
+- Deprecated skills are not matched — referencing a deprecated skill produces a warning
+- Implementation: `workflow.ValidateCapabilities()` in `internal/workflow/capability_validation.go`
 
 ### 7.4 Actor Type Alignment
 
