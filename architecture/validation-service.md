@@ -119,6 +119,17 @@ These rules ensure required predecessor work is in place.
 | `PC-002` | When a Task transitions to `In Progress`, its parent Epic must be at least `In Progress` | Task | Warning |
 | `PC-003` | When an Epic transitions to `In Progress`, its parent Initiative must be at least `In Progress` | Epic | Warning |
 
+### 3.7 Skill Eligibility Rules
+
+These rules validate actor skill eligibility during workflow execution.
+
+| Rule ID | Description | Applies To | Severity |
+|---------|-------------|------------|----------|
+| `SE-001` | Actor must possess all skills declared in `execution.required_capabilities` on the workflow step | Step assignment | Error |
+| `SE-002` | `EventAssignmentFailed` is emitted with missing skill details when skill eligibility check fails | Step assignment | N/A (event) |
+
+Skill eligibility is validated via `actor.ValidateSkillEligibility()`. When an actor is explicitly assigned to a step and lacks required skills, the error message identifies the specific missing skills. When no eligible actors are found during pool-based selection, the assignment fails with `EventAssignmentFailed` including the failure reason in the event payload.
+
 ---
 
 ## 4. Mismatch Classification

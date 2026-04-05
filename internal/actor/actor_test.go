@@ -479,3 +479,115 @@ func TestSelectFallsBackToCapabilities(t *testing.T) {
 		t.Errorf("expected a1, got %s", a.ActorID)
 	}
 }
+
+// ── Skill Eligibility Validation Tests ──
+
+func TestValidateSkillEligibility_AllPresent(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.skills["s2"] = &domain.Skill{SkillID: "s2", Name: "testing"}
+	fs.actorSkills["a1"] = map[string]bool{"s1": true, "s2": true}
+
+	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"code_review", "testing"})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !result.Eligible {
+		t.Errorf("expected eligible, got missing: %v", result.MissingSkills)
+	}
+}
+
+func TestValidateSkillEligibility_MissingSkills(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.actorSkills["a1"] = map[string]bool{"s1": true}
+
+	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"code_review", "deployment"})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if result.Eligible {
+		t.Error("expected not eligible")
+	}
+	if len(result.MissingSkills) != 1 || result.MissingSkills[0] != "deployment" {
+		t.Errorf("expected missing [deployment], got %v", result.MissingSkills)
+	}
+}
+
+func TestValidateSkillEligibility_EmptyRequirements(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
+
+	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", nil)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !result.Eligible {
+		t.Error("expected eligible with no requirements")
+	}
+}
+
+func TestValidateSkillEligibility_FallsBackToCapabilities(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{
+		ActorID: "a1", Status: domain.ActorStatusActive,
+		Capabilities: []string{"legacy_cap"},
+	}
+
+	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"legacy_cap"})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !result.Eligible {
+		t.Error("expected eligible via legacy capabilities fallback")
+	}
+}
+
+func TestSelectExplicitDescriptiveSkillError(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{
+		ActorID: "a1", Type: domain.ActorTypeHuman, Name: "Alice",
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.actorSkills["a1"] = map[string]bool{"s1": true}
+
+	_, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
+		Strategy:             actor.StrategyExplicit,
+		ExplicitActorID:      "a1",
+		RequiredCapabilities: []string{"code_review", "deployment"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing skill")
+	}
+	// Error should mention the specific missing skill
+	errStr := err.Error()
+	if !contains_(errStr, "deployment") {
+		t.Errorf("expected error to mention missing skill 'deployment', got: %s", errStr)
+	}
+}
+
+func contains_(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
+}
+
+func containsSubstring(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

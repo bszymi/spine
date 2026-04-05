@@ -76,6 +76,54 @@ func (s *Service) ListSkills(ctx context.Context, actorID string) ([]domain.Skil
 	return s.store.ListActorSkills(ctx, actorID)
 }
 
+// SkillEligibilityResult describes the outcome of a skill eligibility check.
+type SkillEligibilityResult struct {
+	Eligible      bool
+	MissingSkills []string
+}
+
+// ValidateSkillEligibility checks whether an actor has all required capabilities.
+// Returns which skills are missing if the actor is not eligible.
+func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, requiredCapabilities []string) (*SkillEligibilityResult, error) {
+	if len(requiredCapabilities) == 0 {
+		return &SkillEligibilityResult{Eligible: true}, nil
+	}
+
+	actor, err := s.store.GetActor(ctx, actorID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check skills first, fall back to legacy capabilities
+	skills, skillErr := s.store.ListActorSkills(ctx, actorID)
+	useSkills := skillErr == nil && len(skills) > 0
+
+	var capSet map[string]bool
+	if useSkills {
+		capSet = make(map[string]bool, len(skills))
+		for _, sk := range skills {
+			capSet[sk.Name] = true
+		}
+	} else {
+		capSet = make(map[string]bool, len(actor.Capabilities))
+		for _, c := range actor.Capabilities {
+			capSet[c] = true
+		}
+	}
+
+	var missing []string
+	for _, req := range requiredCapabilities {
+		if !capSet[req] {
+			missing = append(missing, req)
+		}
+	}
+
+	return &SkillEligibilityResult{
+		Eligible:      len(missing) == 0,
+		MissingSkills: missing,
+	}, nil
+}
+
 func (s *Service) updateStatus(ctx context.Context, actorID string, status domain.ActorStatus) error {
 	log := observe.Logger(ctx)
 	actor, err := s.store.GetActor(ctx, actorID)
