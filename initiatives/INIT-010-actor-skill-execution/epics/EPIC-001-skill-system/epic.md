@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: Skill System and Capability Matching
-status: Completed
+status: In Progress
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05
@@ -57,3 +57,4 @@ Currently, actors declare `Capabilities: []string` and workflows declare `requir
 | TASK-007 | Backfill Existing Capabilities into Skills During Migration | TASK-006 |
 | TASK-008 | Propagate Skill Lookup Failures in Actor Selection | None |
 | TASK-009 | Filter Deprecated Skills from Eligibility and Fix Stale Docs | None |
+| TASK-010 | Rename All Capabilities References to Skills | TASK-009 |
