@@ -53,3 +53,4 @@ Currently, actors declare `Capabilities: []string` and workflows declare `requir
 | TASK-003 | Upgrade required_capabilities to Resolve Against Skill Registry | TASK-001 |
 | TASK-004 | Skill Eligibility Validation | TASK-002, TASK-003 |
 | TASK-005 | Skill Query Interface | TASK-001, TASK-002 |
+| TASK-006 | Remove Legacy Capabilities Field from Actor | TASK-002, TASK-003, TASK-004 |
