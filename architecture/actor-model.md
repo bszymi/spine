@@ -62,7 +62,7 @@ Capabilities are formalized through the **Skill** entity (`auth.skills` table). 
 - `category` — grouping (e.g. "development", "review", "operations")
 - `status` — active or deprecated
 
-When `required_capabilities` values on a workflow step match registered skill names, the system resolves them through the skill registry. When no matching skill entity exists, bare string matching against the actor's `capabilities` field is used as a fallback. This provides backward compatibility during migration from opaque capability strings to formal skills.
+When `required_capabilities` values on a workflow step match registered skill names, the system resolves them through the skill registry. Only active skills are considered — deprecated skills do not satisfy capability requirements.
 
 #### Actor-Skill Associations
 
@@ -72,7 +72,7 @@ Skills are assigned to actors via a many-to-many relationship (`auth.actor_skill
 - `RemoveSkill(actorID, skillID)` — remove a skill from an actor
 - `ListSkills(actorID)` — list all skills assigned to an actor
 
-During actor selection, if an actor has skills assigned, the skill-based matching takes precedence over the legacy `capabilities` field. If no skills are assigned, the system falls back to the legacy field.
+During actor selection, capability matching is performed exclusively through the skill registry. Actors without assigned skills are not eligible for steps that require capabilities.
 
 #### Eligible Actor Discovery
 

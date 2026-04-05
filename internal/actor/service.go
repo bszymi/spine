@@ -73,6 +73,9 @@ func (s *Service) RemoveSkill(ctx context.Context, actorID, skillID string) erro
 
 // ListSkills returns skills assigned to an actor.
 func (s *Service) ListSkills(ctx context.Context, actorID string) ([]domain.Skill, error) {
+	if actorID == "" {
+		return nil, domain.NewError(domain.ErrInvalidParams, "actor_id required")
+	}
 	return s.store.ListActorSkills(ctx, actorID)
 }
 
@@ -102,7 +105,9 @@ func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, 
 
 	capSet := make(map[string]bool, len(skills))
 	for _, sk := range skills {
-		capSet[sk.Name] = true
+		if sk.Status == domain.SkillStatusActive {
+			capSet[sk.Name] = true
+		}
 	}
 
 	var missing []string
