@@ -91,10 +91,10 @@ func (s *Service) FindEligibleActors(ctx context.Context, skillNames []string) (
 	return s.store.ListActorsBySkills(ctx, skillNames)
 }
 
-// ValidateSkillEligibility checks whether an actor has all required capabilities
-// by looking up assigned skills. Returns which skills are missing if not eligible.
-func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, requiredCapabilities []string) (*SkillEligibilityResult, error) {
-	if len(requiredCapabilities) == 0 {
+// ValidateSkillEligibility checks whether an actor has all required skills.
+// Returns which skills are missing if the actor is not eligible.
+func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, requiredSkills []string) (*SkillEligibilityResult, error) {
+	if len(requiredSkills) == 0 {
 		return &SkillEligibilityResult{Eligible: true}, nil
 	}
 
@@ -111,7 +111,7 @@ func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, 
 	}
 
 	var missing []string
-	for _, req := range requiredCapabilities {
+	for _, req := range requiredSkills {
 		if !capSet[req] {
 			missing = append(missing, req)
 		}

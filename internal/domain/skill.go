@@ -15,9 +15,8 @@ func ValidSkillStatuses() []SkillStatus {
 	return []SkillStatus{SkillStatusActive, SkillStatusDeprecated}
 }
 
-// Skill represents a workspace-scoped capability that can be assigned to actors
-// and required by workflow steps. Skills formalize the capability matching system:
-// instead of opaque capability strings, skills are first-class entities with
+// Skill represents a workspace-scoped skill that can be assigned to actors
+// and required by workflow steps. Skills are first-class entities with
 // metadata, lifecycle, and category.
 type Skill struct {
 	SkillID     string      `json:"skill_id" yaml:"skill_id"`

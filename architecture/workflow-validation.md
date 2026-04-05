@@ -29,7 +29,7 @@ Workflow validation is organized into five categories, applied in order:
 | Structural validation | Graph properties (reachability, cycles, dead steps) | After schema is valid |
 | Semantic validation | Domain-level consistency (outcome coverage, binding uniqueness) | After structure is valid |
 | Runtime safety validation | Execution risk (deadlocks, unbounded retries, unsatisfiable convergence) | After semantics are valid |
-| Cross-artifact validation | Alignment with task lifecycle, actor model, capability model | After all internal checks pass |
+| Cross-artifact validation | Alignment with task lifecycle, actor model, skill model | After all internal checks pass |
 
 All five categories must pass before a workflow may become `Active`.
 
@@ -84,7 +84,7 @@ Schema validation ensures the workflow YAML conforms to the expected structure.
 |-------|------|-----------|
 | `mode` | enum | One of: `automated_only`, `ai_only`, `human_only`, `hybrid` |
 | `eligible_actor_types` | list | Each entry one of: `human`, `ai_agent`, `automated_system` |
-| `required_capabilities` | list (optional) | Each entry is a non-empty string |
+| `required_skills` | list (optional) | Each entry is a non-empty string |
 
 ### 3.6 Divergence Point Validation
 
@@ -305,14 +305,13 @@ Cross-artifact validation checks that the workflow definition is consistent with
 - Execution workflows for Tasks should cover the terminal states they are responsible for producing during normal execution
 - Administrative terminal states such as `Superseded` or `Abandoned` may be governed outside the execution workflow and therefore do not need to appear as workflow step outcomes, but this must be documented explicitly
 
-### 7.3 Capability Alignment
+### 7.3 Skill Alignment
 
-- `required_capabilities` referenced in step execution blocks are validated against the skill registry (per [Actor Model](/architecture/actor-model.md) §3.1 Skill Registry)
-- When skills are registered in the workspace, each `required_capabilities` value is checked against active skill names
-- Unregistered capability names produce a **warning** (not error) because capabilities may be registered after workflow creation, and the system falls back to legacy string matching
-- If no skills are registered at all, this validation is skipped (the system is still using legacy capabilities)
+- `required_skills` referenced in step execution blocks are validated against the skill registry (per [Actor Model](/architecture/actor-model.md) §3.1 Skill Registry)
+- When skills are registered in the workspace, each `required_skills` value is checked against active skill names
+- Unregistered skill names produce a **warning** (not error) because skills may be registered after workflow creation
 - Deprecated skills are not matched — referencing a deprecated skill produces a warning
-- Implementation: `workflow.ValidateCapabilities()` in `internal/workflow/capability_validation.go`
+- Implementation: `workflow.ValidateSkills()` in `internal/workflow/skill_validation.go`
 
 ### 7.4 Actor Type Alignment
 
@@ -412,7 +411,7 @@ validation_result:
 **Examples of warnings:**
 - Step with no timeout configured
 - Unused divergence or convergence point definition
-- `required_capabilities` not found in registered capabilities
+- `required_skills` not found in registered skills
 - Retry inside a cycle without iteration limit
 - No registered actors matching step requirements
 - Review step without reject outcome
@@ -488,7 +487,7 @@ When a workflow is `Deprecated` or `Superseded`:
 - [System Components](/architecture/components.md) §4.3 — Workflow Engine, §4.8 — Validation Service
 - [Constitution](/governance/constitution.md) §4 — Governed Execution, §11 — Cross-Artifact Validation
 - [Artifact Schema](/governance/artifact-schema.md) §5, §6 — Artifact type schemas and status enums
-- [Actor Model](/architecture/actor-model.md) §3 — Actor registration and capabilities
+- [Actor Model](/architecture/actor-model.md) §3 — Actor registration and skills
 - [Task Lifecycle](/governance/task-lifecycle.md) — Governed terminal states
 - [Validation Service](/architecture/validation-service.md) — Cross-artifact validation rules and extensibility
 

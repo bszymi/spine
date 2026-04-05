@@ -125,7 +125,7 @@ These rules validate actor skill eligibility during workflow execution.
 
 | Rule ID | Description | Applies To | Severity |
 |---------|-------------|------------|----------|
-| `SE-001` | Actor must possess all skills declared in `execution.required_capabilities` on the workflow step | Step assignment | Error |
+| `SE-001` | Actor must possess all skills declared in `execution.required_skills` on the workflow step | Step assignment | Error |
 | `SE-002` | `EventAssignmentFailed` is emitted with missing skill details when skill eligibility check fails | Step assignment | N/A (event) |
 
 Skill eligibility is validated via `actor.ValidateSkillEligibility()`. When an actor is explicitly assigned to a step and lacks required skills, the error message identifies the specific missing skills. When no eligible actors are found during pool-based selection, the assignment fails with `EventAssignmentFailed` including the failure reason in the event payload.

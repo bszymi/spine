@@ -46,23 +46,23 @@ status: <enum>                  # active, suspended, deactivated
 created_at: <timestamp>
 ```
 
-Actor capabilities are managed through the Skill Registry (see below) rather than a field on the actor record.
+Actor skills are managed through the Skill Registry (see below) rather than a field on the actor record.
 
-Capabilities are defined at the system level (not per actor) and represent a shared vocabulary used by workflow definitions and actor configuration.
+Skills are defined at the system level (not per actor) and represent a shared vocabulary used by workflow definitions and actor configuration.
 
-Actors declare which capabilities they possess; workflows declare which capabilities are required. The Workflow Engine performs matching based on these values.
+Actors declare which skills they possess; workflows declare which skills are required. The Workflow Engine performs matching based on these values.
 
 #### Skill Registry
 
-Capabilities are formalized through the **Skill** entity (`auth.skills` table). A Skill is a workspace-scoped, first-class entity with:
+Skills are formalized through the **Skill** entity (`auth.skills` table). A Skill is a workspace-scoped, first-class entity with:
 
 - `skill_id` — unique identifier
-- `name` — unique within workspace, matches against `required_capabilities` in workflow steps
+- `name` — unique within workspace, matches against `required_skills` in workflow steps
 - `description` — human-readable explanation
 - `category` — grouping (e.g. "development", "review", "operations")
 - `status` — active or deprecated
 
-When `required_capabilities` values on a workflow step match registered skill names, the system resolves them through the skill registry. Only active skills are considered — deprecated skills do not satisfy capability requirements.
+When `required_skills` values on a workflow step match registered skill names, the system resolves them through the skill registry. Only active skills are considered — deprecated skills do not satisfy skill requirements.
 
 #### Actor-Skill Associations
 
@@ -72,7 +72,7 @@ Skills are assigned to actors via a many-to-many relationship (`auth.actor_skill
 - `RemoveSkill(actorID, skillID)` — remove a skill from an actor
 - `ListSkills(actorID)` — list all skills assigned to an actor
 
-During actor selection, capability matching is performed exclusively through the skill registry. Actors without assigned skills are not eligible for steps that require capabilities.
+During actor selection, skill matching is performed exclusively through the skill registry. Actors without assigned skills are not eligible for steps that require skills.
 
 #### Eligible Actor Discovery
 
@@ -85,7 +85,7 @@ At the store level, `ListActorsBySkills(skillNames)` performs the query using a 
 - Every actor must be registered before interacting with the system
 - Actor IDs are stable and never reused
 - Actor type is set at registration and cannot be changed (create a new actor record instead)
-- Role and capabilities may be updated by an admin
+- Role and skills may be updated by an admin
 - Deactivated actors cannot authenticate or be assigned to steps
 
 ### 3.3 Why Actors Are Not Git Artifacts
@@ -111,7 +111,7 @@ execution:
   mode: <enum>                   # automated_only, ai_only, human_only, hybrid
   eligible_actor_types:
     - <enum>                     # human, ai_agent, automated_system
-  required_capabilities:
+  required_skills:
     - <string>                   # e.g., architecture_review, code_generation
 ```
 
@@ -120,7 +120,7 @@ execution:
 The Workflow Engine selects an actor through the following process:
 
 1. **Filter by type** — restrict candidates to actors matching `eligible_actor_types`
-2. **Filter by capability** — restrict candidates to actors possessing all `required_capabilities`
+2. **Filter by skill** — restrict candidates to actors possessing all `required_skills`
 3. **Filter by role** — restrict candidates to actors whose role grants sufficient permissions for the operation
 4. **Filter by availability** — restrict candidates to actors with `active` status
 5. **Select** — from the eligible set, select an actor using the configured selection strategy
@@ -237,7 +237,7 @@ actor_id: ai-code-reviewer
 name: AI Code Reviewer
 type: ai_agent
 role: contributor
-capabilities:
+skills:
   - code_review
   - style_review
 status: active
@@ -331,7 +331,7 @@ Availability may include additional operational signals such as error rates, lat
 
 - [Domain Model](/architecture/domain-model.md) §3.4 — Actor entity definition
 - [System Components](/architecture/components.md) §4.6 — Actor Gateway component
-- [Security Model](/architecture/security-model.md) §3 — Authentication, §4 — Authorization and capabilities
+- [Security Model](/architecture/security-model.md) §3 — Authentication, §4 — Authorization and skills
 - [Workflow Definition Format](/architecture/workflow-definition-format.md) §3.2 — Step execution block
 - [Error Handling](/architecture/error-handling-and-recovery.md) — Step failure and retry handling
 - [Observability](/architecture/observability.md) §3 — Trace ID propagation through actor requests
@@ -346,7 +346,7 @@ This actor model is expected to evolve as the system is implemented and actor in
 
 Areas expected to require refinement:
 
-- Actor capability discovery and negotiation
+- Actor skill discovery and negotiation
 - AI agent prompt engineering patterns and templates
 - Actor performance metrics and quality tracking
 - Multi-agent collaboration patterns

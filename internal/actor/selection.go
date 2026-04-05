@@ -21,11 +21,11 @@ const (
 
 // SelectionRequest describes criteria for selecting an actor.
 type SelectionRequest struct {
-	EligibleActorTypes   []string
-	RequiredCapabilities []string
-	MinRole              domain.ActorRole
-	Strategy             SelectionStrategy
-	ExplicitActorID      string // for explicit strategy
+	EligibleActorTypes []string
+	RequiredSkills     []string
+	MinRole            domain.ActorRole
+	Strategy           SelectionStrategy
+	ExplicitActorID    string // for explicit strategy
 }
 
 // roundRobinState tracks assignment rotation per eligible pool key.
@@ -35,8 +35,7 @@ var (
 )
 
 // SelectActor chooses an actor based on the selection criteria.
-// Per Actor Model §4.2: filter by type → capability → role → availability → strategy.
-// Capability matching uses actor skills (via store).
+// Per Actor Model §4.2: filter by type → skill → role → availability → strategy.
 func (s *Service) SelectActor(ctx context.Context, req SelectionRequest) (*domain.Actor, error) {
 	// For explicit strategy, validate the named actor
 	if req.Strategy == StrategyExplicit {
@@ -92,8 +91,8 @@ func (s *Service) selectExplicit(ctx context.Context, req SelectionRequest) (*do
 	}
 
 	// Check skill eligibility with descriptive error
-	if len(req.RequiredCapabilities) > 0 {
-		result, err := s.ValidateSkillEligibility(ctx, actor.ActorID, req.RequiredCapabilities)
+	if len(req.RequiredSkills) > 0 {
+		result, err := s.ValidateSkillEligibility(ctx, actor.ActorID, req.RequiredSkills)
 		if err != nil {
 			return nil, fmt.Errorf("validate skill eligibility: %w", err)
 		}
@@ -107,7 +106,6 @@ func (s *Service) selectExplicit(ctx context.Context, req SelectionRequest) (*do
 }
 
 // filterActorsWithSkills applies the selection criteria filters.
-// For capability matching, it checks actor skills via the store.
 func (s *Service) filterActorsWithSkills(ctx context.Context, actors []domain.Actor, req SelectionRequest) []domain.Actor {
 	var result []domain.Actor
 
@@ -119,9 +117,9 @@ func (s *Service) filterActorsWithSkills(ctx context.Context, actors []domain.Ac
 			continue
 		}
 
-		// Filter by capabilities via skill registry
-		if len(req.RequiredCapabilities) > 0 {
-			has, err := s.actorHasCapabilities(ctx, actor, req.RequiredCapabilities)
+		// Filter by skills via skill registry
+		if len(req.RequiredSkills) > 0 {
+			has, err := s.actorHasSkills(ctx, actor, req.RequiredSkills)
 			if err != nil {
 				observe.Logger(ctx).Warn("skill lookup failed during actor selection, skipping actor",
 					"actor_id", actor.ActorID, "error", err)
@@ -142,11 +140,10 @@ func (s *Service) filterActorsWithSkills(ctx context.Context, actors []domain.Ac
 	return result
 }
 
-// actorHasCapabilities checks if an actor has all required capabilities
-// by looking up assigned active skills via the store. Returns an error
-// if the skill lookup fails so callers can distinguish DB failures from
-// genuine skill mismatches.
-func (s *Service) actorHasCapabilities(ctx context.Context, actor *domain.Actor, required []string) (bool, error) {
+// actorHasSkills checks if an actor has all required skills by looking up
+// assigned active skills via the store. Returns an error if the skill lookup
+// fails so callers can distinguish DB failures from genuine skill mismatches.
+func (s *Service) actorHasSkills(ctx context.Context, actor *domain.Actor, required []string) (bool, error) {
 	skills, err := s.store.ListActorSkills(ctx, actor.ActorID)
 	if err != nil {
 		return false, fmt.Errorf("list skills for actor %s: %w", actor.ActorID, err)
@@ -167,7 +164,7 @@ func (s *Service) actorHasCapabilities(ctx context.Context, actor *domain.Actor,
 
 func selectRoundRobin(actors []domain.Actor, req SelectionRequest) *domain.Actor {
 	// Build a pool key from the selection criteria to keep rotation per-pool
-	key := strings.Join(req.EligibleActorTypes, ",") + "|" + strings.Join(req.RequiredCapabilities, ",") + "|" + string(req.MinRole)
+	key := strings.Join(req.EligibleActorTypes, ",") + "|" + strings.Join(req.RequiredSkills, ",") + "|" + string(req.MinRole)
 
 	rrMu.Lock()
 	defer rrMu.Unlock()
@@ -185,4 +182,3 @@ func contains(slice []string, item string) bool {
 	}
 	return false
 }
-

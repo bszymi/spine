@@ -344,8 +344,8 @@ Emitted when no eligible actor can be found for a step (per [Actor Model](/archi
 payload:
   step_id: <string>             # Step that could not be assigned
   step_name: <string>
-  reason: <string>              # Why assignment failed (no_eligible_actors, actor_unreachable, capability_mismatch)
-  required_capabilities: [<string>] # Capabilities the step requires
+  reason: <string>              # Why assignment failed (no_eligible_actors, actor_unreachable, skill_mismatch)
+  required_skills: [<string>]      # Skills the step requires
   eligible_actor_types: [<string>]  # Actor types the step accepts
   attempt: <integer>            # Assignment attempt number
   branch_id: <string|null>

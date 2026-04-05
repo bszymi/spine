@@ -740,7 +740,7 @@ components:
             severity: { type: string }
             required_role: { type: string }
             actor_role: { type: string }
-            required_capability: { type: string }
+            required_skill: { type: string }
 
     PaginationMeta:
       type: object

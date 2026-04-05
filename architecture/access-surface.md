@@ -232,7 +232,7 @@ For the full authorization model including role hierarchy, capabilities, and enf
 
 - Roles are assigned to actors, not to access modes
 - An actor has the same permissions regardless of whether they access via CLI, API, or GUI
-- Workflow definitions may impose additional step-level constraints via capabilities (e.g., "only actors with `architecture_review` capability may execute this step")
+- Workflow definitions may impose additional step-level constraints via skills (e.g., "only actors with `architecture_review` skill may execute this step")
 - Authorization is enforced at the Access Gateway before requests reach internal components
 
 ### 4.4 Secrets and Credentials
