@@ -139,7 +139,7 @@ An entity that executes workflow steps. Actors are interchangeable — the syste
 - `id` — stable identifier
 - `type` — classification (human, ai_agent, automated_system)
 - `name` — human-readable name
-- `capabilities` — what types of steps this actor can perform (see [Security Model](/architecture/security-model.md) §4.6)
+- `capabilities` — what types of steps this actor can perform (see [Security Model](/architecture/security-model.md) §4.6). Capabilities resolve against the Skill registry when skills exist; bare string matching is used as fallback.
 - `permissions` — what artifacts and workflows the actor may access (derived from role, see [Security Model](/architecture/security-model.md) §4.1)
 
 **Rules:**
@@ -148,6 +148,26 @@ An entity that executes workflow steps. Actors are interchangeable — the syste
 - No actor has implicit authority — authority comes from workflow definitions
 - AI agents are execution participants, not decision authorities
 - Actors cannot mutate artifacts outside workflow definitions
+
+---
+
+### 3.4.1 Skill
+
+A workspace-scoped capability entity that formalizes the capability matching system. Instead of treating capabilities as opaque strings, skills are first-class entities with metadata and lifecycle.
+
+**Attributes:**
+
+- `skill_id` — unique identifier (UUID)
+- `name` — unique within workspace, used for matching against `required_capabilities`
+- `description` — human-readable explanation of the skill
+- `category` — grouping (e.g. "development", "review", "operations")
+- `status` — lifecycle state (active, deprecated)
+
+**Relationships:**
+
+- Skills are assigned to Actors (many-to-many)
+- Workflow steps declare required capabilities that resolve against skills
+- Skills are workspace-scoped — no cross-workspace visibility
 
 ---
 

@@ -52,6 +52,18 @@ Capabilities are defined at the system level (not per actor) and represent a sha
 
 Actors declare which capabilities they possess; workflows declare which capabilities are required. The Workflow Engine performs matching based on these values.
 
+#### Skill Registry
+
+Capabilities are formalized through the **Skill** entity (`auth.skills` table). A Skill is a workspace-scoped, first-class entity with:
+
+- `skill_id` — unique identifier
+- `name` — unique within workspace, matches against `required_capabilities` in workflow steps
+- `description` — human-readable explanation
+- `category` — grouping (e.g. "development", "review", "operations")
+- `status` — active or deprecated
+
+When `required_capabilities` values on a workflow step match registered skill names, the system resolves them through the skill registry. When no matching skill entity exists, bare string matching against the actor's `capabilities` field is used as a fallback. This provides backward compatibility during migration from opaque capability strings to formal skills.
+
 ### 3.2 Registration Rules
 
 - Every actor must be registered before interacting with the system

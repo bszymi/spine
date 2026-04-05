@@ -983,6 +983,77 @@ func (s *PostgresStore) UpdateSyncState(ctx context.Context, state *SyncState) e
 	return err
 }
 
+// ── Skills ──
+
+func (s *PostgresStore) CreateSkill(ctx context.Context, skill *domain.Skill) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO auth.skills (skill_id, name, description, category, status)
+		VALUES ($1, $2, $3, $4, $5)`,
+		skill.SkillID, skill.Name, skill.Description, skill.Category, skill.Status,
+	)
+	return err
+}
+
+func (s *PostgresStore) GetSkill(ctx context.Context, skillID string) (*domain.Skill, error) {
+	var skill domain.Skill
+	err := s.pool.QueryRow(ctx, `
+		SELECT skill_id, name, description, category, status, created_at, updated_at
+		FROM auth.skills WHERE skill_id = $1`, skillID,
+	).Scan(&skill.SkillID, &skill.Name, &skill.Description, &skill.Category, &skill.Status, &skill.CreatedAt, &skill.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "skill not found")
+		}
+		return nil, err
+	}
+	return &skill, nil
+}
+
+func (s *PostgresStore) UpdateSkill(ctx context.Context, skill *domain.Skill) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE auth.skills SET name = $1, description = $2, category = $3, status = $4, updated_at = now()
+		WHERE skill_id = $5`,
+		skill.Name, skill.Description, skill.Category, skill.Status, skill.SkillID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "skill not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListSkills(ctx context.Context) ([]domain.Skill, error) {
+	return s.listSkillsQuery(ctx, `
+		SELECT skill_id, name, description, category, status, created_at, updated_at
+		FROM auth.skills ORDER BY name`)
+}
+
+func (s *PostgresStore) ListSkillsByCategory(ctx context.Context, category string) ([]domain.Skill, error) {
+	return s.listSkillsQuery(ctx, `
+		SELECT skill_id, name, description, category, status, created_at, updated_at
+		FROM auth.skills WHERE category = $1 ORDER BY name`, category)
+}
+
+func (s *PostgresStore) listSkillsQuery(ctx context.Context, query string, args ...any) ([]domain.Skill, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var skills []domain.Skill
+	for rows.Next() {
+		var skill domain.Skill
+		if err := rows.Scan(&skill.SkillID, &skill.Name, &skill.Description, &skill.Category, &skill.Status, &skill.CreatedAt, &skill.UpdatedAt); err != nil {
+			return nil, err
+		}
+		skills = append(skills, skill)
+	}
+	return skills, rows.Err()
+}
+
 // ── Migrations ──
 
 func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir string) error {

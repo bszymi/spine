@@ -360,7 +360,34 @@ CREATE INDEX idx_assignments_timeout ON runtime.actor_assignments (timeout_at)
     WHERE status = 'active';
 ```
 
-### 4.8 JSONB Field Semantics
+### 4.8 `auth.skills`
+
+Workspace-scoped skill entities that formalize the capability matching system. Skills are registered in the `auth` schema alongside actors and tokens.
+
+```sql
+CREATE TABLE auth.skills (
+    skill_id    text        PRIMARY KEY,
+    name        text        NOT NULL UNIQUE,       -- unique within workspace
+    description text        NOT NULL DEFAULT '',
+    category    text        NOT NULL DEFAULT '',    -- e.g. "development", "review", "operations"
+    status      text        NOT NULL DEFAULT 'active',
+                                                    -- active, deprecated
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT skill_status_check CHECK (status IN ('active', 'deprecated'))
+);
+```
+
+**Indexes:**
+
+```sql
+CREATE INDEX idx_skills_name ON auth.skills (name);
+CREATE INDEX idx_skills_category ON auth.skills (category);
+CREATE INDEX idx_skills_status ON auth.skills (status);
+```
+
+### 4.9 JSONB Field Semantics
 
 The following JSONB fields are used for flexible or evolving data structures:
 
