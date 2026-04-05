@@ -74,6 +74,12 @@ Skills are assigned to actors via a many-to-many relationship (`auth.actor_skill
 
 During actor selection, if an actor has skills assigned, the skill-based matching takes precedence over the legacy `capabilities` field. If no skills are assigned, the system falls back to the legacy field.
 
+#### Eligible Actor Discovery
+
+The actor service provides `FindEligibleActors(skillNames)` which returns all active actors possessing all specified skills (AND matching). When no skill names are provided, all active actors are returned. This powers dashboards and AI execution engines that need to discover who can execute a given workflow step.
+
+At the store level, `ListActorsBySkills(skillNames)` performs the query using a `COUNT/HAVING` pattern to enforce AND matching across the actor-skill junction table.
+
 ### 3.2 Registration Rules
 
 - Every actor must be registered before interacting with the system

@@ -97,6 +97,45 @@ func (f *fakeStore) ListActorSkills(_ context.Context, actorID string) ([]domain
 	return result, nil
 }
 
+func (f *fakeStore) ListActorsBySkills(_ context.Context, skillNames []string) ([]domain.Actor, error) {
+	if len(skillNames) == 0 {
+		var result []domain.Actor
+		for _, a := range f.actors {
+			if a.Status == domain.ActorStatusActive {
+				result = append(result, *a)
+			}
+		}
+		return result, nil
+	}
+
+	// AND matching: actor must have ALL requested skill names
+	var result []domain.Actor
+	for actorID, a := range f.actors {
+		if a.Status != domain.ActorStatusActive {
+			continue
+		}
+		assignedSkillIDs := f.actorSkills[actorID]
+		// Build set of skill names for this actor
+		actorSkillNames := make(map[string]bool)
+		for sid := range assignedSkillIDs {
+			if sk, ok := f.skills[sid]; ok {
+				actorSkillNames[sk.Name] = true
+			}
+		}
+		allMatch := true
+		for _, name := range skillNames {
+			if !actorSkillNames[name] {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			result = append(result, *a)
+		}
+	}
+	return result, nil
+}
+
 // ── Service Tests ──
 
 func TestRegisterAndGet(t *testing.T) {
@@ -590,4 +629,65 @@ func containsSubstring(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ── Skill Query Interface Tests ──
+
+func TestFindEligibleActors_AllSkills(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
+	fs.actors["a2"] = &domain.Actor{ActorID: "a2", Status: domain.ActorStatusActive}
+	fs.actors["a3"] = &domain.Actor{ActorID: "a3", Status: domain.ActorStatusActive}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.skills["s2"] = &domain.Skill{SkillID: "s2", Name: "testing"}
+	// a1 has both skills, a2 has only one, a3 has none
+	fs.actorSkills["a1"] = map[string]bool{"s1": true, "s2": true}
+	fs.actorSkills["a2"] = map[string]bool{"s1": true}
+
+	actors, err := svc.FindEligibleActors(context.Background(), []string{"code_review", "testing"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(actors) != 1 {
+		t.Fatalf("expected 1 eligible actor, got %d", len(actors))
+	}
+	if actors[0].ActorID != "a1" {
+		t.Errorf("expected a1, got %s", actors[0].ActorID)
+	}
+}
+
+func TestFindEligibleActors_EmptySkills(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
+	fs.actors["a2"] = &domain.Actor{ActorID: "a2", Status: domain.ActorStatusSuspended}
+
+	actors, err := svc.FindEligibleActors(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	// Should return all active actors
+	if len(actors) != 1 {
+		t.Errorf("expected 1 active actor, got %d", len(actors))
+	}
+}
+
+func TestFindEligibleActors_ExcludesSuspended(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusSuspended}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.actorSkills["a1"] = map[string]bool{"s1": true}
+
+	actors, err := svc.FindEligibleActors(context.Background(), []string{"code_review"})
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if len(actors) != 0 {
+		t.Errorf("expected 0 actors (suspended), got %d", len(actors))
+	}
 }
