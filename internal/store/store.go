@@ -103,6 +103,11 @@ type Store interface {
 	ListSkills(ctx context.Context) ([]domain.Skill, error)
 	ListSkillsByCategory(ctx context.Context, category string) ([]domain.Skill, error)
 
+	// Actor-Skill Associations
+	AddSkillToActor(ctx context.Context, actorID, skillID string) error
+	RemoveSkillFromActor(ctx context.Context, actorID, skillID string) error
+	ListActorSkills(ctx context.Context, actorID string) ([]domain.Skill, error)
+
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error
 	IsMigrationApplied(ctx context.Context, version string) (bool, error)

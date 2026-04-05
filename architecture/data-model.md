@@ -151,6 +151,11 @@ skills
 ├── status             (enum: active, deprecated)
 ├── created_at         (timestamp)
 └── updated_at         (timestamp)
+
+actor_skills
+├── actor_id           (string, foreign key to actors)
+├── skill_id           (string, foreign key to skills)
+└── assigned_at        (timestamp)
 ```
 
 For the production-ready table definitions with indexes, constraints, idempotency strategy, and archival policy, see [Runtime Store Schema](/architecture/runtime-schema.md) §4.

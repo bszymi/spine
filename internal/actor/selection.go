@@ -34,6 +34,8 @@ var (
 
 // SelectActor chooses an actor based on the selection criteria.
 // Per Actor Model §4.2: filter by type → capability → role → availability → strategy.
+// Capability matching uses actor skills (via store) with fallback to the legacy
+// Capabilities field for backward compatibility during migration.
 func (s *Service) SelectActor(ctx context.Context, req SelectionRequest) (*domain.Actor, error) {
 	// For explicit strategy, validate the named actor
 	if req.Strategy == StrategyExplicit {
@@ -46,7 +48,7 @@ func (s *Service) SelectActor(ctx context.Context, req SelectionRequest) (*domai
 		return nil, err
 	}
 
-	eligible := filterActors(actors, req)
+	eligible := s.filterActorsWithSkills(ctx, actors, req)
 
 	if len(eligible) == 0 {
 		return nil, domain.NewError(domain.ErrNotFound, "no eligible actor found")
@@ -77,7 +79,7 @@ func (s *Service) selectExplicit(ctx context.Context, req SelectionRequest) (*do
 	}
 
 	// Verify eligibility
-	eligible := filterActors([]domain.Actor{*actor}, req)
+	eligible := s.filterActorsWithSkills(ctx, []domain.Actor{*actor}, req)
 	if len(eligible) == 0 {
 		return nil, domain.NewError(domain.ErrConflict, "actor does not meet selection criteria")
 	}
@@ -85,8 +87,10 @@ func (s *Service) selectExplicit(ctx context.Context, req SelectionRequest) (*do
 	return &eligible[0], nil
 }
 
-// filterActors applies the selection criteria filters.
-func filterActors(actors []domain.Actor, req SelectionRequest) []domain.Actor {
+// filterActorsWithSkills applies the selection criteria filters.
+// For capability matching, it first checks actor skills via the store.
+// If the actor has no skills assigned, it falls back to the legacy Capabilities field.
+func (s *Service) filterActorsWithSkills(ctx context.Context, actors []domain.Actor, req SelectionRequest) []domain.Actor {
 	var result []domain.Actor
 
 	for i := range actors {
@@ -97,8 +101,8 @@ func filterActors(actors []domain.Actor, req SelectionRequest) []domain.Actor {
 			continue
 		}
 
-		// Filter by capabilities
-		if !hasAllCapabilities(actor.Capabilities, req.RequiredCapabilities) {
+		// Filter by capabilities: try skills first, fall back to legacy field
+		if len(req.RequiredCapabilities) > 0 && !s.actorHasCapabilities(ctx, actor, req.RequiredCapabilities) {
 			continue
 		}
 
@@ -110,6 +114,28 @@ func filterActors(actors []domain.Actor, req SelectionRequest) []domain.Actor {
 		result = append(result, *actor)
 	}
 	return result
+}
+
+// actorHasCapabilities checks if an actor has all required capabilities.
+// It first checks assigned skills via the store. If the actor has no skills,
+// it falls back to the legacy Capabilities []string field.
+func (s *Service) actorHasCapabilities(ctx context.Context, actor *domain.Actor, required []string) bool {
+	skills, err := s.store.ListActorSkills(ctx, actor.ActorID)
+	if err == nil && len(skills) > 0 {
+		skillNames := make(map[string]bool, len(skills))
+		for _, sk := range skills {
+			skillNames[sk.Name] = true
+		}
+		for _, req := range required {
+			if !skillNames[req] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Fallback to legacy capabilities field
+	return hasAllCapabilities(actor.Capabilities, required)
 }
 
 func selectRoundRobin(actors []domain.Actor, req SelectionRequest) *domain.Actor {

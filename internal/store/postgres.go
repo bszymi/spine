@@ -1054,6 +1054,36 @@ func (s *PostgresStore) listSkillsQuery(ctx context.Context, query string, args 
 	return skills, rows.Err()
 }
 
+// ── Actor-Skill Associations ──
+
+func (s *PostgresStore) AddSkillToActor(ctx context.Context, actorID, skillID string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO auth.actor_skills (actor_id, skill_id)
+		VALUES ($1, $2)
+		ON CONFLICT (actor_id, skill_id) DO NOTHING`,
+		actorID, skillID,
+	)
+	return err
+}
+
+func (s *PostgresStore) RemoveSkillFromActor(ctx context.Context, actorID, skillID string) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM auth.actor_skills
+		WHERE actor_id = $1 AND skill_id = $2`,
+		actorID, skillID,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListActorSkills(ctx context.Context, actorID string) ([]domain.Skill, error) {
+	return s.listSkillsQuery(ctx, `
+		SELECT s.skill_id, s.name, s.description, s.category, s.status, s.created_at, s.updated_at
+		FROM auth.skills s
+		JOIN auth.actor_skills as_ ON s.skill_id = as_.skill_id
+		WHERE as_.actor_id = $1
+		ORDER BY s.name`, actorID)
+}
+
 // ── Migrations ──
 
 func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir string) error {

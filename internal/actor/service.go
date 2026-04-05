@@ -55,6 +55,27 @@ func (s *Service) Reactivate(ctx context.Context, actorID string) error {
 	return s.updateStatus(ctx, actorID, domain.ActorStatusActive)
 }
 
+// AddSkill assigns a skill to an actor.
+func (s *Service) AddSkill(ctx context.Context, actorID, skillID string) error {
+	if actorID == "" || skillID == "" {
+		return domain.NewError(domain.ErrInvalidParams, "actor_id and skill_id required")
+	}
+	return s.store.AddSkillToActor(ctx, actorID, skillID)
+}
+
+// RemoveSkill removes a skill from an actor.
+func (s *Service) RemoveSkill(ctx context.Context, actorID, skillID string) error {
+	if actorID == "" || skillID == "" {
+		return domain.NewError(domain.ErrInvalidParams, "actor_id and skill_id required")
+	}
+	return s.store.RemoveSkillFromActor(ctx, actorID, skillID)
+}
+
+// ListSkills returns skills assigned to an actor.
+func (s *Service) ListSkills(ctx context.Context, actorID string) ([]domain.Skill, error) {
+	return s.store.ListActorSkills(ctx, actorID)
+}
+
 func (s *Service) updateStatus(ctx context.Context, actorID string, status domain.ActorStatus) error {
 	log := observe.Logger(ctx)
 	actor, err := s.store.GetActor(ctx, actorID)
