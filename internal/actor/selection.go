@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/observe"
 )
 
 // SelectionStrategy determines how an actor is chosen from eligible candidates.
@@ -119,8 +120,16 @@ func (s *Service) filterActorsWithSkills(ctx context.Context, actors []domain.Ac
 		}
 
 		// Filter by capabilities via skill registry
-		if len(req.RequiredCapabilities) > 0 && !s.actorHasCapabilities(ctx, actor, req.RequiredCapabilities) {
-			continue
+		if len(req.RequiredCapabilities) > 0 {
+			has, err := s.actorHasCapabilities(ctx, actor, req.RequiredCapabilities)
+			if err != nil {
+				observe.Logger(ctx).Warn("skill lookup failed during actor selection, skipping actor",
+					"actor_id", actor.ActorID, "error", err)
+				continue
+			}
+			if !has {
+				continue
+			}
 		}
 
 		// Filter by role
@@ -134,22 +143,26 @@ func (s *Service) filterActorsWithSkills(ctx context.Context, actors []domain.Ac
 }
 
 // actorHasCapabilities checks if an actor has all required capabilities
-// by looking up assigned skills via the store.
-func (s *Service) actorHasCapabilities(ctx context.Context, actor *domain.Actor, required []string) bool {
+// by looking up assigned active skills via the store. Returns an error
+// if the skill lookup fails so callers can distinguish DB failures from
+// genuine skill mismatches.
+func (s *Service) actorHasCapabilities(ctx context.Context, actor *domain.Actor, required []string) (bool, error) {
 	skills, err := s.store.ListActorSkills(ctx, actor.ActorID)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("list skills for actor %s: %w", actor.ActorID, err)
 	}
 	skillNames := make(map[string]bool, len(skills))
 	for _, sk := range skills {
-		skillNames[sk.Name] = true
+		if sk.Status == domain.SkillStatusActive {
+			skillNames[sk.Name] = true
+		}
 	}
 	for _, req := range required {
 		if !skillNames[req] {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func selectRoundRobin(actors []domain.Actor, req SelectionRequest) *domain.Actor {

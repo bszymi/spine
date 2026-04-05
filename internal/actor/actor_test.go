@@ -224,10 +224,10 @@ func setupActors(t *testing.T) (*actor.Service, *fakeStore) {
 	}
 
 	// Register skills and assign to actors (replaces legacy Capabilities field)
-	fs.skills["sk-code-review"] = &domain.Skill{SkillID: "sk-code-review", Name: "code_review"}
-	fs.skills["sk-arch-review"] = &domain.Skill{SkillID: "sk-arch-review", Name: "architecture_review"}
-	fs.skills["sk-code-gen"] = &domain.Skill{SkillID: "sk-code-gen", Name: "code_generation"}
-	fs.skills["sk-testing"] = &domain.Skill{SkillID: "sk-testing", Name: "testing"}
+	fs.skills["sk-code-review"] = &domain.Skill{SkillID: "sk-code-review", Name: "code_review", Status: domain.SkillStatusActive}
+	fs.skills["sk-arch-review"] = &domain.Skill{SkillID: "sk-arch-review", Name: "architecture_review", Status: domain.SkillStatusActive}
+	fs.skills["sk-code-gen"] = &domain.Skill{SkillID: "sk-code-gen", Name: "code_generation", Status: domain.SkillStatusActive}
+	fs.skills["sk-testing"] = &domain.Skill{SkillID: "sk-testing", Name: "testing", Status: domain.SkillStatusActive}
 
 	fs.actorSkills["human-1"] = map[string]bool{"sk-code-review": true}
 	fs.actorSkills["human-2"] = map[string]bool{"sk-code-review": true, "sk-arch-review": true}
@@ -512,8 +512,8 @@ func TestValidateSkillEligibility_AllPresent(t *testing.T) {
 	svc := actor.NewService(fs)
 
 	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
-	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
-	fs.skills["s2"] = &domain.Skill{SkillID: "s2", Name: "testing"}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
+	fs.skills["s2"] = &domain.Skill{SkillID: "s2", Name: "testing", Status: domain.SkillStatusActive}
 	fs.actorSkills["a1"] = map[string]bool{"s1": true, "s2": true}
 
 	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"code_review", "testing"})
@@ -530,7 +530,7 @@ func TestValidateSkillEligibility_MissingSkills(t *testing.T) {
 	svc := actor.NewService(fs)
 
 	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
-	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
 	fs.actorSkills["a1"] = map[string]bool{"s1": true}
 
 	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"code_review", "deployment"})
@@ -586,7 +586,7 @@ func TestSelectExplicitDescriptiveSkillError(t *testing.T) {
 		ActorID: "a1", Type: domain.ActorTypeHuman, Name: "Alice",
 		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
 	}
-	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
 	fs.actorSkills["a1"] = map[string]bool{"s1": true}
 
 	_, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
@@ -626,8 +626,8 @@ func TestFindEligibleActors_AllSkills(t *testing.T) {
 	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
 	fs.actors["a2"] = &domain.Actor{ActorID: "a2", Status: domain.ActorStatusActive}
 	fs.actors["a3"] = &domain.Actor{ActorID: "a3", Status: domain.ActorStatusActive}
-	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
-	fs.skills["s2"] = &domain.Skill{SkillID: "s2", Name: "testing"}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
+	fs.skills["s2"] = &domain.Skill{SkillID: "s2", Name: "testing", Status: domain.SkillStatusActive}
 	// a1 has both skills, a2 has only one, a3 has none
 	fs.actorSkills["a1"] = map[string]bool{"s1": true, "s2": true}
 	fs.actorSkills["a2"] = map[string]bool{"s1": true}
@@ -666,7 +666,7 @@ func TestFindEligibleActors_ExcludesSuspended(t *testing.T) {
 	svc := actor.NewService(fs)
 
 	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusSuspended}
-	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review"}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive}
 	fs.actorSkills["a1"] = map[string]bool{"s1": true}
 
 	actors, err := svc.FindEligibleActors(context.Background(), []string{"code_review"})
@@ -675,5 +675,53 @@ func TestFindEligibleActors_ExcludesSuspended(t *testing.T) {
 	}
 	if len(actors) != 0 {
 		t.Errorf("expected 0 actors (suspended), got %d", len(actors))
+	}
+}
+
+// ── Review Fix Tests ──
+
+func TestDeprecatedSkillDoesNotSatisfyEligibility(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{ActorID: "a1", Status: domain.ActorStatusActive}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "deployment", Status: domain.SkillStatusDeprecated}
+	fs.actorSkills["a1"] = map[string]bool{"s1": true}
+
+	// ValidateSkillEligibility should not count deprecated skill
+	result, err := svc.ValidateSkillEligibility(context.Background(), "a1", []string{"deployment"})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if result.Eligible {
+		t.Error("expected not eligible — deprecated skill should not satisfy requirement")
+	}
+}
+
+func TestDeprecatedSkillExcludedFromSelection(t *testing.T) {
+	fs := newFakeStore()
+	svc := actor.NewService(fs)
+
+	fs.actors["a1"] = &domain.Actor{
+		ActorID: "a1", Type: domain.ActorTypeHuman,
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	fs.skills["s1"] = &domain.Skill{SkillID: "s1", Name: "deployment", Status: domain.SkillStatusDeprecated}
+	fs.actorSkills["a1"] = map[string]bool{"s1": true}
+
+	_, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
+		RequiredCapabilities: []string{"deployment"},
+		Strategy:             actor.StrategyAnyEligible,
+	})
+	if err == nil {
+		t.Error("expected no eligible actor — deprecated skill should not match")
+	}
+}
+
+func TestListSkillsEmptyActorID(t *testing.T) {
+	svc := actor.NewService(newFakeStore())
+	_, err := svc.ListSkills(context.Background(), "")
+	if err == nil {
+		t.Error("expected error for empty actor_id")
 	}
 }

@@ -54,3 +54,6 @@ Currently, actors declare `Capabilities: []string` and workflows declare `requir
 | TASK-004 | Skill Eligibility Validation | TASK-002, TASK-003 |
 | TASK-005 | Skill Query Interface | TASK-001, TASK-002 |
 | TASK-006 | Remove Legacy Capabilities Field from Actor | TASK-002, TASK-003, TASK-004 |
+| TASK-007 | Backfill Existing Capabilities into Skills During Migration | TASK-006 |
+| TASK-008 | Propagate Skill Lookup Failures in Actor Selection | None |
+| TASK-009 | Filter Deprecated Skills from Eligibility and Fix Stale Docs | None |
