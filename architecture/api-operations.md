@@ -160,6 +160,7 @@ System operations are administrative and require elevated authorization.
 | `actor.add_skill` | Assigns a skill to an actor | Configuring actor capabilities |
 | `actor.remove_skill` | Removes a skill from an actor | Revoking capabilities |
 | `actor.list_skills` | Lists skills assigned to an actor | Viewing actor capabilities |
+| `actor.find_eligible` | Lists actors eligible for given skill requirements | Discovering who can execute a step |
 
 ### 3.6 Divergence Operations
 

@@ -82,6 +82,12 @@ type SkillEligibilityResult struct {
 	MissingSkills []string
 }
 
+// FindEligibleActors returns active actors that possess all specified skills.
+// If skillNames is empty, all active actors are returned.
+func (s *Service) FindEligibleActors(ctx context.Context, skillNames []string) ([]domain.Actor, error) {
+	return s.store.ListActorsBySkills(ctx, skillNames)
+}
+
 // ValidateSkillEligibility checks whether an actor has all required capabilities.
 // Returns which skills are missing if the actor is not eligible.
 func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, requiredCapabilities []string) (*SkillEligibilityResult, error) {

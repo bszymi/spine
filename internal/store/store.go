@@ -107,6 +107,7 @@ type Store interface {
 	AddSkillToActor(ctx context.Context, actorID, skillID string) error
 	RemoveSkillFromActor(ctx context.Context, actorID, skillID string) error
 	ListActorSkills(ctx context.Context, actorID string) ([]domain.Skill, error)
+	ListActorsBySkills(ctx context.Context, skillNames []string) ([]domain.Actor, error)
 
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error

@@ -1084,6 +1084,25 @@ func (s *PostgresStore) ListActorSkills(ctx context.Context, actorID string) ([]
 		ORDER BY s.name`, actorID)
 }
 
+func (s *PostgresStore) ListActorsBySkills(ctx context.Context, skillNames []string) ([]domain.Actor, error) {
+	if len(skillNames) == 0 {
+		return s.ListActorsByStatus(ctx, domain.ActorStatusActive)
+	}
+
+	// Find active actors possessing ALL specified skills (AND matching).
+	// Uses a COUNT/HAVING pattern to require all skills are present.
+	return s.listActorsQuery(ctx, `
+		SELECT a.actor_id, a.actor_type, a.name, a.role, a.capabilities, a.status
+		FROM auth.actors a
+		JOIN auth.actor_skills as_ ON a.actor_id = as_.actor_id
+		JOIN auth.skills s ON as_.skill_id = s.skill_id
+		WHERE a.status = 'active'
+		  AND s.name = ANY($1)
+		GROUP BY a.actor_id, a.actor_type, a.name, a.role, a.capabilities, a.status
+		HAVING COUNT(DISTINCT s.name) = $2
+		ORDER BY a.actor_id`, skillNames, len(skillNames))
+}
+
 // ── Migrations ──
 
 func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir string) error {
