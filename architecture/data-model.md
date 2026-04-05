@@ -142,6 +142,15 @@ queue_entries
 ├── status             (enum: pending, processing, completed, failed)
 ├── created_at         (timestamp)
 └── processed_at       (timestamp, nullable)
+
+skills
+├── skill_id           (string, unique identifier)
+├── name               (string, unique within workspace)
+├── description        (string, human-readable explanation)
+├── category           (string, grouping e.g. "development", "review")
+├── status             (enum: active, deprecated)
+├── created_at         (timestamp)
+└── updated_at         (timestamp)
 ```
 
 For the production-ready table definitions with indexes, constraints, idempotency strategy, and archival policy, see [Runtime Store Schema](/architecture/runtime-schema.md) §4.

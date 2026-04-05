@@ -96,6 +96,13 @@ type Store interface {
 	ListComments(ctx context.Context, threadID string) ([]domain.Comment, error)
 	HasOpenThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) (bool, error)
 
+	// Skills
+	CreateSkill(ctx context.Context, skill *domain.Skill) error
+	GetSkill(ctx context.Context, skillID string) (*domain.Skill, error)
+	UpdateSkill(ctx context.Context, skill *domain.Skill) error
+	ListSkills(ctx context.Context) ([]domain.Skill, error)
+	ListSkillsByCategory(ctx context.Context, category string) ([]domain.Skill, error)
+
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error
 	IsMigrationApplied(ctx context.Context, version string) (bool, error)
