@@ -362,7 +362,7 @@ CREATE INDEX idx_assignments_timeout ON runtime.actor_assignments (timeout_at)
 
 ### 4.8 `auth.skills`
 
-Workspace-scoped skill entities that formalize the capability matching system. Skills are registered in the `auth` schema alongside actors and tokens.
+Workspace-scoped skill entities that formalize the skill system. Skills are registered in the `auth` schema alongside actors and tokens.
 
 ```sql
 CREATE TABLE auth.skills (

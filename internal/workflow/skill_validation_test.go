@@ -9,47 +9,47 @@ import (
 	"github.com/bszymi/spine/internal/workflow"
 )
 
-type capFakeStore struct {
+type skillFakeStore struct {
 	store.Store
 	skills []domain.Skill
 }
 
-func (f *capFakeStore) ListSkills(_ context.Context) ([]domain.Skill, error) {
+func (f *skillFakeStore) ListSkills(_ context.Context) ([]domain.Skill, error) {
 	return f.skills, nil
 }
 
-func TestValidateCapabilities_AllRegistered(t *testing.T) {
-	st := &capFakeStore{skills: []domain.Skill{
+func TestValidateSkills_AllRegistered(t *testing.T) {
+	st := &skillFakeStore{skills: []domain.Skill{
 		{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive},
 		{SkillID: "s2", Name: "testing", Status: domain.SkillStatusActive},
 	}}
 	wf := &domain.WorkflowDefinition{
 		Steps: []domain.StepDefinition{
 			{ID: "execute", Execution: &domain.ExecutionConfig{
-				RequiredCapabilities: []string{"code_review", "testing"},
+				RequiredSkills: []string{"code_review", "testing"},
 			}},
 		},
 	}
 
-	warnings := workflow.ValidateCapabilities(context.Background(), wf, st)
+	warnings := workflow.ValidateSkills(context.Background(), wf, st)
 	if len(warnings) != 0 {
 		t.Errorf("expected 0 warnings, got %d: %v", len(warnings), warnings)
 	}
 }
 
-func TestValidateCapabilities_UnregisteredSkill(t *testing.T) {
-	st := &capFakeStore{skills: []domain.Skill{
+func TestValidateSkills_UnregisteredSkill(t *testing.T) {
+	st := &skillFakeStore{skills: []domain.Skill{
 		{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive},
 	}}
 	wf := &domain.WorkflowDefinition{
 		Steps: []domain.StepDefinition{
 			{ID: "execute", Execution: &domain.ExecutionConfig{
-				RequiredCapabilities: []string{"code_review", "unknown_cap"},
+				RequiredSkills: []string{"code_review", "unknown_skill"},
 			}},
 		},
 	}
 
-	warnings := workflow.ValidateCapabilities(context.Background(), wf, st)
+	warnings := workflow.ValidateSkills(context.Background(), wf, st)
 	if len(warnings) != 1 {
 		t.Fatalf("expected 1 warning, got %d", len(warnings))
 	}
@@ -58,43 +58,43 @@ func TestValidateCapabilities_UnregisteredSkill(t *testing.T) {
 	}
 }
 
-func TestValidateCapabilities_NoSkillsRegistered(t *testing.T) {
-	st := &capFakeStore{skills: nil}
+func TestValidateSkills_NoSkillsRegistered(t *testing.T) {
+	st := &skillFakeStore{skills: nil}
 	wf := &domain.WorkflowDefinition{
 		Steps: []domain.StepDefinition{
 			{ID: "execute", Execution: &domain.ExecutionConfig{
-				RequiredCapabilities: []string{"anything"},
+				RequiredSkills: []string{"anything"},
 			}},
 		},
 	}
 
-	warnings := workflow.ValidateCapabilities(context.Background(), wf, st)
+	warnings := workflow.ValidateSkills(context.Background(), wf, st)
 	if len(warnings) != 0 {
 		t.Errorf("expected 0 warnings when no skills registered, got %d", len(warnings))
 	}
 }
 
-func TestValidateCapabilities_DeprecatedSkillNotMatched(t *testing.T) {
-	st := &capFakeStore{skills: []domain.Skill{
+func TestValidateSkills_DeprecatedSkillNotMatched(t *testing.T) {
+	st := &skillFakeStore{skills: []domain.Skill{
 		{SkillID: "s1", Name: "old_skill", Status: domain.SkillStatusDeprecated},
 		{SkillID: "s2", Name: "active_skill", Status: domain.SkillStatusActive},
 	}}
 	wf := &domain.WorkflowDefinition{
 		Steps: []domain.StepDefinition{
 			{ID: "execute", Execution: &domain.ExecutionConfig{
-				RequiredCapabilities: []string{"old_skill"},
+				RequiredSkills: []string{"old_skill"},
 			}},
 		},
 	}
 
-	warnings := workflow.ValidateCapabilities(context.Background(), wf, st)
+	warnings := workflow.ValidateSkills(context.Background(), wf, st)
 	if len(warnings) != 1 {
 		t.Fatalf("expected 1 warning for deprecated skill, got %d", len(warnings))
 	}
 }
 
-func TestValidateCapabilities_NoExecutionBlock(t *testing.T) {
-	st := &capFakeStore{skills: []domain.Skill{
+func TestValidateSkills_NoExecutionBlock(t *testing.T) {
+	st := &skillFakeStore{skills: []domain.Skill{
 		{SkillID: "s1", Name: "code_review", Status: domain.SkillStatusActive},
 	}}
 	wf := &domain.WorkflowDefinition{
@@ -103,7 +103,7 @@ func TestValidateCapabilities_NoExecutionBlock(t *testing.T) {
 		},
 	}
 
-	warnings := workflow.ValidateCapabilities(context.Background(), wf, st)
+	warnings := workflow.ValidateSkills(context.Background(), wf, st)
 	if len(warnings) != 0 {
 		t.Errorf("expected 0 warnings for step without execution block, got %d", len(warnings))
 	}

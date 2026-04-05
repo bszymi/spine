@@ -106,7 +106,7 @@ AI agents and automated systems authenticate via service accounts.
 - Use separate service accounts for distinct responsibilities (e.g., `ci-system`, `ai-reviewer`, `integration-webhook`)
 - Rotate tokens regularly and revoke unused tokens
 
-Service accounts provide identity for non-human actors but do not grant additional privileges beyond assigned roles and capabilities.
+Service accounts provide identity for non-human actors but do not grant additional privileges beyond assigned roles and skills.
 
 ### 3.5 Session Management
 
@@ -153,7 +153,7 @@ Authorization is enforced at multiple layers to ensure both coarse-grained and f
 **Workflow Engine (step-level):**
 
 - Workflow definitions may impose additional constraints on who can execute specific steps
-- Step-level constraints are expressed in the workflow's `execution` block (e.g., `eligible_actor_types`, `required_capabilities`)
+- Step-level constraints are expressed in the workflow's `execution` block (e.g., `eligible_actor_types`, `required_skills`)
 - These constraints are checked when a step is assigned, not at the gateway level
 
 ### 4.4 Step-Level Authorization
@@ -165,7 +165,7 @@ steps:
   - id: architecture_review
     execution:
       eligible_actor_types: [human]
-      required_capabilities: [architecture_review]
+      required_skills: [architecture_review]
 ```
 
 The Workflow Engine evaluates these constraints when assigning actors to steps. An actor must have both sufficient role permissions and meet step-level requirements.
@@ -179,20 +179,20 @@ When the Artifact Service commits to Git on behalf of an actor:
 - The Artifact Service does not perform additional authorization checks — it trusts the authorization established by the Access Gateway and Workflow Engine
 
 
-### 4.6 Capabilities (Execution-Level Permissions)
+### 4.6 Skills (Execution-Level Permissions)
 
-In addition to role-based access control, workflows may require specific capabilities for step execution.
+In addition to role-based access control, workflows may require specific skills for step execution.
 
-Capabilities are fine-grained, domain-specific permissions (e.g., `architecture_review`, `security_approval`, `deployment_access`).
+Skills are fine-grained, domain-specific permissions (e.g., `architecture_review`, `security_approval`, `deployment_access`).
 
 **Properties:**
 
-- Capabilities are assigned to actors alongside roles
-- Capabilities are evaluated by the Workflow Engine (not the Access Gateway)
-- Capabilities do not grant access to operations — they constrain who may execute specific workflow steps
-- Roles define *what an actor can do*; capabilities define *which actor is eligible to perform a specific step*
+- Skills are assigned to actors alongside roles
+- Skills are evaluated by the Workflow Engine (not the Access Gateway)
+- Skills do not grant access to operations — they constrain who may execute specific workflow steps
+- Roles define *what an actor can do*; skills define *which actor is eligible to perform a specific step*
 
-Capabilities extend the authorization model at execution time but do not replace role-based access control.
+Skills extend the authorization model at execution time but do not replace role-based access control.
 
 ---
 

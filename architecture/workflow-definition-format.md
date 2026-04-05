@@ -94,7 +94,7 @@ steps:
       mode: <enum>                 # automated_only, ai_only, human_only, hybrid
       eligible_actor_types:
         - <enum>                   # human, ai_agent, automated_system
-      required_capabilities:       # Optional: capabilities needed to execute
+      required_skills:             # Optional: skills needed to execute
         - <string>               # Resolves against skill registry; warns if unregistered
 
     preconditions:                 # Optional: must be true before step starts

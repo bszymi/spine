@@ -2,7 +2,8 @@
 id: TASK-010
 type: Task
 title: "Rename all capabilities references to skills across codebase"
-status: Pending
+status: Completed
+completed: 2026-04-05
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-001-skill-system/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation

@@ -157,9 +157,9 @@ System operations are administrative and require elevated authorization.
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
-| `actor.add_skill` | Assigns a skill to an actor | Configuring actor capabilities |
-| `actor.remove_skill` | Removes a skill from an actor | Revoking capabilities |
-| `actor.list_skills` | Lists skills assigned to an actor | Viewing actor capabilities |
+| `actor.add_skill` | Assigns a skill to an actor | Configuring actor skills |
+| `actor.remove_skill` | Removes a skill from an actor | Revoking skills |
+| `actor.list_skills` | Lists skills assigned to an actor | Viewing actor skills |
 | `actor.find_eligible` | Lists actors eligible for given skill requirements | Discovering who can execute a step |
 
 ### 3.6 Divergence Operations
@@ -189,7 +189,7 @@ System operations are administrative and require elevated authorization.
 | `already_exists` | Artifact with this ID or path already exists |
 | `validation_failed` | Failed schema or cross-artifact validation |
 | `unauthorized` | Authentication required or invalid |
-| `forbidden` | Actor lacks required role or capabilities |
+| `forbidden` | Actor lacks required role or skills |
 | `conflict` | Operation conflicts with current state |
 | `precondition_failed` | Workflow precondition not met |
 | `invalid_params` | Request parameters malformed or missing |
@@ -203,7 +203,7 @@ System operations are administrative and require elevated authorization.
 - **Validation errors** include structured details (rule_id, artifact_path, field, severity) about which rules failed and where
 - **Conflict errors** indicate the operation cannot proceed because of current state (e.g., active Run exists, task already completed) — the caller should inspect state and decide how to proceed
 - **Git errors** indicate the durable write failed — the operation was not persisted and may be retried
-- **Permission errors** include which role or capability was required vs what the actor has
+- **Permission errors** include which role or skill was required vs what the actor has
 - Errors are designed to never produce partial state — either the full operation succeeds or nothing changes. This is a target architectural invariant
 
 ---
@@ -236,7 +236,7 @@ Authorization is role-based (per [Security Model](/architecture/security-model.m
 | `operator` | Reviewer + system operations, Run cancellation, manual step assignment |
 | `admin` | Full access including actor and token management |
 
-Additionally, individual workflow steps may require specific **capabilities** — the Workflow Engine checks these at assignment time, not the Access Gateway.
+Additionally, individual workflow steps may require specific **skills** — the Workflow Engine checks these at assignment time, not the Access Gateway.
 
 ---
 

@@ -160,7 +160,7 @@ When an actor becomes unresponsive or returns invalid results:
 - Classification is performed by the component detecting the failure, but may be influenced by workflow validation rules
 
 **Skill eligibility failure:**
-- Detected during step assignment when the actor lacks required skills declared in `execution.required_capabilities`
+- Detected during step assignment when the actor lacks required skills declared in `execution.required_skills`
 - For explicit assignment: the error message identifies the specific missing skills (e.g., "actor missing required skills: [deployment]")
 - For pool-based selection: no eligible actor is found and `EventAssignmentFailed` is emitted with the failure reason in the event payload
 - Classified as permanent — skill mismatches cannot be resolved by retry; the actor's skills must be updated or a different actor must be selected

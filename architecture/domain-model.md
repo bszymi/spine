@@ -109,7 +109,7 @@ A configuration element within a Workflow Definition that specifies what must ha
 - `id` — identifier within the workflow definition
 - `name` — human-readable step name
 - `type` — classification (manual, automated, review, convergence)
-- `execution` — execution constraints (mode, eligible actor types, required capabilities)
+- `execution` — execution constraints (mode, eligible actor types, required skills)
 - `preconditions` — what must be true before the step can begin
 - `required_inputs` — artifacts or data required to execute
 - `required_outputs` — artifacts or data that must be produced
@@ -153,12 +153,12 @@ An entity that executes workflow steps. Actors are interchangeable — the syste
 
 ### 3.4.1 Skill
 
-A workspace-scoped capability entity that formalizes the capability matching system. Instead of treating capabilities as opaque strings, skills are first-class entities with metadata and lifecycle.
+A workspace-scoped skill entity that formalizes the skill matching system. Instead of treating skills as opaque strings, skills are first-class entities with metadata and lifecycle.
 
 **Attributes:**
 
 - `skill_id` — unique identifier (UUID)
-- `name` — unique within workspace, used for matching against `required_capabilities`
+- `name` — unique within workspace, used for matching against `required_skills`
 - `description` — human-readable explanation of the skill
 - `category` — grouping (e.g. "development", "review", "operations")
 - `status` — lifecycle state (active, deprecated)
@@ -166,7 +166,7 @@ A workspace-scoped capability entity that formalizes the capability matching sys
 **Relationships:**
 
 - Skills are assigned to Actors (many-to-many)
-- Workflow steps declare required capabilities that resolve against skills
+- Workflow steps declare required skills that resolve against the skill registry
 - Skills are workspace-scoped — no cross-workspace visibility
 
 ---
