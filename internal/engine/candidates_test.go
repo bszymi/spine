@@ -105,3 +105,109 @@ func TestFindExecutionCandidates_NilBlockingStore(t *testing.T) {
 		t.Error("expected error when blocking store is nil")
 	}
 }
+
+func TestFindExecutionCandidates_FilterBySkills(t *testing.T) {
+	bs := newFakeBlockingStore()
+	cs := &fakeCandidateStore{
+		fakeBlockingStore: bs,
+		artifacts: &store.ArtifactQueryResult{
+			Items: []store.ArtifactProjection{
+				{ArtifactPath: "tasks/backend.md", ArtifactID: "T1", Title: "Backend", Status: string(domain.StatusPending),
+					Metadata: []byte(`{"required_skills":["backend"]}`)},
+				{ArtifactPath: "tasks/frontend.md", ArtifactID: "T2", Title: "Frontend", Status: string(domain.StatusPending),
+					Metadata: []byte(`{"required_skills":["frontend"]}`)},
+			},
+		},
+	}
+	orch := &Orchestrator{blocking: cs}
+
+	// Actor has backend skill — should only see backend task.
+	candidates, err := orch.FindExecutionCandidates(context.Background(), ExecutionCandidateFilter{
+		Skills: []string{"backend"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate filtered by skills, got %d", len(candidates))
+	}
+	if candidates[0].TaskPath != "tasks/backend.md" {
+		t.Errorf("expected backend task, got %s", candidates[0].TaskPath)
+	}
+}
+
+func TestFindExecutionCandidates_FilterByActorType(t *testing.T) {
+	bs := newFakeBlockingStore()
+	cs := &fakeCandidateStore{
+		fakeBlockingStore: bs,
+		artifacts: &store.ArtifactQueryResult{
+			Items: []store.ArtifactProjection{
+				{ArtifactPath: "tasks/human-only.md", ArtifactID: "T1", Title: "Human Only", Status: string(domain.StatusPending),
+					Metadata: []byte(`{"required_skills":["review"],"eligible_actor_types":["human"]}`)},
+				{ArtifactPath: "tasks/any.md", ArtifactID: "T2", Title: "Any", Status: string(domain.StatusPending),
+					Metadata: []byte(`{"required_skills":["execution"]}`)},
+			},
+		},
+	}
+	orch := &Orchestrator{blocking: cs}
+
+	// AI agent should not see human-only task.
+	candidates, err := orch.FindExecutionCandidates(context.Background(), ExecutionCandidateFilter{
+		ActorType: "ai_agent",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate for ai_agent, got %d", len(candidates))
+	}
+	if candidates[0].TaskPath != "tasks/any.md" {
+		t.Errorf("expected any task, got %s", candidates[0].TaskPath)
+	}
+}
+
+func TestExtractRequiredSkills(t *testing.T) {
+	skills := extractRequiredSkills([]byte(`{"required_skills":["backend","review"]}`))
+	if len(skills) != 2 {
+		t.Fatalf("expected 2 skills, got %d", len(skills))
+	}
+
+	// Nil/empty metadata.
+	if s := extractRequiredSkills(nil); s != nil {
+		t.Errorf("expected nil for nil metadata, got %v", s)
+	}
+	if s := extractRequiredSkills([]byte(`{}`)); s != nil {
+		t.Errorf("expected nil for empty metadata, got %v", s)
+	}
+
+	// Invalid JSON.
+	if s := extractRequiredSkills([]byte(`not json`)); s != nil {
+		t.Errorf("expected nil for invalid JSON, got %v", s)
+	}
+}
+
+func TestExtractAllowedActorTypes(t *testing.T) {
+	types := extractAllowedActorTypes([]byte(`{"eligible_actor_types":["human","ai_agent"]}`))
+	if len(types) != 2 {
+		t.Fatalf("expected 2 types, got %d", len(types))
+	}
+
+	if types := extractAllowedActorTypes(nil); types != nil {
+		t.Errorf("expected nil for nil metadata")
+	}
+	if types := extractAllowedActorTypes([]byte(`{}`)); types != nil {
+		t.Errorf("expected nil for empty metadata")
+	}
+}
+
+func TestContainsStr(t *testing.T) {
+	if !containsStr([]string{"a", "b", "c"}, "b") {
+		t.Error("expected true for present item")
+	}
+	if containsStr([]string{"a", "b"}, "c") {
+		t.Error("expected false for absent item")
+	}
+	if containsStr(nil, "a") {
+		t.Error("expected false for nil slice")
+	}
+}
