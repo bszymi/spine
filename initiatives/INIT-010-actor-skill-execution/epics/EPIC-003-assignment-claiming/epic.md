@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: Workflow Step Assignment and Claiming
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05

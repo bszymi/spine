@@ -2,12 +2,13 @@
 id: TASK-002
 type: Task
 title: "Task Release Operation"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-003-assignment-claiming/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation
 created: 2026-04-05
-last_updated: 2026-04-05
+last_updated: 2026-04-06
+completed: 2026-04-06
 links:
   - type: parent
     target: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-003-assignment-claiming/epic.md

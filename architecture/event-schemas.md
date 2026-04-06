@@ -363,7 +363,21 @@ payload:
   resolved_by: <string>         # The blocker task that just completed, triggering the transition
 ```
 
-### 4.11 `convergence_completed`
+### 4.11 `task_released`
+
+Emitted when an actor releases a step assignment back to the pool.
+
+**Source:** Workflow Engine
+
+```yaml
+payload:
+  assignment_id: <string>       # The released assignment
+  actor_id: <string>            # Actor who released
+  execution_id: <string>        # Step execution returned to waiting
+  reason: <string>              # Why the actor released
+```
+
+### 4.12 `convergence_completed`
 
 Emitted when a convergence point resolves.
 
