@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: Execution Projections and Query Infrastructure
-status: Completed
+status: In Progress
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05
@@ -50,3 +50,4 @@ Operational queries must be supported through projections derived from artifact 
 |------|-------|-------------|
 | TASK-001 | Execution Projection Schema | None |
 | TASK-002 | Execution Query API | TASK-001 |
+| TASK-003 | Wire Execution Projection Population into Task Lifecycle | TASK-001, TASK-002 |

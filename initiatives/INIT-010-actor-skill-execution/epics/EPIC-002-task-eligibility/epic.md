@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: Task Eligibility and Execution Readiness
-status: Completed
+status: In Progress
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05
@@ -48,3 +48,4 @@ Precondition evaluation already exists in the engine. This epic adds explicit de
 | TASK-001 | Dependency and Blocking Detection | None |
 | TASK-002 | Execution Candidate Discovery API | TASK-001, TASK-003 |
 | TASK-003 | Wire Blocking Detection into Run Lifecycle and Bootstrap | TASK-001 |
+| TASK-004 | Apply Candidate Filters and Exclude Deprecated Skills | TASK-002 |
