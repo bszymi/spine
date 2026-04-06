@@ -294,6 +294,7 @@ ADR (Artifact) — standalone, linked to related artifacts
 | Projection | Artifact | derived from (many:1) |
 | Artifact | Artifact | references (many:many) |
 | Artifact | Artifact | linked_to (many:many, typed relationship) |
+| Task | Task | blocked_by (many:many, via `blocked_by` link type) |
 
 ---
 

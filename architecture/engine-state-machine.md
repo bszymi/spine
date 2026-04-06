@@ -115,7 +115,7 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 | `in_progress` | `failed` | `step.timeout` | Step timeout reached during execution | Apply `timeout_outcome`; emit `step_timeout` |
 | `in_progress` | `failed` | `actor.unavailable` | Actor became unavailable during execution | Classify as `actor_unavailable`; emit `step_failed` |
 | `in_progress` | `blocked` | `step.blocked` | Step waiting for external dependency or precondition | Record block reason; may trigger Run `paused` |
-| `blocked` | `in_progress` | `step.unblocked` | Blocking condition resolved | Resume execution |
+| `blocked` | `in_progress` | `step.unblocked` | Blocking condition resolved (all `blocked_by` targets are terminal) | Resume execution; emit `task_unblocked` |
 | `blocked` | `failed` | `step.timeout` | Step timeout reached while blocked | Apply `timeout_outcome`; emit `step_timeout` |
 
 ### 3.3 Retry Behavior

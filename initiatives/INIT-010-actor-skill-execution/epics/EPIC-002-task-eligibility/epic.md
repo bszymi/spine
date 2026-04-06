@@ -46,4 +46,5 @@ Precondition evaluation already exists in the engine. This epic adds explicit de
 | Task | Title | Dependencies |
 |------|-------|-------------|
 | TASK-001 | Dependency and Blocking Detection | None |
-| TASK-002 | Execution Candidate Discovery API | TASK-001 |
+| TASK-002 | Execution Candidate Discovery API | TASK-001, TASK-003 |
+| TASK-003 | Wire Blocking Detection into Run Lifecycle and Bootstrap | TASK-001 |

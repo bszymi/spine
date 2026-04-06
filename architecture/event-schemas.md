@@ -351,7 +351,19 @@ payload:
   branch_id: <string|null>
 ```
 
-### 4.10 `convergence_completed`
+### 4.10 `task_unblocked`
+
+Emitted when a task transitions from blocked to ready because all `blocked_by` targets have reached terminal status.
+
+**Source:** Workflow Engine
+
+```yaml
+payload:
+  task_path: <string>           # Task that became unblocked
+  resolved_by: <string>         # The blocker task that just completed, triggering the transition
+```
+
+### 4.11 `convergence_completed`
 
 Emitted when a convergence point resolves.
 
@@ -479,7 +491,7 @@ These events should be treated as runtime signals with limited durability rather
 | Component | Events Produced |
 |-----------|----------------|
 | Artifact Service | `artifact_created`, `artifact_updated`, `artifact_superseded`, `workflow_definition_changed` |
-| Workflow Engine | `run_started`, `run_completed`, `run_failed`, `run_cancelled`, `step_started`, `step_completed`, `step_failed`, `step_assigned`, `step_assignment_failed`, `step_timeout`, `retry_attempted`, `engine_recovered`, `divergence_started`, `convergence_completed`, `workflow_validation_completed` |
+| Workflow Engine | `run_started`, `run_completed`, `run_failed`, `run_cancelled`, `step_started`, `step_completed`, `step_failed`, `step_assigned`, `step_assignment_failed`, `step_timeout`, `retry_attempted`, `engine_recovered`, `divergence_started`, `convergence_completed`, `task_unblocked`, `workflow_validation_completed` |
 
 ### 8.2 Consumers
 
