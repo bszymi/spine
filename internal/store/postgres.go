@@ -1082,6 +1082,137 @@ func (s *PostgresStore) ListActorsBySkills(ctx context.Context, skillNames []str
 		ORDER BY a.actor_id`, skillNames, len(skillNames))
 }
 
+// ── Execution Projections ──
+
+func (s *PostgresStore) UpsertExecutionProjection(ctx context.Context, proj *ExecutionProjection) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO projection.execution_projections
+			(task_path, task_id, title, status, required_skills, allowed_actor_types,
+			 blocked, blocked_by, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+		ON CONFLICT (task_path) DO UPDATE SET
+			task_id = EXCLUDED.task_id,
+			title = EXCLUDED.title,
+			status = EXCLUDED.status,
+			required_skills = EXCLUDED.required_skills,
+			allowed_actor_types = EXCLUDED.allowed_actor_types,
+			blocked = EXCLUDED.blocked,
+			blocked_by = EXCLUDED.blocked_by,
+			assigned_actor_id = EXCLUDED.assigned_actor_id,
+			assignment_status = EXCLUDED.assignment_status,
+			run_id = EXCLUDED.run_id,
+			workflow_step = EXCLUDED.workflow_step,
+			last_updated = now()`,
+		proj.TaskPath, proj.TaskID, proj.Title, proj.Status,
+		MarshalSkills(proj.RequiredSkills), MarshalSkills(proj.AllowedActorTypes),
+		proj.Blocked, MarshalSkills(proj.BlockedBy),
+		nilIfEmpty(proj.AssignedActorID), proj.AssignmentStatus,
+		nilIfEmpty(proj.RunID), nilIfEmpty(proj.WorkflowStep),
+	)
+	return err
+}
+
+func (s *PostgresStore) GetExecutionProjection(ctx context.Context, taskPath string) (*ExecutionProjection, error) {
+	var proj ExecutionProjection
+	var reqSkills, actorTypes, blockedBy []byte
+	var assignedActor, runID, wfStep *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT task_path, task_id, title, status, required_skills, allowed_actor_types,
+		       blocked, blocked_by, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated
+		FROM projection.execution_projections WHERE task_path = $1`, taskPath,
+	).Scan(&proj.TaskPath, &proj.TaskID, &proj.Title, &proj.Status,
+		&reqSkills, &actorTypes, &proj.Blocked, &blockedBy,
+		&assignedActor, &proj.AssignmentStatus, &runID, &wfStep, &proj.LastUpdated)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "execution projection not found")
+		}
+		return nil, err
+	}
+	proj.RequiredSkills = UnmarshalSkills(reqSkills)
+	proj.AllowedActorTypes = UnmarshalSkills(actorTypes)
+	proj.BlockedBy = UnmarshalSkills(blockedBy)
+	if assignedActor != nil {
+		proj.AssignedActorID = *assignedActor
+	}
+	if runID != nil {
+		proj.RunID = *runID
+	}
+	if wfStep != nil {
+		proj.WorkflowStep = *wfStep
+	}
+	return &proj, nil
+}
+
+func (s *PostgresStore) QueryExecutionProjections(ctx context.Context, query ExecutionProjectionQuery) ([]ExecutionProjection, error) {
+	sql := `SELECT task_path, task_id, title, status, required_skills, allowed_actor_types,
+	               blocked, blocked_by, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated
+	        FROM projection.execution_projections WHERE 1=1`
+	var args []any
+	argN := 1
+
+	if query.Blocked != nil {
+		sql += fmt.Sprintf(" AND blocked = $%d", argN)
+		args = append(args, *query.Blocked)
+		argN++
+	}
+	if query.AssignmentStatus != "" {
+		sql += fmt.Sprintf(" AND assignment_status = $%d", argN)
+		args = append(args, query.AssignmentStatus)
+		argN++
+	}
+	if query.AssignedActorID != "" {
+		sql += fmt.Sprintf(" AND assigned_actor_id = $%d", argN)
+		args = append(args, query.AssignedActorID)
+		argN++
+	}
+
+	sql += " ORDER BY last_updated DESC"
+
+	if query.Limit > 0 {
+		sql += fmt.Sprintf(" LIMIT $%d", argN)
+		args = append(args, query.Limit)
+	}
+
+	rows, err := s.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ExecutionProjection
+	for rows.Next() {
+		var proj ExecutionProjection
+		var reqSkills, actorTypes, blockedBy []byte
+		var assignedActor, runID, wfStep *string
+		if err := rows.Scan(&proj.TaskPath, &proj.TaskID, &proj.Title, &proj.Status,
+			&reqSkills, &actorTypes, &proj.Blocked, &blockedBy,
+			&assignedActor, &proj.AssignmentStatus, &runID, &wfStep, &proj.LastUpdated,
+		); err != nil {
+			return nil, err
+		}
+		proj.RequiredSkills = UnmarshalSkills(reqSkills)
+		proj.AllowedActorTypes = UnmarshalSkills(actorTypes)
+		proj.BlockedBy = UnmarshalSkills(blockedBy)
+		if assignedActor != nil {
+			proj.AssignedActorID = *assignedActor
+		}
+		if runID != nil {
+			proj.RunID = *runID
+		}
+		if wfStep != nil {
+			proj.WorkflowStep = *wfStep
+		}
+		results = append(results, proj)
+	}
+	return results, rows.Err()
+}
+
+func (s *PostgresStore) DeleteExecutionProjection(ctx context.Context, taskPath string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM projection.execution_projections WHERE task_path = $1`, taskPath)
+	return err
+}
+
 // ── Migrations ──
 
 func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir string) error {
