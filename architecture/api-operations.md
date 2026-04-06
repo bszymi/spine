@@ -183,6 +183,17 @@ Request body:
 
 Validates: step is in `waiting` state, actor type is eligible, step is not already assigned. Returns assignment details on success, conflict error on contention.
 
+| `execution.release` | Releases a step assignment back to the pool | Actor unable to complete work, needs reassignment |
+
+**Endpoint:** `POST /api/v1/execution/release`
+
+Request body:
+```json
+{ "actor_id": "...", "assignment_id": "...", "reason": "..." }
+```
+
+Validates: actor is the current assignee, assignment is active, step is not in terminal state. Step transitions back to `waiting` for re-claiming.
+
 ### 3.6 Divergence Operations
 
 | Operation | Effect | When to Use |

@@ -114,6 +114,7 @@ type Server struct {
 	wsDBProvider       *workspace.DBProvider     // optional, nil in single mode
 	candidateFinder    CandidateFinder            // optional, nil if not configured
 	stepClaimer        StepClaimer                // optional, nil if not configured
+	stepReleaser       StepReleaser               // optional, nil if not configured
 	devMode            bool                      // when true, authorize allows unauthenticated requests
 	rebuilds           sync.Map                  // rebuild_id -> *rebuildState
 }
@@ -126,6 +127,11 @@ type CandidateFinder interface {
 // StepClaimer allows actors to claim step executions.
 type StepClaimer interface {
 	ClaimStep(ctx context.Context, req engine.ClaimRequest) (*engine.ClaimResult, error)
+}
+
+// StepReleaser allows actors to release step assignments.
+type StepReleaser interface {
+	ReleaseStep(ctx context.Context, req engine.ReleaseRequest) error
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -181,6 +187,7 @@ type ServerConfig struct {
 	WSDBProvider       *workspace.DBProvider
 	CandidateFinder    CandidateFinder
 	StepClaimer        StepClaimer
+	StepReleaser       StepReleaser
 	DevMode            bool          // when true, authorize allows unauthenticated requests
 	ReadHeaderTimeout  time.Duration // defaults to 10s
 	ReadTimeout        time.Duration // defaults to 30s
@@ -209,6 +216,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		wsDBProvider:       cfg.WSDBProvider,
 		candidateFinder:    cfg.CandidateFinder,
 		stepClaimer:        cfg.StepClaimer,
+		stepReleaser:       cfg.StepReleaser,
 		devMode:            cfg.DevMode,
 	}
 	s.httpServer = &http.Server{

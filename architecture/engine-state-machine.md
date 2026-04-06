@@ -111,6 +111,7 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 | `assigned` | `in_progress` | `actor.acknowledged` | Actor confirmed receipt | Set `started_at`; emit `step_started` |
 | `assigned` | `failed` | `step.timeout` | Assignment timeout reached | Mark assignment as `timed_out`; emit `step_timeout` |
 | `assigned` | `waiting` | `actor.unavailable` | Actor became unavailable before starting | Cancel assignment; return to pool for reassignment |
+| `assigned` | `waiting` | `step.release` | Actor releases the step via ReleaseStep | Cancel assignment; clear actor_id; emit `task_released` |
 | `in_progress` | `completed` | `step.submit` | Outcome is valid, artifacts pass validation | Set `outcome_id`, `completed_at`; update assignment to `completed`; emit `step_completed` |
 | `in_progress` | `failed` | `step.submit_invalid` | Outcome invalid or artifacts fail validation | Classify error; emit `step_failed` |
 | `in_progress` | `failed` | `step.timeout` | Step timeout reached during execution | Apply `timeout_outcome`; emit `step_timeout` |

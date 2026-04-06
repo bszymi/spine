@@ -75,6 +75,7 @@ func (s *Server) routes() http.Handler {
 			// Execution
 			r.Get("/execution/candidates", s.handleExecutionCandidates)
 			r.Post("/execution/claim", s.handleExecutionClaim)
+			r.Post("/execution/release", s.handleExecutionRelease)
 
 			// Query
 			r.Get("/query/discussions", s.handleQueryDiscussions)
