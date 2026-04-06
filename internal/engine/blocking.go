@@ -115,6 +115,29 @@ func (o *Orchestrator) CheckAndEmitBlockingTransition(ctx context.Context, compl
 	}
 }
 
+// updateExecutionProjection updates a task's execution projection if the store supports it.
+func (o *Orchestrator) updateExecutionProjection(ctx context.Context, taskPath string, update func(proj *store.ExecutionProjection)) {
+	if o.blocking == nil {
+		return
+	}
+	type execProjStore interface {
+		GetExecutionProjection(ctx context.Context, taskPath string) (*store.ExecutionProjection, error)
+		UpsertExecutionProjection(ctx context.Context, proj *store.ExecutionProjection) error
+	}
+	eps, ok := o.blocking.(execProjStore)
+	if !ok {
+		return
+	}
+	proj, err := eps.GetExecutionProjection(ctx, taskPath)
+	if err != nil {
+		return // projection doesn't exist yet — will be created by projection sync
+	}
+	update(proj)
+	if err := eps.UpsertExecutionProjection(ctx, proj); err != nil {
+		observe.Logger(ctx).Warn("failed to update execution projection", "task", taskPath, "error", err)
+	}
+}
+
 // isTerminalArtifactStatus checks if an artifact status represents a terminal state.
 func isTerminalArtifactStatus(status string) bool {
 	switch domain.ArtifactStatus(status) {

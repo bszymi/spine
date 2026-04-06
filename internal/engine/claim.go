@@ -8,6 +8,7 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/store"
 )
 
 // ClaimRequest represents a request to claim a step execution.
@@ -158,6 +159,14 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 		fmt.Sprintf("evt-%s-%s-claimed", run.TraceID[:12], exec.StepID), payload)
 
 	log.Info("step claimed", "execution_id", req.ExecutionID, "actor_id", req.ActorID, "step_id", exec.StepID)
+
+	// Update execution projection.
+	o.updateExecutionProjection(ctx, run.TaskPath, func(proj *store.ExecutionProjection) {
+		proj.AssignedActorID = req.ActorID
+		proj.AssignmentStatus = "assigned"
+		proj.RunID = exec.RunID
+		proj.WorkflowStep = exec.StepID
+	})
 
 	return &ClaimResult{
 		Assignment: assignment,
