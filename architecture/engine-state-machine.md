@@ -105,6 +105,7 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 | From | To | Trigger | Guard | Effects |
 |------|-----|---------|-------|---------|
 | `waiting` | `assigned` | `step.assign` | Eligible actor found; skill eligibility validated | Create ActorAssignment; set `actor_id`; emit `step_assigned` |
+| `waiting` | `assigned` | `step.claim` | Actor claims step; step is waiting and not blocked | Create ActorAssignment; set `actor_id`; emit `step_assigned` with `claim: true` |
 | `waiting` | `failed` | `step.timeout` | Step timeout reached while waiting | Set `outcome` to `timeout_outcome`; emit `step_timeout` |
 | `waiting` | `skipped` | `step.skip` | Workflow definition permits skipping | Emit `step_completed` with skip reason |
 | `assigned` | `in_progress` | `actor.acknowledged` | Actor confirmed receipt | Set `started_at`; emit `step_started` |

@@ -80,6 +80,16 @@ The actor service provides `FindEligibleActors(skillNames)` which returns all ac
 
 At the store level, `ListActorsBySkills(skillNames)` performs the query using a `COUNT/HAVING` pattern to enforce AND matching across the actor-skill junction table.
 
+#### Step Claiming (Pull-Based Assignment)
+
+In addition to the push-based assignment model (where the engine delivers assignments to actors), actors can pull work by claiming step executions via `ClaimStep(actorID, executionID)`. The claim validates:
+
+- Step execution is in `waiting` state
+- Actor type is eligible for the step's execution mode
+- Step is not already assigned (atomic — concurrent claims produce a conflict error)
+
+On success, the step transitions to `assigned` and an assignment record is created. This enables AI agents and human dashboards to actively select work from the execution pool.
+
 ### 3.2 Registration Rules
 
 - Every actor must be registered before interacting with the system
