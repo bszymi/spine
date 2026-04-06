@@ -69,11 +69,13 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 
 	// Validate actor eligibility: type and skills.
 	if stepDef.Execution != nil {
+		actor, err := o.loadActor(ctx, req.ActorID)
+		if err != nil {
+			return nil, fmt.Errorf("load actor: %w", err)
+		}
+
+		// Check actor type.
 		if len(stepDef.Execution.EligibleActorTypes) > 0 {
-			actor, err := o.loadActor(ctx, req.ActorID)
-			if err != nil {
-				return nil, fmt.Errorf("load actor: %w", err)
-			}
 			eligible := false
 			for _, at := range stepDef.Execution.EligibleActorTypes {
 				if at == string(actor.Type) {
@@ -86,18 +88,42 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 					fmt.Sprintf("actor type %q is not eligible for this step (allowed: %v)", actor.Type, stepDef.Execution.EligibleActorTypes))
 			}
 		}
+
+		// Check required skills.
+		if len(stepDef.Execution.RequiredSkills) > 0 && o.blocking != nil {
+			type skillChecker interface {
+				ListActorSkills(ctx context.Context, actorID string) ([]domain.Skill, error)
+			}
+			if sc, ok := o.blocking.(skillChecker); ok {
+				skills, err := sc.ListActorSkills(ctx, req.ActorID)
+				if err != nil {
+					return nil, fmt.Errorf("check actor skills: %w", err)
+				}
+				skillNames := make(map[string]bool, len(skills))
+				for _, sk := range skills {
+					if sk.Status == domain.SkillStatusActive {
+						skillNames[sk.Name] = true
+					}
+				}
+				var missing []string
+				for _, req := range stepDef.Execution.RequiredSkills {
+					if !skillNames[req] {
+						missing = append(missing, req)
+					}
+				}
+				if len(missing) > 0 {
+					return nil, domain.NewError(domain.ErrConflict,
+						fmt.Sprintf("actor missing required skills: %v", missing))
+				}
+			}
+		}
 	}
 
-	// Transition step to assigned.
-	exec.Status = domain.StepStatusAssigned
-	exec.ActorID = req.ActorID
 	now := time.Now()
-	exec.StartedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
-		return nil, fmt.Errorf("update step execution: %w", err)
-	}
 
-	// Create assignment record.
+	// Create assignment record FIRST — the unique index on (execution_id)
+	// WHERE status = 'active' ensures only one active assignment per execution.
+	// If a concurrent claim already inserted, this fails with a conflict.
 	assignment := &domain.Assignment{
 		AssignmentID: fmt.Sprintf("claim-%s-%s", req.ExecutionID, req.ActorID),
 		RunID:        exec.RunID,
@@ -108,9 +134,17 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	}
 	if o.assignments != nil {
 		if err := o.assignments.CreateAssignment(ctx, assignment); err != nil {
-			// Assignment tracking failure is not fatal — log and continue.
-			log.Warn("failed to track claim assignment", "error", err)
+			return nil, domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("step %s is already claimed (concurrent claim conflict)", req.ExecutionID))
 		}
+	}
+
+	// Assignment succeeded — now update the step execution.
+	exec.Status = domain.StepStatusAssigned
+	exec.ActorID = req.ActorID
+	exec.StartedAt = &now
+	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+		return nil, fmt.Errorf("update step execution: %w", err)
 	}
 
 	// Emit event.

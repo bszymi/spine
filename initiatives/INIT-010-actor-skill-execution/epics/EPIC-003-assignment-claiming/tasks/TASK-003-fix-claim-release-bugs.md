@@ -2,7 +2,8 @@
 id: TASK-003
 type: Task
 title: "Fix claim/release bugs: nil-check, skill validation, atomicity"
-status: Pending
+status: Completed
+completed: 2026-04-06
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-003-assignment-claiming/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation
