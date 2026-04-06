@@ -209,3 +209,77 @@ func TestIsBlocked_NilBlockingStore(t *testing.T) {
 		t.Error("expected not blocked when blocking store is nil")
 	}
 }
+
+func TestCheckAndEmitBlockingTransition_DependentUnblocked(t *testing.T) {
+	bs := newFakeBlockingStore()
+
+	// Task A is blocked by Task B.
+	bs.targetLinks["tasks/task-b.md"] = []store.ArtifactLink{
+		{SourcePath: "tasks/task-a.md", TargetPath: "tasks/task-b.md", LinkType: "blocked_by"},
+	}
+	// Task A has only one blocker (task-b), and task-b is now completed.
+	bs.links["tasks/task-a.md"] = []store.ArtifactLink{
+		{SourcePath: "tasks/task-a.md", TargetPath: "tasks/task-b.md", LinkType: "blocked_by"},
+	}
+	bs.projections["tasks/task-b.md"] = &store.ArtifactProjection{
+		ArtifactPath: "tasks/task-b.md",
+		Status:       string(domain.StatusCompleted),
+	}
+
+	events := &memEventCollector{}
+	orch := &Orchestrator{blocking: bs, events: events}
+
+	orch.CheckAndEmitBlockingTransition(context.Background(), "tasks/task-b.md")
+
+	// Should have emitted task_unblocked for task-a.
+	if len(events.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events.events))
+	}
+	if events.events[0].Type != domain.EventTaskUnblocked {
+		t.Errorf("expected task_unblocked, got %s", events.events[0].Type)
+	}
+}
+
+func TestCheckAndEmitBlockingTransition_DependentStillBlocked(t *testing.T) {
+	bs := newFakeBlockingStore()
+
+	// Task A is blocked by both Task B and Task C.
+	bs.targetLinks["tasks/task-b.md"] = []store.ArtifactLink{
+		{SourcePath: "tasks/task-a.md", TargetPath: "tasks/task-b.md", LinkType: "blocked_by"},
+	}
+	bs.links["tasks/task-a.md"] = []store.ArtifactLink{
+		{SourcePath: "tasks/task-a.md", TargetPath: "tasks/task-b.md", LinkType: "blocked_by"},
+		{SourcePath: "tasks/task-a.md", TargetPath: "tasks/task-c.md", LinkType: "blocked_by"},
+	}
+	bs.projections["tasks/task-b.md"] = &store.ArtifactProjection{
+		ArtifactPath: "tasks/task-b.md", Status: string(domain.StatusCompleted),
+	}
+	bs.projections["tasks/task-c.md"] = &store.ArtifactProjection{
+		ArtifactPath: "tasks/task-c.md", Status: string(domain.StatusPending),
+	}
+
+	events := &memEventCollector{}
+	orch := &Orchestrator{blocking: bs, events: events}
+
+	orch.CheckAndEmitBlockingTransition(context.Background(), "tasks/task-b.md")
+
+	// Task A is still blocked by task-c — no event should be emitted.
+	if len(events.events) != 0 {
+		t.Errorf("expected 0 events (still blocked), got %d", len(events.events))
+	}
+}
+
+func TestCheckAndEmitBlockingTransition_NilStore(t *testing.T) {
+	orch := &Orchestrator{} // no blocking store — should not panic
+	orch.CheckAndEmitBlockingTransition(context.Background(), "tasks/task-1.md")
+}
+
+// memEventCollector captures emitted events for testing.
+type memEventCollector struct {
+	events []domain.Event
+}
+
+func (m *memEventCollector) Emit(_ context.Context, e domain.Event) error {
+	m.events = append(m.events, e)
+	return nil
+}
