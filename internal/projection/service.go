@@ -370,7 +370,54 @@ func (s *Service) projectArtifact(ctx context.Context, a *domain.Artifact, commi
 		return fmt.Errorf("upsert links for %s: %w", a.Path, err)
 	}
 
+	// For Task artifacts, also upsert the execution projection.
+	if a.Type == domain.ArtifactTypeTask {
+		blocked, blockedBy := s.resolveBlockingStatus(ctx, a.Path, a.Links)
+		execProj := &store.ExecutionProjection{
+			TaskPath:         a.Path,
+			TaskID:           a.ID,
+			Title:            a.Title,
+			Status:           string(a.Status),
+			Blocked:          blocked,
+			BlockedBy:        blockedBy,
+			AssignmentStatus: "unassigned",
+		}
+		if err := s.store.UpsertExecutionProjection(ctx, execProj); err != nil {
+			observe.Logger(ctx).Warn("failed to upsert execution projection", "path", a.Path, "error", err)
+		}
+	}
+
 	return nil
+}
+
+// resolveBlockingStatus checks blocked_by links and returns blocking state.
+func (s *Service) resolveBlockingStatus(ctx context.Context, taskPath string, links []domain.Link) (bool, []string) {
+	var blockedBy []string
+	for _, link := range links {
+		if link.Type != domain.LinkTypeBlockedBy {
+			continue
+		}
+		// Check if the blocker is in a terminal status.
+		blocker, err := s.store.GetArtifactProjection(ctx, link.Target)
+		if err != nil {
+			// Can't find blocker — treat as blocking (safe default).
+			blockedBy = append(blockedBy, link.Target)
+			continue
+		}
+		if !isTerminalProjectionStatus(blocker.Status) {
+			blockedBy = append(blockedBy, link.Target)
+		}
+	}
+	return len(blockedBy) > 0, blockedBy
+}
+
+func isTerminalProjectionStatus(status string) bool {
+	switch domain.ArtifactStatus(status) {
+	case domain.StatusCompleted, domain.StatusCancelled, domain.StatusRejected,
+		domain.StatusAbandoned, domain.StatusSuperseded:
+		return true
+	}
+	return false
 }
 
 // projectWorkflow reads and projects a workflow YAML file.

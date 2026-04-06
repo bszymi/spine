@@ -9,6 +9,7 @@ import (
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/workflow"
 )
 
@@ -280,6 +281,12 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 		}
 		// Re-evaluate tasks that were blocked by this task.
 		o.CheckAndEmitBlockingTransition(ctx, run.TaskPath)
+		// Update execution projection to reflect completion.
+		o.updateExecutionProjection(ctx, run.TaskPath, func(proj *store.ExecutionProjection) {
+			proj.AssignedActorID = ""
+			proj.AssignmentStatus = "unassigned"
+			proj.Status = string(domain.StatusCompleted)
+		})
 		// Clean up the run branch after successful completion.
 		_ = o.CleanupRunBranch(ctx, runID)
 	} else {

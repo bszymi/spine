@@ -8,6 +8,7 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/store"
 )
 
 // ReleaseRequest represents a request to release a step assignment.
@@ -97,5 +98,14 @@ func (o *Orchestrator) ReleaseStep(ctx context.Context, req ReleaseRequest) erro
 		"execution_id", assignment.ExecutionID,
 		"reason", req.Reason,
 	)
+
+	// Update execution projection.
+	if run != nil {
+		o.updateExecutionProjection(ctx, run.TaskPath, func(proj *store.ExecutionProjection) {
+			proj.AssignedActorID = ""
+			proj.AssignmentStatus = "unassigned"
+		})
+	}
+
 	return nil
 }
