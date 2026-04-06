@@ -136,6 +136,10 @@ Query operations read from the Projection Store for fast access.
 | `query.graph` | Traverses relationship links with configurable depth | When exploring artifact relationships |
 | `query.history` | Reads Git commit history for an artifact | When reviewing change history |
 | `query.runs` | Lists Runs for a task | When reviewing execution history |
+| `execution.tasks` | Lists all tasks with blocking and assignment status | Dashboard overview |
+| `execution.tasks.ready` | Lists tasks not blocked and not assigned | Finding available work |
+| `execution.tasks.blocked` | Lists tasks blocked by dependencies (includes blocker details) | Identifying bottlenecks |
+| `execution.tasks.assigned` | Lists tasks assigned to a specific actor | Viewing actor workload |
 
 **Domain rules:**
 - Queries read from projections, which are eventually consistent with Git

@@ -2,7 +2,7 @@
 id: INIT-010
 type: Initiative
 title: Actor Skills, Task Eligibility, and Execution Queries
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-05
 last_updated: 2026-04-05
