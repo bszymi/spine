@@ -76,6 +76,10 @@ func (s *Server) routes() http.Handler {
 			r.Get("/execution/candidates", s.handleExecutionCandidates)
 			r.Post("/execution/claim", s.handleExecutionClaim)
 			r.Post("/execution/release", s.handleExecutionRelease)
+			r.Get("/execution/tasks", s.handleExecutionTasksAll)
+			r.Get("/execution/tasks/ready", s.handleExecutionTasksReady)
+			r.Get("/execution/tasks/blocked", s.handleExecutionTasksBlocked)
+			r.Get("/execution/tasks/assigned", s.handleExecutionTasksAssigned)
 
 			// Query
 			r.Get("/query/discussions", s.handleQueryDiscussions)
