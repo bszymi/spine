@@ -109,6 +109,12 @@ type Store interface {
 	ListActorSkills(ctx context.Context, actorID string) ([]domain.Skill, error)
 	ListActorsBySkills(ctx context.Context, skillNames []string) ([]domain.Actor, error)
 
+	// Execution Projections
+	UpsertExecutionProjection(ctx context.Context, proj *ExecutionProjection) error
+	GetExecutionProjection(ctx context.Context, taskPath string) (*ExecutionProjection, error)
+	QueryExecutionProjections(ctx context.Context, query ExecutionProjectionQuery) ([]ExecutionProjection, error)
+	DeleteExecutionProjection(ctx context.Context, taskPath string) error
+
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error
 	IsMigrationApplied(ctx context.Context, version string) (bool, error)

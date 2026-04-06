@@ -182,6 +182,7 @@ Synchronizes Git artifact state into a query-optimized database.
 - Watch for Git changes (via events or polling)
 - Parse artifact front matter and content
 - Build and maintain projection records in the Projection Store
+- Build and maintain execution projections (combining artifact state with runtime execution state for task discovery)
 - Track which Git commit each projection reflects
 - Support full reconstruction from Git if the Projection Store is lost
 

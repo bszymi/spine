@@ -83,6 +83,21 @@ projections
 ├── source_commit      (string, Git commit SHA)
 ├── synced_at          (timestamp, when projection was last updated)
 └── content_hash       (string, hash of raw file content for change detection)
+
+execution_projections
+├── task_path          (string, primary key)
+├── task_id            (string, artifact ID)
+├── title              (string)
+├── status             (string, artifact status)
+├── required_skills    (jsonb, from workflow step definition)
+├── allowed_actor_types (jsonb, from execution mode)
+├── blocked            (boolean, computed from blocked_by links)
+├── blocked_by         (jsonb, list of blocking task paths)
+├── assigned_actor_id  (string, nullable)
+├── assignment_status  (enum: unassigned, assigned, in_progress)
+├── run_id             (string, nullable)
+├── workflow_step      (string, nullable)
+└── last_updated       (timestamp)
 ```
 
 For the production-ready table definitions with indexes and constraints, see [Runtime Store Schema](/architecture/runtime-schema.md) §3.
