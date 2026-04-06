@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,6 +20,12 @@ func newMemAssignmentStore() *memAssignmentStore {
 }
 
 func (s *memAssignmentStore) CreateAssignment(_ context.Context, a *domain.Assignment) error {
+	// Simulate the unique index on (execution_id) WHERE status = 'active'.
+	for _, existing := range s.assignments {
+		if existing.ExecutionID == a.ExecutionID && existing.Status == domain.AssignmentStatusActive {
+			return fmt.Errorf("duplicate active assignment for execution %s", a.ExecutionID)
+		}
+	}
 	s.assignments[a.AssignmentID] = a
 	return nil
 }
