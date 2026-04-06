@@ -9,6 +9,7 @@ import (
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
@@ -111,8 +112,14 @@ type Server struct {
 	wsResolver         workspace.Resolver       // optional, nil if not configured
 	servicePool        *workspace.ServicePool   // optional, nil if not configured
 	wsDBProvider       *workspace.DBProvider     // optional, nil in single mode
+	candidateFinder    CandidateFinder            // optional, nil if not configured
 	devMode            bool                      // when true, authorize allows unauthenticated requests
 	rebuilds           sync.Map                  // rebuild_id -> *rebuildState
+}
+
+// CandidateFinder discovers tasks ready for execution.
+type CandidateFinder interface {
+	FindExecutionCandidates(ctx context.Context, filter engine.ExecutionCandidateFilter) ([]engine.ExecutionCandidate, error)
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -166,6 +173,7 @@ type ServerConfig struct {
 	WorkspaceResolver  workspace.Resolver
 	ServicePool        *workspace.ServicePool
 	WSDBProvider       *workspace.DBProvider
+	CandidateFinder    CandidateFinder
 	DevMode            bool          // when true, authorize allows unauthenticated requests
 	ReadHeaderTimeout  time.Duration // defaults to 10s
 	ReadTimeout        time.Duration // defaults to 30s
@@ -192,6 +200,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		wsResolver:         cfg.WorkspaceResolver,
 		servicePool:        cfg.ServicePool,
 		wsDBProvider:       cfg.WSDBProvider,
+		candidateFinder:    cfg.CandidateFinder,
 		devMode:            cfg.DevMode,
 	}
 	s.httpServer = &http.Server{
