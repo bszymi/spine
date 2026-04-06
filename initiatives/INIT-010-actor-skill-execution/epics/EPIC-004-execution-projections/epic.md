@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: Execution Projections and Query Infrastructure
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05
