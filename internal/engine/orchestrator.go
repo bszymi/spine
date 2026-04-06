@@ -19,6 +19,7 @@ type Orchestrator struct {
 	divergence     DivergenceHandler      // optional, nil if not configured
 	convergence    ConvergenceHandler     // optional, nil if not configured
 	artifactWriter ArtifactWriter         // optional, required for planning runs
+	blocking       BlockingStore          // optional, nil if not configured
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -92,4 +93,9 @@ func (o *Orchestrator) WithConvergence(c ConvergenceHandler) {
 // WithArtifactWriter enables artifact creation for planning runs.
 func (o *Orchestrator) WithArtifactWriter(w ArtifactWriter) {
 	o.artifactWriter = w
+}
+
+// WithBlockingStore enables dependency blocking detection.
+func (o *Orchestrator) WithBlockingStore(b BlockingStore) {
+	o.blocking = b
 }
