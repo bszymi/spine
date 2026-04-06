@@ -2,7 +2,8 @@
 id: TASK-004
 type: Task
 title: "Apply candidate filters and exclude deprecated skills from eligibility queries"
-status: Pending
+status: Completed
+completed: 2026-04-06
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-002-task-eligibility/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation

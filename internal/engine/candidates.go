@@ -73,6 +73,35 @@ func (o *Orchestrator) FindExecutionCandidates(ctx context.Context, filter Execu
 			continue
 		}
 
+		// Filter by actor type: if the caller specifies an actor type,
+		// only include candidates whose allowed actor types include it.
+		if filter.ActorType != "" && len(candidate.RequiredSkills) > 0 {
+			// Extract allowed actor types from metadata if available.
+			allowedTypes := extractAllowedActorTypes(proj.Metadata)
+			if len(allowedTypes) > 0 && !containsStr(allowedTypes, filter.ActorType) {
+				continue
+			}
+		}
+
+		// Filter by skills: if the caller specifies skills they have,
+		// only include candidates whose required skills are a subset.
+		if len(filter.Skills) > 0 && len(candidate.RequiredSkills) > 0 {
+			skillSet := make(map[string]bool, len(filter.Skills))
+			for _, s := range filter.Skills {
+				skillSet[s] = true
+			}
+			allMatch := true
+			for _, req := range candidate.RequiredSkills {
+				if !skillSet[req] {
+					allMatch = false
+					break
+				}
+			}
+			if !allMatch {
+				continue
+			}
+		}
+
 		candidates = append(candidates, candidate)
 	}
 
@@ -109,4 +138,39 @@ func extractRequiredSkills(metadata []byte) []string {
 		}
 	}
 	return result
+}
+
+// extractAllowedActorTypes attempts to extract eligible_actor_types from metadata JSONB.
+func extractAllowedActorTypes(metadata []byte) []string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(metadata, &m); err != nil {
+		return nil
+	}
+	types, ok := m["eligible_actor_types"]
+	if !ok {
+		return nil
+	}
+	arr, ok := types.([]any)
+	if !ok {
+		return nil
+	}
+	var result []string
+	for _, v := range arr {
+		if s, ok := v.(string); ok {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+func containsStr(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

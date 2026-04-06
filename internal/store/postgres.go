@@ -1076,6 +1076,7 @@ func (s *PostgresStore) ListActorsBySkills(ctx context.Context, skillNames []str
 		JOIN auth.actor_skills as_ ON a.actor_id = as_.actor_id
 		JOIN auth.skills s ON as_.skill_id = s.skill_id
 		WHERE a.status = 'active'
+		  AND s.status = 'active'
 		  AND s.name = ANY($1)
 		GROUP BY a.actor_id, a.actor_type, a.name, a.role, a.status
 		HAVING COUNT(DISTINCT s.name) = $2
