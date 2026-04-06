@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: Task Eligibility and Execution Readiness
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05
