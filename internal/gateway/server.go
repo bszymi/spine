@@ -113,6 +113,7 @@ type Server struct {
 	servicePool        *workspace.ServicePool   // optional, nil if not configured
 	wsDBProvider       *workspace.DBProvider     // optional, nil in single mode
 	candidateFinder    CandidateFinder            // optional, nil if not configured
+	stepClaimer        StepClaimer                // optional, nil if not configured
 	devMode            bool                      // when true, authorize allows unauthenticated requests
 	rebuilds           sync.Map                  // rebuild_id -> *rebuildState
 }
@@ -120,6 +121,11 @@ type Server struct {
 // CandidateFinder discovers tasks ready for execution.
 type CandidateFinder interface {
 	FindExecutionCandidates(ctx context.Context, filter engine.ExecutionCandidateFilter) ([]engine.ExecutionCandidate, error)
+}
+
+// StepClaimer allows actors to claim step executions.
+type StepClaimer interface {
+	ClaimStep(ctx context.Context, req engine.ClaimRequest) (*engine.ClaimResult, error)
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -174,6 +180,7 @@ type ServerConfig struct {
 	ServicePool        *workspace.ServicePool
 	WSDBProvider       *workspace.DBProvider
 	CandidateFinder    CandidateFinder
+	StepClaimer        StepClaimer
 	DevMode            bool          // when true, authorize allows unauthenticated requests
 	ReadHeaderTimeout  time.Duration // defaults to 10s
 	ReadTimeout        time.Duration // defaults to 30s
@@ -201,6 +208,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		servicePool:        cfg.ServicePool,
 		wsDBProvider:       cfg.WSDBProvider,
 		candidateFinder:    cfg.CandidateFinder,
+		stepClaimer:        cfg.StepClaimer,
 		devMode:            cfg.DevMode,
 	}
 	s.httpServer = &http.Server{

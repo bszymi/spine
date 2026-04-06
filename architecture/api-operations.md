@@ -172,6 +172,17 @@ Query parameters:
 
 Response includes `blocked`, `blocked_by`, and `resolved_blockers` fields on each candidate.
 
+| `execution.claim` | Claims a waiting step execution for an actor | Actor pulling work from the execution pool |
+
+**Endpoint:** `POST /api/v1/execution/claim`
+
+Request body:
+```json
+{ "actor_id": "...", "execution_id": "..." }
+```
+
+Validates: step is in `waiting` state, actor type is eligible, step is not already assigned. Returns assignment details on success, conflict error on contention.
+
 ### 3.6 Divergence Operations
 
 | Operation | Effect | When to Use |
