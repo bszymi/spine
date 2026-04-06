@@ -59,3 +59,4 @@ Currently, actors declare `Capabilities: []string` and workflows declare `requir
 | TASK-009 | Filter Deprecated Skills from Eligibility and Fix Stale Docs | None |
 | TASK-010 | Rename All Capabilities References to Skills | TASK-009 |
 | TASK-011 | Require At Least One Skill on Actor-Assigned Steps | TASK-010 |
+| TASK-012 | Add Scenario Tests for the Skill System | TASK-011 |
