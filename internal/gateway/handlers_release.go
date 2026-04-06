@@ -11,7 +11,7 @@ import (
 // POST /api/v1/execution/release
 // Body: { "actor_id": "...", "assignment_id": "...", "reason": "..." }
 func (s *Server) handleExecutionRelease(w http.ResponseWriter, r *http.Request) {
-	if s.stepClaimer == nil {
+	if s.stepReleaser == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",
 			Errors: []ErrorDetail{{Code: "unavailable", Message: "step release not available"}},

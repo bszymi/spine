@@ -103,16 +103,16 @@ func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, 
 		return nil, err
 	}
 
-	capSet := make(map[string]bool, len(skills))
+	skillSet := make(map[string]bool, len(skills))
 	for _, sk := range skills {
 		if sk.Status == domain.SkillStatusActive {
-			capSet[sk.Name] = true
+			skillSet[sk.Name] = true
 		}
 	}
 
 	var missing []string
 	for _, req := range requiredSkills {
-		if !capSet[req] {
+		if !skillSet[req] {
 			missing = append(missing, req)
 		}
 	}
