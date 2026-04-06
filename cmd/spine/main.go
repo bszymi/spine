@@ -358,6 +358,7 @@ func serveCmd() *cobra.Command {
 				PlanningRunStarter: planningStarter,
 				WorkspaceResolver:  wsResolver,
 				WSDBProvider:       wsDBProvider,
+				CandidateFinder:    orch,
 			})
 
 			// Run startup recovery and start background services.

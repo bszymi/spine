@@ -161,6 +161,16 @@ System operations are administrative and require elevated authorization.
 | `actor.remove_skill` | Removes a skill from an actor | Revoking skills |
 | `actor.list_skills` | Lists skills assigned to an actor | Viewing actor skills |
 | `actor.find_eligible` | Lists actors eligible for given skill requirements | Discovering who can execute a step |
+| `execution.candidates` | Lists tasks ready for execution, filtered by actor type, skills, blocking status | AI agents and dashboards discovering available work |
+
+**Endpoint:** `GET /api/v1/execution/candidates`
+
+Query parameters:
+- `actor_type` — filter by allowed actor type (e.g. `ai_agent`, `human`)
+- `skills` — comma-separated skill names the actor has
+- `include_blocked` — `true` to include blocked tasks (default: `false`)
+
+Response includes `blocked`, `blocked_by`, and `resolved_blockers` fields on each candidate.
 
 ### 3.6 Divergence Operations
 

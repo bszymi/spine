@@ -168,6 +168,7 @@ Artifact creation operations such as `artifact.create` are therefore helpers rat
 | `query.graph` | Retrieve relationship graph for an artifact |
 | `query.history` | View artifact change history from Git |
 | `query.runs` | List runs for a task with execution state |
+| `execution.candidates` | List tasks ready for execution, filtered by skills, actor type, and blocking status |
 
 ### 3.5 System Operations
 
