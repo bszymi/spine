@@ -338,6 +338,7 @@ func serveCmd() *cobra.Command {
 			var planningStarter gateway.PlanningRunStarter
 			if orch != nil {
 				orch.WithArtifactWriter(artifactSvc)
+				orch.WithBlockingStore(st)
 				starter = &runAdapter{orch: orch}
 				planningStarter = &planningRunAdapter{orch: orch}
 			}

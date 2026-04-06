@@ -126,6 +126,18 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		return nil, fmt.Errorf("read task artifact: %w", err)
 	}
 
+	// Check if the task is blocked by unresolved dependencies.
+	if o.blocking != nil {
+		blockResult, err := o.IsBlocked(ctx, taskPath)
+		if err != nil {
+			return nil, fmt.Errorf("check blocking status: %w", err)
+		}
+		if blockResult.Blocked {
+			return nil, domain.NewError(domain.ErrPrecondition,
+				fmt.Sprintf("task is blocked by: %v", blockResult.BlockedBy))
+		}
+	}
+
 	binding, err := o.workflows.ResolveWorkflow(ctx, string(art.Type), "")
 	if err != nil {
 		return nil, fmt.Errorf("resolve workflow: %w", err)
@@ -266,6 +278,8 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 		if run.StartedAt != nil {
 			observe.GlobalMetrics.RunDuration.ObserveDuration(time.Since(*run.StartedAt))
 		}
+		// Re-evaluate tasks that were blocked by this task.
+		o.CheckAndEmitBlockingTransition(ctx, run.TaskPath)
 		// Clean up the run branch after successful completion.
 		_ = o.CleanupRunBranch(ctx, runID)
 	} else {

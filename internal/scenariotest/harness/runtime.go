@@ -142,6 +142,7 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 			orch.WithValidator(rt.Validator)
 		}
 		orch.WithArtifactWriter(rt.Artifacts)
+		orch.WithBlockingStore(db.Store)
 		rt.Orchestrator = orch
 	}
 
