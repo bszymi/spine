@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: Workflow Step Assignment and Claiming
-status: Completed
+status: In Progress
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 owner: bszymi
 created: 2026-04-05
@@ -50,3 +50,4 @@ The existing `DeliverAssignment()` push model remains — this epic adds complem
 |------|-------|-------------|
 | TASK-001 | Task Claim Operation | None |
 | TASK-002 | Task Release Operation | TASK-001 |
+| TASK-003 | Fix Claim/Release Bugs: Nil-Check, Skill Validation, Atomicity | TASK-001, TASK-002 |
