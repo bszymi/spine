@@ -2,7 +2,7 @@
 id: TASK-014
 type: Task
 title: "Add actor-skill association HTTP API endpoints"
-status: Pending
+status: Done
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-001-skill-system/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation
