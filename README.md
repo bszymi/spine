@@ -129,12 +129,20 @@ Spine is implemented in Go with PostgreSQL for runtime state.
 | Workflow Engine | `internal/workflow` | YAML parsing, state machines, binding resolution |
 | Artifact Service | `internal/artifact` | Git-backed CRUD, validation, acceptance |
 | Validation Service | `internal/validation` | 20 cross-artifact rules, 5 violation categories |
-| Actor Gateway | `internal/actor` | Assignment delivery, selection, mock providers |
+| Actor Gateway | `internal/actor` | Assignment delivery, selection, skill execution |
 | Scheduler | `internal/scheduler` | Timeouts, orphan detection, recovery |
 | Access Gateway | `internal/gateway` | HTTP API with auth, all endpoints |
 | Projection Service | `internal/projection` | Git-to-PostgreSQL sync |
 | Event Router | `internal/event` | In-memory event dispatch |
 | Observability | `internal/observe` | Logging, tracing, Prometheus metrics, audit |
+| Auth Service | `internal/auth` | Token-based authentication and authorization |
+| Divergence Service | `internal/divergence` | Parallel execution branching and convergence |
+| Workspace Service | `internal/workspace` | Multi-workspace resolution and registry |
+| Git Client | `internal/git` | Git CLI operations, worktree management |
+| Domain Types | `internal/domain` | Core entities, state constants, errors |
+| Store | `internal/store` | PostgreSQL persistence layer |
+| Config | `internal/config` | .spine.yaml loading, artifacts directory |
+| Queue | `internal/queue` | In-memory event queue |
 | CLI | `internal/cli` | Commands for all operations |
 
 ### CLI Commands
@@ -165,11 +173,23 @@ spine validate [path] [--all]
 | POST | /api/v1/artifacts | Create artifact |
 | GET | /api/v1/artifacts | List artifacts |
 | GET/PUT | /api/v1/artifacts/* | Read/update artifact |
+| PATCH | /api/v1/artifacts/*/accept | Accept task |
+| PATCH | /api/v1/artifacts/*/reject | Reject task |
 | POST | /api/v1/runs | Start workflow run |
 | GET | /api/v1/runs/{id} | Run status |
 | POST | /api/v1/runs/{id}/cancel | Cancel run |
 | POST | /api/v1/steps/{id}/submit | Submit step result |
+| POST | /api/v1/steps/{id}/claim | Claim step |
+| POST | /api/v1/steps/{id}/release | Release step |
 | GET | /api/v1/assignments | List assignments |
+| POST | /api/v1/skills | Create skill |
+| GET | /api/v1/skills | List skills |
+| POST | /api/v1/tokens | Create API token |
+| DELETE | /api/v1/tokens/{id} | Revoke API token |
+| POST | /api/v1/workspaces | Create workspace |
+| GET | /api/v1/workspaces | List workspaces |
+| POST | /api/v1/discussions | Create discussion thread |
+| GET | /api/v1/discussions | List discussions |
 | GET | /api/v1/query/artifacts | Query artifacts |
 | GET | /api/v1/query/graph | Artifact graph |
 | GET | /api/v1/query/history | Change history |
@@ -196,14 +216,15 @@ make docker-vet
 ```
 /
 ├── cmd/spine/           Go binary entry point
-├── internal/            Go packages (18 packages, ~170 files)
-├── migrations/          PostgreSQL migrations (7)
-├── workflows/           Workflow YAML definitions (4)
+├── internal/            Go packages (21 packages, ~260 files)
+├── migrations/          PostgreSQL migrations (13)
+├── workflows/           Workflow YAML definitions (5)
+├── api/                 OpenAPI v3.1 specification
 ├── templates/           Artifact templates
 ├── governance/          Governance documents
 ├── product/             Product definition
 ├── architecture/        Architecture documentation
-├── initiatives/         Work tracking (3 initiatives, 23 epics, 113 tasks)
+├── initiatives/         Work tracking (10 initiatives, 56 epics, 274 tasks)
 ├── Dockerfile           Multi-stage build
 ├── docker-compose.yaml  Dev environment
 └── Makefile             Build and test targets
@@ -234,6 +255,11 @@ make docker-vet
 - [API Operations](/architecture/api-operations.md) — Operation semantics and governance rules
 - [Observability](/architecture/observability.md) — Metrics, tracing, audit, permissions
 - [Runtime Schema](/architecture/runtime-schema.md) — Database tables and indexes
+- [Security Model](/architecture/security-model.md) — Authentication, authorization, path safety
+- [Git Integration](/architecture/git-integration.md) — Branch operations, worktree management
+- [Discussion Model](/architecture/discussion-model.md) — Thread and comment architecture
+- [Docker Runtime](/architecture/docker-runtime.md) — Container environment and compose setup
+- [Scenario Testing](/architecture/scenario-testing-architecture.md) — End-to-end test framework
 
 ---
 
@@ -251,7 +277,7 @@ Spine provides that structure.
 
 ## Status
 
-**All three initiatives complete.** 111 of 113 tasks done (98.2%).
+272 of 274 tasks done across 10 initiatives (99.3%).
 
 ### INIT-001 — Foundations (Completed)
 Governance baseline, product definition, architecture v0.1, governance and architecture refinement.
@@ -261,6 +287,27 @@ Core foundation, artifact service, projection service, workflow engine, access g
 
 ### INIT-003 — Execution System (Completed)
 Execution core, actor delivery, workflow definitions, Git orchestration, evaluation outcomes, validation integration, execution reliability, divergence/convergence integration, event observability, developer experience, production wiring.
+
+### INIT-004 — Product Scenario Testing (Draft)
+End-to-end scenario-based testing to validate Spine behavior from a product perspective.
+
+### INIT-005 — API Spec Conformance (Draft)
+Align HTTP API implementation with OpenAPI specification for request/response schemas.
+
+### INIT-006 — Governed Artifact Creation (Completed)
+Artifact creation through workflows on branches instead of direct commits to main.
+
+### INIT-007 — Git Remote Sync (Pending)
+Auto-push Git changes to origin, human-readable branch names, workspace portability.
+
+### INIT-008 — Dogfooding Fixes (In Progress)
+Bugs and usability issues discovered while using Spine to build its management platform.
+
+### INIT-009 — Workspace Runtime (Completed)
+Single Spine runtime hosting multiple isolated workspace contexts.
+
+### INIT-010 — Actor Skills and Execution Queries (Completed)
+Skill system, task eligibility detection, and execution-focused queries.
 
 ### Remaining Work
 - Documentation alignment (in progress)
