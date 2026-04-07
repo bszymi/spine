@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: "Wire ResultHandler adapter in gateway startup"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-003-execution-system/epics/EPIC-002-actor-delivery/epic.md
 initiative: /initiatives/INIT-003-execution-system/initiative.md
 links:
