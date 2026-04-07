@@ -54,6 +54,28 @@ func (a *runAdapter) StartRun(ctx context.Context, taskPath string) (*gateway.Ru
 	}, nil
 }
 
+// resultAdapter adapts engine.Orchestrator to gateway.ResultHandler.
+type resultAdapter struct {
+	orch *engine.Orchestrator
+}
+
+func (a *resultAdapter) IngestResult(ctx context.Context, req gateway.ResultSubmission) (*gateway.ResultResponse, error) {
+	resp, err := a.orch.IngestResult(ctx, engine.SubmitRequest{
+		ExecutionID:       req.ExecutionID,
+		OutcomeID:         req.OutcomeID,
+		ArtifactsProduced: req.ArtifactsProduced,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &gateway.ResultResponse{
+		ExecutionID: resp.ExecutionID,
+		StepID:      resp.StepID,
+		Status:      string(resp.Status),
+		OutcomeID:   resp.OutcomeID,
+	}, nil
+}
+
 // planningRunAdapter adapts engine.Orchestrator to gateway.PlanningRunStarter.
 type planningRunAdapter struct {
 	orch *engine.Orchestrator
@@ -336,11 +358,13 @@ func serveCmd() *cobra.Command {
 
 			var starter gateway.RunStarter
 			var planningStarter gateway.PlanningRunStarter
+			var resultHandler gateway.ResultHandler
 			if orch != nil {
 				orch.WithArtifactWriter(artifactSvc)
 				orch.WithBlockingStore(st)
 				starter = &runAdapter{orch: orch}
 				planningStarter = &planningRunAdapter{orch: orch}
+				resultHandler = &resultAdapter{orch: orch}
 			}
 
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
@@ -356,6 +380,7 @@ func serveCmd() *cobra.Command {
 				Events:             eventRouter,
 				RunStarter:         starter,
 				PlanningRunStarter: planningStarter,
+				ResultHandler:      resultHandler,
 				WorkspaceResolver:  wsResolver,
 				WSDBProvider:       wsDBProvider,
 				CandidateFinder:    orch,
