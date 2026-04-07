@@ -1046,12 +1046,18 @@ func (s *PostgresStore) AddSkillToActor(ctx context.Context, actorID, skillID st
 }
 
 func (s *PostgresStore) RemoveSkillFromActor(ctx context.Context, actorID, skillID string) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM auth.actor_skills
 		WHERE actor_id = $1 AND skill_id = $2`,
 		actorID, skillID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "actor-skill assignment not found")
+	}
+	return nil
 }
 
 func (s *PostgresStore) ListActorSkills(ctx context.Context, actorID string) ([]domain.Skill, error) {

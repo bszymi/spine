@@ -78,9 +78,12 @@ func (f *fakeStore) AddSkillToActor(_ context.Context, actorID, skillID string) 
 
 func (f *fakeStore) RemoveSkillFromActor(_ context.Context, actorID, skillID string) error {
 	if m, ok := f.actorSkills[actorID]; ok {
-		delete(m, skillID)
+		if _, exists := m[skillID]; exists {
+			delete(m, skillID)
+			return nil
+		}
 	}
-	return nil
+	return domain.NewError(domain.ErrNotFound, "actor-skill assignment not found")
 }
 
 func (f *fakeStore) ListActorSkills(_ context.Context, actorID string) ([]domain.Skill, error) {
