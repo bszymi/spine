@@ -37,10 +37,12 @@ Each handler should:
 - Use existing `store.CreateSkill`, `store.GetSkill`, `store.UpdateSkill`, `store.ListSkills`, `store.ListSkillsByCategory` methods
 - Follow the existing gateway handler patterns (auth, error handling, JSON encoding)
 - Require authentication via `authorize(w, r, "skill.<operation>")`
+- **Register `skill.create`, `skill.read`, `skill.update`, `skill.deprecate` operations in `internal/auth/permissions.go`** so the authorize calls don't 403 on valid tokens
 
 ## Acceptance Criteria
 
 - All five endpoints return correct responses
+- Permission entries added to `auth/permissions.go` for all skill operations
 - List supports optional `?category=` query parameter
 - Deprecate sets status to `deprecated` and returns updated skill
 - Auth required on all endpoints
