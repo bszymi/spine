@@ -95,7 +95,7 @@ Architectural Decision Records capture significant design decisions.
 To create an ADR:
 
 1. Assign the next available four-digit ID: `ADR-XXXX`
-2. Create a file: `/architecture/adrs/ADR-XXXX-<slug>.md`
+2. Create a file: `/architecture/adr/ADR-XXXX-<slug>.md`
 3. Copy `/templates/adr-template.md` and fill in all required sections
 4. Set the initial status to `Proposed`
 
