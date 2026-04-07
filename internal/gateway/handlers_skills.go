@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/workflow"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -166,11 +167,33 @@ func (s *Server) handleSkillDeprecate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if skill is referenced by active workflows.
+	refs, err := workflow.FindWorkflowsReferencingSkill(r.Context(), skill.Name, st)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
+	force := r.URL.Query().Get("force") == "true"
+	if len(refs) > 0 && !force {
+		WriteJSON(w, http.StatusConflict, map[string]any{
+			"status":     "error",
+			"message":    "skill is referenced by active workflows",
+			"workflows":  refs,
+			"hint":       "use ?force=true to deprecate anyway",
+		})
+		return
+	}
+
 	skill.Status = domain.SkillStatusDeprecated
 	if err := st.UpdateSkill(r.Context(), skill); err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, skill)
+	resp := map[string]any{"skill": skill}
+	if len(refs) > 0 {
+		resp["warnings"] = refs
+	}
+	WriteJSON(w, http.StatusOK, resp)
 }

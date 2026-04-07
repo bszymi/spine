@@ -2,7 +2,7 @@
 id: TASK-016
 type: Task
 title: "Guard skill deprecation when referenced by active workflows"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-001-skill-system/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation
