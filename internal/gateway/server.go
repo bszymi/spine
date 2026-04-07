@@ -105,18 +105,18 @@ type Server struct {
 	validator          *validation.Engine
 	resultHandler      ResultHandler
 	workflowResolver   WorkflowResolverFn
-	branchCreator      BranchCreator      // optional, nil if not configured
-	events             EventEmitterGW     // optional, nil if not configured
-	runStarter         RunStarter           // optional, nil if not configured
-	planningRunStarter PlanningRunStarter   // optional, nil if not configured
-	wsResolver         workspace.Resolver       // optional, nil if not configured
-	servicePool        *workspace.ServicePool   // optional, nil if not configured
-	wsDBProvider       *workspace.DBProvider     // optional, nil in single mode
-	candidateFinder    CandidateFinder            // optional, nil if not configured
-	stepClaimer        StepClaimer                // optional, nil if not configured
-	stepReleaser       StepReleaser               // optional, nil if not configured
-	devMode            bool                      // when true, authorize allows unauthenticated requests
-	rebuilds           sync.Map                  // rebuild_id -> *rebuildState
+	branchCreator      BranchCreator          // optional, nil if not configured
+	events             EventEmitterGW         // optional, nil if not configured
+	runStarter         RunStarter             // optional, nil if not configured
+	planningRunStarter PlanningRunStarter     // optional, nil if not configured
+	wsResolver         workspace.Resolver     // optional, nil if not configured
+	servicePool        *workspace.ServicePool // optional, nil if not configured
+	wsDBProvider       *workspace.DBProvider  // optional, nil in single mode
+	candidateFinder    CandidateFinder        // optional, nil if not configured
+	stepClaimer        StepClaimer            // optional, nil if not configured
+	stepReleaser       StepReleaser           // optional, nil if not configured
+	devMode            bool                   // when true, authorize allows unauthenticated requests
+	rebuilds           sync.Map               // rebuild_id -> *rebuildState
 }
 
 // CandidateFinder discovers tasks ready for execution.

@@ -53,7 +53,7 @@ func (p *DatabaseProvisioner) ProvisionDatabase(ctx context.Context, workspaceID
 	if err != nil {
 		return "", fmt.Errorf("connect to admin database: %w", err)
 	}
-	defer adminConn.Close(ctx)
+	defer func() { _ = adminConn.Close(ctx) }()
 
 	// Create database. CREATE DATABASE cannot run inside a transaction.
 	_, err = adminConn.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", pgIdentifier(dbName)))

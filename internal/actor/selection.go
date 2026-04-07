@@ -149,9 +149,9 @@ func (s *Service) actorHasSkills(ctx context.Context, actor *domain.Actor, requi
 		return false, fmt.Errorf("list skills for actor %s: %w", actor.ActorID, err)
 	}
 	skillNames := make(map[string]bool, len(skills))
-	for _, sk := range skills {
-		if sk.Status == domain.SkillStatusActive {
-			skillNames[sk.Name] = true
+	for i := range skills {
+		if skills[i].Status == domain.SkillStatusActive {
+			skillNames[skills[i].Name] = true
 		}
 	}
 	for _, req := range required {

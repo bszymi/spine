@@ -101,9 +101,9 @@ type StepDefinition struct {
 // ExecutionConfig represents execution configuration for a step.
 // Per workflow-definition-format.md §3.2 execution block.
 type ExecutionConfig struct {
-	Mode                 ExecutionMode `json:"mode" yaml:"mode"`
-	EligibleActorTypes   []string      `json:"eligible_actor_types,omitempty" yaml:"eligible_actor_types,omitempty"`
-	RequiredSkills       []string      `json:"required_skills,omitempty" yaml:"required_skills,omitempty"`
+	Mode               ExecutionMode `json:"mode" yaml:"mode"`
+	EligibleActorTypes []string      `json:"eligible_actor_types,omitempty" yaml:"eligible_actor_types,omitempty"`
+	RequiredSkills     []string      `json:"required_skills,omitempty" yaml:"required_skills,omitempty"`
 }
 
 // ValidationRule represents a validation check applied before accepting a step result.

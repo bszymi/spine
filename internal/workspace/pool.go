@@ -19,14 +19,14 @@ import (
 // ServiceSet holds all per-workspace service instances.
 // Each workspace gets its own set, lazily created and cached by the pool.
 type ServiceSet struct {
-	Config     Config
-	Store      store.Store
-	GitClient  *git.CLIClient
-	Artifacts  *artifact.Service
-	ProjQuery  *projection.QueryService
-	ProjSync   *projection.Service
-	Queue      *queue.MemoryQueue
-	Events     *event.QueueRouter
+	Config    Config
+	Store     store.Store
+	GitClient *git.CLIClient
+	Artifacts *artifact.Service
+	ProjQuery *projection.QueryService
+	ProjSync  *projection.Service
+	Queue     *queue.MemoryQueue
+	Events    *event.QueueRouter
 
 	// close is called when the service set is evicted or the pool shuts down.
 	close func()

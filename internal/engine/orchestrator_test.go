@@ -89,11 +89,11 @@ func (s *stubGitOperator) Commit(_ context.Context, _ git.CommitOpts) (git.Commi
 func (s *stubGitOperator) Merge(_ context.Context, _ git.MergeOpts) (git.MergeResult, error) {
 	return git.MergeResult{}, nil
 }
-func (s *stubGitOperator) CreateBranch(_ context.Context, _, _ string) error { return nil }
-func (s *stubGitOperator) DeleteBranch(_ context.Context, _ string) error    { return nil }
-func (s *stubGitOperator) Head(_ context.Context) (string, error)            { return "abc123", nil }
-func (s *stubGitOperator) Push(_ context.Context, _, _ string) error             { return nil }
-func (s *stubGitOperator) PushBranch(_ context.Context, _, _ string) error       { return nil }
+func (s *stubGitOperator) CreateBranch(_ context.Context, _, _ string) error       { return nil }
+func (s *stubGitOperator) DeleteBranch(_ context.Context, _ string) error          { return nil }
+func (s *stubGitOperator) Head(_ context.Context) (string, error)                  { return "abc123", nil }
+func (s *stubGitOperator) Push(_ context.Context, _, _ string) error               { return nil }
+func (s *stubGitOperator) PushBranch(_ context.Context, _, _ string) error         { return nil }
 func (s *stubGitOperator) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }
 
 type stubWorkflowLoader struct{}
@@ -230,9 +230,9 @@ func (s *stubGitClient) ReadFile(_ context.Context, _, _ string) ([]byte, error)
 func (s *stubGitClient) ListFiles(_ context.Context, _, _ string) ([]string, error) {
 	return nil, nil
 }
-func (s *stubGitClient) Head(_ context.Context) (string, error) { return s.headSHA, nil }
-func (s *stubGitClient) Push(_ context.Context, _, _ string) error             { return nil }
-func (s *stubGitClient) PushBranch(_ context.Context, _, _ string) error       { return nil }
+func (s *stubGitClient) Head(_ context.Context) (string, error)                  { return s.headSHA, nil }
+func (s *stubGitClient) Push(_ context.Context, _, _ string) error               { return nil }
+func (s *stubGitClient) PushBranch(_ context.Context, _, _ string) error         { return nil }
 func (s *stubGitClient) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }
 
 func TestBindingResolver_ResolveWorkflow(t *testing.T) {

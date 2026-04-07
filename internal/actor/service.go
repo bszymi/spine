@@ -104,9 +104,9 @@ func (s *Service) ValidateSkillEligibility(ctx context.Context, actorID string, 
 	}
 
 	skillSet := make(map[string]bool, len(skills))
-	for _, sk := range skills {
-		if sk.Status == domain.SkillStatusActive {
-			skillSet[sk.Name] = true
+	for i := range skills {
+		if skills[i].Status == domain.SkillStatusActive {
+			skillSet[skills[i].Name] = true
 		}
 	}
 

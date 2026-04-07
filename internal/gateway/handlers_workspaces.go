@@ -195,10 +195,3 @@ func redactDatabaseURL(rawURL string) string {
 	u.User = nil
 	return u.Host + u.Path
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

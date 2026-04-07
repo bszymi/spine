@@ -28,11 +28,11 @@ func FindWorkflowsReferencingSkill(ctx context.Context, skillName string, st Ski
 	}
 
 	var refs []SkillReference
-	for _, proj := range projections {
-		if workflowReferencesSkill(proj.Definition, skillName) {
+	for i := range projections {
+		if workflowReferencesSkill(projections[i].Definition, skillName) {
 			refs = append(refs, SkillReference{
-				WorkflowID:   proj.WorkflowID,
-				WorkflowPath: proj.WorkflowPath,
+				WorkflowID:   projections[i].WorkflowID,
+				WorkflowPath: projections[i].WorkflowPath,
 			})
 		}
 	}
@@ -51,7 +51,8 @@ func workflowReferencesSkill(definition []byte, skillName string) bool {
 		return false
 	}
 
-	for _, step := range wf.Steps {
+	for i := range wf.Steps {
+		step := &wf.Steps[i]
 		if step.Execution == nil {
 			continue
 		}

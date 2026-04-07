@@ -274,7 +274,7 @@ func TestSelectFilterBySkill(t *testing.T) {
 
 	a, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
 		RequiredSkills: []string{"architecture_review"},
-		Strategy:             actor.StrategyAnyEligible,
+		Strategy:       actor.StrategyAnyEligible,
 	})
 	if err != nil {
 		t.Fatalf("select: %v", err)
@@ -304,7 +304,7 @@ func TestSelectNoEligible(t *testing.T) {
 
 	_, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
 		RequiredSkills: []string{"nonexistent_skill"},
-		Strategy:             actor.StrategyAnyEligible,
+		Strategy:       actor.StrategyAnyEligible,
 	})
 	if err == nil {
 		t.Error("expected error when no eligible actor")
@@ -369,9 +369,9 @@ func TestSelectExplicitNotEligible(t *testing.T) {
 	svc, _ := setupActors(t)
 
 	_, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
-		Strategy:             actor.StrategyExplicit,
-		ExplicitActorID:      "human-1",
-		RequiredSkills: []string{"nonexistent"},
+		Strategy:        actor.StrategyExplicit,
+		ExplicitActorID: "human-1",
+		RequiredSkills:  []string{"nonexistent"},
 	})
 	if err == nil {
 		t.Error("expected error for ineligible explicit actor")
@@ -405,10 +405,10 @@ func TestSelectCombinedFilters(t *testing.T) {
 
 	// Human + code_review skill + contributor role
 	a, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
-		EligibleActorTypes:   []string{"human"},
-		RequiredSkills: []string{"code_review"},
-		MinRole:              domain.RoleContributor,
-		Strategy:             actor.StrategyAnyEligible,
+		EligibleActorTypes: []string{"human"},
+		RequiredSkills:     []string{"code_review"},
+		MinRole:            domain.RoleContributor,
+		Strategy:           actor.StrategyAnyEligible,
 	})
 	if err != nil {
 		t.Fatalf("select: %v", err)
@@ -489,7 +489,7 @@ func TestSelectBySkills(t *testing.T) {
 	// Should match by skill name
 	a, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
 		RequiredSkills: []string{"code_review"},
-		Strategy:             actor.StrategyAnyEligible,
+		Strategy:       actor.StrategyAnyEligible,
 	})
 	if err != nil {
 		t.Fatalf("select: %v", err)
@@ -501,7 +501,7 @@ func TestSelectBySkills(t *testing.T) {
 	// Should NOT match unassigned skill
 	_, err = svc.SelectActor(context.Background(), actor.SelectionRequest{
 		RequiredSkills: []string{"deployment"},
-		Strategy:             actor.StrategyAnyEligible,
+		Strategy:       actor.StrategyAnyEligible,
 	})
 	if err == nil {
 		t.Error("expected no match for unassigned skill")
@@ -593,9 +593,9 @@ func TestSelectExplicitDescriptiveSkillError(t *testing.T) {
 	fs.actorSkills["a1"] = map[string]bool{"s1": true}
 
 	_, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
-		Strategy:             actor.StrategyExplicit,
-		ExplicitActorID:      "a1",
-		RequiredSkills: []string{"code_review", "deployment"},
+		Strategy:        actor.StrategyExplicit,
+		ExplicitActorID: "a1",
+		RequiredSkills:  []string{"code_review", "deployment"},
 	})
 	if err == nil {
 		t.Fatal("expected error for missing skill")
@@ -608,7 +608,7 @@ func TestSelectExplicitDescriptiveSkillError(t *testing.T) {
 }
 
 func contains_(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
+	return len(s) >= len(substr) && (s == substr || s != "" && containsSubstring(s, substr))
 }
 
 func containsSubstring(s, sub string) bool {
@@ -714,7 +714,7 @@ func TestDeprecatedSkillExcludedFromSelection(t *testing.T) {
 
 	_, err := svc.SelectActor(context.Background(), actor.SelectionRequest{
 		RequiredSkills: []string{"deployment"},
-		Strategy:             actor.StrategyAnyEligible,
+		Strategy:       actor.StrategyAnyEligible,
 	})
 	if err == nil {
 		t.Error("expected no eligible actor — deprecated skill should not match")

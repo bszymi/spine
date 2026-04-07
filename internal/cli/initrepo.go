@@ -142,12 +142,6 @@ func commitOnBranch(repoDir string) error {
 		return fmt.Errorf("git add: %w", err)
 	}
 
-	// Check if there are staged changes.
-	if out, _ := run("git", "diff", "--cached", "--quiet"); out == "" {
-		// diff --cached --quiet exits 0 if no changes; the error is when there ARE changes.
-		// Check exit code properly — if git diff --cached --quiet succeeds, no changes.
-	}
-
 	if _, err := run("git", "commit", "-m", "Initialize Spine workspace"); err != nil {
 		// May fail if nothing to commit (idempotent).
 		return nil
