@@ -50,24 +50,6 @@ func (s *Server) handleActorSkillRemove(w http.ResponseWriter, r *http.Request) 
 	actorID := chi.URLParam(r, "actor_id")
 	skillID := chi.URLParam(r, "skill_id")
 
-	// Verify assignment exists before removing.
-	skills, err := st.ListActorSkills(r.Context(), actorID)
-	if err != nil {
-		WriteError(w, err)
-		return
-	}
-	found := false
-	for _, sk := range skills {
-		if sk.SkillID == skillID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		WriteError(w, domain.NewError(domain.ErrNotFound, "actor-skill assignment not found"))
-		return
-	}
-
 	if err := st.RemoveSkillFromActor(r.Context(), actorID, skillID); err != nil {
 		WriteError(w, err)
 		return
