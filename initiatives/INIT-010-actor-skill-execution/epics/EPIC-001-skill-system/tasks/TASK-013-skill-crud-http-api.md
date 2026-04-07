@@ -2,7 +2,7 @@
 id: TASK-013
 type: Task
 title: "Add skill CRUD HTTP API endpoints"
-status: Pending
+status: Done
 epic: /initiatives/INIT-010-actor-skill-execution/epics/EPIC-001-skill-system/epic.md
 initiative: /initiatives/INIT-010-actor-skill-execution/initiative.md
 work_type: implementation

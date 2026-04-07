@@ -54,6 +54,12 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"system.rebuild":  domain.RoleOperator,
 	"system.validate": domain.RoleOperator,
 
+	// Skills
+	"skill.create":    domain.RoleContributor,
+	"skill.read":      domain.RoleReader,
+	"skill.update":    domain.RoleContributor,
+	"skill.deprecate": domain.RoleContributor,
+
 	// Token management
 	"token.create": domain.RoleAdmin,
 	"token.revoke": domain.RoleAdmin,
