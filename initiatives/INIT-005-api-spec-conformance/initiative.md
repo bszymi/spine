@@ -2,7 +2,7 @@
 id: INIT-005
 type: Initiative
 title: "API Spec Conformance"
-status: Draft
+status: Pending
 owner: bszymi
 created: 2026-03-27
 links:

@@ -2,7 +2,7 @@
 id: INIT-004
 type: Initiative
 title: "Product Scenario Testing System"
-status: Draft
+status: Pending
 owner: _TBD_
 created: 2026-03-26
 ---
