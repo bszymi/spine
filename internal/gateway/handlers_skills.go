@@ -177,10 +177,10 @@ func (s *Server) handleSkillDeprecate(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "true"
 	if len(refs) > 0 && !force {
 		WriteJSON(w, http.StatusConflict, map[string]any{
-			"status":     "error",
-			"message":    "skill is referenced by active workflows",
-			"workflows":  refs,
-			"hint":       "use ?force=true to deprecate anyway",
+			"status":    "error",
+			"message":   "skill is referenced by active workflows",
+			"workflows": refs,
+			"hint":      "use ?force=true to deprecate anyway",
 		})
 		return
 	}

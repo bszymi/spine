@@ -101,9 +101,9 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 					return nil, fmt.Errorf("check actor skills: %w", err)
 				}
 				skillNames := make(map[string]bool, len(skills))
-				for _, sk := range skills {
-					if sk.Status == domain.SkillStatusActive {
-						skillNames[sk.Name] = true
+				for i := range skills {
+					if skills[i].Status == domain.SkillStatusActive {
+						skillNames[skills[i].Name] = true
 					}
 				}
 				var missing []string

@@ -19,9 +19,9 @@ func ValidateSkills(ctx context.Context, wf *domain.WorkflowDefinition, st store
 	}
 
 	skillNames := make(map[string]bool, len(skills))
-	for _, s := range skills {
-		if s.Status == domain.SkillStatusActive {
-			skillNames[s.Name] = true
+	for i := range skills {
+		if skills[i].Status == domain.SkillStatusActive {
+			skillNames[skills[i].Name] = true
 		}
 	}
 
@@ -31,11 +31,11 @@ func ValidateSkills(ctx context.Context, wf *domain.WorkflowDefinition, st store
 	}
 
 	var warnings []domain.ValidationError
-	for i, step := range wf.Steps {
-		if step.Execution == nil || len(step.Execution.RequiredSkills) == 0 {
+	for i := range wf.Steps {
+		if wf.Steps[i].Execution == nil || len(wf.Steps[i].Execution.RequiredSkills) == 0 {
 			continue
 		}
-		for _, skill := range step.Execution.RequiredSkills {
+		for _, skill := range wf.Steps[i].Execution.RequiredSkills {
 			if !skillNames[skill] {
 				warnings = append(warnings, domain.ValidationError{
 					RuleID:   "skill_registry",

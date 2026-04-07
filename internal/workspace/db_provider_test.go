@@ -51,7 +51,7 @@ func setupRegistryTable(t *testing.T, dbURL string) {
 	_, _ = pool.Exec(ctx, `DELETE FROM public.workspace_registry`)
 }
 
-func insertWorkspace(t *testing.T, dbURL string, id, displayName, wsDBURL, repoPath, status string) {
+func insertWorkspace(t *testing.T, dbURL, id, displayName, wsDBURL, repoPath, status string) {
 	t.Helper()
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dbURL)

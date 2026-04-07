@@ -11,20 +11,20 @@ import (
 
 // ExecutionCandidateFilter defines parameters for querying execution candidates.
 type ExecutionCandidateFilter struct {
-	ActorType      string // filter by allowed actor type (empty = all)
+	ActorType      string   // filter by allowed actor type (empty = all)
 	Skills         []string // filter by required skills the actor must have (empty = all)
-	IncludeBlocked bool   // include blocked tasks (default: false)
+	IncludeBlocked bool     // include blocked tasks (default: false)
 }
 
 // ExecutionCandidate represents a task that is potentially ready for execution.
 type ExecutionCandidate struct {
-	TaskPath        string   `json:"task_path"`
-	TaskID          string   `json:"task_id"`
-	Title           string   `json:"title"`
-	Status          string   `json:"status"`
-	RequiredSkills  []string `json:"required_skills,omitempty"`
-	Blocked         bool     `json:"blocked"`
-	BlockedBy       []string `json:"blocked_by,omitempty"`
+	TaskPath         string   `json:"task_path"`
+	TaskID           string   `json:"task_id"`
+	Title            string   `json:"title"`
+	Status           string   `json:"status"`
+	RequiredSkills   []string `json:"required_skills,omitempty"`
+	Blocked          bool     `json:"blocked"`
+	BlockedBy        []string `json:"blocked_by,omitempty"`
 	ResolvedBlockers []string `json:"resolved_blockers,omitempty"`
 }
 
@@ -46,19 +46,19 @@ func (o *Orchestrator) FindExecutionCandidates(ctx context.Context, filter Execu
 	}
 
 	var candidates []ExecutionCandidate
-	for _, proj := range result.Items {
+	for i := range result.Items {
 		candidate := ExecutionCandidate{
-			TaskPath: proj.ArtifactPath,
-			TaskID:   proj.ArtifactID,
-			Title:    proj.Title,
-			Status:   proj.Status,
+			TaskPath: result.Items[i].ArtifactPath,
+			TaskID:   result.Items[i].ArtifactID,
+			Title:    result.Items[i].Title,
+			Status:   result.Items[i].Status,
 		}
 
 		// Extract required skills from metadata if available.
-		candidate.RequiredSkills = extractRequiredSkills(proj.Metadata)
+		candidate.RequiredSkills = extractRequiredSkills(result.Items[i].Metadata)
 
 		// Check blocking status.
-		blockResult, err := o.IsBlocked(ctx, proj.ArtifactPath)
+		blockResult, err := o.IsBlocked(ctx, result.Items[i].ArtifactPath)
 		if err != nil {
 			// If blocking check fails, mark as blocked (safe default).
 			candidate.Blocked = true
@@ -77,7 +77,7 @@ func (o *Orchestrator) FindExecutionCandidates(ctx context.Context, filter Execu
 		// only include candidates whose allowed actor types include it.
 		if filter.ActorType != "" && len(candidate.RequiredSkills) > 0 {
 			// Extract allowed actor types from metadata if available.
-			allowedTypes := extractAllowedActorTypes(proj.Metadata)
+			allowedTypes := extractAllowedActorTypes(result.Items[i].Metadata)
 			if len(allowedTypes) > 0 && !containsStr(allowedTypes, filter.ActorType) {
 				continue
 			}
