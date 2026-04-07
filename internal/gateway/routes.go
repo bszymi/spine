@@ -88,6 +88,13 @@ func (s *Server) routes() http.Handler {
 			r.Get("/query/history", s.handleQueryHistory)
 			r.Get("/query/runs", s.handleQueryRuns)
 
+			// Skills
+			r.Post("/skills", s.handleSkillCreate)
+			r.Get("/skills", s.handleSkillList)
+			r.Get("/skills/{skill_id}", s.handleSkillGet)
+			r.Patch("/skills/{skill_id}", s.handleSkillUpdate)
+			r.Post("/skills/{skill_id}/deprecate", s.handleSkillDeprecate)
+
 			// Tokens (admin)
 			r.Post("/tokens", s.handleTokenCreate)
 			r.Delete("/tokens/{token_id}", s.handleTokenRevoke)
