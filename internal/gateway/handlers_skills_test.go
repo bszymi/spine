@@ -19,10 +19,11 @@ import (
 
 type skillStore struct {
 	store.Store
-	actors      map[string]*domain.Actor
-	tokens      map[string]*fakeTokenEntry
-	skills      map[string]*domain.Skill
-	actorSkills map[string]map[string]bool // actorID -> skillID -> exists
+	actors              map[string]*domain.Actor
+	tokens              map[string]*fakeTokenEntry
+	skills              map[string]*domain.Skill
+	actorSkills         map[string]map[string]bool // actorID -> skillID -> exists
+	workflowProjections []store.WorkflowProjection
 }
 
 func newSkillStore() *skillStore {
@@ -131,6 +132,10 @@ func (s *skillStore) RemoveSkillFromActor(_ context.Context, actorID, skillID st
 	return domain.NewError(domain.ErrNotFound, "actor-skill assignment not found")
 }
 
+func (s *skillStore) ListActiveWorkflowProjections(_ context.Context) ([]store.WorkflowProjection, error) {
+	return s.workflowProjections, nil
+}
+
 func (s *skillStore) ListActorSkills(_ context.Context, actorID string) ([]domain.Skill, error) {
 	skillIDs, ok := s.actorSkills[actorID]
 	if !ok {
@@ -143,6 +148,22 @@ func (s *skillStore) ListActorSkills(_ context.Context, actorID string) ([]domai
 		}
 	}
 	return result, nil
+}
+
+func makeWorkflowDefJSON(skills ...string) []byte {
+	wf := domain.WorkflowDefinition{
+		Steps: []domain.StepDefinition{
+			{
+				ID:   "execute",
+				Name: "Execute",
+				Execution: &domain.ExecutionConfig{
+					RequiredSkills: skills,
+				},
+			},
+		},
+	}
+	data, _ := json.Marshal(wf)
+	return data
 }
 
 // ── Setup Helper ──
@@ -360,8 +381,12 @@ func TestSkillDeprecate(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	body := decodeBody(t, resp)
-	if body["status"] != "deprecated" {
-		t.Errorf("expected status 'deprecated', got %v", body["status"])
+	skill, ok := body["skill"].(map[string]any)
+	if !ok {
+		t.Fatal("expected skill object in response")
+	}
+	if skill["status"] != "deprecated" {
+		t.Errorf("expected status 'deprecated', got %v", skill["status"])
 	}
 }
 
@@ -373,6 +398,77 @@ func TestSkillDeprecate_NotFound(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestSkillDeprecate_BlockedByWorkflow(t *testing.T) {
+	ts, ss, token := setupSkillServer(t)
+
+	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "execution", Category: "dev", Status: domain.SkillStatusActive}
+	ss.workflowProjections = []store.WorkflowProjection{
+		{WorkflowID: "task-default", WorkflowPath: "workflows/task-default.yaml", Definition: makeWorkflowDefJSON("execution", "review")},
+	}
+
+	resp := skillRequest(t, "POST", ts.URL+"/api/v1/skills/sk-1/deprecate", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+	body := decodeBody(t, resp)
+	workflows, ok := body["workflows"].([]any)
+	if !ok {
+		t.Fatal("expected workflows array in response")
+	}
+	if len(workflows) != 1 {
+		t.Errorf("expected 1 workflow reference, got %d", len(workflows))
+	}
+}
+
+func TestSkillDeprecate_ForceOverride(t *testing.T) {
+	ts, ss, token := setupSkillServer(t)
+
+	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "execution", Category: "dev", Status: domain.SkillStatusActive}
+	ss.workflowProjections = []store.WorkflowProjection{
+		{WorkflowID: "task-default", WorkflowPath: "workflows/task-default.yaml", Definition: makeWorkflowDefJSON("execution")},
+	}
+
+	resp := skillRequest(t, "POST", ts.URL+"/api/v1/skills/sk-1/deprecate?force=true", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := decodeBody(t, resp)
+	skill, ok := body["skill"].(map[string]any)
+	if !ok {
+		t.Fatal("expected skill object in response")
+	}
+	if skill["status"] != "deprecated" {
+		t.Errorf("expected status 'deprecated', got %v", skill["status"])
+	}
+	warnings, ok := body["warnings"].([]any)
+	if !ok {
+		t.Fatal("expected warnings array in response")
+	}
+	if len(warnings) != 1 {
+		t.Errorf("expected 1 warning, got %d", len(warnings))
+	}
+}
+
+func TestSkillDeprecate_UnrelatedSkillSucceeds(t *testing.T) {
+	ts, ss, token := setupSkillServer(t)
+
+	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "unused-skill", Category: "dev", Status: domain.SkillStatusActive}
+	ss.workflowProjections = []store.WorkflowProjection{
+		{WorkflowID: "task-default", WorkflowPath: "workflows/task-default.yaml", Definition: makeWorkflowDefJSON("execution")},
+	}
+
+	resp := skillRequest(t, "POST", ts.URL+"/api/v1/skills/sk-1/deprecate", token, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 }
 
