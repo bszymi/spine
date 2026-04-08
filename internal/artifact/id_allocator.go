@@ -154,31 +154,47 @@ func Slugify(title string) string {
 	return s
 }
 
+// DocumentDirs maps document artifact types to their default directories.
+var DocumentDirs = map[domain.ArtifactType]string{
+	domain.ArtifactTypeGovernance:   "governance",
+	domain.ArtifactTypeArchitecture: "architecture",
+	domain.ArtifactTypeProduct:      "product",
+}
+
 // BuildArtifactPath constructs the full path for a new artifact.
 //
 //   - Task: parentDir/TASK-XXX-slug.md (file)
 //   - Epic: parentDir/EPIC-XXX-slug/epic.md (directory + file)
 //   - Initiative: parentDir/INIT-XXX-slug/initiative.md (directory + file)
 //   - ADR: parentDir/ADR-XXXX-slug.md (file)
+//   - Document types: parentDir/slug.md
 func BuildArtifactPath(artifactType domain.ArtifactType, id, slug, parentDir string) string {
 	dirSlug := strings.ToLower(id) + "-" + slug
 	parent := strings.TrimSuffix(parentDir, "/")
 
 	switch artifactType {
 	case domain.ArtifactTypeTask:
-		// Tasks are files: parentDir/TASK-XXX-slug.md
 		return filepath.Join(parent, dirSlug+".md")
 	case domain.ArtifactTypeEpic:
-		// Epics are directories: parentDir/EPIC-XXX-slug/epic.md
 		return filepath.Join(parent, dirSlug, "epic.md")
 	case domain.ArtifactTypeInitiative:
-		// Initiatives are directories: parentDir/INIT-XXX-slug/initiative.md
 		return filepath.Join(parent, dirSlug, "initiative.md")
 	case domain.ArtifactTypeADR:
-		// ADRs are files: parentDir/ADR-XXXX-slug.md
 		return filepath.Join(parent, dirSlug+".md")
 	default:
 		// Document types (Governance, Architecture, Product): parentDir/slug.md
 		return filepath.Join(parent, slug+".md")
 	}
+}
+
+// BuildDocumentPath returns the path for a new document artifact.
+// type=Governance → governance/slug.md
+// type=Architecture → architecture/slug.md
+// type=Product → product/slug.md
+func BuildDocumentPath(artifactType domain.ArtifactType, slug string) string {
+	dir, ok := DocumentDirs[artifactType]
+	if !ok {
+		dir = strings.ToLower(string(artifactType))
+	}
+	return filepath.Join(dir, slug+".md")
 }

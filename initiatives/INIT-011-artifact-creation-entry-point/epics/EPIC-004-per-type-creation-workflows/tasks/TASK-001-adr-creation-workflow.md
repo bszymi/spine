@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Create adr-creation.yaml workflow
-status: Pending
+status: Completed
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-004-per-type-creation-workflows/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: implementation

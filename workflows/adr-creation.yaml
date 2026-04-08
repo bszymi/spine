@@ -1,0 +1,82 @@
+id: adr-creation
+name: ADR Creation
+version: "1.0"
+status: Active
+description: >
+  Governs creation of Architectural Decision Records through planning runs.
+  Covers the Proposed → Accepted lifecycle with architecture review.
+mode: creation
+
+applies_to:
+  - ADR
+
+entry_step: draft
+
+steps:
+  - id: draft
+    name: Draft ADR
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+      required_skills: [architecture]
+    description: >
+      Draft the ADR content: context, decision, consequences.
+      Additional supporting artifacts can be added to the branch.
+    required_outputs:
+      - artifact_content
+    outcomes:
+      - id: ready_for_review
+        name: Ready for Review
+        next_step: validate
+
+  - id: validate
+    name: Validate ADR
+    type: automated
+    execution:
+      mode: automated_only
+      eligible_actor_types:
+        - automated_system
+    description: >
+      Validate ADR schema, required sections, and cross-artifact links.
+    outcomes:
+      - id: valid
+        name: Validation Passed
+        next_step: review
+      - id: invalid
+        name: Validation Failed
+        next_step: draft
+    timeout: "5m"
+    timeout_outcome: valid
+
+  - id: review
+    name: Architecture Review
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types:
+        - human
+      required_skills: [architecture, review]
+    description: >
+      Architecture review of the decision. Reviewer evaluates
+      context, alternatives considered, and consequences.
+    required_inputs:
+      - artifact_content
+    outcomes:
+      - id: accepted
+        name: Accepted
+        next_step: end
+        commit:
+          status: Accepted
+      - id: needs_revision
+        name: Needs Revision
+        next_step: draft
+      - id: rejected
+        name: Rejected
+        next_step: end
+        commit:
+          status: Deprecated
+    timeout: "168h"
+    timeout_outcome: needs_revision
