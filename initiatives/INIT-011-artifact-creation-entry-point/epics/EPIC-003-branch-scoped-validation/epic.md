@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: "Branch-Scoped Validation"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 owner: bszymi
 created: 2026-04-08

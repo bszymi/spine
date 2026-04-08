@@ -17,7 +17,7 @@ entry_step: draft
 
 steps:
   - id: draft
-    name: Draft Artifact
+    name: Draft Artifacts
     type: manual
     execution:
       mode: hybrid
@@ -25,6 +25,11 @@ steps:
         - human
         - ai_agent
       required_skills: [planning]
+    description: >
+      Create and refine artifacts on the planning branch.
+      Additional artifacts can be added via POST /artifacts/add
+      or by writing files directly to the branch.
+      Submit when all artifacts are ready for validation.
     preconditions:
       - type: artifact_status
         config:
@@ -37,12 +42,16 @@ steps:
         next_step: validate
 
   - id: validate
-    name: Validate Artifact
+    name: Validate Branch Artifacts
     type: automated
     execution:
       mode: automated_only
       eligible_actor_types:
         - automated_system
+    description: >
+      Discover all new artifacts on the branch (diff against main).
+      Validate each individually and run cross-artifact checks.
+      Uses DiscoverChanges(main, branch) for branch-scoped validation.
     outcomes:
       - id: valid
         name: Validation Passed
