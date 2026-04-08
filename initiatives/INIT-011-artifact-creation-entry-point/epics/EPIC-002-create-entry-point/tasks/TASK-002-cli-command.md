@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: CLI artifact create command
-status: Pending
+status: Completed
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-002-create-entry-point/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: implementation

@@ -18,6 +18,7 @@ func artifactCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(artifactCreateCmd())
+	cmd.AddCommand(artifactEntryCmd())
 	cmd.AddCommand(artifactReadCmd())
 	cmd.AddCommand(artifactUpdateCmd())
 	cmd.AddCommand(artifactListCmd())
@@ -165,6 +166,73 @@ func artifactValidateCmd() *cobra.Command {
 			return printResponse(data)
 		},
 	}
+}
+
+func artifactEntryCmd() *cobra.Command {
+	var artType, epic, initiative, title string
+
+	cmd := &cobra.Command{
+		Use:   "entry",
+		Short: "Create a governed artifact through a planning run",
+		Long: `Start a governed artifact creation workflow.
+
+Allocates the next sequential ID, creates a branch, and starts a
+planning run with the creation workflow.
+
+Examples:
+  spine artifact entry --type Task --epic EPIC-003 --title "Implement validation"
+  spine artifact entry --type Epic --initiative INIT-003 --title "New feature"
+  spine artifact entry --type Initiative --title "New initiative"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if title == "" {
+				return fmt.Errorf("--title is required")
+			}
+
+			// Determine parent based on type and flags.
+			var parent string
+			switch artType {
+			case "Task":
+				if epic == "" {
+					return fmt.Errorf("--epic is required for Task")
+				}
+				parent = epic
+			case "Epic":
+				if initiative == "" {
+					return fmt.Errorf("--initiative is required for Epic")
+				}
+				parent = initiative
+			case "Initiative":
+				// No parent needed.
+			default:
+				return fmt.Errorf("--type must be Task, Epic, or Initiative")
+			}
+
+			c := newAPIClient()
+			data, err := c.Post(context.Background(), "/api/v1/artifacts/entry", map[string]string{
+				"artifact_type": artType,
+				"parent":        parent,
+				"title":         title,
+			})
+			if err != nil {
+				return err
+			}
+
+			return printResponse(data)
+		},
+	}
+
+	cmd.Flags().StringVar(&artType, "type", "", "Artifact type (Task, Epic, Initiative)")
+	cmd.Flags().StringVar(&epic, "epic", "", "Parent epic ID (required for Task)")
+	cmd.Flags().StringVar(&initiative, "initiative", "", "Parent initiative ID (required for Epic)")
+	cmd.Flags().StringVar(&title, "title", "", "Artifact title")
+	return cmd
+}
+
+func str(v any) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // outputFormat holds the global output format flag.
