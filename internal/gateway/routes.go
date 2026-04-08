@@ -42,6 +42,7 @@ func (s *Server) routes() http.Handler {
 
 			// Artifacts — wildcard routing for slash-containing paths
 			r.Post("/artifacts", s.handleArtifactCreate)
+			r.Post("/artifacts/entry", s.handleArtifactEntryCreate)
 			r.Get("/artifacts", s.handleArtifactList)
 			r.HandleFunc("/artifacts/*", s.handleArtifactWildcard)
 

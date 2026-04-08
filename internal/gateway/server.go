@@ -42,6 +42,7 @@ type ProjectionSyncer interface {
 // GitReader defines the Git read operations the gateway needs.
 type GitReader interface {
 	ReadFile(ctx context.Context, ref, path string) ([]byte, error)
+	ListFiles(ctx context.Context, ref, pattern string) ([]string, error)
 	Head(ctx context.Context) (string, error)
 }
 
