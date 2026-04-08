@@ -129,6 +129,62 @@ func TestNextID_UnsupportedType(t *testing.T) {
 	}
 }
 
+func TestNextID_Initiative(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+
+	testutil.WriteFile(t, repo, "initiatives/INIT-001-first/initiative.md",
+		"---\nid: INIT-001\ntype: Initiative\ntitle: First\nstatus: Completed\n---\n# INIT-001\n")
+	testutil.WriteFile(t, repo, "initiatives/INIT-003-third/initiative.md",
+		"---\nid: INIT-003\ntype: Initiative\ntitle: Third\nstatus: Pending\n---\n# INIT-003\n")
+	testutil.GitAdd(t, repo, ".", "add initiatives")
+
+	ctx := context.Background()
+	id, err := artifact.NextID(ctx, client, "initiatives", domain.ArtifactTypeInitiative, "HEAD")
+	if err != nil {
+		t.Fatalf("NextID: %v", err)
+	}
+	if id != "INIT-004" {
+		t.Errorf("expected INIT-004, got %s", id)
+	}
+}
+
+func TestNextID_IgnoresNonMatchingFiles(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+
+	// Add a task, a non-matching file, and a README in the same directory.
+	testutil.WriteFile(t, repo, "tasks/TASK-002-real.md",
+		"---\nid: TASK-002\ntype: Task\ntitle: Real\nstatus: Pending\n---\n# TASK-002\n")
+	testutil.WriteFile(t, repo, "tasks/README.md", "# Tasks\n")
+	testutil.WriteFile(t, repo, "tasks/notes.txt", "some notes\n")
+	testutil.GitAdd(t, repo, ".", "add mixed files")
+
+	ctx := context.Background()
+	id, err := artifact.NextID(ctx, client, "tasks", domain.ArtifactTypeTask, "HEAD")
+	if err != nil {
+		t.Fatalf("NextID: %v", err)
+	}
+	// Only TASK-002 should be counted.
+	if id != "TASK-003" {
+		t.Errorf("expected TASK-003, got %s", id)
+	}
+}
+
+func TestNextID_DefaultRef(t *testing.T) {
+	client, _ := setupIDAllocatorRepo(t)
+	ctx := context.Background()
+
+	// Empty ref should default to HEAD.
+	id, err := artifact.NextID(ctx, client, "initiatives/INIT-001-test/epics/EPIC-001-test/tasks", domain.ArtifactTypeTask, "")
+	if err != nil {
+		t.Fatalf("NextID: %v", err)
+	}
+	if id != "TASK-006" {
+		t.Errorf("expected TASK-006 with empty ref, got %s", id)
+	}
+}
+
 // ── Slugify tests ──
 
 func TestSlugify_Basic(t *testing.T) {

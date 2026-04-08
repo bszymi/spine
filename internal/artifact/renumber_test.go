@@ -165,6 +165,57 @@ func TestUpdateLinksToRenamedArtifact(t *testing.T) {
 	}
 }
 
+func TestRenumberArtifact_PreservesOtherContent(t *testing.T) {
+	dir := t.TempDir()
+
+	taskDir := filepath.Join(dir, "tasks")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nid: TASK-003\ntype: Task\ntitle: Complex Task\nstatus: Draft\nlinks:\n  - type: parent\n    target: /epics/epic.md\n---\n# TASK-003 — Complex Task\n\n## Purpose\n\nThis task does things.\n\n## Acceptance Criteria\n\n- Criterion one\n- Criterion two\n"
+	if err := os.WriteFile(filepath.Join(dir, "tasks/task-003-complex-task.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := artifact.RenumberArtifact(dir, "tasks/task-003-complex-task.md", "Task", "TASK-003", "TASK-004")
+	if err != nil {
+		t.Fatalf("RenumberArtifact: %v", err)
+	}
+
+	newContent, err := os.ReadFile(filepath.Join(dir, result.NewPath))
+	if err != nil {
+		t.Fatalf("read new file: %v", err)
+	}
+
+	s := string(newContent)
+	// ID should be updated.
+	if !strings.Contains(s, "id: TASK-004") {
+		t.Error("front-matter ID not updated")
+	}
+	if !strings.Contains(s, "# TASK-004") {
+		t.Error("heading not updated")
+	}
+	// Other content should be preserved.
+	if !strings.Contains(s, "title: Complex Task") {
+		t.Error("title should be preserved")
+	}
+	if !strings.Contains(s, "target: /epics/epic.md") {
+		t.Error("links should be preserved")
+	}
+	if !strings.Contains(s, "Criterion one") {
+		t.Error("body content should be preserved")
+	}
+}
+
+func TestRenumberArtifact_NonexistentFile(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := artifact.RenumberArtifact(dir, "tasks/nonexistent.md", "Task", "TASK-001", "TASK-002")
+	if err == nil {
+		t.Error("expected error for nonexistent file, got nil")
+	}
+}
+
 func TestUpdateLinksToRenamedArtifact_NoLinksUnchanged(t *testing.T) {
 	dir := t.TempDir()
 
