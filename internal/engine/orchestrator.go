@@ -20,6 +20,7 @@ type Orchestrator struct {
 	convergence    ConvergenceHandler     // optional, nil if not configured
 	artifactWriter ArtifactWriter         // optional, required for planning runs
 	blocking       BlockingStore          // optional, nil if not configured
+	collision      CollisionHandler       // optional, nil if not configured
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -98,4 +99,9 @@ func (o *Orchestrator) WithArtifactWriter(w ArtifactWriter) {
 // WithBlockingStore enables dependency blocking detection.
 func (o *Orchestrator) WithBlockingStore(b BlockingStore) {
 	o.blocking = b
+}
+
+// WithCollisionHandler enables artifact ID collision detection and renumbering during merge.
+func (o *Orchestrator) WithCollisionHandler(c CollisionHandler) {
+	o.collision = c
 }
