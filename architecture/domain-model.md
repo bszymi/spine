@@ -59,6 +59,15 @@ Each artifact type is expected to define or inherit a schema/template that const
 - Artifacts are self-describing — they contain their own metadata
 - Changes to artifacts produce Git commits (explicit, diffable history)
 
+**ID Allocation:**
+
+- Sequential IDs are allocated by scanning the parent directory for existing artifacts of the same type and incrementing the highest number found
+- IDs are zero-padded per naming conventions (3 digits for Task/Epic/Initiative, 4 digits for ADR)
+- Gaps are preserved — if TASK-001 and TASK-003 exist, the next is TASK-004, not TASK-002
+- Follow-up IDs (900-series) are excluded from regular allocation
+- Document types (Governance, Architecture, Product) use descriptive slugs instead of sequential IDs
+- Collision detection at merge time: if two planning runs allocate the same ID, the second is renumbered automatically
+
 Artifacts may include structured linkage information describing relationships to other artifacts. Linkage is intentionally general rather than limited to parent/child hierarchy so the model can express dependencies, follow-up work, related scope, blocking relationships, and other governed connections.
 
 Artifact linkage is stored explicitly in artifact metadata (typically the Markdown front-matter block) so that both humans and automated agents can reliably discover relationships. All structured links for an artifact should appear together in this metadata block.

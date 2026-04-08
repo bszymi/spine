@@ -21,6 +21,11 @@ export SPINE_DATABASE_URL=postgres://localhost:5432/spine
 spine migrate
 spine serve
 
+# Create artifacts through governed workflows
+spine artifact entry --type Task --epic EPIC-003 --title "Implement validation"
+spine artifact entry --type Epic --initiative INIT-003 --title "New feature"
+spine artifact entry --type Initiative --title "New initiative"
+
 # CLI operations
 spine artifact list
 spine query artifacts --type Task --status Pending
@@ -153,6 +158,7 @@ spine health             System health check
 spine migrate            Run database migrations
 spine init-repo [path]   Initialize Spine repository
 
+spine artifact entry --type TYPE --title TITLE  Create artifact through governed workflow
 spine artifact create|read|update|list|validate|links
 spine run start [--task PATH] [--mode standard|planning] [--content FILE]
 spine run status|cancel|inspect
@@ -170,7 +176,9 @@ spine validate [path] [--all]
 | GET | /api/v1/system/metrics | Prometheus metrics |
 | POST | /api/v1/system/rebuild | Projection rebuild |
 | POST | /api/v1/system/validate | Validate all artifacts |
-| POST | /api/v1/artifacts | Create artifact |
+| POST | /api/v1/artifacts | Create artifact (low-level) |
+| POST | /api/v1/artifacts/entry | Create artifact through governed workflow |
+| POST | /api/v1/artifacts/add | Add artifact to planning run branch |
 | GET | /api/v1/artifacts | List artifacts |
 | GET/PUT | /api/v1/artifacts/* | Read/update artifact |
 | PATCH | /api/v1/artifacts/*/accept | Accept task |
@@ -218,13 +226,13 @@ make docker-vet
 ├── cmd/spine/           Go binary entry point
 ├── internal/            Go packages (21 packages, ~260 files)
 ├── migrations/          PostgreSQL migrations (13)
-├── workflows/           Workflow YAML definitions (5)
+├── workflows/           Workflow YAML definitions (7)
 ├── api/                 OpenAPI v3.1 specification
 ├── templates/           Artifact templates
 ├── governance/          Governance documents
 ├── product/             Product definition
 ├── architecture/        Architecture documentation
-├── initiatives/         Work tracking (10 initiatives, 56 epics, 274 tasks)
+├── initiatives/         Work tracking (11 initiatives, 60 epics, 288 tasks)
 ├── Dockerfile           Multi-stage build
 ├── docker-compose.yaml  Dev environment
 └── Makefile             Build and test targets
@@ -308,6 +316,9 @@ Single Spine runtime hosting multiple isolated workspace contexts.
 
 ### INIT-010 — Actor Skills and Execution Queries (Completed)
 Skill system, task eligibility detection, and execution-focused queries.
+
+### INIT-011 — Artifact Creation Entry Point (Completed)
+Governed artifact creation through CLI and API: auto-ID allocation, slug generation, collision detection at merge time, branch-scoped validation, per-type creation workflows (ADR, Governance, Architecture, Product).
 
 ### Remaining Work
 - Documentation alignment (in progress)

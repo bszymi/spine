@@ -76,7 +76,9 @@ Artifact operations create, read, and modify governed artifacts in Git.
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
-| `artifact.create` | Creates a new artifact file and commits to Git | When creating a new initiative, epic, task, ADR, or document |
+| `artifact.create` | Creates a new artifact file and commits to Git | When creating a new artifact with known path and content (low-level) |
+| `artifact.entry` | Allocates next ID, builds content, starts planning run | When creating a new artifact through governed workflow (high-level) |
+| `artifact.add` | Adds an artifact to an existing planning run's branch | When incrementally adding child artifacts during a planning run's draft step |
 | `artifact.read` | Reads artifact content from Git (or projection) | When viewing artifact details; supports reading from non-default refs |
 | `artifact.update` | Updates artifact content and commits to Git | When modifying artifact metadata or content outside a Run |
 | `artifact.validate` | Validates without persisting | When checking an artifact before creation/update, or validating drafts |
@@ -85,8 +87,11 @@ Artifact operations create, read, and modify governed artifacts in Git.
 
 **Domain rules:**
 - `artifact.create` rejects duplicates (same path or same ID within scope)
+- `artifact.entry` allocates the next sequential ID within the parent scope (e.g., TASK-006 if TASK-001 through TASK-005 exist), generates a slug from the title, builds schema-valid front-matter content, and delegates to `run.start_planning`. The parent must exist and be the correct type (tasks require epic parent, epics require initiative parent). Supported types: Task, Epic, Initiative. ADR and document types use separate creation workflows.
+- `artifact.add` writes to a planning run's branch, scanning the branch (not main) for the next ID. Only works while the run is in the `draft` step. The parent can exist on the branch or on main.
 - `artifact.update` validates the full artifact (schema + cross-artifact) before committing
 - Write operations target the authoritative branch by default; when a `write_context` with `run_id` is provided, they target the task branch instead
+- Merge-time collision detection: if two planning runs allocate the same ID, the collision is detected at merge time. The artifact is renumbered and the merge retried (max 2 attempts).
 - Write operations are designed to produce a single atomic Git commit with structured trailers (per [Git Integration](/architecture/git-integration.md) §5). This is a target architectural invariant — implementations must treat partial commits as bugs
 
 ### 3.2 Workflow Operations
