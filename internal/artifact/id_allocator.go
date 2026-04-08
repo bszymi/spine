@@ -9,8 +9,13 @@ import (
 	"unicode"
 
 	"github.com/bszymi/spine/internal/domain"
-	"github.com/bszymi/spine/internal/git"
 )
+
+// FileLister provides file listing capability for ID allocation.
+// This is a subset of git.GitClient — any type that can list files at a ref satisfies it.
+type FileLister interface {
+	ListFiles(ctx context.Context, ref, pattern string) ([]string, error)
+}
 
 // idPrefixes maps artifact types to their ID prefix strings.
 var idPrefixes = map[domain.ArtifactType]string{
@@ -41,7 +46,7 @@ var idPadding = map[domain.ArtifactType]int{
 //   - Gaps are preserved (does not fill gaps)
 //   - IDs in the 900-series (follow-up IDs) are excluded from scanning
 //   - Returns TYPE-001 (or TYPE-0001 for ADR) if no existing artifacts are found
-func NextID(ctx context.Context, gitClient git.GitClient, parentDir string, artifactType domain.ArtifactType, ref string) (string, error) {
+func NextID(ctx context.Context, gitClient FileLister, parentDir string, artifactType domain.ArtifactType, ref string) (string, error) {
 	prefix, ok := idPrefixes[artifactType]
 	if !ok {
 		return "", fmt.Errorf("unsupported artifact type for ID allocation: %s", artifactType)

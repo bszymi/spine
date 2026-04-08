@@ -255,6 +255,14 @@ func (f *fakeGitReader) ReadFile(_ context.Context, _, path string) ([]byte, err
 	return data, nil
 }
 
+func (f *fakeGitReader) ListFiles(_ context.Context, _, _ string) ([]string, error) {
+	var paths []string
+	for p := range f.files {
+		paths = append(paths, p)
+	}
+	return paths, nil
+}
+
 func (f *fakeGitReader) Head(_ context.Context) (string, error) {
 	return "fake-head-sha", nil
 }
