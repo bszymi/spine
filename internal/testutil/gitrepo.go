@@ -69,6 +69,18 @@ func GitRm(t *testing.T, repoDir, relPath, message string) {
 	run("git", "commit", "-m", message)
 }
 
+// GitCheckout runs git checkout with the given arguments in the repository.
+func GitCheckout(t *testing.T, repoDir string, args ...string) {
+	t.Helper()
+	cmdArgs := append([]string{"checkout"}, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git checkout %v failed: %v\n%s", args, err, out)
+	}
+}
+
 // GitAdd stages and commits a file in the given repository.
 func GitAdd(t *testing.T, repoDir, relPath, message string) {
 	t.Helper()
