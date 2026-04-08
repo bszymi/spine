@@ -89,6 +89,7 @@ This initiative is successful when:
 | EPIC-001 | ID Allocation & Collision Resolution | Next-ID scanner, slug generation, merge-time renumbering |
 | EPIC-002 | Create Entry Point | CLI command, API endpoints (create + add), planning run trigger wiring |
 | EPIC-003 | Branch-Scoped Validation | Discovery-based validation for all artifacts on a planning run branch |
+| EPIC-004 | Per-Type Creation Workflows | ADR and document creation workflows, non-hierarchical path building |
 
 ---
 
@@ -104,11 +105,12 @@ This initiative is successful when:
 
 INIT-011 may be marked complete when:
 
-- All three epics are complete
-- `spine artifact create` works end-to-end through CLI and API
+- All four epics are complete
+- `spine artifact create` works end-to-end through CLI and API for all artifact types
 - `POST /artifacts/add` can add artifacts to an existing planning run
 - Artifacts written directly to a branch are discovered and validated
-- Collision renumbering is tested
+- Collision renumbering is tested for sequential IDs, duplicate slug detection for documents
+- ADR, Governance, Architecture, and Product types have creation workflows
 - All existing tests continue to pass
 
 ---
