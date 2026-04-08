@@ -260,3 +260,26 @@ func TestBuildArtifactPath_Document(t *testing.T) {
 		t.Errorf("got %s, want %s", got, expected)
 	}
 }
+
+// ── BuildDocumentPath tests ──
+
+func TestBuildDocumentPath_Governance(t *testing.T) {
+	got := artifact.BuildDocumentPath(domain.ArtifactTypeGovernance, "api-standards")
+	if got != "governance/api-standards.md" {
+		t.Errorf("got %s, want governance/api-standards.md", got)
+	}
+}
+
+func TestBuildDocumentPath_Architecture(t *testing.T) {
+	got := artifact.BuildDocumentPath(domain.ArtifactTypeArchitecture, "caching-strategy")
+	if got != "architecture/caching-strategy.md" {
+		t.Errorf("got %s, want architecture/caching-strategy.md", got)
+	}
+}
+
+func TestBuildDocumentPath_Product(t *testing.T) {
+	got := artifact.BuildDocumentPath(domain.ArtifactTypeProduct, "pricing-model")
+	if got != "product/pricing-model.md" {
+		t.Errorf("got %s, want product/pricing-model.md", got)
+	}
+}

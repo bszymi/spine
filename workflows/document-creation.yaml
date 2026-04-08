@@ -1,0 +1,81 @@
+id: document-creation
+name: Document Creation
+version: "1.0"
+status: Active
+description: >
+  Governs creation of Governance, Architecture, and Product documents
+  through planning runs. These share the Living Document initial status
+  and a review-based approval process.
+mode: creation
+
+applies_to:
+  - Governance
+  - Architecture
+  - Product
+
+entry_step: draft
+
+steps:
+  - id: draft
+    name: Draft Document
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+      required_skills: [planning]
+    description: >
+      Draft the document content. Additional related documents
+      can be added to the branch.
+    required_outputs:
+      - artifact_content
+    outcomes:
+      - id: ready_for_review
+        name: Ready for Review
+        next_step: validate
+
+  - id: validate
+    name: Validate Document
+    type: automated
+    execution:
+      mode: automated_only
+      eligible_actor_types:
+        - automated_system
+    description: >
+      Validate document schema, required front-matter fields,
+      and cross-artifact references.
+    outcomes:
+      - id: valid
+        name: Validation Passed
+        next_step: review
+      - id: invalid
+        name: Validation Failed
+        next_step: draft
+    timeout: "5m"
+    timeout_outcome: valid
+
+  - id: review
+    name: Review Document
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types:
+        - human
+      required_skills: [review]
+    description: >
+      Review the document for accuracy, completeness, and
+      alignment with existing governance/architecture/product docs.
+    required_inputs:
+      - artifact_content
+    outcomes:
+      - id: approved
+        name: Approved
+        next_step: end
+        commit:
+          status: Living Document
+      - id: needs_revision
+        name: Needs Revision
+        next_step: draft
+    timeout: "72h"
+    timeout_outcome: needs_revision

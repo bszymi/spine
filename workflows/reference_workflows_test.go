@@ -197,7 +197,7 @@ func TestNoBindingConflicts(t *testing.T) {
 	// Load all workflows and verify no two Active workflows share
 	// the same (applies_to type, mode) pair — mode disambiguates
 	// execution workflows from creation workflows.
-	files := []string{"task-default.yaml", "task-spike.yaml", "adr.yaml", "epic-lifecycle.yaml", "artifact-creation.yaml"}
+	files := []string{"task-default.yaml", "task-spike.yaml", "adr.yaml", "epic-lifecycle.yaml", "artifact-creation.yaml", "adr-creation.yaml", "document-creation.yaml"}
 
 	// key: "type:mode" → workflow ID
 	bindingMap := make(map[string]string)
@@ -241,5 +241,21 @@ func TestNoBindingConflicts(t *testing.T) {
 	}
 	if id := bindingMap["Epic:creation"]; id != "artifact-creation" {
 		t.Errorf("expected Epic:creation → artifact-creation, got %s", id)
+	}
+
+	// Creation bindings from adr-creation.yaml.
+	if id := bindingMap["ADR:creation"]; id != "adr-creation" {
+		t.Errorf("expected ADR:creation → adr-creation, got %s", id)
+	}
+
+	// Creation bindings from document-creation.yaml.
+	if id := bindingMap["Governance:creation"]; id != "document-creation" {
+		t.Errorf("expected Governance:creation → document-creation, got %s", id)
+	}
+	if id := bindingMap["Architecture:creation"]; id != "document-creation" {
+		t.Errorf("expected Architecture:creation → document-creation, got %s", id)
+	}
+	if id := bindingMap["Product:creation"]; id != "document-creation" {
+		t.Errorf("expected Product:creation → document-creation, got %s", id)
 	}
 }
