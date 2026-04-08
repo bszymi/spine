@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: "ID Allocation & Collision Resolution"
-status: Draft
+status: Pending
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 owner: bszymi
 created: 2026-04-08

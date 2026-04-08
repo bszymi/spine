@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Implement discovery-based validation step
-status: Draft
+status: Pending
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-003-branch-scoped-validation/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: implementation

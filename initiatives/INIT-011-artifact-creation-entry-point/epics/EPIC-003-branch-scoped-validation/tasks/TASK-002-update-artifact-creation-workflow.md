@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Update artifact-creation workflow for branch-scoped validation
-status: Draft
+status: Pending
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-003-branch-scoped-validation/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: implementation

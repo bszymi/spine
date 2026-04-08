@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Unit tests for ID allocation and collision resolution
-status: Draft
+status: Pending
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-001-id-allocation-and-collision-resolution/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: testing

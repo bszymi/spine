@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Tests for per-type creation workflows
-status: Draft
+status: Pending
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-004-per-type-creation-workflows/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: testing
