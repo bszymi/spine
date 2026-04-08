@@ -35,12 +35,14 @@ Extend `internal/gateway/handlers_artifacts.go`.
 {
   "run_id": "uuid",
   "artifact_type": "Task",
+  "parent": "EPIC-004",
   "title": "Implement validation"
 }
 ```
 
 - `run_id` (required): the planning run to add to
-- `artifact_type` (required): Task, Epic, or ADR
+- `artifact_type` (required): Task or Epic (must be a valid child of the run's root or specified parent)
+- `parent` (required): parent artifact ID on the branch — needed because a planning run may contain multiple parents (e.g., an initiative with several epics; tasks must specify which epic they belong to)
 - `title` (required): human-readable title
 
 ### Response schema
@@ -56,8 +58,8 @@ Extend `internal/gateway/handlers_artifacts.go`.
 ### Handler flow
 
 1. Look up the planning run by `run_id` — verify it exists and is in the `draft` step
-2. Determine the parent from the run's root artifact (e.g., if the run created EPIC-004, tasks are scoped to it)
-3. Scan the **branch** (not main) for existing artifacts to allocate the next ID — because previous `add` calls or direct file writes may have already created artifacts
+2. Resolve the `parent` ID to a path on the branch (e.g., EPIC-004 → full path on the branch). The parent must exist on the branch or on main.
+3. Scan the **branch** (not main) under the parent's directory for existing artifacts to allocate the next ID — because previous `add` calls or direct file writes may have already created artifacts
 4. Call `Slugify(title)` and `BuildArtifactPath()`
 5. Build artifact content (front-matter with id, type, title, status: Draft, parent link)
 6. Write the file to the branch using `ArtifactWriter`

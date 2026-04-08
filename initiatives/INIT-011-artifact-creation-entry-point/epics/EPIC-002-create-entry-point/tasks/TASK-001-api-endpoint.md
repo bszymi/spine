@@ -37,7 +37,7 @@ Extend `internal/gateway/handlers_artifacts.go` (or create a new handler file).
 }
 ```
 
-- `artifact_type` (required): Task, Epic, Initiative, or ADR
+- `artifact_type` (required): Task, Epic, or Initiative (ADR excluded — no creation workflow exists for it yet)
 - `parent` (required for Task/Epic): parent artifact ID — the endpoint resolves this to a path
 - `title` (required): human-readable title for the artifact
 
