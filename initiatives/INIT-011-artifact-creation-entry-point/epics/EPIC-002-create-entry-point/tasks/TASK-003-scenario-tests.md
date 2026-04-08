@@ -13,6 +13,8 @@ links:
     target: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-002-create-entry-point/epic.md
   - type: blocked_by
     target: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-002-create-entry-point/tasks/TASK-002-cli-command.md
+  - type: blocked_by
+    target: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-002-create-entry-point/tasks/TASK-004-artifact-add-endpoint.md
 ---
 
 # TASK-003 — Scenario Tests for Artifact Creation Flow
@@ -58,11 +60,22 @@ End-to-end scenario tests that validate the full artifact creation flow from API
    - Create a task in an epic that has no tasks yet
    - Verify: allocates TASK-001
 
+6. **Add artifact to planning run**
+   - Create epic via `POST /artifacts/create`
+   - Add task via `POST /artifacts/add` with the run ID
+   - Verify: task is on the same branch, correctly numbered
+   - Add second task
+   - Verify: sequential numbering (TASK-001, TASK-002)
+
+7. **Add rejected when run past draft step**
+   - Create epic, submit draft step (run advances to validation)
+   - Call `POST /artifacts/add` → returns 409
+
 ---
 
 ## Acceptance Criteria
 
-- All five scenarios pass
+- All seven scenarios pass
 - Tests use the existing scenario test harness (`internal/scenariotest/harness/`)
 - Collision test simulates concurrent creation realistically (two planning runs, sequential merge)
 - No flaky tests — collision scenario must be deterministic

@@ -37,6 +37,11 @@ Without this, artifact creation still requires manually constructing artifact fi
 - Slug generation from title
 - CLI command: `spine artifact create --type Task --epic EPIC-003 --title "Implement validation"`
 - API endpoint: `POST /artifacts/create` that triggers a planning run
+- API endpoint: `POST /artifacts/add` that adds an artifact to an existing planning run's branch (for UI/management platform use)
+- Dual artifact addition paths:
+  - **API path**: `POST /artifacts/add` writes a file and commits to the planning run's branch
+  - **Git-native path**: actor creates artifact files directly on the branch; discovery picks them up
+- Branch-scoped validation: validation step uses `DiscoverChanges(main, branch)` to find and validate all artifacts on the planning run's branch, regardless of how they were created
 - Branch name generation from artifact type, parent, and allocated ID
 - Merge-time collision detection: if the allocated ID was taken by a concurrent merge, detect the conflict
 - Renumber-and-retry: re-scan `main`, pick the next available ID, rename the artifact on the branch, retry merge
@@ -45,7 +50,6 @@ Without this, artifact creation still requires manually constructing artifact fi
 ### Out of Scope
 
 - Per-type creation workflows (the existing generic `artifact-creation.yaml` is sufficient for now; per-type governance is a future enhancement)
-- UI for artifact creation (belongs in the management platform)
 - Automatic child artifact scaffolding
 - Changes to existing `StartPlanningRun()` behavior
 
@@ -58,9 +62,11 @@ This initiative is successful when:
 1. `spine artifact create --type Task --epic EPIC-003 --title "..."` starts a planning run with the correct next ID
 2. The artifact is created on a branch following naming conventions (`INIT-XXX/EPIC-XXX/TASK-XXX-slug`)
 3. The creation workflow resolves via `(artifactType, mode=creation)` binding
-4. If two concurrent creations allocate the same ID, the second one automatically renumbers and retries
-5. ID allocation respects existing conventions: zero-padded, sequential, scoped to parent
-6. All existing tests continue to pass
+4. Additional artifacts can be added to the planning run via API (`POST /artifacts/add`) or by writing files directly to the branch
+5. Validation step discovers and validates all artifacts on the branch, regardless of how they were created
+6. If two concurrent creations allocate the same ID, the second one automatically renumbers and retries
+7. ID allocation respects existing conventions: zero-padded, sequential, scoped to parent
+8. All existing tests continue to pass
 
 ---
 
@@ -81,7 +87,8 @@ This initiative is successful when:
 | Epic | Title | Purpose |
 |------|-------|---------|
 | EPIC-001 | ID Allocation & Collision Resolution | Next-ID scanner, slug generation, merge-time renumbering |
-| EPIC-002 | Create Entry Point | CLI command, API endpoint, planning run trigger wiring |
+| EPIC-002 | Create Entry Point | CLI command, API endpoints (create + add), planning run trigger wiring |
+| EPIC-003 | Branch-Scoped Validation | Discovery-based validation for all artifacts on a planning run branch |
 
 ---
 
@@ -97,8 +104,10 @@ This initiative is successful when:
 
 INIT-011 may be marked complete when:
 
-- Both epics are complete
+- All three epics are complete
 - `spine artifact create` works end-to-end through CLI and API
+- `POST /artifacts/add` can add artifacts to an existing planning run
+- Artifacts written directly to a branch are discovered and validated
 - Collision renumbering is tested
 - All existing tests continue to pass
 

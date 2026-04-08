@@ -28,16 +28,18 @@ Provide the CLI command and API endpoint that allow users and agents to create n
 
 ### In Scope
 
-- API endpoint `POST /artifacts/create` that accepts artifact type, parent reference, and title
+- API endpoint `POST /artifacts/create` that accepts artifact type, parent reference, and title — starts a planning run
+- API endpoint `POST /artifacts/add` that adds an artifact to an existing planning run's branch (for UI/management platform use)
 - CLI command `spine artifact create --type <type> --epic <epic> --title <title>`
 - Wiring: endpoint allocates next ID, resolves creation workflow, starts planning run on a branch
 - Input validation (type must be valid, parent must exist, title must be non-empty)
-- API spec update for the new endpoint
+- API spec update for both endpoints
 - Integration/scenario tests for the full create flow
 
 ### Out of Scope
 
 - ID allocation logic (EPIC-001)
+- Branch-scoped validation logic (EPIC-003)
 - Changes to planning run engine (INIT-006)
 - Per-type creation workflows (future)
 
@@ -46,11 +48,12 @@ Provide the CLI command and API endpoint that allow users and agents to create n
 ## 3. Success Criteria
 
 1. `spine artifact create --type Task --epic EPIC-003 --title "Implement validation"` succeeds and starts a planning run
-2. The API returns the run ID, allocated artifact ID, and branch name
-3. Invalid inputs produce clear error messages
-4. Parent artifact existence is validated before allocation
-5. The creation workflow resolves correctly via `(artifactType, mode=creation)` binding
-6. Scenario test validates the full flow from CLI command to artifact on main
+2. `POST /artifacts/add` can add an artifact to an existing planning run's branch
+3. The API returns the run ID, allocated artifact ID, and branch name
+4. Invalid inputs produce clear error messages
+5. Parent artifact existence is validated (against main for `create`, against branch for `add`)
+6. The creation workflow resolves correctly via `(artifactType, mode=creation)` binding
+7. Scenario test validates the full flow from CLI command to artifact on main
 
 ---
 
