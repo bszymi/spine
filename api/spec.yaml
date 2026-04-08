@@ -71,6 +71,67 @@ paths:
               schema:
                 $ref: '#/components/schemas/ArtifactListResponse'
 
+  /artifacts/entry:
+    post:
+      operationId: artifact.entry
+      summary: Create artifact through governed workflow
+      description: |
+        Allocates the next sequential ID, builds artifact content, and starts a
+        planning run with the appropriate creation workflow. This is the high-level
+        artifact creation entry point — it handles ID allocation, slug generation,
+        parent resolution, and workflow binding automatically.
+      tags: [Artifacts]
+      parameters:
+        - $ref: '#/components/parameters/XTraceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactEntryCreateRequest'
+      responses:
+        '201':
+          description: Planning run started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactEntryCreateResponse'
+        '400':
+          description: Invalid input (missing title, unsupported type, wrong parent type)
+        '404':
+          description: Parent artifact not found
+
+  /artifacts/add:
+    post:
+      operationId: artifact.add
+      summary: Add artifact to a planning run branch
+      description: |
+        Adds an artifact to an existing planning run's branch. Only works while
+        the run is in the draft step. Scans the branch (not main) for the next
+        available ID. The parent must exist on the branch or on main.
+      tags: [Artifacts]
+      parameters:
+        - $ref: '#/components/parameters/XTraceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactAddRequest'
+      responses:
+        '201':
+          description: Artifact created on branch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactAddResponse'
+        '400':
+          description: Invalid input
+        '404':
+          description: Run not found
+        '409':
+          description: Run is past the draft step
+
   /artifacts/{path}:
     get:
       operationId: artifact.read
@@ -721,6 +782,59 @@ components:
       description: Idempotency key for write operations. Falls back to X-Trace-Id if omitted.
 
   schemas:
+
+    # ── Artifact Entry ──
+
+    ArtifactEntryCreateRequest:
+      type: object
+      required: [artifact_type, title]
+      properties:
+        artifact_type:
+          type: string
+          enum: [Task, Epic, Initiative]
+          description: Type of artifact to create
+        parent:
+          type: string
+          description: Parent artifact ID (required for Task and Epic)
+        title:
+          type: string
+          description: Human-readable artifact title
+
+    ArtifactEntryCreateResponse:
+      type: object
+      properties:
+        run_id: { type: string, description: Planning run ID }
+        artifact_id: { type: string, description: Allocated artifact ID (e.g., TASK-006) }
+        artifact_path: { type: string, description: Full artifact path }
+        branch: { type: string, description: Planning run branch name }
+        workflow_id: { type: string, description: Resolved creation workflow ID }
+        trace_id: { type: string }
+
+    ArtifactAddRequest:
+      type: object
+      required: [run_id, artifact_type, parent, title]
+      properties:
+        run_id:
+          type: string
+          description: Planning run to add the artifact to
+        artifact_type:
+          type: string
+          enum: [Task, Epic]
+          description: Type of artifact to add
+        parent:
+          type: string
+          description: Parent artifact ID (on the branch or main)
+        title:
+          type: string
+          description: Human-readable artifact title
+
+    ArtifactAddResponse:
+      type: object
+      properties:
+        artifact_id: { type: string, description: Allocated artifact ID }
+        artifact_path: { type: string, description: Full artifact path on branch }
+        branch: { type: string, description: Planning run branch name }
+        trace_id: { type: string }
 
     # ── Common ──
 

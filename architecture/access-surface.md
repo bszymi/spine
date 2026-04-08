@@ -39,7 +39,9 @@ The command-line interface provides direct, scriptable access to Spine operation
 
 **Capabilities:**
 
+- Create artifacts through governed workflows (`spine artifact entry`)
 - Create, read, update artifact content and metadata
+- Add artifacts to planning run branches incrementally
 - Trigger workflow actions (start run, submit step result, approve/reject)
 - Query artifact state and relationships
 - Validate artifacts against schemas and cross-artifact rules

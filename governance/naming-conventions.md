@@ -42,6 +42,9 @@ Every execution artifact must have a stable, unique identifier.
 2. **Immutability** — once assigned, an ID must never change
 3. **No reuse** — IDs of deleted or superseded artifacts must not be reassigned
 4. **Titles may evolve** — the human-readable title of an artifact may change, but the ID remains stable
+5. **Automatic allocation** — the `spine artifact entry` command and `POST /artifacts/entry` endpoint allocate the next ID automatically by scanning the parent directory. Gaps are preserved (max+1, not gap-filling). Follow-up IDs (900-series) are excluded from regular allocation.
+6. **Collision resolution** — if two concurrent planning runs allocate the same ID, the collision is detected at merge time. The second artifact is renumbered to the next available ID and the merge is retried.
+7. **Document types** — Governance, Architecture, and Product documents use descriptive slugs (e.g., `api-standards.md`) instead of sequential IDs. Duplicate slugs are rejected.
 
 ---
 

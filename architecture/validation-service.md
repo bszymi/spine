@@ -228,6 +228,20 @@ When a step is blocked by validation failure, the Workflow Engine:
 2. Emits an operational event with the validation result
 3. The step remains in `waiting` status until the issues are resolved and validation is re-run
 
+### 5.6 Branch-Scoped Validation
+
+For planning runs, the validation step operates on the entire branch rather than a single artifact. This is implemented by the `ValidateBranch()` function in the engine:
+
+1. **Discovery**: `DiscoverChanges(main, branch)` finds all new and modified artifacts on the planning run's branch
+2. **Individual validation**: each discovered artifact is validated for schema correctness, required fields, and ID format
+3. **Aggregate result**: if all artifacts pass, the step outcome is `valid`; if any fail, the outcome is `invalid` with per-artifact error details
+
+This supports two artifact addition paths:
+- **API path**: artifacts added via `POST /artifacts/add` during the draft step
+- **Git-native path**: actors create artifact files directly on the branch (e.g., AI agents writing markdown files)
+
+The validation step is agnostic to how artifacts arrived on the branch — it validates whatever `DiscoverChanges` finds.
+
 ---
 
 ## 6. Data Access

@@ -232,7 +232,15 @@ The workflow resolver uses the mode to select the correct workflow binding:
 - `StartRun()` resolves to workflows with `mode: execution` (or absent mode)
 - `StartPlanningRun()` resolves to workflows with `mode: creation`
 
-A single `artifact-creation.yaml` workflow with `mode: creation` serves as the reference creation workflow for artifact types that share the Draft → Pending lifecycle (Initiative, Epic, and Task). Product and ADR have different status models and require type-specific creation workflows if planning run support is added for them later. The step sequence is: draft, validate, review, merge — where the validate step runs automated cross-artifact validation before human review.
+Three creation workflows cover all artifact types:
+
+| Workflow | Applies To | Initial → Terminal Status | Key Characteristics |
+|----------|-----------|---------------------------|---------------------|
+| `artifact-creation.yaml` | Initiative, Epic, Task | Draft → Pending | Branch-scoped validation discovers all artifacts on the branch |
+| `adr-creation.yaml` | ADR | Proposed → Accepted | Architecture review step, 168h timeout, rejection produces Deprecated |
+| `document-creation.yaml` | Governance, Architecture, Product | Living Document | Shared workflow for document types with review-based approval |
+
+The `artifact-creation.yaml` draft step supports incremental artifact addition — actors can add child artifacts to the planning run branch via `POST /artifacts/add` or by writing files directly. The validate step uses `DiscoverChanges(main, branch)` to find and validate all artifacts on the branch as a set.
 
 ### 3.5 Applies-To Clause
 
