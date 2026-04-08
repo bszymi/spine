@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Collision detection and renumber at merge time
-status: Pending
+status: Completed
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-001-id-allocation-and-collision-resolution/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: implementation

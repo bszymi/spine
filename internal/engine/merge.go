@@ -61,6 +61,17 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 			return o.retryMerge(ctx, run)
 		}
 
+		// For planning runs with a collision handler, check if this is an
+		// ID collision and attempt to renumber before failing.
+		if run.Mode == domain.RunModePlanning && o.collision != nil {
+			if newPath, renErr := o.collision.DetectAndRenumber(ctx, run, 2); renErr == nil && newPath != "" {
+				log.Info("artifact renumbered after ID collision, retrying merge",
+					"run_id", runID, "old_path", run.TaskPath, "new_path", newPath)
+				run.TaskPath = newPath
+				return o.retryMerge(ctx, run)
+			}
+		}
+
 		log.Error("permanent merge failure",
 			"run_id", runID, "branch", run.BranchName, "error", err)
 		return o.failRunOnMergeError(ctx, run, err)

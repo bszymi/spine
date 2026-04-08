@@ -90,6 +90,16 @@ type ArtifactWriter interface {
 	Create(ctx context.Context, path, content string) (*artifact.WriteResult, error)
 }
 
+// CollisionHandler detects and resolves artifact ID collisions during merge.
+// Used by planning runs when a merge fails due to a path conflict.
+type CollisionHandler interface {
+	// DetectAndRenumber checks if a merge conflict is an ID collision and,
+	// if so, renumbers the artifact on the branch. Returns the new artifact path
+	// if renumbered, or empty string if not an ID collision. Max retries limits
+	// renumber attempts.
+	DetectAndRenumber(ctx context.Context, run *domain.Run, maxRetries int) (newArtifactPath string, err error)
+}
+
 // GitOperator provides Git operations needed for run-level branching and commits.
 type GitOperator interface {
 	Commit(ctx context.Context, opts git.CommitOpts) (git.CommitResult, error)
