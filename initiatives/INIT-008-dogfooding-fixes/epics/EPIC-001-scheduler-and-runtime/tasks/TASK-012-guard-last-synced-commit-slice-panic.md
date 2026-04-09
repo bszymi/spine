@@ -2,7 +2,7 @@
 id: TASK-012
 type: Task
 title: "Guard LastSyncedCommit[:8] against empty string panic"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix

@@ -258,8 +258,8 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		"modified", len(changeset.Modified),
 		"deleted", len(changeset.Deleted),
 		"errors", syncErrors,
-		"from", state.LastSyncedCommit[:8],
-		"to", head[:8],
+		"from", shortSHA(state.LastSyncedCommit),
+		"to", shortSHA(head),
 	)
 
 	observe.GlobalMetrics.ProjectionSyncs.Inc()
@@ -269,8 +269,8 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		return nil
 	}
 	payload, _ := json.Marshal(map[string]any{
-		"from_commit": state.LastSyncedCommit[:8],
-		"to_commit":   head[:8],
+		"from_commit": shortSHA(state.LastSyncedCommit),
+		"to_commit":   shortSHA(head),
 		"created":     len(changeset.Created),
 		"modified":    len(changeset.Modified),
 		"deleted":     len(changeset.Deleted),
@@ -472,4 +472,12 @@ func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string)
 func hashContent(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h)
+}
+
+// shortSHA safely truncates a commit SHA to 8 characters for display.
+func shortSHA(sha string) string {
+	if len(sha) <= 8 {
+		return sha
+	}
+	return sha[:8]
 }
