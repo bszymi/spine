@@ -159,6 +159,7 @@ func serveCmd() *cobra.Command {
 			// SPINE_WORKSPACE_MODE: "single" (default) or "shared".
 			var wsResolver workspace.Resolver
 			var wsDBProvider *workspace.DBProvider
+			var wsServicePool *workspace.ServicePool
 			wsMode := os.Getenv("SPINE_WORKSPACE_MODE")
 			if wsMode == "" {
 				wsMode = "single"
@@ -180,12 +181,12 @@ func serveCmd() *cobra.Command {
 				}
 				defer wsDBProvider.Close()
 				wsResolver = wsDBProvider
+				wsServicePool = workspace.NewServicePool(ctx, wsDBProvider, workspace.PoolConfig{})
+				defer wsServicePool.Close()
 				log.Info("workspace mode: shared", "registry_url", "***")
 			default:
 				return fmt.Errorf("unknown SPINE_WORKSPACE_MODE: %q (expected \"single\" or \"shared\")", wsMode)
 			}
-
-			_ = wsResolver // Will be used by gateway and background services in future epics.
 
 			// Connect to database (optional — server starts without it)
 			var st store.Store
@@ -382,6 +383,7 @@ func serveCmd() *cobra.Command {
 				PlanningRunStarter: planningStarter,
 				ResultHandler:      resultHandler,
 				WorkspaceResolver:  wsResolver,
+				ServicePool:        wsServicePool,
 				WSDBProvider:       wsDBProvider,
 				CandidateFinder:    orch,
 				StepClaimer:        orch,
