@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -26,9 +25,18 @@ type WriteResult struct {
 type Service struct {
 	git          git.GitClient
 	events       event.EventRouter
-	repo         string     // repository root path
-	artifactsDir string     // artifacts directory relative to repo (empty or "/" means repo root)
-	branchMu     sync.Mutex // serializes branch-scoped writes to prevent checkout races
+	repo         string // repository root path
+	artifactsDir string // artifacts directory relative to repo (empty or "/" means repo root)
+}
+
+// branchScope holds the working directory for branch-scoped operations.
+// When a WriteContext specifies a branch, a git worktree is created so that
+// file writes and commits happen in isolation — without changing the main
+// working tree. This eliminates the race between artifact writes and
+// orchestrator operations (MergeRunBranch) that share the same repo.
+type branchScope struct {
+	repoDir string // directory for file I/O and git commands (worktree or main repo)
+	cleanup func() // releases the worktree (no-op when using the main repo)
 }
 
 // NewService creates a new Artifact Service.
@@ -59,10 +67,16 @@ func (s *Service) repoRelativePath(artifactPath string) string {
 	return filepath.Join(s.artifactsDir, artifactPath)
 }
 
-// safePath validates and resolves a path, ensuring it stays within the repo root.
-// The input path is artifact-relative; it is first converted to a repo-relative
-// path via repoRelativePath before being joined with the repo root.
+// safePath validates and resolves a path against the main repo root.
 func (s *Service) safePath(path string) (string, error) {
+	return s.safePathIn(s.repo, path)
+}
+
+// safePathIn validates and resolves a path, ensuring it stays within root.
+// The input path is artifact-relative; it is first converted to a repo-relative
+// path via repoRelativePath before being joined with root.
+// root may be the main repo or an isolated worktree directory.
+func (s *Service) safePathIn(root, path string) (string, error) {
 	// Reject absolute paths before any processing.
 	if filepath.IsAbs(path) {
 		return "", domain.NewError(domain.ErrInvalidParams,
@@ -70,15 +84,15 @@ func (s *Service) safePath(path string) (string, error) {
 	}
 
 	repoPath := s.repoRelativePath(path)
-	fullPath := filepath.Join(s.repo, repoPath)
-	absRepo, err := filepath.Abs(s.repo)
+	fullPath := filepath.Join(root, repoPath)
+	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return "", domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("invalid repo path: %v", err))
 	}
 
-	// Resolve symlinks on the repo root
-	realRepo, err := filepath.EvalSymlinks(absRepo)
+	// Resolve symlinks on the root
+	realRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
 		return "", domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("resolve repo path: %v", err))
@@ -99,7 +113,7 @@ func (s *Service) safePath(path string) (string, error) {
 			fmt.Sprintf("resolve path: %v", err))
 	}
 
-	if !strings.HasPrefix(realPath, realRepo+string(filepath.Separator)) && realPath != realRepo {
+	if !strings.HasPrefix(realPath, realRoot+string(filepath.Separator)) && realPath != realRoot {
 		return "", domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("path escapes repository: %s", path))
 	}
@@ -111,19 +125,7 @@ func (s *Service) safePath(path string) (string, error) {
 func (s *Service) Create(ctx context.Context, path, content string) (*WriteResult, error) {
 	log := observe.Logger(ctx)
 
-	// Validate path stays within repo
-	fullPath, err := s.safePath(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check for duplicate path
-	if _, err := os.Stat(fullPath); err == nil {
-		return nil, domain.NewError(domain.ErrAlreadyExists,
-			fmt.Sprintf("artifact already exists at path: %s", path))
-	}
-
-	// Parse and validate
+	// Parse and validate content before acquiring a worktree.
 	artifact, err := Parse(path, []byte(content))
 	if err != nil {
 		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
@@ -135,12 +137,24 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 			"artifact validation failed", result.Errors)
 	}
 
-	// Switch to target branch before any file writes.
-	cleanup, err := s.enterBranch(ctx)
+	// Acquire an isolated worktree for branch-scoped writes (or the main repo).
+	scope, err := s.enterBranch(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
+	defer scope.cleanup()
+
+	// Validate path stays within the working directory.
+	fullPath, err := s.safePathIn(scope.repoDir, path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for duplicate path
+	if _, err := os.Stat(fullPath); err == nil {
+		return nil, domain.NewError(domain.ErrAlreadyExists,
+			fmt.Sprintf("artifact already exists at path: %s", path))
+	}
 
 	// Write file
 	dir := filepath.Dir(fullPath)
@@ -157,7 +171,7 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 	repoPath := s.repoRelativePath(path)
 	trailers := observe.TrailersFromContext(ctx, "artifact.create")
 
-	commitResult, err := s.stageAndCommit(ctx, repoPath, git.CommitOpts{
+	commitResult, err := s.stageAndCommit(ctx, scope.repoDir, repoPath, git.CommitOpts{
 		Message:  fmt.Sprintf("Create %s: %s", artifact.Type, artifact.Title),
 		Trailers: trailers,
 		Author: git.Author{
@@ -168,11 +182,11 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 	if err != nil {
 		// Clean up the file and unstage on commit failure
 		_ = os.Remove(fullPath)
-		_ = gitReset(ctx, s.repo, repoPath)
+		_ = gitReset(ctx, scope.repoDir, repoPath)
 		return nil, err
 	}
 
-	s.autoPush(ctx)
+	s.autoPush(ctx, scope.repoDir)
 
 	log.Info("artifact created",
 		"path", path,
@@ -216,19 +230,7 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 func (s *Service) Update(ctx context.Context, path, content string) (*WriteResult, error) {
 	log := observe.Logger(ctx)
 
-	// Validate path stays within repo
-	fullPath, err := s.safePath(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Verify artifact exists
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		return nil, domain.NewError(domain.ErrNotFound,
-			fmt.Sprintf("artifact not found: %s", path))
-	}
-
-	// Parse and validate new content
+	// Parse and validate new content before acquiring a worktree.
 	artifact, err := Parse(path, []byte(content))
 	if err != nil {
 		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
@@ -240,12 +242,24 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 			"artifact validation failed", result.Errors)
 	}
 
-	// Switch to target branch before any file writes.
-	cleanup, err := s.enterBranch(ctx)
+	// Acquire an isolated worktree for branch-scoped writes (or the main repo).
+	scope, err := s.enterBranch(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
+	defer scope.cleanup()
+
+	// Validate path stays within the working directory.
+	fullPath, err := s.safePathIn(scope.repoDir, path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify artifact exists
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		return nil, domain.NewError(domain.ErrNotFound,
+			fmt.Sprintf("artifact not found: %s", path))
+	}
 
 	// Save original content for rollback
 	originalContent, readErr := os.ReadFile(fullPath)
@@ -264,7 +278,7 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 	repoPath := s.repoRelativePath(path)
 	trailers := observe.TrailersFromContext(ctx, "artifact.update")
 
-	commitResult, err := s.stageAndCommit(ctx, repoPath, git.CommitOpts{
+	commitResult, err := s.stageAndCommit(ctx, scope.repoDir, repoPath, git.CommitOpts{
 		Message:  fmt.Sprintf("Update %s: %s", artifact.Type, artifact.Title),
 		Trailers: trailers,
 		Author: git.Author{
@@ -278,7 +292,7 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 		return nil, err
 	}
 
-	s.autoPush(ctx)
+	s.autoPush(ctx, scope.repoDir)
 
 	log.Info("artifact updated",
 		"path", path,
@@ -338,32 +352,49 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 	return artifacts, nil
 }
 
-// enterBranch acquires the branch mutex and checks out the target branch
-// if a WriteContext is present. Must be called before any file writes.
-// Returns a cleanup function that switches back and releases the mutex.
-func (s *Service) enterBranch(ctx context.Context) (func(), error) {
+// enterBranch prepares an isolated working directory for branch-scoped writes.
+// When a WriteContext specifies a branch, a git worktree is created so that
+// file I/O and commits target the branch without changing the main working tree.
+// Returns a branchScope whose repoDir should be used for all file and git
+// operations, and whose cleanup must be deferred.
+func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
 	wc := GetWriteContext(ctx)
 	if wc == nil || wc.Branch == "" {
-		return func() {}, nil
+		return &branchScope{repoDir: s.repo, cleanup: func() {}}, nil
 	}
 
-	s.branchMu.Lock()
-	if err := gitCheckout(ctx, s.repo, wc.Branch); err != nil {
-		s.branchMu.Unlock()
+	// Create a temporary directory for the worktree.
+	worktreeDir, err := os.MkdirTemp("", "spine-wt-*")
+	if err != nil {
+		return nil, domain.NewError(domain.ErrInternal,
+			fmt.Sprintf("create worktree temp dir: %v", err))
+	}
+	// git worktree add requires the target path to not exist.
+	os.Remove(worktreeDir)
+
+	cmd := execCommand(ctx, "git", "worktree", "add", worktreeDir, wc.Branch)
+	cmd.Dir = s.repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		os.RemoveAll(worktreeDir)
 		return nil, domain.NewError(domain.ErrGit,
-			fmt.Sprintf("checkout branch %s: %v", wc.Branch, err))
+			fmt.Sprintf("add worktree for branch %s: %s", wc.Branch, strings.TrimSpace(string(out))))
 	}
 
-	return func() {
-		_ = gitCheckout(ctx, s.repo, "-")
-		s.branchMu.Unlock()
+	return &branchScope{
+		repoDir: worktreeDir,
+		cleanup: func() {
+			rmCmd := execCommand(ctx, "git", "worktree", "remove", "--force", worktreeDir)
+			rmCmd.Dir = s.repo
+			_, _ = rmCmd.CombinedOutput()
+			os.RemoveAll(worktreeDir)
+		},
 	}, nil
 }
 
 // stageAndCommit stages a file and creates a scoped Git commit (only this file).
-// The caller must call enterBranch before any file writes if branch-scoped
-// writes are needed.
-func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.CommitOpts) (git.CommitResult, error) {
+// repoDir is the working directory — either the main repo or a worktree.
+func (s *Service) stageAndCommit(ctx context.Context, repoDir, path string, opts git.CommitOpts) (git.CommitResult, error) {
 	// Build the full commit message with trailers
 	msg := opts.Message
 	if len(opts.Trailers) > 0 {
@@ -376,16 +407,16 @@ func (s *Service) stageAndCommit(ctx context.Context, path string, opts git.Comm
 	}
 
 	// Stage the file
-	if err := gitAdd(ctx, s.repo, path); err != nil {
+	if err := gitAdd(ctx, repoDir, path); err != nil {
 		return git.CommitResult{}, domain.NewError(domain.ErrGit,
 			fmt.Sprintf("stage file %s: %v", path, err))
 	}
 
 	// Commit only this specific file (scoped via pathspec)
-	sha, err := gitCommitPath(ctx, s.repo, path, msg, opts.Author)
+	sha, err := gitCommitPath(ctx, repoDir, path, msg, opts.Author)
 	if err != nil {
 		// Unstage the file to leave a clean index on failure
-		_ = gitReset(ctx, s.repo, path)
+		_ = gitReset(ctx, repoDir, path)
 		return git.CommitResult{}, domain.NewError(domain.ErrGit, err.Error())
 	}
 
@@ -434,16 +465,19 @@ func (s *Service) stripArtifactsDir(repoRelPath string) string {
 }
 
 // autoPush pushes the current branch to origin after a commit.
+// repoDir is the working directory (main repo or worktree) used to determine
+// the current branch. The push itself goes through the main git client since
+// worktrees share the same object store.
 // Push failures are logged as warnings but do not fail the operation.
 // Disabled when SPINE_GIT_AUTO_PUSH is set to "false".
-func (s *Service) autoPush(ctx context.Context) {
+func (s *Service) autoPush(ctx context.Context, repoDir string) {
 	if strings.EqualFold(os.Getenv("SPINE_GIT_AUTO_PUSH"), "false") {
 		return
 	}
 
 	log := observe.Logger(ctx)
 
-	branch, err := gitCurrentBranch(ctx, s.repo)
+	branch, err := gitCurrentBranch(ctx, repoDir)
 	if err != nil {
 		log.Warn("auto-push: failed to determine current branch", "error", err)
 		return
@@ -463,18 +497,6 @@ func gitCurrentBranch(ctx context.Context, repoDir string) (string, error) {
 		return "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %s", string(out))
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// gitAdd stages a file using the git CLI directly.
-// Uses -- separator and GIT_LITERAL_PATHSPECS to prevent path injection.
-func gitCheckout(ctx context.Context, repoDir, branch string) error {
-	cmd := execCommand(ctx, "git", "checkout", branch)
-	cmd.Dir = repoDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git checkout %s: %s", branch, string(out))
-	}
-	return nil
 }
 
 func gitAdd(ctx context.Context, repoDir, path string) error {
