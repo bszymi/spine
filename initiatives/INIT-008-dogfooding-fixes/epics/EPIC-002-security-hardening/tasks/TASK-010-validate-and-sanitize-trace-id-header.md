@@ -2,7 +2,7 @@
 id: TASK-010
 type: Task
 title: "Validate and sanitize X-Trace-Id header"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-002-security-hardening/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
