@@ -32,6 +32,12 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"task.abandon":   domain.RoleReviewer,
 	"task.supersede": domain.RoleReviewer,
 
+	// Execution
+	"execution.query":      domain.RoleReader,
+	"execution.candidates": domain.RoleReader,
+	"execution.claim":      domain.RoleContributor,
+	"execution.release":    domain.RoleContributor,
+
 	// Query
 	"query.artifacts": domain.RoleReader,
 	"query.graph":     domain.RoleReader,

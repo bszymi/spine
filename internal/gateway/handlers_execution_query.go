@@ -9,6 +9,9 @@ import (
 // handleExecutionTasksReady returns tasks that are not blocked and not assigned.
 // GET /api/v1/execution/tasks/ready
 func (s *Server) handleExecutionTasksReady(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "execution.query") {
+		return
+	}
 	blocked := false
 	projs, err := s.store.QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
 		Blocked:          &blocked,
@@ -24,6 +27,9 @@ func (s *Server) handleExecutionTasksReady(w http.ResponseWriter, r *http.Reques
 // handleExecutionTasksBlocked returns tasks that are blocked by dependencies.
 // GET /api/v1/execution/tasks/blocked
 func (s *Server) handleExecutionTasksBlocked(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "execution.query") {
+		return
+	}
 	blocked := true
 	projs, err := s.store.QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
 		Blocked: &blocked,
@@ -38,6 +44,9 @@ func (s *Server) handleExecutionTasksBlocked(w http.ResponseWriter, r *http.Requ
 // handleExecutionTasksAssigned returns tasks assigned to a specific actor.
 // GET /api/v1/execution/tasks/assigned?actor_id=...
 func (s *Server) handleExecutionTasksAssigned(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "execution.query") {
+		return
+	}
 	actorID := r.URL.Query().Get("actor_id")
 	if actorID == "" {
 		WriteJSON(w, http.StatusBadRequest, ErrorResponse{
@@ -59,6 +68,9 @@ func (s *Server) handleExecutionTasksAssigned(w http.ResponseWriter, r *http.Req
 // handleExecutionTasksAll returns all tasks with their blocking and assignment status.
 // GET /api/v1/execution/tasks
 func (s *Server) handleExecutionTasksAll(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "execution.query") {
+		return
+	}
 	projs, err := s.store.QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{})
 	if err != nil {
 		WriteError(w, err)
