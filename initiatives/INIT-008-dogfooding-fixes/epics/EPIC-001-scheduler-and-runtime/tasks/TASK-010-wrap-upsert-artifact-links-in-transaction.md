@@ -2,7 +2,7 @@
 id: TASK-010
 type: Task
 title: "Wrap UpsertArtifactLinks in a transaction"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix

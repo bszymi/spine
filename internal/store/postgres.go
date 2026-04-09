@@ -816,12 +816,18 @@ func (s *PostgresStore) DeleteAllProjections(ctx context.Context) error {
 // ── Links ──
 
 func (s *PostgresStore) UpsertArtifactLinks(ctx context.Context, sourcePath string, links []ArtifactLink, sourceCommit string) error {
-	// Delete existing links for this source, then insert new ones
-	if _, err := s.pool.Exec(ctx, `DELETE FROM projection.artifact_links WHERE source_path = $1`, sourcePath); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+
+	// Delete existing links for this source, then insert new ones — atomically.
+	if _, err := tx.Exec(ctx, `DELETE FROM projection.artifact_links WHERE source_path = $1`, sourcePath); err != nil {
 		return err
 	}
 	for _, link := range links {
-		if _, err := s.pool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO projection.artifact_links (source_path, target_path, link_type, source_commit)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (source_path, target_path, link_type) DO UPDATE SET source_commit = EXCLUDED.source_commit`,
@@ -830,7 +836,7 @@ func (s *PostgresStore) UpsertArtifactLinks(ctx context.Context, sourcePath stri
 			return err
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) QueryArtifactLinks(ctx context.Context, sourcePath string) ([]ArtifactLink, error) {
