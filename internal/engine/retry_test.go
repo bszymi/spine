@@ -205,6 +205,32 @@ func TestRetryStep_WrongStatusRejects(t *testing.T) {
 	}
 }
 
+func TestRetryStep_BranchStepPreservesBranchID(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	wf := testRetryWorkflow()
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, nil)
+
+	exec := failedExecution(runID, "start", 1, domain.FailureTransient)
+	exec.BranchID = "branch-abc"
+	store.createdSteps[0] = exec
+
+	err := orch.RetryStep(context.Background(), exec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(store.createdSteps) < 2 {
+		t.Fatal("expected retry execution to be created")
+	}
+	retry := store.createdSteps[len(store.createdSteps)-1]
+	if retry.BranchID != "branch-abc" {
+		t.Errorf("expected BranchID %q, got %q", "branch-abc", retry.BranchID)
+	}
+}
+
 func TestRetryStep_AttemptCountIncremented(t *testing.T) {
 	store, runID := testRunWithStep()
 	events := &mockEventEmitter{}
