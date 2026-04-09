@@ -43,6 +43,19 @@ func (t *postgresTx) UpdateRunStatus(ctx context.Context, runID string, status d
 	return nil
 }
 
+func (t *postgresTx) TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE runtime.runs
+		SET status = $1,
+			started_at = CASE WHEN $1 = 'active' AND started_at IS NULL THEN now() ELSE started_at END,
+			completed_at = CASE WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN now() ELSE completed_at END
+		WHERE run_id = $2 AND status = $3`, toStatus, runID, fromStatus)
+	if err != nil {
+		return false, fmt.Errorf("transition run status in tx: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (t *postgresTx) CreateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
 	_, err := t.tx.Exec(ctx, `
 		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at)
