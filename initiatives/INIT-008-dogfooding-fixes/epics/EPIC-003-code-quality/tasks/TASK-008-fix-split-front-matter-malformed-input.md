@@ -2,7 +2,7 @@
 id: TASK-008
 type: Task
 title: "Fix splitFrontMatter accepting malformed front matter"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix

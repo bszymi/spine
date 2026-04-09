@@ -188,24 +188,36 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 }
 
 // splitFrontMatter separates YAML front matter from Markdown body.
-// Front matter is delimited by --- on its own line.
+// Front matter must start with "---\n" (or "---\r\n") and close with
+// "\n---" followed by newline, \r\n, or EOF.
 func splitFrontMatter(content []byte) ([]byte, string, error) {
 	s := string(content)
 
-	// Must start with ---
-	if !strings.HasPrefix(s, "---") {
+	// Must start with "---" followed by a newline (not arbitrary characters).
+	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "---\r\n") {
 		return nil, "", fmt.Errorf("file does not start with YAML front matter delimiter (---)")
 	}
 
-	// Find closing ---
-	rest := s[3:]
-	idx := strings.Index(rest, "\n---")
+	// Skip the opening delimiter line.
+	rest := s[strings.Index(s, "\n")+1:]
+
+	// Find closing "---" on its own line.
+	idx := strings.Index(rest, "---")
 	if idx < 0 {
+		return nil, "", fmt.Errorf("YAML front matter closing delimiter (---) not found")
+	}
+	// The closing --- must be at the start of a line (idx==0 or preceded by \n).
+	if idx > 0 && rest[idx-1] != '\n' {
+		return nil, "", fmt.Errorf("YAML front matter closing delimiter (---) not found")
+	}
+	// The closing --- must be followed by \n, \r\n, or EOF.
+	afterClose := rest[idx+3:]
+	if afterClose != "" && !strings.HasPrefix(afterClose, "\n") && !strings.HasPrefix(afterClose, "\r\n") {
 		return nil, "", fmt.Errorf("YAML front matter closing delimiter (---) not found")
 	}
 
 	fm := rest[:idx]
-	body := strings.TrimLeft(rest[idx+4:], "\r\n")
+	body := strings.TrimLeft(afterClose, "\r\n")
 
 	return []byte(fm), body, nil
 }
