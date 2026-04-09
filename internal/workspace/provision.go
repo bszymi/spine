@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -175,7 +176,11 @@ func (p *RepoProvisioner) ProvisionRepo(ctx context.Context, workspaceID, gitURL
 
 	if gitURL != "" {
 		// Clone mode.
-		log.Info("cloning remote repo", "workspace_id", workspaceID, "git_url", gitURL)
+		redactedURL := gitURL
+		if u, err := url.Parse(gitURL); err == nil {
+			redactedURL = u.Redacted()
+		}
+		log.Info("cloning remote repo", "workspace_id", workspaceID, "git_url", redactedURL)
 		gitClient := git.NewCLIClient("")
 		if err := gitClient.Clone(ctx, gitURL, repoPath); err != nil {
 			return "", fmt.Errorf("clone %s: %w", gitURL, err)
