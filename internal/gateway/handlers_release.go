@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -28,11 +27,8 @@ func (s *Server) handleExecutionRelease(w http.ResponseWriter, r *http.Request) 
 		AssignmentID string `json:"assignment_id"`
 		Reason       string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteJSON(w, http.StatusBadRequest, ErrorResponse{
-			Status: "error",
-			Errors: []ErrorDetail{{Code: "invalid_params", Message: "invalid request body"}},
-		})
+	if err := decodeJSON(r, &req); err != nil {
+		WriteError(w, err)
 		return
 	}
 
