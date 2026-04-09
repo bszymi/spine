@@ -113,24 +113,20 @@ func (s *Service) setAcceptance(ctx context.Context, path string, acceptance dom
 // insertAcceptanceFields adds acceptance, acceptance_rationale, and updates
 // the status field in YAML front matter.
 func insertAcceptanceFields(content, acceptance, rationale, targetStatus string) string {
-	// First update the status.
-	if targetStatus != "" {
-		content = statusRegexp.ReplaceAllString(content, "status: "+targetStatus)
-	}
-
 	lines := strings.Split(content, "\n")
 	var result []string
-	inFrontMatter := false
+	fmState := 0 // 0=before, 1=inside, 2=after front matter
 	inserted := false
 
 	for _, line := range lines {
-		if line == "---" {
-			if !inFrontMatter {
-				inFrontMatter = true
+		trimmed := strings.TrimRight(line, "\r")
+		if trimmed == "---" && fmState < 2 {
+			if fmState == 0 {
+				fmState = 1
 				result = append(result, line)
 				continue
 			}
-			// Closing ---: insert acceptance before it.
+			// Closing ---: insert acceptance before it and update status.
 			if !inserted {
 				result = append(result, fmt.Sprintf("acceptance: %s", acceptance))
 				if rationale != "" {
@@ -138,7 +134,14 @@ func insertAcceptanceFields(content, acceptance, rationale, targetStatus string)
 				}
 				inserted = true
 			}
-			inFrontMatter = false
+			fmState = 2
+			result = append(result, line)
+			continue
+		}
+		// Update status only within front matter.
+		if fmState == 1 && targetStatus != "" && statusRegexp.MatchString(line) {
+			result = append(result, "status: "+targetStatus)
+			continue
 		}
 		result = append(result, line)
 	}

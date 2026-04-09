@@ -141,11 +141,11 @@ func insertLink(content, linkType, target string) string {
 
 	lines := strings.Split(content, "\n")
 	var result []string
-	inFrontMatter := false
+	fmState := 0 // 0=before, 1=inside, 2=after front matter
 	hasLinks := false
 	inserted := false
 
-	// Check if links: key already exists.
+	// Check if links: key already exists in front matter.
 	for _, line := range lines {
 		if strings.HasPrefix(strings.TrimSpace(line), "links:") {
 			hasLinks = true
@@ -154,9 +154,10 @@ func insertLink(content, linkType, target string) string {
 	}
 
 	for _, line := range lines {
-		if line == "---" {
-			if !inFrontMatter {
-				inFrontMatter = true
+		trimmed := strings.TrimRight(line, "\r")
+		if trimmed == "---" && fmState < 2 {
+			if fmState == 0 {
+				fmState = 1
 				result = append(result, line)
 				continue
 			}
@@ -170,7 +171,7 @@ func insertLink(content, linkType, target string) string {
 					fmt.Sprintf("    target: %s", canonicalTarget))
 				inserted = true
 			}
-			inFrontMatter = false
+			fmState = 2
 		}
 		result = append(result, line)
 	}

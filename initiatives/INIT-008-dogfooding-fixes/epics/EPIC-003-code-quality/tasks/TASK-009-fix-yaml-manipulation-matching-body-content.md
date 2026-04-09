@@ -2,7 +2,7 @@
 id: TASK-009
 type: Task
 title: "Fix line-based YAML manipulation matching body content"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
