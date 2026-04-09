@@ -2,7 +2,7 @@
 id: TASK-011
 type: Task
 title: "Fix DB branch record created before Git branch with no rollback"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
