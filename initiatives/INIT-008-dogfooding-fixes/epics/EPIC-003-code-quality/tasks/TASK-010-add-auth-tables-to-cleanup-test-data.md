@@ -2,7 +2,7 @@
 id: TASK-010
 type: Task
 title: "Add auth tables to CleanupTestData"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
