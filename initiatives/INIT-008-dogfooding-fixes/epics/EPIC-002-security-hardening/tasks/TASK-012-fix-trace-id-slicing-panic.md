@@ -2,7 +2,7 @@
 id: TASK-012
 type: Task
 title: "Fix trace ID slicing panic on short X-Trace-Id headers"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-002-security-hardening/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix

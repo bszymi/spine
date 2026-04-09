@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -149,12 +150,16 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, op auth.Opera
 	return true
 }
 
+// validTraceID matches alphanumeric characters and hyphens, 8-64 chars.
+var validTraceID = regexp.MustCompile(`^[a-zA-Z0-9\-]{8,64}$`)
+
 // traceIDMiddleware extracts or generates a trace ID and propagates it
 // through the request context and response header.
+// Client-provided trace IDs are validated to prevent log injection.
 func traceIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		traceID := r.Header.Get("X-Trace-Id")
-		if traceID == "" {
+		if traceID == "" || !validTraceID.MatchString(traceID) {
 			generated, err := observe.GenerateTraceID()
 			if err != nil {
 				traceID = fmt.Sprintf("fallback-%d", time.Now().UnixNano())

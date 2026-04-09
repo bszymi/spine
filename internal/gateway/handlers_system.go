@@ -98,7 +98,11 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rebuildID := fmt.Sprintf("rb-%s", observe.TraceID(r.Context())[:8])
+	traceID := observe.TraceID(r.Context())
+	if len(traceID) > 8 {
+		traceID = traceID[:8]
+	}
+	rebuildID := fmt.Sprintf("rb-%s", traceID)
 	state := &rebuildState{
 		RebuildID: rebuildID,
 		Status:    "in_progress",
