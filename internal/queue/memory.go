@@ -43,12 +43,14 @@ func (q *MemoryQueue) Publish(ctx context.Context, entry Entry) error {
 	}
 
 	q.mu.Lock()
-	// Check idempotency
 	if entry.IdempotencyKey != "" {
 		if q.idempotencySet[entry.IdempotencyKey] {
 			q.mu.Unlock()
 			return nil // duplicate, silently skip
 		}
+		// Reserve the key before releasing the lock so concurrent
+		// publishers with the same key are rejected immediately.
+		q.idempotencySet[entry.IdempotencyKey] = true
 	}
 	q.mu.Unlock()
 
@@ -58,14 +60,14 @@ func (q *MemoryQueue) Publish(ctx context.Context, entry Entry) error {
 
 	select {
 	case q.entries <- entry:
-		// Record idempotency key only after successful enqueue
-		if entry.IdempotencyKey != "" {
-			q.mu.Lock()
-			q.idempotencySet[entry.IdempotencyKey] = true
-			q.mu.Unlock()
-		}
 		return nil
 	case <-ctx.Done():
+		// Roll back the reservation on failure.
+		if entry.IdempotencyKey != "" {
+			q.mu.Lock()
+			delete(q.idempotencySet, entry.IdempotencyKey)
+			q.mu.Unlock()
+		}
 		return ctx.Err()
 	}
 }

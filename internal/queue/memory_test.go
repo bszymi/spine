@@ -239,6 +239,43 @@ func TestPublishTimeoutIdempotencyNotPoisoned(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 }
 
+func TestConcurrentIdempotency(t *testing.T) {
+	q := queue.NewMemoryQueue(1000)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var received atomic.Int32
+
+	q.Subscribe(ctx, "idem_concurrent", func(ctx context.Context, entry queue.Entry) error {
+		received.Add(1)
+		return nil
+	})
+
+	go q.Start(ctx)
+	defer q.Stop()
+
+	// 50 goroutines all publish with the same idempotency key.
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			q.Publish(ctx, queue.Entry{
+				EntryID:        fmt.Sprintf("dup-%03d", i),
+				EntryType:      "idem_concurrent",
+				IdempotencyKey: "shared-key",
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	time.Sleep(200 * time.Millisecond)
+
+	if got := received.Load(); got != 1 {
+		t.Errorf("expected exactly 1 delivery for shared idempotency key, got %d", got)
+	}
+}
+
 func TestStopSignal(t *testing.T) {
 	q := queue.NewMemoryQueue(100)
 	ctx := context.Background()
