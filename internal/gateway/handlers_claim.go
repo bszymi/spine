@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
 )
 
@@ -31,6 +32,12 @@ func (s *Server) handleExecutionClaim(w http.ResponseWriter, r *http.Request) {
 			Status: "error",
 			Errors: []ErrorDetail{{Code: "invalid_params", Message: "invalid request body"}},
 		})
+		return
+	}
+
+	// Verify actor_id matches the authenticated caller to prevent impersonation.
+	if actor := actorFromContext(r.Context()); actor != nil && req.ActorID != actor.ActorID {
+		WriteError(w, domain.NewError(domain.ErrForbidden, "actor_id does not match authenticated caller"))
 		return
 	}
 
