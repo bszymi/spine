@@ -507,13 +507,9 @@ func TestStartRun_BranchCreationFails(t *testing.T) {
 		t.Fatal("expected error when branch creation fails")
 	}
 
-	// Run should still be persisted (pending) — orphan recovery will clean it up.
-	if store.createdRun == nil {
-		t.Fatal("expected run to be created in store before branch attempt")
-	}
-	// No status update should have happened (run stays pending).
-	if len(store.statusCalls) != 0 {
-		t.Errorf("expected 0 status updates, got %d", len(store.statusCalls))
+	// Git branch is created first — on failure, no run should be persisted.
+	if store.createdRun != nil {
+		t.Fatal("expected no run in store when branch creation fails")
 	}
 }
 
