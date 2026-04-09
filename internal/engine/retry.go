@@ -79,6 +79,7 @@ func (o *Orchestrator) RetryStep(ctx context.Context, exec *domain.StepExecution
 		ExecutionID: fmt.Sprintf("%s-%s-%d", exec.RunID, exec.StepID, nextAttempt),
 		RunID:       exec.RunID,
 		StepID:      exec.StepID,
+		BranchID:    exec.BranchID,
 		Status:      domain.StepStatusWaiting,
 		Attempt:     nextAttempt,
 		RetryAfter:  &retryAfter,
