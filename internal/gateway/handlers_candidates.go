@@ -11,6 +11,9 @@ import (
 // actor type, skills, and blocking status.
 // GET /api/v1/execution/candidates?actor_type=ai_agent&skills=backend_development&include_blocked=true
 func (s *Server) handleExecutionCandidates(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "execution.candidates") {
+		return
+	}
 	if s.candidateFinder == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",

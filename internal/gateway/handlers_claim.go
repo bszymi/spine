@@ -11,6 +11,9 @@ import (
 // POST /api/v1/execution/claim
 // Body: { "actor_id": "...", "execution_id": "..." }
 func (s *Server) handleExecutionClaim(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "execution.claim") {
+		return
+	}
 	if s.stepClaimer == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",

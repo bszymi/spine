@@ -11,6 +11,9 @@ import (
 // POST /api/v1/execution/release
 // Body: { "actor_id": "...", "assignment_id": "...", "reason": "..." }
 func (s *Server) handleExecutionRelease(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "execution.release") {
+		return
+	}
 	if s.stepReleaser == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",
