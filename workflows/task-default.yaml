@@ -30,8 +30,6 @@ steps:
       - id: ready
         name: Ready for Execution
         next_step: execute
-        commit:
-          status: In Progress
     retry:
       limit: 2
       backoff: fixed
@@ -51,7 +49,7 @@ steps:
       - type: field_value
         config:
           field: status
-          value: In Progress
+          value: Pending
     required_outputs:
       - deliverable
     outcomes:
