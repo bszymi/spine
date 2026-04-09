@@ -275,15 +275,23 @@ func canTerminate(wf *domain.WorkflowDefinition) bool {
 		stepMap[wf.Steps[i].ID] = &wf.Steps[i]
 	}
 
-	for i := range wf.Steps {
-		if !canReachEnd(wf.Steps[i].ID, stepMap, make(map[string]bool)) {
-			return false
-		}
+	// Index divergence/convergence points by ID for graph traversal.
+	divMap := make(map[string]*domain.DivergenceDefinition)
+	for i := range wf.DivergencePoints {
+		divMap[wf.DivergencePoints[i].ID] = &wf.DivergencePoints[i]
 	}
-	return true
+	convMap := make(map[string]*domain.ConvergenceDefinition)
+	for i := range wf.ConvergencePoints {
+		convMap[wf.ConvergencePoints[i].ID] = &wf.ConvergencePoints[i]
+	}
+
+	// Check reachability from the entry step only. Steps that are only
+	// reachable via divergence branch StartStep edges are followed through
+	// the divergence definition, not by requiring every step independently.
+	return canReachEnd(wf.EntryStep, stepMap, divMap, convMap, make(map[string]bool))
 }
 
-func canReachEnd(stepID string, stepMap map[string]*domain.StepDefinition, visited map[string]bool) bool {
+func canReachEnd(stepID string, stepMap map[string]*domain.StepDefinition, divMap map[string]*domain.DivergenceDefinition, convMap map[string]*domain.ConvergenceDefinition, visited map[string]bool) bool {
 	if stepID == "end" {
 		return true
 	}
@@ -297,11 +305,37 @@ func canReachEnd(stepID string, stepMap map[string]*domain.StepDefinition, visit
 		return false
 	}
 
+	// Follow normal outcome edges.
 	for j := range step.Outcomes {
-		if canReachEnd(step.Outcomes[j].NextStep, stepMap, copyMap(visited)) {
+		if canReachEnd(step.Outcomes[j].NextStep, stepMap, divMap, convMap, copyMap(visited)) {
 			return true
 		}
 	}
+
+	// Follow divergence branch StartStep edges.
+	if step.Diverge != "" {
+		if div, ok := divMap[step.Diverge]; ok {
+			for _, branch := range div.Branches {
+				if branch.StartStep != "" {
+					if canReachEnd(branch.StartStep, stepMap, divMap, convMap, copyMap(visited)) {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	// Follow convergence EvaluationStep edge.
+	if step.Converge != "" {
+		if conv, ok := convMap[step.Converge]; ok {
+			if conv.EvaluationStep != "" {
+				if canReachEnd(conv.EvaluationStep, stepMap, divMap, convMap, copyMap(visited)) {
+					return true
+				}
+			}
+		}
+	}
+
 	return false
 }
 
