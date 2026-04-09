@@ -45,13 +45,15 @@ func (o *Orchestrator) startRunCommon(ctx context.Context, p startRunParams) (*S
 		}
 	}
 
-	if err := o.store.CreateRun(ctx, run); err != nil {
-		return nil, fmt.Errorf("create run: %w", err)
-	}
-
-	// Create the Git branch after the run is persisted.
+	// Create Git branch first so a failure doesn't leave an orphaned DB record
+	// that the scheduler's recovery logic could later activate.
 	if err := o.git.CreateBranch(ctx, run.BranchName, "HEAD"); err != nil {
 		return nil, fmt.Errorf("create run branch: %w", err)
+	}
+
+	if err := o.store.CreateRun(ctx, run); err != nil {
+		_ = o.git.DeleteBranch(ctx, run.BranchName)
+		return nil, fmt.Errorf("create run: %w", err)
 	}
 	if autoPushEnabled() {
 		if err := o.git.PushBranch(ctx, "origin", run.BranchName); err != nil {
