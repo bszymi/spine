@@ -118,6 +118,10 @@ func (f *fakeStore) UpdateRunStatus(_ context.Context, _ string, _ domain.RunSta
 	return nil
 }
 
+func (f *fakeStore) TransitionRunStatus(_ context.Context, _ string, _, _ domain.RunStatus) (bool, error) {
+	return true, nil
+}
+
 func (f *fakeStore) ListStepExecutionsByRun(_ context.Context, _ string) ([]domain.StepExecution, error) {
 	return []domain.StepExecution{
 		{ExecutionID: "exec-1", RunID: "run-123", StepID: "step1", Status: domain.StepStatusWaiting, Attempt: 1},
@@ -160,7 +164,10 @@ type fakeTx struct {
 
 func (t *fakeTx) CreateRun(_ context.Context, _ *domain.Run) error                      { return nil }
 func (t *fakeTx) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error { return nil }
-func (t *fakeTx) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error  { return nil }
+func (t *fakeTx) TransitionRunStatus(_ context.Context, _ string, _, _ domain.RunStatus) (bool, error) {
+	return true, nil
+}
+func (t *fakeTx) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error { return nil }
 func (t *fakeTx) UpdateStepExecution(_ context.Context, _ *domain.StepExecution) error  { return nil }
 
 // ── Fake ArtifactService ──

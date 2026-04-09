@@ -104,6 +104,20 @@ func (f *fakeStore) UpdateRunStatus(_ context.Context, runID string, status doma
 	return domain.NewError(domain.ErrNotFound, "run not found")
 }
 
+func (f *fakeStore) TransitionRunStatus(_ context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
+	for i := range f.runs {
+		if f.runs[i].RunID == runID {
+			if f.runs[i].Status != fromStatus {
+				return false, nil
+			}
+			f.runs[i].Status = toStatus
+			f.updatedRuns[runID] = toStatus
+			return true, nil
+		}
+	}
+	return false, domain.NewError(domain.ErrNotFound, "run not found")
+}
+
 func (f *fakeStore) UpdateStepExecution(_ context.Context, exec *domain.StepExecution) error {
 	f.updatedSteps[exec.ExecutionID] = exec
 	for i := range f.stepExecs {
@@ -145,6 +159,20 @@ func (t *fakeTx) UpdateRunStatus(_ context.Context, runID string, status domain.
 		}
 	}
 	return domain.NewError(domain.ErrNotFound, "run not found")
+}
+
+func (t *fakeTx) TransitionRunStatus(_ context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
+	for i := range t.store.runs {
+		if t.store.runs[i].RunID == runID {
+			if t.store.runs[i].Status != fromStatus {
+				return false, nil
+			}
+			t.store.runs[i].Status = toStatus
+			t.store.updatedRuns[runID] = toStatus
+			return true, nil
+		}
+	}
+	return false, domain.NewError(domain.ErrNotFound, "run not found")
 }
 
 func (t *fakeTx) CreateStepExecution(_ context.Context, exec *domain.StepExecution) error {

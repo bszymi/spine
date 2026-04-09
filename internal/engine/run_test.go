@@ -87,6 +87,20 @@ func (m *mockRunStore) UpdateRunStatus(_ context.Context, runID string, status d
 	return nil
 }
 
+func (m *mockRunStore) TransitionRunStatus(_ context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
+	if m.runs != nil {
+		if r, ok := m.runs[runID]; ok {
+			if r.Status != fromStatus {
+				return false, nil
+			}
+			r.Status = toStatus
+			m.statusCalls = append(m.statusCalls, statusCall{runID, toStatus})
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *mockRunStore) UpdateCurrentStep(_ context.Context, runID, stepID string) error {
 	if m.runs != nil {
 		if r, ok := m.runs[runID]; ok {

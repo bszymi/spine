@@ -31,6 +31,9 @@ func (s *stubRunStore) GetRun(_ context.Context, _ string) (*domain.Run, error) 
 func (s *stubRunStore) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error {
 	return nil
 }
+func (s *stubRunStore) TransitionRunStatus(_ context.Context, _ string, _, _ domain.RunStatus) (bool, error) {
+	return true, nil
+}
 func (s *stubRunStore) UpdateCurrentStep(_ context.Context, _, _ string) error { return nil }
 func (s *stubRunStore) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error {
 	return nil

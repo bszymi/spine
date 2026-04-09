@@ -142,6 +142,19 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, runID string, statu
 	return nil
 }
 
+func (s *PostgresStore) TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.runs
+		SET status = $1,
+			started_at = CASE WHEN $1 = 'active' AND started_at IS NULL THEN now() ELSE started_at END,
+			completed_at = CASE WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN now() ELSE completed_at END
+		WHERE run_id = $2 AND status = $3`, toStatus, runID, fromStatus)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (s *PostgresStore) UpdateCurrentStep(ctx context.Context, runID, stepID string) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE runtime.runs SET current_step_id = $1 WHERE run_id = $2`, stepID, runID)
 	if err != nil {

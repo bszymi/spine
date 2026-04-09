@@ -113,6 +113,8 @@ func (o *Orchestrator) abortMerge(ctx context.Context) {
 // completeAfterMerge transitions a run from committing to completed
 // via the git.commit_succeeded trigger. When cleanupBranch is true,
 // the run branch is cleaned up (local + remote).
+// Uses TransitionRunStatus (compare-and-swap) to prevent duplicate
+// run_completed events when concurrent MergeRunBranch calls race.
 func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run, cleanupBranch bool) error {
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerGitCommitSucceeded,
@@ -121,8 +123,16 @@ func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run, 
 		return err
 	}
 
-	if err := o.store.UpdateRunStatus(ctx, run.RunID, result.ToStatus); err != nil {
+	// Atomically transition only if the run is still in the expected state.
+	// A concurrent MergeRunBranch may have already completed this run.
+	applied, err := o.store.TransitionRunStatus(ctx, run.RunID, run.Status, result.ToStatus)
+	if err != nil {
 		return fmt.Errorf("update run status: %w", err)
+	}
+	if !applied {
+		observe.Logger(ctx).Info("run already transitioned, skipping duplicate completion",
+			"run_id", run.RunID)
+		return nil
 	}
 
 	o.emitEvent(ctx, domain.EventRunCompleted, run.RunID, run.TraceID,

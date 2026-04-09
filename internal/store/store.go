@@ -20,6 +20,7 @@ type Store interface {
 	CreateRun(ctx context.Context, run *domain.Run) error
 	GetRun(ctx context.Context, runID string) (*domain.Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error
+	TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error)
 	UpdateCurrentStep(ctx context.Context, runID, stepID string) error
 	ListRunsByTask(ctx context.Context, taskPath string) ([]domain.Run, error)
 
@@ -127,6 +128,7 @@ type Store interface {
 type Tx interface {
 	CreateRun(ctx context.Context, run *domain.Run) error
 	UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error
+	TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error)
 	CreateStepExecution(ctx context.Context, exec *domain.StepExecution) error
 	UpdateStepExecution(ctx context.Context, exec *domain.StepExecution) error
 }

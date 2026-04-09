@@ -22,6 +22,10 @@ type RunStore interface {
 	CreateRun(ctx context.Context, run *domain.Run) error
 	GetRun(ctx context.Context, runID string) (*domain.Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error
+	// TransitionRunStatus atomically updates the run status only if it currently
+	// matches fromStatus. Returns true if the transition was applied, false if
+	// the run was already in a different state (no error in that case).
+	TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error)
 	UpdateCurrentStep(ctx context.Context, runID, stepID string) error
 
 	// Step Executions

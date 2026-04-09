@@ -50,6 +50,18 @@ func (s *memStore) UpdateRunStatus(_ context.Context, runID string, status domai
 	return nil
 }
 
+func (s *memStore) TransitionRunStatus(_ context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
+	r, ok := s.runs[runID]
+	if !ok {
+		return false, domain.NewError(domain.ErrNotFound, "run not found")
+	}
+	if r.Status != fromStatus {
+		return false, nil
+	}
+	r.Status = toStatus
+	return true, nil
+}
+
 func (s *memStore) UpdateCurrentStep(_ context.Context, runID, stepID string) error {
 	r, ok := s.runs[runID]
 	if !ok {
