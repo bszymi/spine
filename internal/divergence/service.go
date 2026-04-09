@@ -169,14 +169,16 @@ func (s *Service) createBranchRecord(ctx context.Context, run *domain.Run, divCt
 		CreatedAt:     time.Now(),
 	}
 
-	if err := s.store.CreateBranch(ctx, branch); err != nil {
-		return nil, err
-	}
-
-	// Create Git branch for isolation
+	// Create Git branch first so a failure doesn't leave an orphaned DB record.
 	gitBranchName := fmt.Sprintf("spine/%s/%s/%s", run.RunID, divCtx.DivergenceID, branchID)
 	if err := s.git.CreateBranch(ctx, gitBranchName, "HEAD"); err != nil {
 		return nil, fmt.Errorf("create git branch %s: %w", gitBranchName, err)
+	}
+
+	if err := s.store.CreateBranch(ctx, branch); err != nil {
+		// Clean up the Git branch on DB failure.
+		_ = s.git.DeleteBranch(ctx, gitBranchName)
+		return nil, err
 	}
 
 	return branch, nil
