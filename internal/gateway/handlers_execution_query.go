@@ -13,7 +13,7 @@ func (s *Server) handleExecutionTasksReady(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	blocked := false
-	projs, err := s.store.QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
+	projs, err := s.storeFrom(r.Context()).QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
 		Blocked:          &blocked,
 		AssignmentStatus: "unassigned",
 	})
@@ -31,7 +31,7 @@ func (s *Server) handleExecutionTasksBlocked(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	blocked := true
-	projs, err := s.store.QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
+	projs, err := s.storeFrom(r.Context()).QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
 		Blocked: &blocked,
 	})
 	if err != nil {
@@ -55,7 +55,7 @@ func (s *Server) handleExecutionTasksAssigned(w http.ResponseWriter, r *http.Req
 		})
 		return
 	}
-	projs, err := s.store.QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
+	projs, err := s.storeFrom(r.Context()).QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{
 		AssignedActorID: actorID,
 	})
 	if err != nil {
@@ -71,7 +71,7 @@ func (s *Server) handleExecutionTasksAll(w http.ResponseWriter, r *http.Request)
 	if !s.authorize(w, r, "execution.query") {
 		return
 	}
-	projs, err := s.store.QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{})
+	projs, err := s.storeFrom(r.Context()).QueryExecutionProjections(r.Context(), store.ExecutionProjectionQuery{})
 	if err != nil {
 		WriteError(w, err)
 		return
