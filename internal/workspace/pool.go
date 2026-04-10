@@ -8,12 +8,14 @@ import (
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/config"
+	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
 	"github.com/bszymi/spine/internal/store"
+	"github.com/bszymi/spine/internal/validation"
 )
 
 // ServiceSet holds all per-workspace service instances.
@@ -27,6 +29,23 @@ type ServiceSet struct {
 	ProjSync  *projection.Service
 	Queue     *queue.MemoryQueue
 	Events    *event.QueueRouter
+
+	// Workspace-scoped services constructed in buildServiceSet.
+	Validator  *validation.Engine
+	Divergence *divergence.Service
+
+	// Engine-dependent callback functions for the multi-workspace scheduler.
+	// Set by the PoolConfig.Builder when the engine orchestrator is available.
+	CommitRetryFn  func(ctx context.Context, runID string) error
+	StepRecoveryFn func(ctx context.Context, executionID string) error
+	RunFailFn      func(ctx context.Context, runID, reason string) error
+
+	// RunStarter and PlanningRunStarter hold workspace-scoped run adapters.
+	// Typed as any to avoid a workspace → engine → scheduler → workspace
+	// import cycle. Consumers type-assert to the expected interface
+	// (e.g. gateway.RunStarter, gateway.PlanningRunStarter).
+	RunStarter         any
+	PlanningRunStarter any
 
 	// close is called when the service set is evicted or the pool shuts down.
 	close func()
@@ -46,16 +65,27 @@ type ServicePool struct {
 	mu          sync.Mutex
 	entries     map[string]*poolEntry
 	idleTimeout time.Duration
+	builder     ServiceSetBuilder
 	closed      bool
 	ctx         context.Context    // pool-lifetime context for background goroutines
 	cancel      context.CancelFunc // cancels pool-lifetime context on Close
 }
+
+// ServiceSetBuilder is an optional post-construction hook that extends a
+// ServiceSet with engine-dependent services (orchestrator adapters, scheduler
+// callbacks). It is called after basic services are built.
+type ServiceSetBuilder func(ctx context.Context, ss *ServiceSet) error
 
 // PoolConfig holds configuration for the service pool.
 type PoolConfig struct {
 	// IdleTimeout is how long an unused service set is kept before eviction.
 	// Default: 15 minutes.
 	IdleTimeout time.Duration
+
+	// Builder is an optional hook called after basic service construction.
+	// Use it to inject orchestrator-dependent services that would create
+	// import cycles if constructed directly in buildServiceSet.
+	Builder ServiceSetBuilder
 }
 
 // NewServicePool creates a service pool backed by the given resolver.
@@ -71,6 +101,7 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		resolver:    resolver,
 		entries:     make(map[string]*poolEntry),
 		idleTimeout: timeout,
+		builder:     cfg.Builder,
 		ctx:         poolCtx,
 		cancel:      cancel,
 	}
@@ -106,7 +137,7 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 
 	// Hold the lock during initialization to prevent double-init.
 	// This is acceptable because workspace init is rare (first request only).
-	ss, err := buildServiceSet(p.ctx, *cfg)
+	ss, err := buildServiceSet(p.ctx, *cfg, p.builder)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("init workspace %q services: %w", canonicalID, err)
@@ -200,7 +231,7 @@ func (p *ServicePool) Close() {
 }
 
 // buildServiceSet creates a complete service set from a workspace config.
-func buildServiceSet(ctx context.Context, cfg Config) (*ServiceSet, error) {
+func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder) (*ServiceSet, error) {
 	var closers []func()
 
 	// Database.
@@ -247,21 +278,45 @@ func buildServiceSet(ctx context.Context, cfg Config) (*ServiceSet, error) {
 		projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)
 	}
 
+	// Validation engine.
+	var validator *validation.Engine
+	if st != nil {
+		validator = validation.NewEngine(st)
+	}
+
+	// Divergence service (implements BranchCreator).
+	var divSvc *divergence.Service
+	if st != nil {
+		divSvc = divergence.NewService(st, gitClient, eventRouter)
+	}
+
 	closeAll := func() {
 		for i := len(closers) - 1; i >= 0; i-- {
 			closers[i]()
 		}
 	}
 
-	return &ServiceSet{
-		Config:    cfg,
-		Store:     st,
-		GitClient: gitClient,
-		Artifacts: artifactSvc,
-		ProjQuery: projQuery,
-		ProjSync:  projSync,
-		Queue:     q,
-		Events:    eventRouter,
-		close:     closeAll,
-	}, nil
+	ss := &ServiceSet{
+		Config:     cfg,
+		Store:      st,
+		GitClient:  gitClient,
+		Artifacts:  artifactSvc,
+		ProjQuery:  projQuery,
+		ProjSync:   projSync,
+		Queue:      q,
+		Events:     eventRouter,
+		Validator:  validator,
+		Divergence: divSvc,
+		close:      closeAll,
+	}
+
+	// Run optional builder hook for engine-dependent services.
+	if builder != nil {
+		if err := builder(ctx, ss); err != nil {
+			closeAll()
+			return nil, fmt.Errorf("service set builder: %w", err)
+		}
+	}
+
+	return ss, nil
 }

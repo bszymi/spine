@@ -270,6 +270,38 @@ func (s *Server) gitFrom(ctx context.Context) GitReader {
 	return s.git
 }
 
+func (s *Server) validatorFrom(ctx context.Context) *validation.Engine {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.Validator != nil {
+		return ss.Validator
+	}
+	return s.validator
+}
+
+func (s *Server) branchCreatorFrom(ctx context.Context) BranchCreator {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.Divergence != nil {
+		return ss.Divergence
+	}
+	return s.branchCreator
+}
+
+func (s *Server) runStarterFrom(ctx context.Context) RunStarter {
+	if ss := serviceSetFromContext(ctx); ss != nil {
+		if rs, ok := ss.RunStarter.(RunStarter); ok {
+			return rs
+		}
+	}
+	return s.runStarter
+}
+
+func (s *Server) planningRunStarterFrom(ctx context.Context) PlanningRunStarter {
+	if ss := serviceSetFromContext(ctx); ss != nil {
+		if ps, ok := ss.PlanningRunStarter.(PlanningRunStarter); ok {
+			return ps
+		}
+	}
+	return s.planningRunStarter
+}
+
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe() error {
 	return s.httpServer.ListenAndServe()

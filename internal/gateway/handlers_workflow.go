@@ -67,12 +67,12 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	// Until that is implemented, planning requests are blocked to avoid creating
 	// runs that bind to execution workflows and immediately stall.
 	if req.Mode == "planning" {
-		if s.planningRunStarter == nil {
+		prs := s.planningRunStarterFrom(r.Context())
+		if prs == nil {
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "planning run starter not configured"))
 			return
 		}
-		// TODO(INIT-009): planningRunStarter is still a singleton — needs workspace-scoped orchestrator in ServiceSet.
-		result, err := s.planningRunStarter.StartPlanningRun(r.Context(), req.TaskPath, req.ArtifactContent)
+		result, err := prs.StartPlanningRun(r.Context(), req.TaskPath, req.ArtifactContent)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -100,13 +100,13 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.runStarter == nil {
+	rs := s.runStarterFrom(r.Context())
+	if rs == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "run starter not configured"))
 		return
 	}
 
-	// TODO(INIT-009): runStarter is still a singleton — needs workspace-scoped orchestrator in ServiceSet.
-	result, err := s.runStarter.StartRun(r.Context(), req.TaskPath)
+	result, err := rs.StartRun(r.Context(), req.TaskPath)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -293,7 +293,7 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Evaluate preconditions if validation engine is available
-	if s.validator != nil {
+	if v := s.validatorFrom(r.Context()); v != nil {
 		stepDef := s.resolveStepDef(r.Context(), exec)
 		if stepDef != nil {
 			run, _ := s.storeFrom(r.Context()).GetRun(r.Context(), runID)
@@ -301,7 +301,7 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 			if run != nil {
 				taskPath = run.TaskPath
 			}
-			precondResult := validation.EvaluatePreconditions(r.Context(), s.validator, *stepDef, taskPath)
+			precondResult := validation.EvaluatePreconditions(r.Context(), v, *stepDef, taskPath)
 			if precondResult.Status == "failed" {
 				WriteError(w, domain.NewErrorWithDetail(domain.ErrPrecondition,
 					"step precondition failed", precondResult))

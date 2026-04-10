@@ -152,9 +152,9 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use validation engine if available (cross-artifact rules)
-	// TODO(INIT-009): validator is still a singleton — needs workspace-scoped construction in ServiceSet.
-	if s.validator != nil {
-		results := s.validator.ValidateAll(r.Context())
+	validator := s.validatorFrom(r.Context())
+	if validator != nil {
+		results := validator.ValidateAll(r.Context())
 		if results == nil {
 			WriteError(w, domain.NewError(domain.ErrInternal, "validation query failed"))
 			return

@@ -100,6 +100,84 @@ func (a *planningRunAdapter) StartPlanningRun(ctx context.Context, artifactPath,
 	}, nil
 }
 
+// workspaceOrchestratorBuilder constructs per-workspace engine orchestrator,
+// run starters, and scheduler callbacks from the ServiceSet's basic services.
+func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet) error {
+	if ss.Store == nil {
+		return nil
+	}
+
+	// Workflow provider from projection store.
+	wfProvider := workflow.NewProjectionProviderFromListFn(func(ctx context.Context) ([]workflow.WorkflowProjection, error) {
+		projs, err := ss.Store.ListActiveWorkflowProjections(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result := make([]workflow.WorkflowProjection, len(projs))
+		for i := range projs {
+			result[i] = workflow.WorkflowProjection{
+				WorkflowPath: projs[i].WorkflowPath,
+				WorkflowID:   projs[i].WorkflowID,
+				Name:         projs[i].Name,
+				Version:      projs[i].Version,
+				Status:       projs[i].Status,
+				AppliesTo:    projs[i].AppliesTo,
+				Definition:   projs[i].Definition,
+				SourceCommit: projs[i].SourceCommit,
+			}
+		}
+		return result, nil
+	})
+	bindingResolver := engine.NewBindingResolver(wfProvider, ss.GitClient)
+
+	actorSvc := actor.NewService(ss.Store)
+	actorGw := actor.NewGateway(ss.Store, ss.Events, ss.Queue, actorSvc)
+	wfLoader := engine.NewGitWorkflowLoader(ss.GitClient)
+
+	orch, err := engine.New(
+		bindingResolver, ss.Store, actorGw, ss.Artifacts, ss.Events, ss.GitClient, wfLoader,
+	)
+	if err != nil {
+		return fmt.Errorf("engine orchestrator init: %w", err)
+	}
+
+	orch.WithAssignmentStore(ss.Store)
+	if ss.Validator != nil {
+		orch.WithValidator(ss.Validator)
+	}
+	orch.WithDiscussions(ss.Store)
+	if ss.Divergence != nil {
+		orch.WithDivergence(ss.Divergence)
+		orch.WithConvergence(ss.Divergence)
+	}
+	orch.WithArtifactWriter(ss.Artifacts)
+	orch.WithBlockingStore(ss.Store)
+
+	// Wire run starters.
+	ss.RunStarter = &runAdapter{orch: orch}
+	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
+
+	// Wire scheduler callbacks.
+	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
+		return orch.MergeRunBranch(ctx, runID)
+	}
+	ss.StepRecoveryFn = func(ctx context.Context, execID string) error {
+		exec, err := ss.Store.GetStepExecution(ctx, execID)
+		if err != nil {
+			return err
+		}
+		if exec.Status == domain.StepStatusCompleted {
+			return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
+		}
+		return orch.RetryStep(ctx, exec)
+	}
+	ss.RunFailFn = func(ctx context.Context, runID, reason string) error {
+		return orch.FailRun(ctx, runID, reason)
+	}
+
+	return nil
+}
+
 func main() {
 	// Initialize observability before anything else
 	logLevel := os.Getenv("SPINE_LOG_LEVEL")
@@ -181,7 +259,9 @@ func serveCmd() *cobra.Command {
 				}
 				defer wsDBProvider.Close()
 				wsResolver = wsDBProvider
-				wsServicePool = workspace.NewServicePool(ctx, wsDBProvider, workspace.PoolConfig{})
+				wsServicePool = workspace.NewServicePool(ctx, wsDBProvider, workspace.PoolConfig{
+					Builder: workspaceOrchestratorBuilder,
+				})
 				defer wsServicePool.Close()
 				log.Info("workspace mode: shared", "registry_url", "***")
 			default:
