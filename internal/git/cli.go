@@ -15,6 +15,8 @@ type CLIClient struct {
 	repoPath         string
 	credentialHelper string   // path to external credential helper script
 	pushEnv          []string // extra env vars for push operations (e.g., SMP_WORKSPACE_ID=xxx)
+	pushToken        string   // token for HTTPS push auth (SPINE_GIT_PUSH_TOKEN)
+	pushUsername      string   // username for token auth (default: x-access-token)
 }
 
 // CLIOption configures a CLIClient.
@@ -34,6 +36,16 @@ func WithCredentialHelper(path string) CLIOption {
 func WithPushEnv(env ...string) CLIOption {
 	return func(c *CLIClient) {
 		c.pushEnv = append(c.pushEnv, env...)
+	}
+}
+
+// WithPushToken configures token-based HTTPS push authentication.
+// The token is injected into the remote URL per-push (in-memory only).
+// Only applies to HTTPS remotes; SSH remotes are unaffected.
+func WithPushToken(token, username string) CLIOption {
+	return func(c *CLIClient) {
+		c.pushToken = token
+		c.pushUsername = username
 	}
 }
 
@@ -297,20 +309,55 @@ func (c *CLIClient) HasCommitWithTrailer(ctx context.Context, key, value string)
 
 // Push pushes a ref to the specified remote.
 func (c *CLIClient) Push(ctx context.Context, remote, ref string) error {
-	_, err := c.run(ctx, "push", "push", remote, ref)
+	target, err := c.resolveRemote(ctx, remote)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "push", "push", target, ref)
 	return err
 }
 
 // PushBranch pushes a branch to the specified remote with upstream tracking.
 func (c *CLIClient) PushBranch(ctx context.Context, remote, branch string) error {
-	_, err := c.run(ctx, "push", "push", "-u", remote, branch)
+	target, err := c.resolveRemote(ctx, remote)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "push", "push", "-u", target, branch)
 	return err
 }
 
 // DeleteRemoteBranch deletes a branch on the specified remote.
 func (c *CLIClient) DeleteRemoteBranch(ctx context.Context, remote, branch string) error {
-	_, err := c.run(ctx, "push", "push", remote, "--delete", branch)
+	target, err := c.resolveRemote(ctx, remote)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "push", "push", target, "--delete", branch)
 	return err
+}
+
+// resolveRemote resolves a remote name to a push URL, optionally rewriting it
+// with embedded token credentials. When no push token is configured (or a
+// credential helper is set, which takes priority), returns the remote name as-is.
+func (c *CLIClient) resolveRemote(ctx context.Context, remote string) (string, error) {
+	// Credential helper takes priority over built-in token per the resolution chain.
+	if c.pushToken == "" || c.credentialHelper != "" {
+		return remote, nil
+	}
+
+	// Get the remote URL from git config.
+	remoteURL, err := c.run(ctx, "config", "config", "--get", fmt.Sprintf("remote.%s.url", remote))
+	if err != nil {
+		return remote, nil // Fallback to remote name if URL lookup fails.
+	}
+	remoteURL = strings.TrimSpace(remoteURL)
+
+	rewritten, err := RewriteRemoteURL(remoteURL, c.pushUsername, c.pushToken)
+	if err != nil {
+		return "", err
+	}
+	return rewritten, nil
 }
 
 // run executes a git command and returns stdout. On error, classifies the failure.
