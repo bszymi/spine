@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: "Git Credential Helper Support"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 links:
   - type: parent

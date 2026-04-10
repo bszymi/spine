@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: "Write integration guide for management platform developers"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-004-git-credential-helper-support/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 links:
