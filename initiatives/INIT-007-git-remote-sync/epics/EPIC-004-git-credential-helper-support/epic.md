@@ -23,27 +23,36 @@ This was explicitly out-of-scope for EPIC-001 (auto-push), which handles the pus
 
 ---
 
-## Key Work Areas
+## Architecture
 
-- Configure Git to use an external credential helper
-- Pass workspace identity to the credential helper via environment
-- Graceful handling when no credentials are configured (skip push, don't retry loop)
-- Support for both single-workspace and shared (multi-workspace) deployment modes
+The credential helper uses `SMP_WORKSPACE_ID` to identify which workspace's credentials to fetch. How this ID reaches the helper differs by deployment mode:
+
+**Dedicated mode** (one Spine instance per workspace):
+- SMP sets `SMP_WORKSPACE_ID` as a static container environment variable at provisioning time
+- The credential helper reads it from the process environment
+- One container = one workspace = one credential
+
+**Shared mode** (multiple workspaces per Spine instance):
+- SMP passes `smp_workspace_id` when calling `POST /workspaces` on Spine
+- Spine stores it in the workspace registry
+- When pushing, Spine sets `SMP_WORKSPACE_ID` dynamically in the git push environment
+- Each push uses the correct workspace's credential
 
 ---
 
-## Primary Outputs
+## Key Work Areas
 
-- Git credential helper configuration in Spine's git setup
-- Workspace ID passed to credential helper via environment variable
-- `GIT_PUSH_ENABLED` config flag (false when no credentials, prevents retry loop)
-- Documentation for credential helper protocol integration
+- Configure Git to use an external credential helper
+- Store SMP workspace ID in workspace config (shared mode)
+- Set `SMP_WORKSPACE_ID` in git push environment (both modes)
+- Graceful handling when no credentials are configured (skip push, don't retry loop)
 
 ---
 
 ## Acceptance Criteria
 
 - Spine uses configured credential helper for `git push` authentication
-- Credential helper receives workspace_id to request workspace-specific credentials
+- Credential helper receives `SMP_WORKSPACE_ID` in all push scenarios
 - When no credentials configured, push is skipped (not retried indefinitely)
-- Works in both dedicated (single workspace) and shared (multi-workspace) modes
+- Works in both dedicated (static env) and shared (dynamic env) modes
+- Existing behavior unchanged when credential helper is not configured
