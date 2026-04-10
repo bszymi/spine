@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: "Handle push gracefully when no credentials configured"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-004-git-credential-helper-support/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 links:
