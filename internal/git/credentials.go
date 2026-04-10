@@ -15,7 +15,11 @@ func RewriteRemoteURL(remoteURL, username, token string) (string, error) {
 	}
 
 	// Only rewrite HTTPS URLs — SSH uses keys, not tokens.
-	if !strings.HasPrefix(remoteURL, "https://") && !strings.HasPrefix(remoteURL, "http://") {
+	// Reject plain HTTP to avoid sending credentials over cleartext.
+	if strings.HasPrefix(remoteURL, "http://") {
+		return "", fmt.Errorf("refusing to add credentials to plain HTTP remote %q: use HTTPS", RedactURL(remoteURL))
+	}
+	if !strings.HasPrefix(remoteURL, "https://") {
 		return remoteURL, nil
 	}
 

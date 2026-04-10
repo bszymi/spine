@@ -66,6 +66,12 @@ func TestRewriteRemoteURL(t *testing.T) {
 			token:    "ATBB_abc",
 			want:     "https://x-token-auth:ATBB_abc@bitbucket.org/team/repo.git",
 		},
+		{
+			name:    "plain HTTP rejected",
+			url:     "http://insecure.example.com/repo.git",
+			token:   "secret",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

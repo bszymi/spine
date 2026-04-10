@@ -17,6 +17,7 @@ type CLIClient struct {
 	pushEnv          []string // extra env vars for push operations (e.g., SMP_WORKSPACE_ID=xxx)
 	pushToken        string   // token for HTTPS push auth (SPINE_GIT_PUSH_TOKEN)
 	pushUsername      string   // username for token auth (default: x-access-token)
+	askpassPath      string   // path to temporary GIT_ASKPASS script (created from pushToken)
 }
 
 // CLIOption configures a CLIClient.
@@ -55,7 +56,44 @@ func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
 	for _, opt := range opts {
 		opt(c)
 	}
+	// When a push token is configured (and no credential helper takes priority),
+	// create a GIT_ASKPASS script that reads credentials from environment variables.
+	// This keeps the token out of argv and off disk in the script itself.
+	if c.pushToken != "" && c.credentialHelper == "" {
+		if path, err := createAskpassScript(); err == nil {
+			c.askpassPath = path
+		}
+	}
 	return c
+}
+
+// createAskpassScript writes a minimal GIT_ASKPASS helper to a temp file.
+// The script reads the actual credentials from environment variables set by
+// the run() method, so the token never appears in the script or in argv.
+func createAskpassScript() (string, error) {
+	f, err := os.CreateTemp("", "spine-askpass-*.sh")
+	if err != nil {
+		return "", err
+	}
+	// The script echoes the username or password depending on what Git asks for.
+	// Git passes "Username for ..." or "Password for ..." as the first argument.
+	script := `#!/bin/sh
+case "$1" in
+  Username*) echo "$SPINE_GIT_PUSH_USERNAME_INTERNAL" ;;
+  Password*) echo "$SPINE_GIT_PUSH_TOKEN_INTERNAL" ;;
+esac
+`
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	f.Close()
+	if err := os.Chmod(f.Name(), 0o700); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // ConfigureCredentialHelper sets credential.helper in the repo-local git config.
@@ -309,55 +347,20 @@ func (c *CLIClient) HasCommitWithTrailer(ctx context.Context, key, value string)
 
 // Push pushes a ref to the specified remote.
 func (c *CLIClient) Push(ctx context.Context, remote, ref string) error {
-	target, err := c.resolveRemote(ctx, remote)
-	if err != nil {
-		return err
-	}
-	_, err = c.run(ctx, "push", "push", target, ref)
+	_, err := c.run(ctx, "push", "push", remote, ref)
 	return err
 }
 
 // PushBranch pushes a branch to the specified remote with upstream tracking.
 func (c *CLIClient) PushBranch(ctx context.Context, remote, branch string) error {
-	target, err := c.resolveRemote(ctx, remote)
-	if err != nil {
-		return err
-	}
-	_, err = c.run(ctx, "push", "push", "-u", target, branch)
+	_, err := c.run(ctx, "push", "push", "-u", remote, branch)
 	return err
 }
 
 // DeleteRemoteBranch deletes a branch on the specified remote.
 func (c *CLIClient) DeleteRemoteBranch(ctx context.Context, remote, branch string) error {
-	target, err := c.resolveRemote(ctx, remote)
-	if err != nil {
-		return err
-	}
-	_, err = c.run(ctx, "push", "push", target, "--delete", branch)
+	_, err := c.run(ctx, "push", "push", remote, "--delete", branch)
 	return err
-}
-
-// resolveRemote resolves a remote name to a push URL, optionally rewriting it
-// with embedded token credentials. When no push token is configured (or a
-// credential helper is set, which takes priority), returns the remote name as-is.
-func (c *CLIClient) resolveRemote(ctx context.Context, remote string) (string, error) {
-	// Credential helper takes priority over built-in token per the resolution chain.
-	if c.pushToken == "" || c.credentialHelper != "" {
-		return remote, nil
-	}
-
-	// Get the remote URL from git config.
-	remoteURL, err := c.run(ctx, "config", "config", "--get", fmt.Sprintf("remote.%s.url", remote))
-	if err != nil {
-		return remote, nil // Fallback to remote name if URL lookup fails.
-	}
-	remoteURL = strings.TrimSpace(remoteURL)
-
-	rewritten, err := RewriteRemoteURL(remoteURL, c.pushUsername, c.pushToken)
-	if err != nil {
-		return "", err
-	}
-	return rewritten, nil
 }
 
 // run executes a git command and returns stdout. On error, classifies the failure.
@@ -365,10 +368,31 @@ func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string,
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.repoPath
 
-	// For push operations, inject extra environment variables so the
-	// credential helper can read workspace context (e.g., SMP_WORKSPACE_ID).
-	if op == "push" && len(c.pushEnv) > 0 {
-		cmd.Env = append(os.Environ(), c.pushEnv...)
+	// For push operations, inject extra environment variables for credential
+	// helpers (SMP_WORKSPACE_ID) and token-based auth (GIT_ASKPASS).
+	if op == "push" {
+		var env []string
+		if len(c.pushEnv) > 0 || c.askpassPath != "" {
+			env = os.Environ()
+		}
+		if len(c.pushEnv) > 0 {
+			env = append(env, c.pushEnv...)
+		}
+		if c.askpassPath != "" {
+			username := c.pushUsername
+			if username == "" {
+				username = "x-access-token"
+			}
+			env = append(env,
+				"GIT_ASKPASS="+c.askpassPath,
+				"GIT_TERMINAL_PROMPT=0",
+				"SPINE_GIT_PUSH_TOKEN_INTERNAL="+c.pushToken,
+				"SPINE_GIT_PUSH_USERNAME_INTERNAL="+username,
+			)
+		}
+		if env != nil {
+			cmd.Env = env
+		}
 	}
 
 	var stdout, stderr bytes.Buffer
