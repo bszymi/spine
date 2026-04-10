@@ -74,10 +74,10 @@ func (p *DBProvider) Resolve(ctx context.Context, workspaceID string) (*Config, 
 	var cfg Config
 	var status string
 	err := p.pool.QueryRow(ctx,
-		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status
+		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status, smp_workspace_id
 		 FROM public.workspace_registry
 		 WHERE workspace_id = $1`, workspaceID,
-	).Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status)
+	).Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status, &cfg.SMPWorkspaceID)
 
 	if err != nil {
 		if err.Error() == "no rows in result set" {
@@ -113,7 +113,7 @@ func (p *DBProvider) List(ctx context.Context) ([]Config, error) {
 	p.mu.RUnlock()
 
 	rows, err := p.pool.Query(ctx,
-		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status
+		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status, smp_workspace_id
 		 FROM public.workspace_registry
 		 WHERE status = 'active'
 		 ORDER BY workspace_id`)
@@ -126,7 +126,7 @@ func (p *DBProvider) List(ctx context.Context) ([]Config, error) {
 	for rows.Next() {
 		var cfg Config
 		var status string
-		if err := rows.Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status); err != nil {
+		if err := rows.Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status, &cfg.SMPWorkspaceID); err != nil {
 			return nil, err
 		}
 		cfg.Status = WorkspaceStatus(status)
@@ -162,9 +162,9 @@ func (p *DBProvider) Invalidate(workspaceID string) {
 // CreateWorkspace inserts a new workspace into the registry.
 func (p *DBProvider) CreateWorkspace(ctx context.Context, cfg Config) error {
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO public.workspace_registry (workspace_id, display_name, database_url, repo_path, actor_scope, status)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		cfg.ID, cfg.DisplayName, cfg.DatabaseURL, cfg.RepoPath, cfg.ActorScope, string(cfg.Status))
+		`INSERT INTO public.workspace_registry (workspace_id, display_name, database_url, repo_path, actor_scope, status, smp_workspace_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		cfg.ID, cfg.DisplayName, cfg.DatabaseURL, cfg.RepoPath, cfg.ActorScope, string(cfg.Status), cfg.SMPWorkspaceID)
 	return err
 }
 
@@ -188,10 +188,10 @@ func (p *DBProvider) GetWorkspace(ctx context.Context, workspaceID string) (*Con
 	var cfg Config
 	var status string
 	err := p.pool.QueryRow(ctx,
-		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status
+		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status, smp_workspace_id
 		 FROM public.workspace_registry
 		 WHERE workspace_id = $1`, workspaceID,
-	).Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status)
+	).Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status, &cfg.SMPWorkspaceID)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, ErrWorkspaceNotFound
@@ -205,7 +205,7 @@ func (p *DBProvider) GetWorkspace(ctx context.Context, workspaceID string) (*Con
 // ListAllWorkspaces returns all workspaces (active and inactive).
 func (p *DBProvider) ListAllWorkspaces(ctx context.Context) ([]Config, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status
+		`SELECT workspace_id, display_name, database_url, repo_path, actor_scope, status, smp_workspace_id
 		 FROM public.workspace_registry
 		 ORDER BY workspace_id`)
 	if err != nil {
@@ -217,7 +217,7 @@ func (p *DBProvider) ListAllWorkspaces(ctx context.Context) ([]Config, error) {
 	for rows.Next() {
 		var cfg Config
 		var status string
-		if err := rows.Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status); err != nil {
+		if err := rows.Scan(&cfg.ID, &cfg.DisplayName, &cfg.DatabaseURL, &cfg.RepoPath, &cfg.ActorScope, &status, &cfg.SMPWorkspaceID); err != nil {
 			return nil, err
 		}
 		cfg.Status = WorkspaceStatus(status)

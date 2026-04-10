@@ -32,4 +32,10 @@ type Config struct {
 	// This field carries whatever auth context is needed to initialize
 	// per-workspace actor services (e.g., token signing scope, actor registry ID).
 	ActorScope string
+
+	// SMPWorkspaceID is the Spine Management Platform workspace identifier.
+	// In shared mode, this is set per-workspace via POST /workspaces.
+	// In dedicated mode, this is read from the SMP_WORKSPACE_ID env var.
+	// Passed to the credential helper as SMP_WORKSPACE_ID env var during push.
+	SMPWorkspaceID string
 }

@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Pass workspace context to credential helper"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-004-git-credential-helper-support/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 links:

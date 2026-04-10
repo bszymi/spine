@@ -49,9 +49,10 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		WorkspaceID string `json:"workspace_id"`
-		DisplayName string `json:"display_name"`
-		GitURL      string `json:"git_url,omitempty"`
+		WorkspaceID    string `json:"workspace_id"`
+		DisplayName    string `json:"display_name"`
+		GitURL         string `json:"git_url,omitempty"`
+		SMPWorkspaceID string `json:"smp_workspace_id,omitempty"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		WriteError(w, err)
@@ -83,11 +84,12 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 	// git repo provisioning (TASK-003) here. For now, create the registry
 	// entry as inactive — it must be provisioned before it can serve traffic.
 	cfg := workspace.Config{
-		ID:          req.WorkspaceID,
-		DisplayName: displayName,
-		DatabaseURL: "", // Set by provisioning in TASK-002
-		RepoPath:    "", // Set by provisioning in TASK-003
-		Status:      workspace.StatusInactive,
+		ID:             req.WorkspaceID,
+		DisplayName:    displayName,
+		DatabaseURL:    "", // Set by provisioning in TASK-002
+		RepoPath:       "", // Set by provisioning in TASK-003
+		Status:         workspace.StatusInactive,
+		SMPWorkspaceID: req.SMPWorkspaceID,
 	}
 
 	if err := s.wsDBProvider.CreateWorkspace(r.Context(), cfg); err != nil {
