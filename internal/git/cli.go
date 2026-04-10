@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -11,12 +12,59 @@ import (
 
 // CLIClient implements GitClient by shelling out to the git CLI.
 type CLIClient struct {
-	repoPath string
+	repoPath         string
+	credentialHelper string // path to external credential helper script
+}
+
+// CLIOption configures a CLIClient.
+type CLIOption func(*CLIClient)
+
+// WithCredentialHelper configures the Git client to use an external credential
+// helper for push authentication. The helper path must point to an existing,
+// executable file. An empty path is a no-op (credential helper not configured).
+func WithCredentialHelper(path string) CLIOption {
+	return func(c *CLIClient) {
+		c.credentialHelper = path
+	}
 }
 
 // NewCLIClient creates a new Git client for the repository at the given path.
-func NewCLIClient(repoPath string) *CLIClient {
-	return &CLIClient{repoPath: repoPath}
+func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
+	c := &CLIClient{repoPath: repoPath}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+// ConfigureCredentialHelper sets credential.helper in the repo-local git config.
+// Must be called after the repository exists on disk (after Clone or init).
+// No-op if no credential helper is configured on the client.
+func (c *CLIClient) ConfigureCredentialHelper(ctx context.Context) error {
+	if c.credentialHelper == "" {
+		return nil
+	}
+	_, err := c.run(ctx, "config", "config", "--local", "credential.helper", c.credentialHelper)
+	return err
+}
+
+// ValidateCredentialHelper checks that the configured credential helper path
+// exists and is executable. Returns nil if no helper is configured.
+func ValidateCredentialHelper(path string) error {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("credential helper %q: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("credential helper %q: is a directory", path)
+	}
+	if info.Mode()&0111 == 0 {
+		return fmt.Errorf("credential helper %q: not executable", path)
+	}
+	return nil
 }
 
 // Clone clones a remote repository to a local path.

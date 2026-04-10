@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -252,7 +253,19 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder)
 	if repoPath == "" {
 		repoPath = "."
 	}
-	gitClient := git.NewCLIClient(repoPath)
+	var gitOpts []git.CLIOption
+	if helper := os.Getenv("SPINE_GIT_CREDENTIAL_HELPER"); helper != "" {
+		if err := git.ValidateCredentialHelper(helper); err != nil {
+			return nil, fmt.Errorf("credential helper: %w", err)
+		}
+		gitOpts = append(gitOpts, git.WithCredentialHelper(helper))
+	}
+	gitClient := git.NewCLIClient(repoPath, gitOpts...)
+
+	// Configure credential helper in repo-local git config if set.
+	if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
+		observe.Logger(ctx).Warn("failed to configure credential helper", "error", err)
+	}
 
 	// Load spine config from repo.
 	spineCfg, err := config.Load(repoPath)
