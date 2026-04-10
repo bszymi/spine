@@ -33,11 +33,12 @@ func NewFileProvider() *FileProvider {
 
 	return &FileProvider{
 		config: Config{
-			ID:          id,
-			DisplayName: id,
-			DatabaseURL: dbURL,
-			RepoPath:    repoPath,
-			Status:      StatusActive,
+			ID:             id,
+			DisplayName:    id,
+			DatabaseURL:    dbURL,
+			RepoPath:       repoPath,
+			Status:         StatusActive,
+			SMPWorkspaceID: os.Getenv("SMP_WORKSPACE_ID"),
 		},
 	}
 }

@@ -13,7 +13,8 @@ import (
 // CLIClient implements GitClient by shelling out to the git CLI.
 type CLIClient struct {
 	repoPath         string
-	credentialHelper string // path to external credential helper script
+	credentialHelper string   // path to external credential helper script
+	pushEnv          []string // extra env vars for push operations (e.g., SMP_WORKSPACE_ID=xxx)
 }
 
 // CLIOption configures a CLIClient.
@@ -25,6 +26,14 @@ type CLIOption func(*CLIClient)
 func WithCredentialHelper(path string) CLIOption {
 	return func(c *CLIClient) {
 		c.credentialHelper = path
+	}
+}
+
+// WithPushEnv adds environment variables to push operations.
+// Each entry should be in KEY=VALUE format.
+func WithPushEnv(env ...string) CLIOption {
+	return func(c *CLIClient) {
+		c.pushEnv = append(c.pushEnv, env...)
 	}
 }
 
@@ -308,6 +317,12 @@ func (c *CLIClient) DeleteRemoteBranch(ctx context.Context, remote, branch strin
 func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.repoPath
+
+	// For push operations, inject extra environment variables so the
+	// credential helper can read workspace context (e.g., SMP_WORKSPACE_ID).
+	if op == "push" && len(c.pushEnv) > 0 {
+		cmd.Env = append(os.Environ(), c.pushEnv...)
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

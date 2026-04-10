@@ -260,6 +260,9 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder)
 		}
 		gitOpts = append(gitOpts, git.WithCredentialHelper(helper))
 	}
+	if cfg.SMPWorkspaceID != "" {
+		gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+cfg.SMPWorkspaceID))
+	}
 	gitClient := git.NewCLIClient(repoPath, gitOpts...)
 
 	// Configure credential helper in repo-local git config if set.
