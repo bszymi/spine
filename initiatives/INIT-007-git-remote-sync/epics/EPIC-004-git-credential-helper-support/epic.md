@@ -17,42 +17,47 @@ links:
 
 ## Purpose
 
-Enable Spine to authenticate with remote Git repositories using credentials managed by the hosting platform (Spine Management Platform). Uses the standard Git credential helper mechanism: Spine configures Git to call an external script that retrieves credentials from the platform's encrypted secret store at push time.
-
-This was explicitly out-of-scope for EPIC-001 (auto-push), which handles the push mechanics. This epic handles the authentication mechanics.
+Enable Spine to authenticate with remote Git repositories for push operations. Supports three usage patterns: standalone (env var token), managed platform (credential helper), and user-configured (native Git). Also provides documentation for developers building their own management platforms.
 
 ---
 
-## Architecture
+## Credential Resolution Chain
 
-The credential helper uses `SMP_WORKSPACE_ID` to identify which workspace's credentials to fetch. How this ID reaches the helper differs by deployment mode:
+Spine resolves push credentials in priority order:
+
+1. **External credential helper** (`SPINE_GIT_CREDENTIAL_HELPER`) — Git calls an external script to get credentials. Used by SMP and custom management platforms.
+2. **Built-in token** (`SPINE_GIT_PUSH_TOKEN`) — Spine injects the token into the push URL. Simplest option for standalone/Docker deployments.
+3. **Git native** — User's own credential configuration (SSH keys, credential store, etc.). Spine does nothing extra.
+4. **None** — Push skipped gracefully. Run completes without pushing.
+
+---
+
+## Deployment Mode Handling
 
 **Dedicated mode** (one Spine instance per workspace):
-- SMP sets `SMP_WORKSPACE_ID` as a static container environment variable at provisioning time
-- The credential helper reads it from the process environment
-- One container = one workspace = one credential
+- `SMP_WORKSPACE_ID` set as container env var by the management platform
+- Or `SPINE_GIT_PUSH_TOKEN` set directly (standalone, no platform)
 
 **Shared mode** (multiple workspaces per Spine instance):
-- SMP passes `smp_workspace_id` when calling `POST /workspaces` on Spine
-- Spine stores it in the workspace registry
-- When pushing, Spine sets `SMP_WORKSPACE_ID` dynamically in the git push environment
-- Each push uses the correct workspace's credential
+- Platform passes `smp_workspace_id` via `POST /workspaces`
+- Spine sets `SMP_WORKSPACE_ID` dynamically per-push from workspace config
 
 ---
 
-## Key Work Areas
+## Tasks
 
-- Configure Git to use an external credential helper
-- Store SMP workspace ID in workspace config (shared mode)
-- Set `SMP_WORKSPACE_ID` in git push environment (both modes)
-- Graceful handling when no credentials are configured (skip push, don't retry loop)
+1. **TASK-001**: Configure Git to use external credential helper
+2. **TASK-002**: Store `smp_workspace_id`, pass to credential helper per-push
+3. **TASK-003**: Graceful push handling without credentials
+4. **TASK-004**: Built-in `SPINE_GIT_PUSH_TOKEN` for standalone deployments
+5. **TASK-005**: Integration guide for management platform developers
 
 ---
 
 ## Acceptance Criteria
 
-- Spine uses configured credential helper for `git push` authentication
-- Credential helper receives `SMP_WORKSPACE_ID` in all push scenarios
-- When no credentials configured, push is skipped (not retried indefinitely)
-- Works in both dedicated (static env) and shared (dynamic env) modes
-- Existing behavior unchanged when credential helper is not configured
+- Standalone users can push with a single env var (`SPINE_GIT_PUSH_TOKEN`)
+- Management platforms can integrate via credential helper protocol
+- Push skipped gracefully when no credentials configured
+- Works in both dedicated and shared deployment modes
+- Integration guide enables third-party platform development
