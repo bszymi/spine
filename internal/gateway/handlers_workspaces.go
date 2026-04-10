@@ -79,7 +79,7 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 		displayName = req.WorkspaceID
 	}
 
-	// TODO(INIT-009/EPIC-007): Call database provisioning (TASK-002) and
+	// TODO(EPIC-007): Call database provisioning (TASK-002) and
 	// git repo provisioning (TASK-003) here. For now, create the registry
 	// entry as inactive — it must be provisioned before it can serve traffic.
 	cfg := workspace.Config{

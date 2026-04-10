@@ -61,6 +61,10 @@ func (ms *MultiScheduler) Start(ctx context.Context) {
 	orphanTicker := time.NewTicker(ms.orphanInterval)
 	defer orphanTicker.Stop()
 
+	// Commit retry interval matches orphan scan (same as single-workspace scheduler).
+	commitTicker := time.NewTicker(ms.orphanInterval)
+	defer commitTicker.Stop()
+
 	for {
 		select {
 		case <-timeoutTicker.C:
@@ -76,6 +80,12 @@ func (ms *MultiScheduler) Start(ctx context.Context) {
 			ms.forEachWorkspace(ctx, "orphan-scan", func(ctx context.Context, sched *Scheduler) {
 				if err := sched.ScanOrphans(ctx); err != nil {
 					observe.Logger(ctx).Error("orphan scan failed", "error", err)
+				}
+			})
+		case <-commitTicker.C:
+			ms.forEachWorkspace(ctx, "commit-retry", func(ctx context.Context, sched *Scheduler) {
+				if sched.commitRetryFn != nil {
+					sched.retryCommittingRuns(ctx)
 				}
 			})
 		case <-ctx.Done():
@@ -119,16 +129,18 @@ func (ms *MultiScheduler) forEachWorkspace(ctx context.Context, scanName string,
 			continue // no store, skip
 		}
 
-		// Create a per-workspace scheduler for this scan pass.
-		// TODO(INIT-009): Engine-dependent callbacks (commitRetryFn, runFailFn,
-		// stepRecoveryFn) are not wired here — they require per-workspace
-		// orchestrator construction. Until then:
-		// - Commit-retry pass is skipped (runs stuck in committing won't auto-retry)
-		// - Orphan escalation to failure is skipped (orphaned runs are logged but not failed)
-		// These are handled by the single-workspace Scheduler in main.go for now.
-		sched := New(ss.Store, ss.Events,
-			WithOrphanThreshold(ms.orphanThreshold),
-		)
+		// Create a per-workspace scheduler with engine callbacks from the ServiceSet.
+		opts := []Option{WithOrphanThreshold(ms.orphanThreshold)}
+		if ss.CommitRetryFn != nil {
+			opts = append(opts, WithCommitRetry(ss.CommitRetryFn, 0, 0))
+		}
+		if ss.StepRecoveryFn != nil {
+			opts = append(opts, WithStepRecovery(ss.StepRecoveryFn))
+		}
+		if ss.RunFailFn != nil {
+			opts = append(opts, WithRunFail(ss.RunFailFn))
+		}
+		sched := New(ss.Store, ss.Events, opts...)
 
 		wsCtx := observe.WithWorkspaceID(ctx, ws.ID)
 		fn(wsCtx, sched)
