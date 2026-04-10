@@ -260,6 +260,10 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder)
 		}
 		gitOpts = append(gitOpts, git.WithCredentialHelper(helper))
 	}
+	if token := os.Getenv("SPINE_GIT_PUSH_TOKEN"); token != "" {
+		username := os.Getenv("SPINE_GIT_PUSH_USERNAME")
+		gitOpts = append(gitOpts, git.WithPushToken(token, username))
+	}
 	if cfg.SMPWorkspaceID != "" {
 		gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+cfg.SMPWorkspaceID))
 	}

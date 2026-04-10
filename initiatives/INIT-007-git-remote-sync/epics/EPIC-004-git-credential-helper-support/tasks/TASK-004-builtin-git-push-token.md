@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: "Support SPINE_GIT_PUSH_TOKEN for standalone deployments"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-007-git-remote-sync/epics/EPIC-004-git-credential-helper-support/epic.md
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 links:
