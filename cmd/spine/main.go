@@ -299,7 +299,24 @@ func serveCmd() *cobra.Command {
 			}
 			log.Info("spine config loaded", "artifacts_dir", spineCfg.ArtifactsDir)
 
-			gitClient := git.NewCLIClient(repoPath)
+			var gitOpts []git.CLIOption
+			if helper := os.Getenv("SPINE_GIT_CREDENTIAL_HELPER"); helper != "" {
+				if err := git.ValidateCredentialHelper(helper); err != nil {
+					return fmt.Errorf("credential helper: %w", err)
+				}
+				gitOpts = append(gitOpts, git.WithCredentialHelper(helper))
+			}
+			if token := os.Getenv("SPINE_GIT_PUSH_TOKEN"); token != "" {
+				username := os.Getenv("SPINE_GIT_PUSH_USERNAME")
+				gitOpts = append(gitOpts, git.WithPushToken(token, username))
+			}
+			if smpID := os.Getenv("SMP_WORKSPACE_ID"); smpID != "" {
+				gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+smpID))
+			}
+			gitClient := git.NewCLIClient(repoPath, gitOpts...)
+			if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
+				log.Warn("failed to configure credential helper", "error", err)
+			}
 			q := queue.NewMemoryQueue(100)
 			go q.Start(ctx)
 			eventRouter := event.NewQueueRouter(q)
