@@ -87,9 +87,16 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	// Push the authoritative branch to origin after a successful merge.
 	if autoPushEnabled() {
 		if err := o.git.Push(ctx, "origin", "main"); err != nil {
-			log.Warn("auto-push: failed to push main after merge, staying in committing for retry",
+			// Classify push error: auth failures are permanent (don't retry),
+			// transient errors (network) stay in committing for scheduler retry.
+			var gitErr *git.GitError
+			if errors.As(err, &gitErr) && !gitErr.IsRetryable() {
+				log.Error("auto-push: permanent push failure (auth or rejected), failing run",
+					"run_id", runID, "error", err)
+				return o.failRunOnMergeError(ctx, run, err)
+			}
+			log.Warn("auto-push: transient push failure, staying in committing for retry",
 				"run_id", runID, "error", err)
-			// Stay in committing so the scheduler retries the merge+push cycle.
 			return o.retryMerge(ctx, run)
 		}
 	}

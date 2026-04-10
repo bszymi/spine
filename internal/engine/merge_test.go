@@ -12,11 +12,19 @@ type mockGitOperator struct {
 	stubGitOperator
 	mergeErr    error
 	mergeResult git.MergeResult
+	pushErr     error
 	deleted     []string
 }
 
 func (m *mockGitOperator) Merge(_ context.Context, _ git.MergeOpts) (git.MergeResult, error) {
 	return m.mergeResult, m.mergeErr
+}
+
+func (m *mockGitOperator) Push(_ context.Context, _, _ string) error {
+	if m.pushErr != nil {
+		return m.pushErr
+	}
+	return nil
 }
 
 func (m *mockGitOperator) DeleteBranch(_ context.Context, name string) error {
@@ -200,5 +208,82 @@ func TestMergeRunBranch_NotFound(t *testing.T) {
 	err := orch.MergeRunBranch(context.Background(), "missing")
 	if err == nil {
 		t.Fatal("expected error for missing run")
+	}
+}
+
+func TestMergeRunBranch_PushAuthFailure(t *testing.T) {
+	// When push fails with an auth error (permanent), the run should fail
+	// immediately — not stay in committing for infinite retries.
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {
+				RunID:      "run-1",
+				Status:     domain.RunStatusCommitting,
+				BranchName: "spine/run/run-1",
+				TraceID:    "trace-1234567890ab",
+			},
+		},
+	}
+	gitOp := &mockGitOperator{
+		mergeResult: git.MergeResult{SHA: "merge-sha"},
+		pushErr:     &git.GitError{Kind: git.ErrKindPermanent, Op: "push", Message: "authentication failed"},
+	}
+	events := &mockEventEmitter{}
+
+	orch := &Orchestrator{
+		store:    store,
+		git:      gitOp,
+		events:   events,
+		wfLoader: &stubWorkflowLoader{},
+	}
+
+	t.Setenv("SPINE_GIT_PUSH_ENABLED", "true")
+
+	err := orch.MergeRunBranch(context.Background(), "run-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Run should be failed, not stuck in committing.
+	if store.runs["run-1"].Status != domain.RunStatusFailed {
+		t.Errorf("expected failed on auth error, got %s", store.runs["run-1"].Status)
+	}
+}
+
+func TestMergeRunBranch_PushTransientFailure(t *testing.T) {
+	// When push fails with a transient error (network), the run should stay
+	// in committing for scheduler retry.
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {
+				RunID:      "run-1",
+				Status:     domain.RunStatusCommitting,
+				BranchName: "spine/run/run-1",
+				TraceID:    "trace-1234567890ab",
+			},
+		},
+	}
+	gitOp := &mockGitOperator{
+		mergeResult: git.MergeResult{SHA: "merge-sha"},
+		pushErr:     &git.GitError{Kind: git.ErrKindTransient, Op: "push", Message: "network error"},
+	}
+
+	orch := &Orchestrator{
+		store:    store,
+		git:      gitOp,
+		events:   &mockEventEmitter{},
+		wfLoader: &stubWorkflowLoader{},
+	}
+
+	t.Setenv("SPINE_GIT_PUSH_ENABLED", "true")
+
+	err := orch.MergeRunBranch(context.Background(), "run-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Run should stay committing for retry.
+	if store.runs["run-1"].Status != domain.RunStatusCommitting {
+		t.Errorf("expected committing (retry), got %s", store.runs["run-1"].Status)
 	}
 }
