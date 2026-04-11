@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "8089:8080"
     environment:
       - SPINE_DATABASE_URL=postgres://spine:spine@spine-db:5432/spine?sslmode=disable
       - SPINE_GIT_REPOSITORY_PATH=/repo
@@ -31,7 +31,7 @@ services:
   spine-db:
     image: postgres:18-bookworm
     ports:
-      - "5432:5432"
+      - "5436:5432"
     environment:
       - POSTGRES_USER=spine
       - POSTGRES_PASSWORD=spine
