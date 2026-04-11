@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,6 +33,15 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	if run.BranchName == "" {
 		// No branch to merge — transition directly to completed.
 		return o.completeAfterMerge(ctx, run, false)
+	}
+
+	// Apply commit metadata (e.g., rewrite artifact status) on the branch
+	// before merging so the updated file lands on main.
+	if newStatus := run.CommitMeta["status"]; newStatus != "" {
+		if err := o.applyCommitStatus(ctx, run, newStatus); err != nil {
+			log.Warn("failed to apply commit status, proceeding with merge",
+				"run_id", runID, "error", err)
+		}
 	}
 
 	// Perform the merge into the authoritative branch explicitly.
@@ -237,4 +247,70 @@ func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.
 	if updateErr := o.store.UpdateStepExecution(ctx, lastCompleted); updateErr != nil {
 		observe.Logger(ctx).Warn("failed to record git conflict on step", "error", updateErr)
 	}
+}
+
+// statusFieldRegexp matches the status line in YAML front matter.
+var statusFieldRegexp = regexp.MustCompile(`(?m)^status:\s*.*$`)
+
+// applyCommitStatus rewrites the artifact file's frontmatter status on the
+// run branch before merging. This ensures the merged file on main reflects
+// the workflow outcome's commit.status (e.g., Draft → Pending).
+func (o *Orchestrator) applyCommitStatus(ctx context.Context, run *domain.Run, newStatus string) error {
+	log := observe.Logger(ctx)
+
+	// Read the artifact file from the branch.
+	content, err := o.git.ReadFile(ctx, run.BranchName, run.TaskPath)
+	if err != nil {
+		return fmt.Errorf("read artifact on branch %s: %w", run.BranchName, err)
+	}
+
+	// Rewrite the status field in the front matter.
+	original := string(content)
+	if !strings.HasPrefix(original, "---") {
+		return fmt.Errorf("artifact %s has no front matter", run.TaskPath)
+	}
+	endIdx := strings.Index(original[3:], "---")
+	if endIdx == -1 {
+		return fmt.Errorf("artifact %s has unclosed front matter", run.TaskPath)
+	}
+	endIdx += 3
+
+	frontMatter := original[:endIdx]
+	rest := original[endIdx:]
+	updated := statusFieldRegexp.ReplaceAllString(frontMatter, "status: "+newStatus) + rest
+
+	if updated == original {
+		log.Info("artifact status already matches, no rewrite needed",
+			"run_id", run.RunID, "status", newStatus)
+		return nil
+	}
+
+	// Checkout the branch, write the updated file, commit, then return to main.
+	if err := o.git.Checkout(ctx, run.BranchName); err != nil {
+		return fmt.Errorf("checkout branch: %w", err)
+	}
+
+	if err := o.git.WriteAndStageFile(ctx, run.TaskPath, updated); err != nil {
+		_ = o.git.Checkout(ctx, "main")
+		return fmt.Errorf("write updated artifact: %w", err)
+	}
+
+	if _, err := o.git.Commit(ctx, git.CommitOpts{
+		Message: fmt.Sprintf("Update artifact status to %s", newStatus),
+		Trailers: map[string]string{
+			"Run-ID":   run.RunID,
+			"Trace-ID": run.TraceID,
+		},
+	}); err != nil {
+		_ = o.git.Checkout(ctx, "main")
+		return fmt.Errorf("commit status update: %w", err)
+	}
+
+	if err := o.git.Checkout(ctx, "main"); err != nil {
+		return fmt.Errorf("checkout main after status update: %w", err)
+	}
+
+	log.Info("artifact status updated on branch",
+		"run_id", run.RunID, "path", run.TaskPath, "status", newStatus)
+	return nil
 }

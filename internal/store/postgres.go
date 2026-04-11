@@ -75,16 +75,17 @@ func (s *PostgresStore) CreateRun(ctx context.Context, run *domain.Run) error {
 }
 
 // runColumns is the standard column list for runtime.runs queries.
-const runColumns = `run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode`
+const runColumns = `run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode, commit_meta`
 
 // scanRun scans a single row into a domain.Run, handling nullable columns.
 func scanRun(scanner interface{ Scan(dest ...any) error }) (domain.Run, error) {
 	var run domain.Run
 	var currentStepID, branchName *string
+	var commitMeta map[string]string
 	err := scanner.Scan(
 		&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
 		&run.WorkflowVersionLabel, &run.Status, &currentStepID, &branchName, &run.TraceID,
-		&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt, &run.Mode,
+		&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt, &run.Mode, &commitMeta,
 	)
 	if err != nil {
 		return run, err
@@ -95,6 +96,7 @@ func scanRun(scanner interface{ Scan(dest ...any) error }) (domain.Run, error) {
 	if branchName != nil {
 		run.BranchName = *branchName
 	}
+	run.CommitMeta = commitMeta
 	return run, nil
 }
 
@@ -153,6 +155,18 @@ func (s *PostgresStore) TransitionRunStatus(ctx context.Context, runID string, f
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+func (s *PostgresStore) SetCommitMeta(ctx context.Context, runID string, meta map[string]string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE runtime.runs SET commit_meta = $1 WHERE run_id = $2`, meta, runID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewError(domain.ErrNotFound, "run not found")
+	}
+	return nil
 }
 
 func (s *PostgresStore) UpdateCurrentStep(ctx context.Context, runID, stepID string) error {

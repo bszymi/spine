@@ -51,8 +51,9 @@ type Run struct {
 	Status               RunStatus  `json:"status" yaml:"status"`
 	CurrentStepID        string     `json:"current_step_id,omitempty" yaml:"current_step_id,omitempty"`
 	BranchName           string     `json:"branch_name,omitempty" yaml:"branch_name,omitempty"`
-	TraceID              string     `json:"trace_id" yaml:"trace_id"`
-	TimeoutAt            *time.Time `json:"timeout_at,omitempty" yaml:"timeout_at,omitempty"`
+	TraceID              string            `json:"trace_id" yaml:"trace_id"`
+	CommitMeta           map[string]string `json:"commit_meta,omitempty" yaml:"commit_meta,omitempty"`
+	TimeoutAt            *time.Time        `json:"timeout_at,omitempty" yaml:"timeout_at,omitempty"`
 	StartedAt            *time.Time `json:"started_at,omitempty" yaml:"started_at,omitempty"`
 	CompletedAt          *time.Time `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
 	CreatedAt            time.Time  `json:"created_at" yaml:"created_at"`

@@ -71,6 +71,15 @@ func (s *memStore) UpdateCurrentStep(_ context.Context, runID, stepID string) er
 	return nil
 }
 
+func (s *memStore) SetCommitMeta(_ context.Context, runID string, meta map[string]string) error {
+	r, ok := s.runs[runID]
+	if !ok {
+		return domain.NewError(domain.ErrNotFound, "run not found")
+	}
+	r.CommitMeta = meta
+	return nil
+}
+
 func (s *memStore) CreateStepExecution(_ context.Context, exec *domain.StepExecution) error {
 	s.steps[exec.ExecutionID] = exec
 	return nil
@@ -472,5 +481,10 @@ func (g *noopGitOperator) Head(_ context.Context) (string, error)               
 func (g *noopGitOperator) Push(_ context.Context, _, _ string) error               { return nil }
 func (g *noopGitOperator) PushBranch(_ context.Context, _, _ string) error         { return nil }
 func (g *noopGitOperator) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }
+func (g *noopGitOperator) ReadFile(_ context.Context, _, _ string) ([]byte, error) {
+	return nil, nil
+}
+func (g *noopGitOperator) Checkout(_ context.Context, _ string) error              { return nil }
+func (g *noopGitOperator) WriteAndStageFile(_ context.Context, _, _ string) error  { return nil }
 
 var _ = time.Now // used in memStore

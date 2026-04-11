@@ -110,6 +110,15 @@ func (m *mockRunStore) UpdateCurrentStep(_ context.Context, runID, stepID string
 	return nil
 }
 
+func (m *mockRunStore) SetCommitMeta(_ context.Context, runID string, meta map[string]string) error {
+	if m.runs != nil {
+		if r, ok := m.runs[runID]; ok {
+			r.CommitMeta = meta
+		}
+	}
+	return nil
+}
+
 func (m *mockRunStore) CreateStepExecution(_ context.Context, exec *domain.StepExecution) error {
 	m.createdSteps = append(m.createdSteps, exec)
 	return nil
