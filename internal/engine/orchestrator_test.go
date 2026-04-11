@@ -35,6 +35,9 @@ func (s *stubRunStore) TransitionRunStatus(_ context.Context, _ string, _, _ dom
 	return true, nil
 }
 func (s *stubRunStore) UpdateCurrentStep(_ context.Context, _, _ string) error { return nil }
+func (s *stubRunStore) SetCommitMeta(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
 func (s *stubRunStore) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error {
 	return nil
 }
@@ -86,6 +89,7 @@ func (s *stubEventEmitter) Emit(_ context.Context, _ domain.Event) error { retur
 
 type stubGitOperator struct{}
 
+func (s *stubGitOperator) Checkout(_ context.Context, _ string) error { return nil }
 func (s *stubGitOperator) Commit(_ context.Context, _ git.CommitOpts) (git.CommitResult, error) {
 	return git.CommitResult{}, nil
 }
@@ -98,6 +102,10 @@ func (s *stubGitOperator) Head(_ context.Context) (string, error)               
 func (s *stubGitOperator) Push(_ context.Context, _, _ string) error               { return nil }
 func (s *stubGitOperator) PushBranch(_ context.Context, _, _ string) error         { return nil }
 func (s *stubGitOperator) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }
+func (s *stubGitOperator) ReadFile(_ context.Context, _, _ string) ([]byte, error) {
+	return nil, nil
+}
+func (s *stubGitOperator) WriteAndStageFile(_ context.Context, _, _ string) error { return nil }
 
 type stubWorkflowLoader struct{}
 

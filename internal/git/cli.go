@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -148,6 +149,12 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		return gitErr
 	}
 	return nil
+}
+
+// Checkout switches to the given branch.
+func (c *CLIClient) Checkout(ctx context.Context, branch string) error {
+	_, err := c.run(ctx, "checkout", "checkout", branch)
+	return err
 }
 
 // Commit creates a new commit with the staged changes.
@@ -302,6 +309,21 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 		return nil, err
 	}
 	return []byte(output), nil
+}
+
+// WriteAndStageFile writes content to a file in the working tree and stages it.
+func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string) error {
+	fullPath := filepath.Join(c.repoPath, path)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir for %s: %w", path, err)
+	}
+	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if _, err := c.run(ctx, "add", "add", "--", path); err != nil {
+		return fmt.Errorf("stage %s: %w", path, err)
+	}
+	return nil
 }
 
 // ListFiles lists files matching a pattern at a specific Git ref.

@@ -244,6 +244,13 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 
 	// Route: advance the run.
 	hasCommit := len(outcome.Commit) > 0
+	if hasCommit {
+		// Persist commit metadata so MergeRunBranch can apply it
+		// (e.g., rewrite artifact status from Draft to Pending).
+		if err := o.store.SetCommitMeta(ctx, exec.RunID, outcome.Commit); err != nil {
+			return fmt.Errorf("set commit meta: %w", err)
+		}
+	}
 	if nextStepID == "end" {
 		// Terminal — complete the run.
 		if err := o.CompleteRun(ctx, exec.RunID, hasCommit); err != nil {

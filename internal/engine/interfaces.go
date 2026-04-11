@@ -27,6 +27,7 @@ type RunStore interface {
 	// the run was already in a different state (no error in that case).
 	TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error)
 	UpdateCurrentStep(ctx context.Context, runID, stepID string) error
+	SetCommitMeta(ctx context.Context, runID string, meta map[string]string) error
 
 	// Step Executions
 	CreateStepExecution(ctx context.Context, exec *domain.StepExecution) error
@@ -106,6 +107,7 @@ type CollisionHandler interface {
 
 // GitOperator provides Git operations needed for run-level branching and commits.
 type GitOperator interface {
+	Checkout(ctx context.Context, branch string) error
 	Commit(ctx context.Context, opts git.CommitOpts) (git.CommitResult, error)
 	Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error)
 	CreateBranch(ctx context.Context, name, base string) error
@@ -114,4 +116,6 @@ type GitOperator interface {
 	Push(ctx context.Context, remote, ref string) error
 	PushBranch(ctx context.Context, remote, branch string) error
 	DeleteRemoteBranch(ctx context.Context, remote, branch string) error
+	ReadFile(ctx context.Context, ref, path string) ([]byte, error)
+	WriteAndStageFile(ctx context.Context, path, content string) error
 }

@@ -22,6 +22,7 @@ type Store interface {
 	UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error
 	TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error)
 	UpdateCurrentStep(ctx context.Context, runID, stepID string) error
+	SetCommitMeta(ctx context.Context, runID string, meta map[string]string) error
 	ListRunsByTask(ctx context.Context, taskPath string) ([]domain.Run, error)
 
 	// Step Executions
