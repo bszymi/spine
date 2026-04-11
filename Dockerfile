@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build -o spine ./cmd/spine
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates && \
+    apt-get install -y --no-install-recommends git ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash spine
