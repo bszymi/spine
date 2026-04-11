@@ -315,6 +315,15 @@ func (s *Server) runStarterFrom(ctx context.Context) RunStarter {
 	return s.runStarter
 }
 
+func (s *Server) runCancellerFrom(ctx context.Context) RunCanceller {
+	if ss := serviceSetFromContext(ctx); ss != nil {
+		if rc, ok := ss.RunCanceller.(RunCanceller); ok {
+			return rc
+		}
+	}
+	return s.runCanceller
+}
+
 func (s *Server) planningRunStarterFrom(ctx context.Context) PlanningRunStarter {
 	if ss := serviceSetFromContext(ctx); ss != nil {
 		if ps, ok := ss.PlanningRunStarter.(PlanningRunStarter); ok {

@@ -154,9 +154,10 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	orch.WithArtifactWriter(ss.Artifacts)
 	orch.WithBlockingStore(ss.Store)
 
-	// Wire run starters.
+	// Wire run starters and canceller.
 	ss.RunStarter = &runAdapter{orch: orch}
 	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
+	ss.RunCanceller = orch
 
 	// Wire scheduler callbacks.
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {

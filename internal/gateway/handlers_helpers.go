@@ -21,7 +21,7 @@ func decodeJSON(r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxBodySize)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		if err.Error() == "http: request body too large" {
-			return domain.NewError(domain.ErrInvalidParams, "request body too large (max 1MB)")
+			return domain.NewError(domain.ErrPayloadTooLarge, "request body too large (max 1MB)")
 		}
 		return domain.NewError(domain.ErrInvalidParams, "invalid request body")
 	}

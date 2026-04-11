@@ -186,10 +186,11 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 
 	runID := chi.URLParam(r, "run_id")
 
-	// Route through the orchestrator so that events are emitted and
-	// run branches are cleaned up.
-	if s.runCanceller != nil {
-		if err := s.runCanceller.CancelRun(r.Context(), runID); err != nil {
+	// Route through the workspace-scoped orchestrator so that events are
+	// emitted and run branches are cleaned up.
+	canceller := s.runCancellerFrom(r.Context())
+	if canceller != nil {
+		if err := canceller.CancelRun(r.Context(), runID); err != nil {
 			WriteError(w, err)
 			return
 		}

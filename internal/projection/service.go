@@ -175,10 +175,20 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		return fmt.Errorf("discover changes: %w", err)
 	}
 
+	// When artifactsDir is set, strip the prefix from changeset paths so
+	// they match the projection keys produced by FullRebuild.
+	prefix := ""
+	if s.artifactsDir != "" && s.artifactsDir != "/" {
+		prefix = s.artifactsDir + "/"
+	}
+
 	var syncErrors int
 
 	// Process created artifacts
 	for _, a := range changeset.Created {
+		if prefix != "" {
+			a.Path = strings.TrimPrefix(a.Path, prefix)
+		}
 		if err := s.projectArtifact(ctx, a, head); err != nil {
 			log.Warn("failed to project created artifact",
 				"path", a.Path,
@@ -190,6 +200,9 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 
 	// Process modified artifacts
 	for _, a := range changeset.Modified {
+		if prefix != "" {
+			a.Path = strings.TrimPrefix(a.Path, prefix)
+		}
 		if err := s.projectArtifact(ctx, a, head); err != nil {
 			log.Warn("failed to project modified artifact",
 				"path", a.Path,
@@ -201,6 +214,9 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 
 	// Process deleted artifacts
 	for _, path := range changeset.Deleted {
+		if prefix != "" {
+			path = strings.TrimPrefix(path, prefix)
+		}
 		if err := s.store.DeleteArtifactProjection(ctx, path); err != nil {
 			log.Warn("failed to delete projection",
 				"path", path,
