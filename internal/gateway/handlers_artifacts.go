@@ -7,6 +7,7 @@ import (
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
 )
@@ -143,6 +144,10 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 	}
 
 	ref := r.URL.Query().Get("ref")
+	if err := git.ValidateRef(ref); err != nil {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, err.Error()))
+		return
+	}
 	a, err := s.artifactsFrom(r.Context()).Read(r.Context(), path, ref)
 	if err != nil {
 		WriteError(w, err)

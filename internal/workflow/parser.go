@@ -209,6 +209,20 @@ func ValidateStructure(wf *domain.WorkflowDefinition) []domain.ValidationError {
 		errors = append(errors, structError("workflow may not terminate: not all paths reach 'end'"))
 	}
 
+	// §4.3 Dead-end steps: every reachable step must have at least one outgoing
+	// edge (outcome, diverge, or converge). A step with zero outgoing edges
+	// can strand a run if that step is reached.
+	for i := range wf.Steps {
+		if !reachable[wf.Steps[i].ID] {
+			continue
+		}
+		step := &wf.Steps[i]
+		hasOutgoing := len(step.Outcomes) > 0 || step.Diverge != "" || step.Converge != ""
+		if !hasOutgoing {
+			errors = append(errors, structError(fmt.Sprintf("step %q has no outgoing edges (no outcomes, diverge, or converge) and can strand runs", step.ID)))
+		}
+	}
+
 	return errors
 }
 
@@ -305,7 +319,7 @@ func canReachEnd(stepID string, stepMap map[string]*domain.StepDefinition, divMa
 		return false
 	}
 
-	// Follow normal outcome edges.
+	// Follow normal outcome edges — at least one must reach end.
 	for j := range step.Outcomes {
 		if canReachEnd(step.Outcomes[j].NextStep, stepMap, divMap, convMap, copyMap(visited)) {
 			return true

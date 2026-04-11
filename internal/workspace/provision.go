@@ -175,6 +175,10 @@ func (p *RepoProvisioner) ProvisionRepo(ctx context.Context, workspaceID, gitURL
 	}()
 
 	if gitURL != "" {
+		// Validate URL scheme before cloning.
+		if err := git.ValidateCloneURL(gitURL); err != nil {
+			return "", fmt.Errorf("invalid git URL: %w", err)
+		}
 		// Clone mode.
 		redactedURL := gitURL
 		if u, err := url.Parse(gitURL); err == nil {

@@ -3,11 +3,15 @@ package actor
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
 )
+
+// validActorID allows alphanumeric characters, hyphens, underscores, and dots.
+var validActorID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 // Service manages actor lifecycle and provides actor queries.
 type Service struct {
@@ -23,6 +27,9 @@ func NewService(st store.Store) *Service {
 func (s *Service) Register(ctx context.Context, actor *domain.Actor) error {
 	if actor.ActorID == "" {
 		return domain.NewError(domain.ErrInvalidParams, "actor_id required")
+	}
+	if !validActorID.MatchString(actor.ActorID) {
+		return domain.NewError(domain.ErrInvalidParams, "actor_id must contain only alphanumeric characters, hyphens, underscores, and dots")
 	}
 	actor.Status = domain.ActorStatusActive
 	return s.store.CreateActor(ctx, actor)

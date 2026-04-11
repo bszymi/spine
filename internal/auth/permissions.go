@@ -56,7 +56,11 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"divergence.create_branch": domain.RoleContributor,
 	"divergence.close_window":  domain.RoleOperator,
 
+	// Assignments
+	"assignments.list": domain.RoleReader,
+
 	// System
+	"system.metrics":  domain.RoleOperator,
 	"system.rebuild":  domain.RoleOperator,
 	"system.validate": domain.RoleOperator,
 

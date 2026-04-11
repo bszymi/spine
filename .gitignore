@@ -2,3 +2,10 @@
 /bin/
 /spine
 docker-compose.override.yaml
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key

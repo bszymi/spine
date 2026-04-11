@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"log/slog"
+
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
@@ -74,6 +76,12 @@ type PlanningRunStarter interface {
 	StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*PlanningRunResult, error)
 }
 
+// RunCanceller cancels an active or paused run through the engine,
+// emitting events and cleaning up branches.
+type RunCanceller interface {
+	CancelRun(ctx context.Context, runID string) error
+}
+
 // PlanningRunResult contains the result of starting a planning run.
 // Mirrors engine.StartRunResult but avoids gateway importing engine.
 type PlanningRunResult struct {
@@ -110,6 +118,7 @@ type Server struct {
 	events             EventEmitterGW         // optional, nil if not configured
 	runStarter         RunStarter             // optional, nil if not configured
 	planningRunStarter PlanningRunStarter     // optional, nil if not configured
+	runCanceller       RunCanceller           // optional, nil if not configured
 	wsResolver         workspace.Resolver     // optional, nil if not configured
 	servicePool        *workspace.ServicePool // optional, nil if not configured
 	wsDBProvider       *workspace.DBProvider  // optional, nil in single mode
@@ -183,6 +192,7 @@ type ServerConfig struct {
 	Events             EventEmitterGW
 	RunStarter         RunStarter
 	PlanningRunStarter PlanningRunStarter
+	RunCanceller       RunCanceller
 	WorkspaceResolver  workspace.Resolver
 	ServicePool        *workspace.ServicePool
 	WSDBProvider       *workspace.DBProvider
@@ -211,6 +221,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		events:             cfg.Events,
 		runStarter:         cfg.RunStarter,
 		planningRunStarter: cfg.PlanningRunStarter,
+		runCanceller:       cfg.RunCanceller,
 		workflowResolver:   cfg.WorkflowResolver,
 		wsResolver:         cfg.WorkspaceResolver,
 		servicePool:        cfg.ServicePool,
@@ -220,6 +231,10 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		stepReleaser:       cfg.StepReleaser,
 		devMode:            cfg.DevMode,
 	}
+	if cfg.DevMode {
+		slog.Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
+	}
+
 	s.httpServer = &http.Server{
 		Addr:              addr,
 		Handler:           s.routes(),
@@ -234,6 +249,13 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 // Workspace-scoped service accessors. These check the request context
 // for a workspace ServiceSet first, falling back to the Server's direct
 // fields for backward compatibility and single-workspace mode.
+
+func (s *Server) authFrom(ctx context.Context) *auth.Service {
+	if ss := serviceSetFromContext(ctx); ss != nil && ss.Auth != nil {
+		return ss.Auth
+	}
+	return s.auth
+}
 
 func (s *Server) storeFrom(ctx context.Context) store.Store {
 	if ss := serviceSetFromContext(ctx); ss != nil && ss.Store != nil {

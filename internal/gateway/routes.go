@@ -11,15 +11,16 @@ import (
 func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
 
-	// Global middleware (order matters: recovery outermost, then trace, then logging)
+	// Global middleware (order matters: recovery outermost, then security headers, rate limit, trace, logging)
 	r.Use(recoveryMiddleware)
+	r.Use(securityHeadersMiddleware)
+	r.Use(rateLimitMiddleware(100, 200)) // 100 req/s per IP, burst 200
 	r.Use(traceIDMiddleware)
 	r.Use(loggingMiddleware)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Unauthenticated
 		r.Get("/system/health", s.handleHealth)
-		r.Get("/system/metrics", s.handleMetrics)
 
 		// Workspace management — operator token auth, workspace-exempt
 		r.Group(func(r chi.Router) {
@@ -30,12 +31,15 @@ func (s *Server) routes() http.Handler {
 			r.Post("/workspaces/{workspace_id}/deactivate", s.handleWorkspaceDeactivate)
 		})
 
-		// Authenticated + workspace-scoped routes
+		// Workspace-scoped + authenticated routes.
+		// Workspace resolves first so authMiddleware can validate tokens
+		// against the workspace-scoped store in shared multi-tenant mode.
 		r.Group(func(r chi.Router) {
-			r.Use(s.authMiddleware)
 			r.Use(s.workspaceMiddleware)
+			r.Use(s.authMiddleware)
 
 			// System (operator)
+			r.Get("/system/metrics", s.handleMetrics)
 			r.Post("/system/rebuild", s.handleSystemRebuild)
 			r.Get("/system/rebuild/{rebuild_id}", s.handleSystemRebuildStatus)
 			r.Post("/system/validate", s.handleSystemValidate)

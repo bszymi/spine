@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/config"
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/event"
@@ -24,6 +25,7 @@ import (
 type ServiceSet struct {
 	Config    Config
 	Store     store.Store
+	Auth      *auth.Service
 	GitClient *git.CLIClient
 	Artifacts *artifact.Service
 	ProjQuery *projection.QueryService
@@ -296,6 +298,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder)
 	if st != nil {
 		projQuery = projection.NewQueryService(st, gitClient)
 		projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)
+		projSync.WithArtifactsDir(spineCfg.ArtifactsDir)
 	}
 
 	// Validation engine.
@@ -316,9 +319,16 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder)
 		}
 	}
 
+	// Auth service.
+	var authSvc *auth.Service
+	if st != nil {
+		authSvc = auth.NewService(st)
+	}
+
 	ss := &ServiceSet{
 		Config:     cfg,
 		Store:      st,
+		Auth:       authSvc,
 		GitClient:  gitClient,
 		Artifacts:  artifactSvc,
 		ProjQuery:  projQuery,

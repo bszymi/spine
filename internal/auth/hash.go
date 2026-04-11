@@ -17,6 +17,15 @@ func GenerateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// generateRandomHex returns n cryptographically random bytes as a hex string.
+func generateRandomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate random bytes: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // HashToken computes the SHA-256 hash of a raw token string.
 // SHA-256 is appropriate for API tokens (unlike passwords) because tokens are
 // 256-bit random values — they cannot be brute-forced or found in rainbow tables.

@@ -20,6 +20,9 @@ import (
 // actor authentication.
 func operatorTokenMiddleware(next http.Handler) http.Handler {
 	token := os.Getenv("SPINE_OPERATOR_TOKEN")
+	if token != "" && len(token) < 32 {
+		fmt.Fprintf(os.Stderr, "WARNING: SPINE_OPERATOR_TOKEN is shorter than 32 characters — vulnerable to brute force\n")
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if token == "" {
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "operator token not configured"))

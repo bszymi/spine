@@ -94,10 +94,13 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 }
 
 // authMiddleware validates the Bearer token and sets the actor in context.
-// Fails closed: if auth service is not configured, all authenticated routes return 401.
+// Uses the workspace-scoped auth service when available (shared multi-tenant mode),
+// falling back to the server-level auth service (single-workspace mode).
+// Fails closed: if no auth service is available, all authenticated routes return 401.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.auth == nil {
+		authSvc := s.authFrom(r.Context())
+		if authSvc == nil {
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "authentication not configured"))
 			return
 		}
@@ -119,7 +122,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		actor, err := s.auth.ValidateToken(r.Context(), token)
+		actor, err := authSvc.ValidateToken(r.Context(), token)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -202,6 +205,16 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+// securityHeadersMiddleware sets standard security response headers.
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // recoveryMiddleware catches panics and returns a 500 JSON error response.

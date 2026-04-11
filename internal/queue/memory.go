@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// idempotencyTTL controls how long idempotency keys are retained before eviction.
+const idempotencyTTL = 10 * time.Minute
+
 // MemoryQueue implements Queue using Go channels for in-process async processing.
 // This is not durable — all state is lost on process restart.
 // Per ADR-005: "The in-process queue is not a durable system of record."
@@ -14,8 +17,8 @@ type MemoryQueue struct {
 	mu             sync.RWMutex
 	handlers       map[string][]EntryHandler
 	entries        chan Entry
-	acknowledged   map[string]bool // tracks acknowledged entry IDs
-	idempotencySet map[string]bool // tracks seen idempotency keys
+	acknowledged   map[string]bool      // tracks acknowledged entry IDs
+	idempotencySet map[string]time.Time // tracks seen idempotency keys with insertion time
 	bufferSize     int
 	done           chan struct{}
 }
@@ -29,7 +32,7 @@ func NewMemoryQueue(bufferSize int) *MemoryQueue {
 		handlers:       make(map[string][]EntryHandler),
 		entries:        make(chan Entry, bufferSize),
 		acknowledged:   make(map[string]bool),
-		idempotencySet: make(map[string]bool),
+		idempotencySet: make(map[string]time.Time),
 		bufferSize:     bufferSize,
 		done:           make(chan struct{}),
 	}
@@ -44,13 +47,13 @@ func (q *MemoryQueue) Publish(ctx context.Context, entry Entry) error {
 
 	q.mu.Lock()
 	if entry.IdempotencyKey != "" {
-		if q.idempotencySet[entry.IdempotencyKey] {
+		if ts, ok := q.idempotencySet[entry.IdempotencyKey]; ok && time.Since(ts) < idempotencyTTL {
 			q.mu.Unlock()
 			return nil // duplicate, silently skip
 		}
 		// Reserve the key before releasing the lock so concurrent
 		// publishers with the same key are rejected immediately.
-		q.idempotencySet[entry.IdempotencyKey] = true
+		q.idempotencySet[entry.IdempotencyKey] = time.Now()
 	}
 	q.mu.Unlock()
 
@@ -62,7 +65,6 @@ func (q *MemoryQueue) Publish(ctx context.Context, entry Entry) error {
 	case q.entries <- entry:
 		return nil
 	case <-ctx.Done():
-		// Roll back the reservation on failure.
 		if entry.IdempotencyKey != "" {
 			q.mu.Lock()
 			delete(q.idempotencySet, entry.IdempotencyKey)
@@ -92,14 +94,31 @@ func (q *MemoryQueue) Acknowledge(ctx context.Context, entryID string) error {
 // Start begins processing queue entries. This is a lifecycle method,
 // not part of the portability interface. Called directly in main.go during boot.
 func (q *MemoryQueue) Start(ctx context.Context) {
+	evictTicker := time.NewTicker(idempotencyTTL)
+	defer evictTicker.Stop()
+
 	for {
 		select {
 		case entry := <-q.entries:
 			q.dispatch(ctx, entry)
+		case <-evictTicker.C:
+			q.evictExpiredKeys()
 		case <-ctx.Done():
 			return
 		case <-q.done:
 			return
+		}
+	}
+}
+
+// evictExpiredKeys removes idempotency keys older than idempotencyTTL.
+func (q *MemoryQueue) evictExpiredKeys() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	now := time.Now()
+	for key, ts := range q.idempotencySet {
+		if now.Sub(ts) >= idempotencyTTL {
+			delete(q.idempotencySet, key)
 		}
 	}
 }

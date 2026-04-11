@@ -96,6 +96,15 @@ esac
 	return f.Name(), nil
 }
 
+// Close cleans up temporary resources created by the CLIClient,
+// such as the GIT_ASKPASS script.
+func (c *CLIClient) Close() {
+	if c.askpassPath != "" {
+		os.Remove(c.askpassPath)
+		c.askpassPath = ""
+	}
+}
+
 // ConfigureCredentialHelper sets credential.helper in the repo-local git config.
 // Must be called after the repository exists on disk (after Clone or init).
 // No-op if no credential helper is configured on the client.

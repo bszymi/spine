@@ -17,6 +17,7 @@ const (
 	ErrInvalidParams    ErrorCode = "invalid_params"
 	ErrInternal         ErrorCode = "internal_error"
 	ErrUnavailable      ErrorCode = "service_unavailable"
+	ErrRateLimited      ErrorCode = "rate_limited"
 	ErrGit              ErrorCode = "git_error"
 	ErrWorkflowNotFound ErrorCode = "workflow_not_found"
 )

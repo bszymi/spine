@@ -98,8 +98,8 @@ func (s *Server) handleArtifactEntryCreate(w http.ResponseWriter, r *http.Reques
 	// Allocate next ID using GitReader (which implements git.GitClient).
 	nextID, err := artifact.NextID(ctx, gitReader, parentDir, artType, "HEAD")
 	if err != nil {
-		WriteError(w, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("allocate next ID: %v", err)))
+		observe.Logger(ctx).Error("failed to allocate next ID", "error", err)
+		WriteError(w, domain.NewError(domain.ErrInternal, "failed to allocate artifact ID"))
 		return
 	}
 
@@ -239,8 +239,8 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 	// already added by previous /artifacts/add calls or direct file writes.
 	nextID, err := artifact.NextID(ctx, gitReader, parentDir, artType, run.BranchName)
 	if err != nil {
-		WriteError(w, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("allocate next ID on branch: %v", err)))
+		observe.Logger(ctx).Error("failed to allocate next ID on branch", "error", err, "branch", run.BranchName)
+		WriteError(w, domain.NewError(domain.ErrInternal, "failed to allocate artifact ID"))
 		return
 	}
 
@@ -278,8 +278,7 @@ func resolveParentFromRef(ctx context.Context, artSvc ArtifactService, gitReader
 		// Fall back to HEAD if branch listing fails.
 		artifacts, err = artSvc.List(ctx, "HEAD")
 		if err != nil {
-			return "", "", domain.NewError(domain.ErrInternal,
-				fmt.Sprintf("list artifacts: %v", err))
+			return "", "", domain.NewError(domain.ErrInternal, "failed to list artifacts")
 		}
 	}
 

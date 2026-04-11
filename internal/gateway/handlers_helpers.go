@@ -2,9 +2,9 @@ package gateway
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/bszymi/spine/internal/domain"
 )
@@ -12,9 +12,17 @@ import (
 const maxBodySize = 1 << 20 // 1MB
 
 // decodeJSON reads and decodes a JSON request body with a size limit.
+// Validates Content-Type and returns a 413 if the body exceeds maxBodySize.
 func decodeJSON(r *http.Request, v any) error {
-	body := io.LimitReader(r.Body, maxBodySize)
-	if err := json.NewDecoder(body).Decode(v); err != nil {
+	ct := r.Header.Get("Content-Type")
+	if ct != "" && !strings.HasPrefix(ct, "application/json") {
+		return domain.NewError(domain.ErrInvalidParams, "Content-Type must be application/json")
+	}
+	r.Body = http.MaxBytesReader(nil, r.Body, maxBodySize)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		if err.Error() == "http: request body too large" {
+			return domain.NewError(domain.ErrInvalidParams, "request body too large (max 1MB)")
+		}
 		return domain.NewError(domain.ErrInvalidParams, "invalid request body")
 	}
 	return nil

@@ -184,12 +184,28 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	runID := chi.URLParam(r, "run_id")
+
+	// Route through the orchestrator so that events are emitted and
+	// run branches are cleaned up.
+	if s.runCanceller != nil {
+		if err := s.runCanceller.CancelRun(r.Context(), runID); err != nil {
+			WriteError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"run_id": runID,
+			"status": domain.RunStatusCancelled,
+		})
+		return
+	}
+
+	// Fallback: direct store update when orchestrator is not wired.
 	if s.storeFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
 		return
 	}
 
-	runID := chi.URLParam(r, "run_id")
 	run, err := s.storeFrom(r.Context()).GetRun(r.Context(), runID)
 	if err != nil {
 		WriteError(w, err)

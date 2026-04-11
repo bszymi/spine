@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -272,6 +273,9 @@ func serveCmd() *cobra.Command {
 			var st store.Store
 			dbURL := os.Getenv("SPINE_DATABASE_URL")
 			if dbURL != "" {
+				if strings.Contains(dbURL, "sslmode=disable") {
+					log.Warn("database connection uses sslmode=disable — credentials and data transmitted in plaintext")
+				}
 				pgStore, err := store.NewPostgresStore(ctx, dbURL)
 				if err != nil {
 					log.Error("database connection failed, starting without store", "error", err)
@@ -330,6 +334,7 @@ func serveCmd() *cobra.Command {
 			if st != nil {
 				projQuery = projection.NewQueryService(st, gitClient)
 				projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)
+				projSync.WithArtifactsDir(spineCfg.ArtifactsDir)
 			}
 
 			var validator *validation.Engine
@@ -482,6 +487,7 @@ func serveCmd() *cobra.Command {
 				WorkspaceResolver:  wsResolver,
 				ServicePool:        wsServicePool,
 				WSDBProvider:       wsDBProvider,
+				RunCanceller:       orch,
 				CandidateFinder:    orch,
 				StepClaimer:        orch,
 				StepReleaser:       orch,

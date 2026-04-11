@@ -68,23 +68,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"components": components,
 	}
 
-	// Add optional operational metrics (gracefully handle unavailable services).
-	if s.storeFrom(r.Context()) != nil {
-		func() {
-			defer func() { _ = recover() }()
-			if syncState, err := s.storeFrom(r.Context()).GetSyncState(r.Context()); err == nil && syncState != nil && syncState.LastSyncedAt != nil {
-				lagMs := time.Since(*syncState.LastSyncedAt).Milliseconds()
-				resp["projection_lag_ms"] = lagMs
-			}
-		}()
-		func() {
-			defer func() { _ = recover() }()
-			if activeRuns, err := s.storeFrom(r.Context()).ListRunsByStatus(r.Context(), domain.RunStatusActive); err == nil {
-				resp["active_runs"] = len(activeRuns)
-			}
-		}()
-	}
-
 	WriteJSON(w, http.StatusOK, resp)
 }
 
@@ -112,7 +95,8 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		if err := s.projSyncFrom(r.Context()).FullRebuild(context.Background()); err != nil {
-			state.complete("failed", err.Error())
+			observe.Logger(r.Context()).Error("system rebuild failed", "rebuild_id", rebuildID, "error", err)
+			state.complete("failed", "rebuild failed, check server logs for details")
 		} else {
 			state.complete("completed", "")
 		}
@@ -141,6 +125,9 @@ func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "system.metrics") {
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(observe.ExportPrometheus()))

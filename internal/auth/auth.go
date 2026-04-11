@@ -59,7 +59,12 @@ func (s *Service) CreateToken(ctx context.Context, actorID, name string, expires
 		return "", "", fmt.Errorf("generate token: %w", err)
 	}
 
-	tokenID := fmt.Sprintf("tok_%s", plaintext[:16])
+	// Generate token ID independently from plaintext to avoid leaking any prefix.
+	idSuffix, err := generateRandomHex(8)
+	if err != nil {
+		return "", "", fmt.Errorf("generate token ID: %w", err)
+	}
+	tokenID := fmt.Sprintf("tok_%s", idSuffix)
 	now := time.Now()
 
 	record := &store.TokenRecord{

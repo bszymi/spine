@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
@@ -22,6 +23,7 @@ type Service struct {
 	store        store.Store
 	events       event.EventRouter
 	pollInterval time.Duration
+	artifactsDir string // restricts artifact scanning to a subdirectory
 }
 
 // NewService creates a new Projection Service.
@@ -35,6 +37,12 @@ func NewService(gitClient git.GitClient, s store.Store, events event.EventRouter
 		events:       events,
 		pollInterval: pollInterval,
 	}
+}
+
+// WithArtifactsDir configures the projection service to scope artifact
+// discovery to the given directory (matching .spine.yaml artifacts_dir).
+func (s *Service) WithArtifactsDir(dir string) {
+	s.artifactsDir = dir
 }
 
 // FullRebuild scans the entire repository at HEAD and rebuilds all projections.
@@ -64,8 +72,12 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		return fmt.Errorf("delete projections: %w", err)
 	}
 
-	// Discover all artifacts
-	result, err := artifact.DiscoverAll(ctx, s.git, head)
+	// Discover all artifacts (scoped to artifacts_dir if configured)
+	var discoverOpts []string
+	if s.artifactsDir != "" {
+		discoverOpts = append(discoverOpts, s.artifactsDir)
+	}
+	result, err := artifact.DiscoverAll(ctx, s.git, head, discoverOpts...)
 	if err != nil {
 		return fmt.Errorf("discover artifacts: %w", err)
 	}
@@ -397,8 +409,11 @@ func (s *Service) resolveBlockingStatus(ctx context.Context, taskPath string, li
 		if link.Type != domain.LinkTypeBlockedBy {
 			continue
 		}
+		// Normalize the target path — canonical blocked_by links use a leading
+		// slash (e.g., /initiatives/...) but projection keys do not.
+		target := strings.TrimPrefix(link.Target, "/")
 		// Check if the blocker is in a terminal status.
-		blocker, err := s.store.GetArtifactProjection(ctx, link.Target)
+		blocker, err := s.store.GetArtifactProjection(ctx, target)
 		if err != nil {
 			// Can't find blocker — treat as blocking (safe default).
 			blockedBy = append(blockedBy, link.Target)

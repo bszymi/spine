@@ -91,6 +91,8 @@ func httpStatusForCode(code domain.ErrorCode) int {
 		return http.StatusPreconditionFailed
 	case domain.ErrInvalidParams:
 		return http.StatusBadRequest
+	case domain.ErrRateLimited:
+		return http.StatusTooManyRequests
 	case domain.ErrUnavailable:
 		return http.StatusServiceUnavailable
 	case domain.ErrInternal, domain.ErrGit:
