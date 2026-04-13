@@ -58,6 +58,17 @@ steps:
 
 // TestSkill_WorkflowWithSkillsGoldenPath verifies a workflow with required_skills
 // progresses through all steps to completion.
+//
+// Scenario: Workflow with required_skills runs to completion
+//   Given a governance environment with orchestrator enabled
+//     And a workflow requiring "backend_development" on execute and "code_review" on review
+//     And actors with matching skills registered
+//   When a run is started for a task
+//   Then the run should be Active on step "execute"
+//   When "completed" is submitted with output "deliverable"
+//   Then the current step should be "review"
+//   When "accepted" is submitted on "review"
+//   Then the run should be completed
 func TestSkill_WorkflowWithSkillsGoldenPath(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "skill-workflow-golden-path",
@@ -97,6 +108,11 @@ func TestSkill_WorkflowWithSkillsGoldenPath(t *testing.T) {
 
 // TestSkill_WorkflowValidationRejectsMissingSkills verifies that schema
 // validation rejects a workflow where actor-assigned steps lack required_skills.
+//
+// Scenario: Workflow schema validation rejects hybrid step without required_skills
+//   Given a workflow definition with a hybrid step and no required_skills
+//   When the workflow schema is validated
+//   Then a validation error should be returned for "steps[0].execution.required_skills"
 func TestSkill_WorkflowValidationRejectsMissingSkills(t *testing.T) {
 	wf := &domain.WorkflowDefinition{
 		ID: "test-no-skills", Name: "Test No Skills", Version: "1.0",
@@ -127,6 +143,11 @@ func TestSkill_WorkflowValidationRejectsMissingSkills(t *testing.T) {
 
 // TestSkill_AutomatedStepDoesNotRequireSkills verifies that automated_only
 // steps pass validation without required_skills.
+//
+// Scenario: Automated-only steps do not require skills
+//   Given a workflow definition with an automated_only step and no required_skills
+//   When the workflow schema is validated
+//   Then no validation error should be raised for required_skills
 func TestSkill_AutomatedStepDoesNotRequireSkills(t *testing.T) {
 	wf := &domain.WorkflowDefinition{
 		ID: "test-automated", Name: "Test Automated", Version: "1.0",
@@ -153,6 +174,18 @@ func TestSkill_AutomatedStepDoesNotRequireSkills(t *testing.T) {
 
 // TestSkill_ActorSkillRegistrationAndQuery verifies that skills can be
 // registered, assigned to actors, and queried from the database.
+//
+// Scenario: Skill CRUD and actor-skill assignment via database
+//   Given a governance environment with orchestrator enabled
+//   When 3 skills (backend, frontend, code_review) are registered
+//     And a fullstack actor is assigned all 3 skills
+//     And a backend actor is assigned 1 skill
+//   Then the fullstack actor should have 3 skills
+//     And the backend actor should have 1 skill
+//   When actors eligible for "backend_development" AND "code_review" are queried
+//   Then 1 actor should be returned (fullstack only)
+//   When actors eligible for "backend_development" only are queried
+//   Then 2 actors should be returned
 func TestSkill_ActorSkillRegistrationAndQuery(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "skill-registration-and-query",

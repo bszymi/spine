@@ -22,6 +22,12 @@ import (
 // TestWorkspace_FreshProvisioning verifies that a freshly provisioned workspace
 // (new Git repo with Spine structure) is immediately usable for artifact creation
 // and projection sync.
+//
+// Scenario: Freshly provisioned workspace is immediately usable
+//   Given a new Git repo provisioned from scratch via RepoProvisioner
+//   When an artifact is created in the provisioned workspace
+//     And projections are synced
+//   Then the artifact projection should exist in the workspace DB
 func TestWorkspace_FreshProvisioning(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 
@@ -126,6 +132,12 @@ This artifact was created after workspace provisioning.
 
 // TestWorkspace_CloneProvisioning verifies that cloning an existing Spine repo
 // and syncing projections produces a usable workspace with existing artifacts.
+//
+// Scenario: Cloning an existing Spine repo produces a usable workspace
+//   Given a remote Spine repo with a "Remote Charter" governance artifact
+//   When the remote repo is cloned into a new workspace via RepoProvisioner
+//     And projections are synced
+//   Then the "Remote Charter" artifact should appear in the workspace projections
 func TestWorkspace_CloneProvisioning(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 

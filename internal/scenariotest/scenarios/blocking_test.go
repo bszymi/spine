@@ -70,6 +70,13 @@ links:
 
 // TestBlocking_StartRunRejectedForBlockedTask verifies that StartRun
 // returns an error when the task has unresolved blocked_by links.
+//
+// Scenario: StartRun fails for a task with unresolved blocked_by links
+//   Given a governance environment with orchestrator enabled
+//     And TASK-A (blocker) in status "Pending"
+//     And TASK-B with a "blocked_by" link to TASK-A
+//   When StartRun is attempted for TASK-B
+//   Then it should fail with a blocking error
 func TestBlocking_StartRunRejectedForBlockedTask(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "blocking-start-run-rejected",
@@ -106,6 +113,12 @@ func TestBlocking_StartRunRejectedForBlockedTask(t *testing.T) {
 
 // TestBlocking_StartRunSucceedsAfterBlockerCompletes verifies that once
 // the blocking task completes, the dependent task can start.
+//
+// Scenario: StartRun succeeds for a previously-blocked task after blocker completes
+//   Given TASK-A2 (blocker) already in status "Completed"
+//     And TASK-B2 with a "blocked_by" link to TASK-A2
+//   When StartRun is attempted for TASK-B2
+//   Then the run should be Active (blocker is already resolved)
 func TestBlocking_StartRunSucceedsAfterBlockerCompletes(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "blocking-start-after-blocker-completes",

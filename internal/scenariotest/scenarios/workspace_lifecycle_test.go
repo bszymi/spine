@@ -13,6 +13,18 @@ import (
 
 // TestWorkspace_Lifecycle verifies workspace lifecycle: create, resolve,
 // deactivate, and verify rejection after deactivation.
+//
+// Scenario: Workspace lifecycle — create, resolve, deactivate, verify rejection
+//   Given a registry DB provider
+//   When a workspace "ws-lifecycle" is created with status Active
+//   Then resolving it should return its config
+//     And listing workspaces should include it
+//   When the workspace is deactivated
+//   Then resolving it should return ErrWorkspaceInactive
+//     And listing workspaces should exclude it
+//     And GetWorkspace should still return it with status Inactive
+//   When deactivation is attempted again
+//   Then it should return ErrWorkspaceNotFound
 func TestWorkspace_Lifecycle(t *testing.T) {
 	registryURL := os.Getenv("SPINE_REGISTRY_TEST_DATABASE_URL")
 	if registryURL == "" {

@@ -12,8 +12,12 @@ import (
 	"github.com/bszymi/spine/internal/scenariotest/harness"
 )
 
-// --- Scenario 1: Root directory backward compat ---
-
+// Scenario: Root artifacts_dir backward compatibility
+//   Given a governance environment with default artifacts_dir "/"
+//   When an artifact is created at "governance/root-test.md"
+//     And projections are synced
+//   Then the file should exist at the repo root
+//     And the projection should have title "Root Test"
 func TestArtifactsDir_RootBackwardCompat(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "artifacts-dir-root-backward-compat",
@@ -63,8 +67,12 @@ func TestArtifactsDir_RootBackwardCompat(t *testing.T) {
 	})
 }
 
-// --- Scenario 2: Subdirectory artifacts ---
-
+// Scenario: Subdirectory artifacts_dir places files in subdirectory
+//   Given an environment with artifacts_dir set to "spine"
+//   When an artifact is created at "governance/subdir-test.md"
+//   Then the file should exist at "spine/governance/subdir-test.md" in the repo
+//     And the artifact path should remain "governance/subdir-test.md" (artifacts-relative)
+//     And reading the artifact back should return title "Subdir Test"
 func TestArtifactsDir_Subdirectory(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "artifacts-dir-subdirectory",
@@ -126,8 +134,10 @@ func TestArtifactsDir_Subdirectory(t *testing.T) {
 	})
 }
 
-// --- Scenario 5: Missing .spine.yaml defaults to root ---
-
+// Scenario: Missing .spine.yaml defaults to root
+//   Given a governance environment with no explicit artifacts_dir
+//   When an artifact is created at "governance/default-root.md"
+//   Then the file should exist at the repo root
 func TestArtifactsDir_MissingConfig(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "artifacts-dir-missing-config-defaults-root",

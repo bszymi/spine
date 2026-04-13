@@ -14,6 +14,11 @@ import (
 // TestReconstruction_MultiHierarchyState validates that a complex
 // multi-initiative, multi-epic, multi-task state can be fully
 // reconstructed from Git by a fresh runtime instance.
+//
+// Scenario: Complex multi-hierarchy state is fully reconstructed from Git
+//   Given two hierarchies (INIT-060, INIT-061) plus Governance and Architecture artifacts
+//   When all projections are dropped and a fresh runtime rebuilds from Git
+//   Then all initiatives, epics, tasks, governance, and architecture projections should exist
 func TestReconstruction_MultiHierarchyState(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "multi-hierarchy-reconstruction",
@@ -69,6 +74,12 @@ func TestReconstruction_MultiHierarchyState(t *testing.T) {
 
 // TestReconstruction_LinksIntactAfterRebuild validates that artifact
 // links are correctly reconstructed.
+//
+// Scenario: Artifact link relationships survive reconstruction from Git
+//   Given a hierarchy with synced projections
+//   When the DB is wiped and a fresh runtime rebuilds from Git
+//   Then the epic-to-initiative parent link should be intact
+//     And the task-to-epic parent link should be intact
 func TestReconstruction_LinksIntactAfterRebuild(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "links-intact-after-rebuild",
@@ -116,6 +127,12 @@ func TestReconstruction_LinksIntactAfterRebuild(t *testing.T) {
 // TestReconstruction_OperationalAfterRebuild validates that the system
 // is fully operational after reconstruction — new artifacts can be
 // created and projected.
+//
+// Scenario: System is fully operational after Git reconstruction
+//   Given existing artifacts reconstructed from Git
+//   When a new artifact is created after reconstruction
+//     And projections are synced
+//   Then both the pre-existing and new artifact projections should be accessible
 func TestReconstruction_OperationalAfterRebuild(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "operational-after-rebuild",
@@ -156,6 +173,11 @@ func TestReconstruction_OperationalAfterRebuild(t *testing.T) {
 
 // TestReconstruction_GovernanceDocsReconstructed validates that seeded
 // governance documents (charter, schema, etc.) survive reconstruction.
+//
+// Scenario: Seeded governance documents survive full reconstruction
+//   Given a seeded environment with governance/charter.md synced
+//   When the DB is wiped and projections are rebuilt from Git
+//   Then governance/charter.md should still have ArtifactType "Governance"
 func TestReconstruction_GovernanceDocsReconstructed(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "governance-docs-reconstructed",

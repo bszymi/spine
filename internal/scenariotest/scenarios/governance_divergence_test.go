@@ -16,6 +16,13 @@ import (
 
 // TestDivergence_SelectOneStrategy validates that the select_one
 // convergence strategy selects the first completed branch.
+//
+// Scenario: select_one convergence picks the first completed branch
+//   Given a seeded governance environment
+//     And two completed branches with artifacts
+//   When convergence is evaluated with strategy "select_one"
+//   Then the first branch "b1" should be selected
+//     And only its artifact "art1.md" should be included
 func TestDivergence_SelectOneStrategy(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "select-one-strategy",
@@ -52,6 +59,13 @@ func TestDivergence_SelectOneStrategy(t *testing.T) {
 
 // TestDivergence_MergeStrategy validates that merge requires at least
 // 2 completed branches and includes all their artifacts.
+//
+// Scenario: Merge convergence requires 2+ completed branches
+//   Given a seeded governance environment
+//   When convergence is evaluated with 2 completed branches and strategy "merge"
+//   Then both branches should be selected with all artifacts merged
+//   When convergence is evaluated with only 1 branch and strategy "merge"
+//   Then evaluation should fail with an error
 func TestDivergence_MergeStrategy(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "merge-strategy",
@@ -105,6 +119,13 @@ func TestDivergence_MergeStrategy(t *testing.T) {
 
 // TestDivergence_RequireAllStrategy validates that require_all fails
 // if any branch has failed.
+//
+// Scenario: require_all convergence fails if any branch failed
+//   Given a seeded governance environment
+//   When convergence is evaluated with all branches completed and strategy "require_all"
+//   Then all branches should be selected
+//   When convergence is evaluated with one failed branch
+//   Then evaluation should fail with an error
 func TestDivergence_RequireAllStrategy(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "require-all-strategy",
@@ -156,6 +177,12 @@ func TestDivergence_RequireAllStrategy(t *testing.T) {
 
 // TestDivergence_SelectOneRejectsNoBranches validates that select_one
 // fails when no branches have completed.
+//
+// Scenario: select_one fails when no branches completed
+//   Given a seeded governance environment
+//     And a single failed branch
+//   When convergence is evaluated with strategy "select_one"
+//   Then evaluation should fail with an error
 func TestDivergence_SelectOneRejectsNoBranches(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "select-one-no-branches",
@@ -186,6 +213,13 @@ func TestDivergence_SelectOneRejectsNoBranches(t *testing.T) {
 // TestDivergence_EntryPolicyAllTerminal validates that the
 // all_branches_terminal entry policy triggers convergence only
 // when all branches are in a terminal state.
+//
+// Scenario: all_branches_terminal policy triggers only when all branches are done
+//   Given a seeded governance environment
+//   When 2 of 3 branches are terminal
+//   Then convergence should NOT be triggered
+//   When all 3 branches are terminal
+//   Then convergence should be triggered (status: Converging)
 func TestDivergence_EntryPolicyAllTerminal(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "entry-policy-all-terminal",
@@ -233,6 +267,14 @@ func TestDivergence_EntryPolicyAllTerminal(t *testing.T) {
 // TestDivergence_EntryPolicyMinimumCompleted validates that the
 // minimum_completed_branches policy triggers when enough branches
 // have completed.
+//
+// Scenario: minimum_completed_branches triggers when min threshold is met
+//   Given a seeded governance environment
+//     And a minimum of 2 branches required
+//   When only 1 branch is completed
+//   Then convergence should NOT be triggered
+//   When 2 branches are completed
+//   Then convergence should be triggered (status: Converging)
 func TestDivergence_EntryPolicyMinimumCompleted(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "entry-policy-minimum-completed",

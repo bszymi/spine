@@ -21,6 +21,15 @@ import (
 // TestWorkspace_Isolation verifies that two workspaces operating in the same
 // process are fully isolated: artifacts created in one workspace are invisible
 // to the other.
+//
+// Scenario: Two workspaces are fully isolated from each other
+//   Given workspace Alpha (standard test DB + repo) and workspace Beta (separate DB + repo)
+//   When an artifact is created in Alpha and projections are synced in both workspaces
+//   Then the artifact should be visible in Alpha projections
+//     And the artifact should NOT be visible in Beta projections
+//   When an artifact is created in Beta and its projections are synced
+//   Then the Beta artifact should be visible in Beta projections
+//     And the Beta artifact should NOT be visible in Alpha projections
 func TestWorkspace_Isolation(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 

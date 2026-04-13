@@ -48,8 +48,24 @@ steps:
 `
 
 // TestStandardRun_BranchCreationAndMerge validates the complete standard run
-// lifecycle with Git branch isolation: start → branch created → work on branch
-// → complete → merge to main → branch cleaned up.
+// lifecycle with Git branch isolation: start -> branch created -> work on branch
+// -> complete -> merge to main -> branch cleaned up.
+//
+// Scenario: Standard run creates branch, merges on completion, cleans up
+//   Given a governance environment with orchestrator enabled
+//     And a task-default workflow is configured
+//     And a hierarchy INIT-001 -> EPIC-001 -> TASK-001
+//     And projections are synced
+//   When a standard run is started for task-001
+//   Then the run should be Active
+//     And a branch should exist
+//   When a deliverable is written on the branch
+//     And the execute step completes with outcome "completed"
+//   Then the current step should be "review"
+//   When the review step completes with outcome "accepted"
+//   Then the run should be completed
+//     And the deliverable from the branch should be on main
+//     And the branch should be cleaned up
 func TestStandardRun_BranchCreationAndMerge(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	engine.RunScenario(t, engine.Scenario{
@@ -100,6 +116,13 @@ func TestStandardRun_BranchCreationAndMerge(t *testing.T) {
 
 // TestStandardRun_BranchCreatedOnStart validates that StartRun creates a
 // Git branch and stores it on the run record.
+//
+// Scenario: StartRun creates a Git branch stored on the run record
+//   Given a governance environment with orchestrator enabled
+//     And a task-default workflow and hierarchy
+//   When a standard run is started for task-002
+//   Then the run should be Active
+//     And a branch should exist
 func TestStandardRun_BranchCreatedOnStart(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	engine.RunScenario(t, engine.Scenario{

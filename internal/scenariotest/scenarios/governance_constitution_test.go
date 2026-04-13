@@ -12,6 +12,13 @@ import (
 
 // TestConstitution_RequiredFieldsEnforced validates that artifacts missing
 // required frontmatter fields are rejected during creation.
+//
+// Scenario Outline: Artifacts missing required fields are rejected
+//   Given a seeded governance environment
+//   When an artifact is created missing field "<field>"
+//   Then creation should fail with an error mentioning "<field>"
+//
+//   Examples: type, title, status, created (Initiative), epic (Task), initiative (Epic)
 func TestConstitution_RequiredFieldsEnforced(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -119,6 +126,13 @@ status: Pending
 
 // TestConstitution_InvalidStatusRejected validates that artifacts with
 // statuses not allowed for their type are rejected.
+//
+// Scenario Outline: Artifacts with invalid status for their type are rejected
+//   Given a seeded governance environment
+//   When a "<type>" artifact is created with status "<invalid_status>"
+//   Then creation should fail with an error
+//
+//   Examples: Governance/Draft, ADR/Living Document, Initiative/Cancelled
 func TestConstitution_InvalidStatusRejected(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -187,6 +201,11 @@ created: "2026-01-01"
 
 // TestConstitution_InvalidArtifactTypeRejected validates that unknown
 // artifact types are rejected during parsing.
+//
+// Scenario: Unknown artifact types are rejected
+//   Given a seeded governance environment
+//   When an artifact is created with type "UnknownType"
+//   Then creation should fail with an error
 func TestConstitution_InvalidArtifactTypeRejected(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "invalid-artifact-type",
@@ -211,6 +230,13 @@ status: Draft
 
 // TestConstitution_InvalidIDFormatRejected validates that artifacts with
 // IDs that don't match the required pattern are rejected.
+//
+// Scenario Outline: Artifacts with non-standard ID formats are rejected
+//   Given a seeded governance environment
+//   When a "<type>" artifact is created with ID "BAD-001"
+//   Then creation should fail with an error
+//
+//   Examples: Initiative, Epic, Task
 func TestConstitution_InvalidIDFormatRejected(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -287,6 +313,13 @@ links:
 
 // TestConstitution_LinkConstraintsEnforced validates that link type
 // validation and canonical path requirements are enforced.
+//
+// Scenario Outline: Link constraints are enforced
+//   Given a seeded governance environment
+//   When an artifact is created with "<constraint_violation>"
+//   Then creation should fail with an error
+//
+//   Examples: invalid link type "invalid_link", non-canonical target "governance/charter.md"
 func TestConstitution_LinkConstraintsEnforced(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -344,6 +377,13 @@ links:
 
 // TestConstitution_CrossArtifactValidation validates that the validation
 // engine detects structural and consistency violations across artifacts.
+//
+// Scenario: Cross-artifact validation passes when parents exist
+//   Given a seeded environment with validation enabled
+//     And a complete hierarchy INIT-030 -> EPIC-030 -> TASK-030
+//     And projections are synced
+//   When the task is validated
+//   Then validation should pass (parents exist)
 func TestConstitution_CrossArtifactValidation(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "cross-artifact-validation",
@@ -369,6 +409,12 @@ func TestConstitution_CrossArtifactValidation(t *testing.T) {
 
 // TestConstitution_ValidArtifactTypesAccepted validates that all known
 // artifact types are accepted when properly constructed.
+//
+// Scenario: All valid artifact types are accepted when properly constructed
+//   Given a seeded governance environment
+//   When a Governance, Architecture, and Initiative artifact are created
+//     And projections are synced
+//   Then all three projections should exist with correct titles
 func TestConstitution_ValidArtifactTypesAccepted(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "valid-types-accepted",

@@ -85,7 +85,19 @@ func seedCreationWorkflow() engine.Step {
 }
 
 // TestPlanningRun_InitiativeCreationGoldenPath validates the complete
-// planning run lifecycle: start → draft → validate → review → merge → completed.
+// planning run lifecycle: start -> draft -> validate -> review -> merge -> completed.
+//
+// Scenario: Planning run creates an initiative through the full creation workflow
+//   Given a governance environment with orchestrator and the artifact-creation workflow
+//   When a planning run is started for a new initiative
+//   Then the run should be Active on step "draft"
+//   When "ready_for_review" is submitted with output "artifact_content"
+//   Then the current step should be "validate"
+//   When "valid" is submitted
+//   Then the current step should be "review"
+//   When "approved" is submitted
+//   Then the run should be completed
+//     And the initiative file should exist on main
 func TestPlanningRun_InitiativeCreationGoldenPath(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
@@ -174,6 +186,13 @@ links:
 
 // TestPlanningRun_InitiativeWithChildArtifacts validates that multiple artifacts
 // created on a planning run branch all merge to main on approval.
+//
+// Scenario: Planning run with initiative + multiple child artifacts all merge to main
+//   Given a planning run started for an initiative
+//   When 2 epics and 1 task are created on the run branch
+//     And the run progresses through draft -> validate -> review -> approved
+//   Then the run should be completed
+//     And all 4 artifact files should exist on main
 func TestPlanningRun_InitiativeWithChildArtifacts(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
@@ -225,6 +244,13 @@ func TestPlanningRun_InitiativeWithChildArtifacts(t *testing.T) {
 
 // TestPlanningRun_RejectionAndRework validates that review rejection loops
 // back to draft, and approval on retry succeeds.
+//
+// Scenario: Review rejection loops to draft; retry approval succeeds
+//   Given an active planning run on step "draft"
+//   When the run progresses to review and "needs_revision" is submitted
+//   Then the run should return to step "draft" and remain Active
+//   When the run progresses through draft -> validate -> review -> approved again
+//   Then the run should be completed
 func TestPlanningRun_RejectionAndRework(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
@@ -270,6 +296,11 @@ func TestPlanningRun_RejectionAndRework(t *testing.T) {
 
 // TestPlanningRun_Cancellation validates that cancelling a planning run
 // leaves no trace on main and cleans up the branch.
+//
+// Scenario: Cancellation cleans up branch and leaves main untouched
+//   Given an active planning run with a child artifact created on the branch
+//   When the run is cancelled
+//   Then the run status should be Cancelled
 func TestPlanningRun_Cancellation(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{
@@ -319,6 +350,11 @@ links:
 
 // TestPlanningRun_TaskCreation validates that the generic artifact-creation
 // workflow works for creating individual tasks, proving it is type-agnostic.
+//
+// Scenario: Artifact-creation workflow works for Task type
+//   Given existing parent initiative and epic
+//   When a planning run creates a Task artifact through draft -> validate -> review -> approved
+//   Then the run should be completed
 func TestPlanningRun_TaskCreation(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false") // no remote in test repos
 	engine.RunScenario(t, engine.Scenario{

@@ -15,6 +15,19 @@ import (
 // TestPermission_RoleHierarchy validates that the role hierarchy is
 // correctly enforced: reader < contributor < reviewer < operator < admin.
 // Each operation requires a minimum role; lower roles are denied.
+//
+// Scenario Outline: Role hierarchy enforces minimum role per operation
+//   Given a seeded governance environment
+//     And an actor with role "<role>"
+//   When the actor attempts operation "<operation>"
+//   Then the operation should be "<allowed_or_denied>"
+//
+//   Examples:
+//     Reader: can read, cannot create or start runs
+//     Contributor: can create and submit, cannot cancel runs or assign steps
+//     Reviewer: can accept/reject tasks, cannot rebuild system
+//     Operator: can cancel runs and assign steps, cannot create tokens
+//     Admin: can do everything
 func TestPermission_RoleHierarchy(t *testing.T) {
 	cases := []struct {
 		operation auth.Operation
@@ -81,6 +94,11 @@ func TestPermission_RoleHierarchy(t *testing.T) {
 // TestPermission_RoleInheritance validates that higher roles inherit
 // all permissions of lower roles (reader -> contributor -> reviewer ->
 // operator -> admin).
+//
+// Scenario: Higher roles inherit all lower-role permissions
+//   Given a seeded governance environment
+//   When the inheritance chain is verified for all role pairs
+//   Then each higher role should have at least the privileges of every lower role
 func TestPermission_RoleInheritance(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "role-inheritance",
@@ -118,6 +136,12 @@ func TestPermission_RoleInheritance(t *testing.T) {
 
 // TestPermission_UnknownOperationDenied validates that unknown operations
 // are always denied.
+//
+// Scenario: Unknown operations are denied regardless of role
+//   Given a seeded governance environment
+//     And an Admin actor
+//   When the actor attempts operation "nonexistent.operation"
+//   Then the operation should be denied with ErrForbidden
 func TestPermission_UnknownOperationDenied(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "unknown-operation-denied",
@@ -143,6 +167,15 @@ func TestPermission_UnknownOperationDenied(t *testing.T) {
 
 // TestPermission_WorkflowOperationRoles validates that workflow-specific
 // operations require the correct minimum roles.
+//
+// Scenario: Workflow operations enforce correct minimum roles
+//   Given a seeded governance environment
+//   When the required role is queried for each workflow operation
+//   Then "run.start" should require Contributor
+//     And "run.status" should require Reader
+//     And "run.cancel" should require Operator
+//     And "step.assign" should require Operator
+//     And "step.submit" should require Contributor
 func TestPermission_WorkflowOperationRoles(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "workflow-operation-roles",
@@ -180,6 +213,15 @@ func TestPermission_WorkflowOperationRoles(t *testing.T) {
 // TestPermission_TaskGovernanceRequiresReviewer validates that task
 // governance operations (accept, reject, cancel) require at least
 // reviewer role.
+//
+// Scenario Outline: Task governance operations require Reviewer role
+//   Given a seeded governance environment
+//   When a Contributor attempts "<operation>"
+//   Then the operation should be denied
+//   When a Reviewer attempts "<operation>"
+//   Then the operation should be allowed
+//
+//   Examples: task.accept, task.reject, task.cancel, task.abandon, task.supersede
 func TestPermission_TaskGovernanceRequiresReviewer(t *testing.T) {
 	governanceOps := []auth.Operation{
 		"task.accept",
@@ -230,6 +272,15 @@ func TestPermission_TaskGovernanceRequiresReviewer(t *testing.T) {
 
 // TestPermission_AdminOnlyOperations validates that token management
 // requires admin role.
+//
+// Scenario Outline: Token management operations require Admin role
+//   Given a seeded governance environment
+//   When an Operator attempts "<operation>"
+//   Then the operation should be denied
+//   When an Admin attempts "<operation>"
+//   Then the operation should be allowed
+//
+//   Examples: token.create, token.revoke, token.list
 func TestPermission_AdminOnlyOperations(t *testing.T) {
 	adminOps := []auth.Operation{
 		"token.create",

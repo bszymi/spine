@@ -10,6 +10,13 @@ import (
 	"github.com/bszymi/spine/internal/scenariotest/engine"
 )
 
+// Scenario: Create a Governance artifact end-to-end
+//   Given a bare repository
+//   When a Governance artifact is created via the service at "governance/spike-charter.md"
+//     And projections are synced
+//   Then the file should exist in Git with content "Scenario Test Charter"
+//     And the projection should exist with title "Scenario Test Charter"
+//     And the projection type should be "Governance" with status "Living Document"
 func TestArtifact_CreateGovernanceArtifact(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "create-governance-artifact",

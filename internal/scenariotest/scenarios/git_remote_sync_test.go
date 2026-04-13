@@ -68,6 +68,10 @@ func assertRemoteBranchGone(branch string) engine.Step {
 
 // --- Scenario 1: Artifact create on main pushes to origin ---
 
+// Scenario: Artifact created on main is automatically pushed to origin
+//   Given a governance environment with a bare remote configured as origin
+//   When a Governance artifact is created on main
+//   Then the remote main branch should contain the "Create Governance" commit
 func TestGitRemoteSync_ArtifactCreateOnMain(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "artifact-create-pushes-to-origin",
@@ -92,6 +96,10 @@ func TestGitRemoteSync_ArtifactCreateOnMain(t *testing.T) {
 
 // --- Scenario 2: Planning run start pushes branch to origin ---
 
+// Scenario: Planning run branch is pushed to origin on creation
+//   Given a governance environment with orchestrator and a bare remote
+//   When a planning run is started
+//   Then the run's branch should exist on the remote
 func TestGitRemoteSync_PlanningRunBranchPushed(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "planning-run-branch-pushed-to-origin",
@@ -129,6 +137,10 @@ func TestGitRemoteSync_PlanningRunBranchPushed(t *testing.T) {
 
 // --- Scenario 3: Artifact create via WriteContext pushes to branch on origin ---
 
+// Scenario: Artifact created on run branch is pushed to the branch on origin
+//   Given an active planning run with a branch pushed to origin
+//   When an artifact is created on the run branch via WriteContext
+//   Then the branch on origin should contain the "Create Governance" commit
 func TestGitRemoteSync_ArtifactOnBranchPushed(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "artifact-on-branch-pushed-to-origin",
@@ -180,6 +192,12 @@ func TestGitRemoteSync_ArtifactOnBranchPushed(t *testing.T) {
 
 // --- Scenario 4: Run approval + merge pushes main, deletes branch on origin ---
 
+// Scenario: After merge, main is pushed and run branch is deleted on origin
+//   Given an active planning run with branch on origin
+//   When the run progresses through draft -> validate -> review -> approved
+//   Then the run should be completed
+//     And the remote main should contain a "Merge run" commit
+//     And the run branch should be deleted from origin
 func TestGitRemoteSync_MergeAndCleanup(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "merge-pushes-main-deletes-branch",
@@ -227,6 +245,11 @@ func TestGitRemoteSync_MergeAndCleanup(t *testing.T) {
 
 // --- Scenario 5: Run cancellation deletes branch on origin ---
 
+// Scenario: Cancelling a run deletes its branch on origin
+//   Given an active planning run with branch pushed to origin
+//   When the run is cancelled
+//   Then the run status should be Cancelled
+//     And the run branch should be deleted from origin
 func TestGitRemoteSync_CancelDeletesBranch(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "cancel-deletes-branch-on-origin",
@@ -274,6 +297,10 @@ func TestGitRemoteSync_CancelDeletesBranch(t *testing.T) {
 
 // --- Scenario 6: Auto-push disabled → nothing pushed ---
 
+// Scenario: When SPINE_GIT_AUTO_PUSH=false, nothing is pushed to origin
+//   Given SPINE_GIT_AUTO_PUSH=false and a bare remote configured
+//   When a Governance artifact is created on main
+//   Then the remote main should NOT contain the commit
 func TestGitRemoteSync_AutoPushDisabled(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 
@@ -309,6 +336,11 @@ func TestGitRemoteSync_AutoPushDisabled(t *testing.T) {
 
 // --- Scenario 7: Planning run branch name follows convention ---
 
+// Scenario: Planning run branch follows spine/plan/<id>-<slug>-<hex> convention
+//   Given an active planning run started for an initiative artifact
+//   When the run's branch name is inspected
+//   Then it should start with "spine/plan/init-099-"
+//     And contain the "initiative" slug
 func TestGitRemoteSync_PlanningRunBranchNaming(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "planning-run-branch-naming",
@@ -365,6 +397,11 @@ links:
 # TASK-001 — Test Task for Naming
 `
 
+// Scenario: Standard run branch follows spine/run/<id>-<slug>-<hex> convention
+//   Given a workflows environment with a task artifact
+//   When a standard run is started for the task
+//   Then the branch name should start with "spine/run/task-001-"
+//     And contain the "naming-test" slug
 func TestGitRemoteSync_StandardRunBranchNaming(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "standard-run-branch-naming",

@@ -69,6 +69,15 @@ func setupReviewRun(idSuffix string) []engine.Step {
 
 // TestWorkflow_ApprovalFlow validates that a review step with "approved"
 // outcome completes the run and records the approval decision.
+//
+// Scenario: Approved review completes the run
+//   Given an active run on step "work"
+//   When "done" is submitted on "work"
+//   Then the current step should be "review"
+//   When "approved" is submitted on "review"
+//   Then the run should be completed
+//     And the review step execution should be in Completed status
+//     And total step executions should be 2
 func TestWorkflow_ApprovalFlow(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "approval-flow",
@@ -110,6 +119,13 @@ func TestWorkflow_ApprovalFlow(t *testing.T) {
 
 // TestWorkflow_RejectionWithRework validates that a rejection sends the
 // workflow back to the work step and a subsequent approval completes it.
+//
+// Scenario: Rejection with rework loops back to work; re-approval completes run
+//   Given an active run on step "work"
+//   When "done" is submitted, then "rework" is submitted on review
+//   Then the run should return to step "work" and remain Active
+//   When "done" is submitted again, then "approved" on review
+//   Then the run should be completed with 4 total step executions
 func TestWorkflow_RejectionWithRework(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejection-with-rework",
@@ -145,6 +161,14 @@ func TestWorkflow_RejectionWithRework(t *testing.T) {
 
 // TestWorkflow_RejectionClosed validates that a "rejected" outcome
 // on the review step terminates the run (goes to end).
+//
+// Scenario: Rejected-closed review terminates the run
+//   Given an active run on step "work"
+//   When "done" is submitted on "work"
+//     And "rejected" is submitted on "review"
+//   Then the run should be completed
+//     And the review step outcome should be recorded as "rejected"
+//     And total step executions should be 2
 func TestWorkflow_RejectionClosed(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejection-closed",
@@ -192,6 +216,11 @@ func TestWorkflow_RejectionClosed(t *testing.T) {
 
 // TestWorkflow_ReworkCycleLimit validates that repeated rejections
 // exceeding MaxReworkCycles (10) cause the run to fail.
+//
+// Scenario: Exceeding the rework cycle limit fails the run
+//   Given an active run on step "work"
+//   When the work -> review -> rework cycle is repeated MaxReworkCycles (10) times
+//   Then on the final rework submission the run should transition to Failed status
 func TestWorkflow_ReworkCycleLimit(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rework-cycle-limit",

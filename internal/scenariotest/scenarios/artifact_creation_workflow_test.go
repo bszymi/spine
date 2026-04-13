@@ -51,6 +51,23 @@ steps:
 // TestStandardRunWorkflow_PendingToCompleted validates that a standard
 // execution run rewrites the task artifact's status from Pending to
 // Completed when the terminal outcome declares commit.status: Completed.
+//
+// Scenario: Standard run rewrites task status from Pending to Completed
+//   Given a governance environment with orchestrator enabled
+//     And a task-default workflow with commit.status: Completed on terminal outcome
+//     And a hierarchy with TASK-001 in status "Pending"
+//   When a standard run is started for the task
+//   Then the run should be Active on step "execute"
+//     And a branch should exist
+//   When a deliverable is written on the branch
+//     And the execute step completes with outcome "completed"
+//   Then the current step should be "review"
+//   When the review step completes with outcome "accepted"
+//   Then the run should be completed
+//     And the task file on main should contain "status: Completed"
+//     And the deliverable should be on main
+//     And the branch should be cleaned up
+//     And the projection should reflect status "Completed"
 func TestStandardRunWorkflow_PendingToCompleted(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 
@@ -114,8 +131,24 @@ func TestStandardRunWorkflow_PendingToCompleted(t *testing.T) {
 
 // TestArtifactCreationWorkflow_DraftToPending validates the full artifact
 // creation workflow end-to-end: a task starts as Draft, progresses through
-// draft → validate → review, and on approval the branch auto-merges to main
+// draft -> validate -> review, and on approval the branch auto-merges to main
 // with the artifact status updated to Pending.
+//
+// Scenario: Artifact creation workflow transitions Draft to Pending on approval
+//   Given a governance environment with orchestrator enabled
+//     And parent initiative and epic artifacts exist
+//     And the artifact-creation workflow is seeded
+//   When a planning run is started for a new task with status "Draft"
+//   Then the run should be Active on step "draft"
+//     And a branch should exist
+//   When the draft step completes with "ready_for_review"
+//     And validation passes with "valid"
+//     And review approves with "approved"
+//   Then the run should be completed
+//     And the task file should exist on main
+//     And the branch should be cleaned up
+//     And the task file should contain "status: Pending"
+//     And the projection should reflect status "Pending"
 func TestArtifactCreationWorkflow_DraftToPending(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 

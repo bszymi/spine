@@ -176,6 +176,21 @@ func seedWorkflow(name, yamlContent string) engine.Step {
 
 // TestWorkflow_TaskDefaultGoldenPath validates the complete task-default
 // workflow lifecycle: draft -> execute -> review -> commit -> completed.
+//
+// Scenario: task-default workflow runs to completion
+//   Given a governance environment with orchestrator enabled
+//     And the task-default workflow seeded
+//     And a hierarchy INIT-001 -> EPIC-001 -> TASK-001
+//   When a run is started for task-001
+//   Then the run should be Active on step "draft"
+//   When "ready" is submitted on "draft"
+//   Then the current step should be "execute"
+//   When "completed" is submitted on "execute" with output "deliverable"
+//   Then the current step should be "review"
+//   When "accepted" is submitted on "review"
+//   Then the current step should be "commit"
+//   When "committed" is submitted on "commit"
+//   Then the run should be completed with 4 total step executions
 func TestWorkflow_TaskDefaultGoldenPath(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "task-default-golden-path",
@@ -218,6 +233,19 @@ func TestWorkflow_TaskDefaultGoldenPath(t *testing.T) {
 
 // TestWorkflow_TaskSpikeGoldenPath validates the task-spike workflow
 // lifecycle: investigate -> summarize -> review -> completed.
+//
+// Scenario: task-spike workflow runs to completion
+//   Given a governance environment with orchestrator enabled
+//     And only the task-spike workflow seeded
+//     And a hierarchy INIT-002 -> EPIC-002 -> TASK-002
+//   When a run is started for task-002
+//   Then the run should be Active on step "investigate"
+//   When "findings_ready" is submitted with output "findings"
+//   Then the current step should be "summarize"
+//   When "summarized" is submitted with output "summary"
+//   Then the current step should be "review"
+//   When "accepted" is submitted on "review"
+//   Then the run should be completed with 3 total step executions
 func TestWorkflow_TaskSpikeGoldenPath(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "task-spike-golden-path",
@@ -257,6 +285,19 @@ func TestWorkflow_TaskSpikeGoldenPath(t *testing.T) {
 
 // TestWorkflow_EpicLifecycleGoldenPath validates the epic-lifecycle workflow
 // lifecycle: plan -> execute -> review -> completed.
+//
+// Scenario: epic-lifecycle workflow runs to completion
+//   Given a governance environment with orchestrator enabled
+//     And the epic-lifecycle workflow seeded
+//     And a hierarchy INIT-003 -> EPIC-003 -> TASK-003
+//   When a run is started for epic-003 (not the task)
+//   Then the run should be Active on step "plan"
+//   When "planned" is submitted with output "task_breakdown"
+//   Then the current step should be "execute"
+//   When "tasks_complete" is submitted
+//   Then the current step should be "review"
+//   When "completed" is submitted
+//   Then the run should be completed with 3 total step executions
 func TestWorkflow_EpicLifecycleGoldenPath(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "epic-lifecycle-golden-path",

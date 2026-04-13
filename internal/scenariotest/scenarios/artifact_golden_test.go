@@ -13,6 +13,15 @@ import (
 // TestArtifact_ProjectInitialization validates that a bare repo can be
 // initialized with Charter and Constitution, producing a valid project.
 // Uses a bare environment (no seeded governance) to test from scratch.
+//
+// Scenario: Initialize a project with governance documents
+//   Given a bare repository with no seeded governance
+//   When a Charter artifact is created
+//     And a Constitution artifact is created with status "Foundational"
+//     And projections are synced
+//   Then the Charter projection should exist with type "Governance" and status "Living Document"
+//     And the Constitution projection should exist with status "Foundational"
+//     And both files should exist in Git
 func TestArtifact_ProjectInitialization(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "project-initialization",
@@ -65,6 +74,16 @@ func TestArtifact_ProjectInitialization(t *testing.T) {
 
 // TestArtifact_FullHierarchyCreation validates creating a complete
 // Initiative -> Epic -> Task chain with correct linkage.
+//
+// Scenario: Create a linked Initiative -> Epic -> Task hierarchy
+//   Given a seeded governance environment
+//   When an Initiative, Epic, and Task are created as a hierarchy
+//     And projections are synced
+//   Then the Initiative projection should exist with type "Initiative"
+//     And the Epic projection should exist with type "Epic"
+//     And the Task projection should exist with type "Task" and status "Pending"
+//     And the Epic should have a parent link to the Initiative
+//     And the Task should have a parent link to the Epic
 func TestArtifact_FullHierarchyCreation(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "full-hierarchy-creation",
@@ -128,6 +147,12 @@ func TestArtifact_FullHierarchyCreation(t *testing.T) {
 
 // TestArtifact_SchemaValidationPasses validates that all correctly-formed
 // artifacts pass schema validation.
+//
+// Scenario: Valid artifacts pass schema validation
+//   Given a seeded environment with validation enabled
+//   When a correctly-formed Governance artifact is created
+//     And projections are synced
+//   Then the artifact should pass validation
 func TestArtifact_SchemaValidationPasses(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "schema-validation-passes",

@@ -39,7 +39,14 @@ steps:
     timeout: "4h"
 `
 
-// TestClaiming_ClaimAndRelease verifies the full claim → release → re-claim cycle.
+// TestClaiming_ClaimAndRelease verifies the full claim -> release -> re-claim cycle.
+//
+// Scenario: Actor claims step, releases it, step returns to waiting
+//   Given an active run on step "execute" with two eligible actors
+//   When claimer-1 claims the step
+//   Then the step should be in status "Assigned"
+//   When claimer-1 releases the step with reason "need help"
+//   Then the step should return to status "Waiting"
 func TestClaiming_ClaimAndRelease(t *testing.T) {
 	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
 		Name:        "claim-and-release-cycle",

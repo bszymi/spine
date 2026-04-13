@@ -27,6 +27,12 @@ func setupWorkflowRun() []engine.Step {
 
 // TestWorkflow_RejectsInvalidOutcome verifies that submitting an outcome
 // ID that doesn't exist on the current step is rejected.
+//
+// Scenario: Submitting a non-existent outcome ID is rejected
+//   Given an active run on step "draft"
+//   When outcome "nonexistent" is submitted
+//   Then the submission should fail with error code invalid_params
+//     And the run should remain Active on step "draft"
 func TestWorkflow_RejectsInvalidOutcome(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-invalid-outcome",
@@ -63,6 +69,12 @@ func TestWorkflow_RejectsInvalidOutcome(t *testing.T) {
 
 // TestWorkflow_RejectsMissingRequiredOutputs verifies that submitting
 // a step result without required outputs fails the step.
+//
+// Scenario: Submitting without required outputs fails the step
+//   Given an active run advanced to step "execute" (requires "deliverable" output)
+//   When "completed" is submitted without any artifacts produced
+//   Then the submission should fail with "missing required outputs"
+//     And the step execution should be in Failed status
 func TestWorkflow_RejectsMissingRequiredOutputs(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-missing-required-outputs",
@@ -109,6 +121,12 @@ func TestWorkflow_RejectsMissingRequiredOutputs(t *testing.T) {
 
 // TestWorkflow_RejectsNonExistentExecution verifies that submitting
 // a result for a non-existent execution ID returns not_found.
+//
+// Scenario: Submitting to a non-existent execution ID returns not_found
+//   Given an active run
+//   When outcome "ready" is submitted to execution ID "fake-execution-id"
+//   Then the submission should fail with error code not_found
+//     And the run should remain Active
 func TestWorkflow_RejectsNonExistentExecution(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-nonexistent-execution",
@@ -141,6 +159,12 @@ func TestWorkflow_RejectsNonExistentExecution(t *testing.T) {
 // TestWorkflow_IdempotentOnCompletedStep verifies that re-submitting
 // a result to an already-completed step returns success (idempotent)
 // without changing the run state.
+//
+// Scenario: Re-submitting to a completed step is idempotent
+//   Given an active run where "draft" step completed and run advanced to "execute"
+//   When outcome "ready" is re-submitted to the already-completed draft execution
+//   Then the submission should succeed with status "completed"
+//     And the run should still be on step "execute" (not re-advanced)
 func TestWorkflow_IdempotentOnCompletedStep(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "idempotent-on-completed-step",
@@ -186,6 +210,11 @@ func TestWorkflow_IdempotentOnCompletedStep(t *testing.T) {
 
 // TestWorkflow_RejectsEmptyExecutionID verifies that submitting with
 // an empty execution ID returns invalid_params.
+//
+// Scenario: Submitting with an empty execution ID is rejected
+//   Given an active run
+//   When an outcome is submitted with an empty execution ID
+//   Then the submission should fail with error code invalid_params
 func TestWorkflow_RejectsEmptyExecutionID(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-empty-execution-id",

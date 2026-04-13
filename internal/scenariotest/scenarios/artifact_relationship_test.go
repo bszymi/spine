@@ -12,6 +12,13 @@ import (
 
 // TestArtifact_ParentChildLinkConsistency validates that parent links
 // between Initiative->Epic->Task are correctly projected.
+//
+// Scenario: Parent-child links are correctly stored in projections
+//   Given a seeded governance environment
+//   When a hierarchy INIT-002 -> EPIC-002 -> TASK-002 is created
+//     And projections are synced
+//   Then the Epic should have a "parent" link to the Initiative
+//     And the Task should have a "parent" link to the Epic
 func TestArtifact_ParentChildLinkConsistency(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "parent-child-link-consistency",
@@ -44,6 +51,11 @@ func TestArtifact_ParentChildLinkConsistency(t *testing.T) {
 
 // TestArtifact_RejectsInvalidLinkType validates that artifacts with
 // unknown link types are rejected during creation.
+//
+// Scenario: Artifacts with invalid link types are rejected
+//   Given a seeded governance environment
+//   When an artifact is created with link type "invalid_type"
+//   Then creation should fail with an error
 func TestArtifact_RejectsInvalidLinkType(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-invalid-link-type",
@@ -71,6 +83,11 @@ links:
 
 // TestArtifact_RejectsNonCanonicalLinkTarget validates that link targets
 // must use canonical paths (starting with /).
+//
+// Scenario: Link targets must use canonical paths
+//   Given a seeded governance environment
+//   When an artifact is created with a relative link target "governance/charter.md"
+//   Then creation should fail with an error
 func TestArtifact_RejectsNonCanonicalLinkTarget(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-non-canonical-link-target",
@@ -98,6 +115,14 @@ links:
 
 // TestArtifact_ValidLinkTypes validates that all allowed link types
 // are accepted during artifact creation.
+//
+// Scenario Outline: All valid link types are accepted
+//   Given a seeded governance environment
+//   When an artifact is created with link type "<link_type>" to "/governance/charter.md"
+//     And projections are synced
+//   Then the artifact projection should exist
+//
+//   Examples: parent, related_to, blocks, blocked_by, supersedes, superseded_by, follow_up_to, follow_up_from
 func TestArtifact_ValidLinkTypes(t *testing.T) {
 	validTypes := []string{
 		"parent", "related_to", "blocks", "blocked_by",

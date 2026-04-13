@@ -12,6 +12,16 @@ import (
 
 // TestArtifact_RejectsMissingRequiredFields validates that artifacts with
 // missing required fields (type, title, status) are rejected.
+//
+// Scenario: Artifacts with missing required fields are rejected
+//   Given a seeded governance environment
+//   When an artifact is created without a "type" field
+//   Then creation should fail with an error
+//   When an artifact is created without a "title" field
+//   Then creation should fail with an error
+//   When an artifact is created without a "status" field
+//   Then creation should fail with an error
+//     And no partial artifact files should exist in Git
 func TestArtifact_RejectsMissingRequiredFields(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-missing-required-fields",
@@ -60,6 +70,11 @@ title: No Status
 
 // TestArtifact_RejectsInvalidStatus validates that artifacts with an invalid
 // status for their type are rejected.
+//
+// Scenario: Artifacts with invalid status for their type are rejected
+//   Given a seeded governance environment
+//   When a Governance artifact is created with status "Pending"
+//   Then creation should fail with an error
 func TestArtifact_RejectsInvalidStatus(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-invalid-status",
@@ -83,6 +98,13 @@ status: Pending
 
 // TestArtifact_RejectsDuplicatePath validates that creating an artifact at
 // an existing path is rejected.
+//
+// Scenario: Duplicate artifact paths are rejected
+//   Given a seeded governance environment
+//     And a Governance artifact exists at "governance/duplicate-test.md"
+//   When another artifact is created at the same path
+//   Then creation should fail with an error
+//     And the original artifact should remain unchanged
 func TestArtifact_RejectsDuplicatePath(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rejects-duplicate-path",

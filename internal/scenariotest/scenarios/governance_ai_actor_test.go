@@ -14,6 +14,14 @@ import (
 
 // TestAIActor_SamePermissionsAsHuman validates that AI actors with the
 // same role get identical permission decisions as human actors.
+//
+// Scenario Outline: AI and automated actors get identical permissions as humans
+//   Given a seeded governance environment
+//     And a Human, AI, and Automated actor each with role "<role>"
+//   When all three attempt operation "<operation>"
+//   Then all three should receive the same allow/deny decision
+//
+//   Examples: all combinations of (Reader..Admin) x (artifact.create..token.create)
 func TestAIActor_SamePermissionsAsHuman(t *testing.T) {
 	operations := []auth.Operation{
 		"artifact.create", "artifact.read", "run.start", "run.cancel",
@@ -84,6 +92,16 @@ func TestAIActor_SamePermissionsAsHuman(t *testing.T) {
 
 // TestAIActor_SameArtifactValidation validates that artifact creation
 // validation applies identically regardless of actor type.
+//
+// Scenario: AI actor artifact creation follows identical validation as human
+//   Given a seeded governance environment
+//   When an AI actor creates a valid Governance artifact
+//     And projections are synced
+//   Then the artifact should be projected with correct title
+//   When an AI actor creates an artifact with invalid status "Draft"
+//   Then creation should fail with an error
+//   When an AI actor creates an artifact missing a required "title" field
+//   Then creation should fail with an error
 func TestAIActor_SameArtifactValidation(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "ai-same-artifact-validation",
@@ -135,6 +153,15 @@ status: Living Document
 
 // TestAIActor_GovernanceViolationsRejected validates that AI actors
 // attempting governance violations are rejected with clear errors.
+//
+// Scenario: AI actor governance violations are rejected
+//   Given a seeded governance environment
+//   When an AI actor creates an artifact with unknown type "AISpecialType"
+//   Then creation should fail with an error
+//   When an AI actor creates an artifact with invalid link type "ai_override"
+//   Then creation should fail with an error
+//   When an AI actor creates an artifact with non-standard ID "AI-SPECIAL-001"
+//   Then creation should fail with an error
 func TestAIActor_GovernanceViolationsRejected(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "ai-governance-violations-rejected",
@@ -194,6 +221,12 @@ created: "2026-01-01"
 // TestAIActor_ContributorCannotReview validates that an AI actor
 // with contributor role cannot perform review operations, matching
 // the same restriction applied to human contributors.
+//
+// Scenario: AI contributor is denied review operations
+//   Given a seeded governance environment
+//     And an AI actor with role "Contributor"
+//   When the actor attempts task.accept, task.reject, task.cancel, or discussion.resolve
+//   Then all operations should be denied with ErrForbidden
 func TestAIActor_ContributorCannotReview(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "ai-contributor-cannot-review",
@@ -228,6 +261,12 @@ func TestAIActor_ContributorCannotReview(t *testing.T) {
 
 // TestAIActor_ReaderCannotMutate validates that an AI actor with reader
 // role cannot perform mutating operations.
+//
+// Scenario: AI reader is denied all mutating operations
+//   Given a seeded governance environment
+//     And an AI actor with role "Reader"
+//   When the actor attempts create, update, run.start, step.submit, or discussion operations
+//   Then all operations should be denied with ErrForbidden
 func TestAIActor_ReaderCannotMutate(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "ai-reader-cannot-mutate",

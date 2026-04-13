@@ -13,6 +13,11 @@ import (
 
 // TestProjectionRebuild_MatchesOriginalState validates that projections
 // rebuilt from Git history match the original state exactly.
+//
+// Scenario: Rebuilt projections match original state exactly
+//   Given a hierarchy and governance doc with synced projections
+//   When the DB is wiped and projections are rebuilt from Git
+//   Then all projections should match original titles, statuses, and types
 func TestProjectionRebuild_MatchesOriginalState(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "rebuild-matches-original",
@@ -73,6 +78,11 @@ func TestProjectionRebuild_MatchesOriginalState(t *testing.T) {
 
 // TestProjectionRebuild_IdempotentMultipleRebuilds validates that
 // running rebuild multiple times produces identical results.
+//
+// Scenario: Multiple rebuilds produce identical projection state
+//   Given a seeded hierarchy with projections
+//   When projections are rebuilt 3 additional times
+//   Then the initiative title and task status should be identical each time
 func TestProjectionRebuild_IdempotentMultipleRebuilds(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "idempotent-multiple-rebuilds",
@@ -98,6 +108,11 @@ func TestProjectionRebuild_IdempotentMultipleRebuilds(t *testing.T) {
 
 // TestProjectionRebuild_AllArtifactTypesReconstructed validates that
 // rebuilding captures all artifact types from Git history.
+//
+// Scenario: All artifact types are reconstructed from Git on rebuild
+//   Given Governance, Architecture, and Initiative artifacts with synced projections
+//   When the DB is wiped and projections are rebuilt
+//   Then all three artifact types should be present with correct ArtifactType values
 func TestProjectionRebuild_AllArtifactTypesReconstructed(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "all-types-reconstructed",
@@ -141,6 +156,11 @@ func TestProjectionRebuild_AllArtifactTypesReconstructed(t *testing.T) {
 
 // TestProjectionRebuild_RelationshipsPreserved validates that
 // parent-child link relationships survive a full projection rebuild.
+//
+// Scenario: Parent-child links survive full projection rebuild
+//   Given a hierarchy with verified parent links
+//   When the DB is wiped and projections are rebuilt from Git
+//   Then the epic-to-initiative parent link should still exist
 func TestProjectionRebuild_RelationshipsPreserved(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "relationships-preserved",
@@ -186,6 +206,11 @@ func TestProjectionRebuild_RelationshipsPreserved(t *testing.T) {
 
 // TestProjectionRebuild_QueriesReturnCorrectResults validates that
 // queries against rebuilt projections return correct results.
+//
+// Scenario: Queries against rebuilt projections return correct results
+//   Given a seeded hierarchy with synced projections
+//   When the DB is wiped and projections are rebuilt
+//   Then querying by path should return the task with title "Test Task"
 func TestProjectionRebuild_QueriesReturnCorrectResults(t *testing.T) {
 	engine.RunScenario(t, engine.Scenario{
 		Name:        "queries-after-rebuild",

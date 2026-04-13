@@ -23,6 +23,15 @@ import (
 // constructs independent, workspace-scoped services for each workspace.
 // Each workspace gets its own Validator and Divergence service, and
 // validation results in one workspace do not leak to the other.
+//
+// Scenario: ServicePool Builder creates independent workspace-scoped services
+//   Given two workspaces (Alpha and Beta) each with their own DB and repo
+//   When ServicePool resolves both workspaces
+//   Then each should have a distinct Validator instance
+//     And each should have a distinct Divergence service instance
+//     And each should have a distinct Store connection
+//   When validation is run on each workspace independently
+//   Then each validator should return results only for its own artifacts
 func TestWorkspace_ScopedServices(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	ctx := context.Background()
@@ -218,6 +227,13 @@ Beta-specific content.
 
 // TestWorkspace_ScopedSchedulerCallbacks verifies that the ServicePool Builder
 // can inject per-workspace scheduler callbacks and they execute independently.
+//
+// Scenario: ServicePool Builder can inject per-workspace scheduler callbacks
+//   Given a ServicePool with a Builder that sets CommitRetryFn, StepRecoveryFn, and RunFailFn
+//   When the workspace service set is retrieved
+//   Then all three callbacks should be set on the ServiceSet
+//   When each callback is invoked
+//   Then each should execute without error
 func TestWorkspace_ScopedSchedulerCallbacks(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	ctx := context.Background()

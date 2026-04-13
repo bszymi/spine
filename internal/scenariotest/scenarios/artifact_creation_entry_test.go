@@ -30,6 +30,21 @@ func goldenTaskContent(id, title, epicPath string) string {
 // TestArtifactCreationEntry_TaskGoldenPath validates the full creation flow
 // for a task: seed existing artifacts, start planning run, progress through
 // creation workflow, and verify artifact lands on main.
+//
+// Scenario: Create a task via planning run golden path
+//   Given a governance environment with orchestrator enabled
+//     And an existing initiative, epic, and two tasks (TASK-001, TASK-003)
+//     And the artifact-creation workflow is seeded
+//     And projections are synced
+//   When a planning run is started for TASK-004 (next sequential ID)
+//   Then the run should be Active on step "draft"
+//   When the draft step completes with outcome "ready_for_review"
+//   Then the current step should be "validate"
+//   When validation passes with outcome "valid"
+//   Then the current step should be "review"
+//   When review approves with outcome "approved"
+//   Then the run should be completed
+//     And the task file should exist on main
 func TestArtifactCreationEntry_TaskGoldenPath(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	engine.RunScenario(t, engine.Scenario{
@@ -91,6 +106,14 @@ func TestArtifactCreationEntry_TaskGoldenPath(t *testing.T) {
 }
 
 // TestArtifactCreationEntry_EpicGoldenPath validates epic creation.
+//
+// Scenario: Create an epic via planning run
+//   Given a governance environment with orchestrator enabled
+//     And an existing initiative as parent
+//     And the artifact-creation workflow is seeded
+//   When a planning run creates the epic through draft -> validate -> review -> approved
+//   Then the run should be completed
+//     And the epic file should exist on main
 func TestArtifactCreationEntry_EpicGoldenPath(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	engine.RunScenario(t, engine.Scenario{
@@ -130,6 +153,14 @@ func TestArtifactCreationEntry_EpicGoldenPath(t *testing.T) {
 
 // TestArtifactCreationEntry_FirstArtifactInScope validates that creating
 // the first task in an empty epic allocates TASK-001.
+//
+// Scenario: First task in empty epic allocates TASK-001
+//   Given a governance environment with orchestrator enabled
+//     And an initiative with an empty epic (no existing tasks)
+//     And the artifact-creation workflow is seeded
+//   When a planning run creates TASK-001 through the full workflow
+//   Then the run should be completed
+//     And the task file "task-001-first.md" should exist on main
 func TestArtifactCreationEntry_FirstArtifactInScope(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	engine.RunScenario(t, engine.Scenario{

@@ -14,6 +14,15 @@ import (
 // TestWorkspace_BatchMigration verifies that migrations applied to a workspace
 // database are tracked in schema_migrations and that the migration system is
 // idempotent (running again doesn't fail).
+//
+// Scenario: DB migrations are tracked and idempotent
+//   Given a workspace database
+//   When migrations are applied
+//   Then "001_initial_schema" should be recorded in schema_migrations
+//   When migrations are applied again
+//   Then the operation should succeed without error (idempotent)
+//   When a workspace is registered in the registry and listed
+//   Then the workspace DB should have "001_initial_schema" applied
 func TestWorkspace_BatchMigration(t *testing.T) {
 	wsDBURL := os.Getenv("SPINE_REGISTRY_TEST_DATABASE_URL")
 	if wsDBURL == "" {
