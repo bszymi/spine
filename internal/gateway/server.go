@@ -122,9 +122,10 @@ type Server struct {
 	wsResolver         workspace.Resolver     // optional, nil if not configured
 	servicePool        *workspace.ServicePool // optional, nil if not configured
 	wsDBProvider       *workspace.DBProvider  // optional, nil in single mode
-	candidateFinder    CandidateFinder        // optional, nil if not configured
-	stepClaimer        StepClaimer            // optional, nil if not configured
-	stepReleaser       StepReleaser           // optional, nil if not configured
+	candidateFinder      CandidateFinder        // optional, nil if not configured
+	stepClaimer          StepClaimer            // optional, nil if not configured
+	stepReleaser         StepReleaser           // optional, nil if not configured
+	stepExecutionLister  StepExecutionLister    // optional, nil if not configured
 	devMode            bool                   // when true, authorize allows unauthenticated requests
 	rebuilds           sync.Map               // rebuild_id -> *rebuildState
 }
@@ -142,6 +143,11 @@ type StepClaimer interface {
 // StepReleaser allows actors to release step assignments.
 type StepReleaser interface {
 	ReleaseStep(ctx context.Context, req engine.ReleaseRequest) error
+}
+
+// StepExecutionLister queries active step executions for actor polling.
+type StepExecutionLister interface {
+	ListStepExecutions(ctx context.Context, q engine.StepExecutionQuery) ([]engine.StepExecutionItem, error)
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -196,9 +202,10 @@ type ServerConfig struct {
 	WorkspaceResolver  workspace.Resolver
 	ServicePool        *workspace.ServicePool
 	WSDBProvider       *workspace.DBProvider
-	CandidateFinder    CandidateFinder
-	StepClaimer        StepClaimer
-	StepReleaser       StepReleaser
+	CandidateFinder      CandidateFinder
+	StepClaimer          StepClaimer
+	StepReleaser         StepReleaser
+	StepExecutionLister  StepExecutionLister
 	DevMode            bool          // when true, authorize allows unauthenticated requests
 	ReadHeaderTimeout  time.Duration // defaults to 10s
 	ReadTimeout        time.Duration // defaults to 30s
@@ -226,9 +233,10 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		wsResolver:         cfg.WorkspaceResolver,
 		servicePool:        cfg.ServicePool,
 		wsDBProvider:       cfg.WSDBProvider,
-		candidateFinder:    cfg.CandidateFinder,
-		stepClaimer:        cfg.StepClaimer,
-		stepReleaser:       cfg.StepReleaser,
+		candidateFinder:     cfg.CandidateFinder,
+		stepClaimer:         cfg.StepClaimer,
+		stepReleaser:        cfg.StepReleaser,
+		stepExecutionLister: cfg.StepExecutionLister,
 		devMode:            cfg.DevMode,
 	}
 	if cfg.DevMode {
