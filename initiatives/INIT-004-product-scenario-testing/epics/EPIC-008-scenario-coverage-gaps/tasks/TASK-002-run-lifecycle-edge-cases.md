@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Run lifecycle edge case scenarios"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-004-product-scenario-testing/epics/EPIC-008-scenario-coverage-gaps/epic.md
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
