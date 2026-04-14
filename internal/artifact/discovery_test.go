@@ -439,6 +439,30 @@ func TestDiscoverWorkflows(t *testing.T) {
 	}
 }
 
+func TestDiscoverWorkflows_WithArtifactsDir(t *testing.T) {
+	// Verify the artifactsDir prefix filtering branch is exercised.
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+
+	// Put the workflow inside a sub-directory (the "artifacts dir").
+	testutil.WriteFile(t, repo, "spine/workflows/task-exec.yaml", "id: task-exec\nname: Task Exec\n")
+	// Put something outside to verify it is filtered out.
+	testutil.WriteFile(t, repo, "other/file.yaml", "not-a-workflow\n")
+	testutil.GitAdd(t, repo, ".", "add workflow in subdir")
+
+	ctx := context.Background()
+	workflows, err := artifact.DiscoverWorkflows(ctx, client, "", "spine")
+	if err != nil {
+		t.Fatalf("DiscoverWorkflows: %v", err)
+	}
+	if len(workflows) != 1 {
+		t.Errorf("expected 1 workflow, got %d: %v", len(workflows), workflows)
+	}
+	if len(workflows) > 0 && workflows[0] != "spine/workflows/task-exec.yaml" {
+		t.Errorf("unexpected workflow path: %s", workflows[0])
+	}
+}
+
 func TestFilterByExtension(t *testing.T) {
 	files := []string{"a.md", "b.yaml", "c.md", "d.go", "e.yml"}
 

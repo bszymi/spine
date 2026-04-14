@@ -16,16 +16,25 @@ import (
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
+	"github.com/bszymi/spine/internal/validation"
+	"github.com/bszymi/spine/internal/workspace"
 )
 
 // ── Fake Store ──
 
 type fakeStore struct {
 	store.Store
-	pingErr     error
-	actors      map[string]*domain.Actor
-	tokens      map[string]*fakeTokenEntry // keyed by token_hash
-	workflowDef []byte                     // if set, GetWorkflowProjection returns this
+	pingErr            error
+	actors             map[string]*domain.Actor
+	tokens             map[string]*fakeTokenEntry // keyed by token_hash
+	workflowDef        []byte                     // if set, GetWorkflowProjection returns this
+	assignments        []domain.Assignment
+	listAssignmentsErr error
+	execProjs          []store.ExecutionProjection
+	execProjErr        error
+	divContexts        map[string]*domain.DivergenceContext
+	outgoingLinks      []store.ArtifactLink
+	incomingLinks      []store.ArtifactLink
 }
 
 type fakeTokenEntry struct {
@@ -107,7 +116,11 @@ func (f *fakeStore) QueryArtifacts(_ context.Context, query store.ArtifactQuery)
 }
 
 func (f *fakeStore) QueryArtifactLinks(_ context.Context, _ string) ([]store.ArtifactLink, error) {
-	return nil, nil
+	return f.outgoingLinks, nil
+}
+
+func (f *fakeStore) QueryArtifactLinksByTarget(_ context.Context, _ string) ([]store.ArtifactLink, error) {
+	return f.incomingLinks, nil
 }
 
 func (f *fakeStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
@@ -1453,6 +1466,106 @@ func TestTaskGovernanceNotFoundArtifact(t *testing.T) {
 	}
 }
 
+// ── Run cancel with orchestrator ──
+
+type fakeRunCanceller struct {
+	err error
+}
+
+func (f *fakeRunCanceller) CancelRun(_ context.Context, _ string) error {
+	return f.err
+}
+
+func TestRunCancel_WithOrchestrator_Success(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+
+	canceller := &fakeRunCanceller{}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:        fs,
+		Auth:         authSvc,
+		RunCanceller: canceller,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-1/cancel", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRunCancel_WithOrchestrator_Error(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+
+	canceller := &fakeRunCanceller{err: domain.NewError(domain.ErrInternal, "cancel failed")}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:        fs,
+		Auth:         authSvc,
+		RunCanceller: canceller,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-1/cancel", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskCancelSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/tasks/initiatives/test/task.md/cancel", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 for cancel, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskAbandonSuccess(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/tasks/initiatives/test/task.md/abandon", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 for abandon, got %d", resp.StatusCode)
+	}
+}
+
 // ── System Handler Tests ──
 
 func TestSystemRebuildSuccess(t *testing.T) {
@@ -2447,5 +2560,444 @@ func TestResolveWriteContext_InvalidRunID(t *testing.T) {
 
 	if resp.StatusCode < 400 {
 		t.Errorf("expected error for invalid run_id, got %d", resp.StatusCode)
+	}
+}
+
+// ── Artifact links direction/filter tests ──
+
+func TestArtifactLinks_InvalidDirection(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/test/path.md/links?direction=sideways", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid direction, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactLinks_IncomingDirection(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/test/path.md/links?direction=incoming", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactLinks_BothDirection(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/test/path.md/links?direction=both", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactLinks_WithLinkTypeFilter(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/artifacts/test/path.md/links?link_type=parent", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── Artifact update service error ──
+
+func TestArtifactUpdate_ServiceError(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
+
+	// fakeArtifactService returns error for Update.
+	artSvc := &fakeArtifactService{updateErr: domain.NewError(domain.ErrInternal, "disk failure")}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc, Artifacts: artSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"content":"---\ntype: Task\ntitle: T\nstatus: Draft\n---\n"}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/artifacts/test/path.md", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+// ── Artifact validate error ──
+
+func TestArtifactValidate_ServiceError(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
+
+	artSvc := &fakeArtifactService{readErr: domain.NewError(domain.ErrNotFound, "not found")}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc, Artifacts: artSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts/test/path.md/validate", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// ── Query runs error path ──
+
+func TestQueryRuns_NoProjQuery(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
+	// No ProjQuery in ServerConfig → projQueryFrom returns nil → 503
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/runs?task_path=tasks/TASK-001.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+// ── Artifact validate with inline content ──
+
+func TestArtifactValidate_InlineContent_Valid(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	body := `{"content":"---\ntype: Task\ntitle: Test\nstatus: Draft\nid: TASK-001\nepic: /epics/EPIC-001/epic.md\ninitiative: /inits/INIT-001/init.md\n---\n"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts/test/path.md/validate", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactValidate_InlineContent_ParseError(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	// No front matter → parse error → validation result with failed status
+	body := `{"content":"not valid yaml front matter"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/artifacts/test/path.md/validate", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	// Returns 200 with a failed validation result, not an error status.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── Step assign not found ──
+
+func TestStepAssign_NotFound(t *testing.T) {
+	ts, token, _ := setupFullServer(t)
+	defer ts.Close()
+
+	// Use a stepID that doesn't match "step1" in fakeStore.
+	body := `{"actor_id":"actor-1"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-123/steps/nonexistent-step/assign", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for missing step, got %d", resp.StatusCode)
+	}
+}
+
+// ── Metrics endpoint ──
+
+func TestHandleMetrics_Success(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/system/metrics", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── Workspace middleware ──
+
+type fakeWorkspaceResolver struct {
+	config *workspace.Config
+	err    error
+}
+
+func (f *fakeWorkspaceResolver) Resolve(_ context.Context, _ string) (*workspace.Config, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.config, nil
+}
+
+func (f *fakeWorkspaceResolver) List(_ context.Context) ([]workspace.Config, error) {
+	if f.config != nil {
+		return []workspace.Config{*f.config}, nil
+	}
+	return nil, nil
+}
+
+func TestWorkspaceMiddleware_NotFound(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceNotFound}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Workspace-ID", "nonexistent")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown workspace, got %d", resp.StatusCode)
+	}
+}
+
+func TestWorkspaceMiddleware_MissingHeader(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceNotFound}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// No X-Workspace-ID header → empty workspaceID → resolver returns not found → 400
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing workspace header, got %d", resp.StatusCode)
+	}
+}
+
+func TestWorkspaceMiddleware_Inactive(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceInactive}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Workspace-ID", "ws-inactive")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for inactive workspace, got %d", resp.StatusCode)
+	}
+}
+
+// ── System validate with validator engine ──
+
+// fakeQueryStore wraps fakeStore and overrides QueryArtifacts to return a non-empty result
+// so that validation.Engine.ValidateAll returns a non-nil slice.
+type fakeQueryStore struct {
+	*fakeStore
+	items []store.ArtifactProjection
+}
+
+func (f *fakeQueryStore) QueryArtifacts(_ context.Context, _ store.ArtifactQuery) (*store.ArtifactQueryResult, error) {
+	return &store.ArtifactQueryResult{Items: f.items, HasMore: false}, nil
+}
+
+func (f *fakeQueryStore) GetArtifactProjection(_ context.Context, path string) (*store.ArtifactProjection, error) {
+	for _, item := range f.items {
+		if item.ArtifactPath == path {
+			return &item, nil
+		}
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "not found")
+}
+
+func TestSystemValidate_WithValidator(t *testing.T) {
+	inner := newFakeStore()
+	inner.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	fs := &fakeQueryStore{
+		fakeStore: inner,
+		items: []store.ArtifactProjection{
+			{ArtifactPath: "governance/charter.md", ArtifactType: "Governance", Title: "Charter", Status: "Foundational"},
+		},
+	}
+	authSvc := auth.NewService(inner)
+	token, _, _ := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+
+	artSvc := newFakeArtifactService()
+	validator := validation.NewEngine(fs)
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:     inner,
+		Auth:      authSvc,
+		Artifacts: artSvc,
+		Validator: validator,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/system/validate", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── Recovery middleware unhandled panic ──
+
+func TestWorkspaceMiddleware_InternalError(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["reader-1"] = &domain.Actor{
+		ActorID: "reader-1", Role: domain.RoleReader, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
+
+	// Resolver returns a generic error → 503
+	resolver := &fakeWorkspaceResolver{err: fmt.Errorf("registry unavailable")}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Workspace-ID", "ws-1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 for resolver error, got %d", resp.StatusCode)
 	}
 }
