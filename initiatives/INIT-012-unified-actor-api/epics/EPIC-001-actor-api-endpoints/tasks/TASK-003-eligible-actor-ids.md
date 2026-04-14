@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: "Add eligible_actor_ids to Step Executions"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-14
 epic: /initiatives/INIT-012-unified-actor-api/epics/EPIC-001-actor-api-endpoints/epic.md
