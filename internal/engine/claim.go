@@ -45,9 +45,15 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	}
 
 	// Validate claimable state.
-	if exec.Status != domain.StepStatusWaiting {
+	// Also allow claiming an "assigned" step with no actor: this covers the
+	// pull-based polling model where ActivateStep transitions the step to
+	// "assigned" without resolving a specific actor (actorSelector is nil or
+	// returns no match). Pull-based actors discover the step via ListStepExecutions
+	// and claim the open slot before acknowledging.
+	openSlot := exec.Status == domain.StepStatusAssigned && exec.ActorID == ""
+	if exec.Status != domain.StepStatusWaiting && !openSlot {
 		return nil, domain.NewError(domain.ErrConflict,
-			fmt.Sprintf("step execution %s is in status %q, not claimable (must be waiting)", req.ExecutionID, exec.Status))
+			fmt.Sprintf("step execution %s is in status %q, not claimable (must be waiting or assigned with no actor)", req.ExecutionID, exec.Status))
 	}
 
 	// Load the run for context.

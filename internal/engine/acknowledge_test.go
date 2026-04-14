@@ -67,6 +67,36 @@ func TestAcknowledgeStep_WrongActor(t *testing.T) {
 	}
 }
 
+// TestAcknowledgeStep_Idempotent verifies that acknowledging an already-in_progress step
+// by the same actor returns success without re-applying the transition.
+func TestAcknowledgeStep_Idempotent(t *testing.T) {
+	now := time.Now()
+	started := now.Add(-time.Minute)
+	st := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {RunID: "run-1", TraceID: "trace-123456789"},
+		},
+	}
+	st.createdSteps = []*domain.StepExecution{
+		{ExecutionID: "exec-1", RunID: "run-1", StepID: "execute",
+			Status: domain.StepStatusInProgress, ActorID: "bot-1", CreatedAt: now, StartedAt: &started},
+	}
+	orch := &Orchestrator{store: st}
+
+	result, err := orch.AcknowledgeStep(context.Background(), AcknowledgeRequest{
+		ActorID:     "bot-1",
+		ExecutionID: "exec-1",
+	})
+	if err != nil {
+		t.Fatalf("expected no error for idempotent acknowledge, got: %v", err)
+	}
+	if result.Status != string(domain.StepStatusInProgress) {
+		t.Errorf("expected in_progress status, got %s", result.Status)
+	}
+}
+
+// TestAcknowledgeStep_NotAssigned verifies that acknowledging a step in a
+// non-assigned, non-in_progress state (e.g. waiting) returns ErrConflict.
 func TestAcknowledgeStep_NotAssigned(t *testing.T) {
 	now := time.Now()
 	st := &mockRunStore{
@@ -76,7 +106,7 @@ func TestAcknowledgeStep_NotAssigned(t *testing.T) {
 	}
 	st.createdSteps = []*domain.StepExecution{
 		{ExecutionID: "exec-1", RunID: "run-1", StepID: "execute",
-			Status: domain.StepStatusInProgress, ActorID: "bot-1", CreatedAt: now},
+			Status: domain.StepStatusWaiting, ActorID: "bot-1", CreatedAt: now},
 	}
 	orch := &Orchestrator{store: st}
 
