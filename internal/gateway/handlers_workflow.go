@@ -36,7 +36,8 @@ type stepSubmitRequest struct {
 }
 
 type stepAssignRequest struct {
-	ActorID string `json:"actor_id"`
+	ActorID          string   `json:"actor_id"`
+	EligibleActorIDs []string `json:"eligible_actor_ids,omitempty"`
 }
 
 func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +338,9 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 
 	exec.Status = result.ToStatus
 	exec.ActorID = req.ActorID
+	if len(req.EligibleActorIDs) > 0 {
+		exec.EligibleActorIDs = req.EligibleActorIDs
+	}
 	if err := s.storeFrom(r.Context()).UpdateStepExecution(r.Context(), exec); err != nil {
 		WriteError(w, err)
 		return

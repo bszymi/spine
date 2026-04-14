@@ -57,12 +57,17 @@ func (t *postgresTx) TransitionRunStatus(ctx context.Context, runID string, from
 }
 
 func (t *postgresTx) CreateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
+	eligibleActorIDs := exec.EligibleActorIDs
+	if eligibleActorIDs == nil {
+		eligibleActorIDs = []string{}
+	}
 	_, err := t.tx.Exec(ctx, `
-		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at, eligible_actor_ids)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		exec.ExecutionID, exec.RunID, exec.StepID, nilIfEmpty(exec.BranchID),
 		nilIfEmpty(exec.ActorID), exec.Status, exec.Attempt, nilIfEmpty(exec.OutcomeID),
 		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.CreatedAt,
+		eligibleActorIDs,
 	)
 	if err != nil {
 		return fmt.Errorf("create step execution in tx: %w", err)
@@ -71,12 +76,17 @@ func (t *postgresTx) CreateStepExecution(ctx context.Context, exec *domain.StepE
 }
 
 func (t *postgresTx) UpdateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
+	eligibleActorIDs := exec.EligibleActorIDs
+	if eligibleActorIDs == nil {
+		eligibleActorIDs = []string{}
+	}
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE runtime.step_executions
-		SET status = $1, actor_id = $2, outcome_id = $3, retry_after = $4, started_at = $5, completed_at = $6, error_detail = $7
-		WHERE execution_id = $8`,
+		SET status = $1, actor_id = $2, outcome_id = $3, retry_after = $4, started_at = $5, completed_at = $6, error_detail = $7, eligible_actor_ids = $8
+		WHERE execution_id = $9`,
 		exec.Status, nilIfEmpty(exec.ActorID), nilIfEmpty(exec.OutcomeID),
-		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.ExecutionID,
+		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail,
+		eligibleActorIDs, exec.ExecutionID,
 	)
 	if err != nil {
 		return fmt.Errorf("update step execution in tx: %w", err)

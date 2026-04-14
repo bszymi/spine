@@ -73,11 +73,19 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 		if q.Status != "" && string(exec.Status) != q.Status {
 			continue
 		}
-		// Apply actor_id filter: only meaningful for assigned steps, since waiting
-		// steps have no assigned actor yet. Skip waiting steps when actor_id is
-		// requested — they haven't been claimed by anyone.
-		if q.ActorID != "" && exec.Status == domain.StepStatusAssigned && exec.ActorID != q.ActorID {
-			continue
+		// Apply actor_id filter using eligible_actor_ids when set, otherwise fall
+		// back to matching the assigned actor_id for claimed steps.
+		// For waiting steps: include if eligible_actor_ids is empty (any actor)
+		// or contains the requested actor_id.
+		// For assigned steps: include if the actor_id matches the assigned actor.
+		if q.ActorID != "" {
+			if exec.Status == domain.StepStatusWaiting {
+				if len(exec.EligibleActorIDs) > 0 && !containsStr(exec.EligibleActorIDs, q.ActorID) {
+					continue
+				}
+			} else if exec.Status == domain.StepStatusAssigned && exec.ActorID != q.ActorID {
+				continue
+			}
 		}
 
 		// Load the parent run for task_path and workflow coordinates.
