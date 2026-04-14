@@ -36,10 +36,11 @@ type stepListingStore interface {
 // ListStepExecutions returns non-terminal step executions (waiting or assigned)
 // matching the query, enriched with task_path from the parent run.
 //
-// When actor_type is specified the workflow definition is consulted to check
-// eligible_actor_types for each step. Steps with no eligible_actor_types
-// restriction are included regardless of the requested actor_type (any type
-// may claim them, matching the claim eligibility logic).
+// When actor_id is provided, the actor's type is looked up and used to filter
+// steps via the workflow definition's eligible_actor_types. Steps with no
+// eligible_actor_types restriction are included for all actor types (backward
+// compatible). actor_type in the query is used as a fallback when actor_id is
+// absent or the actor lookup fails.
 func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQuery) ([]StepExecutionItem, error) {
 	if o.blocking == nil {
 		return nil, fmt.Errorf("step execution listing requires blocking store")
@@ -59,12 +60,23 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 		return nil, fmt.Errorf("list active step executions: %w", err)
 	}
 
+	// Derive actor type from the registered actor when actor_id is provided.
+	// This ensures actors only see steps compatible with their type, without
+	// requiring callers to pass actor_type separately.
+	actorType := q.ActorType
+	if q.ActorID != "" {
+		if actor, err := o.loadActor(ctx, q.ActorID); err == nil {
+			actorType = string(actor.Type)
+		}
+	}
+
 	// Cache runs and workflow definitions to avoid redundant lookups per run.
 	runCache := map[string]*domain.Run{}
 	wfCache := map[string]*domain.WorkflowDefinition{} // key: path@version
 
 	var result []StepExecutionItem
-	for _, exec := range execs {
+	for i := range execs {
+		exec := &execs[i]
 		// Only expose waiting and assigned statuses to actors.
 		if exec.Status != domain.StepStatusWaiting && exec.Status != domain.StepStatusAssigned {
 			continue
@@ -100,7 +112,7 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 		}
 
 		// Apply actor_type filter via the workflow step definition.
-		if q.ActorType != "" {
+		if actorType != "" {
 			cacheKey := run.WorkflowPath + "@" + run.WorkflowVersion
 			wfDef, wfHit := wfCache[cacheKey]
 			if !wfHit {
@@ -113,7 +125,7 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 			}
 			stepDef := findStepDef(wfDef, exec.StepID)
 			if stepDef != nil && stepDef.Execution != nil && len(stepDef.Execution.EligibleActorTypes) > 0 {
-				if !containsStr(stepDef.Execution.EligibleActorTypes, q.ActorType) {
+				if !containsStr(stepDef.Execution.EligibleActorTypes, actorType) {
 					continue
 				}
 			}
