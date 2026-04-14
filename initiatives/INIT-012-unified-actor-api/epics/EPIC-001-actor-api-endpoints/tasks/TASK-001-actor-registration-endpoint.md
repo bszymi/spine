@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Add Actor Registration HTTP Endpoint"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-14
 epic: /initiatives/INIT-012-unified-actor-api/epics/EPIC-001-actor-api-endpoints/epic.md
