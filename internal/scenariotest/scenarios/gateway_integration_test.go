@@ -365,8 +365,8 @@ func TestGateway_RunStart_StepQuery(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					if code != http.StatusOK {
-						return fmt.Errorf("expected 200, got %d (body: %s)", code, respBody)
+					if code != http.StatusCreated {
+						return fmt.Errorf("expected 201, got %d (body: %s)", code, respBody)
 					}
 					var resp struct {
 						RunID string `json:"run_id"`
@@ -382,11 +382,14 @@ func TestGateway_RunStart_StepQuery(t *testing.T) {
 				},
 			},
 
-			// GET /api/v1/execution/steps — the entry step should be waiting.
+			// GET /api/v1/execution/steps — after StartRun, ActivateStep transitions
+			// the entry step from waiting → assigned (step.assign trigger). Query with
+			// status=assigned (no actor_id filter, since hybrid steps have no actor
+			// auto-assigned) to verify the step is visible via the HTTP endpoint.
 			{
-				Name: "get-execution-steps-shows-waiting-step",
+				Name: "get-execution-steps-shows-assigned-step",
 				Action: func(sc *scenarioEngine.ScenarioContext) error {
-					url := "/api/v1/execution/steps?actor_id=gw-runner&status=waiting"
+					url := "/api/v1/execution/steps?status=assigned"
 					code, respBody, err := doGET(sc, url, "runner_token")
 					if err != nil {
 						return err
