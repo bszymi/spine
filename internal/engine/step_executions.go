@@ -77,8 +77,10 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 	var result []StepExecutionItem
 	for i := range execs {
 		exec := &execs[i]
-		// Only expose waiting and assigned statuses to actors.
-		if exec.Status != domain.StepStatusWaiting && exec.Status != domain.StepStatusAssigned {
+		// Only expose waiting, assigned, and in_progress statuses to actors.
+		if exec.Status != domain.StepStatusWaiting &&
+			exec.Status != domain.StepStatusAssigned &&
+			exec.Status != domain.StepStatusInProgress {
 			continue
 		}
 		// Apply status filter.
@@ -86,16 +88,16 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 			continue
 		}
 		// Apply actor_id filter using eligible_actor_ids when set, otherwise fall
-		// back to matching the assigned actor_id for claimed steps.
+		// back to matching the assigned actor_id for claimed/in-progress steps.
 		// For waiting steps: include if eligible_actor_ids is empty (any actor)
 		// or contains the requested actor_id.
-		// For assigned steps: include if the actor_id matches the assigned actor.
+		// For assigned/in_progress steps: include if the actor_id matches the assigned actor.
 		if q.ActorID != "" {
 			if exec.Status == domain.StepStatusWaiting {
 				if len(exec.EligibleActorIDs) > 0 && !containsStr(exec.EligibleActorIDs, q.ActorID) {
 					continue
 				}
-			} else if exec.Status == domain.StepStatusAssigned && exec.ActorID != q.ActorID {
+			} else if exec.ActorID != q.ActorID {
 				continue
 			}
 		}

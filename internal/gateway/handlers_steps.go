@@ -25,8 +25,8 @@ func (s *Server) handleListStepExecutions(w http.ResponseWriter, r *http.Request
 	q := r.URL.Query()
 
 	status := q.Get("status")
-	if status != "" && status != string(domain.StepStatusWaiting) && status != string(domain.StepStatusAssigned) {
-		WriteError(w, domain.NewError(domain.ErrInvalidParams, "status must be one of: waiting, assigned"))
+	if status != "" && status != string(domain.StepStatusWaiting) && status != string(domain.StepStatusAssigned) && status != string(domain.StepStatusInProgress) {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "status must be one of: waiting, assigned, in_progress"))
 		return
 	}
 
