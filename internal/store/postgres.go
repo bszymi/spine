@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -302,7 +304,14 @@ func (s *PostgresStore) CreateActor(ctx context.Context, actor *domain.Actor) er
 		VALUES ($1, $2, $3, $4, $5)`,
 		actor.ActorID, actor.Type, actor.Name, actor.Role, actor.Status,
 	)
-	return err
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return domain.NewError(domain.ErrConflict, "actor_id already exists")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *PostgresStore) UpdateActor(ctx context.Context, actor *domain.Actor) error {

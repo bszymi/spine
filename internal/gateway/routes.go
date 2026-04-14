@@ -94,6 +94,9 @@ func (s *Server) routes() http.Handler {
 			r.Get("/query/history", s.handleQueryHistory)
 			r.Get("/query/runs", s.handleQueryRuns)
 
+			// Actors
+			r.Post("/actors", s.handleActorCreate)
+
 			// Actor-Skill Associations
 			r.Post("/actors/{actor_id}/skills/{skill_id}", s.handleActorSkillAssign)
 			r.Delete("/actors/{actor_id}/skills/{skill_id}", s.handleActorSkillRemove)
