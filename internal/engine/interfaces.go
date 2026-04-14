@@ -51,6 +51,12 @@ type ActorAssigner interface {
 	ProcessResult(ctx context.Context, req actor.AssignmentRequest, result actor.AssignmentResult) error
 }
 
+// ActorSelector selects an eligible actor based on type, skills, and strategy.
+// Used for automatic actor resolution when activating automated or ai-only steps.
+type ActorSelector interface {
+	SelectActor(ctx context.Context, req actor.SelectionRequest) (*domain.Actor, error)
+}
+
 // ArtifactReader reads artifacts from the repository.
 type ArtifactReader interface {
 	Read(ctx context.Context, path, ref string) (*domain.Artifact, error)
