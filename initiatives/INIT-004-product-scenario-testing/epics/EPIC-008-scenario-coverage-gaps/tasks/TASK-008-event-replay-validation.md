@@ -2,7 +2,7 @@
 id: TASK-008
 type: Task
 title: "Event replay and reconstruction validation"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-004-product-scenario-testing/epics/EPIC-008-scenario-coverage-gaps/epic.md
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
