@@ -226,6 +226,81 @@ func TestBuildServiceSet_NoStore_NilValidatorAndDivergence(t *testing.T) {
 	}
 }
 
+func TestServicePool_Evict_NoRefs(t *testing.T) {
+	t.Setenv("SPINE_WORKSPACE_ID", "ws-evict-noref")
+	t.Setenv("SPINE_DATABASE_URL", "")
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	provider := NewFileProvider()
+	pool := NewServicePool(ctx, provider, PoolConfig{})
+	defer pool.Close()
+
+	_, err := pool.Get(ctx, "ws-evict-noref")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// Release the reference so eviction can proceed immediately.
+	pool.Release("ws-evict-noref")
+
+	if pool.ActiveCount() != 1 {
+		t.Fatalf("expected 1 active before evict, got %d", pool.ActiveCount())
+	}
+
+	// Evict with no active refs → immediate removal.
+	pool.Evict("ws-evict-noref")
+
+	if pool.ActiveCount() != 0 {
+		t.Errorf("expected 0 active after evict, got %d", pool.ActiveCount())
+	}
+}
+
+func TestServicePool_Evict_WithRefs_DeferredClose(t *testing.T) {
+	t.Setenv("SPINE_WORKSPACE_ID", "ws-deferred")
+	t.Setenv("SPINE_DATABASE_URL", "")
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	provider := NewFileProvider()
+	pool := NewServicePool(ctx, provider, PoolConfig{})
+	defer pool.Close()
+
+	// Acquire reference (refCount=1).
+	_, err := pool.Get(ctx, "ws-deferred")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// Evict while ref is held → marks for deferred close.
+	pool.Evict("ws-deferred")
+
+	// Still active because a ref is held.
+	if pool.ActiveCount() != 1 {
+		t.Errorf("expected 1 active (deferred), got %d", pool.ActiveCount())
+	}
+
+	// Release the last ref → triggers deferred close.
+	pool.Release("ws-deferred")
+
+	if pool.ActiveCount() != 0 {
+		t.Errorf("expected 0 active after deferred close, got %d", pool.ActiveCount())
+	}
+}
+
+func TestServicePool_Evict_NonExistent(t *testing.T) {
+	ctx := context.Background()
+	provider := NewFileProvider()
+	pool := NewServicePool(ctx, provider, PoolConfig{})
+	defer pool.Close()
+
+	// Evicting a workspace that's not in the pool should be a no-op.
+	pool.Evict("does-not-exist")
+	if pool.ActiveCount() != 0 {
+		t.Errorf("expected 0 active, got %d", pool.ActiveCount())
+	}
+}
+
 func TestServicePool_Close(t *testing.T) {
 	t.Setenv("SPINE_WORKSPACE_ID", "ws-close")
 	t.Setenv("SPINE_DATABASE_URL", "")

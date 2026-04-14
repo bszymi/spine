@@ -1,6 +1,10 @@
 package workspace
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestSanitizeDBName(t *testing.T) {
 	tests := []struct {
@@ -83,5 +87,42 @@ func TestPgIdentifier(t *testing.T) {
 				t.Errorf("pgIdentifier(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestIsSpineRepo_WithSpineYaml(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".spine.yaml"), []byte("version: 1"), 0644); err != nil {
+		t.Fatalf("write .spine.yaml: %v", err)
+	}
+	if !IsSpineRepo(dir) {
+		t.Error("expected IsSpineRepo=true when .spine.yaml exists")
+	}
+}
+
+func TestIsSpineRepo_WithGovernanceDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "governance"), 0755); err != nil {
+		t.Fatalf("mkdir governance: %v", err)
+	}
+	if !IsSpineRepo(dir) {
+		t.Error("expected IsSpineRepo=true when governance/ exists")
+	}
+}
+
+func TestIsSpineRepo_WithWorkflowsDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "workflows"), 0755); err != nil {
+		t.Fatalf("mkdir workflows: %v", err)
+	}
+	if !IsSpineRepo(dir) {
+		t.Error("expected IsSpineRepo=true when workflows/ exists")
+	}
+}
+
+func TestIsSpineRepo_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	if IsSpineRepo(dir) {
+		t.Error("expected IsSpineRepo=false for empty directory")
 	}
 }

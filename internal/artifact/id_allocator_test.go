@@ -283,3 +283,11 @@ func TestBuildDocumentPath_Product(t *testing.T) {
 		t.Errorf("got %s, want product/pricing-model.md", got)
 	}
 }
+
+func TestBuildDocumentPath_UnknownType(t *testing.T) {
+	// Unknown type falls back to lowercase type name as directory.
+	got := artifact.BuildDocumentPath(domain.ArtifactTypeTask, "some-doc")
+	if got != "task/some-doc.md" {
+		t.Errorf("got %s, want task/some-doc.md", got)
+	}
+}

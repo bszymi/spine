@@ -69,6 +69,19 @@ func insertWorkspace(t *testing.T, dbURL, id, displayName, wsDBURL, repoPath, st
 	}
 }
 
+func TestNewDBProvider_ConnectionFailure(t *testing.T) {
+	ctx := context.Background()
+	// Use a connect_timeout so the test doesn't hang for 30s.
+	_, err := NewDBProvider(ctx,
+		"postgres://invalid-host-that-does-not-exist:5432/testdb?connect_timeout=1",
+		DBProviderConfig{CacheTTL: time.Second},
+	)
+	if err == nil {
+		t.Skip("unexpectedly connected to a database — skipping (likely a real DB is running)")
+	}
+	// Error expected — the important check is no panic.
+}
+
 func TestDBProvider_Resolve(t *testing.T) {
 	dbURL := registryTestDB(t)
 	setupRegistryTable(t, dbURL)
