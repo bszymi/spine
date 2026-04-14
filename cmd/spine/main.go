@@ -495,6 +495,7 @@ func serveCmd() *cobra.Command {
 				StepClaimer:         orch,
 				StepReleaser:        orch,
 				StepExecutionLister: orch,
+				StepAcknowledger:    orch,
 			})
 
 			// Run startup recovery and start background services.
