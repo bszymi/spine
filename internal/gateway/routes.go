@@ -63,6 +63,7 @@ func (s *Server) routes() http.Handler {
 
 			// Steps
 			r.Post("/steps/{assignment_id}/submit", s.handleStepSubmit)
+			r.Post("/steps/{execution_id}/acknowledge", s.handleStepAcknowledge)
 
 			// Assignments
 			r.Get("/assignments", s.handleListAssignments)

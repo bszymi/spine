@@ -104,30 +104,31 @@ type BranchCreator interface {
 }
 
 type Server struct {
-	httpServer         *http.Server
-	store              store.Store
-	auth               *auth.Service
-	artifacts          ArtifactService
-	projQuery          ProjectionQuerier
-	projSync           ProjectionSyncer
-	git                GitReader
-	validator          *validation.Engine
-	resultHandler      ResultHandler
-	workflowResolver   WorkflowResolverFn
-	branchCreator      BranchCreator          // optional, nil if not configured
-	events             EventEmitterGW         // optional, nil if not configured
-	runStarter         RunStarter             // optional, nil if not configured
-	planningRunStarter PlanningRunStarter     // optional, nil if not configured
-	runCanceller       RunCanceller           // optional, nil if not configured
-	wsResolver         workspace.Resolver     // optional, nil if not configured
-	servicePool        *workspace.ServicePool // optional, nil if not configured
-	wsDBProvider       *workspace.DBProvider  // optional, nil in single mode
-	candidateFinder      CandidateFinder        // optional, nil if not configured
-	stepClaimer          StepClaimer            // optional, nil if not configured
-	stepReleaser         StepReleaser           // optional, nil if not configured
-	stepExecutionLister  StepExecutionLister    // optional, nil if not configured
-	devMode            bool                   // when true, authorize allows unauthenticated requests
-	rebuilds           sync.Map               // rebuild_id -> *rebuildState
+	httpServer          *http.Server
+	store               store.Store
+	auth                *auth.Service
+	artifacts           ArtifactService
+	projQuery           ProjectionQuerier
+	projSync            ProjectionSyncer
+	git                 GitReader
+	validator           *validation.Engine
+	resultHandler       ResultHandler
+	workflowResolver    WorkflowResolverFn
+	branchCreator       BranchCreator          // optional, nil if not configured
+	events              EventEmitterGW         // optional, nil if not configured
+	runStarter          RunStarter             // optional, nil if not configured
+	planningRunStarter  PlanningRunStarter     // optional, nil if not configured
+	runCanceller        RunCanceller           // optional, nil if not configured
+	wsResolver          workspace.Resolver     // optional, nil if not configured
+	servicePool         *workspace.ServicePool // optional, nil if not configured
+	wsDBProvider        *workspace.DBProvider  // optional, nil in single mode
+	candidateFinder     CandidateFinder        // optional, nil if not configured
+	stepClaimer         StepClaimer            // optional, nil if not configured
+	stepReleaser        StepReleaser           // optional, nil if not configured
+	stepExecutionLister StepExecutionLister    // optional, nil if not configured
+	stepAcknowledger    StepAcknowledger       // optional, nil if not configured
+	devMode             bool                   // when true, authorize allows unauthenticated requests
+	rebuilds            sync.Map               // rebuild_id -> *rebuildState
 }
 
 // CandidateFinder discovers tasks ready for execution.
@@ -148,6 +149,11 @@ type StepReleaser interface {
 // StepExecutionLister queries active step executions for actor polling.
 type StepExecutionLister interface {
 	ListStepExecutions(ctx context.Context, q engine.StepExecutionQuery) ([]engine.StepExecutionItem, error)
+}
+
+// StepAcknowledger transitions an assigned step to in_progress.
+type StepAcknowledger interface {
+	AcknowledgeStep(ctx context.Context, req engine.AcknowledgeRequest) (*engine.AcknowledgeResult, error)
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -185,59 +191,61 @@ type ResultResponse struct {
 
 // ServerConfig holds optional service dependencies for the server.
 type ServerConfig struct {
-	Store              store.Store
-	Auth               *auth.Service
-	Artifacts          ArtifactService
-	ProjQuery          ProjectionQuerier
-	ProjSync           ProjectionSyncer
-	Git                GitReader
-	Validator          *validation.Engine
-	ResultHandler      ResultHandler
-	WorkflowResolver   WorkflowResolverFn
-	BranchCreator      BranchCreator
-	Events             EventEmitterGW
-	RunStarter         RunStarter
-	PlanningRunStarter PlanningRunStarter
-	RunCanceller       RunCanceller
-	WorkspaceResolver  workspace.Resolver
-	ServicePool        *workspace.ServicePool
-	WSDBProvider       *workspace.DBProvider
-	CandidateFinder      CandidateFinder
-	StepClaimer          StepClaimer
-	StepReleaser         StepReleaser
-	StepExecutionLister  StepExecutionLister
-	DevMode            bool          // when true, authorize allows unauthenticated requests
-	ReadHeaderTimeout  time.Duration // defaults to 10s
-	ReadTimeout        time.Duration // defaults to 30s
-	WriteTimeout       time.Duration // defaults to 60s
-	IdleTimeout        time.Duration // defaults to 120s
+	Store               store.Store
+	Auth                *auth.Service
+	Artifacts           ArtifactService
+	ProjQuery           ProjectionQuerier
+	ProjSync            ProjectionSyncer
+	Git                 GitReader
+	Validator           *validation.Engine
+	ResultHandler       ResultHandler
+	WorkflowResolver    WorkflowResolverFn
+	BranchCreator       BranchCreator
+	Events              EventEmitterGW
+	RunStarter          RunStarter
+	PlanningRunStarter  PlanningRunStarter
+	RunCanceller        RunCanceller
+	WorkspaceResolver   workspace.Resolver
+	ServicePool         *workspace.ServicePool
+	WSDBProvider        *workspace.DBProvider
+	CandidateFinder     CandidateFinder
+	StepClaimer         StepClaimer
+	StepReleaser        StepReleaser
+	StepExecutionLister StepExecutionLister
+	StepAcknowledger    StepAcknowledger
+	DevMode             bool          // when true, authorize allows unauthenticated requests
+	ReadHeaderTimeout   time.Duration // defaults to 10s
+	ReadTimeout         time.Duration // defaults to 30s
+	WriteTimeout        time.Duration // defaults to 60s
+	IdleTimeout         time.Duration // defaults to 120s
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
 func NewServer(addr string, cfg ServerConfig) *Server {
 	s := &Server{
-		store:              cfg.Store,
-		auth:               cfg.Auth,
-		artifacts:          cfg.Artifacts,
-		projQuery:          cfg.ProjQuery,
-		projSync:           cfg.ProjSync,
-		git:                cfg.Git,
-		validator:          cfg.Validator,
-		resultHandler:      cfg.ResultHandler,
-		branchCreator:      cfg.BranchCreator,
-		events:             cfg.Events,
-		runStarter:         cfg.RunStarter,
-		planningRunStarter: cfg.PlanningRunStarter,
-		runCanceller:       cfg.RunCanceller,
-		workflowResolver:   cfg.WorkflowResolver,
-		wsResolver:         cfg.WorkspaceResolver,
-		servicePool:        cfg.ServicePool,
-		wsDBProvider:       cfg.WSDBProvider,
+		store:               cfg.Store,
+		auth:                cfg.Auth,
+		artifacts:           cfg.Artifacts,
+		projQuery:           cfg.ProjQuery,
+		projSync:            cfg.ProjSync,
+		git:                 cfg.Git,
+		validator:           cfg.Validator,
+		resultHandler:       cfg.ResultHandler,
+		branchCreator:       cfg.BranchCreator,
+		events:              cfg.Events,
+		runStarter:          cfg.RunStarter,
+		planningRunStarter:  cfg.PlanningRunStarter,
+		runCanceller:        cfg.RunCanceller,
+		workflowResolver:    cfg.WorkflowResolver,
+		wsResolver:          cfg.WorkspaceResolver,
+		servicePool:         cfg.ServicePool,
+		wsDBProvider:        cfg.WSDBProvider,
 		candidateFinder:     cfg.CandidateFinder,
 		stepClaimer:         cfg.StepClaimer,
 		stepReleaser:        cfg.StepReleaser,
 		stepExecutionLister: cfg.StepExecutionLister,
-		devMode:            cfg.DevMode,
+		stepAcknowledger:    cfg.StepAcknowledger,
+		devMode:             cfg.DevMode,
 	}
 	if cfg.DevMode {
 		slog.Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
