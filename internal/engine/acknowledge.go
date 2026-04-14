@@ -45,6 +45,18 @@ func (o *Orchestrator) AcknowledgeStep(ctx context.Context, req AcknowledgeReque
 			fmt.Sprintf("actor %q is not assigned to step execution %s", req.ActorID, req.ExecutionID))
 	}
 
+	// Idempotency: acknowledging an already-in_progress step is a no-op.
+	// The same actor calling acknowledge twice (e.g., after a network retry)
+	// should receive the current state rather than an error.
+	if exec.Status == domain.StepStatusInProgress {
+		return &AcknowledgeResult{
+			ExecutionID: exec.ExecutionID,
+			StepID:      exec.StepID,
+			Status:      string(exec.Status),
+			StartedAt:   exec.StartedAt,
+		}, nil
+	}
+
 	// Validate state transition (returns 409 if not in assigned state).
 	if _, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAcknowledged,
