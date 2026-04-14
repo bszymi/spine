@@ -14,6 +14,7 @@ type Orchestrator struct {
 	git            GitOperator
 	wfLoader       WorkflowLoader
 	assignments    AssignmentStore        // optional, nil if not configured
+	actorSelector  ActorSelector          // optional, nil if not configured
 	validator      CrossArtifactValidator // optional, nil if not configured
 	discussions    DiscussionChecker      // optional, nil if not configured
 	divergence     DivergenceHandler      // optional, nil if not configured
@@ -69,6 +70,11 @@ func New(
 // WithAssignmentStore enables assignment tracking on the orchestrator.
 func (o *Orchestrator) WithAssignmentStore(s AssignmentStore) {
 	o.assignments = s
+}
+
+// WithActorSelector enables automatic actor resolution for automated/ai-only steps.
+func (o *Orchestrator) WithActorSelector(s ActorSelector) {
+	o.actorSelector = s
 }
 
 // WithValidator enables cross-artifact validation for step preconditions.

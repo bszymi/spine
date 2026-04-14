@@ -143,6 +143,7 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	}
 
 	orch.WithAssignmentStore(ss.Store)
+	orch.WithActorSelector(actorSvc)
 	if ss.Validator != nil {
 		orch.WithValidator(ss.Validator)
 	}
@@ -405,6 +406,7 @@ func serveCmd() *cobra.Command {
 					log.Error("engine orchestrator init failed", "error", err)
 				} else {
 					orch.WithAssignmentStore(st)
+					orch.WithActorSelector(actorSvc)
 					if validator != nil {
 						orch.WithValidator(validator)
 					}

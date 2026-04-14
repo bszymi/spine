@@ -84,8 +84,40 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		return err
 	}
 	exec.Status = stepResult.ToStatus
+
+	// For automated/ai-only steps, resolve the target actor before persisting.
+	// The actor_id is set on the execution record so runners can discover it
+	// by querying GET /execution/steps?actor_id={my_id}&status=assigned.
+	if stepDef.Execution != nil {
+		mode := stepDef.Execution.Mode
+		if (mode == domain.ExecModeAutomatedOnly || mode == domain.ExecModeAIOnly) && o.actorSelector != nil {
+			if actorID := o.resolveAutoActorID(ctx, exec, stepDef); actorID != "" {
+				exec.ActorID = actorID
+			} else {
+				log.Warn("auto-assignment: no eligible actor found, step will wait",
+					"run_id", runID, "step_id", stepID, "mode", mode)
+			}
+		}
+	}
+
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
+	}
+
+	// Create the assignment record when an actor was auto-selected.
+	if exec.ActorID != "" && o.assignments != nil {
+		autoAssignment := &domain.Assignment{
+			AssignmentID: fmt.Sprintf("auto-%s-%s", exec.ExecutionID, exec.ActorID),
+			RunID:        runID,
+			ExecutionID:  exec.ExecutionID,
+			ActorID:      exec.ActorID,
+			Status:       domain.AssignmentStatusActive,
+			AssignedAt:   time.Now(),
+		}
+		if err := o.assignments.CreateAssignment(ctx, autoAssignment); err != nil {
+			// Non-fatal: log and continue. The runner will still find the step by actor_id.
+			log.Warn("auto-assignment: failed to create assignment record", "error", err)
+		}
 	}
 
 	// Request actor assignment.
@@ -104,6 +136,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		StepID:       stepID,
 		StepName:     stepDef.Name,
 		StepType:     stepDef.Type,
+		ActorID:      exec.ActorID,
 		Context: actor.AssignmentContext{
 			TaskPath:        run.TaskPath,
 			WorkflowID:      run.WorkflowID,
@@ -786,6 +819,57 @@ func (o *Orchestrator) unavailableActorsForStep(ctx context.Context, runID, step
 		}
 	}
 	return excluded
+}
+
+// resolveAutoActorID selects an actor for an automated or ai-only step.
+//
+// Case 1: eligible_actor_ids is set on the execution — validates and picks the
+// first listed actor.
+// Case 2: no eligible_actor_ids — selects any active actor matching the step's
+// eligible_actor_types (falling back to the mode-implied type if unset).
+// Returns "" if no eligible actor is found (graceful degradation).
+func (o *Orchestrator) resolveAutoActorID(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition) string {
+	log := observe.Logger(ctx)
+
+	eligibleTypes := stepDef.Execution.EligibleActorTypes
+	if len(eligibleTypes) == 0 {
+		// Infer from mode when not explicitly configured.
+		switch stepDef.Execution.Mode {
+		case domain.ExecModeAutomatedOnly:
+			eligibleTypes = []string{string(domain.ActorTypeAutomated)}
+		case domain.ExecModeAIOnly:
+			eligibleTypes = []string{string(domain.ActorTypeAIAgent)}
+		}
+	}
+
+	// Case 1: explicit actor list on the execution.
+	if len(exec.EligibleActorIDs) > 0 {
+		selected, err := o.actorSelector.SelectActor(ctx, actor.SelectionRequest{
+			Strategy:           actor.StrategyExplicit,
+			ExplicitActorID:    exec.EligibleActorIDs[0],
+			EligibleActorTypes: eligibleTypes,
+			RequiredSkills:     stepDef.Execution.RequiredSkills,
+		})
+		if err != nil {
+			log.Warn("auto-assignment: explicit actor not eligible",
+				"actor_id", exec.EligibleActorIDs[0], "error", err)
+			return ""
+		}
+		return selected.ActorID
+	}
+
+	// Case 2: pick any eligible actor by type.
+	selected, err := o.actorSelector.SelectActor(ctx, actor.SelectionRequest{
+		Strategy:           actor.StrategyAnyEligible,
+		EligibleActorTypes: eligibleTypes,
+		RequiredSkills:     stepDef.Execution.RequiredSkills,
+	})
+	if err != nil {
+		log.Warn("auto-assignment: no eligible actor of required type",
+			"eligible_types", eligibleTypes, "error", err)
+		return ""
+	}
+	return selected.ActorID
 }
 
 // findOutcome looks up an outcome by ID within a step definition.
