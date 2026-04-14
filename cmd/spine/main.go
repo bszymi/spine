@@ -489,9 +489,10 @@ func serveCmd() *cobra.Command {
 				ServicePool:        wsServicePool,
 				WSDBProvider:       wsDBProvider,
 				RunCanceller:       orch,
-				CandidateFinder:    orch,
-				StepClaimer:        orch,
-				StepReleaser:       orch,
+				CandidateFinder:     orch,
+				StepClaimer:         orch,
+				StepReleaser:        orch,
+				StepExecutionLister: orch,
 			})
 
 			// Run startup recovery and start background services.

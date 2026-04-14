@@ -79,6 +79,7 @@ func (s *Server) routes() http.Handler {
 			r.Post("/discussions/{thread_id}/reopen", s.handleDiscussionReopen)
 
 			// Execution
+			r.Get("/execution/steps", s.handleListStepExecutions)
 			r.Get("/execution/candidates", s.handleExecutionCandidates)
 			r.Post("/execution/claim", s.handleExecutionClaim)
 			r.Post("/execution/release", s.handleExecutionRelease)
