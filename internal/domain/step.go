@@ -85,9 +85,10 @@ type StepExecution struct {
 	ExecutionID string              `json:"execution_id" yaml:"execution_id"`
 	RunID       string              `json:"run_id" yaml:"run_id"`
 	StepID      string              `json:"step_id" yaml:"step_id"`
-	BranchID    string              `json:"branch_id,omitempty" yaml:"branch_id,omitempty"`
-	ActorID     string              `json:"actor_id,omitempty" yaml:"actor_id,omitempty"`
-	Status      StepExecutionStatus `json:"status" yaml:"status"`
+	BranchID         string              `json:"branch_id,omitempty" yaml:"branch_id,omitempty"`
+	ActorID          string              `json:"actor_id,omitempty" yaml:"actor_id,omitempty"`
+	EligibleActorIDs []string            `json:"eligible_actor_ids,omitempty" yaml:"eligible_actor_ids,omitempty"`
+	Status           StepExecutionStatus `json:"status" yaml:"status"`
 	Attempt     int                 `json:"attempt" yaml:"attempt"`
 	OutcomeID   string              `json:"outcome_id,omitempty" yaml:"outcome_id,omitempty"`
 	ErrorDetail *ErrorDetail        `json:"error_detail,omitempty" yaml:"error_detail,omitempty"`

@@ -75,15 +75,17 @@ func (o *Orchestrator) RetryStep(ctx context.Context, exec *domain.StepExecution
 	nextAttempt := exec.Attempt + 1
 
 	// Create a new step execution for the retry attempt.
+	// Preserve eligible_actor_ids so the same actor restriction applies on retry.
 	nextExec := &domain.StepExecution{
-		ExecutionID: fmt.Sprintf("%s-%s-%d", exec.RunID, exec.StepID, nextAttempt),
-		RunID:       exec.RunID,
-		StepID:      exec.StepID,
-		BranchID:    exec.BranchID,
-		Status:      domain.StepStatusWaiting,
-		Attempt:     nextAttempt,
-		RetryAfter:  &retryAfter,
-		CreatedAt:   time.Now(),
+		ExecutionID:      fmt.Sprintf("%s-%s-%d", exec.RunID, exec.StepID, nextAttempt),
+		RunID:            exec.RunID,
+		StepID:           exec.StepID,
+		BranchID:         exec.BranchID,
+		EligibleActorIDs: exec.EligibleActorIDs,
+		Status:           domain.StepStatusWaiting,
+		Attempt:          nextAttempt,
+		RetryAfter:       &retryAfter,
+		CreatedAt:        time.Now(),
 	}
 	if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
 		return fmt.Errorf("create retry execution: %w", err)

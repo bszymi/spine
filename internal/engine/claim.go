@@ -68,7 +68,23 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 			fmt.Sprintf("step %q not found in workflow %s", exec.StepID, wfDef.ID))
 	}
 
-	// Validate actor eligibility: type and skills.
+	// Check eligible actor IDs: enforced regardless of workflow execution block,
+	// since it is a per-execution restriction set at runtime.
+	if len(exec.EligibleActorIDs) > 0 {
+		eligible := false
+		for _, id := range exec.EligibleActorIDs {
+			if id == req.ActorID {
+				eligible = true
+				break
+			}
+		}
+		if !eligible {
+			return nil, domain.NewError(domain.ErrForbidden,
+				fmt.Sprintf("actor %q is not in the eligible actor list for this step", req.ActorID))
+		}
+	}
+
+	// Validate actor eligibility: type and skills (from workflow step definition).
 	if stepDef.Execution != nil {
 		actor, err := o.loadActor(ctx, req.ActorID)
 		if err != nil {
