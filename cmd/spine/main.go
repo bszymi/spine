@@ -16,6 +16,7 @@ import (
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/cli"
 	"github.com/bszymi/spine/internal/config"
+	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
@@ -456,6 +457,27 @@ func serveCmd() *cobra.Command {
 				sched = scheduler.New(st, eventRouter, opts...)
 			}
 
+			// Set up event delivery system (feature-flagged).
+			var deliveryCancel context.CancelFunc
+			if os.Getenv("SPINE_EVENT_DELIVERY") == "true" && st != nil {
+				deliveryCtx, dCancel := context.WithCancel(ctx)
+				deliveryCancel = dCancel
+
+				// Placeholder subscription lister — returns no subscriptions until
+				// EPIC-002 adds the subscription store. Events are captured but not
+				// delivered until subscriptions are configured.
+				subLister := &noopSubscriptionLister{}
+				subscriber := delivery.NewDeliverySubscriber(st, subLister)
+				if err := subscriber.Subscribe(deliveryCtx, eventRouter); err != nil {
+					log.Error("failed to start delivery subscriber", "error", err)
+				} else {
+					subResolver := &noopSubscriptionResolver{}
+					dispatcher := delivery.NewWebhookDispatcher(st, subResolver, delivery.DispatcherConfig{})
+					go dispatcher.Run(deliveryCtx)
+					log.Info("event delivery system started")
+				}
+			}
+
 			// Set up gateway with all services.
 			var divSvcForGateway gateway.BranchCreator
 			if st != nil {
@@ -532,6 +554,9 @@ func serveCmd() *cobra.Command {
 			}
 
 			log.Info("spine server shutting down")
+			if deliveryCancel != nil {
+				deliveryCancel()
+			}
 			if sched != nil {
 				sched.Stop()
 			}
