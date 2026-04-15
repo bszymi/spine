@@ -153,16 +153,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 
 	if err != nil {
 		log.Error("webhook delivery failed", "error", err, "duration_ms", durationMs)
-		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", err.Error(), nil)
-		_ = d.store.LogDeliveryAttempt(ctx, &store.DeliveryLogEntry{
-			LogID:          logID,
-			DeliveryID:     entry.DeliveryID,
-			SubscriptionID: entry.SubscriptionID,
-			EventID:        entry.EventID,
-			DurationMs:     &durationMs,
-			Error:          err.Error(),
-			CreatedAt:      time.Now().UTC(),
-		})
+		d.handleFailure(ctx, entry, logID, durationMs, 0, true, err.Error(), nil)
 		return
 	}
 	defer resp.Body.Close()
@@ -175,8 +166,14 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		_ = d.store.MarkDelivered(ctx, entry.DeliveryID)
 	} else {
 		errMsg := fmt.Sprintf("HTTP %d", statusCode)
-		log.Warn("webhook delivery rejected", "status", statusCode, "duration_ms", durationMs)
-		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", errMsg, nil)
+		retryable := isRetryable(statusCode, false)
+		if retryable {
+			log.Warn("webhook delivery failed (retryable)", "status", statusCode, "duration_ms", durationMs)
+		} else {
+			log.Warn("webhook delivery rejected (permanent)", "status", statusCode, "duration_ms", durationMs)
+		}
+		d.handleFailure(ctx, entry, logID, durationMs, statusCode, retryable, errMsg, resp)
+		return
 	}
 
 	_ = d.store.LogDeliveryAttempt(ctx, &store.DeliveryLogEntry{
@@ -188,6 +185,50 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		DurationMs:     &durationMs,
 		CreatedAt:      time.Now().UTC(),
 	})
+}
+
+// handleFailure processes a delivery failure, deciding whether to retry or dead-letter.
+func (d *WebhookDispatcher) handleFailure(ctx context.Context, entry store.DeliveryEntry, logID string, durationMs int, statusCode int, retryable bool, errMsg string, resp *http.Response) {
+	log := observe.Logger(ctx)
+	maxRetries := maxRetriesFor(entry.EventType)
+	newAttemptCount := entry.AttemptCount + 1
+
+	var sc *int
+	if statusCode > 0 {
+		sc = &statusCode
+	}
+
+	_ = d.store.LogDeliveryAttempt(ctx, &store.DeliveryLogEntry{
+		LogID:          logID,
+		DeliveryID:     entry.DeliveryID,
+		SubscriptionID: entry.SubscriptionID,
+		EventID:        entry.EventID,
+		StatusCode:     sc,
+		DurationMs:     &durationMs,
+		Error:          errMsg,
+		CreatedAt:      time.Now().UTC(),
+	})
+
+	if !retryable || newAttemptCount >= maxRetries {
+		status := "dead"
+		if !retryable {
+			status = "failed"
+		}
+		log.Warn("delivery exhausted", "delivery_id", entry.DeliveryID, "status", status, "attempts", newAttemptCount)
+		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, status, errMsg, nil)
+		return
+	}
+
+	// Schedule retry with backoff
+	delay := nextRetryDelay(newAttemptCount - 1)
+	if statusCode == 429 {
+		if ra := retryAfterFromHeader(resp); ra > 0 {
+			delay = ra
+		}
+	}
+	retryAt := time.Now().Add(delay)
+	log.Info("scheduling retry", "delivery_id", entry.DeliveryID, "attempt", newAttemptCount, "retry_at", retryAt)
+	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", errMsg, &retryAt)
 }
 
 // computeHMAC returns the hex-encoded HMAC-SHA256 of the payload.
