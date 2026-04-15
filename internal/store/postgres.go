@@ -1478,6 +1478,53 @@ func (s *PostgresStore) GetDeliveryStats(ctx context.Context, subscriptionID str
 	return &stats, nil
 }
 
+func (s *PostgresStore) ListEventsAfter(ctx context.Context, afterEventID string, eventTypes []string, limit int) ([]DeliveryEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	sql := `SELECT delivery_id, subscription_id, event_id, event_type, payload,
+	               status, attempt_count, next_retry_at, last_error, created_at, delivered_at
+	        FROM runtime.event_delivery_queue WHERE 1=1`
+	args := []any{}
+	argN := 1
+
+	if afterEventID != "" {
+		// Get the created_at of the cursor event to paginate by time
+		sql += fmt.Sprintf(` AND created_at > (SELECT created_at FROM runtime.event_delivery_queue WHERE event_id = $%d LIMIT 1)`, argN)
+		args = append(args, afterEventID)
+		argN++
+	}
+
+	if len(eventTypes) > 0 {
+		sql += fmt.Sprintf(` AND event_type = ANY($%d)`, argN)
+		args = append(args, eventTypes)
+		argN++
+	}
+
+	sql += ` ORDER BY created_at ASC`
+	sql += fmt.Sprintf(` LIMIT $%d`, argN)
+	args = append(args, limit)
+
+	rows, err := s.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []DeliveryEntry
+	for rows.Next() {
+		var e DeliveryEntry
+		if err := rows.Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
+			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
+			&e.CreatedAt, &e.DeliveredAt); err != nil {
+			return nil, err
+		}
+		results = append(results, e)
+	}
+	return results, rows.Err()
+}
+
 // ── Event Subscriptions ──
 
 func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
