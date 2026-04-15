@@ -2,7 +2,7 @@
 id: INIT-013
 type: Initiative
 title: External Event Delivery
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-15
 links:
