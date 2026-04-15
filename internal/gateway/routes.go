@@ -111,6 +111,17 @@ func (s *Server) routes() http.Handler {
 			r.Patch("/skills/{skill_id}", s.handleSkillUpdate)
 			r.Post("/skills/{skill_id}/deprecate", s.handleSkillDeprecate)
 
+			// Subscriptions
+			r.Post("/subscriptions", s.handleSubscriptionCreate)
+			r.Get("/subscriptions", s.handleSubscriptionList)
+			r.Get("/subscriptions/{subscription_id}", s.handleSubscriptionGet)
+			r.Patch("/subscriptions/{subscription_id}", s.handleSubscriptionUpdate)
+			r.Delete("/subscriptions/{subscription_id}", s.handleSubscriptionDelete)
+			r.Post("/subscriptions/{subscription_id}/activate", s.handleSubscriptionActivate)
+			r.Post("/subscriptions/{subscription_id}/pause", s.handleSubscriptionPause)
+			r.Post("/subscriptions/{subscription_id}/rotate-secret", s.handleSubscriptionRotateSecret)
+			r.Post("/subscriptions/{subscription_id}/test", s.handleSubscriptionTest)
+
 			// Tokens (admin)
 			r.Post("/tokens", s.handleTokenCreate)
 			r.Delete("/tokens/{token_id}", s.handleTokenRevoke)
