@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: "Webhook Delivery"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-013-external-event-delivery/initiative.md
 links:
   - type: parent
