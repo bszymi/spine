@@ -29,6 +29,14 @@ type DeliveryLogEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// EventLogEntry represents a single emitted event in the event log.
+type EventLogEntry struct {
+	EventID   string    `json:"event_id"`
+	EventType string    `json:"event_type"`
+	Payload   []byte    `json:"payload"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // DeliveryHistoryQuery defines parameters for querying delivery history.
 type DeliveryHistoryQuery struct {
 	SubscriptionID string

@@ -10,6 +10,7 @@ import (
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/projection"
@@ -127,6 +128,7 @@ type Server struct {
 	stepReleaser        StepReleaser           // optional, nil if not configured
 	stepExecutionLister StepExecutionLister    // optional, nil if not configured
 	stepAcknowledger    StepAcknowledger       // optional, nil if not configured
+	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
 	devMode             bool                   // when true, authorize allows unauthenticated requests
 	rebuilds            sync.Map               // rebuild_id -> *rebuildState
 }
@@ -213,6 +215,7 @@ type ServerConfig struct {
 	StepReleaser        StepReleaser
 	StepExecutionLister StepExecutionLister
 	StepAcknowledger    StepAcknowledger
+	EventBroadcaster    *delivery.EventBroadcaster
 	DevMode             bool          // when true, authorize allows unauthenticated requests
 	ReadHeaderTimeout   time.Duration // defaults to 10s
 	ReadTimeout         time.Duration // defaults to 30s
@@ -245,6 +248,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		stepReleaser:        cfg.StepReleaser,
 		stepExecutionLister: cfg.StepExecutionLister,
 		stepAcknowledger:    cfg.StepAcknowledger,
+		eventBroadcaster:    cfg.EventBroadcaster,
 		devMode:             cfg.DevMode,
 	}
 	if cfg.DevMode {

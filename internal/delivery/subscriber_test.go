@@ -471,7 +471,10 @@ func (m *minimalStore) LogDeliveryAttempt(context.Context, *store.DeliveryLogEnt
 func (m *minimalStore) ListDeliveryHistory(context.Context, store.DeliveryHistoryQuery) ([]store.DeliveryLogEntry, error) {
 	panic("not used")
 }
-func (m *minimalStore) ListEventsAfter(context.Context, string, []string, int) ([]store.DeliveryEntry, error) {
+func (m *minimalStore) WriteEventLog(context.Context, *store.EventLogEntry) error {
+	return nil // no-op for tests — subscriber always calls this
+}
+func (m *minimalStore) ListEventsAfter(context.Context, string, []string, int) ([]store.EventLogEntry, error) {
 	panic("not used")
 }
 func (m *minimalStore) DeleteExpiredDeliveries(context.Context, time.Time) (int64, error) {

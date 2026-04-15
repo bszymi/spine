@@ -73,6 +73,15 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"skill.update":    domain.RoleContributor,
 	"skill.deprecate": domain.RoleContributor,
 
+	// Subscriptions
+	"subscription.create": domain.RoleAdmin,
+	"subscription.read":   domain.RoleAdmin,
+	"subscription.update": domain.RoleAdmin,
+	"subscription.delete": domain.RoleAdmin,
+
+	// Events
+	"events.read": domain.RoleReader,
+
 	// Token management
 	"token.create": domain.RoleAdmin,
 	"token.revoke": domain.RoleAdmin,

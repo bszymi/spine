@@ -459,6 +459,7 @@ func serveCmd() *cobra.Command {
 
 			// Set up event delivery system (feature-flagged).
 			var deliveryCancel context.CancelFunc
+			var deliverySubscriber *delivery.DeliverySubscriber
 			if os.Getenv("SPINE_EVENT_DELIVERY") == "true" && st != nil {
 				deliveryCtx, dCancel := context.WithCancel(ctx)
 				deliveryCancel = dCancel
@@ -475,8 +476,8 @@ func serveCmd() *cobra.Command {
 				}
 
 				subLister := delivery.NewStoreSubscriptionLister(st)
-				subscriber := delivery.NewDeliverySubscriber(st, subLister)
-				if err := subscriber.Subscribe(deliveryCtx, eventRouter); err != nil {
+				deliverySubscriber = delivery.NewDeliverySubscriber(st, subLister)
+				if err := deliverySubscriber.Subscribe(deliveryCtx, eventRouter); err != nil {
 					log.Error("failed to start delivery subscriber", "error", err)
 				} else {
 					subResolver := delivery.NewStoreSubscriptionResolver(st)
@@ -512,6 +513,11 @@ func serveCmd() *cobra.Command {
 				resultHandler = &resultAdapter{orch: orch}
 			}
 
+			var eventBroadcaster *delivery.EventBroadcaster
+			if deliverySubscriber != nil {
+				eventBroadcaster = deliverySubscriber.Broadcaster
+			}
+
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
 				Store:              st,
 				Auth:               authSvc,
@@ -535,6 +541,7 @@ func serveCmd() *cobra.Command {
 				StepReleaser:        orch,
 				StepExecutionLister: orch,
 				StepAcknowledger:    orch,
+				EventBroadcaster:    eventBroadcaster,
 			})
 
 			// Run startup recovery and start background services.
