@@ -1385,6 +1385,116 @@ func (s *PostgresStore) ListDeliveryHistory(ctx context.Context, query DeliveryH
 	return results, rows.Err()
 }
 
+// ── Event Subscriptions ──
+
+func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.event_subscriptions
+			(subscription_id, workspace_id, name, target_type, target_url, event_types,
+			 signing_secret, status, metadata, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		sub.SubscriptionID, nilIfEmpty(sub.WorkspaceID), sub.Name, sub.TargetType, sub.TargetURL,
+		sub.EventTypes, sub.SigningSecret, sub.Status, sub.Metadata,
+		sub.CreatedBy, sub.CreatedAt, sub.UpdatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID string) (*EventSubscription, error) {
+	var sub EventSubscription
+	var wsID *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT subscription_id, workspace_id, name, target_type, target_url, event_types,
+		       signing_secret, status, metadata, created_by, created_at, updated_at
+		FROM runtime.event_subscriptions WHERE subscription_id = $1`, subscriptionID,
+	).Scan(&sub.SubscriptionID, &wsID, &sub.Name, &sub.TargetType, &sub.TargetURL,
+		&sub.EventTypes, &sub.SigningSecret, &sub.Status, &sub.Metadata,
+		&sub.CreatedBy, &sub.CreatedAt, &sub.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "subscription not found")
+		}
+		return nil, err
+	}
+	if wsID != nil {
+		sub.WorkspaceID = *wsID
+	}
+	return &sub, nil
+}
+
+func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscription) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE runtime.event_subscriptions SET
+			name = $2, target_type = $3, target_url = $4, event_types = $5,
+			signing_secret = $6, status = $7, metadata = $8, updated_at = now()
+		WHERE subscription_id = $1`,
+		sub.SubscriptionID, sub.Name, sub.TargetType, sub.TargetURL,
+		sub.EventTypes, sub.SigningSecret, sub.Status, sub.Metadata,
+	)
+	return err
+}
+
+func (s *PostgresStore) DeleteSubscription(ctx context.Context, subscriptionID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM runtime.event_subscriptions WHERE subscription_id = $1`, subscriptionID)
+	return err
+}
+
+func (s *PostgresStore) ListSubscriptions(ctx context.Context, workspaceID string) ([]EventSubscription, error) {
+	var rows pgx.Rows
+	var err error
+	if workspaceID == "" {
+		rows, err = s.pool.Query(ctx, `
+			SELECT subscription_id, workspace_id, name, target_type, target_url, event_types,
+			       signing_secret, status, metadata, created_by, created_at, updated_at
+			FROM runtime.event_subscriptions ORDER BY created_at`)
+	} else {
+		rows, err = s.pool.Query(ctx, `
+			SELECT subscription_id, workspace_id, name, target_type, target_url, event_types,
+			       signing_secret, status, metadata, created_by, created_at, updated_at
+			FROM runtime.event_subscriptions WHERE workspace_id = $1 ORDER BY created_at`, workspaceID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSubscriptions(rows)
+}
+
+func (s *PostgresStore) ListActiveSubscriptionsByEventType(ctx context.Context, eventType string) ([]EventSubscription, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT subscription_id, workspace_id, name, target_type, target_url, event_types,
+		       signing_secret, status, metadata, created_by, created_at, updated_at
+		FROM runtime.event_subscriptions
+		WHERE status = 'active'
+		  AND (event_types = '{}' OR $1 = ANY(event_types))
+		ORDER BY created_at`, eventType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSubscriptions(rows)
+}
+
+func scanSubscriptions(rows pgx.Rows) ([]EventSubscription, error) {
+	var results []EventSubscription
+	for rows.Next() {
+		var sub EventSubscription
+		var wsID *string
+		if err := rows.Scan(&sub.SubscriptionID, &wsID, &sub.Name, &sub.TargetType, &sub.TargetURL,
+			&sub.EventTypes, &sub.SigningSecret, &sub.Status, &sub.Metadata,
+			&sub.CreatedBy, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if wsID != nil {
+			sub.WorkspaceID = *wsID
+		}
+		results = append(results, sub)
+	}
+	return results, rows.Err()
+}
+
 // ── Migrations ──
 
 func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir string) error {

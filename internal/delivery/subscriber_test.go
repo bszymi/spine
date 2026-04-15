@@ -471,6 +471,22 @@ func (m *minimalStore) LogDeliveryAttempt(context.Context, *store.DeliveryLogEnt
 func (m *minimalStore) ListDeliveryHistory(context.Context, store.DeliveryHistoryQuery) ([]store.DeliveryLogEntry, error) {
 	panic("not used")
 }
+func (m *minimalStore) CreateSubscription(context.Context, *store.EventSubscription) error {
+	panic("not used")
+}
+func (m *minimalStore) GetSubscription(context.Context, string) (*store.EventSubscription, error) {
+	panic("not used")
+}
+func (m *minimalStore) UpdateSubscription(context.Context, *store.EventSubscription) error {
+	panic("not used")
+}
+func (m *minimalStore) DeleteSubscription(context.Context, string) error { panic("not used") }
+func (m *minimalStore) ListSubscriptions(context.Context, string) ([]store.EventSubscription, error) {
+	panic("not used")
+}
+func (m *minimalStore) ListActiveSubscriptionsByEventType(context.Context, string) ([]store.EventSubscription, error) {
+	panic("not used")
+}
 func (m *minimalStore) ApplyMigrations(context.Context, string) error      { panic("not used") }
 func (m *minimalStore) IsMigrationApplied(context.Context, string) (bool, error) {
 	panic("not used")

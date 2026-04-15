@@ -125,6 +125,14 @@ type Store interface {
 	LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error
 	ListDeliveryHistory(ctx context.Context, query DeliveryHistoryQuery) ([]DeliveryLogEntry, error)
 
+	// Event Subscriptions
+	CreateSubscription(ctx context.Context, sub *EventSubscription) error
+	GetSubscription(ctx context.Context, subscriptionID string) (*EventSubscription, error)
+	UpdateSubscription(ctx context.Context, sub *EventSubscription) error
+	DeleteSubscription(ctx context.Context, subscriptionID string) error
+	ListSubscriptions(ctx context.Context, workspaceID string) ([]EventSubscription, error)
+	ListActiveSubscriptionsByEventType(ctx context.Context, eventType string) ([]EventSubscription, error)
+
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error
 	IsMigrationApplied(ctx context.Context, version string) (bool, error)
