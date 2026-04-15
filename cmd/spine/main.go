@@ -463,6 +463,17 @@ func serveCmd() *cobra.Command {
 				deliveryCtx, dCancel := context.WithCancel(ctx)
 				deliveryCancel = dCancel
 
+				// Bootstrap internal SMP subscription from env vars.
+				if smpURL := os.Getenv("SMP_EVENT_URL"); smpURL != "" {
+					if err := delivery.BootstrapInternalSubscription(deliveryCtx, st, delivery.BootstrapConfig{
+						EventURL:    smpURL,
+						WorkspaceID: os.Getenv("SMP_WORKSPACE_ID"),
+						Token:       os.Getenv("SMP_INTERNAL_TOKEN"),
+					}); err != nil {
+						log.Error("failed to bootstrap internal subscription", "error", err)
+					}
+				}
+
 				subLister := delivery.NewStoreSubscriptionLister(st)
 				subscriber := delivery.NewDeliverySubscriber(st, subLister)
 				if err := subscriber.Subscribe(deliveryCtx, eventRouter); err != nil {
