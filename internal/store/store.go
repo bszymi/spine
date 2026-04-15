@@ -117,6 +117,14 @@ type Store interface {
 	QueryExecutionProjections(ctx context.Context, query ExecutionProjectionQuery) ([]ExecutionProjection, error)
 	DeleteExecutionProjection(ctx context.Context, taskPath string) error
 
+	// Event Delivery Queue
+	EnqueueDelivery(ctx context.Context, entry *DeliveryEntry) error
+	ClaimDeliveries(ctx context.Context, limit int) ([]DeliveryEntry, error)
+	UpdateDeliveryStatus(ctx context.Context, deliveryID, status string, lastError string, nextRetryAt *time.Time) error
+	MarkDelivered(ctx context.Context, deliveryID string) error
+	LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error
+	ListDeliveryHistory(ctx context.Context, query DeliveryHistoryQuery) ([]DeliveryLogEntry, error)
+
 	// Migrations
 	ApplyMigrations(ctx context.Context, migrationsDir string) error
 	IsMigrationApplied(ctx context.Context, version string) (bool, error)
