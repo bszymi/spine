@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: "Implement webhook dispatcher"
-status: Pending
+status: Completed
 created: 2026-04-15
 epic: /initiatives/INIT-013-external-event-delivery/epics/EPIC-001-webhook-delivery/epic.md
 initiative: /initiatives/INIT-013-external-event-delivery/initiative.md
