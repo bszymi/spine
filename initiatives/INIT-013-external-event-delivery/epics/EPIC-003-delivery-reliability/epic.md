@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: "Delivery Reliability"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-013-external-event-delivery/initiative.md
 links:
   - type: parent

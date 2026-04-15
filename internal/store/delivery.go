@@ -34,3 +34,14 @@ type DeliveryHistoryQuery struct {
 	SubscriptionID string
 	Limit          int
 }
+
+// DeliveryStats contains aggregate delivery statistics for a subscription.
+type DeliveryStats struct {
+	TotalDeliveries   int     `json:"total_deliveries"`
+	Delivered         int     `json:"delivered"`
+	Failed            int     `json:"failed"`
+	Dead              int     `json:"dead"`
+	Pending           int     `json:"pending"`
+	SuccessRate       float64 `json:"success_rate"`
+	AvgLatencyMs      *int    `json:"avg_latency_ms,omitempty"`
+}

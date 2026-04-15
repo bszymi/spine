@@ -121,6 +121,10 @@ func (s *Server) routes() http.Handler {
 			r.Post("/subscriptions/{subscription_id}/pause", s.handleSubscriptionPause)
 			r.Post("/subscriptions/{subscription_id}/rotate-secret", s.handleSubscriptionRotateSecret)
 			r.Post("/subscriptions/{subscription_id}/test", s.handleSubscriptionTest)
+			r.Get("/subscriptions/{subscription_id}/deliveries", s.handleDeliveryList)
+			r.Get("/subscriptions/{subscription_id}/deliveries/{delivery_id}", s.handleDeliveryGet)
+			r.Post("/subscriptions/{subscription_id}/deliveries/{delivery_id}/replay", s.handleDeliveryReplay)
+			r.Get("/subscriptions/{subscription_id}/stats", s.handleSubscriptionStats)
 
 			// Tokens (admin)
 			r.Post("/tokens", s.handleTokenCreate)

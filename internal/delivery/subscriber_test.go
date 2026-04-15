@@ -471,6 +471,15 @@ func (m *minimalStore) LogDeliveryAttempt(context.Context, *store.DeliveryLogEnt
 func (m *minimalStore) ListDeliveryHistory(context.Context, store.DeliveryHistoryQuery) ([]store.DeliveryLogEntry, error) {
 	panic("not used")
 }
+func (m *minimalStore) GetDelivery(context.Context, string) (*store.DeliveryEntry, error) {
+	panic("not used")
+}
+func (m *minimalStore) ListDeliveries(context.Context, string, string, int) ([]store.DeliveryEntry, error) {
+	panic("not used")
+}
+func (m *minimalStore) GetDeliveryStats(context.Context, string) (*store.DeliveryStats, error) {
+	panic("not used")
+}
 func (m *minimalStore) CreateSubscription(context.Context, *store.EventSubscription) error {
 	panic("not used")
 }
