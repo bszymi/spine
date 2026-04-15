@@ -484,6 +484,15 @@ func serveCmd() *cobra.Command {
 					go dispatcher.Run(deliveryCtx)
 					log.Info("event delivery system started")
 				}
+
+				// Start retention cleanup for expired deliveries.
+				var retention time.Duration
+				if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
+					if d, err := time.ParseDuration(v); err == nil {
+						retention = d
+					}
+				}
+				go delivery.StartRetentionCleanup(deliveryCtx, st, retention)
 			}
 
 			// Set up gateway with all services.

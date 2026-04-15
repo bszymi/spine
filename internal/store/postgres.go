@@ -1525,6 +1525,27 @@ func (s *PostgresStore) ListEventsAfter(ctx context.Context, afterEventID string
 	return results, rows.Err()
 }
 
+func (s *PostgresStore) DeleteExpiredDeliveries(ctx context.Context, before time.Time) (int64, error) {
+	// Delete log entries for expired deliveries first (FK constraint)
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM runtime.event_delivery_log
+		WHERE delivery_id IN (
+			SELECT delivery_id FROM runtime.event_delivery_queue
+			WHERE created_at < $1 AND status IN ('delivered', 'dead')
+		)`, before)
+	if err != nil {
+		return 0, err
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM runtime.event_delivery_queue
+		WHERE created_at < $1 AND status IN ('delivered', 'dead')`, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ── Event Subscriptions ──
 
 func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
