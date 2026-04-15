@@ -7,7 +7,7 @@ initiative: /initiatives/INIT-013-external-event-delivery/initiative.md
 links:
   - type: parent
     target: /initiatives/INIT-013-external-event-delivery/initiative.md
-  - type: depends_on
+  - type: blocked_by
     target: /initiatives/INIT-013-external-event-delivery/epics/EPIC-001-webhook-delivery/epic.md
 ---
 

@@ -5,10 +5,11 @@ title: "Implement subscription CRUD API"
 status: Pending
 created: 2026-04-15
 epic: /initiatives/INIT-013-external-event-delivery/epics/EPIC-002-event-subscription-config/epic.md
+initiative: /initiatives/INIT-013-external-event-delivery/initiative.md
 links:
   - type: parent
     target: /initiatives/INIT-013-external-event-delivery/epics/EPIC-002-event-subscription-config/epic.md
-  - type: depends_on
+  - type: blocked_by
     target: /initiatives/INIT-013-external-event-delivery/epics/EPIC-002-event-subscription-config/tasks/TASK-001-subscription-model-and-schema.md
 ---
 

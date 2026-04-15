@@ -5,6 +5,7 @@ title: "Define subscription data model and database schema"
 status: Pending
 created: 2026-04-15
 epic: /initiatives/INIT-013-external-event-delivery/epics/EPIC-002-event-subscription-config/epic.md
+initiative: /initiatives/INIT-013-external-event-delivery/initiative.md
 links:
   - type: parent
     target: /initiatives/INIT-013-external-event-delivery/epics/EPIC-002-event-subscription-config/epic.md

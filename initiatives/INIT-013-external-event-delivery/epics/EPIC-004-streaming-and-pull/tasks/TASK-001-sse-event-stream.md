@@ -5,6 +5,7 @@ title: "Implement SSE event stream endpoint"
 status: Pending
 created: 2026-04-15
 epic: /initiatives/INIT-013-external-event-delivery/epics/EPIC-004-streaming-and-pull/epic.md
+initiative: /initiatives/INIT-013-external-event-delivery/initiative.md
 links:
   - type: parent
     target: /initiatives/INIT-013-external-event-delivery/epics/EPIC-004-streaming-and-pull/epic.md
