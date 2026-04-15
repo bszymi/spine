@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,8 +23,8 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.events == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "event router not configured"))
+	if s.eventBroadcaster == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "event delivery not configured"))
 		return
 	}
 
@@ -75,29 +74,10 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Subscribe to live events via a channel
+	// Subscribe to broadcaster — automatically cleaned up on disconnect
 	events := make(chan domain.Event, 100)
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	// Subscribe to all event types on the router.
-	// The router will dispatch events to our channel.
-	allTypes := allEventTypes()
-	for _, et := range allTypes {
-		et := et
-		if err := s.events.(interface {
-			Subscribe(ctx context.Context, eventType domain.EventType, handler func(context.Context, domain.Event) error) error
-		}).Subscribe(ctx, et, func(_ context.Context, evt domain.Event) error {
-			select {
-			case events <- evt:
-			default:
-				// Drop if channel full — consumer too slow
-			}
-			return nil
-		}); err != nil {
-			log.Error("failed to subscribe to event type", "type", et, "error", err)
-		}
-	}
+	subID := s.eventBroadcaster.Subscribe(events)
+	defer s.eventBroadcaster.Unsubscribe(subID)
 
 	// Stream loop
 	heartbeat := time.NewTicker(30 * time.Second)
@@ -105,7 +85,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-r.Context().Done():
 			log.Info("SSE stream disconnected")
 			return
 		case evt := <-events:
@@ -129,21 +109,4 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, id, eventType st
 	fmt.Fprintf(w, "event: %s\n", eventType)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
-}
-
-// allEventTypes returns all known event types for SSE subscription.
-func allEventTypes() []domain.EventType {
-	return []domain.EventType{
-		domain.EventArtifactCreated, domain.EventArtifactUpdated,
-		domain.EventRunStarted, domain.EventRunCompleted, domain.EventRunFailed,
-		domain.EventRunCancelled, domain.EventRunPaused, domain.EventRunResumed,
-		domain.EventStepAssigned, domain.EventStepStarted, domain.EventStepCompleted,
-		domain.EventStepFailed, domain.EventStepTimeout, domain.EventRetryAttempted,
-		domain.EventRunTimeout,
-		domain.EventDivergenceStarted, domain.EventConvergenceCompleted,
-		domain.EventEngineRecovered, domain.EventProjectionSynced,
-		domain.EventThreadCreated, domain.EventCommentAdded, domain.EventThreadResolved,
-		domain.EventValidationPassed, domain.EventValidationFailed,
-		domain.EventAssignmentFailed, domain.EventTaskUnblocked, domain.EventTaskReleased,
-	}
 }

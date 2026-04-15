@@ -28,6 +28,7 @@ type SubscriptionLister interface {
 type DeliverySubscriber struct {
 	store         store.Store
 	subscriptions SubscriptionLister
+	Broadcaster   *EventBroadcaster
 }
 
 // NewDeliverySubscriber creates a subscriber that bridges the internal
@@ -36,6 +37,7 @@ func NewDeliverySubscriber(st store.Store, subs SubscriptionLister) *DeliverySub
 	return &DeliverySubscriber{
 		store:         st,
 		subscriptions: subs,
+		Broadcaster:   NewEventBroadcaster(),
 	}
 }
 
@@ -59,6 +61,26 @@ func (s *DeliverySubscriber) Subscribe(ctx context.Context, router event.EventRo
 func (s *DeliverySubscriber) handleEvent(ctx context.Context, evt domain.Event) error {
 	log := observe.Logger(ctx)
 
+	// Broadcast to SSE listeners (non-blocking).
+	s.Broadcaster.Broadcast(evt)
+
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		log.Error("failed to marshal event for delivery", "event_id", evt.EventID, "error", err)
+		return nil
+	}
+
+	// Always write to the event log (for pull API and SSE replay),
+	// regardless of whether any subscriptions match.
+	if err := s.store.WriteEventLog(ctx, &store.EventLogEntry{
+		EventID:   evt.EventID,
+		EventType: string(evt.Type),
+		Payload:   payload,
+		CreatedAt: evt.Timestamp,
+	}); err != nil {
+		log.Error("failed to write event log", "event_id", evt.EventID, "error", err)
+	}
+
 	subs, err := s.subscriptions.ListActiveSubscriptions(ctx, evt.Type)
 	if err != nil {
 		log.Error("failed to list subscriptions", "event_type", evt.Type, "error", err)
@@ -66,12 +88,6 @@ func (s *DeliverySubscriber) handleEvent(ctx context.Context, evt domain.Event) 
 	}
 
 	if len(subs) == 0 {
-		return nil
-	}
-
-	payload, err := json.Marshal(evt)
-	if err != nil {
-		log.Error("failed to marshal event for delivery", "event_id", evt.EventID, "error", err)
 		return nil
 	}
 

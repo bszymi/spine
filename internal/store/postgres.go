@@ -1310,10 +1310,14 @@ func (s *PostgresStore) ClaimDeliveries(ctx context.Context, limit int) ([]Deliv
 	var results []DeliveryEntry
 	for rows.Next() {
 		var e DeliveryEntry
+		var lastError *string
 		if err := rows.Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
-			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
+			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &lastError,
 			&e.CreatedAt, &e.DeliveredAt); err != nil {
 			return nil, err
+		}
+		if lastError != nil {
+			e.LastError = *lastError
 		}
 		results = append(results, e)
 	}
@@ -1387,18 +1391,22 @@ func (s *PostgresStore) ListDeliveryHistory(ctx context.Context, query DeliveryH
 
 func (s *PostgresStore) GetDelivery(ctx context.Context, deliveryID string) (*DeliveryEntry, error) {
 	var e DeliveryEntry
+	var lastError *string
 	err := s.pool.QueryRow(ctx, `
 		SELECT delivery_id, subscription_id, event_id, event_type, payload,
 		       status, attempt_count, next_retry_at, last_error, created_at, delivered_at
 		FROM runtime.event_delivery_queue WHERE delivery_id = $1`, deliveryID,
 	).Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
-		&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
+		&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &lastError,
 		&e.CreatedAt, &e.DeliveredAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, domain.NewError(domain.ErrNotFound, "delivery not found")
 		}
 		return nil, err
+	}
+	if lastError != nil {
+		e.LastError = *lastError
 	}
 	return &e, nil
 }
@@ -1433,10 +1441,14 @@ func (s *PostgresStore) ListDeliveries(ctx context.Context, subscriptionID strin
 	var results []DeliveryEntry
 	for rows.Next() {
 		var e DeliveryEntry
+		var lastError *string
 		if err := rows.Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
-			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
+			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &lastError,
 			&e.CreatedAt, &e.DeliveredAt); err != nil {
 			return nil, err
+		}
+		if lastError != nil {
+			e.LastError = *lastError
 		}
 		results = append(results, e)
 	}
@@ -1478,20 +1490,27 @@ func (s *PostgresStore) GetDeliveryStats(ctx context.Context, subscriptionID str
 	return &stats, nil
 }
 
-func (s *PostgresStore) ListEventsAfter(ctx context.Context, afterEventID string, eventTypes []string, limit int) ([]DeliveryEntry, error) {
+func (s *PostgresStore) WriteEventLog(ctx context.Context, entry *EventLogEntry) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.event_log (event_id, event_type, payload, created_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (event_id) DO NOTHING`,
+		entry.EventID, entry.EventType, entry.Payload, entry.CreatedAt)
+	return err
+}
+
+func (s *PostgresStore) ListEventsAfter(ctx context.Context, afterEventID string, eventTypes []string, limit int) ([]EventLogEntry, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 
-	sql := `SELECT delivery_id, subscription_id, event_id, event_type, payload,
-	               status, attempt_count, next_retry_at, last_error, created_at, delivered_at
-	        FROM runtime.event_delivery_queue WHERE 1=1`
+	sql := `SELECT event_id, event_type, payload, created_at
+	        FROM runtime.event_log WHERE 1=1`
 	args := []any{}
 	argN := 1
 
 	if afterEventID != "" {
-		// Get the created_at of the cursor event to paginate by time
-		sql += fmt.Sprintf(` AND created_at > (SELECT created_at FROM runtime.event_delivery_queue WHERE event_id = $%d LIMIT 1)`, argN)
+		sql += fmt.Sprintf(` AND created_at > (SELECT created_at FROM runtime.event_log WHERE event_id = $%d)`, argN)
 		args = append(args, afterEventID)
 		argN++
 	}
@@ -1512,12 +1531,10 @@ func (s *PostgresStore) ListEventsAfter(ctx context.Context, afterEventID string
 	}
 	defer rows.Close()
 
-	var results []DeliveryEntry
+	var results []EventLogEntry
 	for rows.Next() {
-		var e DeliveryEntry
-		if err := rows.Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
-			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
-			&e.CreatedAt, &e.DeliveredAt); err != nil {
+		var e EventLogEntry
+		if err := rows.Scan(&e.EventID, &e.EventType, &e.Payload, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		results = append(results, e)
@@ -1543,6 +1560,10 @@ func (s *PostgresStore) DeleteExpiredDeliveries(ctx context.Context, before time
 	if err != nil {
 		return 0, err
 	}
+
+	// Clean up event log entries past retention
+	_, _ = s.pool.Exec(ctx, `DELETE FROM runtime.event_log WHERE created_at < $1`, before)
+
 	return tag.RowsAffected(), nil
 }
 
