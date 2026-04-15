@@ -89,6 +89,9 @@ func (s *Server) routes() http.Handler {
 			r.Get("/execution/tasks/blocked", s.handleExecutionTasksBlocked)
 			r.Get("/execution/tasks/assigned", s.handleExecutionTasksAssigned)
 
+			// Events
+			r.Get("/events/stream", s.handleEventStream)
+
 			// Query
 			r.Get("/query/discussions", s.handleQueryDiscussions)
 			r.Get("/query/artifacts", s.handleQueryArtifacts)
