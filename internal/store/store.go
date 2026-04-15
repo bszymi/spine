@@ -124,6 +124,9 @@ type Store interface {
 	MarkDelivered(ctx context.Context, deliveryID string) error
 	LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error
 	ListDeliveryHistory(ctx context.Context, query DeliveryHistoryQuery) ([]DeliveryLogEntry, error)
+	GetDelivery(ctx context.Context, deliveryID string) (*DeliveryEntry, error)
+	ListDeliveries(ctx context.Context, subscriptionID string, status string, limit int) ([]DeliveryEntry, error)
+	GetDeliveryStats(ctx context.Context, subscriptionID string) (*DeliveryStats, error)
 
 	// Event Subscriptions
 	CreateSubscription(ctx context.Context, sub *EventSubscription) error

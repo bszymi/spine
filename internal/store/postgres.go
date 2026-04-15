@@ -1385,6 +1385,99 @@ func (s *PostgresStore) ListDeliveryHistory(ctx context.Context, query DeliveryH
 	return results, rows.Err()
 }
 
+func (s *PostgresStore) GetDelivery(ctx context.Context, deliveryID string) (*DeliveryEntry, error) {
+	var e DeliveryEntry
+	err := s.pool.QueryRow(ctx, `
+		SELECT delivery_id, subscription_id, event_id, event_type, payload,
+		       status, attempt_count, next_retry_at, last_error, created_at, delivered_at
+		FROM runtime.event_delivery_queue WHERE delivery_id = $1`, deliveryID,
+	).Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
+		&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
+		&e.CreatedAt, &e.DeliveredAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, domain.NewError(domain.ErrNotFound, "delivery not found")
+		}
+		return nil, err
+	}
+	return &e, nil
+}
+
+func (s *PostgresStore) ListDeliveries(ctx context.Context, subscriptionID string, status string, limit int) ([]DeliveryEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	sql := `SELECT delivery_id, subscription_id, event_id, event_type, payload,
+	               status, attempt_count, next_retry_at, last_error, created_at, delivered_at
+	        FROM runtime.event_delivery_queue WHERE subscription_id = $1`
+	args := []any{subscriptionID}
+	argN := 2
+
+	if status != "" {
+		sql += fmt.Sprintf(" AND status = $%d", argN)
+		args = append(args, status)
+		argN++
+	}
+
+	sql += " ORDER BY created_at DESC"
+	sql += fmt.Sprintf(" LIMIT $%d", argN)
+	args = append(args, limit)
+
+	rows, err := s.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []DeliveryEntry
+	for rows.Next() {
+		var e DeliveryEntry
+		if err := rows.Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
+			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
+			&e.CreatedAt, &e.DeliveredAt); err != nil {
+			return nil, err
+		}
+		results = append(results, e)
+	}
+	return results, rows.Err()
+}
+
+func (s *PostgresStore) GetDeliveryStats(ctx context.Context, subscriptionID string) (*DeliveryStats, error) {
+	var stats DeliveryStats
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) AS total,
+			COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
+			COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+			COUNT(*) FILTER (WHERE status = 'dead') AS dead,
+			COUNT(*) FILTER (WHERE status IN ('pending', 'delivering')) AS pending
+		FROM runtime.event_delivery_queue
+		WHERE subscription_id = $1`, subscriptionID,
+	).Scan(&stats.TotalDeliveries, &stats.Delivered, &stats.Failed, &stats.Dead, &stats.Pending)
+	if err != nil {
+		return nil, err
+	}
+
+	if stats.TotalDeliveries > 0 {
+		stats.SuccessRate = float64(stats.Delivered) / float64(stats.TotalDeliveries)
+	}
+
+	// Average latency from delivery log
+	var avgMs *float64
+	err = s.pool.QueryRow(ctx, `
+		SELECT AVG(duration_ms)::float8
+		FROM runtime.event_delivery_log
+		WHERE subscription_id = $1 AND status_code IS NOT NULL`, subscriptionID,
+	).Scan(&avgMs)
+	if err == nil && avgMs != nil {
+		v := int(*avgMs)
+		stats.AvgLatencyMs = &v
+	}
+
+	return &stats, nil
+}
+
 // ── Event Subscriptions ──
 
 func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
