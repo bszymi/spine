@@ -463,15 +463,12 @@ func serveCmd() *cobra.Command {
 				deliveryCtx, dCancel := context.WithCancel(ctx)
 				deliveryCancel = dCancel
 
-				// Placeholder subscription lister — returns no subscriptions until
-				// EPIC-002 adds the subscription store. Events are captured but not
-				// delivered until subscriptions are configured.
-				subLister := &noopSubscriptionLister{}
+				subLister := delivery.NewStoreSubscriptionLister(st)
 				subscriber := delivery.NewDeliverySubscriber(st, subLister)
 				if err := subscriber.Subscribe(deliveryCtx, eventRouter); err != nil {
 					log.Error("failed to start delivery subscriber", "error", err)
 				} else {
-					subResolver := &noopSubscriptionResolver{}
+					subResolver := delivery.NewStoreSubscriptionResolver(st)
 					dispatcher := delivery.NewWebhookDispatcher(st, subResolver, delivery.DispatcherConfig{})
 					go dispatcher.Run(deliveryCtx)
 					log.Info("event delivery system started")
