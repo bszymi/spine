@@ -1273,6 +1273,118 @@ func (s *PostgresStore) DeleteExecutionProjection(ctx context.Context, taskPath 
 	return err
 }
 
+// ── Event Delivery Queue ──
+
+func (s *PostgresStore) EnqueueDelivery(ctx context.Context, entry *DeliveryEntry) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.event_delivery_queue
+			(delivery_id, subscription_id, event_id, event_type, payload, status, attempt_count, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (subscription_id, event_id) DO NOTHING`,
+		entry.DeliveryID, entry.SubscriptionID, entry.EventID, entry.EventType,
+		entry.Payload, entry.Status, entry.AttemptCount, entry.CreatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) ClaimDeliveries(ctx context.Context, limit int) ([]DeliveryEntry, error) {
+	rows, err := s.pool.Query(ctx, `
+		UPDATE runtime.event_delivery_queue
+		SET status = 'delivering'
+		WHERE delivery_id IN (
+			SELECT delivery_id FROM runtime.event_delivery_queue
+			WHERE status IN ('pending', 'failed')
+			  AND (next_retry_at IS NULL OR next_retry_at <= now())
+			ORDER BY created_at
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING delivery_id, subscription_id, event_id, event_type, payload,
+		          status, attempt_count, next_retry_at, last_error, created_at, delivered_at`,
+		limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []DeliveryEntry
+	for rows.Next() {
+		var e DeliveryEntry
+		if err := rows.Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
+			&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &e.LastError,
+			&e.CreatedAt, &e.DeliveredAt); err != nil {
+			return nil, err
+		}
+		results = append(results, e)
+	}
+	return results, rows.Err()
+}
+
+func (s *PostgresStore) UpdateDeliveryStatus(ctx context.Context, deliveryID, status string, lastError string, nextRetryAt *time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE runtime.event_delivery_queue
+		SET status = $2, last_error = $3, next_retry_at = $4, attempt_count = attempt_count + 1
+		WHERE delivery_id = $1`,
+		deliveryID, status, nilIfEmpty(lastError), nextRetryAt)
+	return err
+}
+
+func (s *PostgresStore) MarkDelivered(ctx context.Context, deliveryID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE runtime.event_delivery_queue
+		SET status = 'delivered', delivered_at = now(), attempt_count = attempt_count + 1
+		WHERE delivery_id = $1`,
+		deliveryID)
+	return err
+}
+
+func (s *PostgresStore) LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.event_delivery_log
+			(log_id, delivery_id, subscription_id, event_id, status_code, duration_ms, error, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		entry.LogID, entry.DeliveryID, entry.SubscriptionID, entry.EventID,
+		entry.StatusCode, entry.DurationMs, nilIfEmpty(entry.Error), entry.CreatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListDeliveryHistory(ctx context.Context, query DeliveryHistoryQuery) ([]DeliveryLogEntry, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT log_id, delivery_id, subscription_id, event_id, status_code, duration_ms, error, created_at
+		FROM runtime.event_delivery_log
+		WHERE subscription_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2`,
+		query.SubscriptionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []DeliveryLogEntry
+	for rows.Next() {
+		var e DeliveryLogEntry
+		var statusCode, durationMs *int
+		var errStr *string
+		if err := rows.Scan(&e.LogID, &e.DeliveryID, &e.SubscriptionID, &e.EventID,
+			&statusCode, &durationMs, &errStr, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		e.StatusCode = statusCode
+		e.DurationMs = durationMs
+		if errStr != nil {
+			e.Error = *errStr
+		}
+		results = append(results, e)
+	}
+	return results, rows.Err()
+}
+
 // ── Migrations ──
 
 func (s *PostgresStore) ApplyMigrations(ctx context.Context, migrationsDir string) error {
