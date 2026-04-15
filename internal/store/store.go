@@ -128,6 +128,7 @@ type Store interface {
 	ListDeliveries(ctx context.Context, subscriptionID string, status string, limit int) ([]DeliveryEntry, error)
 	GetDeliveryStats(ctx context.Context, subscriptionID string) (*DeliveryStats, error)
 	ListEventsAfter(ctx context.Context, afterEventID string, eventTypes []string, limit int) ([]DeliveryEntry, error)
+	DeleteExpiredDeliveries(ctx context.Context, before time.Time) (int64, error)
 
 	// Event Subscriptions
 	CreateSubscription(ctx context.Context, sub *EventSubscription) error

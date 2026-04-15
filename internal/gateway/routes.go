@@ -91,6 +91,7 @@ func (s *Server) routes() http.Handler {
 
 			// Events
 			r.Get("/events/stream", s.handleEventStream)
+			r.Get("/events", s.handleEventList)
 
 			// Query
 			r.Get("/query/discussions", s.handleQueryDiscussions)

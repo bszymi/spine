@@ -474,6 +474,9 @@ func (m *minimalStore) ListDeliveryHistory(context.Context, store.DeliveryHistor
 func (m *minimalStore) ListEventsAfter(context.Context, string, []string, int) ([]store.DeliveryEntry, error) {
 	panic("not used")
 }
+func (m *minimalStore) DeleteExpiredDeliveries(context.Context, time.Time) (int64, error) {
+	panic("not used")
+}
 func (m *minimalStore) GetDelivery(context.Context, string) (*store.DeliveryEntry, error) {
 	panic("not used")
 }
