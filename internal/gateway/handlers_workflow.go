@@ -251,6 +251,26 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Gateway-level ownership check: the authenticated actor must be
+	// the one the step was claimed by. The downstream IngestResult
+	// check remains as defense-in-depth. If the store isn't available
+	// we fall through to IngestResult rather than failing closed, so
+	// deployments without a fully wired store (e.g., some tests) still
+	// exercise the existing code path; actor == nil only in dev mode.
+	if actor := actorFromContext(r.Context()); actor != nil {
+		if st := s.storeFrom(r.Context()); st != nil {
+			exec, gerr := st.GetStepExecution(r.Context(), executionID)
+			if gerr != nil {
+				WriteError(w, gerr)
+				return
+			}
+			if exec.ActorID != "" && exec.ActorID != actor.ActorID {
+				WriteError(w, domain.NewError(domain.ErrForbidden, "step is not assigned to the authenticated actor"))
+				return
+			}
+		}
+	}
+
 	var artifactPaths []string
 	if req.Output != nil {
 		for _, a := range req.Output.ArtifactsProduced {
