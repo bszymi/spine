@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,6 +10,12 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
+)
+
+const (
+	sseReplayCap     = 100
+	sseHeartbeat     = 30 * time.Second
+	sseWriteDeadline = 5 * time.Second
 )
 
 // GET /api/v1/events/stream — SSE event stream
@@ -33,6 +40,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "streaming not supported"))
 		return
 	}
+	rc := http.NewResponseController(w)
 
 	// Cap concurrent SSE streams per actor to prevent resource exhaustion.
 	var heldActorID string
@@ -66,7 +74,9 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	log := observe.Logger(r.Context())
 	log.Info("SSE stream connected", "types", r.URL.Query().Get("types"))
 
-	// Replay missed events if Last-Event-ID is provided
+	// Replay missed events if Last-Event-ID is provided. Cap the replay at
+	// sseReplayCap so that a stale client reconnecting with an old cursor
+	// can't force a synchronous flood before live streaming begins.
 	lastEventID := r.Header.Get("Last-Event-ID")
 	if lastEventID != "" {
 		var typeList []string
@@ -75,14 +85,17 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 				typeList = append(typeList, t)
 			}
 		}
-		missed, err := st.ListEventsAfter(r.Context(), lastEventID, typeList, 1000)
+		missed, err := st.ListEventsAfter(r.Context(), lastEventID, typeList, sseReplayCap)
 		if err != nil {
 			log.Error("failed to replay missed events", "error", err)
 		} else {
 			for _, entry := range missed {
-				writeSSEEvent(w, flusher, entry.EventID, entry.EventType, entry.Payload)
+				if werr := writeSSEEvent(rc, w, flusher, entry.EventID, entry.EventType, entry.Payload); werr != nil {
+					log.Warn("sse replay write failed, dropping connection", "error", werr)
+					return
+				}
 			}
-			log.Info("replayed missed events", "count", len(missed), "after", lastEventID)
+			log.Info("replayed missed events", "count", len(missed), "after", lastEventID, "cap", sseReplayCap)
 		}
 	}
 
@@ -92,7 +105,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	defer s.eventBroadcaster.Unsubscribe(subID)
 
 	// Stream loop
-	heartbeat := time.NewTicker(30 * time.Second)
+	heartbeat := time.NewTicker(sseHeartbeat)
 	defer heartbeat.Stop()
 
 	for {
@@ -108,17 +121,50 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			writeSSEEvent(w, flusher, evt.EventID, string(evt.Type), payload)
+			if err := writeSSEEvent(rc, w, flusher, evt.EventID, string(evt.Type), payload); err != nil {
+				log.Warn("sse write failed, dropping connection", "error", err)
+				return
+			}
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
-			flusher.Flush()
+			if err := writeSSEHeartbeat(rc, w, flusher); err != nil {
+				log.Warn("sse heartbeat failed, dropping connection", "error", err)
+				return
+			}
 		}
 	}
 }
 
-func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, id, eventType string, data []byte) {
-	fmt.Fprintf(w, "id: %s\n", id)
-	fmt.Fprintf(w, "event: %s\n", eventType)
-	fmt.Fprintf(w, "data: %s\n\n", data)
+// writeSSEEvent writes a single SSE event record. It applies a per-write
+// deadline via http.ResponseController so a stalled client cannot hold
+// the goroutine indefinitely. Returns the first write error, if any.
+func writeSSEEvent(rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher, id, eventType string, data []byte) error {
+	setSSEDeadline(rc)
+	if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", id, eventType, data); err != nil {
+		return err
+	}
 	flusher.Flush()
+	return nil
+}
+
+// writeSSEHeartbeat emits an SSE comment line to keep the connection
+// alive and exercise the write path so a stalled client errors out.
+func writeSSEHeartbeat(rc *http.ResponseController, w http.ResponseWriter, flusher http.Flusher) error {
+	setSSEDeadline(rc)
+	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+// setSSEDeadline applies a short write deadline. Handlers served behind
+// wrappers that don't expose SetWriteDeadline (e.g. some recorders in
+// tests) are tolerated — the error is ignored when unsupported.
+func setSSEDeadline(rc *http.ResponseController) {
+	if err := rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		// Non-fatal. A nil response controller or an intermediate wrapper
+		// without deadline support still leaves the heartbeat loop as a
+		// weaker liveness guard.
+		_ = err
+	}
 }
