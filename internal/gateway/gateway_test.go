@@ -35,6 +35,7 @@ type fakeStore struct {
 	divContexts        map[string]*domain.DivergenceContext
 	outgoingLinks      []store.ArtifactLink
 	incomingLinks      []store.ArtifactLink
+	stepExecOverride   *domain.StepExecution
 }
 
 type fakeTokenEntry struct {
@@ -142,6 +143,9 @@ func (f *fakeStore) ListStepExecutionsByRun(_ context.Context, _ string) ([]doma
 }
 
 func (f *fakeStore) GetStepExecution(_ context.Context, execID string) (*domain.StepExecution, error) {
+	if f.stepExecOverride != nil {
+		return f.stepExecOverride, nil
+	}
 	return &domain.StepExecution{
 		ExecutionID: execID, RunID: "run-1", StepID: "step1",
 		Status: domain.StepStatusInProgress, Attempt: 1,
@@ -2999,6 +3003,55 @@ func TestWorkspaceMiddleware_InternalError(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("expected 500 for resolver error, got %d", resp.StatusCode)
+	}
+}
+
+// Gateway-level ownership check on step submit: actor A cannot submit
+// against a step execution assigned to actor B. Codified here so a
+// future refactor of ResultHandler.IngestResult can't silently regress
+// the guard. See TASK-014.
+func TestStepSubmit_RejectsForeignActor(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["alice"] = &domain.Actor{
+		ActorID: "alice", Type: domain.ActorTypeHuman, Name: "Alice",
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	fs.actors["bob"] = &domain.Actor{
+		ActorID: "bob", Type: domain.ActorTypeHuman, Name: "Bob",
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	// Execution exec-xyz is claimed by bob, but alice is the caller.
+	fs.stepExecOverride = &domain.StepExecution{
+		ExecutionID: "exec-xyz", RunID: "run-1", StepID: "step1",
+		Status: domain.StepStatusInProgress, Attempt: 1,
+		ActorID: "bob",
+	}
+
+	authSvc := auth.NewService(fs)
+	aliceToken, _, err := authSvc.CreateToken(context.Background(), "alice", "test", nil)
+	if err != nil {
+		t.Fatalf("create alice token: %v", err)
+	}
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:         fs,
+		Auth:          authSvc,
+		ResultHandler: &fakeResultHandler{},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"outcome_id":"accepted"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-xyz/submit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for foreign-actor submit, got %d", resp.StatusCode)
 	}
 }
 
