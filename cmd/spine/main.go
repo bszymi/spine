@@ -23,6 +23,7 @@ import (
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
@@ -518,6 +519,32 @@ func serveCmd() *cobra.Command {
 				eventBroadcaster = deliverySubscriber.Broadcaster
 			}
 
+			// Initialize git HTTP handler for serving repos to runner containers.
+			var gitHTTPHandler *githttp.Handler
+			if wsResolver != nil {
+				trustedCIDRs := strings.Split(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"), ",")
+				if trustedCIDRs[0] == "" {
+					// Default: trust Docker internal networks.
+					trustedCIDRs = []string{"172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"}
+				}
+				var err error
+				gitHTTPHandler, err = githttp.NewHandler(githttp.Config{
+					ResolveRepoPath: func(ctx context.Context, workspaceID string) (string, error) {
+						cfg, err := wsResolver.Resolve(ctx, workspaceID)
+						if err != nil {
+							return "", err
+						}
+						return cfg.RepoPath, nil
+					},
+					TrustedCIDRs: trustedCIDRs,
+				})
+				if err != nil {
+					log.Warn("git HTTP endpoint disabled", "reason", err.Error())
+				} else {
+					log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
+				}
+			}
+
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
 				Store:              st,
 				Auth:               authSvc,
@@ -542,6 +569,7 @@ func serveCmd() *cobra.Command {
 				StepExecutionLister: orch,
 				StepAcknowledger:    orch,
 				EventBroadcaster:    eventBroadcaster,
+				GitHTTP:             gitHTTPHandler,
 			})
 
 			// Run startup recovery and start background services.
