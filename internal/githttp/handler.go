@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/cgi"
+	"net/http/cgi" //nolint:gosec // G504: CVE-2016-5386 is a pre-1.6.3 Go issue; this codebase runs 1.26+
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,7 +202,10 @@ func (h *Handler) ensureReceivePackDisabled(ctx context.Context, repoPath string
 	}
 	h.mu.Unlock()
 
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "http.receivepack", "false")
+	// G702 flags cmd.Dir as taint-tracked. repoPath is resolved by
+	// the caller from the workspace registry (validated workspace
+	// IDs), never from untrusted client input.
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "http.receivepack", "false") //nolint:gosec // G702: repoPath is server-resolved from workspace registry, not request input
 	cmd.Dir = repoPath
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git config http.receivepack=false: %w", err)

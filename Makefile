@@ -24,6 +24,12 @@ test-scenario:
 lint:
 	golangci-lint run
 
+# Security-only lint: runs gosec in isolation. This is the gate for
+# TASK-011 — any new security finding must be triaged and either fixed
+# or suppressed with a reasoned //nolint:gosec directive before merge.
+lint-security:
+	golangci-lint run --enable-only=gosec ./...
+
 # ── Docker Dev ──
 # Cached volumes avoid re-downloading Go modules on every run.
 

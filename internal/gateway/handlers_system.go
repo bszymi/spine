@@ -95,7 +95,11 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 	}
 	s.rebuilds.Store(rebuildID, state)
 
-	go func() {
+	// G118: the rebuild deliberately detaches from the request
+	// context. It must survive the client hanging up, and its
+	// duration is unbounded relative to the HTTP request that kicked
+	// it off. Status polling is via the rebuildID returned below.
+	go func() { //nolint:gosec // G118: detached-by-design goroutine
 		if err := s.projSyncFrom(r.Context()).FullRebuild(context.Background()); err != nil {
 			observe.Logger(r.Context()).Error("system rebuild failed", "rebuild_id", rebuildID, "error", err)
 			state.complete("failed", "rebuild failed, check server logs for details")

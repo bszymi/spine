@@ -94,7 +94,7 @@ func (c *Client) do(req *http.Request) ([]byte, error) {
 		req.Header.Set("X-Workspace-ID", c.workspaceID)
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:gosec // G704: CLI client; URL is the user's own configured spine server
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
