@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,35 +88,36 @@ func (s *Service) safePathIn(root, path string) (string, error) {
 	fullPath := filepath.Join(root, repoPath)
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return "", domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("invalid repo path: %v", err))
+		// Log the underlying error server-side; do not leak the repo
+		// root path back to the caller.
+		slog.Default().Warn("safePath: abs(root) failed", "error", err, "root", root)
+		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
 	}
 
 	// Resolve symlinks on the root
 	realRoot, err := filepath.EvalSymlinks(absRoot)
 	if err != nil {
-		return "", domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("resolve repo path: %v", err))
+		slog.Default().Warn("safePath: evalSymlinks(root) failed", "error", err, "root", absRoot)
+		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
 	}
 
 	// Resolve the target path — for new files, resolve the parent directory
 	absPath, err := filepath.Abs(fullPath)
 	if err != nil {
-		return "", domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("invalid path: %s", path))
+		slog.Default().Warn("safePath: abs(fullPath) failed", "error", err, "path", path)
+		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
 	}
 
 	// Resolve symlinks by walking up to the nearest existing ancestor.
 	// This prevents escaping via symlinked directories with missing descendants.
 	realPath, err := resolveToExistingAncestor(absPath)
 	if err != nil {
-		return "", domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("resolve path: %v", err))
+		slog.Default().Warn("safePath: resolveToExistingAncestor failed", "error", err, "path", path)
+		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
 	}
 
 	if !strings.HasPrefix(realPath, realRoot+string(filepath.Separator)) && realPath != realRoot {
-		return "", domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("path escapes repository: %s", path))
+		return "", domain.NewError(domain.ErrInvalidParams, "path escapes repository")
 	}
 	return absPath, nil
 }
@@ -363,17 +365,22 @@ func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
 		return &branchScope{repoDir: s.repo, cleanup: func() {}}, nil
 	}
 
-	// Create a temporary directory for the worktree.
-	worktreeDir, err := os.MkdirTemp("", "spine-wt-*")
+	// Allocate a private parent directory (0700, unique name) and
+	// let git create the worktree inside it. The previous pattern was
+	// mkdtemp → Remove → "git worktree add" in /tmp — a TOCTOU race
+	// where another local user could reinsert a symlink between the
+	// Remove and the add. By keeping the parent and pointing git at a
+	// fresh child name that never existed, there is no remove-then-
+	// recreate window.
+	parent, err := os.MkdirTemp("", "spine-wt-parent-*")
 	if err != nil {
 		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("create worktree temp dir: %v", err))
+			fmt.Sprintf("create worktree parent dir: %v", err))
 	}
-	// git worktree add requires the target path to not exist.
-	os.Remove(worktreeDir)
+	worktreeDir := filepath.Join(parent, "wt")
 
 	if err := validateGitRefName(wc.Branch); err != nil {
-		os.RemoveAll(worktreeDir)
+		os.RemoveAll(parent)
 		return nil, err
 	}
 
@@ -381,7 +388,7 @@ func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
 	cmd.Dir = s.repo
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		os.RemoveAll(worktreeDir)
+		os.RemoveAll(parent)
 		return nil, domain.NewError(domain.ErrGit,
 			fmt.Sprintf("add worktree for branch %s: %s", wc.Branch, strings.TrimSpace(string(out))))
 	}
@@ -392,7 +399,7 @@ func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
 			rmCmd := execCommand(ctx, "git", "worktree", "remove", "--force", worktreeDir)
 			rmCmd.Dir = s.repo
 			_, _ = rmCmd.CombinedOutput()
-			os.RemoveAll(worktreeDir)
+			os.RemoveAll(parent)
 		},
 	}, nil
 }

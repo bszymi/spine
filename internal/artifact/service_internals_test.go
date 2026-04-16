@@ -113,6 +113,23 @@ func TestSafePath_TraversalRejected(t *testing.T) {
 	}
 }
 
+// The error returned from safePath must be generic; the server-side
+// log is the only place filesystem detail should appear. See
+// TASK-023 item 1.
+func TestSafePath_ErrorDoesNotLeakFilesystemPaths(t *testing.T) {
+	svc := newBareService(t)
+	_, err := svc.safePath("../../etc/passwd")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	for _, leak := range []string{"/etc/passwd", "/tmp/", "/var/", "/home/", "/Users/"} {
+		if strings.Contains(msg, leak) {
+			t.Fatalf("safePath error leaked filesystem detail %q: %q", leak, msg)
+		}
+	}
+}
+
 func TestNextFollowupID_Regular(t *testing.T) {
 	tests := []struct {
 		input    string

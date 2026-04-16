@@ -46,13 +46,19 @@ func decodeJSON(r *http.Request, v any) error {
 }
 
 // parsePagination extracts limit and cursor from query params.
-// Defaults: limit=50, max=200.
+// Defaults: limit=50, min=10, max=200. The floor prevents
+// `limit=1` loops from amplifying DB queries against large result
+// sets; clients that genuinely want tiny pages gain nothing over
+// clients that ask for 10.
 func parsePagination(r *http.Request) (int, string) {
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
 		}
+	}
+	if limit < 10 {
+		limit = 10
 	}
 	if limit > 200 {
 		limit = 200
