@@ -320,11 +320,115 @@ The database URL is the same as `SPINE_DATABASE_URL`. For read-only access, crea
 
 ## 6. Event Integration
 
-Spine does not currently expose a real-time event stream. Use polling-based state sync.
+Three push/pull mechanisms cover different integration styles. All three emit the same canonical event schema defined in [`architecture/event-schemas.md`](../architecture/event-schemas.md).
 
-### Change Detection
+Enable the delivery system by setting `SPINE_EVENT_DELIVERY=true`. Without that flag, only projection polling (§6.4) is available.
 
-Poll `projection.sync_state` to detect when the projection has been updated:
+### 6.1 Webhook Subscriptions
+
+HTTP POST delivery to operator-configured URLs with HMAC-signed payloads, exponential-backoff retries, and per-subscription circuit breaking.
+
+**Subscription CRUD** — all routes require a bearer token with subscription-management permissions:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/v1/subscriptions` | Create subscription |
+| `GET` | `/api/v1/subscriptions` | List subscriptions |
+| `GET` | `/api/v1/subscriptions/{id}` | Get one |
+| `PATCH` | `/api/v1/subscriptions/{id}` | Update (partial) |
+| `DELETE` | `/api/v1/subscriptions/{id}` | Delete |
+| `POST` | `/api/v1/subscriptions/{id}/activate` | Status → `active` |
+| `POST` | `/api/v1/subscriptions/{id}/pause` | Status → `paused` |
+| `POST` | `/api/v1/subscriptions/{id}/rotate-secret` | New signing secret (returned once) |
+| `POST` | `/api/v1/subscriptions/{id}/test` | Send a ping event synchronously |
+| `GET`  | `/api/v1/subscriptions/{id}/deliveries` | List delivery attempts |
+| `GET`  | `/api/v1/subscriptions/{id}/deliveries/{delivery_id}` | Delivery detail |
+| `POST` | `/api/v1/subscriptions/{id}/deliveries/{delivery_id}/replay` | Re-queue a failed delivery |
+| `GET`  | `/api/v1/subscriptions/{id}/stats` | Aggregate counts |
+
+**Create body**:
+
+```json
+{
+  "name": "smp-bridge",
+  "target_url": "https://smp.example.com/spine/events",
+  "event_types": ["step_assigned", "step_completed", "run_failed"],
+  "metadata": {
+    "tls": {
+      "spki_sha256": "base64-spki-pin"
+    }
+  }
+}
+```
+
+`event_types` empty/missing = receive all events. The create response returns the generated `signing_secret` exactly once (`whsec_` prefix + 64 hex chars); store it securely — subsequent reads never include it again. Use `POST /rotate-secret` to replace it.
+
+**Outbound webhook request** (sent by Spine to `target_url`):
+
+- `POST <target_url>`
+- `Content-Type: application/json`
+- `X-Spine-Event: <event_type>`
+- `X-Spine-Delivery: <delivery_id>`
+- `X-Spine-Signature: sha256=<HMAC-SHA256(raw-body, signing_secret)>` *(only when a secret is set)*
+- Body: the canonical event object (see [event-schemas.md](../architecture/event-schemas.md)) — `{event_id, type, timestamp, actor_id?, run_id?, artifact_path?, trace_id?, payload?}`.
+
+**Retry and failure handling**:
+
+- Retryable responses: 5xx, network errors, `429` (honours `Retry-After`).
+- Non-retryable: 4xx other than 429 → delivery immediately marked `failed`.
+- Backoff schedule: `1s, 2s, 4s, 8s, 16s` (exponential, capped at 16s).
+- Attempt cap: **5** for domain events (`artifact_*`, `run_*`, `step_*`), **2** for operational events.
+- Exhausted domain-event deliveries land in the `dead` state; operational events in `failed`.
+
+**Per-subscription circuit breaker** — opens after **10** consecutive failures, stays open for **60s**, then half-opens to probe with a single delivery. A success closes it; a probe failure re-opens. While open, new events skip the subscription rather than queueing.
+
+### 6.2 SSE Event Stream
+
+Long-lived Server-Sent Events for dashboards and IDE integrations.
+
+```
+GET /api/v1/events/stream?types=step_assigned,step_completed
+Authorization: Bearer <token>
+Last-Event-ID: <optional replay cursor>
+```
+
+- Auth: caller needs the `events.read` permission.
+- `types=`: comma-separated filter; omit for all events.
+- `Last-Event-ID`: on reconnect, replays up to the last 100 missed events after that cursor.
+- Response headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`.
+- Heartbeat: `: keepalive` comment every 30s. Per-event write deadline is 5s — slow clients get dropped rather than back-pressuring the emitter.
+- Per-actor concurrency cap: default 5, tune via `SPINE_SSE_MAX_CONN_PER_ACTOR` (≤0 disables the cap — not recommended).
+
+### 6.3 Pull-Based Event Log
+
+Stateless cursor-paginated API for consumers that prefer polling over long-lived connections.
+
+```
+GET /api/v1/events?after=<cursor>&types=step_assigned,run_failed&limit=100
+Authorization: Bearer <token>
+```
+
+| Query | Default | Notes |
+|-------|---------|-------|
+| `after` | beginning of log | Cursor returned by a prior response |
+| `types` | all | Comma-separated event types |
+| `limit` | 50 | 1–1000 |
+
+Response:
+
+```json
+{
+  "events": [ { "event_id": "...", "type": "step_assigned", ... } ],
+  "next_cursor": "ev-0000001234",
+  "has_more": true
+}
+```
+
+Resume by echoing `next_cursor` as the next `after` value. The log is retention-capped server-side — schedule consumers to poll frequently enough to stay within the window.
+
+### 6.4 Projection Polling (fallback)
+
+If webhook/SSE/pull are unavailable, detect changes by polling `projection.sync_state`:
 
 ```sql
 SELECT last_synced_commit, last_synced_at
@@ -332,17 +436,52 @@ FROM projection.sync_state
 WHERE id = 'global';
 ```
 
-Compare `last_synced_commit` with your last-seen value. If changed, re-query the tables you care about.
-
-### Recommended Polling
-
-- **Normal operation:** Poll every 5-10 seconds
-- **Backoff on no changes:** Increase interval to 30 seconds after 10 consecutive polls with no changes
-- **Reset on change:** Return to 5-second interval when a change is detected
+Compare `last_synced_commit` with your last-seen value; re-query tables on change. Recommended cadence: 5–10 s during activity, back off to 30 s after ten idle polls, reset on change.
 
 ---
 
-## 7. Deployment Patterns
+## 7. Git HTTP Serve Endpoint
+
+Spine ships a read-only git smart-HTTP server so runner containers can clone workspace repositories directly — no SSH keys, no external git hosting, no additional credentials.
+
+### Route Patterns
+
+- **Shared mode**: `GET /git/{workspace_id}/info/refs?service=git-upload-pack`, `POST /git/{workspace_id}/git-upload-pack`
+- **Single mode**: `GET /git/info/refs?service=git-upload-pack`, `POST /git/git-upload-pack` (workspace is implicit)
+- Dumb protocol objects (`HEAD`, `objects/*`) are also served via GET
+
+The endpoint wraps `git http-backend` with `http.receivepack=false` pinned in the repo config. `git-receive-pack` and any push attempt return **403**.
+
+### Authentication
+
+Two acceptance paths:
+
+1. **Trusted-CIDR bypass** — when the client's source IP falls inside `SPINE_GIT_HTTP_TRUSTED_CIDRS`, no bearer token is required. Set this only to the narrow subnet that runner containers live on (e.g. the Docker compose network). Unset means every caller needs a token.
+2. **Bearer token** — `Authorization: Bearer <token>` validated against the workspace's actor tokens (or the server-level operator token).
+
+Example clone from a runner container on the same Docker network:
+
+```bash
+git clone \
+  http://spine:8080/git/ws-abc123 \
+  --branch spine/run/task-001-implement-x \
+  --depth 1 \
+  /workspace
+```
+
+### Limits
+
+- **Concurrency**: default 5 in-flight pack operations per process; additional requests get `503 Service Unavailable` with `Retry-After: 5`. Configured at construction time (`Config.MaxConcurrent`); not currently an env var.
+- **Per-request timeout**: default 30s (`Config.OpTimeout`).
+- **Read-only**: push/receivepack returns 403 before hitting CGI.
+
+### Observability
+
+Every clone is logged with source IP, resolved `repoPath`, requested branch, and duration. Long-tail connections are surfaced in slog output for capacity tuning.
+
+---
+
+## 8. Deployment Patterns
 
 ### Docker Compose -- Dedicated Mode
 
@@ -470,4 +609,5 @@ spec:
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
-| `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | - | Per-actor cap on concurrent SSE stream connections |
+| `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections (≤0 disables the cap) |
+| `SPINE_EVENT_DELIVERY` | No | `false` | Feature flag — set to `true` to enable webhook / SSE / pull-log delivery. Without it, only projection polling works. |
