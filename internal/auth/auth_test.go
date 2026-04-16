@@ -278,6 +278,10 @@ func TestAuthorizeAllOperations(t *testing.T) {
 		{"system.rebuild", domain.RoleOperator, true},
 		// Operator cannot manage tokens
 		{"token.create", domain.RoleOperator, false},
+		// system.validate is admin-only (reveals the full artifact tree)
+		{"system.validate", domain.RoleOperator, false},
+		{"system.validate", domain.RoleReviewer, false},
+		{"system.validate", domain.RoleAdmin, true},
 		// Admin can do everything
 		{"token.create", domain.RoleAdmin, true},
 		{"artifact.create", domain.RoleAdmin, true},
