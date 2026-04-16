@@ -2,12 +2,13 @@
 id: TASK-010
 type: Task
 title: "Enforce operator token minimum length at startup"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-004-security-audit-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
 created: 2026-04-16
 last_updated: 2026-04-16
+completed: 2026-04-16
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-004-security-audit-2026-04/epic.md
