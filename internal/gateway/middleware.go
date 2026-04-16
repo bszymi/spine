@@ -228,6 +228,20 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+// Flush forwards to the embedded ResponseWriter if it supports Flusher.
+// Without this, wrapping breaks SSE handlers that type-assert to http.Flusher.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying ResponseWriter for http.NewResponseController,
+// which lets the SSE handler reach SetWriteDeadline on the real writer.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // securityHeadersMiddleware sets standard security response headers.
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

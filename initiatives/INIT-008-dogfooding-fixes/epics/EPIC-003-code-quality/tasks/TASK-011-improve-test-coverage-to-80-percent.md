@@ -2,9 +2,10 @@
 id: TASK-011
 type: Task
 title: "Improve test coverage to above 80% for gateway, artifact, and workspace packages"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-14
+last_updated: 2026-04-16
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-003-code-quality/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 links:
