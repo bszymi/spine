@@ -465,17 +465,14 @@ func serveCmd() *cobra.Command {
 			}
 			log.Info("spine config loaded", "artifacts_dir", spineCfg.ArtifactsDir)
 
-			var gitOpts []git.CLIOption
-			if helper := os.Getenv("SPINE_GIT_CREDENTIAL_HELPER"); helper != "" {
-				if err := git.ValidateCredentialHelper(helper); err != nil {
-					return fmt.Errorf("credential helper: %w", err)
-				}
-				gitOpts = append(gitOpts, git.WithCredentialHelper(helper))
+			authWarnings, err := git.LoadPushAuthFromEnv()
+			if err != nil {
+				return fmt.Errorf("credential helper: %w", err)
 			}
-			if token := os.Getenv("SPINE_GIT_PUSH_TOKEN"); token != "" {
-				username := os.Getenv("SPINE_GIT_PUSH_USERNAME")
-				gitOpts = append(gitOpts, git.WithPushToken(token, username))
+			for _, w := range authWarnings {
+				log.Warn(w)
 			}
+			gitOpts := git.PushAuthOpts()
 			if smpID := os.Getenv("SMP_WORKSPACE_ID"); smpID != "" {
 				gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+smpID))
 			}
@@ -710,23 +707,23 @@ func serveCmd() *cobra.Command {
 			}
 
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
-				Store:              st,
-				Auth:               authSvc,
-				Artifacts:          artifactSvc,
-				ProjQuery:          projQuery,
-				ProjSync:           projSync,
-				Git:                gitClient,
-				Validator:          validator,
-				WorkflowResolver:   wfResolver,
-				BranchCreator:      divSvcForGateway,
-				Events:             eventRouter,
-				RunStarter:         starter,
-				PlanningRunStarter: planningStarter,
-				ResultHandler:      resultHandler,
-				WorkspaceResolver:  wsResolver,
-				ServicePool:        wsServicePool,
-				WSDBProvider:       wsDBProvider,
-				RunCanceller:       orch,
+				Store:               st,
+				Auth:                authSvc,
+				Artifacts:           artifactSvc,
+				ProjQuery:           projQuery,
+				ProjSync:            projSync,
+				Git:                 gitClient,
+				Validator:           validator,
+				WorkflowResolver:    wfResolver,
+				BranchCreator:       divSvcForGateway,
+				Events:              eventRouter,
+				RunStarter:          starter,
+				PlanningRunStarter:  planningStarter,
+				ResultHandler:       resultHandler,
+				WorkspaceResolver:   wsResolver,
+				ServicePool:         wsServicePool,
+				WSDBProvider:        wsDBProvider,
+				RunCanceller:        orch,
 				CandidateFinder:     orch,
 				StepClaimer:         orch,
 				StepReleaser:        orch,
