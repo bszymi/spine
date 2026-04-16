@@ -1,12 +1,55 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/bszymi/spine/internal/workspace"
 )
+
+// poolStubResolver resolves a single workspace with no database URL so
+// buildServiceSet yields ss.Store == nil and ss.Auth == nil — the exact
+// branch that used to leak pool refs before TASK-015.
+type poolStubResolver struct{ cfg workspace.Config }
+
+func (r *poolStubResolver) Resolve(_ context.Context, id string) (*workspace.Config, error) {
+	if id != r.cfg.ID {
+		return nil, workspace.ErrWorkspaceNotFound
+	}
+	c := r.cfg
+	return &c, nil
+}
+
+func (r *poolStubResolver) List(_ context.Context) ([]workspace.Config, error) {
+	return []workspace.Config{r.cfg}, nil
+}
+
+func TestValidateGitAuth_DoesNotLeakPoolRefs(t *testing.T) {
+	ctx := context.Background()
+	resolver := &poolStubResolver{cfg: workspace.Config{ID: "ws-1", RepoPath: t.TempDir()}}
+	pool := workspace.NewServicePool(ctx, resolver, workspace.PoolConfig{})
+	defer pool.Close()
+
+	s := &Server{servicePool: pool}
+	cfg := &workspace.Config{ID: "ws-1"}
+
+	req := httptest.NewRequest("GET", "/git/info/refs", nil)
+	req.Header.Set("Authorization", "Bearer bad-token")
+
+	for i := 0; i < 1000; i++ {
+		if err := s.validateGitAuth(req, cfg); err == nil {
+			t.Fatalf("iteration %d: expected auth failure", i)
+		}
+	}
+
+	if ref := pool.RefCount("ws-1"); ref != 0 {
+		t.Fatalf("expected refCount 0 after 1000 failed auths, got %d (pool leak)", ref)
+	}
+}
 
 func TestParseGitPath(t *testing.T) {
 	tests := []struct {

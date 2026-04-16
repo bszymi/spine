@@ -145,12 +145,18 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) error {
 	}
 
 	// Use workspace-scoped auth if available, otherwise server-level.
+	// The Release must run on every path that Get succeeded on — even
+	// when ss.Auth is nil or ValidateToken below fails — otherwise
+	// repeated auth failures leak pool references and eventually
+	// exhaust the workspace pool.
 	authSvc := s.auth
 	if s.servicePool != nil {
 		ss, err := s.servicePool.Get(r.Context(), cfg.ID)
-		if err == nil && ss.Auth != nil {
-			authSvc = ss.Auth
+		if err == nil {
 			defer s.servicePool.Release(cfg.ID)
+			if ss.Auth != nil {
+				authSvc = ss.Auth
+			}
 		}
 	}
 
