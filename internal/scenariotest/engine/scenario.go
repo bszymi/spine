@@ -59,7 +59,13 @@ func (r *ScenarioResult) Passed() bool {
 
 // ScenarioContext carries the test environment and accumulated state between steps.
 type ScenarioContext struct {
-	T       *testing.T
+	// T is the current step's subtest. It is rebound on every step, so
+	// cleanup registered via T.Cleanup fires at the end of that step.
+	T *testing.T
+	// ParentT is the scenario-level test. Cleanup registered here persists
+	// for the entire scenario — use it for resources (servers, listeners)
+	// that must outlive the setup step.
+	ParentT *testing.T
 	Repo    *harness.TestRepo
 	DB      *harness.TestDB
 	Runtime *harness.TestRuntime
@@ -103,6 +109,7 @@ func RunScenario(t *testing.T, scenario Scenario) *ScenarioResult {
 
 	sc := &ScenarioContext{
 		T:       t,
+		ParentT: t,
 		Repo:    env.Repo,
 		DB:      env.DB,
 		Runtime: env.Runtime,

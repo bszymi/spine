@@ -2,7 +2,7 @@
 id: TASK-006
 type: Task
 title: "Add Git HTTP Serve Endpoint"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-009-workspace-runtime/epics/EPIC-001-core-runtime/epic.md
 initiative: /initiatives/INIT-009-workspace-runtime/initiative.md
 work_type: implementation
