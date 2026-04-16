@@ -242,6 +242,25 @@ func parsePositiveIntEnv(name string) int {
 	return n
 }
 
+// parseGitHTTPTrustedCIDRs parses the SPINE_GIT_HTTP_TRUSTED_CIDRS
+// comma-separated list. Returns an empty slice when the input is empty —
+// callers must then require bearer-token auth for every git request.
+// Previously this helper fell back to all RFC1918 ranges, which made any
+// container on any Docker bridge "trusted"; that default has been
+// removed deliberately so deployments must opt in explicitly.
+func parseGitHTTPTrustedCIDRs(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, c := range strings.Split(raw, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // requireSecureDBURL rejects connection strings that use sslmode=disable
 // unless SPINE_INSECURE_LOCAL=1 is set. This prevents production
 // deployments from silently transmitting credentials and data in
@@ -557,11 +576,7 @@ func serveCmd() *cobra.Command {
 			// Initialize git HTTP handler for serving repos to runner containers.
 			var gitHTTPHandler *githttp.Handler
 			if wsResolver != nil {
-				trustedCIDRs := strings.Split(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"), ",")
-				if trustedCIDRs[0] == "" {
-					// Default: trust Docker internal networks.
-					trustedCIDRs = []string{"172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"}
-				}
+				trustedCIDRs := parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"))
 				var err error
 				gitHTTPHandler, err = githttp.NewHandler(githttp.Config{
 					ResolveRepoPath: func(ctx context.Context, workspaceID string) (string, error) {
@@ -575,6 +590,8 @@ func serveCmd() *cobra.Command {
 				})
 				if err != nil {
 					log.Warn("git HTTP endpoint disabled", "reason", err.Error())
+				} else if len(trustedCIDRs) == 0 {
+					log.Warn("git HTTP endpoint enabled with no trusted CIDRs; all clients must present a bearer token. Set SPINE_GIT_HTTP_TRUSTED_CIDRS to a narrow runner subnet to opt in to token-less access.")
 				} else {
 					log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
 				}

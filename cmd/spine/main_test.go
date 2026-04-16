@@ -1,9 +1,32 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestParseGitHTTPTrustedCIDRs(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "empty input yields nil", raw: "", want: nil},
+		{name: "single cidr", raw: "172.17.0.0/16", want: []string{"172.17.0.0/16"}},
+		{name: "multiple with whitespace", raw: " 172.17.0.0/16 , 10.0.0.0/8 ", want: []string{"172.17.0.0/16", "10.0.0.0/8"}},
+		{name: "trailing comma is dropped", raw: "172.17.0.0/16,", want: []string{"172.17.0.0/16"}},
+		{name: "all blanks yield nil", raw: " , , ", want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseGitHTTPTrustedCIDRs(tc.raw)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseGitHTTPTrustedCIDRs(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestRequireSecureDBURL(t *testing.T) {
 	cases := []struct {
