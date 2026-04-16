@@ -1,6 +1,11 @@
 services:
   spine-test-db:
     image: postgres:18-bookworm
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
     ports:
       - "5433:5432"
     environment:
@@ -17,6 +22,11 @@ services:
 
   spine-test-registry-db:
     image: postgres:18-bookworm
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
     ports:
       - "5435:5432"
     environment:
