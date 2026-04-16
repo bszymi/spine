@@ -7,7 +7,10 @@ services:
           cpus: "1.0"
           memory: 512M
     ports:
-      - "5433:5432"
+      # Loopback-only — host-side Go integration tests connect via
+      # localhost:5433. Keep the port mapping, but don't expose it
+      # to any LAN interface.
+      - "127.0.0.1:5433:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_TEST_USER:-spine_test}
       - POSTGRES_PASSWORD=${POSTGRES_TEST_PASSWORD:-spine_test}
@@ -28,7 +31,7 @@ services:
           cpus: "1.0"
           memory: 512M
     ports:
-      - "5435:5432"
+      - "127.0.0.1:5435:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_TEST_REGISTRY_USER:-spine_registry_test}
       - POSTGRES_PASSWORD=${POSTGRES_TEST_REGISTRY_PASSWORD:-spine_registry_test}

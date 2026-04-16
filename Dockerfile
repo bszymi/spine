@@ -11,8 +11,12 @@ RUN CGO_ENABLED=0 go build -o spine ./cmd/spine
 # ── Runtime stage ──
 FROM debian:bookworm-slim
 
+# git is required at runtime: the artifact service shells out to
+# `git worktree add`, `git push`, etc. ca-certificates is needed for
+# outbound HTTPS (webhook deliveries, registry DB). wget was previously
+# installed but unused — dropped to narrow the runtime attack surface.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates wget && \
+    apt-get install -y --no-install-recommends git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash spine
