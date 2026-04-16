@@ -46,6 +46,16 @@ func (s *PostgresStore) ExecRaw(ctx context.Context, sql string, args ...any) er
 	return err
 }
 
+// QueryRowSecret reads the raw (still-encrypted) signing_secret column
+// for the given subscription ID. For testing the at-rest ciphertext
+// invariant — callers bypass the decrypting GetSubscription path.
+func (s *PostgresStore) QueryRowSecret(ctx context.Context, subscriptionID string, dest *string) error {
+	return s.pool.QueryRow(ctx,
+		`SELECT signing_secret FROM runtime.event_subscriptions WHERE subscription_id = $1`,
+		subscriptionID,
+	).Scan(dest)
+}
+
 // CleanupTestData removes all test data from runtime and projection tables.
 func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 	t.Helper()

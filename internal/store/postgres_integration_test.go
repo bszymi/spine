@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	spinecrypto "github.com/bszymi/spine/internal/crypto"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/store"
 )
@@ -609,4 +610,97 @@ func TestMigrationApplied(t *testing.T) {
 	if !applied {
 		t.Error("expected migration 001_initial_schema to be applied")
 	}
+}
+
+func TestEventSubscription_SigningSecretEncryption(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	key := make([]byte, spinecrypto.EncryptionKeySize)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	cipher, err := spinecrypto.NewSecretCipher(key)
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	s.SetSecretCipher(cipher)
+
+	plaintext := "supersecret-webhook-key"
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	sub := &store.EventSubscription{
+		SubscriptionID: "sub-enc-001",
+		Name:           "enc-test",
+		TargetType:     "webhook",
+		TargetURL:      "https://example.com/hook",
+		EventTypes:     []string{"step.assigned"},
+		SigningSecret:  plaintext,
+		Status:         "active",
+		Metadata:       []byte("{}"),
+		CreatedBy:      "system",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := s.CreateSubscription(ctx, sub); err != nil {
+		t.Fatalf("CreateSubscription: %v", err)
+	}
+
+	// Raw column must be ciphertext — a DB compromise should not
+	// surrender the signing key.
+	var rawSecret string
+	if err := s.QueryRowSecret(ctx, sub.SubscriptionID, &rawSecret); err != nil {
+		t.Fatalf("QueryRowSecret: %v", err)
+	}
+	if !spinecrypto.IsEncrypted(rawSecret) {
+		t.Fatalf("expected ciphertext at rest, got %q", rawSecret)
+	}
+	if rawSecret == plaintext {
+		t.Fatal("stored secret is plaintext — encryption did not apply")
+	}
+
+	// Decrypted read path returns the original plaintext.
+	got, err := s.GetSubscription(ctx, sub.SubscriptionID)
+	if err != nil {
+		t.Fatalf("GetSubscription: %v", err)
+	}
+	if got.SigningSecret != plaintext {
+		t.Fatalf("GetSubscription roundtrip mismatch: got %q want %q", got.SigningSecret, plaintext)
+	}
+
+	// Legacy plaintext rows (written before the key was deployed)
+	// must still decrypt to themselves — this is what makes the
+	// migration transparent.
+	legacyID := "sub-enc-legacy"
+	if err := s.ExecRaw(ctx,
+		`INSERT INTO runtime.event_subscriptions
+		  (subscription_id, workspace_id, name, target_type, target_url, event_types,
+		   signing_secret, status, metadata, created_by, created_at, updated_at)
+		 VALUES ($1, NULL, $2, 'webhook', 'https://x', ARRAY['step.assigned']::text[],
+		   $3, 'active', '{}'::jsonb, 'system', $4, $4)`,
+		legacyID, "legacy-test", "legacy-plaintext", now,
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	legacy, err := s.GetSubscription(ctx, legacyID)
+	if err != nil {
+		t.Fatalf("GetSubscription(legacy): %v", err)
+	}
+	if legacy.SigningSecret != "legacy-plaintext" {
+		t.Fatalf("legacy passthrough failed: got %q", legacy.SigningSecret)
+	}
+
+	// Update re-encrypts; the on-disk row must now be ciphertext.
+	if err := s.UpdateSubscription(ctx, legacy); err != nil {
+		t.Fatalf("UpdateSubscription: %v", err)
+	}
+	var afterUpdate string
+	if err := s.QueryRowSecret(ctx, legacyID, &afterUpdate); err != nil {
+		t.Fatalf("QueryRowSecret: %v", err)
+	}
+	if !spinecrypto.IsEncrypted(afterUpdate) {
+		t.Fatalf("legacy row not re-encrypted on update: %q", afterUpdate)
+	}
+
+	s.CleanupTestData(ctx, t)
 }

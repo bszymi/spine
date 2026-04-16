@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	spinecrypto "github.com/bszymi/spine/internal/crypto"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,7 +17,22 @@ import (
 
 // PostgresStore implements Store using PostgreSQL via pgx.
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	cipher *spinecrypto.SecretCipher
+}
+
+// SetSecretCipher installs the AEAD used to encrypt at-rest secrets
+// (currently: event_subscriptions.signing_secret). With no cipher
+// configured the store falls back to plaintext, matching behaviour
+// before TASK-007 so integration tests and development setups work
+// without additional configuration.
+func (s *PostgresStore) SetSecretCipher(c *spinecrypto.SecretCipher) {
+	s.cipher = c
+}
+
+// secretCipher returns the installed cipher or nil.
+func (s *PostgresStore) secretCipher() *spinecrypto.SecretCipher {
+	return s.cipher
 }
 
 // NewPostgresStore creates a new PostgreSQL store with connection pooling.
@@ -1570,16 +1586,41 @@ func (s *PostgresStore) DeleteExpiredDeliveries(ctx context.Context, before time
 // ── Event Subscriptions ──
 
 func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
-	_, err := s.pool.Exec(ctx, `
+	secret, err := s.encryptSubscriptionSecret(sub.SigningSecret)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO runtime.event_subscriptions
 			(subscription_id, workspace_id, name, target_type, target_url, event_types,
 			 signing_secret, status, metadata, created_by, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		sub.SubscriptionID, nilIfEmpty(sub.WorkspaceID), sub.Name, sub.TargetType, sub.TargetURL,
-		sub.EventTypes, sub.SigningSecret, sub.Status, sub.Metadata,
+		sub.EventTypes, secret, sub.Status, sub.Metadata,
 		sub.CreatedBy, sub.CreatedAt, sub.UpdatedAt,
 	)
 	return err
+}
+
+// encryptSubscriptionSecret encrypts a signing secret at rest when a
+// cipher is configured. If the value is already ciphertext (i.e. it
+// was re-saved without being decrypted first) it is passed through so
+// we never double-encrypt.
+func (s *PostgresStore) encryptSubscriptionSecret(secret string) (string, error) {
+	if s.cipher == nil || secret == "" || spinecrypto.IsEncrypted(secret) {
+		return secret, nil
+	}
+	return s.cipher.Encrypt(secret)
+}
+
+// decryptSubscriptionSecret reverses encryptSubscriptionSecret.
+// Pre-migration plaintext rows are returned as-is; they will be
+// re-encrypted on their next UpdateSubscription call.
+func (s *PostgresStore) decryptSubscriptionSecret(stored string) (string, error) {
+	if stored == "" {
+		return stored, nil
+	}
+	return s.cipher.Decrypt(stored)
 }
 
 func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID string) (*EventSubscription, error) {
@@ -1601,17 +1642,26 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID stri
 	if wsID != nil {
 		sub.WorkspaceID = *wsID
 	}
+	secret, err := s.decryptSubscriptionSecret(sub.SigningSecret)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt signing_secret: %w", err)
+	}
+	sub.SigningSecret = secret
 	return &sub, nil
 }
 
 func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscription) error {
-	_, err := s.pool.Exec(ctx, `
+	secret, err := s.encryptSubscriptionSecret(sub.SigningSecret)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
 		UPDATE runtime.event_subscriptions SET
 			name = $2, target_type = $3, target_url = $4, event_types = $5,
 			signing_secret = $6, status = $7, metadata = $8, updated_at = now()
 		WHERE subscription_id = $1`,
 		sub.SubscriptionID, sub.Name, sub.TargetType, sub.TargetURL,
-		sub.EventTypes, sub.SigningSecret, sub.Status, sub.Metadata,
+		sub.EventTypes, secret, sub.Status, sub.Metadata,
 	)
 	return err
 }
@@ -1640,7 +1690,7 @@ func (s *PostgresStore) ListSubscriptions(ctx context.Context, workspaceID strin
 	}
 	defer rows.Close()
 
-	return scanSubscriptions(rows)
+	return s.scanSubscriptions(rows)
 }
 
 func (s *PostgresStore) ListActiveSubscriptionsByEventType(ctx context.Context, eventType string) ([]EventSubscription, error) {
@@ -1656,10 +1706,10 @@ func (s *PostgresStore) ListActiveSubscriptionsByEventType(ctx context.Context, 
 	}
 	defer rows.Close()
 
-	return scanSubscriptions(rows)
+	return s.scanSubscriptions(rows)
 }
 
-func scanSubscriptions(rows pgx.Rows) ([]EventSubscription, error) {
+func (s *PostgresStore) scanSubscriptions(rows pgx.Rows) ([]EventSubscription, error) {
 	var results []EventSubscription
 	for rows.Next() {
 		var sub EventSubscription
@@ -1672,6 +1722,11 @@ func scanSubscriptions(rows pgx.Rows) ([]EventSubscription, error) {
 		if wsID != nil {
 			sub.WorkspaceID = *wsID
 		}
+		secret, err := s.decryptSubscriptionSecret(sub.SigningSecret)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt signing_secret: %w", err)
+		}
+		sub.SigningSecret = secret
 		results = append(results, sub)
 	}
 	return results, rows.Err()
