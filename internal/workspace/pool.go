@@ -10,6 +10,7 @@ import (
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/config"
+	spinecrypto "github.com/bszymi/spine/internal/crypto"
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
@@ -65,14 +66,15 @@ type poolEntry struct {
 // ServicePool lazily creates and caches per-workspace service sets.
 // Per components.md §6.5.
 type ServicePool struct {
-	resolver    Resolver
-	mu          sync.Mutex
-	entries     map[string]*poolEntry
-	idleTimeout time.Duration
-	builder     ServiceSetBuilder
-	closed      bool
-	ctx         context.Context    // pool-lifetime context for background goroutines
-	cancel      context.CancelFunc // cancels pool-lifetime context on Close
+	resolver     Resolver
+	mu           sync.Mutex
+	entries      map[string]*poolEntry
+	idleTimeout  time.Duration
+	builder      ServiceSetBuilder
+	secretCipher *spinecrypto.SecretCipher
+	closed       bool
+	ctx          context.Context    // pool-lifetime context for background goroutines
+	cancel       context.CancelFunc // cancels pool-lifetime context on Close
 }
 
 // ServiceSetBuilder is an optional post-construction hook that extends a
@@ -90,6 +92,11 @@ type PoolConfig struct {
 	// Use it to inject orchestrator-dependent services that would create
 	// import cycles if constructed directly in buildServiceSet.
 	Builder ServiceSetBuilder
+
+	// SecretCipher, if set, is installed on each per-workspace
+	// PostgresStore so at-rest secrets (e.g. webhook signing secrets)
+	// are encrypted with the same key used in single-workspace mode.
+	SecretCipher *spinecrypto.SecretCipher
 }
 
 // NewServicePool creates a service pool backed by the given resolver.
@@ -102,12 +109,13 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 	}
 	poolCtx, cancel := context.WithCancel(ctx)
 	return &ServicePool{
-		resolver:    resolver,
-		entries:     make(map[string]*poolEntry),
-		idleTimeout: timeout,
-		builder:     cfg.Builder,
-		ctx:         poolCtx,
-		cancel:      cancel,
+		resolver:     resolver,
+		entries:      make(map[string]*poolEntry),
+		idleTimeout:  timeout,
+		builder:      cfg.Builder,
+		secretCipher: cfg.SecretCipher,
+		ctx:          poolCtx,
+		cancel:       cancel,
 	}
 }
 
@@ -141,7 +149,7 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 
 	// Hold the lock during initialization to prevent double-init.
 	// This is acceptable because workspace init is rare (first request only).
-	ss, err := buildServiceSet(p.ctx, *cfg, p.builder)
+	ss, err := buildServiceSet(p.ctx, *cfg, p.builder, p.secretCipher)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("init workspace %q services: %w", canonicalID, err)
@@ -247,7 +255,7 @@ func (p *ServicePool) Close() {
 }
 
 // buildServiceSet creates a complete service set from a workspace config.
-func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder) (*ServiceSet, error) {
+func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher) (*ServiceSet, error) {
 	var closers []func()
 
 	// Database.
@@ -259,6 +267,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder)
 		if err != nil {
 			return nil, fmt.Errorf("connect to workspace database: %w", err)
 		}
+		pgStore.SetSecretCipher(cipher)
 		st = pgStore
 		closers = append(closers, pgStore.Close)
 	}

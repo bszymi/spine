@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
@@ -125,6 +127,63 @@ func TestParseGitHTTPTrustedCIDRs(t *testing.T) {
 				t.Fatalf("parseGitHTTPTrustedCIDRs(%q) = %v, want %v", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadSecretCipher_ProductionRequiresKey(t *testing.T) {
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", "")
+	// Production without a key is a deploy-time footgun — refuse to
+	// start rather than silently write plaintext secrets.
+	if _, err := loadSecretCipher("production"); err == nil {
+		t.Fatal("expected error in production without key")
+	}
+}
+
+func TestLoadSecretCipher_DevAllowsMissingKey(t *testing.T) {
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", "")
+	c, err := loadSecretCipher("development")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c != nil {
+		t.Fatal("expected nil cipher when key unset in dev")
+	}
+}
+
+func TestLoadSecretCipher_ValidKeyBuildsCipher(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(key))
+	c, err := loadSecretCipher("production")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil cipher")
+	}
+	ct, err := c.Encrypt("s")
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if got, err := c.Decrypt(ct); err != nil || got != "s" {
+		t.Fatalf("roundtrip failed: got %q err %v", got, err)
+	}
+}
+
+func TestLoadSecretCipher_RejectsMalformedKey(t *testing.T) {
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", "not-base64-!!")
+	if _, err := loadSecretCipher("development"); err == nil {
+		t.Fatal("expected error for malformed key")
+	}
+}
+
+func TestLoadSecretCipher_RejectsShortKey(t *testing.T) {
+	short := base64.StdEncoding.EncodeToString(make([]byte, 16))
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", short)
+	if _, err := loadSecretCipher("development"); err == nil {
+		t.Fatal("expected error for 16-byte key")
 	}
 }
 

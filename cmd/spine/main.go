@@ -16,6 +16,7 @@ import (
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/cli"
 	"github.com/bszymi/spine/internal/config"
+	spinecrypto "github.com/bszymi/spine/internal/crypto"
 	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/domain"
@@ -332,6 +333,29 @@ func validateOperatorToken(token string) error {
 	return nil
 }
 
+// loadSecretCipher builds the at-rest secret cipher from
+// SPINE_SECRET_ENCRYPTION_KEY (TASK-007). In production environments
+// the key is required: without it, webhook signing secrets would be
+// written to the database in plaintext and a DB compromise would
+// hand the attacker the ability to forge webhooks. For non-production
+// environments an unset key is allowed so local development keeps
+// working without extra setup; the caller is expected to log a clear
+// warning in that case.
+func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
+	encoded := os.Getenv("SPINE_SECRET_ENCRYPTION_KEY")
+	if encoded == "" {
+		if env == "production" {
+			return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY is required when SPINE_ENV=production; generate one with `openssl rand -base64 32`")
+		}
+		return nil, nil
+	}
+	key, err := spinecrypto.ParseEncryptionKey(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY: %w", err)
+	}
+	return spinecrypto.NewSecretCipher(key)
+}
+
 func serveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
@@ -352,6 +376,14 @@ func serveCmd() *cobra.Command {
 			}
 			if devMode {
 				log.Warn("SPINE_DEV_MODE is enabled — unauthenticated requests will be allowed", "env", runtimeEnv)
+			}
+
+			secretCipher, err := loadSecretCipher(runtimeEnv)
+			if err != nil {
+				return err
+			}
+			if secretCipher == nil {
+				log.Warn("SPINE_SECRET_ENCRYPTION_KEY is not set — webhook signing secrets will be stored in plaintext", "env", runtimeEnv)
 			}
 
 			port := os.Getenv("SPINE_SERVER_PORT")
@@ -389,7 +421,8 @@ func serveCmd() *cobra.Command {
 				defer wsDBProvider.Close()
 				wsResolver = wsDBProvider
 				wsServicePool = workspace.NewServicePool(ctx, wsDBProvider, workspace.PoolConfig{
-					Builder: workspaceOrchestratorBuilder,
+					Builder:      workspaceOrchestratorBuilder,
+					SecretCipher: secretCipher,
 				})
 				defer wsServicePool.Close()
 				log.Info("workspace mode: shared", "registry_url", "***")
@@ -408,6 +441,7 @@ func serveCmd() *cobra.Command {
 				if err != nil {
 					log.Error("database connection failed, starting without store", "error", err)
 				} else {
+					pgStore.SetSecretCipher(secretCipher)
 					st = pgStore
 					defer pgStore.Close()
 				}
