@@ -3,6 +3,7 @@ package gateway
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,11 +68,14 @@ func (rl *ipRateLimiter) evictLoop() {
 
 // rateLimitMiddleware creates a per-IP rate limiting middleware.
 // rps is the allowed requests per second; burst is the max burst size.
-func rateLimitMiddleware(rps float64, burst int) func(http.Handler) http.Handler {
+// trustedProxies are CIDR-parsed networks whose X-Forwarded-For header
+// will be honored. Pass nil to disable (the default) — the limiter
+// then keys on r.RemoteAddr exactly as before.
+func rateLimitMiddleware(rps float64, burst int, trustedProxies []*net.IPNet) func(http.Handler) http.Handler {
 	limiter := newIPRateLimiter(rate.Limit(rps), burst)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := extractIP(r)
+			ip := clientIPForRateLimit(r, trustedProxies)
 			if !limiter.getLimiter(ip).Allow() {
 				w.Header().Set("Retry-After", "1")
 				WriteError(w, domain.NewError(domain.ErrRateLimited, "rate limit exceeded"))
@@ -89,4 +93,72 @@ func extractIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+// clientIPForRateLimit returns the IP used to bucket a request. When
+// RemoteAddr is inside a trusted proxy CIDR, the right-most
+// X-Forwarded-For entry that is NOT itself trusted is returned; this
+// makes each real client its own bucket when the deployment sits
+// behind a reverse proxy. When no trusted proxies are configured, or
+// when RemoteAddr is not among them, the function returns
+// RemoteAddr — naive X-Forwarded-For trust would let any client forge
+// a source IP and evade the limiter.
+func clientIPForRateLimit(r *http.Request, trustedProxies []*net.IPNet) string {
+	remote := extractIP(r)
+	if len(trustedProxies) == 0 {
+		return remote
+	}
+	remoteIP := net.ParseIP(remote)
+	if remoteIP == nil || !ipInNets(remoteIP, trustedProxies) {
+		return remote
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return remote
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		ip := net.ParseIP(candidate)
+		if ip == nil {
+			continue
+		}
+		if ipInNets(ip, trustedProxies) {
+			continue
+		}
+		return candidate
+	}
+	return remote
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseTrustedProxyCIDRs parses a comma-separated CIDR list. Blank
+// entries are skipped. An unparseable entry is returned as an error
+// so misconfiguration is surfaced at server startup rather than
+// silently degrading to "no proxies trusted".
+func ParseTrustedProxyCIDRs(raw string) ([]*net.IPNet, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []*net.IPNet
+	for _, c := range strings.Split(raw, ",") {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, ipnet, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ipnet)
+	}
+	return out, nil
 }
