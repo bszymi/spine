@@ -372,6 +372,11 @@ func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
 	// git worktree add requires the target path to not exist.
 	os.Remove(worktreeDir)
 
+	if err := validateGitRefName(wc.Branch); err != nil {
+		os.RemoveAll(worktreeDir)
+		return nil, err
+	}
+
 	cmd := execCommand(ctx, "git", "worktree", "add", worktreeDir, wc.Branch)
 	cmd.Dir = s.repo
 	out, err := cmd.CombinedOutput()
