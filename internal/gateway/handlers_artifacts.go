@@ -42,6 +42,10 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "path and content required"))
 		return
 	}
+	if err := validateArtifactContent(req.Content); err != nil {
+		WriteError(w, err)
+		return
+	}
 
 	if s.artifactsFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
@@ -190,6 +194,10 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "content required"))
 		return
 	}
+	if err := validateArtifactContent(req.Content); err != nil {
+		WriteError(w, err)
+		return
+	}
 
 	if s.artifactsFrom(r.Context()) == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
@@ -252,6 +260,10 @@ func (s *Server) handleArtifactValidate(w http.ResponseWriter, r *http.Request, 
 
 	var a *domain.Artifact
 	if req.Content != "" {
+		if err := validateArtifactContent(req.Content); err != nil {
+			WriteError(w, err)
+			return
+		}
 		// Dry-run: parse inline content without saving.
 		parsed, err := artifact.Parse(path, []byte(req.Content))
 		if err != nil {

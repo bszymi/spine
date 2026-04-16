@@ -1,6 +1,7 @@
 package artifact_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/internal/artifact"
@@ -275,6 +276,68 @@ func TestParseInvalidYAML(t *testing.T) {
 	_, err := artifact.Parse("bad.md", content)
 	if err == nil {
 		t.Fatal("expected error for invalid YAML")
+	}
+}
+
+func TestParseRejectsOversizedFrontMatter(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: Governance\ntitle: Test\nstatus: Living Document\n")
+	// Pad with a long scalar that pushes past the 64 KiB cap.
+	b.WriteString("extra: ")
+	b.WriteString(strings.Repeat("a", 70*1024))
+	b.WriteString("\n---\n# body\n")
+
+	_, err := artifact.Parse("huge.md", []byte(b.String()))
+	if err == nil {
+		t.Fatal("expected error for oversized front matter")
+	}
+	if !strings.Contains(err.Error(), "byte cap") {
+		t.Fatalf("expected byte-cap error, got %v", err)
+	}
+}
+
+func TestParseRejectsDeeplyNestedFrontMatter(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: Governance\ntitle: Deep\nstatus: Living Document\n")
+	b.WriteString("nested:\n")
+	// 100 levels of nested maps; well over the depth cap.
+	for i := 0; i < 100; i++ {
+		b.WriteString(strings.Repeat("  ", i+1))
+		b.WriteString("k:\n")
+	}
+	b.WriteString("---\n# body\n")
+
+	_, err := artifact.Parse("deep.md", []byte(b.String()))
+	if err == nil {
+		t.Fatal("expected error for deeply-nested YAML")
+	}
+	if !strings.Contains(err.Error(), "depth") {
+		t.Fatalf("expected depth error, got %v", err)
+	}
+}
+
+func TestParseRejectsAliasExpansion(t *testing.T) {
+	// Billion-laughs style: define an anchor, reference it many times.
+	// We stay under the 64 KB byte cap to exercise the alias guard, not
+	// the size guard.
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("type: Governance\ntitle: Aliases\nstatus: Living Document\n")
+	b.WriteString("anchor: &a hello\n")
+	b.WriteString("refs:\n")
+	for i := 0; i < 200; i++ {
+		b.WriteString("  - *a\n")
+	}
+	b.WriteString("---\n# body\n")
+
+	_, err := artifact.Parse("aliases.md", []byte(b.String()))
+	if err == nil {
+		t.Fatal("expected error for alias-heavy YAML")
+	}
+	if !strings.Contains(err.Error(), "alias") {
+		t.Fatalf("expected alias-count error, got %v", err)
 	}
 }
 
