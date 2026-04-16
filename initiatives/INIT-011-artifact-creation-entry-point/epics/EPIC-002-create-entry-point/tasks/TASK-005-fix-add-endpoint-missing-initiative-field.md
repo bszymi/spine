@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: "Fix addArtifactToRun: populate initiative field when scaffolding child tasks"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-011-artifact-creation-entry-point/epics/EPIC-002-create-entry-point/epic.md
 initiative: /initiatives/INIT-011-artifact-creation-entry-point/initiative.md
 work_type: bugfix

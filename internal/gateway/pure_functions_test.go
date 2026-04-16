@@ -54,7 +54,8 @@ func TestUpdateFrontMatterStatus_NoClosingDelimiter(t *testing.T) {
 // ── buildInitialContent ──
 
 func TestBuildInitialContent_Task(t *testing.T) {
-	content := buildInitialContent(domain.ArtifactTypeTask, "TASK-001", "My Task", "/epics/EPIC-001/epic.md")
+	parentMeta := map[string]string{"initiative": "/initiatives/INIT-001/initiative.md"}
+	content := buildInitialContent(domain.ArtifactTypeTask, "TASK-001", "My Task", "/epics/EPIC-001/epic.md", parentMeta)
 	if !strings.Contains(content, "id: TASK-001") {
 		t.Error("expected id in content")
 	}
@@ -63,6 +64,9 @@ func TestBuildInitialContent_Task(t *testing.T) {
 	}
 	if !strings.Contains(content, "epic: /epics/EPIC-001/epic.md") {
 		t.Error("expected epic field in task content")
+	}
+	if !strings.Contains(content, "initiative: /initiatives/INIT-001/initiative.md") {
+		t.Error("expected initiative field inherited from parent epic")
 	}
 	if !strings.Contains(content, "type: parent") {
 		t.Error("expected parent link in content")
@@ -74,7 +78,7 @@ func TestBuildInitialContent_Task(t *testing.T) {
 }
 
 func TestBuildInitialContent_Epic(t *testing.T) {
-	content := buildInitialContent(domain.ArtifactTypeEpic, "EPIC-001", "My Epic", "/initiatives/INIT-001/initiative.md")
+	content := buildInitialContent(domain.ArtifactTypeEpic, "EPIC-001", "My Epic", "/initiatives/INIT-001/initiative.md", nil)
 	if !strings.Contains(content, "initiative: /initiatives/INIT-001/initiative.md") {
 		t.Error("expected initiative field in epic content")
 	}
@@ -84,7 +88,7 @@ func TestBuildInitialContent_Epic(t *testing.T) {
 }
 
 func TestBuildInitialContent_Initiative(t *testing.T) {
-	content := buildInitialContent(domain.ArtifactTypeInitiative, "INIT-001", "My Initiative", "")
+	content := buildInitialContent(domain.ArtifactTypeInitiative, "INIT-001", "My Initiative", "", nil)
 	if !strings.Contains(content, "id: INIT-001") {
 		t.Error("expected id in content")
 	}
@@ -96,7 +100,7 @@ func TestBuildInitialContent_Initiative(t *testing.T) {
 
 func TestBuildInitialContent_ParentWithoutLeadingSlash(t *testing.T) {
 	// Parent path without leading slash should get one added.
-	content := buildInitialContent(domain.ArtifactTypeTask, "TASK-001", "T", "epics/EPIC-001/epic.md")
+	content := buildInitialContent(domain.ArtifactTypeTask, "TASK-001", "T", "epics/EPIC-001/epic.md", nil)
 	if !strings.Contains(content, "epic: /epics/EPIC-001/epic.md") {
 		t.Errorf("expected leading slash prepended, got: %s", content)
 	}
