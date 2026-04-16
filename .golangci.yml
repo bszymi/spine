@@ -1,34 +1,94 @@
-run:
-  timeout: 5m
-
+version: "2"
 linters:
   enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - unused
-    - ineffassign
-    - gosimple
     - gocritic
-    - gofmt
-    - goimports
-
-linters-settings:
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - hugeParam
-      - unnamedResult
-      - filepathJoin
-
+    - gosec
+  settings:
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - unnamedResult
+        - filepathJoin
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gosec:
+      # Rule IDs excluded at the repo level. Each is either covered by
+      # another linter (errcheck) or is structurally safe in this
+      # codebase. Line-level suppressions document individual cases.
+      excludes:
+        # G104: error not checked — errcheck already covers this with
+        # taste; gosec piles on the same findings plus false positives
+        # in defer/cleanup paths.
+        - G104
+        # G204: subprocess with variable arg — Spine is a git-native
+        # service, every subprocess launch here is a git-CLI call with
+        # validated arguments (refs, paths) passed positionally. The
+        # allowlisted credential helper and the git-ref validator
+        # (internal/git/cli.go + internal/artifact/refname.go) are the
+        # real shell-injection gates.
+        - G204
+        # G301: directory created with 0755 — intentional default for
+        # worktrees, workspace repos, and initrepo scaffolding.
+        - G301
+        # G302: specific chmod — only place this triggers is the
+        # GIT_ASKPASS helper, chmod'd 0700 deliberately.
+        - G302
+        # G304: file opened from a variable path — paths come from
+        # validated artifact slugs (safePath), CLI flags under the
+        # user's own control, or workspace config. safePath is the
+        # gate; gosec cannot see through it.
+        - G304
+        # G306: file written with non-minimal permissions — artifact
+        # files must be world-readable (0644) so git can track them
+        # across checkout/push/clone.
+        - G306
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+        path: _test\.go
+      # G101 fires on test fixtures that look like credentials —
+      # these are table-driven cases containing fake tokens
+      # ("ghp_abc123", "user:pass", "spine_test"). Real secrets never
+      # live in this tree.
+      - linters:
+          - gosec
+        path: _test\.go
+        text: G101
+      # G115 integer-conversion findings inside test fixtures (e.g.
+      # rune('0'+counter)) are bounded by the test's own loop; not a
+      # production concern.
+      - linters:
+          - gosec
+        path: _test\.go
+        text: G115
+      - linters:
+          - gosec
+        path: internal/(store|testutil)/testutil\.go|internal/testutil/db\.go
+        text: G101
+      # math/rand is fine for the scheduler's backoff jitter — this is
+      # not a security context.
+      - linters:
+          - gosec
+        path: internal/scheduler/backoff\.go
+        text: G404
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

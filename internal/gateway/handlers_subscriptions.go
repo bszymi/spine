@@ -330,7 +330,14 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 	// Send a ping event inline
 	pingPayload := []byte(`{"type":"ping","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `"}`)
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, nil)
+	// G704 flags sub.TargetURL as taint. Webhook targets are
+	// operator-configured, persisted in the subscriptions table, and
+	// fetched via an authenticated admin API — that is the trust
+	// boundary. There is no general way to test-dispatch to an
+	// operator-configured URL without "sending HTTP to a
+	// user-supplied URL"; SSRF scanning belongs to the
+	// subscription-creation path, not here.
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, nil) //nolint:gosec // G704: operator-configured webhook URL
 	if err != nil {
 		WriteJSON(w, http.StatusOK, map[string]any{"success": false, "error": err.Error()})
 		return
@@ -342,12 +349,12 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 	// Use a short-lived client for the test
 	client := &http.Client{Timeout: 10 * time.Second}
 	req.Body = nil
-	testReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, nil)
+	testReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, nil) //nolint:gosec // G704: see comment above
 	testReq.Header.Set("Content-Type", "application/json")
 	testReq.Header.Set("X-Spine-Event", "ping")
 
 	start := time.Now()
-	resp, err := client.Do(testReq)
+	resp, err := client.Do(testReq) //nolint:gosec // G704: operator-configured webhook URL
 	durationMs := int(time.Since(start).Milliseconds())
 
 	if err != nil {

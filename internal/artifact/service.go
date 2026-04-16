@@ -290,7 +290,7 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 	})
 	if err != nil {
 		// Rollback: restore original content
-		_ = os.WriteFile(fullPath, originalContent, 0o644)
+		_ = os.WriteFile(fullPath, originalContent, 0o644) //nolint:gosec // G703: fullPath came from safePath above; 0644 required for git tracking
 		return nil, err
 	}
 
