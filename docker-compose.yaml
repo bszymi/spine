@@ -14,7 +14,8 @@ services:
       - SPINE_PROJECTION_POLLING_INTERVAL=5s
       - SPINE_ORPHAN_THRESHOLD=720h
       - SPINE_LOG_LEVEL=debug
-      - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
+      # Narrow to the compose bridge subnet below, not all RFC1918 space.
+      - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.0.0/16
       - SPINE_INSECURE_LOCAL=1
     volumes:
       - repo:/repo
@@ -116,6 +117,9 @@ services:
 networks:
   spine-internal:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
 
 volumes:
   pgdata:
