@@ -93,6 +93,17 @@ func parseGitPath(r *http.Request) (workspaceID string, gitPath string) {
 	workspaceID = chi.URLParam(r, "workspace_id")
 	wildcard := chi.URLParam(r, "*")
 
+	// chi prefers the more specific route, so /git/info/refs matches
+	// /git/{workspace_id}/* with workspace_id="info". Detect this case
+	// by checking if the captured workspace_id is actually a git protocol
+	// segment, and fall back to single-workspace mode.
+	if isGitProtocolSegment(workspaceID) {
+		if wildcard != "" {
+			return "", "/" + workspaceID + "/" + wildcard
+		}
+		return "", "/" + workspaceID
+	}
+
 	if workspaceID != "" {
 		// Matched /git/{workspace_id}/* — wildcard is the git path.
 		return workspaceID, "/" + wildcard
@@ -119,6 +130,16 @@ func isGitProtocolPath(path string) bool {
 		strings.HasPrefix(path, "git-receive-pack") ||
 		strings.HasPrefix(path, "HEAD") ||
 		strings.HasPrefix(path, "objects/")
+}
+
+// isGitProtocolSegment returns true if a single path segment is a known
+// git protocol root ("info", "objects", "git-upload-pack", etc.).
+func isGitProtocolSegment(seg string) bool {
+	switch seg {
+	case "info", "objects", "git-upload-pack", "git-receive-pack", "HEAD":
+		return true
+	}
+	return false
 }
 
 // resolveGitWorkspace resolves the workspace config for git access.

@@ -141,6 +141,71 @@ func TestParseGitPath_SingleMode(t *testing.T) {
 	}
 }
 
+// TestParseGitPath_BothRoutesRegistered reproduces the production routing
+// where both /git/{workspace_id}/* and /git/* are mounted. chi prefers the
+// more specific pattern, so /git/info/refs matches the first route with
+// workspace_id="info" — parseGitPath must still report this as single-mode.
+func TestParseGitPath_BothRoutesRegistered(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		wantWsID string
+		wantPath string
+	}{
+		{"single-mode info/refs", "/git/info/refs", "", "/info/refs"},
+		{"single-mode objects", "/git/objects/pack/pack-abc.pack", "", "/objects/pack/pack-abc.pack"},
+		{"single-mode HEAD", "/git/HEAD", "", "/HEAD"},
+		{"single-mode upload-pack", "/git/git-upload-pack", "", "/git-upload-pack"},
+		{"workspace info/refs", "/git/ws-1/info/refs", "ws-1", "/info/refs"},
+		{"workspace upload-pack", "/git/ws-1/git-upload-pack", "ws-1", "/git-upload-pack"},
+		{"unknown workspace still routes as workspace", "/git/nonexistent/info/refs", "nonexistent", "/info/refs"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := chi.NewRouter()
+			var gotWsID, gotPath string
+			handler := func(_ http.ResponseWriter, r *http.Request) {
+				gotWsID, gotPath = parseGitPath(r)
+			}
+			r.HandleFunc("/git/{workspace_id}/*", handler)
+			r.HandleFunc("/git/*", handler)
+
+			req := httptest.NewRequest("GET", tt.url, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			if gotWsID != tt.wantWsID {
+				t.Errorf("workspaceID = %q, want %q", gotWsID, tt.wantWsID)
+			}
+			if gotPath != tt.wantPath {
+				t.Errorf("gitPath = %q, want %q", gotPath, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestIsGitProtocolSegment(t *testing.T) {
+	cases := map[string]bool{
+		"info":             true,
+		"objects":          true,
+		"git-upload-pack":  true,
+		"git-receive-pack": true,
+		"HEAD":             true,
+		"ws-1":             false,
+		"default":          false,
+		"":                 false,
+		"Info":             false, // case-sensitive
+	}
+	for seg, want := range cases {
+		t.Run(seg, func(t *testing.T) {
+			if got := isGitProtocolSegment(seg); got != want {
+				t.Errorf("isGitProtocolSegment(%q) = %v, want %v", seg, got, want)
+			}
+		})
+	}
+}
+
 func TestIsGitProtocolPath(t *testing.T) {
 	tests := []struct {
 		path string

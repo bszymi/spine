@@ -106,7 +106,7 @@ func setupGitHTTPServer() scenarioEngine.Step {
 
 			srv := gateway.NewServer(":0", cfg)
 			ts := httptest.NewServer(srv.Handler())
-			sc.T.Cleanup(ts.Close)
+			sc.ParentT.Cleanup(ts.Close)
 
 			sc.Set("gw_url", ts.URL)
 			sc.Set("gw_auth", authSvc)
