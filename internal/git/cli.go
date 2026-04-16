@@ -117,21 +117,30 @@ func (c *CLIClient) ConfigureCredentialHelper(ctx context.Context) error {
 	return err
 }
 
-// ValidateCredentialHelper checks that the configured credential helper path
-// exists and is executable. Returns nil if no helper is configured.
-func ValidateCredentialHelper(path string) error {
-	if path == "" {
+// allowedCredentialHelpers enumerates the short git credential helper
+// names Spine accepts. Anything else — including absolute paths,
+// relative paths, or freeform shell strings — is rejected outright.
+// Git treats credential.helper values as "run a program," so without
+// an allowlist a misconfigured env var is a latent RCE surface.
+var allowedCredentialHelpers = map[string]struct{}{
+	"cache":       {},
+	"store":       {},
+	"osxkeychain": {},
+	"manager":     {},
+	"pass":        {},
+}
+
+// ValidateCredentialHelper enforces that the configured credential
+// helper is one of the known-safe short names in allowedCredentialHelpers.
+// Returns nil if no helper is configured. Returning an error here
+// causes spine serve to refuse startup, surfacing misconfiguration
+// instead of letting git inherit a potentially dangerous value.
+func ValidateCredentialHelper(name string) error {
+	if name == "" {
 		return nil
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("credential helper %q: %w", path, err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("credential helper %q: is a directory", path)
-	}
-	if info.Mode()&0111 == 0 {
-		return fmt.Errorf("credential helper %q: not executable", path)
+	if _, ok := allowedCredentialHelpers[name]; !ok {
+		return fmt.Errorf("credential helper %q is not in the allowlist; set SPINE_GIT_CREDENTIAL_HELPER to one of cache, store, osxkeychain, manager, pass", name)
 	}
 	return nil
 }
