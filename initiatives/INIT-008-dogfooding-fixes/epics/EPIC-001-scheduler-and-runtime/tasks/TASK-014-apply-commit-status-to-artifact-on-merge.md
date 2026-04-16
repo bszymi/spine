@@ -2,12 +2,12 @@
 id: TASK-014
 type: Task
 title: "Apply commit.status to artifact file on merge"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix
 created: 2026-04-11
-last_updated: 2026-04-11
+last_updated: 2026-04-16
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
