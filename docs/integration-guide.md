@@ -31,7 +31,7 @@ The management platform owns:
 **Dedicated mode** (one Spine instance per workspace):
 - Simplest setup. One container, one workspace, one database.
 - Workspace identity set via `SMP_WORKSPACE_ID` env var at container creation.
-- Credentials configured via env vars (`SPINE_GIT_PUSH_TOKEN` or `SPINE_GIT_CREDENTIAL_HELPER`).
+- Credentials configured via `SPINE_GIT_CREDENTIAL_HELPER` (recommended) or `SPINE_GIT_PUSH_TOKEN` (fallback; scrubbed from process env at startup).
 
 **Shared mode** (multiple workspaces per Spine instance):
 - Single Spine instance serves multiple workspaces via a registry database.
@@ -64,7 +64,7 @@ Spine resolves push credentials in priority order:
 
 ### Git Credential Helper Protocol
 
-The credential helper must implement the [Git credential helper protocol](https://git-scm.com/docs/gitcredentials). Spine configures it per-repo via `git config --local credential.helper <path>`.
+Spine configures the selected helper per-repo via `git config --local credential.helper <name>`. Only the short names in the allowlist are accepted: `cache`, `store`, `osxkeychain`, `manager`, `pass`. Free-form paths to custom helper scripts are refused at startup — git treats `credential.helper` values as "run this program," so allowing arbitrary strings is a remote-code-execution surface.
 
 **Input** (from Git, via stdin):
 ```
@@ -72,7 +72,7 @@ protocol=https
 host=github.com
 ```
 
-**Output** (from helper, via stdout):
+**Output** (from the selected helper, via stdout):
 ```
 protocol=https
 host=github.com
@@ -80,46 +80,42 @@ username=x-access-token
 password=<token>
 ```
 
-The helper reads `SMP_WORKSPACE_ID` from the environment to determine which credentials to fetch.
+### Populating the Helper's Backing Store
 
-### Example Credential Helper Script
+Since Spine no longer invokes a custom helper script, platform-side credential provisioning becomes a sidecar concern: populate the backing store the chosen helper reads from. Common patterns:
 
-```bash
-#!/bin/bash
-# /opt/spine/credential-helper.sh
-# Called by Git during push. Fetches credentials from the platform API.
-
-WORKSPACE_ID="${SMP_WORKSPACE_ID}"
-if [ -z "$WORKSPACE_ID" ]; then
-  exit 1
-fi
-
-# Fetch credentials from your platform's secret store.
-TOKEN=$(curl -sf "http://platform-api/credentials/${WORKSPACE_ID}/git-token")
-if [ -z "$TOKEN" ]; then
-  exit 1
-fi
-
-# Read the protocol/host from stdin (Git credential protocol).
-while IFS='=' read -r key value; do
-  case "$key" in
-    protocol) PROTOCOL="$value" ;;
-    host) HOST="$value" ;;
-  esac
-done
-
-echo "protocol=${PROTOCOL}"
-echo "host=${HOST}"
-echo "username=x-access-token"
-echo "password=${TOKEN}"
-```
+- **`store`** — write `~/.git-credentials` (one `https://user:token@host` line per entry) from a sidecar that fetches tokens from your platform API on workspace activation.
+- **`cache`** — prime the in-memory cache by shell-invoking `git credential approve` on startup.
+- **`osxkeychain` / `manager` / `pass`** — use the native tooling for the respective secret store.
 
 ### Security Requirements
 
 - Never log tokens or credentials. Spine redacts URLs containing credentials in all log output.
 - Never write tokens to disk. Remote URL rewriting is per-push, in-memory only.
-- The credential helper script must be executable (`chmod +x`).
-- Spine validates the helper path at startup (must exist and be executable).
+- `SPINE_GIT_CREDENTIAL_HELPER` only accepts the allowlisted short names (`cache`, `store`, `osxkeychain`, `manager`, `pass`). Arbitrary paths or shell strings are refused at startup — git treats `credential.helper` values as "run this program," so the allowlist is the RCE gate.
+- `SPINE_GIT_PUSH_TOKEN` is read once at startup, copied into an in-memory `GIT_ASKPASS` helper, and scrubbed from `os.Environ()`. It is not visible to child processes or `/proc/<pid>/environ`.
+
+---
+
+## 2.1 Secrets at Rest {#secrets-at-rest}
+
+Spine encrypts sensitive fields before persisting them. Currently this applies to `event_subscriptions.signing_secret` (the HMAC key used to sign outbound webhooks); a DB compromise alone is not enough to forge webhook payloads.
+
+### Key Management
+
+- **Key source**: `SPINE_SECRET_ENCRYPTION_KEY` — base64-encoded 32 bytes (AES-256), supplied out-of-band from the database. Generate with `openssl rand -base64 32`.
+- **Production gate**: Starting with `SPINE_ENV=production` and no key is refused at startup. Other environments log a warning and fall back to plaintext so local development does not require extra configuration.
+- **Wire format**: Ciphertext rows carry an `enc:v1:` prefix followed by `base64(nonce || aes-gcm-ciphertext)`. Plaintext rows written before the key was deployed are returned untouched on read and transparently re-encrypted on their next update — no data migration is required.
+- **Key rotation**: Losing the key means existing ciphertext cannot be decrypted. Back it up alongside other production secrets (e.g., your cloud KMS or 1Password/secrets-manager bag). Rotation is currently a manual procedure: decrypt with the old key, re-save subscriptions so they are re-encrypted under the new key.
+
+### Webhook TLS Configuration
+
+Per-subscription TLS config lives in the `metadata` JSONB column of `event_subscriptions` under the `tls` key. Set it when creating/updating a subscription to:
+
+- **Pin the server's SPKI hash**: `{"tls":{"spki_sha256":"<base64>"}}` — the webhook dispatcher rejects any certificate whose Subject Public Key Info SHA-256 does not match.
+- **Supply a custom CA bundle** (for internal CAs / private networks): `{"tls":{"root_cas_pem":"-----BEGIN CERTIFICATE-----..."}}`.
+
+Both fields are optional; when neither is set, the dispatcher uses the system trust store. See `internal/delivery/tls.go` for the full validator.
 
 ---
 
@@ -354,14 +350,21 @@ Compare `last_synced_commit` with your last-seen value. If changed, re-query the
 services:
   spine:
     build: .
+    # Bind loopback-only; front with a reverse proxy (see
+    # SPINE_TRUSTED_PROXY_CIDRS) if the service must be public.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
-      - SPINE_DATABASE_URL=postgres://spine:spine@spine-db:5432/spine?sslmode=disable
+      - SPINE_ENV=production
+      - SPINE_DATABASE_URL=postgres://spine:spine@spine-db:5432/spine?sslmode=require
       - SPINE_REPO_PATH=/repo
       - SPINE_SERVER_PORT=8080
       - SPINE_LOG_LEVEL=info
-      - SPINE_GIT_PUSH_TOKEN=${GIT_PUSH_TOKEN}
+      - SPINE_OPERATOR_TOKEN=${SPINE_OPERATOR_TOKEN}      # 32+ chars
+      - SPINE_SECRET_ENCRYPTION_KEY=${SECRET_ENC_KEY}     # openssl rand -base64 32
+      # Recommended push-auth mode: short-name credential helper.
+      # Falls back to SPINE_GIT_PUSH_TOKEN only if no helper is configured.
+      - SPINE_GIT_CREDENTIAL_HELPER=store
       - SPINE_GIT_PUSH_ENABLED=true
     volumes:
       - repo:/repo
@@ -405,57 +408,66 @@ spec:
           ports:
             - containerPort: 8080
           env:
+            - name: SPINE_ENV
+              value: "production"
             - name: SPINE_WORKSPACE_MODE
               value: "shared"
             - name: SPINE_REGISTRY_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: spine-secrets
-                  key: registry-db-url
+                  key: registry-db-url  # must use sslmode=require or stronger
             - name: SPINE_OPERATOR_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: spine-secrets
-                  key: operator-token
+                  key: operator-token   # 32+ chars
+            - name: SPINE_SECRET_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: spine-secrets
+                  key: secret-encryption-key  # base64 32 bytes
             - name: SPINE_GIT_CREDENTIAL_HELPER
-              value: "/opt/spine/credential-helper.sh"
+              value: "store"            # allowlisted helper name; no path/script needed
             - name: SPINE_SERVER_PORT
               value: "8080"
             - name: SPINE_LOG_LEVEL
               value: "info"
           volumeMounts:
-            - name: credential-helper
-              mountPath: /opt/spine/credential-helper.sh
-              subPath: credential-helper.sh
             - name: repos
               mountPath: /var/spine/repos
       volumes:
-        - name: credential-helper
-          configMap:
-            name: spine-credential-helper
-            defaultMode: 0755
         - name: repos
           persistentVolumeClaim:
             claimName: spine-repos
 ```
 
+> The helper allowlist (TASK-022) replaced the previous free-form path model. If your platform needs to talk to a remote secret store, run a sidecar that populates the appropriate backing store for `cache`/`store`/`osxkeychain`/`manager`/`pass` — Spine will call that helper by name only.
+
 ### Environment Variable Reference
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SPINE_DATABASE_URL` | Yes (single mode) | - | PostgreSQL connection string for workspace database |
+| `SPINE_DATABASE_URL` | Yes (single mode) | - | PostgreSQL connection string for workspace database. Must use `sslmode=require` or stronger in production; `sslmode=disable` is refused at startup unless `SPINE_INSECURE_LOCAL=1`. |
 | `SPINE_WORKSPACE_MODE` | No | `single` | `single` or `shared` |
 | `SPINE_WORKSPACE_ID` | No | `default` | Workspace ID in single mode |
-| `SPINE_REGISTRY_DATABASE_URL` | Yes (shared mode) | - | PostgreSQL URL for workspace registry |
+| `SPINE_REGISTRY_DATABASE_URL` | Yes (shared mode) | - | PostgreSQL URL for workspace registry. Same TLS requirements as `SPINE_DATABASE_URL`. |
 | `SPINE_REPO_PATH` | No | `.` | Path to Git repository |
 | `SPINE_SERVER_PORT` | No | `8080` | HTTP server port |
 | `SPINE_LOG_LEVEL` | No | `info` | Log level: debug, info, warn, error |
 | `SPINE_LOG_FORMAT` | No | `json` | Log format: json or text |
-| `SPINE_OPERATOR_TOKEN` | No | - | Static token for workspace management endpoints |
-| `SPINE_GIT_CREDENTIAL_HELPER` | No | - | Path to Git credential helper script |
-| `SPINE_GIT_PUSH_TOKEN` | No | - | Static PAT/deploy token for HTTPS push |
+| `SPINE_ENV` | No | - | Runtime environment: `production`, `staging`, `development`. When `production`, `SPINE_DEV_MODE` is refused and `SPINE_SECRET_ENCRYPTION_KEY` is required. |
+| `SPINE_DEV_MODE` | No | - | `1` or `true` lets unauthenticated requests through the auth gate. Dev-only; refused at startup when `SPINE_ENV=production`. |
+| `SPINE_SECRET_ENCRYPTION_KEY` | Yes (production) | - | Base64-encoded 32-byte AES-256 key for at-rest secret encryption (webhook signing secrets). Generate with `openssl rand -base64 32`. See [Secrets at Rest](#secrets-at-rest). |
+| `SPINE_OPERATOR_TOKEN` | No | - | Static bearer token for system-level endpoints (workspace CRUD). Minimum 32 characters; shorter values are refused at startup. Unset: operator endpoints return 503. |
+| `SPINE_INSECURE_LOCAL` | No | - | Set to `1` only for local development with `sslmode=disable` DB URLs. |
+| `SPINE_TRUSTED_PROXY_CIDRS` | No | - | Comma-separated CIDRs of reverse proxies Spine should trust for `X-Forwarded-For`. Leave unset if directly internet-facing. |
+| `SPINE_GIT_HTTP_TRUSTED_CIDRS` | No | - | Comma-separated CIDRs allowed to clone/fetch over the internal git-HTTP endpoint without a bearer token (e.g. runner container network). Unset = require tokens from every caller. |
+| `SPINE_GIT_CREDENTIAL_HELPER` | No | - | Credential helper name, one of: `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended production mode. Non-allowlisted values are refused at startup. |
+| `SPINE_GIT_PUSH_TOKEN` | No | - | Static PAT/deploy token for HTTPS push. Scrubbed from process env after startup; ignored when `SPINE_GIT_CREDENTIAL_HELPER` is also set. |
 | `SPINE_GIT_PUSH_USERNAME` | No | `x-access-token` | Username for token-based push auth |
 | `SPINE_GIT_PUSH_ENABLED` | No | `true` | Set to `false` to disable git push |
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
+| `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | - | Per-actor cap on concurrent SSE stream connections |

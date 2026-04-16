@@ -12,12 +12,15 @@ The repository is a shared cognitive model — a single contextual source of tru
 
 ## Quick Start
 
+### Local development
+
 ```bash
 # Initialize a new Spine repository
 spine init-repo my-project
 
 # Start the runtime server (requires PostgreSQL)
-export SPINE_DATABASE_URL=postgres://localhost:5432/spine
+export SPINE_DATABASE_URL=postgres://localhost:5432/spine?sslmode=disable
+export SPINE_INSECURE_LOCAL=1   # acknowledges sslmode=disable for local use
 spine migrate
 spine serve
 
@@ -36,6 +39,19 @@ spine run start --task initiatives/INIT-099/initiative.md --mode planning --cont
 spine run inspect <run-id>
 spine validate --all
 ```
+
+### Production startup gates
+
+`spine serve` refuses to start in production without the following environment set. See `docs/integration-guide.md` for the full reference.
+
+| Variable | Purpose |
+|----------|---------|
+| `SPINE_ENV=production` | Activates production checks (refuses dev-mode auth bypass, requires secret encryption). |
+| `SPINE_DATABASE_URL=…?sslmode=require` | `sslmode=disable` is refused unless `SPINE_INSECURE_LOCAL=1`. |
+| `SPINE_SECRET_ENCRYPTION_KEY` | Base64 32-byte AES-256 key for at-rest webhook-secret encryption. Generate with `openssl rand -base64 32`. |
+| `SPINE_OPERATOR_TOKEN` | Bearer token for workspace-management endpoints. Minimum 32 characters. Leave unset to return 503 on those endpoints. |
+| `SPINE_GIT_CREDENTIAL_HELPER` | One of `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended over `SPINE_GIT_PUSH_TOKEN`. |
+| `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. |
 
 ---
 
@@ -215,6 +231,9 @@ make docker-test
 make docker-lint
 make docker-cover
 make docker-vet
+
+# Security-specific lint (gosec) — gate for new security findings
+make lint-security
 ```
 
 ---
