@@ -13,6 +13,7 @@ import (
 	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
+	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
@@ -129,6 +130,7 @@ type Server struct {
 	stepExecutionLister StepExecutionLister    // optional, nil if not configured
 	stepAcknowledger    StepAcknowledger       // optional, nil if not configured
 	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
+	gitHTTP             *githttp.Handler       // optional, nil if not configured
 	devMode             bool                   // when true, authorize allows unauthenticated requests
 	rebuilds            sync.Map               // rebuild_id -> *rebuildState
 }
@@ -216,6 +218,7 @@ type ServerConfig struct {
 	StepExecutionLister StepExecutionLister
 	StepAcknowledger    StepAcknowledger
 	EventBroadcaster    *delivery.EventBroadcaster
+	GitHTTP             *githttp.Handler // optional, serves git repos over HTTP
 	DevMode             bool          // when true, authorize allows unauthenticated requests
 	ReadHeaderTimeout   time.Duration // defaults to 10s
 	ReadTimeout         time.Duration // defaults to 30s
@@ -249,6 +252,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		stepExecutionLister: cfg.StepExecutionLister,
 		stepAcknowledger:    cfg.StepAcknowledger,
 		eventBroadcaster:    cfg.EventBroadcaster,
+		gitHTTP:             cfg.GitHTTP,
 		devMode:             cfg.DevMode,
 	}
 	if cfg.DevMode {

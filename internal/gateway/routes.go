@@ -18,6 +18,9 @@ func (s *Server) routes() http.Handler {
 	r.Use(traceIDMiddleware)
 	r.Use(loggingMiddleware)
 
+	// Git smart HTTP endpoint — outside /api/v1, own auth logic.
+	s.mountGitRoutes(r)
+
 	r.Route("/api/v1", func(r chi.Router) {
 		// Unauthenticated
 		r.Get("/system/health", s.handleHealth)
