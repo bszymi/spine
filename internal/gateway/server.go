@@ -132,6 +132,7 @@ type Server struct {
 	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
 	gitHTTP             *githttp.Handler       // optional, nil if not configured
 	devMode             bool                   // when true, authorize allows unauthenticated requests
+	sseLimiter          *sseLimiter            // caps concurrent SSE streams per actor
 	rebuilds            sync.Map               // rebuild_id -> *rebuildState
 }
 
@@ -224,6 +225,7 @@ type ServerConfig struct {
 	ReadTimeout         time.Duration // defaults to 30s
 	WriteTimeout        time.Duration // defaults to 60s
 	IdleTimeout         time.Duration // defaults to 120s
+	SSEMaxConnPerActor  int           // per-actor SSE connection cap; defaults to 5, <=0 disables
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -254,6 +256,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		eventBroadcaster:    cfg.EventBroadcaster,
 		gitHTTP:             cfg.GitHTTP,
 		devMode:             cfg.DevMode,
+		sseLimiter:          newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),
 	}
 	if cfg.DevMode {
 		slog.Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
@@ -375,6 +378,13 @@ func (s *Server) Handler() http.Handler {
 func withDefault(d, fallback time.Duration) time.Duration {
 	if d > 0 {
 		return d
+	}
+	return fallback
+}
+
+func withDefaultInt(v, fallback int) int {
+	if v > 0 {
+		return v
 	}
 	return fallback
 }

@@ -224,6 +224,24 @@ func main() {
 	}
 }
 
+// parsePositiveIntEnv returns the integer value of the named env var,
+// or 0 if the var is unset or not a positive integer. Used to let
+// ServerConfig fields fall back to their internal defaults.
+func parsePositiveIntEnv(name string) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0
+	}
+	n := 0
+	for _, c := range raw {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
 // requireSecureDBURL rejects connection strings that use sslmode=disable
 // unless SPINE_INSECURE_LOCAL=1 is set. This prevents production
 // deployments from silently transmitting credentials and data in
@@ -587,6 +605,7 @@ func serveCmd() *cobra.Command {
 				StepAcknowledger:    orch,
 				EventBroadcaster:    eventBroadcaster,
 				GitHTTP:             gitHTTPHandler,
+				SSEMaxConnPerActor:  parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
 			})
 
 			// Run startup recovery and start background services.

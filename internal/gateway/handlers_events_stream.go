@@ -34,6 +34,18 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap concurrent SSE streams per actor to prevent resource exhaustion.
+	var heldActorID string
+	if actor := actorFromContext(r.Context()); actor != nil {
+		if !s.sseLimiter.Acquire(actor.ActorID) {
+			observe.Logger(r.Context()).Warn("sse connection limit reached", "actor_id", actor.ActorID)
+			WriteError(w, domain.NewError(domain.ErrRateLimited, "concurrent SSE connections exceeded for this actor"))
+			return
+		}
+		heldActorID = actor.ActorID
+		defer s.sseLimiter.Release(heldActorID)
+	}
+
 	// Parse event type filters
 	var typeFilter map[string]bool
 	if types := r.URL.Query().Get("types"); types != "" {
