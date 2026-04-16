@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -11,10 +12,11 @@ import (
 func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
 
-	// Global middleware (order matters: recovery outermost, then security headers, rate limit, trace, logging)
+	// Global middleware (order matters: recovery outermost, then security headers, rate limit, CORS, trace, logging)
 	r.Use(recoveryMiddleware)
 	r.Use(securityHeadersMiddleware)
 	r.Use(rateLimitMiddleware(100, 200)) // 100 req/s per IP, burst 200
+	r.Use(corsMiddleware(parseCORSOrigins(os.Getenv("SPINE_CORS_ALLOWED_ORIGINS"))))
 	r.Use(traceIDMiddleware)
 	r.Use(loggingMiddleware)
 
