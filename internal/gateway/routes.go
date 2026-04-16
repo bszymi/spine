@@ -15,7 +15,7 @@ func (s *Server) routes() http.Handler {
 	// Global middleware (order matters: recovery outermost, then security headers, rate limit, CORS, trace, logging)
 	r.Use(recoveryMiddleware)
 	r.Use(securityHeadersMiddleware)
-	r.Use(rateLimitMiddleware(100, 200)) // 100 req/s per IP, burst 200
+	r.Use(rateLimitMiddleware(100, 200, s.trustedProxyCIDRs)) // 100 req/s per IP, burst 200
 	r.Use(corsMiddleware(parseCORSOrigins(os.Getenv("SPINE_CORS_ALLOWED_ORIGINS"))))
 	r.Use(traceIDMiddleware)
 	r.Use(loggingMiddleware)

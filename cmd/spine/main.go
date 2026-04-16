@@ -622,6 +622,14 @@ func serveCmd() *cobra.Command {
 				}
 			}
 
+			trustedProxyCIDRs, err := gateway.ParseTrustedProxyCIDRs(os.Getenv("SPINE_TRUSTED_PROXY_CIDRS"))
+			if err != nil {
+				return fmt.Errorf("SPINE_TRUSTED_PROXY_CIDRS: %w", err)
+			}
+			if len(trustedProxyCIDRs) > 0 {
+				log.Info("rate limiter will honor X-Forwarded-For from trusted proxies", "cidrs", os.Getenv("SPINE_TRUSTED_PROXY_CIDRS"))
+			}
+
 			srv := gateway.NewServer(":"+port, gateway.ServerConfig{
 				Store:              st,
 				Auth:               authSvc,
@@ -648,6 +656,7 @@ func serveCmd() *cobra.Command {
 				EventBroadcaster:    eventBroadcaster,
 				GitHTTP:             gitHTTPHandler,
 				SSEMaxConnPerActor:  parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
+				TrustedProxyCIDRs:   trustedProxyCIDRs,
 			})
 
 			// Run startup recovery and start background services.

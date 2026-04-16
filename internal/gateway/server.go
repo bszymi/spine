@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -133,6 +134,7 @@ type Server struct {
 	gitHTTP             *githttp.Handler       // optional, nil if not configured
 	devMode             bool                   // when true, authorize allows unauthenticated requests
 	sseLimiter          *sseLimiter            // caps concurrent SSE streams per actor
+	trustedProxyCIDRs   []*net.IPNet           // reverse-proxy networks whose XFF header is honored for rate limiting
 	rebuilds            sync.Map               // rebuild_id -> *rebuildState
 }
 
@@ -226,6 +228,7 @@ type ServerConfig struct {
 	WriteTimeout        time.Duration // defaults to 60s
 	IdleTimeout         time.Duration // defaults to 120s
 	SSEMaxConnPerActor  int           // per-actor SSE connection cap; defaults to 5, <=0 disables
+	TrustedProxyCIDRs   []*net.IPNet  // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -257,6 +260,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		gitHTTP:             cfg.GitHTTP,
 		devMode:             cfg.DevMode,
 		sseLimiter:          newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),
+		trustedProxyCIDRs:   cfg.TrustedProxyCIDRs,
 	}
 	if cfg.DevMode {
 		slog.Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
