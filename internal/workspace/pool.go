@@ -205,6 +205,18 @@ func (p *ServicePool) ActiveCount() int {
 	return len(p.entries)
 }
 
+// RefCount returns the current reference count for a workspace's cached
+// service set, or 0 if no entry exists. Primarily intended for tests
+// that verify Get/Release pairing under adversarial conditions.
+func (p *ServicePool) RefCount(workspaceID string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry, ok := p.entries[workspaceID]; ok {
+		return int(entry.refCount)
+	}
+	return 0
+}
+
 // EvictIdle removes service sets that have not been accessed within the idle timeout
 // and have no active references. Call this periodically (e.g., from a background ticker).
 func (p *ServicePool) EvictIdle() {
