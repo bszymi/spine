@@ -84,9 +84,10 @@ func (s *Server) handleArtifactEntryCreate(w http.ResponseWriter, r *http.Reques
 	// Resolve parent directory path.
 	var parentDir string
 	var parentArtifactPath string
+	var parentMeta map[string]string
 	if req.Parent != "" {
 		var err error
-		parentArtifactPath, parentDir, err = resolveParentFromList(ctx, artSvc, req.Parent, artType)
+		parentArtifactPath, parentDir, parentMeta, err = resolveParentFromList(ctx, artSvc, req.Parent, artType)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -112,7 +113,7 @@ func (s *Server) handleArtifactEntryCreate(w http.ResponseWriter, r *http.Reques
 	artifactPath := artifact.BuildArtifactPath(artType, nextID, slug, parentDir)
 
 	// Build initial artifact content.
-	content := buildInitialContent(artType, nextID, req.Title, parentArtifactPath)
+	content := buildInitialContent(artType, nextID, req.Title, parentArtifactPath, parentMeta)
 
 	// Start the planning run.
 	result, err := s.planningRunStarter.StartPlanningRun(ctx, artifactPath, content)
@@ -229,7 +230,7 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Try to find parent on the branch first, then fall back to main.
-	parentArtifactPath, parentDir, err := resolveParentFromRef(ctx, artSvc, gitReader, req.Parent, artType, run.BranchName)
+	parentArtifactPath, parentDir, parentMeta, err := resolveParentFromRef(ctx, artSvc, gitReader, req.Parent, artType, run.BranchName)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -251,7 +252,7 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	artifactPath := artifact.BuildArtifactPath(artType, nextID, slug, parentDir)
 
-	content := buildInitialContent(artType, nextID, req.Title, parentArtifactPath)
+	content := buildInitialContent(artType, nextID, req.Title, parentArtifactPath, parentMeta)
 
 	// Write the artifact to the branch using write context.
 	wCtx := artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: run.BranchName})
@@ -271,14 +272,15 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 
 // resolveParentFromRef finds a parent artifact by scanning a specific Git ref.
 // Tries the branch first, falls back to main.
-func resolveParentFromRef(ctx context.Context, artSvc ArtifactService, gitReader GitReader, parentID string, childType domain.ArtifactType, branchRef string) (parentPath, childDir string, err error) {
+// Returns the parent's metadata so callers can inherit fields like initiative.
+func resolveParentFromRef(ctx context.Context, artSvc ArtifactService, gitReader GitReader, parentID string, childType domain.ArtifactType, branchRef string) (parentPath, childDir string, parentMeta map[string]string, err error) {
 	// Try listing from the branch ref first.
 	artifacts, err := artSvc.List(ctx, branchRef)
 	if err != nil {
 		// Fall back to HEAD if branch listing fails.
 		artifacts, err = artSvc.List(ctx, "HEAD")
 		if err != nil {
-			return "", "", domain.NewError(domain.ErrInternal, "failed to list artifacts")
+			return "", "", nil, domain.NewError(domain.ErrInternal, "failed to list artifacts")
 		}
 	}
 
@@ -288,12 +290,12 @@ func resolveParentFromRef(ctx context.Context, artSvc ArtifactService, gitReader
 			switch childType {
 			case domain.ArtifactTypeTask:
 				if a.Type != domain.ArtifactTypeEpic {
-					return "", "", domain.NewError(domain.ErrInvalidParams,
+					return "", "", nil, domain.NewError(domain.ErrInvalidParams,
 						fmt.Sprintf("parent %s is %s, but Task requires an Epic parent", parentID, a.Type))
 				}
 			case domain.ArtifactTypeEpic:
 				if a.Type != domain.ArtifactTypeInitiative {
-					return "", "", domain.NewError(domain.ErrInvalidParams,
+					return "", "", nil, domain.NewError(domain.ErrInvalidParams,
 						fmt.Sprintf("parent %s is %s, but Epic requires an Initiative parent", parentID, a.Type))
 				}
 			}
@@ -308,20 +310,20 @@ func resolveParentFromRef(ctx context.Context, artSvc ArtifactService, gitReader
 			default:
 				childDir = dir
 			}
-			return parentPath, childDir, nil
+			return parentPath, childDir, a.Metadata, nil
 		}
 	}
 
-	return "", "", domain.NewError(domain.ErrNotFound,
+	return "", "", nil, domain.NewError(domain.ErrNotFound,
 		fmt.Sprintf("parent artifact not found on branch or main: %s", parentID))
 }
 
 // resolveParentFromList finds a parent artifact by ID using the artifact service's List.
-// Returns the parent's artifact path and the child directory path.
-func resolveParentFromList(ctx context.Context, artSvc ArtifactService, parentID string, childType domain.ArtifactType) (parentPath, childDir string, err error) {
+// Returns the parent's artifact path, child directory path, and parent metadata.
+func resolveParentFromList(ctx context.Context, artSvc ArtifactService, parentID string, childType domain.ArtifactType) (parentPath, childDir string, parentMeta map[string]string, err error) {
 	artifacts, err := artSvc.List(ctx, "HEAD")
 	if err != nil {
-		return "", "", domain.NewError(domain.ErrInternal,
+		return "", "", nil, domain.NewError(domain.ErrInternal,
 			fmt.Sprintf("list artifacts: %v", err))
 	}
 
@@ -332,12 +334,12 @@ func resolveParentFromList(ctx context.Context, artSvc ArtifactService, parentID
 			switch childType {
 			case domain.ArtifactTypeTask:
 				if a.Type != domain.ArtifactTypeEpic {
-					return "", "", domain.NewError(domain.ErrInvalidParams,
+					return "", "", nil, domain.NewError(domain.ErrInvalidParams,
 						fmt.Sprintf("parent %s is %s, but Task requires an Epic parent", parentID, a.Type))
 				}
 			case domain.ArtifactTypeEpic:
 				if a.Type != domain.ArtifactTypeInitiative {
-					return "", "", domain.NewError(domain.ErrInvalidParams,
+					return "", "", nil, domain.NewError(domain.ErrInvalidParams,
 						fmt.Sprintf("parent %s is %s, but Epic requires an Initiative parent", parentID, a.Type))
 				}
 			}
@@ -354,17 +356,18 @@ func resolveParentFromList(ctx context.Context, artSvc ArtifactService, parentID
 			default:
 				childDir = dir
 			}
-			return parentPath, childDir, nil
+			return parentPath, childDir, a.Metadata, nil
 		}
 	}
 
-	return "", "", domain.NewError(domain.ErrNotFound,
+	return "", "", nil, domain.NewError(domain.ErrNotFound,
 		fmt.Sprintf("parent artifact not found: %s", parentID))
 }
 
 // buildInitialContent creates the markdown content for a new artifact in Draft status.
 // Includes all required front-matter fields per artifact schema validation.
-func buildInitialContent(artType domain.ArtifactType, id, title, parentArtifactPath string) string {
+// parentMeta carries the parent artifact's metadata so fields like initiative can be inherited.
+func buildInitialContent(artType domain.ArtifactType, id, title, parentArtifactPath string, parentMeta map[string]string) string {
 	today := time.Now().Format("2006-01-02")
 
 	var b strings.Builder
@@ -388,8 +391,12 @@ func buildInitialContent(artType domain.ArtifactType, id, title, parentArtifactP
 		case domain.ArtifactTypeTask:
 			// Tasks need epic and initiative metadata.
 			b.WriteString(fmt.Sprintf("epic: %s\n", target))
+			// Inherit initiative from the parent epic's metadata.
+			if initiative := parentMeta["initiative"]; initiative != "" {
+				b.WriteString(fmt.Sprintf("initiative: %s\n", initiative))
+			}
 		case domain.ArtifactTypeEpic:
-			// Epics need initiative metadata.
+			// Epics need initiative metadata — the parent IS the initiative.
 			b.WriteString(fmt.Sprintf("initiative: %s\n", target))
 		}
 
