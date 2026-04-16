@@ -224,6 +224,20 @@ func main() {
 	}
 }
 
+// requireSecureDBURL rejects connection strings that use sslmode=disable
+// unless SPINE_INSECURE_LOCAL=1 is set. This prevents production
+// deployments from silently transmitting credentials and data in
+// plaintext. Local Docker development can opt in via the env var.
+func requireSecureDBURL(url string) error {
+	if !strings.Contains(url, "sslmode=disable") {
+		return nil
+	}
+	if os.Getenv("SPINE_INSECURE_LOCAL") == "1" {
+		return nil
+	}
+	return fmt.Errorf("database URL uses sslmode=disable; set SPINE_INSECURE_LOCAL=1 to acknowledge (local development only) or use sslmode=require/verify-full")
+}
+
 func serveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
@@ -257,6 +271,9 @@ func serveCmd() *cobra.Command {
 				if registryURL == "" {
 					return fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required in shared workspace mode")
 				}
+				if err := requireSecureDBURL(registryURL); err != nil {
+					return fmt.Errorf("registry URL: %w", err)
+				}
 				var err error
 				wsDBProvider, err = workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
 				if err != nil {
@@ -277,8 +294,8 @@ func serveCmd() *cobra.Command {
 			var st store.Store
 			dbURL := os.Getenv("SPINE_DATABASE_URL")
 			if dbURL != "" {
-				if strings.Contains(dbURL, "sslmode=disable") {
-					log.Warn("database connection uses sslmode=disable — credentials and data transmitted in plaintext")
+				if err := requireSecureDBURL(dbURL); err != nil {
+					return err
 				}
 				pgStore, err := store.NewPostgresStore(ctx, dbURL)
 				if err != nil {
@@ -665,6 +682,9 @@ func migrateCmd() *cobra.Command {
 				if dbURL == "" {
 					return fmt.Errorf("SPINE_DATABASE_URL is required")
 				}
+				if err := requireSecureDBURL(dbURL); err != nil {
+					return err
+				}
 
 				s, err := store.NewPostgresStore(ctx, dbURL)
 				if err != nil {
@@ -685,6 +705,9 @@ func migrateCmd() *cobra.Command {
 			registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
 			if registryURL == "" {
 				return fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required for --all-workspaces")
+			}
+			if err := requireSecureDBURL(registryURL); err != nil {
+				return fmt.Errorf("registry URL: %w", err)
 			}
 
 			// 1. Migrate the registry database itself.

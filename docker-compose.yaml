@@ -6,7 +6,7 @@ services:
     ports:
       - "8089:8080"
     environment:
-      - SPINE_DATABASE_URL=postgres://spine:spine@spine-db:5432/spine?sslmode=disable
+      - SPINE_DATABASE_URL=postgres://${POSTGRES_USER:-spine}:${POSTGRES_PASSWORD:-spine}@spine-db:5432/${POSTGRES_DB:-spine}?sslmode=disable
       - SPINE_GIT_REPOSITORY_PATH=/repo
       - SPINE_GIT_AUTHORITATIVE_BRANCH=main
       - SPINE_GIT_WORKTREE_PATH=/var/spine/worktrees
@@ -15,6 +15,7 @@ services:
       - SPINE_ORPHAN_THRESHOLD=720h
       - SPINE_LOG_LEVEL=debug
       - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
+      - SPINE_INSECURE_LOCAL=1
     volumes:
       - repo:/repo
       - worktrees:/var/spine/worktrees
@@ -36,15 +37,15 @@ services:
     ports:
       - "5436:5432"
     environment:
-      - POSTGRES_USER=spine
-      - POSTGRES_PASSWORD=spine
-      - POSTGRES_DB=spine
+      - POSTGRES_USER=${POSTGRES_USER:-spine}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-spine}
+      - POSTGRES_DB=${POSTGRES_DB:-spine}
     volumes:
       - pgdata:/var/lib/postgresql
     networks:
       - spine-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spine"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spine}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -54,7 +55,8 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      - SPINE_DATABASE_URL=postgres://spine:spine@spine-db:5432/spine?sslmode=disable
+      - SPINE_DATABASE_URL=postgres://${POSTGRES_USER:-spine}:${POSTGRES_PASSWORD:-spine}@spine-db:5432/${POSTGRES_DB:-spine}?sslmode=disable
+      - SPINE_INSECURE_LOCAL=1
     depends_on:
       spine-db:
         condition: service_healthy
@@ -68,15 +70,15 @@ services:
     ports:
       - "5434:5432"
     environment:
-      - POSTGRES_USER=spine_registry
-      - POSTGRES_PASSWORD=spine_registry
-      - POSTGRES_DB=spine_registry
+      - POSTGRES_USER=${POSTGRES_REGISTRY_USER:-spine_registry}
+      - POSTGRES_PASSWORD=${POSTGRES_REGISTRY_PASSWORD:-spine_registry}
+      - POSTGRES_DB=${POSTGRES_REGISTRY_DB:-spine_registry}
     volumes:
       - registrydata:/var/lib/postgresql
     networks:
       - spine-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spine_registry"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_REGISTRY_USER:-spine_registry}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -87,8 +89,9 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      - SPINE_DATABASE_URL=postgres://spine_registry:spine_registry@spine-registry-db:5432/spine_registry?sslmode=disable
+      - SPINE_DATABASE_URL=postgres://${POSTGRES_REGISTRY_USER:-spine_registry}:${POSTGRES_REGISTRY_PASSWORD:-spine_registry}@spine-registry-db:5432/${POSTGRES_REGISTRY_DB:-spine_registry}?sslmode=disable
       - SPINE_MIGRATIONS_DIR=migrations/registry
+      - SPINE_INSECURE_LOCAL=1
     depends_on:
       spine-registry-db:
         condition: service_healthy
