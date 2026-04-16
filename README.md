@@ -53,6 +53,11 @@ spine validate --all
 | `SPINE_GIT_CREDENTIAL_HELPER` | One of `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended over `SPINE_GIT_PUSH_TOKEN`. |
 | `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. |
 
+### Integrations
+
+- **Webhook / SSE / pull event delivery** — see [integration-guide §6](/docs/integration-guide.md#6-event-integration). Gated by `SPINE_EVENT_DELIVERY=true`.
+- **Git HTTP clone endpoint for runners** — see [integration-guide §7](/docs/integration-guide.md#7-git-http-serve-endpoint). Scope callers via `SPINE_GIT_HTTP_TRUSTED_CIDRS`.
+
 ---
 
 ## Start Here
