@@ -3,6 +3,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Conservative defaults — override via a compose override file for
+    # load tests. Matched to keep a runaway process from starving the
+    # host; see README ops section.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
     ports:
       - "8089:8080"
     environment:
@@ -35,6 +46,14 @@ services:
 
   spine-db:
     image: postgres:18-bookworm
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
     ports:
       - "5436:5432"
     environment:
@@ -55,6 +74,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     environment:
       - SPINE_DATABASE_URL=postgres://${POSTGRES_USER:-spine}:${POSTGRES_PASSWORD:-spine}@spine-db:5432/${POSTGRES_DB:-spine}?sslmode=disable
       - SPINE_INSECURE_LOCAL=1
@@ -68,6 +92,14 @@ services:
 
   spine-registry-db:
     image: postgres:18-bookworm
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
     ports:
       - "5434:5432"
     environment:
@@ -89,6 +121,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     environment:
       - SPINE_DATABASE_URL=postgres://${POSTGRES_REGISTRY_USER:-spine_registry}:${POSTGRES_REGISTRY_PASSWORD:-spine_registry}@spine-registry-db:5432/${POSTGRES_REGISTRY_DB:-spine_registry}?sslmode=disable
       - SPINE_MIGRATIONS_DIR=migrations/registry
@@ -105,6 +142,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     environment:
       - SPINE_GIT_REPOSITORY_PATH=/repo
     volumes:
