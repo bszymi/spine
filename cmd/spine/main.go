@@ -275,6 +275,27 @@ func requireSecureDBURL(url string) error {
 	return fmt.Errorf("database URL uses sslmode=disable; set SPINE_INSECURE_LOCAL=1 to acknowledge (local development only) or use sslmode=require/verify-full")
 }
 
+// operatorTokenMinLength is the minimum acceptable length for
+// SPINE_OPERATOR_TOKEN. A 32-byte random secret gives ~192 bits of
+// entropy, well beyond brute-force reach even if per-IP rate limiting
+// is circumvented by distributed sources.
+const operatorTokenMinLength = 32
+
+// validateOperatorToken enforces the startup gate described in
+// TASK-010. If the env var is set, its length must meet the minimum;
+// unset tokens are allowed (operator-scoped routes then return 503 at
+// request time, which is preferable to refusing to start for deployments
+// that don't use the operator surface).
+func validateOperatorToken(token string) error {
+	if token == "" {
+		return nil
+	}
+	if len(token) < operatorTokenMinLength {
+		return fmt.Errorf("SPINE_OPERATOR_TOKEN is %d characters; minimum is %d. Generate a stronger secret (e.g. `openssl rand -hex 32`) before starting spine serve", len(token), operatorTokenMinLength)
+	}
+	return nil
+}
+
 func serveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
@@ -283,6 +304,10 @@ func serveCmd() *cobra.Command {
 			ctx := context.Background()
 			ctx = observe.WithComponent(ctx, "server")
 			log := observe.Logger(ctx)
+
+			if err := validateOperatorToken(os.Getenv("SPINE_OPERATOR_TOKEN")); err != nil {
+				return err
+			}
 
 			port := os.Getenv("SPINE_SERVER_PORT")
 			if port == "" {

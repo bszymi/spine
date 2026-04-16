@@ -6,6 +6,34 @@ import (
 	"testing"
 )
 
+func TestValidateOperatorToken(t *testing.T) {
+	cases := []struct {
+		name      string
+		token     string
+		wantError bool
+	}{
+		{name: "empty token allowed (operator endpoints 503 at request time)", token: "", wantError: false},
+		{name: "16-char token rejected", token: "short-token-1234", wantError: true},
+		{name: "31-char token rejected", token: strings.Repeat("a", 31), wantError: true},
+		{name: "32-char token accepted", token: strings.Repeat("a", 32), wantError: false},
+		{name: "64-char token accepted", token: strings.Repeat("b", 64), wantError: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateOperatorToken(tc.token)
+			if tc.wantError && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantError && err != nil && !strings.Contains(err.Error(), "SPINE_OPERATOR_TOKEN") {
+				t.Fatalf("error should mention the env var: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseGitHTTPTrustedCIDRs(t *testing.T) {
 	cases := []struct {
 		name string
