@@ -62,7 +62,7 @@ var operationRoles = map[Operation]domain.ActorRole{
 	// System
 	"system.metrics":  domain.RoleOperator,
 	"system.rebuild":  domain.RoleOperator,
-	"system.validate": domain.RoleOperator,
+	"system.validate": domain.RoleAdmin,
 
 	// Actors
 	"actor.create": domain.RoleOperator,
