@@ -133,6 +133,7 @@ type Server struct {
 	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
 	gitHTTP             *githttp.Handler       // optional, nil if not configured
 	devMode             bool                   // when true, authorize allows unauthenticated requests
+	env                 string                 // SPINE_ENV value (production/staging/development); surfaced in health
 	sseLimiter          *sseLimiter            // caps concurrent SSE streams per actor
 	trustedProxyCIDRs   []*net.IPNet           // reverse-proxy networks whose XFF header is honored for rate limiting
 	rebuilds            sync.Map               // rebuild_id -> *rebuildState
@@ -223,6 +224,7 @@ type ServerConfig struct {
 	EventBroadcaster    *delivery.EventBroadcaster
 	GitHTTP             *githttp.Handler // optional, serves git repos over HTTP
 	DevMode             bool          // when true, authorize allows unauthenticated requests
+	Env                 string        // SPINE_ENV: production/staging/development; surfaced in /system/health
 	ReadHeaderTimeout   time.Duration // defaults to 10s
 	ReadTimeout         time.Duration // defaults to 30s
 	WriteTimeout        time.Duration // defaults to 60s
@@ -259,6 +261,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		eventBroadcaster:    cfg.EventBroadcaster,
 		gitHTTP:             cfg.GitHTTP,
 		devMode:             cfg.DevMode,
+		env:                 cfg.Env,
 		sseLimiter:          newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),
 		trustedProxyCIDRs:   cfg.TrustedProxyCIDRs,
 	}

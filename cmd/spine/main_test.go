@@ -6,6 +6,78 @@ import (
 	"testing"
 )
 
+func TestGuardDevModeEnv(t *testing.T) {
+	cases := []struct {
+		name      string
+		env       string
+		dev       bool
+		wantError bool
+	}{
+		{name: "dev off, env production", env: "production", dev: false, wantError: false},
+		{name: "dev off, env unspecified", env: "", dev: false, wantError: false},
+		{name: "dev on, env development", env: "development", dev: true, wantError: false},
+		{name: "dev on, env staging", env: "staging", dev: true, wantError: false},
+		{name: "dev on, env unspecified", env: "", dev: true, wantError: false},
+		{name: "dev on, env production (rejected)", env: "production", dev: true, wantError: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := guardDevModeEnv(tc.env, tc.dev)
+			if tc.wantError && err == nil {
+				t.Fatal("expected error")
+			}
+			if !tc.wantError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveRuntimeEnv(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "production", want: "production"},
+		{raw: "PRODUCTION", want: "production"},
+		{raw: "  development  ", want: "development"},
+		{raw: "staging", want: "staging"},
+		{raw: "", want: ""},
+		{raw: "nonsense", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Setenv("SPINE_ENV", tc.raw)
+			if got := resolveRuntimeEnv(); got != tc.want {
+				t.Fatalf("resolveRuntimeEnv() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDevModeEnabled(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "1", want: true},
+		{raw: "true", want: true},
+		{raw: "TRUE", want: true},
+		{raw: "0", want: false},
+		{raw: "false", want: false},
+		{raw: "yes", want: false},
+		{raw: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Setenv("SPINE_DEV_MODE", tc.raw)
+			if got := devModeEnabled(); got != tc.want {
+				t.Fatalf("devModeEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateOperatorToken(t *testing.T) {
 	cases := []struct {
 		name      string

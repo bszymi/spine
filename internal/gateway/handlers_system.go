@@ -66,6 +66,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"status":     status,
 		"components": components,
+		"env":        s.env,
+		"dev_mode":   s.devMode,
 	}
 
 	WriteJSON(w, http.StatusOK, resp)

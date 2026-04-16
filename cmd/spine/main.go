@@ -281,6 +281,42 @@ func requireSecureDBURL(url string) error {
 // is circumvented by distributed sources.
 const operatorTokenMinLength = 32
 
+// resolveRuntimeEnv returns the normalized SPINE_ENV value. Accepted
+// values are "production", "staging", and "development". Any other
+// input — including the empty string — is treated as "unspecified" so
+// operators can choose to leave it unset during local development.
+func resolveRuntimeEnv() string {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("SPINE_ENV")))
+	switch v {
+	case "production", "staging", "development":
+		return v
+	default:
+		return ""
+	}
+}
+
+// devModeEnabled reports whether SPINE_DEV_MODE is set to an
+// affirmative value. Only "1" / "true" (case-insensitive) enable dev
+// mode so a stray non-empty env value doesn't accidentally bypass auth.
+func devModeEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("SPINE_DEV_MODE")))
+	return v == "1" || v == "true"
+}
+
+// guardDevModeEnv enforces TASK-020. Running with dev-mode auth in a
+// production environment is refused outright. For any other env (or
+// none at all) the caller is expected to emit a loud warning log;
+// this helper returns nil so startup can proceed.
+func guardDevModeEnv(env string, dev bool) error {
+	if !dev {
+		return nil
+	}
+	if env == "production" {
+		return fmt.Errorf("SPINE_DEV_MODE is enabled but SPINE_ENV=production; dev-mode auth bypass MUST NOT run in production")
+	}
+	return nil
+}
+
 // validateOperatorToken enforces the startup gate described in
 // TASK-010. If the env var is set, its length must meet the minimum;
 // unset tokens are allowed (operator-scoped routes then return 503 at
@@ -307,6 +343,15 @@ func serveCmd() *cobra.Command {
 
 			if err := validateOperatorToken(os.Getenv("SPINE_OPERATOR_TOKEN")); err != nil {
 				return err
+			}
+
+			runtimeEnv := resolveRuntimeEnv()
+			devMode := devModeEnabled()
+			if err := guardDevModeEnv(runtimeEnv, devMode); err != nil {
+				return err
+			}
+			if devMode {
+				log.Warn("SPINE_DEV_MODE is enabled — unauthenticated requests will be allowed", "env", runtimeEnv)
 			}
 
 			port := os.Getenv("SPINE_SERVER_PORT")
@@ -657,6 +702,8 @@ func serveCmd() *cobra.Command {
 				GitHTTP:             gitHTTPHandler,
 				SSEMaxConnPerActor:  parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
 				TrustedProxyCIDRs:   trustedProxyCIDRs,
+				DevMode:             devMode,
+				Env:                 runtimeEnv,
 			})
 
 			// Run startup recovery and start background services.
