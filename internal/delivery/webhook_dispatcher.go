@@ -20,7 +20,11 @@ import (
 type SubscriptionDetail struct {
 	SubscriptionID string
 	TargetURL      string
-	SigningSecret   string
+	SigningSecret  string
+	// TLS is optional per-subscription TLS hardening. When non-nil,
+	// the dispatcher builds a dedicated http.Client honoring the
+	// SPKI pin and/or custom CA bundle.
+	TLS *SubscriptionTLSConfig
 }
 
 // SubscriptionResolver looks up subscription details by ID.
@@ -31,12 +35,25 @@ type SubscriptionResolver interface {
 // WebhookDispatcher reads pending entries from the delivery queue and
 // POSTs them to configured webhook URLs.
 type WebhookDispatcher struct {
-	store       store.Store
-	resolver    SubscriptionResolver
-	client      *http.Client
-	concurrency int
+	store        store.Store
+	resolver     SubscriptionResolver
+	client       *http.Client
+	httpTimeout  time.Duration
+	concurrency  int
 	pollInterval time.Duration
-	breaker     *CircuitBreaker
+	breaker      *CircuitBreaker
+
+	// tlsClients caches per-subscription http.Clients keyed by
+	// subscription ID so we don't rebuild an x509 pool / Transport
+	// for every delivery. Cache entries are invalidated when a
+	// subscription's TLS config changes (new config signature).
+	tlsMu      sync.Mutex
+	tlsClients map[string]*tlsClientEntry
+}
+
+type tlsClientEntry struct {
+	signature string
+	client    *http.Client
 }
 
 // DispatcherConfig configures the webhook dispatcher.
@@ -62,10 +79,34 @@ func NewWebhookDispatcher(st store.Store, resolver SubscriptionResolver, cfg Dis
 		store:        st,
 		resolver:     resolver,
 		client:       &http.Client{Timeout: cfg.HTTPTimeout},
+		httpTimeout:  cfg.HTTPTimeout,
 		concurrency:  cfg.Concurrency,
 		pollInterval: cfg.PollInterval,
 		breaker:      NewCircuitBreaker(),
+		tlsClients:   make(map[string]*tlsClientEntry),
 	}
+}
+
+// clientFor returns an http.Client tailored to the subscription's TLS
+// config, falling back to the shared default when no TLS hardening is
+// configured. An error here aborts the delivery — we fail closed
+// rather than silently downgrading to default TLS.
+func (d *WebhookDispatcher) clientFor(sub *SubscriptionDetail) (*http.Client, error) {
+	if sub.TLS == nil {
+		return d.client, nil
+	}
+	sig := sub.TLS.PinnedSPKISHA256 + "|" + sub.TLS.CABundlePEM
+	d.tlsMu.Lock()
+	defer d.tlsMu.Unlock()
+	if entry, ok := d.tlsClients[sub.SubscriptionID]; ok && entry.signature == sig {
+		return entry.client, nil
+	}
+	client, err := buildTLSClient(sub.TLS, d.httpTimeout)
+	if err != nil {
+		return nil, err
+	}
+	d.tlsClients[sub.SubscriptionID] = &tlsClientEntry{signature: sig, client: client}
+	return client, nil
 }
 
 // Run starts the dispatcher loop. It polls the delivery queue and dispatches
@@ -153,9 +194,18 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		req.Header.Set("X-Spine-Signature", "sha256="+sig)
 	}
 
-	// Execute
+	// Execute. Per-subscription TLS (pinned SPKI / custom CA) — if
+	// configured — uses a dedicated client cached by subscription ID.
+	client, err := d.clientFor(sub)
+	if err != nil {
+		log.Error("subscription TLS config invalid", "error", err)
+		d.breaker.RecordFailure(entry.SubscriptionID)
+		tlsLogID, _ := generateDeliveryID()
+		d.handleFailure(ctx, entry, tlsLogID, 0, 0, false, err.Error(), nil)
+		return
+	}
 	start := time.Now()
-	resp, err := d.client.Do(req)
+	resp, err := client.Do(req)
 	durationMs := int(time.Since(start).Milliseconds())
 
 	// Generate log ID

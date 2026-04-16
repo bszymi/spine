@@ -47,9 +47,14 @@ func (s *StoreSubscriptionResolver) GetSubscription(ctx context.Context, subscri
 	if err != nil {
 		return nil, err
 	}
+	tlsCfg, err := parseSubscriptionTLS(sub.Metadata)
+	if err != nil {
+		return nil, err
+	}
 	return &SubscriptionDetail{
 		SubscriptionID: sub.SubscriptionID,
 		TargetURL:      sub.TargetURL,
-		SigningSecret:   sub.SigningSecret,
+		SigningSecret:  sub.SigningSecret,
+		TLS:            tlsCfg,
 	}, nil
 }
