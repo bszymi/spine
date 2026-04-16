@@ -3,7 +3,6 @@ package workspace
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -277,17 +276,10 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	if repoPath == "" {
 		repoPath = "."
 	}
-	var gitOpts []git.CLIOption
-	if helper := os.Getenv("SPINE_GIT_CREDENTIAL_HELPER"); helper != "" {
-		if err := git.ValidateCredentialHelper(helper); err != nil {
-			return nil, fmt.Errorf("credential helper: %w", err)
-		}
-		gitOpts = append(gitOpts, git.WithCredentialHelper(helper))
-	}
-	if token := os.Getenv("SPINE_GIT_PUSH_TOKEN"); token != "" {
-		username := os.Getenv("SPINE_GIT_PUSH_USERNAME")
-		gitOpts = append(gitOpts, git.WithPushToken(token, username))
-	}
+	// Resolve auth from the shared cache so tokens scrubbed at startup
+	// (see git.LoadPushAuthFromEnv) still apply to lazily-built
+	// per-workspace clients in shared mode.
+	gitOpts := git.PushAuthOpts()
 	if cfg.SMPWorkspaceID != "" {
 		gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+cfg.SMPWorkspaceID))
 	}

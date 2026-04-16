@@ -47,8 +47,8 @@ The management platform owns:
 
 Spine resolves push credentials in priority order:
 
-1. **External credential helper** (`SPINE_GIT_CREDENTIAL_HELPER`) -- Git calls an external script to get credentials. This is the management platform integration point.
-2. **Built-in token** (`SPINE_GIT_PUSH_TOKEN`) -- Spine rewrites the remote URL to inject the token as HTTPS auth. Simplest option for standalone deployments.
+1. **External credential helper** (`SPINE_GIT_CREDENTIAL_HELPER`) -- Git calls an external program (one of: `cache`, `store`, `osxkeychain`, `manager`, `pass`) to retrieve credentials. **Recommended for production.** The token is never resident in Spine's process environment.
+2. **Built-in token** (`SPINE_GIT_PUSH_TOKEN`) -- Read once at startup, copied into an in-memory GIT\_ASKPASS helper, and then scrubbed from `os.Environ()` so the token is no longer visible to child processes, `/proc/<pid>/environ`, or core dumps. A step up from env-resident tokens but still inferior to a credential helper. When a credential helper is also configured, the token is ignored with a warning at startup.
 3. **Git native** -- Whatever the user configured in their git config (SSH keys, credential store, etc.). Spine does nothing extra.
 4. **None** -- Push skipped gracefully. Run completes without pushing.
 
@@ -56,9 +56,9 @@ Spine resolves push credentials in priority order:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SPINE_GIT_CREDENTIAL_HELPER` | Path to credential helper script (mounted into container) | not set |
+| `SPINE_GIT_CREDENTIAL_HELPER` | Credential helper name (`cache`, `store`, `osxkeychain`, `manager`, `pass`). Recommended mode. | not set |
 | `SMP_WORKSPACE_ID` | Workspace identifier for credential lookup (set by platform) | not set |
-| `SPINE_GIT_PUSH_TOKEN` | Static PAT/deploy token for HTTPS push (standalone mode) | not set |
+| `SPINE_GIT_PUSH_TOKEN` | Static PAT/deploy token for HTTPS push (standalone mode). Scrubbed from process env at startup; ignored when `SPINE_GIT_CREDENTIAL_HELPER` is also set. | not set |
 | `SPINE_GIT_PUSH_USERNAME` | Username for token auth | `x-access-token` |
 | `SPINE_GIT_PUSH_ENABLED` | Set to `false` to skip push entirely | `true` |
 

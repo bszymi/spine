@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,7 +18,7 @@ type CLIClient struct {
 	credentialHelper string   // path to external credential helper script
 	pushEnv          []string // extra env vars for push operations (e.g., SMP_WORKSPACE_ID=xxx)
 	pushToken        string   // token for HTTPS push auth (SPINE_GIT_PUSH_TOKEN)
-	pushUsername      string   // username for token auth (default: x-access-token)
+	pushUsername     string   // username for token auth (default: x-access-token)
 	askpassPath      string   // path to temporary GIT_ASKPASS script (created from pushToken)
 }
 
@@ -143,6 +144,91 @@ func ValidateCredentialHelper(name string) error {
 		return fmt.Errorf("credential helper %q is not in the allowlist; set SPINE_GIT_CREDENTIAL_HELPER to one of cache, store, osxkeychain, manager, pass", name)
 	}
 	return nil
+}
+
+// Package-level cache of push-auth configuration resolved once at
+// startup. Shared mode builds a CLIClient per workspace on first use;
+// reading the token from os.Environ() at that point would defeat the
+// scrubbing done in LoadPushAuthFromEnv, so subsequent callers read
+// from this cache instead.
+var (
+	authMu                sync.Mutex
+	authLoaded            bool
+	cachedAuthOpts        []CLIOption
+	cachedCredentialAllow bool
+)
+
+// LoadPushAuthFromEnv reads SPINE_GIT_CREDENTIAL_HELPER,
+// SPINE_GIT_PUSH_TOKEN, and SPINE_GIT_PUSH_USERNAME, caches the
+// resulting CLIOptions for the rest of the process, and scrubs the
+// token/username variables from os.Environ() so they are no longer
+// visible to child processes, core dumps, or /proc/<pid>/environ.
+// A configured credential helper always wins: when both a helper and
+// a token are set, the token is ignored and the user is warned.
+// Returns (warnings, err); warnings should be logged by the caller.
+// On validation failure the cache is left empty so the caller can
+// decide whether to start without push auth.
+func LoadPushAuthFromEnv() (warnings []string, err error) {
+	authMu.Lock()
+	defer authMu.Unlock()
+	if authLoaded {
+		return nil, nil
+	}
+
+	helper := os.Getenv("SPINE_GIT_CREDENTIAL_HELPER")
+	token := os.Getenv("SPINE_GIT_PUSH_TOKEN")
+	username := os.Getenv("SPINE_GIT_PUSH_USERNAME")
+
+	var opts []CLIOption
+
+	if helper != "" {
+		if err := ValidateCredentialHelper(helper); err != nil {
+			return warnings, err
+		}
+		opts = append(opts, WithCredentialHelper(helper))
+		cachedCredentialAllow = true
+		if token != "" {
+			warnings = append(warnings, "SPINE_GIT_CREDENTIAL_HELPER and SPINE_GIT_PUSH_TOKEN are both set; credential helper wins and the token is ignored — unset SPINE_GIT_PUSH_TOKEN to silence this warning")
+			_ = os.Unsetenv("SPINE_GIT_PUSH_TOKEN")
+			_ = os.Unsetenv("SPINE_GIT_PUSH_USERNAME")
+		}
+	} else if token != "" {
+		opts = append(opts, WithPushToken(token, username))
+		// Copy the value into the in-memory CLIOption and remove it
+		// from the process environment. GIT_ASKPASS reads from a
+		// distinct *_INTERNAL var set at push time, not from the
+		// public SPINE_GIT_PUSH_TOKEN, so the scrub is safe.
+		_ = os.Unsetenv("SPINE_GIT_PUSH_TOKEN")
+		_ = os.Unsetenv("SPINE_GIT_PUSH_USERNAME")
+	}
+
+	cachedAuthOpts = opts
+	authLoaded = true
+	return warnings, nil
+}
+
+// PushAuthOpts returns the CLIOptions resolved by LoadPushAuthFromEnv.
+// Returns nil before LoadPushAuthFromEnv has been called or when
+// neither a helper nor a token was configured.
+func PushAuthOpts() []CLIOption {
+	authMu.Lock()
+	defer authMu.Unlock()
+	if len(cachedAuthOpts) == 0 {
+		return nil
+	}
+	out := make([]CLIOption, len(cachedAuthOpts))
+	copy(out, cachedAuthOpts)
+	return out
+}
+
+// resetPushAuthForTest clears the cache so tests can exercise
+// LoadPushAuthFromEnv multiple times with different environments.
+func resetPushAuthForTest() {
+	authMu.Lock()
+	defer authMu.Unlock()
+	authLoaded = false
+	cachedAuthOpts = nil
+	cachedCredentialAllow = false
 }
 
 // Clone clones a remote repository to a local path.
