@@ -3001,3 +3001,52 @@ func TestWorkspaceMiddleware_InternalError(t *testing.T) {
 		t.Errorf("expected 500 for resolver error, got %d", resp.StatusCode)
 	}
 }
+
+// Cross-workspace guard: a token that validates against the workspace
+// auth service but whose actor has no membership record in the
+// workspace-scoped store must be rejected with 403. This models the
+// defense-in-depth requirement from TASK-013 — even if some future
+// auth path trusts a shared identity source, the explicit membership
+// lookup here is the tripwire that keeps workspaces isolated.
+func TestAuthMiddleware_CrossWorkspaceRejected(t *testing.T) {
+	fs := newFakeStore()
+	// Intentionally DO NOT add the actor to fs.actors.
+	// Insert a token entry directly so ValidateToken returns an actor
+	// but the subsequent GetActor lookup in the workspace store fails.
+	ghost := &domain.Actor{
+		ActorID: "alice-ws-a",
+		Role:    domain.RoleReader,
+		Status:  domain.ActorStatusActive,
+	}
+	rawToken := "ghost-token-value-xxxxxxxxxxxxxxxxxxx"
+	fs.tokens[auth.HashToken(rawToken)] = &fakeTokenEntry{
+		actor: ghost,
+		token: &domain.Token{
+			TokenID: "tok_ghost",
+			ActorID: ghost.ActorID,
+		},
+	}
+
+	authSvc := auth.NewService(fs)
+	resolver := &fakeWorkspaceResolver{config: &workspace.Config{ID: "ws-b", RepoPath: "/tmp"}}
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	req.Header.Set("X-Workspace-ID", "ws-b")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-workspace access, got %d", resp.StatusCode)
+	}
+}

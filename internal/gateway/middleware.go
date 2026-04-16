@@ -128,6 +128,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Defense-in-depth: when a workspace is in scope, re-verify the
+		// actor is present in the workspace-scoped store. Today this is
+		// redundant with ValidateToken (it hits the same store), but it
+		// makes the actor-belongs-to-workspace invariant an explicit
+		// middleware concern rather than an implicit artifact of the
+		// service-pool routing. A future code path that validates tokens
+		// against a shared identity source would still be blocked here.
+		if cfg := WorkspaceConfigFromContext(r.Context()); cfg != nil {
+			if st := s.storeFrom(r.Context()); st != nil {
+				if _, gerr := st.GetActor(r.Context(), actor.ActorID); gerr != nil {
+					observe.Logger(r.Context()).Warn("actor not a member of requested workspace",
+						"actor_id", actor.ActorID,
+						"workspace_id", cfg.ID,
+						"error", gerr.Error(),
+					)
+					WriteError(w, domain.NewError(domain.ErrForbidden, "actor has no membership in this workspace"))
+					return
+				}
+			}
+		}
+
 		ctx := context.WithValue(r.Context(), actorContextKey, actor)
 		ctx = observe.WithActorID(ctx, actor.ActorID)
 		next.ServeHTTP(w, r.WithContext(ctx))
