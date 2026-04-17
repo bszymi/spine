@@ -28,7 +28,7 @@ The Validation Service performs **cross-artifact consistency checks** — valida
 It does **not** perform:
 
 - **Schema validation** of individual artifacts (the Artifact Service handles this using [Artifact Schema](/governance/artifact-schema.md))
-- **Workflow definition validation** (handled by [Workflow Validation](/architecture/workflow-validation.md))
+- **Workflow definition validation** — the workflow validation suite lives in [Workflow Validation](/architecture/workflow-validation.md) and is exposed as a distinct code path invoked by `workflow.create`, `workflow.update`, and `workflow.validate` per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md). The generic artifact validation path does not evaluate workflow-specific rules.
 - **Authentication or authorization checks** (handled by the [Security Model](/architecture/security-model.md))
 
 ### 2.2 Governed Context
@@ -150,7 +150,7 @@ When validation fails, each failure is classified to guide resolution:
 
 ### 5.1 Invocation
 
-The Validation Service is invoked in two ways:
+The Validation Service is invoked in three ways:
 
 **From workflow preconditions:**
 
@@ -166,6 +166,10 @@ In this context, the Validation Service validates the Run's governed artifact ag
 **From system operations:**
 
 The `system.validate_all` operation (per [Access Surface](/architecture/access-surface.md) §3.5) triggers validation across all artifacts in the repository. This is an administrative operation for detecting drift.
+
+**From workflow definition operations:**
+
+Workflow definition writes (`workflow.create`, `workflow.update`) and `workflow.validate` invoke a distinct workflow validation suite rather than this service. That suite is defined in [Workflow Validation](/architecture/workflow-validation.md) and enforces workflow-specific structural invariants (step-reference integrity, cycle detection, divergence/convergence balance, actor/skill resolution). Failure produces `validation_failed` responses with the same shape as described in §5.3.
 
 ### 5.2 Input
 
@@ -333,6 +337,8 @@ This is out of scope for v0.x but the validation contract is designed to support
 - [Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2 — `cross_artifact_valid` and `custom` conditions
 - [Artifact Schema](/governance/artifact-schema.md) — Front matter schemas and link model
 - [Access Surface](/architecture/access-surface.md) §3.5 — `system.validate_all` operation
+- [Workflow Validation](/architecture/workflow-validation.md) — Workflow-specific validation suite (distinct from this service)
+- [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md) — Workflow definitions as a separate API resource
 - [Observability](/architecture/observability.md) §4 — Audit trail for validation events
 - [Error Handling](/architecture/error-handling-and-recovery.md) — Step failure when validation blocks execution
 
