@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/internal/cli"
+	"github.com/bszymi/spine/internal/workflow"
 )
 
 // rootOpts creates InitOpts for root-level artifacts (backward compat).
@@ -65,6 +66,37 @@ func TestInitRepo_CreatesSeedFiles(t *testing.T) {
 		if !strings.HasPrefix(string(content), "---\n") {
 			t.Errorf("expected %s to have YAML front matter", f)
 		}
+	}
+}
+
+func TestInitRepo_SeedsWorkflowLifecycle(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := cli.InitRepo(dir, rootOpts()); err != nil {
+		t.Fatalf("InitRepo: %v", err)
+	}
+
+	p := filepath.Join(dir, "workflows/workflow-lifecycle.yaml")
+	content, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("expected workflow-lifecycle.yaml: %v", err)
+	}
+
+	wf, err := workflow.Parse("workflows/workflow-lifecycle.yaml", content)
+	if err != nil {
+		t.Fatalf("parse seeded workflow: %v", err)
+	}
+
+	if wf.ID != "workflow-lifecycle" {
+		t.Errorf("expected id workflow-lifecycle, got %s", wf.ID)
+	}
+	if wf.Mode != "creation" {
+		t.Errorf("expected mode creation, got %s", wf.Mode)
+	}
+
+	result := workflow.Validate(wf)
+	if result.Status != "passed" {
+		t.Errorf("seeded workflow failed validation: %+v", result.Errors)
 	}
 }
 

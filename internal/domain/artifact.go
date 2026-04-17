@@ -11,6 +11,12 @@ const (
 	ArtifactTypeGovernance   ArtifactType = "Governance"
 	ArtifactTypeArchitecture ArtifactType = "Architecture"
 	ArtifactTypeProduct      ArtifactType = "Product"
+	// ArtifactTypeWorkflow refers to a workflow definition (ADR-007). Workflow
+	// definitions are YAML resources, not Markdown-with-frontmatter artifacts,
+	// so they do not appear in the artifact parser — this constant exists so
+	// workflows can declare applies_to: [Workflow] for the workflow-lifecycle
+	// governance flow (ADR-008).
+	ArtifactTypeWorkflow ArtifactType = "Workflow"
 )
 
 // ValidArtifactTypes returns all valid artifact types.
@@ -18,7 +24,7 @@ func ValidArtifactTypes() []ArtifactType {
 	return []ArtifactType{
 		ArtifactTypeInitiative, ArtifactTypeEpic, ArtifactTypeTask,
 		ArtifactTypeADR, ArtifactTypeGovernance, ArtifactTypeArchitecture,
-		ArtifactTypeProduct,
+		ArtifactTypeProduct, ArtifactTypeWorkflow,
 	}
 }
 

@@ -87,6 +87,7 @@ func InitRepo(repoPath string, opts ...InitOpts) error {
 		"templates/epic-template.md":         seedEpicTemplate,
 		"templates/initiative-template.md":   seedInitiativeTemplate,
 		"templates/adr-template.md":          seedADRTemplate,
+		"workflows/workflow-lifecycle.yaml":  seedWorkflowLifecycle,
 	}
 
 	for relPath, content := range seeds {
@@ -323,4 +324,76 @@ decision_makers: "[names]"
 ## Consequences
 
 [What becomes easier or more difficult as a result?]
+`
+
+// seedWorkflowLifecycle governs workflow.create/update per ADR-008.
+// Seeded at init so fresh repos can edit workflows through the governed
+// branch + approval flow from day one. Teams tighten governance by
+// editing this file; the edit itself flows through this same workflow.
+const seedWorkflowLifecycle = `id: workflow-lifecycle
+name: Workflow Lifecycle
+version: "1.0"
+status: Active
+description: >
+  Governs creation and modification of workflow definitions (ADR-008).
+  Two steps: draft (author the workflow body on a branch) and review
+  (approve or request rework). Approval merges the branch to the
+  authoritative branch; rework keeps the branch alive for further edits.
+  Teams that want stricter governance extend this workflow by editing
+  this file — the edit itself flows through the lifecycle workflow.
+mode: creation
+
+applies_to:
+  - Workflow
+
+entry_step: draft
+
+steps:
+  - id: draft
+    name: Draft Workflow
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+      required_skills: [workflow_authoring]
+    description: >
+      Author or edit the workflow definition on the planning run's branch.
+      Repeated workflow.update calls on the same run_id stack commits on
+      the branch. Submit when the workflow body is ready for review.
+    required_outputs:
+      - workflow_body
+    outcomes:
+      - id: submitted
+        name: Submitted for Review
+        next_step: review
+
+  - id: review
+    name: Review Workflow
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types:
+        - human
+      required_skills: [workflow_review]
+    description: >
+      Evaluate the workflow change for domain correctness — step sequence,
+      actor/skill assignments, retry and timeout policy. Structural validity
+      is already enforced by the validator at write time; review covers
+      semantics. Approve to merge the branch to the authoritative branch;
+      request rework to loop back to draft and keep the branch alive.
+    required_inputs:
+      - workflow_body
+    outcomes:
+      - id: approved
+        name: Approved
+        next_step: end
+        commit:
+          status: Active
+      - id: needs_rework
+        name: Needs Rework
+        next_step: draft
+    timeout: "168h"
+    timeout_outcome: needs_rework
 `
