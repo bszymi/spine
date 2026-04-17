@@ -25,9 +25,8 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 
 	divergenceID := chi.URLParam(r, "divergence_id")
 
-	var req createBranchRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[createBranchRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.BranchID == "" || req.StartStep == "" {

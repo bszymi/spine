@@ -7,6 +7,10 @@ import (
 	"github.com/bszymi/spine/internal/engine"
 )
 
+type acknowledgeRequest struct {
+	ActorID string `json:"actor_id"`
+}
+
 // handleStepAcknowledge processes a step acknowledge request.
 // POST /api/v1/steps/{execution_id}/acknowledge
 // Body: { "actor_id": "..." }
@@ -28,11 +32,8 @@ func (s *Server) handleStepAcknowledge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		ActorID string `json:"actor_id"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[acknowledgeRequest](w, r)
+	if !ok {
 		return
 	}
 

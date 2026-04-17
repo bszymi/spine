@@ -45,9 +45,8 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req runStartRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[runStartRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.Mode != "" && req.Mode != "standard" && req.Mode != "planning" {
@@ -141,8 +140,7 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -203,8 +201,7 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback: direct store update when orchestrator is not wired.
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -238,9 +235,8 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req stepSubmitRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[stepSubmitRequest](w, r)
+	if !ok {
 		return
 	}
 
@@ -294,9 +290,8 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req stepAssignRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[stepAssignRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.ActorID == "" {
@@ -304,8 +299,7 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 

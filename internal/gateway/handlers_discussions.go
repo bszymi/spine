@@ -72,14 +72,12 @@ func (s *Server) handleDiscussionCreate(w http.ResponseWriter, r *http.Request) 
 	if !s.authorize(w, r, "discussion.create") {
 		return
 	}
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
-	var req createThreadRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[createThreadRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.AnchorType == "" || req.AnchorID == "" {
@@ -142,8 +140,7 @@ func (s *Server) handleDiscussionList(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "discussion.list") {
 		return
 	}
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -185,8 +182,7 @@ func (s *Server) handleDiscussionGet(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "discussion.get") {
 		return
 	}
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -214,8 +210,7 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 	if !s.authorize(w, r, "discussion.comment") {
 		return
 	}
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -232,9 +227,8 @@ func (s *Server) handleDiscussionComment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var req createCommentRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[createCommentRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.Content == "" {
@@ -286,8 +280,7 @@ func (s *Server) handleDiscussionResolve(w http.ResponseWriter, r *http.Request)
 	if !s.authorize(w, r, "discussion.resolve") {
 		return
 	}
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -303,9 +296,8 @@ func (s *Server) handleDiscussionResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var req resolveThreadRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[resolveThreadRequest](w, r)
+	if !ok {
 		return
 	}
 
@@ -341,8 +333,7 @@ func (s *Server) handleDiscussionReopen(w http.ResponseWriter, r *http.Request) 
 	if !s.authorize(w, r, "discussion.reopen") {
 		return
 	}
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -377,8 +368,7 @@ func (s *Server) handleQueryDiscussions(w http.ResponseWriter, r *http.Request) 
 	if !s.authorize(w, r, "discussion.list") {
 		return
 	}
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 

@@ -16,9 +16,8 @@ func (s *Server) handleDeliveryList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -46,9 +45,8 @@ func (s *Server) handleDeliveryGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -89,9 +87,8 @@ func (s *Server) handleDeliveryReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -126,9 +123,8 @@ func (s *Server) handleSubscriptionStats(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
