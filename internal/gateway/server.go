@@ -18,8 +18,21 @@ import (
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
+	"github.com/bszymi/spine/internal/workflow"
 	"github.com/bszymi/spine/internal/workspace"
 )
+
+// WorkflowService defines the workflow definition operations the gateway needs.
+// Per ADR-007, workflow definitions are a first-class resource with dedicated
+// create/update/read/list/validate operations that run workflow-specific
+// validation at write time.
+type WorkflowService interface {
+	Create(ctx context.Context, id, body string) (*workflow.WriteResult, error)
+	Update(ctx context.Context, id, body string) (*workflow.WriteResult, error)
+	Read(ctx context.Context, id, ref string) (*workflow.ReadResult, error)
+	List(ctx context.Context, opts workflow.ListOptions) ([]*domain.WorkflowDefinition, error)
+	ValidateBody(ctx context.Context, id, body string) domain.ValidationResult
+}
 
 // ArtifactService defines the artifact operations the gateway needs.
 type ArtifactService interface {
@@ -111,6 +124,7 @@ type Server struct {
 	store               store.Store
 	auth                *auth.Service
 	artifacts           ArtifactService
+	workflows           WorkflowService
 	projQuery           ProjectionQuerier
 	projSync            ProjectionSyncer
 	git                 GitReader
@@ -202,6 +216,7 @@ type ServerConfig struct {
 	Store               store.Store
 	Auth                *auth.Service
 	Artifacts           ArtifactService
+	Workflows           WorkflowService
 	ProjQuery           ProjectionQuerier
 	ProjSync            ProjectionSyncer
 	Git                 GitReader
@@ -239,6 +254,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		store:               cfg.Store,
 		auth:                cfg.Auth,
 		artifacts:           cfg.Artifacts,
+		workflows:           cfg.Workflows,
 		projQuery:           cfg.ProjQuery,
 		projSync:            cfg.ProjSync,
 		git:                 cfg.Git,
@@ -303,6 +319,15 @@ func (s *Server) artifactsFrom(ctx context.Context) ArtifactService {
 		return ss.Artifacts
 	}
 	return s.artifacts
+}
+
+func (s *Server) workflowsFrom(ctx context.Context) WorkflowService {
+	if ss := serviceSetFromContext(ctx); ss != nil {
+		if ws, ok := ss.Workflows.(WorkflowService); ok && ws != nil {
+			return ws
+		}
+	}
+	return s.workflows
 }
 
 func (s *Server) projQueryFrom(ctx context.Context) ProjectionQuerier {

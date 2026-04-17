@@ -28,6 +28,7 @@ type ServiceSet struct {
 	Auth      *auth.Service
 	GitClient *git.CLIClient
 	Artifacts *artifact.Service
+	Workflows any // workspace-scoped workflow service; typed as any to avoid an import cycle (see gateway.WorkflowService)
 	ProjQuery *projection.QueryService
 	ProjSync  *projection.Service
 	Queue     *queue.MemoryQueue

@@ -18,7 +18,14 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"artifact.validate": domain.RoleReader,
 	"artifact.links":    domain.RoleReader,
 
-	// Workflow
+	// Workflow definitions (ADR-007)
+	"workflow.create":   domain.RoleReviewer,
+	"workflow.update":   domain.RoleReviewer,
+	"workflow.read":     domain.RoleReader,
+	"workflow.list":     domain.RoleReader,
+	"workflow.validate": domain.RoleReader,
+
+	// Workflow execution
 	"run.start":   domain.RoleContributor,
 	"run.status":  domain.RoleReader,
 	"run.cancel":  domain.RoleOperator,
