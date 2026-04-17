@@ -16,12 +16,12 @@ import (
 	"github.com/bszymi/spine/internal/workspace"
 )
 
-type contextKey string
-
-const (
-	actorContextKey      contextKey = "actor"
-	workspaceContextKey  contextKey = "workspace_config"
-	serviceSetContextKey contextKey = "workspace_service_set"
+// Context keys are empty structs so they collide only with themselves and
+// their label never leaks when a context is formatted for debug output.
+type (
+	actorKey      struct{}
+	workspaceKey  struct{}
+	serviceSetKey struct{}
 )
 
 // WorkspaceHeader is the HTTP header used to pass workspace ID.
@@ -29,19 +29,19 @@ const WorkspaceHeader = "X-Workspace-ID"
 
 // actorFromContext returns the authenticated actor from the request context.
 func actorFromContext(ctx context.Context) *domain.Actor {
-	actor, _ := ctx.Value(actorContextKey).(*domain.Actor)
+	actor, _ := ctx.Value(actorKey{}).(*domain.Actor)
 	return actor
 }
 
 // WorkspaceConfigFromContext returns the resolved workspace config from the request context.
 func WorkspaceConfigFromContext(ctx context.Context) *workspace.Config {
-	cfg, _ := ctx.Value(workspaceContextKey).(*workspace.Config)
+	cfg, _ := ctx.Value(workspaceKey{}).(*workspace.Config)
 	return cfg
 }
 
 // serviceSetFromContext returns the workspace-scoped service set from the request context.
 func serviceSetFromContext(ctx context.Context) *workspace.ServiceSet {
-	ss, _ := ctx.Value(serviceSetContextKey).(*workspace.ServiceSet)
+	ss, _ := ctx.Value(serviceSetKey{}).(*workspace.ServiceSet)
 	return ss
 }
 
@@ -75,7 +75,7 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), workspaceContextKey, cfg)
+		ctx := context.WithValue(r.Context(), workspaceKey{}, cfg)
 		ctx = observe.WithWorkspaceID(ctx, cfg.ID)
 
 		// If service pool is configured, get the workspace's service set.
@@ -85,7 +85,7 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 				WriteError(w, domain.NewError(domain.ErrInternal, "failed to initialize workspace services"))
 				return
 			}
-			ctx = context.WithValue(ctx, serviceSetContextKey, ss)
+			ctx = context.WithValue(ctx, serviceSetKey{}, ss)
 			defer s.servicePool.Release(cfg.ID)
 		}
 
@@ -149,7 +149,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		ctx := context.WithValue(r.Context(), actorContextKey, actor)
+		ctx := context.WithValue(r.Context(), actorKey{}, actor)
 		ctx = observe.WithActorID(ctx, actor.ActorID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

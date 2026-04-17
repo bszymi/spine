@@ -117,7 +117,7 @@ func TestWorkspaceConfigFromContext_Missing(t *testing.T) {
 
 func TestWorkspaceConfigFromContext_Present(t *testing.T) {
 	expected := &workspace.Config{ID: "ws-1", DisplayName: "WS One"}
-	ctx := context.WithValue(context.Background(), workspaceContextKey, expected)
+	ctx := context.WithValue(context.Background(), workspaceKey{}, expected)
 	got := WorkspaceConfigFromContext(ctx)
 	if got == nil || got.ID != "ws-1" {
 		t.Errorf("expected ws-1, got %v", got)
