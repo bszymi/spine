@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Serve-Startup Smoke Test for Advertised Endpoints"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-17
 epic: /initiatives/INIT-016-cmd-spine-refactor/epics/EPIC-001-extract-and-smoke-test/epic.md
