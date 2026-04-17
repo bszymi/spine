@@ -37,9 +37,10 @@ type ReadResult struct {
 	SourceCommit string
 }
 
-// Service implements workflow definition CRUD backed by Git. Writes happen on
-// the authoritative branch only — workflow definitions are governance
-// artifacts, not task deliverables, so task-branch scoping does not apply.
+// Service implements workflow definition CRUD backed by Git. By default writes
+// commit to the authoritative branch; when a WriteContext with a branch is
+// attached to the operation context, writes are scoped to that branch via a
+// git worktree (ADR-008 — workflow edits through the lifecycle workflow).
 type Service struct {
 	git  git.GitClient
 	repo string
@@ -50,6 +51,55 @@ func NewService(gitClient git.GitClient, repoPath string) *Service {
 	return &Service{git: gitClient, repo: repoPath}
 }
 
+// branchScope captures the working directory for a single write operation.
+// When a WriteContext specifies a branch, a worktree is created so file I/O
+// and commits target the branch without disturbing the main working tree;
+// otherwise the main repo is used directly and cleanup is a no-op.
+type branchScope struct {
+	repoDir string
+	cleanup func()
+}
+
+// enterBranch prepares an isolated working directory when a WriteContext
+// branch is set on the context, mirroring internal/artifact.Service.enterBranch.
+// Callers must defer the returned cleanup.
+func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
+	wc := GetWriteContext(ctx)
+	if wc == nil || wc.Branch == "" {
+		return &branchScope{repoDir: s.repo, cleanup: func() {}}, nil
+	}
+
+	if err := validateGitRefName(wc.Branch); err != nil {
+		return nil, err
+	}
+
+	parent, err := os.MkdirTemp("", "spine-wf-wt-*")
+	if err != nil {
+		return nil, domain.NewError(domain.ErrInternal,
+			fmt.Sprintf("create worktree parent: %v", err))
+	}
+	worktreeDir := filepath.Join(parent, "wt")
+
+	cmd := exec.CommandContext(ctx, "git", "worktree", "add", worktreeDir, wc.Branch)
+	cmd.Dir = s.repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		os.RemoveAll(parent)
+		return nil, domain.NewError(domain.ErrGit,
+			fmt.Sprintf("add worktree for branch %s: %s", wc.Branch, strings.TrimSpace(string(out))))
+	}
+
+	return &branchScope{
+		repoDir: worktreeDir,
+		cleanup: func() {
+			rmCmd := exec.CommandContext(ctx, "git", "worktree", "remove", "--force", worktreeDir)
+			rmCmd.Dir = s.repo
+			_, _ = rmCmd.CombinedOutput()
+			os.RemoveAll(parent)
+		},
+	}, nil
+}
+
 // Create writes a new workflow definition, running the full workflow
 // validation suite before commit.
 func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, error) {
@@ -58,7 +108,6 @@ func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, er
 	}
 
 	path := filePath(id)
-	absPath := filepath.Join(s.repo, path)
 
 	wf, err := Parse(path, []byte(body))
 	if err != nil {
@@ -73,6 +122,14 @@ func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, er
 			"workflow validation failed", result.Errors)
 	}
 
+	scope, err := s.enterBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer scope.cleanup()
+
+	absPath := filepath.Join(scope.repoDir, path)
+
 	if _, err := os.Stat(absPath); err == nil {
 		return nil, domain.NewError(domain.ErrAlreadyExists,
 			fmt.Sprintf("workflow already exists: %s", path))
@@ -85,12 +142,12 @@ func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, er
 		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("write file: %v", err))
 	}
 
-	sha, err := stageAndCommit(ctx, s.repo, path,
+	sha, err := stageAndCommit(ctx, scope.repoDir, path,
 		fmt.Sprintf("Create workflow %s (%s)", wf.ID, wf.Version),
 		observe.TrailersFromContext(ctx, "workflow.create"))
 	if err != nil {
 		_ = os.Remove(absPath)
-		_ = gitReset(ctx, s.repo, path)
+		_ = gitReset(ctx, scope.repoDir, path)
 		return nil, err
 	}
 
@@ -106,7 +163,27 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 	}
 
 	path := filePath(id)
-	absPath := filepath.Join(s.repo, path)
+
+	wf, err := Parse(path, []byte(body))
+	if err != nil {
+		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
+	}
+	if wf.ID != id {
+		return nil, domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("body id %q does not match path id %q", wf.ID, id))
+	}
+	if result := Validate(wf); result.Status == "failed" {
+		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
+			"workflow validation failed", result.Errors)
+	}
+
+	scope, err := s.enterBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer scope.cleanup()
+
+	absPath := filepath.Join(scope.repoDir, path)
 
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
 		return nil, domain.NewError(domain.ErrNotFound,
@@ -117,23 +194,10 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 	if err != nil {
 		return nil, err
 	}
-
-	wf, err := Parse(path, []byte(body))
-	if err != nil {
-		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
-	}
-	if wf.ID != id {
-		return nil, domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("body id %q does not match path id %q", wf.ID, id))
-	}
 	if wf.Version == prior.Version {
 		return nil, domain.NewError(domain.ErrValidationFailed,
 			fmt.Sprintf("workflow.update requires a version bump (prior=%s, submitted=%s)",
 				prior.Version, wf.Version))
-	}
-	if result := Validate(wf); result.Status == "failed" {
-		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
-			"workflow validation failed", result.Errors)
 	}
 
 	originalBody, readErr := os.ReadFile(absPath)
@@ -145,7 +209,7 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("write file: %v", err))
 	}
 
-	sha, err := stageAndCommit(ctx, s.repo, path,
+	sha, err := stageAndCommit(ctx, scope.repoDir, path,
 		fmt.Sprintf("Update workflow %s (%s -> %s)", wf.ID, prior.Version, wf.Version),
 		observe.TrailersFromContext(ctx, "workflow.update"))
 	if err != nil {
