@@ -65,7 +65,7 @@ Rebasing an Active Run onto a newer workflow version is explicitly out of scope 
 The reviewer-driven flow above is the default. The operator role retains a direct-commit path:
 
 - `workflow.create` / `workflow.update` with **no** `write_context` and a caller role of `operator` (or higher) commits directly to the authoritative branch, bypassing the Run entirely.
-- The bypass is audit-logged with a distinguishing commit trailer (`workflow.bypass: true`) so an auditor can separate bypass commits from governed merges.
+- The bypass is audit-logged with a distinguishing commit trailer (`Workflow-Bypass: true`) so an auditor can separate bypass commits from governed merges.
 
 The bypass exists specifically for bootstrap deadlocks (the `workflow-lifecycle` workflow is itself broken and the governance flow cannot complete) and incident recovery. It is not a general-purpose fast path — reviewer role calls without `write_context` still start a planning Run.
 
@@ -74,7 +74,7 @@ The bypass exists specifically for bootstrap deadlocks (the `workflow-lifecycle`
 Two distinct audit trails result:
 
 - Governed merge: branch history + planning-run record (step executions, outcomes, reviewer identity) + merge commit. The reviewer and approval rationale are answerable from the Run record.
-- Operator bypass: direct commit on the authoritative branch, tagged with `workflow.bypass: true` and the operator's identity in trailers.
+- Operator bypass: direct commit on the authoritative branch, tagged with `Workflow-Bypass: true` and the operator's identity in trailers.
 
 Both are discoverable from `git log` on the workflow file; the Run record adds structured "who approved this and why" for the governed path.
 

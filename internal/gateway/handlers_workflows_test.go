@@ -142,8 +142,10 @@ func doWorkflowJSON(t *testing.T, method, url, token, body string) *http.Respons
 // ── Tests ──
 
 func TestWorkflowCreate_Success(t *testing.T) {
+	// Uses operator role so the handler takes the direct-commit path
+	// (reviewer without a planning starter now returns 503 per ADR-008).
 	svc := newFakeWorkflowSvc()
-	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
+	ts, tok := newWorkflowServer(t, svc, domain.RoleOperator)
 	defer ts.Close()
 
 	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, `{"id":"task-default","body":"id: task-default\n"}`)
@@ -194,7 +196,9 @@ func TestWorkflowCreate_MissingFields(t *testing.T) {
 func TestWorkflowCreate_ValidationFailed(t *testing.T) {
 	svc := newFakeWorkflowSvc()
 	svc.createErr = domain.NewErrorWithDetail(domain.ErrValidationFailed, "bad", []domain.ValidationError{{RuleID: "SCHEMA", Message: "x"}})
-	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
+	// Operator: direct-commit path so svc.Create runs and returns the
+	// validation error we pre-loaded above.
+	ts, tok := newWorkflowServer(t, svc, domain.RoleOperator)
 	defer ts.Close()
 
 	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, `{"id":"bad","body":"xxx"}`)
@@ -555,17 +559,82 @@ func TestWorkflowCreate_OperatorNoWriteContext_DirectCommit(t *testing.T) {
 	}
 }
 
-func TestWorkflowCreate_ReviewerNoBypassTagged(t *testing.T) {
+func TestWorkflowCreate_ReviewerNoPlanner_Returns503(t *testing.T) {
+	// Reviewer with no write_context and no planning starter wired must
+	// NOT silently demote to direct commit — that would skip the lifecycle
+	// review AND the bypass trailer. The operator-bypass path is the
+	// bootstrap escape hatch (ADR-008 §5), not this one.
 	svc := newFakeWorkflowSvc()
-	// No planner wired so the reviewer falls through to direct commit.
 	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
 	defer ts.Close()
 
 	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, `{"id":"x","body":"id: x\n"}`)
 	defer resp.Body.Close()
 
-	if svc.lastCreateBypass {
-		t.Error("reviewer fallback must not be tagged as bypass")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when starter is nil, got %d", resp.StatusCode)
+	}
+	if svc.lastCreateID != "" {
+		t.Errorf("direct svc.Create must not run when the governance path is unavailable, got id=%q",
+			svc.lastCreateID)
+	}
+}
+
+// TestWorkflowCreate_RoleDispatchTable covers every ActorRole to assert the
+// planning-vs-bypass dispatch can't drift when a new role is inserted between
+// reviewer and operator. callerHasOperatorPrivileges must use HasAtLeast, not
+// equality (review finding #6).
+func TestWorkflowCreate_RoleDispatchTable(t *testing.T) {
+	type want struct {
+		status     int
+		plannerHit bool
+		svcHit     bool
+		bypassCtx  bool
+	}
+	cases := []struct {
+		role domain.ActorRole
+		want want
+	}{
+		// reader / contributor: no workflow.create permission → 403
+		{domain.RoleReader, want{status: http.StatusForbidden}},
+		{domain.RoleContributor, want{status: http.StatusForbidden}},
+		// reviewer: governed via planning run
+		{domain.RoleReviewer, want{status: http.StatusCreated, plannerHit: true}},
+		// operator / admin: direct commit with bypass trailer
+		{domain.RoleOperator, want{status: http.StatusCreated, svcHit: true, bypassCtx: true}},
+		{domain.RoleAdmin, want{status: http.StatusCreated, svcHit: true, bypassCtx: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.role), func(t *testing.T) {
+			svc := newFakeWorkflowSvc()
+			planner := &fakeWFPlanningStarter{}
+			ts, tok := newWorkflowServerWithPlanning(t, svc, planner, tc.role)
+			defer ts.Close()
+
+			resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok,
+				`{"id":"role-test","body":"id: role-test\n"}`)
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.want.status {
+				t.Fatalf("status: got %d, want %d", resp.StatusCode, tc.want.status)
+			}
+			if tc.want.plannerHit && planner.lastID == "" {
+				t.Errorf("%s: expected planner to be called", tc.role)
+			}
+			if !tc.want.plannerHit && planner.lastID != "" {
+				t.Errorf("%s: planner must not be called, got id=%q", tc.role, planner.lastID)
+			}
+			if tc.want.svcHit && svc.lastCreateID == "" {
+				t.Errorf("%s: expected direct svc.Create", tc.role)
+			}
+			if !tc.want.svcHit && svc.lastCreateID != "" {
+				t.Errorf("%s: direct svc.Create must not run, got id=%q", tc.role, svc.lastCreateID)
+			}
+			if svc.lastCreateBypass != tc.want.bypassCtx {
+				t.Errorf("%s: bypass ctx: got %v, want %v", tc.role, svc.lastCreateBypass, tc.want.bypassCtx)
+			}
+		})
 	}
 }
 
@@ -592,24 +661,13 @@ func TestWorkflowCreate_WithWriteContext_RoutesToBranch(t *testing.T) {
 	}
 }
 
-func TestWorkflowCreate_WithoutWriteContext_AuthoritativeMode(t *testing.T) {
-	svc := newFakeWorkflowSvc()
-	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
-	defer ts.Close()
-
-	body := `{"id":"task-default","body":"id: task-default\n"}`
-	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, body)
-	defer resp.Body.Close()
-
-	var out map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	if out["write_mode"] != "authoritative" {
-		t.Errorf("write_mode: %v", out["write_mode"])
-	}
-	if svc.lastCreateBranch != "" {
-		t.Errorf("expected no branch, got %q", svc.lastCreateBranch)
-	}
-}
+// Removed: TestWorkflowCreate_WithoutWriteContext_AuthoritativeMode.
+// The prior behavior (reviewer falling through to direct commit with
+// write_mode: authoritative) was the silent-demotion bug ADR-008 §6
+// warned about. The dispatch rules are now covered by
+// TestWorkflowCreate_RoleDispatchTable:
+//   - reviewer + no planner → 503
+//   - operator + no write_context → write_mode: bypass + Workflow-Bypass trailer
 
 func TestWorkflowUpdate_WithWriteContext_RoutesToBranch(t *testing.T) {
 	svc := newFakeWorkflowSvc()

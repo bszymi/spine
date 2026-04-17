@@ -19,12 +19,28 @@ const (
 	ArtifactTypeWorkflow ArtifactType = "Workflow"
 )
 
-// ValidArtifactTypes returns all valid artifact types.
+// ValidArtifactTypes returns all valid artifact types. Includes
+// ArtifactTypeWorkflow so workflow binding can declare applies_to: [Workflow]
+// (ADR-008). Callers that validate Markdown-with-frontmatter artifacts should
+// use ValidMarkdownArtifactTypes instead — workflow definitions are YAML and
+// must not be routed through the artifact parser.
 func ValidArtifactTypes() []ArtifactType {
 	return []ArtifactType{
 		ArtifactTypeInitiative, ArtifactTypeEpic, ArtifactTypeTask,
 		ArtifactTypeADR, ArtifactTypeGovernance, ArtifactTypeArchitecture,
 		ArtifactTypeProduct, ArtifactTypeWorkflow,
+	}
+}
+
+// ValidMarkdownArtifactTypes returns types that are stored as Markdown with
+// YAML front matter. Excludes ArtifactTypeWorkflow (pure YAML, routed through
+// workflow.Service). Use this when validating or parsing artifact files so a
+// hand-crafted `.md` declaring `type: Workflow` is rejected.
+func ValidMarkdownArtifactTypes() []ArtifactType {
+	return []ArtifactType{
+		ArtifactTypeInitiative, ArtifactTypeEpic, ArtifactTypeTask,
+		ArtifactTypeADR, ArtifactTypeGovernance, ArtifactTypeArchitecture,
+		ArtifactTypeProduct,
 	}
 }
 

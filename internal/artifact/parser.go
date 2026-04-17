@@ -133,9 +133,11 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		return nil, &ParseError{Path: path, Message: "missing required field: type"}
 	}
 
-	// Validate artifact type is known
+	// Validate artifact type is known. ArtifactTypeWorkflow is excluded here:
+	// workflow definitions are YAML (not Markdown+frontmatter) and must be
+	// routed through workflow.Service per ADR-007.
 	validType := false
-	for _, t := range domain.ValidArtifactTypes() {
+	for _, t := range domain.ValidMarkdownArtifactTypes() {
 		if artifactType == t {
 			validType = true
 			break
@@ -258,7 +260,7 @@ func IsArtifact(content []byte) bool {
 		return false
 	}
 
-	for _, t := range domain.ValidArtifactTypes() {
+	for _, t := range domain.ValidMarkdownArtifactTypes() {
 		if domain.ArtifactType(check.Type) == t {
 			return true
 		}

@@ -148,6 +148,18 @@ func TestValidArtifactTypes(t *testing.T) {
 	}
 }
 
+func TestValidMarkdownArtifactTypes(t *testing.T) {
+	types := domain.ValidMarkdownArtifactTypes()
+	if len(types) != 7 {
+		t.Errorf("expected 7 markdown artifact types, got %d", len(types))
+	}
+	for _, tp := range types {
+		if tp == domain.ArtifactTypeWorkflow {
+			t.Error("ValidMarkdownArtifactTypes must exclude Workflow — it's YAML, not Markdown")
+		}
+	}
+}
+
 func TestErrorDetailScan(t *testing.T) {
 	ed := &domain.ErrorDetail{}
 

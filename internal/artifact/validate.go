@@ -230,7 +230,7 @@ func isValidDate(s string) bool {
 }
 
 func isValidArtifactType(t domain.ArtifactType) bool {
-	for _, valid := range domain.ValidArtifactTypes() {
+	for _, valid := range domain.ValidMarkdownArtifactTypes() {
 		if t == valid {
 			return true
 		}
