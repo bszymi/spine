@@ -306,109 +306,100 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 	return s
 }
 
-// Workspace-scoped service accessors. These check the request context
-// for a workspace ServiceSet first, falling back to the Server's direct
-// fields for backward compatibility and single-workspace mode.
+// Workspace-scoped service accessors. Each checks the request context for a
+// workspace ServiceSet first, falling back to the Server's direct field for
+// single-workspace mode. resolve collapses the identical "if ss != nil &&
+// ss.X != nil return ss.X; return s.x" shape into a single helper.
+
+// resolve returns the per-request override from the workspace ServiceSet (if
+// pick returns a non-zero value), otherwise falls back to the given default.
+// T must be comparable against its zero value, which holds for interfaces
+// and pointers (the only concrete accessor types here).
+func resolve[T comparable](ctx context.Context, pick func(*workspace.ServiceSet) T, fallback T) T {
+	var zero T
+	if ss := serviceSetFromContext(ctx); ss != nil {
+		if v := pick(ss); v != zero {
+			return v
+		}
+	}
+	return fallback
+}
 
 func (s *Server) authFrom(ctx context.Context) *auth.Service {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.Auth != nil {
-		return ss.Auth
-	}
-	return s.auth
+	return resolve(ctx, func(ss *workspace.ServiceSet) *auth.Service { return ss.Auth }, s.auth)
 }
 
 func (s *Server) storeFrom(ctx context.Context) store.Store {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.Store != nil {
-		return ss.Store
-	}
-	return s.store
+	return resolve(ctx, func(ss *workspace.ServiceSet) store.Store { return ss.Store }, s.store)
 }
 
 func (s *Server) artifactsFrom(ctx context.Context) ArtifactService {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.Artifacts != nil {
-		return ss.Artifacts
-	}
-	return s.artifacts
+	return resolve(ctx, func(ss *workspace.ServiceSet) ArtifactService { return ss.Artifacts }, s.artifacts)
 }
 
 func (s *Server) workflowsFrom(ctx context.Context) WorkflowService {
-	if ss := serviceSetFromContext(ctx); ss != nil {
-		if ws, ok := ss.Workflows.(WorkflowService); ok && ws != nil {
+	return resolve(ctx, func(ss *workspace.ServiceSet) WorkflowService {
+		if ws, ok := ss.Workflows.(WorkflowService); ok {
 			return ws
 		}
-	}
-	return s.workflows
+		return nil
+	}, s.workflows)
 }
 
 func (s *Server) projQueryFrom(ctx context.Context) ProjectionQuerier {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.ProjQuery != nil {
-		return ss.ProjQuery
-	}
-	return s.projQuery
+	return resolve(ctx, func(ss *workspace.ServiceSet) ProjectionQuerier { return ss.ProjQuery }, s.projQuery)
 }
 
 func (s *Server) projSyncFrom(ctx context.Context) ProjectionSyncer {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.ProjSync != nil {
-		return ss.ProjSync
-	}
-	return s.projSync
+	return resolve(ctx, func(ss *workspace.ServiceSet) ProjectionSyncer { return ss.ProjSync }, s.projSync)
 }
 
 func (s *Server) gitFrom(ctx context.Context) GitReader {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.GitClient != nil {
-		return ss.GitClient
-	}
-	return s.git
+	return resolve(ctx, func(ss *workspace.ServiceSet) GitReader { return ss.GitClient }, s.git)
 }
 
 func (s *Server) validatorFrom(ctx context.Context) *validation.Engine {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.Validator != nil {
-		return ss.Validator
-	}
-	return s.validator
+	return resolve(ctx, func(ss *workspace.ServiceSet) *validation.Engine { return ss.Validator }, s.validator)
 }
 
 func (s *Server) branchCreatorFrom(ctx context.Context) BranchCreator {
-	if ss := serviceSetFromContext(ctx); ss != nil && ss.Divergence != nil {
-		return ss.Divergence
-	}
-	return s.branchCreator
+	return resolve(ctx, func(ss *workspace.ServiceSet) BranchCreator { return ss.Divergence }, s.branchCreator)
 }
 
 func (s *Server) runStarterFrom(ctx context.Context) RunStarter {
-	if ss := serviceSetFromContext(ctx); ss != nil {
+	return resolve(ctx, func(ss *workspace.ServiceSet) RunStarter {
 		if rs, ok := ss.RunStarter.(RunStarter); ok {
 			return rs
 		}
-	}
-	return s.runStarter
+		return nil
+	}, s.runStarter)
 }
 
 func (s *Server) runCancellerFrom(ctx context.Context) RunCanceller {
-	if ss := serviceSetFromContext(ctx); ss != nil {
+	return resolve(ctx, func(ss *workspace.ServiceSet) RunCanceller {
 		if rc, ok := ss.RunCanceller.(RunCanceller); ok {
 			return rc
 		}
-	}
-	return s.runCanceller
+		return nil
+	}, s.runCanceller)
 }
 
 func (s *Server) planningRunStarterFrom(ctx context.Context) PlanningRunStarter {
-	if ss := serviceSetFromContext(ctx); ss != nil {
+	return resolve(ctx, func(ss *workspace.ServiceSet) PlanningRunStarter {
 		if ps, ok := ss.PlanningRunStarter.(PlanningRunStarter); ok {
 			return ps
 		}
-	}
-	return s.planningRunStarter
+		return nil
+	}, s.planningRunStarter)
 }
 
 func (s *Server) wfPlanningStarterFrom(ctx context.Context) WorkflowPlanningRunStarter {
-	if ss := serviceSetFromContext(ctx); ss != nil {
+	return resolve(ctx, func(ss *workspace.ServiceSet) WorkflowPlanningRunStarter {
 		if ps, ok := ss.WFPlanningStarter.(WorkflowPlanningRunStarter); ok {
 			return ps
 		}
-	}
-	return s.wfPlanningStarter
+		return nil
+	}, s.wfPlanningStarter)
 }
 
 // ListenAndServe starts the HTTP server.
