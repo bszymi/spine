@@ -7,14 +7,13 @@ import (
 	"sync"
 	"time"
 
-	"log/slog"
-
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/githttp"
+	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
@@ -292,7 +291,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		trustedProxyCIDRs:   cfg.TrustedProxyCIDRs,
 	}
 	if cfg.DevMode {
-		slog.Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
+		observe.Logger(context.Background()).Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
 	}
 
 	s.httpServer = &http.Server{

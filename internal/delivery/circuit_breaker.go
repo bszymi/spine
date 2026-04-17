@@ -1,10 +1,11 @@
 package delivery
 
 import (
+	"context"
 	"sync"
 	"time"
 
-	"log/slog"
+	"github.com/bszymi/spine/internal/observe"
 )
 
 // CircuitState represents the state of a circuit breaker.
@@ -58,7 +59,7 @@ func NewCircuitBreaker() *CircuitBreaker {
 // AllowDelivery returns true if the circuit allows a delivery attempt
 // for the given subscription. If the circuit is open and the recovery
 // timeout has elapsed, it transitions to half-open.
-func (cb *CircuitBreaker) AllowDelivery(subscriptionID string) bool {
+func (cb *CircuitBreaker) AllowDelivery(ctx context.Context, subscriptionID string) bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
@@ -73,7 +74,7 @@ func (cb *CircuitBreaker) AllowDelivery(subscriptionID string) bool {
 	case CircuitOpen:
 		if time.Since(entry.lastFailureAt) >= circuitRecoveryTimeout {
 			entry.state = CircuitHalfOpen
-			slog.Info("circuit half-open",
+			observe.Logger(ctx).Info("circuit half-open",
 				"subscription_id", subscriptionID)
 			return true // allow one probe
 		}
@@ -86,7 +87,7 @@ func (cb *CircuitBreaker) AllowDelivery(subscriptionID string) bool {
 
 // RecordSuccess records a successful delivery. If the circuit is
 // half-open, this closes it. Resets consecutive failure count.
-func (cb *CircuitBreaker) RecordSuccess(subscriptionID string) {
+func (cb *CircuitBreaker) RecordSuccess(ctx context.Context, subscriptionID string) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
@@ -96,7 +97,7 @@ func (cb *CircuitBreaker) RecordSuccess(subscriptionID string) {
 	}
 
 	if entry.state == CircuitHalfOpen {
-		slog.Info("circuit closed",
+		observe.Logger(ctx).Info("circuit closed",
 			"subscription_id", subscriptionID)
 	}
 
@@ -106,7 +107,7 @@ func (cb *CircuitBreaker) RecordSuccess(subscriptionID string) {
 
 // RecordFailure records a failed delivery. If consecutive failures
 // reach the threshold, the circuit opens.
-func (cb *CircuitBreaker) RecordFailure(subscriptionID string) {
+func (cb *CircuitBreaker) RecordFailure(ctx context.Context, subscriptionID string) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
@@ -121,7 +122,7 @@ func (cb *CircuitBreaker) RecordFailure(subscriptionID string) {
 
 	if entry.state == CircuitHalfOpen {
 		entry.state = CircuitOpen
-		slog.Info("circuit re-tripped (half-open probe failed)",
+		observe.Logger(ctx).Info("circuit re-tripped (half-open probe failed)",
 			"subscription_id", subscriptionID,
 			"failures", entry.consecutiveFailures)
 		return
@@ -129,7 +130,7 @@ func (cb *CircuitBreaker) RecordFailure(subscriptionID string) {
 
 	if entry.consecutiveFailures >= circuitFailureThreshold && entry.state == CircuitClosed {
 		entry.state = CircuitOpen
-		slog.Info("circuit opened",
+		observe.Logger(ctx).Info("circuit opened",
 			"subscription_id", subscriptionID,
 			"failures", entry.consecutiveFailures)
 	}

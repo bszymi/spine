@@ -162,7 +162,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	)
 
 	// Circuit breaker check
-	if !d.breaker.AllowDelivery(entry.SubscriptionID) {
+	if !d.breaker.AllowDelivery(ctx, entry.SubscriptionID) {
 		log.Debug("circuit open, skipping delivery")
 		// Return to pending so it can be retried later
 		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "pending", "circuit open", nil)
@@ -199,7 +199,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	client, err := d.clientFor(sub)
 	if err != nil {
 		log.Error("subscription TLS config invalid", "error", err)
-		d.breaker.RecordFailure(entry.SubscriptionID)
+		d.breaker.RecordFailure(ctx, entry.SubscriptionID)
 		tlsLogID, _ := generateDeliveryID()
 		d.handleFailure(ctx, entry, tlsLogID, 0, 0, false, err.Error(), nil)
 		return
@@ -213,7 +213,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 
 	if err != nil {
 		log.Error("webhook delivery failed", "error", err, "duration_ms", durationMs)
-		d.breaker.RecordFailure(entry.SubscriptionID)
+		d.breaker.RecordFailure(ctx, entry.SubscriptionID)
 		d.handleFailure(ctx, entry, logID, durationMs, 0, true, err.Error(), nil)
 		return
 	}
@@ -224,7 +224,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 
 	if statusCode >= 200 && statusCode < 300 {
 		log.Info("webhook delivered", "status", statusCode, "duration_ms", durationMs)
-		d.breaker.RecordSuccess(entry.SubscriptionID)
+		d.breaker.RecordSuccess(ctx, entry.SubscriptionID)
 		_ = d.store.MarkDelivered(ctx, entry.DeliveryID)
 	} else {
 		errMsg := fmt.Sprintf("HTTP %d", statusCode)
@@ -234,7 +234,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		} else {
 			log.Warn("webhook delivery rejected (permanent)", "status", statusCode, "duration_ms", durationMs)
 		}
-		d.breaker.RecordFailure(entry.SubscriptionID)
+		d.breaker.RecordFailure(ctx, entry.SubscriptionID)
 		d.handleFailure(ctx, entry, logID, durationMs, statusCode, retryable, errMsg, resp)
 		return
 	}
