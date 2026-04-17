@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: Spec Conformance
-status: Draft
+status: Completed
 initiative: /initiatives/INIT-005-api-spec-conformance/initiative.md
 links:
   - type: parent

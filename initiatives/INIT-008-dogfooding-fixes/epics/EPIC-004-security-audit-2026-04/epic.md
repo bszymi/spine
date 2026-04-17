@@ -2,11 +2,11 @@
 id: EPIC-004
 type: Epic
 title: Security Audit 2026-04
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 owner: bszymi
 created: 2026-04-16
-last_updated: 2026-04-16
+last_updated: 2026-04-17
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/initiative.md
