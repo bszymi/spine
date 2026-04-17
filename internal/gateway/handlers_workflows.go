@@ -41,6 +41,10 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If this 503 fires in production, a new service was added to
+	// gateway.ServerConfig without being wired in cmd/spine buildServerConfig.
+	// See cmd/spine/serve_smoke_test.go — that test probes every endpoint
+	// and is the canary for this class of regression.
 	svc := s.workflowsFrom(r.Context())
 	if svc == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "workflow service not configured"))
