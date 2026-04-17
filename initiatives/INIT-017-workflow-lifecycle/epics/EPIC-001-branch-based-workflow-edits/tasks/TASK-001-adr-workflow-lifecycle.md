@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Author ADR-008 — Workflow Lifecycle Governance"
-status: Pending
+status: Completed
 work_type: documentation
 created: 2026-04-17
 epic: /initiatives/INIT-017-workflow-lifecycle/epics/EPIC-001-branch-based-workflow-edits/epic.md
