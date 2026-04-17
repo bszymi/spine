@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -327,7 +328,6 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Send a ping event inline
 	pingPayload := []byte(`{"type":"ping","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `"}`)
 
 	// G704 flags sub.TargetURL as taint. Webhook targets are
@@ -337,22 +337,16 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 	// operator-configured URL without "sending HTTP to a
 	// user-supplied URL"; SSRF scanning belongs to the
 	// subscription-creation path, not here.
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, nil) //nolint:gosec // G704: operator-configured webhook URL
+	testReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, bytes.NewReader(pingPayload)) //nolint:gosec // G704: operator-configured webhook URL
 	if err != nil {
 		WriteJSON(w, http.StatusOK, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Spine-Event", "ping")
-	req.Body = http.NoBody
-
-	// Use a short-lived client for the test
-	client := &http.Client{Timeout: 10 * time.Second}
-	req.Body = nil
-	testReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, nil) //nolint:gosec // G704: see comment above
 	testReq.Header.Set("Content-Type", "application/json")
 	testReq.Header.Set("X-Spine-Event", "ping")
+	testReq.ContentLength = int64(len(pingPayload))
 
+	client := &http.Client{Timeout: 10 * time.Second}
 	start := time.Now()
 	resp, err := client.Do(testReq) //nolint:gosec // G704: operator-configured webhook URL
 	durationMs := int(time.Since(start).Milliseconds())
@@ -367,8 +361,6 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer resp.Body.Close()
-
-	_ = pingPayload // used conceptually; the test sends a minimal GET-like POST
 
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"success":     resp.StatusCode >= 200 && resp.StatusCode < 300,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -421,6 +422,55 @@ func TestSubscriptionTest_Success(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&got)
 	if got["success"] != true {
 		t.Errorf("want success=true, got %v", got)
+	}
+}
+
+func TestSubscriptionTest_DispatchesPingPayload(t *testing.T) {
+	type received struct {
+		contentType string
+		eventHeader string
+		body        map[string]any
+	}
+	capture := make(chan received, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		defer r.Body.Close()
+		var decoded map[string]any
+		_ = json.Unmarshal(body, &decoded)
+		capture <- received{
+			contentType: r.Header.Get("Content-Type"),
+			eventHeader: r.Header.Get("X-Spine-Event"),
+			body:        decoded,
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	ts, fs, token := setupSubServer(t)
+	fs.subs["sub-1"] = &store.EventSubscription{SubscriptionID: "sub-1", TargetURL: backend.URL}
+
+	resp := doJSON(t, http.MethodPost, ts.URL+"/api/v1/subscriptions/sub-1/test", token, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+
+	select {
+	case got := <-capture:
+		if got.contentType != "application/json" {
+			t.Errorf("Content-Type: want application/json, got %q", got.contentType)
+		}
+		if got.eventHeader != "ping" {
+			t.Errorf("X-Spine-Event: want ping, got %q", got.eventHeader)
+		}
+		if got.body["type"] != "ping" {
+			t.Errorf("body.type: want ping, got %v (body=%v)", got.body["type"], got.body)
+		}
+		if _, ok := got.body["timestamp"].(string); !ok {
+			t.Errorf("body.timestamp: want string, got %v", got.body["timestamp"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not receive ping request")
 	}
 }
 
