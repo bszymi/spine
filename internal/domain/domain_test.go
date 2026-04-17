@@ -143,8 +143,8 @@ func TestSpineError(t *testing.T) {
 
 func TestValidArtifactTypes(t *testing.T) {
 	types := domain.ValidArtifactTypes()
-	if len(types) != 7 {
-		t.Errorf("expected 7 artifact types, got %d", len(types))
+	if len(types) != 8 {
+		t.Errorf("expected 8 artifact types, got %d", len(types))
 	}
 }
 

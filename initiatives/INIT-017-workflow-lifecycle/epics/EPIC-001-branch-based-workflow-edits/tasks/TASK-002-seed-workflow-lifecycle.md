@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Seed workflow-lifecycle.yaml via spine init-repo"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-17
 epic: /initiatives/INIT-017-workflow-lifecycle/epics/EPIC-001-branch-based-workflow-edits/epic.md

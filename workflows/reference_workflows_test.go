@@ -193,11 +193,73 @@ func TestArtifactCreationWorkflow_Parses(t *testing.T) {
 	}
 }
 
+func TestWorkflowLifecycleWorkflow_Parses(t *testing.T) {
+	content, err := os.ReadFile("workflow-lifecycle.yaml")
+	if err != nil {
+		t.Fatalf("failed to read workflow: %v", err)
+	}
+
+	wf, err := workflow.Parse("workflows/workflow-lifecycle.yaml", content)
+	if err != nil {
+		t.Fatalf("failed to parse workflow: %v", err)
+	}
+
+	if wf.ID != "workflow-lifecycle" {
+		t.Errorf("expected id workflow-lifecycle, got %s", wf.ID)
+	}
+	if wf.Status != domain.WorkflowStatusActive {
+		t.Errorf("expected Active, got %s", wf.Status)
+	}
+	if wf.Mode != "creation" {
+		t.Errorf("expected mode creation, got %s", wf.Mode)
+	}
+	if len(wf.AppliesTo) != 1 || wf.AppliesTo[0] != "Workflow" {
+		t.Errorf("expected applies_to [Workflow], got %v", wf.AppliesTo)
+	}
+	if wf.EntryStep != "draft" {
+		t.Errorf("expected entry_step draft, got %s", wf.EntryStep)
+	}
+	if len(wf.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(wf.Steps))
+	}
+
+	draft := wf.Steps[0]
+	if draft.ID != "draft" || draft.Type != domain.StepTypeManual {
+		t.Errorf("expected manual step 'draft', got id=%s type=%s", draft.ID, draft.Type)
+	}
+	if draft.Outcomes[0].NextStep != "review" {
+		t.Errorf("expected draft → review, got %s", draft.Outcomes[0].NextStep)
+	}
+
+	review := wf.Steps[1]
+	if review.ID != "review" || review.Type != domain.StepTypeReview {
+		t.Errorf("expected review step 'review', got id=%s type=%s", review.ID, review.Type)
+	}
+	if len(review.Outcomes) != 2 {
+		t.Fatalf("expected 2 review outcomes, got %d", len(review.Outcomes))
+	}
+	if review.Outcomes[0].ID != "approved" || review.Outcomes[0].NextStep != "end" {
+		t.Errorf("expected approved → end, got id=%s next=%s", review.Outcomes[0].ID, review.Outcomes[0].NextStep)
+	}
+	if review.Outcomes[0].Commit["status"] != "Active" {
+		t.Errorf("expected approved commit status Active, got %s", review.Outcomes[0].Commit["status"])
+	}
+	if review.Outcomes[1].ID != "needs_rework" || review.Outcomes[1].NextStep != "draft" {
+		t.Errorf("expected needs_rework → draft, got id=%s next=%s", review.Outcomes[1].ID, review.Outcomes[1].NextStep)
+	}
+
+	// Full validation suite must pass.
+	result := workflow.Validate(wf)
+	if result.Status != "passed" {
+		t.Errorf("expected validation passed, got %s with errors %+v", result.Status, result.Errors)
+	}
+}
+
 func TestNoBindingConflicts(t *testing.T) {
 	// Load all workflows and verify no two Active workflows share
 	// the same (applies_to type, mode) pair — mode disambiguates
 	// execution workflows from creation workflows.
-	files := []string{"task-default.yaml", "task-spike.yaml", "adr.yaml", "epic-lifecycle.yaml", "artifact-creation.yaml", "adr-creation.yaml", "document-creation.yaml"}
+	files := []string{"task-default.yaml", "task-spike.yaml", "adr.yaml", "epic-lifecycle.yaml", "artifact-creation.yaml", "adr-creation.yaml", "document-creation.yaml", "workflow-lifecycle.yaml"}
 
 	// key: "type:mode" → workflow ID
 	bindingMap := make(map[string]string)
@@ -257,5 +319,10 @@ func TestNoBindingConflicts(t *testing.T) {
 	}
 	if id := bindingMap["Product:creation"]; id != "document-creation" {
 		t.Errorf("expected Product:creation → document-creation, got %s", id)
+	}
+
+	// Creation binding from workflow-lifecycle.yaml (ADR-008).
+	if id := bindingMap["Workflow:creation"]; id != "workflow-lifecycle" {
+		t.Errorf("expected Workflow:creation → workflow-lifecycle, got %s", id)
 	}
 }
