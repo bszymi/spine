@@ -1,11 +1,10 @@
 package gateway
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
@@ -299,36 +298,21 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := s.needStore(w, r); !ok {
+	assigner := s.assignerFor(r.Context())
+	if assigner == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "step assigner not configured"))
 		return
 	}
 
 	runID := chi.URLParam(r, "run_id")
 	stepID := chi.URLParam(r, "step_id")
 
-	// Find the step execution for this run/step
-	execs, err := s.storeFrom(r.Context()).ListStepExecutionsByRun(r.Context(), runID)
-	if err != nil {
-		WriteError(w, err)
-		return
-	}
-
-	var exec *domain.StepExecution
-	for i := range execs {
-		if execs[i].StepID == stepID {
-			exec = &execs[i]
-		}
-	}
-	if exec == nil {
-		WriteError(w, domain.NewError(domain.ErrNotFound, "step execution not found"))
-		return
-	}
-
-	// Evaluate preconditions if validation engine is available
+	// Precondition evaluation stays in the gateway: validators resolve
+	// against task-path context that sits above the engine's state-machine
+	// concerns. The assigner owns only the transition + exec update.
 	if v := s.validatorFrom(r.Context()); v != nil {
-		stepDef := s.resolveStepDef(r.Context(), exec)
+		stepDef, run := assigner.LookupStepDef(r.Context(), runID, stepID)
 		if stepDef != nil {
-			run, _ := s.storeFrom(r.Context()).GetRun(r.Context(), runID)
 			taskPath := ""
 			if run != nil {
 				taskPath = run.TaskPath
@@ -342,54 +326,22 @@ func (s *Server) handleStepAssign(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
-		Trigger: workflow.StepTriggerAssign,
+	result, err := assigner.AssignStep(r.Context(), engine.AssignRequest{
+		RunID:            runID,
+		StepID:           stepID,
+		ActorID:          req.ActorID,
+		EligibleActorIDs: req.EligibleActorIDs,
 	})
 	if err != nil {
-		WriteError(w, err)
-		return
-	}
-
-	exec.Status = result.ToStatus
-	exec.ActorID = req.ActorID
-	if len(req.EligibleActorIDs) > 0 {
-		exec.EligibleActorIDs = req.EligibleActorIDs
-	}
-	if err := s.storeFrom(r.Context()).UpdateStepExecution(r.Context(), exec); err != nil {
 		WriteError(w, err)
 		return
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"assignment_id": exec.ExecutionID,
+		"assignment_id": result.Exec.ExecutionID,
 		"run_id":        runID,
-		"step_id":       exec.StepID,
-		"actor_id":      exec.ActorID,
+		"step_id":       result.Exec.StepID,
+		"actor_id":      result.Exec.ActorID,
 		"status":        "active",
 	})
-}
-
-// resolveStepDef loads the StepDefinition for a step execution from the workflow.
-func (s *Server) resolveStepDef(ctx context.Context, exec *domain.StepExecution) *domain.StepDefinition {
-	run, err := s.storeFrom(ctx).GetRun(ctx, exec.RunID)
-	if err != nil || run.WorkflowPath == "" {
-		return nil
-	}
-
-	proj, err := s.storeFrom(ctx).GetWorkflowProjection(ctx, run.WorkflowPath)
-	if err != nil {
-		return nil
-	}
-
-	var wfDef domain.WorkflowDefinition
-	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
-		return nil
-	}
-
-	for i := range wfDef.Steps {
-		if wfDef.Steps[i].ID == exec.StepID {
-			return &wfDef.Steps[i]
-		}
-	}
-	return nil
 }

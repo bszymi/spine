@@ -446,6 +446,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		StepReleaser:        orch,
 		StepExecutionLister: orch,
 		StepAcknowledger:    orch,
+		StepAssigner:        orch,
 		EventBroadcaster:    eventBroadcaster,
 		GitHTTP:             gitHTTPHandler,
 		SSEMaxConnPerActor:  deps.SSEMaxConn,
