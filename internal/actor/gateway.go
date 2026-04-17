@@ -59,17 +59,14 @@ func (g *Gateway) DeliverAssignment(ctx context.Context, req AssignmentRequest) 
 		"actor_id":  req.ActorID,
 		"step_type": req.StepType,
 	})
-	if err := g.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("assigned-%s", req.AssignmentID),
-		Type:      domain.EventStepAssigned,
-		Timestamp: time.Now(),
-		RunID:     req.RunID,
-		TraceID:   req.TraceID,
-		ActorID:   req.ActorID,
-		Payload:   eventPayload,
-	}); err != nil {
-		log.Warn("failed to emit step_assigned event", "error", err)
-	}
+	event.EmitLogged(ctx, g.events, domain.Event{
+		EventID: fmt.Sprintf("assigned-%s", req.AssignmentID),
+		Type:    domain.EventStepAssigned,
+		RunID:   req.RunID,
+		TraceID: req.TraceID,
+		ActorID: req.ActorID,
+		Payload: eventPayload,
+	})
 
 	log.Info("assignment delivered",
 		"assignment_id", req.AssignmentID,
@@ -118,17 +115,14 @@ func (g *Gateway) ProcessResult(ctx context.Context, req AssignmentRequest, resu
 		"actor_id":  result.ActorID,
 		"summary":   result.Summary,
 	})
-	if err := g.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("completed-%s", req.AssignmentID),
-		Type:      domain.EventStepCompleted,
-		Timestamp: time.Now(),
-		RunID:     req.RunID,
-		TraceID:   req.TraceID,
-		ActorID:   result.ActorID,
-		Payload:   eventPayload,
-	}); err != nil {
-		log.Warn("failed to emit step_completed event", "error", err)
-	}
+	event.EmitLogged(ctx, g.events, domain.Event{
+		EventID: fmt.Sprintf("completed-%s", req.AssignmentID),
+		Type:    domain.EventStepCompleted,
+		RunID:   req.RunID,
+		TraceID: req.TraceID,
+		ActorID: result.ActorID,
+		Payload: eventPayload,
+	})
 
 	log.Info("result processed",
 		"assignment_id", req.AssignmentID,

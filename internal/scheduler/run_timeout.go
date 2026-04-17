@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/observe"
 )
 
@@ -61,16 +62,13 @@ func (s *Scheduler) handleRunTimeout(ctx context.Context, run *domain.Run) error
 		"run_id":    run.RunID,
 		"task_path": run.TaskPath,
 	})
-	if err := s.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("timeout-run-%s", run.RunID),
-		Type:      domain.EventRunTimeout,
-		Timestamp: time.Now(),
-		RunID:     run.RunID,
-		TraceID:   run.TraceID,
-		Payload:   payload,
-	}); err != nil {
-		log.Warn("failed to emit run_timeout event", "run_id", run.RunID, "error", err)
-	}
+	event.EmitLogged(ctx, s.events, domain.Event{
+		EventID: fmt.Sprintf("timeout-run-%s", run.RunID),
+		Type:    domain.EventRunTimeout,
+		RunID:   run.RunID,
+		TraceID: run.TraceID,
+		Payload: payload,
+	})
 
 	return nil
 }
