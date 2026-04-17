@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Exclude Workflow Definitions from Artifact Schema Governance Doc"
-status: Pending
+status: Completed
 work_type: documentation
 created: 2026-04-17
 epic: /initiatives/INIT-015-workflow-resource-separation/epics/EPIC-001-workflow-api-separation/epic.md
