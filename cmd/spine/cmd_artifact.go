@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 
-	"github.com/bszymi/spine/internal/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -235,34 +233,3 @@ func str(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// outputFormat holds the global output format flag.
-var outputFormat string
-
-// globalWorkspaceID is set by the root --workspace persistent flag.
-var globalWorkspaceID string
-
-func newAPIClient() *cli.Client {
-	baseURL := os.Getenv("SPINE_SERVER_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:8080"
-	}
-	token := os.Getenv("SPINE_TOKEN")
-	return cli.NewClient(baseURL, token).WithWorkspace(globalWorkspaceID)
-}
-
-// normalizePath strips a leading slash from canonical artifact paths.
-func normalizePath(path string) string {
-	if path != "" && path[0] == '/' {
-		return path[1:]
-	}
-	return path
-}
-
-func printResponse(data []byte) error {
-	var parsed any
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		fmt.Println(string(data))
-		return nil
-	}
-	return cli.PrintResult(cli.OutputFormat(outputFormat), parsed)
-}

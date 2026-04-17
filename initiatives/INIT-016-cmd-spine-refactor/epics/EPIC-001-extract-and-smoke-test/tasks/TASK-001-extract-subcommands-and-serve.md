@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Extract Subcommands and Serve Wiring from main.go"
-status: Pending
+status: Completed
 work_type: refactor
 created: 2026-04-17
 epic: /initiatives/INIT-016-cmd-spine-refactor/epics/EPIC-001-extract-and-smoke-test/epic.md

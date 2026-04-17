@@ -1,0 +1,874 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/bszymi/spine/internal/actor"
+	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/config"
+	spinecrypto "github.com/bszymi/spine/internal/crypto"
+	"github.com/bszymi/spine/internal/delivery"
+	"github.com/bszymi/spine/internal/divergence"
+	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/engine"
+	"github.com/bszymi/spine/internal/event"
+	"github.com/bszymi/spine/internal/gateway"
+	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/githttp"
+	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/projection"
+	"github.com/bszymi/spine/internal/queue"
+	"github.com/bszymi/spine/internal/scheduler"
+	"github.com/bszymi/spine/internal/store"
+	"github.com/bszymi/spine/internal/validation"
+	"github.com/bszymi/spine/internal/workflow"
+	"github.com/bszymi/spine/internal/workspace"
+	"github.com/spf13/cobra"
+)
+
+// operatorTokenMinLength is the minimum acceptable length for
+// SPINE_OPERATOR_TOKEN. A 32-byte random secret gives ~192 bits of
+// entropy, well beyond brute-force reach.
+const operatorTokenMinLength = 32
+
+// runAdapter adapts engine.Orchestrator to gateway.RunStarter.
+type runAdapter struct {
+	orch *engine.Orchestrator
+}
+
+func (a *runAdapter) StartRun(ctx context.Context, taskPath string) (*gateway.RunStartResult, error) {
+	result, err := a.orch.StartRun(ctx, taskPath)
+	if err != nil {
+		return nil, err
+	}
+	return &gateway.RunStartResult{
+		RunID:        result.Run.RunID,
+		TaskPath:     result.Run.TaskPath,
+		WorkflowID:   result.Run.WorkflowID,
+		Status:       string(result.Run.Status),
+		BranchName:   result.Run.BranchName,
+		TraceID:      result.Run.TraceID,
+		VersionLabel: result.Run.WorkflowVersionLabel,
+		CommitSHA:    result.Run.WorkflowVersion,
+	}, nil
+}
+
+// resultAdapter adapts engine.Orchestrator to gateway.ResultHandler.
+type resultAdapter struct {
+	orch *engine.Orchestrator
+}
+
+func (a *resultAdapter) IngestResult(ctx context.Context, req gateway.ResultSubmission) (*gateway.ResultResponse, error) {
+	resp, err := a.orch.IngestResult(ctx, engine.SubmitRequest{
+		ExecutionID:       req.ExecutionID,
+		OutcomeID:         req.OutcomeID,
+		ArtifactsProduced: req.ArtifactsProduced,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &gateway.ResultResponse{
+		ExecutionID: resp.ExecutionID,
+		StepID:      resp.StepID,
+		Status:      string(resp.Status),
+		OutcomeID:   resp.OutcomeID,
+	}, nil
+}
+
+// planningRunAdapter adapts engine.Orchestrator to gateway.PlanningRunStarter.
+type planningRunAdapter struct {
+	orch *engine.Orchestrator
+}
+
+func (a *planningRunAdapter) StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*gateway.PlanningRunResult, error) {
+	result, err := a.orch.StartPlanningRun(ctx, artifactPath, artifactContent)
+	if err != nil {
+		return nil, err
+	}
+	return &gateway.PlanningRunResult{
+		RunID:        result.Run.RunID,
+		TaskPath:     result.Run.TaskPath,
+		WorkflowID:   result.Run.WorkflowID,
+		Status:       string(result.Run.Status),
+		Mode:         string(result.Run.Mode),
+		BranchName:   result.Run.BranchName,
+		TraceID:      result.Run.TraceID,
+		EntryStepID:  result.EntryStep.StepID,
+		VersionLabel: result.Run.WorkflowVersionLabel,
+		CommitSHA:    result.Run.WorkflowVersion,
+	}, nil
+}
+
+// workspaceOrchestratorBuilder constructs per-workspace engine orchestrator,
+// run starters, and scheduler callbacks from the ServiceSet's basic services.
+func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet) error {
+	if ss.Store == nil {
+		return nil
+	}
+
+	wfProvider := workflow.NewProjectionProviderFromListFn(func(ctx context.Context) ([]workflow.WorkflowProjection, error) {
+		projs, err := ss.Store.ListActiveWorkflowProjections(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result := make([]workflow.WorkflowProjection, len(projs))
+		for i := range projs {
+			result[i] = workflow.WorkflowProjection{
+				WorkflowPath: projs[i].WorkflowPath,
+				WorkflowID:   projs[i].WorkflowID,
+				Name:         projs[i].Name,
+				Version:      projs[i].Version,
+				Status:       projs[i].Status,
+				AppliesTo:    projs[i].AppliesTo,
+				Definition:   projs[i].Definition,
+				SourceCommit: projs[i].SourceCommit,
+			}
+		}
+		return result, nil
+	})
+	bindingResolver := engine.NewBindingResolver(wfProvider, ss.GitClient)
+
+	actorSvc := actor.NewService(ss.Store)
+	actorGw := actor.NewGateway(ss.Store, ss.Events, ss.Queue, actorSvc)
+	wfLoader := engine.NewGitWorkflowLoader(ss.GitClient)
+
+	orch, err := engine.New(
+		bindingResolver, ss.Store, actorGw, ss.Artifacts, ss.Events, ss.GitClient, wfLoader,
+	)
+	if err != nil {
+		return fmt.Errorf("engine orchestrator init: %w", err)
+	}
+
+	orch.WithAssignmentStore(ss.Store)
+	orch.WithActorSelector(actorSvc)
+	if ss.Validator != nil {
+		orch.WithValidator(ss.Validator)
+	}
+	orch.WithDiscussions(ss.Store)
+	if ss.Divergence != nil {
+		orch.WithDivergence(ss.Divergence)
+		orch.WithConvergence(ss.Divergence)
+	}
+	orch.WithArtifactWriter(ss.Artifacts)
+	orch.WithBlockingStore(ss.Store)
+
+	ss.RunStarter = &runAdapter{orch: orch}
+	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
+	ss.RunCanceller = orch
+
+	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
+		return orch.MergeRunBranch(ctx, runID)
+	}
+	ss.StepRecoveryFn = func(ctx context.Context, execID string) error {
+		exec, err := ss.Store.GetStepExecution(ctx, execID)
+		if err != nil {
+			return err
+		}
+		if exec.Status == domain.StepStatusCompleted {
+			return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
+		}
+		return orch.RetryStep(ctx, exec)
+	}
+	ss.RunFailFn = func(ctx context.Context, runID, reason string) error {
+		return orch.FailRun(ctx, runID, reason)
+	}
+
+	return nil
+}
+
+// parsePositiveIntEnv returns the integer value of the named env var,
+// or 0 if the var is unset or not a positive integer.
+func parsePositiveIntEnv(name string) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0
+	}
+	n := 0
+	for _, c := range raw {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// parseGitHTTPTrustedCIDRs parses the SPINE_GIT_HTTP_TRUSTED_CIDRS
+// comma-separated list. An empty input yields nil so deployments must
+// opt in explicitly — a prior default of all RFC1918 ranges made any
+// container on any Docker bridge "trusted".
+func parseGitHTTPTrustedCIDRs(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, c := range strings.Split(raw, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// requireSecureDBURL rejects connection strings that use sslmode=disable
+// unless SPINE_INSECURE_LOCAL=1 is set.
+func requireSecureDBURL(url string) error {
+	if !strings.Contains(url, "sslmode=disable") {
+		return nil
+	}
+	if os.Getenv("SPINE_INSECURE_LOCAL") == "1" {
+		return nil
+	}
+	return fmt.Errorf("database URL uses sslmode=disable; set SPINE_INSECURE_LOCAL=1 to acknowledge (local development only) or use sslmode=require/verify-full")
+}
+
+// resolveRuntimeEnv returns the normalized SPINE_ENV value.
+func resolveRuntimeEnv() string {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("SPINE_ENV")))
+	switch v {
+	case "production", "staging", "development":
+		return v
+	default:
+		return ""
+	}
+}
+
+// devModeEnabled reports whether SPINE_DEV_MODE is set to an
+// affirmative value.
+func devModeEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("SPINE_DEV_MODE")))
+	return v == "1" || v == "true"
+}
+
+// guardDevModeEnv enforces TASK-020. Running with dev-mode auth in a
+// production environment is refused outright.
+func guardDevModeEnv(env string, dev bool) error {
+	if !dev {
+		return nil
+	}
+	if env == "production" {
+		return fmt.Errorf("SPINE_DEV_MODE is enabled but SPINE_ENV=production; dev-mode auth bypass MUST NOT run in production")
+	}
+	return nil
+}
+
+// validateOperatorToken enforces the startup gate described in TASK-010.
+func validateOperatorToken(token string) error {
+	if token == "" {
+		return nil
+	}
+	if len(token) < operatorTokenMinLength {
+		return fmt.Errorf("SPINE_OPERATOR_TOKEN is %d characters; minimum is %d. Generate a stronger secret (e.g. `openssl rand -hex 32`) before starting spine serve", len(token), operatorTokenMinLength)
+	}
+	return nil
+}
+
+// loadSecretCipher builds the at-rest secret cipher from
+// SPINE_SECRET_ENCRYPTION_KEY. In production the key is required.
+func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
+	encoded := os.Getenv("SPINE_SECRET_ENCRYPTION_KEY")
+	if encoded == "" {
+		if env == "production" {
+			return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY is required when SPINE_ENV=production; generate one with `openssl rand -base64 32`")
+		}
+		return nil, nil
+	}
+	key, err := spinecrypto.ParseEncryptionKey(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY: %w", err)
+	}
+	return spinecrypto.NewSecretCipher(key)
+}
+
+// serveDeps is the full set of pre-built dependencies needed to assemble
+// a gateway.ServerConfig. serveCmd reads env and constructs these; the
+// serve-startup smoke test builds them in-memory.
+type serveDeps struct {
+	Store               store.Store
+	RepoPath            string
+	SpineCfg            *config.SpineConfig
+	GitClient           *git.CLIClient
+	Queue               *queue.MemoryQueue
+	Events              event.EventRouter
+	WSResolver          workspace.Resolver
+	WSDBProvider        *workspace.DBProvider
+	WSServicePool       *workspace.ServicePool
+	SecretCipher        *spinecrypto.SecretCipher
+	RuntimeEnv          string
+	DevMode             bool
+	TrustedProxyCIDRs   []*net.IPNet
+	TrustedGitHTTPCIDRs []string
+	EventDeliveryOn     bool
+	SMPEventURL         string
+	SMPWorkspaceID      string
+	SMPInternalToken    string
+	EventRetention      time.Duration
+	SSEMaxConn          int
+	OrphanThreshold     time.Duration
+}
+
+// serveRuntime bundles the ServerConfig with the long-lived background
+// services the serve loop must start and stop.
+type serveRuntime struct {
+	Config         gateway.ServerConfig
+	Scheduler      *scheduler.Scheduler
+	ProjSync       *projection.Service
+	DeliveryCancel context.CancelFunc
+}
+
+// buildServerConfig assembles a gateway.ServerConfig from the given deps.
+// It is the single point of wiring for the serve command and the smoke
+// test — any service added to ServerConfig must be wired here so both
+// paths get the same surface.
+func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, error) {
+	log := observe.Logger(ctx)
+
+	var authSvc *auth.Service
+	if deps.Store != nil {
+		authSvc = auth.NewService(deps.Store)
+	}
+
+	artifactSvc := buildArtifactService(deps.GitClient, deps.Events, deps.RepoPath, deps.SpineCfg)
+	workflowSvc := workflow.NewService(deps.GitClient, deps.RepoPath)
+
+	var projQuery *projection.QueryService
+	var projSync *projection.Service
+	if deps.Store != nil {
+		projQuery = projection.NewQueryService(deps.Store, deps.GitClient)
+		projSync = projection.NewService(deps.GitClient, deps.Store, deps.Events, 30*time.Second)
+		projSync.WithArtifactsDir(deps.SpineCfg.ArtifactsDir)
+	}
+
+	var validator *validation.Engine
+	if deps.Store != nil {
+		validator = validation.NewEngine(deps.Store)
+	}
+
+	wfResolver, wfProvider := buildWorkflowResolver(deps.Store, deps.GitClient)
+	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, log)
+
+	var sched *scheduler.Scheduler
+	if deps.Store != nil {
+		sched = buildScheduler(deps.Store, deps.Events, orch, deps.OrphanThreshold)
+	}
+
+	var deliveryCancel context.CancelFunc
+	var deliverySubscriber *delivery.DeliverySubscriber
+	if deps.EventDeliveryOn && deps.Store != nil {
+		deliveryCancel, deliverySubscriber = startEventDelivery(ctx, deps, log)
+	}
+
+	var divSvcForGateway gateway.BranchCreator
+	if deps.Store != nil {
+		divSvcForGateway = divergence.NewService(deps.Store, deps.GitClient, deps.Events)
+	}
+
+	var starter gateway.RunStarter
+	var planningStarter gateway.PlanningRunStarter
+	var resultHandler gateway.ResultHandler
+	if orch != nil {
+		orch.WithArtifactWriter(artifactSvc)
+		orch.WithBlockingStore(deps.Store)
+		starter = &runAdapter{orch: orch}
+		planningStarter = &planningRunAdapter{orch: orch}
+		resultHandler = &resultAdapter{orch: orch}
+	}
+
+	var eventBroadcaster *delivery.EventBroadcaster
+	if deliverySubscriber != nil {
+		eventBroadcaster = deliverySubscriber.Broadcaster
+	}
+
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, log)
+
+	cfg := gateway.ServerConfig{
+		Store:               deps.Store,
+		Auth:                authSvc,
+		Artifacts:           artifactSvc,
+		Workflows:           workflowSvc,
+		ProjQuery:           projQuery,
+		ProjSync:            projSync,
+		Git:                 deps.GitClient,
+		Validator:           validator,
+		WorkflowResolver:    wfResolver,
+		BranchCreator:       divSvcForGateway,
+		Events:              deps.Events,
+		RunStarter:          starter,
+		PlanningRunStarter:  planningStarter,
+		ResultHandler:       resultHandler,
+		WorkspaceResolver:   deps.WSResolver,
+		ServicePool:         deps.WSServicePool,
+		WSDBProvider:        deps.WSDBProvider,
+		RunCanceller:        orch,
+		CandidateFinder:     orch,
+		StepClaimer:         orch,
+		StepReleaser:        orch,
+		StepExecutionLister: orch,
+		StepAcknowledger:    orch,
+		EventBroadcaster:    eventBroadcaster,
+		GitHTTP:             gitHTTPHandler,
+		SSEMaxConnPerActor:  deps.SSEMaxConn,
+		TrustedProxyCIDRs:   deps.TrustedProxyCIDRs,
+		DevMode:             deps.DevMode,
+		Env:                 deps.RuntimeEnv,
+	}
+
+	return &serveRuntime{
+		Config:         cfg,
+		Scheduler:      sched,
+		ProjSync:       projSync,
+		DeliveryCancel: deliveryCancel,
+	}, nil
+}
+
+// buildArtifactService constructs the artifact service with the
+// configured artifacts directory.
+func buildArtifactService(gitClient *git.CLIClient, events event.EventRouter, repoPath string, cfg *config.SpineConfig) *artifact.Service {
+	svc := artifact.NewService(gitClient, events, repoPath)
+	if cfg != nil {
+		svc.WithArtifactsDir(cfg.ArtifactsDir)
+	}
+	return svc
+}
+
+// buildWorkflowResolver builds the projection-backed workflow resolver
+// and the provider used by buildOrchestrator. Returns (nil, nil) when
+// no store is available.
+func buildWorkflowResolver(st store.Store, gitClient *git.CLIClient) (gateway.WorkflowResolverFn, *workflow.ProjectionWorkflowProvider) {
+	if st == nil {
+		return nil, nil
+	}
+	wfProvider := workflow.NewProjectionProviderFromListFn(func(ctx context.Context) ([]workflow.WorkflowProjection, error) {
+		projs, err := st.ListActiveWorkflowProjections(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result := make([]workflow.WorkflowProjection, len(projs))
+		for i := range projs {
+			result[i] = workflow.WorkflowProjection{
+				WorkflowPath: projs[i].WorkflowPath,
+				WorkflowID:   projs[i].WorkflowID,
+				Name:         projs[i].Name,
+				Version:      projs[i].Version,
+				Status:       projs[i].Status,
+				AppliesTo:    projs[i].AppliesTo,
+				Definition:   projs[i].Definition,
+				SourceCommit: projs[i].SourceCommit,
+			}
+		}
+		return result, nil
+	})
+	bindingResolver := engine.NewBindingResolver(wfProvider, gitClient)
+	resolver := func(ctx context.Context, artifactType, _ string) (*gateway.ResolvedWorkflow, error) {
+		result, err := bindingResolver.ResolveWorkflow(ctx, artifactType, "")
+		if err != nil {
+			return nil, err
+		}
+		timeout := ""
+		if result.Workflow != nil {
+			timeout = result.Workflow.Timeout
+		}
+		return &gateway.ResolvedWorkflow{
+			WorkflowID:   result.Workflow.ID,
+			WorkflowPath: result.Workflow.Path,
+			EntryStep:    result.Workflow.EntryStep,
+			CommitSHA:    result.CommitSHA,
+			VersionLabel: result.VersionLabel,
+			Timeout:      timeout,
+		}, nil
+	}
+	return resolver, wfProvider
+}
+
+// buildOrchestrator constructs the engine orchestrator. Returns nil when
+// store or workflow provider are unavailable.
+func buildOrchestrator(
+	st store.Store,
+	wfProvider *workflow.ProjectionWorkflowProvider,
+	gitClient *git.CLIClient,
+	events event.EventRouter,
+	q *queue.MemoryQueue,
+	artifactSvc *artifact.Service,
+	validator *validation.Engine,
+	log *slog.Logger,
+) *engine.Orchestrator {
+	if st == nil || wfProvider == nil {
+		return nil
+	}
+	actorSvc := actor.NewService(st)
+	actorGw := actor.NewGateway(st, events, q, actorSvc)
+	wfLoader := engine.NewGitWorkflowLoader(gitClient)
+	bindingResolver := engine.NewBindingResolver(wfProvider, gitClient)
+
+	orch, err := engine.New(
+		bindingResolver,
+		st, actorGw, artifactSvc, events, gitClient, wfLoader,
+	)
+	if err != nil {
+		log.Error("engine orchestrator init failed", "error", err)
+		return nil
+	}
+
+	orch.WithAssignmentStore(st)
+	orch.WithActorSelector(actorSvc)
+	if validator != nil {
+		orch.WithValidator(validator)
+	}
+	orch.WithDiscussions(st)
+
+	divSvc := divergence.NewService(st, gitClient, events)
+	orch.WithDivergence(divSvc)
+	orch.WithConvergence(divSvc)
+
+	return orch
+}
+
+// buildScheduler wires the background scheduler with recovery callbacks.
+func buildScheduler(
+	st store.Store,
+	events event.EventRouter,
+	orch *engine.Orchestrator,
+	orphanThreshold time.Duration,
+) *scheduler.Scheduler {
+	opts := []scheduler.Option{}
+	if orphanThreshold > 0 {
+		opts = append(opts, scheduler.WithOrphanThreshold(orphanThreshold))
+	}
+	if orch != nil {
+		opts = append(opts,
+			scheduler.WithStepRecovery(func(ctx context.Context, execID string) error {
+				exec, err := st.GetStepExecution(ctx, execID)
+				if err != nil {
+					return err
+				}
+				if exec.Status == domain.StepStatusCompleted {
+					return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
+				}
+				return orch.RetryStep(ctx, exec)
+			}),
+			scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
+				return orch.FailRun(ctx, runID, reason)
+			}),
+			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
+				return orch.MergeRunBranch(ctx, runID)
+			}, 3, 2*time.Minute),
+		)
+	}
+	return scheduler.New(st, events, opts...)
+}
+
+// buildGitHTTPHandler assembles the git HTTP handler. Returns nil when
+// no workspace resolver is available or when handler construction fails.
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, log *slog.Logger) *githttp.Handler {
+	if wsResolver == nil {
+		return nil
+	}
+	h, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(ctx context.Context, workspaceID string) (string, error) {
+			cfg, err := wsResolver.Resolve(ctx, workspaceID)
+			if err != nil {
+				return "", err
+			}
+			return cfg.RepoPath, nil
+		},
+		TrustedCIDRs: trustedCIDRs,
+	})
+	if err != nil {
+		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
+		return nil
+	}
+	if len(trustedCIDRs) == 0 {
+		log.Warn("git HTTP endpoint enabled with no trusted CIDRs; all clients must present a bearer token. Set SPINE_GIT_HTTP_TRUSTED_CIDRS to a narrow runner subnet to opt in to token-less access.")
+	} else {
+		log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
+	}
+	return h
+}
+
+// startEventDelivery bootstraps the event delivery subscriber and
+// webhook dispatcher. Returns the cancel func for the delivery context
+// and the subscriber so its broadcaster can be wired into the gateway.
+func startEventDelivery(ctx context.Context, deps serveDeps, log *slog.Logger) (context.CancelFunc, *delivery.DeliverySubscriber) {
+	deliveryCtx, cancel := context.WithCancel(ctx)
+
+	if deps.SMPEventURL != "" {
+		if err := delivery.BootstrapInternalSubscription(deliveryCtx, deps.Store, delivery.BootstrapConfig{
+			EventURL:    deps.SMPEventURL,
+			WorkspaceID: deps.SMPWorkspaceID,
+			Token:       deps.SMPInternalToken,
+		}); err != nil {
+			log.Error("failed to bootstrap internal subscription", "error", err)
+		}
+	}
+
+	subLister := delivery.NewStoreSubscriptionLister(deps.Store)
+	subscriber := delivery.NewDeliverySubscriber(deps.Store, subLister)
+	if err := subscriber.Subscribe(deliveryCtx, deps.Events); err != nil {
+		log.Error("failed to start delivery subscriber", "error", err)
+	} else {
+		subResolver := delivery.NewStoreSubscriptionResolver(deps.Store)
+		dispatcher := delivery.NewWebhookDispatcher(deps.Store, subResolver, delivery.DispatcherConfig{})
+		go dispatcher.Run(deliveryCtx)
+		log.Info("event delivery system started")
+	}
+
+	go delivery.StartRetentionCleanup(deliveryCtx, deps.Store, deps.EventRetention)
+
+	return cancel, subscriber
+}
+
+func serveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "serve",
+		Short: "Start the Spine runtime server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			ctx = observe.WithComponent(ctx, "server")
+			log := observe.Logger(ctx)
+
+			if err := validateOperatorToken(os.Getenv("SPINE_OPERATOR_TOKEN")); err != nil {
+				return err
+			}
+
+			runtimeEnv := resolveRuntimeEnv()
+			devMode := devModeEnabled()
+			if err := guardDevModeEnv(runtimeEnv, devMode); err != nil {
+				return err
+			}
+			if devMode {
+				log.Warn("SPINE_DEV_MODE is enabled — unauthenticated requests will be allowed", "env", runtimeEnv)
+			}
+
+			secretCipher, err := loadSecretCipher(runtimeEnv)
+			if err != nil {
+				return err
+			}
+			if secretCipher == nil {
+				log.Warn("SPINE_SECRET_ENCRYPTION_KEY is not set — webhook signing secrets will be stored in plaintext", "env", runtimeEnv)
+			}
+
+			port := os.Getenv("SPINE_SERVER_PORT")
+			if port == "" {
+				port = "8080"
+			}
+
+			wsResolver, wsDBProvider, wsServicePool, err := buildWorkspaceResolver(ctx, secretCipher, log)
+			if err != nil {
+				return err
+			}
+			if wsDBProvider != nil {
+				defer wsDBProvider.Close()
+			}
+			if wsServicePool != nil {
+				defer wsServicePool.Close()
+			}
+
+			st, err := buildStore(ctx, secretCipher, log)
+			if err != nil {
+				return err
+			}
+			if closer, ok := st.(interface{ Close() }); ok && st != nil {
+				defer closer.Close()
+			}
+
+			repoPath := os.Getenv("SPINE_REPO_PATH")
+			if repoPath == "" {
+				repoPath = "."
+			}
+			spineCfg, err := config.Load(repoPath)
+			if err != nil {
+				log.Warn("failed to load .spine.yaml, using defaults", "error", err)
+				spineCfg = &config.SpineConfig{ArtifactsDir: "/"}
+			}
+			log.Info("spine config loaded", "artifacts_dir", spineCfg.ArtifactsDir)
+
+			authWarnings, err := git.LoadPushAuthFromEnv()
+			if err != nil {
+				return fmt.Errorf("credential helper: %w", err)
+			}
+			for _, w := range authWarnings {
+				log.Warn(w)
+			}
+			gitOpts := git.PushAuthOpts()
+			if smpID := os.Getenv("SMP_WORKSPACE_ID"); smpID != "" {
+				gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+smpID))
+			}
+			gitClient := git.NewCLIClient(repoPath, gitOpts...)
+			if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
+				log.Warn("failed to configure credential helper", "error", err)
+			}
+
+			q := queue.NewMemoryQueue(100)
+			go q.Start(ctx)
+			eventRouter := event.NewQueueRouter(q)
+
+			trustedProxyCIDRs, err := gateway.ParseTrustedProxyCIDRs(os.Getenv("SPINE_TRUSTED_PROXY_CIDRS"))
+			if err != nil {
+				return fmt.Errorf("SPINE_TRUSTED_PROXY_CIDRS: %w", err)
+			}
+			if len(trustedProxyCIDRs) > 0 {
+				log.Info("rate limiter will honor X-Forwarded-For from trusted proxies", "cidrs", os.Getenv("SPINE_TRUSTED_PROXY_CIDRS"))
+			}
+
+			orphanThreshold := time.Duration(0)
+			if v := os.Getenv("SPINE_ORPHAN_THRESHOLD"); v != "" {
+				if d, parseErr := time.ParseDuration(v); parseErr == nil {
+					orphanThreshold = d
+				} else {
+					log.Error("invalid SPINE_ORPHAN_THRESHOLD, using default", "value", v, "error", parseErr)
+				}
+			}
+
+			var eventRetention time.Duration
+			if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
+				if d, err := time.ParseDuration(v); err == nil {
+					eventRetention = d
+				}
+			}
+
+			deps := serveDeps{
+				Store:               st,
+				RepoPath:            repoPath,
+				SpineCfg:            spineCfg,
+				GitClient:           gitClient,
+				Queue:               q,
+				Events:              eventRouter,
+				WSResolver:          wsResolver,
+				WSDBProvider:        wsDBProvider,
+				WSServicePool:       wsServicePool,
+				SecretCipher:        secretCipher,
+				RuntimeEnv:          runtimeEnv,
+				DevMode:             devMode,
+				TrustedProxyCIDRs:   trustedProxyCIDRs,
+				TrustedGitHTTPCIDRs: parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS")),
+				EventDeliveryOn:     os.Getenv("SPINE_EVENT_DELIVERY") == "true",
+				SMPEventURL:         os.Getenv("SMP_EVENT_URL"),
+				SMPWorkspaceID:      os.Getenv("SMP_WORKSPACE_ID"),
+				SMPInternalToken:    os.Getenv("SMP_INTERNAL_TOKEN"),
+				EventRetention:      eventRetention,
+				SSEMaxConn:          parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
+				OrphanThreshold:     orphanThreshold,
+			}
+
+			rt, err := buildServerConfig(ctx, deps)
+			if err != nil {
+				return err
+			}
+
+			srv := gateway.NewServer(":"+port, rt.Config)
+
+			if rt.Scheduler != nil {
+				if result, err := rt.Scheduler.RecoverOnStartup(ctx); err != nil {
+					log.Error("startup recovery failed", "error", err)
+				} else {
+					log.Info("startup recovery complete",
+						"pending_activated", result.PendingActivated,
+						"active_resumed", result.ActiveResumed,
+					)
+				}
+				go rt.Scheduler.Start(ctx)
+			}
+			if rt.ProjSync != nil {
+				go rt.ProjSync.StartSyncLoop(ctx)
+			}
+
+			listenErr := make(chan error, 1)
+			go func() {
+				log.Info("spine server starting", "port", port)
+				if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					listenErr <- err
+				}
+			}()
+
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+			select {
+			case err := <-listenErr:
+				return fmt.Errorf("server failed to start: %w", err)
+			case <-sig:
+			}
+
+			log.Info("spine server shutting down")
+			if rt.DeliveryCancel != nil {
+				rt.DeliveryCancel()
+			}
+			if rt.Scheduler != nil {
+				rt.Scheduler.Stop()
+			}
+			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return srv.Shutdown(shutdownCtx)
+		},
+	}
+}
+
+// buildWorkspaceResolver initializes the workspace resolver based on
+// SPINE_WORKSPACE_MODE.
+func buildWorkspaceResolver(
+	ctx context.Context,
+	secretCipher *spinecrypto.SecretCipher,
+	log *slog.Logger,
+) (workspace.Resolver, *workspace.DBProvider, *workspace.ServicePool, error) {
+	wsMode := os.Getenv("SPINE_WORKSPACE_MODE")
+	if wsMode == "" {
+		wsMode = "single"
+	}
+
+	switch wsMode {
+	case "single":
+		log.Info("workspace mode: single", "workspace_id", os.Getenv("SPINE_WORKSPACE_ID"))
+		return workspace.NewFileProvider(), nil, nil, nil
+	case "shared":
+		registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
+		if registryURL == "" {
+			return nil, nil, nil, fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required in shared workspace mode")
+		}
+		if err := requireSecureDBURL(registryURL); err != nil {
+			return nil, nil, nil, fmt.Errorf("registry URL: %w", err)
+		}
+		provider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("connect to workspace registry: %w", err)
+		}
+		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
+			Builder:      workspaceOrchestratorBuilder,
+			SecretCipher: secretCipher,
+		})
+		log.Info("workspace mode: shared", "registry_url", "***")
+		return provider, provider, pool, nil
+	default:
+		return nil, nil, nil, fmt.Errorf("unknown SPINE_WORKSPACE_MODE: %q (expected \"single\" or \"shared\")", wsMode)
+	}
+}
+
+// buildStore connects to the Spine database if SPINE_DATABASE_URL is set.
+// A connection failure is logged but does not abort startup — the server
+// still serves store-independent endpoints.
+func buildStore(ctx context.Context, secretCipher *spinecrypto.SecretCipher, log *slog.Logger) (store.Store, error) {
+	dbURL := os.Getenv("SPINE_DATABASE_URL")
+	if dbURL == "" {
+		return nil, nil
+	}
+	if err := requireSecureDBURL(dbURL); err != nil {
+		return nil, err
+	}
+	pgStore, err := store.NewPostgresStore(ctx, dbURL)
+	if err != nil {
+		log.Error("database connection failed, starting without store", "error", err)
+		return nil, nil
+	}
+	pgStore.SetSecretCipher(secretCipher)
+	return pgStore, nil
+}
