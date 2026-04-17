@@ -21,6 +21,12 @@ This document is the canonical reference for what fields each artifact type must
 
 ## 2. General Rules
 
+### 2.0 Scope
+
+This schema covers governed artifacts authored as Markdown files with YAML front matter — Initiatives, Epics, Tasks, ADRs, and Governance / Architecture / Product documents.
+
+**Workflow definitions are out of scope.** They are pure YAML files (no Markdown body, no front matter) governed by [Workflow Definition Format](/architecture/workflow-definition-format.md), validated by the workflow-specific suite described in [Workflow Validation](/architecture/workflow-validation.md), and managed through dedicated API operations per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md). Nothing in this document applies to workflow definition files.
+
 ### 2.1 Format
 
 All artifact metadata is stored as YAML front matter at the top of the Markdown file, delimited by `---` lines:
@@ -140,6 +146,8 @@ Not all artifact mentions are governed links. The `links` section is for governe
 ---
 
 ## 5. Schemas by Artifact Type
+
+The schemas below cover every artifact type governed by this document. Workflow definitions are explicitly **not** listed — see §2.0 and [Workflow Definition Format](/architecture/workflow-definition-format.md).
 
 ### 5.1 Initiative
 
