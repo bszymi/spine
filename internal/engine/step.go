@@ -29,7 +29,6 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		return fmt.Errorf("get run: %w", err)
 	}
 
-	// Load the workflow definition to get step details.
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
 	if err != nil {
 		return fmt.Errorf("load workflow: %w", err)
@@ -41,42 +40,16 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 			fmt.Sprintf("step %q not found in workflow %s", stepID, wfDef.ID))
 	}
 
-	// Find the current step execution.
 	exec, err := o.findStepExecution(ctx, runID, stepID)
 	if err != nil {
 		return err
 	}
 
-	// Evaluate preconditions. If they fail, the step stays in waiting and
-	// the caller receives a precondition error. The step is not transitioned
-	// because waiting→blocked is not valid in the step state machine.
-	passed, valResult := o.evaluatePreconditions(ctx, stepDef, run)
-	if !passed {
-		// If validation produced detailed errors, persist them on the step execution.
-		if valResult != nil && len(valResult.Errors) > 0 {
-			exec.ErrorDetail = &domain.ErrorDetail{
-				Classification: domain.FailureValidation,
-				Message:        summarizeValidationErrors(valResult.Errors),
-				StepID:         stepID,
-				Violations:     valResult.Errors,
-			}
-			if updateErr := o.store.UpdateStepExecution(ctx, exec); updateErr != nil {
-				log.Warn("failed to persist validation errors", "error", updateErr)
-			}
-		}
-		log.Info("step preconditions not met", "run_id", runID, "step_id", stepID)
-		if valResult != nil {
-			return domain.NewErrorWithDetail(domain.ErrPrecondition,
-				fmt.Sprintf("preconditions not met for step %s", stepID), valResult)
-		}
-		return domain.NewError(domain.ErrPrecondition,
-			fmt.Sprintf("preconditions not met for step %s", stepID))
+	if passed, valResult := o.evaluatePreconditions(ctx, stepDef, run); !passed {
+		return o.preparePreconditionFailure(ctx, exec, valResult, runID, stepID)
 	}
 
-	// Preconditions pass — transition to assigned via step.assign.
-	// Clear any stale validation errors from a prior failed attempt.
 	exec.ErrorDetail = nil
-
 	stepResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAssign,
 	})
@@ -85,55 +58,117 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	}
 	exec.Status = stepResult.ToStatus
 
-	// For automated/ai-only steps, resolve the target actor before persisting.
-	// The actor_id is set on the execution record so runners can discover it
-	// by querying GET /execution/steps?actor_id={my_id}&status=assigned.
-	if stepDef.Execution != nil {
-		mode := stepDef.Execution.Mode
-		if (mode == domain.ExecModeAutomatedOnly || mode == domain.ExecModeAIOnly) && o.actorSelector != nil {
-			if actorID := o.resolveAutoActorID(ctx, exec, stepDef); actorID != "" {
-				exec.ActorID = actorID
-			} else {
-				log.Warn("auto-assignment: no eligible actor found, step will wait",
-					"run_id", runID, "step_id", stepID, "mode", mode)
-			}
-		}
-	}
+	o.resolveAutoActor(ctx, exec, stepDef, runID, stepID)
 
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
 
-	// Create the assignment record when an actor was auto-selected.
-	if exec.ActorID != "" && o.assignments != nil {
-		autoAssignment := &domain.Assignment{
-			AssignmentID: fmt.Sprintf("auto-%s-%s", exec.ExecutionID, exec.ActorID),
-			RunID:        runID,
-			ExecutionID:  exec.ExecutionID,
-			ActorID:      exec.ActorID,
-			Status:       domain.AssignmentStatusActive,
-			AssignedAt:   time.Now(),
-		}
-		if err := o.assignments.CreateAssignment(ctx, autoAssignment); err != nil {
-			// Non-fatal: log and continue. The runner will still find the step by actor_id.
-			log.Warn("auto-assignment: failed to create assignment record", "error", err)
-		}
+	o.createAutoAssignmentRecord(ctx, exec, runID)
+
+	assignReq := o.buildAssignmentRequest(ctx, exec, stepDef, run)
+	if err := o.actors.DeliverAssignment(ctx, assignReq); err != nil {
+		log.Warn("failed to deliver assignment", "step_id", stepID, "error", err)
+		failPayload, _ := json.Marshal(map[string]any{
+			"step_id": stepID,
+			"reason":  err.Error(),
+		})
+		o.emitEvent(ctx, domain.EventAssignmentFailed, runID, run.TraceID,
+			fmt.Sprintf("evt-%s-assign-failed", run.TraceID[:12]), failPayload)
+		return fmt.Errorf("deliver assignment: %w", err)
 	}
 
-	// Request actor assignment.
+	o.trackStepTimeout(ctx, exec, stepDef, assignReq.ActorID, runID)
+
+	o.emitEvent(ctx, domain.EventStepAssigned, runID, run.TraceID,
+		fmt.Sprintf("evt-%s-%s-assigned", run.TraceID[:12], stepID), nil)
+
+	log.Info("step activated", "run_id", runID, "step_id", stepID)
+	return nil
+}
+
+// preparePreconditionFailure persists validation errors (when present) on the
+// step execution and returns the appropriate domain error. Callers return the
+// result directly; the step stays in waiting because waiting→blocked is not
+// a valid transition.
+func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *domain.StepExecution, valResult *domain.ValidationResult, runID, stepID string) error {
+	log := observe.Logger(ctx)
+	if valResult != nil && len(valResult.Errors) > 0 {
+		exec.ErrorDetail = &domain.ErrorDetail{
+			Classification: domain.FailureValidation,
+			Message:        summarizeValidationErrors(valResult.Errors),
+			StepID:         stepID,
+			Violations:     valResult.Errors,
+		}
+		if updateErr := o.store.UpdateStepExecution(ctx, exec); updateErr != nil {
+			log.Warn("failed to persist validation errors", "error", updateErr)
+		}
+	}
+	log.Info("step preconditions not met", "run_id", runID, "step_id", stepID)
+	if valResult != nil {
+		return domain.NewErrorWithDetail(domain.ErrPrecondition,
+			fmt.Sprintf("preconditions not met for step %s", stepID), valResult)
+	}
+	return domain.NewError(domain.ErrPrecondition,
+		fmt.Sprintf("preconditions not met for step %s", stepID))
+}
+
+// resolveAutoActor sets exec.ActorID when the step declares an automated or
+// AI-only execution mode and a selector is configured. Missing selections
+// are logged but not fatal — the step simply waits.
+func (o *Orchestrator) resolveAutoActor(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition, runID, stepID string) {
+	if stepDef.Execution == nil {
+		return
+	}
+	mode := stepDef.Execution.Mode
+	if mode != domain.ExecModeAutomatedOnly && mode != domain.ExecModeAIOnly {
+		return
+	}
+	if o.actorSelector == nil {
+		return
+	}
+	if actorID := o.resolveAutoActorID(ctx, exec, stepDef); actorID != "" {
+		exec.ActorID = actorID
+		return
+	}
+	observe.Logger(ctx).Warn("auto-assignment: no eligible actor found, step will wait",
+		"run_id", runID, "step_id", stepID, "mode", mode)
+}
+
+// createAutoAssignmentRecord persists an assignment row for an auto-selected
+// actor so runners can discover the step via the assignment query surface.
+// The call is a no-op when no actor was selected or assignments aren't wired.
+func (o *Orchestrator) createAutoAssignmentRecord(ctx context.Context, exec *domain.StepExecution, runID string) {
+	if exec.ActorID == "" || o.assignments == nil {
+		return
+	}
+	autoAssignment := &domain.Assignment{
+		AssignmentID: fmt.Sprintf("auto-%s-%s", exec.ExecutionID, exec.ActorID),
+		RunID:        runID,
+		ExecutionID:  exec.ExecutionID,
+		ActorID:      exec.ActorID,
+		Status:       domain.AssignmentStatusActive,
+		AssignedAt:   time.Now(),
+	}
+	if err := o.assignments.CreateAssignment(ctx, autoAssignment); err != nil {
+		observe.Logger(ctx).Warn("auto-assignment: failed to create assignment record", "error", err)
+	}
+}
+
+// buildAssignmentRequest packages the execution, step, and run context into
+// the payload delivered to actor runners.
+func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition, run *domain.Run) actor.AssignmentRequest {
 	outcomeIDs := make([]string, len(stepDef.Outcomes))
 	for i, o := range stepDef.Outcomes {
 		outcomeIDs[i] = o.ID
 	}
+	excludeActors := o.unavailableActorsForStep(ctx, run.RunID, exec.StepID)
 
-	// Build exclusion list from prior failed executions where actor was unavailable.
-	excludeActors := o.unavailableActorsForStep(ctx, runID, stepID)
-
-	assignReq := actor.AssignmentRequest{
+	return actor.AssignmentRequest{
 		AssignmentID: exec.ExecutionID,
-		RunID:        runID,
+		RunID:        run.RunID,
 		TraceID:      run.TraceID,
-		StepID:       stepID,
+		StepID:       exec.StepID,
 		StepName:     stepDef.Name,
 		StepType:     stepDef.Type,
 		ActorID:      exec.ActorID,
@@ -149,35 +184,21 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 			ExcludeActors:    excludeActors,
 		},
 	}
+}
 
-	if err := o.actors.DeliverAssignment(ctx, assignReq); err != nil {
-		log.Warn("failed to deliver assignment", "step_id", stepID, "error", err)
-		failPayload, _ := json.Marshal(map[string]any{
-			"step_id": stepID,
-			"reason":  err.Error(),
-		})
-		o.emitEvent(ctx, domain.EventAssignmentFailed, runID, run.TraceID,
-			fmt.Sprintf("evt-%s-assign-failed", run.TraceID[:12]), failPayload)
-		return fmt.Errorf("deliver assignment: %w", err)
-	}
-
-	// Track assignment for polling and expiry.
+// trackStepTimeout parses the step's timeout (if set) and registers the
+// assignment for polling and expiry.
+func (o *Orchestrator) trackStepTimeout(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition, actorID, runID string) {
 	var timeout time.Duration
 	if stepDef.Timeout != "" {
 		d, err := time.ParseDuration(stepDef.Timeout)
 		if err != nil {
-			log.Warn("invalid step timeout duration", "step_id", stepID, "timeout", stepDef.Timeout, "error", err)
+			observe.Logger(ctx).Warn("invalid step timeout duration", "step_id", exec.StepID, "timeout", stepDef.Timeout, "error", err)
 		} else {
 			timeout = d
 		}
 	}
-	o.TrackAssignment(ctx, exec.ExecutionID, runID, exec.ExecutionID, assignReq.ActorID, timeout)
-
-	o.emitEvent(ctx, domain.EventStepAssigned, runID, run.TraceID,
-		fmt.Sprintf("evt-%s-%s-assigned", run.TraceID[:12], stepID), nil)
-
-	log.Info("step activated", "run_id", runID, "step_id", stepID)
-	return nil
+	o.TrackAssignment(ctx, exec.ExecutionID, runID, exec.ExecutionID, actorID, timeout)
 }
 
 // SubmitStepResult processes an actor's result for a step, validates the outcome,
@@ -193,7 +214,6 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return fmt.Errorf("get run: %w", err)
 	}
 
-	// Load the workflow to validate the outcome.
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
 	if err != nil {
 		return fmt.Errorf("load workflow: %w", err)
@@ -205,7 +225,6 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 			fmt.Sprintf("step %q not found in workflow", exec.StepID))
 	}
 
-	// Validate outcome ID is defined in the step.
 	outcome := findOutcome(stepDef, result.OutcomeID)
 	if outcome == nil {
 		return domain.NewError(domain.ErrInvalidParams,
@@ -214,24 +233,11 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 
 	// If step is assigned, auto-acknowledge to in_progress first.
 	if exec.Status == domain.StepStatusAssigned {
-		ackResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
-			Trigger: workflow.StepTriggerAcknowledged,
-		})
-		if err != nil {
-			return fmt.Errorf("acknowledge step: %w", err)
+		if err := o.autoAcknowledgeStep(ctx, exec, run); err != nil {
+			return err
 		}
-		now := time.Now()
-		exec.Status = ackResult.ToStatus
-		exec.StartedAt = &now
-		if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
-			return fmt.Errorf("update step execution: %w", err)
-		}
-
-		o.emitEvent(ctx, domain.EventStepStarted, exec.RunID, run.TraceID,
-			fmt.Sprintf("evt-%s-started", exec.ExecutionID), nil)
 	}
 
-	// Submit: transition to completed.
 	stepTResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger:   workflow.StepTriggerSubmit,
 		OutcomeID: result.OutcomeID,
@@ -248,54 +254,69 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return fmt.Errorf("update step execution: %w", err)
 	}
 
-	// Mark assignment as completed.
 	o.CompleteAssignment(ctx, executionID)
 
 	o.emitEvent(ctx, domain.EventStepCompleted, exec.RunID, run.TraceID,
 		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID), nil)
 
-	// Record step duration metric.
 	if exec.StartedAt != nil {
 		observe.GlobalMetrics.StepDuration.ObserveDuration(time.Since(*exec.StartedAt))
 	}
 
-	// Check if this step triggers divergence.
+	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, now)
+}
+
+// autoAcknowledgeStep transitions an assigned step to in_progress before the
+// submit transition. Extracted so SubmitStepResult's main body stays on the
+// happy path; an error here aborts submission.
+func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.StepExecution, run *domain.Run) error {
+	ackResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
+		Trigger: workflow.StepTriggerAcknowledged,
+	})
+	if err != nil {
+		return fmt.Errorf("acknowledge step: %w", err)
+	}
+	now := time.Now()
+	exec.Status = ackResult.ToStatus
+	exec.StartedAt = &now
+	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+		return fmt.Errorf("update step execution: %w", err)
+	}
+	o.emitEvent(ctx, domain.EventStepStarted, exec.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-started", exec.ExecutionID), nil)
+	return nil
+}
+
+// routeStepOutcome dispatches the step's outcome into one of the three
+// post-submit paths: trigger divergence, complete a branch, or advance the
+// run (possibly by completing it at the "end" terminal step). SetCommitMeta
+// runs when the outcome carries commit metadata.
+func (o *Orchestrator) routeStepOutcome(ctx context.Context, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, exec *domain.StepExecution, run *domain.Run, wfDef *domain.WorkflowDefinition, now time.Time) error {
 	if stepDef.Diverge != "" && o.divergence != nil {
 		return o.startDivergence(ctx, run, wfDef, stepDef, exec)
 	}
-
-	// Check if this step is inside a branch and is terminal for the branch.
 	if exec.BranchID != "" {
 		return o.completeBranchStep(ctx, run, exec, outcome, now)
 	}
 
-	// Determine next step from outcome.
 	nextStepID := outcome.NextStep
 	if nextStepID == "" {
 		nextStepID = "end"
 	}
 
-	// Route: advance the run.
 	hasCommit := len(outcome.Commit) > 0
 	if hasCommit {
-		// Persist commit metadata so MergeRunBranch can apply it
-		// (e.g., rewrite artifact status from Draft to Pending).
 		if err := o.store.SetCommitMeta(ctx, exec.RunID, outcome.Commit); err != nil {
 			return fmt.Errorf("set commit meta: %w", err)
 		}
 	}
 	if nextStepID == "end" {
-		// Terminal — complete the run.
 		if err := o.CompleteRun(ctx, exec.RunID, hasCommit); err != nil {
 			return fmt.Errorf("complete run: %w", err)
 		}
-	} else {
-		if err := o.advanceToNextStep(ctx, exec, nextStepID, "", now); err != nil {
-			return err
-		}
+		return nil
 	}
-
-	return nil
+	return o.advanceToNextStep(ctx, exec, nextStepID, "", now)
 }
 
 // advanceToNextStep creates the next step execution, updates current_step_id, and activates.
