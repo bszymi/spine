@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
-	"os"
 
 	"github.com/bszymi/spine/internal/cli"
 	"github.com/spf13/cobra"
@@ -55,14 +55,11 @@ func workflowCmd() *cobra.Command {
 			if id == "" || file == "" {
 				return fmt.Errorf("--id and --file are required")
 			}
-			body, err := os.ReadFile(file)
-			if err != nil {
-				return fmt.Errorf("read file: %w", err)
-			}
-			c := newAPIClient()
-			data, err := c.Post(cmd.Context(), "/api/v1/workflows", map[string]string{
-				"id":   id,
-				"body": string(body),
+			data, err := cli.SendFile(cmd.Context(), newAPIClient(), file, cli.SendFileOpts{
+				Method:    http.MethodPost,
+				Endpoint:  "/api/v1/workflows",
+				BodyField: "body",
+				Extra:     map[string]string{"id": id},
 			})
 			if err != nil {
 				return err
@@ -82,13 +79,10 @@ func workflowCmd() *cobra.Command {
 			if file == "" {
 				return fmt.Errorf("--file is required")
 			}
-			body, err := os.ReadFile(file)
-			if err != nil {
-				return fmt.Errorf("read file: %w", err)
-			}
-			c := newAPIClient()
-			data, err := c.Put(cmd.Context(), "/api/v1/workflows/"+args[0], map[string]string{
-				"body": string(body),
+			data, err := cli.SendFile(cmd.Context(), newAPIClient(), file, cli.SendFileOpts{
+				Method:    http.MethodPut,
+				Endpoint:  "/api/v1/workflows/" + args[0],
+				BodyField: "body",
 			})
 			if err != nil {
 				return err
@@ -107,13 +101,10 @@ func workflowCmd() *cobra.Command {
 			if file == "" {
 				return fmt.Errorf("--file is required")
 			}
-			body, err := os.ReadFile(file)
-			if err != nil {
-				return fmt.Errorf("read file: %w", err)
-			}
-			c := newAPIClient()
-			data, err := c.Post(cmd.Context(), "/api/v1/workflows/"+args[0]+"/validate", map[string]string{
-				"body": string(body),
+			data, err := cli.SendFile(cmd.Context(), newAPIClient(), file, cli.SendFileOpts{
+				Method:    http.MethodPost,
+				Endpoint:  "/api/v1/workflows/" + args[0] + "/validate",
+				BodyField: "body",
 			})
 			if err != nil {
 				return err

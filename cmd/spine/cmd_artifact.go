@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
-	"os"
 
+	"github.com/bszymi/spine/internal/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -36,15 +37,11 @@ func artifactCreateCmd() *cobra.Command {
 				return fmt.Errorf("--path and --file are required")
 			}
 
-			content, err := os.ReadFile(file)
-			if err != nil {
-				return fmt.Errorf("read file: %w", err)
-			}
-
-			c := newAPIClient()
-			data, err := c.Post(context.Background(), "/api/v1/artifacts", map[string]string{
-				"path":    path,
-				"content": string(content),
+			data, err := cli.SendFile(context.Background(), newAPIClient(), file, cli.SendFileOpts{
+				Method:    http.MethodPost,
+				Endpoint:  "/api/v1/artifacts",
+				BodyField: "content",
+				Extra:     map[string]string{"path": path},
 			})
 			if err != nil {
 				return err
@@ -95,14 +92,10 @@ func artifactUpdateCmd() *cobra.Command {
 				return fmt.Errorf("--path and --file are required")
 			}
 
-			content, err := os.ReadFile(file)
-			if err != nil {
-				return fmt.Errorf("read file: %w", err)
-			}
-
-			c := newAPIClient()
-			data, err := c.Put(context.Background(), "/api/v1/artifacts/"+normalizePath(path), map[string]string{
-				"content": string(content),
+			data, err := cli.SendFile(context.Background(), newAPIClient(), file, cli.SendFileOpts{
+				Method:    http.MethodPut,
+				Endpoint:  "/api/v1/artifacts/" + normalizePath(path),
+				BodyField: "content",
 			})
 			if err != nil {
 				return err
