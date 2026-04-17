@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
-	"gopkg.in/yaml.v3"
+	"github.com/bszymi/spine/internal/yamlsafe"
 )
 
 // validateDuration parses a duration string using the same function the
@@ -24,9 +24,11 @@ func validateDuration(field, value string) *domain.ValidationError {
 }
 
 // Parse parses a workflow YAML file into a domain WorkflowDefinition.
+// Input is bounded via yamlsafe so workflow bodies share the same
+// billion-laughs / deep-alias guards artifact front-matter has.
 func Parse(path string, content []byte) (*domain.WorkflowDefinition, error) {
 	var wf domain.WorkflowDefinition
-	if err := yaml.Unmarshal(content, &wf); err != nil {
+	if err := yamlsafe.DecodeInto(content, &wf); err != nil {
 		return nil, fmt.Errorf("parse workflow %s: %w", path, err)
 	}
 	wf.Path = path
