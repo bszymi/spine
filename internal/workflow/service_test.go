@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -245,4 +246,95 @@ func fmtYAML(id, version string) string {
 	out := strings.ReplaceAll(minimalYAML, "{ID}", id)
 	out = strings.ReplaceAll(out, "{V}", version)
 	return out
+}
+
+func TestService_Create_BranchScoped_DoesNotTouchMain(t *testing.T) {
+	svc, repo := newSvc(t)
+
+	// Create a branch for the write. Git wants a ref to create it from; use HEAD.
+	mustRun(t, repo, "git", "checkout", "-b", "spine/run/wf-abc")
+	mustRun(t, repo, "git", "checkout", "main")
+
+	ctx := workflow.WithWriteContext(ctxWithActor(), workflow.WriteContext{Branch: "spine/run/wf-abc"})
+
+	if _, err := svc.Create(ctx, "task-default", fmtYAML("task-default", "1.0")); err != nil {
+		t.Fatalf("Create on branch: %v", err)
+	}
+
+	// main must not have the workflow file.
+	mainPath := filepath.Join(repo, "workflows", "task-default.yaml")
+	if _, err := os.Stat(mainPath); !os.IsNotExist(err) {
+		t.Fatalf("expected main working tree to not have the file, got err=%v", err)
+	}
+
+	// The branch must have the commit with the file.
+	listing := mustOutput(t, repo, "git", "ls-tree", "-r", "--name-only", "spine/run/wf-abc")
+	if !strings.Contains(listing, "workflows/task-default.yaml") {
+		t.Fatalf("expected file on spine/run/wf-abc; ls-tree:\n%s", listing)
+	}
+	mainListing := mustOutput(t, repo, "git", "ls-tree", "-r", "--name-only", "main")
+	if strings.Contains(mainListing, "workflows/task-default.yaml") {
+		t.Fatalf("workflow leaked onto main; ls-tree:\n%s", mainListing)
+	}
+}
+
+func TestService_Update_BranchScoped_DoesNotTouchMain(t *testing.T) {
+	svc, repo := newSvc(t)
+
+	// Seed the workflow on main first.
+	if _, err := svc.Create(ctxWithActor(), "task-default", fmtYAML("task-default", "1.0")); err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	// Branch from main so it has the v1.0 file already committed.
+	mustRun(t, repo, "git", "checkout", "-b", "spine/run/wf-xyz")
+	mustRun(t, repo, "git", "checkout", "main")
+
+	ctx := workflow.WithWriteContext(ctxWithActor(), workflow.WriteContext{Branch: "spine/run/wf-xyz"})
+	if _, err := svc.Update(ctx, "task-default", fmtYAML("task-default", "1.1")); err != nil {
+		t.Fatalf("Update on branch: %v", err)
+	}
+
+	// main still has v1.0; the branch tip has v1.1.
+	mainBody := mustOutput(t, repo, "git", "show", "main:workflows/task-default.yaml")
+	if !strings.Contains(mainBody, "version: \"1.0\"") {
+		t.Fatalf("main should still hold v1.0, got:\n%s", mainBody)
+	}
+	branchBody := mustOutput(t, repo, "git", "show", "spine/run/wf-xyz:workflows/task-default.yaml")
+	if !strings.Contains(branchBody, "version: \"1.1\"") {
+		t.Fatalf("branch should hold v1.1, got:\n%s", branchBody)
+	}
+}
+
+func TestService_Create_BranchScoped_InvalidBranchName(t *testing.T) {
+	svc, _ := newSvc(t)
+	ctx := workflow.WithWriteContext(ctxWithActor(), workflow.WriteContext{Branch: "-bad"})
+	_, err := svc.Create(ctx, "task-default", fmtYAML("task-default", "1.0"))
+	if err == nil {
+		t.Fatal("expected branch-name validation error")
+	}
+	se, ok := err.(*domain.SpineError)
+	if !ok || se.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func mustRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v failed: %v\n%s", args, err, out)
+	}
+}
+
+func mustOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v failed: %v\n%s", args, err, out)
+	}
+	return string(out)
 }

@@ -14,12 +14,14 @@ import (
 )
 
 type workflowCreateRequest struct {
-	ID   string `json:"id"`
-	Body string `json:"body"`
+	ID           string               `json:"id"`
+	Body         string               `json:"body"`
+	WriteContext *writeContextRequest `json:"write_context,omitempty"`
 }
 
 type workflowUpdateRequest struct {
-	Body string `json:"body"`
+	Body         string               `json:"body"`
+	WriteContext *writeContextRequest `json:"write_context,omitempty"`
 }
 
 type workflowValidateRequest struct {
@@ -51,13 +53,25 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := svc.Create(r.Context(), req.ID, req.Body)
+	ctx := r.Context()
+	if req.WriteContext != nil {
+		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		if branch != "" {
+			ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
+		}
+	}
+
+	result, err := svc.Create(ctx, req.ID, req.Body)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	WriteJSON(w, http.StatusCreated, workflowWriteResponse(result, r.Context()))
+	WriteJSON(w, http.StatusCreated, workflowWriteResponse(result, r.Context(), req.WriteContext))
 }
 
 func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id string) {
@@ -81,13 +95,25 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	result, err := svc.Update(r.Context(), id, req.Body)
+	ctx := r.Context()
+	if req.WriteContext != nil {
+		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		if branch != "" {
+			ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
+		}
+	}
+
+	result, err := svc.Update(ctx, id, req.Body)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, workflowWriteResponse(result, r.Context()))
+	WriteJSON(w, http.StatusOK, workflowWriteResponse(result, r.Context(), req.WriteContext))
 }
 
 func (s *Server) handleWorkflowRead(w http.ResponseWriter, r *http.Request, id string) {
@@ -228,13 +254,17 @@ func splitWorkflowSuffix(raw string) (string, string) {
 	return raw, ""
 }
 
-func workflowWriteResponse(result *workflow.WriteResult, ctx context.Context) map[string]any {
+func workflowWriteResponse(result *workflow.WriteResult, ctx context.Context, wc *writeContextRequest) map[string]any {
+	writeMode := "authoritative"
+	if wc != nil && wc.RunID != "" {
+		writeMode = "proposed"
+	}
 	return map[string]any{
 		"id":            result.Workflow.ID,
 		"workflow_path": result.Path,
 		"version":       result.Workflow.Version,
 		"commit_sha":    result.CommitSHA,
+		"write_mode":    writeMode,
 		"trace_id":      observe.TraceID(ctx),
 	}
 }
-

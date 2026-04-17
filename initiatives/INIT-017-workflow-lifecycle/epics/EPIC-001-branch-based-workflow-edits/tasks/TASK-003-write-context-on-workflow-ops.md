@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: "Support write_context { run_id } on workflow.create/update"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-17
 epic: /initiatives/INIT-017-workflow-lifecycle/epics/EPIC-001-branch-based-workflow-edits/epic.md

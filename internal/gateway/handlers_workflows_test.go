@@ -17,19 +17,21 @@ import (
 // ── Fake Workflow Service ──
 
 type fakeWorkflowSvc struct {
-	createErr       error
-	updateErr       error
-	readErr         error
-	listErr         error
-	lastCreateID    string
-	lastCreateBody  string
-	lastUpdateID    string
-	lastUpdateBody  string
-	lastReadID      string
-	lastValidateID  string
-	validateStatus  string
-	validateErrors  []domain.ValidationError
-	stored          map[string]*domain.WorkflowDefinition
+	createErr        error
+	updateErr        error
+	readErr          error
+	listErr          error
+	lastCreateID     string
+	lastCreateBody   string
+	lastCreateBranch string
+	lastUpdateID     string
+	lastUpdateBody   string
+	lastUpdateBranch string
+	lastReadID       string
+	lastValidateID   string
+	validateStatus   string
+	validateErrors   []domain.ValidationError
+	stored           map[string]*domain.WorkflowDefinition
 }
 
 func newFakeWorkflowSvc() *fakeWorkflowSvc {
@@ -38,9 +40,12 @@ func newFakeWorkflowSvc() *fakeWorkflowSvc {
 	}
 }
 
-func (f *fakeWorkflowSvc) Create(_ context.Context, id, body string) (*workflow.WriteResult, error) {
+func (f *fakeWorkflowSvc) Create(ctx context.Context, id, body string) (*workflow.WriteResult, error) {
 	f.lastCreateID = id
 	f.lastCreateBody = body
+	if wc := workflow.GetWriteContext(ctx); wc != nil {
+		f.lastCreateBranch = wc.Branch
+	}
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -49,9 +54,12 @@ func (f *fakeWorkflowSvc) Create(_ context.Context, id, body string) (*workflow.
 	return &workflow.WriteResult{Workflow: wf, Path: wf.Path, CommitSHA: "cafef00d"}, nil
 }
 
-func (f *fakeWorkflowSvc) Update(_ context.Context, id, body string) (*workflow.WriteResult, error) {
+func (f *fakeWorkflowSvc) Update(ctx context.Context, id, body string) (*workflow.WriteResult, error) {
 	f.lastUpdateID = id
 	f.lastUpdateBody = body
+	if wc := workflow.GetWriteContext(ctx); wc != nil {
+		f.lastUpdateBranch = wc.Branch
+	}
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
@@ -396,6 +404,105 @@ func TestWorkflow_ListServiceError(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("status: %d", resp.StatusCode)
+	}
+}
+
+// workflowPlanningStore returns a planning-mode Active run from GetRun so that
+// resolveWriteContext routes writes to the run's branch without requiring a
+// task_path (the workflow lifecycle is a planning flow per ADR-006/008).
+type workflowPlanningStore struct {
+	fakeStore
+	branch string
+}
+
+func (s *workflowPlanningStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
+	return &domain.Run{
+		RunID:      runID,
+		Status:     domain.RunStatusActive,
+		Mode:       domain.RunModePlanning,
+		BranchName: s.branch,
+	}, nil
+}
+
+func newWorkflowServerWithStore(t *testing.T, svc gateway.WorkflowService, store *workflowPlanningStore, role domain.ActorRole) (*httptest.Server, string) {
+	t.Helper()
+	store.fakeStore = *newFakeStore()
+	store.actors["actor-1"] = &domain.Actor{
+		ActorID: "actor-1", Type: domain.ActorTypeHuman, Name: "Dev",
+		Role: role, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(store)
+	token, _, err := authSvc.CreateToken(context.Background(), "actor-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: store, Auth: authSvc, Workflows: svc})
+	return httptest.NewServer(srv.Handler()), token
+}
+
+func TestWorkflowCreate_WithWriteContext_RoutesToBranch(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	store := &workflowPlanningStore{branch: "spine/run/wf-42"}
+	ts, tok := newWorkflowServerWithStore(t, svc, store, domain.RoleReviewer)
+	defer ts.Close()
+
+	body := `{"id":"task-default","body":"id: task-default\n","write_context":{"run_id":"run-abc"}}`
+	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["write_mode"] != "proposed" {
+		t.Errorf("write_mode: %v", out["write_mode"])
+	}
+	if svc.lastCreateBranch != "spine/run/wf-42" {
+		t.Errorf("branch not forwarded: %q", svc.lastCreateBranch)
+	}
+}
+
+func TestWorkflowCreate_WithoutWriteContext_AuthoritativeMode(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
+	defer ts.Close()
+
+	body := `{"id":"task-default","body":"id: task-default\n"}`
+	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, body)
+	defer resp.Body.Close()
+
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["write_mode"] != "authoritative" {
+		t.Errorf("write_mode: %v", out["write_mode"])
+	}
+	if svc.lastCreateBranch != "" {
+		t.Errorf("expected no branch, got %q", svc.lastCreateBranch)
+	}
+}
+
+func TestWorkflowUpdate_WithWriteContext_RoutesToBranch(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	svc.stored["task-default"] = &domain.WorkflowDefinition{ID: "task-default", Version: "1.0.0", Path: "workflows/task-default.yaml"}
+	store := &workflowPlanningStore{branch: "spine/run/wf-99"}
+	ts, tok := newWorkflowServerWithStore(t, svc, store, domain.RoleReviewer)
+	defer ts.Close()
+
+	body := `{"body":"new","write_context":{"run_id":"run-99"}}`
+	resp := doWorkflowJSON(t, "PUT", ts.URL+"/api/v1/workflows/task-default", tok, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["write_mode"] != "proposed" {
+		t.Errorf("write_mode: %v", out["write_mode"])
+	}
+	if svc.lastUpdateBranch != "spine/run/wf-99" {
+		t.Errorf("branch not forwarded: %q", svc.lastUpdateBranch)
 	}
 }
 
