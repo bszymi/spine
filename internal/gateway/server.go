@@ -151,6 +151,7 @@ type Server struct {
 	stepReleaser        StepReleaser               // optional, nil if not configured
 	stepExecutionLister StepExecutionLister        // optional, nil if not configured
 	stepAcknowledger    StepAcknowledger           // optional, nil if not configured
+	stepAssigner        StepAssigner               // optional, nil if not configured
 	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
 	gitHTTP             *githttp.Handler           // optional, nil if not configured
 	devMode             bool                       // when true, authorize allows unauthenticated requests
@@ -183,6 +184,15 @@ type StepExecutionLister interface {
 // StepAcknowledger transitions an assigned step to in_progress.
 type StepAcknowledger interface {
 	AcknowledgeStep(ctx context.Context, req engine.AcknowledgeRequest) (*engine.AcknowledgeResult, error)
+}
+
+// StepAssigner performs a manual step assignment (third-party selects the
+// actor). Mirrors StepClaimer / StepAcknowledger but for the assign
+// transition. The handler retains precondition evaluation; the assigner
+// owns the state-machine transition.
+type StepAssigner interface {
+	AssignStep(ctx context.Context, req engine.AssignRequest) (*engine.AssignResult, error)
+	LookupStepDef(ctx context.Context, runID, stepID string) (*domain.StepDefinition, *domain.Run)
 }
 
 // WorkflowResolverFn resolves the governing workflow for an artifact type.
@@ -244,6 +254,7 @@ type ServerConfig struct {
 	StepReleaser        StepReleaser
 	StepExecutionLister StepExecutionLister
 	StepAcknowledger    StepAcknowledger
+	StepAssigner        StepAssigner
 	EventBroadcaster    *delivery.EventBroadcaster
 	GitHTTP             *githttp.Handler // optional, serves git repos over HTTP
 	DevMode             bool             // when true, authorize allows unauthenticated requests
@@ -283,6 +294,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		stepReleaser:        cfg.StepReleaser,
 		stepExecutionLister: cfg.StepExecutionLister,
 		stepAcknowledger:    cfg.StepAcknowledger,
+		stepAssigner:        cfg.StepAssigner,
 		eventBroadcaster:    cfg.EventBroadcaster,
 		gitHTTP:             cfg.GitHTTP,
 		devMode:             cfg.DevMode,
