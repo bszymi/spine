@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/go-chi/chi/v5"
 )
@@ -448,19 +449,11 @@ func (s *Server) emitDiscussionEvent(ctx context.Context, eventType domain.Event
 	extra["thread_id"] = threadID
 	payload, _ := json.Marshal(extra)
 	evtID, _ := generateID("evt")
-	if err := s.events.Emit(ctx, domain.Event{
-		EventID:   evtID,
-		Type:      eventType,
-		Timestamp: time.Now(),
-		TraceID:   observe.TraceID(ctx),
-		Payload:   payload,
-	}); err != nil {
-		observe.Logger(ctx).Warn("failed to emit discussion event",
-			"event_type", eventType,
-			"thread_id", threadID,
-			"error", err,
-		)
-	}
+	event.EmitLogged(ctx, s.events, domain.Event{
+		EventID: evtID,
+		Type:    eventType,
+		Payload: payload,
+	})
 }
 
 func (s *Server) validateAnchorExists(ctx context.Context, anchorType domain.AnchorType, anchorID string) error {

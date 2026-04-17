@@ -82,15 +82,13 @@ func (s *Service) StartDivergence(ctx context.Context, run *domain.Run, divDef d
 	if err != nil {
 		log.Warn("failed to marshal divergence event payload", "error", err)
 	}
-	if err := s.events.Emit(ctx, domain.Event{
+	event.EmitLogged(ctx, s.events, domain.Event{
 		EventID:   fmt.Sprintf("div-started-%s", divCtx.DivergenceID),
 		Type:      domain.EventDivergenceStarted,
 		Timestamp: now,
 		RunID:     run.RunID,
 		Payload:   payload,
-	}); err != nil {
-		log.Warn("failed to emit divergence_started event", "error", err)
-	}
+	})
 
 	log.Info("divergence started",
 		"divergence_id", divCtx.DivergenceID,

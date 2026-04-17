@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/workflow"
 )
@@ -101,15 +102,13 @@ func (s *Scheduler) handleStepTimeout(ctx context.Context, exec *domain.StepExec
 		"execution_id": exec.ExecutionID,
 		"timeout":      stepDef.Timeout,
 	})
-	if err := s.events.Emit(ctx, domain.Event{
+	event.EmitLogged(ctx, s.events, domain.Event{
 		EventID:   fmt.Sprintf("timeout-%s", exec.ExecutionID),
 		Type:      domain.EventStepTimeout,
 		Timestamp: now,
 		RunID:     exec.RunID,
 		Payload:   payload,
-	}); err != nil {
-		log.Warn("failed to emit step_timeout event", "execution_id", exec.ExecutionID, "error", err)
-	}
+	})
 
 	return nil
 }

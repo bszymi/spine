@@ -419,15 +419,8 @@ func (s *Service) emitEvent(ctx context.Context, eventType domain.EventType, a *
 		}),
 	}
 
-	// Fire and forget — event delivery is async, but log failures
-	if err := s.events.Emit(ctx, evt); err != nil {
-		log := observe.Logger(ctx)
-		log.Warn("failed to emit event",
-			"event_type", eventType,
-			"artifact_path", a.Path,
-			"error", err,
-		)
-	}
+	// Fire and forget — event delivery is async, errors logged by EmitLogged.
+	event.EmitLogged(ctx, s.events, evt)
 }
 
 func mustJSON(v any) json.RawMessage {

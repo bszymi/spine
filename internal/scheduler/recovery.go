@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/workflow"
@@ -55,14 +56,11 @@ func (s *Scheduler) RecoverOnStartup(ctx context.Context) (*RecoveryResult, erro
 		"committing_found":  result.CommittingFound,
 		"steps_recovered":   result.StepsRecovered,
 	})
-	if err := s.events.Emit(ctx, domain.Event{
-		EventID:   fmt.Sprintf("recovery-%d", time.Now().UnixNano()),
-		Type:      domain.EventEngineRecovered,
-		Timestamp: time.Now(),
-		Payload:   payload,
-	}); err != nil {
-		log.Warn("failed to emit engine_recovered event", "error", err)
-	}
+	event.EmitLogged(ctx, s.events, domain.Event{
+		EventID: fmt.Sprintf("recovery-%d", time.Now().UnixNano()),
+		Type:    domain.EventEngineRecovered,
+		Payload: payload,
+	})
 
 	return result, nil
 }

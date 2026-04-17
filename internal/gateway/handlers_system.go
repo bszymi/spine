@@ -10,6 +10,7 @@ import (
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/go-chi/chi/v5"
 )
@@ -196,14 +197,11 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 				"issues_count":    len(issues),
 			})
 			if s.events != nil {
-				if err := s.events.Emit(r.Context(), domain.Event{
-					EventID:   fmt.Sprintf("validate-%s", observe.TraceID(r.Context())),
-					Type:      evtType,
-					Timestamp: time.Now(),
-					Payload:   payload,
-				}); err != nil {
-					observe.Logger(r.Context()).Warn("failed to emit validation event", "error", err)
-				}
+				event.EmitLogged(r.Context(), s.events, domain.Event{
+					EventID: fmt.Sprintf("validate-%s", observe.TraceID(r.Context())),
+					Type:    evtType,
+					Payload: payload,
+				})
 			}
 		}
 

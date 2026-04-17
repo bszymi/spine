@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/workflow"
@@ -205,15 +206,13 @@ func (s *Service) CommitConvergence(ctx context.Context, divCtx *domain.Divergen
 		"selected_branch":   output.Result.SelectedBranch,
 		"selected_branches": output.Result.SelectedBranches,
 	})
-	if err := s.events.Emit(ctx, domain.Event{
+	event.EmitLogged(ctx, s.events, domain.Event{
 		EventID:   fmt.Sprintf("conv-completed-%s", divCtx.DivergenceID),
 		Type:      domain.EventConvergenceCompleted,
 		Timestamp: now,
 		RunID:     divCtx.RunID,
 		Payload:   payload,
-	}); err != nil {
-		log.Warn("failed to emit convergence_completed event", "error", err)
-	}
+	})
 
 	_ = evalRecord // stored in event payload
 	log.Info("convergence committed",
