@@ -27,9 +27,8 @@ func (s *Server) handleArtifactEntryCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req artifactEntryCreateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[artifactEntryCreateRequest](w, r)
+	if !ok {
 		return
 	}
 
@@ -152,9 +151,8 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req artifactAddRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[artifactAddRequest](w, r)
+	if !ok {
 		return
 	}
 
@@ -179,9 +177,8 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Look up the run.
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 	run, err := st.GetRun(r.Context(), req.RunID)

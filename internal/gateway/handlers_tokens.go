@@ -30,9 +30,8 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req createTokenRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[createTokenRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.ActorID == "" {
@@ -88,8 +87,7 @@ func (s *Server) handleTokenList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 

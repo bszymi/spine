@@ -24,9 +24,8 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 

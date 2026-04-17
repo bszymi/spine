@@ -7,6 +7,12 @@ import (
 	"github.com/bszymi/spine/internal/engine"
 )
 
+type releaseRequest struct {
+	ActorID      string `json:"actor_id"`
+	AssignmentID string `json:"assignment_id"`
+	Reason       string `json:"reason"`
+}
+
 // handleExecutionRelease processes a step release request.
 // POST /api/v1/execution/release
 // Body: { "actor_id": "...", "assignment_id": "...", "reason": "..." }
@@ -22,13 +28,8 @@ func (s *Server) handleExecutionRelease(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req struct {
-		ActorID      string `json:"actor_id"`
-		AssignmentID string `json:"assignment_id"`
-		Reason       string `json:"reason"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[releaseRequest](w, r)
+	if !ok {
 		return
 	}
 

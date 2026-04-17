@@ -3,7 +3,6 @@ package gateway
 import (
 	"net/http"
 
-	"github.com/bszymi/spine/internal/domain"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -12,9 +11,8 @@ func (s *Server) handleActorSkillAssign(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -41,9 +39,8 @@ func (s *Server) handleActorSkillRemove(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -63,9 +60,8 @@ func (s *Server) handleActorSkillList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 

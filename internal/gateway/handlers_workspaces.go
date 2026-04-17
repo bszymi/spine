@@ -45,20 +45,21 @@ func operatorTokenMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+type workspaceCreateRequest struct {
+	WorkspaceID    string `json:"workspace_id"`
+	DisplayName    string `json:"display_name"`
+	GitURL         string `json:"git_url,omitempty"`
+	SMPWorkspaceID string `json:"smp_workspace_id,omitempty"`
+}
+
 func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 	if s.wsDBProvider == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "workspace management requires shared mode"))
 		return
 	}
 
-	var req struct {
-		WorkspaceID    string `json:"workspace_id"`
-		DisplayName    string `json:"display_name"`
-		GitURL         string `json:"git_url,omitempty"`
-		SMPWorkspaceID string `json:"smp_workspace_id,omitempty"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[workspaceCreateRequest](w, r)
+	if !ok {
 		return
 	}
 

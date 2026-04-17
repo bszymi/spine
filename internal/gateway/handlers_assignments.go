@@ -11,8 +11,7 @@ func (s *Server) handleListAssignments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 

@@ -34,15 +34,13 @@ func (s *Server) handleSubscriptionCreate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
-	var req createSubscriptionRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[createSubscriptionRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.Name == "" {
@@ -122,9 +120,8 @@ func (s *Server) handleSubscriptionList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -152,9 +149,8 @@ func (s *Server) handleSubscriptionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -174,9 +170,8 @@ func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -187,9 +182,8 @@ func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var req updateSubscriptionRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[updateSubscriptionRequest](w, r)
+	if !ok {
 		return
 	}
 
@@ -220,9 +214,8 @@ func (s *Server) handleSubscriptionDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -250,9 +243,8 @@ func (s *Server) setSubscriptionStatus(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -278,9 +270,8 @@ func (s *Server) handleSubscriptionRotateSecret(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 
@@ -315,9 +306,8 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	st := s.storeFrom(r.Context())
-	if st == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	st, ok := s.needStore(w, r)
+	if !ok {
 		return
 	}
 

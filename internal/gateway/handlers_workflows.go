@@ -33,9 +33,8 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req workflowCreateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[workflowCreateRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.ID == "" || req.Body == "" {
@@ -130,9 +129,8 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	var req workflowUpdateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[workflowUpdateRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.Body == "" {
@@ -254,9 +252,8 @@ func (s *Server) handleWorkflowValidate(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	var req workflowValidateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[workflowValidateRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.Body == "" {

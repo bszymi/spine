@@ -53,9 +53,8 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req artifactCreateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[artifactCreateRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.Path == "" || req.Content == "" {
@@ -125,8 +124,7 @@ func (s *Server) handleArtifactList(w http.ResponseWriter, r *http.Request) {
 		Cursor:     cursor,
 	}
 
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 
@@ -231,9 +229,8 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 
-	var req artifactUpdateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[artifactUpdateRequest](w, r)
+	if !ok {
 		return
 	}
 	if req.Content == "" {
@@ -344,8 +341,7 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 		return
 	}
 
-	if s.storeFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "store not configured"))
+	if _, ok := s.needStore(w, r); !ok {
 		return
 	}
 

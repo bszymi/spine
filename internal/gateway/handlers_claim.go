@@ -7,6 +7,11 @@ import (
 	"github.com/bszymi/spine/internal/engine"
 )
 
+type claimRequest struct {
+	ActorID     string `json:"actor_id"`
+	ExecutionID string `json:"execution_id"`
+}
+
 // handleExecutionClaim processes a step claim request.
 // POST /api/v1/execution/claim
 // Body: { "actor_id": "...", "execution_id": "..." }
@@ -22,12 +27,8 @@ func (s *Server) handleExecutionClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		ActorID     string `json:"actor_id"`
-		ExecutionID string `json:"execution_id"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
-		WriteError(w, err)
+	req, ok := decodeBody[claimRequest](w, r)
+	if !ok {
 		return
 	}
 
