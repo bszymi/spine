@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -61,6 +62,41 @@ func TestGenerateBranchNameWithSuffix(t *testing.T) {
 	want := "spine/plan/init-001-initiative-0a5d0f6d"
 	if name != want {
 		t.Errorf("got %q, want %q", name, want)
+	}
+}
+
+// TestGenerateBranchNameWithSuffix_WorkflowPlanningNamespace asserts that
+// workflow-lifecycle planning runs produce branch names under a distinct
+// namespace that cannot collide with artifact-creation planning or task
+// runs: `spine/plan/` + workflow-id-derived slug. Paired with the fact
+// that workflow paths live under `workflows/` which is disjoint from
+// `initiatives/` + `epics/` + `tasks/`.
+func TestGenerateBranchNameWithSuffix_WorkflowPlanningNamespace(t *testing.T) {
+	// Workflow planning run.
+	wfName := generateBranchNameWithSuffix(
+		domain.RunModePlanning,
+		"workflow-lifecycle",
+		"workflows/workflow-lifecycle.yaml",
+		"run-0a5d0f6d",
+	)
+
+	// Artifact planning run with the same run ID — must NOT equal the above.
+	artName := generateBranchNameWithSuffix(
+		domain.RunModePlanning,
+		"INIT-001",
+		"initiatives/init-001/initiative.md",
+		"run-0a5d0f6d",
+	)
+
+	if wfName == artName {
+		t.Fatalf("workflow and artifact planning runs must produce distinct branch names: %q vs %q",
+			wfName, artName)
+	}
+	if !strings.HasPrefix(wfName, "spine/plan/") {
+		t.Errorf("workflow planning branch must use spine/plan/ prefix, got %q", wfName)
+	}
+	if !strings.Contains(wfName, "workflow-lifecycle") {
+		t.Errorf("workflow planning branch should embed workflow id, got %q", wfName)
 	}
 }
 

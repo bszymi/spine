@@ -396,7 +396,12 @@ func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
 	return &branchScope{
 		repoDir: worktreeDir,
 		cleanup: func() {
-			rmCmd := execCommand(ctx, "git", "worktree", "remove", "--force", worktreeDir)
+			// Cleanup uses a fresh bounded context, not the request ctx —
+			// if the request was cancelled (client disconnect, timeout)
+			// the worktree must still be removed or we leak it on disk.
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			rmCmd := execCommand(cleanupCtx, "git", "worktree", "remove", "--force", worktreeDir)
 			rmCmd.Dir = s.repo
 			_, _ = rmCmd.CombinedOutput()
 			os.RemoveAll(parent)
