@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: "Implement workflow.* Gateway Handlers"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-17
 epic: /initiatives/INIT-015-workflow-resource-separation/epics/EPIC-001-workflow-api-separation/epic.md

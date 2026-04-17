@@ -56,6 +56,11 @@ func (s *Server) routes() http.Handler {
 			r.Get("/artifacts", s.handleArtifactList)
 			r.HandleFunc("/artifacts/*", s.handleArtifactWildcard)
 
+			// Workflow definitions (ADR-007)
+			r.Post("/workflows", s.handleWorkflowCreate)
+			r.Get("/workflows", s.handleWorkflowList)
+			r.HandleFunc("/workflows/*", s.handleWorkflowWildcard)
+
 			// Runs
 			r.Post("/runs", s.handleRunStart)
 			r.Get("/runs/{run_id}", s.handleRunStatus)
