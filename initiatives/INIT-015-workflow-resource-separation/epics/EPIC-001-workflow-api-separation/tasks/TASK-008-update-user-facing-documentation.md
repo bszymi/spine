@@ -2,7 +2,7 @@
 id: TASK-008
 type: Task
 title: "Update User-Facing Documentation for Workflow API Split"
-status: Pending
+status: Completed
 work_type: documentation
 created: 2026-04-17
 epic: /initiatives/INIT-015-workflow-resource-separation/epics/EPIC-001-workflow-api-separation/epic.md

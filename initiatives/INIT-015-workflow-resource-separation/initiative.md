@@ -2,7 +2,7 @@
 id: INIT-015
 type: Initiative
 title: Workflow Resource Separation
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-17
 links:

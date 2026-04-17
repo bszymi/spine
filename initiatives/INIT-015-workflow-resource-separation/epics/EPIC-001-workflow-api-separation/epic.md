@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: "Workflow API Separation"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-015-workflow-resource-separation/initiative.md
 links:
   - type: parent
