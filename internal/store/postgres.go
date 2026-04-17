@@ -137,10 +137,7 @@ func (s *PostgresStore) GetRun(ctx context.Context, runID string) (*domain.Run, 
 		`SELECT `+runColumns+` FROM runtime.runs WHERE run_id = $1`, runID)
 	run, err := scanRun(row)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "run not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "run not found")
 	}
 	return &run, nil
 }
@@ -156,10 +153,7 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, runID string, statu
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "run not found")
-	}
-	return nil
+	return mustAffect(tag, "run not found")
 }
 
 func (s *PostgresStore) TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
@@ -181,10 +175,7 @@ func (s *PostgresStore) SetCommitMeta(ctx context.Context, runID string, meta ma
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "run not found")
-	}
-	return nil
+	return mustAffect(tag, "run not found")
 }
 
 func (s *PostgresStore) UpdateCurrentStep(ctx context.Context, runID, stepID string) error {
@@ -192,10 +183,7 @@ func (s *PostgresStore) UpdateCurrentStep(ctx context.Context, runID, stepID str
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "run not found")
-	}
-	return nil
+	return mustAffect(tag, "run not found")
 }
 
 func (s *PostgresStore) ListRunsByTask(ctx context.Context, taskPath string) ([]domain.Run, error) {
@@ -269,10 +257,7 @@ func (s *PostgresStore) GetStepExecution(ctx context.Context, executionID string
 		`SELECT `+stepExecColumns+` FROM runtime.step_executions WHERE execution_id = $1`, executionID)
 	exec, err := scanStepExecution(row)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "step execution not found")
 	}
 	return &exec, nil
 }
@@ -293,10 +278,7 @@ func (s *PostgresStore) UpdateStepExecution(ctx context.Context, exec *domain.St
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "step execution not found")
-	}
-	return nil
+	return mustAffect(tag, "step execution not found")
 }
 
 func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID string) ([]domain.StepExecution, error) {
@@ -317,10 +299,7 @@ func (s *PostgresStore) GetActor(ctx context.Context, actorID string) (*domain.A
 		FROM auth.actors WHERE actor_id = $1`, actorID,
 	).Scan(&actor.ActorID, &actor.Type, &actor.Name, &actor.Role, &actor.Status)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "actor not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "actor not found")
 	}
 	return &actor, nil
 }
@@ -350,10 +329,7 @@ func (s *PostgresStore) UpdateActor(ctx context.Context, actor *domain.Actor) er
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "actor not found")
-	}
-	return nil
+	return mustAffect(tag, "actor not found")
 }
 
 func (s *PostgresStore) ListActors(ctx context.Context) ([]domain.Actor, error) {
@@ -425,31 +401,18 @@ func (s *PostgresStore) RevokeToken(ctx context.Context, tokenID string) error {
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "token not found or already revoked")
-	}
-	return nil
+	return mustAffect(tag, "token not found or already revoked")
 }
 
 func (s *PostgresStore) ListTokensByActor(ctx context.Context, actorID string) ([]domain.Token, error) {
-	rows, err := s.pool.Query(ctx, `
+	return queryAll(ctx, s.pool, `
 		SELECT token_id, actor_id, name, expires_at, revoked_at, created_at
-		FROM auth.tokens WHERE actor_id = $1 ORDER BY created_at DESC`, actorID,
+		FROM auth.tokens WHERE actor_id = $1 ORDER BY created_at DESC`,
+		[]any{actorID},
+		func(row pgx.Rows, t *domain.Token) error {
+			return row.Scan(&t.TokenID, &t.ActorID, &t.Name, &t.ExpiresAt, &t.RevokedAt, &t.CreatedAt)
+		},
 	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tokens []domain.Token
-	for rows.Next() {
-		var t domain.Token
-		if err := rows.Scan(&t.TokenID, &t.ActorID, &t.Name, &t.ExpiresAt, &t.RevokedAt, &t.CreatedAt); err != nil {
-			return nil, err
-		}
-		tokens = append(tokens, t)
-	}
-	return tokens, rows.Err()
 }
 
 // ── Divergence ──
@@ -473,10 +436,7 @@ func (s *PostgresStore) UpdateDivergenceContext(ctx context.Context, div *domain
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "divergence context not found")
-	}
-	return nil
+	return mustAffect(tag, "divergence context not found")
 }
 
 func (s *PostgresStore) GetDivergenceContext(ctx context.Context, divergenceID string) (*domain.DivergenceContext, error) {
@@ -488,10 +448,7 @@ func (s *PostgresStore) GetDivergenceContext(ctx context.Context, divergenceID s
 	).Scan(&div.DivergenceID, &div.RunID, &div.Status, &div.DivergenceMode, &div.DivergenceWindow,
 		&div.MinBranches, &div.MaxBranches, &convergenceID, &div.TriggeredAt, &div.ResolvedAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "divergence context not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "divergence context not found")
 	}
 	if convergenceID != nil {
 		div.ConvergenceID = *convergenceID
@@ -519,10 +476,7 @@ func (s *PostgresStore) UpdateBranch(ctx context.Context, branch *domain.Branch)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "branch not found")
-	}
-	return nil
+	return mustAffect(tag, "branch not found")
 }
 
 func (s *PostgresStore) GetBranch(ctx context.Context, branchID string) (*domain.Branch, error) {
@@ -537,10 +491,7 @@ func (s *PostgresStore) GetBranch(ctx context.Context, branchID string) (*domain
 		&branch.CreatedAt, &branch.CompletedAt,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "branch not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "branch not found")
 	}
 	if currentStepID != nil {
 		branch.CurrentStepID = *currentStepID
@@ -549,29 +500,22 @@ func (s *PostgresStore) GetBranch(ctx context.Context, branchID string) (*domain
 }
 
 func (s *PostgresStore) ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error) {
-	rows, err := s.pool.Query(ctx, `
+	return queryAll(ctx, s.pool, `
 		SELECT branch_id, run_id, divergence_id, status, current_step_id, outcome, artifacts_produced, created_at, completed_at
-		FROM runtime.branches WHERE divergence_id = $1 ORDER BY created_at`, divergenceID,
+		FROM runtime.branches WHERE divergence_id = $1 ORDER BY created_at`,
+		[]any{divergenceID},
+		func(row pgx.Rows, b *domain.Branch) error {
+			var currentStepID *string
+			if err := row.Scan(&b.BranchID, &b.RunID, &b.DivergenceID, &b.Status,
+				&currentStepID, &b.Outcome, &b.ArtifactsProduced, &b.CreatedAt, &b.CompletedAt); err != nil {
+				return err
+			}
+			if currentStepID != nil {
+				b.CurrentStepID = *currentStepID
+			}
+			return nil
+		},
 	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var branches []domain.Branch
-	for rows.Next() {
-		var b domain.Branch
-		var currentStepID *string
-		if err := rows.Scan(&b.BranchID, &b.RunID, &b.DivergenceID, &b.Status,
-			&currentStepID, &b.Outcome, &b.ArtifactsProduced, &b.CreatedAt, &b.CompletedAt); err != nil {
-			return nil, err
-		}
-		if currentStepID != nil {
-			b.CurrentStepID = *currentStepID
-		}
-		branches = append(branches, b)
-	}
-	return branches, rows.Err()
 }
 
 // ── Assignment Tracking ──
@@ -594,10 +538,7 @@ func (s *PostgresStore) UpdateAssignmentStatus(ctx context.Context, assignmentID
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "assignment not found")
-	}
-	return nil
+	return mustAffect(tag, "assignment not found")
 }
 
 func (s *PostgresStore) GetAssignment(ctx context.Context, assignmentID string) (*domain.Assignment, error) {
@@ -607,10 +548,7 @@ func (s *PostgresStore) GetAssignment(ctx context.Context, assignmentID string) 
 		FROM runtime.actor_assignments WHERE assignment_id = $1`, assignmentID,
 	).Scan(&a.AssignmentID, &a.RunID, &a.ExecutionID, &a.ActorID, &a.Status, &a.AssignedAt, &a.RespondedAt, &a.TimeoutAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "assignment not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "assignment not found")
 	}
 	return &a, nil
 }
@@ -645,24 +583,15 @@ func (s *PostgresStore) ListAssignmentsByActor(ctx context.Context, actorID stri
 }
 
 func (s *PostgresStore) ListExpiredAssignments(ctx context.Context, before time.Time) ([]domain.Assignment, error) {
-	rows, err := s.pool.Query(ctx, `
+	return queryAll(ctx, s.pool, `
 		SELECT assignment_id, run_id, execution_id, actor_id, status, assigned_at, responded_at, timeout_at
 		FROM runtime.actor_assignments WHERE status = 'active' AND timeout_at IS NOT NULL AND timeout_at < $1
-		ORDER BY timeout_at`, before,
+		ORDER BY timeout_at`,
+		[]any{before},
+		func(row pgx.Rows, a *domain.Assignment) error {
+			return row.Scan(&a.AssignmentID, &a.RunID, &a.ExecutionID, &a.ActorID, &a.Status, &a.AssignedAt, &a.RespondedAt, &a.TimeoutAt)
+		},
 	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var assignments []domain.Assignment
-	for rows.Next() {
-		var a domain.Assignment
-		if err := rows.Scan(&a.AssignmentID, &a.RunID, &a.ExecutionID, &a.ActorID, &a.Status, &a.AssignedAt, &a.RespondedAt, &a.TimeoutAt); err != nil {
-			return nil, err
-		}
-		assignments = append(assignments, a)
-	}
-	return assignments, rows.Err()
 }
 
 // ── Scheduler Queries ──
@@ -757,10 +686,7 @@ func (s *PostgresStore) GetArtifactProjection(ctx context.Context, artifactPath 
 		&proj.SourceCommit, &proj.ContentHash,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "artifact not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "artifact not found")
 	}
 	return &proj, nil
 }
@@ -965,10 +891,7 @@ func (s *PostgresStore) GetWorkflowProjection(ctx context.Context, workflowPath 
 		&proj.Status, &proj.AppliesTo, &proj.Definition, &proj.SourceCommit,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "workflow not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "workflow not found")
 	}
 	return &proj, nil
 }
@@ -1049,10 +972,7 @@ func (s *PostgresStore) GetSkill(ctx context.Context, skillID string) (*domain.S
 		FROM auth.skills WHERE skill_id = $1`, skillID,
 	).Scan(&skill.SkillID, &skill.Name, &skill.Description, &skill.Category, &skill.Status, &skill.CreatedAt, &skill.UpdatedAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "skill not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "skill not found")
 	}
 	return &skill, nil
 }
@@ -1066,10 +986,7 @@ func (s *PostgresStore) UpdateSkill(ctx context.Context, skill *domain.Skill) er
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "skill not found")
-	}
-	return nil
+	return mustAffect(tag, "skill not found")
 }
 
 func (s *PostgresStore) ListSkills(ctx context.Context) ([]domain.Skill, error) {
@@ -1123,10 +1040,7 @@ func (s *PostgresStore) RemoveSkillFromActor(ctx context.Context, actorID, skill
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "actor-skill assignment not found")
-	}
-	return nil
+	return mustAffect(tag, "actor-skill assignment not found")
 }
 
 func (s *PostgresStore) ListActorSkills(ctx context.Context, actorID string) ([]domain.Skill, error) {
@@ -1200,10 +1114,7 @@ func (s *PostgresStore) GetExecutionProjection(ctx context.Context, taskPath str
 		&reqSkills, &actorTypes, &proj.Blocked, &blockedBy,
 		&assignedActor, &proj.AssignmentStatus, &runID, &wfStep, &proj.LastUpdated)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "execution projection not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "execution projection not found")
 	}
 	proj.RequiredSkills = UnmarshalSkills(reqSkills)
 	proj.AllowedActorTypes = UnmarshalSkills(actorTypes)
@@ -1416,10 +1327,7 @@ func (s *PostgresStore) GetDelivery(ctx context.Context, deliveryID string) (*De
 		&e.Payload, &e.Status, &e.AttemptCount, &e.NextRetryAt, &lastError,
 		&e.CreatedAt, &e.DeliveredAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "delivery not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "delivery not found")
 	}
 	if lastError != nil {
 		e.LastError = *lastError
@@ -1634,10 +1542,7 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID stri
 		&sub.EventTypes, &sub.SigningSecret, &sub.Status, &sub.Metadata,
 		&sub.CreatedBy, &sub.CreatedAt, &sub.UpdatedAt)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "subscription not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "subscription not found")
 	}
 	if wsID != nil {
 		sub.WorkspaceID = *wsID
@@ -1825,10 +1730,7 @@ func (s *PostgresStore) GetThread(ctx context.Context, threadID string) (*domain
 		&resolutionType, &t.ResolutionRefs,
 	)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, domain.NewError(domain.ErrNotFound, "thread not found")
-		}
-		return nil, err
+		return nil, notFoundOr(err, "thread not found")
 	}
 	if topicKey != nil {
 		t.TopicKey = *topicKey
@@ -1889,10 +1791,7 @@ func (s *PostgresStore) UpdateThread(ctx context.Context, thread *domain.Discuss
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewError(domain.ErrNotFound, "thread not found")
-	}
-	return nil
+	return mustAffect(tag, "thread not found")
 }
 
 func (s *PostgresStore) CreateComment(ctx context.Context, comment *domain.Comment) error {
@@ -1907,33 +1806,26 @@ func (s *PostgresStore) CreateComment(ctx context.Context, comment *domain.Comme
 }
 
 func (s *PostgresStore) ListComments(ctx context.Context, threadID string) ([]domain.Comment, error) {
-	rows, err := s.pool.Query(ctx, `
+	return queryAll(ctx, s.pool, `
 		SELECT comment_id, thread_id, parent_comment_id, author_id, author_type, content, metadata, created_at, edited_at, deleted
 		FROM runtime.comments WHERE thread_id = $1
-		ORDER BY created_at ASC`, threadID,
+		ORDER BY created_at ASC`,
+		[]any{threadID},
+		func(row pgx.Rows, c *domain.Comment) error {
+			var parentCommentID *string
+			if err := row.Scan(
+				&c.CommentID, &c.ThreadID, &parentCommentID,
+				&c.AuthorID, &c.AuthorType, &c.Content, &c.Metadata,
+				&c.CreatedAt, &c.EditedAt, &c.Deleted,
+			); err != nil {
+				return err
+			}
+			if parentCommentID != nil {
+				c.ParentCommentID = *parentCommentID
+			}
+			return nil
+		},
 	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var comments []domain.Comment
-	for rows.Next() {
-		var c domain.Comment
-		var parentCommentID *string
-		if err := rows.Scan(
-			&c.CommentID, &c.ThreadID, &parentCommentID,
-			&c.AuthorID, &c.AuthorType, &c.Content, &c.Metadata,
-			&c.CreatedAt, &c.EditedAt, &c.Deleted,
-		); err != nil {
-			return nil, err
-		}
-		if parentCommentID != nil {
-			c.ParentCommentID = *parentCommentID
-		}
-		comments = append(comments, c)
-	}
-	return comments, rows.Err()
 }
 
 func (s *PostgresStore) HasOpenThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) (bool, error) {
