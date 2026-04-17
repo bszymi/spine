@@ -111,7 +111,7 @@ Workflow Definition Operations create, read, and modify workflow definition arti
 
 **Domain rules:**
 - Write operations (`workflow.create`, `workflow.update`) invoke the workflow validation suite directly; validation failures produce structured `validation_failed` responses and do not persist any state.
-- `workflow.update` enforces a version bump relative to the prior definition.
+- `workflow.update` enforces a version bump relative to the prior definition on **every** call — including repeated updates within the same planning run. A reviewer stacking edits on a single `run_id` must bump `version` on each body; the prior definition is read from the branch tip, not from `main`. Bodies that keep the version unchanged are rejected with `validation_failed`.
 - Workflow writes produce a single atomic Git commit with structured trailers, consistent with the artifact write invariant in [Git Integration](/architecture/git-integration.md) §5.
 - Reviewer role is required for `workflow.create` and `workflow.update`. `workflow.read`, `workflow.list`, and `workflow.validate` require reader.
 - `workflow.read` is the **only** way to retrieve an executable workflow body. `artifact.read`, `query.artifacts`, and `query.graph` return summary metadata only (id, path, version, status, applies_to).

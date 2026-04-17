@@ -180,7 +180,15 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	}
 	orch.WithArtifactWriter(ss.Artifacts)
 	orch.WithBlockingStore(ss.Store)
-	if wfWriter, ok := ss.Workflows.(engine.WorkflowWriter); ok && wfWriter != nil {
+	// Workflow writer is required for ADR-008 planning runs. Fail fast at
+	// startup if ss.Workflows is populated but doesn't satisfy the
+	// interface — a silent skip here degrades workflow.create into 503 at
+	// request time, which is much harder to notice in production logs.
+	if ss.Workflows != nil {
+		wfWriter, ok := ss.Workflows.(engine.WorkflowWriter)
+		if !ok {
+			return fmt.Errorf("engine orchestrator init: ss.Workflows (%T) does not satisfy engine.WorkflowWriter", ss.Workflows)
+		}
 		orch.WithWorkflowWriter(wfWriter)
 	}
 
