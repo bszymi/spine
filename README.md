@@ -185,7 +185,9 @@ spine run start [--task PATH] [--mode standard|planning] [--content FILE]
 spine run status|cancel|inspect
 spine task accept|reject|cancel|abandon|supersede
 spine query artifacts|graph|history|runs
-spine workflow list|show|resolve
+spine workflow list|show|resolve                 (disk-based, offline)
+spine workflow create|update|validate             (API-based, ADR-007)
+spine workflow api-list|api-read                  (API-based reads)
 spine validate [path] [--all]
 ```
 
@@ -204,6 +206,10 @@ spine validate [path] [--all]
 | GET/PUT | /api/v1/artifacts/* | Read/update artifact |
 | PATCH | /api/v1/artifacts/*/accept | Accept task |
 | PATCH | /api/v1/artifacts/*/reject | Reject task |
+| POST | /api/v1/workflows | Create workflow definition (ADR-007) |
+| GET | /api/v1/workflows | List workflow definitions |
+| GET/PUT | /api/v1/workflows/{id} | Read/update workflow definition |
+| POST | /api/v1/workflows/{id}/validate | Validate candidate body |
 | POST | /api/v1/runs | Start workflow run |
 | GET | /api/v1/runs/{id} | Run status |
 | POST | /api/v1/runs/{id}/cancel | Cancel run |
