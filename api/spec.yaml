@@ -23,6 +23,10 @@ paths:
     post:
       operationId: artifact.create
       summary: Create a new artifact
+      description: |
+        Creates a new governed artifact. Workflow definition paths are rejected —
+        per ADR-007, workflow definitions must be created through `workflow.create`
+        (`POST /workflows`).
       tags: [Artifacts]
       parameters:
         - $ref: '#/components/parameters/XTraceId'
@@ -42,6 +46,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ArtifactCreateResponse'
+        '400':
+          $ref: '#/components/responses/InvalidParams'
         '409':
           $ref: '#/components/responses/AlreadyExists'
         '422':
@@ -109,6 +115,9 @@ paths:
         Adds an artifact to an existing planning run's branch. Only works while
         the run is in the draft step. Scans the branch (not main) for the next
         available ID. The parent must exist on the branch or on main.
+
+        Workflow definition paths are rejected — per ADR-007, workflow
+        definitions must be created through `workflow.create` (`POST /workflows`).
       tags: [Artifacts]
       parameters:
         - $ref: '#/components/parameters/XTraceId'
@@ -126,7 +135,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ArtifactAddResponse'
         '400':
-          description: Invalid input
+          $ref: '#/components/responses/InvalidParams'
         '404':
           description: Run not found
         '409':
@@ -136,6 +145,11 @@ paths:
     get:
       operationId: artifact.read
       summary: Read an artifact
+      description: |
+        Reads an artifact by repository-relative path. For workflow definition
+        paths, the response contains summary metadata only (no executable body).
+        Use `workflow.read` (`GET /workflows/{id}`) to retrieve the executable
+        workflow definition.
       tags: [Artifacts]
       parameters:
         - $ref: '#/components/parameters/ArtifactPath'
@@ -156,6 +170,10 @@ paths:
     put:
       operationId: artifact.update
       summary: Update an artifact
+      description: |
+        Updates a governed artifact. Workflow definition paths are rejected —
+        per ADR-007, workflow definitions must be updated through `workflow.update`
+        (`PUT /workflows/{id}`).
       tags: [Artifacts]
       parameters:
         - $ref: '#/components/parameters/ArtifactPath'
@@ -176,6 +194,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ArtifactUpdateResponse'
+        '400':
+          $ref: '#/components/responses/InvalidParams'
         '404':
           $ref: '#/components/responses/NotFound'
         '422':
@@ -228,6 +248,170 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ArtifactLinksResponse'
+
+  # ── Workflow Definition Operations ──
+  # See ADR-007 for rationale. Dedicated resource so workflow-specific
+  # validation (step-reference integrity, cycle detection, divergence/
+  # convergence balance) runs in a single code path and malformed
+  # definitions fail at write time rather than Run execution time.
+
+  /workflows:
+    post:
+      operationId: workflow.create
+      summary: Create a new workflow definition
+      description: |
+        Creates a new workflow definition. The full workflow validation suite
+        (per /architecture/workflow-validation.md) runs before commit. On
+        validation failure, no Git state changes.
+      tags: [Workflows]
+      parameters:
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowCreateRequest'
+      responses:
+        '201':
+          description: Workflow created
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowWriteResponse'
+        '400':
+          $ref: '#/components/responses/InvalidParams'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/AlreadyExists'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+    get:
+      operationId: workflow.list
+      summary: List workflow definitions
+      description: |
+        Returns workflow definition summaries only (no executable body).
+      tags: [Workflows]
+      parameters:
+        - name: applies_to
+          in: query
+          schema: { type: string }
+          description: Filter by artifact type the workflow applies to
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [Active, Deprecated, Superseded]
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [execution, creation]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Workflow definition list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowListResponse'
+
+  /workflows/{id}:
+    get:
+      operationId: workflow.read
+      summary: Read a workflow definition
+      description: |
+        Returns the executable workflow definition body. This is the only
+        endpoint that returns the full body — `artifact.read`, `query.artifacts`,
+        and `query.graph` return summary metadata only.
+      tags: [Workflows]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - name: version
+          in: query
+          schema: { type: string }
+          description: Optional specific version (default latest on authoritative branch)
+        - name: ref
+          in: query
+          schema: { type: string }
+          description: Git ref to read from (default authoritative branch HEAD)
+      responses:
+        '200':
+          description: Workflow definition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowReadResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      operationId: workflow.update
+      summary: Update a workflow definition
+      description: |
+        Updates an existing workflow definition. Version bump relative to the
+        prior definition is required. The full workflow validation suite runs
+        before commit.
+      tags: [Workflows]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+        - $ref: '#/components/parameters/XTraceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowUpdateRequest'
+      responses:
+        '200':
+          description: Workflow updated
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowWriteResponse'
+        '400':
+          $ref: '#/components/responses/InvalidParams'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /workflows/{id}/validate:
+    post:
+      operationId: workflow.validate
+      summary: Validate a workflow definition without persisting
+      description: |
+        Runs the workflow validation suite against a candidate body. No Git
+        state changes regardless of outcome.
+      tags: [Workflows]
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowValidateRequest'
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationResult'
+        '400':
+          $ref: '#/components/responses/InvalidParams'
 
   # ── Workflow Operations ──
 
@@ -755,6 +939,13 @@ components:
       required: true
       schema: { type: string }
 
+    WorkflowId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Stable workflow identifier (e.g. `task-default`)
+
     Limit:
       name: limit
       in: query
@@ -974,6 +1165,79 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Error'
+
+    # ── Workflow Definition Schemas ──
+
+    WorkflowSummary:
+      type: object
+      required: [id, workflow_path, version, status]
+      properties:
+        id: { type: string, description: Stable workflow identifier }
+        workflow_path: { type: string, description: Repository-relative path (e.g. /workflows/task-default.yaml) }
+        name: { type: string }
+        version: { type: string }
+        status: { type: string, enum: [Active, Deprecated, Superseded] }
+        mode: { type: string, enum: [execution, creation] }
+        applies_to:
+          type: array
+          items: { type: string }
+        description: { type: string }
+
+    WorkflowCreateRequest:
+      type: object
+      required: [id, body]
+      properties:
+        id:
+          type: string
+          description: Stable workflow identifier (determines the file path `/workflows/{id}.yaml`)
+        body:
+          type: string
+          description: YAML body of the workflow definition
+
+    WorkflowUpdateRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          description: YAML body of the updated workflow definition (must bump `version`)
+
+    WorkflowValidateRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          description: Candidate YAML body to validate
+
+    WorkflowReadResponse:
+      allOf:
+        - $ref: '#/components/schemas/WorkflowSummary'
+        - type: object
+          required: [body, source_commit]
+          properties:
+            body: { type: string, description: Executable YAML body }
+            source_commit: { type: string }
+
+    WorkflowWriteResponse:
+      type: object
+      required: [id, workflow_path, version, commit_sha, trace_id]
+      properties:
+        id: { type: string }
+        workflow_path: { type: string }
+        version: { type: string }
+        commit_sha: { type: string }
+        trace_id: { type: string }
+
+    WorkflowListResponse:
+      allOf:
+        - $ref: '#/components/schemas/PaginationMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/WorkflowSummary'
 
     # ── Run Schemas ──
 
@@ -1247,6 +1511,23 @@ components:
 
     Forbidden:
       description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [error] }
+              errors:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Error'
+
+    InvalidParams:
+      description: |
+        Request parameters invalid or not permitted on this endpoint. Returned
+        by generic artifact write endpoints when the target is a workflow
+        definition path (per ADR-007); the error payload names the
+        corresponding `workflow.*` operation.
       content:
         application/json:
           schema:
