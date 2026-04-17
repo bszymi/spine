@@ -171,6 +171,8 @@ The `system.validate_all` operation (per [Access Surface](/architecture/access-s
 
 Workflow definition writes (`workflow.create`, `workflow.update`) and `workflow.validate` invoke a distinct workflow validation suite rather than this service. That suite is defined in [Workflow Validation](/architecture/workflow-validation.md) and enforces workflow-specific structural invariants (step-reference integrity, cycle detection, divergence/convergence balance, actor/skill resolution). Failure produces `validation_failed` responses with the same shape as described in §5.3.
 
+Per [ADR-008](/architecture/adr/ADR-008-workflow-lifecycle-governance.md), this structural suite runs at every commit regardless of dispatch path (planning run, branch-scoped write, or operator bypass). Domain-logic review (wrong step sequence, inappropriate actor type for a step, subtle retry/timeout policy) is a separate concern handled by the `review` step of the `workflow-lifecycle` workflow — not by this validation service.
+
 ### 5.2 Input
 
 The Validation Service receives:

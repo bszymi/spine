@@ -24,9 +24,11 @@ type fakeWorkflowSvc struct {
 	lastCreateID     string
 	lastCreateBody   string
 	lastCreateBranch string
+	lastCreateBypass bool
 	lastUpdateID     string
 	lastUpdateBody   string
 	lastUpdateBranch string
+	lastUpdateBypass bool
 	lastReadID       string
 	lastValidateID   string
 	validateStatus   string
@@ -46,6 +48,7 @@ func (f *fakeWorkflowSvc) Create(ctx context.Context, id, body string) (*workflo
 	if wc := workflow.GetWriteContext(ctx); wc != nil {
 		f.lastCreateBranch = wc.Branch
 	}
+	f.lastCreateBypass = workflow.IsBypass(ctx)
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -60,6 +63,7 @@ func (f *fakeWorkflowSvc) Update(ctx context.Context, id, body string) (*workflo
 	if wc := workflow.GetWriteContext(ctx); wc != nil {
 		f.lastUpdateBranch = wc.Branch
 	}
+	f.lastUpdateBypass = workflow.IsBypass(ctx)
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
@@ -534,14 +538,34 @@ func TestWorkflowCreate_OperatorNoWriteContext_DirectCommit(t *testing.T) {
 	}
 	var out map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&out)
-	if out["write_mode"] != "authoritative" {
-		t.Errorf("operator should bypass planning: write_mode=%v", out["write_mode"])
+	if out["write_mode"] != "bypass" {
+		t.Errorf("operator direct-commit should be tagged bypass: write_mode=%v", out["write_mode"])
+	}
+	if out["workflow_bypass"] != true {
+		t.Errorf("operator direct-commit should set workflow_bypass=true: %v", out["workflow_bypass"])
 	}
 	if planner.lastID != "" {
 		t.Errorf("planner should not have been called for operator, got id=%q", planner.lastID)
 	}
 	if svc.lastCreateID != "new-flow" {
 		t.Errorf("direct svc.Create expected, got id=%q", svc.lastCreateID)
+	}
+	if !svc.lastCreateBypass {
+		t.Error("expected service ctx to be marked as bypass write")
+	}
+}
+
+func TestWorkflowCreate_ReviewerNoBypassTagged(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	// No planner wired so the reviewer falls through to direct commit.
+	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
+	defer ts.Close()
+
+	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, `{"id":"x","body":"id: x\n"}`)
+	defer resp.Body.Close()
+
+	if svc.lastCreateBypass {
+		t.Error("reviewer fallback must not be tagged as bypass")
 	}
 }
 

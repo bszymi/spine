@@ -117,6 +117,13 @@ Workflow Definition Operations create, read, and modify workflow definition arti
 - `workflow.read` is the **only** way to retrieve an executable workflow body. `artifact.read`, `query.artifacts`, and `query.graph` return summary metadata only (id, path, version, status, applies_to).
 - Run binding resolution (see §3.3) uses `workflow.read` internally to pin a definition version to a Run; callers do not need to pre-resolve.
 
+**Lifecycle governance (per [ADR-008](/architecture/adr/ADR-008-workflow-lifecycle-governance.md)):**
+- `workflow.create` and `workflow.update` dispatch based on caller role and `write_context`:
+  - **Reviewer, no `write_context`** — opens a planning-mode Run under the seeded `workflow-lifecycle` workflow; the response returns `run_id`, `branch_name`, `workflow_path`, and `write_mode: planning`. Approval on the `review` step merges the branch; `needs_rework` loops back to `draft` with the branch kept alive.
+  - **`write_context { run_id }` present** — commits to the run's task branch via worktree. Response includes `write_mode: proposed`.
+  - **Operator (or admin), no `write_context`** — commits directly to the authoritative branch as a recovery escape hatch. The commit carries a `Workflow-Bypass: true` trailer and the response includes `write_mode: bypass` plus `workflow_bypass: true`. The bypass exists for bootstrap/recovery when the lifecycle flow itself is unavailable; it is not a routine operator path.
+- Existing Runs are unaffected by subsequent workflow edits — they stay pinned to the workflow commit SHA captured at `run.start` (per [ADR-001](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md)).
+
 ### 3.3 Workflow Execution Operations
 
 Workflow Execution Operations control Run execution and task governance decisions.

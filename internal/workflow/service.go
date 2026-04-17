@@ -144,7 +144,7 @@ func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, er
 
 	sha, err := stageAndCommit(ctx, scope.repoDir, path,
 		fmt.Sprintf("Create workflow %s (%s)", wf.ID, wf.Version),
-		observe.TrailersFromContext(ctx, "workflow.create"))
+		workflowTrailers(ctx, "workflow.create"))
 	if err != nil {
 		_ = os.Remove(absPath)
 		_ = gitReset(ctx, scope.repoDir, path)
@@ -211,7 +211,7 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 
 	sha, err := stageAndCommit(ctx, scope.repoDir, path,
 		fmt.Sprintf("Update workflow %s (%s -> %s)", wf.ID, prior.Version, wf.Version),
-		observe.TrailersFromContext(ctx, "workflow.update"))
+		workflowTrailers(ctx, "workflow.update"))
 	if err != nil {
 		_ = os.WriteFile(absPath, originalBody, 0o644)
 		return nil, err
@@ -346,15 +346,25 @@ func contains(xs []string, target string) bool {
 	return false
 }
 
+// workflowTrailers builds the trailer set for workflow writes, adding the
+// Workflow-Bypass trailer (ADR-008 §5) when the context is marked as an
+// operator-bypass write.
+func workflowTrailers(ctx context.Context, operation string) map[string]string {
+	trailers := observe.TrailersFromContext(ctx, operation)
+	if IsBypass(ctx) {
+		trailers["Workflow-Bypass"] = "true"
+	}
+	return trailers
+}
+
 // stageAndCommit stages a single file and commits it with the given message
 // and structured trailers. Mirrors the pattern in internal/artifact but
-// avoids the worktree machinery since workflow writes target the
-// authoritative branch only.
+// routes through the worktree when a WriteContext branch is set.
 func stageAndCommit(ctx context.Context, repoDir, path, message string, trailers map[string]string) (string, error) {
 	msg := message
 	if len(trailers) > 0 {
 		msg += "\n"
-		for _, key := range []string{"Trace-ID", "Actor-ID", "Run-ID", "Operation"} {
+		for _, key := range []string{"Trace-ID", "Actor-ID", "Run-ID", "Operation", "Workflow-Bypass"} {
 			if val, ok := trailers[key]; ok {
 				msg += "\n" + key + ": " + val
 			}

@@ -3,6 +3,7 @@ package workflow
 import "context"
 
 type writeContextKey struct{}
+type bypassKey struct{}
 
 // WriteContext carries branch information for scoped workflow writes.
 // When attached to a context, workflow.Create/Update route commits to the
@@ -25,4 +26,19 @@ func GetWriteContext(ctx context.Context) *WriteContext {
 		return v
 	}
 	return nil
+}
+
+// WithBypass marks the context as an operator-bypass write so that the
+// resulting Git commit carries a Workflow-Bypass trailer (ADR-008). Bypass is
+// reserved for operator/admin direct-commit recovery when the lifecycle
+// governance flow cannot be used — the trailer makes it discoverable in audit.
+func WithBypass(ctx context.Context) context.Context {
+	return context.WithValue(ctx, bypassKey{}, true)
+}
+
+// IsBypass returns true when the context has been marked as an
+// operator-bypass write via WithBypass.
+func IsBypass(ctx context.Context) bool {
+	v, _ := ctx.Value(bypassKey{}).(bool)
+	return v
 }

@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: "Branch-Based Workflow Edits with Approval"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-017-workflow-lifecycle/initiative.md
 links:
   - type: parent

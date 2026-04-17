@@ -54,9 +54,11 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	// With no write_context and a non-operator caller, start a planning run
-	// under the workflow-lifecycle workflow (ADR-008). Operators (and higher)
-	// fall through to the direct-commit path; TASK-005 formalizes that bypass.
+	// Dispatch per ADR-008:
+	//   - write_context present → branch-scoped write via resolveWriteContext
+	//   - no write_context + reviewer → planning run under workflow-lifecycle
+	//   - no write_context + operator/admin → direct commit (bypass), tagged
+	//     with a Workflow-Bypass trailer for audit
 	if req.WriteContext == nil && !callerHasOperatorPrivileges(ctx) {
 		if starter := s.wfPlanningStarterFrom(ctx); starter != nil {
 			planning, err := starter.StartWorkflowPlanningRun(ctx, req.ID, req.Body)
@@ -79,8 +81,8 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		// No planning starter wired (e.g., single-workspace mode without
 		// the workflow-planning adapter) — fall through to direct commit so
-		// operators can still bootstrap. The handler's default direct-commit
-		// behavior remains available below.
+		// bootstrap remains possible. The governed path is the default in
+		// production; this fallback is a safety valve, not a routine path.
 	}
 	if req.WriteContext != nil {
 		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
@@ -91,6 +93,9 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		if branch != "" {
 			ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
 		}
+	} else if callerHasOperatorPrivileges(ctx) {
+		// Operator direct-commit path: tag the commit for audit.
+		ctx = workflow.WithBypass(ctx)
 	}
 
 	result, err := svc.Create(ctx, req.ID, req.Body)
@@ -99,7 +104,7 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusCreated, workflowWriteResponse(result, r.Context(), req.WriteContext))
+	WriteJSON(w, http.StatusCreated, workflowWriteResponse(result, r.Context(), req.WriteContext, workflow.IsBypass(ctx)))
 }
 
 // callerHasOperatorPrivileges returns true when the authenticated actor is an
@@ -144,6 +149,9 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 		if branch != "" {
 			ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
 		}
+	} else if callerHasOperatorPrivileges(ctx) {
+		// Operator direct-commit path: tag the commit for audit (ADR-008).
+		ctx = workflow.WithBypass(ctx)
 	}
 
 	result, err := svc.Update(ctx, id, req.Body)
@@ -152,7 +160,7 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, workflowWriteResponse(result, r.Context(), req.WriteContext))
+	WriteJSON(w, http.StatusOK, workflowWriteResponse(result, r.Context(), req.WriteContext, workflow.IsBypass(ctx)))
 }
 
 func (s *Server) handleWorkflowRead(w http.ResponseWriter, r *http.Request, id string) {
@@ -293,12 +301,15 @@ func splitWorkflowSuffix(raw string) (string, string) {
 	return raw, ""
 }
 
-func workflowWriteResponse(result *workflow.WriteResult, ctx context.Context, wc *writeContextRequest) map[string]any {
+func workflowWriteResponse(result *workflow.WriteResult, ctx context.Context, wc *writeContextRequest, bypass bool) map[string]any {
 	writeMode := "authoritative"
-	if wc != nil && wc.RunID != "" {
+	switch {
+	case wc != nil && wc.RunID != "":
 		writeMode = "proposed"
+	case bypass:
+		writeMode = "bypass"
 	}
-	return map[string]any{
+	resp := map[string]any{
 		"id":            result.Workflow.ID,
 		"workflow_path": result.Path,
 		"version":       result.Workflow.Version,
@@ -306,4 +317,8 @@ func workflowWriteResponse(result *workflow.WriteResult, ctx context.Context, wc
 		"write_mode":    writeMode,
 		"trace_id":      observe.TraceID(ctx),
 	}
+	if bypass {
+		resp["workflow_bypass"] = true
+	}
+	return resp
 }

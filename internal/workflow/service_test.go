@@ -306,6 +306,33 @@ func TestService_Update_BranchScoped_DoesNotTouchMain(t *testing.T) {
 	}
 }
 
+func TestService_Create_Bypass_WritesTrailer(t *testing.T) {
+	svc, repo := newSvc(t)
+	ctx := workflow.WithBypass(ctxWithActor())
+
+	if _, err := svc.Create(ctx, "task-default", fmtYAML("task-default", "1.0")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	trailers := mustOutput(t, repo, "git", "log", "-1", "--pretty=%B")
+	if !strings.Contains(trailers, "Workflow-Bypass: true") {
+		t.Fatalf("expected Workflow-Bypass trailer in commit, got:\n%s", trailers)
+	}
+}
+
+func TestService_Create_NoBypass_OmitsTrailer(t *testing.T) {
+	svc, repo := newSvc(t)
+
+	if _, err := svc.Create(ctxWithActor(), "task-default", fmtYAML("task-default", "1.0")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	trailers := mustOutput(t, repo, "git", "log", "-1", "--pretty=%B")
+	if strings.Contains(trailers, "Workflow-Bypass") {
+		t.Fatalf("non-bypass commit must not carry Workflow-Bypass trailer, got:\n%s", trailers)
+	}
+}
+
 func TestService_Create_BranchScoped_InvalidBranchName(t *testing.T) {
 	svc, _ := newSvc(t)
 	ctx := workflow.WithWriteContext(ctxWithActor(), workflow.WriteContext{Branch: "-bad"})
