@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Document Workflow Definition Operations in api-operations.md"
-status: Pending
+status: Completed
 work_type: documentation
 created: 2026-04-17
 epic: /initiatives/INIT-015-workflow-resource-separation/epics/EPIC-001-workflow-api-separation/epic.md

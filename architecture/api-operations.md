@@ -74,13 +74,15 @@ Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) produc
 
 Artifact operations create, read, and modify governed artifacts in Git.
 
+Workflow definitions are **not** governed by this category. Per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md), they are a separate resource with dedicated operations (see §3.2). Requests to `artifact.create`, `artifact.update`, or `artifact.add` that target a workflow path (prefix `/workflows/`) or declared type are rejected with `400 invalid_params` and an error payload pointing to the corresponding `workflow.*` operation. `artifact.read` against a workflow path returns the same summary projection as `query.artifacts` — not the executable body.
+
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
-| `artifact.create` | Creates a new artifact file and commits to Git | When creating a new artifact with known path and content (low-level) |
+| `artifact.create` | Creates a new artifact file and commits to Git | When creating a new artifact with known path and content (low-level). Does not accept workflow definitions. |
 | `artifact.entry` | Allocates next ID, builds content, starts planning run | When creating a new artifact through governed workflow (high-level) |
-| `artifact.add` | Adds an artifact to an existing planning run's branch | When incrementally adding child artifacts during a planning run's draft step |
-| `artifact.read` | Reads artifact content from Git (or projection) | When viewing artifact details; supports reading from non-default refs |
-| `artifact.update` | Updates artifact content and commits to Git | When modifying artifact metadata or content outside a Run |
+| `artifact.add` | Adds an artifact to an existing planning run's branch | When incrementally adding child artifacts during a planning run's draft step. Does not accept workflow definitions. |
+| `artifact.read` | Reads artifact content from Git (or projection) | When viewing artifact details; supports reading from non-default refs. For workflow paths, returns summary metadata only. |
+| `artifact.update` | Updates artifact content and commits to Git | When modifying artifact metadata or content outside a Run. Does not accept workflow definitions. |
 | `artifact.validate` | Validates without persisting | When checking an artifact before creation/update, or validating drafts |
 | `artifact.list` | Queries projected artifacts | When browsing or filtering the artifact inventory |
 | `artifact.links` | Queries artifact relationships | When exploring dependency graphs or parent/child hierarchies |
@@ -93,10 +95,31 @@ Artifact operations create, read, and modify governed artifacts in Git.
 - Write operations target the authoritative branch by default; when a `write_context` with `run_id` is provided, they target the task branch instead
 - Merge-time collision detection: if two planning runs allocate the same ID, the collision is detected at merge time. The artifact is renumbered and the merge retried (max 2 attempts).
 - Write operations are designed to produce a single atomic Git commit with structured trailers (per [Git Integration](/architecture/git-integration.md) §5). This is a target architectural invariant — implementations must treat partial commits as bugs
+- `artifact.create`, `artifact.update`, and `artifact.add` reject workflow targets with `400 invalid_params`; the error payload identifies the corresponding `workflow.*` operation to use instead
 
-### 3.2 Workflow Operations
+### 3.2 Workflow Definition Operations
 
-Workflow operations control Run execution and task governance decisions.
+Workflow Definition Operations create, read, and modify workflow definition artifacts. Per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md), workflow definitions are a first-class resource with their own operations because their structural invariants (step-reference integrity, cycle detection, divergence/convergence balance, actor/skill resolution — see [Workflow Validation](/architecture/workflow-validation.md)) are materially stricter than those of any other artifact type and a malformed workflow blocks Runs at execution time.
+
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `workflow.create` | Creates a new workflow definition; runs the full workflow validation suite before commit | When introducing a new workflow |
+| `workflow.update` | Updates an existing workflow definition; version bump required | When evolving an existing workflow |
+| `workflow.read` | Returns the executable workflow definition body by `id` (optionally by version) | When a caller needs the full workflow document |
+| `workflow.list` | Lists workflow definition summaries, filterable by `applies_to`, `status`, `mode` | When browsing available workflows |
+| `workflow.validate` | Validates a candidate workflow body without persisting | When authoring or CI-checking a workflow before commit |
+
+**Domain rules:**
+- Write operations (`workflow.create`, `workflow.update`) invoke the workflow validation suite directly; validation failures produce structured `validation_failed` responses and do not persist any state.
+- `workflow.update` enforces a version bump relative to the prior definition.
+- Workflow writes produce a single atomic Git commit with structured trailers, consistent with the artifact write invariant in [Git Integration](/architecture/git-integration.md) §5.
+- Reviewer role is required for `workflow.create` and `workflow.update`. `workflow.read`, `workflow.list`, and `workflow.validate` require reader.
+- `workflow.read` is the **only** way to retrieve an executable workflow body. `artifact.read`, `query.artifacts`, and `query.graph` return summary metadata only (id, path, version, status, applies_to).
+- Run binding resolution (see §3.3) uses `workflow.read` internally to pin a definition version to a Run; callers do not need to pre-resolve.
+
+### 3.3 Workflow Execution Operations
+
+Workflow Execution Operations control Run execution and task governance decisions.
 
 **Run lifecycle:**
 
@@ -131,7 +154,7 @@ Workflow operations control Run execution and task governance decisions.
 - Task governance operations (`accept`, `reject`, `cancel`, `abandon`, `supersede`) are Git writes — they produce durable commits that change the task artifact's front matter
 - `task.reject` requires a rationale; the `acceptance` field must be one of `rejected_with_followup` or `rejected_closed` (per [Task Lifecycle](/governance/task-lifecycle.md))
 
-### 3.3 Query Operations
+### 3.4 Query Operations
 
 Query operations read from the Projection Store for fast access.
 
@@ -151,7 +174,7 @@ Query operations read from the Projection Store for fast access.
 - Consumers must tolerate staleness (per [Data Model](/architecture/data-model.md) §4.3)
 - `query.history` reads from Git directly, not projections — it always returns authoritative history
 
-### 3.4 System Operations
+### 3.5 System Operations
 
 System operations are administrative and require elevated authorization.
 
@@ -162,7 +185,7 @@ System operations are administrative and require elevated authorization.
 | `system.rebuild` | Triggers full projection rebuild from Git | After projection corruption or drift |
 | `system.validate_all` | Runs validation across all artifacts | Periodic governance audits |
 
-### 3.5 Skill Operations
+### 3.6 Skill Operations
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
@@ -203,7 +226,7 @@ Request body:
 
 Validates: actor is the current assignee, assignment is active, step is not in terminal state. Step transitions back to `waiting` for re-claiming.
 
-### 3.6 Divergence Operations
+### 3.7 Divergence Operations
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
@@ -307,6 +330,10 @@ Both headers are defined as reusable components in the OpenAPI specification.
 - [Validation Service](/architecture/validation-service.md) — Cross-artifact validation rules
 - [Actor Model](/architecture/actor-model.md) §5 — Step assignment protocol
 - [Data Model](/architecture/data-model.md) §4.3 — Projection consistency model
+- [ADR-001](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md) — Workflow definition storage and execution recording
+- [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md) — Workflow definitions as a separate API resource
+- [Workflow Definition Format](/architecture/workflow-definition-format.md) — Schema and file format for workflow definitions
+- [Workflow Validation](/architecture/workflow-validation.md) — Workflow-specific validation suite
 
 ---
 
