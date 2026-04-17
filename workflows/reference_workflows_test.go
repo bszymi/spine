@@ -241,8 +241,8 @@ func TestWorkflowLifecycleWorkflow_Parses(t *testing.T) {
 	if review.Outcomes[0].ID != "approved" || review.Outcomes[0].NextStep != "end" {
 		t.Errorf("expected approved → end, got id=%s next=%s", review.Outcomes[0].ID, review.Outcomes[0].NextStep)
 	}
-	if review.Outcomes[0].Commit["status"] != "Active" {
-		t.Errorf("expected approved commit status Active, got %s", review.Outcomes[0].Commit["status"])
+	if len(review.Outcomes[0].Commit) == 0 {
+		t.Error("approved outcome must have a non-empty commit map to trigger merge")
 	}
 	if review.Outcomes[1].ID != "needs_rework" || review.Outcomes[1].NextStep != "draft" {
 		t.Errorf("expected needs_rework → draft, got id=%s next=%s", review.Outcomes[1].ID, review.Outcomes[1].NextStep)

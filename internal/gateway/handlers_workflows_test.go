@@ -407,6 +407,35 @@ func TestWorkflow_ListServiceError(t *testing.T) {
 	}
 }
 
+// fakeWFPlanningStarter captures StartWorkflowPlanningRun calls for tests.
+type fakeWFPlanningStarter struct {
+	lastID   string
+	lastBody string
+	result   *gateway.PlanningRunResult
+	err      error
+}
+
+func (f *fakeWFPlanningStarter) StartWorkflowPlanningRun(_ context.Context, id, body string) (*gateway.PlanningRunResult, error) {
+	f.lastID = id
+	f.lastBody = body
+	if f.err != nil {
+		return nil, f.err
+	}
+	res := f.result
+	if res == nil {
+		res = &gateway.PlanningRunResult{
+			RunID:      "run-abc",
+			TaskPath:   "workflows/" + id + ".yaml",
+			WorkflowID: "workflow-lifecycle",
+			Status:     "active",
+			Mode:       "planning",
+			BranchName: "spine/plan/wf-abc",
+			TraceID:    "trace-1234",
+		}
+	}
+	return res, nil
+}
+
 // workflowPlanningStore returns a planning-mode Active run from GetRun so that
 // resolveWriteContext routes writes to the run's branch without requiring a
 // task_path (the workflow lifecycle is a planning flow per ADR-006/008).
@@ -438,6 +467,82 @@ func newWorkflowServerWithStore(t *testing.T, svc gateway.WorkflowService, store
 	}
 	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: store, Auth: authSvc, Workflows: svc})
 	return httptest.NewServer(srv.Handler()), token
+}
+
+func newWorkflowServerWithPlanning(t *testing.T, svc gateway.WorkflowService, starter gateway.WorkflowPlanningRunStarter, role domain.ActorRole) (*httptest.Server, string) {
+	t.Helper()
+	fs := newFakeStore()
+	fs.actors["actor-1"] = &domain.Actor{
+		ActorID: "actor-1", Type: domain.ActorTypeHuman, Name: "Dev",
+		Role: role, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	token, _, err := authSvc.CreateToken(context.Background(), "actor-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store: fs, Auth: authSvc, Workflows: svc, WFPlanningStarter: starter,
+	})
+	return httptest.NewServer(srv.Handler()), token
+}
+
+func TestWorkflowCreate_ReviewerNoWriteContext_StartsPlanningRun(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	planner := &fakeWFPlanningStarter{}
+	ts, tok := newWorkflowServerWithPlanning(t, svc, planner, domain.RoleReviewer)
+	defer ts.Close()
+
+	body := `{"id":"new-flow","body":"id: new-flow\n"}`
+	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["write_mode"] != "planning" {
+		t.Errorf("write_mode: %v", out["write_mode"])
+	}
+	if out["run_id"] != "run-abc" {
+		t.Errorf("run_id: %v", out["run_id"])
+	}
+	if out["branch_name"] != "spine/plan/wf-abc" {
+		t.Errorf("branch_name: %v", out["branch_name"])
+	}
+	if planner.lastID != "new-flow" {
+		t.Errorf("planner id: %q", planner.lastID)
+	}
+	if svc.lastCreateID != "" {
+		t.Errorf("direct svc.Create should not have run, got id=%q", svc.lastCreateID)
+	}
+}
+
+func TestWorkflowCreate_OperatorNoWriteContext_DirectCommit(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	planner := &fakeWFPlanningStarter{}
+	ts, tok := newWorkflowServerWithPlanning(t, svc, planner, domain.RoleOperator)
+	defer ts.Close()
+
+	body := `{"id":"new-flow","body":"id: new-flow\n"}`
+	resp := doWorkflowJSON(t, "POST", ts.URL+"/api/v1/workflows", tok, body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["write_mode"] != "authoritative" {
+		t.Errorf("operator should bypass planning: write_mode=%v", out["write_mode"])
+	}
+	if planner.lastID != "" {
+		t.Errorf("planner should not have been called for operator, got id=%q", planner.lastID)
+	}
+	if svc.lastCreateID != "new-flow" {
+		t.Errorf("direct svc.Create expected, got id=%q", svc.lastCreateID)
+	}
 }
 
 func TestWorkflowCreate_WithWriteContext_RoutesToBranch(t *testing.T) {

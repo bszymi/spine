@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: "Planning-Run Integration for workflow.create and Merge-on-Approval"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-17
 epic: /initiatives/INIT-017-workflow-lifecycle/epics/EPIC-001-branch-based-workflow-edits/epic.md

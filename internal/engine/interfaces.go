@@ -101,6 +101,14 @@ type ArtifactWriter interface {
 	Create(ctx context.Context, path, content string) (*artifact.WriteResult, error)
 }
 
+// WorkflowWriter creates workflow definitions on branches during workflow
+// planning runs (ADR-008). The shape mirrors ArtifactWriter but targets YAML
+// workflow files — which are routed through the separate workflow.Service
+// (ADR-007) — rather than Markdown artifacts.
+type WorkflowWriter interface {
+	Create(ctx context.Context, id, body string) (*workflow.WriteResult, error)
+}
+
 // CollisionHandler detects and resolves artifact ID collisions during merge.
 // Used by planning runs when a merge fails due to a path conflict.
 type CollisionHandler interface {

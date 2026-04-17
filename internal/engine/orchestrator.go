@@ -20,6 +20,7 @@ type Orchestrator struct {
 	divergence     DivergenceHandler      // optional, nil if not configured
 	convergence    ConvergenceHandler     // optional, nil if not configured
 	artifactWriter ArtifactWriter         // optional, required for planning runs
+	workflowWriter WorkflowWriter         // optional, required for workflow planning runs (ADR-008)
 	blocking       BlockingStore          // optional, nil if not configured
 	collision      CollisionHandler       // optional, nil if not configured
 }
@@ -100,6 +101,12 @@ func (o *Orchestrator) WithConvergence(c ConvergenceHandler) {
 // WithArtifactWriter enables artifact creation for planning runs.
 func (o *Orchestrator) WithArtifactWriter(w ArtifactWriter) {
 	o.artifactWriter = w
+}
+
+// WithWorkflowWriter enables workflow-definition writes for workflow planning
+// runs (ADR-008). Required only for callers that use StartWorkflowPlanningRun.
+func (o *Orchestrator) WithWorkflowWriter(w WorkflowWriter) {
+	o.workflowWriter = w
 }
 
 // WithBlockingStore enables dependency blocking detection.

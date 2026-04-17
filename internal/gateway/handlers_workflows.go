@@ -54,6 +54,34 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	// With no write_context and a non-operator caller, start a planning run
+	// under the workflow-lifecycle workflow (ADR-008). Operators (and higher)
+	// fall through to the direct-commit path; TASK-005 formalizes that bypass.
+	if req.WriteContext == nil && !callerHasOperatorPrivileges(ctx) {
+		if starter := s.wfPlanningStarterFrom(ctx); starter != nil {
+			planning, err := starter.StartWorkflowPlanningRun(ctx, req.ID, req.Body)
+			if err != nil {
+				WriteError(w, err)
+				return
+			}
+			WriteJSON(w, http.StatusCreated, map[string]any{
+				"run_id":                planning.RunID,
+				"branch_name":           planning.BranchName,
+				"workflow_id":           req.ID,
+				"workflow_path":         planning.TaskPath,
+				"governing_workflow_id": planning.WorkflowID,
+				"status":                planning.Status,
+				"mode":                  planning.Mode,
+				"trace_id":              planning.TraceID,
+				"write_mode":            "planning",
+			})
+			return
+		}
+		// No planning starter wired (e.g., single-workspace mode without
+		// the workflow-planning adapter) — fall through to direct commit so
+		// operators can still bootstrap. The handler's default direct-commit
+		// behavior remains available below.
+	}
 	if req.WriteContext != nil {
 		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
 		if err != nil {
@@ -72,6 +100,17 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusCreated, workflowWriteResponse(result, r.Context(), req.WriteContext))
+}
+
+// callerHasOperatorPrivileges returns true when the authenticated actor is an
+// operator or admin. Reviewers are governed through the workflow-lifecycle
+// planning flow; operators retain a direct-commit path for recovery (ADR-008).
+func callerHasOperatorPrivileges(ctx context.Context) bool {
+	actor := actorFromContext(ctx)
+	if actor == nil {
+		return false
+	}
+	return actor.Role == domain.RoleOperator || actor.Role == domain.RoleAdmin
 }
 
 func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id string) {

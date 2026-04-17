@@ -92,6 +92,13 @@ type PlanningRunStarter interface {
 	StartPlanningRun(ctx context.Context, artifactPath, artifactContent string) (*PlanningRunResult, error)
 }
 
+// WorkflowPlanningRunStarter starts planning runs that govern workflow
+// definition edits (ADR-008). Separate from PlanningRunStarter because the
+// body is a YAML workflow definition, not a Markdown artifact.
+type WorkflowPlanningRunStarter interface {
+	StartWorkflowPlanningRun(ctx context.Context, workflowID, body string) (*PlanningRunResult, error)
+}
+
 // RunCanceller cancels an active or paused run through the engine,
 // emitting events and cleaning up branches.
 type RunCanceller interface {
@@ -131,26 +138,27 @@ type Server struct {
 	validator           *validation.Engine
 	resultHandler       ResultHandler
 	workflowResolver    WorkflowResolverFn
-	branchCreator       BranchCreator          // optional, nil if not configured
-	events              EventEmitterGW         // optional, nil if not configured
-	runStarter          RunStarter             // optional, nil if not configured
-	planningRunStarter  PlanningRunStarter     // optional, nil if not configured
-	runCanceller        RunCanceller           // optional, nil if not configured
-	wsResolver          workspace.Resolver     // optional, nil if not configured
-	servicePool         *workspace.ServicePool // optional, nil if not configured
-	wsDBProvider        *workspace.DBProvider  // optional, nil in single mode
-	candidateFinder     CandidateFinder        // optional, nil if not configured
-	stepClaimer         StepClaimer            // optional, nil if not configured
-	stepReleaser        StepReleaser           // optional, nil if not configured
-	stepExecutionLister StepExecutionLister    // optional, nil if not configured
-	stepAcknowledger    StepAcknowledger       // optional, nil if not configured
+	branchCreator       BranchCreator              // optional, nil if not configured
+	events              EventEmitterGW             // optional, nil if not configured
+	runStarter          RunStarter                 // optional, nil if not configured
+	planningRunStarter  PlanningRunStarter         // optional, nil if not configured
+	wfPlanningStarter   WorkflowPlanningRunStarter // optional, nil if not configured
+	runCanceller        RunCanceller               // optional, nil if not configured
+	wsResolver          workspace.Resolver         // optional, nil if not configured
+	servicePool         *workspace.ServicePool     // optional, nil if not configured
+	wsDBProvider        *workspace.DBProvider      // optional, nil in single mode
+	candidateFinder     CandidateFinder            // optional, nil if not configured
+	stepClaimer         StepClaimer                // optional, nil if not configured
+	stepReleaser        StepReleaser               // optional, nil if not configured
+	stepExecutionLister StepExecutionLister        // optional, nil if not configured
+	stepAcknowledger    StepAcknowledger           // optional, nil if not configured
 	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
-	gitHTTP             *githttp.Handler       // optional, nil if not configured
-	devMode             bool                   // when true, authorize allows unauthenticated requests
-	env                 string                 // SPINE_ENV value (production/staging/development); surfaced in health
-	sseLimiter          *sseLimiter            // caps concurrent SSE streams per actor
-	trustedProxyCIDRs   []*net.IPNet           // reverse-proxy networks whose XFF header is honored for rate limiting
-	rebuilds            sync.Map               // rebuild_id -> *rebuildState
+	gitHTTP             *githttp.Handler           // optional, nil if not configured
+	devMode             bool                       // when true, authorize allows unauthenticated requests
+	env                 string                     // SPINE_ENV value (production/staging/development); surfaced in health
+	sseLimiter          *sseLimiter                // caps concurrent SSE streams per actor
+	trustedProxyCIDRs   []*net.IPNet               // reverse-proxy networks whose XFF header is honored for rate limiting
+	rebuilds            sync.Map                   // rebuild_id -> *rebuildState
 }
 
 // CandidateFinder discovers tasks ready for execution.
@@ -227,6 +235,7 @@ type ServerConfig struct {
 	Events              EventEmitterGW
 	RunStarter          RunStarter
 	PlanningRunStarter  PlanningRunStarter
+	WFPlanningStarter   WorkflowPlanningRunStarter
 	RunCanceller        RunCanceller
 	WorkspaceResolver   workspace.Resolver
 	ServicePool         *workspace.ServicePool
@@ -238,14 +247,14 @@ type ServerConfig struct {
 	StepAcknowledger    StepAcknowledger
 	EventBroadcaster    *delivery.EventBroadcaster
 	GitHTTP             *githttp.Handler // optional, serves git repos over HTTP
-	DevMode             bool          // when true, authorize allows unauthenticated requests
-	Env                 string        // SPINE_ENV: production/staging/development; surfaced in /system/health
-	ReadHeaderTimeout   time.Duration // defaults to 10s
-	ReadTimeout         time.Duration // defaults to 30s
-	WriteTimeout        time.Duration // defaults to 60s
-	IdleTimeout         time.Duration // defaults to 120s
-	SSEMaxConnPerActor  int           // per-actor SSE connection cap; defaults to 5, <=0 disables
-	TrustedProxyCIDRs   []*net.IPNet  // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
+	DevMode             bool             // when true, authorize allows unauthenticated requests
+	Env                 string           // SPINE_ENV: production/staging/development; surfaced in /system/health
+	ReadHeaderTimeout   time.Duration    // defaults to 10s
+	ReadTimeout         time.Duration    // defaults to 30s
+	WriteTimeout        time.Duration    // defaults to 60s
+	IdleTimeout         time.Duration    // defaults to 120s
+	SSEMaxConnPerActor  int              // per-actor SSE connection cap; defaults to 5, <=0 disables
+	TrustedProxyCIDRs   []*net.IPNet     // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -264,6 +273,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		events:              cfg.Events,
 		runStarter:          cfg.RunStarter,
 		planningRunStarter:  cfg.PlanningRunStarter,
+		wfPlanningStarter:   cfg.WFPlanningStarter,
 		runCanceller:        cfg.RunCanceller,
 		workflowResolver:    cfg.WorkflowResolver,
 		wsResolver:          cfg.WorkspaceResolver,
@@ -390,6 +400,15 @@ func (s *Server) planningRunStarterFrom(ctx context.Context) PlanningRunStarter 
 		}
 	}
 	return s.planningRunStarter
+}
+
+func (s *Server) wfPlanningStarterFrom(ctx context.Context) WorkflowPlanningRunStarter {
+	if ss := serviceSetFromContext(ctx); ss != nil {
+		if ps, ok := ss.WFPlanningStarter.(WorkflowPlanningRunStarter); ok {
+			return ps
+		}
+	}
+	return s.wfPlanningStarter
 }
 
 // ListenAndServe starts the HTTP server.

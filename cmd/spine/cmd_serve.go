@@ -96,6 +96,24 @@ func (a *planningRunAdapter) StartPlanningRun(ctx context.Context, artifactPath,
 	if err != nil {
 		return nil, err
 	}
+	return planningRunResult(result), nil
+}
+
+// workflowPlanningRunAdapter adapts engine.Orchestrator to
+// gateway.WorkflowPlanningRunStarter for ADR-008 workflow-edit planning runs.
+type workflowPlanningRunAdapter struct {
+	orch *engine.Orchestrator
+}
+
+func (a *workflowPlanningRunAdapter) StartWorkflowPlanningRun(ctx context.Context, workflowID, body string) (*gateway.PlanningRunResult, error) {
+	result, err := a.orch.StartWorkflowPlanningRun(ctx, workflowID, body)
+	if err != nil {
+		return nil, err
+	}
+	return planningRunResult(result), nil
+}
+
+func planningRunResult(result *engine.StartRunResult) *gateway.PlanningRunResult {
 	return &gateway.PlanningRunResult{
 		RunID:        result.Run.RunID,
 		TaskPath:     result.Run.TaskPath,
@@ -107,7 +125,7 @@ func (a *planningRunAdapter) StartPlanningRun(ctx context.Context, artifactPath,
 		EntryStepID:  result.EntryStep.StepID,
 		VersionLabel: result.Run.WorkflowVersionLabel,
 		CommitSHA:    result.Run.WorkflowVersion,
-	}, nil
+	}
 }
 
 // workspaceOrchestratorBuilder constructs per-workspace engine orchestrator,
@@ -162,9 +180,13 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	}
 	orch.WithArtifactWriter(ss.Artifacts)
 	orch.WithBlockingStore(ss.Store)
+	if wfWriter, ok := ss.Workflows.(engine.WorkflowWriter); ok && wfWriter != nil {
+		orch.WithWorkflowWriter(wfWriter)
+	}
 
 	ss.RunStarter = &runAdapter{orch: orch}
 	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
+	ss.WFPlanningStarter = &workflowPlanningRunAdapter{orch: orch}
 	ss.RunCanceller = orch
 
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
