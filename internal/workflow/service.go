@@ -52,14 +52,22 @@ func NewService(gitClient git.GitClient, repoPath string) *Service {
 
 // enterBranch prepares an isolated working directory when a WriteContext
 // branch is set on the context. Callers must defer the returned scope's
-// Cleanup.
+// Cleanup. Untyped worktree failures are wrapped as ErrGit so the gateway
+// preserves the git_error response contract.
 func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 	wc := GetWriteContext(ctx)
 	branch := ""
 	if wc != nil {
 		branch = wc.Branch
 	}
-	return git.EnterBranch(ctx, s.repo, branch, validateGitRefName)
+	scope, err := git.EnterBranch(ctx, s.repo, branch, validateGitRefName)
+	if err != nil {
+		if _, ok := err.(*domain.SpineError); ok {
+			return nil, err
+		}
+		return nil, domain.NewError(domain.ErrGit, err.Error())
+	}
+	return scope, nil
 }
 
 // Create writes a new workflow definition, running the full workflow

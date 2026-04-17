@@ -354,7 +354,18 @@ func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 	if wc != nil {
 		branch = wc.Branch
 	}
-	return git.EnterBranch(ctx, s.repo, branch, validateGitRefName)
+	scope, err := git.EnterBranch(ctx, s.repo, branch, validateGitRefName)
+	if err != nil {
+		// Preserve typed domain error so the gateway surfaces git_error, not
+		// internal_error, on the realistic "branch missing or already
+		// checked out" failure path. validateGitRefName already returns a
+		// typed error; passthrough only the untyped worktree failure.
+		if _, ok := err.(*domain.SpineError); ok {
+			return nil, err
+		}
+		return nil, domain.NewError(domain.ErrGit, err.Error())
+	}
+	return scope, nil
 }
 
 // resolveToExistingAncestor resolves symlinks by walking up the path
