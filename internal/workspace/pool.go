@@ -51,6 +51,7 @@ type ServiceSet struct {
 	// (e.g. gateway.RunStarter, gateway.PlanningRunStarter).
 	RunStarter         any
 	PlanningRunStarter any
+	WFPlanningStarter  any
 	RunCanceller       any
 
 	// close is called when the service set is evicted or the pool shuts down.

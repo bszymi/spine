@@ -57,8 +57,12 @@ steps:
       - id: approved
         name: Approved
         next_step: end
+        # Non-empty commit map signals the orchestrator to merge the run
+        # branch. The "merge" key is structural — applyCommitStatus only
+        # acts on a "status" key, which does not apply here since workflow
+        # YAML files have no Markdown front matter to rewrite.
         commit:
-          status: Active
+          merge: "true"
       - id: needs_rework
         name: Needs Rework
         next_step: draft

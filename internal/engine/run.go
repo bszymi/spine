@@ -247,6 +247,88 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	})
 }
 
+// StartWorkflowPlanningRun creates a planning-mode run governing a workflow
+// definition edit (ADR-008). The workflow body is validated, written to a
+// fresh task branch, and the governing workflow is resolved as the
+// `applies_to: [Workflow]` / `mode: creation` binding (today: workflow-lifecycle).
+func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID, body string) (*StartRunResult, error) {
+	if o.workflowWriter == nil {
+		return nil, domain.NewError(domain.ErrUnavailable, "workflow writer not configured")
+	}
+	if workflowID == "" {
+		return nil, domain.NewError(domain.ErrInvalidParams, "workflow id is required")
+	}
+	if body == "" {
+		return nil, domain.NewError(domain.ErrInvalidParams, "workflow body is required")
+	}
+
+	path := workflow.WorkflowsDir + "/" + workflowID + ".yaml"
+
+	parsed, err := workflow.Parse(path, []byte(body))
+	if err != nil {
+		return nil, domain.NewError(domain.ErrInvalidParams, fmt.Sprintf("invalid workflow body: %v", err))
+	}
+	if parsed.ID != workflowID {
+		return nil, domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("body id %q does not match requested id %q", parsed.ID, workflowID))
+	}
+	if vResult := workflow.Validate(parsed); vResult.Status != "passed" {
+		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
+			"workflow validation failed", vResult.Errors)
+	}
+
+	binding, err := o.workflows.ResolveWorkflowForMode(ctx, string(domain.ArtifactTypeWorkflow), "", "creation")
+	if err != nil {
+		return nil, fmt.Errorf("resolve governing workflow: %w", err)
+	}
+	if binding.Workflow.EntryStep == "" {
+		return nil, domain.NewError(domain.ErrInvalidParams, "governing workflow has no entry_step")
+	}
+
+	traceID, err := observe.GenerateTraceID()
+	if err != nil {
+		return nil, fmt.Errorf("generate trace ID: %w", err)
+	}
+	runID := fmt.Sprintf("run-%s", traceID[:8])
+	branchName := generateBranchNameWithSuffix(domain.RunModePlanning, parsed.ID, path, runID)
+
+	return o.startRunCommon(ctx, startRunParams{
+		run: &domain.Run{
+			RunID:                runID,
+			TaskPath:             path,
+			WorkflowPath:         binding.Workflow.Path,
+			WorkflowID:           binding.Workflow.ID,
+			WorkflowVersion:      binding.CommitSHA,
+			WorkflowVersionLabel: binding.VersionLabel,
+			Status:               domain.RunStatusPending,
+			Mode:                 domain.RunModePlanning,
+			CurrentStepID:        binding.Workflow.EntryStep,
+			BranchName:           branchName,
+			TraceID:              traceID,
+			CreatedAt:            time.Now(),
+		},
+		wfDef: binding.Workflow,
+		onBranch: func(ctx context.Context, branch string) error {
+			log := observe.Logger(ctx)
+			branchCtx := workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
+			branchCtx = observe.WithTraceID(branchCtx, traceID)
+			branchCtx = observe.WithRunID(branchCtx, runID)
+			if _, err := o.workflowWriter.Create(branchCtx, workflowID, body); err != nil {
+				if delErr := o.git.DeleteBranch(ctx, branch); delErr != nil {
+					log.Warn("failed to clean up workflow planning branch", "branch", branch, "error", delErr)
+				}
+				if autoPushEnabled() {
+					if delErr := o.git.DeleteRemoteBranch(ctx, "origin", branch); delErr != nil {
+						log.Warn("auto-push: failed to clean up remote workflow planning branch", "branch", branch, "error", delErr)
+					}
+				}
+				return fmt.Errorf("create workflow on branch: %w", err)
+			}
+			return nil
+		},
+	})
+}
+
 // CompleteRun transitions an active run to completed (or committing if
 // hasCommit is true) when the terminal step has been reached.
 // When hasCommit is true, the run enters the committing state for Git

@@ -7,6 +7,7 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	spineEngine "github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/scenariotest/assert"
+	"github.com/bszymi/spine/internal/workflow"
 )
 
 // StartRun returns a step that starts a workflow run for the given task.
@@ -56,6 +57,59 @@ func StartPlanningRun(artifactPath, artifactContent string) Step {
 			if result.EntryStep != nil {
 				sc.Set("current_execution_id", result.EntryStep.ExecutionID)
 				sc.Set("current_step_id", result.EntryStep.StepID)
+			}
+			return nil
+		},
+	}
+}
+
+// StartWorkflowPlanningRun returns a step that starts a planning run governing
+// a workflow-definition edit (ADR-008). Mirrors StartPlanningRun but routes
+// through the workflow planning path — YAML body, workflow.Service writer,
+// governing workflow resolved as applies_to: [Workflow] / mode: creation.
+func StartWorkflowPlanningRun(workflowID, body string) Step {
+	return Step{
+		Name: "start-workflow-planning-run-" + workflowID,
+		Action: func(sc *ScenarioContext) error {
+			if sc.Runtime.Orchestrator == nil {
+				return fmt.Errorf("StartWorkflowPlanningRun requires WithOrchestrator() on the runtime")
+			}
+			result, err := sc.Runtime.Orchestrator.StartWorkflowPlanningRun(sc.Ctx, workflowID, body)
+			if err != nil {
+				return fmt.Errorf("start workflow planning run for %s: %w", workflowID, err)
+			}
+			sc.Set("run_id", result.Run.RunID)
+			sc.Set("run_status", string(result.Run.Status))
+			sc.Set("run_mode", string(result.Run.Mode))
+			sc.Set("run_workflow_id", result.Run.WorkflowID)
+			sc.Set("run_workflow_sha", result.Run.WorkflowVersion)
+			if result.EntryStep != nil {
+				sc.Set("current_execution_id", result.EntryStep.ExecutionID)
+				sc.Set("current_step_id", result.EntryStep.StepID)
+			}
+			return nil
+		},
+	}
+}
+
+// UpdateWorkflowOnBranch rewrites a workflow on the current run's branch using
+// the workflow.Service with a WriteContext. Used to stack edits during the
+// draft step of a workflow planning run.
+func UpdateWorkflowOnBranch(workflowID, body string) Step {
+	return Step{
+		Name: "update-workflow-on-branch-" + workflowID,
+		Action: func(sc *ScenarioContext) error {
+			runID := sc.MustGet("run_id").(string)
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run: %w", err)
+			}
+			if run.BranchName == "" {
+				return fmt.Errorf("run %s has no branch", runID)
+			}
+			ctx := workflow.WithWriteContext(sc.Ctx, workflow.WriteContext{Branch: run.BranchName})
+			if _, err := sc.Runtime.Workflows.Update(ctx, workflowID, body); err != nil {
+				return fmt.Errorf("update workflow %s on branch: %w", workflowID, err)
 			}
 			return nil
 		},

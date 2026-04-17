@@ -23,6 +23,7 @@ import (
 type TestRuntime struct {
 	Store        *store.PostgresStore
 	Artifacts    *artifact.Service
+	Workflows    *workflow.Service
 	Projections  *projection.Service
 	Validator    *validation.Engine
 	Events       event.EventRouter
@@ -96,6 +97,7 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 	}
 
 	rt.Artifacts = artifact.NewService(repo.Git, eventRouter, repo.Dir)
+	rt.Workflows = workflow.NewService(repo.Git, repo.Dir)
 	rt.Projections = projection.NewService(repo.Git, db.Store, eventRouter, 1*time.Second)
 
 	if cfg.withValidation {
@@ -142,6 +144,7 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 			orch.WithValidator(rt.Validator)
 		}
 		orch.WithArtifactWriter(rt.Artifacts)
+		orch.WithWorkflowWriter(rt.Workflows)
 		orch.WithBlockingStore(db.Store)
 		orch.WithAssignmentStore(db.Store)
 		rt.Orchestrator = orch

@@ -1110,3 +1110,250 @@ func TestStartPlanningRun_StoreCreateRunFailure(t *testing.T) {
 		t.Error("artifact should not have been written on store failure")
 	}
 }
+
+// ── StartWorkflowPlanningRun tests ──
+
+type mockWorkflowWriter struct {
+	createdID   string
+	createdBody string
+	branch      string
+	err         error
+}
+
+func (m *mockWorkflowWriter) Create(ctx context.Context, id, body string) (*workflow.WriteResult, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	m.createdID = id
+	m.createdBody = body
+	if wc := workflow.GetWriteContext(ctx); wc != nil {
+		m.branch = wc.Branch
+	}
+	return &workflow.WriteResult{
+		Workflow:  &domain.WorkflowDefinition{ID: id, Path: "workflows/" + id + ".yaml"},
+		Path:      "workflows/" + id + ".yaml",
+		CommitSHA: "wf-commit",
+	}, nil
+}
+
+const validWorkflowBody = `id: new-workflow
+name: New Workflow
+version: "1.0"
+status: Active
+description: test
+applies_to:
+  - Task
+entry_step: start
+steps:
+  - id: start
+    name: Start
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types: [human]
+      required_skills: [planning]
+    outcomes:
+      - id: done
+        name: Done
+        next_step: end
+`
+
+func workflowPlanningResolver() *mockWorkflowResolver {
+	return &mockWorkflowResolver{
+		result: &workflow.BindingResult{
+			Workflow: &domain.WorkflowDefinition{
+				ID:        "workflow-lifecycle",
+				Path:      "workflows/workflow-lifecycle.yaml",
+				Version:   "1.0",
+				EntryStep: "draft",
+				Steps:     []domain.StepDefinition{{ID: "draft", Name: "Draft"}},
+			},
+			CommitSHA:    "abc123",
+			VersionLabel: "1.0",
+		},
+	}
+}
+
+func workflowPlanningOrchestrator(writer WorkflowWriter, resolver WorkflowResolver, store *mockRunStore, events *mockEventEmitter, gitOp GitOperator) *Orchestrator {
+	o := &Orchestrator{
+		workflows: resolver,
+		store:     store,
+		actors:    &stubActorAssigner{},
+		artifacts: &mockArtifactReader{},
+		events:    events,
+		git:       gitOp,
+		wfLoader:  &stubWorkflowLoader{},
+	}
+	if writer != nil {
+		o.workflowWriter = writer
+	}
+	return o
+}
+
+func TestStartWorkflowPlanningRun_HappyPath(t *testing.T) {
+	writer := &mockWorkflowWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := workflowPlanningOrchestrator(writer, workflowPlanningResolver(), store, events, &stubGitOperator{})
+
+	result, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", validWorkflowBody)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Run.Mode != domain.RunModePlanning {
+		t.Errorf("expected planning mode, got %s", result.Run.Mode)
+	}
+	if result.Run.TaskPath != "workflows/new-workflow.yaml" {
+		t.Errorf("task path: %s", result.Run.TaskPath)
+	}
+	if result.Run.WorkflowID != "workflow-lifecycle" {
+		t.Errorf("governing workflow: %s", result.Run.WorkflowID)
+	}
+	if writer.createdID != "new-workflow" {
+		t.Errorf("writer called with id %q", writer.createdID)
+	}
+	if writer.branch != result.Run.BranchName {
+		t.Errorf("expected writer branch %q, got %q", result.Run.BranchName, writer.branch)
+	}
+}
+
+func TestStartWorkflowPlanningRun_MissingWriter(t *testing.T) {
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := workflowPlanningOrchestrator(nil, workflowPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", validWorkflowBody)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var de *domain.SpineError
+	if !errors.As(err, &de) || de.Code != domain.ErrUnavailable {
+		t.Errorf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestStartWorkflowPlanningRun_IDMismatch(t *testing.T) {
+	writer := &mockWorkflowWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := workflowPlanningOrchestrator(writer, workflowPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartWorkflowPlanningRun(context.Background(), "other-id", validWorkflowBody)
+	if err == nil {
+		t.Fatal("expected id-mismatch error")
+	}
+	var de *domain.SpineError
+	if !errors.As(err, &de) || de.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestStartWorkflowPlanningRun_InvalidBody(t *testing.T) {
+	writer := &mockWorkflowWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := workflowPlanningOrchestrator(writer, workflowPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", "id: new-workflow\n")
+	if err == nil {
+		t.Fatal("expected validation failure")
+	}
+	var de *domain.SpineError
+	if !errors.As(err, &de) || de.Code != domain.ErrValidationFailed {
+		t.Errorf("expected ErrValidationFailed, got %v", err)
+	}
+}
+
+func TestStartWorkflowPlanningRun_EmptyID(t *testing.T) {
+	writer := &mockWorkflowWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := workflowPlanningOrchestrator(writer, workflowPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartWorkflowPlanningRun(context.Background(), "", validWorkflowBody)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var de *domain.SpineError
+	if !errors.As(err, &de) || de.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestStartWorkflowPlanningRun_EmptyBody(t *testing.T) {
+	writer := &mockWorkflowWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	orch := workflowPlanningOrchestrator(writer, workflowPlanningResolver(), store, events, &stubGitOperator{})
+
+	_, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", "")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var de *domain.SpineError
+	if !errors.As(err, &de) || de.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestStartWorkflowPlanningRun_ResolverError(t *testing.T) {
+	writer := &mockWorkflowWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	resolver := &mockWorkflowResolver{err: domain.NewError(domain.ErrNotFound, "no governing workflow")}
+	orch := workflowPlanningOrchestrator(writer, resolver, store, events, &stubGitOperator{})
+
+	_, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", validWorkflowBody)
+	if err == nil {
+		t.Fatal("expected resolver error")
+	}
+}
+
+func TestStartWorkflowPlanningRun_WriterFailure_CleansBranch(t *testing.T) {
+	writer := &mockWorkflowWriter{err: errors.New("write failed")}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	gitOp := &planningGitOperator{}
+	orch := workflowPlanningOrchestrator(writer, workflowPlanningResolver(), store, events, gitOp)
+
+	_, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", validWorkflowBody)
+	if err == nil {
+		t.Fatal("expected error from writer failure")
+	}
+	if len(gitOp.deletedBranches) == 0 {
+		t.Error("expected the orphan branch to be cleaned up after writer failure")
+	}
+}
+
+// TestStartWorkflowPlanningRun_RunPinning asserts the run pins its workflow
+// to the resolver's SHA at start time — subsequent resolver responses do not
+// update an existing run's WorkflowVersion (ADR-001 invariant, re-checked in
+// context of INIT-017 TASK-004 acceptance criterion on no-cascade).
+func TestStartWorkflowPlanningRun_RunPinning(t *testing.T) {
+	writer := &mockWorkflowWriter{}
+	store := &mockRunStore{}
+	events := &mockEventEmitter{}
+	resolver := workflowPlanningResolver()
+	resolver.result.CommitSHA = "pinned-sha-v1"
+	orch := workflowPlanningOrchestrator(writer, resolver, store, events, &stubGitOperator{})
+
+	result, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", validWorkflowBody)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if result.Run.WorkflowVersion != "pinned-sha-v1" {
+		t.Fatalf("expected pinned SHA v1, got %s", result.Run.WorkflowVersion)
+	}
+
+	// Simulate the governing workflow being updated (new SHA): the already
+	// started run's WorkflowVersion stays on the pinned commit.
+	resolver.result.CommitSHA = "pinned-sha-v2"
+	stored, err := store.GetRun(context.Background(), result.Run.RunID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if stored.WorkflowVersion != "pinned-sha-v1" {
+		t.Errorf("run must remain pinned to v1 after resolver change; got %s", stored.WorkflowVersion)
+	}
+}

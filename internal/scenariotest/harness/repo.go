@@ -432,4 +432,55 @@ steps:
         next_step: investigate
     timeout: "24h"
 `,
+	"workflows/workflow-lifecycle.yaml": `id: workflow-lifecycle
+name: Workflow Lifecycle
+version: "1.0"
+status: Active
+description: Governs workflow edits per ADR-008.
+mode: creation
+
+applies_to:
+  - Workflow
+
+entry_step: draft
+
+steps:
+  - id: draft
+    name: Draft Workflow
+    type: manual
+    execution:
+      mode: hybrid
+      eligible_actor_types:
+        - human
+        - ai_agent
+      required_skills: [workflow_authoring]
+    required_outputs:
+      - workflow_body
+    outcomes:
+      - id: submitted
+        name: Submitted for Review
+        next_step: review
+
+  - id: review
+    name: Review Workflow
+    type: review
+    execution:
+      mode: human_only
+      eligible_actor_types:
+        - human
+      required_skills: [workflow_review]
+    required_inputs:
+      - workflow_body
+    outcomes:
+      - id: approved
+        name: Approved
+        next_step: end
+        commit:
+          merge: "true"
+      - id: needs_rework
+        name: Needs Rework
+        next_step: draft
+    timeout: "168h"
+    timeout_outcome: needs_rework
+`,
 }
