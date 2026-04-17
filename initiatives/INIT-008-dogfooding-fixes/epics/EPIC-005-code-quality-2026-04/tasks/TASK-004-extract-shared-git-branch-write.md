@@ -28,7 +28,7 @@ links:
 1. Create `internal/git/branchwrite.go` with:
    - `type WriteScope struct { RepoDir string; Branch string; Cleanup func() }`
    - `func EnterBranch(ctx context.Context, client Client, repo, branch string) (*WriteScope, error)`
-   - `func StageAndCommit(ctx context.Context, scope *WriteScope, path, message string, author Author) error`
+   - `func StageAndCommit(ctx context.Context, scope *WriteScope, path string, opts git.CommitOpts) (git.CommitResult, error)` — reuses the existing `git.CommitOpts { Message, Author, Trailers }` and `git.CommitResult { SHA }` shapes so artifact.Service and workflow.Service keep populating `WriteResult.CommitSHA` and emitting trace/actor/run/operation trailers unchanged. Preserve the fixed trailer ordering (`Trace-ID`, `Actor-ID`, `Run-ID`, `Operation`, `Workflow-Bypass`).
    - `func ResetWorktree(ctx context.Context, scope *WriteScope) error`
 2. Move `autoPush` logic alongside so both services share one push implementation. Keep env-var gating (`SPINE_GIT_AUTO_PUSH`) unchanged.
 3. Remove the per-service `branchScope`, `enterBranch`, `stageAndCommit`, `gitAdd`, `gitCommitPath`, `gitReset`, `gitCurrentBranch`, `autoPush`. Services keep their domain logic (validation, path safety, event emission) but delegate all git mechanics.
