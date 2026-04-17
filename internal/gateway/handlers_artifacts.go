@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
@@ -11,6 +12,25 @@ import (
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
 )
+
+// isWorkflowTarget reports whether a path points at a workflow definition.
+// Per ADR-007, generic artifact write operations must reject such targets.
+func isWorkflowTarget(path string) bool {
+	p := strings.TrimPrefix(path, "/")
+	return strings.HasPrefix(p, "workflows/")
+}
+
+// workflowRejection returns the canonical 400 error that generic artifact
+// write handlers surface when a caller tries to write a workflow definition.
+// The detail payload names the correct workflow.* operation per ADR-007.
+func workflowRejection(op string) error {
+	return domain.NewErrorWithDetail(domain.ErrInvalidParams,
+		"workflow definitions must be written through workflow."+op+" (see ADR-007)",
+		map[string]string{
+			"use_operation": "workflow." + op,
+			"adr":           "ADR-007",
+		})
+}
 
 type writeContextRequest struct {
 	RunID    string `json:"run_id"`
@@ -40,6 +60,10 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Path == "" || req.Content == "" {
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "path and content required"))
+		return
+	}
+	if isWorkflowTarget(req.Path) {
+		WriteError(w, workflowRejection("create"))
 		return
 	}
 	if err := validateArtifactContent(req.Content); err != nil {
@@ -168,6 +192,23 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 		}
 	}
 
+	// Per ADR-007, workflow definitions read via the generic artifact endpoint
+	// return summary metadata only — the executable body is served exclusively
+	// by workflow.read.
+	if isWorkflowTarget(path) {
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"artifact_path": a.Path,
+			"artifact_id":   a.ID,
+			"artifact_type": a.Type,
+			"status":        a.Status,
+			"title":         a.Title,
+			"metadata":      a.Metadata,
+			"source_commit": sourceCommit,
+			"note":          "workflow definition body omitted; use GET /workflows/{id}",
+		})
+		return
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"artifact_path": a.Path,
 		"artifact_id":   a.ID,
@@ -182,6 +223,11 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 
 func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, path string) {
 	if !s.authorize(w, r, "artifact.update") {
+		return
+	}
+
+	if isWorkflowTarget(path) {
+		WriteError(w, workflowRejection("update"))
 		return
 	}
 
