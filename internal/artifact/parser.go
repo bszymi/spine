@@ -5,19 +5,7 @@ import (
 	"strings"
 
 	"github.com/bszymi/spine/internal/domain"
-	"gopkg.in/yaml.v3"
-)
-
-// Bounds on front-matter parsing. Real artifacts sit well under 4 KB
-// with a handful of fields; these limits reject adversarial YAML
-// (deep nesting, billion-laughs alias expansion, long scalars) before
-// the decoder can allocate unbounded memory. The thresholds are
-// generous enough that legitimate artifacts will never hit them.
-const (
-	maxFrontMatterBytes = 64 * 1024
-	maxYAMLNodes        = 10_000
-	maxYAMLDepth        = 64
-	maxYAMLAliases      = 100
+	"github.com/bszymi/spine/internal/yamlsafe"
 )
 
 // frontMatter represents the raw YAML front matter before mapping to domain types.
@@ -54,7 +42,7 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		return nil, &ParseError{Path: path, Message: err.Error()}
 	}
 
-	root, err := decodeBoundedYAML(fm)
+	root, err := yamlsafe.Decode(fm)
 	if err != nil {
 		return nil, &ParseError{Path: path, Message: err.Error()}
 	}
@@ -249,7 +237,7 @@ func IsArtifact(content []byte) bool {
 		return false
 	}
 
-	root, err := decodeBoundedYAML(fm)
+	root, err := yamlsafe.Decode(fm)
 	if err != nil {
 		return false
 	}
@@ -266,54 +254,6 @@ func IsArtifact(content []byte) bool {
 		}
 	}
 	return false
-}
-
-// decodeBoundedYAML parses YAML into a yaml.Node and rejects documents
-// that exceed the configured byte, depth, node-count, or alias-count
-// caps. Aliases are *not* expanded during the initial unmarshal into a
-// Node, so counting them here catches billion-laughs inputs before a
-// subsequent .Decode into a typed target would explode memory.
-func decodeBoundedYAML(fm []byte) (*yaml.Node, error) {
-	if len(fm) > maxFrontMatterBytes {
-		return nil, fmt.Errorf("YAML front matter exceeds %d byte cap (got %d)", maxFrontMatterBytes, len(fm))
-	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(fm, &root); err != nil {
-		return nil, fmt.Errorf("invalid YAML: %v", err)
-	}
-	nodes, aliases := 0, 0
-	if err := walkYAMLBounds(&root, 0, &nodes, &aliases); err != nil {
-		return nil, err
-	}
-	return &root, nil
-}
-
-func walkYAMLBounds(n *yaml.Node, depth int, nodes, aliases *int) error {
-	if n == nil {
-		return nil
-	}
-	if depth > maxYAMLDepth {
-		return fmt.Errorf("YAML nesting depth exceeds %d", maxYAMLDepth)
-	}
-	*nodes++
-	if *nodes > maxYAMLNodes {
-		return fmt.Errorf("YAML node count exceeds %d", maxYAMLNodes)
-	}
-	if n.Kind == yaml.AliasNode {
-		*aliases++
-		if *aliases > maxYAMLAliases {
-			return fmt.Errorf("YAML alias count exceeds %d", maxYAMLAliases)
-		}
-		// Do not follow the alias — counting the reference is enough
-		// and recursing could loop on cyclic anchors.
-		return nil
-	}
-	for _, c := range n.Content {
-		if err := walkYAMLBounds(c, depth+1, nodes, aliases); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // ParseError represents a failure to parse an artifact file.

@@ -554,6 +554,31 @@ func TestParseInvalidYAML(t *testing.T) {
 	}
 }
 
+func TestParseRejectsOversizedYAML(t *testing.T) {
+	big := make([]byte, 65*1024)
+	for i := range big {
+		big[i] = 'a'
+	}
+	_, err := workflow.Parse("big.yaml", big)
+	if err == nil {
+		t.Fatal("expected parse to reject >64KB YAML")
+	}
+}
+
+func TestParseRejectsAliasBomb(t *testing.T) {
+	// Simple billion-laughs input: many alias references to a single anchor.
+	var buf []byte
+	buf = append(buf, []byte("a: &anchor x\n")...)
+	buf = append(buf, []byte("bombs:\n")...)
+	for i := 0; i < 200; i++ {
+		buf = append(buf, []byte("  - *anchor\n")...)
+	}
+	_, err := workflow.Parse("bomb.yaml", buf)
+	if err == nil {
+		t.Fatal("expected parse to reject input exceeding alias cap")
+	}
+}
+
 func TestValidateDuplicateStepIDs(t *testing.T) {
 	wf := &domain.WorkflowDefinition{
 		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
