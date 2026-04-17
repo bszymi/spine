@@ -491,6 +491,10 @@ func serveCmd() *cobra.Command {
 
 			artifactSvc = artifact.NewService(gitClient, eventRouter, repoPath)
 			artifactSvc.WithArtifactsDir(spineCfg.ArtifactsDir)
+
+			// Workflow service (ADR-007): writes workflow YAML files on the
+			// authoritative branch and runs the full validation suite before commit.
+			workflowSvc := workflow.NewService(gitClient, repoPath)
 			if st != nil {
 				projQuery = projection.NewQueryService(st, gitClient)
 				projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)
@@ -711,6 +715,7 @@ func serveCmd() *cobra.Command {
 				Store:               st,
 				Auth:                authSvc,
 				Artifacts:           artifactSvc,
+				Workflows:           workflowSvc,
 				ProjQuery:           projQuery,
 				ProjSync:            projSync,
 				Git:                 gitClient,

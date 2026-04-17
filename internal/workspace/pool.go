@@ -18,6 +18,7 @@ import (
 	"github.com/bszymi/spine/internal/queue"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
+	"github.com/bszymi/spine/internal/workflow"
 )
 
 // ServiceSet holds all per-workspace service instances.
@@ -307,6 +308,11 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	artifactSvc := artifact.NewService(gitClient, eventRouter, repoPath)
 	artifactSvc.WithArtifactsDir(spineCfg.ArtifactsDir)
 
+	// Workflow service (ADR-007): dedicated surface for workflow definition
+	// writes, kept separate from the generic artifact service so the
+	// workflow validation suite owns the write path.
+	workflowSvc := workflow.NewService(gitClient, repoPath)
+
 	// Projection services.
 	var projQuery *projection.QueryService
 	var projSync *projection.Service
@@ -346,6 +352,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		Auth:       authSvc,
 		GitClient:  gitClient,
 		Artifacts:  artifactSvc,
+		Workflows:  workflowSvc,
 		ProjQuery:  projQuery,
 		ProjSync:   projSync,
 		Queue:      q,
