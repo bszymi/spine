@@ -47,11 +47,15 @@ func (a *storeStepAssigner) AssignStep(ctx context.Context, req engine.AssignReq
 	if err != nil {
 		return nil, err
 	}
+	// Walk all executions keeping the LAST match: store orders by
+	// created_at, so after a retry the terminal first attempt sorts
+	// before the new waiting attempt. Picking the latest match matches
+	// the original handler's behaviour and avoids returning a conflict
+	// error for retried steps.
 	var exec *domain.StepExecution
 	for i := range execs {
 		if execs[i].StepID == req.StepID {
 			exec = &execs[i]
-			break
 		}
 	}
 	if exec == nil {

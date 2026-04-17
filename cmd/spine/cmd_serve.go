@@ -407,12 +407,14 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	var starter gateway.RunStarter
 	var planningStarter gateway.PlanningRunStarter
 	var resultHandler gateway.ResultHandler
+	var stepAssigner gateway.StepAssigner
 	if orch != nil {
 		orch.WithArtifactWriter(artifactSvc)
 		orch.WithBlockingStore(deps.Store)
 		starter = &runAdapter{orch: orch}
 		planningStarter = &planningRunAdapter{orch: orch}
 		resultHandler = &resultAdapter{orch: orch}
+		stepAssigner = orch
 	}
 
 	var eventBroadcaster *delivery.EventBroadcaster
@@ -446,7 +448,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		StepReleaser:        orch,
 		StepExecutionLister: orch,
 		StepAcknowledger:    orch,
-		StepAssigner:        orch,
+		StepAssigner:        stepAssigner,
 		EventBroadcaster:    eventBroadcaster,
 		GitHTTP:             gitHTTPHandler,
 		SSEMaxConnPerActor:  deps.SSEMaxConn,
