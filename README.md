@@ -151,8 +151,8 @@ Spine is implemented in Go with PostgreSQL for runtime state.
 
 | Component | Package | Description |
 |-----------|---------|-------------|
-| Engine Orchestrator | `internal/engine` | Run/step lifecycle, divergence, retry, merge |
-| Workflow Engine | `internal/workflow` | YAML parsing, state machines, binding resolution |
+| Engine Orchestrator | `internal/engine` | Run/step lifecycle, divergence, retry, merge, planning runs (ADR-006 / ADR-008) |
+| Workflow Engine | `internal/workflow` | YAML parsing, state machines, binding resolution, workflow-definition service (ADR-007) |
 | Artifact Service | `internal/artifact` | Git-backed CRUD, validation, acceptance |
 | Validation Service | `internal/validation` | 20 cross-artifact rules, 5 violation categories |
 | Actor Gateway | `internal/actor` | Assignment delivery, selection, skill execution |
@@ -160,11 +160,14 @@ Spine is implemented in Go with PostgreSQL for runtime state.
 | Access Gateway | `internal/gateway` | HTTP API with auth, all endpoints |
 | Projection Service | `internal/projection` | Git-to-PostgreSQL sync |
 | Event Router | `internal/event` | In-memory event dispatch |
+| Delivery | `internal/delivery` | External event delivery: webhooks, SSE, pull log (INIT-013) |
+| Git HTTP Serve | `internal/githttp` | Git clone/fetch endpoint for runners |
 | Observability | `internal/observe` | Logging, tracing, Prometheus metrics, audit |
 | Auth Service | `internal/auth` | Token-based authentication and authorization |
 | Divergence Service | `internal/divergence` | Parallel execution branching and convergence |
 | Workspace Service | `internal/workspace` | Multi-workspace resolution and registry |
 | Git Client | `internal/git` | Git CLI operations, worktree management |
+| Crypto | `internal/crypto` | At-rest secret encryption (AES-256 GCM) |
 | Domain Types | `internal/domain` | Core entities, state constants, errors |
 | Store | `internal/store` | PostgreSQL persistence layer |
 | Config | `internal/config` | .spine.yaml loading, artifacts directory |
@@ -254,15 +257,15 @@ make lint-security
 ```
 /
 ├── cmd/spine/           Go binary entry point
-├── internal/            Go packages (21 packages, ~260 files)
-├── migrations/          PostgreSQL migrations (13)
-├── workflows/           Workflow YAML definitions (7)
+├── internal/            Go packages (24 packages, ~184 non-test .go files)
+├── migrations/          PostgreSQL migrations (18)
+├── workflows/           Workflow YAML definitions (8)
 ├── api/                 OpenAPI v3.1 specification
 ├── templates/           Artifact templates
 ├── governance/          Governance documents
 ├── product/             Product definition
 ├── architecture/        Architecture documentation
-├── initiatives/         Work tracking (11 initiatives, 60 epics, 288 tasks)
+├── initiatives/         Work tracking (16 initiatives, 72 epics, 387 tasks)
 ├── Dockerfile           Multi-stage build
 ├── docker-compose.yaml  Dev environment
 └── Makefile             Build and test targets
@@ -315,7 +318,7 @@ Spine provides that structure.
 
 ## Status
 
-272 of 274 tasks done across 10 initiatives (99.3%).
+385 of 387 tasks Completed across 16 initiatives (99.5%). The remaining two are terminal non-Completed: one Superseded, one Cancelled.
 
 ### INIT-001 — Foundations (Completed)
 Governance baseline, product definition, architecture v0.1, governance and architecture refinement.
@@ -326,17 +329,17 @@ Core foundation, artifact service, projection service, workflow engine, access g
 ### INIT-003 — Execution System (Completed)
 Execution core, actor delivery, workflow definitions, Git orchestration, evaluation outcomes, validation integration, execution reliability, divergence/convergence integration, event observability, developer experience, production wiring.
 
-### INIT-004 — Product Scenario Testing (Draft)
+### INIT-004 — Product Scenario Testing (Completed)
 End-to-end scenario-based testing to validate Spine behavior from a product perspective.
 
-### INIT-005 — API Spec Conformance (Draft)
-Align HTTP API implementation with OpenAPI specification for request/response schemas.
+### INIT-005 — API Spec Conformance (Completed)
+Aligned HTTP API implementation with OpenAPI specification for request/response schemas.
 
 ### INIT-006 — Governed Artifact Creation (Completed)
 Artifact creation through workflows on branches instead of direct commits to main.
 
-### INIT-007 — Git Remote Sync (Pending)
-Auto-push Git changes to origin, human-readable branch names, workspace portability.
+### INIT-007 — Git Remote Sync, Branch Usability, Workspace Portability (Completed)
+Auto-push to origin, human-readable branch names, configurable artifacts directory, Git credential helper support.
 
 ### INIT-008 — Dogfooding Fixes (In Progress)
 Bugs and usability issues discovered while using Spine to build its management platform.
@@ -350,9 +353,25 @@ Skill system, task eligibility detection, and execution-focused queries.
 ### INIT-011 — Artifact Creation Entry Point (Completed)
 Governed artifact creation through CLI and API: auto-ID allocation, slug generation, collision detection at merge time, branch-scoped validation, per-type creation workflows (ADR, Governance, Architecture, Product).
 
+### INIT-012 — Unified Actor API for Direct Communication (Completed)
+Actor-facing endpoints consolidated into a direct communication surface.
+
+### INIT-013 — External Event Delivery (Completed)
+Webhook, SSE, and pull-log event delivery (gated by `SPINE_EVENT_DELIVERY=true`).
+
+### INIT-015 — Workflow Resource Separation (Completed)
+[ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md): workflow definitions became a first-class API resource with dedicated `workflow.*` operations and workflow-specific validation at write time.
+
+### INIT-016 — cmd/spine Refactor and Startup Smoke Test (Pending)
+Extract subcommands from `cmd/spine/main.go`; add a startup smoke test that probes every gateway endpoint to catch wiring regressions.
+
+### INIT-017 — Workflow Lifecycle Governance (Completed)
+[ADR-008](/architecture/adr/ADR-008-workflow-lifecycle-governance.md): `workflow.create/update` by reviewers flows through a planning-mode Run under the seeded `workflow-lifecycle` workflow (draft → review → merge). Operators retain a direct-commit path tagged with a `Workflow-Bypass: true` trailer for audit.
+
 ### Remaining Work
-- Documentation alignment (in progress)
-- Discussion and comments runtime (planned)
-- Known limitations cleanup (WriteContext, idempotency, queue delivery)
+- INIT-008 dogfooding backlog.
+- INIT-016 `cmd/spine` refactor + serve-startup smoke test.
+- Discussion and comments runtime (design frozen; implementation pending).
+- Known limitations cleanup (WriteContext, idempotency, queue delivery).
 
 See [Known Limitations](/KNOWN-LIMITATIONS.md) for details.
