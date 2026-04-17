@@ -690,66 +690,57 @@ func resolveReadRef(run *domain.Run) string {
 	return "HEAD"
 }
 
-// checkArtifactStatus verifies an artifact at config["path"] has config["status"].
-func (o *Orchestrator) checkArtifactStatus(ctx context.Context, config map[string]string, run *domain.Run) bool {
+// loadPreconditionArtifact reads the artifact referenced by config["path"]
+// (falling back to run.TaskPath) at the run's current read ref. Returns
+// (nil, false) if the read fails — callers treat that as a failed check.
+func (o *Orchestrator) loadPreconditionArtifact(ctx context.Context, config map[string]string, run *domain.Run) (*domain.Artifact, bool) {
 	path := config["path"]
 	if path == "" {
 		path = run.TaskPath
 	}
-	expectedStatus := config["status"]
-
 	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
 	if err != nil {
+		return nil, false
+	}
+	return art, true
+}
+
+// checkArtifactStatus verifies an artifact at config["path"] has config["status"].
+func (o *Orchestrator) checkArtifactStatus(ctx context.Context, config map[string]string, run *domain.Run) bool {
+	art, ok := o.loadPreconditionArtifact(ctx, config, run)
+	if !ok {
 		return false
 	}
-	return string(art.Status) == expectedStatus
+	return string(art.Status) == config["status"]
 }
 
 // checkFieldPresent verifies an artifact at config["path"] has a non-empty metadata field.
 func (o *Orchestrator) checkFieldPresent(ctx context.Context, config map[string]string, run *domain.Run) bool {
-	path := config["path"]
-	if path == "" {
-		path = run.TaskPath
-	}
-	field := config["field"]
-
-	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
-	if err != nil {
+	art, ok := o.loadPreconditionArtifact(ctx, config, run)
+	if !ok {
 		return false
 	}
-	return art.Metadata[field] != ""
+	return art.Metadata[config["field"]] != ""
 }
 
 // checkFieldValue verifies an artifact field matches an expected value.
 func (o *Orchestrator) checkFieldValue(ctx context.Context, config map[string]string, run *domain.Run) bool {
-	path := config["path"]
-	if path == "" {
-		path = run.TaskPath
-	}
-	field := config["field"]
-	expected := config["value"]
-
-	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
-	if err != nil {
+	art, ok := o.loadPreconditionArtifact(ctx, config, run)
+	if !ok {
 		return false
 	}
-	return art.Metadata[field] == expected
+	return art.Metadata[config["field"]] == config["value"]
 }
 
 // checkLinksExist verifies an artifact has at least one link of the given type.
 func (o *Orchestrator) checkLinksExist(ctx context.Context, config map[string]string, run *domain.Run) bool {
-	path := config["path"]
-	if path == "" {
-		path = run.TaskPath
-	}
-	linkType := config["link_type"]
-
-	art, err := o.artifacts.Read(ctx, path, resolveReadRef(run))
-	if err != nil {
+	art, ok := o.loadPreconditionArtifact(ctx, config, run)
+	if !ok {
 		return false
 	}
+	linkType := domain.LinkType(config["link_type"])
 	for _, link := range art.Links {
-		if link.Type == domain.LinkType(linkType) {
+		if link.Type == linkType {
 			return true
 		}
 	}
