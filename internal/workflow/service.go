@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/git"
@@ -52,58 +50,16 @@ func NewService(gitClient git.GitClient, repoPath string) *Service {
 	return &Service{git: gitClient, repo: repoPath}
 }
 
-// branchScope captures the working directory for a single write operation.
-// When a WriteContext specifies a branch, a worktree is created so file I/O
-// and commits target the branch without disturbing the main working tree;
-// otherwise the main repo is used directly and cleanup is a no-op.
-type branchScope struct {
-	repoDir string
-	cleanup func()
-}
-
 // enterBranch prepares an isolated working directory when a WriteContext
-// branch is set on the context, mirroring internal/artifact.Service.enterBranch.
-// Callers must defer the returned cleanup.
-func (s *Service) enterBranch(ctx context.Context) (*branchScope, error) {
+// branch is set on the context. Callers must defer the returned scope's
+// Cleanup.
+func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 	wc := GetWriteContext(ctx)
-	if wc == nil || wc.Branch == "" {
-		return &branchScope{repoDir: s.repo, cleanup: func() {}}, nil
+	branch := ""
+	if wc != nil {
+		branch = wc.Branch
 	}
-
-	if err := validateGitRefName(wc.Branch); err != nil {
-		return nil, err
-	}
-
-	parent, err := os.MkdirTemp("", "spine-wf-wt-*")
-	if err != nil {
-		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("create worktree parent: %v", err))
-	}
-	worktreeDir := filepath.Join(parent, "wt")
-
-	cmd := exec.CommandContext(ctx, "git", "worktree", "add", worktreeDir, wc.Branch)
-	cmd.Dir = s.repo
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		os.RemoveAll(parent)
-		return nil, domain.NewError(domain.ErrGit,
-			fmt.Sprintf("add worktree for branch %s: %s", wc.Branch, strings.TrimSpace(string(out))))
-	}
-
-	return &branchScope{
-		repoDir: worktreeDir,
-		cleanup: func() {
-			// Cleanup uses a fresh bounded context, not the request ctx —
-			// if the request was cancelled (client disconnect, timeout)
-			// the worktree must still be removed or we leak it on disk.
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			rmCmd := exec.CommandContext(cleanupCtx, "git", "worktree", "remove", "--force", worktreeDir)
-			rmCmd.Dir = s.repo
-			_, _ = rmCmd.CombinedOutput()
-			os.RemoveAll(parent)
-		},
-	}, nil
+	return git.EnterBranch(ctx, s.repo, branch, validateGitRefName)
 }
 
 // Create writes a new workflow definition, running the full workflow
@@ -132,9 +88,9 @@ func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, er
 	if err != nil {
 		return nil, err
 	}
-	defer scope.cleanup()
+	defer scope.Cleanup()
 
-	absPath := filepath.Join(scope.repoDir, path)
+	absPath := filepath.Join(scope.RepoDir, path)
 
 	if _, err := os.Stat(absPath); err == nil {
 		return nil, domain.NewError(domain.ErrAlreadyExists,
@@ -148,16 +104,17 @@ func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, er
 		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("write file: %v", err))
 	}
 
-	sha, err := stageAndCommit(ctx, scope.repoDir, path,
-		fmt.Sprintf("Create workflow %s (%s)", wf.ID, wf.Version),
-		workflowTrailers(ctx, "workflow.create"))
+	commit, err := git.StageAndCommit(ctx, scope, path, git.CommitOpts{
+		Message:  fmt.Sprintf("Create workflow %s (%s)", wf.ID, wf.Version),
+		Trailers: workflowTrailers(ctx, "workflow.create"),
+		Author:   workflowAuthor(ctx),
+	})
 	if err != nil {
 		_ = os.Remove(absPath)
-		_ = gitReset(ctx, scope.repoDir, path)
-		return nil, err
+		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
-	return &WriteResult{Workflow: wf, Path: path, CommitSHA: sha}, nil
+	return &WriteResult{Workflow: wf, Path: path, CommitSHA: commit.SHA}, nil
 }
 
 // Update rewrites an existing workflow definition. The new body must declare a
@@ -187,9 +144,9 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 	if err != nil {
 		return nil, err
 	}
-	defer scope.cleanup()
+	defer scope.Cleanup()
 
-	absPath := filepath.Join(scope.repoDir, path)
+	absPath := filepath.Join(scope.RepoDir, path)
 
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
 		return nil, domain.NewError(domain.ErrNotFound,
@@ -215,15 +172,17 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("write file: %v", err))
 	}
 
-	sha, err := stageAndCommit(ctx, scope.repoDir, path,
-		fmt.Sprintf("Update workflow %s (%s -> %s)", wf.ID, prior.Version, wf.Version),
-		workflowTrailers(ctx, "workflow.update"))
+	commit, err := git.StageAndCommit(ctx, scope, path, git.CommitOpts{
+		Message:  fmt.Sprintf("Update workflow %s (%s -> %s)", wf.ID, prior.Version, wf.Version),
+		Trailers: workflowTrailers(ctx, "workflow.update"),
+		Author:   workflowAuthor(ctx),
+	})
 	if err != nil {
 		_ = os.WriteFile(absPath, originalBody, 0o644)
-		return nil, err
+		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
-	return &WriteResult{Workflow: wf, Path: path, CommitSHA: sha}, nil
+	return &WriteResult{Workflow: wf, Path: path, CommitSHA: commit.SHA}, nil
 }
 
 // Read returns the executable workflow definition at the given ref. Empty ref
@@ -363,66 +322,12 @@ func workflowTrailers(ctx context.Context, operation string) map[string]string {
 	return trailers
 }
 
-// stageAndCommit stages a single file and commits it with the given message
-// and structured trailers. Mirrors the pattern in internal/artifact but
-// routes through the worktree when a WriteContext branch is set.
-func stageAndCommit(ctx context.Context, repoDir, path, message string, trailers map[string]string) (string, error) {
-	msg := message
-	if len(trailers) > 0 {
-		msg += "\n"
-		for _, key := range []string{"Trace-ID", "Actor-ID", "Run-ID", "Operation", "Workflow-Bypass"} {
-			if val, ok := trailers[key]; ok {
-				msg += "\n" + key + ": " + val
-			}
-		}
-	}
-
-	if err := runGit(ctx, repoDir, "add", "--", path); err != nil {
-		return "", domain.NewError(domain.ErrGit, fmt.Sprintf("stage %s: %v", path, err))
-	}
-
-	args := []string{"commit", "-m", msg}
+// workflowAuthor derives the commit Author from the request actor, matching
+// the pre-extraction convention "<actor> <actor@spine.local>".
+func workflowAuthor(ctx context.Context) git.Author {
 	actor := observe.ActorID(ctx)
-	if actor != "" {
-		args = append(args, "--author", fmt.Sprintf("%s <%s@spine.local>", actor, actor))
+	if actor == "" {
+		return git.Author{}
 	}
-	args = append(args, "--", path)
-	if err := runGit(ctx, repoDir, args...); err != nil {
-		_ = gitReset(ctx, repoDir, path)
-		return "", domain.NewError(domain.ErrGit, fmt.Sprintf("commit %s: %v", path, err))
-	}
-
-	out, err := runGitOutput(ctx, repoDir, "rev-parse", "HEAD")
-	if err != nil {
-		return "", domain.NewError(domain.ErrGit, fmt.Sprintf("rev-parse: %v", err))
-	}
-	return strings.TrimSpace(out), nil
-}
-
-func gitReset(ctx context.Context, repoDir, path string) error {
-	return runGit(ctx, repoDir, "reset", "HEAD", "--", path)
-}
-
-// execGit is exposed as a variable so tests can stub git invocations.
-var execGit = func(ctx context.Context, repoDir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repoDir
-	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
-	return cmd.CombinedOutput()
-}
-
-func runGit(ctx context.Context, repoDir string, args ...string) error {
-	out, err := execGit(ctx, repoDir, args...)
-	if err != nil {
-		return fmt.Errorf("%s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func runGitOutput(ctx context.Context, repoDir string, args ...string) (string, error) {
-	out, err := execGit(ctx, repoDir, args...)
-	if err != nil {
-		return "", fmt.Errorf("%s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
+	return git.Author{Name: actor, Email: actor + "@spine.local"}
 }
