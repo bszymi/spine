@@ -206,9 +206,9 @@ spine validate [path] [--all]
 | GET/PUT | /api/v1/artifacts/* | Read/update artifact |
 | PATCH | /api/v1/artifacts/*/accept | Accept task |
 | PATCH | /api/v1/artifacts/*/reject | Reject task |
-| POST | /api/v1/workflows | Create workflow definition (ADR-007) |
+| POST | /api/v1/workflows | Create workflow definition — opens a planning Run for reviewers; direct commit for operators (ADR-007, ADR-008) |
 | GET | /api/v1/workflows | List workflow definitions |
-| GET/PUT | /api/v1/workflows/{id} | Read/update workflow definition |
+| GET/PUT | /api/v1/workflows/{id} | Read/update workflow definition (PUT follows the same dispatch rules as POST) |
 | POST | /api/v1/workflows/{id}/validate | Validate candidate body |
 | POST | /api/v1/runs | Start workflow run |
 | GET | /api/v1/runs/{id} | Run status |

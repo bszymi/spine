@@ -2,7 +2,7 @@
 id: INIT-017
 type: Initiative
 title: Workflow Lifecycle Governance
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-17
 links:

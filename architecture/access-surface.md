@@ -164,6 +164,8 @@ Per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md), workfl
 
 CLI and GUI surfaces route workflow create/update/validate actions to this category, not to `artifact.*`.
 
+**Lifecycle governance ([ADR-008](/architecture/adr/ADR-008-workflow-lifecycle-governance.md)):** workflow edits flow through a planning-mode Run under the seeded `workflow-lifecycle` workflow (draft → review). Reviewer callers invoking `workflow.create`/`workflow.update` without a `write_context` open a planning run and receive `run_id` + `branch_name`; approval merges the branch to the authoritative branch. Operators (and admins) retain a direct-commit path — commits on that path are tagged with a `Workflow-Bypass: true` trailer and reported with `write_mode: bypass` in the response. Existing Runs stay pinned to their captured workflow commit SHA and are not rebased by later edits.
+
 ### 3.3 Workflow Execution Operations
 
 | Operation | Description | Modifies Git |

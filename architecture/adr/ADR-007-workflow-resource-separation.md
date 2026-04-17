@@ -98,6 +98,7 @@ Backwards compatibility with existing callers of the generic artifact endpoints 
 
 ## Future Work
 
+- Governance of workflow edits themselves — **superseded by [ADR-008 — Workflow Lifecycle Governance](/architecture/adr/ADR-008-workflow-lifecycle-governance.md)**, which routes `workflow.create`/`workflow.update` through a planning-mode Run with approval-gated merge and defines the operator bypass for recovery.
 - Versioning and deprecation semantics for workflow definitions (interaction with Run binding resolution).
 - Whether `workflow.update` should require the superseded-version link, mirroring ADR supersession.
 - Migration tooling to convert any existing workflow artifacts written through the generic path (if any exist in repository history) to the new operation's commit-trailer format.
