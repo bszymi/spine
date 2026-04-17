@@ -52,7 +52,7 @@ steps:
       - id: execute_timeout
         name: Execution Timed Out
         next_step: end
-    timeout: "30d"
+    timeout: "720h"
     timeout_outcome: execute_timeout
 
   - id: review
@@ -77,7 +77,7 @@ steps:
       - id: review_timeout
         name: Review Timed Out
         next_step: end
-    timeout: "7d"
+    timeout: "168h"
     timeout_outcome: review_timeout
 `
 
@@ -210,6 +210,78 @@ func TestValidateSchemaTimeoutWithoutOutcome(t *testing.T) {
 	}
 	if !hasTimeoutError {
 		t.Error("expected timeout_outcome validation error")
+	}
+}
+
+func TestValidateSchemaStepTimeoutRejectsDaySuffix(t *testing.T) {
+	// Go's time.ParseDuration does not accept "d" — the runtime scheduler
+	// would fail on this, so the validator must reject it at write time.
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Timeout:        "7d",
+			TimeoutOutcome: "o1",
+			Outcomes: []domain.OutcomeDefinition{
+				{ID: "o1", Name: "Timeout", NextStep: "end"},
+				{ID: "o2", Name: "Done", NextStep: "end"},
+			},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	found := false
+	for _, e := range errors {
+		if e.Field == "steps[0].timeout" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected steps[0].timeout error for \"7d\"; got errors: %+v", errors)
+	}
+}
+
+func TestValidateSchemaStepTimeoutAcceptsHours(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Timeout:        "168h",
+			TimeoutOutcome: "o1",
+			Outcomes: []domain.OutcomeDefinition{
+				{ID: "o1", Name: "Timeout", NextStep: "end"},
+				{ID: "o2", Name: "Done", NextStep: "end"},
+			},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	for _, e := range errors {
+		if e.Field == "steps[0].timeout" {
+			t.Errorf("unexpected timeout error for \"168h\": %+v", e)
+		}
+	}
+}
+
+func TestValidateSchemaWorkflowTimeoutRejectsInvalid(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Timeout:     "2w",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
+			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	found := false
+	for _, e := range errors {
+		if e.Field == "timeout" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected top-level timeout error for \"2w\"; got: %+v", errors)
 	}
 }
 

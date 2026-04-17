@@ -2,10 +2,26 @@ package workflow
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"gopkg.in/yaml.v3"
 )
+
+// validateDuration parses a duration string using the same function the
+// runtime scheduler uses (time.ParseDuration). Go's parser does not accept
+// "d" / "w" / "y" suffixes, so catching malformed values here prevents a
+// malformed workflow from blocking Runs at execution time.
+func validateDuration(field, value string) *domain.ValidationError {
+	if value == "" {
+		return nil
+	}
+	if _, err := time.ParseDuration(value); err != nil {
+		e := schemaError(field, fmt.Sprintf("invalid duration %q (must be parseable by Go time.ParseDuration — e.g. \"30m\", \"4h\", \"168h\"; day/week suffixes are not supported): %v", value, err))
+		return &e
+	}
+	return nil
+}
 
 // Parse parses a workflow YAML file into a domain WorkflowDefinition.
 func Parse(path string, content []byte) (*domain.WorkflowDefinition, error) {
@@ -48,6 +64,9 @@ func ValidateSchema(wf *domain.WorkflowDefinition) []domain.ValidationError {
 	}
 	if len(wf.AppliesTo) == 0 {
 		errors = append(errors, schemaError("applies_to", "must be non-empty"))
+	}
+	if e := validateDuration("timeout", wf.Timeout); e != nil {
+		errors = append(errors, *e)
 	}
 	if wf.EntryStep == "" {
 		errors = append(errors, schemaError("entry_step", "required field missing"))
@@ -107,6 +126,9 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 	}
 	if step.Timeout != "" && step.TimeoutOutcome == "" {
 		errors = append(errors, schemaError(prefix+".timeout_outcome", "required when timeout is set"))
+	}
+	if e := validateDuration(prefix+".timeout", step.Timeout); e != nil {
+		errors = append(errors, *e)
 	}
 
 	// §3.4 Outcome validation
