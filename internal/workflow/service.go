@@ -73,66 +73,52 @@ func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 // Create writes a new workflow definition, running the full workflow
 // validation suite before commit.
 func (s *Service) Create(ctx context.Context, id, body string) (*WriteResult, error) {
-	if err := validateID(id); err != nil {
-		return nil, err
-	}
-
-	path := filePath(id)
-
-	wf, err := Parse(path, []byte(body))
-	if err != nil {
-		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
-	}
-	if wf.ID != id {
-		return nil, domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("body id %q does not match path id %q", wf.ID, id))
-	}
-	if result := Validate(wf); result.Status == "failed" {
-		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
-			"workflow validation failed", result.Errors)
-	}
-
-	scope, err := s.enterBranch(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer scope.Cleanup()
-
-	absPath := filepath.Join(scope.RepoDir, path)
-
-	if _, err := os.Stat(absPath); err == nil {
-		return nil, domain.NewError(domain.ErrAlreadyExists,
-			fmt.Sprintf("workflow already exists: %s", path))
-	}
-
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("create dir: %v", err))
-	}
-	if err := os.WriteFile(absPath, []byte(body), 0o644); err != nil {
-		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("write file: %v", err))
-	}
-
-	commit, err := git.StageAndCommit(ctx, scope, path, git.CommitOpts{
-		Message:  fmt.Sprintf("Create workflow %s (%s)", wf.ID, wf.Version),
-		Trailers: workflowTrailers(ctx, "workflow.create"),
-		Author:   workflowAuthor(ctx),
+	return s.writeAndCommit(ctx, id, body, wfWriteOp{
+		requireExists: false,
+		operation:     "workflow.create",
+		messageFn: func(wf, _ *domain.WorkflowDefinition) string {
+			return fmt.Sprintf("Create workflow %s (%s)", wf.ID, wf.Version)
+		},
 	})
-	if err != nil {
-		_ = os.Remove(absPath)
-		return nil, domain.NewError(domain.ErrGit, err.Error())
-	}
-
-	return &WriteResult{Workflow: wf, Path: path, CommitSHA: commit.SHA}, nil
 }
 
 // Update rewrites an existing workflow definition. The new body must declare a
 // different version from the prior definition; the full validation suite runs
 // before commit.
 func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, error) {
+	return s.writeAndCommit(ctx, id, body, wfWriteOp{
+		requireExists: true,
+		operation:     "workflow.update",
+		messageFn: func(wf, prior *domain.WorkflowDefinition) string {
+			return fmt.Sprintf("Update workflow %s (%s -> %s)", wf.ID, prior.Version, wf.Version)
+		},
+		priorCheck: func(wf, prior *domain.WorkflowDefinition) error {
+			if wf.Version == prior.Version {
+				return domain.NewError(domain.ErrValidationFailed,
+					fmt.Sprintf("workflow.update requires a version bump (prior=%s, submitted=%s)",
+						prior.Version, wf.Version))
+			}
+			return nil
+		},
+	})
+}
+
+// wfWriteOp encodes the axes that distinguish Create from Update: pre-check
+// semantics, commit-message verb, operation trailer, and the optional
+// prior-workflow check (Update's version-bump rule). Both paths share the
+// parse → validate → enterBranch → pre-check → write → commit →
+// rollback-on-error skeleton.
+type wfWriteOp struct {
+	requireExists bool
+	operation     string
+	messageFn     func(wf, prior *domain.WorkflowDefinition) string
+	priorCheck    func(wf, prior *domain.WorkflowDefinition) error
+}
+
+func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWriteOp) (*WriteResult, error) {
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
-
 	path := filePath(id)
 
 	wf, err := Parse(path, []byte(body))
@@ -156,24 +142,36 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 
 	absPath := filepath.Join(scope.RepoDir, path)
 
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return nil, domain.NewError(domain.ErrNotFound,
-			fmt.Sprintf("workflow not found: %s", path))
-	}
-
-	prior, err := s.readFromDisk(absPath, path)
-	if err != nil {
-		return nil, err
-	}
-	if wf.Version == prior.Version {
-		return nil, domain.NewError(domain.ErrValidationFailed,
-			fmt.Sprintf("workflow.update requires a version bump (prior=%s, submitted=%s)",
-				prior.Version, wf.Version))
-	}
-
-	originalBody, readErr := os.ReadFile(absPath)
-	if readErr != nil {
-		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("read original: %v", readErr))
+	var prior *domain.WorkflowDefinition
+	var originalBody []byte
+	if op.requireExists {
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			return nil, domain.NewError(domain.ErrNotFound,
+				fmt.Sprintf("workflow not found: %s", path))
+		}
+		p, readErr := s.readFromDisk(absPath, path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		prior = p
+		if op.priorCheck != nil {
+			if err := op.priorCheck(wf, prior); err != nil {
+				return nil, err
+			}
+		}
+		original, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("read original: %v", readErr))
+		}
+		originalBody = original
+	} else {
+		if _, err := os.Stat(absPath); err == nil {
+			return nil, domain.NewError(domain.ErrAlreadyExists,
+				fmt.Sprintf("workflow already exists: %s", path))
+		}
+		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+			return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("create dir: %v", err))
+		}
 	}
 
 	if err := os.WriteFile(absPath, []byte(body), 0o644); err != nil {
@@ -181,12 +179,16 @@ func (s *Service) Update(ctx context.Context, id, body string) (*WriteResult, er
 	}
 
 	commit, err := git.StageAndCommit(ctx, scope, path, git.CommitOpts{
-		Message:  fmt.Sprintf("Update workflow %s (%s -> %s)", wf.ID, prior.Version, wf.Version),
-		Trailers: workflowTrailers(ctx, "workflow.update"),
+		Message:  op.messageFn(wf, prior),
+		Trailers: workflowTrailers(ctx, op.operation),
 		Author:   workflowAuthor(ctx),
 	})
 	if err != nil {
-		_ = os.WriteFile(absPath, originalBody, 0o644)
+		if op.requireExists {
+			_ = os.WriteFile(absPath, originalBody, 0o644)
+		} else {
+			_ = os.Remove(absPath)
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
