@@ -115,9 +115,31 @@ func (s *Service) safePathIn(root, path string) (string, error) {
 // Create creates a new artifact, validates it, writes the file, commits to Git,
 // and emits an artifact_created event.
 func (s *Service) Create(ctx context.Context, path, content string) (*WriteResult, error) {
+	return s.writeAndCommit(ctx, path, content, writeOp{
+		requireExists: false,
+		messageVerb:   "Create",
+		operation:     "artifact.create",
+		eventType:     domain.EventArtifactCreated,
+		logAction:     "artifact created",
+	})
+}
+
+// writeOp encodes the three axes that distinguish Create from Update: the
+// pre-check semantics, the commit-message verb + operation trailer, and the
+// emitted event type. Both paths share the remaining 10-step skeleton
+// (parse → validate → enterBranch → safePath → pre-check → write → commit
+// → rollback-on-error → autoPush → emit).
+type writeOp struct {
+	requireExists bool // false: must not exist (Create); true: must exist (Update)
+	messageVerb   string
+	operation     string
+	eventType     domain.EventType
+	logAction     string
+}
+
+func (s *Service) writeAndCommit(ctx context.Context, path, content string, op writeOp) (*WriteResult, error) {
 	log := observe.Logger(ctx)
 
-	// Parse and validate content before acquiring a worktree.
 	artifact, err := Parse(path, []byte(content))
 	if err != nil {
 		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
@@ -129,64 +151,74 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 			"artifact validation failed", result.Errors)
 	}
 
-	// Acquire an isolated worktree for branch-scoped writes (or the main repo).
 	scope, err := s.enterBranch(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer scope.Cleanup()
 
-	// Validate path stays within the working directory.
 	fullPath, err := s.safePathIn(scope.RepoDir, path)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check for duplicate path
-	if _, err := os.Stat(fullPath); err == nil {
-		return nil, domain.NewError(domain.ErrAlreadyExists,
-			fmt.Sprintf("artifact already exists at path: %s", path))
+	var originalContent []byte
+	if op.requireExists {
+		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+			return nil, domain.NewError(domain.ErrNotFound,
+				fmt.Sprintf("artifact not found: %s", path))
+		}
+		var readErr error
+		originalContent, readErr = os.ReadFile(fullPath)
+		if readErr != nil {
+			return nil, domain.NewError(domain.ErrInternal,
+				fmt.Sprintf("read original %s: %v", path, readErr))
+		}
+	} else {
+		if _, err := os.Stat(fullPath); err == nil {
+			return nil, domain.NewError(domain.ErrAlreadyExists,
+				fmt.Sprintf("artifact already exists at path: %s", path))
+		}
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			return nil, domain.NewError(domain.ErrInternal,
+				fmt.Sprintf("create directory %s: %v", filepath.Dir(fullPath), err))
+		}
 	}
 
-	// Write file
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("create directory %s: %v", dir, err))
-	}
 	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
 		return nil, domain.NewError(domain.ErrInternal,
 			fmt.Sprintf("write file %s: %v", path, err))
 	}
 
-	// Stage and commit using repo-relative path for git operations.
 	repoPath := s.repoRelativePath(path)
-	trailers := observe.TrailersFromContext(ctx, "artifact.create")
-
 	commitResult, err := git.StageAndCommit(ctx, scope, repoPath, git.CommitOpts{
-		Message:  fmt.Sprintf("Create %s: %s", artifact.Type, artifact.Title),
-		Trailers: trailers,
+		Message:  fmt.Sprintf("%s %s: %s", op.messageVerb, artifact.Type, artifact.Title),
+		Trailers: observe.TrailersFromContext(ctx, op.operation),
 		Author: git.Author{
 			Name:  observe.ActorID(ctx),
 			Email: observe.ActorID(ctx) + "@spine.local",
 		},
 	})
 	if err != nil {
-		// Clean up the file on commit failure; StageAndCommit already unstages.
-		_ = os.Remove(fullPath)
+		// Rollback. StageAndCommit already unstaged on failure, so we only
+		// have to restore file state here.
+		if op.requireExists {
+			_ = os.WriteFile(fullPath, originalContent, 0o644) //nolint:gosec // G703: fullPath came from safePath above; 0644 required for git tracking
+		} else {
+			_ = os.Remove(fullPath)
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
 	s.autoPush(ctx, scope.RepoDir)
 
-	log.Info("artifact created",
+	log.Info(op.logAction,
 		"path", path,
 		"type", artifact.Type,
 		"commit", commitResult.SHA,
 	)
 
-	// Emit event
-	s.emitEvent(ctx, domain.EventArtifactCreated, artifact, commitResult.SHA)
+	s.emitEvent(ctx, op.eventType, artifact, commitResult.SHA)
 
 	return &WriteResult{Artifact: artifact, CommitSHA: commitResult.SHA}, nil
 }
@@ -219,82 +251,13 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 // Update updates an existing artifact, validates the new content, commits to Git,
 // and emits an artifact_updated event.
 func (s *Service) Update(ctx context.Context, path, content string) (*WriteResult, error) {
-	log := observe.Logger(ctx)
-
-	// Parse and validate new content before acquiring a worktree.
-	artifact, err := Parse(path, []byte(content))
-	if err != nil {
-		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
-	}
-
-	result := Validate(artifact)
-	if result.Status == "failed" {
-		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
-			"artifact validation failed", result.Errors)
-	}
-
-	// Acquire an isolated worktree for branch-scoped writes (or the main repo).
-	scope, err := s.enterBranch(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer scope.Cleanup()
-
-	// Validate path stays within the working directory.
-	fullPath, err := s.safePathIn(scope.RepoDir, path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Verify artifact exists
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		return nil, domain.NewError(domain.ErrNotFound,
-			fmt.Sprintf("artifact not found: %s", path))
-	}
-
-	// Save original content for rollback
-	originalContent, readErr := os.ReadFile(fullPath)
-	if readErr != nil {
-		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("read original %s: %v", path, readErr))
-	}
-
-	// Write updated file
-	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
-		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("write file %s: %v", path, err))
-	}
-
-	// Stage and commit using repo-relative path for git operations.
-	repoPath := s.repoRelativePath(path)
-	trailers := observe.TrailersFromContext(ctx, "artifact.update")
-
-	commitResult, err := git.StageAndCommit(ctx, scope, repoPath, git.CommitOpts{
-		Message:  fmt.Sprintf("Update %s: %s", artifact.Type, artifact.Title),
-		Trailers: trailers,
-		Author: git.Author{
-			Name:  observe.ActorID(ctx),
-			Email: observe.ActorID(ctx) + "@spine.local",
-		},
+	return s.writeAndCommit(ctx, path, content, writeOp{
+		requireExists: true,
+		messageVerb:   "Update",
+		operation:     "artifact.update",
+		eventType:     domain.EventArtifactUpdated,
+		logAction:     "artifact updated",
 	})
-	if err != nil {
-		// Rollback: restore original content; StageAndCommit already unstages.
-		_ = os.WriteFile(fullPath, originalContent, 0o644) //nolint:gosec // G703: fullPath came from safePath above; 0644 required for git tracking
-		return nil, domain.NewError(domain.ErrGit, err.Error())
-	}
-
-	s.autoPush(ctx, scope.RepoDir)
-
-	log.Info("artifact updated",
-		"path", path,
-		"type", artifact.Type,
-		"commit", commitResult.SHA,
-	)
-
-	// Emit event
-	s.emitEvent(ctx, domain.EventArtifactUpdated, artifact, commitResult.SHA)
-
-	return &WriteResult{Artifact: artifact, CommitSHA: commitResult.SHA}, nil
 }
 
 // List scans the repository for all artifacts.
