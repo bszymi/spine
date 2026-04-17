@@ -49,7 +49,7 @@ func TestValidatorFrom_PrefersServiceSet(t *testing.T) {
 	wsV := &validation.Engine{}
 
 	s := &Server{validator: serverV}
-	ctx := context.WithValue(context.Background(), serviceSetContextKey, &workspace.ServiceSet{
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
 		Validator: wsV,
 	})
 
@@ -65,7 +65,7 @@ func TestValidatorFrom_PrefersServiceSet(t *testing.T) {
 func TestValidatorFrom_NilServiceSetValidator_FallsBack(t *testing.T) {
 	serverV := &validation.Engine{}
 	s := &Server{validator: serverV}
-	ctx := context.WithValue(context.Background(), serviceSetContextKey, &workspace.ServiceSet{
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
 		Validator: nil,
 	})
 
@@ -90,7 +90,7 @@ func TestBranchCreatorFrom_PrefersServiceSet(t *testing.T) {
 	wsDiv := &divergence.Service{}
 
 	s := &Server{branchCreator: serverBC}
-	ctx := context.WithValue(context.Background(), serviceSetContextKey, &workspace.ServiceSet{
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
 		Divergence: wsDiv,
 	})
 
@@ -118,7 +118,7 @@ func TestRunStarterFrom_PrefersServiceSet(t *testing.T) {
 	wsRS := &stubRunStarter{id: "workspace"}
 
 	s := &Server{runStarter: serverRS}
-	ctx := context.WithValue(context.Background(), serviceSetContextKey, &workspace.ServiceSet{
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
 		RunStarter: wsRS,
 	})
 
@@ -132,7 +132,7 @@ func TestRunStarterFrom_PrefersServiceSet(t *testing.T) {
 func TestRunStarterFrom_InvalidType_FallsBack(t *testing.T) {
 	serverRS := &stubRunStarter{id: "server"}
 	s := &Server{runStarter: serverRS}
-	ctx := context.WithValue(context.Background(), serviceSetContextKey, &workspace.ServiceSet{
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
 		RunStarter: "not-a-RunStarter",
 	})
 
@@ -157,7 +157,7 @@ func TestPlanningRunStarterFrom_PrefersServiceSet(t *testing.T) {
 	wsPS := &stubPlanningRunStarter{id: "workspace"}
 
 	s := &Server{planningRunStarter: serverPS}
-	ctx := context.WithValue(context.Background(), serviceSetContextKey, &workspace.ServiceSet{
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
 		PlanningRunStarter: wsPS,
 	})
 

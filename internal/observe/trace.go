@@ -6,16 +6,26 @@ import (
 	"fmt"
 )
 
-type contextKey string
+// Context keys are empty structs so they collide only with themselves and
+// their label never leaks when a context is formatted for debug output.
+type (
+	traceIDKeyT      struct{}
+	runIDKeyT        struct{}
+	stepIDKeyT       struct{}
+	actorIDKeyT      struct{}
+	artifactPathKeyT struct{}
+	componentKeyT    struct{}
+	workspaceIDKeyT  struct{}
+)
 
-const (
-	traceIDKey      contextKey = "trace_id"
-	runIDKey        contextKey = "run_id"
-	stepIDKey       contextKey = "step_id"
-	actorIDKey      contextKey = "actor_id"
-	artifactPathKey contextKey = "artifact_path"
-	componentKey    contextKey = "component"
-	workspaceIDKey  contextKey = "workspace_id"
+var (
+	traceIDKey      = traceIDKeyT{}
+	runIDKey        = runIDKeyT{}
+	stepIDKey       = stepIDKeyT{}
+	actorIDKey      = actorIDKeyT{}
+	artifactPathKey = artifactPathKeyT{}
+	componentKey    = componentKeyT{}
+	workspaceIDKey  = workspaceIDKeyT{}
 )
 
 // GenerateTraceID creates a new random trace ID.
