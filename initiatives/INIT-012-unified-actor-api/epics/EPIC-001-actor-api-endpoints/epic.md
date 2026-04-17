@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: "Actor API Endpoints"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-012-unified-actor-api/initiative.md
 links:
   - type: parent

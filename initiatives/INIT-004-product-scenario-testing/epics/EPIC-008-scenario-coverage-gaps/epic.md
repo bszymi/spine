@@ -2,7 +2,7 @@
 id: EPIC-008
 type: Epic
 title: "Scenario Coverage Gaps"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-004-product-scenario-testing/initiative.md
 links:
   - type: parent

@@ -2,7 +2,7 @@
 id: INIT-012
 type: Initiative
 title: Unified Actor API for Direct Communication
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-14
 links:

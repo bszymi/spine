@@ -2,11 +2,11 @@
 id: EPIC-003
 type: Epic
 title: Configurable Artifacts Directory
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-007-git-remote-sync/initiative.md
 owner: bszymi
 created: 2026-03-31
-last_updated: 2026-03-31
+last_updated: 2026-04-17
 links:
   - type: parent
     target: /initiatives/INIT-007-git-remote-sync/initiative.md

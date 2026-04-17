@@ -2,11 +2,11 @@
 id: EPIC-002
 type: Epic
 title: Security Hardening
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 owner: bszymi
 created: 2026-04-04
-last_updated: 2026-04-04
+last_updated: 2026-04-17
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/initiative.md
