@@ -2,12 +2,13 @@
 id: TASK-003
 type: Task
 title: "Split internal/store/postgres.go along existing concern boundaries"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: refactor
 created: 2026-04-17
 last_updated: 2026-04-17
+completed: 2026-04-17
 links:
   - type: parent
     target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md
