@@ -111,22 +111,25 @@ The graphical interface provides visual access for exploration, review, and gove
 
 ### 3.1 Operation Categories
 
-Operations exposed through the access surface fall into four categories:
+Operations exposed through the access surface fall into five categories:
 
 | Category | Description | Examples |
 |----------|-------------|---------|
-| Artifact operations | Create, read, update, query artifacts | Create task, update status, search by type |
-| Workflow operations | Interact with workflow execution | Start run, submit step result, approve/reject |
+| Artifact operations | Create, read, update, query governed artifacts (Initiative/Epic/Task/ADR/Document) | Create task, update status, search by type |
+| Workflow definition operations | Create, read, update, validate workflow definitions (per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md)) | Create workflow, update to new version, pre-commit validate |
+| Workflow execution operations | Interact with workflow execution | Start run, submit step result, approve/reject |
 | Query operations | Retrieve projected state | List artifacts by status, view relationship graph |
 | System operations | Administrative and operational | Validate schema, trigger projection rebuild, health check |
 
 ### 3.2 Artifact Operations
 
+These operations govern Initiative, Epic, Task, ADR, and Document artifacts. Workflow definitions are managed through a separate category (§3.2.2) — generic artifact write operations reject workflow paths with `400 invalid_params` per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md).
+
 | Operation | Description | Modifies Git |
 |-----------|-------------|-------------|
-| `artifact.create` | Create a new artifact with validated front matter | Yes |
-| `artifact.read` | Read artifact content and metadata | No |
-| `artifact.update` | Update artifact content or metadata | Yes |
+| `artifact.create` | Create a new artifact with validated front matter (not workflow definitions) | Yes |
+| `artifact.read` | Read artifact content and metadata (workflow paths return summary only) | No |
+| `artifact.update` | Update artifact content or metadata (not workflow definitions) | Yes |
 | `artifact.validate` | Validate artifact against schema and cross-artifact rules | No |
 | `artifact.list` | List artifacts by type, status, or parent | No |
 | `artifact.links` | Query artifact relationships | No |
@@ -147,7 +150,21 @@ This model ensures that:
 
 Artifact creation operations such as `artifact.create` are therefore helpers rather than the only mechanism through which artifacts may appear in the system.
 
-### 3.3 Workflow Operations
+### 3.2.2 Workflow Definition Operations
+
+Per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md), workflow definitions are a first-class API resource with dedicated operations. Their structural invariants (step-reference integrity, cycle detection, divergence/convergence balance, actor/skill resolution — see [Workflow Validation](/architecture/workflow-validation.md)) are enforced by the workflow validation suite at write time, so malformed definitions are rejected before commit rather than at Run execution time.
+
+| Operation | Description | Modifies Git |
+|-----------|-------------|-------------|
+| `workflow.create` | Create a new workflow definition; runs full workflow validation suite before commit | Yes |
+| `workflow.update` | Update an existing workflow definition; version bump required | Yes |
+| `workflow.read` | Return the executable workflow definition body (only endpoint that does) | No |
+| `workflow.list` | List workflow definition summaries, filterable by `applies_to`, `status`, `mode` | No |
+| `workflow.validate` | Validate a candidate workflow body without persisting | No |
+
+CLI and GUI surfaces route workflow create/update/validate actions to this category, not to `artifact.*`.
+
+### 3.3 Workflow Execution Operations
 
 | Operation | Description | Modifies Git |
 |-----------|-------------|-------------|
@@ -320,6 +337,9 @@ Operations executed through this model represent governed domain transitions rat
 - [Constitution](/governance/constitution.md) — Actor Neutrality (§5), Governed Execution (§4)
 - [Security Model](/architecture/security-model.md) — Full authorization model, credential management, trust boundaries
 - [Task Lifecycle](/governance/task-lifecycle.md) — Which operations modify Git vs runtime only
+- [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md) — Workflow definitions as a separate API resource
+- [Workflow Definition Format](/architecture/workflow-definition-format.md) — Schema for workflow definitions governed by §3.2.2
+- [Workflow Validation](/architecture/workflow-validation.md) — Workflow-specific validation suite
 
 ---
 
