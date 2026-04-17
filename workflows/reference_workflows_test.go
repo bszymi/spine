@@ -278,9 +278,15 @@ func TestNoBindingConflicts(t *testing.T) {
 		for _, at := range wf.AppliesTo {
 			key := at + ":" + wf.Mode
 			if existing, ok := bindingMap[key]; ok {
-				// task-default and task-spike both match Task:execution.
-				// This is expected — work_type filtering will disambiguate.
-				t.Logf("NOTE: binding %q matched by both %s and %s (disambiguated by work_type)", key, existing, wf.ID)
+				switch key {
+				case "Task:execution":
+					// task-default and task-spike deliberately share this
+					// binding — work_type selection disambiguates at runtime.
+					t.Logf("NOTE: binding %q matched by both %s and %s (disambiguated by work_type)", key, existing, wf.ID)
+				default:
+					t.Errorf("duplicate binding %q: both %s and %s match; the resolver will return ErrConflict at runtime",
+						key, existing, wf.ID)
+				}
 			}
 			bindingMap[key] = wf.ID
 		}

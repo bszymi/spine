@@ -60,29 +60,33 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	//   - no write_context + operator/admin → direct commit (bypass), tagged
 	//     with a Workflow-Bypass trailer for audit
 	if req.WriteContext == nil && !callerHasOperatorPrivileges(ctx) {
-		if starter := s.wfPlanningStarterFrom(ctx); starter != nil {
-			planning, err := starter.StartWorkflowPlanningRun(ctx, req.ID, req.Body)
-			if err != nil {
-				WriteError(w, err)
-				return
-			}
-			WriteJSON(w, http.StatusCreated, map[string]any{
-				"run_id":                planning.RunID,
-				"branch_name":           planning.BranchName,
-				"workflow_id":           req.ID,
-				"workflow_path":         planning.TaskPath,
-				"governing_workflow_id": planning.WorkflowID,
-				"status":                planning.Status,
-				"mode":                  planning.Mode,
-				"trace_id":              planning.TraceID,
-				"write_mode":            "planning",
-			})
+		starter := s.wfPlanningStarterFrom(ctx)
+		if starter == nil {
+			// No planning starter wired — refuse rather than silently
+			// demoting the reviewer to a direct commit that would skip
+			// both the lifecycle review AND the bypass trailer. Bootstrap
+			// recovery is the operator-bypass path (ADR-008 §5).
+			WriteError(w, domain.NewError(domain.ErrUnavailable,
+				"workflow planning run starter not configured; reviewer writes require the governance flow"))
 			return
 		}
-		// No planning starter wired (e.g., single-workspace mode without
-		// the workflow-planning adapter) — fall through to direct commit so
-		// bootstrap remains possible. The governed path is the default in
-		// production; this fallback is a safety valve, not a routine path.
+		planning, err := starter.StartWorkflowPlanningRun(ctx, req.ID, req.Body)
+		if err != nil {
+			WriteError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusCreated, map[string]any{
+			"run_id":                planning.RunID,
+			"branch_name":           planning.BranchName,
+			"workflow_id":           req.ID,
+			"workflow_path":         planning.TaskPath,
+			"governing_workflow_id": planning.WorkflowID,
+			"status":                planning.Status,
+			"mode":                  planning.Mode,
+			"trace_id":              planning.TraceID,
+			"write_mode":            "planning",
+		})
+		return
 	}
 	if req.WriteContext != nil {
 		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
@@ -107,15 +111,18 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, workflowWriteResponse(result, r.Context(), req.WriteContext, workflow.IsBypass(ctx)))
 }
 
-// callerHasOperatorPrivileges returns true when the authenticated actor is an
-// operator or admin. Reviewers are governed through the workflow-lifecycle
-// planning flow; operators retain a direct-commit path for recovery (ADR-008).
+// callerHasOperatorPrivileges returns true when the authenticated actor is at
+// operator level or higher. Reviewers are governed through the
+// workflow-lifecycle planning flow; operators (and above) retain a
+// direct-commit path for recovery (ADR-008). Uses HasAtLeast so future roles
+// inserted between reviewer and operator do not silently drop into the wrong
+// dispatch branch.
 func callerHasOperatorPrivileges(ctx context.Context) bool {
 	actor := actorFromContext(ctx)
 	if actor == nil {
 		return false
 	}
-	return actor.Role == domain.RoleOperator || actor.Role == domain.RoleAdmin
+	return actor.Role.HasAtLeast(domain.RoleOperator)
 }
 
 func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id string) {
