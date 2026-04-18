@@ -1,6 +1,7 @@
 /tmp/
 /bin/
 /spine
+/.gocache/
 docker-compose.override.yaml
 
 # Secrets and credentials
