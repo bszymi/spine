@@ -65,6 +65,7 @@ Both fields are required. Unknown keys cause a parse error.
 
 ### 3.3 Branch Patterns
 
+- Patterns are **short branch names only**. Fully-qualified refs (`refs/heads/main`, `refs/tags/v1`) are rejected at parse time — tag and other non-branch namespaces are out of scope for v1.
 - A literal name (`main`, `staging`) matches exactly one branch.
 - A glob using `*` / `?` / `[...]` matches a branch name per Go's `path.Match` semantics. Notably, `*` matches a sequence of non-`/` characters — it does **not** cross a slash. So `release/*` matches `release/1.0` but not `release/1.0/patch`, and a bare `*` matches branches with no `/` at all.
 - To protect a nested prefix, list explicit segments (`release/*/patch`) or add one rule per depth. A `**`-style recursive match is not supported in v1.

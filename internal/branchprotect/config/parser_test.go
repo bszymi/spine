@@ -147,6 +147,16 @@ func TestParse_Errors(t *testing.T) {
 			wantSub: "not allowed in Git ref names",
 		},
 		{
+			name:    "fully-qualified tag ref pattern",
+			body:    "version: 1\nrules:\n  - branch: \"refs/tags/*\"\n    protections: [no-delete]\n",
+			wantSub: "must be a short branch name",
+		},
+		{
+			name:    "fully-qualified heads ref pattern",
+			body:    "version: 1\nrules:\n  - branch: \"refs/heads/main\"\n    protections: [no-delete]\n",
+			wantSub: "must be a short branch name",
+		},
+		{
 			name:    "trailing YAML document",
 			body:    "version: 1\nrules: []\n---\nversion: 99\n",
 			wantSub: "second YAML document",

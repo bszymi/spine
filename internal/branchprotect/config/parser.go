@@ -92,6 +92,15 @@ func Parse(r io.Reader) (*Config, error) {
 		if idx := strings.IndexAny(rr.Branch, "^~: "); idx >= 0 {
 			return nil, fmt.Errorf("parse branch-protection config: rules[%d].branch: character %q in %q is not allowed in Git ref names (see git-check-ref-format)", i, rr.Branch[idx:idx+1], rr.Branch)
 		}
+		// Patterns must be short branch names, not fully-qualified refs.
+		// A pattern like `refs/tags/*` would either match nothing (if the
+		// caller passes short names) or pull tag refs into scope (if the
+		// caller forgets to strip). Tags are explicitly out of scope
+		// (ADR-009 §6); non-branch ref namespaces have no place here at
+		// all. Rejecting the prefix keeps the config surface unambiguous.
+		if strings.HasPrefix(rr.Branch, "refs/") {
+			return nil, fmt.Errorf("parse branch-protection config: rules[%d].branch: pattern %q must be a short branch name, not a fully-qualified ref (tag refs and other ref namespaces are out of scope in v1)", i, rr.Branch)
+		}
 		if _, err := path.Match(rr.Branch, ""); err != nil {
 			return nil, fmt.Errorf("parse branch-protection config: rules[%d].branch: invalid pattern %q: %v", i, rr.Branch, err)
 		}
