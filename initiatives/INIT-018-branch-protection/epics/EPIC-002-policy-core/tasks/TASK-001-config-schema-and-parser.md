@@ -2,9 +2,11 @@
 id: TASK-001
 type: Task
 title: "Define branch-protection config schema and parser"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-18
+last_updated: 2026-04-18
+completed: 2026-04-18
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-002-policy-core/epic.md
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:

@@ -205,6 +205,7 @@ An operator enters "bypass mode" for some duration, during which all of their op
 
 - [INIT-018 — Branch Protection](/initiatives/INIT-018-branch-protection/initiative.md)
 - [INIT-018 product description](/product/features/branch-protection.md)
+- [Branch Protection Config Format](/architecture/branch-protection-config-format.md)
 - [ADR-001 — Workflow Definition Storage and Execution Recording](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md)
 - [ADR-006 — Planning Runs](/architecture/adr/ADR-006-planning-runs.md)
 - [ADR-008 — Workflow Lifecycle Governance](/architecture/adr/ADR-008-workflow-lifecycle-governance.md)
