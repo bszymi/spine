@@ -9,6 +9,7 @@ import (
 	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/workflow"
+	"github.com/bszymi/spine/internal/workspace"
 )
 
 // storeStepAssigner is the gateway's built-in StepAssigner fallback. It's
@@ -21,12 +22,19 @@ type storeStepAssigner struct {
 }
 
 // assignerFor picks a StepAssigner for the current request. Priority:
-// 1. The configured orchestrator-backed assigner (engine-side).
-// 2. A per-request fallback backed by the resolved store.
-// Returns nil only when neither an assigner nor a store is available.
+// 1. The workspace-scoped orchestrator on the request's ServiceSet (shared mode).
+// 2. The server's global orchestrator-backed assigner (single-workspace mode).
+// 3. A per-request fallback backed by the resolved store.
+// Returns nil only when none of the above is available.
 func (s *Server) assignerFor(ctx context.Context) StepAssigner {
-	if s.stepAssigner != nil {
-		return s.stepAssigner
+	sa := resolve(ctx, func(ss *workspace.ServiceSet) StepAssigner {
+		if a, ok := ss.StepAssigner.(StepAssigner); ok {
+			return a
+		}
+		return nil
+	}, s.stepAssigner)
+	if sa != nil {
+		return sa
 	}
 	st := s.storeFrom(ctx)
 	if st == nil {
