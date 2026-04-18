@@ -196,6 +196,7 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
 	ss.WFPlanningStarter = &workflowPlanningRunAdapter{orch: orch}
 	ss.RunCanceller = orch
+	ss.StepAssigner = orch
 
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
 		return orch.MergeRunBranch(ctx, runID)
