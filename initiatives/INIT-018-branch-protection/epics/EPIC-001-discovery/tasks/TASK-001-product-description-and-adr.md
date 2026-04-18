@@ -47,7 +47,7 @@ Retire the "Spine is not a code hosting platform" framing. Replace it with "Spin
 
 Open a stub initiative (INIT-019 — Interface-Agnostic Governance Core) capturing the architectural programme that makes "forges as clients" a real property of the system rather than documentation. That initiative is out of scope for this task; only the stub is created.
 
-### 1. Product description — `/initiatives/INIT-018-branch-protection/product.md`
+### 1. Product description — `/product/features/branch-protection.md`
 
 A feature-level product doc (not code-design) covering:
 
