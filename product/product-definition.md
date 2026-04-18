@@ -64,6 +64,8 @@ Artifacts define:
 
 Git repositories are the authoritative source of truth. Runtime systems and databases exist only as projections of repository artifacts. Change is explicit. History is immutable. Truth is diffable.
 
+Spine hosts the governed Git repository itself and owns the governance structures around change: PR state, review discussions, approval outcomes, and merge authority live in Spine's Run and discussion model. External forges integrate as *clients* of that governance engine — they can surface and forward, but they cannot authorize. See [Boundaries §2.1-§2.3](/product/boundaries-and-constraints.md) and [Git Integration Contract](/architecture/git-integration.md).
+
 ### 4.2 Execution Layer — Workflow Governance
 
 A workflow engine interprets and enforces how work progresses.

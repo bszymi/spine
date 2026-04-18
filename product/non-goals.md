@@ -57,13 +57,25 @@ Spine may trigger or be triggered by CI/CD systems as part of governed workflows
 
 ---
 
-### 3.3 Spine is not a code hosting platform
+### 3.3 Spine is not a forge UI
 
-Spine depends on Git as the foundational infrastructure for artifact storage and versioning.
+Spine depends on Git as the foundational infrastructure for artifact storage and versioning, and — per [Boundaries §2.1](/product/boundaries-and-constraints.md) — hosts the governed Git repository itself. Spine also owns the *governance* of change proposals: PR state, review discussions, approval outcomes, and merge gates live in Spine's Run and discussion model. What Spine does not own is the *presentation surface* that renders those things.
 
-Spine does not host repositories, manage pull requests, or replace repository platforms such as GitHub, GitLab, or Bitbucket.
+Out of scope:
 
-**Filter:** If a feature request looks like "manage pull requests" or "host repositories," it is out of scope.
+- Rendering PR diffs, inline review comments, code browsing, code search
+- Hosting wikis, releases pages, sponsor tooling, forge-native social features
+- CI/CD integration surfaces (checks API, status badges, deployment environments)
+
+In scope (and often confused with the above):
+
+- The state machine behind a PR — branch, review, approval, merge — is governance, owned by Spine.
+- Review discussions attached to a change are governance artifacts, owned by Spine.
+- Approval outcomes and merge authority are Spine's to grant.
+
+A team that wants a rendered forge-style UI over this state can use an external platform as a **client** — mirroring refs, surfacing PR/review data, forwarding user actions back to Spine for evaluation. The forge never authorizes a merge or owns review state; it is an interface. This is the "forge as client" boundary in [Boundaries §2.3](/product/boundaries-and-constraints.md); the architectural programme that makes this cleanly possible is tracked as a follow-up initiative.
+
+**Filter:** If a feature request is "render a PR view," "browse code," "host a wiki," or "mirror releases," it is out of scope. If it is "run a workflow when a PR is opened," "require a review before merge," "reject a push that violates governance," or "attach a review comment to a change" — it is in scope. The dividing line is: does this describe governance state and transitions (in), or does it describe the surface that users see (out)?
 
 ---
 
@@ -140,7 +152,7 @@ AI agents in Spine operate under the same governance as human actors. Spine will
 | Misconception | Reality |
 |---------------|---------|
 | Spine is a better Jira | Spine governs execution through versioned artifacts. It may reduce the need for ticketing tools but does not aim to replace them. |
-| Spine replaces GitHub | Spine depends on Git. It adds a governance and execution layer on top of Git, not a replacement for it. |
+| Spine replaces GitHub | Spine owns the governance behind PRs (state, reviews, approvals, merges) and hosts the Git repo. It does not replace the forge *UI* — PR diff rendering, code browsing, wikis, releases. Forges integrate as clients of Spine's governance engine, not as authorities over it. |
 | Spine is an AI agent framework | Spine governs AI agents as actors within workflows. It does not orchestrate LLM calls or manage agent internals. |
 | Spine makes teams faster | Spine makes teams more structurally sound. Speed is a secondary effect of clarity, not a primary goal. |
 | Spine is only for large teams | Spine is for any team where structural integrity between intent and execution matters — size is not the determining factor. |
@@ -158,7 +170,7 @@ AI agents in Spine operate under the same governance as human actors. Spine will
 | Documentation (Confluence, Notion) | Uses Markdown artifacts as truth | Host, render, or index documentation |
 | AI frameworks (LangChain, CrewAI) | Governs agents as workflow actors | Orchestrate prompts or manage agent memory |
 | AI model platforms | Agnostic to model infrastructure | Train, host, or provide models |
-| Code hosting (GitHub, GitLab) | Depends on Git hosting platforms | Host repositories or manage pull requests |
+| Code collaboration platforms (GitHub, GitLab) | Hosts the governed repo; owns PR/review/approval state; forges integrate as clients to surface that state | Render PR diffs, host wikis, own issue UIs, provide forge-native social features |
 | Version control (Git) | Depends on Git as foundational infrastructure | Replace Git |
 
 ---

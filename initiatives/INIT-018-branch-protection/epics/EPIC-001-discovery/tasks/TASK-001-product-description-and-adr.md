@@ -2,9 +2,11 @@
 id: TASK-001
 type: Task
 title: "Author branch-protection product description and ADR-009"
-status: Pending
+status: Completed
 work_type: documentation
 created: 2026-04-18
+last_updated: 2026-04-18
+completed: 2026-04-18
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-001-discovery/epic.md
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:
@@ -30,6 +32,20 @@ Before any implementation, we need a product-level description of the feature an
 ---
 
 ## Deliverable
+
+### 0. Product-boundary updates
+
+`product/boundaries-and-constraints.md`, `product/non-goals.md`, and `product/product-definition.md` currently state that Spine delegates code hosting to external forges. That boundary is inconsistent with current architecture (`internal/githttp` serves workspace repositories), with the branch-protection feature itself (protection is only enforceable when Spine is the Git host), and with the fact that PR-shaped workflows — reviews, approvals, merge authority — are already governance, not presentation.
+
+Update the product docs to reflect three layered claims:
+
+1. **Spine hosts the governed Git repository directly.** Branch-level governance and performance-sensitive deployments require it.
+2. **Spine owns PR-shaped governance.** The state machine behind a change proposal — planning-run branches, review discussions, approval outcomes, merge authority — lives in Spine. It is not delegable.
+3. **Forges and other external interfaces are clients of Spine's governance engine, not authorities over it.** A merge "performed" outside Spine is not a governed merge. Mirroring and forge adapters are direction-preserving: governance flows outward from Spine, never inward from the forge.
+
+Retire the "Spine is not a code hosting platform" framing. Replace it with "Spine is not a forge UI" — the remaining delegation is around presentation surfaces (PR diff rendering, code browsing, wikis, releases pages), not governance state.
+
+Open a stub initiative (INIT-019 — Interface-Agnostic Governance Core) capturing the architectural programme that makes "forges as clients" a real property of the system rather than documentation. That initiative is out of scope for this task; only the stub is created.
 
 ### 1. Product description — `/initiatives/INIT-018-branch-protection/product.md`
 
