@@ -24,7 +24,7 @@ The rest of Spine goes to some length to prevent exactly this: [ADR-001](/archit
 
 The product-level prerequisite for this ADR is that Spine owns the Git host for governed repositories and the governance state machine around change proposals (PRs, reviews, approvals, merge authority). Both are now reflected in [Boundaries §2.1-§2.3](/product/boundaries-and-constraints.md): Spine hosts the governed repository via the `githttp` endpoint and owns the PR-shaped governance layer, delegating only the presentation surfaces that render it. External forges, when present, integrate as *clients* of Spine's governance engine, not as authorities over it. Without that boundary, branch protection would have to push rules to an external forge's API — which cannot see Spine's Run state and therefore cannot distinguish a governed merge from a direct write.
 
-[INIT-018](/initiatives/INIT-018-branch-protection/initiative.md) and the companion [product description](/initiatives/INIT-018-branch-protection/product.md) establish the feature scope: two protection types (`no-delete`, `no-direct-write`), reviewer-authored configuration, operator override with audit. This ADR decides the architectural questions: storage, enforcement point, override surface, and how Spine-owned operations interact with the rules.
+[INIT-018](/initiatives/INIT-018-branch-protection/initiative.md) and the companion [product description](/product/features/branch-protection.md) establish the feature scope: two protection types (`no-delete`, `no-direct-write`), reviewer-authored configuration, operator override with audit. This ADR decides the architectural questions: storage, enforcement point, override surface, and how Spine-owned operations interact with the rules.
 
 ---
 
@@ -204,7 +204,7 @@ An operator enters "bypass mode" for some duration, during which all of their op
 ## Links
 
 - [INIT-018 — Branch Protection](/initiatives/INIT-018-branch-protection/initiative.md)
-- [INIT-018 product description](/initiatives/INIT-018-branch-protection/product.md)
+- [INIT-018 product description](/product/features/branch-protection.md)
 - [ADR-001 — Workflow Definition Storage and Execution Recording](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md)
 - [ADR-006 — Planning Runs](/architecture/adr/ADR-006-planning-runs.md)
 - [ADR-008 — Workflow Lifecycle Governance](/architecture/adr/ADR-008-workflow-lifecycle-governance.md)

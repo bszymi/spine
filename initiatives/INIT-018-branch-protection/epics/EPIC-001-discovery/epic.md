@@ -29,6 +29,6 @@ Produce the two governance artifacts needed before any branch-protection impleme
 
 ## Acceptance Criteria
 
-- `/initiatives/INIT-018-branch-protection/product.md` exists and describes the feature from a user/product perspective.
+- `/product/features/branch-protection.md` exists and describes the feature from a user/product perspective.
 - `/architecture/adr/ADR-009-branch-protection.md` exists, is marked `Accepted`, and answers every open question raised in the initiative.
 - Follow-up implementation epics can be authored from the ADR without further discovery.

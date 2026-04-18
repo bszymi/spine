@@ -143,7 +143,7 @@ Per [Workflow Definition Format](/architecture/workflow-definition-format.md):
 
 ### 3.5 `/product/`
 
-Contains product definition artifacts produced by product-focused epics.
+Contains product definition artifacts. Cross-cutting documents live directly in `/product/`; feature-level product descriptions live in `/product/features/<feature>.md`, one file per feature.
 
 ```
 product/
@@ -151,8 +151,12 @@ product/
 ├── users-and-use-cases.md
 ├── non-goals.md
 ├── success-metrics.md
-└── boundaries-and-constraints.md
+├── boundaries-and-constraints.md
+└── features/
+    └── <feature>.md
 ```
+
+A feature-level file describes the user-facing shape of a single feature (problem, users, in/out of scope, flows) and is the canonical home for that feature's product-level truth. Initiatives that scope a feature link to it from their `initiative.md` rather than duplicating the description.
 
 ### 3.6 `/templates/`
 
@@ -186,7 +190,7 @@ Spine uses the following artifact types:
 | ADR | `ADR-XXXX` | `/architecture/adrs/ADR-XXXX-<slug>.md` | Architectural decision record |
 | Governance | — | `/governance/<name>.md` | Charter, Constitution, Guidelines, and related documents |
 | Architecture | — | `/architecture/<name>.md` | System design and component documentation |
-| Product | — | `/product/<name>.md` | Product definition and scope documents |
+| Product | — | `/product/<name>.md` (cross-cutting) or `/product/features/<feature>.md` (per-feature) | Product definition and scope documents |
 | Template | — | `/templates/<name>-template.md` | Reusable artifact structure definitions |
 
 ### 4.1 Hierarchy

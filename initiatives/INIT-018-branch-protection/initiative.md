@@ -53,7 +53,7 @@ INIT-018's discovery phase is complete when the product description and the ADR 
 
 ## Primary Artifacts Produced (Discovery Phase)
 
-- `/initiatives/INIT-018-branch-protection/product.md` — feature-level product description.
+- `/product/features/branch-protection.md` — feature-level product description.
 - `/architecture/adr/ADR-009-branch-protection.md` — governance + storage + enforcement decision.
 
 ---
