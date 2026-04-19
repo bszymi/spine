@@ -15,7 +15,7 @@ import (
 
 // fakeStore captures enqueued deliveries.
 type fakeStore struct {
-	mu        sync.Mutex
+	mu         sync.Mutex
 	deliveries []store.DeliveryEntry
 }
 
@@ -185,7 +185,7 @@ func TestDeliverySubscriber_FiltersByEventType(t *testing.T) {
 	fs := &fakeStore{}
 	subs := &filteredSubscriptions{
 		subs: []Subscription{
-			{SubscriptionID: "sub-all", EventTypes: nil},                               // matches all
+			{SubscriptionID: "sub-all", EventTypes: nil},                                       // matches all
 			{SubscriptionID: "sub-runs", EventTypes: []string{"run_started", "run_completed"}}, // matches run events only
 		},
 	}
@@ -347,8 +347,8 @@ func (m *minimalStore) ListActorsByStatus(context.Context, domain.ActorStatus) (
 func (m *minimalStore) GetActorByTokenHash(context.Context, string) (*domain.Actor, *domain.Token, error) {
 	panic("not used")
 }
-func (m *minimalStore) CreateToken(context.Context, *store.TokenRecord) error  { panic("not used") }
-func (m *minimalStore) RevokeToken(context.Context, string) error              { panic("not used") }
+func (m *minimalStore) CreateToken(context.Context, *store.TokenRecord) error { panic("not used") }
+func (m *minimalStore) RevokeToken(context.Context, string) error             { panic("not used") }
 func (m *minimalStore) ListTokensByActor(context.Context, string) ([]domain.Token, error) {
 	panic("not used")
 }
@@ -361,8 +361,8 @@ func (m *minimalStore) UpdateDivergenceContext(context.Context, *domain.Divergen
 func (m *minimalStore) GetDivergenceContext(context.Context, string) (*domain.DivergenceContext, error) {
 	panic("not used")
 }
-func (m *minimalStore) CreateBranch(context.Context, *domain.Branch) error  { panic("not used") }
-func (m *minimalStore) UpdateBranch(context.Context, *domain.Branch) error  { panic("not used") }
+func (m *minimalStore) CreateBranch(context.Context, *domain.Branch) error { panic("not used") }
+func (m *minimalStore) UpdateBranch(context.Context, *domain.Branch) error { panic("not used") }
 func (m *minimalStore) GetBranch(context.Context, string) (*domain.Branch, error) {
 	panic("not used")
 }
@@ -406,6 +406,12 @@ func (m *minimalStore) GetWorkflowProjection(context.Context, string) (*store.Wo
 func (m *minimalStore) ListActiveWorkflowProjections(context.Context) ([]store.WorkflowProjection, error) {
 	panic("not used")
 }
+func (m *minimalStore) UpsertBranchProtectionRules(context.Context, []store.BranchProtectionRuleProjection, string) error {
+	panic("not used")
+}
+func (m *minimalStore) ListBranchProtectionRules(context.Context) ([]store.BranchProtectionRuleProjection, error) {
+	panic("not used")
+}
 func (m *minimalStore) GetSyncState(context.Context) (*store.SyncState, error) { panic("not used") }
 func (m *minimalStore) UpdateSyncState(context.Context, *store.SyncState) error {
 	panic("not used")
@@ -429,16 +435,16 @@ func (m *minimalStore) ListComments(context.Context, string) ([]domain.Comment, 
 func (m *minimalStore) HasOpenThreads(context.Context, domain.AnchorType, string) (bool, error) {
 	panic("not used")
 }
-func (m *minimalStore) CreateSkill(context.Context, *domain.Skill) error  { panic("not used") }
+func (m *minimalStore) CreateSkill(context.Context, *domain.Skill) error { panic("not used") }
 func (m *minimalStore) GetSkill(context.Context, string) (*domain.Skill, error) {
 	panic("not used")
 }
-func (m *minimalStore) UpdateSkill(context.Context, *domain.Skill) error    { panic("not used") }
-func (m *minimalStore) ListSkills(context.Context) ([]domain.Skill, error)  { panic("not used") }
+func (m *minimalStore) UpdateSkill(context.Context, *domain.Skill) error   { panic("not used") }
+func (m *minimalStore) ListSkills(context.Context) ([]domain.Skill, error) { panic("not used") }
 func (m *minimalStore) ListSkillsByCategory(context.Context, string) ([]domain.Skill, error) {
 	panic("not used")
 }
-func (m *minimalStore) AddSkillToActor(context.Context, string, string) error    { panic("not used") }
+func (m *minimalStore) AddSkillToActor(context.Context, string, string) error { panic("not used") }
 func (m *minimalStore) RemoveSkillFromActor(context.Context, string, string) error {
 	panic("not used")
 }
@@ -505,7 +511,7 @@ func (m *minimalStore) ListSubscriptions(context.Context, string) ([]store.Event
 func (m *minimalStore) ListActiveSubscriptionsByEventType(context.Context, string) ([]store.EventSubscription, error) {
 	panic("not used")
 }
-func (m *minimalStore) ApplyMigrations(context.Context, string) error      { panic("not used") }
+func (m *minimalStore) ApplyMigrations(context.Context, string) error { panic("not used") }
 func (m *minimalStore) IsMigrationApplied(context.Context, string) (bool, error) {
 	panic("not used")
 }

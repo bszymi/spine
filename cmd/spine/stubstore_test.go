@@ -231,6 +231,14 @@ func (stubStore) ListActiveWorkflowProjections(ctx context.Context) ([]store.Wor
 	return nil, nil
 }
 
+func (stubStore) UpsertBranchProtectionRules(ctx context.Context, rules []store.BranchProtectionRuleProjection, sourceCommit string) error {
+	return nil
+}
+
+func (stubStore) ListBranchProtectionRules(ctx context.Context) ([]store.BranchProtectionRuleProjection, error) {
+	return nil, nil
+}
+
 func (stubStore) GetSyncState(ctx context.Context) (*store.SyncState, error) {
 	return nil, nil
 }
@@ -399,8 +407,7 @@ func (stubStore) IsMigrationApplied(ctx context.Context, version string) (bool, 
 	return false, nil
 }
 
-func (stubStore) Close()  {
+func (stubStore) Close() {
 }
-
 
 var _ store.Store = stubStore{}

@@ -85,6 +85,11 @@ type Store interface {
 	GetWorkflowProjection(ctx context.Context, workflowPath string) (*WorkflowProjection, error)
 	ListActiveWorkflowProjections(ctx context.Context) ([]WorkflowProjection, error)
 
+	// Branch Protection Rules (ADR-009 projection). Atomic swap — a
+	// single call replaces the workspace's effective ruleset.
+	UpsertBranchProtectionRules(ctx context.Context, rules []BranchProtectionRuleProjection, sourceCommit string) error
+	ListBranchProtectionRules(ctx context.Context) ([]BranchProtectionRuleProjection, error)
+
 	// Sync State
 	GetSyncState(ctx context.Context) (*SyncState, error)
 	UpdateSyncState(ctx context.Context, state *SyncState) error
@@ -187,6 +192,20 @@ type WorkflowProjection struct {
 	AppliesTo    []byte `json:"applies_to"` // JSONB
 	Definition   []byte `json:"definition"` // JSONB
 	SourceCommit string `json:"source_commit"`
+}
+
+// BranchProtectionRuleProjection is one row of the projected
+// /.spine/branch-protection.yaml ruleset (ADR-009 §1). Protections is a
+// JSONB array of rule-kind strings (e.g. ["no-delete","no-direct-write"])
+// mirroring the YAML value; the branchprotect package converts it to its
+// typed RuleKind enum. SourceCommit is "bootstrap" for the seed rows
+// installed by the 018 migration, otherwise the commit SHA that produced
+// the projection.
+type BranchProtectionRuleProjection struct {
+	BranchPattern string `json:"branch_pattern"`
+	RuleOrder     int    `json:"rule_order"`
+	Protections   []byte `json:"protections"` // JSONB array of strings
+	SourceCommit  string `json:"source_commit"`
 }
 
 // SyncState tracks projection sync progress.
