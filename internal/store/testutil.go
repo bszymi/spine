@@ -78,6 +78,21 @@ func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 		"projection.workflows",
 		"projection.sync_state",
 	}
+	// projection.branch_protection_rules needs a restore-to-bootstrap
+	// rather than a plain DELETE. Migration 018 seeds the bootstrap
+	// default and ApplyMigrations won't re-run it, so leaving the
+	// table alone lets one test leak its custom ruleset into the
+	// next. Reset to the documented bootstrap state (ADR-009 §1) so
+	// every test starts from the same predictable baseline.
+	ctxInner := context.Background()
+	if _, err := s.pool.Exec(ctxInner, "DELETE FROM projection.branch_protection_rules"); err != nil {
+		t.Logf("cleanup branch_protection_rules: %v", err)
+	}
+	if _, err := s.pool.Exec(ctxInner,
+		"INSERT INTO projection.branch_protection_rules (branch_pattern, rule_order, protections, source_commit) VALUES ('main', 0, '[\"no-delete\",\"no-direct-write\"]', 'bootstrap')",
+	); err != nil {
+		t.Logf("reseed branch_protection_rules: %v", err)
+	}
 	for _, table := range tables {
 		if _, err := s.pool.Exec(ctx, "DELETE FROM "+table); err != nil {
 			t.Logf("cleanup %s: %v", table, err)

@@ -143,6 +143,12 @@ func (s *PostgresStore) DeleteAllProjections(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, "DELETE FROM projection.workflows"); err != nil {
 		return fmt.Errorf("delete workflows: %w", err)
 	}
+	// Intentionally omit projection.branch_protection_rules — it is
+	// replaced atomically by UpsertBranchProtectionRules, so wiping it
+	// here would open a window where the rule-source adapter sees an
+	// empty table (treated as "explicit empty, unprotected") if the
+	// subsequent projection step fails for any reason. The atomic
+	// swap preserves the previous ruleset until replacement succeeds.
 	return nil
 }
 
@@ -272,6 +278,61 @@ func (s *PostgresStore) ListActiveWorkflowProjections(ctx context.Context) ([]Wo
 		var p WorkflowProjection
 		if err := rows.Scan(&p.WorkflowPath, &p.WorkflowID, &p.Name, &p.Version,
 			&p.Status, &p.AppliesTo, &p.Definition, &p.SourceCommit); err != nil {
+			return nil, err
+		}
+		projections = append(projections, p)
+	}
+	return projections, rows.Err()
+}
+
+// ── Branch Protection Rules ──
+
+// UpsertBranchProtectionRules atomically replaces the entire effective
+// ruleset. An empty rules slice leaves zero rows (the author's explicit
+// "nothing protected" choice); ADR-009 bootstrap defaults are applied
+// upstream by the projection handler when the config file is absent, not
+// by this method. sourceCommit is the commit that produced the projection
+// and is stamped on every inserted row.
+func (s *PostgresStore) UpsertBranchProtectionRules(ctx context.Context, rules []BranchProtectionRuleProjection, sourceCommit string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+
+	if _, err := tx.Exec(ctx, `DELETE FROM projection.branch_protection_rules`); err != nil {
+		return fmt.Errorf("clear branch_protection_rules: %w", err)
+	}
+	for _, r := range rules {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO projection.branch_protection_rules (branch_pattern, rule_order, protections, source_commit)
+			VALUES ($1, $2, $3, $4)`,
+			r.BranchPattern, r.RuleOrder, r.Protections, sourceCommit,
+		); err != nil {
+			return fmt.Errorf("insert branch_protection_rules: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// ListBranchProtectionRules returns every projected rule in source-file
+// order. The branchprotect package relies on this ordering to preserve
+// the author's intended match sequence (config.Config.MatchRules
+// contract).
+func (s *PostgresStore) ListBranchProtectionRules(ctx context.Context) ([]BranchProtectionRuleProjection, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT branch_pattern, rule_order, protections, source_commit
+		FROM projection.branch_protection_rules
+		ORDER BY rule_order, branch_pattern`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projections []BranchProtectionRuleProjection
+	for rows.Next() {
+		var p BranchProtectionRuleProjection
+		if err := rows.Scan(&p.BranchPattern, &p.RuleOrder, &p.Protections, &p.SourceCommit); err != nil {
 			return nil, err
 		}
 		projections = append(projections, p)

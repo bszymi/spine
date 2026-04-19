@@ -1,6 +1,7 @@
 package projection
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/branchprotect"
+	bpconfig "github.com/bszymi/spine/internal/branchprotect/config"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
@@ -16,6 +19,10 @@ import (
 	"github.com/bszymi/spine/internal/store"
 	"gopkg.in/yaml.v3"
 )
+
+// BranchProtectionConfigPath is the fixed repo path the projection
+// watches. Not configurable (ADR-009 §2.2).
+const BranchProtectionConfigPath = ".spine/branch-protection.yaml"
 
 // Service implements the Projection Service — syncs Git state to PostgreSQL.
 type Service struct {
@@ -107,6 +114,16 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 			)
 			projErrors++
 		}
+	}
+
+	// Project branch-protection config (ADR-009 §1). Always runs on
+	// rebuild so bootstrap defaults land even when the file is absent.
+	if err := s.projectBranchProtection(ctx, head); err != nil {
+		log.Warn("failed to project branch-protection config",
+			"path", BranchProtectionConfigPath,
+			"error", err,
+		)
+		projErrors++
 	}
 
 	// Update sync state — only mark idle if no errors
@@ -233,8 +250,37 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		}
 	}
 
-	// Sync workflow changes
+	// Sync workflow + branch-protection changes from the diff.
 	diffs, _ := s.git.Diff(ctx, state.LastSyncedCommit, head)
+
+	// Branch-protection.yaml: a single file at a fixed path — any diff
+	// touching it triggers a re-projection. Both adds/modifies and
+	// deletions re-run the projection (deletion re-seeds bootstrap
+	// defaults per ADR-009 §1). If the previous sync state was "error",
+	// we re-project unconditionally: a FullRebuild that failed on a
+	// malformed config records LastSyncedCommit=head, which means the
+	// diff window below is empty — without this force-refresh, the
+	// bad config would never be retried and an error state could
+	// silently transition to "idle" with stale rules.
+	bpDirty := state.Status == "error"
+	if !bpDirty {
+		for _, diff := range diffs {
+			if diff.Path == BranchProtectionConfigPath || diff.OldPath == BranchProtectionConfigPath {
+				bpDirty = true
+				break
+			}
+		}
+	}
+	if bpDirty {
+		if err := s.projectBranchProtection(ctx, head); err != nil {
+			log.Warn("failed to project branch-protection config",
+				"path", BranchProtectionConfigPath,
+				"error", err,
+			)
+			syncErrors++
+		}
+	}
+
 	for _, diff := range diffs {
 		if !artifact.IsWorkflowPath(diff.Path) && (diff.OldPath == "" || !artifact.IsWorkflowPath(diff.OldPath)) {
 			continue
@@ -495,6 +541,107 @@ func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string)
 	}
 
 	return s.store.UpsertWorkflowProjection(ctx, proj)
+}
+
+// projectBranchProtection reads /.spine/branch-protection.yaml at the
+// given commit, parses it, and atomically replaces the effective ruleset
+// in projection.branch_protection_rules.
+//
+// Behaviour per ADR-009 §1 and EPIC-002 TASK-003:
+//   - File present + parses cleanly: rows are replaced with the parsed
+//     contents, stamped with commitSHA as source_commit.
+//   - File present + parse error: rows left intact, the caller counts
+//     this as a sync error (preventing the sync state from advancing
+//     past a broken commit). Never falls back to an empty ruleset —
+//     that would silently disable protection on malformed input.
+//   - File absent: rows are replaced with BootstrapDefaults, stamped
+//     with source_commit="bootstrap" so operators can tell the table
+//     reflects defaults rather than an explicit config.
+func (s *Service) projectBranchProtection(ctx context.Context, commitSHA string) error {
+	// Determine existence by listing, not by ReadFile's error string —
+	// git CLIs surface "file missing" with various messages, and
+	// conflating every read error with "missing" would let a transient
+	// git failure silently relax protection (ADR-009 §1). Only when
+	// ListFiles confirms the path does not exist do we apply bootstrap
+	// defaults; every other failure propagates as a sync error.
+	files, listErr := s.git.ListFiles(ctx, commitSHA, BranchProtectionConfigPath)
+	if listErr != nil {
+		return fmt.Errorf("list branch-protection config at %s: %w", shortSHA(commitSHA), listErr)
+	}
+	if !containsPath(files, BranchProtectionConfigPath) {
+		// Config truly absent — seed bootstrap defaults.
+		return s.store.UpsertBranchProtectionRules(ctx, bootstrapRows(), "bootstrap")
+	}
+
+	content, readErr := s.git.ReadFile(ctx, commitSHA, BranchProtectionConfigPath)
+	if readErr != nil {
+		return fmt.Errorf("read branch-protection config at %s: %w", shortSHA(commitSHA), readErr)
+	}
+	if len(bytes.TrimSpace(content)) == 0 {
+		// A committed-but-empty file is treated as a malformed config,
+		// not as "missing". Falling back to bootstrap here could
+		// silently drop previously projected rules (e.g. `staging`,
+		// `release/*`) that an earlier non-empty commit installed.
+		// The parser's "file is empty" error propagates, preventing
+		// sync state from advancing past this commit.
+		return fmt.Errorf("parse branch-protection config at %s: file is empty", shortSHA(commitSHA))
+	}
+
+	cfg, err := bpconfig.Parse(bytes.NewReader(content))
+	if err != nil {
+		// Retain the existing ruleset — do NOT replace with empty.
+		// The caller counts this as a sync error so the commit is not
+		// advanced past the bad file.
+		return fmt.Errorf("parse branch-protection config at %s: %w", shortSHA(commitSHA), err)
+	}
+
+	rows := make([]store.BranchProtectionRuleProjection, 0, len(cfg.Rules))
+	for i, r := range cfg.Rules {
+		protections, err := json.Marshal(ruleKindsToStrings(r.Protections))
+		if err != nil {
+			return fmt.Errorf("marshal protections for %q: %w", r.Branch, err)
+		}
+		rows = append(rows, store.BranchProtectionRuleProjection{
+			BranchPattern: r.Branch,
+			RuleOrder:     i,
+			Protections:   protections,
+		})
+	}
+	return s.store.UpsertBranchProtectionRules(ctx, rows, commitSHA)
+}
+
+// bootstrapRows renders branchprotect.BootstrapDefaults() into the store
+// row shape so the projection handler can insert them the same way it
+// inserts user-authored rules.
+func bootstrapRows() []store.BranchProtectionRuleProjection {
+	defaults := branchprotect.BootstrapDefaults()
+	rows := make([]store.BranchProtectionRuleProjection, 0, len(defaults))
+	for i, r := range defaults {
+		protections, _ := json.Marshal(ruleKindsToStrings(r.Protections))
+		rows = append(rows, store.BranchProtectionRuleProjection{
+			BranchPattern: r.Branch,
+			RuleOrder:     i,
+			Protections:   protections,
+		})
+	}
+	return rows
+}
+
+func ruleKindsToStrings(kinds []bpconfig.RuleKind) []string {
+	out := make([]string, len(kinds))
+	for i, k := range kinds {
+		out[i] = string(k)
+	}
+	return out
+}
+
+func containsPath(paths []string, target string) bool {
+	for _, p := range paths {
+		if p == target {
+			return true
+		}
+	}
+	return false
 }
 
 func hashContent(content string) string {

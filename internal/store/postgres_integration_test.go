@@ -704,3 +704,73 @@ func TestEventSubscription_SigningSecretEncryption(t *testing.T) {
 
 	s.CleanupTestData(ctx, t)
 }
+
+func TestBranchProtectionRulesProjection(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	// Reset to a known state. The migration seeds bootstrap defaults,
+	// but a shared test DB may carry state from prior tests — so
+	// explicitly install the bootstrap row and assert from there.
+	bootstrap := []store.BranchProtectionRuleProjection{
+		{BranchPattern: "main", RuleOrder: 0, Protections: []byte(`["no-delete","no-direct-write"]`)},
+	}
+	if err := s.UpsertBranchProtectionRules(ctx, bootstrap, "bootstrap"); err != nil {
+		t.Fatalf("seed bootstrap: %v", err)
+	}
+	rows, err := s.ListBranchProtectionRules(ctx)
+	if err != nil {
+		t.Fatalf("ListBranchProtectionRules: %v", err)
+	}
+	if len(rows) != 1 || rows[0].BranchPattern != "main" || rows[0].SourceCommit != "bootstrap" {
+		t.Fatalf("bootstrap state wrong: %+v", rows)
+	}
+
+	// Upsert a three-rule config with a real source commit.
+	rules := []store.BranchProtectionRuleProjection{
+		{BranchPattern: "main", RuleOrder: 0, Protections: []byte(`["no-delete","no-direct-write"]`)},
+		{BranchPattern: "staging", RuleOrder: 1, Protections: []byte(`["no-delete"]`)},
+		{BranchPattern: "release/*", RuleOrder: 2, Protections: []byte(`["no-delete","no-direct-write"]`)},
+	}
+	if err := s.UpsertBranchProtectionRules(ctx, rules, "abc123def456"); err != nil {
+		t.Fatalf("UpsertBranchProtectionRules: %v", err)
+	}
+
+	rows, err = s.ListBranchProtectionRules(ctx)
+	if err != nil {
+		t.Fatalf("ListBranchProtectionRules (after upsert): %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	if rows[0].BranchPattern != "main" || rows[1].BranchPattern != "staging" || rows[2].BranchPattern != "release/*" {
+		t.Fatalf("row order wrong: %+v", rows)
+	}
+	if rows[0].SourceCommit != "abc123def456" {
+		t.Fatalf("source_commit = %q, want abc123def456", rows[0].SourceCommit)
+	}
+
+	// An atomic swap: upsert a smaller ruleset. The old `staging` and
+	// `release/*` rows must be gone, not shadowed by the old rows.
+	shorter := []store.BranchProtectionRuleProjection{
+		{BranchPattern: "main", RuleOrder: 0, Protections: []byte(`["no-delete"]`)},
+	}
+	if err := s.UpsertBranchProtectionRules(ctx, shorter, "def789"); err != nil {
+		t.Fatalf("UpsertBranchProtectionRules (shorter): %v", err)
+	}
+	rows, _ = s.ListBranchProtectionRules(ctx)
+	if len(rows) != 1 || rows[0].BranchPattern != "main" {
+		t.Fatalf("after shrink: %+v", rows)
+	}
+
+	// Explicit empty ruleset — author opts out entirely.
+	if err := s.UpsertBranchProtectionRules(ctx, nil, "ghi000"); err != nil {
+		t.Fatalf("UpsertBranchProtectionRules (empty): %v", err)
+	}
+	rows, _ = s.ListBranchProtectionRules(ctx)
+	if len(rows) != 0 {
+		t.Fatalf("empty upsert left %d rows", len(rows))
+	}
+
+	s.CleanupTestData(ctx, t)
+}
