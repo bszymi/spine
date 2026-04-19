@@ -2,9 +2,11 @@
 id: TASK-004
 type: Task
 title: "Seed /.spine/branch-protection.yaml in spine init-repo"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-18
+last_updated: 2026-04-19
+completed: 2026-04-19
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-002-policy-core/epic.md
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/bszymi/spine/internal/branchprotect"
 )
 
 // InitOpts configures init-repo behavior.
@@ -100,6 +102,15 @@ func InitRepo(repoPath string, opts ...InitOpts) error {
 		}
 	}
 
+	// Seed /.spine/branch-protection.yaml at the repo root — not under
+	// artifactBase. ADR-009 §2.2 fixes the path; the projection watches
+	// it literally and so does Git. Idempotent: existing content is
+	// preserved so operators who have customised the file upstream can
+	// re-run init-repo without losing their edits.
+	if err := seedBranchProtection(absPath); err != nil {
+		return err
+	}
+
 	// Commit on a branch unless --no-branch.
 	if !opt.NoBranch {
 		if err := commitOnBranch(absPath); err != nil {
@@ -166,6 +177,83 @@ func commitOnBranch(repoDir string) error {
 // autoPushDisabled checks the SPINE_GIT_AUTO_PUSH env var.
 func autoPushDisabled() bool {
 	return strings.EqualFold(os.Getenv("SPINE_GIT_AUTO_PUSH"), "false")
+}
+
+// seedBranchProtection writes /.spine/branch-protection.yaml with the
+// documented bootstrap defaults (ADR-009 §1), creating the /.spine/
+// directory if needed. Idempotent — existing content is preserved.
+//
+// The generated file is pinned to branchprotect.BootstrapDefaults() by
+// TestInitRepo_SeedBranchProtectionMatchesDefaults so the seed and
+// the policy layer cannot drift silently.
+func seedBranchProtection(repoPath string) error {
+	// Check .gitignore state BEFORE any filesystem work so a retry on a
+	// repo with an existing (but ignored) seed still surfaces the
+	// error rather than short-circuiting on the preserve-existing
+	// guard. The authoritative branch cannot be allowed to reach a
+	// state where the seed sits in the working tree but `git add .`
+	// silently skips it.
+	if ignored, err := isGitIgnored(repoPath, ".spine/branch-protection.yaml"); err == nil && ignored {
+		return fmt.Errorf(".spine/branch-protection.yaml is excluded by .gitignore; remove the `.spine/` pattern (a directory-level ignore cannot be overridden by a file-level negation) so the branch-protection config can be committed — ADR-009 §1 requires it on the authoritative branch")
+	}
+	dir := filepath.Join(repoPath, ".spine")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create .spine/: %w", err)
+	}
+	path := filepath.Join(dir, "branch-protection.yaml")
+	if _, err := os.Stat(path); err == nil {
+		return nil // preserve existing content
+	}
+	if err := os.WriteFile(path, []byte(seedBranchProtectionContent()), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// isGitIgnored reports whether Git would ignore the given relative
+// path in repoPath. Uses `git check-ignore -q`:
+//   - exit 0 → path is ignored
+//   - exit 1 → path is not ignored
+//   - any other error (not a git repo, etc.) is treated as "unknown"
+//     and the caller falls back to permissive behaviour.
+func isGitIgnored(repoPath, relPath string) (bool, error) {
+	cmd := exec.Command("git", "check-ignore", "-q", relPath)
+	cmd.Dir = repoPath
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
+// seedBranchProtectionContent renders branchprotect.BootstrapDefaults()
+// as YAML with a reader-facing header pointing at ADR-009. Kept as a
+// function rather than a const so the defaults live in exactly one
+// place (the policy package); the round-trip test pins the generated
+// content to BootstrapDefaults() so drift fails loudly.
+func seedBranchProtectionContent() string {
+	var b strings.Builder
+	b.WriteString("# Branch-protection rules. See /architecture/adr/ADR-009-branch-protection.md\n")
+	b.WriteString("# and /architecture/branch-protection-config-format.md for the schema.\n")
+	b.WriteString("# Edits flow through the protection-config governance workflow\n")
+	b.WriteString("# (INIT-018 EPIC-002 TASK-005); an operator override is the escape hatch.\n")
+	b.WriteString("version: 1\n")
+	b.WriteString("rules:\n")
+	for _, r := range branchprotect.BootstrapDefaults() {
+		fmt.Fprintf(&b, "  - branch: %s\n", r.Branch)
+		b.WriteString("    protections: [")
+		for i, k := range r.Protections {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(string(k))
+		}
+		b.WriteString("]\n")
+	}
+	return b.String()
 }
 
 // Seed content — minimal valid artifacts with YAML front matter.
