@@ -248,6 +248,30 @@ func TestOverride_WireTypeDecodesOverrideField(t *testing.T) {
 	}
 }
 
+// TestBootstrapDefaults_DirectCommitToMainRejected pins the ADR-009 §1
+// "repo without a .spine/branch-protection.yaml still has authoritative-
+// branch invariants" guarantee. A fresh deployment that has not yet
+// seeded the config file must still reject direct writes to main —
+// the policy falls back to BootstrapDefaults() when the rule source
+// returns (nil, nil), which it does for StaticRules(nil).
+func TestBootstrapDefaults_DirectCommitToMainRejected(t *testing.T) {
+	// Nil rules == unseeded source. branchprotect.Policy treats that as
+	// "apply BootstrapDefaults()" per effectiveRules in policy.go.
+	svc, _, _, _ := newServiceWithEvents(t, nil)
+
+	_, err := svc.Create(testCtx(), "governance/bootstrap.md", governanceContent)
+	if err == nil {
+		t.Fatal("expected direct commit to main on bootstrap-defaults repo to be rejected")
+	}
+	spineErr, ok := err.(*domain.SpineError)
+	if !ok {
+		t.Fatalf("expected *domain.SpineError, got %T", err)
+	}
+	if spineErr.Code != domain.ErrForbidden {
+		t.Errorf("error code = %q, want forbidden (bootstrap defaults protect main)", spineErr.Code)
+	}
+}
+
 // Ensure we don't accidentally wire branchprotect.Reason into Detail
 // via a type that breaks the JSON/detail round-trip. Reading and asserting
 // shape here catches a refactor that changes reasonsToDetail's type.

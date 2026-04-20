@@ -389,7 +389,7 @@ All Spine-managed branches use the `spine/` prefix to distinguish them from huma
 
 Human-managed branches (per [Naming Conventions](/governance/naming-conventions.md) §6) use the `INIT-XXX/EPIC-XXX/TASK-XXX-<slug>` pattern. These are not managed by the Artifact Service.
 
-Spine-managed branches (`spine/*`) are governed exclusively by the Artifact Service. Direct manipulation (including manual merges) via Git hosting platforms is not allowed for these branches.
+Spine-managed branches (`spine/*`) are governed exclusively by the Artifact Service. Direct manipulation of user-facing authoritative branches (e.g. `main`, `staging`, `release/*`) is **enforced** against direct writes and deletions by the branch-protection policy described in [ADR-009](/architecture/adr/ADR-009-branch-protection.md). Operators authoring `/.spine/branch-protection.yaml` are expected to scope rules to user-facing branches; the config parser does not currently reject patterns that would match `spine/*` (e.g. `spine/run/*`, `*/*/*`), so a pattern like that would accidentally gate Spine's own Run branches and block routine Orchestrator operations. Treat `spine/*` as a reserved namespace and do not target it from rules.
 
 ---
 
