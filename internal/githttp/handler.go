@@ -1,11 +1,18 @@
-// Package githttp provides a read-only Git smart HTTP endpoint that wraps
-// git-http-backend CGI. It allows runner containers to clone workspace
-// repositories via HTTP without needing SSH keys or external git hosting.
+// Package githttp provides a Git smart HTTP endpoint that wraps
+// git-http-backend CGI. Upload-pack (clone/fetch) is always served;
+// receive-pack (push) is gated by a config flag and, when enabled,
+// wrapped with an HTTP-layer pre-receive check that consults
+// branchprotect.Policy on every ref update (ADR-009 / EPIC-004).
 package githttp
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bszymi/spine/internal/branchprotect"
+	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
 )
 
@@ -47,6 +56,20 @@ type Handler struct {
 	// this change does not silently start accepting pushes.
 	receivePackEnabled bool
 
+	// policy evaluates every ref update on a push (ADR-009 / EPIC-004
+	// TASK-002). A nil policy is equivalent to a permissive policy —
+	// pushes pass through unchecked. Production wires the
+	// projection-backed policy; tests install whatever shape they need.
+	policy branchprotect.Policy
+
+	// maxPushBody caps the buffered portion of a receive-pack request
+	// body at the command-section boundary. The full push body can be
+	// very large (pack data), but the ref-update section is tiny — a
+	// few hundred bytes per ref. We read pkt-lines until the flush
+	// packet; this cap bounds the damage if a malicious client sends
+	// an endless command stream with no flush.
+	maxPushCommandBytes int
+
 	// mu protects ensuredRepos which tracks repos whose local
 	// http.receivepack config has been aligned with receivePackEnabled.
 	mu           sync.Mutex
@@ -72,11 +95,18 @@ type Config struct {
 	TrustedCIDRs []string
 
 	// ReceivePackEnabled turns on the git push endpoint
-	// (git-receive-pack). Default false. This is a bare on-off switch
-	// per EPIC-004 TASK-001 — no branch-protection logic runs here yet;
-	// TASK-002 wraps receive-pack with pre-receive enforcement. Upgrade
-	// paths must opt in explicitly.
+	// (git-receive-pack). Default false. Upgrade paths must opt in
+	// explicitly — an existing deployment that installs this change
+	// without setting the flag keeps the read-only behaviour it had
+	// before.
 	ReceivePackEnabled bool
+
+	// Policy evaluates every ref update on a push against the
+	// branch-protection ruleset (ADR-009 §3). When nil, pushes pass
+	// through with no protection — appropriate for local development
+	// and early-bootstrap deployments, but production should always
+	// wire a real policy or pushes to `main` will succeed unchecked.
+	Policy branchprotect.Policy
 }
 
 // NewHandler creates a new git HTTP handler.
@@ -106,15 +136,22 @@ func NewHandler(cfg Config) (*Handler, error) {
 	}
 
 	return &Handler{
-		resolveRepoPath:    cfg.ResolveRepoPath,
-		gitBackendPath:     backendPath,
-		sem:                make(chan struct{}, maxConcurrent),
-		opTimeout:          opTimeout,
-		trustedCIDRs:       trustedCIDRs,
-		receivePackEnabled: cfg.ReceivePackEnabled,
-		ensuredRepos:       make(map[string]bool),
+		resolveRepoPath:     cfg.ResolveRepoPath,
+		gitBackendPath:      backendPath,
+		sem:                 make(chan struct{}, maxConcurrent),
+		opTimeout:           opTimeout,
+		trustedCIDRs:        trustedCIDRs,
+		receivePackEnabled:  cfg.ReceivePackEnabled,
+		policy:              cfg.Policy,
+		maxPushCommandBytes: defaultMaxPushCommandBytes,
+		ensuredRepos:        make(map[string]bool),
 	}, nil
 }
+
+// defaultMaxPushCommandBytes caps the pre-PACK portion of a push body
+// we buffer for ref-update parsing. 1 MiB is generous — a push with
+// 1000 refs is ~200 KiB of command text.
+const defaultMaxPushCommandBytes = 1 << 20
 
 // ReceivePackEnabled reports whether git push is configured to reach
 // the backend. Exposed for assembly-site logging and tests; callers
@@ -210,6 +247,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pre-receive branch-protection check. Runs only on the POST
+	// /git-receive-pack request (the one that carries ref updates);
+	// GET info/refs?service=git-receive-pack is just the capability
+	// advertisement and carries no ref updates to evaluate.
+	if push && r.Method == http.MethodPost {
+		newBody, ok := h.prereceive(w, r, log)
+		if !ok {
+			return
+		}
+		r.Body = newBody
+	}
+
 	start := time.Now()
 
 	// Apply per-operation timeout.
@@ -236,6 +285,216 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"repo_path", repoPath,
 		"duration_ms", duration.Milliseconds(),
 	)
+}
+
+// prereceive intercepts the receive-pack request body, peels the
+// ref-update command section off the front, evaluates each update
+// against the handler's policy, and — if anything denies — writes a
+// git-shaped error response and returns ok=false. On allow it returns
+// a new Body that stitches the buffered command bytes back in front of
+// the still-pending PACK stream so CGI sees the full push unchanged.
+//
+// Pre-receive semantics are all-or-nothing: any Deny rejects the
+// whole push (no partial application). The response mirrors
+// git-http-backend's shape when a real pre-receive hook exits
+// non-zero so Git clients render the rejection as "remote: ..." lines
+// plus per-ref "ng" results.
+//
+// A nil policy is treated as permissive — we still parse the command
+// section (so a malformed push is rejected), but we do not gate any
+// update. This keeps early-bootstrap deployments functional and
+// matches how the API-path policy guards behave.
+func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.Logger) (io.ReadCloser, bool) {
+	// Buffer up to maxPushCommandBytes looking for the flush that
+	// terminates the command section. Anything after the flush is
+	// PACK data and must reach CGI unchanged — so we do not fully
+	// drain the body.
+	cmdBuf, pendingBody, err := readPushCommands(r.Body, h.maxPushCommandBytes)
+	if err != nil {
+		log.Warn("pre-receive parse failed",
+			"remote_addr", r.RemoteAddr, "error", err)
+		h.writeReceivePackDenial(w,
+			[]string{fmt.Sprintf("branch-protection: malformed push: %s", err)},
+			nil)
+		return nil, false
+	}
+
+	updates, err := parseRefUpdates(bytes.NewReader(cmdBuf))
+	if err != nil {
+		log.Warn("pre-receive parse failed",
+			"remote_addr", r.RemoteAddr, "error", err)
+		h.writeReceivePackDenial(w,
+			[]string{fmt.Sprintf("branch-protection: malformed push: %s", err)},
+			nil)
+		return nil, false
+	}
+
+	// Resolve the policy for this push. The context value wins — the
+	// gateway sets it per-request so a shared-mode deployment
+	// evaluates against the target workspace's rules, not a
+	// process-wide store captured at startup. The handler's Config
+	// policy is the fallback for single-mode and tests.
+	policy := policyFromContext(r.Context())
+	if policy == nil {
+		policy = h.policy
+	}
+
+	// Evaluate every non-spine/* ref. spine/* refs are out of scope
+	// for user-authored rules (ADR-009 §3) but still flow through CGI
+	// for audit/logging on the read side; we pass them through here
+	// without calling Policy.Evaluate so the API-path and Git-path
+	// audit surfaces remain consistent.
+	if policy != nil {
+		actor := actorForPush(r.Context())
+		traceID := traceIDForPush(r.Context())
+		var messages []string
+		for _, u := range updates {
+			if strings.HasPrefix(u.Ref, "refs/heads/spine/") || strings.HasPrefix(u.Ref, "spine/") {
+				continue
+			}
+			kind := branchprotect.OpDirectWrite
+			if u.IsDelete() {
+				kind = branchprotect.OpDelete
+			}
+			dec, reasons, err := policy.Evaluate(r.Context(), branchprotect.Request{
+				Branch:  u.Ref,
+				Kind:    kind,
+				Actor:   actor,
+				TraceID: traceID,
+			})
+			if err != nil {
+				log.Error("branch-protection evaluation failed, rejecting push",
+					"ref", u.Ref, "error", err)
+				messages = append(messages,
+					fmt.Sprintf("branch-protection: evaluation error on %s", trimRefsHeads(u.Ref)))
+				continue
+			}
+			if dec == branchprotect.DecisionDeny {
+				for _, rc := range reasons {
+					messages = append(messages,
+						fmt.Sprintf("branch-protection: %s", rc.Message))
+				}
+			}
+		}
+		if len(messages) > 0 {
+			log.Warn("pre-receive rejected push",
+				"remote_addr", r.RemoteAddr,
+				"refs", refPaths(updates),
+				"reasons", messages,
+			)
+			h.writeReceivePackDenial(w, messages, updates)
+			return nil, false
+		}
+	}
+
+	// All updates allowed. Stitch the buffered command bytes back in
+	// front of the remaining body so CGI sees the original stream.
+	combined := io.MultiReader(bytes.NewReader(cmdBuf), pendingBody)
+	return &combinedBody{r: combined, closer: pendingBody}, true
+}
+
+// combinedBody adapts io.Reader + io.Closer into an io.ReadCloser the
+// http.Request body field expects.
+type combinedBody struct {
+	r      io.Reader
+	closer io.Closer
+}
+
+func (c *combinedBody) Read(p []byte) (int, error) { return c.r.Read(p) }
+func (c *combinedBody) Close() error {
+	if c.closer == nil {
+		return nil
+	}
+	return c.closer.Close()
+}
+
+// readPushCommands reads pkt-lines from body, appending them to a
+// buffer, until the first flush-pkt (0000) is consumed. The buffer
+// includes the flush so the caller can replay it verbatim. The
+// returned body is the reader positioned just past the flush — that
+// is the PACK stream (plus the trailing response close on the client
+// side).
+func readPushCommands(body io.ReadCloser, maxBytes int) ([]byte, io.ReadCloser, error) {
+	var buf []byte
+	for {
+		if len(buf) >= maxBytes {
+			return nil, body, errors.New("command section exceeds size cap without a flush packet")
+		}
+		lenBytes := make([]byte, 4)
+		if _, err := io.ReadFull(body, lenBytes); err != nil {
+			return nil, body, fmt.Errorf("read pkt-line length: %w", err)
+		}
+		buf = append(buf, lenBytes...)
+		if string(lenBytes) == flushPkt {
+			return buf, body, nil
+		}
+		length, err := parseHex16(lenBytes)
+		if err != nil {
+			return nil, body, fmt.Errorf("parse pkt-line length %q: %w", lenBytes, err)
+		}
+		if length < 4 {
+			return nil, body, fmt.Errorf("pkt-line length %d below minimum (4)", length)
+		}
+		payload := make([]byte, length-4)
+		if _, err := io.ReadFull(body, payload); err != nil {
+			return nil, body, fmt.Errorf("read pkt-line payload: %w", err)
+		}
+		buf = append(buf, payload...)
+	}
+}
+
+// writeReceivePackDenial renders a receive-pack-result body that
+// rejects every update and surfaces the given messages as
+// "remote: ..." lines on the client. Uses HTTP 200 so Git's smart
+// HTTP client parses the sideband response rather than treating the
+// push as a connection error.
+func (h *Handler) writeReceivePackDenial(w http.ResponseWriter, messages []string, updates []RefUpdate) {
+	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buildReceivePackDenial(messages, updates))
+}
+
+// actorForPush returns the authenticated actor on the request, or an
+// empty Actor if none is attached. Branch-protection evaluation
+// tolerates an empty Actor (override defaults to false, role is the
+// zero-value role which is below operator) — this is the right
+// fail-closed behaviour when an unauthenticated push somehow reaches
+// the gate.
+func actorForPush(ctx context.Context) domain.Actor {
+	if a := domain.ActorFromContext(ctx); a != nil {
+		return *a
+	}
+	return domain.Actor{}
+}
+
+// traceIDForPush returns a trace id for the push. Prefers the incoming
+// request trace id; falls back to a fresh random id so override-audit
+// events always have something to correlate on.
+func traceIDForPush(ctx context.Context) string {
+	if id := observe.TraceID(ctx); id != "" {
+		return id
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return hex.EncodeToString(b[:])
+	}
+	return ""
+}
+
+// refPaths extracts the Ref field of each update for logging.
+func refPaths(updates []RefUpdate) []string {
+	out := make([]string, len(updates))
+	for i, u := range updates {
+		out[i] = u.Ref
+	}
+	return out
+}
+
+// trimRefsHeads strips the "refs/heads/" prefix for readability in
+// log/error messages; leaves non-branch refs alone.
+func trimRefsHeads(ref string) string {
+	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
 // ensureReceivePackConfig aligns the repo's local http.receivepack with
@@ -337,6 +596,27 @@ func findGitHTTPBackend() (string, error) {
 	}
 
 	return "", fmt.Errorf("git-http-backend not found in any known location")
+}
+
+// policyKey is the context key for a per-request branch-protection
+// policy. Gateways set this before delegating to the handler so each
+// push can be evaluated against the workspace's own rules (shared
+// mode has per-workspace stores, so a single fixed policy captured at
+// startup would mix or miss rules).
+type policyKey struct{}
+
+// WithPolicy returns a copy of ctx carrying the given policy. Reads
+// in prereceive prefer this value over the handler's default Policy,
+// letting the gateway scope each push to the target workspace.
+func WithPolicy(ctx context.Context, p branchprotect.Policy) context.Context {
+	return context.WithValue(ctx, policyKey{}, p)
+}
+
+// policyFromContext returns the per-request policy or nil if none is
+// attached.
+func policyFromContext(ctx context.Context) branchprotect.Policy {
+	p, _ := ctx.Value(policyKey{}).(branchprotect.Policy)
+	return p
 }
 
 // repoPathKey is the context key for the resolved repo filesystem path.

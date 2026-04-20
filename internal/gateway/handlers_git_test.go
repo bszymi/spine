@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/workspace"
 )
@@ -43,7 +44,7 @@ func TestValidateGitAuth_DoesNotLeakPoolRefs(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer bad-token")
 
 	for i := 0; i < 1000; i++ {
-		if err := s.validateGitAuth(req, cfg); err == nil {
+		if _, err := s.validateGitAuth(req, cfg); err == nil {
 			t.Fatalf("iteration %d: expected auth failure", i)
 		}
 	}
@@ -229,6 +230,116 @@ func TestIsGitProtocolPath(t *testing.T) {
 				t.Errorf("isGitProtocolPath(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestHandleGit_DisabledPushDoesNotResolvePolicy asserts that when
+// ReceivePackEnabled is false, the gateway does NOT call
+// GitPushPolicyFor for a push attempt. Otherwise a failing policy
+// resolver (e.g. an unreachable workspace DB) would mask the
+// documented 403 that names `SPINE_GIT_RECEIVE_PACK_ENABLED` behind
+// a 500, turning a misconfiguration into a confusing operator error.
+func TestHandleGit_DisabledPushDoesNotResolvePolicy(t *testing.T) {
+	repo := t.TempDir()
+	resolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-off",
+		RepoPath: repo,
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+		// Flag OFF — push is unreachable by design.
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	var resolverCalled bool
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: resolver,
+		devMode:    true,
+		gitPushPolicyFor: func(_ context.Context, _ string) (branchprotect.Policy, func(), error) {
+			resolverCalled = true
+			return branchprotect.NewPermissive(), func() {}, nil
+		},
+	}
+
+	req := httptest.NewRequest("POST", "/git/ws-off/git-receive-pack",
+		strings.NewReader(""))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-off")
+	rctx.URLParams.Add("*", "git-receive-pack")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if resolverCalled {
+		t.Error("policy resolver must not run when receive-pack is disabled")
+	}
+	// And the response must be the flag-off 403 so operators can
+	// find the switch.
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for disabled push, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
+		t.Errorf("expected 403 body to name the flag, got: %s", w.Body.String())
+	}
+}
+
+// TestHandleGit_PerWorkspacePolicyInvoked asserts that on a push
+// request, the gateway calls GitPushPolicyFor with the target
+// workspace ID (not a process-wide default). In shared mode each
+// workspace has its own branch-protection table; a single
+// captured-at-startup policy would mix or miss rules, so this wiring
+// is a correctness requirement, not an optimisation.
+func TestHandleGit_PerWorkspacePolicyInvoked(t *testing.T) {
+	repo := t.TempDir()
+	resolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-7",
+		RepoPath: repo,
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+		ReceivePackEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	var resolvedFor string
+	var released bool
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: resolver,
+		devMode:    true, // bypass auth so we reach the policy resolver
+		gitPushPolicyFor: func(_ context.Context, workspaceID string) (branchprotect.Policy, func(), error) {
+			resolvedFor = workspaceID
+			return branchprotect.NewPermissive(), func() { released = true }, nil
+		},
+	}
+
+	req := httptest.NewRequest("POST", "/git/ws-7/git-receive-pack",
+		strings.NewReader(""))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-7")
+	rctx.URLParams.Add("*", "git-receive-pack")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if resolvedFor != "ws-7" {
+		t.Errorf("expected policy resolved for ws-7, got %q", resolvedFor)
+	}
+	if !released {
+		t.Errorf("expected release callback to run for pool-held reference")
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/branchprotect"
+	"github.com/bszymi/spine/internal/branchprotect/config"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/projection"
@@ -58,13 +60,14 @@ func (f *fakeWSResolver) List(_ context.Context) ([]workspace.Config, error) {
 //   - "gw_auth"   — *auth.Service
 //   - "repo_path" — filesystem path to the test repo
 func setupGitHTTPServer() scenarioEngine.Step {
-	return setupGitHTTPServerWithOptions(false, false)
+	return setupGitHTTPServerWithOptions(false, false, nil)
 }
 
 // setupGitHTTPServerWithOptions is setupGitHTTPServer with knobs that a
 // handful of scenarios need (receive-pack gate, devMode for auth
-// bypass). The default helper keeps the previous read-only shape.
-func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool) scenarioEngine.Step {
+// bypass, branch-protection policy). The default helper keeps the
+// previous read-only shape.
+func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool, policy branchprotect.Policy) scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-git-http-server",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
@@ -96,6 +99,7 @@ func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool) scenarioEng
 				TrustedCIDRs:       []string{"127.0.0.0/8"},
 				MaxConcurrent:      5,
 				ReceivePackEnabled: receivePackEnabled,
+				Policy:             policy,
 			})
 			if err != nil {
 				return fmt.Errorf("create git HTTP handler: %w", err)
@@ -530,7 +534,7 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 			// devMode bypasses auth and keeps the test focused on
 			// the receive-pack gate. A separate unit test covers
 			// the push-requires-auth contract.
-			setupGitHTTPServerWithOptions(true, true),
+			setupGitHTTPServerWithOptions(true, true, nil),
 			enableGitHTTPExport(),
 			{
 				// Server is a non-bare repo; pushing to its
@@ -601,6 +605,105 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 						return fmt.Errorf("server should have refs/heads/spine/test/push after push, got: %w\n%s", err, out)
 					}
 
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// TestGitHTTP_PushRejectedByPreReceivePolicy covers EPIC-004 TASK-002
+// end-to-end: a push to a protected branch is rejected by the
+// pre-receive gate before touching the server ref. The client sees
+// the rejection as `remote: branch-protection: ...` lines on stderr
+// and git exits non-zero.
+func TestGitHTTP_PushRejectedByPreReceivePolicy(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-push-rejected-by-policy",
+		Description: "Pre-receive policy rejects a direct push to a protected branch; ref unchanged on server",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			// release/* is protected with no-direct-write. The client
+			// will try to push a new branch refs/heads/release/1.x; the
+			// gate must reject it before git-http-backend advances the
+			// ref.
+			setupGitHTTPServerWithOptions(true, true, branchprotect.New(
+				branchprotect.StaticRules([]config.Rule{{
+					Branch:      "release/*",
+					Protections: []config.RuleKind{config.KindNoDirectWrite},
+				}}),
+			)),
+			enableGitHTTPExport(),
+			{
+				Name: "clone-and-attempt-protected-push",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					base := sc.MustGet("gw_url").(string)
+					repoPath := sc.Repo.Dir
+					cloneDir := filepath.Join(sc.T.TempDir(), "rejected-clone")
+
+					if out, err := exec.Command("git", "clone", base+"/git", cloneDir).CombinedOutput(); err != nil {
+						return fmt.Errorf("git clone failed: %w\n%s", err, out)
+					}
+					for _, kv := range [][2]string{
+						{"user.email", "reject-test@spine.local"},
+						{"user.name", "Reject Test"},
+					} {
+						c := exec.Command("git", "config", kv[0], kv[1])
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git config %s: %w\n%s", kv[0], err, out)
+						}
+					}
+					// Create a protected branch and a commit on it.
+					for _, args := range [][]string{
+						{"checkout", "-b", "release/1.x"},
+					} {
+						c := exec.Command("git", args...)
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git %v: %w\n%s", args, err, out)
+						}
+					}
+					if err := os.WriteFile(filepath.Join(cloneDir, "release.md"), []byte("# Release\n"), 0o644); err != nil {
+						return fmt.Errorf("write file: %w", err)
+					}
+					for _, args := range [][]string{
+						{"add", "release.md"},
+						{"commit", "-m", "release bump"},
+					} {
+						c := exec.Command("git", args...)
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git %v: %w\n%s", args, err, out)
+						}
+					}
+
+					// The push MUST fail.
+					push := exec.Command("git", "push", "origin", "release/1.x")
+					push.Dir = cloneDir
+					out, err := push.CombinedOutput()
+					if err == nil {
+						return fmt.Errorf("expected git push to fail under no-direct-write policy, but it succeeded:\n%s", out)
+					}
+					// Client-side output must name the protection so
+					// operators know why their push bounced.
+					if !bytes.Contains(out, []byte("branch-protection")) {
+						return fmt.Errorf("expected remote branch-protection message, got:\n%s", out)
+					}
+					if !bytes.Contains(out, []byte("no-direct-write")) {
+						return fmt.Errorf("expected remote to name no-direct-write kind, got:\n%s", out)
+					}
+
+					// Server-side ref MUST NOT exist — pre-receive
+					// rejects all-or-nothing (ADR-009 §3).
+					show := exec.Command("git", "show-ref", "--verify", "refs/heads/release/1.x")
+					show.Dir = repoPath
+					if err := show.Run(); err == nil {
+						return fmt.Errorf("server must not have refs/heads/release/1.x after pre-receive denial")
+					}
 					return nil
 				},
 			},

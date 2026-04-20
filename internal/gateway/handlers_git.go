@@ -9,11 +9,25 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/workspace"
 )
+
+// GitPushPolicyFunc resolves the branch-protection policy for a git
+// push to a specific workspace. Shared-mode deployments must provide
+// one so each workspace evaluates against its own rules table — a
+// single process-wide policy captured at startup would mix rules from
+// the wrong database, leaving a bypass in shared mode (ADR-009 §3 /
+// EPIC-004 TASK-002).
+//
+// Returns the policy, a release callback the caller must run after
+// the push completes (e.g. to decrement ServicePool refs so pools do
+// not leak), and an error. The callback is never nil even on error —
+// callers can always defer it.
+type GitPushPolicyFunc func(ctx context.Context, workspaceID string) (branchprotect.Policy, func(), error)
 
 // mountGitRoutes adds the git smart HTTP routes to the router.
 // These routes have their own middleware chain — workspace is resolved from
@@ -85,19 +99,55 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	push := githttp.IsReceivePack(r)
 	pushDisabledShortCircuit := push && !s.gitHTTP.ReceivePackEnabled()
 	trustedBypass := !push && s.gitHTTP.IsTrustedIP(r.RemoteAddr)
+	var actor *domain.Actor
 	if !pushDisabledShortCircuit && !trustedBypass && !s.devMode {
-		if err := s.validateGitAuth(r, cfg); err != nil {
+		a, err := s.validateGitAuth(r, cfg)
+		if err != nil {
 			WriteError(w, err)
 			return
 		}
+		actor = a
 	}
 
 	// Rewrite request path to just the git-specific portion.
 	r.URL.Path = gitPath
 
-	// Set repo path in context and delegate to git handler.
+	// Set repo path in context and delegate to git handler. The actor
+	// is attached so the handler's pre-receive check can pin the
+	// caller identity on every ref update (EPIC-004 TASK-002).
 	ctx := githttp.WithRepoPath(r.Context(), cfg.RepoPath)
 	ctx = observe.WithWorkspaceID(ctx, cfg.ID)
+	if actor != nil {
+		ctx = domain.WithActor(ctx, actor)
+	}
+
+	// Resolve the workspace-scoped branch-protection policy and
+	// attach it to the context. Scoped narrowly to:
+	//   - POST /git-receive-pack (the only path that actually
+	//     carries ref updates to evaluate — info/refs for push is
+	//     just capability advertisement),
+	//   - with the flag on (a disabled-push attempt falls through
+	//     to the handler's 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED`
+	//     guidance — resolving the policy here would hide that
+	//     message behind a DB-lookup error),
+	//   - and only when a resolver is configured.
+	//
+	// Release must run after ServeHTTP so any ServicePool ref taken
+	// by the resolver is held for the life of the push.
+	if push && r.Method == http.MethodPost && s.gitHTTP.ReceivePackEnabled() && s.gitPushPolicyFor != nil {
+		policy, release, err := s.gitPushPolicyFor(ctx, cfg.ID)
+		defer release()
+		if err != nil {
+			observe.Logger(ctx).Error("resolve push policy failed",
+				"workspace_id", cfg.ID, "error", err)
+			WriteError(w, domain.NewError(domain.ErrInternal, "branch-protection policy unavailable"))
+			return
+		}
+		if policy != nil {
+			ctx = githttp.WithPolicy(ctx, policy)
+		}
+	}
+
 	s.gitHTTP.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -171,18 +221,21 @@ func (s *Server) resolveGitWorkspace(ctx context.Context, workspaceID string) (*
 }
 
 // validateGitAuth validates the bearer token for non-trusted git requests.
-func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) error {
+// Returns the authenticated actor so the caller can attach it to the
+// request context — the push path's pre-receive check needs the actor
+// identity to evaluate branch-protection rules.
+func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domain.Actor, error) {
 	header := r.Header.Get("Authorization")
 	if header == "" {
-		return domain.NewError(domain.ErrUnauthorized, "authorization required for external git access")
+		return nil, domain.NewError(domain.ErrUnauthorized, "authorization required for external git access")
 	}
 
 	if len(header) < 7 || !strings.EqualFold(header[:7], "bearer ") {
-		return domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
+		return nil, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
 	}
 	token := header[7:]
 	if token == "" {
-		return domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
+		return nil, domain.NewError(domain.ErrUnauthorized, "invalid authorization header format")
 	}
 
 	// Use workspace-scoped auth if available, otherwise server-level.
@@ -202,9 +255,8 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) error {
 	}
 
 	if authSvc == nil {
-		return domain.NewError(domain.ErrUnavailable, "authentication not configured")
+		return nil, domain.NewError(domain.ErrUnavailable, "authentication not configured")
 	}
 
-	_, err := authSvc.ValidateToken(r.Context(), token)
-	return err
+	return authSvc.ValidateToken(r.Context(), token)
 }
