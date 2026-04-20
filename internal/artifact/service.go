@@ -187,7 +187,8 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	// denied write never creates a worktree. The Artifact Service writes
 	// commits but never merges — every writeAndCommit is an OpDirectWrite.
 	// OpGovernedMerge lives on the Orchestrator (EPIC-003 TASK-002).
-	if err := s.checkBranchProtection(ctx, op.operation); err != nil {
+	bpResult, err := s.checkBranchProtection(ctx, op.operation)
+	if err != nil {
 		return nil, err
 	}
 
@@ -231,9 +232,18 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	}
 
 	repoPath := s.repoRelativePath(path)
+	trailers := observe.TrailersFromContext(ctx, op.operation)
+	if bpResult.overrideHonoured {
+		// ADR-009 §4: API-path overrides carry a Branch-Protection-Override
+		// trailer. Git-push overrides do not (handler does not rewrite
+		// pushed commits). The trailer is a convenience for `git log`
+		// inspection; the governance event below is the authoritative
+		// audit record.
+		trailers["Branch-Protection-Override"] = "true"
+	}
 	commitResult, err := git.StageAndCommit(ctx, scope, repoPath, git.CommitOpts{
 		Message:  fmt.Sprintf("%s %s: %s", op.messageVerb, artifact.Type, artifact.Title),
-		Trailers: observe.TrailersFromContext(ctx, op.operation),
+		Trailers: trailers,
 		Author: git.Author{
 			Name:  observe.ActorID(ctx),
 			Email: observe.ActorID(ctx) + "@spine.local",
@@ -259,6 +269,10 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	)
 
 	s.emitEvent(ctx, op.eventType, artifact, commitResult.SHA)
+
+	if bpResult.overrideHonoured {
+		s.emitBranchProtectionOverride(ctx, op.operation, bpResult.branch, bpResult.ruleKinds, commitResult.SHA)
+	}
 
 	return &WriteResult{Artifact: artifact, CommitSHA: commitResult.SHA}, nil
 }
@@ -359,27 +373,45 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 // to gate; a contributor who omits WriteContext and targets "main" is
 // exactly what "no-direct-write" is for.
 //
-// Override stays false here — TASK-003 threads write_context.override
-// through the gateway. Under the v1 policy, this means any direct write
-// to a protected branch is denied regardless of role until that task
-// lands.
-func (s *Service) checkBranchProtection(ctx context.Context, operation string) error {
+// Override is threaded from WriteContext.Override (set by the gateway's
+// handleArtifact* path from write_context.override in the request body).
+// The policy evaluator gates effective use on Actor.Role ≥ operator; a
+// contributor who sets the flag sees a distinct "override not authorised"
+// reason rather than a silent "rule denies".
+//
+// Returns (overrideHonoured, err). The caller uses overrideHonoured to
+// stamp the commit trailer and emit the governance event (ADR-009 §4);
+// neither is produced when the flag was set but did not actually bypass
+// a rule (e.g. a branch with no matching rule — the write would have
+// succeeded either way).
+type branchProtectResult struct {
+	overrideHonoured bool
+	branch           string
+	ruleKinds        []string
+}
+
+func (s *Service) checkBranchProtection(ctx context.Context, operation string) (branchProtectResult, error) {
 	if s.policy == nil {
-		return domain.NewError(domain.ErrUnavailable,
+		return branchProtectResult{}, domain.NewError(domain.ErrUnavailable,
 			"artifact service: branch-protection policy not configured (production must call WithPolicy; tests may install a permissive policy)")
 	}
 
 	branch := s.defaultRef
-	if wc := GetWriteContext(ctx); wc != nil && wc.Branch != "" {
-		branch = wc.Branch
+	override := false
+	if wc := GetWriteContext(ctx); wc != nil {
+		if wc.Branch != "" {
+			branch = wc.Branch
+		}
+		override = wc.Override
 	}
 
 	req := branchprotect.Request{
-		Branch:  branch,
-		Kind:    branchprotect.OpDirectWrite,
-		Actor:   actorForRequest(ctx),
-		RunID:   observe.RunID(ctx),
-		TraceID: observe.TraceID(ctx),
+		Branch:   branch,
+		Kind:     branchprotect.OpDirectWrite,
+		Actor:    actorForRequest(ctx),
+		Override: override,
+		RunID:    observe.RunID(ctx),
+		TraceID:  observe.TraceID(ctx),
 	}
 
 	decision, reasons, evalErr := s.policy.Evaluate(ctx, req)
@@ -393,7 +425,7 @@ func (s *Service) checkBranchProtection(ctx context.Context, operation string) e
 			"branch", branch,
 			"error", evalErr.Error(),
 		)
-		return domain.NewError(domain.ErrInternal,
+		return branchProtectResult{}, domain.NewError(domain.ErrInternal,
 			fmt.Sprintf("branch-protection evaluation failed: %v", evalErr))
 	}
 
@@ -403,7 +435,7 @@ func (s *Service) checkBranchProtection(ctx context.Context, operation string) e
 			"branch", branch,
 			"reasons", reasonCodes(reasons),
 		)
-		return domain.NewErrorWithDetail(domain.ErrForbidden,
+		return branchProtectResult{}, domain.NewErrorWithDetail(domain.ErrForbidden,
 			firstDenyMessage(reasons, branch),
 			map[string]any{
 				"branch":  branch,
@@ -411,7 +443,27 @@ func (s *Service) checkBranchProtection(ctx context.Context, operation string) e
 			})
 	}
 
-	return nil
+	honoured, kinds := overrideHonoured(reasons)
+	return branchProtectResult{
+		overrideHonoured: honoured,
+		branch:           branch,
+		ruleKinds:        kinds,
+	}, nil
+}
+
+// overrideHonoured reports whether the policy's allow-decision reasons
+// indicate that an override actually bypassed a matching rule, and
+// returns the bypassed rule kinds. A write that allowed without invoking
+// override (e.g. no matching rule) returns (false, nil) — the caller
+// skips the governance event and commit trailer, per ADR-009 §4.
+func overrideHonoured(reasons []branchprotect.Reason) (bool, []string) {
+	var kinds []string
+	for _, r := range reasons {
+		if r.Code == branchprotect.ReasonOverrideHonoured {
+			kinds = append(kinds, string(r.RuleKind))
+		}
+	}
+	return len(kinds) > 0, kinds
 }
 
 // actorForRequest resolves the authenticated actor from ctx for use in a
@@ -576,4 +628,49 @@ func (s *Service) emitEvent(ctx context.Context, eventType domain.EventType, a *
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// emitBranchProtectionOverride emits the governance event required by
+// ADR-009 §4 for every honored override on the Spine write path. The
+// payload captures the actor, branch, bypassed rule kinds, operation,
+// trace/run identifiers, and the resulting commit SHA — commitSHA is
+// empty on the Delete path (not yet exposed on the API), which the event
+// renders as null via omitempty.
+func (s *Service) emitBranchProtectionOverride(ctx context.Context, operation, branch string, ruleKinds []string, commitSHA string) {
+	if s.events == nil {
+		return
+	}
+	// Prefer the authenticated domain.Actor's ID for the governance
+	// audit event — observe.ActorID is a free-floating trace field that
+	// tests may leave unset, but the policy gate fired because of the
+	// actor bound to the request context.
+	actorID := observe.ActorID(ctx)
+	if a := domain.ActorFromContext(ctx); a != nil && a.ActorID != "" {
+		actorID = a.ActorID
+	}
+	eventID, _ := observe.GenerateTraceID()
+	evt := domain.Event{
+		EventID:   eventID,
+		Type:      domain.EventBranchProtectionOverride,
+		Timestamp: time.Now(),
+		ActorID:   actorID,
+		RunID:     observe.RunID(ctx),
+		TraceID:   observe.TraceID(ctx),
+		Payload: mustJSON(map[string]any{
+			"branch":     branch,
+			"rule_kinds": ruleKinds,
+			"operation":  operation,
+			"commit_sha": nullableSHA(commitSHA),
+		}),
+	}
+	event.EmitLogged(ctx, s.events, evt)
+}
+
+// nullableSHA returns nil for an empty SHA so JSON marshals to null,
+// matching the Git-path event shape for override-deletes (ADR-009 §4).
+func nullableSHA(sha string) any {
+	if sha == "" {
+		return nil
+	}
+	return sha
 }

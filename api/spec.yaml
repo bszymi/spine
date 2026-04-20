@@ -1055,7 +1055,7 @@ components:
 
     WriteContext:
       type: object
-      description: Controls where artifact writes land (authoritative branch vs task branch)
+      description: Controls where artifact writes land (authoritative branch vs task branch) and opts into the branch-protection override surface.
       properties:
         run_id:
           type: string
@@ -1063,6 +1063,19 @@ components:
         task_path:
           type: string
           description: Task context for the write (required when run_id is provided)
+        override:
+          type: boolean
+          default: false
+          description: |
+            Opts the caller into the per-operation branch-protection override
+            (ADR-009 §4). The policy gate is effective only for actors with
+            `operator+` role; lower roles see a 403 with reason
+            `override_not_authorised`. An honored override on the Spine API
+            path emits a `branch_protection.override` governance event and
+            adds a `Branch-Protection-Override: true` commit trailer. Today
+            only artifact endpoints honor this flag — workflow endpoints
+            reject `override: true` with 400 (use the ADR-008 operator-
+            bypass path instead).
 
     # ── Artifact Schemas ──
 

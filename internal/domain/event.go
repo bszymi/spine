@@ -41,6 +41,13 @@ const (
 	EventAssignmentFailed     EventType = "step_assignment_failed"
 	EventTaskUnblocked        EventType = "task_unblocked"
 	EventTaskReleased         EventType = "task_released"
+	// EventBranchProtectionOverride is emitted on every honored branch-
+	// protection override (ADR-009 §4). Payload names the branch,
+	// operation, rule kinds that the override bypassed, and — on the
+	// Spine API path — the resulting commit SHA. commit_sha is null for
+	// deletions and for ref pushes that do not produce a new commit in-
+	// process.
+	EventBranchProtectionOverride EventType = "branch_protection.override"
 )
 
 // Event represents a domain or operational event emitted by the system.

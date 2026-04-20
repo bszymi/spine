@@ -598,12 +598,16 @@ func parseLogOutput(output string) []CommitInfo {
 
 		if len(lines) > 4 {
 			ci.Message = strings.TrimSpace(lines[4])
-			// Extract trailers from message
+			// Extract trailers from message. Whitelist kept in sync with
+			// TrailerOrder (branchwrite.go) so trailers the producer side
+			// can write are also surfaced through this parser.
 			for _, msgLine := range strings.Split(lines[4], "\n") {
 				msgLine = strings.TrimSpace(msgLine)
 				if idx := strings.Index(msgLine, ": "); idx > 0 {
 					key := msgLine[:idx]
-					if key == "Trace-ID" || key == "Actor-ID" || key == "Run-ID" || key == "Operation" {
+					switch key {
+					case "Trace-ID", "Actor-ID", "Run-ID", "Operation",
+						"Workflow-Bypass", "Branch-Protection-Override":
 						ci.Trailers[key] = msgLine[idx+2:]
 					}
 				}

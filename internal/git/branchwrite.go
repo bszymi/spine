@@ -32,7 +32,14 @@ func (s *WriteScope) Cleanup() {
 // TrailerOrder is the fixed order used when appending trailers to commit
 // messages. Preserves the pre-extraction ordering across artifact.Service
 // and workflow.Service; extra keys are silently skipped.
-var TrailerOrder = []string{"Trace-ID", "Actor-ID", "Run-ID", "Operation", "Workflow-Bypass"}
+var TrailerOrder = []string{
+	"Trace-ID",
+	"Actor-ID",
+	"Run-ID",
+	"Operation",
+	"Workflow-Bypass",
+	"Branch-Protection-Override",
+}
 
 // EnterBranch prepares a WriteScope for a write operation.
 //

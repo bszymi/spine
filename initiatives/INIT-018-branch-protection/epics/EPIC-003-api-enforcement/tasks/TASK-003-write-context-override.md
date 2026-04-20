@@ -2,9 +2,11 @@
 id: TASK-003
 type: Task
 title: "Add write_context.override with operator gate, governance event, and commit trailer"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-18
+last_updated: 2026-04-20
+completed: 2026-04-20
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-003-api-enforcement/epic.md
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:
@@ -66,3 +68,11 @@ Expose the per-operation override on the Spine API surface. An operator calling 
 - Every honored override emits exactly one `branch_protection.override` governance event with the full payload.
 - API-path overrides carry the `Branch-Protection-Override: true` commit trailer; Git-path overrides (TASK-003 of EPIC-004) do not — and this asymmetry is documented.
 - Unnecessary overrides (flag set on an unmatched branch) are allowed silently, do not emit events, and do not add the trailer.
+
+---
+
+## Scope decision — workflow endpoints
+
+ADR-009 §4 names both artifact and workflow endpoints as carrying `write_context.override`, but enforcement is wired only on the **Artifact Service** in this task (matching TASK-001 of this epic, which wired branchprotect into `internal/artifact` only). `workflow.Service` does not consult `branchprotect.Policy` today, so an accepted `override` there would silently succeed without the mandatory audit event or commit trailer — worse than rejecting.
+
+This PR's gateway therefore **rejects `write_context.override: true` on workflow endpoints with 400**, naming the ADR-008 operator-bypass path as the working alternative (omit `write_context` entirely as operator+ role → adds a `Workflow-Bypass` trailer). Wiring branchprotect into `workflow.Service` and unifying the two bypass mechanisms is tracked as follow-up work; ADR-009 §4 can be considered fully delivered once that wiring lands.

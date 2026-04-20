@@ -9,6 +9,11 @@ type writeContextKey struct{}
 // instead of the current branch (authoritative/main).
 type WriteContext struct {
 	Branch string // Target branch for writes (e.g., "run-abc123")
+	// Override opts the caller into the branch-protection override
+	// surface for this operation (ADR-009 §4). The policy evaluator
+	// gates effective use on Actor.Role ≥ operator; setting this flag
+	// below operator rank is rejected with a distinct reason.
+	Override bool
 }
 
 // WithWriteContext attaches a WriteContext to the given context.
