@@ -2,7 +2,7 @@
 id: EPIC-004
 type: Epic
 title: "Branch Protection — Git-Path Enforcement"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:
   - type: parent
