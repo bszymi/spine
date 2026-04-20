@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/actor"
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/git"
@@ -258,6 +259,7 @@ func TestEndToEndExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create orchestrator: %v", err)
 	}
+	orch.WithBranchProtectPolicy(branchprotect.NewPermissive())
 
 	ctx := context.Background()
 

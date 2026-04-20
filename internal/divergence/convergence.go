@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
@@ -175,6 +176,14 @@ func (s *Service) CommitConvergence(ctx context.Context, divCtx *domain.Divergen
 	// Merge selected branch artifacts to the task branch
 	for _, branchID := range s.selectedBranchIDs(output) {
 		gitBranch := fmt.Sprintf("spine/%s/%s/%s", divCtx.RunID, divCtx.DivergenceID, extractBranchSuffix(branchID, divCtx.DivergenceID))
+		// Route through branch-protection policy (ADR-009 §3) for audit
+		// consistency. Divergence merges target the parent run branch
+		// (spine/*), so no user rule matches — the check is a no-op at
+		// the decision level but keeps the audit trail symmetric with
+		// the MergeRunBranch guard.
+		if err := s.evaluateBranchOp(ctx, gitBranch, branchprotect.OpGovernedMerge, divCtx.RunID); err != nil {
+			return err
+		}
 		if _, err := s.git.Merge(ctx, git.MergeOpts{
 			Source:   gitBranch,
 			Strategy: "merge-commit",

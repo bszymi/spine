@@ -345,6 +345,11 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	var divSvc *divergence.Service
 	if st != nil {
 		divSvc = divergence.NewService(st, gitClient, eventRouter)
+		// Same projection-backed policy wired into the Artifact Service
+		// and Orchestrator above. spine/* divergence branches never
+		// match user rules, so the check is audit-consistency only,
+		// but wiring it keeps the guard symmetric (ADR-009 §3).
+		divSvc.WithBranchProtectPolicy(branchprotect.New(bpprojection.New(st)))
 	}
 
 	closeAll := func() {

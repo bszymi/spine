@@ -2,9 +2,11 @@
 id: TASK-002
 type: Task
 title: "Wire Policy.Evaluate into Orchestrator merge and divergence paths"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-18
+last_updated: 2026-04-20
+completed: 2026-04-20
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-003-api-enforcement/epic.md
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:

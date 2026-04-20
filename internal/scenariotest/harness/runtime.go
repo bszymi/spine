@@ -154,6 +154,11 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 		orch.WithWorkflowWriter(rt.Workflows)
 		orch.WithBlockingStore(db.Store)
 		orch.WithAssignmentStore(db.Store)
+		// Scenarios do not exercise branch-protection denial paths on
+		// MergeRunBranch — OpGovernedMerge is allowed unconditionally —
+		// so a permissive policy matches the scenario harness's
+		// intent: "route through the guard, but do not block".
+		orch.WithBranchProtectPolicy(branchprotect.NewPermissive())
 		rt.Orchestrator = orch
 	}
 

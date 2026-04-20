@@ -1,6 +1,10 @@
 package engine
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/bszymi/spine/internal/branchprotect"
+)
 
 // Orchestrator wires the workflow engine, store, actor gateway, artifact service,
 // event router, and Git client into a single execution coordinator. It manages
@@ -23,6 +27,7 @@ type Orchestrator struct {
 	workflowWriter WorkflowWriter         // optional, required for workflow planning runs (ADR-008)
 	blocking       BlockingStore          // optional, nil if not configured
 	collision      CollisionHandler       // optional, nil if not configured
+	policy         branchprotect.Policy   // branch-protection guard for MergeRunBranch (ADR-009 §3)
 }
 
 // New creates an Orchestrator with all required dependencies.
@@ -117,4 +122,19 @@ func (o *Orchestrator) WithBlockingStore(b BlockingStore) {
 // WithCollisionHandler enables artifact ID collision detection and renumbering during merge.
 func (o *Orchestrator) WithCollisionHandler(c CollisionHandler) {
 	o.collision = c
+}
+
+// WithBranchProtectPolicy installs the branch-protection policy consulted by
+// MergeRunBranch before advancing the authoritative ref (ADR-009 §3). A nil
+// policy is fail-closed at the merge boundary — MergeRunBranch refuses to
+// merge until one is wired. Production wires the projection-backed policy
+// in cmd/spine; tests install branchprotect.NewPermissive() (or a specific
+// rule source) to match the behaviour they want to exercise.
+//
+// spine/* branches (run branches, divergence branches, scheduler-managed
+// refs) are out of scope of user-authored rules by construction (ADR-009 §3),
+// so there is no guard on the run-branch-creation / divergence paths; the
+// only authoritative ref the Orchestrator advances is main-via-merge.
+func (o *Orchestrator) WithBranchProtectPolicy(p branchprotect.Policy) {
+	o.policy = p
 }
