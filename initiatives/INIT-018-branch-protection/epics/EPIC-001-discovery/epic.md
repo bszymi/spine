@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: "Branch Protection — Discovery"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:
   - type: parent

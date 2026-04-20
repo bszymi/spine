@@ -2,7 +2,7 @@
 id: INIT-018
 type: Initiative
 title: Branch Protection
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-18
 links:
