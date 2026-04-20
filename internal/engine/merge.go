@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/git"
@@ -352,65 +353,152 @@ func firstMergeDenyMessage(reasons []branchprotect.Reason, runID string) string 
 // statusFieldRegexp matches the status line in YAML front matter.
 var statusFieldRegexp = regexp.MustCompile(`(?m)^status:\s*.*$`)
 
-// applyCommitStatus rewrites the artifact file's frontmatter status on the
-// run branch before merging. This ensures the merged file on main reflects
-// the workflow outcome's commit.status (e.g., Draft → Pending).
+// applyCommitStatus rewrites frontmatter status on every artifact file added
+// on the run branch vs the authoritative branch, and lands all rewrites in a
+// single commit on the branch. This cascade is required by TASK-016: a
+// planning run that adds a parent artifact plus child artifacts via
+// POST /artifacts/add (or direct file writes on the branch) should get one
+// operator review = one status transition for the whole planned package.
+// Without the cascade, children are merged to main as Draft while only
+// run.TaskPath gets rewritten.
+//
+// Enumeration is best-effort: if Diff fails, the cascade degrades to the
+// original single-artifact behaviour on run.TaskPath so the primary contract
+// is preserved.
 func (o *Orchestrator) applyCommitStatus(ctx context.Context, run *domain.Run, newStatus string) error {
 	log := observe.Logger(ctx)
 
-	// Read the artifact file from the branch.
-	content, err := o.git.ReadFile(ctx, run.BranchName, run.TaskPath)
-	if err != nil {
-		return fmt.Errorf("read artifact on branch %s: %w", run.BranchName, err)
+	paths := o.cascadePaths(ctx, run)
+
+	updates := make(map[string]string, len(paths))
+	for _, path := range paths {
+		content, err := o.git.ReadFile(ctx, run.BranchName, path)
+		if err != nil {
+			if path == run.TaskPath {
+				return fmt.Errorf("read artifact on branch %s: %w", run.BranchName, err)
+			}
+			log.Warn("skip cascade path, read failed",
+				"run_id", run.RunID, "artifact_path", path, "error", err)
+			continue
+		}
+		// For non-primary paths, require the file to parse as a Spine
+		// artifact before rewriting. This prevents commit.status from
+		// clobbering the `status:` field on incidental Markdown files
+		// (e.g., deliverables with their own YAML frontmatter) that a
+		// run happens to add on the branch.
+		if path != run.TaskPath && !artifact.IsArtifact(content) {
+			continue
+		}
+		original := string(content)
+		updated, err := rewriteStatusField(original, newStatus, path)
+		if err != nil {
+			if path == run.TaskPath {
+				return err
+			}
+			continue
+		}
+		if updated == original {
+			continue
+		}
+		updates[path] = updated
 	}
 
-	// Rewrite the status field in the front matter.
-	original := string(content)
-	if !strings.HasPrefix(original, "---") {
-		return fmt.Errorf("artifact %s has no front matter", run.TaskPath)
-	}
-	endIdx := strings.Index(original[3:], "---")
-	if endIdx == -1 {
-		return fmt.Errorf("artifact %s has unclosed front matter", run.TaskPath)
-	}
-	endIdx += 3
-
-	frontMatter := original[:endIdx]
-	rest := original[endIdx:]
-	updated := statusFieldRegexp.ReplaceAllString(frontMatter, "status: "+newStatus) + rest
-
-	if updated == original {
-		log.Info("artifact status already matches, no rewrite needed",
+	if len(updates) == 0 {
+		log.Info("artifact statuses already match, no cascade commit needed",
 			"run_id", run.RunID, "status", newStatus)
 		return nil
 	}
 
-	// Checkout the branch, write the updated file, commit, then return to main.
 	if err := o.git.Checkout(ctx, run.BranchName); err != nil {
 		return fmt.Errorf("checkout branch: %w", err)
 	}
-
-	if err := o.git.WriteAndStageFile(ctx, run.TaskPath, updated); err != nil {
-		_ = o.git.Checkout(ctx, "main")
-		return fmt.Errorf("write updated artifact: %w", err)
+	for path, content := range updates {
+		if err := o.git.WriteAndStageFile(ctx, path, content); err != nil {
+			_ = o.git.Checkout(ctx, authoritativeBranch)
+			return fmt.Errorf("write updated artifact %s: %w", path, err)
+		}
 	}
-
+	msg := fmt.Sprintf("Update artifact status to %s", newStatus)
+	if len(updates) > 1 {
+		msg = fmt.Sprintf("Cascade artifact status to %s across %d artifacts", newStatus, len(updates))
+	}
 	if _, err := o.git.Commit(ctx, git.CommitOpts{
-		Message: fmt.Sprintf("Update artifact status to %s", newStatus),
+		Message: msg,
 		Trailers: map[string]string{
 			"Run-ID":   run.RunID,
 			"Trace-ID": run.TraceID,
 		},
 	}); err != nil {
-		_ = o.git.Checkout(ctx, "main")
+		_ = o.git.Checkout(ctx, authoritativeBranch)
 		return fmt.Errorf("commit status update: %w", err)
 	}
-
-	if err := o.git.Checkout(ctx, "main"); err != nil {
+	if err := o.git.Checkout(ctx, authoritativeBranch); err != nil {
 		return fmt.Errorf("checkout main after status update: %w", err)
 	}
 
-	log.Info("artifact status updated on branch",
-		"run_id", run.RunID, "path", run.TaskPath, "status", newStatus)
+	for path := range updates {
+		log.Info("artifact status updated on branch",
+			"run_id", run.RunID, "artifact_path", path, "new_status", newStatus)
+	}
 	return nil
+}
+
+// cascadePaths returns run.TaskPath plus any additional .md files the run
+// added on its branch since it diverged from the authoritative branch. The
+// diff is scoped to the merge-base, not to the current tip of main — if
+// main has advanced while the run was in-flight (e.g. another run deleted
+// an unrelated artifact), diffing against main's tip would misreport that
+// deletion as "added on the run branch" and the cascade would resurrect
+// (or conflict on) the deletion at merge time.
+//
+// On any Diff/MergeBase failure the cascade degrades to just the primary
+// path so applyCommitStatus still meets its original single-artifact
+// contract.
+func (o *Orchestrator) cascadePaths(ctx context.Context, run *domain.Run) []string {
+	paths := []string{run.TaskPath}
+	base, err := o.git.MergeBase(ctx, authoritativeBranch, run.BranchName)
+	if err != nil || base == "" {
+		observe.Logger(ctx).Warn("merge-base for status cascade failed, falling back to primary only",
+			"run_id", run.RunID, "error", err)
+		return paths
+	}
+	diffs, err := o.git.Diff(ctx, base, run.BranchName)
+	if err != nil {
+		observe.Logger(ctx).Warn("diff for status cascade failed, falling back to primary only",
+			"run_id", run.RunID, "error", err)
+		return paths
+	}
+	seen := map[string]struct{}{run.TaskPath: {}}
+	for _, d := range diffs {
+		if d.Status != "added" {
+			continue
+		}
+		if !strings.HasSuffix(d.Path, ".md") {
+			continue
+		}
+		if _, ok := seen[d.Path]; ok {
+			continue
+		}
+		seen[d.Path] = struct{}{}
+		paths = append(paths, d.Path)
+	}
+	return paths
+}
+
+// rewriteStatusField replaces the status line in YAML frontmatter. Returns
+// the original content unchanged when the status already matches. Returns
+// an error when the file has no (or an unclosed) frontmatter block — the
+// caller decides whether that is fatal (primary) or skippable (cascade).
+func rewriteStatusField(original, newStatus, path string) (string, error) {
+	if !strings.HasPrefix(original, "---") {
+		return "", fmt.Errorf("artifact %s has no front matter", path)
+	}
+	endIdx := strings.Index(original[3:], "---")
+	if endIdx == -1 {
+		return "", fmt.Errorf("artifact %s has unclosed front matter", path)
+	}
+	endIdx += 3
+	frontMatter := original[:endIdx]
+	rest := original[endIdx:]
+	return statusFieldRegexp.ReplaceAllString(frontMatter, "status: "+newStatus) + rest, nil
 }

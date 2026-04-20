@@ -449,6 +449,18 @@ func (c *CLIClient) Head(ctx context.Context) (string, error) {
 	return strings.TrimSpace(output), nil
 }
 
+// MergeBase returns the best common ancestor SHA between two refs.
+// Callers use this to scope diffs to "what a branch added since it diverged"
+// rather than "what differs from the current tip of the other ref", which
+// would also flag files the other ref deleted or modified in the meantime.
+func (c *CLIClient) MergeBase(ctx context.Context, a, b string) (string, error) {
+	output, err := c.run(ctx, "merge-base", "merge-base", a, b)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(output), nil
+}
+
 // HasCommitWithTrailer checks if a commit with the given trailer value exists.
 // Used for idempotent commit detection per Git Integration §5.6.
 func (c *CLIClient) HasCommitWithTrailer(ctx context.Context, key, value string) (string, bool, error) {
