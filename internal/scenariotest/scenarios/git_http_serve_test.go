@@ -12,11 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/branchprotect/config"
+	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/projection"
@@ -60,14 +63,18 @@ func (f *fakeWSResolver) List(_ context.Context) ([]workspace.Config, error) {
 //   - "gw_auth"   — *auth.Service
 //   - "repo_path" — filesystem path to the test repo
 func setupGitHTTPServer() scenarioEngine.Step {
-	return setupGitHTTPServerWithOptions(false, false, nil)
+	return setupGitHTTPServerWithOptions(false, false, nil, nil)
 }
 
 // setupGitHTTPServerWithOptions is setupGitHTTPServer with knobs that a
 // handful of scenarios need (receive-pack gate, devMode for auth
 // bypass, branch-protection policy). The default helper keeps the
 // previous read-only shape.
-func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool, policy branchprotect.Policy) scenarioEngine.Step {
+//
+// When pushEvents is non-nil, it is wired as the push-path event
+// sink so tests can assert branch_protection.override emission from
+// the Git path without subscribing through the full event router.
+func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool, policy branchprotect.Policy, pushEvents event.Emitter) scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-git-http-server",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
@@ -107,6 +114,15 @@ func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool, policy bran
 
 			authSvc := auth.NewService(sc.Runtime.Store)
 
+			// Wire the pre-receive gate's per-push resources. In a
+			// real deployment this comes from WSServicePool; for
+			// scenarios the policy is fixed at setup time and the
+			// events sink is whatever the caller wants to record
+			// against.
+			pushResolver := gateway.GitPushResolverFunc(func(_ context.Context, _ string) (gateway.GitPushResources, func(), error) {
+				return gateway.GitPushResources{Policy: policy, Events: pushEvents}, func() {}, nil
+			})
+
 			cfg := gateway.ServerConfig{
 				Store:             sc.Runtime.Store,
 				Auth:              authSvc,
@@ -115,6 +131,7 @@ func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool, policy bran
 				ProjSync:          sc.Runtime.Projections,
 				WorkspaceResolver: wsResolver,
 				GitHTTP:           gitHandler,
+				GitPushResolver:   pushResolver,
 				DevMode:           devMode,
 			}
 
@@ -534,7 +551,7 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 			// devMode bypasses auth and keeps the test focused on
 			// the receive-pack gate. A separate unit test covers
 			// the push-requires-auth contract.
-			setupGitHTTPServerWithOptions(true, true, nil),
+			setupGitHTTPServerWithOptions(true, true, nil, nil),
 			enableGitHTTPExport(),
 			{
 				// Server is a non-bare repo; pushing to its
@@ -635,7 +652,7 @@ func TestGitHTTP_PushRejectedByPreReceivePolicy(t *testing.T) {
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDirectWrite},
 				}}),
-			)),
+			), nil),
 			enableGitHTTPExport(),
 			{
 				Name: "clone-and-attempt-protected-push",
@@ -709,4 +726,222 @@ func TestGitHTTP_PushRejectedByPreReceivePolicy(t *testing.T) {
 			},
 		},
 	})
+}
+
+// pushEventRecorder captures branch_protection.override events so
+// the scenario can assert on emission without subscribing through
+// the full event router.
+type pushEventRecorder struct {
+	mu     sync.Mutex
+	events []domain.Event
+}
+
+func (r *pushEventRecorder) Emit(_ context.Context, e domain.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *pushEventRecorder) snapshot() []domain.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]domain.Event, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+// TestGitHTTP_PushOverrideHonouredForOperator covers TASK-003
+// end-to-end: an operator pushes to a protected branch with
+// `-o spine.override=true`, the pre-receive gate honours the
+// override, the push lands on the server, and exactly one
+// branch_protection.override event is emitted with the ADR-009 §4
+// payload (including pre_receive_ref).
+func TestGitHTTP_PushOverrideHonouredForOperator(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	recorder := &pushEventRecorder{}
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-push-override-operator",
+		Description: "Operator push with spine.override=true bypasses protection and emits one governance event",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			// release/* is protected with no-direct-write. The
+			// push below includes spine.override=true; devMode
+			// bypasses bearer auth, and the actor the gateway
+			// attaches in devMode has operator role so the
+			// role gate lets the override through.
+			setupGitHTTPServerWithOptionsAndActor(
+				true, true,
+				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
+					Branch:      "release/*",
+					Protections: []config.RuleKind{config.KindNoDirectWrite},
+				}})),
+				recorder,
+				&domain.Actor{ActorID: "op-scenario", Role: domain.RoleOperator},
+			),
+			enableGitHTTPExport(),
+			{
+				Name: "operator-overrides-protected-push",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					base := sc.MustGet("gw_url").(string)
+					repoPath := sc.Repo.Dir
+					cloneDir := filepath.Join(sc.T.TempDir(), "override-clone")
+
+					if out, err := exec.Command("git", "clone", base+"/git", cloneDir).CombinedOutput(); err != nil {
+						return fmt.Errorf("git clone: %w\n%s", err, out)
+					}
+					for _, kv := range [][2]string{
+						{"user.email", "op-scenario@spine.local"},
+						{"user.name", "Op Scenario"},
+					} {
+						c := exec.Command("git", "config", kv[0], kv[1])
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git config %s: %w\n%s", kv[0], err, out)
+						}
+					}
+					// Create a protected branch + commit.
+					for _, args := range [][]string{{"checkout", "-b", "release/2.x"}} {
+						c := exec.Command("git", args...)
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git %v: %w\n%s", args, err, out)
+						}
+					}
+					if err := os.WriteFile(filepath.Join(cloneDir, "release.md"), []byte("# Release 2.x\n"), 0o644); err != nil {
+						return fmt.Errorf("write file: %w", err)
+					}
+					for _, args := range [][]string{
+						{"add", "release.md"},
+						{"commit", "-m", "release 2.x bump"},
+					} {
+						c := exec.Command("git", args...)
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git %v: %w\n%s", args, err, out)
+						}
+					}
+
+					// Push with the override option.
+					push := exec.Command("git", "push",
+						"-o", "spine.override=true",
+						"origin", "release/2.x",
+					)
+					push.Dir = cloneDir
+					if out, err := push.CombinedOutput(); err != nil {
+						return fmt.Errorf("override push failed (should succeed): %w\n%s", err, out)
+					}
+
+					// Server ref must exist.
+					show := exec.Command("git", "show-ref", "--verify", "refs/heads/release/2.x")
+					show.Dir = repoPath
+					if out, err := show.CombinedOutput(); err != nil {
+						return fmt.Errorf("server should have refs/heads/release/2.x after override push: %w\n%s", err, out)
+					}
+
+					events := recorder.snapshot()
+					if len(events) != 1 {
+						return fmt.Errorf("expected exactly 1 branch_protection.override event, got %d", len(events))
+					}
+					ev := events[0]
+					if ev.Type != domain.EventBranchProtectionOverride {
+						return fmt.Errorf("wrong event type: %s", ev.Type)
+					}
+					payload := string(ev.Payload)
+					for _, substr := range []string{
+						`"branch":"refs/heads/release/2.x"`,
+						`"rule_kinds":["no-direct-write"]`,
+						`"operation":"direct_write"`,
+						`"pre_receive_ref"`,
+					} {
+						if !bytes.Contains([]byte(payload), []byte(substr)) {
+							return fmt.Errorf("payload missing %q, got: %s", substr, payload)
+						}
+					}
+					return nil
+				},
+			},
+		},
+	})
+	_ = event.Emitter(nil) // keep import referenced on all platforms
+}
+
+// setupGitHTTPServerWithOptionsAndActor is a variant of
+// setupGitHTTPServerWithOptions that also attaches a fixed actor to
+// each push request via a small gateway middleware. devMode alone
+// would accept the request but leaves the actor blank, which makes
+// the branch-protection override role-gate fail; the scenario tests
+// explicitly exercising override need an operator on the context.
+func setupGitHTTPServerWithOptionsAndActor(receivePackEnabled, devMode bool, policy branchprotect.Policy, pushEvents event.Emitter, actor *domain.Actor) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "setup-git-http-server-with-actor",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			repoPath := sc.Repo.Dir
+
+			wsResolver := &fakeWSResolver{
+				workspaces: map[string]*workspace.Config{
+					"default": {
+						ID:       "default",
+						RepoPath: repoPath,
+						Status:   workspace.StatusActive,
+					},
+				},
+			}
+
+			gitHandler, err := githttp.NewHandler(githttp.Config{
+				ResolveRepoPath: func(ctx context.Context, workspaceID string) (string, error) {
+					cfg, err := wsResolver.Resolve(ctx, workspaceID)
+					if err != nil {
+						return "", err
+					}
+					return cfg.RepoPath, nil
+				},
+				TrustedCIDRs:       []string{"127.0.0.0/8"},
+				MaxConcurrent:      5,
+				ReceivePackEnabled: receivePackEnabled,
+				Policy:             policy,
+			})
+			if err != nil {
+				return fmt.Errorf("create git HTTP handler: %w", err)
+			}
+
+			authSvc := auth.NewService(sc.Runtime.Store)
+
+			pushResolver := gateway.GitPushResolverFunc(func(_ context.Context, _ string) (gateway.GitPushResources, func(), error) {
+				return gateway.GitPushResources{Policy: policy, Events: pushEvents}, func() {}, nil
+			})
+
+			cfg := gateway.ServerConfig{
+				Store:             sc.Runtime.Store,
+				Auth:              authSvc,
+				Artifacts:         sc.Runtime.Artifacts,
+				ProjQuery:         projection.NewQueryService(sc.Runtime.Store, sc.Repo.Git),
+				ProjSync:          sc.Runtime.Projections,
+				WorkspaceResolver: wsResolver,
+				GitHTTP:           gitHandler,
+				GitPushResolver:   pushResolver,
+				DevMode:           devMode,
+			}
+
+			srv := gateway.NewServer(":0", cfg)
+			// Wrap the handler with an actor-injection middleware so
+			// the pre-receive gate sees the scenario's chosen role.
+			inner := srv.Handler()
+			wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if actor != nil {
+					r = r.WithContext(domain.WithActor(r.Context(), actor))
+				}
+				inner.ServeHTTP(w, r)
+			})
+			ts := httptest.NewServer(wrapped)
+			sc.ParentT.Cleanup(ts.Close)
+
+			sc.Set("gw_url", ts.URL)
+			sc.Set("gw_auth", authSvc)
+			sc.Set("repo_path", repoPath)
+			return nil
+		},
+	}
 }

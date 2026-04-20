@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/observe"
 )
 
@@ -307,8 +309,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.Logger) (io.ReadCloser, bool) {
 	// Buffer up to maxPushCommandBytes looking for the flush that
 	// terminates the command section. Anything after the flush is
-	// PACK data and must reach CGI unchanged — so we do not fully
-	// drain the body.
+	// PACK data (or a push-options section, see below) and must
+	// reach CGI unchanged on allow.
 	cmdBuf, pendingBody, err := readPushCommands(r.Body, h.maxPushCommandBytes)
 	if err != nil {
 		log.Warn("pre-receive parse failed",
@@ -319,7 +321,7 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 		return nil, false
 	}
 
-	updates, err := parseRefUpdates(bytes.NewReader(cmdBuf))
+	updates, caps, err := parseRefUpdates(bytes.NewReader(cmdBuf))
 	if err != nil {
 		log.Warn("pre-receive parse failed",
 			"remote_addr", r.RemoteAddr, "error", err)
@@ -327,6 +329,38 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 			[]string{fmt.Sprintf("branch-protection: malformed push: %s", err)},
 			nil)
 		return nil, false
+	}
+
+	// Push-options section — only present when the client advertised
+	// the `push-options` capability on the first ref-update frame
+	// AND the server repo has `receive.advertisePushOptions=true`
+	// (ensureReceivePackConfig sets that when receive-pack is on).
+	// Options sit between the command flush and the PACK data; we
+	// append the options block to cmdBuf so CGI still sees the
+	// original stream on allow.
+	pushOptions := map[string]string{}
+	if _, ok := caps["push-options"]; ok {
+		optsBuf, afterOpts, err := readPushCommands(pendingBody, h.maxPushCommandBytes)
+		if err != nil {
+			log.Warn("pre-receive push-options parse failed",
+				"remote_addr", r.RemoteAddr, "error", err)
+			h.writeReceivePackDenial(w,
+				[]string{fmt.Sprintf("branch-protection: malformed push options: %s", err)},
+				nil)
+			return nil, false
+		}
+		opts, err := parsePushOptions(bytes.NewReader(optsBuf))
+		if err != nil {
+			log.Warn("pre-receive push-options parse failed",
+				"remote_addr", r.RemoteAddr, "error", err)
+			h.writeReceivePackDenial(w,
+				[]string{fmt.Sprintf("branch-protection: malformed push options: %s", err)},
+				nil)
+			return nil, false
+		}
+		pushOptions = opts
+		cmdBuf = append(cmdBuf, optsBuf...)
+		pendingBody = afterOpts
 	}
 
 	// Resolve the policy for this push. The context value wins — the
@@ -339,14 +373,30 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 		policy = h.policy
 	}
 
+	override := pushOptions["spine.override"] == "true"
+
 	// Evaluate every non-spine/* ref. spine/* refs are out of scope
 	// for user-authored rules (ADR-009 §3) but still flow through CGI
 	// for audit/logging on the read side; we pass them through here
 	// without calling Policy.Evaluate so the API-path and Git-path
 	// audit surfaces remain consistent.
+	//
+	// Override-honored refs collected for governance-event emission
+	// after the loop: ADR-009 §4 requires exactly one event per
+	// overridden ref update (not per push), with rule_kinds carrying
+	// the kinds that actually would have denied.
+	type honored struct {
+		update    RefUpdate
+		ruleKinds []string
+	}
+	var honoredOverrides []honored
+	// Resolve trace-id once at the top so the post-loop event
+	// emitter can re-attach it when the request context came in
+	// without gateway trace middleware (e.g. direct-embed tests).
+	traceID := traceIDForPush(r.Context())
+
 	if policy != nil {
 		actor := actorForPush(r.Context())
-		traceID := traceIDForPush(r.Context())
 		var messages []string
 		for _, u := range updates {
 			if strings.HasPrefix(u.Ref, "refs/heads/spine/") || strings.HasPrefix(u.Ref, "spine/") {
@@ -357,10 +407,11 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 				kind = branchprotect.OpDelete
 			}
 			dec, reasons, err := policy.Evaluate(r.Context(), branchprotect.Request{
-				Branch:  u.Ref,
-				Kind:    kind,
-				Actor:   actor,
-				TraceID: traceID,
+				Branch:   u.Ref,
+				Kind:     kind,
+				Actor:    actor,
+				Override: override,
+				TraceID:  traceID,
 			})
 			if err != nil {
 				log.Error("branch-protection evaluation failed, rejecting push",
@@ -374,6 +425,15 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 					messages = append(messages,
 						fmt.Sprintf("branch-protection: %s", rc.Message))
 				}
+				continue
+			}
+			// Allowed. If the allow was because of an honored
+			// override, record it for the audit event; a plain
+			// "no matching rule" allow is not overridable and
+			// emits nothing (per ADR-009 §4: avoid log pollution
+			// from unused overrides).
+			if kinds := overrideHonouredKinds(reasons); len(kinds) > 0 {
+				honoredOverrides = append(honoredOverrides, honored{update: u, ruleKinds: kinds})
 			}
 		}
 		if len(messages) > 0 {
@@ -387,10 +447,108 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 		}
 	}
 
+	// Allow path: emit one governance event per overridden ref
+	// update BEFORE handing off to CGI. This mirrors the API-path
+	// wiring — the event is the authoritative audit record and must
+	// be written whether or not CGI ultimately persists the ref
+	// (CGI failure after this point still represents an override
+	// attempt an operator consented to).
+	//
+	// Re-attach the push trace ID to the context the emitter sees:
+	// traceIDForPush falls back to a freshly generated ID when the
+	// request arrived without gateway trace middleware (unit tests,
+	// future direct-embed deployments). Without this re-attach
+	// the audit event emits with an empty trace_id, breaking the
+	// correlation guarantee ADR-009 §4 expects.
+	if emitter := eventsFromContext(r.Context()); emitter != nil && len(honoredOverrides) > 0 {
+		emitCtx := r.Context()
+		if observe.TraceID(emitCtx) == "" && traceID != "" {
+			emitCtx = observe.WithTraceID(emitCtx, traceID)
+		}
+		for _, h := range honoredOverrides {
+			emitOverrideEvent(emitCtx, emitter, h.update, h.ruleKinds)
+		}
+	}
+
 	// All updates allowed. Stitch the buffered command bytes back in
 	// front of the remaining body so CGI sees the original stream.
 	combined := io.MultiReader(bytes.NewReader(cmdBuf), pendingBody)
 	return &combinedBody{r: combined, closer: pendingBody}, true
+}
+
+// overrideHonouredKinds extracts the rule kinds from reasons marked
+// ReasonOverrideHonoured. Empty result means the allow was not an
+// override (e.g. no matching rule or governed merge), so no event
+// should be emitted.
+func overrideHonouredKinds(reasons []branchprotect.Reason) []string {
+	var kinds []string
+	for _, r := range reasons {
+		if r.Code == branchprotect.ReasonOverrideHonoured {
+			kinds = append(kinds, string(r.RuleKind))
+		}
+	}
+	return kinds
+}
+
+// emitOverrideEvent emits a branch_protection.override governance
+// event for one overridden ref update. The payload shape matches
+// ADR-009 §4 and is a superset of the API-path event: pre_receive_ref
+// carries the (old, new, ref) triple the policy evaluated, which is
+// the Git-path's only record of what the client intended to push
+// (pushes are not rewritten to add a commit trailer — ADR-009 §4).
+func emitOverrideEvent(ctx context.Context, emitter event.Emitter, u RefUpdate, ruleKinds []string) {
+	actorID := observe.ActorID(ctx)
+	if a := domain.ActorFromContext(ctx); a != nil && a.ActorID != "" {
+		actorID = a.ActorID
+	}
+	operation := string(branchprotect.OpDirectWrite)
+	commitSHA := u.NewSHA
+	if u.IsDelete() {
+		operation = string(branchprotect.OpDelete)
+		commitSHA = ""
+	}
+	eventID, _ := observe.GenerateTraceID()
+	evt := domain.Event{
+		EventID:   eventID,
+		Type:      domain.EventBranchProtectionOverride,
+		Timestamp: time.Now(),
+		ActorID:   actorID,
+		TraceID:   observe.TraceID(ctx),
+		Payload: mustJSONPayload(map[string]any{
+			"branch":     u.Ref,
+			"rule_kinds": ruleKinds,
+			"operation":  operation,
+			"commit_sha": nullableSHA(commitSHA),
+			"pre_receive_ref": map[string]any{
+				"old_sha": u.OldSHA,
+				"new_sha": u.NewSHA,
+				"ref":     u.Ref,
+			},
+		}),
+	}
+	event.EmitLogged(ctx, emitter, evt)
+}
+
+// nullableSHA returns nil for an empty SHA so JSON marshals to null,
+// matching the API-path event shape for override-deletes (ADR-009 §4).
+func nullableSHA(sha string) any {
+	if sha == "" {
+		return nil
+	}
+	return sha
+}
+
+// mustJSONPayload marshals v to JSON. An encoding error here means a
+// developer put a non-marshalable value in the payload map (maps are
+// marshalable by definition, so the only realistic failure is a
+// chan/func/unsupported-type bug); we log it but still emit an event
+// with an empty payload rather than dropping the audit record.
+func mustJSONPayload(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return b
 }
 
 // combinedBody adapts io.Reader + io.Closer into an io.ReadCloser the
@@ -497,10 +655,18 @@ func trimRefsHeads(ref string) string {
 	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
-// ensureReceivePackConfig aligns the repo's local http.receivepack with
-// the handler's ReceivePackEnabled setting. Idempotent per repo path per
-// handler lifetime — the value never flips at runtime, so caching by
+// ensureReceivePackConfig aligns the repo's local git config with the
+// handler's ReceivePackEnabled setting. Idempotent per repo path per
+// handler lifetime — the values never flip at runtime, so caching by
 // path is safe.
+//
+// Writes two keys:
+//   - http.receivepack: exposes (or hides) git-http-backend's
+//     receive-pack entry for this repo.
+//   - receive.advertisePushOptions: makes the ref-advertisement include
+//     the `push-options` capability. Without this, `git push -o ...`
+//     on the client silently drops options and our pre-receive gate
+//     never sees them — EPIC-004 TASK-003 depends on this being set.
 func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) error {
 	h.mu.Lock()
 	if h.ensuredRepos[repoPath] {
@@ -514,13 +680,18 @@ func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) 
 		value = "true"
 	}
 
-	// G702 flags cmd.Dir as taint-tracked. repoPath is resolved by
-	// the caller from the workspace registry (validated workspace
-	// IDs), never from untrusted client input.
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "http.receivepack", value) //nolint:gosec // G702: repoPath is server-resolved from workspace registry, not request input
-	cmd.Dir = repoPath
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git config http.receivepack=%s: %w", value, err)
+	for _, kv := range [][2]string{
+		{"http.receivepack", value},
+		{"receive.advertisePushOptions", value},
+	} {
+		// G702 flags cmd.Dir as taint-tracked. repoPath is resolved
+		// by the caller from the workspace registry (validated
+		// workspace IDs), never from untrusted client input.
+		cmd := exec.CommandContext(ctx, "git", "config", "--local", kv[0], kv[1]) //nolint:gosec // G702: repoPath is server-resolved from workspace registry, not request input
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("git config %s=%s: %w", kv[0], kv[1], err)
+		}
 	}
 
 	h.mu.Lock()
@@ -605,6 +776,12 @@ func findGitHTTPBackend() (string, error) {
 // startup would mix or miss rules).
 type policyKey struct{}
 
+// eventsKey is the context key for a per-request event emitter. Used
+// by the pre-receive gate to emit branch_protection.override
+// governance events (ADR-009 §4). Like policyKey, this is per-request
+// so shared-mode deployments audit to the right workspace stream.
+type eventsKey struct{}
+
 // WithPolicy returns a copy of ctx carrying the given policy. Reads
 // in prereceive prefer this value over the handler's default Policy,
 // letting the gateway scope each push to the target workspace.
@@ -617,6 +794,20 @@ func WithPolicy(ctx context.Context, p branchprotect.Policy) context.Context {
 func policyFromContext(ctx context.Context) branchprotect.Policy {
 	p, _ := ctx.Value(policyKey{}).(branchprotect.Policy)
 	return p
+}
+
+// WithEvents returns a copy of ctx carrying the given event emitter.
+// The pre-receive gate reads this when it needs to emit
+// branch_protection.override events on an operator-honored override.
+func WithEvents(ctx context.Context, e event.Emitter) context.Context {
+	return context.WithValue(ctx, eventsKey{}, e)
+}
+
+// eventsFromContext returns the per-request event emitter or nil if
+// none is attached.
+func eventsFromContext(ctx context.Context) event.Emitter {
+	e, _ := ctx.Value(eventsKey{}).(event.Emitter)
+	return e
 }
 
 // repoPathKey is the context key for the resolved repo filesystem path.

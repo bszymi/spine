@@ -17,7 +17,7 @@ func TestParseRefUpdates_SingleRefWithCapabilities(t *testing.T) {
 	body := append([]byte{}, frame...)
 	body = append(body, []byte(flushPkt)...)
 
-	updates, err := parseRefUpdates(bytes.NewReader(body))
+	updates, _, err := parseRefUpdates(bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("parseRefUpdates: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestParseRefUpdates_MultiRef(t *testing.T) {
 	body = append(body, pktLine(old+" "+new2+" refs/heads/feature\n")...)
 	body = append(body, []byte(flushPkt)...)
 
-	updates, err := parseRefUpdates(bytes.NewReader(body))
+	updates, _, err := parseRefUpdates(bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("parseRefUpdates: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestParseRefUpdates_DeleteRef(t *testing.T) {
 	body := pktLine(old + " " + zeroSHA + " refs/heads/main\n")
 	body = append(body, []byte(flushPkt)...)
 
-	updates, err := parseRefUpdates(bytes.NewReader(body))
+	updates, _, err := parseRefUpdates(bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("parseRefUpdates: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestParseRefUpdates_DeleteRef(t *testing.T) {
 
 func TestParseRefUpdates_MalformedLengthRejected(t *testing.T) {
 	body := []byte("XXXXnot a pkt-line")
-	if _, err := parseRefUpdates(bytes.NewReader(body)); err == nil {
+	if _, _, err := parseRefUpdates(bytes.NewReader(body)); err == nil {
 		t.Error("expected error for non-hex length prefix")
 	}
 }
@@ -83,7 +83,7 @@ func TestParseRefUpdates_MalformedFrameRejected(t *testing.T) {
 	// valid ref update command.
 	body := pktLine("0000 refs/heads/main\n")
 	body = append(body, []byte(flushPkt)...)
-	if _, err := parseRefUpdates(bytes.NewReader(body)); err == nil {
+	if _, _, err := parseRefUpdates(bytes.NewReader(body)); err == nil {
 		t.Error("expected error for malformed ref update")
 	}
 }
@@ -93,7 +93,7 @@ func TestParseRefUpdates_EOFBeforeFlushRejected(t *testing.T) {
 	new := strings.Repeat("a", 40)
 	body := pktLine(old + " " + new + " refs/heads/main\n")
 	// No flush-pkt appended.
-	if _, err := parseRefUpdates(bytes.NewReader(body)); err == nil {
+	if _, _, err := parseRefUpdates(bytes.NewReader(body)); err == nil {
 		t.Error("expected error when stream ends before flush")
 	}
 }
@@ -191,4 +191,55 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestParseRefUpdates_CapturesPushOptionsCap(t *testing.T) {
+	old := strings.Repeat("0", 40)
+	new := strings.Repeat("a", 40)
+	// First frame's capability string advertises push-options.
+	payload := old + " " + new + " refs/heads/main\x00report-status push-options side-band-64k\n"
+	body := append([]byte{}, pktLine(payload)...)
+	body = append(body, []byte(flushPkt)...)
+
+	_, caps, err := parseRefUpdates(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("parseRefUpdates: %v", err)
+	}
+	if _, ok := caps["push-options"]; !ok {
+		t.Errorf("expected push-options capability, got caps=%v", caps)
+	}
+	if _, ok := caps["report-status"]; !ok {
+		t.Errorf("expected other caps to round-trip too, got %v", caps)
+	}
+}
+
+func TestParsePushOptions_KeyValueAndBareKeys(t *testing.T) {
+	body := []byte{}
+	body = append(body, pktLine("spine.override=true\n")...)
+	body = append(body, pktLine("ci-skip\n")...)
+	body = append(body, []byte(flushPkt)...)
+
+	opts, err := parsePushOptions(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("parsePushOptions: %v", err)
+	}
+	if opts["spine.override"] != "true" {
+		t.Errorf("expected spine.override=true, got %q", opts["spine.override"])
+	}
+	if _, ok := opts["ci-skip"]; !ok {
+		t.Errorf("bare key ci-skip should round-trip, got %v", opts)
+	}
+}
+
+func TestParsePushOptions_EmptySection(t *testing.T) {
+	// Client advertised push-options capability but sent no options.
+	// Parser must return an empty map, not error.
+	body := []byte(flushPkt)
+	opts, err := parsePushOptions(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("parsePushOptions: %v", err)
+	}
+	if len(opts) != 0 {
+		t.Errorf("expected empty options map, got %v", opts)
+	}
 }

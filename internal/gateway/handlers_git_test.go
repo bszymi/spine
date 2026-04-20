@@ -235,7 +235,7 @@ func TestIsGitProtocolPath(t *testing.T) {
 
 // TestHandleGit_DisabledPushDoesNotResolvePolicy asserts that when
 // ReceivePackEnabled is false, the gateway does NOT call
-// GitPushPolicyFor for a push attempt. Otherwise a failing policy
+// GitPushResolver for a push attempt. Otherwise a failing policy
 // resolver (e.g. an unreachable workspace DB) would mask the
 // documented 403 that names `SPINE_GIT_RECEIVE_PACK_ENABLED` behind
 // a 500, turning a misconfiguration into a confusing operator error.
@@ -261,9 +261,9 @@ func TestHandleGit_DisabledPushDoesNotResolvePolicy(t *testing.T) {
 		gitHTTP:    handler,
 		wsResolver: resolver,
 		devMode:    true,
-		gitPushPolicyFor: func(_ context.Context, _ string) (branchprotect.Policy, func(), error) {
+		gitPushResolver: func(_ context.Context, _ string) (GitPushResources, func(), error) {
 			resolverCalled = true
-			return branchprotect.NewPermissive(), func() {}, nil
+			return GitPushResources{Policy: branchprotect.NewPermissive()}, func() {}, nil
 		},
 	}
 
@@ -291,7 +291,7 @@ func TestHandleGit_DisabledPushDoesNotResolvePolicy(t *testing.T) {
 }
 
 // TestHandleGit_PerWorkspacePolicyInvoked asserts that on a push
-// request, the gateway calls GitPushPolicyFor with the target
+// request, the gateway calls GitPushResolver with the target
 // workspace ID (not a process-wide default). In shared mode each
 // workspace has its own branch-protection table; a single
 // captured-at-startup policy would mix or miss rules, so this wiring
@@ -319,9 +319,9 @@ func TestHandleGit_PerWorkspacePolicyInvoked(t *testing.T) {
 		gitHTTP:    handler,
 		wsResolver: resolver,
 		devMode:    true, // bypass auth so we reach the policy resolver
-		gitPushPolicyFor: func(_ context.Context, workspaceID string) (branchprotect.Policy, func(), error) {
+		gitPushResolver: func(_ context.Context, workspaceID string) (GitPushResources, func(), error) {
 			resolvedFor = workspaceID
-			return branchprotect.NewPermissive(), func() { released = true }, nil
+			return GitPushResources{Policy: branchprotect.NewPermissive()}, func() { released = true }, nil
 		},
 	}
 

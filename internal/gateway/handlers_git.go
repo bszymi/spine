@@ -11,23 +11,27 @@ import (
 
 	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/workspace"
 )
 
-// GitPushPolicyFunc resolves the branch-protection policy for a git
-// push to a specific workspace. Shared-mode deployments must provide
-// one so each workspace evaluates against its own rules table — a
-// single process-wide policy captured at startup would mix rules from
-// the wrong database, leaving a bypass in shared mode (ADR-009 §3 /
-// EPIC-004 TASK-002).
-//
-// Returns the policy, a release callback the caller must run after
-// the push completes (e.g. to decrement ServicePool refs so pools do
-// not leak), and an error. The callback is never nil even on error —
-// callers can always defer it.
-type GitPushPolicyFunc func(ctx context.Context, workspaceID string) (branchprotect.Policy, func(), error)
+// GitPushResources bundles per-workspace state the pre-receive gate
+// needs: the branch-protection policy for evaluating ref updates and
+// the event emitter for honored-override governance events (ADR-009
+// §4). Both come off the target workspace's ServiceSet so shared-mode
+// deployments evaluate and audit against the right workspace.
+type GitPushResources struct {
+	Policy branchprotect.Policy
+	Events event.Emitter
+}
+
+// GitPushResolverFunc resolves the per-workspace push resources. Callers
+// must defer the returned release — it decrements the ServicePool ref
+// the resolver took, so pools do not leak across pushes. The callback
+// is never nil even on error.
+type GitPushResolverFunc func(ctx context.Context, workspaceID string) (GitPushResources, func(), error)
 
 // mountGitRoutes adds the git smart HTTP routes to the router.
 // These routes have their own middleware chain — workspace is resolved from
@@ -134,17 +138,20 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	//
 	// Release must run after ServeHTTP so any ServicePool ref taken
 	// by the resolver is held for the life of the push.
-	if push && r.Method == http.MethodPost && s.gitHTTP.ReceivePackEnabled() && s.gitPushPolicyFor != nil {
-		policy, release, err := s.gitPushPolicyFor(ctx, cfg.ID)
+	if push && r.Method == http.MethodPost && s.gitHTTP.ReceivePackEnabled() && s.gitPushResolver != nil {
+		res, release, err := s.gitPushResolver(ctx, cfg.ID)
 		defer release()
 		if err != nil {
-			observe.Logger(ctx).Error("resolve push policy failed",
+			observe.Logger(ctx).Error("resolve push resources failed",
 				"workspace_id", cfg.ID, "error", err)
 			WriteError(w, domain.NewError(domain.ErrInternal, "branch-protection policy unavailable"))
 			return
 		}
-		if policy != nil {
-			ctx = githttp.WithPolicy(ctx, policy)
+		if res.Policy != nil {
+			ctx = githttp.WithPolicy(ctx, res.Policy)
+		}
+		if res.Events != nil {
+			ctx = githttp.WithEvents(ctx, res.Events)
 		}
 	}
 

@@ -88,9 +88,37 @@ release is cut — this file is a staging area.
   same decision point as API-path writes, no Git reads in the hot
   path.
 
-### Not yet implemented (follow-up in EPIC-004)
+### Added (TASK-003)
 
-- `git push -o spine.override=true` operator override (TASK-003).
+- **`git push -o spine.override=true` operator override.** The
+  Git-path equivalent of `write_context.override` (ADR-009 §4).
+  Operators pushing with this option bypass a matching rule for
+  that single push; contributors setting the same option are
+  rejected with a distinct "override not authorised" reason, not
+  silently accepted.
+- **`branch_protection.override` governance events on the push
+  path.** Every honored override emits exactly one event per
+  overridden ref update (not per push — a single push overriding
+  two branches emits two events) with the ADR-009 §4 payload,
+  including a `pre_receive_ref` block carrying the
+  `(old_sha, new_sha, ref)` the client attempted. The Git server
+  never rewrites client-produced commits, so this event is the
+  sole audit record on the push path.
+- Pushes are not rewritten to add any trailer — commits land
+  byte-identical on the server to what the client sent.
+- Unused overrides (option set on a push that did not need it) do
+  not emit events, to avoid log pollution.
+- `receive.advertisePushOptions=true` is set on every workspace
+  repo alongside `http.receivepack=true`, so `git push -o` is
+  actually supported end-to-end.
+
+### Changed
+
+- Gateway `GitPushResolverFunc` replaces the earlier
+  `GitPushPolicyFunc` — it now returns both the per-workspace
+  policy and event emitter in one pool-held tuple, so the
+  pre-receive gate can emit override events to the target
+  workspace's stream.
 
 ### Upgrade notes
 
