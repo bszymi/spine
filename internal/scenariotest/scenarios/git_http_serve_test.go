@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -944,4 +945,371 @@ func setupGitHTTPServerWithOptionsAndActor(receivePackEnabled, devMode bool, pol
 			return nil
 		},
 	}
+}
+
+// pushClientClone clones the test repo into a fresh directory and
+// configures a committer identity on the client side. Returns the
+// clone dir. Shared setup across the EPIC-004 push scenarios so
+// each test body focuses on what it is actually exercising.
+func pushClientClone(sc *scenarioEngine.ScenarioContext, label string) (string, error) {
+	base := sc.MustGet("gw_url").(string)
+	cloneDir := filepath.Join(sc.T.TempDir(), label)
+	if out, err := exec.Command("git", "clone", base+"/git", cloneDir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git clone: %w\n%s", err, out)
+	}
+	for _, kv := range [][2]string{
+		{"user.email", label + "@spine.local"},
+		{"user.name", "Push Test " + label},
+	} {
+		c := exec.Command("git", "config", kv[0], kv[1])
+		c.Dir = cloneDir
+		if out, err := c.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git config %s: %w\n%s", kv[0], err, out)
+		}
+	}
+	return cloneDir, nil
+}
+
+func runGit(t *testing.T, dir string, args ...string) error {
+	t.Helper()
+	c := exec.Command("git", args...)
+	c.Dir = dir
+	if out, err := c.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %v: %w\n%s", args, err, out)
+	}
+	return nil
+}
+
+// TestGitHTTP_PushDeleteRejectedByNoDelete drives a real `git push
+// --delete` against a branch that `branch-protection.yaml` has marked
+// `no-delete`. The pre-receive gate must reject with the rule kind
+// on the wire and the server ref must still exist afterwards.
+func TestGitHTTP_PushDeleteRejectedByNoDelete(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-push-delete-rejected",
+		Description: "git push --delete against a no-delete ref is rejected and the server ref is preserved",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			{
+				Name: "seed-release-branch",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					// Server-side branch to try to delete. We do it
+					// before the server starts so the ref is visible
+					// to the clone.
+					if err := runGit(t, sc.Repo.Dir, "branch", "release/prod"); err != nil {
+						return err
+					}
+					return runGit(t, sc.Repo.Dir, "update-server-info")
+				},
+			},
+			setupGitHTTPServerWithOptionsAndActor(
+				true, true,
+				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
+					Branch:      "release/*",
+					Protections: []config.RuleKind{config.KindNoDelete},
+				}})),
+				nil,
+				&domain.Actor{ActorID: "c-1", Role: domain.RoleContributor},
+			),
+			{
+				Name: "attempt-delete",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					cloneDir, err := pushClientClone(sc, "delete-reject")
+					if err != nil {
+						return err
+					}
+					// git push --delete.
+					out, err := exec.Command("git", "-C", cloneDir, "push", "origin", "--delete", "release/prod").CombinedOutput()
+					if err == nil {
+						return fmt.Errorf("expected delete push to fail under no-delete rule, succeeded:\n%s", out)
+					}
+					if !bytes.Contains(out, []byte("no-delete")) {
+						return fmt.Errorf("expected remote message to name no-delete, got:\n%s", out)
+					}
+					// Server ref must still exist.
+					if err := runGit(t, sc.Repo.Dir, "show-ref", "--verify", "refs/heads/release/prod"); err != nil {
+						return fmt.Errorf("server-side ref must survive denied delete: %w", err)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// TestGitHTTP_PushOverrideRejectedForContributor drives the role-gate
+// on the push override: a contributor pushes with `-o
+// spine.override=true` to a protected branch and is rejected with
+// the `override_not_authorised` reason on the wire. The server ref
+// must be unchanged and no audit event must be emitted.
+func TestGitHTTP_PushOverrideRejectedForContributor(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	recorder := &pushEventRecorder{}
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-push-override-contributor-rejected",
+		Description: "Contributor with spine.override=true still hits the role gate and nothing is emitted",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			setupGitHTTPServerWithOptionsAndActor(
+				true, true,
+				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
+					Branch:      "release/*",
+					Protections: []config.RuleKind{config.KindNoDirectWrite},
+				}})),
+				recorder,
+				&domain.Actor{ActorID: "c-1", Role: domain.RoleContributor},
+			),
+			enableGitHTTPExport(),
+			{
+				Name: "contributor-override-rejected",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					cloneDir, err := pushClientClone(sc, "contributor-override")
+					if err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "checkout", "-b", "release/contrib"); err != nil {
+						return err
+					}
+					if err := os.WriteFile(filepath.Join(cloneDir, "release.md"), []byte("# C\n"), 0o644); err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "add", "release.md"); err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "commit", "-m", "c"); err != nil {
+						return err
+					}
+
+					out, err := exec.Command("git", "-C", cloneDir, "push",
+						"-o", "spine.override=true",
+						"origin", "release/contrib").CombinedOutput()
+					if err == nil {
+						return fmt.Errorf("contributor push with override should fail, succeeded:\n%s", out)
+					}
+					if !bytes.Contains(out, []byte("override")) {
+						return fmt.Errorf("expected remote message to mention override, got:\n%s", out)
+					}
+					if err := exec.Command("git", "-C", sc.Repo.Dir, "show-ref",
+						"--verify", "refs/heads/release/contrib").Run(); err == nil {
+						return fmt.Errorf("server ref must not exist after contributor override rejection")
+					}
+					if n := len(recorder.snapshot()); n != 0 {
+						return fmt.Errorf("contributor override must emit 0 events, got %d", n)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// TestGitHTTP_UnusedOverrideEmitsNoEvent covers the "silent on
+// unused override" rule from ADR-009 §4: an operator sets the
+// override flag on a push to an unprotected branch. The push is
+// allowed (no rule matched) and NO event is emitted — otherwise
+// every operator who habitually sets the flag would flood the audit
+// log.
+func TestGitHTTP_UnusedOverrideEmitsNoEvent(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	recorder := &pushEventRecorder{}
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-unused-override-silent",
+		Description: "Override flag on a push to an unprotected branch emits no governance event",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			setupGitHTTPServerWithOptionsAndActor(
+				true, true,
+				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
+					Branch:      "release/*",
+					Protections: []config.RuleKind{config.KindNoDirectWrite},
+				}})),
+				recorder,
+				&domain.Actor{ActorID: "op-unused", Role: domain.RoleOperator},
+			),
+			enableGitHTTPExport(),
+			{
+				Name: "push-with-unused-override",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					cloneDir, err := pushClientClone(sc, "unused-override")
+					if err != nil {
+						return err
+					}
+					// feature/* is NOT covered by any rule.
+					if err := runGit(t, cloneDir, "checkout", "-b", "feature/untouched"); err != nil {
+						return err
+					}
+					if err := os.WriteFile(filepath.Join(cloneDir, "f.md"), []byte("f\n"), 0o644); err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "add", "f.md"); err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "commit", "-m", "f"); err != nil {
+						return err
+					}
+					out, err := exec.Command("git", "-C", cloneDir, "push",
+						"-o", "spine.override=true",
+						"origin", "feature/untouched").CombinedOutput()
+					if err != nil {
+						return fmt.Errorf("push with unused override should succeed:\n%s", out)
+					}
+					if n := len(recorder.snapshot()); n != 0 {
+						return fmt.Errorf("unused override must emit 0 events, got %d", n)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// TestGitHTTP_MixedPushRejectedAllOrNothing asserts ADR-009 §3's
+// pre-receive semantics: a push that updates an allowed ref and a
+// denied ref is rejected as a whole, and NEITHER server-side ref
+// advances.
+func TestGitHTTP_MixedPushRejectedAllOrNothing(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-mixed-push-rejected",
+		Description: "Push with one denied ref is rejected in full; no partial application",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			setupGitHTTPServerWithOptionsAndActor(
+				true, true,
+				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
+					Branch:      "release/*",
+					Protections: []config.RuleKind{config.KindNoDirectWrite},
+				}})),
+				nil,
+				&domain.Actor{ActorID: "c-mixed", Role: domain.RoleContributor},
+			),
+			enableGitHTTPExport(),
+			{
+				Name: "mixed-push",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					cloneDir, err := pushClientClone(sc, "mixed")
+					if err != nil {
+						return err
+					}
+					// Two fresh branches: one allowed, one denied.
+					for _, branch := range []string{"feature/a", "release/3.x"} {
+						if err := runGit(t, cloneDir, "checkout", "-b", branch); err != nil {
+							return err
+						}
+						if err := os.WriteFile(filepath.Join(cloneDir, branch+".md"), []byte(branch+"\n"), 0o644); err != nil {
+							return err
+						}
+						if err := runGit(t, cloneDir, "add", "."); err != nil {
+							return err
+						}
+						if err := runGit(t, cloneDir, "commit", "-m", branch); err != nil {
+							return err
+						}
+						if err := runGit(t, cloneDir, "checkout", "main"); err != nil {
+							return err
+						}
+					}
+
+					out, err := exec.Command("git", "-C", cloneDir, "push", "origin",
+						"feature/a", "release/3.x").CombinedOutput()
+					if err == nil {
+						return fmt.Errorf("mixed push should be rejected, got success:\n%s", out)
+					}
+					// Both refs must be absent on the server.
+					for _, branch := range []string{"feature/a", "release/3.x"} {
+						if err := exec.Command("git", "-C", sc.Repo.Dir, "show-ref",
+							"--verify", "refs/heads/"+branch).Run(); err == nil {
+							return fmt.Errorf("server must not have refs/heads/%s after all-or-nothing rejection", branch)
+						}
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// TestGitHTTP_PushedCommitIsByteIdentical asserts that Spine does
+// not rewrite client-produced commits — the operator override path
+// uses the `branch_protection.override` event as the audit record,
+// not a commit trailer rewrite. The commit SHA the client created
+// must equal the ref SHA on the server after the override push.
+func TestGitHTTP_PushedCommitIsByteIdentical(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-pushed-commit-byte-identical",
+		Description: "Operator-override push lands on the server with the client's exact commit SHA — no trailer rewrite",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			setupGitHTTPServerWithOptionsAndActor(
+				true, true,
+				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
+					Branch:      "release/*",
+					Protections: []config.RuleKind{config.KindNoDirectWrite},
+				}})),
+				&pushEventRecorder{},
+				&domain.Actor{ActorID: "op-bytes", Role: domain.RoleOperator},
+			),
+			enableGitHTTPExport(),
+			{
+				Name: "override-push-preserves-sha",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					cloneDir, err := pushClientClone(sc, "byte-identical")
+					if err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "checkout", "-b", "release/bytes"); err != nil {
+						return err
+					}
+					if err := os.WriteFile(filepath.Join(cloneDir, "b.md"), []byte("b\n"), 0o644); err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "add", "b.md"); err != nil {
+						return err
+					}
+					if err := runGit(t, cloneDir, "commit", "-m", "b"); err != nil {
+						return err
+					}
+					// Capture the client-side SHA.
+					clientSHAOut, err := exec.Command("git", "-C", cloneDir, "rev-parse", "HEAD").CombinedOutput()
+					if err != nil {
+						return fmt.Errorf("client rev-parse: %w\n%s", err, clientSHAOut)
+					}
+					clientSHA := strings.TrimSpace(string(clientSHAOut))
+
+					out, err := exec.Command("git", "-C", cloneDir, "push",
+						"-o", "spine.override=true",
+						"origin", "release/bytes").CombinedOutput()
+					if err != nil {
+						return fmt.Errorf("override push failed:\n%s", out)
+					}
+
+					// Server SHA for the same ref must equal the
+					// client's — if Spine rewrote the commit to add
+					// a trailer, the SHAs would diverge.
+					serverSHAOut, err := exec.Command("git", "-C", sc.Repo.Dir,
+						"rev-parse", "refs/heads/release/bytes").CombinedOutput()
+					if err != nil {
+						return fmt.Errorf("server rev-parse: %w\n%s", err, serverSHAOut)
+					}
+					serverSHA := strings.TrimSpace(string(serverSHAOut))
+					if serverSHA != clientSHA {
+						return fmt.Errorf("server rewrote the commit: client=%s server=%s", clientSHA, serverSHA)
+					}
+					return nil
+				},
+			},
+		},
+	})
 }

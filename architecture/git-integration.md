@@ -391,6 +391,22 @@ Human-managed branches (per [Naming Conventions](/governance/naming-conventions.
 
 Spine-managed branches (`spine/*`) are governed exclusively by the Artifact Service. Direct manipulation of user-facing authoritative branches (e.g. `main`, `staging`, `release/*`) is **enforced** against direct writes and deletions by the branch-protection policy described in [ADR-009](/architecture/adr/ADR-009-branch-protection.md). Operators authoring `/.spine/branch-protection.yaml` are expected to scope rules to user-facing branches; the config parser does not currently reject patterns that would match `spine/*` (e.g. `spine/run/*`, `*/*/*`), so a pattern like that would accidentally gate Spine's own Run branches and block routine Orchestrator operations. Treat `spine/*` as a reserved namespace and do not target it from rules.
 
+### 6.5 Git Push (`git-receive-pack`)
+
+Push is a first-class, enforced surface in v1. It is off by default — `SPINE_GIT_RECEIVE_PACK_ENABLED=true` (accepted: `1`/`true`/`yes`/`on`) turns it on. An upgrade that does not set the flag keeps the prior read-only behaviour.
+
+**Enforcement sequence** on each `POST /git-receive-pack`:
+
+1. The gateway requires a bearer token on every push. The trusted-CIDR bypass used for clone/fetch does not apply to receive-pack — every push carries an actor identity so branch-protection decisions and audit events can pin the caller.
+2. The pre-receive gate in `internal/githttp` reads the pkt-line command section out of the request body, extracts each `(old_sha, new_sha, ref)` triple, and classifies it (`delete` if `new_sha == 00…0`, else `direct_write` — every push is a direct write from the policy's perspective; governed merges happen inside Spine, not over the wire).
+3. `branchprotect.Policy.Evaluate` is called per ref update against the target **workspace's** rules (each workspace has its own branch-protection table in shared mode). A `Deny` on any ref rejects the **entire** push — pre-receive semantics are all-or-nothing, so no ref advances if any ref would have been blocked. `spine/*` refs bypass the policy by design (§6.4) but still flow through CGI so audit remains consistent with the API path.
+4. Rejections render as a `x-git-receive-pack-result` body: a side-band 2 `remote: branch-protection: <rule> denies <branch>` line plus a side-band 1 `unpack ok` + `ng <ref> pre-receive hook declined` per ref. Frames are chunked to stay under the pkt-line length limit so even multi-thousand-ref pushes parse cleanly.
+5. On allow, the buffered command bytes are replayed verbatim in front of the still-pending PACK stream; `git-http-backend` sees the original request unchanged. Spine does not rewrite client-produced commits.
+
+**Operator override.** The Git-path equivalent of `write_context.override` is `git push -o spine.override=true`. Operators (role `operator+`) bypass a matching rule for that single push; contributors setting the same option are rejected with a distinct "override not authorised" reason, not silently accepted. Every honored override emits exactly one `branch_protection.override` governance event per overridden ref update — not per push — with the ADR-009 §4 payload plus a `pre_receive_ref: {old_sha, new_sha, ref}` block. No commit trailer is added on this path; the event is the sole audit record for a Git push override. Unused overrides (flag set on a push that did not need it) emit nothing.
+
+**`receive.advertisePushOptions=true`** is set on every workspace repo alongside `http.receivepack=true` so `git push -o` actually reaches the gate — without it the client silently drops the option.
+
 ---
 
 ## 7. Conflict Handling

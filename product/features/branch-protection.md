@@ -11,7 +11,7 @@ version: "0.1"
 
 ## 1. Problem
 
-Spine is its own Git server. Workspaces are served over Spine's `githttp` endpoint, and the Artifact Service mediates every write the engine performs on the authoritative branch. When push is enabled on the Git endpoint (today it is read-only; enabling it is a near-term roadmap item), a contributor will be able to:
+Spine is its own Git server. Workspaces are served over Spine's `githttp` endpoint, and the Artifact Service mediates every write the engine performs on the authoritative branch. Push is enabled via the `SPINE_GIT_RECEIVE_PACK_ENABLED` flag (EPIC-004 TASK-001); when on, the pre-receive gate (TASK-002) evaluates every ref update against the same `branchprotect.Policy` the API-path uses. Without those enforcement points, a contributor would be able to:
 
 1. **Delete** any branch — including long-lived ones like `staging` or release branches — with a single `git push --delete`.
 2. **Advance** the authoritative branch (`main`) with a direct push, bypassing the planning-run / approval / merge machinery that every other write is required to go through.

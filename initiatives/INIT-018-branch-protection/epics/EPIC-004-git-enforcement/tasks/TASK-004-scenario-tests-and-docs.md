@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: "Git-path scenario tests and documentation sweep"
-status: Pending
+status: Completed
 work_type: testing+documentation
 created: 2026-04-18
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-004-git-enforcement/epic.md
