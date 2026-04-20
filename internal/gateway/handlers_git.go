@@ -62,13 +62,33 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth: skip for trusted IPs, require bearer token for others.
-	if !s.gitHTTP.IsTrustedIP(r.RemoteAddr) {
-		if !s.devMode {
-			if err := s.validateGitAuth(r, cfg); err != nil {
-				WriteError(w, err)
-				return
-			}
+	// Auth gate.
+	//
+	//  - Read-only (clone/fetch): trusted-CIDR source IPs bypass the
+	//    bearer-token check. This is the original runner-container
+	//    affordance.
+	//  - Push (git-receive-pack) with the flag ON: the trusted-CIDR
+	//    bypass does NOT apply. Every push must carry a bearer token
+	//    so an actor identity is pinned for the upcoming
+	//    branch-protection pre-receive check (EPIC-004 TASK-002) and
+	//    for audit. Without this split, a runner subnet configured
+	//    for token-less cloning could also push anonymously once
+	//    receive-pack is on.
+	//  - Push with the flag OFF: skip the auth gate so the handler
+	//    can return its documented 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED`
+	//    guidance. Authenticating a request we are about to reject
+	//    adds no security value and hides the flag name from
+	//    unauthenticated callers who are exactly the ones most likely
+	//    to hit it.
+	//  - devMode bypasses auth entirely so local development does not
+	//    require wiring a token.
+	push := githttp.IsReceivePack(r)
+	pushDisabledShortCircuit := push && !s.gitHTTP.ReceivePackEnabled()
+	trustedBypass := !push && s.gitHTTP.IsTrustedIP(r.RemoteAddr)
+	if !pushDisabledShortCircuit && !trustedBypass && !s.devMode {
+		if err := s.validateGitAuth(r, cfg); err != nil {
+			WriteError(w, err)
+			return
 		}
 	}
 

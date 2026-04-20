@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,7 +84,7 @@ func TestNewHandler_CustomConfig(t *testing.T) {
 	h, err := NewHandler(Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
 		MaxConcurrent:   10,
-		OpTimeout:        60 * time.Second,
+		OpTimeout:       60 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +131,38 @@ func TestIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestIsReceivePack(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		query  string
+		want   bool
+	}{
+		{"info refs receive-pack", "GET", "/info/refs", "service=git-receive-pack", true},
+		{"info refs upload-pack", "GET", "/info/refs", "service=git-upload-pack", false},
+		{"info refs no service", "GET", "/info/refs", "", false},
+		{"POST receive-pack", "POST", "/git-receive-pack", "", true},
+		{"POST upload-pack", "POST", "/git-upload-pack", "", false},
+		{"GET HEAD", "GET", "/HEAD", "", false},
+		{"GET objects", "GET", "/objects/pack/pack-abc.pack", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := tt.path
+			if tt.query != "" {
+				url += "?" + tt.query
+			}
+			req := httptest.NewRequest(tt.method, url, nil)
+			got := IsReceivePack(req)
+			if got != tt.want {
+				t.Errorf("IsReceivePack(%s %s?%s) = %v, want %v",
+					tt.method, tt.path, tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestServeHTTP_NoRepoPath(t *testing.T) {
 	h, err := NewHandler(Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
@@ -149,23 +182,80 @@ func TestServeHTTP_NoRepoPath(t *testing.T) {
 	}
 }
 
-func TestServeHTTP_PushRejected(t *testing.T) {
+func TestServeHTTP_PushRejectedWhenFlagOff(t *testing.T) {
 	h, err := NewHandler(Config{
 		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if h.ReceivePackEnabled() {
+		t.Fatal("expected ReceivePackEnabled default to be false")
+	}
+
+	// Both push entry points (info/refs service and POST) must be
+	// rejected when the flag is off. If only one is gated, a client
+	// can still drive a push by skipping the advertisement.
+	cases := []struct {
+		name   string
+		method string
+		url    string
+	}{
+		{"info-refs", "GET", "/info/refs?service=git-receive-pack"},
+		{"post-receive-pack", "POST", "/git-receive-pack"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.url, nil)
+			ctx := WithRepoPath(req.Context(), "/tmp/repo")
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("expected 403 for push attempt, got %d", w.Code)
+			}
+			// Error message must name the flag so operators can
+			// find it without grepping source.
+			if !strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
+				t.Errorf("rejection message should name the config flag, got: %q",
+					w.Body.String())
+			}
+		})
+	}
+}
+
+// TestServeHTTP_PushPassesGateWhenFlagOn asserts that the receive-pack
+// request gate no longer rejects a push when ReceivePackEnabled is true.
+// The test cannot complete a full push because that would require a real
+// bare repo and git-http-backend CGI; instead it sets ResolveRepoPath to
+// a path that fails the ensureReceivePackConfig step, proving the gate
+// itself passed and the request reached the config-align stage. The
+// end-to-end push path is covered by the scenario test.
+func TestServeHTTP_PushPassesGateWhenFlagOn(t *testing.T) {
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
+		ReceivePackEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.ReceivePackEnabled() {
+		t.Fatal("expected ReceivePackEnabled=true")
+	}
 
 	req := httptest.NewRequest("GET", "/info/refs?service=git-receive-pack", nil)
-	ctx := WithRepoPath(req.Context(), "/tmp/repo")
+	// Deliberately non-existent path so ensureReceivePackConfig fails;
+	// that 500 proves we passed the 403 push gate.
+	ctx := WithRepoPath(req.Context(), "/nonexistent/definitely/not/a/repo")
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Errorf("expected 403 for push attempt, got %d", w.Code)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("expected push gate to pass when flag is on, got 403 %q", w.Body.String())
 	}
 }
 

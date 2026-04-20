@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/workspace"
 )
 
@@ -53,11 +55,11 @@ func TestValidateGitAuth_DoesNotLeakPoolRefs(t *testing.T) {
 
 func TestParseGitPath(t *testing.T) {
 	tests := []struct {
-		name       string
-		pattern    string
-		url        string
-		wantWsID   string
-		wantPath   string
+		name     string
+		pattern  string
+		url      string
+		wantWsID string
+		wantPath string
 	}{
 		{
 			name:     "workspace with info refs",
@@ -240,5 +242,150 @@ func TestHandleGit_NilHandler(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when gitHTTP is nil, got %d", w.Code)
+	}
+}
+
+// TestHandleGit_TrustedCIDRDoesNotBypassPushAuth asserts that a push
+// from a trusted source IP is still required to present a bearer
+// token. EPIC-004 TASK-001 requires an actor identity on every push so
+// the upcoming pre-receive branch-protection check (TASK-002) can pin
+// the caller. Without this split a trusted runner subnet configured
+// for token-less cloning could also push anonymously.
+func TestHandleGit_TrustedCIDRDoesNotBypassPushAuth(t *testing.T) {
+	repo := t.TempDir()
+	resolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: repo,
+		Status:   workspace.StatusActive,
+	}}
+
+	// Trust 127.0.0.0/8 so the test request's default RemoteAddr
+	// (127.0.0.1:...) sits inside a trusted CIDR.
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+		TrustedCIDRs:       []string{"127.0.0.0/8"},
+		ReceivePackEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: resolver,
+	}
+
+	// info/refs?service=git-receive-pack from a trusted IP, no auth
+	// header. The auth gate must refuse; the read-only clone/fetch
+	// path would have accepted the same RemoteAddr.
+	req := httptest.NewRequest("GET",
+		"/git/ws-1/info/refs?service=git-receive-pack", nil)
+	req.RemoteAddr = "127.0.0.1:54321" // in trusted 127.0.0.0/8
+	// Route the request through chi so URLParam("workspace_id") resolves.
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for trusted-CIDR push without token, got %d (body: %s)",
+			w.Code, w.Body.String())
+	}
+}
+
+// TestHandleGit_PushDisabledReturns403NotAuth asserts that when the
+// receive-pack flag is off, the handler's 403-with-flag-name response
+// reaches the caller even without a bearer token. The auth gate must
+// not hide that guidance behind a 401 — operators who hit this for the
+// first time will not have configured a token yet, and the flag-name
+// message is the whole point of the UX.
+func TestHandleGit_PushDisabledReturns403NotAuth(t *testing.T) {
+	repo := t.TempDir()
+	resolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: repo,
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+		// Flag OFF.
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: resolver,
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/ws-1/info/refs?service=git-receive-pack", nil)
+	// External IP, no auth header.
+	req.RemoteAddr = "203.0.113.1:12345"
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 with flag-name guidance, got %d (body: %s)",
+			w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
+		t.Errorf("expected 403 body to name SPINE_GIT_RECEIVE_PACK_ENABLED, got: %s",
+			w.Body.String())
+	}
+}
+
+// TestHandleGit_TrustedCIDRBypassesReadAuth is the counterpart of the
+// push-auth test: for a clone/fetch request from a trusted IP with no
+// token, the gate must pass through to the git handler (which then
+// proceeds to the backend or 500s on the repo path, either of which is
+// past the auth gate).
+func TestHandleGit_TrustedCIDRBypassesReadAuth(t *testing.T) {
+	repo := t.TempDir()
+	resolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: repo,
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+		TrustedCIDRs: []string{"127.0.0.0/8"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: resolver,
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/ws-1/info/refs?service=git-upload-pack", nil)
+	req.RemoteAddr = "127.0.0.1:54321" // in trusted 127.0.0.0/8
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("read from trusted CIDR should not be rejected by auth gate, got 401: %s",
+			w.Body.String())
 	}
 }

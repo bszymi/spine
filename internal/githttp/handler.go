@@ -21,7 +21,10 @@ import (
 )
 
 // Handler serves Git repositories over HTTP using git-http-backend CGI.
-// It is read-only (upload-pack only) and supports workspace-scoped repo resolution.
+// Upload-pack (clone/fetch) is always served; receive-pack (push) is
+// gated by ReceivePackEnabled — see ADR-009 / EPIC-004 TASK-001 for the
+// config surface. When enabled, this handler is a plain passthrough with
+// no branch-protection; TASK-002 wraps it with the pre-receive policy.
 type Handler struct {
 	// resolveRepoPath returns the absolute filesystem path for a given workspace ID.
 	// Returns an error if the workspace is unknown or inactive.
@@ -39,8 +42,14 @@ type Handler struct {
 	// trustedCIDRs are IP ranges that bypass authentication.
 	trustedCIDRs []*net.IPNet
 
-	// mu protects ensuredRepos which tracks repos with receivepack disabled.
-	mu          sync.Mutex
+	// receivePackEnabled controls whether git-receive-pack (push) is
+	// reachable. Default false — an existing deployment upgrading past
+	// this change does not silently start accepting pushes.
+	receivePackEnabled bool
+
+	// mu protects ensuredRepos which tracks repos whose local
+	// http.receivepack config has been aligned with receivePackEnabled.
+	mu           sync.Mutex
 	ensuredRepos map[string]bool
 }
 
@@ -61,6 +70,13 @@ type Config struct {
 	// Requests from these ranges can access the git endpoint without a bearer token.
 	// Example: ["172.16.0.0/12", "10.0.0.0/8"]
 	TrustedCIDRs []string
+
+	// ReceivePackEnabled turns on the git push endpoint
+	// (git-receive-pack). Default false. This is a bare on-off switch
+	// per EPIC-004 TASK-001 — no branch-protection logic runs here yet;
+	// TASK-002 wraps receive-pack with pre-receive enforcement. Upgrade
+	// paths must opt in explicitly.
+	ReceivePackEnabled bool
 }
 
 // NewHandler creates a new git HTTP handler.
@@ -90,13 +106,21 @@ func NewHandler(cfg Config) (*Handler, error) {
 	}
 
 	return &Handler{
-		resolveRepoPath: cfg.ResolveRepoPath,
-		gitBackendPath:  backendPath,
-		sem:             make(chan struct{}, maxConcurrent),
-		opTimeout:       opTimeout,
-		trustedCIDRs:    trustedCIDRs,
-		ensuredRepos:    make(map[string]bool),
+		resolveRepoPath:    cfg.ResolveRepoPath,
+		gitBackendPath:     backendPath,
+		sem:                make(chan struct{}, maxConcurrent),
+		opTimeout:          opTimeout,
+		trustedCIDRs:       trustedCIDRs,
+		receivePackEnabled: cfg.ReceivePackEnabled,
+		ensuredRepos:       make(map[string]bool),
 	}, nil
+}
+
+// ReceivePackEnabled reports whether git push is configured to reach
+// the backend. Exposed for assembly-site logging and tests; callers
+// should not rely on this to gate requests — ServeHTTP is authoritative.
+func (h *Handler) ReceivePackEnabled() bool {
+	return h.receivePackEnabled
 }
 
 // IsTrustedIP returns true if the IP is within a trusted CIDR range.
@@ -134,13 +158,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	gitPath := r.URL.Path
 	log := observe.Logger(r.Context())
 
-	// Only allow read operations (upload-pack).
-	if !isReadOnly(r) {
-		log.Warn("git push attempt rejected",
+	// Push path: reachable only when ReceivePackEnabled is on. The
+	// flag default is false so existing deployments see no behaviour
+	// change on upgrade. When off, deny with a message that names the
+	// flag so operators can find it without grepping source.
+	push := IsReceivePack(r)
+	if push && !h.receivePackEnabled {
+		log.Warn("git push attempt rejected — receive-pack disabled",
 			"remote_addr", r.RemoteAddr,
 			"path", gitPath,
 		)
-		http.Error(w, "push is not allowed — this endpoint is read-only", http.StatusForbidden)
+		http.Error(w,
+			"git push is disabled — enable via git.receive_pack_enabled "+
+				"(SPINE_GIT_RECEIVE_PACK_ENABLED=true); see ADR-009",
+			http.StatusForbidden)
+		return
+	}
+
+	// Non-read, non-push requests are unsupported (e.g. arbitrary POSTs
+	// to paths outside the git protocol).
+	if !push && !isReadOnly(r) {
+		log.Warn("git request rejected — not a supported operation",
+			"remote_addr", r.RemoteAddr,
+			"path", gitPath,
+			"method", r.Method,
+		)
+		http.Error(w, "unsupported git operation", http.StatusForbidden)
 		return
 	}
 
@@ -149,7 +192,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case h.sem <- struct{}{}:
 		defer func() { <-h.sem }()
 	default:
-		log.Warn("git clone rejected — concurrency limit reached",
+		log.Warn("git request rejected — concurrency limit reached",
 			"remote_addr", r.RemoteAddr,
 		)
 		w.Header().Set("Retry-After", "5")
@@ -157,9 +200,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure receivepack is disabled for this repo.
-	if err := h.ensureReceivePackDisabled(r.Context(), repoPath); err != nil {
-		log.Error("failed to disable receivepack", "error", err, "repo_path", repoPath)
+	// Align the repo's local http.receivepack with the flag. Without
+	// this, git-http-backend refuses push even when our gate above
+	// allows it, because the repo config still carries an explicit
+	// `http.receivepack=false` from a previous handler lifetime.
+	if err := h.ensureReceivePackConfig(r.Context(), repoPath); err != nil {
+		log.Error("failed to align receivepack config", "error", err, "repo_path", repoPath)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -192,9 +238,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-// ensureReceivePackDisabled sets http.receivepack=false on the repo's git config.
-// This is idempotent and only runs once per repo path per handler lifetime.
-func (h *Handler) ensureReceivePackDisabled(ctx context.Context, repoPath string) error {
+// ensureReceivePackConfig aligns the repo's local http.receivepack with
+// the handler's ReceivePackEnabled setting. Idempotent per repo path per
+// handler lifetime — the value never flips at runtime, so caching by
+// path is safe.
+func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) error {
 	h.mu.Lock()
 	if h.ensuredRepos[repoPath] {
 		h.mu.Unlock()
@@ -202,13 +250,18 @@ func (h *Handler) ensureReceivePackDisabled(ctx context.Context, repoPath string
 	}
 	h.mu.Unlock()
 
+	value := "false"
+	if h.receivePackEnabled {
+		value = "true"
+	}
+
 	// G702 flags cmd.Dir as taint-tracked. repoPath is resolved by
 	// the caller from the workspace registry (validated workspace
 	// IDs), never from untrusted client input.
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "http.receivepack", "false") //nolint:gosec // G702: repoPath is server-resolved from workspace registry, not request input
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "http.receivepack", value) //nolint:gosec // G702: repoPath is server-resolved from workspace registry, not request input
 	cmd.Dir = repoPath
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git config http.receivepack=false: %w", err)
+		return fmt.Errorf("git config http.receivepack=%s: %w", value, err)
 	}
 
 	h.mu.Lock()
@@ -233,10 +286,33 @@ func isReadOnly(r *http.Request) bool {
 	}
 
 	// GET for dumb HTTP protocol files (HEAD, objects/*, etc.)
+	// Excludes info/refs?service=git-receive-pack which falls through the
+	// query-string check above (returns false there).
 	if r.Method == http.MethodGet {
 		return true
 	}
 
+	return false
+}
+
+// IsReceivePack returns true if the request is a git push (receive-pack)
+// operation — either the ref advertisement for push or the pack data.
+// The receive-pack gate in ServeHTTP drives off this and must stay in
+// sync with isReadOnly's rejection of the same paths.
+//
+// Exported so the gateway's auth middleware can distinguish push from
+// read: trusted-CIDR bypass applies to clone/fetch but not to push, so
+// every push has an actor identity attached for branch-protection and
+// audit.
+func IsReceivePack(r *http.Request) bool {
+	path := r.URL.Path
+
+	if r.Method == http.MethodGet && strings.HasSuffix(path, "/info/refs") {
+		return r.URL.Query().Get("service") == "git-receive-pack"
+	}
+	if r.Method == http.MethodPost && strings.HasSuffix(path, "/git-receive-pack") {
+		return true
+	}
 	return false
 }
 
