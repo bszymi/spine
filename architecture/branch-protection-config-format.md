@@ -121,7 +121,7 @@ Behavior of this config (per ADR-009 §2–§4):
 
 ## 6. Relationship to Runtime
 
-The Projection Service watches `/.spine/branch-protection.yaml` on the authoritative branch. On every merge:
+The Projection Service watches `/.spine/branch-protection.yaml` on the authoritative branch. On every advance of the authoritative branch (governed merge, operator-override direct push per [ADR-009 §5](/architecture/adr/ADR-009-branch-protection.md), or full rebuild):
 
 1. Read the file content.
 2. Parse via `internal/branchprotect/config.Parse`.

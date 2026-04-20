@@ -24,15 +24,15 @@ The rest of Spine goes to some length to prevent exactly this: [ADR-001](/archit
 
 The product-level prerequisite for this ADR is that Spine owns the Git host for governed repositories and the governance state machine around change proposals (PRs, reviews, approvals, merge authority). Both are now reflected in [Boundaries §2.1-§2.3](/product/boundaries-and-constraints.md): Spine hosts the governed repository via the `githttp` endpoint and owns the PR-shaped governance layer, delegating only the presentation surfaces that render it. External forges, when present, integrate as *clients* of Spine's governance engine, not as authorities over it. Without that boundary, branch protection would have to push rules to an external forge's API — which cannot see Spine's Run state and therefore cannot distinguish a governed merge from a direct write.
 
-[INIT-018](/initiatives/INIT-018-branch-protection/initiative.md) and the companion [product description](/product/features/branch-protection.md) establish the feature scope: two protection types (`no-delete`, `no-direct-write`), reviewer-authored configuration, operator override with audit. This ADR decides the architectural questions: storage, enforcement point, override surface, and how Spine-owned operations interact with the rules.
+[INIT-018](/initiatives/INIT-018-branch-protection/initiative.md) and the companion [product description](/product/features/branch-protection.md) establish the feature scope: two protection types (`no-delete`, `no-direct-write`), operator-edited configuration, operator override with audit. This ADR decides the architectural questions: storage, enforcement point, override surface, and how Spine-owned operations interact with the rules.
 
 ---
 
 ## Decision
 
-### 1. Configuration Is a Governed Artifact in Git
+### 1. Configuration Is a Git-Tracked Operator Config
 
-The branch-protection ruleset lives at `/.spine/branch-protection.yaml` on the authoritative branch. It is a governed artifact — the same class as a workflow definition — with front-matter-less YAML content (workflows are YAML without front matter; the protection config follows the same convention).
+The branch-protection ruleset lives at `/.spine/branch-protection.yaml` on the authoritative branch. It is an operator-controlled config file (edit flow in §5), stored in Git as the source of truth, with front-matter-less YAML content (workflows are YAML without front matter; the protection config follows the same convention).
 
 Shape:
 
@@ -50,9 +50,15 @@ rules:
 
 Git is the source of truth; the Projection Service mirrors the parsed ruleset into a runtime table (`branch_protection_rules`) the same way it does for workflow projections, and the enforcement path reads the projection (not the file) so evaluation is an in-memory lookup.
 
-**Self-protection is branch-level, not path-level.** The config file lives on the authoritative branch, and the authoritative branch is covered by `no-direct-write` (either via explicit config or via the bootstrap defaults below). That alone ensures config edits can only land through a governed merge — there is no separate path-scoped rule on `/.spine/branch-protection.yaml`. The ruleset is explicitly flat (branch + kind); adding a path-scoped check would contradict §6 and push v1 into path-rule territory.
+**Self-protection is branch-level, not path-level.** The config file lives on the authoritative branch, and the authoritative branch is covered by `no-direct-write` (either via explicit config or via the bootstrap defaults below). The ruleset is explicitly flat (branch + kind); there is no separate path-scoped rule on `/.spine/branch-protection.yaml`, and adding one would contradict §6 and push v1 into path-rule territory.
 
-The only way to relax protection on the authoritative branch is either (a) a governed merge approved through the normal flow, or (b) an operator override on a direct commit. Both produce audit records (§4). An attacker with commit access but no operator role cannot disable self-protection, because every path that lands the edit goes through `Policy.Evaluate` for the authoritative branch.
+The enforcement boundary that follows from branch-level protection is narrower than "no one can change the bytes of the file":
+
+- **Direct advance of the authoritative branch (`git push main`, `artifact.create` without `write_context`).** While the authoritative branch carries `no-direct-write` (the bootstrap default), these are blocked unless the caller invokes the §4 override path. Under that configuration, the operator-only edit property in §5 holds — every edit that arrives this way is an operator with `Override: true`, producing a `branch_protection.override` event.
+- **Governed merge of a run branch that happens to include the config file.** `OpGovernedMerge` is allowed by `Policy.Evaluate` unconditionally (§3), and `Orchestrator.MergeRunBranch` merges the whole branch. A contributor with write access to a run branch can include a change to `/.spine/branch-protection.yaml` there; the governing workflow's review step is the only gate. v1 does **not** add a merge-time path guard that would force an override on this path. The reason is that path-scoped enforcement is explicitly out of scope (§6), and adding it would contradict the "flat (branch + kind)" invariant. Reviewers on run branches that touch `.spine/*` are expected to catch such changes the same way they would catch a surprise edit to a workflow definition or any other governance file.
+- **Direct pushes while `no-direct-write` is not in effect.** If an operator later removes `no-direct-write` from the authoritative branch, self-protection is off — subsequent edits to `/.spine/branch-protection.yaml` are ordinary direct writes and do not emit a `branch_protection.override` event. That relaxation itself is an audited override (the act of removing the rule required one); further writes under the relaxed config are not. Deployments that want the stronger property keep `no-direct-write` on the authoritative branch.
+
+This ADR does not force the self-protection invariant at the schema level, because (a) path-scoped self-protection is explicitly out of scope (§6), (b) imposing a hard-coded "authoritative branch cannot be relaxed" rule would foreclose legitimate configurations (e.g. workspaces that use a different ref as authoritative, or air-gapped repos that vouch for protection out-of-band), and (c) the merge-time guard for the run-branch path is a decision a future ADR can add once there is evidence it is warranted. Closing either gap would be a deliberate expansion of scope, not a bug fix.
 
 **Bootstrap.** A fresh repository without `branch-protection.yaml` evaluates as if the following defaults were present:
 
@@ -120,15 +126,36 @@ An auditor answering "who overrode protection on this branch" consults the event
 
 Per-actor override allow-lists (a deployment bot that must force-push to `staging`) are **not** included in v1 — operator override is the only escape hatch. If dogfooding surfaces a real need, a new ADR adds them.
 
-### 5. Editing the Protection Config Goes Through the Governance Flow
+### 5. Editing the Protection Config Is an Operator Direct Commit (Intended Path)
 
-`/.spine/branch-protection.yaml` is a governed artifact. Editing it means:
+`/.spine/branch-protection.yaml` is treated as an operator-controlled governance config, in the same class as `.spine.yaml`, `.gitignore`, and the seed files produced by `spine init-repo` — **not** as a governed artifact with a lifecycle workflow.
 
-1. The reviewer starts a Run whose workflow writes to the config path. (The specific governing workflow — a dedicated `branch-protection-lifecycle.yaml`, or just bracketing the file under the existing `workflow-lifecycle.yaml`-style scheme — is an implementation decision for the follow-up epic, not this ADR.)
-2. The Run's branch is created, the edit is committed, a review step is required, and merging the branch updates the config.
-3. The `Projection Service` detects the merge via the usual sync path and refreshes the in-memory ruleset.
+No dedicated `branch-protection-lifecycle.yaml` exists, and the file is deliberately not bound to a `workflow-lifecycle.yaml`-style planning flow. The intended edit path is for an operator to land the change via the standard override surface defined in §4: a direct commit on the authoritative branch, pushed with the Git push option `-o spine.override=true`. `Policy.Evaluate` honors the override because the actor is `operator+`, and a `branch_protection.override` governance event is emitted in the usual way. No new signaling mechanism is introduced for config edits — this is the same surface every other honored override already uses.
 
-Bootstrap deadlock — the config protects itself and the config is broken — is the same class of problem ADR-008 addresses for the lifecycle workflow. The resolution is the same: operator override. An operator may land a direct commit on `/.spine/branch-protection.yaml` via the override path, and that commit carries the audit trailer.
+The enforcement boundary around that path is exactly what §1 describes. Summarized:
+
+- Direct advance of the authoritative branch that touches this file under `no-direct-write`: blocked unless an operator uses the §4 override. This is the case the "operator-only" framing applies to.
+- Governed merge of a run branch that happens to modify the file: allowed unconditionally (§3); the governing workflow's review step is the control. v1 does not add a merge-time path guard for this path — see §1.
+
+This ADR does not close the run-branch-slippage gap for the protection config specifically, because the same gap exists today for every other governance file (workflows, ADRs, `.spine.yaml`) that a contributor could slip onto a run branch. Addressing it uniformly would be a separate decision about path-scoped merge-time guards, not a decision about branch-protection specifically.
+
+Why not a lifecycle workflow:
+
+- **Who edits the rules is already constrained.** Branch-protection policy is an operator/admin concern by design — the override-to-edit path is gated on `operator+` anyway. Adding a reviewer-authored flow on top produces a review step that only operators are qualified to land.
+- **Lifecycle workflows pay off when an artifact has production semantics.** Workflows, ADRs, Tasks are drafted, reviewed, iterated. Branch-protection rules are a short list of (branch, kinds) entries; there is no drafting effort that benefits from a separate review step beyond the commit review the operator's change receives at the Git/API boundary.
+- **The self-protection recursion is avoided.** Under the previously considered design, a rule change would have to merge through a branch covered by the rule it is trying to change — every edit would require an override anyway for the bootstrap or self-disable case. Making the operator-commit path the only path removes the distinction between the "normal" and "recovery" edit paths: there is just one path.
+
+Edit flow:
+
+1. An operator edits `/.spine/branch-protection.yaml` on a local clone of the repo.
+2. The commit is pushed to the authoritative branch with `git push -o spine.override=true` (the Git-path override surface from §4). Per §4 the Git push path does not rewrite commits, so no `Branch-Protection-Override` trailer is added — the governance event is the sole record.
+3. `Policy.Evaluate` sees `Override: true` on the push and the caller's `operator+` role, and allows the advance.
+4. A `branch_protection.override` governance event is emitted with the usual metadata (§4).
+5. The `Projection Service` detects the advance via the usual sync path and refreshes the in-memory ruleset.
+
+The "operator-only edit" property is a consequence of the authoritative branch carrying `no-direct-write`, not a separate invariant enforced by the branch-protection module. It constrains the direct-push path; it does not close the run-branch-slippage path (§1) or survive a relaxation of `no-direct-write` on the authoritative branch.
+
+Non-operator authors who want a rule change propose it through the normal channels (file an issue, ask an operator) — the same escalation pattern for any other operator-controlled config. If dogfooding shows that operators routinely hand-edit complex rule changes and would genuinely benefit from a draft/review flow, or that run-branch slippage becomes a concrete problem, a future ADR can introduce a lifecycle workflow or a merge-time path guard; this ADR explicitly closes v1 without either.
 
 ### 6. Scope of v1
 
@@ -157,14 +184,14 @@ Out of scope (explicitly — each requires its own ADR):
 
 - Authoritative-branch invariants become enforceable, not aspirational. The `Git Integration Contract` §6.3 claim about Spine-managed branches becomes a runtime fact.
 - Both push-layer and internal-API-layer writes are checked by a single policy module, eliminating the "one path forgot to check" failure mode.
-- Protection rules are governed by the same machinery as any other artifact — reviewing a rule change looks like reviewing an ADR or a workflow.
+- Protection rules live in Git and carry their edit audit trail in the event stream (§4, §5), so "who changed protection on `main` and when" is answered the same way as any other governance event.
 - Override is auditable, attributable, and scoped to the single operation that requested it.
 
 ### Negative
 
 - New dependency: the enforcement path adds a latency tax on every merge and every push. For the Git path this is unavoidable; for the API path the cost is an in-memory lookup against the projected ruleset.
 - Bootstrap story is slightly more complex — repos without a config file evaluate against implicit defaults, and implementers must remember to keep the defaults and the seed file in sync.
-- Self-protection creates a recursion: relaxing protection requires an operator override. This is the intended behavior but adds a support-surface edge case (an operator is always required to ship the first relaxation).
+- There is no API-level path for a non-operator to propose a rule change — non-operators must escalate out-of-band. This is the intended consequence of treating protection as operator-owned configuration (§5), and accepting it is what avoids the "lifecycle workflow reviewing an operator-only change" shape. Note: this bullet is about the intended edit path only. The branch-level enforcement boundary (§1) does not make "every edit requires an operator" a hard invariant — a run-branch governed merge can still carry a config change, and the governing workflow's review step is the control for that path.
 
 ### Neutral
 
