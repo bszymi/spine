@@ -162,5 +162,6 @@ func allEventTypes() []domain.EventType {
 		domain.EventAssignmentFailed,
 		domain.EventTaskUnblocked,
 		domain.EventTaskReleased,
+		domain.EventBranchProtectionOverride,
 	}
 }

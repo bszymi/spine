@@ -88,7 +88,23 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.WriteContext != nil {
-		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		// ADR-009 §4 names both artifact and workflow endpoints as
+		// carrying write_context.override, but enforcement is currently
+		// wired only on the Artifact Service (TASK-001 of this epic).
+		// workflow.Service does not consult branchprotect.Policy, so an
+		// accepted override here would silently succeed without the
+		// mandatory audit event or commit trailer — worse than rejecting.
+		// Operators needing a direct-commit write to a workflow already
+		// have the ADR-008 operator-bypass path (omit write_context as
+		// operator+ role, which adds a Workflow-Bypass trailer). Wiring
+		// branchprotect into workflow.Service is tracked as follow-up
+		// work; until then this returns 400 with the bypass hint.
+		if req.WriteContext.Override {
+			WriteError(w, domain.NewError(domain.ErrInvalidParams,
+				"write_context.override is not yet supported on workflow endpoints (use ADR-008 operator bypass: omit write_context entirely as operator+ role)"))
+			return
+		}
+		branch, _, err := s.resolveWriteContext(ctx, req.WriteContext)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -146,7 +162,15 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 
 	ctx := r.Context()
 	if req.WriteContext != nil {
-		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		// See handleWorkflowCreate for the rationale; override on the
+		// workflow surface is rejected until workflow.Service consults
+		// branchprotect.Policy.
+		if req.WriteContext.Override {
+			WriteError(w, domain.NewError(domain.ErrInvalidParams,
+				"write_context.override is not yet supported on workflow endpoints (use ADR-008 operator bypass: omit write_context entirely as operator+ role)"))
+			return
+		}
+		branch, _, err := s.resolveWriteContext(ctx, req.WriteContext)
 		if err != nil {
 			WriteError(w, err)
 			return

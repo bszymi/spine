@@ -35,6 +35,11 @@ func workflowRejection(op string) error {
 type writeContextRequest struct {
 	RunID    string `json:"run_id"`
 	TaskPath string `json:"task_path"`
+	// Override opts the caller into the branch-protection override surface
+	// for this single operation (ADR-009 §4). The policy evaluator gates
+	// effective use on Actor.Role ≥ operator — contributors who set this
+	// flag see a distinct "override not authorised" reason. Omitted ≡ false.
+	Override bool `json:"override,omitempty"`
 }
 
 type artifactCreateRequest struct {
@@ -77,13 +82,13 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	if req.WriteContext != nil {
-		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		branch, override, err := s.resolveWriteContext(ctx, req.WriteContext)
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
-		if branch != "" {
-			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
+		if branch != "" || override {
+			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch, Override: override})
 		}
 	}
 	result, err := s.artifactsFrom(r.Context()).Create(ctx, req.Path, req.Content)
@@ -253,13 +258,13 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 		// (e.g., during draft/rework). Full ADR-006 §8 enforcement (blocking updates
 		// to pre-existing artifacts from main) requires distinguishing branch-local
 		// vs inherited files, which is deferred to a future task.
-		branch, err := s.resolveWriteContext(ctx, req.WriteContext)
+		branch, override, err := s.resolveWriteContext(ctx, req.WriteContext)
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
-		if branch != "" {
-			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch})
+		if branch != "" || override {
+			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch, Override: override})
 		}
 	}
 	result, err := s.artifactsFrom(r.Context()).Update(ctx, path, req.Content)
@@ -411,42 +416,44 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 	})
 }
 
-// resolveWriteContext resolves a WriteContext request (run_id + task_path) to a branch name.
-// Returns empty string if no run_id is provided (authoritative branch write).
-// Planning runs skip task_path validation per ADR-006 §7.
-func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextRequest) (string, error) {
+// resolveWriteContext resolves a WriteContext request (run_id + task_path)
+// into the destination branch and the override flag. Empty run_id yields
+// ("", override, nil) — an authoritative-branch write, the case where the
+// override flag is actually meaningful. Planning runs skip task_path
+// validation per ADR-006 §7.
+func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextRequest) (string, bool, error) {
 	if wc.RunID == "" {
-		return "", nil
+		return "", wc.Override, nil
 	}
 	if s.storeFrom(ctx) == nil {
-		return "", domain.NewError(domain.ErrUnavailable, "store not configured")
+		return "", false, domain.NewError(domain.ErrUnavailable, "store not configured")
 	}
 	run, err := s.storeFrom(ctx).GetRun(ctx, wc.RunID)
 	if err != nil {
-		return "", fmt.Errorf("resolve write context: %w", err)
+		return "", false, fmt.Errorf("resolve write context: %w", err)
 	}
 	if run.Status != domain.RunStatusActive {
-		return "", domain.NewError(domain.ErrInvalidParams,
+		return "", false, domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("run %s is not active (status: %s)", wc.RunID, run.Status))
 	}
 	if run.BranchName == "" {
-		return "", domain.NewError(domain.ErrInvalidParams,
+		return "", false, domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("run %s has no branch", wc.RunID))
 	}
 
 	// Planning runs: skip task_path validation. The run owns a constrained
 	// creation scope on the branch for multi-artifact writes.
 	if run.Mode == domain.RunModePlanning {
-		return run.BranchName, nil
+		return run.BranchName, wc.Override, nil
 	}
 
 	// Standard runs: require task_path and validate it matches the run.
 	if wc.TaskPath == "" {
-		return "", domain.NewError(domain.ErrInvalidParams, "write_context.task_path is required when run_id is provided")
+		return "", false, domain.NewError(domain.ErrInvalidParams, "write_context.task_path is required when run_id is provided")
 	}
 	if run.TaskPath != wc.TaskPath {
-		return "", domain.NewError(domain.ErrInvalidParams,
+		return "", false, domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("task_path mismatch: run %s belongs to %s, not %s", wc.RunID, run.TaskPath, wc.TaskPath))
 	}
-	return run.BranchName, nil
+	return run.BranchName, wc.Override, nil
 }
