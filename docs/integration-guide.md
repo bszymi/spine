@@ -460,6 +460,8 @@ Auth on push is **stricter** than on clone/fetch: the trusted-CIDR bypass does n
 
 **Branch-protection pre-receive enforcement.** When the flag is on, every push is intercepted at the HTTP layer before `git-http-backend` writes any ref: the command section of the request body is parsed into `(old, new, ref)` triples, each triple is classified (`delete` if `new == 0000...`, else `direct-write`), and each is evaluated against the projection-backed `branchprotect.Policy`. Any Deny rejects the **entire** push (pre-receive semantics — no partial application), and the client sees the rejection as `remote: branch-protection: <rule> denies <branch>` lines plus a per-ref `ng <ref> pre-receive hook declined`. Refs under `spine/*` (run branches, scheduler-managed refs) bypass policy by design — they are out of scope for user-authored rules (ADR-009 §3).
 
+**Operator override on push.** The Git-path equivalent of `write_context.override` is `git push -o spine.override=true`. Operators (role `operator+`) bypass a matching rule for that single push; contributors who set the same option are rejected with a distinct "override not authorised" message, not silently accepted. Every honored override emits a `branch_protection.override` governance event with the full ADR-009 §4 payload, including a `pre_receive_ref` block carrying the `(old_sha, new_sha, ref)` the client tried to push — the Git path does **not** rewrite client-produced commits to add a trailer, so the event is the sole record on this path. Unused overrides (flag set on a push that did not need it) emit nothing.
+
 ### Authentication
 
 Two acceptance paths:

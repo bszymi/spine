@@ -154,7 +154,7 @@ type Server struct {
 	stepAssigner        StepAssigner               // optional, nil if not configured
 	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
 	gitHTTP             *githttp.Handler           // optional, nil if not configured
-	gitPushPolicyFor    GitPushPolicyFunc          // optional, nil if not configured; per-workspace branch-protection policy for push
+	gitPushResolver     GitPushResolverFunc        // optional, nil if not configured; resolves per-workspace policy+events for push
 	devMode             bool                       // when true, authorize allows unauthenticated requests
 	env                 string                     // SPINE_ENV value (production/staging/development); surfaced in health
 	sseLimiter          *sseLimiter                // caps concurrent SSE streams per actor
@@ -257,16 +257,16 @@ type ServerConfig struct {
 	StepAcknowledger    StepAcknowledger
 	StepAssigner        StepAssigner
 	EventBroadcaster    *delivery.EventBroadcaster
-	GitHTTP             *githttp.Handler  // optional, serves git repos over HTTP
-	GitPushPolicyFor    GitPushPolicyFunc // optional; resolves the per-workspace branch-protection policy used by the Git push pre-receive gate. Required for correct shared-mode enforcement (each workspace has its own branch-protection table); single-mode callers may omit it and the handler's default policy is used.
-	DevMode             bool              // when true, authorize allows unauthenticated requests
-	Env                 string            // SPINE_ENV: production/staging/development; surfaced in /system/health
-	ReadHeaderTimeout   time.Duration     // defaults to 10s
-	ReadTimeout         time.Duration     // defaults to 30s
-	WriteTimeout        time.Duration     // defaults to 60s
-	IdleTimeout         time.Duration     // defaults to 120s
-	SSEMaxConnPerActor  int               // per-actor SSE connection cap; defaults to 5, <=0 disables
-	TrustedProxyCIDRs   []*net.IPNet      // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
+	GitHTTP             *githttp.Handler    // optional, serves git repos over HTTP
+	GitPushResolver     GitPushResolverFunc // optional; resolves the per-workspace policy + events used by the Git push pre-receive gate. Required for correct shared-mode enforcement (each workspace has its own branch-protection table and event stream); single-mode callers may omit it and the handler's default policy is used.
+	DevMode             bool                // when true, authorize allows unauthenticated requests
+	Env                 string              // SPINE_ENV: production/staging/development; surfaced in /system/health
+	ReadHeaderTimeout   time.Duration       // defaults to 10s
+	ReadTimeout         time.Duration       // defaults to 30s
+	WriteTimeout        time.Duration       // defaults to 60s
+	IdleTimeout         time.Duration       // defaults to 120s
+	SSEMaxConnPerActor  int                 // per-actor SSE connection cap; defaults to 5, <=0 disables
+	TrustedProxyCIDRs   []*net.IPNet        // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -299,7 +299,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		stepAssigner:        cfg.StepAssigner,
 		eventBroadcaster:    cfg.EventBroadcaster,
 		gitHTTP:             cfg.GitHTTP,
-		gitPushPolicyFor:    cfg.GitPushPolicyFor,
+		gitPushResolver:     cfg.GitPushResolver,
 		devMode:             cfg.DevMode,
 		env:                 cfg.Env,
 		sseLimiter:          newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),

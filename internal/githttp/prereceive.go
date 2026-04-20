@@ -34,10 +34,13 @@ const zeroSHA = "0000000000000000000000000000000000000000"
 const flushPkt = "0000"
 
 // parseRefUpdates reads the command section of a receive-pack request
-// body and returns the list of ref updates. The body starts with one
-// or more pkt-line frames carrying "<old> <new> <ref>[\0caps]\n" and
-// ends with a flush-pkt ("0000"); what follows is the PACK and is not
-// consumed here.
+// body and returns the list of ref updates and the capability set
+// advertised by the client on the first frame. The body starts with
+// one or more pkt-line frames carrying "<old> <new> <ref>[\0caps]\n"
+// and ends with a flush-pkt ("0000"); what follows is the PACK and
+// is not consumed here (unless caps include "push-options", in which
+// case an options section sits between the flush and the PACK — see
+// readPreamble).
 //
 // Pkt-line format (Git protocol): each frame is a 4-byte hex length
 // (including the 4 length bytes themselves) followed by that many
@@ -48,33 +51,39 @@ const flushPkt = "0000"
 // does not match the command shape, or EOF before the flush returns an
 // error. The caller must treat a parse error as a hard reject — we
 // cannot evaluate ref updates we could not parse.
-func parseRefUpdates(r io.Reader) ([]RefUpdate, error) {
+func parseRefUpdates(r io.Reader) ([]RefUpdate, map[string]struct{}, error) {
 	var updates []RefUpdate
+	caps := map[string]struct{}{}
 	first := true
 	for {
 		lenBuf := make([]byte, 4)
 		if _, err := io.ReadFull(r, lenBuf); err != nil {
-			return nil, fmt.Errorf("read pkt-line length: %w", err)
+			return nil, nil, fmt.Errorf("read pkt-line length: %w", err)
 		}
 		if string(lenBuf) == flushPkt {
-			return updates, nil
+			return updates, caps, nil
 		}
 		length, err := parseHex16(lenBuf)
 		if err != nil {
-			return nil, fmt.Errorf("parse pkt-line length %q: %w", lenBuf, err)
+			return nil, nil, fmt.Errorf("parse pkt-line length %q: %w", lenBuf, err)
 		}
 		if length < 4 {
-			return nil, fmt.Errorf("pkt-line length %d below minimum (4)", length)
+			return nil, nil, fmt.Errorf("pkt-line length %d below minimum (4)", length)
 		}
 		payload := make([]byte, length-4)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return nil, fmt.Errorf("read pkt-line payload: %w", err)
+			return nil, nil, fmt.Errorf("read pkt-line payload: %w", err)
 		}
-		// First frame may carry capabilities after a NUL byte. Both
-		// frames may end with a newline; trim both.
 		line := string(payload)
+		// First frame may carry capabilities after a NUL byte.
+		// Capabilities are space-separated; we keep them as a set
+		// so `push-options` presence is an O(1) lookup in the
+		// caller.
 		if first {
 			if idx := strings.IndexByte(line, 0); idx >= 0 {
+				for _, c := range strings.Fields(line[idx+1:]) {
+					caps[c] = struct{}{}
+				}
 				line = line[:idx]
 			}
 			first = false
@@ -83,13 +92,48 @@ func parseRefUpdates(r io.Reader) ([]RefUpdate, error) {
 
 		parts := strings.SplitN(line, " ", 3)
 		if len(parts) != 3 {
-			return nil, fmt.Errorf("malformed ref update %q", line)
+			return nil, nil, fmt.Errorf("malformed ref update %q", line)
 		}
 		updates = append(updates, RefUpdate{
 			OldSHA: parts[0],
 			NewSHA: parts[1],
 			Ref:    parts[2],
 		})
+	}
+}
+
+// parsePushOptions reads the options section of a receive-pack body.
+// Each option is one pkt-line of "key=value" or bare "key"; the
+// section ends with a flush-pkt. Unknown keys are returned verbatim
+// so the caller can decide which ones it honours (TASK-003: only
+// `spine.override=true` today).
+func parsePushOptions(r io.Reader) (map[string]string, error) {
+	out := map[string]string{}
+	for {
+		lenBuf := make([]byte, 4)
+		if _, err := io.ReadFull(r, lenBuf); err != nil {
+			return nil, fmt.Errorf("read push-option pkt-line length: %w", err)
+		}
+		if string(lenBuf) == flushPkt {
+			return out, nil
+		}
+		length, err := parseHex16(lenBuf)
+		if err != nil {
+			return nil, fmt.Errorf("parse push-option length %q: %w", lenBuf, err)
+		}
+		if length < 4 {
+			return nil, fmt.Errorf("push-option pkt-line length %d below minimum (4)", length)
+		}
+		payload := make([]byte, length-4)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return nil, fmt.Errorf("read push-option payload: %w", err)
+		}
+		line := strings.TrimRight(string(payload), "\n")
+		if idx := strings.IndexByte(line, '='); idx >= 0 {
+			out[line[:idx]] = line[idx+1:]
+			continue
+		}
+		out[line] = ""
 	}
 }
 

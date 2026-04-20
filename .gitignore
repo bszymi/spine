@@ -2,6 +2,7 @@
 /bin/
 /spine
 /.gocache/
+/.claude/
 docker-compose.override.yaml
 
 # Secrets and credentials

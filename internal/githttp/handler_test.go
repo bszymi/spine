@@ -271,21 +271,47 @@ func TestServeHTTP_PushPassesGateWhenFlagOn(t *testing.T) {
 // real pack.
 func buildPushBody(t *testing.T, updates ...RefUpdate) []byte {
 	t.Helper()
+	return buildPushBodyWithOptions(t, nil, updates...)
+}
+
+// buildPushBodyWithOptions is buildPushBody with a push-options
+// section appended between the command-flush and the PACK. When
+// options is non-nil (even empty), the first ref frame's capability
+// string advertises `push-options` so the parser reads the section.
+func buildPushBodyWithOptions(t *testing.T, options []string, updates ...RefUpdate) []byte {
+	t.Helper()
 	var body []byte
+	caps := "report-status"
+	if options != nil {
+		caps += " push-options"
+	}
 	for i, u := range updates {
 		line := u.OldSHA + " " + u.NewSHA + " " + u.Ref
 		if i == 0 {
-			line += "\x00report-status"
+			line += "\x00" + caps
 		}
 		line += "\n"
 		body = append(body, pktLine(line)...)
 	}
 	body = append(body, []byte(flushPkt)...)
-	// Sentinel PACK body so read-through on allow has something to
-	// stream (tests intercept before CGI, so content does not
-	// matter).
+	if options != nil {
+		for _, opt := range options {
+			body = append(body, pktLine(opt+"\n")...)
+		}
+		body = append(body, []byte(flushPkt)...)
+	}
 	body = append(body, []byte("PACK-stub")...)
 	return body
+}
+
+// recordedEmitter captures emitted events so assertions can inspect
+// the ADR-009 §4 payload shape without subscribing through the real
+// event router.
+type recordedEmitter struct{ events []domain.Event }
+
+func (r *recordedEmitter) Emit(_ context.Context, e domain.Event) error {
+	r.events = append(r.events, e)
+	return nil
 }
 
 // staticRulePolicy returns a branchprotect.Policy that evaluates
@@ -503,6 +529,257 @@ func TestServeHTTP_PreReceiveOperatorOverrideHonoured(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "no-direct-write") {
 		t.Errorf("expected no-direct-write denial when operator pushes without override, got: %s",
 			w.Body.String())
+	}
+}
+
+// TestServeHTTP_OperatorOverrideAllowsAndEmitsEvent covers TASK-003's
+// golden path: operator pushes with `-o spine.override=true` to a
+// no-direct-write branch, the gate allows the push, and exactly one
+// branch_protection.override event is emitted with the ADR-009 §4
+// payload shape (including pre_receive_ref).
+func TestServeHTTP_OperatorOverrideAllowsAndEmitsEvent(t *testing.T) {
+	policy := staticRulePolicy(config.Rule{
+		Branch:      "main",
+		Protections: []config.RuleKind{config.KindNoDirectWrite},
+	})
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := strings.Repeat("0", 40)
+	new := strings.Repeat("a", 40)
+	body := buildPushBodyWithOptions(t,
+		[]string{"spine.override=true"},
+		RefUpdate{OldSHA: old, NewSHA: new, Ref: "refs/heads/main"},
+	)
+
+	req := httptest.NewRequest("POST", "/git-receive-pack", bytes.NewReader(body))
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
+	ctx = domain.WithActor(ctx, &domain.Actor{ActorID: "op-1", Role: domain.RoleOperator})
+	emitter := &recordedEmitter{}
+	ctx = WithEvents(ctx, emitter)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	// The push must have passed the gate — the denial body marker
+	// must be absent. (CGI runs after; we do not assert on its
+	// output because it needs a real bare repo.)
+	if strings.Contains(w.Body.String(), "pre-receive hook declined") {
+		t.Fatalf("expected operator override to allow push, got denial body: %s", w.Body.String())
+	}
+
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 branch_protection.override event, got %d", len(emitter.events))
+	}
+	ev := emitter.events[0]
+	if ev.Type != domain.EventBranchProtectionOverride {
+		t.Errorf("expected type=%s, got %s", domain.EventBranchProtectionOverride, ev.Type)
+	}
+	if ev.ActorID != "op-1" {
+		t.Errorf("expected actor_id=op-1, got %q", ev.ActorID)
+	}
+	// Payload must carry the ADR-009 §4 fields, including the
+	// Git-path-specific pre_receive_ref block.
+	for _, substr := range []string{
+		`"branch":"refs/heads/main"`,
+		`"rule_kinds":["no-direct-write"]`,
+		`"operation":"direct_write"`,
+		`"commit_sha":"` + new + `"`,
+		`"pre_receive_ref"`,
+		`"old_sha":"` + old + `"`,
+		`"new_sha":"` + new + `"`,
+		`"ref":"refs/heads/main"`,
+	} {
+		if !strings.Contains(string(ev.Payload), substr) {
+			t.Errorf("payload missing %q; got:\n%s", substr, ev.Payload)
+		}
+	}
+}
+
+// TestServeHTTP_OverrideEventCarriesTraceID asserts that the emitted
+// branch_protection.override event always has a non-empty trace_id,
+// even when the request arrived without the gateway's trace
+// middleware (direct-embed tests, future non-gateway deployments).
+// Without the fallback the audit record loses the correlation key
+// ADR-009 §4 requires.
+func TestServeHTTP_OverrideEventCarriesTraceID(t *testing.T) {
+	policy := staticRulePolicy(config.Rule{
+		Branch:      "main",
+		Protections: []config.RuleKind{config.KindNoDirectWrite},
+	})
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := strings.Repeat("0", 40)
+	new := strings.Repeat("a", 40)
+	body := buildPushBodyWithOptions(t,
+		[]string{"spine.override=true"},
+		RefUpdate{OldSHA: old, NewSHA: new, Ref: "refs/heads/main"},
+	)
+
+	req := httptest.NewRequest("POST", "/git-receive-pack", bytes.NewReader(body))
+	// No trace middleware — context has no trace-id.
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
+	ctx = domain.WithActor(ctx, &domain.Actor{ActorID: "op-trace", Role: domain.RoleOperator})
+	emitter := &recordedEmitter{}
+	ctx = WithEvents(ctx, emitter)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 override event, got %d", len(emitter.events))
+	}
+	if emitter.events[0].TraceID == "" {
+		t.Errorf("override event must have a fallback trace_id, got empty")
+	}
+}
+
+// TestServeHTTP_ContributorOverrideRejected covers TASK-003's
+// role-gate: a contributor pushes with `-o spine.override=true` and
+// the policy denies with ReasonOverrideNotAuthorised, which the gate
+// surfaces on the wire and emits NO event (no override was honored).
+func TestServeHTTP_ContributorOverrideRejected(t *testing.T) {
+	policy := staticRulePolicy(config.Rule{
+		Branch:      "main",
+		Protections: []config.RuleKind{config.KindNoDirectWrite},
+	})
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := strings.Repeat("0", 40)
+	new := strings.Repeat("a", 40)
+	body := buildPushBodyWithOptions(t,
+		[]string{"spine.override=true"},
+		RefUpdate{OldSHA: old, NewSHA: new, Ref: "refs/heads/main"},
+	)
+	req := httptest.NewRequest("POST", "/git-receive-pack", bytes.NewReader(body))
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
+	ctx = domain.WithActor(ctx, &domain.Actor{ActorID: "c-1", Role: domain.RoleContributor})
+	emitter := &recordedEmitter{}
+	ctx = WithEvents(ctx, emitter)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	// The gate must have denied with the override-not-authorised
+	// reason on the wire.
+	if !strings.Contains(w.Body.String(), "override") {
+		t.Errorf("expected denial mentioning override, got: %s", w.Body.String())
+	}
+	if len(emitter.events) != 0 {
+		t.Errorf("expected no override event for contributor, got %d", len(emitter.events))
+	}
+}
+
+// TestServeHTTP_UnusedOverrideEmitsNoEvent asserts that setting
+// `-o spine.override=true` on a push to an unprotected branch does
+// not emit an override event. ADR-009 §4: unused overrides are
+// silent to avoid log pollution.
+func TestServeHTTP_UnusedOverrideEmitsNoEvent(t *testing.T) {
+	policy := staticRulePolicy(config.Rule{
+		Branch:      "main",
+		Protections: []config.RuleKind{config.KindNoDirectWrite},
+	})
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := strings.Repeat("0", 40)
+	new := strings.Repeat("a", 40)
+	// Push to "feature" — no rule matches. Override is set anyway.
+	body := buildPushBodyWithOptions(t,
+		[]string{"spine.override=true"},
+		RefUpdate{OldSHA: old, NewSHA: new, Ref: "refs/heads/feature"},
+	)
+	req := httptest.NewRequest("POST", "/git-receive-pack", bytes.NewReader(body))
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
+	ctx = domain.WithActor(ctx, &domain.Actor{ActorID: "op-2", Role: domain.RoleOperator})
+	emitter := &recordedEmitter{}
+	ctx = WithEvents(ctx, emitter)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if strings.Contains(w.Body.String(), "pre-receive hook declined") {
+		t.Fatalf("expected push to be allowed on unprotected branch, got denial: %s", w.Body.String())
+	}
+	if len(emitter.events) != 0 {
+		t.Errorf("unused override must not emit events, got %d", len(emitter.events))
+	}
+}
+
+// TestServeHTTP_MixedOverridePushEmitsEventOnlyForProtectedRef covers
+// the ADR-009 §4 requirement that the event is per-ref-update, not
+// per-push: a single push updating an unprotected ref + a protected
+// ref (with override) emits exactly one event — for the protected
+// ref only.
+func TestServeHTTP_MixedOverridePushEmitsEventOnlyForProtectedRef(t *testing.T) {
+	policy := staticRulePolicy(config.Rule{
+		Branch:      "main",
+		Protections: []config.RuleKind{config.KindNoDirectWrite},
+	})
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := strings.Repeat("0", 40)
+	new := strings.Repeat("a", 40)
+	body := buildPushBodyWithOptions(t,
+		[]string{"spine.override=true"},
+		RefUpdate{OldSHA: old, NewSHA: new, Ref: "refs/heads/feature"},
+		RefUpdate{OldSHA: old, NewSHA: new, Ref: "refs/heads/main"},
+	)
+	req := httptest.NewRequest("POST", "/git-receive-pack", bytes.NewReader(body))
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
+	ctx = domain.WithActor(ctx, &domain.Actor{ActorID: "op-3", Role: domain.RoleOperator})
+	emitter := &recordedEmitter{}
+	ctx = WithEvents(ctx, emitter)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if strings.Contains(w.Body.String(), "pre-receive hook declined") {
+		t.Fatalf("expected mixed push to be allowed, got denial: %s", w.Body.String())
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected exactly 1 event for the protected ref only, got %d", len(emitter.events))
+	}
+	if !strings.Contains(string(emitter.events[0].Payload), `"branch":"refs/heads/main"`) {
+		t.Errorf("expected event for refs/heads/main, got payload: %s", emitter.events[0].Payload)
 	}
 }
 

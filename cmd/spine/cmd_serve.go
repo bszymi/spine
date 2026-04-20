@@ -446,7 +446,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	}
 
 	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, buildBranchProtectPolicy(deps.Store), log)
-	gitPushPolicyFor := buildGitPushPolicyFunc(deps.WSServicePool, deps.Store)
+	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events)
 
 	cfg := gateway.ServerConfig{
 		Store:               deps.Store,
@@ -475,7 +475,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		StepAssigner:        stepAssigner,
 		EventBroadcaster:    eventBroadcaster,
 		GitHTTP:             gitHTTPHandler,
-		GitPushPolicyFor:    gitPushPolicyFor,
+		GitPushResolver:     gitPushResolver,
 		SSEMaxConnPerActor:  deps.SSEMaxConn,
 		TrustedProxyCIDRs:   deps.TrustedProxyCIDRs,
 		DevMode:             deps.DevMode,
@@ -523,36 +523,49 @@ func buildBranchProtectPolicy(st store.Store) branchprotect.Policy {
 	return branchprotect.New(bpprojection.New(st))
 }
 
-// buildGitPushPolicyFunc returns a resolver the gateway calls on each
-// push to fetch the target workspace's branch-protection policy. In
-// shared mode the pool yields the workspace's own store (different
-// database per workspace, so the policy MUST be per-request). In
-// single mode (pool == nil) we fall back to the process-level store
-// — both artifact-path and push-path writes evaluate against the same
-// ruleset there.
+// buildGitPushResolver returns a resolver the gateway calls on each
+// push to fetch the target workspace's branch-protection policy and
+// event emitter. In shared mode the pool yields the workspace's own
+// store and event router (different database and event stream per
+// workspace, so both MUST be per-request). In single mode
+// (pool == nil) we fall back to the process-level store + event
+// router — both artifact-path and push-path writes evaluate and audit
+// against the same services there.
 //
 // The returned release callback decrements the ServicePool ref so
 // workspace pools do not leak. Callers defer it; it is always safe to
 // call.
-func buildGitPushPolicyFunc(pool *workspace.ServicePool, fallback store.Store) gateway.GitPushPolicyFunc {
-	return func(ctx context.Context, workspaceID string) (branchprotect.Policy, func(), error) {
+func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store, fallbackEvents event.EventRouter) gateway.GitPushResolverFunc {
+	return func(ctx context.Context, workspaceID string) (gateway.GitPushResources, func(), error) {
 		noop := func() {}
 		if pool == nil {
-			return buildBranchProtectPolicy(fallback), noop, nil
+			return gateway.GitPushResources{
+				Policy: buildBranchProtectPolicy(fallbackStore),
+				Events: fallbackEvents,
+			}, noop, nil
 		}
 		ss, err := pool.Get(ctx, workspaceID)
 		if err != nil {
-			return nil, noop, err
+			return gateway.GitPushResources{}, noop, err
 		}
 		release := func() { pool.Release(workspaceID) }
+		var policy branchprotect.Policy
 		if ss.Store == nil {
 			// Shared-mode workspace with no database URL yet: a
-			// permissive policy avoids blocking the push, but
-			// surfacing this as "allowed" is the right behaviour —
-			// no rules projection means no rules to enforce.
-			return branchprotect.NewPermissive(), release, nil
+			// permissive policy avoids blocking the push. The event
+			// stream is also unavailable in that state; an override
+			// on such a workspace emits nothing, which is the right
+			// audit behaviour (there is no rule to override, so
+			// nothing to record).
+			policy = branchprotect.NewPermissive()
+		} else {
+			policy = buildBranchProtectPolicy(ss.Store)
 		}
-		return buildBranchProtectPolicy(ss.Store), release, nil
+		var events event.Emitter
+		if ss.Events != nil {
+			events = ss.Events
+		}
+		return gateway.GitPushResources{Policy: policy, Events: events}, release, nil
 	}
 }
 
