@@ -445,7 +445,8 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		eventBroadcaster = deliverySubscriber.Broadcaster
 	}
 
-	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, log)
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, buildBranchProtectPolicy(deps.Store), log)
+	gitPushPolicyFor := buildGitPushPolicyFunc(deps.WSServicePool, deps.Store)
 
 	cfg := gateway.ServerConfig{
 		Store:               deps.Store,
@@ -474,6 +475,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		StepAssigner:        stepAssigner,
 		EventBroadcaster:    eventBroadcaster,
 		GitHTTP:             gitHTTPHandler,
+		GitPushPolicyFor:    gitPushPolicyFor,
 		SSEMaxConnPerActor:  deps.SSEMaxConn,
 		TrustedProxyCIDRs:   deps.TrustedProxyCIDRs,
 		DevMode:             deps.DevMode,
@@ -519,6 +521,39 @@ func buildBranchProtectPolicy(st store.Store) branchprotect.Policy {
 		return branchprotect.NewPermissive()
 	}
 	return branchprotect.New(bpprojection.New(st))
+}
+
+// buildGitPushPolicyFunc returns a resolver the gateway calls on each
+// push to fetch the target workspace's branch-protection policy. In
+// shared mode the pool yields the workspace's own store (different
+// database per workspace, so the policy MUST be per-request). In
+// single mode (pool == nil) we fall back to the process-level store
+// — both artifact-path and push-path writes evaluate against the same
+// ruleset there.
+//
+// The returned release callback decrements the ServicePool ref so
+// workspace pools do not leak. Callers defer it; it is always safe to
+// call.
+func buildGitPushPolicyFunc(pool *workspace.ServicePool, fallback store.Store) gateway.GitPushPolicyFunc {
+	return func(ctx context.Context, workspaceID string) (branchprotect.Policy, func(), error) {
+		noop := func() {}
+		if pool == nil {
+			return buildBranchProtectPolicy(fallback), noop, nil
+		}
+		ss, err := pool.Get(ctx, workspaceID)
+		if err != nil {
+			return nil, noop, err
+		}
+		release := func() { pool.Release(workspaceID) }
+		if ss.Store == nil {
+			// Shared-mode workspace with no database URL yet: a
+			// permissive policy avoids blocking the push, but
+			// surfacing this as "allowed" is the right behaviour —
+			// no rules projection means no rules to enforce.
+			return branchprotect.NewPermissive(), release, nil
+		}
+		return buildBranchProtectPolicy(ss.Store), release, nil
+	}
 }
 
 // buildWorkflowResolver builds the projection-backed workflow resolver
@@ -654,7 +689,7 @@ func buildScheduler(
 
 // buildGitHTTPHandler assembles the git HTTP handler. Returns nil when
 // no workspace resolver is available or when handler construction fails.
-func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, log *slog.Logger) *githttp.Handler {
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
@@ -668,6 +703,7 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 		},
 		TrustedCIDRs:       trustedCIDRs,
 		ReceivePackEnabled: receivePackEnabled,
+		Policy:             policy,
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
@@ -679,11 +715,14 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 		log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
 	}
 	if receivePackEnabled {
-		// EPIC-004 TASK-001: opt-in push endpoint is intentionally a
-		// bare passthrough. TASK-002 wraps it with branchprotect
-		// pre-receive enforcement; until then there is no branch
-		// policy gate, so we log loudly on startup.
-		log.Warn("git HTTP receive-pack is ENABLED (SPINE_GIT_RECEIVE_PACK_ENABLED=true); branch-protection pre-receive enforcement is not wired yet (EPIC-004 TASK-002)")
+		if policy == nil {
+			// A nil policy is valid (early-bootstrap, no Store), but
+			// it means pushes are not gated by branch protection —
+			// surface that loudly.
+			log.Warn("git HTTP receive-pack is ENABLED with no branch-protection policy; pushes will land unchecked")
+		} else {
+			log.Info("git HTTP receive-pack is ENABLED with branch-protection pre-receive enforcement (EPIC-004)")
+		}
 	}
 	return h
 }

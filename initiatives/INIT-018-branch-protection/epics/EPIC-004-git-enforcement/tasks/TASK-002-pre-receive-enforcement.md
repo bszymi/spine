@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: "Pre-receive enforcement via branchprotect.Policy"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-18
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-004-git-enforcement/epic.md

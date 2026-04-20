@@ -68,12 +68,28 @@ release is cut — this file is a staging area.
   source. Authentication is enforced on push the same way it is on
   clone/fetch (trusted-CIDR bypass or bearer token).
 
+### Added (TASK-002)
+
+- **Pre-receive branch-protection enforcement.** With
+  `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, every push is intercepted at
+  the HTTP layer before `git-http-backend` advances any ref. The
+  command section of the receive-pack request is parsed into
+  `(old, new, ref)` triples; each triple is classified (`delete` on
+  all-zero `new`, else `direct-write`) and passed through
+  `branchprotect.Policy.Evaluate`. Any Deny rejects the entire push
+  (pre-receive semantics — all-or-nothing) with a git-shaped
+  receive-pack-result body: a `remote: branch-protection: <rule>
+  denies <branch>` line on the client and `ng <ref> pre-receive hook
+  declined` per ref.
+- `spine/*` refs bypass the policy by design (out of scope for
+  user-authored rules per ADR-009 §3) so scheduler-managed and run
+  branches still flow through.
+- Policy evaluation is served from the projected runtime table —
+  same decision point as API-path writes, no Git reads in the hot
+  path.
+
 ### Not yet implemented (follow-up in EPIC-004)
 
-- Pre-receive branch-protection enforcement (TASK-002). With the flag
-  on but no policy wired, **pushing directly to `main` succeeds** —
-  treat `SPINE_GIT_RECEIVE_PACK_ENABLED=true` as a lab/testing switch
-  until TASK-002 lands.
 - `git push -o spine.override=true` operator override (TASK-003).
 
 ### Upgrade notes

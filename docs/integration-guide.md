@@ -456,7 +456,9 @@ The endpoint ships with push **disabled** (`http.receivepack=false` pinned in th
 
 Set `SPINE_GIT_RECEIVE_PACK_ENABLED=true` (accepted values: `1`, `true`, `yes`, `on`) to reach the push endpoint. Flipping this on is a deliberate opt-in — an existing deployment that upgrades past this change keeps the read-only behaviour it had before.
 
-Auth on push is **stricter** than on clone/fetch: the trusted-CIDR bypass does not apply to `git-receive-pack`. Every push must carry `Authorization: Bearer <token>` so an actor identity is pinned for audit and the upcoming pre-receive branch-protection check — a runner subnet configured for token-less cloning still needs a token to push. Role-based authorisation of who can push what is a separate concern covered by branch-protection enforcement (see ADR-009). Until that layer is wired, pushing to `main` with the flag on **will succeed** for any authenticated caller — treat the flag as a lab/testing switch, not production-ready.
+Auth on push is **stricter** than on clone/fetch: the trusted-CIDR bypass does not apply to `git-receive-pack`. Every push must carry `Authorization: Bearer <token>` so an actor identity is pinned for audit and the pre-receive branch-protection check — a runner subnet configured for token-less cloning still needs a token to push.
+
+**Branch-protection pre-receive enforcement.** When the flag is on, every push is intercepted at the HTTP layer before `git-http-backend` writes any ref: the command section of the request body is parsed into `(old, new, ref)` triples, each triple is classified (`delete` if `new == 0000...`, else `direct-write`), and each is evaluated against the projection-backed `branchprotect.Policy`. Any Deny rejects the **entire** push (pre-receive semantics — no partial application), and the client sees the rejection as `remote: branch-protection: <rule> denies <branch>` lines plus a per-ref `ng <ref> pre-receive hook declined`. Refs under `spine/*` (run branches, scheduler-managed refs) bypass policy by design — they are out of scope for user-authored rules (ADR-009 §3).
 
 ### Authentication
 
