@@ -2,7 +2,7 @@
 id: TASK-016
 type: Task
 title: Cascade applyCommitStatus to all branch-added artifacts
-status: Pending
+status: Completed
 created: 2026-04-20
 last_updated: 2026-04-20
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md

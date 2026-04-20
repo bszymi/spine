@@ -126,6 +126,8 @@ type GitOperator interface {
 	Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error)
 	CreateBranch(ctx context.Context, name, base string) error
 	DeleteBranch(ctx context.Context, name string) error
+	Diff(ctx context.Context, from, to string) ([]git.FileDiff, error)
+	MergeBase(ctx context.Context, a, b string) (string, error)
 	Head(ctx context.Context) (string, error)
 	Push(ctx context.Context, remote, ref string) error
 	PushBranch(ctx context.Context, remote, branch string) error

@@ -388,3 +388,69 @@ func TestPlanningRun_TaskCreation(t *testing.T) {
 		},
 	})
 }
+
+// Dedicated Draft contents for the status-cascade scenario. Child task
+// here is Draft (not Pending like childTaskContent) so the cascade has
+// something to rewrite — the acceptance criterion for TASK-016 is that
+// one parent approval = Draft→Pending across the whole planned package.
+const cascadeChildTaskDraftContent = `---
+id: TASK-001
+type: Task
+title: Cascade Test Task
+status: Draft
+epic: /initiatives/init-099/epics/epic-001/epic.md
+initiative: /initiatives/init-099/initiative.md
+created: 2026-01-01
+last_updated: 2026-01-01
+links:
+  - type: parent
+    target: /initiatives/init-099/epics/epic-001/epic.md
+---
+# TASK-001 — Cascade Test Task
+`
+
+// TestPlanningRun_StatusCascadesToChildren validates TASK-016: a planning
+// run that adds child artifacts on its branch cascades the commit.status
+// rewrite (Draft → Pending) to every artifact file added on the branch —
+// not just the primary run.TaskPath. Without the cascade, children would
+// merge to main as Draft while only the initiative gets rewritten.
+func TestPlanningRun_StatusCascadesToChildren(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "planning-run-status-cascades-to-children",
+		Description: "One operator approval rewrites Draft→Pending across parent and all branch-added children",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			seedCreationWorkflow(),
+			engine.SyncProjections(),
+
+			engine.StartPlanningRun(
+				"initiatives/init-099/initiative.md",
+				testInitiativeContent,
+			),
+			engine.AssertRunStatus(domain.RunStatusActive),
+
+			engine.CreateArtifactOnBranch(
+				"initiatives/init-099/epics/epic-001/epic.md",
+				childEpicContent,
+			),
+			engine.CreateArtifactOnBranch(
+				"initiatives/init-099/epics/epic-001/tasks/task-001.md",
+				cascadeChildTaskDraftContent,
+			),
+
+			engine.SubmitStepResult("ready_for_review", "artifact_content"),
+			engine.SubmitStepResult("valid"),
+			engine.SubmitStepResult("approved"),
+			engine.AssertRunCompleted(),
+
+			// Parent and both children must all land on main as Pending.
+			engine.AssertFileContains("initiatives/init-099/initiative.md", "status: Pending"),
+			engine.AssertFileContains("initiatives/init-099/epics/epic-001/epic.md", "status: Pending"),
+			engine.AssertFileContains("initiatives/init-099/epics/epic-001/tasks/task-001.md", "status: Pending"),
+		},
+	})
+}

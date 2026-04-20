@@ -96,9 +96,13 @@ func (s *stubGitOperator) Commit(_ context.Context, _ git.CommitOpts) (git.Commi
 func (s *stubGitOperator) Merge(_ context.Context, _ git.MergeOpts) (git.MergeResult, error) {
 	return git.MergeResult{}, nil
 }
-func (s *stubGitOperator) CreateBranch(_ context.Context, _, _ string) error       { return nil }
-func (s *stubGitOperator) DeleteBranch(_ context.Context, _ string) error          { return nil }
-func (s *stubGitOperator) Head(_ context.Context) (string, error)                  { return "abc123", nil }
+func (s *stubGitOperator) CreateBranch(_ context.Context, _, _ string) error { return nil }
+func (s *stubGitOperator) DeleteBranch(_ context.Context, _ string) error    { return nil }
+func (s *stubGitOperator) Diff(_ context.Context, _, _ string) ([]git.FileDiff, error) {
+	return nil, nil
+}
+func (s *stubGitOperator) MergeBase(_ context.Context, a, _ string) (string, error) { return a, nil }
+func (s *stubGitOperator) Head(_ context.Context) (string, error)                   { return "abc123", nil }
 func (s *stubGitOperator) Push(_ context.Context, _, _ string) error               { return nil }
 func (s *stubGitOperator) PushBranch(_ context.Context, _, _ string) error         { return nil }
 func (s *stubGitOperator) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }
@@ -234,6 +238,7 @@ func (s *stubGitClient) DeleteBranch(_ context.Context, _ string) error    { ret
 func (s *stubGitClient) Diff(_ context.Context, _, _ string) ([]git.FileDiff, error) {
 	return nil, nil
 }
+func (s *stubGitClient) MergeBase(_ context.Context, a, _ string) (string, error) { return a, nil }
 func (s *stubGitClient) Log(_ context.Context, _ git.LogOpts) ([]git.CommitInfo, error) {
 	return nil, nil
 }

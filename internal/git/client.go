@@ -15,6 +15,7 @@ type GitClient interface {
 	CreateBranch(ctx context.Context, name, base string) error
 	DeleteBranch(ctx context.Context, name string) error
 	Diff(ctx context.Context, from, to string) ([]FileDiff, error)
+	MergeBase(ctx context.Context, a, b string) (string, error)
 	Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 	ReadFile(ctx context.Context, ref, path string) ([]byte, error)
 	ListFiles(ctx context.Context, ref, pattern string) ([]string, error)
