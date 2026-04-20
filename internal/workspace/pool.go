@@ -8,6 +8,8 @@ import (
 
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/branchprotect"
+	bpprojection "github.com/bszymi/spine/internal/branchprotect/projection"
 	"github.com/bszymi/spine/internal/config"
 	spinecrypto "github.com/bszymi/spine/internal/crypto"
 	"github.com/bszymi/spine/internal/divergence"
@@ -306,9 +308,18 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	closers = append(closers, func() { q.Stop() })
 	eventRouter := event.NewQueueRouter(q)
 
-	// Artifact service.
+	// Artifact service. The branch-protection policy is wired from the
+	// projection-backed RuleSource when a Store is available; otherwise a
+	// permissive policy keeps the very early bootstrap window functional
+	// without silently disabling protection in production (the same
+	// pattern cmd/spine uses — production workspaces always have a Store).
 	artifactSvc := artifact.NewService(gitClient, eventRouter, repoPath)
 	artifactSvc.WithArtifactsDir(spineCfg.ArtifactsDir)
+	if st != nil {
+		artifactSvc.WithPolicy(branchprotect.New(bpprojection.New(st)))
+	} else {
+		artifactSvc.WithPolicy(branchprotect.NewPermissive())
+	}
 
 	// Workflow service (ADR-007): dedicated surface for workflow definition
 	// writes, kept separate from the generic artifact service so the

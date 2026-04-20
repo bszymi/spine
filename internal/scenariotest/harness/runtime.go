@@ -7,6 +7,7 @@ import (
 
 	"github.com/bszymi/spine/internal/actor"
 	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/projection"
@@ -97,6 +98,12 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 	}
 
 	rt.Artifacts = artifact.NewService(repo.Git, eventRouter, repo.Dir)
+	// Most scenarios do not exercise branch protection and their repos
+	// are not seeded with the 018 projection rows — use a permissive
+	// policy by default so the Service is policy-wired (ADR-009 §3 is not
+	// bypassed) without blocking writes to main. Scenarios that do want
+	// to exercise the guard install a projection-backed policy explicitly.
+	rt.Artifacts.WithPolicy(branchprotect.NewPermissive())
 	rt.Workflows = workflow.NewService(repo.Git, repo.Dir)
 	rt.Projections = projection.NewService(repo.Git, db.Store, eventRouter, 1*time.Second)
 

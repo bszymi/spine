@@ -34,6 +34,18 @@ func (s StaticRules) Rules(_ context.Context) ([]config.Rule, error) {
 	return []config.Rule(s), nil
 }
 
+// NewPermissive returns a Policy whose source has an explicit empty rule
+// set — no branch matches, every direct-write and delete is allowed. It
+// exists for the narrow cases where wiring a real projection-backed
+// source is not practical: unit tests that do not exercise branch
+// protection, and the very early cmd/spine path when no Store is
+// available yet. Production code that has a Store must use the
+// projection-backed source instead; a permissive policy in production
+// silently disables branch protection.
+func NewPermissive() Policy {
+	return New(StaticRules([]config.Rule{}))
+}
+
 // BootstrapDefaults returns the ruleset applied when a workspace has no
 // /.spine/branch-protection.yaml yet (ADR-009 §1). `main` is protected
 // with both no-delete and no-direct-write so a freshly-imported or

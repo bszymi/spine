@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
@@ -24,6 +25,7 @@ func newTestService(t *testing.T) (*artifact.Service, *git.CLIClient, string, *q
 	q := queue.NewMemoryQueue(100)
 	router := event.NewQueueRouter(q)
 	svc := artifact.NewService(client, router, repo)
+	svc.WithPolicy(branchprotect.NewPermissive())
 	return svc, client, repo, q
 }
 
@@ -352,6 +354,7 @@ func TestCreateWithNilEvents(t *testing.T) {
 	client := git.NewCLIClient(repo)
 	// Service with nil event router
 	svc := artifact.NewService(client, nil, repo)
+	svc.WithPolicy(branchprotect.NewPermissive())
 	ctx := testCtx()
 
 	result, err := svc.Create(ctx, "governance/no-events.md", governanceContent)

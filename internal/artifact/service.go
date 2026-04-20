@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
@@ -26,17 +27,28 @@ type WriteResult struct {
 type Service struct {
 	git          git.GitClient
 	events       event.EventRouter
-	repo         string // repository root path
-	artifactsDir string // artifacts directory relative to repo (empty or "/" means repo root)
+	repo         string               // repository root path
+	artifactsDir string               // artifacts directory relative to repo (empty or "/" means repo root)
+	policy       branchprotect.Policy // branch-protection guard for direct writes; required in production (ADR-009 §3)
+	defaultRef   string               // branch to report when no WriteContext is set; defaults to "main"
 }
 
 // NewService creates a new Artifact Service.
+//
+// Production construction MUST follow up with WithPolicy to install the
+// branch-protection guard (ADR-009 §3). A Service without a policy is
+// fail-closed at the write boundary — writeAndCommit refuses to advance
+// any ref until a policy is wired. Tests that do not care about branch
+// protection can install a permissive policy via
+// branchprotect.New(branchprotect.StaticRules(nil-slice → bootstrap,
+// []config.Rule{} → no protection)).
 func NewService(gitClient git.GitClient, events event.EventRouter, repoPath string) *Service {
 	return &Service{
 		git:          gitClient,
 		events:       events,
 		repo:         repoPath,
 		artifactsDir: "/",
+		defaultRef:   "main",
 	}
 }
 
@@ -45,6 +57,26 @@ func NewService(gitClient git.GitClient, events event.EventRouter, repoPath stri
 // are prefixed with this directory for file I/O and git operations.
 func (s *Service) WithArtifactsDir(dir string) {
 	s.artifactsDir = dir
+}
+
+// WithPolicy installs the branch-protection policy consulted by every
+// ref-advancing helper (ADR-009 §3). Callers in production wire the
+// projection-backed policy built in cmd/spine; tests inject a mock or a
+// permissive policy. Passing nil is equivalent to never calling
+// WithPolicy — the Service remains fail-closed.
+func (s *Service) WithPolicy(p branchprotect.Policy) {
+	s.policy = p
+}
+
+// WithDefaultRef overrides the branch reported to branch-protection when
+// no WriteContext is set on the request. The default is "main" — matching
+// the bootstrap authoritative-branch name used throughout Spine. Tests
+// that check-out a different authoritative branch point this at that
+// name so the policy evaluator sees the real target.
+func (s *Service) WithDefaultRef(ref string) {
+	if ref != "" {
+		s.defaultRef = ref
+	}
 }
 
 // repoRelativePath converts an artifact-relative path to a repo-relative path.
@@ -149,6 +181,14 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	if result.Status == "failed" {
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"artifact validation failed", result.Errors)
+	}
+
+	// Branch-protection check (ADR-009 §3). Run before enterBranch so a
+	// denied write never creates a worktree. The Artifact Service writes
+	// commits but never merges — every writeAndCommit is an OpDirectWrite.
+	// OpGovernedMerge lives on the Orchestrator (EPIC-003 TASK-002).
+	if err := s.checkBranchProtection(ctx, op.operation); err != nil {
+		return nil, err
 	}
 
 	scope, err := s.enterBranch(ctx)
@@ -304,6 +344,116 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 	}
 
 	return artifacts, nil
+}
+
+// checkBranchProtection consults the installed branch-protection policy
+// (ADR-009 §3) before the Service advances any ref. The Artifact Service
+// only produces direct commits — merges are the Orchestrator's job — so
+// every write is classified as OpDirectWrite. A nil policy is fail-closed:
+// the Service refuses to write until WithPolicy has installed one.
+//
+// Branch resolution: a non-empty WriteContext.Branch is the destination
+// (typically a "spine/run/*" branch that matches no protection rule). A
+// missing WriteContext means the write would land on the main repo's
+// authoritative branch — s.defaultRef. That is the case the policy exists
+// to gate; a contributor who omits WriteContext and targets "main" is
+// exactly what "no-direct-write" is for.
+//
+// Override stays false here — TASK-003 threads write_context.override
+// through the gateway. Under the v1 policy, this means any direct write
+// to a protected branch is denied regardless of role until that task
+// lands.
+func (s *Service) checkBranchProtection(ctx context.Context, operation string) error {
+	if s.policy == nil {
+		return domain.NewError(domain.ErrUnavailable,
+			"artifact service: branch-protection policy not configured (production must call WithPolicy; tests may install a permissive policy)")
+	}
+
+	branch := s.defaultRef
+	if wc := GetWriteContext(ctx); wc != nil && wc.Branch != "" {
+		branch = wc.Branch
+	}
+
+	req := branchprotect.Request{
+		Branch:  branch,
+		Kind:    branchprotect.OpDirectWrite,
+		Actor:   actorForRequest(ctx),
+		RunID:   observe.RunID(ctx),
+		TraceID: observe.TraceID(ctx),
+	}
+
+	decision, reasons, evalErr := s.policy.Evaluate(ctx, req)
+	if evalErr != nil {
+		// Policy error is fail-closed — the evaluator itself signals Deny
+		// with a non-nil error when the rule source is unreachable, and
+		// we surface that as ErrInternal so the gateway renders a 5xx
+		// rather than a 403 that implies "this is forbidden by rule".
+		observe.Logger(ctx).Error("branch-protection evaluation failed",
+			"operation", operation,
+			"branch", branch,
+			"error", evalErr.Error(),
+		)
+		return domain.NewError(domain.ErrInternal,
+			fmt.Sprintf("branch-protection evaluation failed: %v", evalErr))
+	}
+
+	if decision == branchprotect.DecisionDeny {
+		observe.Logger(ctx).Info("branch-protection denied write",
+			"operation", operation,
+			"branch", branch,
+			"reasons", reasonCodes(reasons),
+		)
+		return domain.NewErrorWithDetail(domain.ErrForbidden,
+			firstDenyMessage(reasons, branch),
+			map[string]any{
+				"branch":  branch,
+				"reasons": reasonsToDetail(reasons),
+			})
+	}
+
+	return nil
+}
+
+// actorForRequest resolves the authenticated actor from ctx for use in a
+// branchprotect.Request. Falls back to a zero-role actor identified only
+// by observe.ActorID(ctx) when no full actor is bound — the evaluator
+// then treats Override requests as unauthorised (correct fail-closed
+// behaviour for the unauthenticated / test paths).
+func actorForRequest(ctx context.Context) domain.Actor {
+	if a := domain.ActorFromContext(ctx); a != nil {
+		return *a
+	}
+	return domain.Actor{ActorID: observe.ActorID(ctx)}
+}
+
+func reasonCodes(reasons []branchprotect.Reason) []string {
+	out := make([]string, len(reasons))
+	for i, r := range reasons {
+		out[i] = string(r.Code)
+	}
+	return out
+}
+
+func reasonsToDetail(reasons []branchprotect.Reason) []map[string]string {
+	out := make([]map[string]string, len(reasons))
+	for i, r := range reasons {
+		entry := map[string]string{
+			"code":    string(r.Code),
+			"message": r.Message,
+		}
+		if r.RuleKind != "" {
+			entry["rule_kind"] = string(r.RuleKind)
+		}
+		out[i] = entry
+	}
+	return out
+}
+
+func firstDenyMessage(reasons []branchprotect.Reason, branch string) string {
+	if len(reasons) == 0 {
+		return fmt.Sprintf("branch %q is protected", branch)
+	}
+	return reasons[0].Message
 }
 
 // enterBranch prepares an isolated working directory for branch-scoped writes.

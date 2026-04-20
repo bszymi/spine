@@ -16,6 +16,8 @@ import (
 	"github.com/bszymi/spine/internal/actor"
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/branchprotect"
+	bpprojection "github.com/bszymi/spine/internal/branchprotect/projection"
 	"github.com/bszymi/spine/internal/config"
 	spinecrypto "github.com/bszymi/spine/internal/crypto"
 	"github.com/bszymi/spine/internal/delivery"
@@ -370,7 +372,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		authSvc = auth.NewService(deps.Store)
 	}
 
-	artifactSvc := buildArtifactService(deps.GitClient, deps.Events, deps.RepoPath, deps.SpineCfg)
+	artifactSvc := buildArtifactService(deps.GitClient, deps.Events, deps.RepoPath, deps.SpineCfg, deps.Store)
 	workflowSvc := workflow.NewService(deps.GitClient, deps.RepoPath)
 
 	var projQuery *projection.QueryService
@@ -467,13 +469,36 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 }
 
 // buildArtifactService constructs the artifact service with the
-// configured artifacts directory.
-func buildArtifactService(gitClient *git.CLIClient, events event.EventRouter, repoPath string, cfg *config.SpineConfig) *artifact.Service {
+// configured artifacts directory and wires the branch-protection policy
+// (ADR-009 §3). The policy reads from the projection-backed RuleSource
+// so evaluation is an in-memory lookup against the runtime table; the
+// projection handler keeps the table in sync with the committed config
+// on every advance of the authoritative branch.
+//
+// When no Store is available (e.g. early bootstrap before migrations run)
+// the policy is built over an empty static rule set. That still denies
+// nothing — there are no rules to match — but the Service remains
+// "policy-wired" and any future rule, once the Store is online, flows
+// through the same code path.
+func buildArtifactService(gitClient *git.CLIClient, events event.EventRouter, repoPath string, cfg *config.SpineConfig, st store.Store) *artifact.Service {
 	svc := artifact.NewService(gitClient, events, repoPath)
 	if cfg != nil {
 		svc.WithArtifactsDir(cfg.ArtifactsDir)
 	}
+	svc.WithPolicy(buildBranchProtectPolicy(st))
 	return svc
+}
+
+// buildBranchProtectPolicy returns a branchprotect.Policy suitable for
+// the Artifact Service's guard. When a Store is configured, the policy
+// reads the projection-backed rules; otherwise it falls back to a
+// rules-less source, which evaluates to "no matching rule, allow" for
+// every branch and keeps early-bootstrap paths functional.
+func buildBranchProtectPolicy(st store.Store) branchprotect.Policy {
+	if st == nil {
+		return branchprotect.NewPermissive()
+	}
+	return branchprotect.New(bpprojection.New(st))
 }
 
 // buildWorkflowResolver builds the projection-backed workflow resolver
