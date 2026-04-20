@@ -182,6 +182,10 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	}
 	orch.WithArtifactWriter(ss.Artifacts)
 	orch.WithBlockingStore(ss.Store)
+	// Branch-protection guard for MergeRunBranch (ADR-009 §3). Same
+	// projection-backed policy wired into the Artifact Service above, so
+	// both API writes and governed merges share a single decision point.
+	orch.WithBranchProtectPolicy(buildBranchProtectPolicy(ss.Store))
 	// Workflow writer is required for ADR-008 planning runs. Fail fast at
 	// startup if ss.Workflows is populated but doesn't satisfy the
 	// interface — a silent skip here degrades workflow.create into 503 at
@@ -585,8 +589,13 @@ func buildOrchestrator(
 		orch.WithValidator(validator)
 	}
 	orch.WithDiscussions(st)
+	// Branch-protection guard for MergeRunBranch (ADR-009 §3). Uses the
+	// same projection-backed policy the Artifact Service installs, so
+	// API-path writes and governed merges share a single decision point.
+	orch.WithBranchProtectPolicy(buildBranchProtectPolicy(st))
 
 	divSvc := divergence.NewService(st, gitClient, events)
+	divSvc.WithBranchProtectPolicy(buildBranchProtectPolicy(st))
 	orch.WithDivergence(divSvc)
 	orch.WithConvergence(divSvc)
 

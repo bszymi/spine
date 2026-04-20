@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/git"
 )
@@ -84,6 +85,7 @@ func TestWorkflowLifecycle_ApprovedOutcomeMergesBranch(t *testing.T) {
 		events:    events,
 		git:       gitOp,
 		wfLoader:  &mockWorkflowLoader{wfDef: workflowLifecycleDef()},
+		policy:    branchprotect.NewPermissive(),
 	}
 
 	// Submit the approved outcome. CompleteRun triggers MergeRunBranch
@@ -211,6 +213,7 @@ func TestMergeRunBranch_HappyPath(t *testing.T) {
 		git:      gitOp,
 		events:   events,
 		wfLoader: &stubWorkflowLoader{},
+		policy:   branchprotect.NewPermissive(),
 	}
 
 	err := orch.MergeRunBranch(context.Background(), "run-1")
@@ -261,6 +264,7 @@ func TestMergeRunBranch_PermanentFailure(t *testing.T) {
 		git:      gitOp,
 		events:   events,
 		wfLoader: &stubWorkflowLoader{},
+		policy:   branchprotect.NewPermissive(),
 	}
 
 	err := orch.MergeRunBranch(context.Background(), "run-1")
@@ -299,6 +303,7 @@ func TestMergeRunBranch_TransientFailure(t *testing.T) {
 		git:      gitOp,
 		events:   &mockEventEmitter{},
 		wfLoader: &stubWorkflowLoader{},
+		policy:   branchprotect.NewPermissive(),
 	}
 
 	err := orch.MergeRunBranch(context.Background(), "run-1")
@@ -329,6 +334,7 @@ func TestMergeRunBranch_NoBranch(t *testing.T) {
 		git:      &stubGitOperator{},
 		events:   events,
 		wfLoader: &stubWorkflowLoader{},
+		policy:   branchprotect.NewPermissive(),
 	}
 
 	err := orch.MergeRunBranch(context.Background(), "run-1")
@@ -395,6 +401,7 @@ func TestMergeRunBranch_PushAuthFailure(t *testing.T) {
 		git:      gitOp,
 		events:   events,
 		wfLoader: &stubWorkflowLoader{},
+		policy:   branchprotect.NewPermissive(),
 	}
 
 	t.Setenv("SPINE_GIT_PUSH_ENABLED", "true")
@@ -433,6 +440,7 @@ func TestMergeRunBranch_PushTransientFailure(t *testing.T) {
 		git:      gitOp,
 		events:   &mockEventEmitter{},
 		wfLoader: &stubWorkflowLoader{},
+		policy:   branchprotect.NewPermissive(),
 	}
 
 	t.Setenv("SPINE_GIT_PUSH_ENABLED", "true")

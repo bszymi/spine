@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
@@ -19,11 +20,58 @@ type Service struct {
 	store  store.Store
 	git    git.GitClient
 	events event.EventRouter
+	policy branchprotect.Policy
 }
 
 // NewService creates a new divergence service.
 func NewService(st store.Store, gitClient git.GitClient, events event.EventRouter) *Service {
 	return &Service{store: st, git: gitClient, events: events}
+}
+
+// WithBranchProtectPolicy installs the branch-protection policy consulted
+// before every divergence-branch mutation (ADR-009 §3). Divergence
+// branches live in the spine/* namespace and so match no user-authored
+// rule by construction — the check is an audit-consistency hook rather
+// than an enforcement gate. A nil policy skips the check: divergence
+// paths cannot be blocked by the policy anyway, so silent skip matches
+// the null-op behaviour production would see with a real policy.
+func (s *Service) WithBranchProtectPolicy(p branchprotect.Policy) {
+	s.policy = p
+}
+
+// evaluateBranchOp consults the installed policy (if any) before a
+// divergence-branch ref operation. Returns an error only when a wired
+// policy denies or errors — nil policy is treated as a no-op per
+// WithBranchProtectPolicy's contract.
+func (s *Service) evaluateBranchOp(ctx context.Context, branch string, kind branchprotect.OperationKind, runID string) error {
+	if s.policy == nil {
+		return nil
+	}
+	var actor domain.Actor
+	if a := domain.ActorFromContext(ctx); a != nil {
+		actor = *a
+	}
+	decision, reasons, err := s.policy.Evaluate(ctx, branchprotect.Request{
+		Branch:  branch,
+		Kind:    kind,
+		Actor:   actor,
+		RunID:   runID,
+		TraceID: observe.TraceID(ctx),
+	})
+	if err != nil {
+		observe.Logger(ctx).Error("branch-protection evaluation failed on divergence",
+			"branch", branch, "kind", kind, "run_id", runID, "error", err.Error())
+		return domain.NewError(domain.ErrInternal,
+			fmt.Sprintf("branch-protection evaluation failed: %v", err))
+	}
+	if decision == branchprotect.DecisionDeny {
+		msg := fmt.Sprintf("branch %q blocked by branch protection", branch)
+		if len(reasons) > 0 {
+			msg = reasons[0].Message
+		}
+		return domain.NewError(domain.ErrForbidden, msg)
+	}
+	return nil
 }
 
 // StartDivergence creates a divergence context and its branches.
@@ -169,6 +217,11 @@ func (s *Service) createBranchRecord(ctx context.Context, run *domain.Run, divCt
 
 	// Create Git branch first so a failure doesn't leave an orphaned DB record.
 	gitBranchName := fmt.Sprintf("spine/%s/%s/%s", run.RunID, divCtx.DivergenceID, branchID)
+	// Route through the branch-protection policy (ADR-009 §3). spine/*
+	// branches never match user rules, so this is audit-consistency only.
+	if err := s.evaluateBranchOp(ctx, gitBranchName, branchprotect.OpDirectWrite, run.RunID); err != nil {
+		return nil, err
+	}
 	if err := s.git.CreateBranch(ctx, gitBranchName, "HEAD"); err != nil {
 		return nil, fmt.Errorf("create git branch %s: %w", gitBranchName, err)
 	}

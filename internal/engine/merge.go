@@ -8,11 +8,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/workflow"
 )
+
+// authoritativeBranch is the destination of every governed merge the
+// Orchestrator performs today. Centralised here so the branch-protection
+// request is built consistently with the git.MergeOpts target below — if
+// either changes, they change together.
+const authoritativeBranch = "main"
 
 // MergeRunBranch merges the run's branch to the authoritative branch (main)
 // and transitions the run from committing to completed. If the merge fails,
@@ -35,6 +42,23 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		return o.completeAfterMerge(ctx, run, false)
 	}
 
+	// Branch-protection check (ADR-009 §3). Runs before any ref-advancing
+	// work — including applyCommitStatus, which writes to the run branch —
+	// so a nil policy or a denied governed merge does not leave half-
+	// applied commits on the branch. OpGovernedMerge is allowed
+	// unconditionally by the real evaluator (rules do not gate it), so
+	// under normal operation this is a no-op at the decision level. The
+	// check still runs so (a) a nil policy is caught as a configuration
+	// error rather than a silent bypass, and (b) a future evaluator that
+	// does want to gate governed merges (e.g. to reject merges from a
+	// contributor on a branch touching .spine/branch-protection.yaml —
+	// see ADR-009 §1 run-branch-slippage) has a single site to plug into.
+	// Rule-source errors for governed merges do NOT surface here: the
+	// evaluator short-circuits before loading rules, by design.
+	if err := o.checkBranchProtectMerge(ctx, run); err != nil {
+		return err
+	}
+
 	// Apply commit metadata (e.g., rewrite artifact status) on the branch
 	// before merging so the updated file lands on main.
 	if newStatus := run.CommitMeta["status"]; newStatus != "" {
@@ -52,7 +76,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 
 	mergeResult, err := o.git.Merge(ctx, git.MergeOpts{
 		Source:   run.BranchName,
-		Target:   "main",
+		Target:   authoritativeBranch,
 		Strategy: "merge-commit",
 		Message:  fmt.Sprintf("Merge run %s: %s", runID, run.TaskPath),
 		Trailers: trailers,
@@ -247,6 +271,82 @@ func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.
 	if updateErr := o.store.UpdateStepExecution(ctx, lastCompleted); updateErr != nil {
 		observe.Logger(ctx).Warn("failed to record git conflict on step", "error", updateErr)
 	}
+}
+
+// checkBranchProtectMerge consults the installed branch-protection
+// policy before MergeRunBranch advances the authoritative branch
+// (ADR-009 §3). The operation is classified as OpGovernedMerge — the
+// real policy allows those unconditionally (rules do not gate governed
+// merges). The check still runs so a nil policy is caught as a
+// configuration error rather than a silent bypass, and so any future
+// evaluator that does want to gate merges has a single site to plug in.
+//
+// Note: rule-source failures for OpGovernedMerge do not surface from
+// the real policy — it short-circuits before loading rules. Fail-closed
+// on source errors is enforced on the DirectWrite path (artifact
+// service); this path's fail-closed property is limited to "nil policy".
+//
+// The actor on the request is whichever actor is bound to ctx (may be
+// nil on scheduler recovery paths — OpGovernedMerge does not consult
+// Actor.Role, so a zero actor is fine). RunID comes from the Run being
+// merged; TraceID from the Run's trace so override/audit events
+// correlate with the request that started the run.
+func (o *Orchestrator) checkBranchProtectMerge(ctx context.Context, run *domain.Run) error {
+	if o.policy == nil {
+		return domain.NewError(domain.ErrUnavailable,
+			"engine: branch-protection policy not configured (production must call WithBranchProtectPolicy)")
+	}
+
+	var actor domain.Actor
+	if a := domain.ActorFromContext(ctx); a != nil {
+		actor = *a
+	}
+
+	req := branchprotect.Request{
+		Branch:  authoritativeBranch,
+		Kind:    branchprotect.OpGovernedMerge,
+		Actor:   actor,
+		RunID:   run.RunID,
+		TraceID: run.TraceID,
+	}
+
+	decision, reasons, err := o.policy.Evaluate(ctx, req)
+	if err != nil {
+		observe.Logger(ctx).Error("branch-protection evaluation failed on merge",
+			"run_id", run.RunID,
+			"branch", authoritativeBranch,
+			"error", err.Error(),
+		)
+		return domain.NewError(domain.ErrInternal,
+			fmt.Sprintf("branch-protection evaluation failed: %v", err))
+	}
+
+	if decision == branchprotect.DecisionDeny {
+		observe.Logger(ctx).Warn("branch-protection denied governed merge",
+			"run_id", run.RunID,
+			"branch", authoritativeBranch,
+			"reasons", denyReasonCodes(reasons),
+		)
+		return domain.NewError(domain.ErrForbidden,
+			firstMergeDenyMessage(reasons, run.RunID))
+	}
+
+	return nil
+}
+
+func denyReasonCodes(reasons []branchprotect.Reason) []string {
+	out := make([]string, len(reasons))
+	for i, r := range reasons {
+		out[i] = string(r.Code)
+	}
+	return out
+}
+
+func firstMergeDenyMessage(reasons []branchprotect.Reason, runID string) string {
+	if len(reasons) == 0 {
+		return fmt.Sprintf("governed merge for run %s denied by branch protection", runID)
+	}
+	return reasons[0].Message
 }
 
 // statusFieldRegexp matches the status line in YAML front matter.
