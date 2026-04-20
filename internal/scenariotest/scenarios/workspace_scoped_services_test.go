@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/projection"
@@ -65,6 +66,7 @@ func TestWorkspace_ScopedServices(t *testing.T) {
 	t.Cleanup(func() { qBeta.Stop() })
 	eventsBeta := event.NewQueueRouter(qBeta)
 	artifactsBeta := artifact.NewService(gitBeta, eventsBeta, repoBeta.Dir)
+	artifactsBeta.WithPolicy(branchprotect.NewPermissive())
 	projBeta := projection.NewService(gitBeta, betaStore, eventsBeta, 30*time.Second)
 
 	// --- Step 1: Create different artifacts in each workspace ---

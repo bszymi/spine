@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/artifact"
+	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/projection"
@@ -85,6 +86,7 @@ func TestWorkspace_FreshProvisioning(t *testing.T) {
 	events := event.NewQueueRouter(q)
 
 	artifactSvc := artifact.NewService(gitClient, events, repoPath)
+	artifactSvc.WithPolicy(branchprotect.NewPermissive())
 	projSvc := projection.NewService(gitClient, wsStore, events, 30*time.Second)
 
 	// --- Step 3: Create artifact in provisioned workspace ---

@@ -28,9 +28,16 @@ type (
 const WorkspaceHeader = "X-Workspace-ID"
 
 // actorFromContext returns the authenticated actor from the request context.
+// The gateway stores the actor under both its private key (for handler code
+// that stayed local to this package before the domain helper existed) and
+// the shared domain key (so downstream services like internal/artifact can
+// read the actor without importing gateway). Reads prefer the local key
+// but fall back to the shared one.
 func actorFromContext(ctx context.Context) *domain.Actor {
-	actor, _ := ctx.Value(actorKey{}).(*domain.Actor)
-	return actor
+	if actor, ok := ctx.Value(actorKey{}).(*domain.Actor); ok {
+		return actor
+	}
+	return domain.ActorFromContext(ctx)
 }
 
 // WorkspaceConfigFromContext returns the resolved workspace config from the request context.
@@ -150,6 +157,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		ctx := context.WithValue(r.Context(), actorKey{}, actor)
+		ctx = domain.WithActor(ctx, actor)
 		ctx = observe.WithActorID(ctx, actor.ActorID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
