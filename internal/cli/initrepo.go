@@ -238,8 +238,10 @@ func seedBranchProtectionContent() string {
 	var b strings.Builder
 	b.WriteString("# Branch-protection rules. See /architecture/adr/ADR-009-branch-protection.md\n")
 	b.WriteString("# and /architecture/branch-protection-config-format.md for the schema.\n")
-	b.WriteString("# Edits flow through the protection-config governance workflow\n")
-	b.WriteString("# (INIT-018 EPIC-002 TASK-005); an operator override is the escape hatch.\n")
+	b.WriteString("# This file is operator-edited (ADR-009 §5): commit the change directly\n")
+	b.WriteString("# on the authoritative branch and push with `git push -o spine.override=true`.\n")
+	b.WriteString("# No lifecycle workflow governs this file; the override emits a\n")
+	b.WriteString("# branch_protection.override governance event that is the audit record.\n")
 	b.WriteString("version: 1\n")
 	b.WriteString("rules:\n")
 	for _, r := range branchprotect.BootstrapDefaults() {

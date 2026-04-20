@@ -29,7 +29,7 @@ Both EPIC-003 (API-path enforcement) and EPIC-004 (Git-path enforcement) consume
 - `internal/branchprotect` package: `Policy`, `Request`, `Decision`, `Evaluate`, bootstrap defaults.
 - Projection of the parsed config into `branch_protection_rules` runtime table.
 - `spine init-repo` seeds the config with documented defaults.
-- Governance workflow for editing the protection config.
+- Design decision recorded in ADR-009 §5: protection config is operator-edited; no lifecycle workflow.
 
 ---
 
@@ -38,7 +38,7 @@ Both EPIC-003 (API-path enforcement) and EPIC-004 (Git-path enforcement) consume
 - `internal/branchprotect/` package (policy evaluation, types, tests).
 - `.spine/branch-protection.yaml` format + seeded content in new repos.
 - `branch_protection_rules` runtime table + projection wiring.
-- Workflow definition governing edits to `branch-protection.yaml`.
+- ADR-009 §5 updated with the resolved edit flow (operator-only direct commit via the existing §4 override surface — `git push -o spine.override=true`).
 - Architecture doc updates describing the policy module and its integration points.
 
 ---
@@ -49,5 +49,5 @@ Both EPIC-003 (API-path enforcement) and EPIC-004 (Git-path enforcement) consume
 - A fresh repository evaluates against the bootstrap defaults (`main` protected with `no-delete` + `no-direct-write`) even without a config file.
 - `spine init-repo` seeds `/.spine/branch-protection.yaml` with the documented defaults, and existing tests still pass.
 - The Projection Service mirrors `/.spine/branch-protection.yaml` into `branch_protection_rules` on merge and on bootstrap; reads are served from the runtime table.
-- Editing the config goes through a named governance workflow; the workflow is documented in `/workflows/` and referenced from `/architecture/adr/ADR-009-branch-protection.md`.
+- Editing the config is described in ADR-009 §5 as an operator-only direct commit pushed with the existing §4 override surface (`git push -o spine.override=true`); no lifecycle workflow. The open "deferred" language in §5 is replaced with this resolution.
 - No call site actually rejects an operation yet — EPIC-003 and EPIC-004 do that. This epic ends with a wired but dormant policy module.

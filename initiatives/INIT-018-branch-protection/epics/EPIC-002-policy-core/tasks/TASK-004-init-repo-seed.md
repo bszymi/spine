@@ -40,12 +40,15 @@ Whatever command currently bootstraps a workspace (the one that creates `.spine.
 
 ## Deliverable
 
-1. **Seed content.** A canonical `/.spine/branch-protection.yaml` matching the bootstrap defaults, with an inline comment pointing at ADR-009 for the full schema:
+1. **Seed content.** A canonical `/.spine/branch-protection.yaml` matching the bootstrap defaults, with an inline comment pointing at ADR-009 for the full schema and the operator-edit flow resolved in TASK-005 / ADR-009 §5:
 
    ```yaml
    # Branch-protection rules. See /architecture/adr/ADR-009-branch-protection.md
-   # for the full schema. Edits to this file flow through the protection-lifecycle
-   # governance workflow (TASK-005 in EPIC-002).
+   # and /architecture/branch-protection-config-format.md for the schema.
+   # This file is operator-edited (ADR-009 §5): commit the change directly
+   # on the authoritative branch and push with `git push -o spine.override=true`.
+   # No lifecycle workflow governs this file; the override emits a
+   # branch_protection.override governance event that is the audit record.
    version: 1
    rules:
      - branch: main

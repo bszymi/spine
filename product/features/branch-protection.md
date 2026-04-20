@@ -26,7 +26,7 @@ Forge-level protection (GitHub / GitLab branch rules) does not help: Spine is th
 
 ### 2.1 Who Configures Protection
 
-**Reviewers.** Protection rules are governance artifacts — they declare which branches are load-bearing and how they are to be treated. A reviewer edits the config the same way they edit a workflow definition: on a branch, reviewed, merged.
+**Operators.** Protection rules declare which branches are load-bearing and how they are to be treated. They are an operator/admin concern — the same role that can already override protection on any given operation (§7) is the one who sets the rules. The intended path is for an operator to edit `/.spine/branch-protection.yaml` directly on the authoritative branch and push with the override surface (`git push -o spine.override=true`); an edit that arrives that way produces a `branch_protection.override` governance event. No lifecycle workflow governs the file; the enforcement boundary is branch-level rather than path-level (a run-branch governed merge that includes the file is allowed unconditionally — see [ADR-009 §1](/architecture/adr/ADR-009-branch-protection.md)), so review of run branches touching `.spine/*` is the control for that path. Rationale in [ADR-009 §5](/architecture/adr/ADR-009-branch-protection.md).
 
 ### 2.2 Who Is Protected
 
@@ -110,10 +110,10 @@ Planning-run branch creation, divergence branch creation, task-branch merges int
 
 The intended author experience — the technical form of the config is resolved in ADR-009:
 
-1. The config is a **versioned artifact** in Git, at a well-known path. Editing it is a governance change, not a runtime toggle.
+1. The config is a **versioned config file** in Git, at a well-known path. Editing it is a governance change, not a runtime toggle.
 2. Each rule names a branch (or a branch pattern) and the rule types applied (`no-delete`, `no-direct-write`). There are no per-actor or per-role override allow-lists in v1 — operator override is the only escape hatch.
-3. Changes to the config go through Spine's governance machinery the same way any other artifact does — a reviewer edits it on a branch, the change is reviewed, and the merge lands on `main`.
-4. The config file lives on the authoritative branch, and the authoritative branch is protected by `no-direct-write`. That alone ensures protection cannot be silently relaxed — every edit of the config is a governed merge or an audited operator override.
+3. The intended path for changes is for an **operator** to commit directly on the authoritative branch and push with the override surface (`git push -o spine.override=true`). While the authoritative branch carries `no-direct-write` (the seeded default), that is the path a direct push to `main` has to take, and it produces a `branch_protection.override` governance event. There is no lifecycle workflow for this file; non-operators escalate out-of-band if they want a rule change. See [ADR-009 §5](/architecture/adr/ADR-009-branch-protection.md).
+4. The enforcement boundary around that path is branch-level, not path-level. In particular: a governed merge of a run branch that happens to include a change to `.spine/branch-protection.yaml` is allowed by the policy module unconditionally (`OpGovernedMerge` is always permitted, see ADR-009 §3). The governing workflow's review step is the control on that path — the same as for any other governance file (workflows, ADRs, `.spine.yaml`). If a deployment relaxes `no-direct-write` on the authoritative branch, self-protection is off for the direct-push path as well. v1 accepts both limitations as consequences of the flat (branch + kind) ruleset; a future ADR can tighten them if dogfooding warrants. See [ADR-009 §1](/architecture/adr/ADR-009-branch-protection.md) for the full reasoning.
 
 Example (illustrative only, the exact shape is decided in the ADR):
 
