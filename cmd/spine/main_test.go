@@ -130,6 +130,38 @@ func TestParseGitHTTPTrustedCIDRs(t *testing.T) {
 	}
 }
 
+func TestParseGitReceivePackEnabled(t *testing.T) {
+	// Default is false — upgrading past EPIC-004 TASK-001 must not
+	// silently accept pushes. Only an explicit affirmative flips it on,
+	// and typos should fall back to false rather than enabling by
+	// accident.
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{"", false},
+		{" ", false},
+		{"false", false},
+		{"no", false},
+		{"0", false},
+		{"off", false},
+		{"garbage", false},
+		{"true", true},
+		{"TRUE", true},
+		{"1", true},
+		{"yes", true},
+		{"on", true},
+		{" true ", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			if got := parseGitReceivePackEnabled(tc.raw); got != tc.want {
+				t.Fatalf("parseGitReceivePackEnabled(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadSecretCipher_ProductionRequiresKey(t *testing.T) {
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", "")
 	// Production without a key is a deploy-time footgun — refuse to

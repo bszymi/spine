@@ -258,6 +258,18 @@ func parseGitHTTPTrustedCIDRs(raw string) []string {
 	return out
 }
 
+// parseGitReceivePackEnabled reads the SPINE_GIT_RECEIVE_PACK_ENABLED
+// env var. Default false — an explicit true/1/yes/on is required to
+// turn push on. Unrecognised values fall back to false so a typo never
+// silently enables the endpoint.
+func parseGitReceivePackEnabled(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // requireSecureDBURL rejects connection strings that use sslmode=disable
 // unless SPINE_INSECURE_LOCAL=1 is set.
 func requireSecureDBURL(url string) error {
@@ -346,13 +358,17 @@ type serveDeps struct {
 	DevMode             bool
 	TrustedProxyCIDRs   []*net.IPNet
 	TrustedGitHTTPCIDRs []string
-	EventDeliveryOn     bool
-	SMPEventURL         string
-	SMPWorkspaceID      string
-	SMPInternalToken    string
-	EventRetention      time.Duration
-	SSEMaxConn          int
-	OrphanThreshold     time.Duration
+	// GitReceivePackEnabled wires the git push endpoint (receive-pack).
+	// Default false; EPIC-004 TASK-001. When true this is still a bare
+	// passthrough — branch-protection enforcement is TASK-002.
+	GitReceivePackEnabled bool
+	EventDeliveryOn       bool
+	SMPEventURL           string
+	SMPWorkspaceID        string
+	SMPInternalToken      string
+	EventRetention        time.Duration
+	SSEMaxConn            int
+	OrphanThreshold       time.Duration
 }
 
 // serveRuntime bundles the ServerConfig with the long-lived background
@@ -429,7 +445,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		eventBroadcaster = deliverySubscriber.Broadcaster
 	}
 
-	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, log)
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, log)
 
 	cfg := gateway.ServerConfig{
 		Store:               deps.Store,
@@ -638,7 +654,7 @@ func buildScheduler(
 
 // buildGitHTTPHandler assembles the git HTTP handler. Returns nil when
 // no workspace resolver is available or when handler construction fails.
-func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, log *slog.Logger) *githttp.Handler {
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
@@ -650,7 +666,8 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, l
 			}
 			return cfg.RepoPath, nil
 		},
-		TrustedCIDRs: trustedCIDRs,
+		TrustedCIDRs:       trustedCIDRs,
+		ReceivePackEnabled: receivePackEnabled,
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
@@ -660,6 +677,13 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, l
 		log.Warn("git HTTP endpoint enabled with no trusted CIDRs; all clients must present a bearer token. Set SPINE_GIT_HTTP_TRUSTED_CIDRS to a narrow runner subnet to opt in to token-less access.")
 	} else {
 		log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
+	}
+	if receivePackEnabled {
+		// EPIC-004 TASK-001: opt-in push endpoint is intentionally a
+		// bare passthrough. TASK-002 wraps it with branchprotect
+		// pre-receive enforcement; until then there is no branch
+		// policy gate, so we log loudly on startup.
+		log.Warn("git HTTP receive-pack is ENABLED (SPINE_GIT_RECEIVE_PACK_ENABLED=true); branch-protection pre-receive enforcement is not wired yet (EPIC-004 TASK-002)")
 	}
 	return h
 }
@@ -806,27 +830,28 @@ func serveCmd() *cobra.Command {
 			}
 
 			deps := serveDeps{
-				Store:               st,
-				RepoPath:            repoPath,
-				SpineCfg:            spineCfg,
-				GitClient:           gitClient,
-				Queue:               q,
-				Events:              eventRouter,
-				WSResolver:          wsResolver,
-				WSDBProvider:        wsDBProvider,
-				WSServicePool:       wsServicePool,
-				SecretCipher:        secretCipher,
-				RuntimeEnv:          runtimeEnv,
-				DevMode:             devMode,
-				TrustedProxyCIDRs:   trustedProxyCIDRs,
-				TrustedGitHTTPCIDRs: parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS")),
-				EventDeliveryOn:     os.Getenv("SPINE_EVENT_DELIVERY") == "true",
-				SMPEventURL:         os.Getenv("SMP_EVENT_URL"),
-				SMPWorkspaceID:      os.Getenv("SMP_WORKSPACE_ID"),
-				SMPInternalToken:    os.Getenv("SMP_INTERNAL_TOKEN"),
-				EventRetention:      eventRetention,
-				SSEMaxConn:          parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
-				OrphanThreshold:     orphanThreshold,
+				Store:                 st,
+				RepoPath:              repoPath,
+				SpineCfg:              spineCfg,
+				GitClient:             gitClient,
+				Queue:                 q,
+				Events:                eventRouter,
+				WSResolver:            wsResolver,
+				WSDBProvider:          wsDBProvider,
+				WSServicePool:         wsServicePool,
+				SecretCipher:          secretCipher,
+				RuntimeEnv:            runtimeEnv,
+				DevMode:               devMode,
+				TrustedProxyCIDRs:     trustedProxyCIDRs,
+				TrustedGitHTTPCIDRs:   parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS")),
+				GitReceivePackEnabled: parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
+				EventDeliveryOn:       os.Getenv("SPINE_EVENT_DELIVERY") == "true",
+				SMPEventURL:           os.Getenv("SMP_EVENT_URL"),
+				SMPWorkspaceID:        os.Getenv("SMP_WORKSPACE_ID"),
+				SMPInternalToken:      os.Getenv("SMP_INTERNAL_TOKEN"),
+				EventRetention:        eventRetention,
+				SSEMaxConn:            parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
+				OrphanThreshold:       orphanThreshold,
 			}
 
 			rt, err := buildServerConfig(ctx, deps)

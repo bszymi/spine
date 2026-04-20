@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Enable git-receive-pack in internal/githttp behind config flag"
-status: Pending
+status: Completed
 work_type: implementation
 created: 2026-04-18
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-004-git-enforcement/epic.md

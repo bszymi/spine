@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -57,6 +58,13 @@ func (f *fakeWSResolver) List(_ context.Context) ([]workspace.Config, error) {
 //   - "gw_auth"   — *auth.Service
 //   - "repo_path" — filesystem path to the test repo
 func setupGitHTTPServer() scenarioEngine.Step {
+	return setupGitHTTPServerWithOptions(false, false)
+}
+
+// setupGitHTTPServerWithOptions is setupGitHTTPServer with knobs that a
+// handful of scenarios need (receive-pack gate, devMode for auth
+// bypass). The default helper keeps the previous read-only shape.
+func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool) scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-git-http-server",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
@@ -85,8 +93,9 @@ func setupGitHTTPServer() scenarioEngine.Step {
 					}
 					return cfg.RepoPath, nil
 				},
-				TrustedCIDRs:  []string{"127.0.0.0/8"},
-				MaxConcurrent: 5,
+				TrustedCIDRs:       []string{"127.0.0.0/8"},
+				MaxConcurrent:      5,
+				ReceivePackEnabled: receivePackEnabled,
 			})
 			if err != nil {
 				return fmt.Errorf("create git HTTP handler: %w", err)
@@ -102,6 +111,7 @@ func setupGitHTTPServer() scenarioEngine.Step {
 				ProjSync:          sc.Runtime.Projections,
 				WorkspaceResolver: wsResolver,
 				GitHTTP:           gitHandler,
+				DevMode:           devMode,
 			}
 
 			srv := gateway.NewServer(":0", cfg)
@@ -293,10 +303,15 @@ func TestGitHTTP_PushRejected(t *testing.T) {
 						return err
 					}
 					defer resp.Body.Close()
+					body, _ := io.ReadAll(resp.Body)
 
 					if resp.StatusCode != http.StatusForbidden {
-						body, _ := io.ReadAll(resp.Body)
 						return fmt.Errorf("expected 403, got %d (body: %s)", resp.StatusCode, body)
+					}
+					// The message must name the flag so an operator
+					// hitting this in the wild can find the switch.
+					if !bytes.Contains(body, []byte("SPINE_GIT_RECEIVE_PACK_ENABLED")) {
+						return fmt.Errorf("rejection should mention SPINE_GIT_RECEIVE_PACK_ENABLED, got: %s", body)
 					}
 					return nil
 				},
@@ -480,6 +495,110 @@ func TestGitHTTP_BranchClone(t *testing.T) {
 					branch := string(bytes.TrimSpace(branchOut))
 					if branch != "spine/run/test-branch" {
 						return fmt.Errorf("expected branch spine/run/test-branch, got %q", branch)
+					}
+
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// TestGitHTTP_PushAcceptedWhenFlagOn verifies that once ReceivePackEnabled
+// is on, `git push` to a fresh branch succeeds end-to-end through the
+// Spine git HTTP endpoint — the ref advertisement is served, the pack
+// upload is accepted, and the server repo ends up with the new commit.
+//
+// This exercises the flag-on path of EPIC-004 TASK-001. Note: no branch
+// protection runs here; that is EPIC-004 TASK-002. The scenario pushes
+// to a new branch (rather than `main`) so the server's working-tree
+// checkout does not block the update.
+func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-push-accepted",
+		Description: "Git push is accepted end-to-end when ReceivePackEnabled is on",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			// Push is gated on a bearer token in production (the
+			// trusted-CIDR bypass deliberately does NOT apply to
+			// receive-pack). Minting a test token here would require
+			// wiring the token store; for this scenario's scope —
+			// does the flag actually let the CGI push through? —
+			// devMode bypasses auth and keeps the test focused on
+			// the receive-pack gate. A separate unit test covers
+			// the push-requires-auth contract.
+			setupGitHTTPServerWithOptions(true, true),
+			enableGitHTTPExport(),
+			{
+				// Server is a non-bare repo; pushing to its
+				// currently-checked-out branch would fail with
+				// "refusing to update checked out branch". Pushing
+				// to a fresh branch sidesteps that and still
+				// exercises the CGI push path.
+				Name: "clone-and-push-new-branch",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					base := sc.MustGet("gw_url").(string)
+					repoPath := sc.Repo.Dir
+					cloneDir := filepath.Join(sc.T.TempDir(), "push-clone")
+
+					if out, err := exec.Command("git", "clone", base+"/git", cloneDir).CombinedOutput(); err != nil {
+						return fmt.Errorf("git clone failed: %w\n%s", err, out)
+					}
+
+					// Configure identity on the client side
+					// so `git commit` has an author.
+					for _, kv := range [][2]string{
+						{"user.email", "push-test@spine.local"},
+						{"user.name", "Push Test"},
+					} {
+						c := exec.Command("git", "config", kv[0], kv[1])
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git config %s: %w\n%s", kv[0], err, out)
+						}
+					}
+
+					// Create a new branch, add a file, commit.
+					branchCmds := [][]string{
+						{"checkout", "-b", "spine/test/push"},
+					}
+					for _, args := range branchCmds {
+						c := exec.Command("git", args...)
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git %v: %w\n%s", args, err, out)
+						}
+					}
+					newFile := filepath.Join(cloneDir, "pushed-file.md")
+					if err := os.WriteFile(newFile, []byte("# Pushed\n"), 0o644); err != nil {
+						return fmt.Errorf("write pushed file: %w", err)
+					}
+					for _, args := range [][]string{
+						{"add", "pushed-file.md"},
+						{"commit", "-m", "add pushed file"},
+					} {
+						c := exec.Command("git", args...)
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git %v: %w\n%s", args, err, out)
+						}
+					}
+
+					// Push to the HTTP endpoint.
+					push := exec.Command("git", "push", "origin", "spine/test/push")
+					push.Dir = cloneDir
+					if out, err := push.CombinedOutput(); err != nil {
+						return fmt.Errorf("git push failed: %w\n%s", err, out)
+					}
+
+					// Verify the server repo has the new branch.
+					show := exec.Command("git", "show-ref", "--verify", "refs/heads/spine/test/push")
+					show.Dir = repoPath
+					if out, err := show.CombinedOutput(); err != nil {
+						return fmt.Errorf("server should have refs/heads/spine/test/push after push, got: %w\n%s", err, out)
 					}
 
 					return nil

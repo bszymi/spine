@@ -53,6 +53,29 @@ release is cut — this file is a staging area.
 - Git push path enforcement (EPIC-004) — the pre-receive handler is the
   subject of a follow-up epic.
 
+---
+
+## INIT-018 — Branch Protection (EPIC-004 Git-path enforcement, in progress)
+
+### Added
+
+- **Git push endpoint (`git-receive-pack`) behind a config flag.** The
+  Spine git HTTP server now serves `git-receive-pack` when
+  `SPINE_GIT_RECEIVE_PACK_ENABLED=true` (accepted: `1`/`true`/`yes`/
+  `on`). Default remains off, so existing deployments upgrade with no
+  behaviour change. When off, push returns **403** with a message
+  naming the flag so operators can find the switch without grepping
+  source. Authentication is enforced on push the same way it is on
+  clone/fetch (trusted-CIDR bypass or bearer token).
+
+### Not yet implemented (follow-up in EPIC-004)
+
+- Pre-receive branch-protection enforcement (TASK-002). With the flag
+  on but no policy wired, **pushing directly to `main` succeeds** —
+  treat `SPINE_GIT_RECEIVE_PACK_ENABLED=true` as a lab/testing switch
+  until TASK-002 lands.
+- `git push -o spine.override=true` operator override (TASK-003).
+
 ### Upgrade notes
 
 Clients sending `write_context` to artifact endpoints may now include an

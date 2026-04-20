@@ -442,7 +442,7 @@ Compare `last_synced_commit` with your last-seen value; re-query tables on chang
 
 ## 7. Git HTTP Serve Endpoint
 
-Spine ships a read-only git smart-HTTP server so runner containers can clone workspace repositories directly — no SSH keys, no external git hosting, no additional credentials.
+Spine ships a git smart-HTTP server so runner containers can clone workspace repositories directly — no SSH keys, no external git hosting, no additional credentials. Push (`git-receive-pack`) is available but off by default; see below.
 
 ### Route Patterns
 
@@ -450,7 +450,13 @@ Spine ships a read-only git smart-HTTP server so runner containers can clone wor
 - **Single mode**: `GET /git/info/refs?service=git-upload-pack`, `POST /git/git-upload-pack` (workspace is implicit)
 - Dumb protocol objects (`HEAD`, `objects/*`) are also served via GET
 
-The endpoint wraps `git http-backend` with `http.receivepack=false` pinned in the repo config. `git-receive-pack` and any push attempt return **403**.
+### Push (`git-receive-pack`)
+
+The endpoint ships with push **disabled** (`http.receivepack=false` pinned in the repo config). Any `git push` attempt returns **403** with a message naming the flag.
+
+Set `SPINE_GIT_RECEIVE_PACK_ENABLED=true` (accepted values: `1`, `true`, `yes`, `on`) to reach the push endpoint. Flipping this on is a deliberate opt-in — an existing deployment that upgrades past this change keeps the read-only behaviour it had before.
+
+Auth on push is **stricter** than on clone/fetch: the trusted-CIDR bypass does not apply to `git-receive-pack`. Every push must carry `Authorization: Bearer <token>` so an actor identity is pinned for audit and the upcoming pre-receive branch-protection check — a runner subnet configured for token-less cloning still needs a token to push. Role-based authorisation of who can push what is a separate concern covered by branch-protection enforcement (see ADR-009). Until that layer is wired, pushing to `main` with the flag on **will succeed** for any authenticated caller — treat the flag as a lab/testing switch, not production-ready.
 
 ### Authentication
 
@@ -473,7 +479,7 @@ git clone \
 
 - **Concurrency**: default 5 in-flight pack operations per process; additional requests get `503 Service Unavailable` with `Retry-After: 5`. Configured at construction time (`Config.MaxConcurrent`); not currently an env var.
 - **Per-request timeout**: default 30s (`Config.OpTimeout`).
-- **Read-only**: push/receivepack returns 403 before hitting CGI.
+- **Push gate**: when `SPINE_GIT_RECEIVE_PACK_ENABLED` is unset/false, `git-receive-pack` is rejected before hitting CGI.
 
 ### Observability
 
