@@ -120,6 +120,32 @@ release is cut — this file is a staging area.
   pre-receive gate can emit override events to the target
   workspace's stream.
 
+### EPIC-004 release notes (TASK-004)
+
+A consolidated summary of the Git-path story now enabled by
+`SPINE_GIT_RECEIVE_PACK_ENABLED=true`:
+
+- `git push` over HTTPS is a **first-class, enforced surface**. The
+  prior "push is on the roadmap" prose has been retired from
+  `product/features/branch-protection.md`.
+- Every push is authenticated with a bearer token — the
+  trusted-CIDR bypass used for clone/fetch does **not** apply to
+  push, so runner subnets that are token-less for reads still need
+  a token for writes.
+- Every ref update in the push goes through `branchprotect.Policy`
+  (same evaluator as the API path). Denials reject the whole push
+  with a git-shaped `remote: branch-protection: <rule> denies
+  <branch>` line and per-ref `ng <ref> pre-receive hook declined`.
+- Operators bypass a matching rule with `git push -o
+  spine.override=true`. Each honored override emits exactly one
+  `branch_protection.override` governance event per overridden
+  ref update. The commit is **not** rewritten — the event is the
+  sole audit record for a Git push override.
+- `/architecture/git-integration.md` §6.5 documents the
+  enforcement sequence; `/docs/git-push-guide.md` is the
+  operator-facing how-to (includes the client-visible error
+  catalogue).
+
 ### Upgrade notes
 
 Clients sending `write_context` to artifact endpoints may now include an
