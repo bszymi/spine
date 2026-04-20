@@ -299,11 +299,22 @@ Commit signing becomes more important as the system matures and audit requiremen
 
 ### 7.3 Branch Protection
 
-The authoritative branch (typically `main`) should be protected:
+The authoritative branch (typically `main`) is protected **by Spine itself** (per [ADR-009](/architecture/adr/ADR-009-branch-protection.md)), not by an external forge. Spine is its own Git server (see [Boundaries §2.1](/product/boundaries-and-constraints.md)), so forge-level protection is not available — the enforcement point lives in `internal/branchprotect` and is consulted on both the Git push path and the Spine API write path (ADR-009 §3).
 
-- Direct pushes by actors are prohibited — changes must go through the Artifact Service
-- Force pushes are prohibited (commits are never rewritten, per Constitution §7)
-- Branch protection rules are enforced at the Git hosting level, not by Spine itself
+The ruleset lives at `/.spine/branch-protection.yaml` on the authoritative branch and is mirrored into the runtime `branch_protection_rules` table by the Projection Service. Two rule kinds are supported in v1:
+
+- **`no-delete`** — blocks `git push --delete` and Artifact Service deletion paths on the named branch.
+- **`no-direct-write`** — blocks any ref advance that is not a Spine-governed merge. Governed merges produced by the Artifact Service merge path (with an authorizing Run) are allowed; direct `artifact.create` / `workflow.create` without `write_context`, or raw `git push`, are not.
+
+Bootstrap defaults apply to repositories that have not yet seeded the config file, so protection is correct even pre-seed — `main` is always `no-delete` + `no-direct-write` unless an operator explicitly relaxes it.
+
+**Override.** Operators may bypass a rule per-operation:
+- **Spine API path (available today):** `write_context.override: true` on the operation. Honored on artifact endpoints; workflow wiring is follow-up work — see [INIT-018 EPIC-003 TASK-003](/initiatives/INIT-018-branch-protection/epics/EPIC-003-api-enforcement/tasks/TASK-003-write-context-override.md).
+- **Git push path (planned — EPIC-004):** `git push -o spine.override=true` will be recognized by the pre-receive handler once `internal/githttp` accepts writes and the push-option parsing lands. The Git endpoint is read-only in this release; operators bypassing the authoritative-branch protection do so through the API path.
+
+Every honored API-path override produces a `branch_protection.override` governance event and adds a `Branch-Protection-Override: true` commit trailer. The Git path will emit the event (once enabled) but will not rewrite pushed commits — the event is the sole audit record on that path. Per-actor allow-lists are out of scope for v1 — operator override is the only escape hatch.
+
+Force pushes are prohibited (commits are never rewritten, per Constitution §7); `no-direct-write` covers them as a subset, since a force push is a non-governed advance.
 
 ### 7.4 Repository Access
 

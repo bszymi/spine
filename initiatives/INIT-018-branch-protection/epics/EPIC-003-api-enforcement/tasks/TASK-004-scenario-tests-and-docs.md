@@ -2,9 +2,11 @@
 id: TASK-004
 type: Task
 title: "API-path scenario tests and documentation sweep"
-status: Pending
+status: Completed
 work_type: testing+documentation
 created: 2026-04-18
+last_updated: 2026-04-20
+completed: 2026-04-20
 epic: /initiatives/INIT-018-branch-protection/epics/EPIC-003-api-enforcement/epic.md
 initiative: /initiatives/INIT-018-branch-protection/initiative.md
 links:
