@@ -3,6 +3,7 @@
 package scenarios_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -147,6 +148,100 @@ func TestArtifactCreationEntry_EpicGoldenPath(t *testing.T) {
 			engine.AssertRunCompleted(),
 
 			engine.AssertFileExists("initiatives/init-001-test/epics/epic-001-new/epic.md"),
+		},
+	})
+}
+
+// TestArtifactCreationEntry_SiblingTasksDistinctIDs guards INIT-008 EPIC-005
+// TASK-018: two consecutive addArtifactToRun calls for Task children of an
+// epic created earlier in the same planning run must produce distinct IDs
+// (TASK-001, TASK-002) and distinct paths. Before the fix the allocator
+// missed the first sibling because its lowercase filename did not match the
+// uppercase NextID regex, so both calls collided on TASK-001.
+//
+// Scenario: Two siblings added to the same planning run branch get distinct IDs
+//   Given an initiative on main and an epic created on the planning-run branch
+//   When two addArtifactToRun calls allocate task IDs for children of that epic
+//   Then the first returns TASK-001 and the second returns TASK-002
+//     And the two paths differ
+func TestArtifactCreationEntry_SiblingTasksDistinctIDs(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	const (
+		tasksDir = "initiatives/init-001-test/epics/epic-042-sibling-scope/tasks"
+		epicPath = "initiatives/init-001-test/epics/epic-042-sibling-scope/epic.md"
+	)
+	// Inline builder: the production /artifacts/add handler inherits
+	// `initiative` from the parent epic's metadata via buildInitialContent;
+	// the scenario helper does not, so we include it explicitly here.
+	taskBody := func(title string) func(string) string {
+		return func(allocated string) string {
+			return "---\n" +
+				"id: " + allocated + "\n" +
+				"type: Task\n" +
+				"title: " + title + "\n" +
+				"status: Draft\n" +
+				"epic: /" + epicPath + "\n" +
+				"initiative: /initiatives/init-001-test/initiative.md\n" +
+				"created: 2026-01-01\n" +
+				"last_updated: 2026-01-01\n" +
+				"links:\n" +
+				"  - type: parent\n" +
+				"    target: /" + epicPath + "\n" +
+				"---\n\n" +
+				"# " + allocated + " — " + title + "\n"
+		}
+	}
+
+	engine.RunScenario(t, engine.Scenario{
+		Name:        "sibling-tasks-distinct-ids",
+		Description: "Two /artifacts/add calls on the same planning run allocate distinct IDs",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []engine.Step{
+			// Seed initiative on main so the planning run has a valid parent.
+			engine.WriteAndCommit(
+				"initiatives/init-001-test/initiative.md",
+				"---\nid: INIT-001\ntype: Initiative\ntitle: Test Init\nstatus: Pending\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-001\n",
+				"seed initiative",
+			),
+			seedCreationWorkflow(),
+			engine.SyncProjections(),
+
+			// Start a planning run that creates the epic; the epic is
+			// committed to the run branch by StartPlanningRun itself.
+			engine.StartPlanningRun(
+				epicPath,
+				"---\nid: EPIC-042\ntype: Epic\ntitle: Sibling Scope\nstatus: Draft\ninitiative: /initiatives/init-001-test/initiative.md\ncreated: 2026-01-01\nlast_updated: 2026-01-01\nlinks:\n  - type: parent\n    target: /initiatives/init-001-test/initiative.md\n---\n# EPIC-042\n",
+			),
+			engine.AssertRunStatus(domain.RunStatusActive),
+			engine.AssertCurrentStep("draft"),
+
+			// Two consecutive adds — the second must see the first sibling
+			// already on the branch and advance to TASK-002.
+			engine.AddSiblingTaskToRun(tasksDir, "Cascade child one", "first", taskBody("Cascade child one")),
+			engine.AddSiblingTaskToRun(tasksDir, "Cascade child two", "second", taskBody("Cascade child two")),
+
+			{
+				Name: "assert-distinct-ids-and-paths",
+				Action: func(sc *engine.ScenarioContext) error {
+					firstID := sc.MustGet("first_id").(string)
+					secondID := sc.MustGet("second_id").(string)
+					firstPath := sc.MustGet("first_path").(string)
+					secondPath := sc.MustGet("second_path").(string)
+					if firstID != "TASK-001" {
+						return fmt.Errorf("first sibling: expected TASK-001, got %s", firstID)
+					}
+					if secondID != "TASK-002" {
+						return fmt.Errorf("second sibling: expected TASK-002 (duplicate allocation bug), got %s", secondID)
+					}
+					if firstPath == secondPath {
+						return fmt.Errorf("sibling paths must differ, both = %s", firstPath)
+					}
+					return nil
+				},
+			},
 		},
 	})
 }

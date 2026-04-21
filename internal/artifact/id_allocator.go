@@ -68,8 +68,11 @@ func NextID(ctx context.Context, gitClient FileLister, parentDir string, artifac
 
 	// Build the pattern to match entries under parentDir.
 	// Match prefix followed by dash and digits (e.g., TASK-001, EPIC-002).
+	// Case-insensitive: BuildArtifactPath lowercases the ID in filenames
+	// (task-001-slug.md), so a branch that already carries a sibling added
+	// earlier in the same run must still be counted.
 	entryPrefix := prefix + "-"
-	pattern := regexp.MustCompile(`^` + regexp.QuoteMeta(entryPrefix) + `(\d+)`)
+	pattern := regexp.MustCompile(`(?i)^` + regexp.QuoteMeta(entryPrefix) + `(\d+)`)
 
 	// Normalize parentDir for prefix matching.
 	scanDir := strings.TrimSuffix(parentDir, "/")
