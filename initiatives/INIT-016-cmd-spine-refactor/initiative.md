@@ -2,7 +2,7 @@
 id: INIT-016
 type: Initiative
 title: cmd/spine Refactor and Startup Smoke Test
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-17
 ---

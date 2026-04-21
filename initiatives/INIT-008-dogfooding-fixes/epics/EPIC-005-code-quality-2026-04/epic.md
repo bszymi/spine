@@ -2,7 +2,7 @@
 id: EPIC-005
 type: Epic
 title: Code Quality 2026-04
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 owner: bszymi
 created: 2026-04-17

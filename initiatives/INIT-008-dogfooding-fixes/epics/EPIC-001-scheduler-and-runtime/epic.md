@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: Scheduler & Runtime
-status: In Progress
+status: Completed
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 owner: bszymi
 created: 2026-03-31

@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: "Extract cmd/spine and Add Startup Smoke Test"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-016-cmd-spine-refactor/initiative.md
 links:
   - type: parent
