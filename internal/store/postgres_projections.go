@@ -143,6 +143,13 @@ func (s *PostgresStore) DeleteAllProjections(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, "DELETE FROM projection.workflows"); err != nil {
 		return fmt.Errorf("delete workflows: %w", err)
 	}
+	// execution_projections is path-keyed off artifacts and re-populated
+	// on each sync pass, so a rebuild must wipe it too — otherwise rows
+	// for renamed/removed artifacts survive forever and keep showing up
+	// in /api/v1/execution/tasks/ready.
+	if _, err := s.pool.Exec(ctx, "DELETE FROM projection.execution_projections"); err != nil {
+		return fmt.Errorf("delete execution_projections: %w", err)
+	}
 	// Intentionally omit projection.branch_protection_rules — it is
 	// replaced atomically by UpsertBranchProtectionRules, so wiping it
 	// here would open a window where the rule-source adapter sees an

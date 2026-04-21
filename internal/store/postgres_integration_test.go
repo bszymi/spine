@@ -774,3 +774,36 @@ func TestBranchProtectionRulesProjection(t *testing.T) {
 
 	s.CleanupTestData(ctx, t)
 }
+
+func TestDeleteAllProjectionsPurgesExecutionProjections(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	// Seed an execution_projections row whose task_path no longer
+	// exists in projection.artifacts — the orphan case from the
+	// 2026-04-21 dogfooding session.
+	orphan := &store.ExecutionProjection{
+		TaskPath:         "initiatives/INIT-stale/epics/EPIC-gone/tasks/TASK-001.md",
+		TaskID:           "TASK-001",
+		Title:            "Stale orphan",
+		Status:           "Pending",
+		AssignmentStatus: "unassigned",
+	}
+	if err := s.UpsertExecutionProjection(ctx, orphan); err != nil {
+		t.Fatalf("seed UpsertExecutionProjection: %v", err)
+	}
+	if _, err := s.GetExecutionProjection(ctx, orphan.TaskPath); err != nil {
+		t.Fatalf("precondition: GetExecutionProjection: %v", err)
+	}
+
+	if err := s.DeleteAllProjections(ctx); err != nil {
+		t.Fatalf("DeleteAllProjections: %v", err)
+	}
+
+	if _, err := s.GetExecutionProjection(ctx, orphan.TaskPath); err == nil {
+		t.Fatalf("orphan execution_projection row survived rebuild")
+	}
+
+	s.CleanupTestData(ctx, t)
+}

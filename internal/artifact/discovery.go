@@ -79,6 +79,15 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string, artif
 			continue
 		}
 
+		// Shape-reference files under templates/ are not governed
+		// artifacts even when their frontmatter declares a valid
+		// type — they exist as copy-paste sources for new artifacts.
+		// See IsArtifact / IsWorkflowPath for the other path rules.
+		if IsTemplatePath(artifactPath) {
+			result.Skipped = append(result.Skipped, artifactPath)
+			continue
+		}
+
 		content, err := gitClient.ReadFile(ctx, ref, file)
 		if err != nil {
 			result.Errors = append(result.Errors, DiscoveryError{
@@ -247,6 +256,15 @@ func ClassifyByType(artifacts []*domain.Artifact) map[domain.ArtifactType][]*dom
 func IsWorkflowPath(path string) bool {
 	return strings.HasPrefix(path, "workflows/") &&
 		(strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml"))
+}
+
+// IsTemplatePath returns true if the path is under the top-level
+// templates/ directory. These files hold frontmatter shape examples
+// (e.g. templates/task-template.md with type: Task) and are excluded
+// from artifact discovery even though IsArtifact would otherwise
+// admit them.
+func IsTemplatePath(path string) bool {
+	return strings.HasPrefix(path, "templates/")
 }
 
 // DiscoverWorkflows returns all workflow definition paths at a given ref.
