@@ -477,6 +477,85 @@ func TestFilterByExtension(t *testing.T) {
 	}
 }
 
+func TestDiscoverAllSkipsTemplates(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+
+	// A real artifact that should be discovered.
+	testutil.WriteFile(t, repo, "governance/charter.md", `---
+type: Governance
+title: Charter
+status: Foundational
+---
+
+# Charter
+`)
+
+	// Template files: valid frontmatter so IsArtifact would admit them,
+	// but they live under templates/ and must be Skipped.
+	testutil.WriteFile(t, repo, "templates/task-template.md", `---
+type: Task
+id: TASK-000
+title: Task Template
+status: Draft
+---
+
+# Task Template
+`)
+	testutil.WriteFile(t, repo, "templates/initiative-template.md", `---
+type: Initiative
+id: INIT-000
+title: Initiative Template
+status: Draft
+---
+
+# Initiative Template
+`)
+
+	testutil.GitAdd(t, repo, ".", "add templates fixture")
+
+	result, err := artifact.DiscoverAll(context.Background(), client, "HEAD")
+	if err != nil {
+		t.Fatalf("DiscoverAll: %v", err)
+	}
+
+	if len(result.Artifacts) != 1 {
+		t.Errorf("expected 1 artifact (charter), got %d", len(result.Artifacts))
+		for _, a := range result.Artifacts {
+			t.Logf("  artifact: %s", a.Path)
+		}
+	}
+
+	wantSkipped := map[string]bool{
+		"templates/task-template.md":       true,
+		"templates/initiative-template.md": true,
+	}
+	for _, s := range result.Skipped {
+		delete(wantSkipped, s)
+	}
+	if len(wantSkipped) != 0 {
+		t.Errorf("expected templates to be skipped; missing: %v (got skipped=%v)", wantSkipped, result.Skipped)
+	}
+}
+
+func TestIsTemplatePath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"templates/task-template.md", true},
+		{"templates/nested/foo.md", true},
+		{"workflows/templates/foo.yaml", false},
+		{"initiatives/templates/foo.md", false},
+		{"governance/charter.md", false},
+	}
+	for _, tt := range tests {
+		if got := artifact.IsTemplatePath(tt.path); got != tt.want {
+			t.Errorf("IsTemplatePath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
 func TestIsWorkflowFile(t *testing.T) {
 	tests := []struct {
 		path string

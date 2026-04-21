@@ -2,7 +2,7 @@
 id: TASK-017
 type: Task
 title: Purge orphan execution_projections on rebuild and skip templates/ in discovery
-status: Draft
+status: Completed
 created: 2026-04-21
 last_updated: 2026-04-21
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md
