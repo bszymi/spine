@@ -185,6 +185,61 @@ func TestNextID_DefaultRef(t *testing.T) {
 	}
 }
 
+// TestNextID_SiblingOnPlanningBranch guards INIT-008 EPIC-005 TASK-018: two
+// consecutive POST /artifacts/add calls in the same planning run must not
+// collide on TASK-001. BuildArtifactPath writes the artifact filename in
+// lowercase (task-001-slug.md), so NextID must match case-insensitively when
+// scanning a branch that already carries the first sibling added earlier in
+// the run.
+func TestNextID_SiblingOnPlanningBranch(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+	ctx := context.Background()
+
+	// First sibling is committed to the branch with the lowercase filename
+	// that BuildArtifactPath produces. The front-matter id preserves the
+	// canonical uppercase form.
+	testutil.WriteFile(t, repo,
+		"initiatives/INIT-001-test/epics/EPIC-001-test/tasks/task-001-first-child.md",
+		"---\nid: TASK-001\ntype: Task\ntitle: First child\nstatus: Draft\n---\n# TASK-001\n")
+	testutil.GitAdd(t, repo, ".", "add first sibling on branch")
+
+	id, err := artifact.NextID(ctx, client,
+		"initiatives/INIT-001-test/epics/EPIC-001-test/tasks",
+		domain.ArtifactTypeTask, "HEAD")
+	if err != nil {
+		t.Fatalf("NextID: %v", err)
+	}
+	if id != "TASK-002" {
+		t.Errorf("expected TASK-002 for second sibling on branch, got %s", id)
+	}
+}
+
+// TestNextID_MixedCaseFilenames verifies the allocator treats lowercase and
+// uppercase artifact filenames as the same ID family. A mixed directory
+// (uppercase files inherited from main, lowercase files just committed on a
+// branch) must yield max+1 across both sets.
+func TestNextID_MixedCaseFilenames(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+	ctx := context.Background()
+
+	// Uppercase (legacy) and lowercase (service-created) filenames coexist.
+	testutil.WriteFile(t, repo, "tasks/TASK-001-legacy.md",
+		"---\nid: TASK-001\ntype: Task\ntitle: Legacy\nstatus: Completed\n---\n# TASK-001\n")
+	testutil.WriteFile(t, repo, "tasks/task-002-fresh.md",
+		"---\nid: TASK-002\ntype: Task\ntitle: Fresh\nstatus: Draft\n---\n# TASK-002\n")
+	testutil.GitAdd(t, repo, ".", "add mixed-case siblings")
+
+	id, err := artifact.NextID(ctx, client, "tasks", domain.ArtifactTypeTask, "HEAD")
+	if err != nil {
+		t.Fatalf("NextID: %v", err)
+	}
+	if id != "TASK-003" {
+		t.Errorf("expected TASK-003, got %s", id)
+	}
+}
+
 // ── Slugify tests ──
 
 func TestSlugify_Basic(t *testing.T) {

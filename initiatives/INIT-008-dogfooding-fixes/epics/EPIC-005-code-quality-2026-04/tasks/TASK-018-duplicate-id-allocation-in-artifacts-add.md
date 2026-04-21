@@ -2,7 +2,7 @@
 id: TASK-018
 type: Task
 title: Fix duplicate ID allocation in POST /artifacts/add for siblings in the same run
-status: Draft
+status: Completed
 created: 2026-04-21
 last_updated: 2026-04-21
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md

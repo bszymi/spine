@@ -140,6 +140,40 @@ func CreateArtifactOnBranch(path, content string) Step {
 	}
 }
 
+// AddSiblingTaskToRun mirrors POST /artifacts/add for Task children: it
+// allocates the next ID by scanning the run's branch, builds the path via
+// BuildArtifactPath, and creates the artifact. It stores the allocated ID and
+// path in scenario state keyed by stateKey ("<key>_id", "<key>_path"), so
+// subsequent steps can assert on both. buildContent is called with the
+// allocated ID to produce the artifact body.
+func AddSiblingTaskToRun(parentDir, title, stateKey string, buildContent func(id string) string) Step {
+	return Step{
+		Name: "add-sibling-task-" + stateKey,
+		Action: func(sc *ScenarioContext) error {
+			runID := sc.MustGet("run_id").(string)
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run: %w", err)
+			}
+			if run.BranchName == "" {
+				return fmt.Errorf("run %s has no branch", runID)
+			}
+			id, err := artifact.NextID(sc.Ctx, sc.Repo.Git, parentDir, domain.ArtifactTypeTask, run.BranchName)
+			if err != nil {
+				return fmt.Errorf("allocate next task id: %w", err)
+			}
+			path := artifact.BuildArtifactPath(domain.ArtifactTypeTask, id, artifact.Slugify(title), parentDir)
+			ctx := artifact.WithWriteContext(sc.Ctx, artifact.WriteContext{Branch: run.BranchName})
+			if _, err := sc.Runtime.Artifacts.Create(ctx, path, buildContent(id)); err != nil {
+				return fmt.Errorf("create sibling task %s on branch: %w", id, err)
+			}
+			sc.Set(stateKey+"_id", id)
+			sc.Set(stateKey+"_path", path)
+			return nil
+		},
+	}
+}
+
 // SubmitStepResult returns a step that submits a result for the current
 // step execution with the given outcome ID. Uses IngestResult which validates
 // required outputs before routing, matching the production API path.
