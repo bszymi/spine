@@ -2,7 +2,7 @@
 id: TASK-016
 type: Task
 title: "Workflow publish-step audit: standardize authoritative merge across all workflows"
-status: In Progress
+status: Cancelled
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: refactor
