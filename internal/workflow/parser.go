@@ -113,7 +113,8 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 	if step.Type == "" {
 		errors = append(errors, schemaError(prefix+".type", "required field missing"))
 	} else if step.Type != domain.StepTypeManual && step.Type != domain.StepTypeAutomated &&
-		step.Type != domain.StepTypeReview && step.Type != domain.StepTypeConvergence {
+		step.Type != domain.StepTypeReview && step.Type != domain.StepTypeConvergence &&
+		step.Type != domain.StepTypeInternal {
 		errors = append(errors, schemaError(prefix+".type", fmt.Sprintf("invalid step type %q", step.Type)))
 	}
 	if len(step.Outcomes) == 0 {
@@ -124,6 +125,20 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 	if step.Type == domain.StepTypeAutomated {
 		if step.Retry == nil || step.Retry.Limit < 1 {
 			errors = append(errors, schemaError(prefix+".retry", "automated steps must have retry with limit >= 1"))
+		}
+		// Close the "no execution profile means engine handles it" loophole.
+		// Automated steps must declare how they are executed (mode +
+		// eligible_actor_types). Engine-handled steps use type: internal.
+		if step.Execution == nil {
+			errors = append(errors, schemaError(prefix+".execution", "automated steps must declare an execution block (use type: internal for engine-handled steps)"))
+		}
+	}
+	if step.Type == domain.StepTypeInternal {
+		if step.Retry == nil || step.Retry.Limit < 1 {
+			errors = append(errors, schemaError(prefix+".retry", "internal steps must have retry with limit >= 1"))
+		}
+		if step.Execution == nil {
+			errors = append(errors, schemaError(prefix+".execution", "internal steps must declare an execution block with mode: spine_only and a handler"))
 		}
 	}
 	if step.Timeout != "" && step.TimeoutOutcome == "" {
@@ -196,16 +211,43 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 				domain.ExecModeAIOnly:        true,
 				domain.ExecModeHumanOnly:     true,
 				domain.ExecModeHybrid:        true,
+				domain.ExecModeSpineOnly:     true,
 			}
 			if !validModes[step.Execution.Mode] {
 				errors = append(errors, schemaError(ePrefix+".mode", fmt.Sprintf("invalid execution mode %q", step.Execution.Mode)))
 			}
 		}
 
-		// Steps that involve actor selection must declare at least one required skill.
-		// Automated-only steps are exempt since they don't require actor assignment.
-		if step.Execution.Mode != domain.ExecModeAutomatedOnly && len(step.Execution.RequiredSkills) == 0 {
-			errors = append(errors, schemaError(ePrefix+".required_skills", "at least one required skill must be declared for actor-assigned steps"))
+		// Internal steps are engine-handled. Enforce spine_only + known
+		// handler, and reject actor-selection fields that do not apply.
+		if step.Type == domain.StepTypeInternal {
+			if step.Execution.Mode != domain.ExecModeSpineOnly {
+				errors = append(errors, schemaError(ePrefix+".mode", fmt.Sprintf("internal steps must use execution mode %q", domain.ExecModeSpineOnly)))
+			}
+			if step.Execution.Handler == "" {
+				errors = append(errors, schemaError(ePrefix+".handler", "internal steps must declare a handler"))
+			} else if !IsKnownInternalHandler(step.Execution.Handler) {
+				errors = append(errors, schemaError(ePrefix+".handler", fmt.Sprintf("unknown internal handler %q", step.Execution.Handler)))
+			}
+			if len(step.Execution.EligibleActorTypes) > 0 {
+				errors = append(errors, schemaError(ePrefix+".eligible_actor_types", "must be empty for internal steps (the step is executed by the Spine engine, not by an actor)"))
+			}
+			if len(step.Execution.RequiredSkills) > 0 {
+				errors = append(errors, schemaError(ePrefix+".required_skills", "must be empty for internal steps (the step is executed by the Spine engine, not by an actor)"))
+			}
+		} else {
+			// Non-internal steps must not use the spine_only mode or a handler.
+			if step.Execution.Mode == domain.ExecModeSpineOnly {
+				errors = append(errors, schemaError(ePrefix+".mode", "execution mode spine_only is only valid on internal steps"))
+			}
+			if step.Execution.Handler != "" {
+				errors = append(errors, schemaError(ePrefix+".handler", "handler is only valid on internal steps"))
+			}
+			// Steps that involve actor selection must declare at least one required skill.
+			// Automated-only steps are exempt since they don't require actor assignment.
+			if step.Execution.Mode != domain.ExecModeAutomatedOnly && len(step.Execution.RequiredSkills) == 0 {
+				errors = append(errors, schemaError(ePrefix+".required_skills", "at least one required skill must be declared for actor-assigned steps"))
+			}
 		}
 	}
 

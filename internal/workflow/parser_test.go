@@ -22,6 +22,10 @@ steps:
   - id: assign
     name: Assign Actor
     type: automated
+    execution:
+      mode: automated_only
+      eligible_actor_types:
+        - automated_system
     required_outputs:
       - actor_assignment
     outcomes:
@@ -267,7 +271,7 @@ func TestValidateSchemaWorkflowTimeoutRejectsInvalid(t *testing.T) {
 	wf := &domain.WorkflowDefinition{
 		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
 		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
-		Timeout:     "2w",
+		Timeout: "2w",
 		Steps: []domain.StepDefinition{{
 			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
 			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
@@ -544,6 +548,232 @@ func TestValidateSchemaTimeoutOutcomeReference(t *testing.T) {
 	}
 	if !hasRefError {
 		t.Error("expected unknown outcome reference error")
+	}
+}
+
+func TestValidateSchemaInternalStepAccepted(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Publish", Type: domain.StepTypeInternal,
+			Execution: &domain.ExecutionConfig{
+				Mode:    domain.ExecModeSpineOnly,
+				Handler: "merge",
+			},
+			Retry: &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes: []domain.OutcomeDefinition{
+				{ID: "published", Name: "Published", NextStep: "end"},
+				{ID: "merge_failed", Name: "Merge Failed", NextStep: "end"},
+			},
+		}},
+	}
+	result := workflow.Validate(wf)
+	if result.Status != "passed" {
+		t.Errorf("expected passed, got %s: %+v", result.Status, result.Errors)
+	}
+}
+
+func TestValidateSchemaInternalStepRejectsWrongMode(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Publish", Type: domain.StepTypeInternal,
+			Execution: &domain.ExecutionConfig{
+				Mode:    domain.ExecModeAutomatedOnly,
+				Handler: "merge",
+			},
+			Retry:    &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes: []domain.OutcomeDefinition{{ID: "published", Name: "Published", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasModeError := false
+	for _, e := range errors {
+		if e.Field == "steps[0].execution.mode" && contains(e.Message, "spine_only") {
+			hasModeError = true
+		}
+	}
+	if !hasModeError {
+		t.Errorf("expected internal step to require spine_only mode; got %+v", errors)
+	}
+}
+
+func TestValidateSchemaInternalStepRejectsUnknownHandler(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Publish", Type: domain.StepTypeInternal,
+			Execution: &domain.ExecutionConfig{
+				Mode:    domain.ExecModeSpineOnly,
+				Handler: "does_not_exist",
+			},
+			Retry:    &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes: []domain.OutcomeDefinition{{ID: "published", Name: "Published", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasHandlerError := false
+	for _, e := range errors {
+		if e.Field == "steps[0].execution.handler" && contains(e.Message, "unknown") {
+			hasHandlerError = true
+		}
+	}
+	if !hasHandlerError {
+		t.Errorf("expected unknown handler error; got %+v", errors)
+	}
+}
+
+func TestValidateSchemaInternalStepRequiresHandler(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Publish", Type: domain.StepTypeInternal,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeSpineOnly},
+			Retry:     &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes:  []domain.OutcomeDefinition{{ID: "published", Name: "Published", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasHandlerError := false
+	for _, e := range errors {
+		if e.Field == "steps[0].execution.handler" && contains(e.Message, "must declare a handler") {
+			hasHandlerError = true
+		}
+	}
+	if !hasHandlerError {
+		t.Errorf("expected handler-required error; got %+v", errors)
+	}
+}
+
+func TestValidateSchemaInternalStepRejectsActorFields(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Publish", Type: domain.StepTypeInternal,
+			Execution: &domain.ExecutionConfig{
+				Mode:               domain.ExecModeSpineOnly,
+				Handler:            "merge",
+				EligibleActorTypes: []string{"automated_system"},
+				RequiredSkills:     []string{"merge"},
+			},
+			Retry:    &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes: []domain.OutcomeDefinition{{ID: "published", Name: "Published", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	var hasActorError, hasSkillError bool
+	for _, e := range errors {
+		if e.Field == "steps[0].execution.eligible_actor_types" {
+			hasActorError = true
+		}
+		if e.Field == "steps[0].execution.required_skills" && contains(e.Message, "must be empty") {
+			hasSkillError = true
+		}
+	}
+	if !hasActorError {
+		t.Errorf("expected eligible_actor_types rejection on internal step; got %+v", errors)
+	}
+	if !hasSkillError {
+		t.Errorf("expected required_skills rejection on internal step; got %+v", errors)
+	}
+}
+
+func TestValidateSchemaSpineOnlyRejectedOnNonInternalStep(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeAutomated,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeSpineOnly},
+			Retry:     &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes:  []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasModeError := false
+	for _, e := range errors {
+		if e.Field == "steps[0].execution.mode" && contains(e.Message, "only valid on internal") {
+			hasModeError = true
+		}
+	}
+	if !hasModeError {
+		t.Errorf("expected spine_only-on-automated rejection; got %+v", errors)
+	}
+}
+
+func TestValidateSchemaHandlerRejectedOnNonInternalStep(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeAutomated,
+			Execution: &domain.ExecutionConfig{
+				Mode:               domain.ExecModeAutomatedOnly,
+				Handler:            "merge",
+				EligibleActorTypes: []string{"automated_system"},
+			},
+			Retry:    &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasHandlerError := false
+	for _, e := range errors {
+		if e.Field == "steps[0].execution.handler" && contains(e.Message, "only valid on internal") {
+			hasHandlerError = true
+		}
+	}
+	if !hasHandlerError {
+		t.Errorf("expected handler-on-automated rejection; got %+v", errors)
+	}
+}
+
+func TestValidateSchemaAutomatedStepWithoutExecutionRejected(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Step", Type: domain.StepTypeAutomated,
+			Retry:    &domain.RetryConfig{Limit: 3, Backoff: "exponential"},
+			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasExecError := false
+	for _, e := range errors {
+		if e.Field == "steps[0].execution" && contains(e.Message, "must declare an execution block") {
+			hasExecError = true
+		}
+	}
+	if !hasExecError {
+		t.Errorf("expected automated-without-execution rejection; got %+v", errors)
+	}
+}
+
+func TestValidateSchemaInternalStepRequiresRetry(t *testing.T) {
+	wf := &domain.WorkflowDefinition{
+		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
+		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
+		Steps: []domain.StepDefinition{{
+			ID: "s1", Name: "Publish", Type: domain.StepTypeInternal,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeSpineOnly, Handler: "merge"},
+			Outcomes:  []domain.OutcomeDefinition{{ID: "published", Name: "Published", NextStep: "end"}},
+		}},
+	}
+	errors := workflow.ValidateSchema(wf)
+	hasRetryError := false
+	for _, e := range errors {
+		if e.Field == "steps[0].retry" {
+			hasRetryError = true
+		}
+	}
+	if !hasRetryError {
+		t.Errorf("expected retry-required error for internal step; got %+v", errors)
 	}
 }
 

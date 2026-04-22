@@ -18,6 +18,7 @@ const (
 	StepTypeAutomated   StepType = "automated"
 	StepTypeReview      StepType = "review"
 	StepTypeConvergence StepType = "convergence"
+	StepTypeInternal    StepType = "internal"
 )
 
 // ExecutionMode represents how a step is executed.
@@ -29,6 +30,7 @@ const (
 	ExecModeAIOnly        ExecutionMode = "ai_only"
 	ExecModeHumanOnly     ExecutionMode = "human_only"
 	ExecModeHybrid        ExecutionMode = "hybrid"
+	ExecModeSpineOnly     ExecutionMode = "spine_only"
 )
 
 // DivergenceMode represents the type of divergence.
@@ -104,6 +106,7 @@ type ExecutionConfig struct {
 	Mode               ExecutionMode `json:"mode" yaml:"mode"`
 	EligibleActorTypes []string      `json:"eligible_actor_types,omitempty" yaml:"eligible_actor_types,omitempty"`
 	RequiredSkills     []string      `json:"required_skills,omitempty" yaml:"required_skills,omitempty"`
+	Handler            string        `json:"handler,omitempty" yaml:"handler,omitempty"`
 }
 
 // ValidationRule represents a validation check applied before accepting a step result.

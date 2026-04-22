@@ -49,6 +49,14 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		return o.preparePreconditionFailure(ctx, exec, valResult, runID, stepID)
 	}
 
+	// Internal steps are advanced by the Spine engine itself via a
+	// handler registered in engine/handlers.go — no runner dispatch,
+	// no actor selection, no assignment record. Route them here before
+	// the actor-dispatch code below takes over.
+	if stepDef.Type == domain.StepTypeInternal {
+		return o.activateInternalStep(ctx, exec, stepDef, run)
+	}
+
 	exec.ErrorDetail = nil
 	stepResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAssign,

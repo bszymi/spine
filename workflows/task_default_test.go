@@ -36,7 +36,7 @@ func TestTaskDefaultWorkflow_Parses(t *testing.T) {
 	}
 
 	// Verify step IDs.
-	expectedSteps := []string{"draft", "execute", "review", "commit"}
+	expectedSteps := []string{"draft", "execute", "review", "publish"}
 	for i, expected := range expectedSteps {
 		if wf.Steps[i].ID != expected {
 			t.Errorf("step %d: expected %s, got %s", i, expected, wf.Steps[i].ID)
@@ -53,6 +53,9 @@ func TestTaskDefaultWorkflow_Parses(t *testing.T) {
 	if wf.Steps[2].Type != domain.StepTypeReview {
 		t.Errorf("review step: expected review, got %s", wf.Steps[2].Type)
 	}
+	if wf.Steps[3].Type != domain.StepTypeInternal {
+		t.Errorf("publish step: expected internal, got %s", wf.Steps[3].Type)
+	}
 
 	// Verify review outcomes.
 	review := wf.Steps[2]
@@ -62,8 +65,11 @@ func TestTaskDefaultWorkflow_Parses(t *testing.T) {
 	if review.Outcomes[0].ID != "accepted" {
 		t.Errorf("expected first review outcome accepted, got %s", review.Outcomes[0].ID)
 	}
-	if review.Outcomes[0].NextStep != "commit" {
-		t.Errorf("expected accepted → commit, got %s", review.Outcomes[0].NextStep)
+	if review.Outcomes[0].NextStep != "publish" {
+		t.Errorf("expected accepted → publish, got %s", review.Outcomes[0].NextStep)
+	}
+	if review.Outcomes[0].Commit["status"] != "Completed" {
+		t.Errorf("expected accepted.commit.status=Completed, got %v", review.Outcomes[0].Commit)
 	}
 	if review.Outcomes[1].ID != "needs_rework" {
 		t.Errorf("expected second review outcome needs_rework, got %s", review.Outcomes[1].ID)
@@ -82,16 +88,25 @@ func TestTaskDefaultWorkflow_Parses(t *testing.T) {
 		t.Errorf("execute: expected required_outputs [deliverable], got %v", wf.Steps[1].RequiredOutputs)
 	}
 
-	// Verify commit step has commit effect.
-	commit := wf.Steps[3]
-	if len(commit.Outcomes) != 1 {
-		t.Fatalf("commit: expected 1 outcome, got %d", len(commit.Outcomes))
+	// Verify publish step is engine-owned and has the two expected outcomes.
+	publish := wf.Steps[3]
+	if publish.Execution == nil {
+		t.Fatal("publish: expected execution block")
 	}
-	if commit.Outcomes[0].NextStep != "end" {
-		t.Errorf("expected committed → end, got %s", commit.Outcomes[0].NextStep)
+	if publish.Execution.Mode != domain.ExecModeSpineOnly {
+		t.Errorf("publish: expected mode spine_only, got %s", publish.Execution.Mode)
 	}
-	if commit.Outcomes[0].Commit["status"] != "Completed" {
-		t.Errorf("expected commit status=Completed, got %v", commit.Outcomes[0].Commit)
+	if publish.Execution.Handler != "merge" {
+		t.Errorf("publish: expected handler=merge, got %s", publish.Execution.Handler)
+	}
+	if len(publish.Outcomes) != 2 {
+		t.Fatalf("publish: expected 2 outcomes, got %d", len(publish.Outcomes))
+	}
+	if publish.Outcomes[0].ID != "published" || publish.Outcomes[0].NextStep != "end" {
+		t.Errorf("publish: expected published → end, got %s → %s", publish.Outcomes[0].ID, publish.Outcomes[0].NextStep)
+	}
+	if publish.Outcomes[1].ID != "merge_failed" || publish.Outcomes[1].NextStep != "execute" {
+		t.Errorf("publish: expected merge_failed → execute, got %s → %s", publish.Outcomes[1].ID, publish.Outcomes[1].NextStep)
 	}
 
 	// Verify retry config on execute.

@@ -10,16 +10,18 @@ import (
 type Trigger string
 
 const (
-	TriggerActivate              Trigger = "run.activate"
-	TriggerStepCompleted         Trigger = "step.completed"
-	TriggerStepBlocked           Trigger = "step.blocked"
-	TriggerStepFailedPermanently Trigger = "step.failed_permanently"
-	TriggerDivergenceFailed      Trigger = "divergence.failed"
-	TriggerCancel                Trigger = "run.cancel"
-	TriggerResume                Trigger = "run.resume"
-	TriggerGitCommitSucceeded    Trigger = "git.commit_succeeded"
-	TriggerGitCommitFailedTrans  Trigger = "git.commit_failed_transient"
-	TriggerGitCommitFailedPerm   Trigger = "git.commit_failed_permanent"
+	TriggerActivate                Trigger = "run.activate"
+	TriggerStepCompleted           Trigger = "step.completed"
+	TriggerStepBlocked             Trigger = "step.blocked"
+	TriggerStepFailedPermanently   Trigger = "step.failed_permanently"
+	TriggerDivergenceFailed        Trigger = "divergence.failed"
+	TriggerCancel                  Trigger = "run.cancel"
+	TriggerResume                  Trigger = "run.resume"
+	TriggerGitCommitSucceeded      Trigger = "git.commit_succeeded"
+	TriggerGitCommitFailedTrans    Trigger = "git.commit_failed_transient"
+	TriggerGitCommitFailedPerm     Trigger = "git.commit_failed_permanent"
+	TriggerGitMergeStarted         Trigger = "git.merge_started"
+	TriggerGitMergeFailedRouteBack Trigger = "git.merge_failed_route_back"
 )
 
 // TransitionRequest describes a requested state transition for a Run.
@@ -110,6 +112,13 @@ func evaluateActiveTransition(result *TransitionResult, req TransitionRequest) (
 		result.ToStatus = domain.RunStatusFailed
 		return result, nil
 
+	case TriggerGitMergeStarted:
+		// Engine-owned publish step is activating — move run into
+		// committing so MergeRunBranch's state check passes and the
+		// scheduler's commit-retry loop picks up transient failures.
+		result.ToStatus = domain.RunStatusCommitting
+		return result, nil
+
 	case TriggerCancel:
 		result.ToStatus = domain.RunStatusCancelled
 		return result, nil
@@ -151,6 +160,14 @@ func evaluateCommittingTransition(result *TransitionResult, req TransitionReques
 		result.ToStatus = domain.RunStatusFailed
 		return result, nil
 
+	case TriggerGitMergeFailedRouteBack:
+		// Engine-owned publish step caught a permanent merge failure and
+		// is routing the merge_failed outcome back to an earlier step
+		// (typically execute). The run stays alive; the step-machine
+		// routing advances it.
+		result.ToStatus = domain.RunStatusActive
+		return result, nil
+
 	default:
 		return nil, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("invalid trigger %q for committing Run", req.Trigger))
@@ -174,5 +191,7 @@ func ValidRunTransitions() []TransitionResult {
 		{domain.RunStatusCommitting, domain.RunStatusCompleted, TriggerGitCommitSucceeded},
 		{domain.RunStatusCommitting, domain.RunStatusCommitting, TriggerGitCommitFailedTrans},
 		{domain.RunStatusCommitting, domain.RunStatusFailed, TriggerGitCommitFailedPerm},
+		{domain.RunStatusActive, domain.RunStatusCommitting, TriggerGitMergeStarted},
+		{domain.RunStatusCommitting, domain.RunStatusActive, TriggerGitMergeFailedRouteBack},
 	}
 }

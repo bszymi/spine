@@ -109,7 +109,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 
 		log.Error("permanent merge failure",
 			"run_id", runID, "branch", run.BranchName, "error", err)
-		return o.failRunOnMergeError(ctx, run, err)
+		return o.handlePermanentMergeFailure(ctx, run, err)
 	}
 
 	log.Info("run branch merged",
@@ -128,7 +128,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 			if errors.As(err, &gitErr) && !gitErr.IsRetryable() {
 				log.Error("auto-push: permanent push failure (auth or rejected), failing run",
 					"run_id", runID, "error", err)
-				return o.failRunOnMergeError(ctx, run, err)
+				return o.handlePermanentMergeFailure(ctx, run, err)
 			}
 			log.Warn("auto-push: transient push failure, staying in committing for retry",
 				"run_id", runID, "error", err)
@@ -137,7 +137,33 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	}
 
 	// Transition committing → completed (with branch cleanup).
-	return o.completeAfterMerge(ctx, run, true)
+	if err := o.completeAfterMerge(ctx, run, true); err != nil {
+		return err
+	}
+	// Advance the publish step (type: internal, handler: merge) for
+	// workflows that have one. No-op on workflows that model commit via
+	// terminal-outcome metadata — the merge has landed either way.
+	return o.advancePublishStepIfAny(ctx, run, "published")
+}
+
+// handlePermanentMergeFailure routes a permanent merge error through the
+// workflow's publish step if one exists: the step's merge_failed outcome
+// sends the run back to execute (per task-default.yaml) so the actor can
+// retry. When the workflow has no publish step (the legacy pattern used
+// by artifact-creation, adr, etc.) the run is failed outright — same
+// behaviour as before TASK-015.
+func (o *Orchestrator) handlePermanentMergeFailure(ctx context.Context, run *domain.Run, mergeErr error) error {
+	wfDef, wfErr := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+	if wfErr != nil {
+		// Fall back to the run-failed path if we can't load the workflow.
+		return o.failRunOnMergeError(ctx, run, mergeErr)
+	}
+	stepExec, _ := o.findActiveMergeStep(ctx, run, wfDef)
+	if stepExec == nil {
+		return o.failRunOnMergeError(ctx, run, mergeErr)
+	}
+	o.recordGitConflictOnStep(ctx, run, mergeErr)
+	return o.advancePublishStepIfAny(ctx, run, "merge_failed")
 }
 
 // abortMerge cleans up a failed merge so the repo is not left dirty.

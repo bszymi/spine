@@ -327,30 +327,34 @@ steps:
     outcomes:
       - id: accepted
         name: Accepted
-        next_step: commit
+        next_step: publish
+        commit:
+          status: Completed
       - id: needs_rework
         name: Needs Rework
         next_step: execute
     timeout: "24h"
 
-  - id: commit
-    name: Commit Outcomes
-    type: automated
+  - id: publish
+    name: Publish Accepted Outcome
+    type: internal
+    description: >
+      Spine promotes the reviewed/accepted outcome into authoritative
+      project truth by merging the run branch into main. This step is
+      executed by the Spine engine directly (no runner dispatch).
     execution:
-      mode: automated_only
-      eligible_actor_types:
-        - automated_system
+      mode: spine_only
+      handler: merge
     outcomes:
-      - id: committed
-        name: Changes Committed
+      - id: published
+        name: Outcome Published
         next_step: end
-        commit:
-          status: Completed
+      - id: merge_failed
+        name: Merge Failed
+        next_step: execute
     retry:
       limit: 3
       backoff: exponential
-    timeout: "10m"
-    timeout_outcome: committed
 `,
 	"workflows/task-spike.yaml": `id: task-spike
 name: Spike Investigation Workflow
