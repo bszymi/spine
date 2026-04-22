@@ -283,7 +283,7 @@ func TestTransitionResultMetadata(t *testing.T) {
 
 func TestValidRunTransitions(t *testing.T) {
 	transitions := workflow.ValidRunTransitions()
-	if len(transitions) != 13 {
-		t.Errorf("expected 13 valid transitions, got %d", len(transitions))
+	if len(transitions) != 15 {
+		t.Errorf("expected 15 valid transitions, got %d", len(transitions))
 	}
 }
