@@ -355,8 +355,6 @@ steps:
     retry:
       limit: 3
       backoff: exponential
-    timeout: "10m"
-    timeout_outcome: merge_failed
 `,
 	"workflows/task-spike.yaml": `id: task-spike
 name: Spike Investigation Workflow

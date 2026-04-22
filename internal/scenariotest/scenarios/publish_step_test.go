@@ -66,8 +66,6 @@ steps:
     retry:
       limit: 3
       backoff: exponential
-    timeout: "10m"
-    timeout_outcome: merge_failed
 `
 
 // assertPublishStepEngineAdvanced verifies that the run's publish step

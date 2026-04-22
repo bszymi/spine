@@ -271,7 +271,7 @@ func TestValidateSchemaWorkflowTimeoutRejectsInvalid(t *testing.T) {
 	wf := &domain.WorkflowDefinition{
 		ID: "test", Name: "Test", Version: "1.0", Status: domain.WorkflowStatusActive,
 		Description: "Test", AppliesTo: []string{"Task"}, EntryStep: "s1",
-		Timeout:     "2w",
+		Timeout: "2w",
 		Steps: []domain.StepDefinition{{
 			ID: "s1", Name: "Step", Type: domain.StepTypeManual,
 			Outcomes: []domain.OutcomeDefinition{{ID: "o1", Name: "Done", NextStep: "end"}},

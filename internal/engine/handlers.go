@@ -161,7 +161,11 @@ func (o *Orchestrator) advancePublishStepIfAny(ctx context.Context, run *domain.
 
 	stepExec, stepDef := o.findActiveMergeStep(ctx, run, wfDef)
 	if stepExec == nil {
-		// No publish step in this workflow — nothing to advance.
+		// No publish step in this workflow — nothing to advance. Also
+		// covers the concurrent-advance case: a sibling merge attempt
+		// has already moved the step to a terminal state, so
+		// findActiveMergeStep (which filters on non-terminal) returns
+		// nothing.
 		return nil
 	}
 
@@ -197,8 +201,22 @@ func (o *Orchestrator) advancePublishStepIfAny(ctx context.Context, run *domain.
 		if err != nil {
 			return fmt.Errorf("evaluate merge_failed route-back transition: %w", err)
 		}
-		if err := o.store.UpdateRunStatus(ctx, run.RunID, routeResult.ToStatus); err != nil {
+		// Compare-and-swap: concurrent merge attempts may race — for
+		// example a faster attempt can succeed and transition the run
+		// to completed while this (slower) attempt is still observing
+		// a failure. In that case we must not reopen the run by
+		// writing it back to active. TransitionRunStatus returns
+		// !applied when another transition has already landed; we
+		// log and skip the step routing because the run has already
+		// terminated successfully.
+		applied, err := o.store.TransitionRunStatus(ctx, run.RunID, run.Status, routeResult.ToStatus)
+		if err != nil {
 			return fmt.Errorf("route run back to active: %w", err)
+		}
+		if !applied {
+			log.Info("publish step merge_failed, but run already transitioned (concurrent merge success); skipping route-back",
+				"run_id", run.RunID)
+			return nil
 		}
 		run.Status = routeResult.ToStatus
 

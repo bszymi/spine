@@ -97,6 +97,10 @@ steps:
       Spine promotes the reviewed/accepted outcome into authoritative
       project truth by merging the run branch into main. This step is
       executed by the Spine engine directly (no runner dispatch).
+      Transient failures are retried by the scheduler's commit-retry
+      loop at the run level; no step-level timeout is configured, to
+      avoid a race where the timeout scanner marks the step
+      merge_failed while the commit-retry loop is still working.
     execution:
       mode: spine_only
       handler: merge
@@ -110,5 +114,3 @@ steps:
     retry:
       limit: 3
       backoff: exponential
-    timeout: "10m"
-    timeout_outcome: merge_failed

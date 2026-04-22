@@ -10,13 +10,13 @@ import (
 type Trigger string
 
 const (
-	TriggerActivate              Trigger = "run.activate"
-	TriggerStepCompleted         Trigger = "step.completed"
-	TriggerStepBlocked           Trigger = "step.blocked"
-	TriggerStepFailedPermanently Trigger = "step.failed_permanently"
-	TriggerDivergenceFailed      Trigger = "divergence.failed"
-	TriggerCancel                Trigger = "run.cancel"
-	TriggerResume                Trigger = "run.resume"
+	TriggerActivate                Trigger = "run.activate"
+	TriggerStepCompleted           Trigger = "step.completed"
+	TriggerStepBlocked             Trigger = "step.blocked"
+	TriggerStepFailedPermanently   Trigger = "step.failed_permanently"
+	TriggerDivergenceFailed        Trigger = "divergence.failed"
+	TriggerCancel                  Trigger = "run.cancel"
+	TriggerResume                  Trigger = "run.resume"
 	TriggerGitCommitSucceeded      Trigger = "git.commit_succeeded"
 	TriggerGitCommitFailedTrans    Trigger = "git.commit_failed_transient"
 	TriggerGitCommitFailedPerm     Trigger = "git.commit_failed_permanent"
