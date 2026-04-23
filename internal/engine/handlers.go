@@ -120,8 +120,17 @@ func (o *Orchestrator) activateInternalStep(ctx context.Context, exec *domain.St
 	o.emitEvent(ctx, domain.EventStepStarted, run.RunID, run.TraceID,
 		fmt.Sprintf("evt-%s-%s-started", run.TraceID[:12], exec.StepID), nil)
 
-	log.Info("internal step activated",
-		"run_id", run.RunID, "step_id", exec.StepID, "handler", stepDef.Execution.Handler)
+	// Emitted immediately before the handler runs so that a wedged
+	// internal step can be diagnosed as "handler crashed mid-flight"
+	// vs. "handler never fired" — the only two failure modes that
+	// leave the step stuck at in_progress with no terminal outcome.
+	log.Info("internal handler invoked",
+		"workflow_id", run.WorkflowID,
+		"run_id", run.RunID,
+		"execution_id", exec.ExecutionID,
+		"step_id", exec.StepID,
+		"handler", stepDef.Execution.Handler,
+	)
 
 	if err := handler(ctx, o, run, exec, stepDef); err != nil {
 		// Transient failures (e.g. merge retry) propagate up so the

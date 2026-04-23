@@ -3,7 +3,9 @@
 package scenarios_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -146,6 +148,62 @@ func assertNoAssignmentForPublish() engine.Step {
 	}
 }
 
+// assertNoStepAssignedEventForPublish scans the event log for
+// step_assigned events on this run and fails if any reference the
+// publish step. TASK-015's acceptance criteria explicitly forbade a
+// runner dispatch event for spine_only steps; this is the direct
+// check of that.
+//
+// The helper is scoped to the current run_id because the scenario
+// harness shares one Postgres instance across scenarios and earlier
+// runs emit their own legitimate step_assigned events. The match is
+// deliberately double-sided: the engine has two step_assigned
+// emission paths — gateway.go carries step_id in the inner payload,
+// step.go:91 emits with a nil payload and encodes the step in the
+// event_id ("evt-{trace}-{stepID}-assigned"). We catch either.
+func assertNoStepAssignedEventForPublish() engine.Step {
+	return engine.Step{
+		Name: "assert-no-step-assigned-event-for-publish",
+		Action: func(sc *engine.ScenarioContext) error {
+			runID := sc.MustGet("run_id").(string)
+			events, err := sc.Runtime.Store.ListEventsAfter(sc.Ctx, "",
+				[]string{string(domain.EventStepAssigned)}, 1000)
+			if err != nil {
+				return fmt.Errorf("list step_assigned events: %w", err)
+			}
+			for i := range events {
+				// Stored payload is the JSON-marshalled domain.Event
+				// (see internal/delivery/subscriber.go handleEvent).
+				var outer domain.Event
+				if err := json.Unmarshal(events[i].Payload, &outer); err != nil {
+					continue
+				}
+				if outer.RunID != runID {
+					continue
+				}
+				// Inner payload (when present) carries step_id.
+				if len(outer.Payload) > 0 {
+					var inner struct {
+						StepID string `json:"step_id"`
+					}
+					if err := json.Unmarshal(outer.Payload, &inner); err == nil && inner.StepID == "publish" {
+						sc.T.Errorf("expected no step_assigned event for publish step, found event_id=%q", outer.EventID)
+						continue
+					}
+				}
+				// Nil-payload emitter (engine/step.go:91) encodes the
+				// step in the event_id as "-{stepID}-assigned". Cover
+				// that shape too so a regression to that path still
+				// trips the guard.
+				if strings.HasSuffix(outer.EventID, "-publish-assigned") {
+					sc.T.Errorf("expected no step_assigned event for publish step, found event_id=%q", outer.EventID)
+				}
+			}
+			return nil
+		},
+	}
+}
+
 // TestStandardRun_PublishStepEngineAdvanced exercises the full task-
 // default flow through the engine-owned publish step.
 //
@@ -198,10 +256,22 @@ func TestStandardRun_PublishStepEngineAdvanced(t *testing.T) {
 			// Deliverable landed on main.
 			engine.AssertFileExists("initiatives/init-100/epics/epic-100/tasks/task-100-deliverable.md"),
 
+			// Task artifact's status was promoted to Completed on main by
+			// the merge handler's applyCommitStatus pass. Without this, the
+			// "end-to-end completion" story is only half true — the
+			// deliverable lands, but the task frontmatter still reads
+			// Pending on main, and operators fall back to a manual
+			// status-flip commit.
+			engine.AssertFileContains(
+				"initiatives/init-100/epics/epic-100/tasks/task-100.md",
+				"status: Completed",
+			),
+
 			// The publish step was advanced by the engine with the expected
 			// actor and outcome, and no Assignment was ever created for it.
 			assertPublishStepEngineAdvanced(),
 			assertNoAssignmentForPublish(),
+			assertNoStepAssignedEventForPublish(),
 
 			engine.AssertBranchNotExists(),
 		},
