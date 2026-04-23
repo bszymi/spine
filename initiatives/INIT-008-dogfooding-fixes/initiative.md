@@ -2,10 +2,10 @@
 id: INIT-008
 type: Initiative
 title: Dogfooding Fixes
-status: Completed
+status: In Progress
 owner: bszymi
 created: 2026-03-31
-last_updated: 2026-04-21
+last_updated: 2026-04-24
 links:
   - type: related_to
     target: /governance/constitution.md
@@ -64,6 +64,7 @@ Epics are organized by component area. New epics and tasks are added as issues a
 | EPIC-002 | Security Hardening | Credential redaction, auth fallback, HTTP timeouts, input validation |
 | EPIC-003 | Code Quality | Legacy code removal, duplication reduction, data race fixes |
 | EPIC-004 | Security Audit 2026-04 | CORS, SSE DoS, YAML bomb, supply chain, container hardening, workspace scope checks |
+| EPIC-005 | Code Quality 2026-04 | Follow-up duplication, composition, and coverage work |
 
 ---
 
