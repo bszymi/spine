@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "Fire engine-owned publish handler on step activation"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 work_type: bugfix
