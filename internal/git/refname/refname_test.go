@@ -1,11 +1,11 @@
-package artifact
+package refname
 
 import (
 	"strings"
 	"testing"
 )
 
-func TestValidateGitRefName(t *testing.T) {
+func TestValidate(t *testing.T) {
 	cases := []struct {
 		name      string
 		ref       string
@@ -25,10 +25,14 @@ func TestValidateGitRefName(t *testing.T) {
 		{name: "contains question mark", ref: "feature?", wantError: true, wantMsg: "forbidden character"},
 		{name: "contains space", ref: "feature bad", wantError: true, wantMsg: "whitespace"},
 		{name: "contains newline", ref: "feature\nbad", wantError: true, wantMsg: "control"},
+		{name: "contains backslash", ref: "feature\\bad", wantError: true, wantMsg: "forbidden character"},
+		{name: "contains caret", ref: "feature^bad", wantError: true, wantMsg: "forbidden character"},
+		{name: "contains asterisk", ref: "feature*", wantError: true, wantMsg: "forbidden character"},
+		{name: "contains open bracket", ref: "feature[bad", wantError: true, wantMsg: "forbidden character"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateGitRefName(tc.ref)
+			err := Validate(tc.ref)
 			if tc.wantError {
 				if err == nil {
 					t.Fatalf("expected error, got nil")

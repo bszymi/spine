@@ -2,7 +2,7 @@
 id: TASK-019
 type: Task
 title: Extract shared Git refname validation helper
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: refactor

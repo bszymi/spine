@@ -14,6 +14,7 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/git/refname"
 	"github.com/bszymi/spine/internal/observe"
 )
 
@@ -519,11 +520,11 @@ func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 	if wc != nil {
 		branch = wc.Branch
 	}
-	scope, err := git.EnterBranch(ctx, s.repo, branch, validateGitRefName)
+	scope, err := git.EnterBranch(ctx, s.repo, branch, refname.Validate)
 	if err != nil {
 		// Preserve typed domain error so the gateway surfaces git_error, not
 		// internal_error, on the realistic "branch missing or already
-		// checked out" failure path. validateGitRefName already returns a
+		// checked out" failure path. refname.Validate already returns a
 		// typed error; passthrough only the untyped worktree failure.
 		if _, ok := err.(*domain.SpineError); ok {
 			return nil, err
