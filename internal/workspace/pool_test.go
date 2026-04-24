@@ -649,6 +649,142 @@ func TestServicePool_Evict_DuringInit_DeferredCloseOnRelease(t *testing.T) {
 	}
 }
 
+func TestServicePool_Close_WakesWaitersOnInFlightEntry(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"ws-close-wait": {ID: "ws-close-wait", RepoPath: ".", Status: StatusActive},
+	}}
+
+	builderStarted := make(chan struct{})
+	builderRelease := make(chan struct{})
+	pool := NewServicePool(ctx, resolver, PoolConfig{
+		Builder: func(_ context.Context, _ *ServiceSet) error {
+			close(builderStarted)
+			<-builderRelease
+			return nil
+		},
+	})
+
+	// Initiator Get kicks off the in-flight init.
+	initDone := make(chan struct{})
+	go func() {
+		_, _ = pool.Get(ctx, "ws-close-wait")
+		close(initDone)
+	}()
+	<-builderStarted
+
+	// A second Get parks on the in-flight entry's ready channel.
+	waiterDone := make(chan struct{})
+	var waiterErr error
+	go func() {
+		_, waiterErr = pool.Get(ctx, "ws-close-wait")
+		close(waiterDone)
+	}()
+	// Give the waiter time to enter the select on ready.
+	time.Sleep(20 * time.Millisecond)
+
+	// Close should wake the waiter with a closed-pool error promptly,
+	// without waiting on the (still-blocked) builder.
+	closeDone := make(chan struct{})
+	go func() {
+		pool.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-waiterDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Close did not wake Get waiter on in-flight entry")
+	}
+	if waiterErr == nil || !strings.Contains(waiterErr.Error(), "closed") {
+		t.Errorf("expected closed-pool error for waiter, got: %v", waiterErr)
+	}
+
+	close(builderRelease)
+	<-initDone
+	<-closeDone
+	if pool.ActiveCount() != 0 {
+		t.Errorf("expected 0 active after close; got %d", pool.ActiveCount())
+	}
+}
+
+func TestServicePool_Evict_DuringInit_ConcurrentGet_DoesNotOverwrite(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"ws-evict-race": {ID: "ws-evict-race", RepoPath: ".", Status: StatusActive},
+	}}
+
+	builderStarted := make(chan struct{}, 1)
+	builderRelease := make(chan struct{})
+	var builderCalls int32
+	pool := NewServicePool(ctx, resolver, PoolConfig{
+		Builder: func(_ context.Context, _ *ServiceSet) error {
+			call := atomic.AddInt32(&builderCalls, 1)
+			if call == 1 {
+				builderStarted <- struct{}{}
+				<-builderRelease
+			}
+			return nil
+		},
+	})
+	defer pool.Close()
+
+	// First Get starts the slow init.
+	firstDone := make(chan struct{})
+	var firstSS *ServiceSet
+	go func() {
+		firstSS, _ = pool.Get(ctx, "ws-evict-race")
+		close(firstDone)
+	}()
+	<-builderStarted
+
+	// Evict while init is in flight — this marks the entry evicting.
+	pool.Evict("ws-evict-race")
+
+	// A concurrent Get for the same workspace must not overwrite the
+	// in-flight entry; it should wait for the old entry to leave the
+	// map before starting a fresh initialization.
+	secondDone := make(chan struct{})
+	var secondSS *ServiceSet
+	var secondErr error
+	go func() {
+		secondSS, secondErr = pool.Get(ctx, "ws-evict-race")
+		close(secondDone)
+	}()
+	// Give the second Get enough time to observe the evicting entry and
+	// park on its gone channel.
+	time.Sleep(20 * time.Millisecond)
+
+	// Let the first init finish. The first Get now holds a ref; Release
+	// should close the old entry and wake the second Get.
+	close(builderRelease)
+	<-firstDone
+	if firstSS == nil {
+		t.Fatal("first Get returned nil")
+	}
+	pool.Release("ws-evict-race")
+
+	<-secondDone
+	if secondErr != nil {
+		t.Fatalf("second Get: %v", secondErr)
+	}
+	if secondSS == nil {
+		t.Fatal("second Get returned nil")
+	}
+	if secondSS == firstSS {
+		t.Error("second Get should have produced a fresh service set after Evict, got the same instance")
+	}
+	if got := atomic.LoadInt32(&builderCalls); got != 2 {
+		t.Errorf("expected 2 builder calls (one per entry), got %d", got)
+	}
+	if got := pool.RefCount("ws-evict-race"); got != 1 {
+		t.Errorf("expected refCount=1 on fresh entry, got %d", got)
+	}
+}
+
 func TestServicePool_Close(t *testing.T) {
 	t.Setenv("SPINE_WORKSPACE_ID", "ws-close")
 	t.Setenv("SPINE_DATABASE_URL", "")

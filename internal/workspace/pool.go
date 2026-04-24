@@ -67,13 +67,21 @@ type poolEntry struct {
 	refCount   int32 // number of active users of this service set
 	evicting   bool  // marked for deferred close on last Release
 
-	// ready is non-nil while initialization is in flight. Closing it
-	// signals waiters that services (on success) or initErr (on failure)
-	// has been populated. All state transitions are performed under the
-	// pool mutex; the channel itself is read without the lock only by
-	// waiters blocked on it.
-	ready   chan struct{}
-	initErr error
+	// ready signals completion of initialization. Closed exactly once
+	// (tracked by readyClosed) when services is populated on success or
+	// initErr is set on failure. Waiters read the channel without the
+	// lock; all state transitions happen under p.mu.
+	ready       chan struct{}
+	readyClosed bool
+	initErr     error
+
+	// gone signals removal of this entry from p.entries. Closed exactly
+	// once by removeLocked. A concurrent Get observing an evicting entry
+	// waits on this channel so it can start a fresh initialization only
+	// after the old entry is fully released (preventing the old
+	// initiator's Release from mutating a replacement entry under the
+	// same workspace ID).
+	gone chan struct{}
 }
 
 // ServicePool lazily creates and caches per-workspace service sets.
@@ -162,19 +170,40 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 
 	for {
 		entry, ok := p.entries[canonicalID]
-		if !ok || entry.evicting {
-			// No entry, or the current entry is being phased out — start
-			// a new initialization ourselves. Register a placeholder so
-			// concurrent Get calls for the same workspace join this
-			// in-flight init instead of launching a duplicate.
+		if !ok {
+			// No entry — start a new initialization ourselves. Register
+			// a placeholder so concurrent Get calls for the same
+			// workspace join this in-flight init instead of launching a
+			// duplicate.
 			newEntry := &poolEntry{
 				ready:      make(chan struct{}),
+				gone:       make(chan struct{}),
 				refCount:   1,
 				lastAccess: time.Now(),
 			}
 			p.entries[canonicalID] = newEntry
 			p.mu.Unlock()
 			return p.initializeEntry(ctx, canonicalID, *cfg, newEntry)
+		}
+
+		if entry.evicting {
+			// Entry is being phased out. Wait until it is fully removed
+			// from the map before starting a fresh initialization —
+			// otherwise the old initiator's Release(workspaceID) would
+			// decrement the wrong entry's refcount.
+			gone := entry.gone
+			p.mu.Unlock()
+			select {
+			case <-gone:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				return nil, fmt.Errorf("service pool is closed")
+			}
+			continue
 		}
 
 		if entry.services != nil {
@@ -212,6 +241,32 @@ func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet,
 	}
 }
 
+// publishReadyLocked closes entry.ready exactly once. Callers must hold
+// p.mu. Idempotent so the normal initializer handoff and Close's
+// wake-up-waiters path can both call it safely.
+func publishReadyLocked(entry *poolEntry) {
+	if entry == nil || entry.ready == nil {
+		return
+	}
+	if !entry.readyClosed {
+		close(entry.ready)
+		entry.readyClosed = true
+	}
+}
+
+// removeLocked removes entry from p.entries (if it is still the current
+// entry under id) and signals any Get waiters blocked on its gone channel.
+// Callers must hold p.mu.
+func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
+	if cur, ok := p.entries[id]; ok && cur == entry {
+		delete(p.entries, id)
+	}
+	if entry.gone != nil {
+		close(entry.gone)
+		entry.gone = nil
+	}
+}
+
 // initializeEntry runs buildServiceSet outside the pool mutex for the
 // supplied entry and publishes the outcome. It always closes entry.ready.
 // On success, entry.services is set; on failure, entry.initErr is set and
@@ -231,23 +286,21 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 			ss.close()
 		}
 		closedErr := fmt.Errorf("service pool is closed")
-		entry.initErr = closedErr
-		if cur, ok := p.entries[canonicalID]; ok && cur == entry {
-			delete(p.entries, canonicalID)
+		// Close may already have set initErr and signaled waiters; the
+		// helpers below are idempotent either way.
+		if entry.initErr == nil {
+			entry.initErr = closedErr
 		}
-		close(entry.ready)
-		return nil, closedErr
+		p.removeLocked(canonicalID, entry)
+		publishReadyLocked(entry)
+		return nil, entry.initErr
 	}
 
 	if buildErr != nil {
 		wrapped := fmt.Errorf("init workspace %q services: %w", canonicalID, buildErr)
 		entry.initErr = wrapped
-		// Only remove the entry if it is still the in-flight one; a
-		// concurrent Evict/Close may have already replaced or removed it.
-		if cur, ok := p.entries[canonicalID]; ok && cur == entry {
-			delete(p.entries, canonicalID)
-		}
-		close(entry.ready)
+		p.removeLocked(canonicalID, entry)
+		publishReadyLocked(entry)
 		return nil, wrapped
 	}
 
@@ -256,7 +309,7 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 	// initiator's eventual Release triggers the deferred close path.
 	entry.services = ss
 	entry.lastAccess = time.Now()
-	close(entry.ready)
+	publishReadyLocked(entry)
 
 	observe.Logger(ctx).Info("workspace service set initialized", "workspace_id", canonicalID)
 	return ss, nil
@@ -276,8 +329,10 @@ func (p *ServicePool) Release(workspaceID string) {
 		entry.lastAccess = time.Now()
 
 		if entry.evicting && entry.refCount == 0 {
-			entry.services.close()
-			delete(p.entries, workspaceID)
+			if entry.services != nil {
+				entry.services.close()
+			}
+			p.removeLocked(workspaceID, entry)
 		}
 	}
 }
@@ -294,8 +349,10 @@ func (p *ServicePool) Evict(workspaceID string) {
 			// Mark for deferred close — Release will handle cleanup.
 			entry.evicting = true
 		} else {
-			entry.services.close()
-			delete(p.entries, workspaceID)
+			if entry.services != nil {
+				entry.services.close()
+			}
+			p.removeLocked(workspaceID, entry)
 		}
 	}
 }
@@ -328,29 +385,41 @@ func (p *ServicePool) EvictIdle() {
 	now := time.Now()
 	for id, entry := range p.entries {
 		if entry.refCount == 0 && now.Sub(entry.lastAccess) > p.idleTimeout {
-			entry.services.close()
-			delete(p.entries, id)
+			if entry.services != nil {
+				entry.services.close()
+			}
+			p.removeLocked(id, entry)
 		}
 	}
 }
 
 // Close shuts down all cached service sets, cancels the pool-lifetime context,
-// and marks the pool as closed. Any in-flight initialization will see the
-// closed flag when it completes, close its own services, and signal its
-// waiters.
+// and marks the pool as closed. Any in-flight initialization's handler
+// observes p.closed when it re-acquires the lock and closes the service
+// set it built. Any Get waiting on an in-flight entry's ready channel is
+// woken immediately with a closed-pool error.
 func (p *ServicePool) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.cancel()
+	closedErr := fmt.Errorf("service pool is closed")
 	for id, entry := range p.entries {
-		// In-flight entries have services==nil; their initialize handler
-		// will clean up the service set (if any) once buildServiceSet
-		// returns, because it observes p.closed.
 		if entry.services != nil {
 			entry.services.close()
+		} else {
+			// In-flight entry: wake any Get waiters with a closed-pool
+			// error so they don't block until ctx is cancelled. The
+			// initialize handler's later re-lock will observe p.closed
+			// and clean up the service set it built; publishReadyLocked
+			// and removeLocked are both idempotent so that double-touch
+			// is safe.
+			if entry.initErr == nil {
+				entry.initErr = closedErr
+			}
+			publishReadyLocked(entry)
 		}
-		delete(p.entries, id)
+		p.removeLocked(id, entry)
 	}
 	p.closed = true
 }
