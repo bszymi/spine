@@ -2,7 +2,7 @@
 id: TASK-022
 type: Task
 title: Add focused coverage for low-coverage runtime packages
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: test

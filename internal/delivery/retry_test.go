@@ -90,6 +90,34 @@ func TestRetryAfterFromHeader(t *testing.T) {
 	if got := retryAfterFromHeader(nil); got != 0 {
 		t.Errorf("nil: got %v, want 0", got)
 	}
+
+	// Negative seconds value — treat as "no hint" rather than back-dated.
+	resp = &http.Response{Header: http.Header{"Retry-After": []string{"-5"}}}
+	if got := retryAfterFromHeader(resp); got != 0 {
+		t.Errorf("negative: got %v, want 0", got)
+	}
+
+	// Non-numeric, non-date garbage.
+	resp = &http.Response{Header: http.Header{"Retry-After": []string{"tomorrow"}}}
+	if got := retryAfterFromHeader(resp); got != 0 {
+		t.Errorf("garbage: got %v, want 0", got)
+	}
+
+	// HTTP-date in the future.
+	future := time.Now().Add(2 * time.Minute).UTC().Format(http.TimeFormat)
+	resp = &http.Response{Header: http.Header{"Retry-After": []string{future}}}
+	got := retryAfterFromHeader(resp)
+	// Allow a wide band — scheduling and TimeFormat precision cause drift.
+	if got <= 30*time.Second || got > 3*time.Minute {
+		t.Errorf("future date: got %v, want ~2m", got)
+	}
+
+	// HTTP-date in the past — must round up to 0, not return a negative.
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(http.TimeFormat)
+	resp = &http.Response{Header: http.Header{"Retry-After": []string{past}}}
+	if got := retryAfterFromHeader(resp); got != 0 {
+		t.Errorf("past date: got %v, want 0", got)
+	}
 }
 
 func TestIsDomainEvent(t *testing.T) {

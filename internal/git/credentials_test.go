@@ -120,6 +120,80 @@ func TestRedactURL(t *testing.T) {
 	}
 }
 
+func TestValidateRef(t *testing.T) {
+	tests := []struct {
+		name    string
+		ref     string
+		wantErr string
+	}{
+		{name: "empty ref is allowed (means HEAD)", ref: ""},
+		{name: "plain branch", ref: "feature/login"},
+		{name: "tag-like", ref: "v1.2.3"},
+		{name: "SHA-like", ref: "abcdef0123456789"},
+		{name: "flag injection", ref: "--upload-pack=evil", wantErr: "must not start with '-'"},
+		{name: "control character", ref: "foo\x01bar", wantErr: "unsafe character"},
+		{name: "DEL character", ref: "foo\x7fbar", wantErr: "unsafe character"},
+		{name: "space", ref: "foo bar", wantErr: "unsafe character"},
+		{name: "tilde", ref: "foo~1", wantErr: "unsafe character"},
+		{name: "caret", ref: "foo^1", wantErr: "unsafe character"},
+		{name: "colon", ref: "foo:bar", wantErr: "unsafe character"},
+		{name: "backslash", ref: "foo\\bar", wantErr: "unsafe character"},
+		{name: "double-dot traversal", ref: "foo..bar", wantErr: "'..'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := git.ValidateRef(tt.ref)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateRef(%q) = %v, want nil", tt.ref, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateRef(%q) = nil, want error containing %q", tt.ref, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ValidateRef(%q) error %q does not contain %q", tt.ref, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateCloneURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr string
+	}{
+		{name: "https ok", url: "https://github.com/org/repo.git"},
+		{name: "ssh ok", url: "ssh://git@github.com/org/repo.git"},
+		{name: "scp-like ssh ok", url: "git@github.com:org/repo.git"},
+		{name: "empty", url: "", wantErr: "empty"},
+		{name: "ext:: command execution", url: "ext::bash -c 'id'", wantErr: "ext::"},
+		{name: "ext:: case-insensitive", url: "EXT::bash", wantErr: "ext::"},
+		{name: "file:// scheme", url: "file:///etc/passwd", wantErr: "file://"},
+		{name: "File:// case-insensitive", url: "File:///etc/passwd", wantErr: "file://"},
+		{name: "leading dash (flag injection)", url: "--upload-pack=evil", wantErr: "starting with '-'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := git.ValidateCloneURL(tt.url)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateCloneURL(%q) = %v, want nil", tt.url, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateCloneURL(%q) = nil, want error containing %q", tt.url, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ValidateCloneURL(%q) error %q does not contain %q", tt.url, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestPushWithToken(t *testing.T) {
 	// Set up a repo with a bare remote (local, no auth needed).
 	repo := testutil.NewTempRepo(t)

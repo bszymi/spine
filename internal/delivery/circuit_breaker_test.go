@@ -141,3 +141,33 @@ func TestCircuitBreaker_IndependentPerSubscription(t *testing.T) {
 		t.Error("sub-1 should be blocked")
 	}
 }
+
+func TestCircuitState_String(t *testing.T) {
+	tests := []struct {
+		state CircuitState
+		want  string
+	}{
+		{state: CircuitClosed, want: "closed"},
+		{state: CircuitOpen, want: "open"},
+		{state: CircuitHalfOpen, want: "half-open"},
+		{state: CircuitState(42), want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.state.String(); got != tt.want {
+				t.Errorf("CircuitState(%d).String() = %q, want %q", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCircuitBreaker_RecordSuccess_UnknownSubscription_NoOp(t *testing.T) {
+	cb := NewCircuitBreaker()
+	// Calling RecordSuccess on a subscription the breaker has never seen
+	// must be a silent no-op; the uninitialized entry path was otherwise
+	// untested.
+	cb.RecordSuccess(context.Background(), "never-recorded")
+	if cb.State("never-recorded") != CircuitClosed {
+		t.Errorf("expected default closed state, got %v", cb.State("never-recorded"))
+	}
+}

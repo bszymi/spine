@@ -126,3 +126,30 @@ func TestIsSpineRepo_EmptyDir(t *testing.T) {
 		t.Error("expected IsSpineRepo=false for empty directory")
 	}
 }
+
+func TestReplaceDatabaseInURL_EdgeCases(t *testing.T) {
+	// Arbitrary format without dbname= falls through to append.
+	got := replaceDatabaseInURL("something=else", "newdb")
+	if got != "something=else dbname=newdb" {
+		t.Errorf("fallback append: got %q", got)
+	}
+
+	// dbname= replacement preserves trailing key=value pairs.
+	got = replaceDatabaseInURL("host=localhost dbname=old sslmode=disable", "newdb")
+	if got != "host=localhost dbname=newdb sslmode=disable" {
+		t.Errorf("dbname= middle replace: got %q", got)
+	}
+
+	// postgres:// with no path segment: the helper must add the database
+	// path, not overwrite the authority. Regression guard for the
+	// pre-refactor behaviour that produced "postgres://newdb".
+	got = replaceDatabaseInURL("postgres://host?sslmode=disable", "newdb")
+	if got != "postgres://host/newdb?sslmode=disable" {
+		t.Errorf("no-path URL: got %q", got)
+	}
+
+	got = replaceDatabaseInURL("postgres://host:5432", "newdb")
+	if got != "postgres://host:5432/newdb" {
+		t.Errorf("no-path URL without query: got %q", got)
+	}
+}
