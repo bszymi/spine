@@ -44,6 +44,14 @@ func TestTargetValidator_ValidateURL(t *testing.T) {
 		// bounded DNS lookup inside ValidateURL catches these so a
 		// legacy-looking https URL can't persist a private target.
 		{name: "https localhost resolves to loopback", url: "https://localhost/hook", wantErr: "loopback"},
+
+		// Out-of-range port rejected so the row never persists as
+		// permanently-undeliverable. Default ports, explicit valid
+		// ports, and port ranges up to 65535 still pass.
+		{name: "port > 65535", url: "https://example.com:99999/hook", wantErr: "invalid port"},
+		{name: "port zero", url: "https://example.com:0/hook", wantErr: "invalid port"},
+		{name: "non-numeric port", url: "https://example.com:abc/hook", wantErr: "parse error"},
+		{name: "valid port", url: "https://example.com:8443/hook"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -261,6 +269,26 @@ func TestTargetValidator_SafeDialContext_UsesValidatedAddresses(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+}
+
+func TestPerAddrDialTimeout(t *testing.T) {
+	// Evenly split across answers.
+	if got := perAddrDialTimeout(10*time.Second, 2); got != 5*time.Second {
+		t.Errorf("10s / 2 = %v, want 5s", got)
+	}
+	// Floor at 1s so a pathological answer set (e.g. 20 addresses)
+	// doesn't leave each attempt with sub-second budgets.
+	if got := perAddrDialTimeout(10*time.Second, 20); got != time.Second {
+		t.Errorf("10s / 20 floor: got %v, want 1s", got)
+	}
+	// No total timeout configured — use the modest default.
+	if got := perAddrDialTimeout(0, 2); got != 3*time.Second {
+		t.Errorf("no-timeout fallback: got %v, want 3s", got)
+	}
+	// No addresses — return the default rather than dividing by zero.
+	if got := perAddrDialTimeout(10*time.Second, 0); got != 3*time.Second {
+		t.Errorf("no-addresses fallback: got %v, want 3s", got)
 	}
 }
 

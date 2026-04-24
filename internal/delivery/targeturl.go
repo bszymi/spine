@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,6 +107,12 @@ func (v *TargetValidator) ValidateURL(rawURL string) error {
 	host := u.Hostname()
 	if host == "" {
 		return domain.NewError(domain.ErrInvalidParams, "target_url: missing host")
+	}
+	if p := u.Port(); p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil || port < 1 || port > 65535 {
+			return domain.NewError(domain.ErrInvalidParams, fmt.Sprintf("target_url: invalid port %q", p))
+		}
 	}
 	if scheme == "http" && !v.isAllowedHost(host) {
 		return domain.NewError(domain.ErrInvalidParams, "target_url: http scheme only permitted for allowlisted hosts")
@@ -239,10 +246,16 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 		// connect to the host's actual answer set (preserving
 		// multi-A/AAAA reachability and IPv4 fallback when IPv6 is
 		// broken), while never letting the kernel/OS resolver
-		// re-query and race us into a newly-poisoned answer.
+		// re-query and race us into a newly-poisoned answer. Each
+		// attempt gets a bounded per-address deadline so a single
+		// blackholed answer can't consume the caller's entire
+		// timeout budget.
+		perAddr := perAddrDialTimeout(d.Timeout, len(ips))
 		var lastErr error
 		for _, ipa := range ips {
-			conn, err := d.DialContext(ctx, network, net.JoinHostPort(ipa.IP.String(), port))
+			attemptCtx, cancel := context.WithTimeout(ctx, perAddr)
+			conn, err := d.DialContext(attemptCtx, network, net.JoinHostPort(ipa.IP.String(), port))
+			cancel()
 			if err == nil {
 				return conn, nil
 			}
@@ -250,6 +263,25 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 		}
 		return nil, lastErr
 	}
+}
+
+// perAddrDialTimeout divides the dialer's overall timeout across the
+// resolved addresses so fallback happens within the caller's budget.
+// If the dialer has no explicit timeout, we fall back to a modest
+// per-address default.
+func perAddrDialTimeout(total time.Duration, n int) time.Duration {
+	const defaultPerAddr = 3 * time.Second
+	if n <= 0 {
+		return defaultPerAddr
+	}
+	if total <= 0 {
+		return defaultPerAddr
+	}
+	t := total / time.Duration(n)
+	if t < time.Second {
+		return time.Second
+	}
+	return t
 }
 
 // HTTPClient returns an *http.Client whose transport dials through
