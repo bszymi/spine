@@ -2,7 +2,7 @@
 id: TASK-028
 type: Task
 title: Route remaining repo-controlled YAML through yamlsafe
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-004-security-audit-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: security
