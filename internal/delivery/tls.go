@@ -122,8 +122,12 @@ func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration, targets *
 		// private host via a configured proxy.
 		transport.Proxy = nil
 	}
-	return &http.Client{
+	client := &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
-	}, nil
+	}
+	if targets != nil {
+		client.CheckRedirect = targets.CheckRedirect
+	}
+	return client, nil
 }

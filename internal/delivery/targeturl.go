@@ -187,14 +187,20 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 				return nil, err
 			}
 		}
-		// Dial the first resolved address explicitly so the kernel/OS
-		// resolver doesn't re-query and race us into a newly-poisoned
-		// answer between our validation and the connect() call.
-		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
-		if err != nil {
-			return nil, err
+		// Dial the already-validated addresses in order so we still
+		// connect to the host's actual answer set (preserving
+		// multi-A/AAAA reachability and IPv4 fallback when IPv6 is
+		// broken), while never letting the kernel/OS resolver
+		// re-query and race us into a newly-poisoned answer.
+		var lastErr error
+		for _, ipa := range ips {
+			conn, err := d.DialContext(ctx, network, net.JoinHostPort(ipa.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
 		}
-		return conn, nil
+		return nil, lastErr
 	}
 }
 
@@ -202,6 +208,12 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 // SafeDialContext. Use this for any outbound request built from a
 // subscription's target_url — the gateway subscription-test handler
 // and the webhook dispatcher both route through it.
+//
+// Every redirect the client would follow is re-validated against
+// ValidateURL. Without this a validated https:// webhook that
+// responds with "Location: http://169.254.169.254/" would be
+// followed to a cleartext private host using the default http redirect
+// policy, bypassing the whole guard.
 //
 // A nil receiver returns a plain *http.Client with the supplied
 // timeout, preserving prior behaviour for tests that haven't wired
@@ -214,9 +226,26 @@ func (v *TargetValidator) HTTPClient(timeout time.Duration) *http.Client {
 		return &http.Client{Timeout: timeout}
 	}
 	return &http.Client{
-		Timeout:   timeout,
-		Transport: v.Transport(nil),
+		Timeout:       timeout,
+		Transport:     v.Transport(nil),
+		CheckRedirect: v.CheckRedirect,
 	}
+}
+
+// CheckRedirect is an http.Client.CheckRedirect that re-applies
+// ValidateURL to every redirect target, so a validated webhook cannot
+// bounce a delivery onto an unsafe URL via a 30x response. The
+// request's target_url is also the thing the dialer sees, so this is
+// the only place the scheme / IP / allowlist contract can still be
+// enforced once the response is in-flight.
+func (v *TargetValidator) CheckRedirect(req *http.Request, via []*http.Request) error {
+	if v == nil {
+		return nil
+	}
+	if len(via) >= 10 {
+		return fmt.Errorf("target_url: too many redirects")
+	}
+	return v.ValidateURL(req.URL.String())
 }
 
 // Transport wraps base (or a fresh default transport) so the final
