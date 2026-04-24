@@ -297,6 +297,53 @@ func TestWebhookDispatcher_NoSignatureWithoutSecret(t *testing.T) {
 	}
 }
 
+// TestWebhookDispatcher_RejectsPersistedUnsafeURL proves the dispatcher
+// refuses to deliver to a persisted SSRF-flavoured target_url even
+// when the resolver returns it — the validator is consulted on every
+// dispatch, not just at subscription create time.
+func TestWebhookDispatcher_RejectsPersistedUnsafeURL(t *testing.T) {
+	ds := newDispatcherStore()
+	resolver := &staticResolver{sub: &SubscriptionDetail{
+		SubscriptionID: "sub-bad",
+		TargetURL:      "http://169.254.169.254/latest/meta-data/",
+	}}
+	ds.addToQueue(store.DeliveryEntry{
+		DeliveryID:     "dlv-bad",
+		SubscriptionID: "sub-bad",
+		EventID:        "evt-1",
+		EventType:      "run_started",
+		Payload:        []byte(`{}`),
+		Status:         "delivering",
+		CreatedAt:      time.Now().UTC(),
+	})
+
+	dispatcher := NewWebhookDispatcher(
+		newDispatcherMinimalStore(ds),
+		resolver,
+		DispatcherConfig{
+			Concurrency:  1,
+			PollInterval: 50 * time.Millisecond,
+			Targets:      NewTargetValidator(nil),
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go dispatcher.Run(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if ds.getStatus("dlv-bad") == "failed" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected delivery to be marked failed, got status=%q", ds.getStatus("dlv-bad"))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestComputeHMAC(t *testing.T) {
 	payload := []byte(`{"test":"data"}`)
 	secret := "my-secret"

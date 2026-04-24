@@ -70,7 +70,11 @@ func parseSubscriptionTLS(metadata []byte) (*SubscriptionTLSConfig, error) {
 // alone is authoritative), and a custom CA does NOT imply pinning (a
 // legitimately-signed new cert is still acceptable). Timeout matches
 // the dispatcher's HTTP timeout for consistency.
-func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration) (*http.Client, error) {
+//
+// If targets is non-nil, the transport dials through its
+// SafeDialContext so per-subscription TLS clients are subject to the
+// same SSRF / DNS-rebinding protection as the default client.
+func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration, targets *TargetValidator) (*http.Client, error) {
 	tlsCfg := &tls.Config{}
 	if cfg.CABundlePEM != "" {
 		pool := x509.NewCertPool()
@@ -107,8 +111,23 @@ func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration) (*http.Cl
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       tlsCfg,
 	}
-	return &http.Client{
+	if targets != nil {
+		transport.DialContext = targets.SafeDialContext(&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		})
+		// Disable HTTP proxies so the safe dialer validates the real
+		// webhook destination, not the proxy. Without this, a URL
+		// like https://public.example.com/ could be tunneled to a
+		// private host via a configured proxy.
+		transport.Proxy = nil
+	}
+	client := &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
-	}, nil
+	}
+	if targets != nil {
+		client.CheckRedirect = targets.CheckRedirect
+	}
+	return client, nil
 }
