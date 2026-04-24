@@ -39,6 +39,11 @@ func TestTargetValidator_ValidateURL(t *testing.T) {
 		{name: "https AWS IMDS literal", url: "https://169.254.169.254/", wantErr: "link-local"},
 		{name: "https RFC1918 literal", url: "https://10.0.0.5/hook", wantErr: "private"},
 		{name: "https IPv6 loopback", url: "https://[::1]/hook", wantErr: "loopback"},
+
+		// DNS-resolving hostnames that land on blocked ranges — the
+		// bounded DNS lookup inside ValidateURL catches these so a
+		// legacy-looking https URL can't persist a private target.
+		{name: "https localhost resolves to loopback", url: "https://localhost/hook", wantErr: "loopback"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
