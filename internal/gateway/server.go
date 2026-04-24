@@ -155,6 +155,7 @@ type Server struct {
 	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
 	gitHTTP             *githttp.Handler           // optional, nil if not configured
 	gitPushResolver     GitPushResolverFunc        // optional, nil if not configured; resolves per-workspace policy+events for push
+	webhookTargets      *delivery.TargetValidator  // optional, nil = permissive; enforces SSRF rules on target_url writes and tests
 	devMode             bool                       // when true, authorize allows unauthenticated requests
 	env                 string                     // SPINE_ENV value (production/staging/development); surfaced in health
 	sseLimiter          *sseLimiter                // caps concurrent SSE streams per actor
@@ -259,6 +260,7 @@ type ServerConfig struct {
 	EventBroadcaster    *delivery.EventBroadcaster
 	GitHTTP             *githttp.Handler    // optional, serves git repos over HTTP
 	GitPushResolver     GitPushResolverFunc // optional; resolves the per-workspace policy + events used by the Git push pre-receive gate. Required for correct shared-mode enforcement (each workspace has its own branch-protection table and event stream); single-mode callers may omit it and the handler's default policy is used.
+	WebhookTargets      *delivery.TargetValidator // optional; enforces webhook target_url SSRF rules on create/update/test. A nil validator permits every URL and is only appropriate for tests.
 	DevMode             bool                // when true, authorize allows unauthenticated requests
 	Env                 string              // SPINE_ENV: production/staging/development; surfaced in /system/health
 	ReadHeaderTimeout   time.Duration       // defaults to 10s
@@ -300,6 +302,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		eventBroadcaster:    cfg.EventBroadcaster,
 		gitHTTP:             cfg.GitHTTP,
 		gitPushResolver:     cfg.GitPushResolver,
+		webhookTargets:      cfg.WebhookTargets,
 		devMode:             cfg.DevMode,
 		env:                 cfg.Env,
 		sseLimiter:          newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/internal/auth"
+	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/store"
@@ -148,6 +149,14 @@ func (f *subFakeStore) ListEventsAfter(_ context.Context, _ string, _ []string, 
 
 func setupSubServer(t *testing.T) (*httptest.Server, *subFakeStore, string) {
 	t.Helper()
+	return setupSubServerWithCfg(t, func(cfg *gateway.ServerConfig) {})
+}
+
+// setupSubServerWithCfg is setupSubServer plus an injection hook so
+// tests can swap in a non-default webhook target validator or other
+// server-config fields without copying the boilerplate.
+func setupSubServerWithCfg(t *testing.T, mutate func(cfg *gateway.ServerConfig)) (*httptest.Server, *subFakeStore, string) {
+	t.Helper()
 	sfs := newSubFakeStore()
 	sfs.fakeStore.actors["admin-1"] = &domain.Actor{
 		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
@@ -158,7 +167,11 @@ func setupSubServer(t *testing.T) (*httptest.Server, *subFakeStore, string) {
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}
-	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: sfs, Auth: authSvc})
+	cfg := gateway.ServerConfig{Store: sfs, Auth: authSvc}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	srv := gateway.NewServer(":0", cfg)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts, sfs, plaintext
@@ -279,6 +292,120 @@ func TestSubscriptionCreate_MissingFields(t *testing.T) {
 				t.Errorf("want 400, got %d", resp.StatusCode)
 			}
 		})
+	}
+}
+
+// TestSubscriptionCreate_SSRFRejections covers each acceptance criterion
+// URL from TASK-026. With a validator configured (no allowlist), the
+// create handler must refuse every SSRF-flavoured URL with 400
+// invalid_params before touching the store.
+func TestSubscriptionCreate_SSRFRejections(t *testing.T) {
+	ts, fs, token := setupSubServerWithCfg(t, func(cfg *gateway.ServerConfig) {
+		cfg.WebhookTargets = delivery.NewTargetValidator(nil)
+	})
+
+	cases := map[string]string{
+		"AWS IMDS (link-local)":        "http://169.254.169.254/latest/meta-data/",
+		"loopback IPv4":                "http://127.0.0.1/hook",
+		"loopback hostname":            "http://localhost/hook",
+		"file scheme":                  "file:///etc/passwd",
+		"userinfo in https":            "https://user:pass@example.com/hook",
+		"empty":                        "",
+		"no scheme":                    "example.com/hook",
+		"gopher scheme":                "gopher://example.com/",
+	}
+	for name, target := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp := doJSON(t, http.MethodPost, ts.URL+"/api/v1/subscriptions", token, map[string]any{
+				"name":       "ssrf-test",
+				"target_url": target,
+			})
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("target %q: want 400, got %d", target, resp.StatusCode)
+			}
+			var body struct {
+				Errors []struct {
+					Code string `json:"code"`
+				} `json:"errors"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(body.Errors) == 0 || body.Errors[0].Code != string(domain.ErrInvalidParams) {
+				t.Errorf("target %q: expected invalid_params code, got %+v", target, body.Errors)
+			}
+			if len(fs.subs) != 0 {
+				t.Errorf("target %q: validator must reject before persistence; got %d rows", target, len(fs.subs))
+			}
+		})
+	}
+}
+
+// TestSubscriptionUpdate_SSRFRejection mirrors the create test — an
+// update that swaps in an unsafe URL must be refused even though the
+// existing row is otherwise safe.
+func TestSubscriptionUpdate_SSRFRejection(t *testing.T) {
+	ts, fs, token := setupSubServerWithCfg(t, func(cfg *gateway.ServerConfig) {
+		cfg.WebhookTargets = delivery.NewTargetValidator(nil)
+	})
+	fs.subs["sub-1"] = &store.EventSubscription{
+		SubscriptionID: "sub-1",
+		Name:           "ci",
+		TargetURL:      "https://public.example.com/hook",
+		Status:         "active",
+	}
+
+	unsafe := "http://169.254.169.254/"
+	resp := doJSON(t, http.MethodPatch, ts.URL+"/api/v1/subscriptions/sub-1", token, map[string]any{
+		"target_url": unsafe,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", resp.StatusCode)
+	}
+	if fs.subs["sub-1"].TargetURL != "https://public.example.com/hook" {
+		t.Errorf("persisted target_url must be unchanged after a rejected update, got %q", fs.subs["sub-1"].TargetURL)
+	}
+}
+
+// TestSubscriptionTest_RejectsPersistedUnsafeURL proves that a
+// subscription row created before this task landed (with a
+// dangerous target_url) cannot be probed via the test endpoint —
+// the dispatcher and test-endpoint re-validate on every use.
+func TestSubscriptionTest_RejectsPersistedUnsafeURL(t *testing.T) {
+	ts, fs, token := setupSubServerWithCfg(t, func(cfg *gateway.ServerConfig) {
+		cfg.WebhookTargets = delivery.NewTargetValidator(nil)
+	})
+	fs.subs["legacy-sub"] = &store.EventSubscription{
+		SubscriptionID: "legacy-sub",
+		Name:           "legacy",
+		TargetURL:      "http://169.254.169.254/latest/meta-data/",
+		Status:         "active",
+	}
+
+	resp := doJSON(t, http.MethodPost, ts.URL+"/api/v1/subscriptions/legacy-sub/test", token, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400 for persisted unsafe URL, got %d", resp.StatusCode)
+	}
+}
+
+func TestSubscriptionCreate_Allowlist_AcceptsLocalhost(t *testing.T) {
+	ts, fs, token := setupSubServerWithCfg(t, func(cfg *gateway.ServerConfig) {
+		cfg.WebhookTargets = delivery.NewTargetValidator([]string{"localhost"})
+	})
+
+	resp := doJSON(t, http.MethodPost, ts.URL+"/api/v1/subscriptions", token, map[string]any{
+		"name":       "dev-hook",
+		"target_url": "http://localhost:8080/hook",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("allowlisted localhost http should succeed, got %d", resp.StatusCode)
+	}
+	if len(fs.subs) != 1 {
+		t.Errorf("expected 1 persisted subscription, got %d", len(fs.subs))
 	}
 }
 

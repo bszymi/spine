@@ -49,6 +49,13 @@ type WebhookDispatcher struct {
 	// subscription's TLS config changes (new config signature).
 	tlsMu      sync.Mutex
 	tlsClients map[string]*tlsClientEntry
+
+	// targets, if non-nil, gates every outbound delivery URL and
+	// enforces the safe dialer on both the default and per-TLS
+	// clients. Kept as a field (rather than only on cfg) so
+	// deliver() can re-validate the persisted target_url before
+	// issuing the request.
+	targets *TargetValidator
 }
 
 type tlsClientEntry struct {
@@ -61,6 +68,13 @@ type DispatcherConfig struct {
 	Concurrency  int           // Max concurrent deliveries (default 5)
 	HTTPTimeout  time.Duration // Per-request timeout (default 10s)
 	PollInterval time.Duration // How often to poll the queue (default 1s)
+
+	// Targets, if non-nil, rejects deliveries whose persisted
+	// target_url fails URL validation and routes every outbound HTTP
+	// request through the safe dialer so a rebound DNS name can't
+	// reach a private address at connect time. Production callers
+	// must set this; tests may leave it nil for a permissive client.
+	Targets *TargetValidator
 }
 
 // NewWebhookDispatcher creates a dispatcher that delivers events to webhook URLs.
@@ -78,12 +92,13 @@ func NewWebhookDispatcher(st store.Store, resolver SubscriptionResolver, cfg Dis
 	return &WebhookDispatcher{
 		store:        st,
 		resolver:     resolver,
-		client:       &http.Client{Timeout: cfg.HTTPTimeout},
+		client:       cfg.Targets.HTTPClient(cfg.HTTPTimeout),
 		httpTimeout:  cfg.HTTPTimeout,
 		concurrency:  cfg.Concurrency,
 		pollInterval: cfg.PollInterval,
 		breaker:      NewCircuitBreaker(),
 		tlsClients:   make(map[string]*tlsClientEntry),
+		targets:      cfg.Targets,
 	}
 }
 
@@ -101,7 +116,7 @@ func (d *WebhookDispatcher) clientFor(sub *SubscriptionDetail) (*http.Client, er
 	if entry, ok := d.tlsClients[sub.SubscriptionID]; ok && entry.signature == sig {
 		return entry.client, nil
 	}
-	client, err := buildTLSClient(sub.TLS, d.httpTimeout)
+	client, err := buildTLSClient(sub.TLS, d.httpTimeout, d.targets)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +187,15 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	sub, err := d.resolver.GetSubscription(ctx, entry.SubscriptionID)
 	if err != nil {
 		log.Error("failed to resolve subscription", "error", err)
+		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", err.Error(), nil)
+		return
+	}
+
+	// Re-validate the persisted URL before every delivery so
+	// subscriptions predating the SSRF hardening are rejected here,
+	// not at the socket. Failures are permanent (not retryable).
+	if err := d.targets.ValidateURL(sub.TargetURL); err != nil {
+		log.Warn("webhook target_url rejected by validator", "error", err)
 		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", err.Error(), nil)
 		return
 	}

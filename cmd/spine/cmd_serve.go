@@ -241,6 +241,27 @@ func parsePositiveIntEnv(name string) int {
 	return n
 }
 
+// parseWebhookAllowedHosts parses the SPINE_WEBHOOK_ALLOWED_HOSTS env
+// var into a slice of hostnames the webhook target validator should
+// exempt from the "HTTPS + public IP only" default. Entries are
+// comma-separated; empty or whitespace-only entries are dropped.
+// Operators opt into private destinations explicitly — a bare env var
+// never permits arbitrary private ranges.
+func parseWebhookAllowedHosts(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // parseGitHTTPTrustedCIDRs parses the SPINE_GIT_HTTP_TRUSTED_CIDRS
 // comma-separated list. An empty input yields nil so deployments must
 // opt in explicitly — a prior default of all RFC1918 ranges made any
@@ -369,6 +390,13 @@ type serveDeps struct {
 	EventRetention        time.Duration
 	SSEMaxConn            int
 	OrphanThreshold       time.Duration
+
+	// WebhookTargets is the SSRF gate applied to every subscription
+	// target_url on create / update / test and to every webhook
+	// delivery. Operators widen the default "public HTTPS only" policy
+	// with SPINE_WEBHOOK_ALLOWED_HOSTS (comma-separated) when internal
+	// or localhost destinations are intentional.
+	WebhookTargets *delivery.TargetValidator
 }
 
 // serveRuntime bundles the ServerConfig with the long-lived background
@@ -476,6 +504,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		EventBroadcaster:    eventBroadcaster,
 		GitHTTP:             gitHTTPHandler,
 		GitPushResolver:     gitPushResolver,
+		WebhookTargets:      deps.WebhookTargets,
 		SSEMaxConnPerActor:  deps.SSEMaxConn,
 		TrustedProxyCIDRs:   deps.TrustedProxyCIDRs,
 		DevMode:             deps.DevMode,
@@ -762,7 +791,9 @@ func startEventDelivery(ctx context.Context, deps serveDeps, log *slog.Logger) (
 		log.Error("failed to start delivery subscriber", "error", err)
 	} else {
 		subResolver := delivery.NewStoreSubscriptionResolver(deps.Store)
-		dispatcher := delivery.NewWebhookDispatcher(deps.Store, subResolver, delivery.DispatcherConfig{})
+		dispatcher := delivery.NewWebhookDispatcher(deps.Store, subResolver, delivery.DispatcherConfig{
+			Targets: deps.WebhookTargets,
+		})
 		go dispatcher.Run(deliveryCtx)
 		log.Info("event delivery system started")
 	}
@@ -904,6 +935,7 @@ func serveCmd() *cobra.Command {
 				EventRetention:        eventRetention,
 				SSEMaxConn:            parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
 				OrphanThreshold:       orphanThreshold,
+				WebhookTargets:        delivery.NewTargetValidator(parseWebhookAllowedHosts(os.Getenv("SPINE_WEBHOOK_ALLOWED_HOSTS"))),
 			}
 
 			rt, err := buildServerConfig(ctx, deps)

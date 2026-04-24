@@ -47,8 +47,8 @@ func (s *Server) handleSubscriptionCreate(w http.ResponseWriter, r *http.Request
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "name required"))
 		return
 	}
-	if req.TargetURL == "" {
-		WriteError(w, domain.NewError(domain.ErrInvalidParams, "target_url required"))
+	if err := s.webhookTargets.ValidateURL(req.TargetURL); err != nil {
+		WriteError(w, err)
 		return
 	}
 
@@ -187,6 +187,13 @@ func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if req.TargetURL != nil {
+		if err := s.webhookTargets.ValidateURL(*req.TargetURL); err != nil {
+			WriteError(w, err)
+			return
+		}
+	}
+
 	if req.Name != nil {
 		sub.Name = *req.Name
 	}
@@ -318,16 +325,21 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Re-validate the persisted URL every time we test-dispatch, so
+	// subscriptions created before this check landed cannot be used to
+	// probe private networks by simply clicking "test". The SSRF guard
+	// at create/update is the primary defence; this is the secondary.
+	if err := s.webhookTargets.ValidateURL(sub.TargetURL); err != nil {
+		WriteError(w, err)
+		return
+	}
+
 	pingPayload := []byte(`{"type":"ping","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `"}`)
 
-	// G704 flags sub.TargetURL as taint. Webhook targets are
-	// operator-configured, persisted in the subscriptions table, and
-	// fetched via an authenticated admin API — that is the trust
-	// boundary. There is no general way to test-dispatch to an
-	// operator-configured URL without "sending HTTP to a
-	// user-supplied URL"; SSRF scanning belongs to the
-	// subscription-creation path, not here.
-	testReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, bytes.NewReader(pingPayload)) //nolint:gosec // G704: operator-configured webhook URL
+	// G704 flags sub.TargetURL as taint. The URL goes through the
+	// create/update validator and the per-connection safe dialer, so
+	// SSRF exposure is bounded even for operator-configured targets.
+	testReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, bytes.NewReader(pingPayload)) //nolint:gosec // G704: operator-configured webhook URL, validator-gated
 	if err != nil {
 		WriteJSON(w, http.StatusOK, map[string]any{"success": false, "error": err.Error()})
 		return
@@ -336,9 +348,12 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 	testReq.Header.Set("X-Spine-Event", "ping")
 	testReq.ContentLength = int64(len(pingPayload))
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// The dialer re-checks the resolved IP at connect time, so DNS
+	// rebinding cannot sneak an unsafe destination past the
+	// create-time URL check.
+	client := s.webhookTargets.HTTPClient(10 * time.Second)
 	start := time.Now()
-	resp, err := client.Do(testReq) //nolint:gosec // G704: operator-configured webhook URL
+	resp, err := client.Do(testReq) //nolint:gosec // G704: operator-configured webhook URL, validator-gated
 	durationMs := int(time.Since(start).Milliseconds())
 
 	if err != nil {

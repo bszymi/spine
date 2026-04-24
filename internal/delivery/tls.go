@@ -70,7 +70,11 @@ func parseSubscriptionTLS(metadata []byte) (*SubscriptionTLSConfig, error) {
 // alone is authoritative), and a custom CA does NOT imply pinning (a
 // legitimately-signed new cert is still acceptable). Timeout matches
 // the dispatcher's HTTP timeout for consistency.
-func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration) (*http.Client, error) {
+//
+// If targets is non-nil, the transport dials through its
+// SafeDialContext so per-subscription TLS clients are subject to the
+// same SSRF / DNS-rebinding protection as the default client.
+func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration, targets *TargetValidator) (*http.Client, error) {
 	tlsCfg := &tls.Config{}
 	if cfg.CABundlePEM != "" {
 		pool := x509.NewCertPool()
@@ -106,6 +110,12 @@ func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration) (*http.Cl
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       tlsCfg,
+	}
+	if targets != nil {
+		transport.DialContext = targets.SafeDialContext(&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		})
 	}
 	return &http.Client{
 		Timeout:   timeout,

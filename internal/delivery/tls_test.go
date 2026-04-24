@@ -122,7 +122,7 @@ func TestBuildTLSClient_PinnedSPKI_Match(t *testing.T) {
 	client, err := buildTLSClient(&SubscriptionTLSConfig{
 		PinnedSPKISHA256: spkiSHA256Hex(parsed),
 		CABundlePEM:      string(pem),
-	}, 5*time.Second)
+	}, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestBuildTLSClient_PinnedSPKI_Mismatch(t *testing.T) {
 	client, err := buildTLSClient(&SubscriptionTLSConfig{
 		PinnedSPKISHA256: bogusPin,
 		CABundlePEM:      string(pem),
-	}, 5*time.Second)
+	}, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestBuildTLSClient_CustomCA_Accepts(t *testing.T) {
 
 	client, err := buildTLSClient(&SubscriptionTLSConfig{
 		CABundlePEM: string(pem),
-	}, 5*time.Second)
+	}, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
