@@ -10,6 +10,7 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/git/refname"
 	"github.com/bszymi/spine/internal/observe"
 )
 
@@ -60,7 +61,7 @@ func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 	if wc != nil {
 		branch = wc.Branch
 	}
-	scope, err := git.EnterBranch(ctx, s.repo, branch, validateGitRefName)
+	scope, err := git.EnterBranch(ctx, s.repo, branch, refname.Validate)
 	if err != nil {
 		if _, ok := err.(*domain.SpineError); ok {
 			return nil, err
