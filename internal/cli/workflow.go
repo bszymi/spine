@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/bszymi/spine/internal/yamlsafe"
 )
 
 // WorkflowSummary holds the key fields for display.
@@ -119,7 +119,7 @@ func ResolveWorkflow(repoPath, artifactPath string, format OutputFormat) error {
 	var artMeta struct {
 		Type string `yaml:"type"`
 	}
-	if err := yaml.Unmarshal(extractFrontMatter(artData), &artMeta); err != nil {
+	if err := yamlsafe.DecodeInto(extractFrontMatter(artData), &artMeta); err != nil {
 		return fmt.Errorf("parse artifact front matter: %w", err)
 	}
 
@@ -192,7 +192,7 @@ func parseWorkflowSummary(path string) (*WorkflowSummary, error) {
 		return nil, err
 	}
 	var wf WorkflowSummary
-	if err := yaml.Unmarshal(data, &wf); err != nil {
+	if err := yamlsafe.DecodeInto(data, &wf); err != nil {
 		return nil, err
 	}
 	return &wf, nil
@@ -217,7 +217,7 @@ func parseWorkflowDetail(path string) (*WorkflowDetail, error) {
 			} `yaml:"outcomes"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := yamlsafe.DecodeInto(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse workflow: %w", err)
 	}
 

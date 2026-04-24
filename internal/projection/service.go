@@ -17,7 +17,7 @@ import (
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/store"
-	"gopkg.in/yaml.v3"
+	"github.com/bszymi/spine/internal/yamlsafe"
 )
 
 // BranchProtectionConfigPath is the fixed repo path the projection
@@ -501,7 +501,15 @@ func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string)
 		return fmt.Errorf("read workflow %s: %w", wfPath, err)
 	}
 
-	// Parse minimal fields for projection
+	// Bound size / depth / alias count once via yamlsafe so a hostile
+	// workflow file can't stall projection with a billion-laughs payload,
+	// then decode twice off the same parsed node: once for the typed
+	// projection fields, once as `any` for the JSONB definition column.
+	node, err := yamlsafe.Decode(content)
+	if err != nil {
+		return fmt.Errorf("parse workflow %s: %w", wfPath, err)
+	}
+
 	var wf struct {
 		ID        string   `yaml:"id" json:"id"`
 		Name      string   `yaml:"name" json:"name"`
@@ -509,8 +517,7 @@ func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string)
 		Status    string   `yaml:"status" json:"status"`
 		AppliesTo []string `yaml:"applies_to" json:"applies_to"`
 	}
-
-	if err := yaml.Unmarshal(content, &wf); err != nil {
+	if err := node.Decode(&wf); err != nil {
 		return fmt.Errorf("parse workflow %s: %w", wfPath, err)
 	}
 
@@ -519,10 +526,10 @@ func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string)
 		return fmt.Errorf("marshal workflow applies_to: %w", err)
 	}
 
-	// Convert YAML to JSON for the JSONB definition column
+	// Convert YAML to JSON for the JSONB definition column.
 	var rawDef any
-	if err := yaml.Unmarshal(content, &rawDef); err != nil {
-		return fmt.Errorf("parse workflow raw definition: %w", err)
+	if err := node.Decode(&rawDef); err != nil {
+		return fmt.Errorf("parse workflow raw definition %s: %w", wfPath, err)
 	}
 	definition, err := json.Marshal(rawDef)
 	if err != nil {
