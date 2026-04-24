@@ -18,7 +18,7 @@ func TestValidateID(t *testing.T) {
 		{name: "default", id: "default"},
 		{name: "uppercase ok", id: "Prod1"},
 		{name: "digit lead", id: "1ws"},
-		{name: "max length 63", id: strings.Repeat("a", 63)},
+		{name: "max length 54 fits spine_ws_ prefix", id: strings.Repeat("a", 54)},
 
 		// Reject — acceptance criteria shapes.
 		{name: "empty", id: "", wantErr: true},
@@ -35,7 +35,8 @@ func TestValidateID(t *testing.T) {
 		{name: "dot in middle", id: "ws.1", wantErr: true},
 		{name: "unicode", id: "wś-1", wantErr: true},
 		{name: "null byte", id: "ws\x00x", wantErr: true},
-		{name: "too long", id: strings.Repeat("a", 64), wantErr: true},
+		{name: "too long (55 would overflow spine_ws_ prefix)", id: strings.Repeat("a", 55), wantErr: true},
+		{name: "way too long", id: strings.Repeat("a", 200), wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
