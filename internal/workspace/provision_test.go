@@ -140,13 +140,16 @@ func TestReplaceDatabaseInURL_EdgeCases(t *testing.T) {
 		t.Errorf("dbname= middle replace: got %q", got)
 	}
 
-	// postgres:// with no path and a query string: the last "/" is the
-	// slash after the scheme, so the path and query are replaced. This
-	// is the documented current behaviour (pgIdentifier inputs are
-	// produced by sanitizeDBName, never raw URLs); if the helper ever
-	// gains real URL parsing, update this expectation.
+	// postgres:// with no path segment: the helper must add the database
+	// path, not overwrite the authority. Regression guard for the
+	// pre-refactor behaviour that produced "postgres://newdb".
 	got = replaceDatabaseInURL("postgres://host?sslmode=disable", "newdb")
-	if got != "postgres://newdb?sslmode=disable" {
+	if got != "postgres://host/newdb?sslmode=disable" {
 		t.Errorf("no-path URL: got %q", got)
+	}
+
+	got = replaceDatabaseInURL("postgres://host:5432", "newdb")
+	if got != "postgres://host:5432/newdb" {
+		t.Errorf("no-path URL without query: got %q", got)
 	}
 }

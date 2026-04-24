@@ -110,7 +110,8 @@ func pgIdentifier(name string) string {
 func replaceDatabaseInURL(connURL, newDB string) string {
 	// Handle postgres:// URL format.
 	if strings.HasPrefix(connURL, "postgres://") || strings.HasPrefix(connURL, "postgresql://") {
-		// Find the last / before any ? query params.
+		// Split off any ?query portion so LastIndex("/") only scans the
+		// authority+path, never the query.
 		qIdx := strings.Index(connURL, "?")
 		query := ""
 		base := connURL
@@ -119,10 +120,16 @@ func replaceDatabaseInURL(connURL, newDB string) string {
 			base = connURL[:qIdx]
 		}
 
-		lastSlash := strings.LastIndex(base, "/")
-		if lastSlash >= 0 {
-			return base[:lastSlash+1] + newDB + query
+		// Look for a "/" *after* the "://" scheme separator so the two
+		// slashes in the scheme itself aren't mistaken for a path.
+		const sep = "://"
+		schemeEnd := strings.Index(base, sep)
+		authority := base[schemeEnd+len(sep):]
+		if pathStart := strings.Index(authority, "/"); pathStart >= 0 {
+			lastSlash := strings.LastIndex(authority, "/")
+			return base[:schemeEnd+len(sep)+lastSlash+1] + newDB + query
 		}
+		// No existing path component — append one.
 		return base + "/" + newDB + query
 	}
 
