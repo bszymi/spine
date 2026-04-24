@@ -54,11 +54,7 @@ type artifactUpdateRequest struct {
 }
 
 func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
-	if !s.authorize(w, r, "artifact.create") {
-		return
-	}
-
-	req, ok := decodeBody[artifactCreateRequest](w, r)
+	req, ok := decodeAuthedJSON[artifactCreateRequest](s, w, r, "artifact.create")
 	if !ok {
 		return
 	}
@@ -75,8 +71,8 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.artifactsFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
 
@@ -91,7 +87,7 @@ func (s *Server) handleArtifactCreate(w http.ResponseWriter, r *http.Request) {
 			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch, Override: override})
 		}
 	}
-	result, err := s.artifactsFrom(r.Context()).Create(ctx, req.Path, req.Content)
+	result, err := artSvc.Create(ctx, req.Path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -169,8 +165,8 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 		return
 	}
 
-	if s.artifactsFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
 
@@ -179,7 +175,7 @@ func (s *Server) handleArtifactRead(w http.ResponseWriter, r *http.Request, path
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, err.Error()))
 		return
 	}
-	a, err := s.artifactsFrom(r.Context()).Read(r.Context(), path, ref)
+	a, err := artSvc.Read(r.Context(), path, ref)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -247,8 +243,8 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 
-	if s.artifactsFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
 
@@ -267,7 +263,7 @@ func (s *Server) handleArtifactUpdate(w http.ResponseWriter, r *http.Request, pa
 			ctx = artifact.WithWriteContext(ctx, artifact.WriteContext{Branch: branch, Override: override})
 		}
 	}
-	result, err := s.artifactsFrom(r.Context()).Update(ctx, path, req.Content)
+	result, err := artSvc.Update(ctx, path, req.Content)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -295,8 +291,8 @@ func (s *Server) handleArtifactValidate(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if s.artifactsFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
 
@@ -329,7 +325,7 @@ func (s *Server) handleArtifactValidate(w http.ResponseWriter, r *http.Request, 
 		a = parsed
 	} else {
 		// Default: read the stored artifact.
-		stored, err := s.artifactsFrom(r.Context()).Read(r.Context(), path, "")
+		stored, err := artSvc.Read(r.Context(), path, "")
 		if err != nil {
 			WriteError(w, err)
 			return

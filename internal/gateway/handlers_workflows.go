@@ -46,9 +46,8 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	// gateway.ServerConfig without being wired in cmd/spine buildServerConfig.
 	// See cmd/spine/serve_smoke_test.go — that test probes every endpoint
 	// and is the canary for this class of regression.
-	svc := s.workflowsFrom(r.Context())
-	if svc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "workflow service not configured"))
+	svc, ok := s.needWorkflows(w, r)
+	if !ok {
 		return
 	}
 
@@ -154,9 +153,8 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	svc := s.workflowsFrom(r.Context())
-	if svc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "workflow service not configured"))
+	svc, ok := s.needWorkflows(w, r)
+	if !ok {
 		return
 	}
 
@@ -203,9 +201,8 @@ func (s *Server) handleWorkflowRead(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	svc := s.workflowsFrom(r.Context())
-	if svc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "workflow service not configured"))
+	svc, ok := s.needWorkflows(w, r)
+	if !ok {
 		return
 	}
 
@@ -235,9 +232,8 @@ func (s *Server) handleWorkflowList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svc := s.workflowsFrom(r.Context())
-	if svc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "workflow service not configured"))
+	svc, ok := s.needWorkflows(w, r)
+	if !ok {
 		return
 	}
 
@@ -285,9 +281,8 @@ func (s *Server) handleWorkflowValidate(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	svc := s.workflowsFrom(r.Context())
-	if svc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "workflow service not configured"))
+	svc, ok := s.needWorkflows(w, r)
+	if !ok {
 		return
 	}
 

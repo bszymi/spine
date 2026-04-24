@@ -79,8 +79,8 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.projSyncFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "projection service not configured"))
+	projSync, ok := s.needProjSync(w, r)
+	if !ok {
 		return
 	}
 
@@ -101,7 +101,7 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 	// duration is unbounded relative to the HTTP request that kicked
 	// it off. Status polling is via the rebuildID returned below.
 	go func() { //nolint:gosec // G118: detached-by-design goroutine
-		if err := s.projSyncFrom(r.Context()).FullRebuild(context.Background()); err != nil {
+		if err := projSync.FullRebuild(context.Background()); err != nil {
 			observe.Logger(r.Context()).Error("system rebuild failed", "rebuild_id", rebuildID, "error", err)
 			state.complete("failed", "rebuild failed, check server logs for details")
 		} else {
@@ -235,13 +235,14 @@ func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fallback to schema-only validation
-	if s.artifactsFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "validation not configured"))
+	// Fallback to schema-only validation. Without the artifact service
+	// there is nothing to list, so respond consistently with other
+	// routes rather than with a validate-specific message.
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
-
-	artifacts, err := s.artifactsFrom(r.Context()).List(r.Context(), "")
+	artifacts, err := artSvc.List(r.Context(), "")
 	if err != nil {
 		WriteError(w, err)
 		return
