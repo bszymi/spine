@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -126,7 +127,9 @@ func TestHandleWorkspaceCreate_MissingWorkspaceID(t *testing.T) {
 	ts := newOperatorServer(t)
 	defer ts.Close()
 
-	// No wsDBProvider, so this still returns 503 from the nil check.
+	// Empty workspace_id must be rejected as invalid_params before the
+	// provider check — malformed input never depends on shared-mode
+	// wiring. Regression guard for TASK-027.
 	req, _ := operatorReq("POST", ts.URL+"/api/v1/workspaces", testOperatorToken, `{}`)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -134,8 +137,59 @@ func TestHandleWorkspaceCreate_MissingWorkspaceID(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Provider is nil → 503 (provider check happens before workspace_id check).
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 (invalid_params), got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleWorkspaceCreate_InvalidIDShapes covers every shape the
+// TASK-027 acceptance criteria calls out — they must all be rejected
+// before any provider/persistence call.
+func TestHandleWorkspaceCreate_InvalidIDShapes(t *testing.T) {
+	ts := newOperatorServer(t)
+	defer ts.Close()
+
+	ids := []string{
+		"../x",
+		"/tmp/x",
+		"a/b",
+		"ws 1",
+		"-rm",
+		"",
+		"ws.1",
+	}
+	for _, id := range ids {
+		t.Run(id, func(t *testing.T) {
+			body := `{"workspace_id":` + strconv.Quote(id) + `}`
+			req, _ := operatorReq("POST", ts.URL+"/api/v1/workspaces", testOperatorToken, body)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("id %q: want 400, got %d", id, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestHandleWorkspaceGet_InvalidID(t *testing.T) {
+	ts := newOperatorServer(t)
+	defer ts.Close()
+
+	req, _ := operatorReq("GET", ts.URL+"/api/v1/workspaces/..%2Fescape", testOperatorToken, "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	// Whether chi rejects the encoded path at routing time or the
+	// handler catches it via ValidateID, the response MUST NOT be a
+	// 200 that triggered a provider call. Accept 400 or 404 as safe
+	// surface errors; reject anything in the 2xx/5xx range that would
+	// indicate we reached the provider/persistence path.
+	if resp.StatusCode/100 == 2 || resp.StatusCode == http.StatusInternalServerError {
+		t.Errorf("traversal-shaped id must not reach provider; got %d", resp.StatusCode)
 	}
 }

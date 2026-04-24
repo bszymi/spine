@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/bszymi/spine/internal/cli"
+	"github.com/bszymi/spine/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -33,6 +34,12 @@ func workspaceCreateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			workspaceID := args[0]
+
+			// Fail before we make a network call so obviously-bad IDs
+			// don't spend a round trip getting rejected server-side.
+			if err := workspace.ValidateID(workspaceID); err != nil {
+				return err
+			}
 
 			body := map[string]string{
 				"workspace_id": workspaceID,
@@ -101,6 +108,9 @@ func workspaceGetCmd() *cobra.Command {
 		Short: "Get workspace details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := workspace.ValidateID(args[0]); err != nil {
+				return err
+			}
 			c := newOperatorClient()
 			data, err := c.Get(cmd.Context(), "/api/v1/workspaces/"+args[0], nil)
 			if err != nil {
@@ -140,6 +150,9 @@ func workspaceDeactivateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			workspaceID := args[0]
+			if err := workspace.ValidateID(workspaceID); err != nil {
+				return err
+			}
 
 			if !yes {
 				fmt.Printf("Deactivate workspace %q? This will stop serving requests for it. [y/N] ", workspaceID)

@@ -44,6 +44,10 @@ func NewDatabaseProvisioner(adminURL, migrationsDir string) *DatabaseProvisioner
 // runs all schema migrations. Returns the database URL for the new workspace.
 // If any step fails, the partially created database is dropped.
 func (p *DatabaseProvisioner) ProvisionDatabase(ctx context.Context, workspaceID string) (string, error) {
+	if err := ValidateID(workspaceID); err != nil {
+		return "", err
+	}
+
 	log := observe.Logger(ctx)
 
 	dbName := sanitizeDBName(workspaceID)
@@ -160,9 +164,30 @@ func NewRepoProvisioner(baseDir string) *RepoProvisioner {
 // Detects existing Spine repos and skips init for those.
 // Returns the repo path. On failure, cleans up the partial directory.
 func (p *RepoProvisioner) ProvisionRepo(ctx context.Context, workspaceID, gitURL string) (string, error) {
+	if err := ValidateID(workspaceID); err != nil {
+		return "", err
+	}
+
 	log := observe.Logger(ctx)
 
 	repoPath := filepath.Join(p.baseDir, workspaceID)
+
+	// Belt-and-braces: even though ValidateID rules out traversal
+	// shapes, confirm the joined path is still inside baseDir. Protects
+	// against future relaxations of the regex and guards call sites
+	// that somehow bypassed ValidateID.
+	absBase, err := filepath.Abs(p.baseDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve base dir: %w", err)
+	}
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve repo path: %w", err)
+	}
+	rel, err := filepath.Rel(absBase, absRepo)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("workspace_id %q escapes workspace repos dir", workspaceID)
+	}
 
 	// Check if directory already exists.
 	if _, err := os.Stat(repoPath); err == nil {
