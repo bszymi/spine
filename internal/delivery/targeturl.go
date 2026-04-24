@@ -156,7 +156,34 @@ func (v *TargetValidator) CheckAddr(host string, ip net.IP) error {
 	if ip.IsPrivate() {
 		return fmt.Errorf("target_url: private address %s not permitted", ip)
 	}
+	// IsPrivate does not include several non-public IPv4 ranges that
+	// are routinely used for internal services:
+	//   - 100.64.0.0/10 (RFC 6598 shared address space, aka CGNAT)
+	//   - 198.18.0.0/15 (RFC 2544 benchmarking, also used internally)
+	// Reject them explicitly so the allowlist remains the only way in.
+	for _, cidr := range extraNonPublicV4 {
+		if cidr.Contains(ip) {
+			return fmt.Errorf("target_url: non-public address %s not permitted", ip)
+		}
+	}
 	return nil
+}
+
+// extraNonPublicV4 are IPv4 ranges that net.IP.IsPrivate does not
+// classify as private but that routinely host internal services, so
+// the SSRF guard must also reject them. Parsed once at init so
+// CheckAddr stays allocation-free on the hot path.
+var extraNonPublicV4 = []*net.IPNet{
+	mustParseCIDR("100.64.0.0/10"), // RFC 6598 shared address space (CGNAT)
+	mustParseCIDR("198.18.0.0/15"), // RFC 2544 benchmarking
+}
+
+func mustParseCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic("invalid CIDR in extraNonPublicV4: " + s + ": " + err.Error())
+	}
+	return n
 }
 
 // SafeDialContext wraps a *net.Dialer so every dial re-validates the

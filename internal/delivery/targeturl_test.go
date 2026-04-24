@@ -102,6 +102,8 @@ func TestTargetValidator_CheckAddr_RejectsDangerousRanges(t *testing.T) {
 		{name: "RFC1918 172.16/12", ip: "172.16.5.5", wantErr: "private"},
 		{name: "RFC1918 192.168/16", ip: "192.168.1.1", wantErr: "private"},
 		{name: "IPv6 ULA", ip: "fc00::1", wantErr: "private"},
+		{name: "RFC 6598 CGNAT", ip: "100.64.1.1", wantErr: "non-public"},
+		{name: "RFC 2544 benchmarking", ip: "198.18.0.5", wantErr: "non-public"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
