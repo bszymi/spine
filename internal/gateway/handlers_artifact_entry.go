@@ -63,18 +63,16 @@ func (s *Server) handleArtifactEntryCreate(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Check dependencies.
-	if s.planningRunStarter == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "planning run starter not configured"))
+	planningRunStarter, ok := s.needPlanningRunStarter(w, r)
+	if !ok {
 		return
 	}
-	artSvc := s.artifactsFrom(r.Context())
-	if artSvc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
-	gitReader := s.gitFrom(r.Context())
-	if gitReader == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "git reader not configured"))
+	gitReader, ok := s.needGit(w, r)
+	if !ok {
 		return
 	}
 
@@ -115,7 +113,7 @@ func (s *Server) handleArtifactEntryCreate(w http.ResponseWriter, r *http.Reques
 	content := buildInitialContent(artType, nextID, req.Title, parentArtifactPath, parentMeta)
 
 	// Start the planning run.
-	result, err := s.planningRunStarter.StartPlanningRun(ctx, artifactPath, content)
+	result, err := planningRunStarter.StartPlanningRun(ctx, artifactPath, content)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -213,14 +211,12 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve parent from the branch (not main) — parent may exist on the branch only.
-	artSvc := s.artifactsFrom(r.Context())
-	if artSvc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
-	gitReader := s.gitFrom(r.Context())
-	if gitReader == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "git reader not configured"))
+	gitReader, ok := s.needGit(w, r)
+	if !ok {
 		return
 	}
 

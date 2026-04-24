@@ -37,8 +37,8 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.artifactsFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "artifact service not configured"))
+	artSvc, ok := s.needArtifacts(w, r)
+	if !ok {
 		return
 	}
 
@@ -56,7 +56,7 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 			rationale = appendThreadRefs(rationale, req.ThreadRefs)
 		}
 
-		result, err := s.artifactsFrom(r.Context()).AcceptTask(r.Context(), taskPath, rationale)
+		result, err := artSvc.AcceptTask(r.Context(), taskPath, rationale)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -86,7 +86,7 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 		if len(req.ThreadRefs) > 0 {
 			rationale = appendThreadRefs(rationale, req.ThreadRefs)
 		}
-		result, err := s.artifactsFrom(r.Context()).RejectTask(r.Context(), taskPath, acceptance, rationale)
+		result, err := artSvc.RejectTask(r.Context(), taskPath, acceptance, rationale)
 		if err != nil {
 			WriteError(w, err)
 			return
@@ -112,7 +112,7 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 	// Other actions (cancel, abandon, supersede) — status-only transition.
 
 	// Read current task — need raw content with front matter for status update
-	a, err := s.artifactsFrom(r.Context()).Read(r.Context(), taskPath, "")
+	a, err := artSvc.Read(r.Context(), taskPath, "")
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -124,11 +124,11 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read raw file content (with front matter) via Git
-	if s.gitFrom(r.Context()) == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "git client not configured"))
+	gitReader, ok := s.needGit(w, r)
+	if !ok {
 		return
 	}
-	rawContent, err := s.gitFrom(r.Context()).ReadFile(r.Context(), "HEAD", taskPath)
+	rawContent, err := gitReader.ReadFile(r.Context(), "HEAD", taskPath)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -137,7 +137,7 @@ func (s *Server) handleTaskWildcard(w http.ResponseWriter, r *http.Request) {
 	// Update the status in the raw content
 	updatedContent := updateFrontMatterStatus(string(rawContent), string(targetStatus))
 
-	result, err := s.artifactsFrom(r.Context()).Update(r.Context(), taskPath, updatedContent)
+	result, err := artSvc.Update(r.Context(), taskPath, updatedContent)
 	if err != nil {
 		WriteError(w, err)
 		return
