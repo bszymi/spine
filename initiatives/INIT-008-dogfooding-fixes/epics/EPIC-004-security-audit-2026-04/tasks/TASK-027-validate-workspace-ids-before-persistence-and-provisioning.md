@@ -2,7 +2,7 @@
 id: TASK-027
 type: Task
 title: Validate workspace IDs before persistence and provisioning
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-004-security-audit-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: security

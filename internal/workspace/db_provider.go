@@ -59,6 +59,14 @@ func NewDBProvider(ctx context.Context, databaseURL string, cfg DBProviderConfig
 // Returns ErrWorkspaceNotFound if the ID does not exist.
 // Returns ErrWorkspaceInactive if the workspace exists but is inactive.
 func (p *DBProvider) Resolve(ctx context.Context, workspaceID string) (*Config, error) {
+	// Reject malformed IDs before any cache lookup or SQL. A
+	// traversal-shaped ID won't match a registry row in practice,
+	// but validating first keeps the error surface consistent
+	// (invalid id → invalid-params error, not a generic not-found).
+	if err := ValidateID(workspaceID); err != nil {
+		return nil, ErrWorkspaceNotFound
+	}
+
 	// Check cache first.
 	p.mu.RLock()
 	if cached, ok := p.cache[workspaceID]; ok {
@@ -161,6 +169,9 @@ func (p *DBProvider) Invalidate(workspaceID string) {
 
 // CreateWorkspace inserts a new workspace into the registry.
 func (p *DBProvider) CreateWorkspace(ctx context.Context, cfg Config) error {
+	if err := ValidateID(cfg.ID); err != nil {
+		return err
+	}
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO public.workspace_registry (workspace_id, display_name, database_url, repo_path, actor_scope, status, smp_workspace_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -170,6 +181,9 @@ func (p *DBProvider) CreateWorkspace(ctx context.Context, cfg Config) error {
 
 // DeactivateWorkspace marks a workspace as inactive in the registry.
 func (p *DBProvider) DeactivateWorkspace(ctx context.Context, workspaceID string) error {
+	if err := ValidateID(workspaceID); err != nil {
+		return ErrWorkspaceNotFound
+	}
 	result, err := p.pool.Exec(ctx,
 		`UPDATE public.workspace_registry SET status = 'inactive', updated_at = now()
 		 WHERE workspace_id = $1 AND status = 'active'`,
@@ -185,6 +199,9 @@ func (p *DBProvider) DeactivateWorkspace(ctx context.Context, workspaceID string
 
 // GetWorkspace returns a workspace config regardless of status.
 func (p *DBProvider) GetWorkspace(ctx context.Context, workspaceID string) (*Config, error) {
+	if err := ValidateID(workspaceID); err != nil {
+		return nil, ErrWorkspaceNotFound
+	}
 	var cfg Config
 	var status string
 	err := p.pool.QueryRow(ctx,

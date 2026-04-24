@@ -53,18 +53,23 @@ type workspaceCreateRequest struct {
 }
 
 func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
-	if s.wsDBProvider == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "workspace management requires shared mode"))
-		return
-	}
-
 	req, ok := decodeBody[workspaceCreateRequest](w, r)
 	if !ok {
 		return
 	}
 
-	if req.WorkspaceID == "" {
-		WriteError(w, domain.NewError(domain.ErrInvalidParams, "workspace_id is required"))
+	// Validate the ID before the provider check so malformed IDs
+	// reliably surface as invalid_params regardless of whether shared
+	// mode is configured. Without this, the single-mode server
+	// returns 503 for a traversal-shaped ID — correct in effect, but
+	// the reason (malformed input) never reaches the operator.
+	if err := workspace.ValidateID(req.WorkspaceID); err != nil {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, err.Error()))
+		return
+	}
+
+	if s.wsDBProvider == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "workspace management requires shared mode"))
 		return
 	}
 
@@ -134,12 +139,16 @@ func (s *Server) handleWorkspaceList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkspaceGet(w http.ResponseWriter, r *http.Request) {
+	workspaceID := chi.URLParam(r, "workspace_id")
+	if err := workspace.ValidateID(workspaceID); err != nil {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, err.Error()))
+		return
+	}
+
 	if s.wsDBProvider == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "workspace management requires shared mode"))
 		return
 	}
-
-	workspaceID := chi.URLParam(r, "workspace_id")
 	ws, err := s.wsDBProvider.GetWorkspace(r.Context(), workspaceID)
 	if err != nil {
 		if errors.Is(err, workspace.ErrWorkspaceNotFound) {
@@ -163,12 +172,16 @@ func (s *Server) handleWorkspaceGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkspaceDeactivate(w http.ResponseWriter, r *http.Request) {
+	workspaceID := chi.URLParam(r, "workspace_id")
+	if err := workspace.ValidateID(workspaceID); err != nil {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, err.Error()))
+		return
+	}
+
 	if s.wsDBProvider == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "workspace management requires shared mode"))
 		return
 	}
-
-	workspaceID := chi.URLParam(r, "workspace_id")
 
 	if err := s.wsDBProvider.DeactivateWorkspace(r.Context(), workspaceID); err != nil {
 		if errors.Is(err, workspace.ErrWorkspaceNotFound) {

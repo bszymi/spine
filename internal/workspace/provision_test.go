@@ -1,8 +1,10 @@
 package workspace
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -124,6 +126,57 @@ func TestIsSpineRepo_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	if IsSpineRepo(dir) {
 		t.Error("expected IsSpineRepo=false for empty directory")
+	}
+}
+
+func TestProvisionRepo_RejectsInvalidID(t *testing.T) {
+	baseDir := t.TempDir()
+	p := NewRepoProvisioner(baseDir)
+
+	cases := []string{
+		"../escape",
+		"a/b",
+		"-rm",
+		"",
+		"ws id with space",
+	}
+	for _, id := range cases {
+		t.Run(id, func(t *testing.T) {
+			path, err := p.ProvisionRepo(context.Background(), id, "")
+			if err == nil {
+				t.Fatalf("ProvisionRepo(%q) = %q, want error", id, path)
+			}
+		})
+	}
+}
+
+func TestProvisionRepo_StaysInsideBaseDir(t *testing.T) {
+	baseDir := t.TempDir()
+	p := NewRepoProvisioner(baseDir)
+
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		t.Fatalf("abs base: %v", err)
+	}
+
+	// Fresh init with a valid ID.
+	repoPath, err := p.ProvisionRepo(context.Background(), "valid-ws_1", "")
+	if err != nil {
+		t.Fatalf("ProvisionRepo: %v", err)
+	}
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		t.Fatalf("abs repo: %v", err)
+	}
+	rel, err := filepath.Rel(absBase, absRepo)
+	if err != nil {
+		t.Fatalf("rel: %v", err)
+	}
+	if strings.HasPrefix(rel, "..") || rel == "." {
+		t.Fatalf("repo path %q escapes base %q (rel=%q)", absRepo, absBase, rel)
+	}
+	if rel != "valid-ws_1" {
+		t.Errorf("expected path directly under base, got rel=%q", rel)
 	}
 }
 
