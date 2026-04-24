@@ -2,7 +2,7 @@
 id: TASK-020
 type: Task
 title: Avoid holding the service-pool global lock during workspace initialization
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: refactor
