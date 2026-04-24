@@ -306,8 +306,11 @@ func TestSubscriptionCreate_SSRFRejections(t *testing.T) {
 
 	cases := map[string]string{
 		"AWS IMDS (link-local)":        "http://169.254.169.254/latest/meta-data/",
+		"AWS IMDS over https literal":  "https://169.254.169.254/",
 		"loopback IPv4":                "http://127.0.0.1/hook",
 		"loopback hostname":            "http://localhost/hook",
+		"https loopback IPv4 literal":  "https://127.0.0.1/hook",
+		"https RFC1918 literal":        "https://10.0.0.5/hook",
 		"file scheme":                  "file:///etc/passwd",
 		"userinfo in https":            "https://user:pass@example.com/hook",
 		"empty":                        "",

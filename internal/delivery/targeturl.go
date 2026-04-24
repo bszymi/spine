@@ -110,6 +110,17 @@ func (v *TargetValidator) ValidateURL(rawURL string) error {
 	if scheme == "http" && !v.isAllowedHost(host) {
 		return domain.NewError(domain.ErrInvalidParams, "target_url: http scheme only permitted for allowlisted hosts")
 	}
+	// If the host is a literal IP, reject the unsafe ranges at create
+	// time so the row never makes it into the subscriptions table —
+	// otherwise a row like https://127.0.0.1/ would persist and only
+	// fail at dial time with a connection error (not invalid_params).
+	// DNS hostnames are checked at connect time in SafeDialContext
+	// since we can't resolve them from a pure URL parser.
+	if ip := net.ParseIP(host); ip != nil {
+		if err := v.CheckAddr(host, ip); err != nil {
+			return domain.NewError(domain.ErrInvalidParams, "target_url: "+err.Error())
+		}
+	}
 	return nil
 }
 
@@ -209,11 +220,15 @@ func (v *TargetValidator) HTTPClient(timeout time.Duration) *http.Client {
 }
 
 // Transport wraps base (or a fresh default transport) so the final
-// dial goes through SafeDialContext. It leaves every other transport
-// field (TLS config, proxy, etc.) untouched.
+// dial goes through SafeDialContext. It also disables HTTP proxies for
+// the returned transport: if HTTP_PROXY / HTTPS_PROXY were inherited
+// from http.DefaultTransport, the dialer would validate the proxy
+// address rather than the webhook destination, letting a
+// public-looking URL tunnel to a private host. Webhooks should
+// connect to their target directly.
 //
 // A nil receiver returns base (or a cloned default transport) without
-// injecting the safe dialer.
+// injecting the safe dialer or clearing proxies.
 func (v *TargetValidator) Transport(base *http.Transport) *http.Transport {
 	if base == nil {
 		base = http.DefaultTransport.(*http.Transport).Clone()
@@ -221,6 +236,7 @@ func (v *TargetValidator) Transport(base *http.Transport) *http.Transport {
 	if v == nil {
 		return base
 	}
+	base.Proxy = nil
 	base.DialContext = v.SafeDialContext(&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second})
 	return base
 }

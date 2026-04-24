@@ -31,6 +31,13 @@ func TestTargetValidator_ValidateURL(t *testing.T) {
 		{name: "empty host", url: "https:///path", wantErr: "missing host"},
 		{name: "http not allowlisted", url: "http://example.com/", wantErr: "http scheme only permitted"},
 		{name: "parse error", url: "https://[invalid", wantErr: "parse error"},
+
+		// IP-literal rejections applied at URL validation so the row
+		// never lands in the database.
+		{name: "https IPv4 loopback", url: "https://127.0.0.1/hook", wantErr: "loopback"},
+		{name: "https AWS IMDS literal", url: "https://169.254.169.254/", wantErr: "link-local"},
+		{name: "https RFC1918 literal", url: "https://10.0.0.5/hook", wantErr: "private"},
+		{name: "https IPv6 loopback", url: "https://[::1]/hook", wantErr: "loopback"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,6 +158,23 @@ func TestTargetValidator_HTTPClient_RejectsLoopback(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("expected loopback rejection, got %v", err)
+	}
+}
+
+// TestTargetValidator_Transport_DisablesProxy guards against the
+// HTTP_PROXY/HTTPS_PROXY inheritance hole: http.DefaultTransport
+// populates Proxy with ProxyFromEnvironment, which would tunnel
+// webhook traffic to the proxy and bypass the dial-time IP check.
+// The safe transport must clear Proxy so dials always resolve the
+// webhook host directly.
+func TestTargetValidator_Transport_DisablesProxy(t *testing.T) {
+	v := NewTargetValidator(nil)
+	tr := v.Transport(nil)
+	if tr.Proxy != nil {
+		t.Errorf("Transport must clear Proxy to prevent SSRF-via-proxy, got non-nil Proxy")
+	}
+	if tr.DialContext == nil {
+		t.Error("Transport must install SafeDialContext")
 	}
 }
 

@@ -116,6 +116,11 @@ func buildTLSClient(cfg *SubscriptionTLSConfig, timeout time.Duration, targets *
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		})
+		// Disable HTTP proxies so the safe dialer validates the real
+		// webhook destination, not the proxy. Without this, a URL
+		// like https://public.example.com/ could be tunneled to a
+		// private host via a configured proxy.
+		transport.Proxy = nil
 	}
 	return &http.Client{
 		Timeout:   timeout,
