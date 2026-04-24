@@ -126,3 +126,27 @@ func TestIsSpineRepo_EmptyDir(t *testing.T) {
 		t.Error("expected IsSpineRepo=false for empty directory")
 	}
 }
+
+func TestReplaceDatabaseInURL_EdgeCases(t *testing.T) {
+	// Arbitrary format without dbname= falls through to append.
+	got := replaceDatabaseInURL("something=else", "newdb")
+	if got != "something=else dbname=newdb" {
+		t.Errorf("fallback append: got %q", got)
+	}
+
+	// dbname= replacement preserves trailing key=value pairs.
+	got = replaceDatabaseInURL("host=localhost dbname=old sslmode=disable", "newdb")
+	if got != "host=localhost dbname=newdb sslmode=disable" {
+		t.Errorf("dbname= middle replace: got %q", got)
+	}
+
+	// postgres:// with no path and a query string: the last "/" is the
+	// slash after the scheme, so the path and query are replaced. This
+	// is the documented current behaviour (pgIdentifier inputs are
+	// produced by sanitizeDBName, never raw URLs); if the helper ever
+	// gains real URL parsing, update this expectation.
+	got = replaceDatabaseInURL("postgres://host?sslmode=disable", "newdb")
+	if got != "postgres://newdb?sslmode=disable" {
+		t.Errorf("no-path URL: got %q", got)
+	}
+}
