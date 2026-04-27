@@ -2,7 +2,7 @@
 id: TASK-007
 type: Task
 title: Idle eviction and invalidation-driven pool close
-status: Draft
+status: Pending
 epic: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/epics/EPIC-003-pool-policy/epic.md
 initiative: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/initiative.md
 links:
