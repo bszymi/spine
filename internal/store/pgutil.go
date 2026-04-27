@@ -7,7 +7,6 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // notFoundOr maps pgx.ErrNoRows to a domain NotFound error with the given
@@ -38,7 +37,7 @@ func mustAffect(tag pgconn.CommandTag, message string) error {
 // → append` loop that otherwise repeats at every "List by X" site.
 func queryAll[T any](
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	pool poolQuerier,
 	sql string,
 	args []any,
 	scan func(pgx.Rows, *T) error,

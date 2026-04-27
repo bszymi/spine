@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -1051,6 +1052,7 @@ func buildWorkspaceResolver(
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
+			DBPolicy:     dbPolicyFromEnv(),
 		})
 		log.Info("workspace resolver: db", "registry_url", "***")
 		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool}, nil
@@ -1084,6 +1086,7 @@ func buildWorkspaceResolver(
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
+			DBPolicy:     dbPolicyFromEnv(),
 		})
 		invalidator := &workspace.CombinedBindingInvalidator{
 			Provider: provider,
@@ -1106,6 +1109,40 @@ func buildWorkspaceResolver(
 	default:
 		return nil, fmt.Errorf("unknown WORKSPACE_RESOLVER=%q (expected file|db|platform-binding)", resolver)
 	}
+}
+
+// dbPolicyFromEnv reads ADR-012 pool overrides from environment
+// variables. Unset fields fall back to PoolPolicyDefault().
+//
+//   - SPINE_WS_POOL_MIN_CONNS, SPINE_WS_POOL_MAX_CONNS
+//   - SPINE_WS_POOL_ACQUIRE_TIMEOUT (Go duration; e.g. "5s")
+//   - SPINE_WS_POOL_HEALTH_CHECK_PERIOD
+//   - SPINE_WS_POOL_QUEUE_SIZE
+//
+// Per-workspace overrides via binding metadata are out of scope
+// here; ADR-012 leaves that for a future binding field.
+func dbPolicyFromEnv() workspace.PoolPolicy {
+	var p workspace.PoolPolicy
+	if v := parsePositiveIntEnv("SPINE_WS_POOL_MIN_CONNS"); v > 0 && v <= math.MaxInt32 {
+		p.MinConns = int32(v)
+	}
+	if v := parsePositiveIntEnv("SPINE_WS_POOL_MAX_CONNS"); v > 0 && v <= math.MaxInt32 {
+		p.MaxConns = int32(v)
+	}
+	if raw := os.Getenv("SPINE_WS_POOL_ACQUIRE_TIMEOUT"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			p.AcquireTimeout = d
+		}
+	}
+	if raw := os.Getenv("SPINE_WS_POOL_HEALTH_CHECK_PERIOD"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			p.HealthCheckPeriod = d
+		}
+	}
+	if v := parsePositiveIntEnv("SPINE_WS_POOL_QUEUE_SIZE"); v > 0 {
+		p.QueueSize = v
+	}
+	return p
 }
 
 // buildSecretClient constructs a SecretClient based on

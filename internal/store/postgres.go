@@ -4,15 +4,41 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	spinecrypto "github.com/bszymi/spine/internal/crypto"
 	"github.com/bszymi/spine/internal/domain"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// poolQuerier is the subset of *pgxpool.Pool that PostgresStore
+// depends on. Both *pgxpool.Pool and the per-workspace
+// WorkspaceDBPool (which adds the ADR-012 saturation gate)
+// satisfy it, so the store can run gated or ungated against the
+// same SQL surface.
+type poolQuerier interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Ping(ctx context.Context) error
+}
 
 // PostgresStore implements Store using PostgreSQL via pgx.
 type PostgresStore struct {
-	pool   *pgxpool.Pool
-	cipher *spinecrypto.SecretCipher
+	pool poolQuerier
+	// rawPool is the underlying pgxpool.Pool, retained for the
+	// owning teardown path and any future code that needs raw pool
+	// access (e.g. Stat). Nil only in tests; production code always
+	// has a backing pgxpool.
+	rawPool *pgxpool.Pool
+	// ownsPool is true when PostgresStore opened the pgxpool itself
+	// (single-workspace path) and false when an outer wrapper handed
+	// the pool in (per-workspace WorkspaceDBPool path). Close
+	// respects this so the pool is torn down exactly once.
+	ownsPool bool
+	cipher   *spinecrypto.SecretCipher
 }
 
 // SetSecretCipher installs the AEAD used to encrypt at-rest secrets
@@ -30,6 +56,7 @@ func (s *PostgresStore) secretCipher() *spinecrypto.SecretCipher {
 }
 
 // NewPostgresStore creates a new PostgreSQL store with connection pooling.
+// The returned store owns the pgxpool and tears it down on Close.
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -41,12 +68,24 @@ func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, 
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	return &PostgresStore{pool: pool}, nil
+	return &PostgresStore{pool: pool, rawPool: pool, ownsPool: true}, nil
 }
 
-// Close closes the connection pool.
+// NewPostgresStoreWithQuerier wraps an externally-owned pool in a
+// PostgresStore. The querier may be a saturation-gated wrapper
+// (e.g. workspace.WorkspaceDBPool) that satisfies the same Begin /
+// Query / QueryRow / Exec / Ping surface as *pgxpool.Pool. The
+// store does not Close the pool — the caller retains ownership and
+// drives tear-down through the wrapper.
+func NewPostgresStoreWithQuerier(querier poolQuerier) *PostgresStore {
+	return &PostgresStore{pool: querier, ownsPool: false}
+}
+
+// Close closes the connection pool if this store owns it.
 func (s *PostgresStore) Close() {
-	s.pool.Close()
+	if s.ownsPool && s.rawPool != nil {
+		s.rawPool.Close()
+	}
 }
 
 // Ping checks database connectivity.

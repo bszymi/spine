@@ -2,6 +2,7 @@ package observe
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,7 +98,54 @@ func ExportPrometheus() string {
 	writeHistogram(&b, "spine_run_duration_seconds", m.RunDuration)
 	writeHistogram(&b, "spine_step_duration_seconds", m.StepDuration)
 
+	writePoolMetrics(&b)
+
 	return b.String()
+}
+
+// writePoolMetrics emits the per-workspace connection-pool series
+// from ADR-012. Gauges are read live from the workspace pool
+// registry; counters live in poolStatsRegistry.
+func writePoolMetrics(b *strings.Builder) {
+	gauges := currentPoolGauges()
+	if len(gauges) > 0 {
+		sort.Slice(gauges, func(i, j int) bool { return gauges[i].WorkspaceID < gauges[j].WorkspaceID })
+		fmt.Fprintf(b, "# TYPE spine_workspace_pool_size gauge\n")
+		for _, g := range gauges {
+			fmt.Fprintf(b, "spine_workspace_pool_size{workspace_id=%q} %d\n", g.WorkspaceID, g.TotalConns)
+		}
+		fmt.Fprintf(b, "# TYPE spine_workspace_pool_in_use gauge\n")
+		for _, g := range gauges {
+			fmt.Fprintf(b, "spine_workspace_pool_in_use{workspace_id=%q} %d\n", g.WorkspaceID, g.AcquiredConns)
+		}
+		fmt.Fprintf(b, "# TYPE spine_workspace_pool_idle gauge\n")
+		for _, g := range gauges {
+			fmt.Fprintf(b, "spine_workspace_pool_idle{workspace_id=%q} %d\n", g.WorkspaceID, g.IdleConns)
+		}
+		fmt.Fprintf(b, "# TYPE spine_workspace_pool_max gauge\n")
+		for _, g := range gauges {
+			fmt.Fprintf(b, "spine_workspace_pool_max{workspace_id=%q} %d\n", g.WorkspaceID, g.MaxConns)
+		}
+	}
+
+	stats := listPoolStats()
+	if len(stats) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "# TYPE spine_workspace_pool_open_total counter\n")
+	for _, s := range stats {
+		fmt.Fprintf(b, "spine_workspace_pool_open_total{workspace_id=%q} %d\n", s.id, s.stats.Open.Value())
+	}
+	fmt.Fprintf(b, "# TYPE spine_workspace_pool_saturation_total counter\n")
+	for _, s := range stats {
+		fmt.Fprintf(b, "spine_workspace_pool_saturation_total{workspace_id=%q} %d\n", s.id, s.stats.Saturation.Value())
+	}
+	fmt.Fprintf(b, "# TYPE spine_workspace_pool_close_total counter\n")
+	for _, s := range stats {
+		for _, rc := range s.stats.closeReasons() {
+			fmt.Fprintf(b, "spine_workspace_pool_close_total{workspace_id=%q,reason=%q} %d\n", s.id, rc.reason, rc.count)
+		}
+	}
 }
 
 func writeCounter(b *strings.Builder, name string, value int64) {
