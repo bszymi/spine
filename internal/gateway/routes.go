@@ -23,6 +23,16 @@ func (s *Server) routes() http.Handler {
 	// Git smart HTTP endpoint — outside /api/v1, own auth logic.
 	s.mountGitRoutes(r)
 
+	// Platform → Spine binding-invalidation webhook (ADR-011).
+	// Outside /api/v1: it is internal control plane, not actor API.
+	// The handler enforces its own bearer-token auth, so it sits
+	// outside the global middleware groups.
+	if s.bindingInvalidationHandler != nil {
+		r.Method(http.MethodPost,
+			"/internal/v1/workspaces/{workspace_id}/binding-invalidate",
+			s.bindingInvalidationHandler)
+	}
+
 	r.Route("/api/v1", func(r chi.Router) {
 		// Unauthenticated
 		r.Get("/system/health", s.handleHealth)

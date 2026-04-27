@@ -435,6 +435,31 @@ func TestPlatformBindingProvider_AuthHeaderIsBearer(t *testing.T) {
 	}
 }
 
+func TestPlatformBindingProvider_CombinedInvalidatorDropsCache(t *testing.T) {
+	// End-to-end check that CombinedBindingInvalidator forces a
+	// refetch on the next Resolve and (if a pool is wired) evicts
+	// the corresponding pool entry.
+	ps := newPlatformServer(t, map[string]workspace.PlatformBinding{"acme": bindingFor("acme")})
+	sc := seedFakeSecrets("acme")
+	p := newProvider(t, ps, sc)
+
+	if _, err := p.Resolve(context.Background(), "acme"); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+
+	inv := &workspace.CombinedBindingInvalidator{Provider: p}
+	inv.InvalidateBinding("acme")
+
+	// Expect a fresh platform fetch on the next Resolve, even though
+	// the TTL has not elapsed.
+	if _, err := p.Resolve(context.Background(), "acme"); err != nil {
+		t.Fatalf("post-invalidate Resolve: %v", err)
+	}
+	if got := ps.hits.Load(); got != 2 {
+		t.Fatalf("platform hits = %d, want 2 (CombinedBindingInvalidator must force refetch)", got)
+	}
+}
+
 func TestPlatformBindingProvider_RejectsBindingForDifferentWorkspace(t *testing.T) {
 	// Platform returns a binding whose workspace_id does not match the
 	// requested workspace. This must not be cached and must surface as
