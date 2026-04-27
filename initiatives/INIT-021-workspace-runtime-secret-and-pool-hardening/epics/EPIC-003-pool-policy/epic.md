@@ -2,7 +2,7 @@
 id: EPIC-003
 type: Epic
 title: Per-workspace pool and cache policy
-status: Draft
+status: Pending
 initiative: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/initiative.md
 links:
   - type: parent

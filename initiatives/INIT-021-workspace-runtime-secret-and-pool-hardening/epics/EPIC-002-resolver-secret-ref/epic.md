@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: Resolver dereference of secret references
-status: Draft
+status: Pending
 initiative: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/initiative.md
 links:
   - type: parent
