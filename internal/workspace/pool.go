@@ -57,15 +57,19 @@ type ServiceSet struct {
 	RunCanceller       any
 	StepAssigner       any
 
-	// close is called when the service set is evicted or the pool shuts down.
-	close func()
+	// close is called when the service set is evicted or the pool
+	// shuts down. The reason is recorded on the per-workspace pool
+	// close-reason metric (ADR-012). Callers pass one of:
+	// "shutdown", "idle", "invalidate", "init-error".
+	close func(reason string)
 }
 
 type poolEntry struct {
-	services   *ServiceSet
-	lastAccess time.Time
-	refCount   int32 // number of active users of this service set
-	evicting   bool  // marked for deferred close on last Release
+	services    *ServiceSet
+	lastAccess  time.Time
+	refCount    int32  // number of active users of this service set
+	evicting    bool   // marked for deferred close on last Release
+	evictReason string // close-reason when the deferred close fires
 
 	// ready signals completion of initialization. Closed exactly once
 	// (tracked by readyClosed) when services is populated on success or
@@ -93,6 +97,7 @@ type ServicePool struct {
 	idleTimeout  time.Duration
 	builder      ServiceSetBuilder
 	secretCipher *spinecrypto.SecretCipher
+	dbPolicy     PoolPolicy
 	closed       bool
 	ctx          context.Context    // pool-lifetime context for background goroutines
 	cancel       context.CancelFunc // cancels pool-lifetime context on Close
@@ -118,6 +123,10 @@ type PoolConfig struct {
 	// PostgresStore so at-rest secrets (e.g. webhook signing secrets)
 	// are encrypted with the same key used in single-workspace mode.
 	SecretCipher *spinecrypto.SecretCipher
+
+	// DBPolicy is the per-workspace connection-pool policy from
+	// ADR-012. Zero-valued fields fall back to PoolPolicyDefault().
+	DBPolicy PoolPolicy
 }
 
 // NewServicePool creates a service pool backed by the given resolver.
@@ -135,6 +144,7 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		idleTimeout:  timeout,
 		builder:      cfg.Builder,
 		secretCipher: cfg.SecretCipher,
+		dbPolicy:     cfg.DBPolicy,
 		ctx:          poolCtx,
 		cancel:       cancel,
 	}
@@ -274,7 +284,7 @@ func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
 // inserted the entry into p.entries with refCount=1 before releasing the
 // mutex.
 func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, cfg Config, entry *poolEntry) (*ServiceSet, error) {
-	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher)
+	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.dbPolicy)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -283,7 +293,7 @@ func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, c
 	// we built so we don't leak goroutines or DB connections.
 	if p.closed {
 		if ss != nil {
-			ss.close()
+			ss.close("shutdown")
 		}
 		closedErr := fmt.Errorf("service pool is closed")
 		// Close may already have set initErr and signaled waiters; the
@@ -330,7 +340,11 @@ func (p *ServicePool) Release(workspaceID string) {
 
 		if entry.evicting && entry.refCount == 0 {
 			if entry.services != nil {
-				entry.services.close()
+				reason := entry.evictReason
+				if reason == "" {
+					reason = "invalidate"
+				}
+				entry.services.close(reason)
 			}
 			p.removeLocked(workspaceID, entry)
 		}
@@ -340,7 +354,10 @@ func (p *ServicePool) Release(workspaceID string) {
 // Evict removes a specific workspace's service set from the pool.
 // If the set has active references, it is marked for deferred closure —
 // Release will close it when the last reference is dropped. If no
-// active references, it is closed and removed immediately.
+// active references, it is closed and removed immediately. The
+// close-reason is recorded as "invalidate" so the per-workspace
+// pool close-reason metric distinguishes platform-driven drops
+// from idle eviction and shutdown.
 func (p *ServicePool) Evict(workspaceID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -348,9 +365,10 @@ func (p *ServicePool) Evict(workspaceID string) {
 		if entry.refCount > 0 {
 			// Mark for deferred close — Release will handle cleanup.
 			entry.evicting = true
+			entry.evictReason = "invalidate"
 		} else {
 			if entry.services != nil {
-				entry.services.close()
+				entry.services.close("invalidate")
 			}
 			p.removeLocked(workspaceID, entry)
 		}
@@ -386,7 +404,7 @@ func (p *ServicePool) EvictIdle() {
 	for id, entry := range p.entries {
 		if entry.refCount == 0 && now.Sub(entry.lastAccess) > p.idleTimeout {
 			if entry.services != nil {
-				entry.services.close()
+				entry.services.close("idle")
 			}
 			p.removeLocked(id, entry)
 		}
@@ -406,7 +424,7 @@ func (p *ServicePool) Close() {
 	closedErr := fmt.Errorf("service pool is closed")
 	for id, entry := range p.entries {
 		if entry.services != nil {
-			entry.services.close()
+			entry.services.close("shutdown")
 		} else {
 			// In-flight entry: wake any Get waiters with a closed-pool
 			// error so they don't block until ctx is cancelled. The
@@ -425,21 +443,29 @@ func (p *ServicePool) Close() {
 }
 
 // buildServiceSet creates a complete service set from a workspace config.
-func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher) (*ServiceSet, error) {
-	var closers []func()
+func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, dbPolicy PoolPolicy) (*ServiceSet, error) {
+	// Each closer accepts the reason the service set is being torn
+	// down so the workspace pool can record the per-reason
+	// close-counter (ADR-012). Closers that don't care about the
+	// reason simply ignore it.
+	var closers []func(reason string)
 
 	// Database.
 	var st store.Store
 	var pgStore *store.PostgresStore
 	if cfg.DatabaseURL != "" {
-		var err error
-		pgStore, err = store.NewPostgresStore(ctx, cfg.DatabaseURL)
+		// Build a per-workspace pgxpool with ADR-012 policy and wrap
+		// it for saturation observability. The PostgresStore reads
+		// through the underlying pgxpool; the WorkspaceDBPool owns
+		// teardown and metric registration.
+		wp, err := NewWorkspaceDBPool(ctx, cfg.ID, cfg.DatabaseURL, dbPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("connect to workspace database: %w", err)
 		}
+		pgStore = store.NewPostgresStoreWithQuerier(wp)
 		pgStore.SetSecretCipher(cipher)
 		st = pgStore
-		closers = append(closers, pgStore.Close)
+		closers = append(closers, func(reason string) { wp.Close(reason) })
 	}
 
 	// Git client.
@@ -470,7 +496,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// Queue and event router.
 	q := queue.NewMemoryQueue(100)
 	go q.Start(ctx)
-	closers = append(closers, func() { q.Stop() })
+	closers = append(closers, func(string) { q.Stop() })
 	eventRouter := event.NewQueueRouter(q)
 
 	// Artifact service. The branch-protection policy is wired from the
@@ -517,9 +543,9 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		divSvc.WithBranchProtectPolicy(branchprotect.New(bpprojection.New(st)))
 	}
 
-	closeAll := func() {
+	closeAll := func(reason string) {
 		for i := len(closers) - 1; i >= 0; i-- {
-			closers[i]()
+			closers[i](reason)
 		}
 	}
 
@@ -548,7 +574,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// Run optional builder hook for engine-dependent services.
 	if builder != nil {
 		if err := builder(ctx, ss); err != nil {
-			closeAll()
+			closeAll("init-error")
 			return nil, fmt.Errorf("service set builder: %w", err)
 		}
 	}

@@ -237,11 +237,11 @@ func TestBuildServiceSet_NoStore_NilValidatorAndDivergence(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{ID: "ws-nostore", RepoPath: "."}
 
-	ss, err := buildServiceSet(ctx, cfg, nil, nil)
+	ss, err := buildServiceSet(ctx, cfg, nil, nil, PoolPolicy{})
 	if err != nil {
 		t.Fatalf("buildServiceSet: %v", err)
 	}
-	defer ss.close()
+	defer ss.close("shutdown")
 
 	if ss.Validator != nil {
 		t.Error("expected nil Validator when no database URL")

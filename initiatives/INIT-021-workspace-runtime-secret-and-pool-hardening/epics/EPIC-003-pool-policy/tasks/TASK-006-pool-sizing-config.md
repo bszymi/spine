@@ -2,7 +2,7 @@
 id: TASK-006
 type: Task
 title: Per-workspace pool sizing and configuration
-status: Pending
+status: Completed
 epic: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/epics/EPIC-003-pool-policy/epic.md
 initiative: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/initiative.md
 links:

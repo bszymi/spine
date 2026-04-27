@@ -28,11 +28,20 @@ type SpineError struct {
 	Code    ErrorCode `json:"code" yaml:"code"`
 	Message string    `json:"message" yaml:"message"`
 	Detail  any       `json:"detail,omitempty" yaml:"detail,omitempty"`
+
+	// cause is an optional wrapped error so callers can use
+	// errors.Is / errors.As against package-level sentinels
+	// (e.g. workspace.ErrPoolSaturated) without losing the
+	// HTTP-mapped Code/Message that the gateway needs.
+	cause error
 }
 
 func (e *SpineError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }
+
+// Unwrap returns the wrapped cause for errors.Is / errors.As.
+func (e *SpineError) Unwrap() error { return e.cause }
 
 // NewError creates a new SpineError.
 func NewError(code ErrorCode, message string) *SpineError {
@@ -42,6 +51,13 @@ func NewError(code ErrorCode, message string) *SpineError {
 // NewErrorWithDetail creates a new SpineError with structured detail.
 func NewErrorWithDetail(code ErrorCode, message string, detail any) *SpineError {
 	return &SpineError{Code: code, Message: message, Detail: detail}
+}
+
+// NewErrorWithCause wraps a cause error so the gateway can map the
+// SpineError to an HTTP status while callers can still match the
+// underlying sentinel via errors.Is.
+func NewErrorWithCause(code ErrorCode, message string, cause error) *SpineError {
+	return &SpineError{Code: code, Message: message, cause: cause}
 }
 
 // ViolationClassification classifies a validation failure for resolution guidance.
