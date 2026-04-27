@@ -811,3 +811,201 @@ func TestServicePool_Close(t *testing.T) {
 		t.Fatal("expected error after pool closed")
 	}
 }
+
+// countingResolver wraps multiConfigResolver and counts Resolve calls
+// per workspace ID. Used to assert that Evict + Get triggers a fresh
+// resolver lookup (re-resolve binding after invalidation).
+type countingResolver struct {
+	inner multiConfigResolver
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (r *countingResolver) Resolve(ctx context.Context, id string) (*Config, error) {
+	r.mu.Lock()
+	if r.calls == nil {
+		r.calls = make(map[string]int)
+	}
+	r.calls[id]++
+	r.mu.Unlock()
+	return r.inner.Resolve(ctx, id)
+}
+
+func (r *countingResolver) List(ctx context.Context) ([]Config, error) { return r.inner.List(ctx) }
+
+func (r *countingResolver) callsFor(id string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls[id]
+}
+
+// TestServicePool_BackgroundIdleEvictor verifies that a ServicePool
+// constructed with a short IdleCheckInterval evicts idle workspaces
+// without an explicit EvictIdle() call. ADR-012 requires that idle
+// pools be closed automatically; this test pins the contract.
+func TestServicePool_BackgroundIdleEvictor(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"ws-bg": {ID: "ws-bg", RepoPath: ".", Status: StatusActive},
+	}}
+	pool := NewServicePool(ctx, resolver, PoolConfig{
+		IdleTimeout:       10 * time.Millisecond,
+		IdleCheckInterval: 5 * time.Millisecond,
+	})
+	defer pool.Close()
+
+	if _, err := pool.Get(ctx, "ws-bg"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	pool.Release("ws-bg")
+	if pool.ActiveCount() != 1 {
+		t.Fatalf("expected 1 active before idle, got %d", pool.ActiveCount())
+	}
+
+	// The background loop should drop the entry without us calling
+	// EvictIdle() ourselves.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.ActiveCount() == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("background evictor did not remove idle entry (active=%d)", pool.ActiveCount())
+}
+
+// TestServicePool_BackgroundIdleEvictor_DisabledByNegativeInterval
+// ensures unit-test callers can opt out of the background loop by
+// passing IdleCheckInterval < 0 — otherwise tests that drive
+// EvictIdle by hand would race the ticker.
+func TestServicePool_BackgroundIdleEvictor_DisabledByNegativeInterval(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"ws-disabled": {ID: "ws-disabled", RepoPath: ".", Status: StatusActive},
+	}}
+	pool := NewServicePool(ctx, resolver, PoolConfig{
+		IdleTimeout:       1 * time.Millisecond,
+		IdleCheckInterval: -1,
+	})
+	defer pool.Close()
+
+	if _, err := pool.Get(ctx, "ws-disabled"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	pool.Release("ws-disabled")
+
+	// Even after the idle timeout passes the entry must still be
+	// present, because the loop is disabled and no one calls
+	// EvictIdle.
+	time.Sleep(20 * time.Millisecond)
+	if pool.ActiveCount() != 1 {
+		t.Fatalf("disabled background loop should not evict; got active=%d", pool.ActiveCount())
+	}
+}
+
+// TestServicePool_Evict_IsolatesWorkspaces asserts the ADR-011
+// guarantee that invalidating workspace A does not disturb B or C.
+func TestServicePool_Evict_IsolatesWorkspaces(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"acme":    {ID: "acme", RepoPath: ".", Status: StatusActive},
+		"globex":  {ID: "globex", RepoPath: ".", Status: StatusActive},
+		"initech": {ID: "initech", RepoPath: ".", Status: StatusActive},
+	}}
+	pool := NewServicePool(ctx, resolver, PoolConfig{IdleCheckInterval: -1})
+	defer pool.Close()
+
+	for _, id := range []string{"acme", "globex", "initech"} {
+		if _, err := pool.Get(ctx, id); err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		pool.Release(id)
+	}
+	if pool.ActiveCount() != 3 {
+		t.Fatalf("expected 3 active before evict, got %d", pool.ActiveCount())
+	}
+
+	pool.Evict("acme")
+
+	if pool.ActiveCount() != 2 {
+		t.Fatalf("expected 2 active after evicting acme, got %d", pool.ActiveCount())
+	}
+	if pool.RefCount("acme") != 0 {
+		t.Errorf("acme should be gone, refCount=%d", pool.RefCount("acme"))
+	}
+	if _, ok := poolHasEntry(pool, "globex"); !ok {
+		t.Error("evict acme accidentally dropped globex")
+	}
+	if _, ok := poolHasEntry(pool, "initech"); !ok {
+		t.Error("evict acme accidentally dropped initech")
+	}
+}
+
+// poolHasEntry is a test-only probe of ServicePool.entries that
+// avoids exposing the internal map publicly.
+func poolHasEntry(p *ServicePool, id string) (*poolEntry, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.entries[id]
+	return e, ok
+}
+
+// TestServicePool_GetAfterEvict_ReResolves verifies that after
+// Evict, the next Get for the same workspace runs the resolver again
+// — this is how an invalidation webhook causes credentials to be
+// re-fetched (ADR-012 invalidation triggers).
+func TestServicePool_GetAfterEvict_ReResolves(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &countingResolver{inner: multiConfigResolver{configs: map[string]Config{
+		"ws-rotate": {ID: "ws-rotate", RepoPath: ".", Status: StatusActive},
+	}}}
+	pool := NewServicePool(ctx, resolver, PoolConfig{IdleCheckInterval: -1})
+	defer pool.Close()
+
+	first, err := pool.Get(ctx, "ws-rotate")
+	if err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	pool.Release("ws-rotate")
+
+	// Cache hit: resolver may be called by Get (it canonicalizes the
+	// workspace ID), but the service set is reused.
+	cached, err := pool.Get(ctx, "ws-rotate")
+	if err != nil {
+		t.Fatalf("cached Get: %v", err)
+	}
+	pool.Release("ws-rotate")
+	if cached != first {
+		t.Fatal("expected cached service set to be reused before evict")
+	}
+
+	callsBefore := resolver.callsFor("ws-rotate")
+
+	// Simulate a binding-invalidate webhook hitting this workspace.
+	pool.Evict("ws-rotate")
+	if pool.ActiveCount() != 0 {
+		t.Fatalf("expected 0 active after evict, got %d", pool.ActiveCount())
+	}
+
+	// Subsequent Get must re-resolve and produce a fresh service set.
+	rebuilt, err := pool.Get(ctx, "ws-rotate")
+	if err != nil {
+		t.Fatalf("post-evict Get: %v", err)
+	}
+	defer pool.Release("ws-rotate")
+
+	if rebuilt == first {
+		t.Error("post-evict Get returned the same service set; expected a fresh build")
+	}
+	if got := resolver.callsFor("ws-rotate"); got <= callsBefore {
+		t.Errorf("expected resolver to be called again after evict; calls before=%d after=%d", callsBefore, got)
+	}
+}

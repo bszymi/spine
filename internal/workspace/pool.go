@@ -111,8 +111,14 @@ type ServiceSetBuilder func(ctx context.Context, ss *ServiceSet) error
 // PoolConfig holds configuration for the service pool.
 type PoolConfig struct {
 	// IdleTimeout is how long an unused service set is kept before eviction.
-	// Default: 15 minutes.
+	// Default: 10 minutes (ADR-012).
 	IdleTimeout time.Duration
+
+	// IdleCheckInterval is how often the background eviction loop
+	// scans for idle workspaces. Default: IdleTimeout / 4, clamped
+	// to [30s, 5min]. Set to a negative value to disable the loop
+	// entirely (tests that drive EvictIdle by hand).
+	IdleCheckInterval time.Duration
 
 	// Builder is an optional hook called after basic service construction.
 	// Use it to inject orchestrator-dependent services that would create
@@ -131,14 +137,15 @@ type PoolConfig struct {
 
 // NewServicePool creates a service pool backed by the given resolver.
 // The provided context is used as the parent for pool-lifetime goroutines
-// (e.g., queue workers). It should not be a request context.
+// (e.g., queue workers, idle-eviction ticker). It should not be a
+// request context.
 func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *ServicePool {
 	timeout := cfg.IdleTimeout
 	if timeout == 0 {
-		timeout = 15 * time.Minute
+		timeout = 10 * time.Minute
 	}
 	poolCtx, cancel := context.WithCancel(ctx)
-	return &ServicePool{
+	p := &ServicePool{
 		resolver:     resolver,
 		entries:      make(map[string]*poolEntry),
 		idleTimeout:  timeout,
@@ -147,6 +154,49 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		dbPolicy:     cfg.DBPolicy,
 		ctx:          poolCtx,
 		cancel:       cancel,
+	}
+	if interval := resolveIdleCheckInterval(cfg.IdleCheckInterval, timeout); interval > 0 {
+		go p.runIdleEvictor(interval)
+	}
+	return p
+}
+
+// resolveIdleCheckInterval picks the eviction tick rate. A negative
+// configured value disables the background loop (callers drive
+// EvictIdle by hand — used by unit tests). Zero means "use a sane
+// default derived from IdleTimeout". Otherwise the configured value
+// is used verbatim.
+func resolveIdleCheckInterval(configured, idleTimeout time.Duration) time.Duration {
+	if configured < 0 {
+		return 0
+	}
+	if configured > 0 {
+		return configured
+	}
+	interval := idleTimeout / 4
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+	if interval > 5*time.Minute {
+		interval = 5 * time.Minute
+	}
+	return interval
+}
+
+// runIdleEvictor scans for idle workspaces every interval and closes
+// any whose lastAccess is older than idleTimeout with no active
+// references. Exits when the pool's lifetime context is cancelled
+// (Close).
+func (p *ServicePool) runIdleEvictor(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-t.C:
+			p.EvictIdle()
+		}
 	}
 }
 
