@@ -1053,6 +1053,7 @@ func buildWorkspaceResolver(
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
 			DBPolicy:     dbPolicyFromEnv(),
+			IdleTimeout:  poolIdleTimeoutFromEnv(),
 		})
 		log.Info("workspace resolver: db", "registry_url", "***")
 		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool}, nil
@@ -1087,6 +1088,7 @@ func buildWorkspaceResolver(
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
 			DBPolicy:     dbPolicyFromEnv(),
+			IdleTimeout:  poolIdleTimeoutFromEnv(),
 		})
 		invalidator := &workspace.CombinedBindingInvalidator{
 			Provider: provider,
@@ -1143,6 +1145,22 @@ func dbPolicyFromEnv() workspace.PoolPolicy {
 		p.QueueSize = v
 	}
 	return p
+}
+
+// poolIdleTimeoutFromEnv reads SPINE_WS_POOL_IDLE_TIMEOUT (Go duration,
+// e.g. "10m"). Zero means "use the ServicePool default" (10m, ADR-012).
+// Bad values are silently ignored so a typo doesn't fail startup; the
+// default keeps the runtime correct.
+func poolIdleTimeoutFromEnv() time.Duration {
+	raw := os.Getenv("SPINE_WS_POOL_IDLE_TIMEOUT")
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // buildSecretClient constructs a SecretClient based on
