@@ -2,7 +2,7 @@
 id: TASK-004
 type: Task
 title: Resolver dereference of binding secret refs
-status: Pending
+status: Completed
 epic: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/epics/EPIC-002-resolver-secret-ref/epic.md
 initiative: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/initiative.md
 links:

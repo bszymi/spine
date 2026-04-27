@@ -11,6 +11,14 @@ var ErrWorkspaceNotFound = errors.New("workspace not found")
 // ErrWorkspaceInactive is returned when a workspace exists but is not active.
 var ErrWorkspaceInactive = errors.New("workspace inactive")
 
+// ErrWorkspaceUnavailable is returned when a workspace exists but its
+// configuration cannot currently be assembled — typically because the
+// platform binding API or the secret store are unreachable, or
+// credentials cannot be retrieved for the workspace. Resolvers wrap
+// this sentinel via fmt.Errorf %w so callers can distinguish a
+// transient outage from a true "not found".
+var ErrWorkspaceUnavailable = errors.New("workspace unavailable")
+
 // Resolver resolves workspace configuration by ID.
 // Per components.md §6.5, two implementations exist:
 //   - File/env provider for single-workspace mode

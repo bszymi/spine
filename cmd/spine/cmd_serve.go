@@ -32,6 +32,7 @@ import (
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
 	"github.com/bszymi/spine/internal/scheduler"
+	"github.com/bszymi/spine/internal/secrets"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
@@ -992,25 +993,35 @@ func serveCmd() *cobra.Command {
 }
 
 // buildWorkspaceResolver initializes the workspace resolver based on
-// SPINE_WORKSPACE_MODE.
+// the WORKSPACE_RESOLVER env var (file | db | platform-binding).
+//
+// SPINE_WORKSPACE_MODE was retired in ADR-011; if it is set without
+// WORKSPACE_RESOLVER, startup fails fast so a deployment that missed
+// the migration cannot silently fall back.
 func buildWorkspaceResolver(
 	ctx context.Context,
 	secretCipher *spinecrypto.SecretCipher,
 	log *slog.Logger,
 ) (workspace.Resolver, *workspace.DBProvider, *workspace.ServicePool, error) {
-	wsMode := os.Getenv("SPINE_WORKSPACE_MODE")
-	if wsMode == "" {
-		wsMode = "single"
+	resolver := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER")))
+	legacyMode := os.Getenv("SPINE_WORKSPACE_MODE")
+
+	if resolver == "" {
+		if legacyMode != "" {
+			return nil, nil, nil, fmt.Errorf("SPINE_WORKSPACE_MODE=%q is no longer supported; set WORKSPACE_RESOLVER=file|db|platform-binding (see ADR-011)", legacyMode)
+		}
+		resolver = "file"
 	}
 
-	switch wsMode {
-	case "single":
-		log.Info("workspace mode: single", "workspace_id", os.Getenv("SPINE_WORKSPACE_ID"))
+	switch resolver {
+	case "file":
+		log.Info("workspace resolver: file", "workspace_id", os.Getenv("SPINE_WORKSPACE_ID"))
 		return workspace.NewFileProvider(), nil, nil, nil
-	case "shared":
+
+	case "db":
 		registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
 		if registryURL == "" {
-			return nil, nil, nil, fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required in shared workspace mode")
+			return nil, nil, nil, fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required for WORKSPACE_RESOLVER=db")
 		}
 		if err := requireSecureDBURL(registryURL); err != nil {
 			return nil, nil, nil, fmt.Errorf("registry URL: %w", err)
@@ -1023,10 +1034,75 @@ func buildWorkspaceResolver(
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
 		})
-		log.Info("workspace mode: shared", "registry_url", "***")
+		log.Info("workspace resolver: db", "registry_url", "***")
 		return provider, provider, pool, nil
+
+	case "platform-binding":
+		platformURL := os.Getenv("SPINE_PLATFORM_URL")
+		if platformURL == "" {
+			return nil, nil, nil, fmt.Errorf("SPINE_PLATFORM_URL is required for WORKSPACE_RESOLVER=platform-binding")
+		}
+		serviceToken := os.Getenv("SPINE_PLATFORM_SERVICE_TOKEN")
+		if serviceToken == "" {
+			return nil, nil, nil, fmt.Errorf("SPINE_PLATFORM_SERVICE_TOKEN is required for WORKSPACE_RESOLVER=platform-binding")
+		}
+		secretClient, err := buildSecretClient(ctx)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		provider, err := workspace.NewPlatformBindingProvider(workspace.PlatformBindingConfig{
+			PlatformBaseURL: platformURL,
+			ServiceToken:    serviceToken,
+			SecretClient:    secretClient,
+		})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("init platform-binding resolver: %w", err)
+		}
+		// Multi-workspace traffic routes per-workspace stores/git
+		// services through ServicePool; wire it on top of the new
+		// resolver so requests don't fall through to the
+		// process-level store. EPIC-003 (TASK-006/007) refines pool
+		// sizing and invalidation for this mode.
+		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
+			Builder:      workspaceOrchestratorBuilder,
+			SecretCipher: secretCipher,
+		})
+		log.Info("workspace resolver: platform-binding", "platform_url", platformURL)
+		return provider, nil, pool, nil
+
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown SPINE_WORKSPACE_MODE: %q (expected \"single\" or \"shared\")", wsMode)
+		return nil, nil, nil, fmt.Errorf("unknown WORKSPACE_RESOLVER=%q (expected file|db|platform-binding)", resolver)
+	}
+}
+
+// buildSecretClient constructs a SecretClient based on
+// SPINE_SECRET_PROVIDER. Required for WORKSPACE_RESOLVER=platform-binding.
+//
+// Supported values:
+//   - file: dev/test path, reads from SPINE_SECRET_FILE_ROOT.
+//   - aws : production path, reads from SPINE_SECRET_AWS_REGION,
+//     SPINE_SECRET_AWS_ACCOUNT, SPINE_SECRET_AWS_ENV.
+func buildSecretClient(ctx context.Context) (secrets.SecretClient, error) {
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("SPINE_SECRET_PROVIDER")))
+	switch provider {
+	case "", "file":
+		root := os.Getenv("SPINE_SECRET_FILE_ROOT")
+		if root == "" {
+			return nil, fmt.Errorf("SPINE_SECRET_FILE_ROOT is required for SPINE_SECRET_PROVIDER=file")
+		}
+		return secrets.NewFileClient(secrets.FileConfig{Root: root})
+
+	case "aws":
+		region := os.Getenv("SPINE_SECRET_AWS_REGION")
+		account := os.Getenv("SPINE_SECRET_AWS_ACCOUNT")
+		env := os.Getenv("SPINE_SECRET_AWS_ENV")
+		if region == "" || account == "" || env == "" {
+			return nil, fmt.Errorf("SPINE_SECRET_AWS_REGION, SPINE_SECRET_AWS_ACCOUNT, SPINE_SECRET_AWS_ENV are required for SPINE_SECRET_PROVIDER=aws")
+		}
+		return secrets.NewAWSClient(ctx, secrets.AWSConfig{Region: region, Account: account, Env: env})
+
+	default:
+		return nil, fmt.Errorf("unknown SPINE_SECRET_PROVIDER=%q (expected file|aws)", provider)
 	}
 }
 
