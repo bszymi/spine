@@ -2,7 +2,7 @@
 id: ADR-012
 type: ADR
 title: Per-workspace connection-pool policy — sizing, eviction, invalidation
-status: Proposed
+status: Accepted
 date: 2026-04-27
 decision_makers: bszymi
 links:

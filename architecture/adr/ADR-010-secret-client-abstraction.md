@@ -2,7 +2,7 @@
 id: ADR-010
 type: ADR
 title: SecretClient abstraction for workspace credential resolution
-status: Proposed
+status: Accepted
 date: 2026-04-27
 decision_makers: bszymi
 links:

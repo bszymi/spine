@@ -2,7 +2,7 @@
 id: ADR-011
 type: ADR
 title: WorkspaceResolver dereferences secret references via the platform binding API
-status: Proposed
+status: Accepted
 date: 2026-04-27
 decision_makers: bszymi
 links:
