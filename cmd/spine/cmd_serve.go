@@ -366,20 +366,23 @@ func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
 // a gateway.ServerConfig. serveCmd reads env and constructs these; the
 // serve-startup smoke test builds them in-memory.
 type serveDeps struct {
-	Store               store.Store
-	RepoPath            string
-	SpineCfg            *config.SpineConfig
-	GitClient           *git.CLIClient
-	Queue               *queue.MemoryQueue
-	Events              event.EventRouter
-	WSResolver          workspace.Resolver
-	WSDBProvider        *workspace.DBProvider
-	WSServicePool       *workspace.ServicePool
-	SecretCipher        *spinecrypto.SecretCipher
-	RuntimeEnv          string
-	DevMode             bool
-	TrustedProxyCIDRs   []*net.IPNet
-	TrustedGitHTTPCIDRs []string
+	Store         store.Store
+	RepoPath      string
+	SpineCfg      *config.SpineConfig
+	GitClient     *git.CLIClient
+	Queue         *queue.MemoryQueue
+	Events        event.EventRouter
+	WSResolver    workspace.Resolver
+	WSDBProvider  *workspace.DBProvider
+	WSServicePool *workspace.ServicePool
+	// BindingInvalidationHandler is the optional ADR-011 webhook
+	// receiver. Wired only when WORKSPACE_RESOLVER=platform-binding.
+	BindingInvalidationHandler http.Handler
+	SecretCipher               *spinecrypto.SecretCipher
+	RuntimeEnv                 string
+	DevMode                    bool
+	TrustedProxyCIDRs          []*net.IPNet
+	TrustedGitHTTPCIDRs        []string
 	// GitReceivePackEnabled wires the git push endpoint (receive-pack).
 	// Default false; EPIC-004 TASK-001. When true this is still a bare
 	// passthrough — branch-protection enforcement is TASK-002.
@@ -478,38 +481,39 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events)
 
 	cfg := gateway.ServerConfig{
-		Store:               deps.Store,
-		Auth:                authSvc,
-		Artifacts:           artifactSvc,
-		Workflows:           workflowSvc,
-		ProjQuery:           projQuery,
-		ProjSync:            projSync,
-		Git:                 deps.GitClient,
-		Validator:           validator,
-		WorkflowResolver:    wfResolver,
-		BranchCreator:       divSvcForGateway,
-		Events:              deps.Events,
-		RunStarter:          starter,
-		PlanningRunStarter:  planningStarter,
-		ResultHandler:       resultHandler,
-		WorkspaceResolver:   deps.WSResolver,
-		ServicePool:         deps.WSServicePool,
-		WSDBProvider:        deps.WSDBProvider,
-		RunCanceller:        orch,
-		CandidateFinder:     orch,
-		StepClaimer:         orch,
-		StepReleaser:        orch,
-		StepExecutionLister: orch,
-		StepAcknowledger:    orch,
-		StepAssigner:        stepAssigner,
-		EventBroadcaster:    eventBroadcaster,
-		GitHTTP:             gitHTTPHandler,
-		GitPushResolver:     gitPushResolver,
-		WebhookTargets:      deps.WebhookTargets,
-		SSEMaxConnPerActor:  deps.SSEMaxConn,
-		TrustedProxyCIDRs:   deps.TrustedProxyCIDRs,
-		DevMode:             deps.DevMode,
-		Env:                 deps.RuntimeEnv,
+		Store:                      deps.Store,
+		Auth:                       authSvc,
+		Artifacts:                  artifactSvc,
+		Workflows:                  workflowSvc,
+		ProjQuery:                  projQuery,
+		ProjSync:                   projSync,
+		Git:                        deps.GitClient,
+		Validator:                  validator,
+		WorkflowResolver:           wfResolver,
+		BranchCreator:              divSvcForGateway,
+		Events:                     deps.Events,
+		RunStarter:                 starter,
+		PlanningRunStarter:         planningStarter,
+		ResultHandler:              resultHandler,
+		WorkspaceResolver:          deps.WSResolver,
+		ServicePool:                deps.WSServicePool,
+		WSDBProvider:               deps.WSDBProvider,
+		RunCanceller:               orch,
+		CandidateFinder:            orch,
+		StepClaimer:                orch,
+		StepReleaser:               orch,
+		StepExecutionLister:        orch,
+		StepAcknowledger:           orch,
+		StepAssigner:               stepAssigner,
+		EventBroadcaster:           eventBroadcaster,
+		GitHTTP:                    gitHTTPHandler,
+		GitPushResolver:            gitPushResolver,
+		BindingInvalidationHandler: deps.BindingInvalidationHandler,
+		WebhookTargets:             deps.WebhookTargets,
+		SSEMaxConnPerActor:         deps.SSEMaxConn,
+		TrustedProxyCIDRs:          deps.TrustedProxyCIDRs,
+		DevMode:                    deps.DevMode,
+		Env:                        deps.RuntimeEnv,
 	}
 
 	return &serveRuntime{
@@ -839,15 +843,15 @@ func serveCmd() *cobra.Command {
 				port = "8080"
 			}
 
-			wsResolver, wsDBProvider, wsServicePool, err := buildWorkspaceResolver(ctx, secretCipher, log)
+			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log)
 			if err != nil {
 				return err
 			}
-			if wsDBProvider != nil {
-				defer wsDBProvider.Close()
+			if wsWiring.DBProvider != nil {
+				defer wsWiring.DBProvider.Close()
 			}
-			if wsServicePool != nil {
-				defer wsServicePool.Close()
+			if wsWiring.Pool != nil {
+				defer wsWiring.Pool.Close()
 			}
 
 			st, err := buildStore(ctx, secretCipher, log)
@@ -914,29 +918,30 @@ func serveCmd() *cobra.Command {
 			}
 
 			deps := serveDeps{
-				Store:                 st,
-				RepoPath:              repoPath,
-				SpineCfg:              spineCfg,
-				GitClient:             gitClient,
-				Queue:                 q,
-				Events:                eventRouter,
-				WSResolver:            wsResolver,
-				WSDBProvider:          wsDBProvider,
-				WSServicePool:         wsServicePool,
-				SecretCipher:          secretCipher,
-				RuntimeEnv:            runtimeEnv,
-				DevMode:               devMode,
-				TrustedProxyCIDRs:     trustedProxyCIDRs,
-				TrustedGitHTTPCIDRs:   parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS")),
-				GitReceivePackEnabled: parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
-				EventDeliveryOn:       os.Getenv("SPINE_EVENT_DELIVERY") == "true",
-				SMPEventURL:           os.Getenv("SMP_EVENT_URL"),
-				SMPWorkspaceID:        os.Getenv("SMP_WORKSPACE_ID"),
-				SMPInternalToken:      os.Getenv("SMP_INTERNAL_TOKEN"),
-				EventRetention:        eventRetention,
-				SSEMaxConn:            parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
-				OrphanThreshold:       orphanThreshold,
-				WebhookTargets:        delivery.NewTargetValidator(parseWebhookAllowedHosts(os.Getenv("SPINE_WEBHOOK_ALLOWED_HOSTS"))),
+				Store:                      st,
+				RepoPath:                   repoPath,
+				SpineCfg:                   spineCfg,
+				GitClient:                  gitClient,
+				Queue:                      q,
+				Events:                     eventRouter,
+				WSResolver:                 wsWiring.Resolver,
+				WSDBProvider:               wsWiring.DBProvider,
+				WSServicePool:              wsWiring.Pool,
+				BindingInvalidationHandler: wsWiring.BindingInvalidationHandler,
+				SecretCipher:               secretCipher,
+				RuntimeEnv:                 runtimeEnv,
+				DevMode:                    devMode,
+				TrustedProxyCIDRs:          trustedProxyCIDRs,
+				TrustedGitHTTPCIDRs:        parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS")),
+				GitReceivePackEnabled:      parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
+				EventDeliveryOn:            os.Getenv("SPINE_EVENT_DELIVERY") == "true",
+				SMPEventURL:                os.Getenv("SMP_EVENT_URL"),
+				SMPWorkspaceID:             os.Getenv("SMP_WORKSPACE_ID"),
+				SMPInternalToken:           os.Getenv("SMP_INTERNAL_TOKEN"),
+				EventRetention:             eventRetention,
+				SSEMaxConn:                 parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
+				OrphanThreshold:            orphanThreshold,
+				WebhookTargets:             delivery.NewTargetValidator(parseWebhookAllowedHosts(os.Getenv("SPINE_WEBHOOK_ALLOWED_HOSTS"))),
 			}
 
 			rt, err := buildServerConfig(ctx, deps)
@@ -992,6 +997,19 @@ func serveCmd() *cobra.Command {
 	}
 }
 
+// resolverWiring is the bundle returned by buildWorkspaceResolver:
+// the resolver itself, the optional concrete DBProvider (for
+// workspace-management endpoints), the optional ServicePool, and the
+// optional binding-invalidation webhook handler that drives both the
+// resolver cache and the pool when the platform pushes an
+// invalidation (ADR-011).
+type resolverWiring struct {
+	Resolver                   workspace.Resolver
+	DBProvider                 *workspace.DBProvider
+	Pool                       *workspace.ServicePool
+	BindingInvalidationHandler http.Handler
+}
+
 // buildWorkspaceResolver initializes the workspace resolver based on
 // the WORKSPACE_RESOLVER env var (file | db | platform-binding).
 //
@@ -1002,13 +1020,13 @@ func buildWorkspaceResolver(
 	ctx context.Context,
 	secretCipher *spinecrypto.SecretCipher,
 	log *slog.Logger,
-) (workspace.Resolver, *workspace.DBProvider, *workspace.ServicePool, error) {
+) (*resolverWiring, error) {
 	resolver := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER")))
 	legacyMode := os.Getenv("SPINE_WORKSPACE_MODE")
 
 	if resolver == "" {
 		if legacyMode != "" {
-			return nil, nil, nil, fmt.Errorf("SPINE_WORKSPACE_MODE=%q is no longer supported; set WORKSPACE_RESOLVER=file|db|platform-binding (see ADR-011)", legacyMode)
+			return nil, fmt.Errorf("SPINE_WORKSPACE_MODE=%q is no longer supported; set WORKSPACE_RESOLVER=file|db|platform-binding (see ADR-011)", legacyMode)
 		}
 		resolver = "file"
 	}
@@ -1016,39 +1034,39 @@ func buildWorkspaceResolver(
 	switch resolver {
 	case "file":
 		log.Info("workspace resolver: file", "workspace_id", os.Getenv("SPINE_WORKSPACE_ID"))
-		return workspace.NewFileProvider(), nil, nil, nil
+		return &resolverWiring{Resolver: workspace.NewFileProvider()}, nil
 
 	case "db":
 		registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
 		if registryURL == "" {
-			return nil, nil, nil, fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required for WORKSPACE_RESOLVER=db")
+			return nil, fmt.Errorf("SPINE_REGISTRY_DATABASE_URL is required for WORKSPACE_RESOLVER=db")
 		}
 		if err := requireSecureDBURL(registryURL); err != nil {
-			return nil, nil, nil, fmt.Errorf("registry URL: %w", err)
+			return nil, fmt.Errorf("registry URL: %w", err)
 		}
 		provider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("connect to workspace registry: %w", err)
+			return nil, fmt.Errorf("connect to workspace registry: %w", err)
 		}
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
 		})
 		log.Info("workspace resolver: db", "registry_url", "***")
-		return provider, provider, pool, nil
+		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool}, nil
 
 	case "platform-binding":
 		platformURL := os.Getenv("SPINE_PLATFORM_URL")
 		if platformURL == "" {
-			return nil, nil, nil, fmt.Errorf("SPINE_PLATFORM_URL is required for WORKSPACE_RESOLVER=platform-binding")
+			return nil, fmt.Errorf("SPINE_PLATFORM_URL is required for WORKSPACE_RESOLVER=platform-binding")
 		}
 		serviceToken := os.Getenv("SPINE_PLATFORM_SERVICE_TOKEN")
 		if serviceToken == "" {
-			return nil, nil, nil, fmt.Errorf("SPINE_PLATFORM_SERVICE_TOKEN is required for WORKSPACE_RESOLVER=platform-binding")
+			return nil, fmt.Errorf("SPINE_PLATFORM_SERVICE_TOKEN is required for WORKSPACE_RESOLVER=platform-binding")
 		}
 		secretClient, err := buildSecretClient(ctx)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
 		provider, err := workspace.NewPlatformBindingProvider(workspace.PlatformBindingConfig{
 			PlatformBaseURL: platformURL,
@@ -1056,7 +1074,7 @@ func buildWorkspaceResolver(
 			SecretClient:    secretClient,
 		})
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("init platform-binding resolver: %w", err)
+			return nil, fmt.Errorf("init platform-binding resolver: %w", err)
 		}
 		// Multi-workspace traffic routes per-workspace stores/git
 		// services through ServicePool; wire it on top of the new
@@ -1067,11 +1085,26 @@ func buildWorkspaceResolver(
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
 		})
+		invalidator := &workspace.CombinedBindingInvalidator{
+			Provider: provider,
+			Pool:     pool,
+		}
+		handler, err := workspace.NewBindingInvalidateHandler(workspace.BindingInvalidateHandlerConfig{
+			Invalidator:  invalidator,
+			ServiceToken: serviceToken,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("init binding invalidate handler: %w", err)
+		}
 		log.Info("workspace resolver: platform-binding", "platform_url", platformURL)
-		return provider, nil, pool, nil
+		return &resolverWiring{
+			Resolver:                   provider,
+			Pool:                       pool,
+			BindingInvalidationHandler: handler,
+		}, nil
 
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown WORKSPACE_RESOLVER=%q (expected file|db|platform-binding)", resolver)
+		return nil, fmt.Errorf("unknown WORKSPACE_RESOLVER=%q (expected file|db|platform-binding)", resolver)
 	}
 }
 

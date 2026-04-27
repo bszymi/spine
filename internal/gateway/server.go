@@ -126,41 +126,42 @@ type BranchCreator interface {
 }
 
 type Server struct {
-	httpServer          *http.Server
-	store               store.Store
-	auth                *auth.Service
-	artifacts           ArtifactService
-	workflows           WorkflowService
-	projQuery           ProjectionQuerier
-	projSync            ProjectionSyncer
-	git                 GitReader
-	validator           *validation.Engine
-	resultHandler       ResultHandler
-	workflowResolver    WorkflowResolverFn
-	branchCreator       BranchCreator              // optional, nil if not configured
-	events              EventEmitterGW             // optional, nil if not configured
-	runStarter          RunStarter                 // optional, nil if not configured
-	planningRunStarter  PlanningRunStarter         // optional, nil if not configured
-	wfPlanningStarter   WorkflowPlanningRunStarter // optional, nil if not configured
-	runCanceller        RunCanceller               // optional, nil if not configured
-	wsResolver          workspace.Resolver         // optional, nil if not configured
-	servicePool         *workspace.ServicePool     // optional, nil if not configured
-	wsDBProvider        *workspace.DBProvider      // optional, nil in single mode
-	candidateFinder     CandidateFinder            // optional, nil if not configured
-	stepClaimer         StepClaimer                // optional, nil if not configured
-	stepReleaser        StepReleaser               // optional, nil if not configured
-	stepExecutionLister StepExecutionLister        // optional, nil if not configured
-	stepAcknowledger    StepAcknowledger           // optional, nil if not configured
-	stepAssigner        StepAssigner               // optional, nil if not configured
-	eventBroadcaster    *delivery.EventBroadcaster // optional, nil if not configured
-	gitHTTP             *githttp.Handler           // optional, nil if not configured
-	gitPushResolver     GitPushResolverFunc        // optional, nil if not configured; resolves per-workspace policy+events for push
-	webhookTargets      *delivery.TargetValidator  // optional, nil = permissive; enforces SSRF rules on target_url writes and tests
-	devMode             bool                       // when true, authorize allows unauthenticated requests
-	env                 string                     // SPINE_ENV value (production/staging/development); surfaced in health
-	sseLimiter          *sseLimiter                // caps concurrent SSE streams per actor
-	trustedProxyCIDRs   []*net.IPNet               // reverse-proxy networks whose XFF header is honored for rate limiting
-	rebuilds            sync.Map                   // rebuild_id -> *rebuildState
+	httpServer                 *http.Server
+	store                      store.Store
+	auth                       *auth.Service
+	artifacts                  ArtifactService
+	workflows                  WorkflowService
+	projQuery                  ProjectionQuerier
+	projSync                   ProjectionSyncer
+	git                        GitReader
+	validator                  *validation.Engine
+	resultHandler              ResultHandler
+	workflowResolver           WorkflowResolverFn
+	branchCreator              BranchCreator              // optional, nil if not configured
+	events                     EventEmitterGW             // optional, nil if not configured
+	runStarter                 RunStarter                 // optional, nil if not configured
+	planningRunStarter         PlanningRunStarter         // optional, nil if not configured
+	wfPlanningStarter          WorkflowPlanningRunStarter // optional, nil if not configured
+	runCanceller               RunCanceller               // optional, nil if not configured
+	wsResolver                 workspace.Resolver         // optional, nil if not configured
+	servicePool                *workspace.ServicePool     // optional, nil if not configured
+	wsDBProvider               *workspace.DBProvider      // optional, nil in single mode
+	candidateFinder            CandidateFinder            // optional, nil if not configured
+	stepClaimer                StepClaimer                // optional, nil if not configured
+	stepReleaser               StepReleaser               // optional, nil if not configured
+	stepExecutionLister        StepExecutionLister        // optional, nil if not configured
+	stepAcknowledger           StepAcknowledger           // optional, nil if not configured
+	stepAssigner               StepAssigner               // optional, nil if not configured
+	eventBroadcaster           *delivery.EventBroadcaster // optional, nil if not configured
+	gitHTTP                    *githttp.Handler           // optional, nil if not configured
+	gitPushResolver            GitPushResolverFunc        // optional, nil if not configured; resolves per-workspace policy+events for push
+	webhookTargets             *delivery.TargetValidator  // optional, nil = permissive; enforces SSRF rules on target_url writes and tests
+	bindingInvalidationHandler http.Handler               // optional, nil if not configured; ADR-011 platform → Spine invalidation webhook
+	devMode                    bool                       // when true, authorize allows unauthenticated requests
+	env                        string                     // SPINE_ENV value (production/staging/development); surfaced in health
+	sseLimiter                 *sseLimiter                // caps concurrent SSE streams per actor
+	trustedProxyCIDRs          []*net.IPNet               // reverse-proxy networks whose XFF header is honored for rate limiting
+	rebuilds                   sync.Map                   // rebuild_id -> *rebuildState
 }
 
 // CandidateFinder discovers tasks ready for execution.
@@ -260,53 +261,61 @@ type ServerConfig struct {
 	EventBroadcaster    *delivery.EventBroadcaster
 	GitHTTP             *githttp.Handler    // optional, serves git repos over HTTP
 	GitPushResolver     GitPushResolverFunc // optional; resolves the per-workspace policy + events used by the Git push pre-receive gate. Required for correct shared-mode enforcement (each workspace has its own branch-protection table and event stream); single-mode callers may omit it and the handler's default policy is used.
-	WebhookTargets      *delivery.TargetValidator // optional; enforces webhook target_url SSRF rules on create/update/test. A nil validator permits every URL and is only appropriate for tests.
-	DevMode             bool                // when true, authorize allows unauthenticated requests
-	Env                 string              // SPINE_ENV: production/staging/development; surfaced in /system/health
-	ReadHeaderTimeout   time.Duration       // defaults to 10s
-	ReadTimeout         time.Duration       // defaults to 30s
-	WriteTimeout        time.Duration       // defaults to 60s
-	IdleTimeout         time.Duration       // defaults to 120s
-	SSEMaxConnPerActor  int                 // per-actor SSE connection cap; defaults to 5, <=0 disables
-	TrustedProxyCIDRs   []*net.IPNet        // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
+
+	// BindingInvalidationHandler is the platform → Spine webhook
+	// receiver for ADR-011 binding invalidations. When non-nil, it
+	// is mounted at POST /internal/v1/workspaces/{workspace_id}/binding-invalidate.
+	// The handler owns its own bearer-token auth, so it sits
+	// outside the operator-token and per-actor middleware chains.
+	BindingInvalidationHandler http.Handler
+	WebhookTargets             *delivery.TargetValidator // optional; enforces webhook target_url SSRF rules on create/update/test. A nil validator permits every URL and is only appropriate for tests.
+	DevMode                    bool                      // when true, authorize allows unauthenticated requests
+	Env                        string                    // SPINE_ENV: production/staging/development; surfaced in /system/health
+	ReadHeaderTimeout          time.Duration             // defaults to 10s
+	ReadTimeout                time.Duration             // defaults to 30s
+	WriteTimeout               time.Duration             // defaults to 60s
+	IdleTimeout                time.Duration             // defaults to 120s
+	SSEMaxConnPerActor         int                       // per-actor SSE connection cap; defaults to 5, <=0 disables
+	TrustedProxyCIDRs          []*net.IPNet              // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
 func NewServer(addr string, cfg ServerConfig) *Server {
 	s := &Server{
-		store:               cfg.Store,
-		auth:                cfg.Auth,
-		artifacts:           cfg.Artifacts,
-		workflows:           cfg.Workflows,
-		projQuery:           cfg.ProjQuery,
-		projSync:            cfg.ProjSync,
-		git:                 cfg.Git,
-		validator:           cfg.Validator,
-		resultHandler:       cfg.ResultHandler,
-		branchCreator:       cfg.BranchCreator,
-		events:              cfg.Events,
-		runStarter:          cfg.RunStarter,
-		planningRunStarter:  cfg.PlanningRunStarter,
-		wfPlanningStarter:   cfg.WFPlanningStarter,
-		runCanceller:        cfg.RunCanceller,
-		workflowResolver:    cfg.WorkflowResolver,
-		wsResolver:          cfg.WorkspaceResolver,
-		servicePool:         cfg.ServicePool,
-		wsDBProvider:        cfg.WSDBProvider,
-		candidateFinder:     cfg.CandidateFinder,
-		stepClaimer:         cfg.StepClaimer,
-		stepReleaser:        cfg.StepReleaser,
-		stepExecutionLister: cfg.StepExecutionLister,
-		stepAcknowledger:    cfg.StepAcknowledger,
-		stepAssigner:        cfg.StepAssigner,
-		eventBroadcaster:    cfg.EventBroadcaster,
-		gitHTTP:             cfg.GitHTTP,
-		gitPushResolver:     cfg.GitPushResolver,
-		webhookTargets:      cfg.WebhookTargets,
-		devMode:             cfg.DevMode,
-		env:                 cfg.Env,
-		sseLimiter:          newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),
-		trustedProxyCIDRs:   cfg.TrustedProxyCIDRs,
+		store:                      cfg.Store,
+		auth:                       cfg.Auth,
+		artifacts:                  cfg.Artifacts,
+		workflows:                  cfg.Workflows,
+		projQuery:                  cfg.ProjQuery,
+		projSync:                   cfg.ProjSync,
+		git:                        cfg.Git,
+		validator:                  cfg.Validator,
+		resultHandler:              cfg.ResultHandler,
+		branchCreator:              cfg.BranchCreator,
+		events:                     cfg.Events,
+		runStarter:                 cfg.RunStarter,
+		planningRunStarter:         cfg.PlanningRunStarter,
+		wfPlanningStarter:          cfg.WFPlanningStarter,
+		runCanceller:               cfg.RunCanceller,
+		workflowResolver:           cfg.WorkflowResolver,
+		wsResolver:                 cfg.WorkspaceResolver,
+		servicePool:                cfg.ServicePool,
+		wsDBProvider:               cfg.WSDBProvider,
+		candidateFinder:            cfg.CandidateFinder,
+		stepClaimer:                cfg.StepClaimer,
+		stepReleaser:               cfg.StepReleaser,
+		stepExecutionLister:        cfg.StepExecutionLister,
+		stepAcknowledger:           cfg.StepAcknowledger,
+		stepAssigner:               cfg.StepAssigner,
+		eventBroadcaster:           cfg.EventBroadcaster,
+		gitHTTP:                    cfg.GitHTTP,
+		gitPushResolver:            cfg.GitPushResolver,
+		bindingInvalidationHandler: cfg.BindingInvalidationHandler,
+		webhookTargets:             cfg.WebhookTargets,
+		devMode:                    cfg.DevMode,
+		env:                        cfg.Env,
+		sseLimiter:                 newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),
+		trustedProxyCIDRs:          cfg.TrustedProxyCIDRs,
 	}
 	if cfg.DevMode {
 		observe.Logger(context.Background()).Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
