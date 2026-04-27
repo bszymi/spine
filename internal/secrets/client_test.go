@@ -54,6 +54,9 @@ func TestParseRefRejectsMalformed(t *testing.T) {
 		"https://workspaces/acme/runtime_db",
 		"secret-store://workspaces/acme/unknown_purpose",
 		"secret-store://workspaces/acme/RUNTIME_DB",
+		"secret-store://workspaces/./runtime_db",
+		"secret-store://workspaces/../runtime_db",
+		`secret-store://workspaces/acme\evil/runtime_db`,
 	}
 
 	for _, in := range cases {

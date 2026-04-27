@@ -52,8 +52,11 @@ func WorkspaceRef(workspaceID, purpose string) SecretRef {
 }
 
 // ParseRef extracts (workspaceID, purpose) from a SecretRef. Returns
-// ErrInvalidRef if the URI shape does not match or if purpose is not
-// in the documented allowlist.
+// ErrInvalidRef if the URI shape does not match, if purpose is not in
+// the documented allowlist, or if workspaceID has a shape that could
+// be interpreted as a path component (".", "..", or anything
+// containing "/" or "\\"). The path-shape check ensures filesystem-
+// backed providers cannot be tricked into reading outside their root.
 func ParseRef(ref SecretRef) (workspaceID, purpose string, err error) {
 	s := string(ref)
 	rest, ok := strings.CutPrefix(s, refScheme)
@@ -64,13 +67,26 @@ func ParseRef(ref SecretRef) (workspaceID, purpose string, err error) {
 	if !ok || workspaceID == "" || purpose == "" {
 		return "", "", fmt.Errorf("%w: %q", ErrInvalidRef, s)
 	}
-	if strings.ContainsRune(workspaceID, '/') || strings.ContainsRune(purpose, '/') {
+	if !safeSegment(workspaceID) || !safeSegment(purpose) {
 		return "", "", fmt.Errorf("%w: %q", ErrInvalidRef, s)
 	}
 	if !validPurpose(purpose) {
 		return "", "", fmt.Errorf("%w: unsupported purpose %q in %q", ErrInvalidRef, purpose, s)
 	}
 	return workspaceID, purpose, nil
+}
+
+// safeSegment rejects path-shaped strings that, after being joined
+// into a filesystem path, could escape a containing directory.
+// Specifically: ".", "..", and anything containing "/" or "\\".
+func safeSegment(s string) bool {
+	if s == "." || s == ".." {
+		return false
+	}
+	if strings.ContainsAny(s, `/\`) {
+		return false
+	}
+	return true
 }
 
 // SecretValue carries credential bytes. It redacts itself in String,
