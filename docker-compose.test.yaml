@@ -23,6 +23,27 @@ services:
       timeout: 2s
       retries: 10
 
+  spine-test-localstack:
+    image: localstack/localstack:3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    ports:
+      # Loopback-only — host-side Go integration tests target
+      # http://localhost:4566. Override via SPINE_TEST_AWS_ENDPOINT.
+      - "127.0.0.1:4566:4566"
+    environment:
+      - SERVICES=secretsmanager
+      - DEFAULT_REGION=us-east-1
+      - DEBUG=0
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"secretsmanager\": \"available\"\\|\"secretsmanager\": \"running\"'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   spine-test-registry-db:
     image: postgres:18-bookworm
     deploy:
