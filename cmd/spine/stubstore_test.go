@@ -239,6 +239,34 @@ func (stubStore) ListBranchProtectionRules(ctx context.Context) ([]store.BranchP
 	return nil, nil
 }
 
+func (stubStore) CreateRepositoryBinding(ctx context.Context, b *store.RepositoryBinding) error {
+	return nil
+}
+
+func (stubStore) GetRepositoryBinding(ctx context.Context, workspaceID, repositoryID string) (*store.RepositoryBinding, error) {
+	return nil, nil
+}
+
+func (stubStore) GetActiveRepositoryBinding(ctx context.Context, workspaceID, repositoryID string) (*store.RepositoryBinding, error) {
+	return nil, nil
+}
+
+func (stubStore) UpdateRepositoryBinding(ctx context.Context, b *store.RepositoryBinding) error {
+	return nil
+}
+
+func (stubStore) ListRepositoryBindings(ctx context.Context, workspaceID string) ([]store.RepositoryBinding, error) {
+	return nil, nil
+}
+
+func (stubStore) ListActiveRepositoryBindings(ctx context.Context, workspaceID string) ([]store.RepositoryBinding, error) {
+	return nil, nil
+}
+
+func (stubStore) DeactivateRepositoryBinding(ctx context.Context, workspaceID, repositoryID string) error {
+	return nil
+}
+
 func (stubStore) GetSyncState(ctx context.Context) (*store.SyncState, error) {
 	return nil, nil
 }

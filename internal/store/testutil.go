@@ -69,6 +69,7 @@ func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 		"runtime.queue_entries",
 		"runtime.step_executions",
 		"runtime.runs",
+		"runtime.repositories",
 		"auth.actor_skills",
 		"auth.tokens",
 		"auth.skills",
