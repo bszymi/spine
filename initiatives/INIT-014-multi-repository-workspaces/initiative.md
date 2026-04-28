@@ -10,6 +10,8 @@ links:
     target: /architecture/git-integration.md
   - type: related_to
     target: /product/product-definition.md
+  - type: related_to
+    target: /initiatives/INIT-009-workspace-runtime/initiative.md
 ---
 
 # INIT-014 — Multi-Repository Workspaces
@@ -74,10 +76,13 @@ If a merge succeeds in repo A but fails in repo B, the run stays open and the fa
 
 ## Epics
 
-- **EPIC-001: Repository Domain Model and Registry** — Define the Repository entity, storage, and CRUD API
-- **EPIC-002: Multi-Repo Git Client Pool** — Replace single git client per workspace with per-repo client resolution
-- **EPIC-003: Multi-Repo Run Lifecycle** — Branch creation, step execution routing, and merge across repositories
-- **EPIC-004: Product and Architecture Documentation** — Extend product definition, git integration contract, and component model for multi-repo support
+- **EPIC-001: Repository Catalog and Operational Bindings** - Define the repository identity model, governed catalog, runtime bindings, and management API.
+- **EPIC-002: Task Schema and Repository Validation** - Let tasks declare affected repositories and validate those references before execution.
+- **EPIC-003: Git Client Pool and Repository Routing** - Replace single-repo Git wiring with per-repository client resolution and git HTTP routing.
+- **EPIC-004: Multi-Repo Run Lifecycle** - Create, expose, and route run branches across the primary repo and affected code repos.
+- **EPIC-005: Merge Outcomes and Recovery** - Merge affected repos independently, record outcomes in the primary repo, and support partial-merge recovery.
+- **EPIC-006: Cross-Repo Execution Evidence** - Prove that code repo changes satisfy governed intent through deterministic checks and evidence recorded in the primary repo.
+- **EPIC-007: Documentation and Product Updates** - Reconcile product definition, architecture docs, and operator runbooks with the shipped multi-repo behavior (Success Criterion #7).
 
 ## Design Principles
 
