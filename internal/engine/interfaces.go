@@ -7,6 +7,7 @@ import (
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/workflow"
 )
 
@@ -75,6 +76,19 @@ type WorkflowLoader interface {
 // CrossArtifactValidator runs cross-artifact validation rules against a single artifact.
 type CrossArtifactValidator interface {
 	Validate(ctx context.Context, artifactPath string) domain.ValidationResult
+}
+
+// RepositoryResolver resolves a workspace repository ID to its merged
+// catalog/binding view at run-start time, returning the typed errors
+// from the repository package (ErrRepositoryNotFound,
+// ErrRepositoryUnbound, ErrRepositoryInactive) so the orchestrator can
+// classify failures.
+//
+// This is the single point where the orchestrator consults runtime
+// state for repository availability; validate-time catalog existence
+// checks live in the validation engine (RE-001) and run earlier.
+type RepositoryResolver interface {
+	Lookup(ctx context.Context, id string) (*repository.Repository, error)
 }
 
 // DivergenceHandler manages divergence lifecycle for the orchestrator.

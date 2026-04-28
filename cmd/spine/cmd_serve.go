@@ -189,6 +189,21 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	// projection-backed policy wired into the Artifact Service above, so
 	// both API writes and governed merges share a single decision point.
 	orch.WithBranchProtectPolicy(buildBranchProtectPolicy(ss.Store))
+	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
+	// Mirrors the wiring on the process-level orchestrator so shared
+	// workspace deployments enforce the same invariants. Until the
+	// Git-backed catalog loader lands, the registry resolves the
+	// implicit primary repo only.
+	repoSpec := repository.PrimarySpec{LocalPath: ss.Config.RepoPath}
+	repoRegistry := repository.New(
+		ss.Config.ID,
+		repoSpec,
+		func(_ context.Context) (*repository.Catalog, error) {
+			return repository.ParseCatalog(nil, repoSpec)
+		},
+		ss.Store,
+	)
+	orch.WithRepositoryResolver(repoRegistry)
 	// Workflow writer is required for ADR-008 planning runs. Fail fast at
 	// startup if ss.Workflows is populated but doesn't satisfy the
 	// interface — a silent skip here degrades workflow.create into 503 at
@@ -452,6 +467,22 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 
 	wfResolver, wfProvider := buildWorkflowResolver(deps.Store, deps.GitClient)
 	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, log)
+	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
+	// Wired against the primary-only catalog for the same reason the
+	// validator is: no Git-backed loader exists yet. The registry
+	// rejects any non-"spine" ID with ErrRepositoryNotFound, which
+	// StartRun categorises and surfaces before any branch is created.
+	if orch != nil && deps.Store != nil {
+		repoRegistry := repository.New(
+			deps.SMPWorkspaceID,
+			repository.PrimarySpec{LocalPath: deps.RepoPath},
+			func(_ context.Context) (*repository.Catalog, error) {
+				return repository.ParseCatalog(nil, repository.PrimarySpec{LocalPath: deps.RepoPath})
+			},
+			deps.Store,
+		)
+		orch.WithRepositoryResolver(repoRegistry)
+	}
 
 	var sched *scheduler.Scheduler
 	if deps.Store != nil {

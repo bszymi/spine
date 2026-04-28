@@ -141,6 +141,15 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		}
 	}
 
+	// Repository runtime preconditions (INIT-014 EPIC-002 TASK-004) —
+	// after blocking, before any branch-creating work, so a missing or
+	// inactive binding fails the run start cleanly without touching Git.
+	// Catalog-existence checks are TASK-003 territory and are expected
+	// to have run at validate time before this point.
+	if err := o.checkRepositoryPreconditions(ctx, art); err != nil {
+		return nil, err
+	}
+
 	binding, err := o.workflows.ResolveWorkflow(ctx, string(art.Type), "")
 	if err != nil {
 		return nil, fmt.Errorf("resolve workflow: %w", err)
