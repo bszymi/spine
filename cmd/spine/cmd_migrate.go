@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/secrets"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/workspace"
 	"github.com/spf13/cobra"
@@ -84,7 +85,21 @@ func migrateCmd() *cobra.Command {
 			registryStore.Close()
 			log.Info("registry migrations applied")
 
-			dbProvider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
+			// Wire SecretClient when configured so registry rows that
+			// store database_url as `secret-store://...` can be
+			// dereferenced for migration. Optional: legacy URL rows
+			// continue to work without it.
+			var dbSecretClient secrets.SecretClient
+			if secretClientConfigured() {
+				c, err := buildSecretClient(ctx)
+				if err != nil {
+					return fmt.Errorf("build secret client: %w", err)
+				}
+				dbSecretClient = c
+			}
+			dbProvider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{
+				SecretClient: dbSecretClient,
+			})
 			if err != nil {
 				return fmt.Errorf("connect to workspace registry: %w", err)
 			}
@@ -105,13 +120,24 @@ func migrateCmd() *cobra.Command {
 				wsCtx := observe.WithWorkspaceID(ctx, ws.ID)
 				wsLog := observe.Logger(wsCtx)
 
-				if ws.DatabaseURL == "" {
+				// List returns column values wrapped verbatim — resolve
+				// per workspace so a `secret-store://...` ref is
+				// dereferenced through SecretClient before opening
+				// the connection.
+				resolved, err := dbProvider.Resolve(wsCtx, ws.ID)
+				if err != nil {
+					wsLog.Error("resolve workspace failed", "error", err)
+					failed = append(failed, ws.ID)
+					continue
+				}
+				dbURL := string(resolved.DatabaseURL.Reveal())
+				if dbURL == "" {
 					wsLog.Warn("workspace has no database URL, skipping")
 					continue
 				}
 
 				wsLog.Info("migrating workspace database")
-				wsStore, err := store.NewPostgresStore(wsCtx, ws.DatabaseURL)
+				wsStore, err := store.NewPostgresStore(wsCtx, dbURL)
 				if err != nil {
 					wsLog.Error("connect to workspace database failed", "error", err)
 					failed = append(failed, ws.ID)

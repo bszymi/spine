@@ -2,7 +2,7 @@
 id: TASK-008
 type: Task
 title: Migrate single-workspace resolver to SecretClient
-status: Pending
+status: Completed
 epic: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/epics/EPIC-001-secret-client/epic.md
 initiative: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/initiative.md
 links:

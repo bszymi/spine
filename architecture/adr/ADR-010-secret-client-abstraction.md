@@ -162,6 +162,8 @@ per-workspace dir) would not exercise.
 ## Links
 
 - Spine companion ADRs: ADR-011, ADR-012
+- Initiative INIT-021, EPIC-001 (Secret Client) closed by TASK-008
+  (single-workspace resolver migration to `SecretClient`)
 - Platform side: `smp:/architecture/adrs/ADR-012-workspace-runtime-binding-model.md`,
   `smp:/architecture/adrs/ADR-014-aws-secrets-manager-production-secret-store.md`
 - Cross-repo overview: `smp:/architecture/runtime-binding-overview.md`

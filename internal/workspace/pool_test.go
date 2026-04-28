@@ -39,7 +39,7 @@ func TestServicePool_Get(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{IdleTimeout: 5 * time.Second})
 	defer pool.Close()
 
@@ -81,7 +81,7 @@ func TestServicePool_Get_NotFound(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{})
 	defer pool.Close()
 
@@ -97,7 +97,7 @@ func TestServicePool_EvictIdle(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{IdleTimeout: 1 * time.Millisecond})
 	defer pool.Close()
 
@@ -131,7 +131,7 @@ func TestServicePool_Builder_Called(t *testing.T) {
 	var builderSS *ServiceSet
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{
 		Builder: func(_ context.Context, ss *ServiceSet) error {
 			builderCalled = true
@@ -160,7 +160,7 @@ func TestServicePool_Builder_CanExtendServiceSet(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{
 		Builder: func(_ context.Context, ss *ServiceSet) error {
 			ss.CommitRetryFn = func(_ context.Context, _ string) error { return nil }
@@ -189,7 +189,7 @@ func TestServicePool_Builder_Error_PreventsCreation(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{
 		Builder: func(_ context.Context, _ *ServiceSet) error {
 			return fmt.Errorf("builder failed")
@@ -216,7 +216,7 @@ func TestServicePool_NilBuilder_Works(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{})
 	defer pool.Close()
 
@@ -257,7 +257,7 @@ func TestServicePool_Evict_NoRefs(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{})
 	defer pool.Close()
 
@@ -287,7 +287,7 @@ func TestServicePool_Evict_WithRefs_DeferredClose(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{})
 	defer pool.Close()
 
@@ -315,7 +315,7 @@ func TestServicePool_Evict_WithRefs_DeferredClose(t *testing.T) {
 
 func TestServicePool_Evict_NonExistent(t *testing.T) {
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{})
 	defer pool.Close()
 
@@ -791,7 +791,7 @@ func TestServicePool_Close(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	provider := NewFileProvider()
+	provider := NewFileProvider(nil)
 	pool := NewServicePool(ctx, provider, PoolConfig{})
 
 	_, err := pool.Get(ctx, "ws-close")

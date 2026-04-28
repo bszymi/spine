@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
@@ -93,10 +92,10 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 	// git repo provisioning (TASK-003) here. For now, create the registry
 	// entry as inactive — it must be provisioned before it can serve traffic.
 	cfg := workspace.Config{
-		ID:             req.WorkspaceID,
-		DisplayName:    displayName,
-		DatabaseURL:    "", // Set by provisioning in TASK-002
-		RepoPath:       "", // Set by provisioning in TASK-003
+		ID:          req.WorkspaceID,
+		DisplayName: displayName,
+		// DatabaseURL set by provisioning (TASK-002); RepoPath set by
+		// provisioning (TASK-003). Both default to zero-value here.
 		Status:         workspace.StatusInactive,
 		SMPWorkspaceID: req.SMPWorkspaceID,
 	}
@@ -165,8 +164,10 @@ func (s *Server) handleWorkspaceGet(w http.ResponseWriter, r *http.Request) {
 		"status":       string(ws.Status),
 		"repo_path":    ws.RepoPath,
 	}
-	if ws.DatabaseURL != "" {
-		resp["database_host"] = redactDatabaseURL(ws.DatabaseURL)
+	// Database credential is redacted via secrets.SecretValue: include
+	// the field as a presence indicator, but never echo the URL.
+	if len(ws.DatabaseURL.Reveal()) > 0 {
+		resp["database_url"] = ws.DatabaseURL.String()
 	}
 	WriteJSON(w, http.StatusOK, resp)
 }
@@ -202,15 +203,4 @@ func (s *Server) handleWorkspaceDeactivate(w http.ResponseWriter, r *http.Reques
 		"workspace_id": workspaceID,
 		"status":       "inactive",
 	})
-}
-
-// redactDatabaseURL strips credentials from a PostgreSQL connection string,
-// returning only host:port/dbname. Returns the original string if parsing fails.
-func redactDatabaseURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "***"
-	}
-	u.User = nil
-	return u.Host + u.Path
 }

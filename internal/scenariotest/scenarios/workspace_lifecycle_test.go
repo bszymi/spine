@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/bszymi/spine/internal/secrets"
 	"github.com/bszymi/spine/internal/workspace"
 )
 
@@ -56,7 +57,7 @@ func TestWorkspace_Lifecycle(t *testing.T) {
 		err := provider.CreateWorkspace(ctx, workspace.Config{
 			ID:          "ws-lifecycle",
 			DisplayName: "Lifecycle Test Workspace",
-			DatabaseURL: "postgres://fake:fake@localhost/fake",
+			DatabaseURL: secrets.NewSecretValue([]byte("postgres://fake:fake@localhost/fake")),
 			RepoPath:    "/tmp/fake-repo",
 			Status:      workspace.StatusActive,
 		})

@@ -78,6 +78,14 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 				WriteError(w, domain.NewError(domain.ErrForbidden, fmt.Sprintf("workspace %q is inactive", workspaceID)))
 				return
 			}
+			if errors.Is(err, workspace.ErrWorkspaceUnavailable) {
+				// Transient: secret store down, missing/denied
+				// runtime_db, or platform binding fetch failure.
+				// Map to 503 so callers retry instead of treating
+				// it as a permanent 500.
+				WriteError(w, domain.NewError(domain.ErrUnavailable, fmt.Sprintf("workspace %q is currently unavailable", workspaceID)))
+				return
+			}
 			WriteError(w, domain.NewError(domain.ErrInternal, "failed to resolve workspace"))
 			return
 		}

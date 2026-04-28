@@ -167,8 +167,8 @@ func TestPlatformBindingProvider_ResolveSuccess(t *testing.T) {
 	if cfg.ID != "acme" {
 		t.Fatalf("ID = %q", cfg.ID)
 	}
-	if cfg.DatabaseURL != "postgres://runtime/acme" {
-		t.Fatalf("DatabaseURL = %q", cfg.DatabaseURL)
+	if got := string(cfg.DatabaseURL.Reveal()); got != "postgres://runtime/acme" {
+		t.Fatalf("DatabaseURL = %q", got)
 	}
 	if cfg.SMPWorkspaceID != "acme-smp" {
 		t.Fatalf("SMPWorkspaceID = %q", cfg.SMPWorkspaceID)
@@ -235,8 +235,8 @@ func TestPlatformBindingProvider_NotModifiedReusesCached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve 2: %v", err)
 	}
-	if cfg.DatabaseURL != "postgres://runtime/acme" {
-		t.Fatalf("DatabaseURL = %q", cfg.DatabaseURL)
+	if got := string(cfg.DatabaseURL.Reveal()); got != "postgres://runtime/acme" {
+		t.Fatalf("DatabaseURL = %q", got)
 	}
 	if got := ps.hits.Load(); got != 2 {
 		t.Fatalf("platform hits = %d, want 2", got)
@@ -301,8 +301,8 @@ func TestPlatformBindingProvider_PlatformDownServesStaleWithinGrace(t *testing.T
 	if err != nil {
 		t.Fatalf("expected stale-on-error to succeed, got %v", err)
 	}
-	if cfg.DatabaseURL != "postgres://runtime/acme" {
-		t.Fatalf("stale DatabaseURL wrong: %q", cfg.DatabaseURL)
+	if got := string(cfg.DatabaseURL.Reveal()); got != "postgres://runtime/acme" {
+		t.Fatalf("stale DatabaseURL wrong: %q", got)
 	}
 }
 

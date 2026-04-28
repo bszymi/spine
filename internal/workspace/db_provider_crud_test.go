@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/bszymi/spine/internal/secrets"
 )
 
 // TestDBProvider_CRUD exercises the write-side methods (Create / Deactivate /
@@ -23,7 +25,7 @@ func TestDBProvider_CRUD(t *testing.T) {
 	cfg := Config{
 		ID:          "ws-crud",
 		DisplayName: "CRUD Workspace",
-		DatabaseURL: "postgres://localhost/ws-crud",
+		DatabaseURL: secrets.NewSecretValue([]byte("postgres://localhost/ws-crud")),
 		RepoPath:    "/repos/ws-crud",
 		Status:      StatusActive,
 	}

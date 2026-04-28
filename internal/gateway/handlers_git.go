@@ -75,6 +75,10 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, domain.NewError(domain.ErrForbidden, fmt.Sprintf("workspace %q is inactive", workspaceID)))
 			return
 		}
+		if errors.Is(err, workspace.ErrWorkspaceUnavailable) {
+			WriteError(w, domain.NewError(domain.ErrUnavailable, fmt.Sprintf("workspace %q is currently unavailable", workspaceID)))
+			return
+		}
 		log.Error("workspace resolution failed", "error", err)
 		WriteError(w, domain.NewError(domain.ErrInternal, "workspace resolution failed"))
 		return

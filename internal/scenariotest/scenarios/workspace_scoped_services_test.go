@@ -15,6 +15,7 @@ import (
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
 	"github.com/bszymi/spine/internal/scenariotest/harness"
+	"github.com/bszymi/spine/internal/secrets"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workspace"
@@ -121,12 +122,12 @@ Beta-specific content.
 		resolver := &twoWorkspaceResolver{
 			alpha: workspace.Config{
 				ID:          "alpha",
-				DatabaseURL: os.Getenv("SPINE_DATABASE_URL"),
+				DatabaseURL: secrets.NewSecretValue([]byte(os.Getenv("SPINE_DATABASE_URL"))),
 				RepoPath:    envAlpha.Repo.Dir,
 			},
 			beta: workspace.Config{
 				ID:          "beta",
-				DatabaseURL: betaDBURL,
+				DatabaseURL: secrets.NewSecretValue([]byte(betaDBURL)),
 				RepoPath:    repoBeta.Dir,
 			},
 		}
@@ -246,7 +247,7 @@ func TestWorkspace_ScopedSchedulerCallbacks(t *testing.T) {
 		resolver := &singleWorkspaceResolver{
 			cfg: workspace.Config{
 				ID:          "alpha",
-				DatabaseURL: os.Getenv("SPINE_DATABASE_URL"),
+				DatabaseURL: secrets.NewSecretValue([]byte(os.Getenv("SPINE_DATABASE_URL"))),
 				RepoPath:    envAlpha.Repo.Dir,
 			},
 		}

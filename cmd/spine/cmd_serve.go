@@ -855,7 +855,16 @@ func serveCmd() *cobra.Command {
 				defer wsWiring.Pool.Close()
 			}
 
-			st, err := buildStore(ctx, secretCipher, log)
+			// Only the file resolver is single-workspace and sized to
+			// back the process-level store. db / platform-binding
+			// modes route per-workspace via ServicePool, so passing
+			// their resolver here would resolve only one tenant's
+			// credential into a shared store — not the desired model.
+			var storeResolver workspace.Resolver
+			if wsWiring.Pool == nil {
+				storeResolver = wsWiring.Resolver
+			}
+			st, err := buildStore(ctx, storeResolver, secretCipher, log)
 			if err != nil {
 				return err
 			}
@@ -1034,8 +1043,12 @@ func buildWorkspaceResolver(
 
 	switch resolver {
 	case "file":
+		fileSecretClient, err := buildFileResolverSecretClient(ctx)
+		if err != nil {
+			return nil, err
+		}
 		log.Info("workspace resolver: file", "workspace_id", os.Getenv("SPINE_WORKSPACE_ID"))
-		return &resolverWiring{Resolver: workspace.NewFileProvider()}, nil
+		return &resolverWiring{Resolver: workspace.NewFileProvider(fileSecretClient)}, nil
 
 	case "db":
 		registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
@@ -1045,7 +1058,20 @@ func buildWorkspaceResolver(
 		if err := requireSecureDBURL(registryURL); err != nil {
 			return nil, fmt.Errorf("registry URL: %w", err)
 		}
-		provider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{})
+		// SecretClient is required for ref-shaped database_url rows.
+		// Optional when no secret backend is configured — legacy URL
+		// rows still work, but ref rows would fail at Resolve.
+		var dbSecretClient secrets.SecretClient
+		if secretClientConfigured() {
+			c, err := buildSecretClient(ctx)
+			if err != nil {
+				return nil, err
+			}
+			dbSecretClient = c
+		}
+		provider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{
+			SecretClient: dbSecretClient,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("connect to workspace registry: %w", err)
 		}
@@ -1147,6 +1173,64 @@ func dbPolicyFromEnv() workspace.PoolPolicy {
 	return p
 }
 
+// secretClientConfigured reports whether the env signals any secret
+// backend selection. It treats both the explicit
+// SPINE_SECRET_PROVIDER selector and the file-mode SPINE_SECRET_FILE_ROOT
+// (which buildSecretClient honours when SPINE_SECRET_PROVIDER is
+// unset) as "configured". Used by db-mode and migrate paths to
+// decide whether a SecretClient should be wired into DBProvider for
+// dereferencing ref-shaped database_url rows.
+func secretClientConfigured() bool {
+	if strings.TrimSpace(os.Getenv("SPINE_SECRET_PROVIDER")) != "" {
+		return true
+	}
+	if os.Getenv("SPINE_SECRET_FILE_ROOT") != "" {
+		return true
+	}
+	return false
+}
+
+// buildFileResolverSecretClient assembles the SecretClient used by
+// the single-workspace FileProvider. The shape depends on the
+// configured backend:
+//
+//   - No backend / file backend: a real (or NotFound) client wrapped
+//     by EnvFallbackSecretClient so SPINE_DATABASE_URL keeps working
+//     for the canonical default/runtime_db ref. Dev-friendly bootstrap.
+//   - AWS backend: the AWS client is returned directly, with no env
+//     fallback. Production deployments that explicitly opted into AWS
+//     must fail closed when a runtime_db secret is missing — falling
+//     back to a stale SPINE_DATABASE_URL would mask a misprovisioned
+//     secret.
+func buildFileResolverSecretClient(ctx context.Context) (secrets.SecretClient, error) {
+	id := os.Getenv("SPINE_WORKSPACE_ID")
+	if id == "" {
+		id = "default"
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("SPINE_SECRET_PROVIDER")))
+
+	if provider == "aws" {
+		// Production: no env-var bypass. A missing AWS secret must
+		// surface as ErrSecretNotFound, not silently resolve to
+		// whatever is in SPINE_DATABASE_URL.
+		return buildSecretClient(ctx)
+	}
+
+	var inner secrets.SecretClient
+	if !secretClientConfigured() {
+		inner = workspace.NotFoundSecretClient{}
+	} else {
+		c, err := buildSecretClient(ctx)
+		if err != nil {
+			return nil, err
+		}
+		inner = c
+	}
+
+	return workspace.NewEnvFallbackSecretClient(inner, id, "SPINE_DATABASE_URL")
+}
+
 // poolIdleTimeoutFromEnv reads SPINE_WS_POOL_IDLE_TIMEOUT (Go duration,
 // e.g. "10m"). Zero means "use the ServicePool default" (10m, ADR-012).
 // Bad values are silently ignored so a typo doesn't fail startup; the
@@ -1194,11 +1278,25 @@ func buildSecretClient(ctx context.Context) (secrets.SecretClient, error) {
 	}
 }
 
-// buildStore connects to the Spine database if SPINE_DATABASE_URL is set.
-// A connection failure is logged but does not abort startup — the server
-// still serves store-independent endpoints.
-func buildStore(ctx context.Context, secretCipher *spinecrypto.SecretCipher, log *slog.Logger) (store.Store, error) {
-	dbURL := os.Getenv("SPINE_DATABASE_URL")
+// buildStore connects to the workspace database in single-workspace
+// mode. The runtime DB URL is read through the resolver — which in
+// turn goes through SecretClient (ADR-010, TASK-008) — so a deployment
+// configured with `SPINE_SECRET_PROVIDER=file|aws` opens its store
+// against the value supplied by the secret backend instead of an
+// env var. The bootstrap shim in front of the file SecretClient
+// preserves legacy `SPINE_DATABASE_URL=…` workflows.
+//
+// A connection failure is logged but does not abort startup so the
+// server still serves store-independent endpoints.
+func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *spinecrypto.SecretCipher, log *slog.Logger) (store.Store, error) {
+	var dbURL string
+	if resolver != nil {
+		cfg, err := resolver.Resolve(ctx, "")
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace for store: %w", err)
+		}
+		dbURL = string(cfg.DatabaseURL.Reveal())
+	}
 	if dbURL == "" {
 		return nil, nil
 	}
