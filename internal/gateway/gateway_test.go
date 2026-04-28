@@ -2913,6 +2913,139 @@ func TestWorkspaceMiddleware_Inactive(t *testing.T) {
 	}
 }
 
+// ── Workspace middleware: pre-auth state must not leak ──
+
+// TestWorkspaceMiddleware_UnauthenticatedReturns401_NotFound asserts that an
+// unauthenticated client probing a non-existent workspace cannot tell it
+// apart from any other rejection — the response is a uniform 401.
+func TestWorkspaceMiddleware_UnauthenticatedReturns401_NotFound(t *testing.T) {
+	fs := newFakeStore()
+	authSvc := auth.NewService(fs)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceNotFound}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("X-Workspace-ID", "nonexistent")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated workspace probe, got %d", resp.StatusCode)
+	}
+}
+
+func TestWorkspaceMiddleware_UnauthenticatedReturns401_MissingHeader(t *testing.T) {
+	fs := newFakeStore()
+	authSvc := auth.NewService(fs)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceNotFound}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated request with no workspace header, got %d", resp.StatusCode)
+	}
+}
+
+func TestWorkspaceMiddleware_UnauthenticatedReturns401_Inactive(t *testing.T) {
+	fs := newFakeStore()
+	authSvc := auth.NewService(fs)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceInactive}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("X-Workspace-ID", "ws-inactive")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated probe of inactive workspace, got %d", resp.StatusCode)
+	}
+}
+
+func TestWorkspaceMiddleware_UnauthenticatedReturns401_Unavailable(t *testing.T) {
+	fs := newFakeStore()
+	authSvc := auth.NewService(fs)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceUnavailable}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("X-Workspace-ID", "ws-down")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated probe of unavailable workspace, got %d", resp.StatusCode)
+	}
+}
+
+// TestWorkspaceMiddleware_InvalidBearerReturns401_NoLeak guards against the
+// other half of the enumeration vector: a syntactically present but invalid
+// bearer must not unlock the workspace error message.
+func TestWorkspaceMiddleware_InvalidBearerReturns401_NoLeak(t *testing.T) {
+	fs := newFakeStore()
+	authSvc := auth.NewService(fs)
+
+	resolver := &fakeWorkspaceResolver{err: workspace.ErrWorkspaceNotFound}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:             fs,
+		Auth:              authSvc,
+		WorkspaceResolver: resolver,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/query/artifacts?path=test.md", http.NoBody)
+	req.Header.Set("Authorization", "Bearer not-a-real-token")
+	req.Header.Set("X-Workspace-ID", "nonexistent")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for invalid-bearer workspace probe, got %d", resp.StatusCode)
+	}
+}
+
 // ── System validate with validator engine ──
 
 // fakeQueryStore wraps fakeStore and overrides QueryArtifacts to return a non-empty result

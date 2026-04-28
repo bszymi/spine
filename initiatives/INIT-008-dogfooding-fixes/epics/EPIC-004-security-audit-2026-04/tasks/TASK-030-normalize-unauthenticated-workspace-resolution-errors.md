@@ -2,7 +2,7 @@
 id: TASK-030
 type: Task
 title: Normalize unauthenticated workspace resolution errors
-status: Pending
+status: Completed
 epic: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-004-security-audit-2026-04/epic.md
 initiative: /initiatives/INIT-008-dogfooding-fixes/initiative.md
 work_type: bugfix

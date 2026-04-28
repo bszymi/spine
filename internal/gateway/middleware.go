@@ -19,10 +19,24 @@ import (
 // Context keys are empty structs so they collide only with themselves and
 // their label never leaks when a context is formatted for debug output.
 type (
-	actorKey      struct{}
-	workspaceKey  struct{}
-	serviceSetKey struct{}
+	actorKey        struct{}
+	workspaceKey    struct{}
+	serviceSetKey   struct{}
+	workspaceErrKey struct{}
 )
+
+// pendingWorkspaceErr returns the workspace-resolution error that
+// workspaceMiddleware deferred to authMiddleware (and ok=false if there is
+// none). The error is only surfaced after the bearer token has been
+// validated, so unauthenticated callers cannot enumerate workspace
+// existence/state by probing distinct error codes.
+func pendingWorkspaceErr(ctx context.Context) (error, bool) {
+	v := ctx.Value(workspaceErrKey{})
+	if v == nil {
+		return nil, false
+	}
+	return v.(error), true
+}
 
 // WorkspaceHeader is the HTTP header used to pass workspace ID.
 const WorkspaceHeader = "X-Workspace-ID"
@@ -55,6 +69,12 @@ func serviceSetFromContext(ctx context.Context) *workspace.ServiceSet {
 // workspaceMiddleware resolves the workspace from the X-Workspace-ID header.
 // In shared mode, the header is required — missing or invalid IDs are rejected.
 // In single mode (FileProvider), an empty header falls back to the default workspace.
+//
+// Resolution failures are not written to the response here. They are stashed
+// in the request context so authMiddleware can run first and reject
+// unauthenticated callers with a uniform 401 — without leaking whether the
+// workspace exists, is inactive, or is currently unavailable. Authenticated
+// callers see the original tenant-state error after the bearer is validated.
 func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.wsResolver == nil {
@@ -66,27 +86,8 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 
 		cfg, err := s.wsResolver.Resolve(r.Context(), workspaceID)
 		if err != nil {
-			if errors.Is(err, workspace.ErrWorkspaceNotFound) {
-				if workspaceID == "" {
-					WriteError(w, domain.NewError(domain.ErrInvalidParams, "X-Workspace-ID header is required"))
-				} else {
-					WriteError(w, domain.NewError(domain.ErrNotFound, fmt.Sprintf("workspace %q not found", workspaceID)))
-				}
-				return
-			}
-			if errors.Is(err, workspace.ErrWorkspaceInactive) {
-				WriteError(w, domain.NewError(domain.ErrForbidden, fmt.Sprintf("workspace %q is inactive", workspaceID)))
-				return
-			}
-			if errors.Is(err, workspace.ErrWorkspaceUnavailable) {
-				// Transient: secret store down, missing/denied
-				// runtime_db, or platform binding fetch failure.
-				// Map to 503 so callers retry instead of treating
-				// it as a permanent 500.
-				WriteError(w, domain.NewError(domain.ErrUnavailable, fmt.Sprintf("workspace %q is currently unavailable", workspaceID)))
-				return
-			}
-			WriteError(w, domain.NewError(domain.ErrInternal, "failed to resolve workspace"))
+			ctx := context.WithValue(r.Context(), workspaceErrKey{}, mapWorkspaceResolveErr(err, workspaceID))
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -108,14 +109,57 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// mapWorkspaceResolveErr translates a workspace.Resolver error into the
+// public-facing domain error (and message) that authMiddleware will surface
+// to authenticated callers.
+func mapWorkspaceResolveErr(err error, workspaceID string) error {
+	switch {
+	case errors.Is(err, workspace.ErrWorkspaceNotFound):
+		if workspaceID == "" {
+			return domain.NewError(domain.ErrInvalidParams, "X-Workspace-ID header is required")
+		}
+		return domain.NewError(domain.ErrNotFound, fmt.Sprintf("workspace %q not found", workspaceID))
+	case errors.Is(err, workspace.ErrWorkspaceInactive):
+		return domain.NewError(domain.ErrForbidden, fmt.Sprintf("workspace %q is inactive", workspaceID))
+	case errors.Is(err, workspace.ErrWorkspaceUnavailable):
+		// Transient: secret store down, missing/denied runtime_db, or
+		// platform binding fetch failure. 503 so callers retry instead
+		// of treating it as a permanent 500.
+		return domain.NewError(domain.ErrUnavailable, fmt.Sprintf("workspace %q is currently unavailable", workspaceID))
+	default:
+		return domain.NewError(domain.ErrInternal, "failed to resolve workspace")
+	}
+}
+
 // authMiddleware validates the Bearer token and sets the actor in context.
 // Uses the workspace-scoped auth service when available (shared multi-tenant mode),
 // falling back to the server-level auth service (single-workspace mode).
 // Fails closed: if no auth service is available, all authenticated routes return 401.
+//
+// Any workspace-resolution error stashed by workspaceMiddleware is only
+// surfaced after the bearer has been successfully validated. Unauthenticated
+// callers always receive a uniform 401 so they cannot enumerate workspace
+// IDs or status by probing distinct error codes.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsErr, hasWSErr := pendingWorkspaceErr(r.Context())
+
 		authSvc := s.authFrom(r.Context())
 		if authSvc == nil {
+			// In pool-backed shared mode the server-level auth is nil
+			// and the workspace's auth.Service only becomes available
+			// after a successful resolve. If resolution failed there
+			// is no store to validate the bearer against — collapse to
+			// a uniform 401 so the missing auth service cannot itself
+			// be used to enumerate workspace state. Authenticated
+			// callers in this mode forfeit the granular 404/403/503
+			// they would have seen pre-fix; that trade is the point of
+			// TASK-030. Without a pending workspace error this is a
+			// genuine server config issue, so keep the original 503.
+			if hasWSErr {
+				WriteError(w, domain.NewError(domain.ErrUnauthorized, "authentication required"))
+				return
+			}
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "authentication not configured"))
 			return
 		}
@@ -140,6 +184,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		actor, err := authSvc.ValidateToken(r.Context(), token)
 		if err != nil {
 			WriteError(w, err)
+			return
+		}
+
+		// Bearer is now proven good; safe to surface the deferred
+		// workspace-resolution error to the authenticated caller.
+		if hasWSErr {
+			WriteError(w, wsErr)
 			return
 		}
 
