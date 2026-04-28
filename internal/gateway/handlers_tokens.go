@@ -25,8 +25,8 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.auth == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "auth not configured"))
+	authSvc, ok := s.needAuth(w, r)
+	if !ok {
 		return
 	}
 
@@ -50,7 +50,7 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
-	plaintext, tokenID, err := s.auth.CreateToken(r.Context(), req.ActorID, req.Name, expiresAt)
+	plaintext, tokenID, err := authSvc.CreateToken(r.Context(), req.ActorID, req.Name, expiresAt)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -68,13 +68,13 @@ func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.auth == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "auth not configured"))
+	authSvc, ok := s.needAuth(w, r)
+	if !ok {
 		return
 	}
 
 	tokenID := chi.URLParam(r, "token_id")
-	if err := s.auth.RevokeToken(r.Context(), tokenID); err != nil {
+	if err := authSvc.RevokeToken(r.Context(), tokenID); err != nil {
 		WriteError(w, err)
 		return
 	}
