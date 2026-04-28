@@ -93,6 +93,12 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"token.create": domain.RoleAdmin,
 	"token.revoke": domain.RoleAdmin,
 	"token.list":   domain.RoleAdmin,
+
+	// Repository catalog & bindings (INIT-014 EPIC-001)
+	"repository.create":     domain.RoleOperator,
+	"repository.read":       domain.RoleReader,
+	"repository.update":     domain.RoleOperator,
+	"repository.deactivate": domain.RoleOperator,
 }
 
 // RequiredRole returns the minimum role for an operation.

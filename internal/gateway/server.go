@@ -15,6 +15,7 @@ import (
 	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
@@ -157,6 +158,7 @@ type Server struct {
 	gitPushResolver            GitPushResolverFunc        // optional, nil if not configured; resolves per-workspace policy+events for push
 	webhookTargets             *delivery.TargetValidator  // optional, nil = permissive; enforces SSRF rules on target_url writes and tests
 	bindingInvalidationHandler http.Handler               // optional, nil if not configured; ADR-011 platform → Spine invalidation webhook
+	repoManager                *repository.Manager        // optional, nil if not configured; INIT-014 EPIC-001 multi-repo workspace management
 	devMode                    bool                       // when true, authorize allows unauthenticated requests
 	env                        string                     // SPINE_ENV value (production/staging/development); surfaced in health
 	sseLimiter                 *sseLimiter                // caps concurrent SSE streams per actor
@@ -268,6 +270,7 @@ type ServerConfig struct {
 	// The handler owns its own bearer-token auth, so it sits
 	// outside the operator-token and per-actor middleware chains.
 	BindingInvalidationHandler http.Handler
+	RepositoryManager          *repository.Manager       // optional; serves /api/v1/repositories
 	WebhookTargets             *delivery.TargetValidator // optional; enforces webhook target_url SSRF rules on create/update/test. A nil validator permits every URL and is only appropriate for tests.
 	DevMode                    bool                      // when true, authorize allows unauthenticated requests
 	Env                        string                    // SPINE_ENV: production/staging/development; surfaced in /system/health
@@ -311,6 +314,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		gitHTTP:                    cfg.GitHTTP,
 		gitPushResolver:            cfg.GitPushResolver,
 		bindingInvalidationHandler: cfg.BindingInvalidationHandler,
+		repoManager:                cfg.RepositoryManager,
 		webhookTargets:             cfg.WebhookTargets,
 		devMode:                    cfg.DevMode,
 		env:                        cfg.Env,

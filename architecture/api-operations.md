@@ -233,7 +233,63 @@ Request body:
 
 Validates: actor is the current assignee, assignment is active, step is not in terminal state. Step transitions back to `waiting` for re-claiming.
 
-### 3.7 Divergence Operations
+### 3.7 Repository Operations (INIT-014 EPIC-001)
+
+Workspace-scoped operations for the multi-repository model defined by [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md). The catalog (`/.spine/repositories.yaml`) is the source of truth for repository identity; the runtime `repositories` table holds operational connection details. The primary `spine` repository is implicit and never has a binding row.
+
+| Operation | Effect | When to Use |
+|-----------|--------|-------------|
+| `repository.create` | Registers a code repository: appends a catalog entry and inserts a binding row. Rolls back the catalog write if the binding insert fails. | Operator onboarding a new code repo into a workspace |
+| `repository.read` | Returns one repository or the full list. The primary `spine` is always included. Inactive bindings are surfaced for admin views. | UIs and CLIs listing or inspecting repositories |
+| `repository.update` | Applies partial updates to identity (name, default_branch, role, description) and/or operational fields (clone_url, credentials_ref, local_path). Empty status preserves the existing active/inactive flag. | Rotating a clone URL, retitling, switching default branch |
+| `repository.deactivate` | Flips the binding row to `inactive`. Refused with `precondition_failed` if any non-terminal Run currently references the repository. The catalog entry is left in place. | Taking a repository out of execution rotation without losing its identity |
+
+**Endpoints:**
+- `POST /api/v1/repositories` — register
+- `GET /api/v1/repositories` — list
+- `GET /api/v1/repositories/{repository_id}` — get one
+- `PUT /api/v1/repositories/{repository_id}` — update
+- `POST /api/v1/repositories/{repository_id}/deactivate` — deactivate
+
+**Register request body:**
+```json
+{
+  "id": "payments-service",
+  "name": "Payments Service",
+  "default_branch": "main",
+  "role": "service",
+  "description": "Core payment processing API.",
+  "clone_url": "https://github.com/acme/payments.git",
+  "credentials_ref": "secret://payments-deploy",
+  "local_path": "/var/spine/workspaces/acme/repos/payments-service"
+}
+```
+
+`id` must match `^[a-z0-9]+(-[a-z0-9]+)*$` (≤ 64 chars). The reserved id `spine` is rejected — the primary repo is implicit. `clone_url` must use `https`, `ssh`, `git`, `file`, or SCP-like (`git@host:path`) — `http` is rejected.
+
+**Update request body:** any subset of `{name, default_branch, role, description, clone_url, credentials_ref, local_path}`. Identity changes flow to the catalog; operational changes flow to the binding row.
+
+**Response shape:**
+```json
+{
+  "id": "payments-service",
+  "workspace_id": "acme",
+  "kind": "code",
+  "name": "Payments Service",
+  "default_branch": "main",
+  "role": "service",
+  "clone_url": "https://github.com/acme/payments.git",
+  "credentials_ref": "secret://payments-deploy",
+  "local_path": "/var/spine/workspaces/acme/repos/payments-service",
+  "status": "active"
+}
+```
+
+**Redaction:** any embedded user:password component in `clone_url` is stripped from responses. SCP-like syntax (`git@host:path`) is left intact — the `git` user there is the SSH login, not a credential. `credentials_ref` is a pointer into the secrets backend (ADR-010/011), not the secret material itself, and is surfaced as-is so operators can manage it.
+
+**Wiring note:** the API surface, validation, redaction, and orchestration are in place. A `serve` configuration without a `RepositoryManager` returns `503 service_unavailable: repository manager not configured` for every endpoint above. Production wiring requires a Git-backed `CatalogStore` that commits `/.spine/repositories.yaml` on the primary repo — that piece is intentionally deferred so the volatile `InMemoryCatalogStore` cannot ship as a default and silently drop registrations on restart.
+
+### 3.8 Divergence Operations
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|

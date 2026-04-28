@@ -154,6 +154,13 @@ func (s *Server) routes() http.Handler {
 			r.Post("/tokens", s.handleTokenCreate)
 			r.Delete("/tokens/{token_id}", s.handleTokenRevoke)
 			r.Get("/tokens", s.handleTokenList)
+
+			// Repository catalog & bindings (INIT-014 EPIC-001)
+			r.Post("/repositories", s.handleRepositoryCreate)
+			r.Get("/repositories", s.handleRepositoryList)
+			r.Get("/repositories/{repository_id}", s.handleRepositoryGet)
+			r.Put("/repositories/{repository_id}", s.handleRepositoryUpdate)
+			r.Post("/repositories/{repository_id}/deactivate", s.handleRepositoryDeactivate)
 		})
 	})
 
