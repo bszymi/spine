@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Repository registry integration scenarios
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: testing
