@@ -2,14 +2,17 @@
 id: TASK-001
 type: Task
 title: Define governed repository catalog format
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: design
 created: 2026-04-28
+last_updated: 2026-04-28
 links:
   - type: parent
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/epic.md
+  - type: related_to
+    target: /architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md
 ---
 
 # TASK-001 - Define Governed Repository Catalog Format

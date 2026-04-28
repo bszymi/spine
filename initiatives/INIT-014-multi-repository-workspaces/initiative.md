@@ -2,9 +2,10 @@
 id: INIT-014
 type: Initiative
 title: Multi-Repository Workspaces
-status: Pending
+status: In Progress
 owner: bszymi
 created: 2026-04-16
+last_updated: 2026-04-28
 links:
   - type: related_to
     target: /architecture/git-integration.md
