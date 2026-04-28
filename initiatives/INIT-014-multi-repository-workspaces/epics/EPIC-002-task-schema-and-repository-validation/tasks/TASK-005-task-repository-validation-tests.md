@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Task repository validation tests
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-002-task-schema-and-repository-validation/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: testing

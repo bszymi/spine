@@ -775,6 +775,147 @@ func TestBranchProtectionRulesProjection(t *testing.T) {
 	s.CleanupTestData(ctx, t)
 }
 
+// TestArtifactProjection_RepositoriesRoundTrip pins the TASK-005
+// acceptance criterion that repository metadata is queryable through
+// the projection store. It exercises both the read-by-path and the
+// list/query code paths so a JSONB marshalling regression on either
+// side fails the test rather than silently dropping the field.
+func TestArtifactProjection_RepositoriesRoundTrip(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+	defer s.CleanupTestData(ctx, t)
+
+	cases := []struct {
+		name string
+		path string
+		in   []string
+	}{
+		{name: "no repositories", path: "initiatives/INIT-X/epics/EPIC-X/tasks/TASK-001.md", in: nil},
+		{name: "single repo", path: "initiatives/INIT-X/epics/EPIC-X/tasks/TASK-002.md", in: []string{"payments-service"}},
+		{name: "multi repo", path: "initiatives/INIT-X/epics/EPIC-X/tasks/TASK-003.md", in: []string{"spine", "payments-service", "api-gateway"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proj := &store.ArtifactProjection{
+				ArtifactPath: tc.path,
+				ArtifactID:   "TASK-XYZ",
+				ArtifactType: string(domain.ArtifactTypeTask),
+				Title:        "Repositories round-trip",
+				Status:       string(domain.StatusPending),
+				Metadata:     []byte(`{}`),
+				Content:      "# x",
+				Links:        []byte(`[]`),
+				Repositories: tc.in,
+				SourceCommit: "deadbeef",
+				ContentHash:  "hash",
+			}
+			if err := s.UpsertArtifactProjection(ctx, proj); err != nil {
+				t.Fatalf("UpsertArtifactProjection: %v", err)
+			}
+
+			got, err := s.GetArtifactProjection(ctx, tc.path)
+			if err != nil {
+				t.Fatalf("GetArtifactProjection: %v", err)
+			}
+			if !equalStrings(got.Repositories, tc.in) {
+				t.Errorf("GetArtifactProjection.Repositories: got %v, want %v", got.Repositories, tc.in)
+			}
+
+			res, err := s.QueryArtifacts(ctx, store.ArtifactQuery{Type: string(domain.ArtifactTypeTask), Limit: 100})
+			if err != nil {
+				t.Fatalf("QueryArtifacts: %v", err)
+			}
+			var found *store.ArtifactProjection
+			for i := range res.Items {
+				if res.Items[i].ArtifactPath == tc.path {
+					found = &res.Items[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("QueryArtifacts did not return %s", tc.path)
+			}
+			if !equalStrings(found.Repositories, tc.in) {
+				t.Errorf("QueryArtifacts row Repositories: got %v, want %v", found.Repositories, tc.in)
+			}
+		})
+	}
+}
+
+// TestExecutionProjection_RepositoriesRoundTrip mirrors the artifact
+// round-trip test for the execution_projections table. The Task-only
+// Repositories column drives operational dashboards (which repos a
+// pending task touches), so a regression silently breaks ops queries.
+func TestExecutionProjection_RepositoriesRoundTrip(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+	defer s.CleanupTestData(ctx, t)
+
+	cases := []struct {
+		name string
+		path string
+		in   []string
+	}{
+		{name: "no repositories", path: "initiatives/INIT-Y/epics/EPIC-Y/tasks/TASK-001.md", in: nil},
+		{name: "multi repo", path: "initiatives/INIT-Y/epics/EPIC-Y/tasks/TASK-002.md", in: []string{"spine", "payments-service"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &store.ExecutionProjection{
+				TaskPath:         tc.path,
+				TaskID:           "TASK-001",
+				Title:            "Execution round-trip",
+				Status:           string(domain.StatusPending),
+				AssignmentStatus: "unassigned",
+				Repositories:     tc.in,
+			}
+			if err := s.UpsertExecutionProjection(ctx, exec); err != nil {
+				t.Fatalf("UpsertExecutionProjection: %v", err)
+			}
+
+			got, err := s.GetExecutionProjection(ctx, tc.path)
+			if err != nil {
+				t.Fatalf("GetExecutionProjection: %v", err)
+			}
+			if !equalStrings(got.Repositories, tc.in) {
+				t.Errorf("GetExecutionProjection.Repositories: got %v, want %v", got.Repositories, tc.in)
+			}
+
+			rows, err := s.QueryExecutionProjections(ctx, store.ExecutionProjectionQuery{Limit: 100})
+			if err != nil {
+				t.Fatalf("QueryExecutionProjections: %v", err)
+			}
+			var found *store.ExecutionProjection
+			for i := range rows {
+				if rows[i].TaskPath == tc.path {
+					found = &rows[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("QueryExecutionProjections did not return %s", tc.path)
+			}
+			if !equalStrings(found.Repositories, tc.in) {
+				t.Errorf("QueryExecutionProjections row Repositories: got %v, want %v", found.Repositories, tc.in)
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return len(a) == 0 && len(b) == 0
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestDeleteAllProjectionsPurgesExecutionProjections(t *testing.T) {
 	s := store.NewTestStore(t)
 	ctx := context.Background()

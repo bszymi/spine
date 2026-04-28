@@ -77,6 +77,71 @@ func (g *queryFakeGit) Log(_ context.Context, opts git.LogOpts) ([]git.CommitInf
 	return g.logResult, g.logErr
 }
 
+// TestQueryService_RepositoriesFieldRoundTrip covers the TASK-005
+// acceptance criterion that "repository metadata is queryable" through
+// the projection query API. It pins the pass-through guarantee so a
+// future store refactor can't quietly drop the Repositories field on
+// either GetArtifact or QueryArtifacts.
+func TestQueryService_RepositoriesFieldRoundTrip(t *testing.T) {
+	taskPath := "initiatives/INIT-001/epics/EPIC-001/tasks/TASK-001-x.md"
+	cases := []struct {
+		name string
+		in   []string
+	}{
+		{name: "no repositories", in: nil},
+		{name: "single repo", in: []string{"payments-service"}},
+		{name: "multi repo", in: []string{"spine", "payments-service", "api-gateway"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proj := &store.ArtifactProjection{
+				ArtifactPath: taskPath,
+				ArtifactID:   "TASK-001",
+				ArtifactType: string(domain.ArtifactTypeTask),
+				Title:        "Test",
+				Status:       string(domain.StatusPending),
+				Repositories: tc.in,
+			}
+			st := &queryFakeStore{
+				projections:     map[string]*store.ArtifactProjection{taskPath: proj},
+				artifactsResult: &store.ArtifactQueryResult{Items: []store.ArtifactProjection{*proj}},
+			}
+			q := NewQueryService(st, nil)
+
+			got, err := q.GetArtifact(context.Background(), taskPath)
+			if err != nil {
+				t.Fatalf("GetArtifact: %v", err)
+			}
+			if !sameStrings(got.Repositories, tc.in) {
+				t.Errorf("GetArtifact.Repositories: got %v, want %v", got.Repositories, tc.in)
+			}
+
+			res, err := q.QueryArtifacts(context.Background(), store.ArtifactQuery{Type: string(domain.ArtifactTypeTask)})
+			if err != nil {
+				t.Fatalf("QueryArtifacts: %v", err)
+			}
+			if len(res.Items) != 1 {
+				t.Fatalf("expected 1 item, got %d", len(res.Items))
+			}
+			if !sameStrings(res.Items[0].Repositories, tc.in) {
+				t.Errorf("QueryArtifacts.Items[0].Repositories: got %v, want %v", res.Items[0].Repositories, tc.in)
+			}
+		})
+	}
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return len(a) == 0 && len(b) == 0
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestQueryService_QueryArtifacts_DelegatesAndPropagatesError(t *testing.T) {
 	want := &store.ArtifactQueryResult{Items: []store.ArtifactProjection{{ArtifactPath: "a"}}}
 	st := &queryFakeStore{artifactsResult: want}
