@@ -176,16 +176,17 @@ type Tx interface {
 
 // ArtifactProjection represents a projected artifact in the database.
 type ArtifactProjection struct {
-	ArtifactPath string `json:"artifact_path"`
-	ArtifactID   string `json:"artifact_id"`
-	ArtifactType string `json:"artifact_type"`
-	Title        string `json:"title"`
-	Status       string `json:"status"`
-	Metadata     []byte `json:"metadata"` // JSONB
-	Content      string `json:"content"`
-	Links        []byte `json:"links"` // JSONB
-	SourceCommit string `json:"source_commit"`
-	ContentHash  string `json:"content_hash"`
+	ArtifactPath string   `json:"artifact_path"`
+	ArtifactID   string   `json:"artifact_id"`
+	ArtifactType string   `json:"artifact_type"`
+	Title        string   `json:"title"`
+	Status       string   `json:"status"`
+	Metadata     []byte   `json:"metadata"` // JSONB
+	Content      string   `json:"content"`
+	Links        []byte   `json:"links"`        // JSONB
+	Repositories []string `json:"repositories"` // task-only: code repository IDs declared in frontmatter
+	SourceCommit string   `json:"source_commit"`
+	ContentHash  string   `json:"content_hash"`
 }
 
 // ArtifactLink represents a denormalized link in the projection store.

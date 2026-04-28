@@ -16,6 +16,7 @@ type ExecutionProjection struct {
 	AllowedActorTypes []string  `json:"allowed_actor_types,omitempty"`
 	Blocked           bool      `json:"blocked"`
 	BlockedBy         []string  `json:"blocked_by,omitempty"`
+	Repositories      []string  `json:"repositories,omitempty"` // code repository IDs declared by the Task
 	AssignedActorID   string    `json:"assigned_actor_id,omitempty"`
 	AssignmentStatus  string    `json:"assignment_status"` // unassigned, assigned, in_progress
 	RunID             string    `json:"run_id,omitempty"`
