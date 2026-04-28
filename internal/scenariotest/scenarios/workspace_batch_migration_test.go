@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/bszymi/spine/internal/secrets"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/workspace"
 )
@@ -95,7 +96,7 @@ func TestWorkspace_BatchMigration(t *testing.T) {
 		err = provider.CreateWorkspace(ctx, workspace.Config{
 			ID:          "ws-migration-test",
 			DisplayName: "Migration Test",
-			DatabaseURL: wsDBURL,
+			DatabaseURL: secrets.NewSecretValue([]byte(wsDBURL)),
 			RepoPath:    "/tmp/fake",
 			Status:      workspace.StatusActive,
 		})
@@ -114,7 +115,7 @@ func TestWorkspace_BatchMigration(t *testing.T) {
 			if ws.ID == "ws-migration-test" {
 				found = true
 				// Verify we could connect to its DB and check migrations.
-				wsStore, err := store.NewPostgresStore(ctx, ws.DatabaseURL)
+				wsStore, err := store.NewPostgresStore(ctx, string(ws.DatabaseURL.Reveal()))
 				if err != nil {
 					t.Fatalf("connect to workspace DB: %v", err)
 				}

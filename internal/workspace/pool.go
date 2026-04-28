@@ -500,15 +500,17 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// reason simply ignore it.
 	var closers []func(reason string)
 
-	// Database.
+	// Database. Reveal the workspace credential only at this
+	// boundary; the pgxpool driver is the legitimate consumer of the
+	// URL string (ADR-010).
 	var st store.Store
 	var pgStore *store.PostgresStore
-	if cfg.DatabaseURL != "" {
+	if dbURL := string(cfg.DatabaseURL.Reveal()); dbURL != "" {
 		// Build a per-workspace pgxpool with ADR-012 policy and wrap
 		// it for saturation observability. The PostgresStore reads
 		// through the underlying pgxpool; the WorkspaceDBPool owns
 		// teardown and metric registration.
-		wp, err := NewWorkspaceDBPool(ctx, cfg.ID, cfg.DatabaseURL, dbPolicy)
+		wp, err := NewWorkspaceDBPool(ctx, cfg.ID, dbURL, dbPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("connect to workspace database: %w", err)
 		}

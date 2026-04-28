@@ -32,7 +32,7 @@ func TestNewMultiProjectionSync(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	resolver := &fakeResolver{}
@@ -48,7 +48,7 @@ func TestNewMultiProjectionSync_DefaultInterval(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	resolver := &fakeResolver{}
@@ -65,7 +65,7 @@ func TestMultiProjectionSync_Stop(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	resolver := &fakeResolver{}
@@ -88,7 +88,7 @@ func TestMultiProjectionSync_Start_ContextCancel(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	resolver := &fakeResolver{}
@@ -116,7 +116,7 @@ func TestMultiProjectionSync_SyncAll_EmptyWorkspaces(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	resolver := &fakeResolver{configs: []Config{}} // empty list
@@ -132,7 +132,7 @@ func TestMultiProjectionSync_SyncAll_ListError(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	// Resolver returns an error → syncAll should log and return without panic.
@@ -147,7 +147,7 @@ func TestMultiProjectionSync_SyncAll_PoolGetError(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	// Resolver returns a workspace ID unknown to the pool → Get returns error.
@@ -163,7 +163,7 @@ func TestMultiProjectionSync_SyncAll_NilProjSync(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
 	ctx := context.Background()
-	pool := NewServicePool(ctx, NewFileProvider(), PoolConfig{})
+	pool := NewServicePool(ctx, NewFileProvider(nil), PoolConfig{})
 	defer pool.Close()
 
 	// The pool resolves this workspace (file provider reads env SPINE_WORKSPACE_ID).

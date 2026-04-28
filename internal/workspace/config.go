@@ -1,5 +1,7 @@
 package workspace
 
+import "github.com/bszymi/spine/internal/secrets"
+
 // WorkspaceStatus represents the lifecycle status of a workspace.
 type WorkspaceStatus string
 
@@ -17,9 +19,12 @@ type Config struct {
 	// DisplayName is a human-readable name for the workspace.
 	DisplayName string
 
-	// DatabaseURL is the connection string for the workspace's PostgreSQL database
-	// (runtime + projection schemas).
-	DatabaseURL string
+	// DatabaseURL is the runtime PostgreSQL connection string for the
+	// workspace, wrapped in secrets.SecretValue so structured logs and
+	// JSON responses redact automatically (ADR-010). Reveal at the
+	// store / driver boundary only. Zero value (empty Reveal()) means
+	// "no database configured".
+	DatabaseURL secrets.SecretValue
 
 	// RepoPath is the filesystem path to the workspace's Git working directory.
 	RepoPath string

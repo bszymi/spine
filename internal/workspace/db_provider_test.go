@@ -104,8 +104,8 @@ func TestDBProvider_Resolve(t *testing.T) {
 	if cfg.DisplayName != "Workspace One" {
 		t.Errorf("expected DisplayName %q, got %q", "Workspace One", cfg.DisplayName)
 	}
-	if cfg.DatabaseURL != "postgres://localhost/ws1" {
-		t.Errorf("expected DatabaseURL %q, got %q", "postgres://localhost/ws1", cfg.DatabaseURL)
+	if got := string(cfg.DatabaseURL.Reveal()); got != "postgres://localhost/ws1" {
+		t.Errorf("expected DatabaseURL %q, got %q", "postgres://localhost/ws1", got)
 	}
 	if cfg.Status != StatusActive {
 		t.Errorf("expected Status %q, got %q", StatusActive, cfg.Status)

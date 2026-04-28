@@ -332,7 +332,7 @@ func (p *PlatformBindingProvider) assembleConfig(ctx context.Context, b Platform
 	return &Config{
 		ID:             b.WorkspaceID,
 		DisplayName:    b.DisplayName,
-		DatabaseURL:    runtimeDB,
+		DatabaseURL:    secrets.NewSecretValue([]byte(runtimeDB)),
 		RepoPath:       b.RepoPath,
 		Status:         StatusActive,
 		ActorScope:     b.ActorScope,
