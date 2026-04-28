@@ -510,6 +510,137 @@ func TestParseCRLFLineEndings(t *testing.T) {
 	}
 }
 
+func TestParseTaskRepositoriesAbsent(t *testing.T) {
+	// A pre-INIT-014 task with no `repositories` field must still parse
+	// cleanly and produce an empty Repositories slice — this is the
+	// backward-compatibility guarantee from EPIC-002 acceptance #5.
+	content := []byte(`---
+id: TASK-001
+type: Task
+title: Legacy single-repo task
+status: Pending
+epic: /init/epic.md
+initiative: /init/initiative.md
+---
+
+# Legacy
+`)
+	a, err := artifact.Parse("tasks/TASK-001.md", content)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(a.Repositories) != 0 {
+		t.Errorf("expected empty Repositories, got %v", a.Repositories)
+	}
+}
+
+func TestParseTaskRepositoriesSingleAndMulti(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{
+			name: "single",
+			yaml: "repositories:\n  - payments-service\n",
+			want: []string{"payments-service"},
+		},
+		{
+			name: "multi",
+			yaml: "repositories:\n  - payments-service\n  - api-gateway\n",
+			want: []string{"payments-service", "api-gateway"},
+		},
+		{
+			name: "empty list",
+			yaml: "repositories: []\n",
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := []byte("---\nid: TASK-002\ntype: Task\ntitle: T\nstatus: Pending\nepic: /e.md\ninitiative: /i.md\n" + tt.yaml + "---\n# body\n")
+			a, err := artifact.Parse("t.md", content)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if len(a.Repositories) != len(tt.want) {
+				t.Fatalf("Repositories len: got %d (%v), want %d (%v)", len(a.Repositories), a.Repositories, len(tt.want), tt.want)
+			}
+			for i, id := range tt.want {
+				if a.Repositories[i] != id {
+					t.Errorf("Repositories[%d]: got %q, want %q", i, a.Repositories[i], id)
+				}
+			}
+			// repositories must not also leak into the metadata map —
+			// downstream code reads typed Artifact.Repositories, not
+			// stringified YAML.
+			if _, ok := a.Metadata["repositories"]; ok {
+				t.Errorf("repositories must not appear in Metadata, got %q", a.Metadata["repositories"])
+			}
+		})
+	}
+}
+
+func TestParseTaskRepositoriesRejectsBadShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "scalar instead of list",
+			yaml: "repositories: payments-service\n",
+		},
+		{
+			name: "map instead of list",
+			yaml: "repositories:\n  payments-service: true\n",
+		},
+		{
+			name: "empty string entry",
+			yaml: "repositories:\n  - \"\"\n",
+		},
+		{
+			name: "whitespace-only entry",
+			yaml: "repositories:\n  - \"   \"\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := []byte("---\nid: TASK-003\ntype: Task\ntitle: T\nstatus: Pending\nepic: /e.md\ninitiative: /i.md\n" + tt.yaml + "---\n# body\n")
+			if _, err := artifact.Parse("t.md", content); err == nil {
+				t.Fatal("expected parse error for bad repositories shape")
+			}
+		})
+	}
+}
+
+func TestParseRepositoriesRejectedOnNonTask(t *testing.T) {
+	// `repositories` is a Task-only field. A stray entry on another
+	// artifact must be rejected at parse time so it can never reach
+	// downstream resolution code. Cover non-empty, empty, and null
+	// shapes — the field's mere presence on a non-Task is the error,
+	// not its content.
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{"non-empty", "repositories:\n  - payments-service\n"},
+		{"empty list", "repositories: []\n"},
+		{"null", "repositories: null\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := []byte("---\nid: EPIC-001\ntype: Epic\ntitle: T\nstatus: Pending\ninitiative: /i.md\n" + tc.yaml + "---\n\n# Body\n")
+			_, err := artifact.Parse("epic.md", content)
+			if err == nil {
+				t.Fatal("expected parse error: repositories on Epic")
+			}
+			if !strings.Contains(err.Error(), "repositories is only valid on Task") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseExtraFields(t *testing.T) {
 	content := []byte(`---
 type: Task

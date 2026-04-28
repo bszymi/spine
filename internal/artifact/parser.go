@@ -23,6 +23,7 @@ type frontMatter struct {
 	WorkType            string         `yaml:"work_type"`
 	Acceptance          string         `yaml:"acceptance"`
 	AcceptanceRationale string         `yaml:"acceptance_rationale"`
+	Repositories        []string       `yaml:"repositories"`
 	Date                string         `yaml:"date"`
 	DecisionMakers      string         `yaml:"decision_makers"`
 	Links               []rawLink      `yaml:"links"`
@@ -60,14 +61,27 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		metadata = make(map[string]any)
 	}
 
+	artifactType := domain.ArtifactType(parsed.Type)
+
+	// `repositories` is a Task-only field per artifact-schema.md §5.3.
+	// Detect field presence in the raw map (rather than parsed.Repositories)
+	// so that `repositories: []` or `repositories: null` on a non-Task is
+	// rejected too, not just non-empty lists.
+	if _, hasRepos := metadata["repositories"]; hasRepos && artifactType != domain.ArtifactTypeTask {
+		return nil, &ParseError{Path: path, Message: fmt.Sprintf("repositories is only valid on Task artifacts, got %s", artifactType)}
+	}
+
 	// Remove known fields from metadata map
 	for _, key := range []string{"id", "type", "title", "status", "owner", "created",
 		"last_updated", "version", "initiative", "epic", "work_type", "acceptance",
-		"acceptance_rationale", "date", "decision_makers", "links"} {
+		"acceptance_rationale", "repositories", "date", "decision_makers", "links"} {
 		delete(metadata, key)
 	}
-
-	artifactType := domain.ArtifactType(parsed.Type)
+	for i, rid := range parsed.Repositories {
+		if strings.TrimSpace(rid) == "" {
+			return nil, &ParseError{Path: path, Message: fmt.Sprintf("repositories[%d]: empty repository id", i)}
+		}
+	}
 
 	links := make([]domain.Link, 0, len(parsed.Links))
 	for _, rl := range parsed.Links {
@@ -188,6 +202,7 @@ func Parse(path string, content []byte) (*domain.Artifact, error) {
 		Status:              domain.ArtifactStatus(parsed.Status),
 		Acceptance:          domain.TaskAcceptance(parsed.Acceptance),
 		AcceptanceRationale: parsed.AcceptanceRationale,
+		Repositories:        parsed.Repositories,
 		Links:               links,
 		Metadata:            meta,
 		Content:             body,

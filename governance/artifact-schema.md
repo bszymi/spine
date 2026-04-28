@@ -227,11 +227,24 @@ links:
 | `work_type` | optional | string | Workflow classification (e.g., `implementation`, `spike`, `bugfix`). Used by the Workflow Engine for [binding resolution](/architecture/task-workflow-binding.md). |
 | `acceptance` | optional | enum | `Approved`, `Rejected With Followup`, `Rejected Closed` |
 | `acceptance_rationale` | optional | string | Reason for acceptance outcome |
+| `repositories` | optional | list of strings | Code repository IDs the task affects (see below). Omit or leave empty for primary-repo-only execution. |
 | `created` | optional | date | Creation date |
 | `last_updated` | optional | date | Last modification date |
 | `links` | optional | list | Typed artifact links |
 
-Example:
+#### `repositories`
+
+The `repositories` field declares which **code repositories** (registered in the workspace [repository catalog](#58-repository-catalog)) participate in the task. It encodes part of task intent: where implementation work is expected to occur. See [Multi-Repository Integration §4.1](/architecture/multi-repository-integration.md) for the runtime resolution rules.
+
+Rules:
+
+- The field is optional.
+- Values are repository IDs (the same IDs declared in `/.spine/repositories.yaml`), not URLs or local paths.
+- Omitting the field — or leaving it as an empty list — means the task targets the primary Spine repository only (single-repo execution). Existing pre-INIT-014 tasks remain valid without changes.
+- The primary `spine` repository always participates and need not be listed; tasks may omit it even when other repositories are declared.
+- The field is a Task-only field. Including `repositories` on any other artifact type is a schema error.
+
+Single-repo example (no field — backward compatible):
 
 ```yaml
 ---
@@ -244,6 +257,25 @@ initiative: /initiatives/INIT-001-foundations/initiative.md
 links:
   - type: parent
     target: /initiatives/INIT-001-foundations/epics/EPIC-004-governance-refinement/epic.md
+---
+```
+
+Multi-repo example:
+
+```yaml
+---
+id: TASK-042
+type: Task
+title: Add rate limiting
+status: In Progress
+epic: /initiatives/INIT-005-platform-hardening/epics/EPIC-002-rate-limiting/epic.md
+initiative: /initiatives/INIT-005-platform-hardening/initiative.md
+repositories:
+  - payments-service
+  - api-gateway
+links:
+  - type: parent
+    target: /initiatives/INIT-005-platform-hardening/epics/EPIC-002-rate-limiting/epic.md
 ---
 ```
 

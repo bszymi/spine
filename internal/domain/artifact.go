@@ -131,6 +131,7 @@ type Artifact struct {
 	Status              ArtifactStatus    `json:"status" yaml:"status"`                                                 // lifecycle status
 	Acceptance          TaskAcceptance    `json:"acceptance,omitempty" yaml:"acceptance,omitempty"`                     // task acceptance outcome
 	AcceptanceRationale string            `json:"acceptance_rationale,omitempty" yaml:"acceptance_rationale,omitempty"` // rationale
+	Repositories        []string          `json:"repositories,omitempty" yaml:"repositories,omitempty"`                 // task-only: code repository IDs (excluding the primary spine repo)
 	Links               []Link            `json:"links" yaml:"links"`                                                   // relationships to other artifacts
 	Metadata            map[string]string `json:"metadata" yaml:"metadata"`                                             // additional front matter fields
 	Content             string            `json:"content" yaml:"content"`                                               // markdown body (after front matter)
