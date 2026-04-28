@@ -12,8 +12,8 @@ import (
 
 func (s *PostgresStore) UpsertArtifactProjection(ctx context.Context, proj *ArtifactProjection) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO projection.artifacts (artifact_path, artifact_id, artifact_type, title, status, metadata, content, links, source_commit, content_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO projection.artifacts (artifact_path, artifact_id, artifact_type, title, status, metadata, content, links, repositories, source_commit, content_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (artifact_path) DO UPDATE SET
 			artifact_id = EXCLUDED.artifact_id,
 			artifact_type = EXCLUDED.artifact_type,
@@ -22,11 +22,13 @@ func (s *PostgresStore) UpsertArtifactProjection(ctx context.Context, proj *Arti
 			metadata = EXCLUDED.metadata,
 			content = EXCLUDED.content,
 			links = EXCLUDED.links,
+			repositories = EXCLUDED.repositories,
 			source_commit = EXCLUDED.source_commit,
 			content_hash = EXCLUDED.content_hash,
 			synced_at = now()`,
 		proj.ArtifactPath, proj.ArtifactID, proj.ArtifactType, proj.Title,
 		proj.Status, proj.Metadata, proj.Content, proj.Links,
+		MarshalSkills(proj.Repositories),
 		proj.SourceCommit, proj.ContentHash,
 	)
 	return err
@@ -34,17 +36,19 @@ func (s *PostgresStore) UpsertArtifactProjection(ctx context.Context, proj *Arti
 
 func (s *PostgresStore) GetArtifactProjection(ctx context.Context, artifactPath string) (*ArtifactProjection, error) {
 	var proj ArtifactProjection
+	var repos []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT artifact_path, artifact_id, artifact_type, title, status, metadata, content, links, source_commit, content_hash
+		SELECT artifact_path, artifact_id, artifact_type, title, status, metadata, content, links, repositories, source_commit, content_hash
 		FROM projection.artifacts WHERE artifact_path = $1`, artifactPath,
 	).Scan(
 		&proj.ArtifactPath, &proj.ArtifactID, &proj.ArtifactType, &proj.Title,
-		&proj.Status, &proj.Metadata, &proj.Content, &proj.Links,
+		&proj.Status, &proj.Metadata, &proj.Content, &proj.Links, &repos,
 		&proj.SourceCommit, &proj.ContentHash,
 	)
 	if err != nil {
 		return nil, notFoundOr(err, "artifact not found")
 	}
+	proj.Repositories = UnmarshalSkills(repos)
 	return &proj, nil
 }
 
@@ -89,7 +93,7 @@ func (s *PostgresStore) QueryArtifacts(ctx context.Context, query ArtifactQuery)
 	limit := query.ClampedLimit()
 
 	sql := fmt.Sprintf(`
-		SELECT artifact_path, artifact_id, artifact_type, title, status, metadata, content, links, source_commit, content_hash
+		SELECT artifact_path, artifact_id, artifact_type, title, status, metadata, content, links, repositories, source_commit, content_hash
 		FROM projection.artifacts %s
 		ORDER BY artifact_path
 		LIMIT %d`, where, limit+1)
@@ -103,13 +107,15 @@ func (s *PostgresStore) QueryArtifacts(ctx context.Context, query ArtifactQuery)
 	var items []ArtifactProjection
 	for rows.Next() {
 		var proj ArtifactProjection
+		var repos []byte
 		if err := rows.Scan(
 			&proj.ArtifactPath, &proj.ArtifactID, &proj.ArtifactType, &proj.Title,
-			&proj.Status, &proj.Metadata, &proj.Content, &proj.Links,
+			&proj.Status, &proj.Metadata, &proj.Content, &proj.Links, &repos,
 			&proj.SourceCommit, &proj.ContentHash,
 		); err != nil {
 			return nil, err
 		}
+		proj.Repositories = UnmarshalSkills(repos)
 		items = append(items, proj)
 	}
 	if err := rows.Err(); err != nil {
@@ -385,8 +391,8 @@ func (s *PostgresStore) UpsertExecutionProjection(ctx context.Context, proj *Exe
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO projection.execution_projections
 			(task_path, task_id, title, status, required_skills, allowed_actor_types,
-			 blocked, blocked_by, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+			 blocked, blocked_by, repositories, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		ON CONFLICT (task_path) DO UPDATE SET
 			task_id = EXCLUDED.task_id,
 			title = EXCLUDED.title,
@@ -395,6 +401,7 @@ func (s *PostgresStore) UpsertExecutionProjection(ctx context.Context, proj *Exe
 			allowed_actor_types = EXCLUDED.allowed_actor_types,
 			blocked = EXCLUDED.blocked,
 			blocked_by = EXCLUDED.blocked_by,
+			repositories = EXCLUDED.repositories,
 			assigned_actor_id = EXCLUDED.assigned_actor_id,
 			assignment_status = EXCLUDED.assignment_status,
 			run_id = EXCLUDED.run_id,
@@ -402,7 +409,7 @@ func (s *PostgresStore) UpsertExecutionProjection(ctx context.Context, proj *Exe
 			last_updated = now()`,
 		proj.TaskPath, proj.TaskID, proj.Title, proj.Status,
 		MarshalSkills(proj.RequiredSkills), MarshalSkills(proj.AllowedActorTypes),
-		proj.Blocked, MarshalSkills(proj.BlockedBy),
+		proj.Blocked, MarshalSkills(proj.BlockedBy), MarshalSkills(proj.Repositories),
 		nilIfEmpty(proj.AssignedActorID), proj.AssignmentStatus,
 		nilIfEmpty(proj.RunID), nilIfEmpty(proj.WorkflowStep),
 	)
@@ -411,14 +418,14 @@ func (s *PostgresStore) UpsertExecutionProjection(ctx context.Context, proj *Exe
 
 func (s *PostgresStore) GetExecutionProjection(ctx context.Context, taskPath string) (*ExecutionProjection, error) {
 	var proj ExecutionProjection
-	var reqSkills, actorTypes, blockedBy []byte
+	var reqSkills, actorTypes, blockedBy, repos []byte
 	var assignedActor, runID, wfStep *string
 	err := s.pool.QueryRow(ctx, `
 		SELECT task_path, task_id, title, status, required_skills, allowed_actor_types,
-		       blocked, blocked_by, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated
+		       blocked, blocked_by, repositories, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated
 		FROM projection.execution_projections WHERE task_path = $1`, taskPath,
 	).Scan(&proj.TaskPath, &proj.TaskID, &proj.Title, &proj.Status,
-		&reqSkills, &actorTypes, &proj.Blocked, &blockedBy,
+		&reqSkills, &actorTypes, &proj.Blocked, &blockedBy, &repos,
 		&assignedActor, &proj.AssignmentStatus, &runID, &wfStep, &proj.LastUpdated)
 	if err != nil {
 		return nil, notFoundOr(err, "execution projection not found")
@@ -426,6 +433,7 @@ func (s *PostgresStore) GetExecutionProjection(ctx context.Context, taskPath str
 	proj.RequiredSkills = UnmarshalSkills(reqSkills)
 	proj.AllowedActorTypes = UnmarshalSkills(actorTypes)
 	proj.BlockedBy = UnmarshalSkills(blockedBy)
+	proj.Repositories = UnmarshalSkills(repos)
 	if assignedActor != nil {
 		proj.AssignedActorID = *assignedActor
 	}
@@ -440,7 +448,7 @@ func (s *PostgresStore) GetExecutionProjection(ctx context.Context, taskPath str
 
 func (s *PostgresStore) QueryExecutionProjections(ctx context.Context, query ExecutionProjectionQuery) ([]ExecutionProjection, error) {
 	sql := `SELECT task_path, task_id, title, status, required_skills, allowed_actor_types,
-	               blocked, blocked_by, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated
+	               blocked, blocked_by, repositories, assigned_actor_id, assignment_status, run_id, workflow_step, last_updated
 	        FROM projection.execution_projections WHERE 1=1`
 	var args []any
 	argN := 1
@@ -477,10 +485,10 @@ func (s *PostgresStore) QueryExecutionProjections(ctx context.Context, query Exe
 	var results []ExecutionProjection
 	for rows.Next() {
 		var proj ExecutionProjection
-		var reqSkills, actorTypes, blockedBy []byte
+		var reqSkills, actorTypes, blockedBy, repos []byte
 		var assignedActor, runID, wfStep *string
 		if err := rows.Scan(&proj.TaskPath, &proj.TaskID, &proj.Title, &proj.Status,
-			&reqSkills, &actorTypes, &proj.Blocked, &blockedBy,
+			&reqSkills, &actorTypes, &proj.Blocked, &blockedBy, &repos,
 			&assignedActor, &proj.AssignmentStatus, &runID, &wfStep, &proj.LastUpdated,
 		); err != nil {
 			return nil, err
@@ -488,6 +496,7 @@ func (s *PostgresStore) QueryExecutionProjections(ctx context.Context, query Exe
 		proj.RequiredSkills = UnmarshalSkills(reqSkills)
 		proj.AllowedActorTypes = UnmarshalSkills(actorTypes)
 		proj.BlockedBy = UnmarshalSkills(blockedBy)
+		proj.Repositories = UnmarshalSkills(repos)
 		if assignedActor != nil {
 			proj.AssignedActorID = *assignedActor
 		}

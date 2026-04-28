@@ -419,6 +419,7 @@ func (s *Service) projectArtifact(ctx context.Context, a *domain.Artifact, commi
 		Metadata:     metadata,
 		Content:      a.Content,
 		Links:        linksJSON,
+		Repositories: a.Repositories,
 		SourceCommit: commitSHA,
 		ContentHash:  contentHash,
 	}
@@ -451,6 +452,7 @@ func (s *Service) projectArtifact(ctx context.Context, a *domain.Artifact, commi
 			Status:           string(a.Status),
 			Blocked:          blocked,
 			BlockedBy:        blockedBy,
+			Repositories:     a.Repositories,
 			AssignmentStatus: "unassigned",
 		}
 		if err := s.store.UpsertExecutionProjection(ctx, execProj); err != nil {
