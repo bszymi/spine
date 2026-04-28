@@ -56,6 +56,18 @@ func (s *PostgresStore) QueryRowSecret(ctx context.Context, subscriptionID strin
 	).Scan(dest)
 }
 
+// CountRepositoryBindings returns the total number of rows in
+// runtime.repositories across all workspaces. Used by the single-repo
+// backward-compatibility scenario to assert that running a task on a
+// pre-INIT-014 workspace never silently materialises a binding row.
+func (s *PostgresStore) CountRepositoryBindings(ctx context.Context) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM runtime.repositories`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // CleanupTestData removes all test data from runtime and projection tables.
 func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 	t.Helper()
