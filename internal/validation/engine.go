@@ -75,16 +75,32 @@ func (e *Engine) Validate(ctx context.Context, artifactPath string) domain.Valid
 }
 
 // ValidateAll runs validation against all projected artifacts.
+//
+// The store caps QueryArtifacts at ArtifactQueryMaxLimit per call,
+// so we walk the cursor here. A single Limit:1000 fetch used to
+// silently truncate to that page size and miss validation errors in
+// any workspace with more artifacts than the cap; the loop fixes
+// that by following HasMore/NextCursor until the projection is
+// exhausted.
 func (e *Engine) ValidateAll(ctx context.Context) []domain.ValidationResult {
-	result, err := e.store.QueryArtifacts(ctx, store.ArtifactQuery{Limit: 1000})
-	if err != nil {
-		return nil
-	}
-
 	var results []domain.ValidationResult
-	for i := range result.Items {
-		r := e.Validate(ctx, result.Items[i].ArtifactPath)
-		results = append(results, r)
+	cursor := ""
+	for {
+		result, err := e.store.QueryArtifacts(ctx, store.ArtifactQuery{
+			Limit:  store.ArtifactQueryMaxLimit,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return nil
+		}
+		for i := range result.Items {
+			r := e.Validate(ctx, result.Items[i].ArtifactPath)
+			results = append(results, r)
+		}
+		if !result.HasMore {
+			break
+		}
+		cursor = result.NextCursor
 	}
 	return results
 }

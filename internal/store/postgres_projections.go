@@ -83,10 +83,10 @@ func (s *PostgresStore) QueryArtifacts(ctx context.Context, query ArtifactQuery)
 		where = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	limit := query.Limit
-	if limit <= 0 {
-		limit = 50
-	}
+	// Clamp at the store boundary so a misbehaving internal caller
+	// (any non-HTTP path that builds an ArtifactQuery directly)
+	// cannot interpolate an unbounded LIMIT into the SQL below.
+	limit := query.ClampedLimit()
 
 	sql := fmt.Sprintf(`
 		SELECT artifact_path, artifact_id, artifact_type, title, status, metadata, content, links, source_commit, content_hash
