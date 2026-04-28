@@ -19,50 +19,127 @@ The current contract assumes one repository per workspace. This document specifi
 
 ## 2. Repository Domain Model
 
-### 2.1 Repository Entity
+Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md), every registered repository has two records: a **governed catalog entry** in `/.spine/repositories.yaml` (the source of truth for identity) and a **runtime binding row** in the `repositories` table (the source of truth for connection details). They are linked by the workspace-scoped repository ID.
 
+### 2.1 Governed Catalog (`/.spine/repositories.yaml`)
+
+The catalog lives in the primary Spine repo and is committed alongside other governed artifacts. It is the authority on which repository IDs exist within the workspace.
+
+```yaml
+# /.spine/repositories.yaml
+- id: spine
+  kind: spine
+  name: Payments Platform Spine
+  default_branch: main
+  description: Governance, product, and architecture artifacts.
+
+- id: payments-service
+  kind: code
+  name: Payments Service
+  default_branch: main
+  role: service
+  description: Core payment processing API.
+
+- id: api-gateway
+  kind: code
+  name: API Gateway
+  default_branch: main
+  role: edge
+
+- id: shared-libs
+  kind: code
+  name: Shared Libraries
+  default_branch: develop
+  role: library
 ```
-Repository {
-    ID              string          // Unique within workspace (e.g., "payments-service")
-    WorkspaceID     string          // Owning workspace
-    Kind            RepositoryKind  // "spine" | "code"
-    URL             string          // Clone URL (HTTPS or SSH)
-    DefaultBranch   string          // "main", "master", "develop", etc.
-    LocalPath       string          // Resolved filesystem path (runtime, not persisted)
-    Status          string          // "active" | "inactive"
-    CreatedAt       time.Time
-    UpdatedAt       time.Time
-}
-```
 
-**Invariants:**
-- Every workspace has exactly one repository with `Kind = spine`. It is created when the workspace is provisioned and cannot be deleted.
-- Repository IDs are unique within a workspace. IDs must be lowercase alphanumeric with hyphens (e.g., `payments-service`, `api-gateway`).
-- The `spine` repository's ID is always `"spine"`. It cannot be renamed.
-- The URL field is used for initial clone. After cloning, Spine operates on the local copy.
+**Catalog fields:**
 
-### 2.2 Storage
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `id` | yes | string | Workspace-scoped ID. `spine` is reserved for the primary repo. |
+| `kind` | yes | enum | `spine` or `code`. Exactly one entry has `kind: spine`. |
+| `name` | yes | string | Human display name. |
+| `default_branch` | yes | string | Branch that `spine/run/*` branches are cut from in this repo. |
+| `role` | optional | string | Free-form role label (e.g., `service`, `library`, `infra`). |
+| `description` | optional | string | One- or two-sentence explanation. |
 
-Repository metadata is stored in the workspace's runtime database (not in Git — it is operational config, not governed artifact state).
+**Operational fields are forbidden in the catalog.** The catalog parser rejects entries that contain `url`, `clone_url`, `credentials`, `token`, `secret_ref`, `local_path`, `path`, or `status`. Adding a new field requires an ADR change.
+
+**ID rules:**
+- IDs match `^[a-z0-9]+(-[a-z0-9]+)*$` (lowercase alphanumeric with single internal hyphens, max 64 chars; consecutive or leading/trailing hyphens are rejected).
+- IDs are unique within a workspace.
+- `spine` is reserved as the primary repository ID. The primary entry MUST use it; no other entry may.
+- IDs are immutable. Renaming is a deregister + register cycle.
+
+**Catalog presence:**
+- Single-repo workspaces MAY omit the file entirely. The workspace behaves as if a single `kind: spine` entry existed with the configured authoritative branch — backward compatible with v0.x.
+- Multi-repo workspaces MUST commit the file. The first code repo registration creates it.
+- When present, the file MUST contain exactly one `kind: spine` entry. Zero or two-or-more primary entries fail validation at workspace load.
+
+### 2.2 Runtime Binding
+
+Operational connection details are stored in the workspace's runtime database, never in Git. The binding row holds clone URL, credentials reference, local path, and status; it holds no identity fields beyond the ID itself.
 
 ```sql
 CREATE TABLE repositories (
-    repository_id   TEXT        NOT NULL,
-    workspace_id    TEXT        NOT NULL,
-    kind            TEXT        NOT NULL DEFAULT 'code',
-    url             TEXT        NOT NULL,
-    default_branch  TEXT        NOT NULL DEFAULT 'main',
-    status          TEXT        NOT NULL DEFAULT 'active',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    repository_id     TEXT        NOT NULL,    -- matches catalog id
+    workspace_id      TEXT        NOT NULL,
+    clone_url         TEXT        NOT NULL,
+    credentials_ref   TEXT        NULL,        -- secret-client ref (ADR-010/011)
+    local_path        TEXT        NOT NULL,    -- resolved at runtime
+    status            TEXT        NOT NULL DEFAULT 'active',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     PRIMARY KEY (workspace_id, repository_id),
-    CHECK (kind IN ('spine', 'code')),
     CHECK (status IN ('active', 'inactive'))
 );
 ```
 
-### 2.3 Filesystem Layout
+`kind`, `name`, `default_branch`, `role`, and `description` are read from the catalog at workspace load — they are not duplicated in the binding row. The runtime store is a binding, not a copy.
+
+### 2.3 Reconstruction From Git
+
+The runtime store is disposable (Constitution §8). On rebuild:
+
+1. The workspace re-reads `/.spine/repositories.yaml` from the primary Spine repo.
+2. For each catalog entry, a binding row is constructed using the operator-supplied clone URL and credentials reference from runtime configuration.
+3. A binding row whose `repository_id` is not present in the catalog is an orphan — it is dropped with a warning event and not used during the session.
+4. A catalog entry that has no operator-supplied connection details is left without a binding row; subsequent operations against that repository fail with a `repository_unbound` error until an operator registers the runtime details.
+
+This ensures task artifacts that reference repository IDs survive a database rebuild — the IDs come from Git, not from the database.
+
+### 2.4 In-Memory Repository View
+
+For services and the git client pool, the catalog and binding are joined into a single in-memory view:
+
+```
+Repository {
+    ID              string          // From catalog
+    WorkspaceID     string
+    Kind            RepositoryKind  // "spine" | "code", from catalog
+    Name            string          // From catalog
+    DefaultBranch   string          // From catalog
+    Role            string          // From catalog (optional)
+    Description     string          // From catalog (optional)
+    CloneURL        string          // From binding
+    CredentialsRef  string          // From binding
+    LocalPath       string          // From binding
+    Status          string          // From binding ("active" | "inactive")
+    CreatedAt       time.Time       // From binding
+    UpdatedAt       time.Time       // From binding
+}
+```
+
+Code that mutates the view writes to the correct side: identity fields go to the catalog (governance commit on the primary Spine repo); connection fields go to the binding (runtime store update, no commit).
+
+**Invariants:**
+- Every workspace has exactly one repository with `Kind = spine`. It is created when the workspace is provisioned and cannot be deleted.
+- The `spine` repository's ID is always `"spine"`. It cannot be renamed.
+- The clone URL is used for initial clone. After cloning, Spine operates on the local copy.
+
+### 2.5 Filesystem Layout
 
 Each workspace's repositories are stored under the workspace's base directory:
 
@@ -253,18 +330,32 @@ All security requirements from TASK-006 apply per-repo:
 POST /api/v1/repositories
 {
     "repository_id": "payments-service",
+    "name": "Payments Service",
     "url": "https://github.com/acme/payments-service.git",
-    "default_branch": "main"
+    "default_branch": "main",
+    "role": "service",
+    "description": "Core payment processing API.",
+    "credentials_ref": "secret://payments-deploy-key"
 }
 ```
 
 On registration:
-1. Validate repository ID (format, uniqueness within workspace)
-2. Insert metadata into `repositories` table
-3. Clone repository to `{workspace_base}/repos/{repo_id}/`
-4. Verify clone succeeded and default branch exists
-5. Create git client and add to pool
-6. Return repository metadata
+1. Validate repository ID (format and uniqueness against the existing catalog).
+2. Append a catalog entry to `/.spine/repositories.yaml` with the identity fields (`id`, `kind: code`, `name`, `default_branch`, optional `role` and `description`). If the file does not exist, create it with the implicit primary entry materialized first.
+3. Commit the catalog change to the primary Spine repo as a governance commit (standard commit trailers per [Git Integration Contract](/architecture/git-integration.md) §5).
+4. Insert a binding row into the runtime `repositories` table with `clone_url`, `credentials_ref`, the resolved `local_path`, and `status: active`.
+5. Clone the repository to `{workspace_base}/repos/{repo_id}/`.
+6. Verify the clone succeeded and the catalog's `default_branch` exists.
+7. Create the git client and add it to the pool.
+8. Return the in-memory repository view.
+
+Failure handling: if any step after the catalog commit fails (binding insert, clone, default-branch verification, or client creation), the registration is rolled back end-to-end:
+
+- The binding row is deleted (or never inserted, if the failure occurred earlier).
+- Any partial local clone at `{workspace_base}/repos/{repo_id}/` is removed.
+- The catalog commit is reverted on the primary Spine repo with a follow-up commit.
+
+The catalog never advances ahead of a working binding, and the binding never lingers without a matching catalog entry. After a failed registration, the same `repository_id` must be reusable on retry without manual cleanup.
 
 ### 6.2 Credential Management
 
@@ -277,12 +368,13 @@ Code repos may require authentication for clone and push operations. Credentials
 ### 6.3 Deregistration
 
 Deregistering a code repo:
-1. Verify no active runs reference this repo
-2. Set status to `inactive` (soft delete — preserves history)
-3. Remove git client from pool
-4. Local clone is retained for audit (operator can clean up manually)
+1. Verify no active runs reference this repo.
+2. Remove the catalog entry from `/.spine/repositories.yaml` and commit the change to the primary Spine repo. The committed catalog is what task validation reads against on subsequent run starts, and the Git history of this file is the durable audit record for the deregistration.
+3. Delete the binding row from the runtime `repositories` table. Retaining the row would create an orphan under the reconstruction rule in §2.3 (it would be dropped on the next workspace load anyway) and would keep the `(workspace_id, repository_id)` primary key occupied, blocking re-registration of the same ID.
+4. Remove the git client from the pool.
+5. The local clone at `{workspace_base}/repos/{repo_id}/` is retained on disk (operator can clean up manually). It is no longer registered, so Spine will not operate on it.
 
-Hard deletion is an operator action, not available via API.
+Soft deletion — flipping the binding row's `status` to `inactive` while leaving the catalog entry in place — is reserved for operator maintenance windows where a code repo must be temporarily taken out of rotation without losing its identity. The public deregistration API always removes the catalog entry and the binding row together. Hard deletion of the local clone directory is an operator action, not available via API.
 
 ---
 
@@ -298,7 +390,7 @@ Hard deletion is an operator action, not available via API.
 
 - Continues to project from the primary Spine repo only
 - Code repos are not projected — Spine does not index source code
-- The `repositories` table is a runtime table, not a projection
+- The `repositories` table is a runtime binding, not a projection. The Projection Service does, however, read `/.spine/repositories.yaml` from the primary Spine repo and surface the catalog (identity fields only) so cross-artifact validation can resolve `repositories: [...]` references in tasks.
 
 ### 7.3 Workflow Engine
 
@@ -341,6 +433,8 @@ Hard deletion is an operator action, not available via API.
 - [System Components](/architecture/components.md) — Artifact Service, Projection Service, Engine
 - [Product Definition: Multi-Repository Workspaces](/product/multi-repository-workspaces.md) — product model and use cases
 - [Security Model](/architecture/security-model.md) — credential management
+- [Artifact Front Matter Schema](/governance/artifact-schema.md) — catalog file as a governed artifact
+- [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md) — identity model and catalog/binding split
 - [INIT-014](/initiatives/INIT-014-multi-repository-workspaces/initiative.md) — parent initiative
 - [INIT-009 TASK-006](/initiatives/INIT-009-workspace-runtime/epics/EPIC-001-core-runtime/tasks/TASK-006-git-http-serve-endpoint.md) — git HTTP serve endpoint (extended for repo routing)
 

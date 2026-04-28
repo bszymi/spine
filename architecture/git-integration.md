@@ -21,21 +21,28 @@ Git is Spine's authoritative source of truth (Constitution §2). The [Artifact S
 
 ### 2.1 Repository Scope
 
-Each workspace operates against a single Git repository. A `.spine.yaml` file at the repository root configures the **artifacts directory** — the subdirectory where all Spine artifacts live. When absent, artifacts are at the repo root (backward compatible). See [Repository Structure §1.1](/governance/repository-structure.md).
+Each workspace operates against one **primary Spine repository** (`kind: spine`) and, optionally, N registered **code repositories** (`kind: code`). The primary repo holds governed artifacts; code repos hold implementation code that governed runs target. The full multi-repo model — repository identity, the governed `/.spine/repositories.yaml` catalog, and the runtime binding split — is specified in [Multi-Repository Integration](/architecture/multi-repository-integration.md) and [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md). Workspaces with no registered code repositories operate in single-repo mode and may omit the catalog file entirely; this document's contract applies unchanged in that case.
+
+A `.spine.yaml` file at the primary repository root configures the **artifacts directory** — the subdirectory where all Spine artifacts live. When absent, artifacts are at the repo root (backward compatible). See [Repository Structure §1.1](/governance/repository-structure.md).
 
 At startup (or on first request for a workspace in shared mode), Spine reads `.spine.yaml` and applies the `artifacts_dir` setting to all path resolution, file discovery, and git operations (commits, pathspecs).
 
-The repository contains:
+The primary Spine repository contains:
 
 - All governed artifacts (initiatives, epics, tasks, ADRs, governance, architecture, product documents)
 - Workflow definitions (`workflows/*.yaml`)
+- Workspace-level operational governance under `/.spine/` (e.g., `branch-protection.yaml`, `repositories.yaml`)
 - Runtime configuration is **not** stored in the repository (per [Security Model](/architecture/security-model.md) §5)
+
+Code repositories contain implementation code only. Spine does not project, validate, or index code repo contents — they participate in branch and merge lifecycles but are not governance authorities.
+
+Unless otherwise stated, the rules in this document — authoritative branch, commit format, branch strategy, merge behavior — describe operations against the primary Spine repository. Code repository operations follow the same rules but are routed through the per-repo git client described in [Multi-Repository Integration](/architecture/multi-repository-integration.md) §3.
 
 #### Workspace-Scoped Repositories
 
-In single mode (v0.x default), the repository path is set via the `SPINE_REPO_PATH` environment variable — one repository per Spine instance. This is unchanged from the original v0.x model.
+In single mode (v0.x default), the primary repository path is set via the `SPINE_REPO_PATH` environment variable — one primary Spine repository per Spine instance. This is unchanged from the original v0.x model.
 
-In shared mode, each workspace's repository path is resolved from the workspace registry at the request boundary. Each workspace has its own independent Git repository, working directory, and credentials. All Git integration rules defined in this document — branch strategy, commit model, authoritative branch, merge behavior — apply per workspace.
+In shared mode, each workspace's primary repository path is resolved from the workspace registry at the request boundary. Each workspace has its own independent Git repository, working directory, and credentials. All Git integration rules defined in this document — branch strategy, commit model, authoritative branch, merge behavior — apply per workspace and per repository within the workspace.
 
 ### 2.2 Authoritative Branch
 
@@ -509,7 +516,7 @@ This Git integration contract is expected to evolve as the system is implemented
 
 Areas expected to require refinement:
 
-- Multi-repository support (artifacts spanning multiple repos within a single workspace) — see [Multi-Repository Integration](/architecture/multi-repository-integration.md)
+- Multi-repository support (artifacts spanning multiple repos within a single workspace) — see [Multi-Repository Integration](/architecture/multi-repository-integration.md) and [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md)
 - Git LFS integration for large binary artifacts
 - Automated conflict resolution strategies
 - Monorepo vs polyrepo guidance

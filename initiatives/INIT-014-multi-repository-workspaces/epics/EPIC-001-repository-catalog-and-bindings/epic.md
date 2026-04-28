@@ -2,10 +2,11 @@
 id: EPIC-001
 type: Epic
 title: "Repository Catalog and Operational Bindings"
-status: Pending
+status: In Progress
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 owner: bszymi
 created: 2026-04-28
+last_updated: 2026-04-28
 links:
   - type: parent
     target: /initiatives/INIT-014-multi-repository-workspaces/initiative.md

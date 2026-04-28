@@ -27,6 +27,8 @@ This schema covers governed artifacts authored as Markdown files with YAML front
 
 **Workflow definitions are out of scope.** They are pure YAML files (no Markdown body, no front matter) governed by [Workflow Definition Format](/architecture/workflow-definition-format.md), validated by the workflow-specific suite described in [Workflow Validation](/architecture/workflow-validation.md), and managed through dedicated API operations per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md). Nothing in this document applies to workflow definition files.
 
+**Workspace operational governance files are out of scope for the front-matter schema but are governed artifacts.** Pure YAML files under `/.spine/` (e.g., the [repository catalog](#58-repository-catalog) `/.spine/repositories.yaml`) carry no Markdown body and no front matter, but they are committed to the primary Spine repository and validated at workspace load. Their schemas are defined in the architecture documents linked from §5.8.
+
 ### 2.1 Format
 
 All artifact metadata is stored as YAML front matter at the top of the Markdown file, delimited by `---` lines:
@@ -358,6 +360,24 @@ links:
 ```
 
 Note: Product documents do not use sequential IDs. They are identified by their canonical path.
+
+---
+
+### 5.8 Repository Catalog
+
+The repository catalog at `/.spine/repositories.yaml` is a governed artifact: it is committed to the primary Spine repository, validated at workspace load, and changed only through governance commits. Unlike the artifact types above, it is a pure YAML file with no Markdown body and no front matter, so the schema rules in §2 and §4 do not apply to it.
+
+| Property | Value |
+|----------|-------|
+| Canonical path | `/.spine/repositories.yaml` |
+| Format | YAML list of catalog entries (no front matter, no Markdown body) |
+| Required when | Multi-repo workspaces (workspaces with one or more registered code repositories) |
+| Optional when | Single-repo workspaces (file may be omitted; the workspace behaves as if a single `kind: spine` entry existed) |
+| Identity authority | This file is the source of truth for which repository IDs exist within the workspace |
+| Schema and validation | Defined in [Multi-Repository Integration §2.1](/architecture/multi-repository-integration.md) and [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md) |
+| Excluded fields | Operational connection fields (`url`, `clone_url`, `credentials`, `token`, `secret_ref`, `local_path`, `path`, `status`) — these live in the runtime binding, never in Git |
+
+Catalog changes (registering or deregistering a code repository) produce governance commits using the standard commit format defined in [Git Integration §5](/architecture/git-integration.md). Operational connection details (clone URLs, credentials, local paths, active/inactive status) are managed in the runtime binding described in [Multi-Repository Integration §2.2](/architecture/multi-repository-integration.md) and are never written to Git.
 
 ---
 
