@@ -193,9 +193,19 @@ func (p *Pool) Client(ctx context.Context, repositoryID string) (git.GitClient, 
 	if err != nil {
 		return nil, err
 	}
+	return p.clientForRepo(ctx, repo)
+}
+
+// clientForRepo runs the prepare/cache/clone path against an
+// already-resolved repository snapshot. Splitting this out lets
+// RepositoryPath share one Lookup with the preparation step — a
+// concurrent binding update that rewrites local_path between two
+// independent Lookups would otherwise let the gateway return a path
+// that was never validated or cloned.
+func (p *Pool) clientForRepo(ctx context.Context, repo *repository.Repository) (git.GitClient, error) {
 	if repo.LocalPath == "" {
 		return nil, domain.NewError(domain.ErrPrecondition,
-			fmt.Sprintf("repository %q has no local clone path", repositoryID))
+			fmt.Sprintf("repository %q has no local clone path", repo.ID))
 	}
 
 	if p.cloner == nil {
@@ -207,10 +217,10 @@ func (p *Pool) Client(ctx context.Context, repositoryID string) (git.GitClient, 
 	}
 
 	p.mu.RLock()
-	if c, ok := p.cache[repositoryID]; ok && c.path == repo.LocalPath {
+	if c, ok := p.cache[repo.ID]; ok && c.path == repo.LocalPath {
 		p.mu.RUnlock()
 		p.cacheHits.Add(1)
-		p.logger.Debug("gitpool: cache hit", "repository_id", repositoryID, "local_path", repo.LocalPath)
+		p.logger.Debug("gitpool: cache hit", "repository_id", repo.ID, "local_path", repo.LocalPath)
 		return c.client, nil
 	}
 	p.mu.RUnlock()
@@ -236,7 +246,7 @@ func (p *Pool) Client(ctx context.Context, repositoryID string) (git.GitClient, 
 	// produce distinct flights — exactly what we want for the
 	// path-changed scenario.
 	cloneCtx := context.WithoutCancel(ctx)
-	sfKey := repositoryID + "\x00" + repo.LocalPath
+	sfKey := repo.ID + "\x00" + repo.LocalPath
 	ch := p.sf.DoChan(sfKey, func() (any, error) {
 		return p.initClient(cloneCtx, repo)
 	})
@@ -250,7 +260,7 @@ func (p *Pool) Client(ctx context.Context, repositoryID string) (git.GitClient, 
 		if res.Shared {
 			p.coalesceCount.Add(1)
 			p.logger.Info("gitpool: concurrent first-access coalesced",
-				"repository_id", repositoryID, "local_path", repo.LocalPath)
+				"repository_id", repo.ID, "local_path", repo.LocalPath)
 		}
 		return res.Val.(git.GitClient), nil
 	}
@@ -391,10 +401,18 @@ func cloneExists(localPath string) bool {
 	return true
 }
 
-// RepositoryPath returns the local clone path for repositoryID.
-// Same resolution semantics as Client; "spine" returns the path
-// configured on the registry's primary spec via Lookup so callers
-// see one consistent source of truth.
+// RepositoryPath returns the local clone path for repositoryID after
+// running the same preparation Client would: in clone mode it
+// triggers lazy clone-on-miss and the WithRepoBase validation; in
+// pass-through mode it short-circuits. "spine" returns the
+// configured primary path via Lookup so callers see one consistent
+// source of truth.
+//
+// Use this from the gateway routing layer that only needs the
+// on-disk path (e.g. to pass to git-http-backend). The single
+// Lookup snapshot is reused across preparation and the returned
+// path so a concurrent binding update that rewrites local_path
+// cannot make us return a path that was never validated or cloned.
 func (p *Pool) RepositoryPath(ctx context.Context, repositoryID string) (string, error) {
 	repo, err := p.resolver.Lookup(ctx, repositoryID)
 	if err != nil {
@@ -403,6 +421,14 @@ func (p *Pool) RepositoryPath(ctx context.Context, repositoryID string) (string,
 	if repo.LocalPath == "" {
 		return "", domain.NewError(domain.ErrPrecondition,
 			fmt.Sprintf("repository %q has no local clone path", repositoryID))
+	}
+	if repositoryID == repository.PrimaryRepositoryID {
+		// Primary path is taken from the registry's primary spec
+		// directly; no preparation step is required.
+		return repo.LocalPath, nil
+	}
+	if _, err := p.clientForRepo(ctx, repo); err != nil {
+		return "", err
 	}
 	return repo.LocalPath, nil
 }

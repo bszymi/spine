@@ -572,7 +572,16 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// change. EPIC-003 TASK-006 will replace the bare CLI factory
 	// with credential-aware per-binding resolution; until then, code
 	// repo clients reuse the primary's auth profile via gitOpts.
-	gitPool, err := gitpool.New(gitClient, registry, gitpool.NewCLIClientFactory(gitOpts...))
+	//
+	// WithCloner enables lazy clone-on-miss so the gateway's git HTTP
+	// routing (`/git/{ws}/{repo}/...`) materialises a code repo on
+	// first access instead of handing an empty directory to
+	// git-http-backend. The concrete *git.CLIClient is reused as the
+	// Cloner because its Clone method is repoPath-independent.
+	gitPool, err := gitpool.New(gitClient, registry,
+		gitpool.NewCLIClientFactory(gitOpts...),
+		gitpool.WithCloner(gitClient),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("git client pool: %w", err)
 	}

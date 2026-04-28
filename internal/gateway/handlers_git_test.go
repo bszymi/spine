@@ -2,15 +2,22 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/bszymi/spine/internal/branchprotect"
+	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/githttp"
+	"github.com/bszymi/spine/internal/gitpool"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/workspace"
 )
 
@@ -84,10 +91,10 @@ func TestParseGitPath(t *testing.T) {
 			r := chi.NewRouter()
 			var gotWsID, gotPath string
 			r.HandleFunc(tt.pattern, func(_ http.ResponseWriter, r *http.Request) {
-				gotWsID, gotPath = parseGitPath(r)
+				gotWsID, _, gotPath = parseGitPath(r)
 			})
 
-			req := httptest.NewRequest("GET", tt.url, nil)
+			req := httptest.NewRequest("GET", tt.url, http.NoBody)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 
@@ -127,10 +134,10 @@ func TestParseGitPath_SingleMode(t *testing.T) {
 			r := chi.NewRouter()
 			var gotWsID, gotPath string
 			r.HandleFunc("/git/*", func(_ http.ResponseWriter, r *http.Request) {
-				gotWsID, gotPath = parseGitPath(r)
+				gotWsID, _, gotPath = parseGitPath(r)
 			})
 
-			req := httptest.NewRequest("GET", tt.url, nil)
+			req := httptest.NewRequest("GET", tt.url, http.NoBody)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 
@@ -169,12 +176,12 @@ func TestParseGitPath_BothRoutesRegistered(t *testing.T) {
 			r := chi.NewRouter()
 			var gotWsID, gotPath string
 			handler := func(_ http.ResponseWriter, r *http.Request) {
-				gotWsID, gotPath = parseGitPath(r)
+				gotWsID, _, gotPath = parseGitPath(r)
 			}
 			r.HandleFunc("/git/{workspace_id}/*", handler)
 			r.HandleFunc("/git/*", handler)
 
-			req := httptest.NewRequest("GET", tt.url, nil)
+			req := httptest.NewRequest("GET", tt.url, http.NoBody)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 
@@ -673,5 +680,467 @@ func TestHandleGit_PushFlagOffOnMissingWorkspace_Returns401(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "secret-ws") {
 		t.Errorf("response leaks workspace ID: %s", w.Body.String())
+	}
+}
+
+// TestParseGitPath_WithRepository covers the new shared-mode form
+// `/git/{workspace_id}/{repository_id}/...`. The first wildcard
+// segment is a repository ID iff it is not a known git protocol
+// segment — `/git/{ws}/info/refs` must still parse as the legacy
+// primary-only form, never as repo "info" with path "/refs".
+func TestParseGitPath_WithRepository(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		wantWsID   string
+		wantRepoID string
+		wantPath   string
+	}{
+		{"workspace + repo + info/refs", "/git/ws-1/code/info/refs", "ws-1", "code", "/info/refs"},
+		{"workspace + repo + upload-pack", "/git/ws-1/code/git-upload-pack", "ws-1", "code", "/git-upload-pack"},
+		{"workspace + repo + receive-pack", "/git/ws-1/code/git-receive-pack", "ws-1", "code", "/git-receive-pack"},
+		{"workspace + repo + nested objects", "/git/ws-1/code/objects/pack/pack-abc.pack", "ws-1", "code", "/objects/pack/pack-abc.pack"},
+
+		// Legacy form (no repo) — first segment IS a protocol segment.
+		{"workspace + protocol info no repo", "/git/ws-1/info/refs", "ws-1", "", "/info/refs"},
+		{"workspace + protocol upload-pack no repo", "/git/ws-1/git-upload-pack", "ws-1", "", "/git-upload-pack"},
+		{"workspace + protocol HEAD no repo", "/git/ws-1/HEAD", "ws-1", "", "/HEAD"},
+
+		// `spine` is a valid repository ID — the registry will
+		// resolve it as the primary, so the gateway must not treat
+		// it as a protocol segment.
+		{"workspace + explicit spine repo", "/git/ws-1/spine/info/refs", "ws-1", "spine", "/info/refs"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := chi.NewRouter()
+			var gotWs, gotRepo, gotPath string
+			handler := func(_ http.ResponseWriter, r *http.Request) {
+				gotWs, gotRepo, gotPath = parseGitPath(r)
+			}
+			r.HandleFunc("/git/{workspace_id}/*", handler)
+			r.HandleFunc("/git/*", handler)
+
+			req := httptest.NewRequest("GET", tt.url, http.NoBody)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			if gotWs != tt.wantWsID {
+				t.Errorf("workspaceID = %q, want %q", gotWs, tt.wantWsID)
+			}
+			if gotRepo != tt.wantRepoID {
+				t.Errorf("repositoryID = %q, want %q", gotRepo, tt.wantRepoID)
+			}
+			if gotPath != tt.wantPath {
+				t.Errorf("gitPath = %q, want %q", gotPath, tt.wantPath)
+			}
+		})
+	}
+}
+
+// gitPoolResolverStub is a test-local Resolver for gitpool.New that
+// records every Lookup so we can verify the gateway is actually
+// asking the pool to resolve the URL repository ID rather than using
+// the segment as a filesystem path.
+type gitPoolResolverStub struct {
+	mu      sync.Mutex
+	repos   map[string]string // repositoryID -> LocalPath
+	lookups []string
+}
+
+func (r *gitPoolResolverStub) Lookup(_ context.Context, id string) (*repository.Repository, error) {
+	r.mu.Lock()
+	r.lookups = append(r.lookups, id)
+	r.mu.Unlock()
+	if path, ok := r.repos[id]; ok {
+		return &repository.Repository{ID: id, LocalPath: path}, nil
+	}
+	return nil, domain.NewErrorWithCause(domain.ErrNotFound,
+		fmt.Sprintf("repository %q not found in catalog", id),
+		repository.ErrRepositoryNotFound)
+}
+
+func (r *gitPoolResolverStub) ListActive(_ context.Context) ([]repository.Repository, error) {
+	return nil, nil
+}
+
+func newTestPool(t *testing.T, repos map[string]string) (*gitpool.Pool, *gitPoolResolverStub) {
+	t.Helper()
+	primary := git.NewCLIClient(t.TempDir())
+	resolver := &gitPoolResolverStub{repos: repos}
+	pool, err := gitpool.New(primary, resolver, gitpool.NewCLIClientFactory())
+	if err != nil {
+		t.Fatalf("gitpool.New: %v", err)
+	}
+	return pool, resolver
+}
+
+// TestResolveGitRepoPath_PrimaryFallback asserts that an empty
+// repository ID and the literal "spine" both bypass the pool and
+// return the workspace's primary path. This is what keeps existing
+// `/git/{ws}/info/refs` URLs working with no pool dependency.
+func TestResolveGitRepoPath_PrimaryFallback(t *testing.T) {
+	primaryPath := t.TempDir()
+	cfg := &workspace.Config{ID: "ws-1", RepoPath: primaryPath}
+	s := &Server{}
+
+	for _, repoID := range []string{"", "spine"} {
+		got, err := s.resolveGitRepoPath(context.Background(), cfg, repoID)
+		if err != nil {
+			t.Fatalf("repoID=%q: %v", repoID, err)
+		}
+		if got != primaryPath {
+			t.Errorf("repoID=%q: got %q, want primary %q", repoID, got, primaryPath)
+		}
+	}
+}
+
+// TestResolveGitRepoPath_CodeRepoViaPool asserts that a non-primary
+// repository ID is routed through the gitpool — the registry
+// resolves it to the binding's LocalPath, never the URL segment as a
+// filesystem path. This is the core ADR-013 invariant.
+func TestResolveGitRepoPath_CodeRepoViaPool(t *testing.T) {
+	codePath := t.TempDir()
+	pool, resolver := newTestPool(t, map[string]string{"code": codePath})
+
+	cfg := &workspace.Config{ID: "ws-1", RepoPath: t.TempDir()}
+	s := &Server{gitPool: pool}
+
+	got, err := s.resolveGitRepoPath(context.Background(), cfg, "code")
+	if err != nil {
+		t.Fatalf("resolveGitRepoPath: %v", err)
+	}
+	if got != codePath {
+		t.Errorf("got %q, want %q", got, codePath)
+	}
+	if len(resolver.lookups) == 0 {
+		t.Errorf("expected at least one Lookup(\"code\"), got %v", resolver.lookups)
+	}
+	for _, id := range resolver.lookups {
+		if id != "code" {
+			t.Errorf("unexpected lookup id %q", id)
+		}
+	}
+}
+
+// TestResolveGitRepoPath_UnknownRepoNotFound asserts that an unknown
+// repository ID propagates the registry's ErrRepositoryNotFound
+// (wrapped in SpineError so the gateway maps to 404). The URL
+// segment must never be reused as a path.
+func TestResolveGitRepoPath_UnknownRepoNotFound(t *testing.T) {
+	pool, _ := newTestPool(t, map[string]string{})
+	cfg := &workspace.Config{ID: "ws-1", RepoPath: t.TempDir()}
+	s := &Server{gitPool: pool}
+
+	_, err := s.resolveGitRepoPath(context.Background(), cfg, "missing")
+	if err == nil {
+		t.Fatal("expected error for unknown repo")
+	}
+	if !errors.Is(err, repository.ErrRepositoryNotFound) {
+		t.Errorf("expected ErrRepositoryNotFound, got %v", err)
+	}
+	var se *domain.SpineError
+	if !errors.As(err, &se) || se.Code != domain.ErrNotFound {
+		t.Errorf("expected SpineError code=ErrNotFound, got %v", err)
+	}
+}
+
+// TestResolveGitRepoPath_SharedMode_PrefersServiceSetPool asserts
+// that in shared mode (servicePool configured) the workspace's own
+// gitpool from ServiceSet.GitPool is used — not the process-level
+// s.gitPool. Otherwise multi-workspace deployments would resolve
+// `/git/{ws}/{repo}` against the wrong registry.
+func TestResolveGitRepoPath_SharedMode_PrefersServiceSetPool(t *testing.T) {
+	otherPool, otherResolver := newTestPool(t, map[string]string{"code": t.TempDir()})
+
+	// Real workspace ServicePool: buildServiceSet wires a real
+	// registry against the workspace primary path with no catalog
+	// file, so "code" is unknown to it. If resolveGitRepoPath
+	// silently fell back to otherPool, "code" would resolve
+	// successfully (and otherResolver would record a Lookup).
+	resolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: t.TempDir(),
+		Status:   workspace.StatusActive,
+	}}
+	pool := workspace.NewServicePool(context.Background(), resolver, workspace.PoolConfig{})
+	defer pool.Close()
+
+	cfg := &workspace.Config{ID: "ws-1", RepoPath: t.TempDir()}
+	s := &Server{
+		gitPool:     otherPool, // would be the wrong choice in shared mode
+		servicePool: pool,
+	}
+
+	got, err := s.resolveGitRepoPath(context.Background(), cfg, "code")
+	if err == nil {
+		t.Fatalf("expected lookup against ws-scoped pool to fail; got path=%q (fell back to s.gitPool)", got)
+	}
+	if len(otherResolver.lookups) != 0 {
+		t.Errorf("server-level pool must not be consulted in shared mode, got lookups=%v",
+			otherResolver.lookups)
+	}
+}
+
+// errServicePoolResolver fails Resolve so servicePool.Get errors —
+// resolveGitRepoPath must surface that, not silently use s.gitPool.
+type errServicePoolResolver struct{}
+
+func (errServicePoolResolver) Resolve(_ context.Context, _ string) (*workspace.Config, error) {
+	return nil, workspace.ErrWorkspaceUnavailable
+}
+
+func (errServicePoolResolver) List(_ context.Context) ([]workspace.Config, error) {
+	return nil, nil
+}
+
+// TestResolveGitRepoPath_SharedMode_GetErrorPropagates asserts that a
+// servicePool.Get failure surfaces unchanged rather than collapsing
+// to a fallback. Otherwise a workspace outage would be masked as a
+// repository-not-found against the wrong registry.
+func TestResolveGitRepoPath_SharedMode_GetErrorPropagates(t *testing.T) {
+	otherPool, _ := newTestPool(t, map[string]string{"code": t.TempDir()})
+	pool := workspace.NewServicePool(context.Background(), errServicePoolResolver{}, workspace.PoolConfig{})
+	defer pool.Close()
+
+	cfg := &workspace.Config{ID: "ws-1", RepoPath: t.TempDir()}
+	s := &Server{
+		gitPool:     otherPool,
+		servicePool: pool,
+	}
+
+	_, err := s.resolveGitRepoPath(context.Background(), cfg, "code")
+	if err == nil {
+		t.Fatal("expected error to propagate from servicePool.Get")
+	}
+	if !errors.Is(err, workspace.ErrWorkspaceUnavailable) {
+		t.Errorf("expected ErrWorkspaceUnavailable, got %v", err)
+	}
+}
+
+// TestResolveGitRepoPath_NoPool asserts that a code-repo request
+// without a configured gitpool fails 503 rather than silently
+// resolving to the workspace primary path. A misconfigured server
+// must not appear to "succeed" by serving the wrong repo.
+func TestResolveGitRepoPath_NoPool(t *testing.T) {
+	cfg := &workspace.Config{ID: "ws-1", RepoPath: t.TempDir()}
+	s := &Server{} // no gitPool, no servicePool
+
+	_, err := s.resolveGitRepoPath(context.Background(), cfg, "code")
+	if err == nil {
+		t.Fatal("expected error when no pool configured")
+	}
+	var se *domain.SpineError
+	if !errors.As(err, &se) || se.Code != domain.ErrUnavailable {
+		t.Errorf("expected SpineError code=ErrUnavailable, got %v", err)
+	}
+}
+
+// TestHandleGit_PerRepoRouting_ReachesGitHandler exercises the full
+// route: a request to `/git/{ws}/{repo}/info/refs` must (a) parse
+// out workspace_id="ws" and repository_id="repo", (b) resolve the
+// repo via the pool, (c) install the repo's LocalPath in the
+// request context for the inner githttp handler. We assert that the
+// pool was asked for "code" — proving the URL segment is not used
+// as a filesystem path — and that the request reached the inner
+// handler (not blocked by auth or workspace resolution).
+func TestHandleGit_PerRepoRouting_ReachesGitHandler(t *testing.T) {
+	codePath := t.TempDir()
+	pool, resolver := newTestPool(t, map[string]string{"code": codePath})
+
+	wsResolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: t.TempDir(),
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		// ResolveRepoPath is required by NewHandler validation but
+		// the gateway sets the path via context, so this fallback
+		// path is only used if the gateway forgets to set it.
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return "/should/not/be/used", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: wsResolver,
+		gitPool:    pool,
+		devMode:    true, // bypass auth so we reach the repo resolver
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/ws-1/code/info/refs?service=git-upload-pack", http.NoBody)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "code/info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if len(resolver.lookups) == 0 {
+		t.Errorf("expected the pool to be consulted for \"code\", got no lookups")
+	}
+	for _, id := range resolver.lookups {
+		if id != "code" {
+			t.Errorf("unexpected lookup id %q", id)
+		}
+	}
+	// We don't assert a specific status — the temp dir is not a real
+	// git repo so git-http-backend will refuse — but the response
+	// must be past the auth gate (not 401) and not the workspace
+	// resolution layer (not 404 with workspace id).
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("auth gate should have been bypassed: 401 body=%s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "ws-1") &&
+		strings.Contains(w.Body.String(), "not found") {
+		t.Errorf("workspace resolution should not have failed: %s", w.Body.String())
+	}
+}
+
+// TestHandleGit_PerRepoRouting_UnknownRepoReturnsNotFound asserts
+// that an unknown repository ID surfaces the registry's wrapped
+// ErrNotFound (404) — past the auth gate, distinct codes are safe
+// and operators need them to debug missing bindings.
+func TestHandleGit_PerRepoRouting_UnknownRepoReturnsNotFound(t *testing.T) {
+	pool, _ := newTestPool(t, map[string]string{}) // empty registry
+	wsResolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: t.TempDir(),
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return "/x", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: wsResolver,
+		gitPool:    pool,
+		devMode:    true,
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/ws-1/missing/info/refs?service=git-upload-pack", http.NoBody)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "missing/info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown repository, got %d body=%s",
+			w.Code, w.Body.String())
+	}
+}
+
+// TestHandleGit_PerRepoRouting_PushDisabledKeeps403 asserts that an
+// unauthenticated `git-receive-pack` probe with the receive-pack
+// flag OFF receives the inner handler's 403 (with
+// SPINE_GIT_RECEIVE_PACK_ENABLED guidance) — even when the URL
+// includes an unknown repository ID. Resolving the repository here
+// would leak its state (404 vs 412) to a caller we deliberately
+// chose not to authenticate.
+func TestHandleGit_PerRepoRouting_PushDisabledKeeps403(t *testing.T) {
+	pool, _ := newTestPool(t, map[string]string{}) // empty registry
+	wsResolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: t.TempDir(),
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return "/x", nil
+		},
+		// Receive-pack flag OFF.
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: wsResolver,
+		gitPool:    pool,
+	}
+
+	req := httptest.NewRequest("POST",
+		"/git/ws-1/missing-repo/git-receive-pack", strings.NewReader(""))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "missing-repo/git-receive-pack")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for disabled push (not 404 from repo resolution), got %d body=%s",
+			w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
+		t.Errorf("expected flag-name guidance in body, got: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "missing-repo") {
+		t.Errorf("response leaks repository ID: %s", w.Body.String())
+	}
+}
+
+// TestHandleGit_PerRepoRouting_PrimaryStillWorks asserts that the
+// existing `/git/{ws}/info/refs` URLs (no repository segment) keep
+// resolving to the workspace primary path — the new routing must
+// not regress single-repo deployments.
+func TestHandleGit_PerRepoRouting_PrimaryStillWorks(t *testing.T) {
+	primaryPath := t.TempDir()
+	pool, resolver := newTestPool(t, map[string]string{"code": t.TempDir()})
+
+	wsResolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: primaryPath,
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return "/x", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: wsResolver,
+		gitPool:    pool,
+		devMode:    true,
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/ws-1/info/refs?service=git-upload-pack", http.NoBody)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if len(resolver.lookups) != 0 {
+		t.Errorf("primary path must skip the pool resolver, got lookups=%v",
+			resolver.lookups)
+	}
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusNotFound {
+		t.Errorf("legacy primary URL should reach the inner handler, got %d body=%s",
+			w.Code, w.Body.String())
 	}
 }

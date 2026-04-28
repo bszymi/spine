@@ -194,6 +194,36 @@ func TestParseCatalogRejectsBadIDs(t *testing.T) {
 	}
 }
 
+// TestParseCatalogRejectsReservedIDs asserts that catalog IDs which
+// would collide with git smart-HTTP path segments are rejected at
+// parse time. Without this, `/git/{ws}/{repo_id}/...` parsing would
+// be ambiguous for those IDs and the affected repository would be
+// unreachable over HTTP.
+func TestParseCatalogRejectsReservedIDs(t *testing.T) {
+	for _, id := range []string{"info", "objects", "git-upload-pack", "git-receive-pack", "head"} {
+		t.Run(id, func(t *testing.T) {
+			body := strings.ReplaceAll(`
+- id: spine
+  kind: spine
+  name: S
+  default_branch: main
+- id: __ID__
+  kind: code
+  name: C
+  default_branch: main
+`, "__ID__", id)
+			_, err := repository.ParseCatalog([]byte(body), repository.PrimarySpec{})
+			if err == nil {
+				t.Fatalf("expected error for reserved id %q", id)
+			}
+			assertInvalidParams(t, err)
+			if !strings.Contains(err.Error(), "reserved") {
+				t.Errorf("expected 'reserved' in error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestParseCatalogIDLengthCap(t *testing.T) {
 	long := strings.Repeat("a", repository.MaxIDLength+1)
 	body := `

@@ -428,5 +428,14 @@ func validateID(id string) error {
 		return domain.NewError(domain.ErrInvalidParams,
 			"repository id must match "+idPattern.String())
 	}
+	if _, reserved := reservedRepositoryIDs[id]; reserved {
+		// Mirror the catalog parser: IDs that collide with a git
+		// HTTP path segment cannot be addressed through the
+		// gateway's `/git/{ws}/{repo}/...` routing, so we refuse
+		// them at the registration boundary too. Without this an
+		// admin could create a binding the gateway can never reach.
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("repository id %q collides with a git HTTP path segment and is reserved", id))
+	}
 	return nil
 }
