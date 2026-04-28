@@ -33,6 +33,17 @@ const MaxIDLength = 64
 // leading, or trailing hyphens are rejected.
 var idPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// IsValidID reports whether id matches the catalog ID format and length
+// limit. Validators outside this package (e.g. task repository
+// references) use this so the rule stays in lockstep with the catalog
+// parser.
+func IsValidID(id string) bool {
+	if id == "" || len(id) > MaxIDLength {
+		return false
+	}
+	return idPattern.MatchString(id)
+}
+
 // forbiddenFields are operational keys that must never appear in the
 // governed catalog. They live in the runtime binding instead.
 var forbiddenFields = map[string]struct{}{

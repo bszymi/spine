@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/store"
 )
 
@@ -15,20 +16,61 @@ type Rule interface {
 	Evaluate(ctx context.Context, proj *store.ArtifactProjection, st store.Store) []domain.ValidationError
 }
 
+// CatalogSnapshot returns the parsed repository catalog plus a
+// reproducibility tag (typically the Git commit SHA the catalog was
+// read from). RE-* rules call it on each evaluation so the catalog
+// stays consistent with the latest governance commit; the tag is
+// emitted in rule logs so a validation failure can be replayed against
+// the exact catalog state.
+//
+// When no snapshot is wired the engine treats the workspace as
+// single-repo: only the implicit primary "spine" ID is valid.
+type CatalogSnapshot func(ctx context.Context) (*repository.Catalog, string, error)
+
+// Option configures Engine construction.
+type Option func(*Engine)
+
+// WithCatalogSnapshot wires the catalog source consulted by the RE-*
+// repository reference rules.
+func WithCatalogSnapshot(snapshot CatalogSnapshot) Option {
+	return func(e *Engine) {
+		e.catalogSnapshot = snapshot
+	}
+}
+
+// PrimaryOnlyCatalogSnapshot returns a CatalogSnapshot that always
+// resolves to the synthesised primary-only catalog. This is the safe
+// production default for workspaces that have not committed
+// /.spine/repositories.yaml: RE-001 accepts the implicit "spine" ID
+// and rejects every other repository reference. Callers that read the
+// real catalog from Git should pass their own snapshot via
+// WithCatalogSnapshot instead.
+func PrimaryOnlyCatalogSnapshot(spec repository.PrimarySpec) CatalogSnapshot {
+	cat, err := repository.ParseCatalog(nil, spec)
+	return func(_ context.Context) (*repository.Catalog, string, error) {
+		return cat, "primary-only", err
+	}
+}
+
 // Engine runs cross-artifact validation rules against the Projection Store.
 type Engine struct {
-	store store.Store
-	rules []Rule
+	store           store.Store
+	catalogSnapshot CatalogSnapshot
+	rules           []Rule
 }
 
 // NewEngine creates a validation engine with all registered rules.
-func NewEngine(st store.Store) *Engine {
+func NewEngine(st store.Store, opts ...Option) *Engine {
 	e := &Engine{store: st}
+	for _, opt := range opts {
+		opt(e)
+	}
 	e.rules = append(e.rules, structuralRules()...)
 	e.rules = append(e.rules, linkRules()...)
 	e.rules = append(e.rules, statusRules()...)
 	e.rules = append(e.rules, scopeRules()...)
 	e.rules = append(e.rules, prereqRules()...)
+	e.rules = append(e.rules, repositoryRules(e.catalogSnapshot)...)
 	return e
 }
 

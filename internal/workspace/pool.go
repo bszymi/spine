@@ -18,6 +18,7 @@ import (
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
@@ -581,7 +582,15 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// Validation engine.
 	var validator *validation.Engine
 	if st != nil {
-		validator = validation.NewEngine(st)
+		// Today no production code reads /.spine/repositories.yaml from
+		// Git, so every workspace behaves as single-repo. Wiring the
+		// primary-only catalog snapshot here matches that real state:
+		// RE-001 accepts `repositories: [spine]` and rejects any other
+		// ID. When the Git-backed loader lands (later INIT-014 task),
+		// this single line is replaced with that loader and RE-001
+		// upgrades to full multi-repo enforcement automatically.
+		validator = validation.NewEngine(st,
+			validation.WithCatalogSnapshot(validation.PrimaryOnlyCatalogSnapshot(repository.PrimarySpec{})))
 	}
 
 	// Divergence service (implements BranchCreator).
