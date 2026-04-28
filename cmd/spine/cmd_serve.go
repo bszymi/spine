@@ -29,6 +29,7 @@ import (
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/githttp"
+	"github.com/bszymi/spine/internal/gitpool"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
@@ -160,11 +161,18 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 		}
 		return result, nil
 	})
-	bindingResolver := engine.NewBindingResolver(wfProvider, ss.GitClient)
+	// Run-time consumers (binding resolver, workflow loader) take the
+	// abstract git.GitClient and so receive pool.PrimaryClient() —
+	// keeping the call site routed through the pool. engine.New
+	// requires the richer engine.GitOperator (includes Checkout, not
+	// part of git.GitClient), so it stays on the concrete CLI client;
+	// either form points at the same underlying repo.
+	primaryClient := ss.GitPool.PrimaryClient()
+	bindingResolver := engine.NewBindingResolver(wfProvider, primaryClient)
 
 	actorSvc := actor.NewService(ss.Store)
 	actorGw := actor.NewGateway(ss.Store, ss.Events, ss.Queue, actorSvc)
-	wfLoader := engine.NewGitWorkflowLoader(ss.GitClient)
+	wfLoader := engine.NewGitWorkflowLoader(primaryClient)
 
 	orch, err := engine.New(
 		bindingResolver, ss.Store, actorGw, ss.Artifacts, ss.Events, ss.GitClient, wfLoader,
@@ -191,19 +199,13 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	orch.WithBranchProtectPolicy(buildBranchProtectPolicy(ss.Store))
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Mirrors the wiring on the process-level orchestrator so shared
-	// workspace deployments enforce the same invariants. Until the
-	// Git-backed catalog loader lands, the registry resolves the
-	// implicit primary repo only.
-	repoSpec := repository.PrimarySpec{LocalPath: ss.Config.RepoPath}
-	repoRegistry := repository.New(
-		ss.Config.ID,
-		repoSpec,
-		func(_ context.Context) (*repository.Catalog, error) {
-			return repository.ParseCatalog(nil, repoSpec)
-		},
-		ss.Store,
-	)
-	orch.WithRepositoryResolver(repoRegistry)
+	// workspace deployments enforce the same invariants. The
+	// workspace's ServiceSet already owns the registry constructed
+	// in buildServiceSet, so reuse it here rather than building a
+	// duplicate that could drift if the loader changes.
+	if ss.Registry != nil {
+		orch.WithRepositoryResolver(ss.Registry)
+	}
 	// Workflow writer is required for ADR-008 planning runs. Fail fast at
 	// startup if ss.Workflows is populated but doesn't satisfy the
 	// interface — a silent skip here degrades workflow.create into 503 at
@@ -441,14 +443,39 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		authSvc = auth.NewService(deps.Store)
 	}
 
-	artifactSvc := buildArtifactService(deps.GitClient, deps.Events, deps.RepoPath, deps.SpineCfg, deps.Store)
-	workflowSvc := workflow.NewService(deps.GitClient, deps.RepoPath)
+	// Repository registry — the single source of truth for catalog
+	// identity + binding row joins, consumed by the git pool, the
+	// run-start preconditions, and (later in INIT-014) the validator.
+	// Built unconditionally so the pool always has a resolver, even
+	// when the orchestrator path below is skipped (no store).
+	repoSpec := repository.PrimarySpec{LocalPath: deps.RepoPath}
+	repoRegistry := repository.New(
+		deps.SMPWorkspaceID,
+		repoSpec,
+		func(_ context.Context) (*repository.Catalog, error) {
+			return repository.ParseCatalog(nil, repoSpec)
+		},
+		deps.Store,
+	)
+
+	// Git client pool. PrimaryClient() returns deps.GitClient
+	// unchanged — services keep operating on the primary repo with
+	// no behavior change. EPIC-003 TASK-006 will replace the bare
+	// CLI factory with credential-aware per-binding resolution.
+	gitPool, err := gitpool.New(deps.GitClient, repoRegistry, gitpool.NewCLIClientFactory())
+	if err != nil {
+		return nil, fmt.Errorf("git client pool: %w", err)
+	}
+	primaryClient := gitPool.PrimaryClient()
+
+	artifactSvc := buildArtifactService(primaryClient, deps.Events, deps.RepoPath, deps.SpineCfg, deps.Store)
+	workflowSvc := workflow.NewService(primaryClient, deps.RepoPath)
 
 	var projQuery *projection.QueryService
 	var projSync *projection.Service
 	if deps.Store != nil {
-		projQuery = projection.NewQueryService(deps.Store, deps.GitClient)
-		projSync = projection.NewService(deps.GitClient, deps.Store, deps.Events, 30*time.Second)
+		projQuery = projection.NewQueryService(deps.Store, primaryClient)
+		projSync = projection.NewService(primaryClient, deps.Store, deps.Events, 30*time.Second)
 		projSync.WithArtifactsDir(deps.SpineCfg.ArtifactsDir)
 	}
 
@@ -465,22 +492,18 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 			validation.WithCatalogSnapshot(validation.PrimaryOnlyCatalogSnapshot(repository.PrimarySpec{})))
 	}
 
-	wfResolver, wfProvider := buildWorkflowResolver(deps.Store, deps.GitClient)
+	wfResolver, wfProvider := buildWorkflowResolver(deps.Store, primaryClient)
+	// buildOrchestrator forwards the client to engine.New, which
+	// needs the engine.GitOperator surface (includes Checkout, not
+	// part of git.GitClient). The concrete deps.GitClient is the
+	// same instance pool.PrimaryClient() returns — passing it here
+	// keeps semantics identical to a routed call without expanding
+	// the abstract interface.
 	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, log)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
-	// Wired against the primary-only catalog for the same reason the
-	// validator is: no Git-backed loader exists yet. The registry
-	// rejects any non-"spine" ID with ErrRepositoryNotFound, which
-	// StartRun categorises and surfaces before any branch is created.
+	// Reuses the registry built above so the pool and the orchestrator
+	// resolve through the same authoritative source.
 	if orch != nil && deps.Store != nil {
-		repoRegistry := repository.New(
-			deps.SMPWorkspaceID,
-			repository.PrimarySpec{LocalPath: deps.RepoPath},
-			func(_ context.Context) (*repository.Catalog, error) {
-				return repository.ParseCatalog(nil, repository.PrimarySpec{LocalPath: deps.RepoPath})
-			},
-			deps.Store,
-		)
 		orch.WithRepositoryResolver(repoRegistry)
 	}
 
@@ -497,7 +520,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 
 	var divSvcForGateway gateway.BranchCreator
 	if deps.Store != nil {
-		divSvcForGateway = divergence.NewService(deps.Store, deps.GitClient, deps.Events)
+		divSvcForGateway = divergence.NewService(deps.Store, primaryClient, deps.Events)
 	}
 
 	var starter gateway.RunStarter
@@ -528,7 +551,8 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		Workflows:                  workflowSvc,
 		ProjQuery:                  projQuery,
 		ProjSync:                   projSync,
-		Git:                        deps.GitClient,
+		Git:                        primaryClient,
+		GitPool:                    gitPool,
 		Validator:                  validator,
 		WorkflowResolver:           wfResolver,
 		BranchCreator:              divSvcForGateway,
@@ -577,7 +601,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 // nothing — there are no rules to match — but the Service remains
 // "policy-wired" and any future rule, once the Store is online, flows
 // through the same code path.
-func buildArtifactService(gitClient *git.CLIClient, events event.EventRouter, repoPath string, cfg *config.SpineConfig, st store.Store) *artifact.Service {
+func buildArtifactService(gitClient git.GitClient, events event.EventRouter, repoPath string, cfg *config.SpineConfig, st store.Store) *artifact.Service {
 	svc := artifact.NewService(gitClient, events, repoPath)
 	if cfg != nil {
 		svc.WithArtifactsDir(cfg.ArtifactsDir)
@@ -647,7 +671,7 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 // buildWorkflowResolver builds the projection-backed workflow resolver
 // and the provider used by buildOrchestrator. Returns (nil, nil) when
 // no store is available.
-func buildWorkflowResolver(st store.Store, gitClient *git.CLIClient) (gateway.WorkflowResolverFn, *workflow.ProjectionWorkflowProvider) {
+func buildWorkflowResolver(st store.Store, gitClient git.GitClient) (gateway.WorkflowResolverFn, *workflow.ProjectionWorkflowProvider) {
 	if st == nil {
 		return nil, nil
 	}

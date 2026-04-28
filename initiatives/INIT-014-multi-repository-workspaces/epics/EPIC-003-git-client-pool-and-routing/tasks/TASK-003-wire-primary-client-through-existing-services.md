@@ -2,7 +2,7 @@
 id: TASK-003
 type: Task
 title: Wire primary client through existing services
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-003-git-client-pool-and-routing/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation
