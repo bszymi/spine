@@ -500,3 +500,178 @@ func TestHandleGit_TrustedCIDRBypassesReadAuth(t *testing.T) {
 			w.Body.String())
 	}
 }
+
+// errResolver always returns the configured workspace resolution error
+// — used to exercise the unauthenticated-untrusted enumeration paths
+// guarded by TASK-031.
+type errResolver struct{ err error }
+
+func (r *errResolver) Resolve(_ context.Context, _ string) (*workspace.Config, error) {
+	return nil, r.err
+}
+
+func (r *errResolver) List(_ context.Context) ([]workspace.Config, error) {
+	return nil, r.err
+}
+
+// runUnauthenticatedGitProbe issues a clone-style request from an
+// untrusted IP with no Authorization header against a workspace ID
+// that the resolver will reject with the given error. The TASK-031
+// contract is that the response collapses to a uniform 401 without
+// the workspace ID or status appearing in the body.
+func runUnauthenticatedGitProbe(t *testing.T, resolveErr error) *httptest.ResponseRecorder {
+	t.Helper()
+	repo := t.TempDir()
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: &errResolver{err: resolveErr},
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/secret-ws/info/refs?service=git-upload-pack", nil)
+	req.RemoteAddr = "203.0.113.1:12345" // untrusted external IP, no CIDR allowlist
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "secret-ws")
+	rctx.URLParams.Add("*", "info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+	return w
+}
+
+// TestHandleGit_UnauthenticatedNotFound_Returns401 asserts that an
+// untrusted unauthenticated client probing a non-existent workspace
+// receives the same 401 it would for a missing or invalid bearer —
+// not a 404 that confirms "this workspace does not exist."
+func TestHandleGit_UnauthenticatedNotFound_Returns401(t *testing.T) {
+	w := runUnauthenticatedGitProbe(t, workspace.ErrWorkspaceNotFound)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 (no tenant-state leak), got %d body=%s",
+			w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-ws") {
+		t.Errorf("response leaks workspace ID: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "not found") {
+		t.Errorf("response leaks 'not found' status: %s", w.Body.String())
+	}
+}
+
+// TestHandleGit_UnauthenticatedInactive_Returns401 asserts the same
+// uniform-401 contract for an inactive workspace — a 403 here would
+// confirm to the caller that the workspace exists.
+func TestHandleGit_UnauthenticatedInactive_Returns401(t *testing.T) {
+	w := runUnauthenticatedGitProbe(t, workspace.ErrWorkspaceInactive)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 (no tenant-state leak), got %d body=%s",
+			w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "inactive") {
+		t.Errorf("response leaks 'inactive' status: %s", w.Body.String())
+	}
+}
+
+// TestHandleGit_UnauthenticatedUnavailable_Returns401 asserts the
+// same uniform-401 contract for a temporarily unavailable workspace
+// — a 503 here would let an attacker correlate workspace IDs with
+// outage windows.
+func TestHandleGit_UnauthenticatedUnavailable_Returns401(t *testing.T) {
+	w := runUnauthenticatedGitProbe(t, workspace.ErrWorkspaceUnavailable)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 (no tenant-state leak), got %d body=%s",
+			w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "unavailable") {
+		t.Errorf("response leaks 'unavailable' status: %s", w.Body.String())
+	}
+}
+
+// TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors asserts that
+// trusted-CIDR callers — which the existing clone affordance trusts
+// to know workspace IDs already — continue to receive distinct
+// resolution errors so operators can debug genuinely missing repos.
+// Hiding this from trusted callers would turn TASK-031 into a
+// usability regression.
+func TestHandleGit_TrustedCIDRStillSeesWorkspaceErrors(t *testing.T) {
+	repo := t.TempDir()
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+		TrustedCIDRs: []string{"127.0.0.0/8"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: &errResolver{err: workspace.ErrWorkspaceNotFound},
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/missing-ws/info/refs?service=git-upload-pack", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "missing-ws")
+	rctx.URLParams.Add("*", "info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("trusted-CIDR caller should see the distinct 404, got %d body=%s",
+			w.Code, w.Body.String())
+	}
+}
+
+// TestHandleGit_PushFlagOffOnMissingWorkspace_Returns401 asserts that
+// the flag-off short-circuit does NOT bypass auth when the workspace
+// fails to resolve. Otherwise an unauthenticated probe to
+// `/git/{id}/git-receive-pack` with receive-pack disabled could still
+// distinguish missing/inactive/unavailable workspaces via the leaked
+// resolution error.
+func TestHandleGit_PushFlagOffOnMissingWorkspace_Returns401(t *testing.T) {
+	repo := t.TempDir()
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) {
+			return repo, nil
+		},
+		// Receive-pack flag deliberately OFF.
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: &errResolver{err: workspace.ErrWorkspaceNotFound},
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/secret-ws/info/refs?service=git-receive-pack", nil)
+	req.RemoteAddr = "203.0.113.1:12345"
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "secret-ws")
+	rctx.URLParams.Add("*", "info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauth probe of missing ws on flag-off receive-pack, got %d body=%s",
+			w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "secret-ws") {
+		t.Errorf("response leaks workspace ID: %s", w.Body.String())
+	}
+}

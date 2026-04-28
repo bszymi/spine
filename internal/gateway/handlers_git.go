@@ -61,28 +61,12 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// Resolve workspace from URL path.
 	workspaceID, gitPath := parseGitPath(r)
 
-	cfg, err := s.resolveGitWorkspace(r.Context(), workspaceID)
-	if err != nil {
-		if errors.Is(err, workspace.ErrWorkspaceNotFound) {
-			if workspaceID == "" {
-				WriteError(w, domain.NewError(domain.ErrInvalidParams, "workspace ID required in shared mode"))
-			} else {
-				WriteError(w, domain.NewError(domain.ErrNotFound, fmt.Sprintf("workspace %q not found", workspaceID)))
-			}
-			return
-		}
-		if errors.Is(err, workspace.ErrWorkspaceInactive) {
-			WriteError(w, domain.NewError(domain.ErrForbidden, fmt.Sprintf("workspace %q is inactive", workspaceID)))
-			return
-		}
-		if errors.Is(err, workspace.ErrWorkspaceUnavailable) {
-			WriteError(w, domain.NewError(domain.ErrUnavailable, fmt.Sprintf("workspace %q is currently unavailable", workspaceID)))
-			return
-		}
-		log.Error("workspace resolution failed", "error", err)
-		WriteError(w, domain.NewError(domain.ErrInternal, "workspace resolution failed"))
-		return
-	}
+	// Resolve workspace, but defer surfacing tenant-state errors
+	// until we know the caller is allowed to learn them. Distinct
+	// 404/403/503 responses on this endpoint would otherwise let an
+	// untrusted unauthenticated client enumerate workspace IDs and
+	// status by walking /git/{id}/info/refs (EPIC-004 TASK-031).
+	cfg, resolveErr := s.resolveGitWorkspace(r.Context(), workspaceID)
 
 	// Auth gate.
 	//
@@ -105,16 +89,70 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	//  - devMode bypasses auth entirely so local development does not
 	//    require wiring a token.
 	push := githttp.IsReceivePack(r)
-	pushDisabledShortCircuit := push && !s.gitHTTP.ReceivePackEnabled()
+	// pushDisabledShortCircuit only bypasses auth when the workspace
+	// actually resolved. Otherwise an untrusted unauthenticated client
+	// could probe `/git/{id}/git-receive-pack` with the flag off and
+	// distinguish missing/inactive/unavailable workspaces by the leaked
+	// error code. With this guard, missing-workspace probes go through
+	// the auth gate and collapse to a uniform 401, while a flag-off
+	// request against a real workspace still surfaces the operator-
+	// friendly 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED` guidance.
+	pushDisabledShortCircuit := push && !s.gitHTTP.ReceivePackEnabled() && resolveErr == nil
 	trustedBypass := !push && s.gitHTTP.IsTrustedIP(r.RemoteAddr)
+	authBypass := pushDisabledShortCircuit || trustedBypass || s.devMode
 	var actor *domain.Actor
-	if !pushDisabledShortCircuit && !trustedBypass && !s.devMode {
+	if !authBypass {
+		// validateGitAuth tolerates a nil cfg — when workspace
+		// resolution failed we still attempt server-level auth so
+		// a missing/inactive/unavailable workspace returns the same
+		// uniform 401 as a missing or invalid bearer.
+		//
+		// Failure handling splits on resolveErr:
+		//  - resolveErr != nil: collapse every auth failure to a
+		//    uniform 401. The caller has not authenticated, so we
+		//    must not leak whether the workspace is missing,
+		//    inactive, or unavailable.
+		//  - resolveErr == nil: surface the real auth error. A
+		//    valid-workspace outage like "authentication not
+		//    configured" (503) or a store error (500) carries a
+		//    retryable/server-side signal that operators and
+		//    clients need; collapsing it to 401 would misreport
+		//    the failure as bad credentials.
 		a, err := s.validateGitAuth(r, cfg)
 		if err != nil {
-			WriteError(w, err)
+			if resolveErr != nil {
+				WriteError(w, domain.NewError(domain.ErrUnauthorized, "authorization required for external git access"))
+			} else {
+				WriteError(w, err)
+			}
 			return
 		}
 		actor = a
+	}
+
+	// Past the auth gate (or bypassed). Surface the workspace
+	// resolution error now — only authenticated or trusted callers
+	// reach this point, so distinct codes are safe.
+	if resolveErr != nil {
+		if errors.Is(resolveErr, workspace.ErrWorkspaceNotFound) {
+			if workspaceID == "" {
+				WriteError(w, domain.NewError(domain.ErrInvalidParams, "workspace ID required in shared mode"))
+			} else {
+				WriteError(w, domain.NewError(domain.ErrNotFound, fmt.Sprintf("workspace %q not found", workspaceID)))
+			}
+			return
+		}
+		if errors.Is(resolveErr, workspace.ErrWorkspaceInactive) {
+			WriteError(w, domain.NewError(domain.ErrForbidden, fmt.Sprintf("workspace %q is inactive", workspaceID)))
+			return
+		}
+		if errors.Is(resolveErr, workspace.ErrWorkspaceUnavailable) {
+			WriteError(w, domain.NewError(domain.ErrUnavailable, fmt.Sprintf("workspace %q is currently unavailable", workspaceID)))
+			return
+		}
+		log.Error("workspace resolution failed", "error", resolveErr)
+		WriteError(w, domain.NewError(domain.ErrInternal, "workspace resolution failed"))
+		return
 	}
 
 	// Rewrite request path to just the git-specific portion.
@@ -254,8 +292,13 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domai
 	// when ss.Auth is nil or ValidateToken below fails — otherwise
 	// repeated auth failures leak pool references and eventually
 	// exhaust the workspace pool.
+	//
+	// cfg may be nil when the caller invoked us before workspace
+	// resolution succeeded (TASK-031 defers state-leaking workspace
+	// errors past the auth gate). Skip the pool lookup in that case
+	// — server-level auth still applies in single mode.
 	authSvc := s.auth
-	if s.servicePool != nil {
+	if cfg != nil && s.servicePool != nil {
 		ss, err := s.servicePool.Get(r.Context(), cfg.ID)
 		if err == nil {
 			defer s.servicePool.Release(cfg.ID)
