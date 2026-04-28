@@ -2,16 +2,19 @@
 id: TASK-003
 type: Task
 title: Implement repository registry service
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation
 created: 2026-04-28
+last_updated: 2026-04-28
 links:
   - type: parent
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/epic.md
   - type: blocked_by
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/tasks/TASK-002-runtime-repository-binding-schema.md
+  - type: related_to
+    target: /architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md
 ---
 
 # TASK-003 - Implement Repository Registry Service
