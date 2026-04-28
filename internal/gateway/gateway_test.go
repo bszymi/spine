@@ -13,6 +13,7 @@ import (
 	"github.com/bszymi/spine/internal/artifact"
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/store"
@@ -3234,5 +3235,81 @@ func TestAuthMiddleware_CrossWorkspaceRejected(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 for cross-workspace access, got %d", resp.StatusCode)
+	}
+}
+
+// TestRunStart_RepositoryPreconditionFailure_Surfaces412 pins the
+// HTTP contract for INIT-014 EPIC-002 TASK-005: a typed
+// engine.RepositoryPreconditionFailure returned from StartRun must
+// reach the API consumer as a 412 with the repository_id and category
+// fields preserved on the error envelope. Without this guarantee a
+// caller can't distinguish "your task names a repo we don't know"
+// from a generic precondition failure.
+func TestRunStart_RepositoryPreconditionFailure_Surfaces412(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	authSvc := auth.NewService(fs)
+	tok, _, err := authSvc.CreateToken(context.Background(), "admin-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	preconditionErr := domain.NewError(domain.ErrPrecondition, `repository "ghost-service" precondition failed: not_found`)
+	preconditionErr.Detail = engine.RepositoryPreconditionFailure{
+		RepositoryID: "ghost-service",
+		Category:     "not_found",
+	}
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:      fs,
+		Auth:       authSvc,
+		RunStarter: &fakeRunStarter{err: preconditionErr},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"task_path":"initiatives/x/tasks/TASK-001.md"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d", resp.StatusCode)
+	}
+
+	var env struct {
+		Status string `json:"status"`
+		Errors []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Detail  struct {
+				RepositoryID string `json:"repository_id"`
+				Category     string `json:"category"`
+			} `json:"detail"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if env.Status != "error" || len(env.Errors) != 1 {
+		t.Fatalf("unexpected envelope shape: %+v", env)
+	}
+	got := env.Errors[0]
+	if got.Code != string(domain.ErrPrecondition) {
+		t.Errorf("error code: got %q, want %q", got.Code, domain.ErrPrecondition)
+	}
+	if got.Detail.RepositoryID != "ghost-service" {
+		t.Errorf("detail.repository_id: got %q, want ghost-service", got.Detail.RepositoryID)
+	}
+	if got.Detail.Category != "not_found" {
+		t.Errorf("detail.category: got %q, want not_found", got.Detail.Category)
 	}
 }

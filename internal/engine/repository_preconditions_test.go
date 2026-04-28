@@ -230,6 +230,66 @@ func TestRepoPrecondition_InternalErrorCategorized(t *testing.T) {
 	assertPreconditionFailure(t, err, "payments-service", repoPreconditionInternal)
 }
 
+// recordingResolver wraps stubRepositoryResolver to capture the
+// sequence of Lookup calls. The order matters — the precondition
+// check is documented to walk the artifact's repositories slice in
+// order, and dashboards/log readers depend on that ordering.
+type recordingResolver struct {
+	stubRepositoryResolver
+	calls []string
+}
+
+func (r *recordingResolver) Lookup(ctx context.Context, id string) (*repository.Repository, error) {
+	r.calls = append(r.calls, id)
+	return r.stubRepositoryResolver.Lookup(ctx, id)
+}
+
+// TestRepoPrecondition_MultiRepoScenarioStartsRun is the TASK-005
+// "scenario test starts a run for a valid multi-repo task" anchor.
+// It pins three guarantees in one place:
+//   - every declared repository is consulted, in declaration order,
+//   - the run is persisted (no precondition short-circuit),
+//   - the run branch is created (no Git-side abort).
+func TestRepoPrecondition_MultiRepoScenarioStartsRun(t *testing.T) {
+	declared := []string{"spine", "payments-service", "api-gateway"}
+	art := taskWithRepos(declared)
+	resolver := &recordingResolver{
+		stubRepositoryResolver: stubRepositoryResolver{
+			lookups: map[string]repoLookup{
+				"spine":            {repo: &repository.Repository{ID: "spine", Status: "active"}},
+				"payments-service": {repo: &repository.Repository{ID: "payments-service", Status: "active"}},
+				"api-gateway":      {repo: &repository.Repository{ID: "api-gateway", Status: "active"}},
+			},
+		},
+	}
+	orch, store, git := startRunOrchestrator(t, art, resolver)
+
+	if _, err := orch.StartRun(context.Background(), art.Path); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if got := resolver.calls; !equalSlice(got, declared) {
+		t.Errorf("Lookup call order: got %v, want %v", got, declared)
+	}
+	if !git.createBranchCalled {
+		t.Error("expected branch creation for valid multi-repo run")
+	}
+	if store.createdRun == nil {
+		t.Error("expected run created for valid multi-repo task")
+	}
+}
+
+func equalSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRepoPrecondition_ShortCircuitsOnFirstFailure(t *testing.T) {
 	// The check stops at the first failing ID so the error names that
 	// repo (not a later one). Order of the slice matters for this test.

@@ -88,6 +88,7 @@ func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 		"auth.actors",
 		"projection.artifact_links",
 		"projection.artifacts",
+		"projection.execution_projections",
 		"projection.workflows",
 		"projection.sync_state",
 	}
