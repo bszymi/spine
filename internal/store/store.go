@@ -216,6 +216,17 @@ type SyncState struct {
 	ErrorDetail      string     `json:"error_detail,omitempty"`
 }
 
+// Artifact-query pagination bounds shared between the HTTP handler
+// and the store. The store enforces these defensively even when an
+// internal caller bypasses the HTTP pagination helper, so a stray
+// `Limit: 0` cannot fan out to an unbounded scan and a `Limit:
+// 1_000_000` cannot push a multi-megabyte result set through the
+// gateway.
+const (
+	ArtifactQueryDefaultLimit = 50
+	ArtifactQueryMaxLimit     = 200
+)
+
 // ArtifactQuery defines parameters for querying projected artifacts.
 type ArtifactQuery struct {
 	Type       string
@@ -224,6 +235,21 @@ type ArtifactQuery struct {
 	Search     string
 	Limit      int
 	Cursor     string
+}
+
+// ClampedLimit returns the limit value the store will use for this
+// query: non-positive limits resolve to ArtifactQueryDefaultLimit and
+// oversize limits are capped at ArtifactQueryMaxLimit. Exposed so
+// callers (and tests) can preview the effective limit before
+// QueryArtifacts runs.
+func (q ArtifactQuery) ClampedLimit() int {
+	if q.Limit <= 0 {
+		return ArtifactQueryDefaultLimit
+	}
+	if q.Limit > ArtifactQueryMaxLimit {
+		return ArtifactQueryMaxLimit
+	}
+	return q.Limit
 }
 
 // ArtifactQueryResult contains the result of an artifact query.

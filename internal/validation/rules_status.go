@@ -75,37 +75,48 @@ func (r *ruleSC003) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 }
 
 func checkChildrenTerminal(ctx context.Context, st store.Store, parent *store.ArtifactProjection, childType domain.ArtifactType, ruleID string) []domain.ValidationError {
-	result, err := st.QueryArtifacts(ctx, store.ArtifactQuery{
-		Type:  string(childType),
-		Limit: 500,
-	})
-	if err != nil {
-		return nil
-	}
-
 	parentPath := "/" + parent.ArtifactPath
 	var errors []domain.ValidationError
-	for i := range result.Items {
-		meta := parseMetadata(&result.Items[i])
-		childParent := ""
-		switch childType {
-		case domain.ArtifactTypeTask:
-			childParent = meta["epic"]
-		case domain.ArtifactTypeEpic:
-			childParent = meta["initiative"]
+	// Walk the cursor instead of fetching a fixed Limit:500 page —
+	// the store now clamps to ArtifactQueryMaxLimit, and a workspace
+	// with more children than that would otherwise have its tail
+	// pages silently dropped from this rule.
+	cursor := ""
+	for {
+		result, err := st.QueryArtifacts(ctx, store.ArtifactQuery{
+			Type:   string(childType),
+			Limit:  store.ArtifactQueryMaxLimit,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return nil
 		}
+		for i := range result.Items {
+			meta := parseMetadata(&result.Items[i])
+			childParent := ""
+			switch childType {
+			case domain.ArtifactTypeTask:
+				childParent = meta["epic"]
+			case domain.ArtifactTypeEpic:
+				childParent = meta["initiative"]
+			}
 
-		if childParent != parentPath {
-			continue
-		}
+			if childParent != parentPath {
+				continue
+			}
 
-		if !isTerminalStatus(result.Items[i].Status) {
-			errors = append(errors, domain.ValidationError{
-				RuleID:   ruleID,
-				Severity: "warning",
-				Message:  fmt.Sprintf("parent is Completed but child %s is %s", result.Items[i].ArtifactPath, result.Items[i].Status),
-			})
+			if !isTerminalStatus(result.Items[i].Status) {
+				errors = append(errors, domain.ValidationError{
+					RuleID:   ruleID,
+					Severity: "warning",
+					Message:  fmt.Sprintf("parent is Completed but child %s is %s", result.Items[i].ArtifactPath, result.Items[i].Status),
+				})
+			}
 		}
+		if !result.HasMore {
+			break
+		}
+		cursor = result.NextCursor
 	}
 	return errors
 }
