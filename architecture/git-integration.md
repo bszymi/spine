@@ -509,7 +509,7 @@ This Git integration contract is expected to evolve as the system is implemented
 
 Areas expected to require refinement:
 
-- Multi-repository support (artifacts spanning multiple repos within a single workspace)
+- Multi-repository support (artifacts spanning multiple repos within a single workspace) — see [Multi-Repository Integration](/architecture/multi-repository-integration.md)
 - Git LFS integration for large binary artifacts
 - Automated conflict resolution strategies
 - Monorepo vs polyrepo guidance
