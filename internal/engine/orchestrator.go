@@ -27,6 +27,7 @@ type Orchestrator struct {
 	workflowWriter WorkflowWriter         // optional, required for workflow planning runs (ADR-008)
 	blocking       BlockingStore          // optional, nil if not configured
 	collision      CollisionHandler       // optional, nil if not configured
+	repositories   RepositoryResolver     // optional, gates run start on repository availability
 	policy         branchprotect.Policy   // branch-protection guard for MergeRunBranch (ADR-009 §3)
 }
 
@@ -122,6 +123,17 @@ func (o *Orchestrator) WithBlockingStore(b BlockingStore) {
 // WithCollisionHandler enables artifact ID collision detection and renumbering during merge.
 func (o *Orchestrator) WithCollisionHandler(c CollisionHandler) {
 	o.collision = c
+}
+
+// WithRepositoryResolver enables run-start preconditions that gate the
+// run on every declared repository being resolvable to an active
+// runtime binding (INIT-014 EPIC-002 TASK-004). When nil, the
+// preconditions are skipped and StartRun behaves as before — useful
+// for tests and for production paths that haven't yet wired the
+// registry. The check fires after blocking and before the run branch
+// is created so a failed precondition leaves no orphan branch.
+func (o *Orchestrator) WithRepositoryResolver(r RepositoryResolver) {
+	o.repositories = r
 }
 
 // WithBranchProtectPolicy installs the branch-protection policy consulted by
