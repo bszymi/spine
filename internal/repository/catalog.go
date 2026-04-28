@@ -25,6 +25,22 @@ const (
 // repository. The primary entry MUST use this ID and no other entry may.
 const PrimaryRepositoryID = "spine"
 
+// reservedRepositoryIDs are catalog IDs that collide with git smart-
+// HTTP path segments. The gateway routes
+// `/git/{workspace_id}/{repository_id}/...`; a catalog ID matching a
+// known git protocol segment would make `/git/{ws}/info/...` parse
+// as the legacy primary form and leave that repository unreachable
+// over HTTP. Rejecting them at parse time keeps the routing rule
+// `repository_id is everything that isn't a git verb` correct
+// regardless of how new git verbs evolve.
+var reservedRepositoryIDs = map[string]struct{}{
+	"info":             {},
+	"objects":          {},
+	"git-upload-pack":  {},
+	"git-receive-pack": {},
+	"head":             {}, // HEAD is uppercase in URLs but IDs are lowercase
+}
+
 // MaxIDLength caps the catalog ID length. Matches the ADR-013 contract.
 const MaxIDLength = 64
 
@@ -34,14 +50,21 @@ const MaxIDLength = 64
 var idPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 // IsValidID reports whether id matches the catalog ID format and length
-// limit. Validators outside this package (e.g. task repository
-// references) use this so the rule stays in lockstep with the catalog
-// parser.
+// limit and is not one of the reserved git-protocol-segment names.
+// Validators outside this package (e.g. task repository references via
+// RE-003) use this so the rule stays in lockstep with the catalog
+// parser and the registration manager.
 func IsValidID(id string) bool {
 	if id == "" || len(id) > MaxIDLength {
 		return false
 	}
-	return idPattern.MatchString(id)
+	if !idPattern.MatchString(id) {
+		return false
+	}
+	if _, reserved := reservedRepositoryIDs[id]; reserved {
+		return false
+	}
+	return true
 }
 
 // forbiddenFields are operational keys that must never appear in the
@@ -271,6 +294,10 @@ func validateEntries(entries []CatalogEntry) error {
 		if !idPattern.MatchString(e.ID) {
 			return domain.NewError(domain.ErrInvalidParams,
 				fmt.Sprintf("repository catalog entry %q: id must match %s", e.ID, idPattern.String()))
+		}
+		if _, reserved := reservedRepositoryIDs[e.ID]; reserved {
+			return domain.NewError(domain.ErrInvalidParams,
+				fmt.Sprintf("repository catalog entry %q: id collides with a git HTTP path segment and is reserved", e.ID))
 		}
 		if _, dup := seen[e.ID]; dup {
 			return domain.NewError(domain.ErrInvalidParams,

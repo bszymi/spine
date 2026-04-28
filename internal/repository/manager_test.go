@@ -139,6 +139,14 @@ func TestManagerRegisterRejectsBadIDsAndCloneURLs(t *testing.T) {
 			ID: "spine", Name: "x", DefaultBranch: "main",
 			CloneURL: "https://example.com/x.git", LocalPath: "/r/x",
 		},
+		"reserved http segment info": {
+			ID: "info", Name: "x", DefaultBranch: "main",
+			CloneURL: "https://example.com/x.git", LocalPath: "/r/x",
+		},
+		"reserved http segment git-upload-pack": {
+			ID: "git-upload-pack", Name: "x", DefaultBranch: "main",
+			CloneURL: "https://example.com/x.git", LocalPath: "/r/x",
+		},
 		"missing name": {
 			ID: "ok-id", DefaultBranch: "main",
 			CloneURL: "https://example.com/x.git", LocalPath: "/r/x",

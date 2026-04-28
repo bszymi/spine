@@ -462,7 +462,16 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// unchanged — services keep operating on the primary repo with
 	// no behavior change. EPIC-003 TASK-006 will replace the bare
 	// CLI factory with credential-aware per-binding resolution.
-	gitPool, err := gitpool.New(deps.GitClient, repoRegistry, gitpool.NewCLIClientFactory())
+	//
+	// WithCloner enables lazy clone-on-miss so the gateway's git
+	// HTTP routing (`/git/{ws}/{repo}/...`) materialises a code repo
+	// on first access instead of handing an empty directory to
+	// git-http-backend. The concrete *git.CLIClient is reused as the
+	// Cloner because its Clone method is repoPath-independent.
+	gitPool, err := gitpool.New(deps.GitClient, repoRegistry,
+		gitpool.NewCLIClientFactory(),
+		gitpool.WithCloner(deps.GitClient),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("git client pool: %w", err)
 	}

@@ -13,7 +13,9 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/githttp"
+	"github.com/bszymi/spine/internal/gitpool"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/workspace"
 )
 
@@ -58,8 +60,8 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 
 	log := observe.Logger(r.Context())
 
-	// Resolve workspace from URL path.
-	workspaceID, gitPath := parseGitPath(r)
+	// Resolve workspace and repository from URL path.
+	workspaceID, repositoryID, gitPath := parseGitPath(r)
 
 	// Resolve workspace, but defer surfacing tenant-state errors
 	// until we know the caller is allowed to learn them. Distinct
@@ -155,13 +157,42 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the repository the request targets. An empty/"spine"
+	// segment falls back to the workspace primary so existing single-
+	// repo URLs (`/git/{ws}/info/refs`) keep working unchanged.
+	// Catalog/binding errors from the registry surface as the
+	// SpineError they were wrapped in (404 not found, 412 inactive/
+	// unbound) — this is past the auth gate, so distinct codes are
+	// safe and operators get an actionable error.
+	//
+	// The push-disabled short-circuit deliberately skipped the auth
+	// gate so the inner handler can emit the uniform 403 with
+	// `SPINE_GIT_RECEIVE_PACK_ENABLED` guidance. Resolving the
+	// repository here would replace that 403 with a 404/412 carrying
+	// the repository ID — leaking repository state to a caller we
+	// chose not to authenticate. Use the workspace primary path; the
+	// inner handler will refuse before touching it.
+	var repoPath string
+	if pushDisabledShortCircuit {
+		repoPath = cfg.RepoPath
+	} else {
+		var repoErr error
+		repoPath, repoErr = s.resolveGitRepoPath(r.Context(), cfg, repositoryID)
+		if repoErr != nil {
+			log.Info("git repo resolution failed",
+				"workspace_id", cfg.ID, "repository_id", repositoryID, "error", repoErr)
+			WriteError(w, repoErr)
+			return
+		}
+	}
+
 	// Rewrite request path to just the git-specific portion.
 	r.URL.Path = gitPath
 
 	// Set repo path in context and delegate to git handler. The actor
 	// is attached so the handler's pre-receive check can pin the
 	// caller identity on every ref update (EPIC-004 TASK-002).
-	ctx := githttp.WithRepoPath(r.Context(), cfg.RepoPath)
+	ctx := githttp.WithRepoPath(r.Context(), repoPath)
 	ctx = observe.WithWorkspaceID(ctx, cfg.ID)
 	if actor != nil {
 		ctx = domain.WithActor(ctx, actor)
@@ -200,14 +231,20 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	s.gitHTTP.ServeHTTP(w, r.WithContext(ctx))
 }
 
-// parseGitPath extracts the workspace ID and git-specific path from the request.
-// URL patterns:
+// parseGitPath extracts the workspace ID, optional repository ID, and
+// git-specific path from the request. URL patterns:
 //
-//	/git/{workspace_id}/info/refs  -> ("workspace_id", "/info/refs")
-//	/git/{workspace_id}/git-upload-pack -> ("workspace_id", "/git-upload-pack")
-//	/git/info/refs                 -> ("", "/info/refs")
-//	/git/git-upload-pack           -> ("", "/git-upload-pack")
-func parseGitPath(r *http.Request) (workspaceID string, gitPath string) {
+//	/git/{workspace_id}/{repository_id}/info/refs  -> ("workspace_id", "repository_id", "/info/refs")
+//	/git/{workspace_id}/info/refs                  -> ("workspace_id", "", "/info/refs")
+//	/git/{workspace_id}/git-upload-pack            -> ("workspace_id", "", "/git-upload-pack")
+//	/git/info/refs                                 -> ("", "", "/info/refs")
+//	/git/git-upload-pack                           -> ("", "", "/git-upload-pack")
+//
+// An empty repository ID at the workspace level means "use the
+// primary repo" — the caller resolves it through the registry as
+// `spine`. The single-mode (no workspace) form preserves the legacy
+// behaviour and never carries a repository segment.
+func parseGitPath(r *http.Request) (workspaceID, repositoryID, gitPath string) {
 	// chi captures workspace_id if the /{workspace_id}/* route matched.
 	workspaceID = chi.URLParam(r, "workspace_id")
 	wildcard := chi.URLParam(r, "*")
@@ -218,28 +255,54 @@ func parseGitPath(r *http.Request) (workspaceID string, gitPath string) {
 	// segment, and fall back to single-workspace mode.
 	if isGitProtocolSegment(workspaceID) {
 		if wildcard != "" {
-			return "", "/" + workspaceID + "/" + wildcard
+			return "", "", "/" + workspaceID + "/" + wildcard
 		}
-		return "", "/" + workspaceID
+		return "", "", "/" + workspaceID
 	}
 
 	if workspaceID != "" {
-		// Matched /git/{workspace_id}/* — wildcard is the git path.
-		return workspaceID, "/" + wildcard
+		// Matched /git/{workspace_id}/*. The wildcard is either the
+		// raw git path (legacy single-repo form) or repository_id +
+		// git path. Discriminate on the first segment: if it is a
+		// known git protocol segment, no repository ID was supplied.
+		repoID, rest := splitFirstSegment(wildcard)
+		if isGitProtocolSegment(repoID) {
+			return workspaceID, "", "/" + wildcard
+		}
+		return workspaceID, repoID, "/" + rest
 	}
 
 	// Matched /git/* — the wildcard contains everything after /git/.
 	// Check if the first segment is a known git path or a workspace ID.
 	if isGitProtocolPath(wildcard) {
-		return "", "/" + wildcard
+		return "", "", "/" + wildcard
 	}
 
-	// First segment is the workspace ID.
-	parts := strings.SplitN(wildcard, "/", 2)
-	if len(parts) == 2 {
-		return parts[0], "/" + parts[1]
+	// First segment is the workspace ID. Single-mode (no workspace)
+	// never carries a repository segment — the legacy form is
+	// `/git/{workspace_id}/...` only. To extend per-repository
+	// addressing here we would need a third "is this a repo or a
+	// protocol segment" check, which the test matrix below
+	// exercises explicitly.
+	first, rest := splitFirstSegment(wildcard)
+	if rest == "" {
+		return first, "", "/"
 	}
-	return parts[0], "/"
+	repoID, gitRest := splitFirstSegment(rest)
+	if isGitProtocolSegment(repoID) {
+		return first, "", "/" + rest
+	}
+	return first, repoID, "/" + gitRest
+}
+
+// splitFirstSegment returns ("first", "rest-of-path") with no leading
+// slash on either side. A path with no slash returns ("path", "").
+func splitFirstSegment(s string) (string, string) {
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return parts[0], ""
 }
 
 // isGitProtocolPath returns true if the path starts with a known git protocol segment.
@@ -259,6 +322,72 @@ func isGitProtocolSegment(seg string) bool {
 		return true
 	}
 	return false
+}
+
+// resolveGitRepoPath returns the absolute filesystem path for the
+// repository targeted by a git HTTP request. An empty repositoryID or
+// the literal `spine` ID resolves to the workspace primary path
+// (cfg.RepoPath) so single-repo URLs keep working without any pool
+// dependency. For code repos, resolution goes through the workspace's
+// gitpool.Pool — `Pool.RepositoryPath` triggers lazy clone-on-miss
+// and runs the path-base validation, so the gateway never hands an
+// unmaterialised or out-of-base path to git-http-backend.
+//
+// Pool selection mirrors validateGitAuth's auth-service selection:
+//
+//   - Shared mode (s.servicePool != nil): the workspace-scoped pool
+//     from ServiceSet.GitPool is authoritative, and a servicePool.Get
+//     failure must surface to the caller — falling back to
+//     s.gitPool here would resolve a `/git/{ws}/{repo}` request
+//     against the wrong workspace's registry or mask a workspace
+//     outage as a misleading repository error.
+//   - Single mode (s.servicePool == nil): s.gitPool is the only
+//     pool, and we use it directly.
+func (s *Server) resolveGitRepoPath(ctx context.Context, cfg *workspace.Config, repositoryID string) (string, error) {
+	if repositoryID == "" || repositoryID == repository.PrimaryRepositoryID {
+		return cfg.RepoPath, nil
+	}
+
+	var pool *gitpool.Pool
+	if s.servicePool != nil {
+		if cfg == nil {
+			// Caller invariant: cfg is set past the workspace
+			// resolution step. Defensive nil-check so a future
+			// refactor can't sneak a nil cfg past this branch.
+			return "", domain.NewError(domain.ErrInternal,
+				"git pool resolution requires a resolved workspace")
+		}
+		ss, err := s.servicePool.Get(ctx, cfg.ID)
+		if err != nil {
+			// Surface, do not silently fall back to s.gitPool —
+			// that would resolve against the wrong registry in
+			// shared mode.
+			return "", err
+		}
+		defer s.servicePool.Release(cfg.ID)
+		pool = ss.GitPool
+	} else {
+		pool = s.gitPool
+	}
+
+	if pool == nil {
+		return "", domain.NewError(domain.ErrUnavailable,
+			fmt.Sprintf("git pool not configured; cannot route repository %q", repositoryID))
+	}
+
+	path, err := pool.RepositoryPath(ctx, repositoryID)
+	if err != nil {
+		return "", err
+	}
+	// Defence against a binding row whose local_path slipped through
+	// to an empty string. `Pool.RepositoryPath` already returns
+	// ErrPrecondition for that case, but the explicit check protects
+	// the handler from feeding "" into git-http-backend's repo path.
+	if path == "" {
+		return "", domain.NewError(domain.ErrPrecondition,
+			fmt.Sprintf("repository %q has no local clone path", repositoryID))
+	}
+	return path, nil
 }
 
 // resolveGitWorkspace resolves the workspace config for git access.
