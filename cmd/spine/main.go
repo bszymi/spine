@@ -80,6 +80,7 @@ func main() {
 	root.AddCommand(validateCmd())
 	root.AddCommand(discussionCmd())
 	root.AddCommand(workspaceCmd())
+	root.AddCommand(repositoryCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

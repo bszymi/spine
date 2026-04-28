@@ -2,16 +2,19 @@
 id: TASK-004
 type: Task
 title: Add repository management API and CLI
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation
 created: 2026-04-28
+last_updated: 2026-04-28
 links:
   - type: parent
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/epic.md
   - type: blocked_by
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-001-repository-catalog-and-bindings/tasks/TASK-003-repository-registry-service.md
+  - type: related_to
+    target: /architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md
 ---
 
 # TASK-004 - Add Repository Management API and CLI
