@@ -412,6 +412,27 @@ func (m *minimalStore) UpsertBranchProtectionRules(context.Context, []store.Bran
 func (m *minimalStore) ListBranchProtectionRules(context.Context) ([]store.BranchProtectionRuleProjection, error) {
 	panic("not used")
 }
+func (m *minimalStore) CreateRepositoryBinding(context.Context, *store.RepositoryBinding) error {
+	panic("not used")
+}
+func (m *minimalStore) GetRepositoryBinding(context.Context, string, string) (*store.RepositoryBinding, error) {
+	panic("not used")
+}
+func (m *minimalStore) GetActiveRepositoryBinding(context.Context, string, string) (*store.RepositoryBinding, error) {
+	panic("not used")
+}
+func (m *minimalStore) UpdateRepositoryBinding(context.Context, *store.RepositoryBinding) error {
+	panic("not used")
+}
+func (m *minimalStore) ListRepositoryBindings(context.Context, string) ([]store.RepositoryBinding, error) {
+	panic("not used")
+}
+func (m *minimalStore) ListActiveRepositoryBindings(context.Context, string) ([]store.RepositoryBinding, error) {
+	panic("not used")
+}
+func (m *minimalStore) DeactivateRepositoryBinding(context.Context, string, string) error {
+	panic("not used")
+}
 func (m *minimalStore) GetSyncState(context.Context) (*store.SyncState, error) { panic("not used") }
 func (m *minimalStore) UpdateSyncState(context.Context, *store.SyncState) error {
 	panic("not used")

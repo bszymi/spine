@@ -90,6 +90,19 @@ type Store interface {
 	UpsertBranchProtectionRules(ctx context.Context, rules []BranchProtectionRuleProjection, sourceCommit string) error
 	ListBranchProtectionRules(ctx context.Context) ([]BranchProtectionRuleProjection, error)
 
+	// Repository Bindings (ADR-013, INIT-014 EPIC-001).
+	// Operational connection details for code repositories registered in
+	// the workspace catalog at /.spine/repositories.yaml. The primary
+	// "spine" repository has no row and is resolved virtually from the
+	// workspace's RepoPath and configured authoritative branch.
+	CreateRepositoryBinding(ctx context.Context, b *RepositoryBinding) error
+	GetRepositoryBinding(ctx context.Context, workspaceID, repositoryID string) (*RepositoryBinding, error)
+	GetActiveRepositoryBinding(ctx context.Context, workspaceID, repositoryID string) (*RepositoryBinding, error)
+	UpdateRepositoryBinding(ctx context.Context, b *RepositoryBinding) error
+	ListRepositoryBindings(ctx context.Context, workspaceID string) ([]RepositoryBinding, error)
+	ListActiveRepositoryBindings(ctx context.Context, workspaceID string) ([]RepositoryBinding, error)
+	DeactivateRepositoryBinding(ctx context.Context, workspaceID, repositoryID string) error
+
 	// Sync State
 	GetSyncState(ctx context.Context) (*SyncState, error)
 	UpdateSyncState(ctx context.Context, state *SyncState) error
@@ -207,6 +220,49 @@ type BranchProtectionRuleProjection struct {
 	Protections   []byte `json:"protections"` // JSONB array of strings
 	SourceCommit  string `json:"source_commit"`
 }
+
+// RepositoryBinding holds the operational connection details for a code
+// repository registered in the workspace catalog (ADR-013). Identity
+// fields (kind, name, default_branch, role, description) live in
+// /.spine/repositories.yaml — only the runtime fields are stored here.
+//
+// The primary Spine repository (`repository_id = "spine"`) has no
+// binding row; it is resolved virtually from the workspace's RepoPath
+// and configured authoritative branch. The migration enforces this
+// with a CHECK constraint, and the store's create path rejects the ID
+// up front.
+//
+// DefaultBranch is an optional override — when empty, callers fall
+// back to the catalog's `default_branch` for the same repository ID.
+// It exists so a single workspace can pin a non-catalog branch (e.g.
+// a long-lived release branch) without rewriting the governed
+// catalog.
+type RepositoryBinding struct {
+	RepositoryID   string    `json:"repository_id" yaml:"repository_id"`
+	WorkspaceID    string    `json:"workspace_id" yaml:"workspace_id"`
+	CloneURL       string    `json:"clone_url" yaml:"clone_url"`
+	CredentialsRef string    `json:"credentials_ref,omitempty" yaml:"credentials_ref,omitempty"`
+	LocalPath      string    `json:"local_path" yaml:"local_path"`
+	DefaultBranch  string    `json:"default_branch,omitempty" yaml:"default_branch,omitempty"`
+	Status         string    `json:"status" yaml:"status"`
+	CreatedAt      time.Time `json:"created_at" yaml:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at" yaml:"updated_at"`
+}
+
+// Repository binding statuses.
+const (
+	RepositoryBindingStatusActive   = "active"
+	RepositoryBindingStatusInactive = "inactive"
+)
+
+// PrimaryRepositoryID is the reserved ID of the primary Spine
+// repository within a workspace. No binding row may use it — it is
+// resolved virtually from the workspace's RepoPath and the configured
+// authoritative branch. The 019 migration enforces this with a CHECK
+// constraint, and the store's create path rejects it explicitly so
+// callers see a SpineError instead of a generic database constraint
+// violation.
+const PrimaryRepositoryID = "spine"
 
 // SyncState tracks projection sync progress.
 type SyncState struct {
