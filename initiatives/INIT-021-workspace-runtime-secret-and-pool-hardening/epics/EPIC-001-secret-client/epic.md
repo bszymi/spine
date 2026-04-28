@@ -2,7 +2,7 @@
 id: EPIC-001
 type: Epic
 title: SecretClient abstraction and providers
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-021-workspace-runtime-secret-and-pool-hardening/initiative.md
 links:
   - type: parent

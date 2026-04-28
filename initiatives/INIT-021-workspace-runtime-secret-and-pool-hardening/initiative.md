@@ -2,10 +2,10 @@
 id: INIT-021
 type: Initiative
 title: Workspace Runtime — Secret Resolution and Connection-Pool Hardening
-status: Pending
+status: Completed
 owner: bszymi
 created: 2026-04-27
-last_updated: 2026-04-27
+last_updated: 2026-04-28
 links:
   - type: related_to
     target: /initiatives/INIT-009-workspace-runtime/initiative.md
