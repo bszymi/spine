@@ -15,6 +15,7 @@ import (
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/gitpool"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
@@ -37,6 +38,19 @@ type ServiceSet struct {
 	ProjSync  *projection.Service
 	Queue     *queue.MemoryQueue
 	Events    *event.QueueRouter
+
+	// Registry is the per-workspace repository.Registry — the single
+	// authoritative resolver of catalog identity + binding row for
+	// run-start preconditions, the git pool, and any code path that
+	// needs to know which repos are active. INIT-014 EPIC-003.
+	Registry *repository.Registry
+
+	// GitPool routes Git client lookups by repository ID. Production
+	// callers in this workspace pull primary clients via
+	// GitPool.PrimaryClient() (semantically identical to GitClient
+	// today, kept distinct so the pool can later mediate per-repo
+	// auth and lazy clone). Always non-nil after buildServiceSet.
+	GitPool *gitpool.Pool
 
 	// Workspace-scoped services constructed in buildServiceSet.
 	Validator  *validation.Engine
@@ -540,6 +554,30 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		observe.Logger(ctx).Warn("failed to configure credential helper", "error", err)
 	}
 
+	// Repository registry — primary-only catalog (Git-backed loader
+	// lands later in INIT-014). Primary lookup always succeeds; code
+	// repos resolve through the binding store when one is configured.
+	repoSpec := repository.PrimarySpec{LocalPath: repoPath}
+	registry := repository.New(
+		cfg.ID,
+		repoSpec,
+		func(_ context.Context) (*repository.Catalog, error) {
+			return repository.ParseCatalog(nil, repoSpec)
+		},
+		st,
+	)
+
+	// Git client pool. PrimaryClient() returns gitClient unchanged —
+	// services keep using the primary repo without any behavior
+	// change. EPIC-003 TASK-006 will replace the bare CLI factory
+	// with credential-aware per-binding resolution; until then, code
+	// repo clients reuse the primary's auth profile via gitOpts.
+	gitPool, err := gitpool.New(gitClient, registry, gitpool.NewCLIClientFactory(gitOpts...))
+	if err != nil {
+		return nil, fmt.Errorf("git client pool: %w", err)
+	}
+	primaryClient := gitPool.PrimaryClient()
+
 	// Load spine config from repo.
 	spineCfg, err := config.Load(repoPath)
 	if err != nil {
@@ -557,7 +595,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// permissive policy keeps the very early bootstrap window functional
 	// without silently disabling protection in production (the same
 	// pattern cmd/spine uses — production workspaces always have a Store).
-	artifactSvc := artifact.NewService(gitClient, eventRouter, repoPath)
+	artifactSvc := artifact.NewService(primaryClient, eventRouter, repoPath)
 	artifactSvc.WithArtifactsDir(spineCfg.ArtifactsDir)
 	if st != nil {
 		artifactSvc.WithPolicy(branchprotect.New(bpprojection.New(st)))
@@ -568,14 +606,14 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// Workflow service (ADR-007): dedicated surface for workflow definition
 	// writes, kept separate from the generic artifact service so the
 	// workflow validation suite owns the write path.
-	workflowSvc := workflow.NewService(gitClient, repoPath)
+	workflowSvc := workflow.NewService(primaryClient, repoPath)
 
 	// Projection services.
 	var projQuery *projection.QueryService
 	var projSync *projection.Service
 	if st != nil {
-		projQuery = projection.NewQueryService(st, gitClient)
-		projSync = projection.NewService(gitClient, st, eventRouter, 30*time.Second)
+		projQuery = projection.NewQueryService(st, primaryClient)
+		projSync = projection.NewService(primaryClient, st, eventRouter, 30*time.Second)
 		projSync.WithArtifactsDir(spineCfg.ArtifactsDir)
 	}
 
@@ -596,7 +634,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// Divergence service (implements BranchCreator).
 	var divSvc *divergence.Service
 	if st != nil {
-		divSvc = divergence.NewService(st, gitClient, eventRouter)
+		divSvc = divergence.NewService(st, primaryClient, eventRouter)
 		// Same projection-backed policy wired into the Artifact Service
 		// and Orchestrator above. spine/* divergence branches never
 		// match user rules, so the check is audit-consistency only,
@@ -627,6 +665,8 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		ProjSync:   projSync,
 		Queue:      q,
 		Events:     eventRouter,
+		Registry:   registry,
+		GitPool:    gitPool,
 		Validator:  validator,
 		Divergence: divSvc,
 		close:      closeAll,

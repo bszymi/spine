@@ -249,6 +249,21 @@ func TestBuildServiceSet_NoStore_NilValidatorAndDivergence(t *testing.T) {
 	if ss.Divergence != nil {
 		t.Error("expected nil Divergence when no database URL")
 	}
+	// INIT-014 EPIC-003 TASK-003: every workspace must have a non-nil
+	// repository registry and Git client pool, even when no store is
+	// available. Governance reads otherwise have no entry point for
+	// the multi-repo abstractions, which defeats single-repo
+	// backward compatibility (the pool degenerates to "primary
+	// only" but must always exist).
+	if ss.Registry == nil {
+		t.Error("expected non-nil Registry on ServiceSet")
+	}
+	if ss.GitPool == nil {
+		t.Error("expected non-nil GitPool on ServiceSet")
+	}
+	if ss.GitPool != nil && ss.GitPool.PrimaryClient() == nil {
+		t.Error("GitPool.PrimaryClient must return a usable client")
+	}
 }
 
 func TestServicePool_Evict_NoRefs(t *testing.T) {

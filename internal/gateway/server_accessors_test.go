@@ -6,6 +6,9 @@ import (
 
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/gitpool"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workspace"
 )
@@ -165,6 +168,69 @@ func TestPlanningRunStarterFrom_PrefersServiceSet(t *testing.T) {
 	result, _ := got.StartPlanningRun(context.Background(), "path", "content")
 	if result.RunID != "workspace" {
 		t.Errorf("expected workspace PlanningRunStarter, got RunID=%q", result.RunID)
+	}
+}
+
+// gitPoolStubResolver is the minimal Resolver shape gitpool.New
+// requires; we never invoke it in these tests, only construct a Pool
+// to exercise field-copy and accessor wiring.
+type gitPoolStubResolver struct{}
+
+func (gitPoolStubResolver) Lookup(_ context.Context, _ string) (*repository.Repository, error) {
+	return nil, nil
+}
+func (gitPoolStubResolver) ListActive(_ context.Context) ([]repository.Repository, error) {
+	return nil, nil
+}
+
+func newPoolForAccessorTest(t *testing.T) *gitpool.Pool {
+	t.Helper()
+	primary := git.NewCLIClient(t.TempDir())
+	p, err := gitpool.New(primary, gitPoolStubResolver{}, gitpool.NewCLIClientFactory())
+	if err != nil {
+		t.Fatalf("gitpool.New: %v", err)
+	}
+	return p
+}
+
+func TestNewServer_CopiesGitPoolFromConfig(t *testing.T) {
+	// The server's gitPool field is the only handle handlers have on
+	// the workspace pool; if NewServer dropped it, every per-repo
+	// resolution would silently fall back to nil.
+	pool := newPoolForAccessorTest(t)
+	srv := NewServer("", ServerConfig{GitPool: pool})
+
+	got := srv.gitPoolFrom(context.Background())
+	if got != pool {
+		t.Error("expected gitPool from config to be reachable via accessor")
+	}
+}
+
+func TestGitPoolFrom_PrefersServiceSet(t *testing.T) {
+	serverPool := newPoolForAccessorTest(t)
+	wsPool := newPoolForAccessorTest(t)
+
+	s := &Server{gitPool: serverPool}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		GitPool: wsPool,
+	})
+
+	got := s.gitPoolFrom(ctx)
+	if got != wsPool {
+		t.Error("expected workspace-scoped GitPool from ServiceSet")
+	}
+}
+
+func TestGitPoolFrom_NilServiceSetGitPool_FallsBack(t *testing.T) {
+	serverPool := newPoolForAccessorTest(t)
+	s := &Server{gitPool: serverPool}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		GitPool: nil,
+	})
+
+	got := s.gitPoolFrom(ctx)
+	if got != serverPool {
+		t.Error("expected fallback to server-level gitPool when ServiceSet pool is nil")
 	}
 }
 

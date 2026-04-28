@@ -13,6 +13,7 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/githttp"
+	"github.com/bszymi/spine/internal/gitpool"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/repository"
@@ -156,6 +157,7 @@ type Server struct {
 	eventBroadcaster           *delivery.EventBroadcaster // optional, nil if not configured
 	gitHTTP                    *githttp.Handler           // optional, nil if not configured
 	gitPushResolver            GitPushResolverFunc        // optional, nil if not configured; resolves per-workspace policy+events for push
+	gitPool                    *gitpool.Pool              // optional, nil if not configured; routes Git client lookups by repository ID (INIT-014 EPIC-003)
 	webhookTargets             *delivery.TargetValidator  // optional, nil = permissive; enforces SSRF rules on target_url writes and tests
 	bindingInvalidationHandler http.Handler               // optional, nil if not configured; ADR-011 platform → Spine invalidation webhook
 	repoManager                *repository.Manager        // optional, nil if not configured; INIT-014 EPIC-001 multi-repo workspace management
@@ -264,6 +266,14 @@ type ServerConfig struct {
 	GitHTTP             *githttp.Handler    // optional, serves git repos over HTTP
 	GitPushResolver     GitPushResolverFunc // optional; resolves the per-workspace policy + events used by the Git push pre-receive gate. Required for correct shared-mode enforcement (each workspace has its own branch-protection table and event stream); single-mode callers may omit it and the handler's default policy is used.
 
+	// GitPool is the workspace's repository-routed Git client pool
+	// (INIT-014 EPIC-003). Single-mode and shared-mode callers wire
+	// it; the gateway forwards it to handlers that need to operate
+	// on per-task code repositories. Read-side handlers continue to
+	// use Git (GitReader) for the primary repo; the pool is the
+	// single source of truth for non-primary clients.
+	GitPool *gitpool.Pool
+
 	// BindingInvalidationHandler is the platform → Spine webhook
 	// receiver for ADR-011 binding invalidations. When non-nil, it
 	// is mounted at POST /internal/v1/workspaces/{workspace_id}/binding-invalidate.
@@ -313,6 +323,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		eventBroadcaster:           cfg.EventBroadcaster,
 		gitHTTP:                    cfg.GitHTTP,
 		gitPushResolver:            cfg.GitPushResolver,
+		gitPool:                    cfg.GitPool,
 		bindingInvalidationHandler: cfg.BindingInvalidationHandler,
 		repoManager:                cfg.RepositoryManager,
 		webhookTargets:             cfg.WebhookTargets,
@@ -386,6 +397,15 @@ func (s *Server) projSyncFrom(ctx context.Context) ProjectionSyncer {
 
 func (s *Server) gitFrom(ctx context.Context) GitReader {
 	return resolve(ctx, func(ss *workspace.ServiceSet) GitReader { return ss.GitClient }, s.git)
+}
+
+// gitPoolFrom returns the GitPool for the active workspace. In shared
+// mode each ServiceSet owns its own pool (different repo paths and
+// auth profiles per workspace); in single mode the process-level pool
+// is the fallback. Handlers consult the pool to resolve non-primary
+// repositories by ID — TASK-004 onwards builds the routing on top.
+func (s *Server) gitPoolFrom(ctx context.Context) *gitpool.Pool {
+	return resolve(ctx, func(ss *workspace.ServiceSet) *gitpool.Pool { return ss.GitPool }, s.gitPool)
 }
 
 func (s *Server) validatorFrom(ctx context.Context) *validation.Engine {

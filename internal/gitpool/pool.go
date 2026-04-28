@@ -415,6 +415,19 @@ func (p *Pool) ListActive(ctx context.Context) ([]repository.Repository, error) 
 	return p.resolver.ListActive(ctx)
 }
 
+// NewCLIClientFactory returns a production ClientFactory that builds
+// a *git.CLIClient rooted at the given local path. The returned
+// factory threads opts (push token, credential helper, etc.) through
+// to every code-repo client so non-primary clients share the same
+// auth profile the primary was constructed with. EPIC-003 TASK-006
+// extends this with per-binding credential resolution; until then,
+// the same process-level options apply uniformly.
+func NewCLIClientFactory(opts ...git.CLIOption) ClientFactory {
+	return func(localPath string) git.GitClient {
+		return git.NewCLIClient(localPath, opts...)
+	}
+}
+
 // Stats reports pool counters. Exposed for tests and for callers that
 // want to surface clone activity through their own metrics pipeline
 // without reaching into observe.GlobalMetrics.
