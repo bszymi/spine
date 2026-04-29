@@ -267,6 +267,18 @@ func (stubStore) DeactivateRepositoryBinding(ctx context.Context, workspaceID, r
 	return nil
 }
 
+func (stubStore) UpsertRepositoryMergeOutcome(ctx context.Context, outcome *domain.RepositoryMergeOutcome) error {
+	return nil
+}
+
+func (stubStore) GetRepositoryMergeOutcome(ctx context.Context, runID, repositoryID string) (*domain.RepositoryMergeOutcome, error) {
+	return nil, nil
+}
+
+func (stubStore) ListRepositoryMergeOutcomes(ctx context.Context, runID string) ([]domain.RepositoryMergeOutcome, error) {
+	return nil, nil
+}
+
 func (stubStore) GetSyncState(ctx context.Context) (*store.SyncState, error) {
 	return nil, nil
 }

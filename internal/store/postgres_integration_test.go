@@ -681,6 +681,454 @@ func TestRunAffectedRepositoriesFallback(t *testing.T) {
 	s.CleanupTestData(ctx, t)
 }
 
+func TestRepositoryMergeOutcome_RoundTrip(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	run := seedRunForMergeOutcomes(t, s, ctx, "run-merge-outcome-roundtrip", []string{"spine", "payments-service"})
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	primary := &domain.RepositoryMergeOutcome{
+		RunID:           run.RunID,
+		RepositoryID:    domain.PrimaryRepositoryID,
+		Status:          domain.RepositoryMergeStatusMerged,
+		SourceBranch:    run.BranchName,
+		TargetBranch:    "main",
+		MergeCommitSHA:  "abc123",
+		LedgerCommitSHA: "ledger456",
+		Attempts:        1,
+		CreatedAt:       now,
+		MergedAt:        timePtr(now),
+		LastAttemptedAt: timePtr(now),
+	}
+	if err := s.UpsertRepositoryMergeOutcome(ctx, primary); err != nil {
+		t.Fatalf("upsert primary outcome: %v", err)
+	}
+
+	got, err := s.GetRepositoryMergeOutcome(ctx, run.RunID, domain.PrimaryRepositoryID)
+	if err != nil {
+		t.Fatalf("get primary outcome: %v", err)
+	}
+	if got.Status != domain.RepositoryMergeStatusMerged {
+		t.Errorf("status: got %q, want merged", got.Status)
+	}
+	if got.MergeCommitSHA != "abc123" {
+		t.Errorf("merge_commit_sha: got %q, want abc123", got.MergeCommitSHA)
+	}
+	if got.LedgerCommitSHA != "ledger456" {
+		t.Errorf("ledger_commit_sha: got %q, want ledger456", got.LedgerCommitSHA)
+	}
+	if got.MergedAt == nil {
+		t.Errorf("merged_at: got nil, want set")
+	}
+	if got.UpdatedAt.IsZero() {
+		t.Errorf("updated_at: should be auto-populated")
+	}
+}
+
+func TestRepositoryMergeOutcome_ListByRunOrdersStably(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	run := seedRunForMergeOutcomes(t, s, ctx, "run-merge-outcome-list", []string{"spine", "payments-service", "api-gateway"})
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for _, repoID := range []string{"spine", "payments-service", "api-gateway"} {
+		out := &domain.RepositoryMergeOutcome{
+			RunID:        run.RunID,
+			RepositoryID: repoID,
+			Status:       domain.RepositoryMergeStatusPending,
+			SourceBranch: run.BranchName,
+			TargetBranch: "main",
+			CreatedAt:    now,
+		}
+		if err := s.UpsertRepositoryMergeOutcome(ctx, out); err != nil {
+			t.Fatalf("upsert %q: %v", repoID, err)
+		}
+	}
+
+	all, err := s.ListRepositoryMergeOutcomes(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	want := []string{"api-gateway", "payments-service", "spine"} // alphabetical
+	if len(all) != len(want) {
+		t.Fatalf("list length: got %d, want %d", len(all), len(want))
+	}
+	for i, repoID := range want {
+		if all[i].RepositoryID != repoID {
+			t.Errorf("list[%d]: got %q, want %q", i, all[i].RepositoryID, repoID)
+		}
+	}
+
+	empty, err := s.ListRepositoryMergeOutcomes(ctx, "no-such-run")
+	if err != nil {
+		t.Fatalf("list empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("list empty: got %d, want 0", len(empty))
+	}
+	if empty == nil {
+		t.Errorf("list empty: should return empty slice, not nil, so JSON encoders emit []")
+	}
+}
+
+func TestRepositoryMergeOutcome_UpsertIsIdempotent(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	run := seedRunForMergeOutcomes(t, s, ctx, "run-merge-upsert", []string{"spine", "payments-service"})
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	first := &domain.RepositoryMergeOutcome{
+		RunID:           run.RunID,
+		RepositoryID:    "payments-service",
+		Status:          domain.RepositoryMergeStatusPending,
+		SourceBranch:    run.BranchName,
+		TargetBranch:    "main",
+		Attempts:        0,
+		CreatedAt:       now,
+		LastAttemptedAt: timePtr(now),
+	}
+	if err := s.UpsertRepositoryMergeOutcome(ctx, first); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	got, err := s.GetRepositoryMergeOutcome(ctx, run.RunID, "payments-service")
+	if err != nil {
+		t.Fatalf("get after first upsert: %v", err)
+	}
+	originalCreatedAt := got.CreatedAt
+
+	// Second upsert flips to failed with a transient class. Created_at
+	// must NOT change; status, failure fields, and attempts must.
+	second := &domain.RepositoryMergeOutcome{
+		RunID:           run.RunID,
+		RepositoryID:    "payments-service",
+		Status:          domain.RepositoryMergeStatusFailed,
+		SourceBranch:    run.BranchName,
+		TargetBranch:    "main",
+		FailureClass:    domain.MergeFailureNetwork,
+		FailureDetail:   "connection refused: foo.example.com",
+		Attempts:        2,
+		LastAttemptedAt: timePtr(now.Add(time.Minute)),
+	}
+	if err := s.UpsertRepositoryMergeOutcome(ctx, second); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	got, err = s.GetRepositoryMergeOutcome(ctx, run.RunID, "payments-service")
+	if err != nil {
+		t.Fatalf("get after second upsert: %v", err)
+	}
+	if !got.CreatedAt.Equal(originalCreatedAt) {
+		t.Errorf("created_at: got %v, want preserved %v", got.CreatedAt, originalCreatedAt)
+	}
+	if got.Status != domain.RepositoryMergeStatusFailed {
+		t.Errorf("status: got %q, want failed", got.Status)
+	}
+	if got.FailureClass != domain.MergeFailureNetwork {
+		t.Errorf("failure_class: got %q, want network", got.FailureClass)
+	}
+	if got.Attempts != 2 {
+		t.Errorf("attempts: got %d, want 2", got.Attempts)
+	}
+	if got.IsTerminal() {
+		t.Errorf("transient network failure must NOT be terminal — scheduler should retry")
+	}
+}
+
+func TestRepositoryMergeOutcome_PartialMergeStates(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	run := seedRunForMergeOutcomes(t, s, ctx, "run-partial-merge", []string{"spine", "payments-service", "api-gateway"})
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	codeMerged := &domain.RepositoryMergeOutcome{
+		RunID:           run.RunID,
+		RepositoryID:    "api-gateway",
+		Status:          domain.RepositoryMergeStatusMerged,
+		SourceBranch:    run.BranchName,
+		TargetBranch:    "main",
+		MergeCommitSHA:  "feedface",
+		Attempts:        1,
+		CreatedAt:       now,
+		MergedAt:        timePtr(now),
+		LastAttemptedAt: timePtr(now),
+	}
+	codeFailed := &domain.RepositoryMergeOutcome{
+		RunID:           run.RunID,
+		RepositoryID:    "payments-service",
+		Status:          domain.RepositoryMergeStatusFailed,
+		SourceBranch:    run.BranchName,
+		TargetBranch:    "main",
+		FailureClass:    domain.MergeFailureConflict,
+		FailureDetail:   "conflict at internal/payments/handler.go",
+		Attempts:        1,
+		CreatedAt:       now,
+		LastAttemptedAt: timePtr(now),
+	}
+	primaryPending := &domain.RepositoryMergeOutcome{
+		RunID:        run.RunID,
+		RepositoryID: domain.PrimaryRepositoryID,
+		Status:       domain.RepositoryMergeStatusPending,
+		SourceBranch: run.BranchName,
+		TargetBranch: "main",
+		CreatedAt:    now,
+	}
+	for _, o := range []*domain.RepositoryMergeOutcome{codeMerged, codeFailed, primaryPending} {
+		if err := s.UpsertRepositoryMergeOutcome(ctx, o); err != nil {
+			t.Fatalf("upsert %s: %v", o.RepositoryID, err)
+		}
+	}
+
+	all, err := s.ListRepositoryMergeOutcomes(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("list length: got %d, want 3", len(all))
+	}
+	statusByRepo := map[string]domain.RepositoryMergeStatus{}
+	for _, o := range all {
+		statusByRepo[o.RepositoryID] = o.Status
+	}
+	wantStatus := map[string]domain.RepositoryMergeStatus{
+		"api-gateway":              domain.RepositoryMergeStatusMerged,
+		"payments-service":         domain.RepositoryMergeStatusFailed,
+		domain.PrimaryRepositoryID: domain.RepositoryMergeStatusPending,
+	}
+	for repo, want := range wantStatus {
+		if got := statusByRepo[repo]; got != want {
+			t.Errorf("status[%s]: got %q, want %q", repo, got, want)
+		}
+	}
+
+	// Permanent (conflict) failure on payments-service is terminal.
+	pay, err := s.GetRepositoryMergeOutcome(ctx, run.RunID, "payments-service")
+	if err != nil {
+		t.Fatalf("get payments-service: %v", err)
+	}
+	if !pay.IsTerminal() {
+		t.Errorf("conflict failure must be terminal — scheduler must NOT retry without human action")
+	}
+}
+
+func TestRepositoryMergeOutcome_ResolvedExternallyAuditFields(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	run := seedRunForMergeOutcomes(t, s, ctx, "run-merge-resolved", []string{"spine", "payments-service"})
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	out := &domain.RepositoryMergeOutcome{
+		RunID:            run.RunID,
+		RepositoryID:     "payments-service",
+		Status:           domain.RepositoryMergeStatusResolvedExternally,
+		SourceBranch:     run.BranchName,
+		TargetBranch:     "main",
+		ResolvedBy:       "actor:bszymi",
+		ResolutionReason: "merged manually after rebase onto main",
+		Attempts:         3,
+		CreatedAt:        now,
+		LastAttemptedAt:  timePtr(now),
+	}
+	if err := s.UpsertRepositoryMergeOutcome(ctx, out); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := s.GetRepositoryMergeOutcome(ctx, run.RunID, "payments-service")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ResolvedBy != "actor:bszymi" {
+		t.Errorf("resolved_by: got %q, want actor:bszymi", got.ResolvedBy)
+	}
+	if got.ResolutionReason != "merged manually after rebase onto main" {
+		t.Errorf("resolution_reason: got %q, want match", got.ResolutionReason)
+	}
+	if !got.IsTerminal() {
+		t.Errorf("resolved-externally must be terminal")
+	}
+}
+
+func TestRepositoryMergeOutcome_GetNotFound(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	_, err := s.GetRepositoryMergeOutcome(ctx, "no-such-run", "no-such-repo")
+	if err == nil {
+		t.Fatalf("expected not-found error, got nil")
+	}
+}
+
+func TestRepositoryMergeOutcome_InvalidPayloadRejectedBeforeDB(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	// Code repo carrying a ledger SHA — Validate must reject this so a
+	// CHECK violation never reaches Postgres.
+	bad := &domain.RepositoryMergeOutcome{
+		RunID:           "run-x",
+		RepositoryID:    "payments-service",
+		Status:          domain.RepositoryMergeStatusMerged,
+		SourceBranch:    "spine/run/x",
+		TargetBranch:    "main",
+		MergeCommitSHA:  "abc",
+		LedgerCommitSHA: "ledger-on-code-repo",
+		CreatedAt:       time.Now().UTC(),
+	}
+	err := s.UpsertRepositoryMergeOutcome(ctx, bad)
+	if err == nil {
+		t.Fatalf("expected validation error, got nil")
+	}
+}
+
+// TestRepositoryMergeOutcome_DirectInsertCheckConstraints exercises the
+// SQL-side backstop that mirrors domain.RepositoryMergeOutcome.Validate.
+// The Go upsert path validates first, but a direct INSERT (manual psql,
+// future code path) must still get rejected so the read side never has
+// to trust a malformed row. Bypasses the validator on purpose.
+func TestRepositoryMergeOutcome_DirectInsertCheckConstraints(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	run := seedRunForMergeOutcomes(t, s, ctx, "run-merge-check", []string{"spine", "payments-service"})
+
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "merged without sha is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch, merged_at)
+				VALUES ($1, 'payments-service', 'merged', 'spine/run/x', 'main', now())`,
+		},
+		{
+			name: "merged without timestamp is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch, merge_commit_sha)
+				VALUES ($1, 'payments-service', 'merged', 'spine/run/x', 'main', 'abc')`,
+		},
+		{
+			name: "failed without class is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch)
+				VALUES ($1, 'payments-service', 'failed', 'spine/run/x', 'main')`,
+		},
+		{
+			name: "pending with stale failure_class is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch, failure_class)
+				VALUES ($1, 'payments-service', 'pending', 'spine/run/x', 'main', 'network')`,
+		},
+		{
+			name: "resolved-externally without resolver is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch)
+				VALUES ($1, 'payments-service', 'resolved-externally', 'spine/run/x', 'main')`,
+		},
+		{
+			name: "code repo with ledger sha is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch, merge_commit_sha, ledger_commit_sha, merged_at)
+				VALUES ($1, 'payments-service', 'merged', 'spine/run/x', 'main', 'abc', 'ledger', now())`,
+		},
+		{
+			name: "resolved-externally with merge_commit_sha is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch, resolved_by, resolution_reason, merge_commit_sha)
+				VALUES ($1, 'payments-service', 'resolved-externally', 'spine/run/x', 'main', 'actor:x', 'manual', 'abc')`,
+		},
+		{
+			name: "empty source_branch is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch)
+				VALUES ($1, 'payments-service', 'pending', '', 'main')`,
+		},
+		{
+			name: "resolved-externally with empty resolved_by is rejected",
+			sql: `INSERT INTO runtime.repository_merge_outcomes
+				(run_id, repository_id, status, source_branch, target_branch, resolved_by, resolution_reason)
+				VALUES ($1, 'payments-service', 'resolved-externally', 'spine/run/x', 'main', '', 'reason')`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.ExecRaw(ctx, tc.sql, run.RunID)
+			if err == nil {
+				t.Fatalf("expected CHECK constraint violation, got nil")
+			}
+		})
+	}
+}
+
+func TestRepositoryMergeOutcome_DeletedWhenRunDeleted(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	run := seedRunForMergeOutcomes(t, s, ctx, "run-merge-cascade", []string{"spine", "payments-service"})
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if err := s.UpsertRepositoryMergeOutcome(ctx, &domain.RepositoryMergeOutcome{
+		RunID:        run.RunID,
+		RepositoryID: "payments-service",
+		Status:       domain.RepositoryMergeStatusPending,
+		SourceBranch: run.BranchName,
+		TargetBranch: "main",
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if err := s.ExecRaw(ctx, `DELETE FROM runtime.runs WHERE run_id = $1`, run.RunID); err != nil {
+		t.Fatalf("delete run: %v", err)
+	}
+
+	all, err := s.ListRepositoryMergeOutcomes(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("list after run delete: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("expected cascade delete, got %d rows", len(all))
+	}
+}
+
+func seedRunForMergeOutcomes(t *testing.T, s *store.PostgresStore, ctx context.Context, runID string, repos []string) *domain.Run {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	run := &domain.Run{
+		RunID:                runID,
+		TaskPath:             "tasks/merge.md",
+		WorkflowPath:         "workflows/test.yaml",
+		WorkflowID:           "test",
+		WorkflowVersion:      "abc",
+		Status:               domain.RunStatusPending,
+		BranchName:           "spine/run/" + runID,
+		AffectedRepositories: repos,
+		PrimaryRepository:    true,
+		TraceID:              "trace-" + runID,
+		CreatedAt:            now,
+	}
+	if err := s.CreateRun(ctx, run); err != nil {
+		t.Fatalf("seed CreateRun: %v", err)
+	}
+	return run
+}
+
+func timePtr(t time.Time) *time.Time { return &t }
+
 func TestMigrationApplied(t *testing.T) {
 	s := store.NewTestStore(t)
 	ctx := context.Background()

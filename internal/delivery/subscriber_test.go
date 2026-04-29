@@ -433,6 +433,15 @@ func (m *minimalStore) ListActiveRepositoryBindings(context.Context, string) ([]
 func (m *minimalStore) DeactivateRepositoryBinding(context.Context, string, string) error {
 	panic("not used")
 }
+func (m *minimalStore) UpsertRepositoryMergeOutcome(context.Context, *domain.RepositoryMergeOutcome) error {
+	panic("not used")
+}
+func (m *minimalStore) GetRepositoryMergeOutcome(context.Context, string, string) (*domain.RepositoryMergeOutcome, error) {
+	panic("not used")
+}
+func (m *minimalStore) ListRepositoryMergeOutcomes(context.Context, string) ([]domain.RepositoryMergeOutcome, error) {
+	panic("not used")
+}
 func (m *minimalStore) GetSyncState(context.Context) (*store.SyncState, error) { panic("not used") }
 func (m *minimalStore) UpdateSyncState(context.Context, *store.SyncState) error {
 	panic("not used")
