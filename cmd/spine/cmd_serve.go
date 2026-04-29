@@ -206,6 +206,13 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	if ss.Registry != nil {
 		orch.WithRepositoryResolver(ss.Registry)
 	}
+	// Multi-repo branch creation at run start (INIT-014 EPIC-004
+	// TASK-002). The workspace pool is the single point of per-repo
+	// client resolution; wiring it here lets StartRun create the same
+	// run branch on every affected code repo, not just the primary.
+	if ss.GitPool != nil {
+		orch.WithRepositoryGitClients(ss.GitPool)
+	}
 	// Workflow writer is required for ADR-008 planning runs. Fail fast at
 	// startup if ss.Workflows is populated but doesn't satisfy the
 	// interface — a silent skip here degrades workflow.create into 503 at
@@ -534,6 +541,13 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// resolve through the same authoritative source.
 	if orch != nil && deps.Store != nil {
 		orch.WithRepositoryResolver(repoRegistry)
+	}
+	// Multi-repo branch creation at run start (INIT-014 EPIC-004
+	// TASK-002). The pool already routes by repository ID; wiring it
+	// into the engine lets StartRun create the same run branch on
+	// every affected code repo's working tree.
+	if orch != nil && gitPool != nil {
+		orch.WithRepositoryGitClients(gitPool)
 	}
 
 	var sched *scheduler.Scheduler
