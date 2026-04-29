@@ -67,6 +67,15 @@ func (s *stubRunStore) GetBranch(_ context.Context, _ string) (*domain.Branch, e
 func (s *stubRunStore) ListBranchesByDivergence(_ context.Context, _ string) ([]domain.Branch, error) {
 	return nil, nil
 }
+func (s *stubRunStore) UpsertRepositoryMergeOutcome(_ context.Context, _ *domain.RepositoryMergeOutcome) error {
+	return nil
+}
+func (s *stubRunStore) GetRepositoryMergeOutcome(_ context.Context, _, _ string) (*domain.RepositoryMergeOutcome, error) {
+	return nil, domain.NewError(domain.ErrNotFound, "merge outcome not found")
+}
+func (s *stubRunStore) ListRepositoryMergeOutcomes(_ context.Context, _ string) ([]domain.RepositoryMergeOutcome, error) {
+	return []domain.RepositoryMergeOutcome{}, nil
+}
 
 type stubActorAssigner struct{}
 

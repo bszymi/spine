@@ -44,6 +44,14 @@ type RunStore interface {
 	UpdateBranch(ctx context.Context, branch *domain.Branch) error
 	GetBranch(ctx context.Context, branchID string) (*domain.Branch, error)
 	ListBranchesByDivergence(ctx context.Context, divergenceID string) ([]domain.Branch, error)
+
+	// Repository merge outcomes (INIT-014 EPIC-005). One row per
+	// (run_id, repository_id); the orchestrator upserts an outcome
+	// after each per-repo merge attempt so partial cross-repo states
+	// are explicit and queryable rather than inferred from prose.
+	UpsertRepositoryMergeOutcome(ctx context.Context, outcome *domain.RepositoryMergeOutcome) error
+	GetRepositoryMergeOutcome(ctx context.Context, runID, repositoryID string) (*domain.RepositoryMergeOutcome, error)
+	ListRepositoryMergeOutcomes(ctx context.Context, runID string) ([]domain.RepositoryMergeOutcome, error)
 }
 
 // ActorAssigner assigns work to actors and processes their results.
