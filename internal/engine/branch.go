@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
 	"github.com/bszymi/spine/internal/repository"
 )
@@ -14,6 +15,14 @@ import (
 // surfaced (it is the run's authoritative ref); per-repo cleanup
 // failures on code repos are logged best-effort so a transient git
 // error in one repo cannot mask the rest of the cleanup.
+//
+// EPIC-005 TASK-002 refinement: code repos whose merge outcome is
+// `failed` keep their run branch so an operator can resolve the
+// conflict (or rotate creds, etc.) and re-merge from the same source
+// ref. Without this guard the code-repo-first merge order would
+// quietly destroy the only ref carrying the unmerged work the moment
+// the primary repo completes. Branch cleanup per repo (full TASK-004
+// scope) refines this further.
 func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error {
 	run, err := o.store.GetRun(ctx, runID)
 	if err != nil {
@@ -52,6 +61,18 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 		}
 	}
 
+	// Per-repo merge outcomes drive whether each code repo's branch can
+	// be deleted. A repo with a failed outcome keeps its branch — that
+	// is the only ref carrying the unmerged work the operator needs to
+	// resolve. Pending/Merged/Skipped/ResolvedExternally repos all get
+	// cleaned up. preserveAll is set when ListRepositoryMergeOutcomes
+	// errored: rather than risk deleting the only ref a recoverable
+	// failed-merge has, we err on the side of keeping every code-repo
+	// branch and let an operator clean up by hand. The primary cleanup
+	// is unaffected — its branch is on a separate working tree and a
+	// store hiccup does not change its merge status.
+	preserved, preserveAll := o.preservedRepoBranches(ctx, runID)
+
 	// Multi-repo cleanup (INIT-014 EPIC-004 TASK-002). Symmetric with
 	// createRunBranches: every non-primary affected repo received the
 	// same run branch (and an auto-push remote ref when enabled), so
@@ -61,6 +82,16 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 	if o.repoClients != nil {
 		for _, repoID := range run.AffectedRepositories {
 			if repoID == "" || repoID == repository.PrimaryRepositoryID {
+				continue
+			}
+			if preserveAll || preserved[repoID] {
+				reason := "failed merge outcome"
+				if preserveAll {
+					reason = "merge outcome list unavailable"
+				}
+				log.Info("cleanup: preserving run branch",
+					"run_id", runID, "repository_id", repoID,
+					"branch", run.BranchName, "reason", reason)
 				continue
 			}
 			client, err := o.repoClients.Client(ctx, repoID)
@@ -90,6 +121,33 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 	}
 	log.Info("run branch cleaned up", "run_id", runID, "branch", run.BranchName)
 	return nil
+}
+
+// preservedRepoBranches returns (preserved-set, preserveAll).
+//
+// preserved-set: the repository IDs whose merge outcome is `failed`
+// and whose run branch must therefore be kept after run completion.
+//
+// preserveAll: true when ListRepositoryMergeOutcomes errored. In that
+// case the caller must preserve every code-repo branch — a transient
+// store error at cleanup time would otherwise let CleanupRunBranch
+// delete the only ref carrying an unmerged failure's work, which is
+// strictly worse than leaving recoverable cruft. Operators can
+// reconcile by hand once the store recovers.
+func (o *Orchestrator) preservedRepoBranches(ctx context.Context, runID string) (map[string]bool, bool) {
+	preserved := map[string]bool{}
+	outcomes, err := o.store.ListRepositoryMergeOutcomes(ctx, runID)
+	if err != nil {
+		observe.Logger(ctx).Warn("cleanup: failed to list merge outcomes — preserving all code-repo branches",
+			"run_id", runID, "error", err)
+		return preserved, true
+	}
+	for _, outcome := range outcomes {
+		if outcome.Status == domain.RepositoryMergeStatusFailed {
+			preserved[outcome.RepositoryID] = true
+		}
+	}
+	return preserved, false
 }
 
 // RunBranch returns the branch name for a run, or empty if not set.

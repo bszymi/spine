@@ -47,6 +47,13 @@ type mockRunStore struct {
 	statusCalls        []statusCall
 	createRunErr       error
 	updateErr          error
+
+	// mergeOutcomes records every Upsert in call order so tests can
+	// pin the merge sequence (TASK-002 AC: tests pin merge ordering).
+	// The slice is append-only on first write per (run_id, repo_id) and
+	// in-place updated on subsequent writes — same key never appears
+	// twice.
+	mergeOutcomes []domain.RepositoryMergeOutcome
 }
 
 type statusCall struct {
@@ -190,6 +197,43 @@ func (m *mockRunStore) UpdateBranch(_ context.Context, branch *domain.Branch) er
 		}
 	}
 	return domain.NewError(domain.ErrNotFound, "branch not found")
+}
+
+func (m *mockRunStore) UpsertRepositoryMergeOutcome(_ context.Context, outcome *domain.RepositoryMergeOutcome) error {
+	if outcome == nil {
+		return domain.NewError(domain.ErrInvalidParams, "merge outcome required")
+	}
+	if err := outcome.Validate(); err != nil {
+		return err
+	}
+	for i, o := range m.mergeOutcomes {
+		if o.RunID == outcome.RunID && o.RepositoryID == outcome.RepositoryID {
+			m.mergeOutcomes[i] = *outcome
+			return nil
+		}
+	}
+	m.mergeOutcomes = append(m.mergeOutcomes, *outcome)
+	return nil
+}
+
+func (m *mockRunStore) GetRepositoryMergeOutcome(_ context.Context, runID, repositoryID string) (*domain.RepositoryMergeOutcome, error) {
+	for i := range m.mergeOutcomes {
+		if m.mergeOutcomes[i].RunID == runID && m.mergeOutcomes[i].RepositoryID == repositoryID {
+			cp := m.mergeOutcomes[i]
+			return &cp, nil
+		}
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "merge outcome not found")
+}
+
+func (m *mockRunStore) ListRepositoryMergeOutcomes(_ context.Context, runID string) ([]domain.RepositoryMergeOutcome, error) {
+	out := []domain.RepositoryMergeOutcome{}
+	for _, o := range m.mergeOutcomes {
+		if o.RunID == runID {
+			out = append(out, o)
+		}
+	}
+	return out, nil
 }
 
 type mockEventEmitter struct {

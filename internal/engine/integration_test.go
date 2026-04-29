@@ -126,6 +126,15 @@ func (s *memStore) GetBranch(_ context.Context, _ string) (*domain.Branch, error
 func (s *memStore) ListBranchesByDivergence(_ context.Context, _ string) ([]domain.Branch, error) {
 	return nil, nil
 }
+func (s *memStore) UpsertRepositoryMergeOutcome(_ context.Context, _ *domain.RepositoryMergeOutcome) error {
+	return nil
+}
+func (s *memStore) GetRepositoryMergeOutcome(_ context.Context, _, _ string) (*domain.RepositoryMergeOutcome, error) {
+	return nil, domain.NewError(domain.ErrNotFound, "merge outcome not found")
+}
+func (s *memStore) ListRepositoryMergeOutcomes(_ context.Context, _ string) ([]domain.RepositoryMergeOutcome, error) {
+	return []domain.RepositoryMergeOutcome{}, nil
+}
 
 // memArtifactReader returns a predefined artifact.
 type memArtifactReader struct {
