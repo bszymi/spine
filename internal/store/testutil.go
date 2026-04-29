@@ -80,6 +80,7 @@ func (s *PostgresStore) CleanupTestData(ctx context.Context, t *testing.T) {
 		"runtime.divergence_contexts",
 		"runtime.queue_entries",
 		"runtime.step_executions",
+		"runtime.repository_merge_outcomes",
 		"runtime.runs",
 		"runtime.repositories",
 		"auth.actor_skills",

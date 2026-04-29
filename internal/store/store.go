@@ -103,6 +103,18 @@ type Store interface {
 	ListActiveRepositoryBindings(ctx context.Context, workspaceID string) ([]RepositoryBinding, error)
 	DeactivateRepositoryBinding(ctx context.Context, workspaceID, repositoryID string) error
 
+	// Repository Merge Outcomes (INIT-014 EPIC-005 TASK-001).
+	// Per-repository merge progress for a Run. EPIC-005 stores one row
+	// per (run_id, repository_id) so partial cross-repo merge states
+	// are explicit and queryable. Upsert is idempotent — the same
+	// (run, repo) can be written repeatedly across retries without
+	// first deleting the existing row. The composite primary key
+	// covers per-run lookup, the dominant access pattern for
+	// dashboards and recovery planners.
+	UpsertRepositoryMergeOutcome(ctx context.Context, outcome *domain.RepositoryMergeOutcome) error
+	GetRepositoryMergeOutcome(ctx context.Context, runID, repositoryID string) (*domain.RepositoryMergeOutcome, error)
+	ListRepositoryMergeOutcomes(ctx context.Context, runID string) ([]domain.RepositoryMergeOutcome, error)
+
 	// Sync State
 	GetSyncState(ctx context.Context) (*SyncState, error)
 	UpdateSyncState(ctx context.Context, state *SyncState) error
