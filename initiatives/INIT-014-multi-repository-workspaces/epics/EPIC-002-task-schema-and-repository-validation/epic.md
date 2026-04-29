@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: "Task Schema and Repository Validation"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 owner: bszymi
 created: 2026-04-28

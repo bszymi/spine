@@ -599,6 +599,88 @@ func TestRunModeDatabaseDefault(t *testing.T) {
 	s.CleanupTestData(ctx, t)
 }
 
+func TestRunAffectedRepositoriesRoundTrip(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	run := &domain.Run{
+		RunID:                "run-multi-repo",
+		TaskPath:             "tasks/multi.md",
+		WorkflowPath:         "workflows/test.yaml",
+		WorkflowID:           "test",
+		WorkflowVersion:      "abc",
+		Status:               domain.RunStatusPending,
+		BranchName:           "spine/run/multi",
+		AffectedRepositories: []string{"spine", "payments-service", "api-gateway"},
+		PrimaryRepository:    true,
+		RepositoryBranches: map[string]string{
+			"payments-service": "spine/run/multi-payments",
+		},
+		TraceID:   "trace-multi",
+		CreatedAt: now,
+	}
+
+	if err := s.CreateRun(ctx, run); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	got, err := s.GetRun(ctx, "run-multi-repo")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if want := []string{"spine", "payments-service", "api-gateway"}; !equalStrings(got.AffectedRepositories, want) {
+		t.Errorf("affected_repositories: got %v, want %v", got.AffectedRepositories, want)
+	}
+	if !got.PrimaryRepository {
+		t.Errorf("primary_repository: got false, want true")
+	}
+	if got.RepositoryBranches["payments-service"] != "spine/run/multi-payments" {
+		t.Errorf("repository_branches[payments-service]: got %q, want spine/run/multi-payments",
+			got.RepositoryBranches["payments-service"])
+	}
+
+	s.CleanupTestData(ctx, t)
+}
+
+// TestRunAffectedRepositoriesFallback covers the missing-metadata fallback
+// (INIT-014 EPIC-004 TASK-001 acceptance: "Missing task repository metadata
+// produces [spine]"). A caller that constructs a Run literal without the new
+// fields — e.g. legacy harness code — must still persist as primary-repo-only.
+func TestRunAffectedRepositoriesFallback(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	run := &domain.Run{
+		RunID:           "run-no-repos",
+		TaskPath:        "tasks/none.md",
+		WorkflowPath:    "workflows/test.yaml",
+		WorkflowID:      "test",
+		WorkflowVersion: "abc",
+		Status:          domain.RunStatusPending,
+		TraceID:         "trace-none",
+		CreatedAt:       now,
+	}
+
+	if err := s.CreateRun(ctx, run); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	got, err := s.GetRun(ctx, "run-no-repos")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if want := []string{domain.PrimaryRepositoryID}; !equalStrings(got.AffectedRepositories, want) {
+		t.Errorf("affected_repositories fallback: got %v, want %v", got.AffectedRepositories, want)
+	}
+	if !got.PrimaryRepository {
+		t.Errorf("primary_repository fallback: got false, want true")
+	}
+
+	s.CleanupTestData(ctx, t)
+}
+
 func TestMigrationApplied(t *testing.T) {
 	s := store.NewTestStore(t)
 	ctx := context.Background()
