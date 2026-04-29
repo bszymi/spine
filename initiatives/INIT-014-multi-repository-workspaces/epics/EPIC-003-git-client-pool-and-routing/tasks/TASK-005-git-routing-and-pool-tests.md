@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Git routing and pool tests
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-003-git-client-pool-and-routing/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: testing

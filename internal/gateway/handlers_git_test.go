@@ -1046,6 +1046,72 @@ func TestHandleGit_PerRepoRouting_UnknownRepoReturnsNotFound(t *testing.T) {
 	}
 }
 
+// TestHandleGit_PerRepoRouting_InactiveRepoReturnsPrecondition
+// asserts that an inactive code-repo binding surfaces past the auth
+// gate as a 412 (Precondition) — the registry's typed
+// ErrRepositoryInactive carries that code via SpineError. Operators
+// need this to distinguish "repo never existed" (404) from "repo
+// exists but binding is disabled" (412).
+func TestHandleGit_PerRepoRouting_InactiveRepoReturnsPrecondition(t *testing.T) {
+	pool, err := gitpool.New(git.NewCLIClient(t.TempDir()),
+		&inactiveLookupResolver{}, gitpool.NewCLIClientFactory())
+	if err != nil {
+		t.Fatalf("gitpool.New: %v", err)
+	}
+
+	wsResolver := &poolStubResolver{cfg: workspace.Config{
+		ID:       "ws-1",
+		RepoPath: t.TempDir(),
+		Status:   workspace.StatusActive,
+	}}
+	handler, err := githttp.NewHandler(githttp.Config{
+		ResolveRepoPath: func(_ context.Context, _ string) (string, error) { return "/x", nil },
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	s := &Server{
+		gitHTTP:    handler,
+		wsResolver: wsResolver,
+		gitPool:    pool,
+		devMode:    true,
+	}
+
+	req := httptest.NewRequest("GET",
+		"/git/ws-1/payments/info/refs?service=git-upload-pack", http.NoBody)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", "ws-1")
+	rctx.URLParams.Add("*", "payments/info/refs")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	s.handleGit(w, req)
+
+	// SpineError(ErrPrecondition) maps to 412.
+	if w.Code != http.StatusPreconditionFailed {
+		t.Errorf("expected 412 for inactive binding, got %d body=%s",
+			w.Code, w.Body.String())
+	}
+}
+
+// inactiveLookupResolver returns ErrRepositoryInactive for every
+// non-primary lookup so the gateway test can exercise the inactive
+// branch without standing up a Manager + binding store.
+type inactiveLookupResolver struct{}
+
+func (inactiveLookupResolver) Lookup(_ context.Context, id string) (*repository.Repository, error) {
+	if id == repository.PrimaryRepositoryID {
+		return &repository.Repository{ID: id, LocalPath: "/var/spine/primary"}, nil
+	}
+	return nil, domain.NewErrorWithCause(domain.ErrPrecondition,
+		fmt.Sprintf("repository %q binding is inactive", id),
+		repository.ErrRepositoryInactive)
+}
+
+func (inactiveLookupResolver) ListActive(_ context.Context) ([]repository.Repository, error) {
+	return nil, nil
+}
+
 // TestHandleGit_PerRepoRouting_PushDisabledKeeps403 asserts that an
 // unauthenticated `git-receive-pack` probe with the receive-pack
 // flag OFF receives the inner handler's 403 (with
