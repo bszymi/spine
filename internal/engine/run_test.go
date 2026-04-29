@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -271,6 +272,16 @@ func TestStartRun_HappyPath(t *testing.T) {
 		t.Error("expected non-empty trace ID")
 	}
 
+	// Multi-repo run lifecycle (INIT-014 EPIC-004 TASK-001): a task with no
+	// repositories field defaults to primary-only and the primary flag is
+	// recorded so future schemas can distinguish primary participation.
+	if want := []string{domain.PrimaryRepositoryID}; !reflect.DeepEqual(result.Run.AffectedRepositories, want) {
+		t.Errorf("expected affected_repositories %v, got %v", want, result.Run.AffectedRepositories)
+	}
+	if !result.Run.PrimaryRepository {
+		t.Error("expected primary_repository true for standard run")
+	}
+
 	// Entry step should be created in waiting status.
 	if result.EntryStep == nil {
 		t.Fatal("expected non-nil entry step")
@@ -305,6 +316,47 @@ func TestStartRun_HappyPath(t *testing.T) {
 	}
 	if events.events[0].Type != domain.EventRunStarted {
 		t.Errorf("expected first event run_started, got %s", events.events[0].Type)
+	}
+}
+
+// TestStartRun_AffectedRepositoriesFromTask covers the multi-repo branch of
+// the affected-repositories derivation: when the task front matter declares
+// code repos, those flow into Run.AffectedRepositories with the primary
+// "spine" repo prepended (INIT-014 EPIC-004 TASK-001).
+func TestStartRun_AffectedRepositoriesFromTask(t *testing.T) {
+	artifacts := &mockArtifactReader{
+		artifact: &domain.Artifact{
+			Type:         "task",
+			Path:         "tasks/my-task.md",
+			Repositories: []string{"payments-service", "api-gateway"},
+		},
+	}
+	resolver := &mockWorkflowResolver{
+		result: &workflow.BindingResult{
+			Workflow: &domain.WorkflowDefinition{
+				ID:        "wf-task",
+				Path:      "workflows/task.yaml",
+				Version:   "1.0.0",
+				EntryStep: "start",
+				Steps:     []domain.StepDefinition{{ID: "start", Name: "Start"}},
+			},
+			CommitSHA:    "abc123",
+			VersionLabel: "1.0.0",
+		},
+	}
+	orch := testOrchestrator(artifacts, resolver, &mockRunStore{}, &mockEventEmitter{})
+
+	result, err := orch.StartRun(context.Background(), "tasks/my-task.md")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{domain.PrimaryRepositoryID, "payments-service", "api-gateway"}
+	if !reflect.DeepEqual(result.Run.AffectedRepositories, want) {
+		t.Errorf("expected affected_repositories %v, got %v", want, result.Run.AffectedRepositories)
+	}
+	if !result.Run.PrimaryRepository {
+		t.Error("expected primary_repository true even when task declares code repos")
 	}
 }
 
@@ -948,6 +1000,14 @@ func TestStartPlanningRun_HappyPath(t *testing.T) {
 	}
 	if writer.createdPath != "initiatives/INIT-099/initiative.md" {
 		t.Errorf("expected artifact written to initiatives/INIT-099/initiative.md, got %s", writer.createdPath)
+	}
+	// Planning runs are primary-repo-only regardless of any task-side
+	// repositories declaration (INIT-014 EPIC-004 TASK-001).
+	if want := []string{domain.PrimaryRepositoryID}; !reflect.DeepEqual(result.Run.AffectedRepositories, want) {
+		t.Errorf("expected affected_repositories %v, got %v", want, result.Run.AffectedRepositories)
+	}
+	if !result.Run.PrimaryRepository {
+		t.Error("expected primary_repository true for planning run")
 	}
 	if len(events.events) < 1 || events.events[0].Type != domain.EventRunStarted {
 		t.Error("expected run_started event")
