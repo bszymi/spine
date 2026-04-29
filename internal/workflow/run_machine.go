@@ -22,6 +22,21 @@ const (
 	TriggerGitCommitFailedPerm     Trigger = "git.commit_failed_permanent"
 	TriggerGitMergeStarted         Trigger = "git.merge_started"
 	TriggerGitMergeFailedRouteBack Trigger = "git.merge_failed_route_back"
+
+	// TriggerCodeRepoPartialFailure is fired by the engine when the
+	// primary repo merge has landed but at least one affected code
+	// repo ended in a permanent-failed state. The run moves
+	// committing → partially-merged so dashboards see a stuck-but-
+	// resumable run rather than a flat failure (EPIC-005 TASK-003).
+	TriggerCodeRepoPartialFailure Trigger = "git.code_repo_partial_failure"
+
+	// TriggerRetryPartialMerge moves a partially-merged run back into
+	// committing so MergeRunBranch can re-walk the per-repo loop. The
+	// scheduler fires this when an operator has had a chance to
+	// resolve the failed code repo (TASK-006 will add explicit manual
+	// triggers); the loop's already-terminal skip guard prevents
+	// re-merging successful repos.
+	TriggerRetryPartialMerge Trigger = "git.retry_partial_merge"
 )
 
 // TransitionRequest describes a requested state transition for a Run.
@@ -63,6 +78,8 @@ func EvaluateRunTransition(currentStatus domain.RunStatus, req TransitionRequest
 		return evaluatePausedTransition(result, req)
 	case domain.RunStatusCommitting:
 		return evaluateCommittingTransition(result, req)
+	case domain.RunStatusPartiallyMerged:
+		return evaluatePartiallyMergedTransition(result, req)
 	default:
 		return nil, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("unknown run status %q", currentStatus))
@@ -160,6 +177,14 @@ func evaluateCommittingTransition(result *TransitionResult, req TransitionReques
 		result.ToStatus = domain.RunStatusFailed
 		return result, nil
 
+	case TriggerCodeRepoPartialFailure:
+		// Primary repo merged, but at least one code repo permanently
+		// failed. The run is blocked until the operator resolves it,
+		// but the merged work is preserved on every successful repo
+		// so we mark the run partially-merged rather than failed.
+		result.ToStatus = domain.RunStatusPartiallyMerged
+		return result, nil
+
 	case TriggerGitMergeFailedRouteBack:
 		// Engine-owned publish step caught a permanent merge failure and
 		// is routing the merge_failed outcome back to an earlier step
@@ -171,6 +196,26 @@ func evaluateCommittingTransition(result *TransitionResult, req TransitionReques
 	default:
 		return nil, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("invalid trigger %q for committing Run", req.Trigger))
+	}
+}
+
+// evaluatePartiallyMergedTransition handles transitions out of
+// partially-merged. The state is non-terminal: a run can come back to
+// committing on retry (typical after manual resolution) or be
+// explicitly cancelled by the operator.
+func evaluatePartiallyMergedTransition(result *TransitionResult, req TransitionRequest) (*TransitionResult, error) {
+	switch req.Trigger {
+	case TriggerRetryPartialMerge:
+		result.ToStatus = domain.RunStatusCommitting
+		return result, nil
+
+	case TriggerCancel:
+		result.ToStatus = domain.RunStatusCancelled
+		return result, nil
+
+	default:
+		return nil, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("invalid trigger %q for partially-merged Run", req.Trigger))
 	}
 }
 
@@ -191,7 +236,10 @@ func ValidRunTransitions() []TransitionResult {
 		{domain.RunStatusCommitting, domain.RunStatusCompleted, TriggerGitCommitSucceeded},
 		{domain.RunStatusCommitting, domain.RunStatusCommitting, TriggerGitCommitFailedTrans},
 		{domain.RunStatusCommitting, domain.RunStatusFailed, TriggerGitCommitFailedPerm},
+		{domain.RunStatusCommitting, domain.RunStatusPartiallyMerged, TriggerCodeRepoPartialFailure},
 		{domain.RunStatusActive, domain.RunStatusCommitting, TriggerGitMergeStarted},
 		{domain.RunStatusCommitting, domain.RunStatusActive, TriggerGitMergeFailedRouteBack},
+		{domain.RunStatusPartiallyMerged, domain.RunStatusCommitting, TriggerRetryPartialMerge},
+		{domain.RunStatusPartiallyMerged, domain.RunStatusCancelled, TriggerCancel},
 	}
 }

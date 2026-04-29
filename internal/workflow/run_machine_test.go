@@ -283,7 +283,62 @@ func TestTransitionResultMetadata(t *testing.T) {
 
 func TestValidRunTransitions(t *testing.T) {
 	transitions := workflow.ValidRunTransitions()
-	if len(transitions) != 15 {
-		t.Errorf("expected 15 valid transitions, got %d", len(transitions))
+	if len(transitions) != 18 {
+		t.Errorf("expected 18 valid transitions, got %d", len(transitions))
+	}
+}
+
+// TestEvaluateRunTransition_CommittingToPartiallyMerged pins the
+// committing → partially-merged path that EPIC-005 TASK-003 added.
+// The trigger fires when the primary repo merged but at least one
+// affected code repo ended in a permanent failure.
+func TestEvaluateRunTransition_CommittingToPartiallyMerged(t *testing.T) {
+	result, err := workflow.EvaluateRunTransition(domain.RunStatusCommitting, workflow.TransitionRequest{
+		Trigger: workflow.TriggerCodeRepoPartialFailure,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRunTransition: %v", err)
+	}
+	if result.ToStatus != domain.RunStatusPartiallyMerged {
+		t.Errorf("ToStatus: got %s, want partially-merged", result.ToStatus)
+	}
+}
+
+// TestEvaluateRunTransition_PartiallyMergedToCommitting verifies the
+// resume path the scheduler uses to retry a partially-merged run.
+func TestEvaluateRunTransition_PartiallyMergedToCommitting(t *testing.T) {
+	result, err := workflow.EvaluateRunTransition(domain.RunStatusPartiallyMerged, workflow.TransitionRequest{
+		Trigger: workflow.TriggerRetryPartialMerge,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRunTransition: %v", err)
+	}
+	if result.ToStatus != domain.RunStatusCommitting {
+		t.Errorf("ToStatus: got %s, want committing", result.ToStatus)
+	}
+}
+
+// TestEvaluateRunTransition_PartiallyMergedToCancelled confirms the
+// operator-cancel path is allowed from partially-merged.
+func TestEvaluateRunTransition_PartiallyMergedToCancelled(t *testing.T) {
+	result, err := workflow.EvaluateRunTransition(domain.RunStatusPartiallyMerged, workflow.TransitionRequest{
+		Trigger: workflow.TriggerCancel,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRunTransition: %v", err)
+	}
+	if result.ToStatus != domain.RunStatusCancelled {
+		t.Errorf("ToStatus: got %s, want cancelled", result.ToStatus)
+	}
+}
+
+// TestEvaluateRunTransition_PartiallyMergedRejectsUnknownTrigger
+// confirms only the documented triggers transition from
+// partially-merged.
+func TestEvaluateRunTransition_PartiallyMergedRejectsUnknownTrigger(t *testing.T) {
+	if _, err := workflow.EvaluateRunTransition(domain.RunStatusPartiallyMerged, workflow.TransitionRequest{
+		Trigger: workflow.TriggerActivate,
+	}); err == nil {
+		t.Error("expected error for invalid trigger from partially-merged")
 	}
 }

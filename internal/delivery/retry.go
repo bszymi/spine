@@ -26,7 +26,7 @@ func isDomainEvent(eventType string) bool {
 	switch eventType {
 	case "artifact_created", "artifact_updated",
 		"run_started", "run_completed", "run_failed", "run_cancelled",
-		"run_paused", "run_resumed",
+		"run_paused", "run_resumed", "run_partially_merged",
 		"step_assigned", "step_started", "step_completed", "step_failed",
 		"step_timeout", "retry_attempted", "run_timeout":
 		return true

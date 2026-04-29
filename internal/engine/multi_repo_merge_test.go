@@ -320,20 +320,17 @@ func (s *snapshotPrimaryGit) Merge(ctx context.Context, opts git.MergeOpts) (git
 	return s.trackingPrimaryGit.Merge(ctx, opts)
 }
 
-// TestMergeRunBranch_CodeRepoFailureDoesNotBlockPrimaryButFailsRun
+// TestMergeRunBranch_CodeRepoFailureTransitionsToPartiallyMerged
 // covers two ACs together. A permanently-failed code repo:
 //
 //   - does NOT roll back successful prior merges, and the primary
 //     repo still merges and records its outcome (TASK-002 ACs);
 //   - DOES prevent the run from completing — EPIC-005 AC #5 says
 //     completed runs require every affected repo to merge
-//     successfully. The run transitions to failed and every branch
-//     is preserved so an operator can resolve the conflict.
-//
-// The partial-merge run state proper is TASK-003's scope; this
-// iteration uses the existing failed transition so the AC is honored
-// in this commit.
-func TestMergeRunBranch_CodeRepoFailureDoesNotBlockPrimaryButFailsRun(t *testing.T) {
+//     successfully. TASK-003 introduces the non-terminal
+//     partially-merged state for this case so the run remains
+//     resumable rather than going to flat failed.
+func TestMergeRunBranch_CodeRepoFailureTransitionsToPartiallyMerged(t *testing.T) {
 	const runID = "run-fail-1"
 	affected := []string{repository.PrimaryRepositoryID, "payments-service", "api-gateway"}
 
@@ -373,10 +370,13 @@ func TestMergeRunBranch_CodeRepoFailureDoesNotBlockPrimaryButFailsRun(t *testing
 		t.Errorf("primary Merge calls: got %d, want 1", len(setup.primary.mergeCalls))
 	}
 
-	// Run is FAILED — EPIC-005 AC #5: completed runs require every
-	// affected repo to merge successfully.
-	if got := setup.store.runs[runID].Status; got != domain.RunStatusFailed {
-		t.Errorf("run status: got %s, want failed (EPIC-005 AC #5)", got)
+	// Run is partially-merged (NOT failed): non-terminal state so the
+	// scheduler can resume it after operator resolution.
+	if got := setup.store.runs[runID].Status; got != domain.RunStatusPartiallyMerged {
+		t.Errorf("run status: got %s, want partially-merged (TASK-003)", got)
+	}
+	if domain.RunStatusPartiallyMerged.IsTerminal() {
+		t.Error("partially-merged must be non-terminal")
 	}
 }
 
@@ -587,12 +587,12 @@ func TestMergeRunBranch_CodeRepoMissingWiringFailsLoudly(t *testing.T) {
 	}
 }
 
-// TestMergeRunBranch_FailedCodeRepoFailsRunAndPreservesAllBranches
-// extends the run-fails-on-permanent-code-repo-failure check with the
-// branch-cleanup invariant: when the run goes to failed via
-// failRunOnMergeError, no branches are cleaned up — primary or code
-// repo. Operators get every ref the conflict needs for recovery.
-func TestMergeRunBranch_FailedCodeRepoFailsRunAndPreservesAllBranches(t *testing.T) {
+// TestMergeRunBranch_PartiallyMergedPreservesAllBranches extends the
+// partially-merged transition check with the branch-cleanup
+// invariant: when the run moves committing → partially-merged
+// (TASK-003), no branches are cleaned up — primary or code repo.
+// Operators get every ref the conflict resolution needs.
+func TestMergeRunBranch_PartiallyMergedPreservesAllBranches(t *testing.T) {
 	const runID = "run-preserve-1"
 	const branch = "spine/run/run-preserve-1"
 	affected := []string{repository.PrimaryRepositoryID, "payments-service", "api-gateway"}
@@ -607,29 +607,29 @@ func TestMergeRunBranch_FailedCodeRepoFailsRunAndPreservesAllBranches(t *testing
 		t.Fatalf("MergeRunBranch: %v", err)
 	}
 
-	// Run is failed (EPIC-005 AC #5).
-	if got := setup.store.runs[runID].Status; got != domain.RunStatusFailed {
-		t.Errorf("run status: got %s, want failed", got)
+	if got := setup.store.runs[runID].Status; got != domain.RunStatusPartiallyMerged {
+		t.Errorf("run status: got %s, want partially-merged", got)
 	}
 
-	// payments-service merged successfully but the run failed before
-	// completeAfterMerge could run cleanup — branch preserved.
+	// payments-service merged successfully but the run is partially-
+	// merged (not completed) so completeAfterMerge never ran cleanup.
 	pmt := setup.repos["payments-service"]
 	if len(pmt.deleteCalls) != 0 {
-		t.Errorf("payments-service: expected NO DeleteBranch on failed run, got %v",
+		t.Errorf("payments-service: expected NO DeleteBranch on partially-merged run, got %v",
 			pmt.deleteCalls)
 	}
 
-	// api-gateway failed → branch preserved.
+	// api-gateway failed → branch preserved regardless.
 	api := setup.repos["api-gateway"]
 	if len(api.deleteCalls) != 0 {
 		t.Errorf("api-gateway: expected NO DeleteBranch (preserved for recovery), got %v",
 			api.deleteCalls)
 	}
 
-	// Primary branch also preserved on failed run path.
+	// Primary branch also preserved on partially-merged path.
 	if len(setup.primary.deleted) != 0 {
-		t.Errorf("primary: expected NO DeleteBranch on failed run, got %v", setup.primary.deleted)
+		t.Errorf("primary: expected NO DeleteBranch on partially-merged run, got %v",
+			setup.primary.deleted)
 	}
 }
 
@@ -998,6 +998,101 @@ func (l *lookupFailingStore) GetRepositoryMergeOutcome(_ context.Context, _, rep
 		return nil, errors.New("synthetic non-NotFound store read failure")
 	}
 	return nil, domain.NewError(domain.ErrNotFound, "merge outcome not found")
+}
+
+// TestMergeRunBranch_PartiallyMergedResumesToCompletion drives the
+// full TASK-003 lifecycle: a permanent code-repo failure parks the
+// run in partially-merged → operator "resolves" the conflict (the
+// test simulates by clearing the merge error and overwriting the
+// failed outcome to non-terminal) → MergeRunBranch from committing
+// re-walks and completes. Pins:
+//   - partially-merged is the entry state from a permanent failure
+//   - the run does NOT auto-complete while a code repo is failed
+//   - once the failed outcome is reset and the merge error cleared,
+//     a fresh MergeRunBranch (after committing transition) re-walks
+//     the loop, merges the previously-failed repo, and completes
+//     the run
+func TestMergeRunBranch_PartiallyMergedResumesToCompletion(t *testing.T) {
+	const runID = "run-resume-1"
+	affected := []string{repository.PrimaryRepositoryID, "payments-service"}
+
+	setup := setupMergeOrderTest(t, runID, "spine/run/run-resume-1", affected)
+	setup.repos["payments-service"].mergeErr = &git.GitError{
+		Kind: git.ErrKindPermanent, Op: "merge", Message: "merge conflict",
+	}
+
+	if err := setup.orch.MergeRunBranch(context.Background(), runID); err != nil {
+		t.Fatalf("MergeRunBranch (1st): %v", err)
+	}
+	if got := setup.store.runs[runID].Status; got != domain.RunStatusPartiallyMerged {
+		t.Fatalf("after 1st: got status %s, want partially-merged", got)
+	}
+
+	// Simulate operator resolution: clear the merge error and reset
+	// the failed outcome so the loop's terminal-skip guard re-attempts
+	// the repo. In production this would be driven by TASK-006's
+	// manual-resolution API; for TASK-003 we verify the engine path.
+	setup.repos["payments-service"].mergeErr = nil
+	for i := range setup.store.mergeOutcomes {
+		o := &setup.store.mergeOutcomes[i]
+		if o.RunID == runID && o.RepositoryID == "payments-service" {
+			o.Status = domain.RepositoryMergeStatusPending
+			o.FailureClass = ""
+			o.FailureDetail = ""
+		}
+	}
+	// Scheduler resume: partially-merged → committing.
+	applied, err := setup.store.TransitionRunStatus(context.Background(), runID,
+		domain.RunStatusPartiallyMerged, domain.RunStatusCommitting)
+	if err != nil || !applied {
+		t.Fatalf("resume transition: applied=%v err=%v", applied, err)
+	}
+
+	if err := setup.orch.MergeRunBranch(context.Background(), runID); err != nil {
+		t.Fatalf("MergeRunBranch (2nd): %v", err)
+	}
+	if got := setup.store.runs[runID].Status; got != domain.RunStatusCompleted {
+		t.Errorf("after resume: got status %s, want completed", got)
+	}
+
+	pmt := setup.outcomeForRepo(t, runID, "payments-service")
+	if pmt.Status != domain.RepositoryMergeStatusMerged {
+		t.Errorf("payments-service after resume: got %s, want merged", pmt.Status)
+	}
+}
+
+// TestMergeRunBranch_PartiallyMergedEmitsRunPartiallyMergedEvent
+// guarantees the dedicated event is emitted so external subscribers
+// (dashboards, runbook automation) can react to the new state without
+// polling the runs table.
+func TestMergeRunBranch_PartiallyMergedEmitsRunPartiallyMergedEvent(t *testing.T) {
+	const runID = "run-event-1"
+	affected := []string{repository.PrimaryRepositoryID, "payments-service"}
+
+	setup := setupMergeOrderTest(t, runID, "spine/run/run-event-1", affected)
+	setup.repos["payments-service"].mergeErr = &git.GitError{
+		Kind: git.ErrKindPermanent, Op: "merge", Message: "merge conflict",
+	}
+
+	if err := setup.orch.MergeRunBranch(context.Background(), runID); err != nil {
+		t.Fatalf("MergeRunBranch: %v", err)
+	}
+
+	emitter, ok := setup.orch.events.(*mockEventEmitter)
+	if !ok {
+		t.Fatalf("event emitter is not *mockEventEmitter: %T", setup.orch.events)
+	}
+	found := false
+	for _, e := range emitter.events {
+		if e.Type == domain.EventRunPartiallyMerged {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected %q event, events=%v",
+			domain.EventRunPartiallyMerged, emitter.events)
+	}
 }
 
 // TestClassifyMergeFailure covers the GitError → MergeFailureClass

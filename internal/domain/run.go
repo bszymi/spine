@@ -7,25 +7,33 @@ import "time"
 type RunStatus string
 
 const (
-	RunStatusPending    RunStatus = "pending"
-	RunStatusActive     RunStatus = "active"
-	RunStatusPaused     RunStatus = "paused"
-	RunStatusCommitting RunStatus = "committing"
-	RunStatusCompleted  RunStatus = "completed"
-	RunStatusFailed     RunStatus = "failed"
-	RunStatusCancelled  RunStatus = "cancelled"
+	RunStatusPending          RunStatus = "pending"
+	RunStatusActive           RunStatus = "active"
+	RunStatusPaused           RunStatus = "paused"
+	RunStatusCommitting       RunStatus = "committing"
+	RunStatusPartiallyMerged  RunStatus = "partially-merged"
+	RunStatusCompleted        RunStatus = "completed"
+	RunStatusFailed           RunStatus = "failed"
+	RunStatusCancelled        RunStatus = "cancelled"
 )
 
 // ValidRunStatuses returns all valid Run statuses.
 func ValidRunStatuses() []RunStatus {
 	return []RunStatus{
 		RunStatusPending, RunStatusActive, RunStatusPaused,
-		RunStatusCommitting, RunStatusCompleted, RunStatusFailed,
-		RunStatusCancelled,
+		RunStatusCommitting, RunStatusPartiallyMerged,
+		RunStatusCompleted, RunStatusFailed, RunStatusCancelled,
 	}
 }
 
 // IsTerminal returns true if the Run status is a terminal state.
+//
+// RunStatusPartiallyMerged is intentionally NON-terminal: a run in this
+// state is blocked on a permanent code-repo failure (EPIC-005 TASK-003)
+// and the scheduler keeps it eligible for retry once the operator has
+// resolved the underlying conflict. Treating it as terminal would let
+// the run leak past dashboards and dependency-blocking checks while
+// still carrying unmerged work.
 func (s RunStatus) IsTerminal() bool {
 	return s == RunStatusCompleted || s == RunStatusFailed || s == RunStatusCancelled
 }

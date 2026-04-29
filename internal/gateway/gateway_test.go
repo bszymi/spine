@@ -143,6 +143,10 @@ func (f *fakeStore) ListStepExecutionsByRun(_ context.Context, _ string) ([]doma
 	}, nil
 }
 
+func (f *fakeStore) ListRepositoryMergeOutcomes(_ context.Context, _ string) ([]domain.RepositoryMergeOutcome, error) {
+	return []domain.RepositoryMergeOutcome{}, nil
+}
+
 func (f *fakeStore) GetStepExecution(_ context.Context, execID string) (*domain.StepExecution, error) {
 	if f.stepExecOverride != nil {
 		return f.stepExecOverride, nil

@@ -195,8 +195,18 @@ func TestRoleLevelUnknown(t *testing.T) {
 
 func TestValidRunStatuses(t *testing.T) {
 	statuses := domain.ValidRunStatuses()
-	if len(statuses) != 7 {
-		t.Errorf("expected 7 run statuses, got %d", len(statuses))
+	if len(statuses) != 8 {
+		t.Errorf("expected 8 run statuses, got %d", len(statuses))
+	}
+}
+
+// TestRunStatusPartiallyMergedIsNonTerminal pins EPIC-005 TASK-003's
+// core invariant: the new partially-merged status must NOT be terminal
+// or the scheduler stops resuming it and dependency-blocking checks
+// would treat the run as done while it still carries unmerged work.
+func TestRunStatusPartiallyMergedIsNonTerminal(t *testing.T) {
+	if domain.RunStatusPartiallyMerged.IsTerminal() {
+		t.Errorf("RunStatusPartiallyMerged.IsTerminal() = true, want false")
 	}
 }
 
