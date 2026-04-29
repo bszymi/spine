@@ -47,21 +47,20 @@ func (o *Orchestrator) startRunCommon(ctx context.Context, p startRunParams) (*S
 
 	// Create Git branches first so a failure doesn't leave an orphaned DB
 	// record that the scheduler's recovery logic could later activate.
-	// The primary branch is created from HEAD; each code repo's branch is
-	// created from that repo's default branch. The branch name is
-	// identical across repos so downstream tooling can address the run by
-	// a single ref regardless of which repository it touches.
-	createdRepos, err := o.createRunBranches(ctx, run)
+	// The primary branch is cut from HEAD; each code repo's branch is
+	// cut from that repo's default branch. The branch name is identical
+	// across repos so downstream tooling can address the run by a
+	// single ref regardless of which repository it touches. Auto-push
+	// runs per-repo inside createRunBranches so a later failure can
+	// roll back symmetric refs (local + remote) on every prior repo.
+	created, err := o.createRunBranches(ctx, run)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := o.store.CreateRun(ctx, run); err != nil {
-		o.rollbackRunBranches(ctx, run, createdRepos)
+		o.rollbackRunBranches(ctx, run, created)
 		return nil, fmt.Errorf("create run: %w", err)
-	}
-	if autoPushEnabled() {
-		o.pushRunBranches(ctx, run, createdRepos)
 	}
 
 	// Optional callback for work on the branch (e.g., writing artifacts in planning runs).
