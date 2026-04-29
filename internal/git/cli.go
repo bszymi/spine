@@ -52,6 +52,20 @@ func WithPushToken(token, username string) CLIOption {
 	}
 }
 
+// WithoutCredentialHelper clears any previously-configured credential
+// helper on the client. Use this when layering a per-binding
+// WithPushToken on top of process-level base options that include a
+// SPINE_GIT_CREDENTIAL_HELPER: NewCLIClient creates the GIT_ASKPASS
+// helper only when the credential helper is empty, so a per-binding
+// token would otherwise lose to the workspace-level helper. Apply this
+// before WithPushToken so the askpass-creation check at the end of
+// NewCLIClient sees credentialHelper == "".
+func WithoutCredentialHelper() CLIOption {
+	return func(c *CLIClient) {
+		c.credentialHelper = ""
+	}
+}
+
 // NewCLIClient creates a new Git client for the repository at the given path.
 func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
 	c := &CLIClient{repoPath: repoPath}
@@ -234,8 +248,75 @@ func resetPushAuthForTest() {
 // Clone clones a remote repository to a local path.
 // Unlike other operations, Clone does not run inside repoPath since the
 // target directory may not exist yet.
+//
+// When the client was constructed with WithPushToken, Clone wires the
+// same GIT_ASKPASS-based auth path used by Push. The token is fed to
+// git via env-var-backed askpass (never argv, never .git/config), and
+// GIT_TERMINAL_PROMPT=0 ensures git fails fast instead of prompting on
+// a missing or wrong credential.
+//
+// When the client was constructed with WithCredentialHelper, Clone
+// passes the helper inline via `git -c credential.helper=<name> clone`.
+// The `-c` is positioned BEFORE the clone subcommand so the override
+// applies for the duration of this command only and is NOT persisted
+// to the cloned repo's local config. If we used `git clone -c ...` the
+// value would be written into .git/config; a later binding update that
+// adds a per-binding token would then lose to the still-persisted
+// helper because git consults repo-local config before any in-memory
+// override. Command-scoped -c keeps the on-disk state clean so
+// rotation paths can take effect.
+//
+// askpass and credential-helper paths are mutually exclusive at
+// construction time (NewCLIClient only creates the askpass when no
+// helper is configured), so Clone applies whichever was wired.
 func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
-	cmd := exec.CommandContext(ctx, "git", "clone", url, path)
+	var args []string
+	switch {
+	case c.askpassPath != "":
+		// Per-binding token path. An empty `credential.helper=` value
+		// passed via `git -c` disables every helper resolution for
+		// the duration of the command — global, system, and any
+		// pre-existing local config — so the resolved token reaches
+		// git via GIT_ASKPASS instead of being masked by stale
+		// credentials a host happens to have configured. The empty
+		// value is git's documented "no helper" override.
+		args = append(args, "-c", "credential.helper=")
+	case c.credentialHelper != "":
+		// Helper-only path. The helper hasn't been written to the
+		// new repo's local config yet (clone is creating that repo),
+		// so we pass it inline. Command-scoped via `git -c` rather
+		// than `git clone -c` so the value is not persisted —
+		// otherwise a later rotation to a per-binding token would
+		// lose to the still-on-disk helper.
+		args = append(args, "-c", "credential.helper="+c.credentialHelper)
+	}
+	args = append(args, "clone", url, path)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	// Build the clone environment when the client carries any auth
+	// state — askpass token, credential-helper env (e.g.
+	// SMP_WORKSPACE_ID for per-workspace helpers), or both. Skipping
+	// the env in the helper-only branch would drop WithPushEnv
+	// entries and leave the helper invoking without its required
+	// context, so any non-empty pushEnv triggers env injection.
+	if c.askpassPath != "" || len(c.pushEnv) > 0 {
+		env := os.Environ()
+		if len(c.pushEnv) > 0 {
+			env = append(env, c.pushEnv...)
+		}
+		if c.askpassPath != "" {
+			username := c.pushUsername
+			if username == "" {
+				username = "x-access-token"
+			}
+			env = append(env,
+				"GIT_ASKPASS="+c.askpassPath,
+				"GIT_TERMINAL_PROMPT=0",
+				"SPINE_GIT_PUSH_TOKEN_INTERNAL="+c.pushToken,
+				"SPINE_GIT_PUSH_USERNAME_INTERNAL="+username,
+			)
+		}
+		cmd.Env = env
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -503,6 +584,24 @@ func (c *CLIClient) DeleteRemoteBranch(ctx context.Context, remote, branch strin
 
 // run executes a git command and returns stdout. On error, classifies the failure.
 func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string, error) {
+	// For push operations, prepend a command-scoped credential.helper
+	// override via `git -c` so authentication is wired the same way
+	// it was for the lazy clone (Clone applies the symmetric logic).
+	//
+	//   - askpass token configured  → empty helper to disable any
+	//     external system/global/repo-local helper, letting the
+	//     GIT_ASKPASS-fed token reach git unmasked.
+	//   - credential helper configured (no token) → pass it inline
+	//     so the helper engages even when the cloned repo's local
+	//     config does not persist it (Clone uses command-scoped -c
+	//     so a later token rotation can take effect without a stale
+	//     helper on disk).
+	switch {
+	case op == "push" && c.askpassPath != "":
+		args = append([]string{"-c", "credential.helper="}, args...)
+	case op == "push" && c.credentialHelper != "":
+		args = append([]string{"-c", "credential.helper=" + c.credentialHelper}, args...)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.repoPath
 

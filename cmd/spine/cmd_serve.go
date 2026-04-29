@@ -398,10 +398,17 @@ type serveDeps struct {
 	// receiver. Wired only when WORKSPACE_RESOLVER=platform-binding.
 	BindingInvalidationHandler http.Handler
 	SecretCipher               *spinecrypto.SecretCipher
-	RuntimeEnv                 string
-	DevMode                    bool
-	TrustedProxyCIDRs          []*net.IPNet
-	TrustedGitHTTPCIDRs        []string
+	// SecretClient is the workspace-scoped secret resolver used by the
+	// git client pool to dereference per-binding `credentials_ref`
+	// fields (INIT-014 EPIC-003 TASK-006). Optional: when nil, code
+	// repos with a credentials_ref fail closed with a typed
+	// credentials-unavailable error; bindings without one keep working
+	// through the legacy SPINE_GIT_PUSH_TOKEN path.
+	SecretClient        secrets.SecretClient
+	RuntimeEnv          string
+	DevMode             bool
+	TrustedProxyCIDRs   []*net.IPNet
+	TrustedGitHTTPCIDRs []string
 	// GitReceivePackEnabled wires the git push endpoint (receive-pack).
 	// Default false; EPIC-004 TASK-001. When true this is still a bare
 	// passthrough — branch-protection enforcement is TASK-002.
@@ -459,18 +466,31 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	)
 
 	// Git client pool. PrimaryClient() returns deps.GitClient
-	// unchanged — services keep operating on the primary repo with
-	// no behavior change. EPIC-003 TASK-006 will replace the bare
-	// CLI factory with credential-aware per-binding resolution.
+	// unchanged so governance services keep operating on the primary
+	// repo with no behavior change.
 	//
-	// WithCloner enables lazy clone-on-miss so the gateway's git
-	// HTTP routing (`/git/{ws}/{repo}/...`) materialises a code repo
-	// on first access instead of handing an empty directory to
-	// git-http-backend. The concrete *git.CLIClient is reused as the
-	// Cloner because its Clone method is repoPath-independent.
+	// WithCloner and the factory are both threaded with the full
+	// auth profile already baked into deps.GitClient — process-level
+	// SPINE_GIT_PUSH_TOKEN / credential-helper opts (PushAuthOpts)
+	// plus the dedicated-mode SMP_WORKSPACE_ID env. Without the SMP
+	// env, lazy code-repo clones that depend on a per-workspace
+	// credential helper would invoke the helper missing the workspace
+	// ID it needs to resolve credentials. SecretCredentialResolver
+	// layers a per-binding token on top via WithPushToken when the
+	// binding sets credentials_ref; the resolver is installed
+	// unconditionally (even when SecretClient is nil) so a
+	// misconfigured deployment with credentialed bindings fails
+	// closed instead of cloning unauthenticated.
+	codeRepoOpts := append([]git.CLIOption{}, git.PushAuthOpts()...)
+	if deps.SMPWorkspaceID != "" {
+		codeRepoOpts = append(codeRepoOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+deps.SMPWorkspaceID))
+	}
 	gitPool, err := gitpool.New(deps.GitClient, repoRegistry,
-		gitpool.NewCLIClientFactory(),
-		gitpool.WithCloner(deps.GitClient),
+		gitpool.NewCLIClientFactory(codeRepoOpts...),
+		gitpool.WithCloner(gitpool.NewCLICloner(codeRepoOpts...)),
+		gitpool.WithCredentialResolver(&gitpool.SecretCredentialResolver{
+			Client: deps.SecretClient,
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("git client pool: %w", err)
@@ -1012,6 +1032,7 @@ func serveCmd() *cobra.Command {
 				WSServicePool:              wsWiring.Pool,
 				BindingInvalidationHandler: wsWiring.BindingInvalidationHandler,
 				SecretCipher:               secretCipher,
+				SecretClient:               wsWiring.SecretClient,
 				RuntimeEnv:                 runtimeEnv,
 				DevMode:                    devMode,
 				TrustedProxyCIDRs:          trustedProxyCIDRs,
@@ -1091,6 +1112,12 @@ type resolverWiring struct {
 	DBProvider                 *workspace.DBProvider
 	Pool                       *workspace.ServicePool
 	BindingInvalidationHandler http.Handler
+	// SecretClient is the workspace-scoped SecretClient already wired
+	// for runtime DB resolution (db / platform-binding modes). The
+	// dedicated-mode git client pool reuses it for per-binding
+	// `credentials_ref` resolution so we don't build a parallel client
+	// for the same backend (INIT-014 EPIC-003 TASK-006).
+	SecretClient secrets.SecretClient
 }
 
 // buildWorkspaceResolver initializes the workspace resolver based on
@@ -1121,7 +1148,16 @@ func buildWorkspaceResolver(
 			return nil, err
 		}
 		log.Info("workspace resolver: file", "workspace_id", os.Getenv("SPINE_WORKSPACE_ID"))
-		return &resolverWiring{Resolver: workspace.NewFileProvider(fileSecretClient)}, nil
+		// fileSecretClient is propagated to deps so the dedicated git
+		// pool can dereference per-binding credentials_ref through the
+		// same backend already used for runtime DB resolution. Without
+		// this, file-mode deployments would always see "no secret
+		// client configured" for credentialed bindings even when the
+		// file backend is fully wired.
+		return &resolverWiring{
+			Resolver:     workspace.NewFileProvider(fileSecretClient),
+			SecretClient: fileSecretClient,
+		}, nil
 
 	case "db":
 		registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
@@ -1151,11 +1187,12 @@ func buildWorkspaceResolver(
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
+			SecretClient: dbSecretClient,
 			DBPolicy:     dbPolicyFromEnv(),
 			IdleTimeout:  poolIdleTimeoutFromEnv(),
 		})
 		log.Info("workspace resolver: db", "registry_url", "***")
-		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool}, nil
+		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool, SecretClient: dbSecretClient}, nil
 
 	case "platform-binding":
 		platformURL := os.Getenv("SPINE_PLATFORM_URL")
@@ -1186,6 +1223,7 @@ func buildWorkspaceResolver(
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
 			Builder:      workspaceOrchestratorBuilder,
 			SecretCipher: secretCipher,
+			SecretClient: secretClient,
 			DBPolicy:     dbPolicyFromEnv(),
 			IdleTimeout:  poolIdleTimeoutFromEnv(),
 		})
@@ -1205,6 +1243,7 @@ func buildWorkspaceResolver(
 			Resolver:                   provider,
 			Pool:                       pool,
 			BindingInvalidationHandler: handler,
+			SecretClient:               secretClient,
 		}, nil
 
 	default:

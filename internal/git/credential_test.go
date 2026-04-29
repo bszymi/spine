@@ -134,6 +134,41 @@ func TestWithCredentialHelper_Option(t *testing.T) {
 	// Error should be from git, not from nil-check (proving the field was set).
 }
 
+func TestWithoutCredentialHelper_ClearsHelperSoTokenWins(t *testing.T) {
+	// When a workspace-level credential helper is layered with a
+	// per-binding push token, the askpass file must still be
+	// created — otherwise the token cannot reach git's auth path.
+	// WithoutCredentialHelper applied between the helper and the
+	// token clears the helper field, restoring the
+	// `pushToken != "" && credentialHelper == ""` precondition the
+	// askpass-creation branch in NewCLIClient checks.
+	client := git.NewCLIClient(t.TempDir(),
+		git.WithCredentialHelper("cache"),
+		git.WithoutCredentialHelper(),
+		git.WithPushToken("tok-xyz", "x-access-token"),
+	)
+	defer client.Close()
+	if client.AskpassPathForTest() == "" {
+		t.Error("expected askpass path to be non-empty when WithoutCredentialHelper precedes WithPushToken")
+	}
+}
+
+func TestWithPushToken_LosesToCredentialHelperWithoutClear(t *testing.T) {
+	// Pin the documented "credential helper wins" semantics so the
+	// override path above is the only way a per-binding token can
+	// take precedence. If this regresses (askpass created even with
+	// helper present), we'd silently double-configure auth and
+	// produce confusing failures.
+	client := git.NewCLIClient(t.TempDir(),
+		git.WithCredentialHelper("cache"),
+		git.WithPushToken("tok-xyz", "x-access-token"),
+	)
+	defer client.Close()
+	if client.AskpassPathForTest() != "" {
+		t.Error("expected askpass path to be empty when credential helper is present without explicit clear")
+	}
+}
+
 func TestWithPushEnv_PassesEnvToPush(t *testing.T) {
 	repo := testutil.NewTempRepo(t)
 	bare := setupRemote(t, repo)

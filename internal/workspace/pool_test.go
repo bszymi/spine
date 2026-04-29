@@ -237,7 +237,7 @@ func TestBuildServiceSet_NoStore_NilValidatorAndDivergence(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{ID: "ws-nostore", RepoPath: "."}
 
-	ss, err := buildServiceSet(ctx, cfg, nil, nil, PoolPolicy{})
+	ss, err := buildServiceSet(ctx, cfg, nil, nil, nil, PoolPolicy{})
 	if err != nil {
 		t.Fatalf("buildServiceSet: %v", err)
 	}

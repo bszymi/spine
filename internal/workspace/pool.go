@@ -20,6 +20,7 @@ import (
 	"github.com/bszymi/spine/internal/projection"
 	"github.com/bszymi/spine/internal/queue"
 	"github.com/bszymi/spine/internal/repository"
+	"github.com/bszymi/spine/internal/secrets"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/validation"
 	"github.com/bszymi/spine/internal/workflow"
@@ -112,6 +113,7 @@ type ServicePool struct {
 	idleTimeout  time.Duration
 	builder      ServiceSetBuilder
 	secretCipher *spinecrypto.SecretCipher
+	secretClient secrets.SecretClient
 	dbPolicy     PoolPolicy
 	closed       bool
 	ctx          context.Context    // pool-lifetime context for background goroutines
@@ -145,6 +147,16 @@ type PoolConfig struct {
 	// are encrypted with the same key used in single-workspace mode.
 	SecretCipher *spinecrypto.SecretCipher
 
+	// SecretClient, if set, is wired into each workspace's git client
+	// pool as the credential resolver for per-binding `credentials_ref`
+	// references (INIT-014 EPIC-003 TASK-006). The same client must
+	// satisfy ADR-010 redaction guarantees; the pool reveals bytes only
+	// at the boundary with the git CLI's GIT_ASKPASS env. When nil,
+	// bindings without credentials_ref keep working through the
+	// process-wide SPINE_GIT_PUSH_TOKEN; bindings that declare a ref
+	// fail closed with a typed credentials-unavailable error.
+	SecretClient secrets.SecretClient
+
 	// DBPolicy is the per-workspace connection-pool policy from
 	// ADR-012. Zero-valued fields fall back to PoolPolicyDefault().
 	DBPolicy PoolPolicy
@@ -166,6 +178,7 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		idleTimeout:  timeout,
 		builder:      cfg.Builder,
 		secretCipher: cfg.SecretCipher,
+		secretClient: cfg.SecretClient,
 		dbPolicy:     cfg.DBPolicy,
 		ctx:          poolCtx,
 		cancel:       cancel,
@@ -349,7 +362,7 @@ func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
 // inserted the entry into p.entries with refCount=1 before releasing the
 // mutex.
 func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, cfg Config, entry *poolEntry) (*ServiceSet, error) {
-	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.dbPolicy)
+	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretClient, p.dbPolicy)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -508,7 +521,7 @@ func (p *ServicePool) Close() {
 }
 
 // buildServiceSet creates a complete service set from a workspace config.
-func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, dbPolicy PoolPolicy) (*ServiceSet, error) {
+func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, secretClient secrets.SecretClient, dbPolicy PoolPolicy) (*ServiceSet, error) {
 	// Each closer accepts the reason the service set is being torn
 	// down so the workspace pool can record the per-reason
 	// close-counter (ADR-012). Closers that don't care about the
@@ -567,20 +580,43 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		st,
 	)
 
-	// Git client pool. PrimaryClient() returns gitClient unchanged —
-	// services keep using the primary repo without any behavior
-	// change. EPIC-003 TASK-006 will replace the bare CLI factory
-	// with credential-aware per-binding resolution; until then, code
-	// repo clients reuse the primary's auth profile via gitOpts.
+	// Git client pool. PrimaryClient() returns gitClient unchanged so
+	// governance services keep operating on the primary repo without
+	// any behavior change.
 	//
-	// WithCloner enables lazy clone-on-miss so the gateway's git HTTP
-	// routing (`/git/{ws}/{repo}/...`) materialises a code repo on
-	// first access instead of handing an empty directory to
-	// git-http-backend. The concrete *git.CLIClient is reused as the
-	// Cloner because its Clone method is repoPath-independent.
+	// WithCloner uses gitpool.NewCLICloner — a per-call factory that
+	// builds a fresh *git.CLIClient per clone, so per-binding
+	// credentials can be threaded through GIT_ASKPASS for one
+	// invocation without leaking into a long-lived shared client.
+	// gitOpts (the workspace's process-level auth profile) flows into
+	// every clone as a baseline; SecretCredentialResolver layers a
+	// per-binding token on top when the binding sets credentials_ref.
+	//
+	// The credential resolver is wired from cfg.SecretClient when
+	// available — that's the same SecretClient the workspace already
+	// uses for runtime/projection DB credentials (ADR-010), so adding
+	// a per-binding `credentials_ref` reuses existing infrastructure
+	// instead of introducing a parallel secret pipeline. Workspaces
+	// without a SecretClient (single-workspace dev mode) fall back to
+	// the legacy process-wide SPINE_GIT_PUSH_TOKEN path baked into
+	// gitOpts: bindings without credentials_ref still work, and any
+	// binding that does declare one fails closed with a typed
+	// credentials-unavailable error.
+	// SecretCredentialResolver is installed unconditionally so a
+	// binding with a non-empty CredentialsRef in a workspace that
+	// happens to lack a SecretClient (single-workspace dev mode, DB
+	// resolver without secret backend) fails closed with a typed
+	// credentials-unavailable error rather than silently cloning
+	// unauthenticated. The resolver itself short-circuits to the
+	// empty Credential for repos with no CredentialsRef, so the
+	// public-repo path stays free of secret-store round-trips even
+	// when secretClient is nil.
 	gitPool, err := gitpool.New(gitClient, registry,
 		gitpool.NewCLIClientFactory(gitOpts...),
-		gitpool.WithCloner(gitClient),
+		gitpool.WithCloner(gitpool.NewCLICloner(gitOpts...)),
+		gitpool.WithCredentialResolver(&gitpool.SecretCredentialResolver{
+			Client: secretClient,
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("git client pool: %w", err)
