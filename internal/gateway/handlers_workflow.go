@@ -156,6 +156,20 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-repo merge outcomes are required by EPIC-005 TASK-003 so
+	// that a run in `partially-merged` exposes which repos succeeded
+	// and which still need resolution. Returned as an empty slice (not
+	// null) when the run produced no outcomes, so consumers do not
+	// have to distinguish "no rows yet" from "field missing".
+	outcomes, err := s.storeFrom(r.Context()).ListRepositoryMergeOutcomes(r.Context(), runID)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+	if outcomes == nil {
+		outcomes = []domain.RepositoryMergeOutcome{}
+	}
+
 	resp := map[string]any{
 		"run_id":          run.RunID,
 		"task_path":       run.TaskPath,
@@ -164,6 +178,7 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 		"current_step_id": run.CurrentStepID,
 		"trace_id":        run.TraceID,
 		"step_executions": steps,
+		"merge_outcomes":  outcomes,
 	}
 	if run.BranchName != "" {
 		resp["branch_name"] = run.BranchName
@@ -173,6 +188,9 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if run.CompletedAt != nil {
 		resp["completed_at"] = run.CompletedAt
+	}
+	if len(run.AffectedRepositories) > 0 {
+		resp["affected_repositories"] = run.AffectedRepositories
 	}
 	WriteJSON(w, http.StatusOK, resp)
 }

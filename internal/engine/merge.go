@@ -194,26 +194,25 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	// already landed (its outcome is recorded above), but a code
 	// repo that ended in a permanent-failed state — typically a
 	// merge conflict, branch protection rejection, or auth error —
-	// must NOT let the run flip to completed. Failing the run here
-	// keeps the unmerged work visible and prevents downstream
-	// consumers from acting on a half-applied multi-repo change.
-	// The corresponding partial-merge run state is TASK-003's scope;
-	// this iteration uses the existing failed transition.
+	// must NOT let the run flip to completed. Per TASK-003 the run
+	// transitions committing → partially-merged instead of failed:
+	// the run is blocked until an operator resolves the failed code
+	// repo, but the work that has merged stays preserved and the
+	// scheduler keeps the run resumable so a retry after manual
+	// resolution promotes it back to committing.
 	if failed, listErr := o.firstPermanentCodeRepoFailure(ctx, run.RunID); listErr != nil {
 		// Fail-closed: surface the lookup error so the run stays in
 		// committing and the scheduler retries when the store
 		// recovers, rather than guess at completeness.
 		return fmt.Errorf("verify code repo merge completion: %w", listErr)
 	} else if failed != nil {
-		log.Error("code repo merge permanently failed; failing run instead of completing",
+		log.Error("code repo merge permanently failed; transitioning run to partially-merged",
 			"run_id", runID,
 			"repository_id", failed.RepositoryID,
 			"failure_class", string(failed.FailureClass),
 			"failure_detail", failed.FailureDetail,
 		)
-		return o.failRunOnMergeError(ctx, run,
-			fmt.Errorf("code repo %q merge failed (class=%s): %s",
-				failed.RepositoryID, failed.FailureClass, failed.FailureDetail))
+		return o.transitionToPartiallyMerged(ctx, run, failed)
 	}
 
 	// Transition committing → completed (with branch cleanup).
@@ -310,6 +309,50 @@ func (o *Orchestrator) retryMerge(ctx context.Context, run *domain.Run) error {
 		return err
 	}
 	// Status stays committing — scheduler will retry.
+	return nil
+}
+
+// transitionToPartiallyMerged moves a run from committing to
+// partially-merged when the primary repo merge has landed but at least
+// one affected code repo ended in a permanent-failed state. The
+// branches involved (both the merged and the failed) stay preserved
+// — CleanupRunBranch keys off the per-repo outcomes for that — so an
+// operator can resolve the conflict against the unmodified source
+// ref. The scheduler resumes the run after operator action; the
+// per-repo loop's already-terminal skip guard prevents already-merged
+// repos from being re-attempted.
+func (o *Orchestrator) transitionToPartiallyMerged(ctx context.Context, run *domain.Run, failedOutcome *domain.RepositoryMergeOutcome) error {
+	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
+		Trigger: workflow.TriggerCodeRepoPartialFailure,
+	})
+	if err != nil {
+		return err
+	}
+
+	applied, err := o.store.TransitionRunStatus(ctx, run.RunID, run.Status, result.ToStatus)
+	if err != nil {
+		return fmt.Errorf("update run status: %w", err)
+	}
+	if !applied {
+		observe.Logger(ctx).Info("run already transitioned, skipping duplicate partial-merge transition",
+			"run_id", run.RunID)
+		return nil
+	}
+
+	// Surface the partial-merge classification on the last completed
+	// step so step-level dashboards and HTTP detail responses agree
+	// with the per-repo outcomes table on what is blocking the run.
+	stepErr := fmt.Errorf("code repo %q merge failed (class=%s): %s",
+		failedOutcome.RepositoryID, failedOutcome.FailureClass, failedOutcome.FailureDetail)
+	o.recordGitConflictOnStep(ctx, run, stepErr)
+
+	// Each retry of a partially-merged run can re-enter this state if
+	// the operator's resolution failed; using a unique suffix per
+	// transition keeps the delivery queue and event log from
+	// deduping later occurrences against the first one. Same pattern
+	// as the run paused/resumed events.
+	o.emitEvent(ctx, domain.EventRunPartiallyMerged, run.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-partially-merged-%d", run.TraceID[:12], time.Now().UnixMilli()), nil)
 	return nil
 }
 

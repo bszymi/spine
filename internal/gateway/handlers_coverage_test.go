@@ -23,7 +23,8 @@ import (
 
 type runStatusFakeStore struct {
 	*fakeStore
-	run *domain.Run
+	run      *domain.Run
+	outcomes []domain.RepositoryMergeOutcome
 }
 
 func (r *runStatusFakeStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
@@ -41,14 +42,23 @@ func (r *runStatusFakeStore) ListStepExecutionsByRun(_ context.Context, _ string
 	return nil, nil
 }
 
+func (r *runStatusFakeStore) ListRepositoryMergeOutcomes(_ context.Context, _ string) ([]domain.RepositoryMergeOutcome, error) {
+	return r.outcomes, nil
+}
+
 func newRunStatusServer(t *testing.T, run *domain.Run) (*httptest.Server, string) {
+	t.Helper()
+	return newRunStatusServerWithOutcomes(t, run, nil)
+}
+
+func newRunStatusServerWithOutcomes(t *testing.T, run *domain.Run, outcomes []domain.RepositoryMergeOutcome) (*httptest.Server, string) {
 	t.Helper()
 	fs := newFakeStore()
 	fs.actors["reader-1"] = &domain.Actor{
 		ActorID: "reader-1", Type: domain.ActorTypeHuman, Name: "Reader",
 		Role: domain.RoleReader, Status: domain.ActorStatusActive,
 	}
-	rfs := &runStatusFakeStore{fakeStore: fs, run: run}
+	rfs := &runStatusFakeStore{fakeStore: fs, run: run, outcomes: outcomes}
 	authSvc := auth.NewService(fs)
 	token, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test", nil)
 	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: rfs, Auth: authSvc})
@@ -682,5 +692,110 @@ func TestHandleDiscussionResolve_UpdateError(t *testing.T) {
 
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("expected 500 (update thread error), got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleRunStatus_PartiallyMergedSurfacesOutcomes pins EPIC-005
+// TASK-003 AC: "API responses expose partial merge status and
+// outcomes." A run in partially-merged returns its status string AND
+// the per-repo outcome rows so dashboards can render the partial
+// state without a separate round-trip.
+func TestHandleRunStatus_PartiallyMergedSurfacesOutcomes(t *testing.T) {
+	mergedAt := time.Now().Add(-5 * time.Minute)
+	run := &domain.Run{
+		Status:               domain.RunStatusPartiallyMerged,
+		BranchName:           "spine/run/partial",
+		AffectedRepositories: []string{"spine", "payments-service"},
+	}
+	outcomes := []domain.RepositoryMergeOutcome{
+		{
+			RunID:           "run-123",
+			RepositoryID:    "spine",
+			Status:          domain.RepositoryMergeStatusMerged,
+			SourceBranch:    "spine/run/partial",
+			TargetBranch:    "main",
+			MergeCommitSHA:  "sha-spine",
+			Attempts:        1,
+			CreatedAt:       mergedAt,
+			UpdatedAt:       mergedAt,
+			MergedAt:        &mergedAt,
+		},
+		{
+			RunID:         "run-123",
+			RepositoryID:  "payments-service",
+			Status:        domain.RepositoryMergeStatusFailed,
+			SourceBranch:  "spine/run/partial",
+			TargetBranch:  "main",
+			FailureClass:  domain.MergeFailureConflict,
+			FailureDetail: "git merge: merge conflict",
+			Attempts:      1,
+			CreatedAt:     mergedAt,
+			UpdatedAt:     mergedAt,
+		},
+	}
+	ts, token := newRunStatusServerWithOutcomes(t, run, outcomes)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/runs/run-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "partially-merged" {
+		t.Errorf("status: got %v, want %q", body["status"], "partially-merged")
+	}
+	got, ok := body["merge_outcomes"].([]any)
+	if !ok {
+		t.Fatalf("merge_outcomes missing or wrong type: %v", body["merge_outcomes"])
+	}
+	if len(got) != 2 {
+		t.Errorf("merge_outcomes length: got %d, want 2", len(got))
+	}
+	repos, ok := body["affected_repositories"].([]any)
+	if !ok {
+		t.Fatalf("affected_repositories missing or wrong type: %v", body["affected_repositories"])
+	}
+	if len(repos) != 2 {
+		t.Errorf("affected_repositories length: got %d, want 2", len(repos))
+	}
+}
+
+// TestHandleRunStatus_NoOutcomesEmitsEmptySlice ensures the response
+// includes an empty `merge_outcomes` array when no outcomes have been
+// recorded yet (typical for runs that never reached the merge phase),
+// so HTTP consumers do not need to distinguish absent from empty.
+func TestHandleRunStatus_NoOutcomesEmitsEmptySlice(t *testing.T) {
+	run := &domain.Run{Status: domain.RunStatusActive}
+	ts, token := newRunStatusServerWithOutcomes(t, run, nil)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/runs/run-123", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := body["merge_outcomes"].([]any)
+	if !ok {
+		t.Fatalf("merge_outcomes missing: %v", body["merge_outcomes"])
+	}
+	if len(got) != 0 {
+		t.Errorf("merge_outcomes: got %d entries, want 0", len(got))
 	}
 }

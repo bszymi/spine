@@ -22,6 +22,7 @@ type fakeStore struct {
 	workflows    map[string]*store.WorkflowProjection
 	updatedRuns  map[string]domain.RunStatus
 	updatedSteps map[string]*domain.StepExecution
+	outcomes     map[string][]domain.RepositoryMergeOutcome // run_id → outcomes
 }
 
 func newFakeStore() *fakeStore {
@@ -30,6 +31,10 @@ func newFakeStore() *fakeStore {
 		updatedRuns:  make(map[string]domain.RunStatus),
 		updatedSteps: make(map[string]*domain.StepExecution),
 	}
+}
+
+func (f *fakeStore) ListRepositoryMergeOutcomes(_ context.Context, runID string) ([]domain.RepositoryMergeOutcome, error) {
+	return f.outcomes[runID], nil
 }
 
 func (f *fakeStore) ListRunsByStatus(_ context.Context, status domain.RunStatus) ([]domain.Run, error) {

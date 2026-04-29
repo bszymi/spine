@@ -142,6 +142,7 @@ func allEventTypes() []domain.EventType {
 		domain.EventRunCancelled,
 		domain.EventRunPaused,
 		domain.EventRunResumed,
+		domain.EventRunPartiallyMerged,
 		domain.EventStepAssigned,
 		domain.EventStepStarted,
 		domain.EventStepCompleted,

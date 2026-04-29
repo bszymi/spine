@@ -9,6 +9,7 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
 	"github.com/bszymi/spine/internal/observe"
+	"github.com/bszymi/spine/internal/repository"
 	"github.com/bszymi/spine/internal/store"
 	"github.com/bszymi/spine/internal/workflow"
 )
@@ -284,22 +285,136 @@ func (s *Scheduler) recoverCommittingRuns(ctx context.Context, result *RecoveryR
 	return nil
 }
 
-// retryCommittingRuns is called periodically to retry stuck committing runs.
+// retryCommittingRuns is called periodically to retry stuck committing
+// runs. EPIC-005 TASK-003: also resume runs in partially-merged state
+// — those are blocked on a permanent code-repo failure and need to be
+// re-attempted once the operator (or an external resolution loop) has
+// resolved the underlying conflict. The CAS-based transition below
+// keeps committing-only retries safe: if a parallel actor has already
+// moved the run, the second call no-ops.
 func (s *Scheduler) retryCommittingRuns(ctx context.Context) {
+	s.retryRunsByStatus(ctx, domain.RunStatusCommitting, "")
+	s.retryRunsByStatus(ctx, domain.RunStatusPartiallyMerged, workflow.TriggerRetryPartialMerge)
+}
+
+// RunRetryCycle drives one pass of the periodic merge-retry loop —
+// same code path as the ticker-driven sweep, but callable
+// synchronously. Tests use it to drive deterministic assertions
+// without relying on ticker timing; an admin endpoint could
+// foreseeably do the same to force-resume a partial-merge after a
+// manual fix without waiting for the next tick.
+func (s *Scheduler) RunRetryCycle(ctx context.Context) {
+	if s.commitRetryFn == nil {
+		return
+	}
+	s.retryCommittingRuns(ctx)
+}
+
+// retryRunsByStatus drives the commit retry callback over every run
+// in the given status. When resumeTrigger is non-empty the run is
+// transitioned through the trigger before commitRetryFn fires, so
+// MergeRunBranch (which only accepts committing) sees the expected
+// state. Transition errors are logged and the run is skipped — the
+// next tick will re-attempt.
+//
+// EPIC-005 TASK-003 retry-flapping guard: when the trigger is the
+// partially-merged resume, we skip runs whose merge outcomes still
+// carry a permanently-failed code repo. Without this gate every
+// scheduler tick would flip the run committing → partially-merged
+// in a tight loop — MergeRunBranch's per-repo skip guard would treat
+// the failed outcome as terminal and re-park the run on every pass,
+// emitting duplicate run_partially_merged events and inflating the
+// primary outcome's attempts counter without any progress. An
+// operator resolution (which TASK-006 will provide) flips a failed
+// outcome to merged / pending / resolved-externally; the next tick
+// then sees no failed code-repo and the resume proceeds.
+func (s *Scheduler) retryRunsByStatus(ctx context.Context, status domain.RunStatus, resumeTrigger workflow.Trigger) {
 	log := observe.Logger(ctx)
 
-	runs, err := s.store.ListRunsByStatus(ctx, domain.RunStatusCommitting)
+	runs, err := s.store.ListRunsByStatus(ctx, status)
 	if err != nil {
-		log.Error("list committing runs failed", "error", err)
+		log.Error("list runs by status failed", "status", string(status), "error", err)
 		return
 	}
 
 	for i := range runs {
-		log.Info("retrying commit for committing run", "run_id", runs[i].RunID)
-		if err := s.commitRetryFn(ctx, runs[i].RunID); err != nil {
-			log.Error("commit retry failed", "run_id", runs[i].RunID, "error", err)
+		runID := runs[i].RunID
+		if resumeTrigger != "" {
+			if status == domain.RunStatusPartiallyMerged {
+				eligible, err := codeRepoOutcomesAllowResume(ctx, s.store, runID)
+				if err != nil {
+					log.Error("partial-merge resume gate lookup failed",
+						"run_id", runID, "error", err)
+					continue
+				}
+				if !eligible {
+					// Logged at debug-level intent: an unresolved
+					// partial-merge is the expected steady state until
+					// an operator acts.
+					log.Info("partial-merge resume skipped: failed code repo unchanged",
+						"run_id", runID)
+					continue
+				}
+			}
+
+			result, err := workflow.EvaluateRunTransition(status, workflow.TransitionRequest{
+				Trigger: resumeTrigger,
+			})
+			if err != nil {
+				log.Error("resume transition lookup failed",
+					"run_id", runID, "from_status", string(status),
+					"trigger", string(resumeTrigger), "error", err)
+				continue
+			}
+			applied, err := s.store.TransitionRunStatus(ctx, runID, status, result.ToStatus)
+			if err != nil {
+				log.Error("resume transition failed",
+					"run_id", runID, "from_status", string(status),
+					"to_status", string(result.ToStatus), "error", err)
+				continue
+			}
+			if !applied {
+				// Concurrent actor moved the run; skip this tick.
+				continue
+			}
+			log.Info("resumed run for retry",
+				"run_id", runID,
+				"from_status", string(status),
+				"to_status", string(result.ToStatus))
+		}
+
+		log.Info("retrying commit", "run_id", runID, "status", string(status))
+		if err := s.commitRetryFn(ctx, runID); err != nil {
+			log.Error("commit retry failed", "run_id", runID, "error", err)
 		}
 	}
+}
+
+// codeRepoOutcomesAllowResume reports whether a partially-merged run
+// is eligible for an automatic resume. The rule is: every non-primary
+// outcome must be in a state that the per-repo merge loop can act on
+// — anything other than `failed`. A `failed` outcome (always a
+// permanent class on a partially-merged run, since transient
+// failures keep the run in committing) means the underlying conflict
+// is unresolved and MergeRunBranch's terminal-skip guard would just
+// re-park the run.
+//
+// Store errors are surfaced so the caller can stay fail-closed and
+// re-try on the next tick rather than guess.
+func codeRepoOutcomesAllowResume(ctx context.Context, st store.Store, runID string) (bool, error) {
+	outcomes, err := st.ListRepositoryMergeOutcomes(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	for i := range outcomes {
+		if outcomes[i].RepositoryID == repository.PrimaryRepositoryID {
+			continue
+		}
+		if outcomes[i].Status == domain.RepositoryMergeStatusFailed {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // findCurrentExecution returns the most recent execution for the given step ID.
