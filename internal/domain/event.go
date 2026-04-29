@@ -49,6 +49,16 @@ const (
 	// deletions and for ref pushes that do not produce a new commit in-
 	// process.
 	EventBranchProtectionOverride EventType = "branch_protection.override"
+
+	// EventRunBranchCleanupFailed is emitted when post-run branch
+	// cleanup hits a git error on a specific repository. The merge
+	// outcome itself is unaffected — a failed cleanup is best-effort
+	// observable state, not a regression of the merge result. Payload:
+	// run_id, repository_id, branch, scope ("local"|"remote"), error.
+	// Operational tier (not reconstructible from Git history) so the
+	// retry budget treats it as low-priority delivery — losing one
+	// cleanup notification does not invalidate any merged commit.
+	EventRunBranchCleanupFailed EventType = "run_branch_cleanup_failed"
 )
 
 // Event represents a domain or operational event emitted by the system.
