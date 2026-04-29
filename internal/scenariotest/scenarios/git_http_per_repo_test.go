@@ -147,7 +147,7 @@ func setupGitHTTPServerWithCodeRepo(opts codeRepoSetup) scenarioEngine.Step {
 			primaryClient := git.NewCLIClient(repoPath)
 			pool, err := gitpool.New(primaryClient, poolResolver,
 				gitpool.NewCLIClientFactory(),
-				gitpool.WithCloner(primaryClient),
+				gitpool.WithCloner(gitpool.NewCLICloner()),
 			)
 			if err != nil {
 				return fmt.Errorf("gitpool.New: %w", err)

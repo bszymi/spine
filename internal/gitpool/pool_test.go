@@ -63,8 +63,8 @@ func TestNew_RejectsNilDeps(t *testing.T) {
 		resolver gitpool.Resolver
 		factory  gitpool.ClientFactory
 	}{
-		{name: "nil primary", primary: nil, resolver: &stubResolver{}, factory: func(string) git.GitClient { return nil }},
-		{name: "nil resolver", primary: &stubClient{}, resolver: nil, factory: func(string) git.GitClient { return nil }},
+		{name: "nil primary", primary: nil, resolver: &stubResolver{}, factory: func(string, gitpool.Credential) git.GitClient { return nil }},
+		{name: "nil resolver", primary: &stubClient{}, resolver: nil, factory: func(string, gitpool.Credential) git.GitClient { return nil }},
 		{name: "nil factory", primary: &stubClient{}, resolver: &stubResolver{}, factory: nil},
 	}
 	for _, tc := range cases {
@@ -79,7 +79,7 @@ func TestNew_RejectsNilDeps(t *testing.T) {
 func TestPrimaryClient_ReturnsCachedAndSkipsResolver(t *testing.T) {
 	primary := &stubClient{}
 	resolver := &stubResolver{}
-	pool := newPool(t, primary, resolver, func(string) git.GitClient {
+	pool := newPool(t, primary, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called for primary")
 		return nil
 	})
@@ -98,7 +98,7 @@ func TestClient_PrimaryShortCircuits(t *testing.T) {
 	// governance read would otherwise pay a resolver round-trip.
 	primary := &stubClient{}
 	resolver := &stubResolver{}
-	pool := newPool(t, primary, resolver, func(string) git.GitClient {
+	pool := newPool(t, primary, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called for primary")
 		return nil
 	})
@@ -129,7 +129,7 @@ func TestClient_CodeRepoBuildsFromBindingPath(t *testing.T) {
 		},
 	}
 	var seenPath string
-	pool := newPool(t, primary, resolver, func(p string) git.GitClient {
+	pool := newPool(t, primary, resolver, func(p string, _ gitpool.Credential) git.GitClient {
 		seenPath = p
 		return codeClient
 	})
@@ -153,7 +153,7 @@ func TestClient_UnknownErrorPropagates(t *testing.T) {
 			"ghost-service": {err: notFound},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called when Lookup fails")
 		return nil
 	})
@@ -174,7 +174,7 @@ func TestClient_InactiveErrorPropagates(t *testing.T) {
 			"payments-service": {err: inactive},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called when Lookup fails")
 		return nil
 	})
@@ -195,7 +195,7 @@ func TestClient_UnboundErrorPropagates(t *testing.T) {
 			"api-gateway": {err: unbound},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called when Lookup fails")
 		return nil
 	})
@@ -221,7 +221,7 @@ func TestClient_EmptyLocalPathIsPrecondition(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called when LocalPath is empty")
 		return nil
 	})
@@ -245,7 +245,7 @@ func TestRepositoryPath_PrimaryThroughResolver(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return nil })
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return nil })
 
 	got, err := pool.RepositoryPath(context.Background(), repository.PrimaryRepositoryID)
 	if err != nil {
@@ -265,7 +265,7 @@ func TestRepositoryPath_CodeRepoReturnsBindingLocalPath(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return nil })
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return nil })
 
 	got, err := pool.RepositoryPath(context.Background(), "payments-service")
 	if err != nil {
@@ -282,7 +282,7 @@ func TestRepositoryPath_UnknownErrorPropagates(t *testing.T) {
 			"ghost-service": {err: repository.ErrRepositoryNotFound},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return nil })
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return nil })
 
 	_, err := pool.RepositoryPath(context.Background(), "ghost-service")
 	if !errors.Is(err, repository.ErrRepositoryNotFound) {
@@ -301,7 +301,7 @@ func TestRepositoryPath_InactiveErrorPropagates(t *testing.T) {
 			"payments-service": {err: repository.ErrRepositoryInactive},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return nil })
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return nil })
 
 	_, err := pool.RepositoryPath(context.Background(), "payments-service")
 	if !errors.Is(err, repository.ErrRepositoryInactive) {
@@ -331,7 +331,7 @@ func TestRepositoryPath_TriggersCloneInClonerMode(t *testing.T) {
 		},
 	}
 	pool := newPool(t, &stubClient{}, resolver,
-		func(p string) git.GitClient {
+		func(p string, _ gitpool.Credential) git.GitClient {
 			if p != localPath {
 				t.Errorf("factory got %q, want %q", p, localPath)
 			}
@@ -384,7 +384,7 @@ func TestRepositoryPath_RepoBaseEnforced(t *testing.T) {
 		},
 	}
 	pool := newPool(t, &stubClient{}, resolver,
-		func(string) git.GitClient { return &stubClient{} },
+		func(string, gitpool.Credential) git.GitClient { return &stubClient{} },
 		gitpool.WithCloner(cloner), gitpool.WithRepoBase(base),
 	)
 
@@ -405,7 +405,7 @@ func TestRepositoryPath_EmptyLocalPathIsPrecondition(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return nil })
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return nil })
 
 	_, err := pool.RepositoryPath(context.Background(), "payments-service")
 	if err == nil {
@@ -429,7 +429,7 @@ type cloneCall struct {
 	path string
 }
 
-func (f *fakeCloner) Clone(ctx context.Context, url, localPath string) error {
+func (f *fakeCloner) Clone(ctx context.Context, url, localPath string, _ gitpool.Credential) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, cloneCall{url: url, path: localPath})
 	rel := f.release
@@ -479,7 +479,7 @@ func TestClient_LazyCloneOnFirstAccess(t *testing.T) {
 		},
 	}
 	var factoryCalls int
-	pool := newPool(t, primary, resolver, func(p string) git.GitClient {
+	pool := newPool(t, primary, resolver, func(p string, _ gitpool.Credential) git.GitClient {
 		factoryCalls++
 		if p != localPath {
 			t.Errorf("factory got %q, want %q", p, localPath)
@@ -525,7 +525,7 @@ func TestClient_SubsequentAccessReusesCachedClient(t *testing.T) {
 		},
 	}
 	var factoryCalls int32
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		atomic.AddInt32(&factoryCalls, 1)
 		return codeClient
 	}, gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
@@ -569,7 +569,7 @@ func TestClient_ExistingCloneIsReusedWithoutCloning(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return codeClient },
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return codeClient },
 		gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
 
 	got, err := pool.Client(context.Background(), "shared-libs")
@@ -607,7 +607,7 @@ func TestClient_ConcurrentFirstAccessClonesOnce(t *testing.T) {
 		},
 	}
 	var factoryCalls int32
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		atomic.AddInt32(&factoryCalls, 1)
 		return codeClient
 	}, gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
@@ -670,7 +670,7 @@ func TestClient_CloneFailureSurfacesAsUnavailable(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called when clone fails")
 		return nil
 	}, gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
@@ -703,7 +703,7 @@ func TestClient_RepoBaseEnforcement(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called when LocalPath escapes repo base")
 		return nil
 	}, gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
@@ -743,7 +743,7 @@ func TestClient_RepoBaseRejectsSymlinkedEscape(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called for symlinked-escape path")
 		return nil
 	}, gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
@@ -777,7 +777,7 @@ func TestClient_MissingCloneURLIsPrecondition(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called without clone")
 		return nil
 	}, gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
@@ -814,7 +814,7 @@ func TestClient_BindingPathChangeEvictsCache(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(p string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(p string, _ gitpool.Credential) git.GitClient {
 		switch p {
 		case pathA:
 			return clientA
@@ -871,7 +871,7 @@ func TestClient_DuplicateWaiterRespectsContextCancellation(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return &stubClient{} },
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return &stubClient{} },
 		gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
 
 	leaderDone := make(chan struct{})
@@ -924,7 +924,7 @@ func TestClient_LeaderCancellationDoesNotAbortSharedClone(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return codeClient },
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return codeClient },
 		gitpool.WithCloner(cloner), gitpool.WithRepoBase(base))
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
@@ -998,7 +998,7 @@ func TestClient_PathChangeMidFlightDoesNotJoinLeaderFlight(t *testing.T) {
 			}},
 		},
 	}
-	pool := newPool(t, &stubClient{}, resolver, func(p string) git.GitClient {
+	pool := newPool(t, &stubClient{}, resolver, func(p string, _ gitpool.Credential) git.GitClient {
 		switch p {
 		case pathA:
 			return clientA
@@ -1064,7 +1064,7 @@ func TestClient_PrimaryShortCircuitsEvenInCloneMode(t *testing.T) {
 	primary := &stubClient{}
 	cloner := &fakeCloner{}
 	resolver := &stubResolver{}
-	pool := newPool(t, primary, resolver, func(string) git.GitClient {
+	pool := newPool(t, primary, resolver, func(string, gitpool.Credential) git.GitClient {
 		t.Error("factory must not be called for primary")
 		return nil
 	}, gitpool.WithCloner(cloner), gitpool.WithRepoBase(t.TempDir()))
@@ -1099,7 +1099,7 @@ func TestListActive_DelegatesToResolver(t *testing.T) {
 		{ID: "payments-service", Status: "active"},
 	}
 	resolver := &stubResolver{active: want}
-	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return nil })
+	pool := newPool(t, &stubClient{}, resolver, func(string, gitpool.Credential) git.GitClient { return nil })
 
 	got, err := pool.ListActive(context.Background())
 	if err != nil {
