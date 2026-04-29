@@ -290,6 +290,113 @@ func TestRepositoryPath_UnknownErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestRepositoryPath_InactiveErrorPropagates pins the registry's
+// inactive-binding error class through RepositoryPath. The gateway's
+// per-repo route maps this to a 412 past the auth gate, and a
+// regression that swallowed it would let an inactive code repo serve
+// HTTP traffic.
+func TestRepositoryPath_InactiveErrorPropagates(t *testing.T) {
+	resolver := &stubResolver{
+		lookups: map[string]lookupResult{
+			"payments-service": {err: repository.ErrRepositoryInactive},
+		},
+	}
+	pool := newPool(t, &stubClient{}, resolver, func(string) git.GitClient { return nil })
+
+	_, err := pool.RepositoryPath(context.Background(), "payments-service")
+	if !errors.Is(err, repository.ErrRepositoryInactive) {
+		t.Errorf("expected ErrRepositoryInactive, got %v", err)
+	}
+}
+
+// TestRepositoryPath_TriggersCloneInClonerMode is the integration
+// guarantee that the gateway's per-repo HTTP route relies on:
+// when the pool is built with WithCloner, a RepositoryPath call for
+// a code repo whose local clone is missing must invoke Cloner.Clone
+// before returning the path. Without this the gateway would hand an
+// empty directory to git-http-backend and the first /git/{ws}/{repo}
+// request would fail.
+func TestRepositoryPath_TriggersCloneInClonerMode(t *testing.T) {
+	base := t.TempDir()
+	localPath := filepath.Join(base, "payments-service")
+	cloner := &fakeCloner{}
+	resolver := &stubResolver{
+		lookups: map[string]lookupResult{
+			"payments-service": {repo: &repository.Repository{
+				ID:        "payments-service",
+				Status:    "active",
+				LocalPath: localPath,
+				CloneURL:  "https://git.example/payments.git",
+			}},
+		},
+	}
+	pool := newPool(t, &stubClient{}, resolver,
+		func(p string) git.GitClient {
+			if p != localPath {
+				t.Errorf("factory got %q, want %q", p, localPath)
+			}
+			return &stubClient{}
+		},
+		gitpool.WithCloner(cloner), gitpool.WithRepoBase(base),
+	)
+
+	got, err := pool.RepositoryPath(context.Background(), "payments-service")
+	if err != nil {
+		t.Fatalf("RepositoryPath: %v", err)
+	}
+	if got != localPath {
+		t.Errorf("got %q, want %q", got, localPath)
+	}
+	if cloner.callCount() != 1 {
+		t.Errorf("clone calls: got %d, want 1", cloner.callCount())
+	}
+
+	// Second call hits the cache — no additional clone.
+	got2, err := pool.RepositoryPath(context.Background(), "payments-service")
+	if err != nil {
+		t.Fatalf("RepositoryPath (second): %v", err)
+	}
+	if got2 != localPath {
+		t.Errorf("second got %q, want %q", got2, localPath)
+	}
+	if cloner.callCount() != 1 {
+		t.Errorf("second call must reuse cache, total clones got %d, want 1", cloner.callCount())
+	}
+}
+
+// TestRepositoryPath_RepoBaseEnforced asserts that a binding whose
+// local_path resolves outside the configured repo base is rejected
+// before the cloner runs. Without this the gateway could be tricked
+// into serving an attacker-controlled directory if a malicious
+// binding row sneaked past validation.
+func TestRepositoryPath_RepoBaseEnforced(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "evil")
+	cloner := &fakeCloner{}
+	resolver := &stubResolver{
+		lookups: map[string]lookupResult{
+			"payments-service": {repo: &repository.Repository{
+				ID:        "payments-service",
+				Status:    "active",
+				LocalPath: outside,
+				CloneURL:  "https://git.example/payments.git",
+			}},
+		},
+	}
+	pool := newPool(t, &stubClient{}, resolver,
+		func(string) git.GitClient { return &stubClient{} },
+		gitpool.WithCloner(cloner), gitpool.WithRepoBase(base),
+	)
+
+	_, err := pool.RepositoryPath(context.Background(), "payments-service")
+	if err == nil {
+		t.Fatal("expected error for path outside repo base")
+	}
+	if cloner.callCount() != 0 {
+		t.Errorf("cloner must not run for out-of-base path, calls=%d", cloner.callCount())
+	}
+}
+
 func TestRepositoryPath_EmptyLocalPathIsPrecondition(t *testing.T) {
 	resolver := &stubResolver{
 		lookups: map[string]lookupResult{
