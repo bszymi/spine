@@ -91,6 +91,22 @@ type RepositoryResolver interface {
 	Lookup(ctx context.Context, id string) (*repository.Repository, error)
 }
 
+// RepositoryGitClients hands back a git.GitClient for a workspace
+// repository ID — the per-repo clone for code repos, the primary
+// client for "spine". Required when the orchestrator starts a run
+// whose AffectedRepositories include any non-primary repo: branch
+// creation must hit each code repo's working tree, not just the
+// primary's. Production wires this to *gitpool.Pool, which already
+// implements Client(ctx, id) with lazy clone, caching, and credential
+// resolution; tests inject a fake.
+//
+// Without this resolver the orchestrator falls back to primary-only
+// branching — backward-compatible with single-repo deployments and
+// every test that stubs only o.git.
+type RepositoryGitClients interface {
+	Client(ctx context.Context, repositoryID string) (git.GitClient, error)
+}
+
 // DivergenceHandler manages divergence lifecycle for the orchestrator.
 type DivergenceHandler interface {
 	StartDivergence(ctx context.Context, run *domain.Run, divDef domain.DivergenceDefinition, convergenceID string) (*domain.DivergenceContext, error)

@@ -322,7 +322,10 @@ func TestStartRun_HappyPath(t *testing.T) {
 // TestStartRun_AffectedRepositoriesFromTask covers the multi-repo branch of
 // the affected-repositories derivation: when the task front matter declares
 // code repos, those flow into Run.AffectedRepositories with the primary
-// "spine" repo prepended (INIT-014 EPIC-004 TASK-001).
+// "spine" repo prepended (INIT-014 EPIC-004 TASK-001). Multi-repo branch
+// creation is exercised in detail by tests in multi_repo_branch_test.go;
+// here we just confirm the Run record carries the expected list when the
+// per-repo wirings are present.
 func TestStartRun_AffectedRepositoriesFromTask(t *testing.T) {
 	artifacts := &mockArtifactReader{
 		artifact: &domain.Artifact{
@@ -345,6 +348,12 @@ func TestStartRun_AffectedRepositoriesFromTask(t *testing.T) {
 		},
 	}
 	orch := testOrchestrator(artifacts, resolver, &mockRunStore{}, &mockEventEmitter{})
+	repoResolver := newRepoResolver(map[string]repoLookup{
+		"payments-service": activeRepoLookup("payments-service", "main"),
+		"api-gateway":      activeRepoLookup("api-gateway", "main"),
+	})
+	orch.WithRepositoryResolver(repoResolver)
+	orch.WithRepositoryGitClients(newStubRepoGitClients("payments-service", "api-gateway"))
 
 	result, err := orch.StartRun(context.Background(), "tasks/my-task.md")
 	if err != nil {

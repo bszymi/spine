@@ -69,7 +69,38 @@ func startRunOrchestrator(t *testing.T, art *domain.Artifact, resolver Repositor
 	if resolver != nil {
 		orch.WithRepositoryResolver(resolver)
 	}
+	// When the task declares non-primary repos, the orchestrator
+	// requires per-repo client wiring as well (TASK-002). Tests that
+	// stub a resolver but want to keep the run-start path on the
+	// happy line need a stub client too — wire one for every active
+	// lookup the resolver knows about.
+	if resolver != nil {
+		if stub, ok := resolverWithLookups(resolver); ok {
+			clients := newStubRepoGitClients()
+			for id, lookup := range stub.lookups {
+				if lookup.repo != nil && id != "spine" {
+					clients.clients[id] = &stubCodeRepoClient{repoID: id}
+				}
+			}
+			if len(clients.clients) > 0 {
+				orch.WithRepositoryGitClients(clients)
+			}
+		}
+	}
 	return orch, store, git
+}
+
+// resolverWithLookups unwraps a resolver to its underlying
+// stubRepositoryResolver if possible. Recordingresolver embeds the
+// stub, so this returns the inner map without re-listing entries.
+func resolverWithLookups(r RepositoryResolver) (*stubRepositoryResolver, bool) {
+	switch v := r.(type) {
+	case *stubRepositoryResolver:
+		return v, true
+	case *recordingResolver:
+		return &v.stubRepositoryResolver, true
+	}
+	return nil, false
 }
 
 // trackingGitOperator records branch-creation calls so tests can
@@ -85,11 +116,10 @@ func (g *trackingGitOperator) CreateBranch(_ context.Context, _, _ string) error
 	return nil
 }
 
-func TestRepoPrecondition_NoResolverSkips(t *testing.T) {
-	// No resolver wired — the run must proceed regardless of any
-	// `repositories:` declared on the task. This is the legacy/test
-	// fallback path.
-	art := taskWithRepos([]string{"payments-service"})
+func TestRepoPrecondition_NoResolverPrimaryOnlyStillStarts(t *testing.T) {
+	// No resolver wired and no code repos declared — the legacy
+	// primary-only run path still works without any registry wiring.
+	art := taskWithRepos(nil)
 	orch, store, git := startRunOrchestrator(t, art, nil)
 
 	_, err := orch.StartRun(context.Background(), art.Path)
@@ -101,6 +131,27 @@ func TestRepoPrecondition_NoResolverSkips(t *testing.T) {
 	}
 	if store.createdRun == nil {
 		t.Error("expected run created when resolver is nil")
+	}
+}
+
+// TestRepoPrecondition_NoResolverWithCodeReposFails locks in the
+// TASK-002 invariant: a task that declares code repos cannot start
+// without per-repo wiring. Silently degrading to primary-only would
+// persist the run with phantom AffectedRepositories — branches
+// listed but never created — and break downstream cleanup.
+func TestRepoPrecondition_NoResolverWithCodeReposFails(t *testing.T) {
+	art := taskWithRepos([]string{"payments-service"})
+	orch, store, git := startRunOrchestrator(t, art, nil)
+
+	_, err := orch.StartRun(context.Background(), art.Path)
+	if err == nil {
+		t.Fatal("expected error when code repos declared without per-repo wiring")
+	}
+	if git.createBranchCalled {
+		t.Error("primary branch must not be created when wiring is missing")
+	}
+	if store.createdRun != nil {
+		t.Error("run must not be persisted when wiring is missing")
 	}
 }
 
@@ -129,8 +180,8 @@ func TestRepoPrecondition_MissingReposStartsPrimaryOnly(t *testing.T) {
 func TestRepoPrecondition_AllActiveSucceeds(t *testing.T) {
 	art := taskWithRepos([]string{"spine", "payments-service"})
 	resolver := newRepoResolver(map[string]repoLookup{
-		"spine":            {repo: &repository.Repository{ID: "spine", Status: "active"}},
-		"payments-service": {repo: &repository.Repository{ID: "payments-service", Status: "active"}},
+		"spine":            {repo: &repository.Repository{ID: "spine", Status: "active", DefaultBranch: "main"}},
+		"payments-service": {repo: &repository.Repository{ID: "payments-service", Status: "active", DefaultBranch: "main"}},
 	})
 	orch, store, git := startRunOrchestrator(t, art, resolver)
 
@@ -256,9 +307,9 @@ func TestRepoPrecondition_MultiRepoScenarioStartsRun(t *testing.T) {
 	resolver := &recordingResolver{
 		stubRepositoryResolver: stubRepositoryResolver{
 			lookups: map[string]repoLookup{
-				"spine":            {repo: &repository.Repository{ID: "spine", Status: "active"}},
-				"payments-service": {repo: &repository.Repository{ID: "payments-service", Status: "active"}},
-				"api-gateway":      {repo: &repository.Repository{ID: "api-gateway", Status: "active"}},
+				"spine":            {repo: &repository.Repository{ID: "spine", Status: "active", DefaultBranch: "main"}},
+				"payments-service": {repo: &repository.Repository{ID: "payments-service", Status: "active", DefaultBranch: "main"}},
+				"api-gateway":      {repo: &repository.Repository{ID: "api-gateway", Status: "active", DefaultBranch: "main"}},
 			},
 		},
 	}
@@ -267,8 +318,13 @@ func TestRepoPrecondition_MultiRepoScenarioStartsRun(t *testing.T) {
 	if _, err := orch.StartRun(context.Background(), art.Path); err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	if got := resolver.calls; !equalSlice(got, declared) {
-		t.Errorf("Lookup call order: got %v, want %v", got, declared)
+	// The precondition check walks every declared repository up front,
+	// in declaration order. Branch creation (TASK-002) re-looks up
+	// each non-primary repo for its default_branch, so additional
+	// lookups appear after the prefix; the prefix is what the
+	// dashboard contract relies on.
+	if len(resolver.calls) < len(declared) || !equalSlice(resolver.calls[:len(declared)], declared) {
+		t.Errorf("Lookup precondition prefix: got %v, want prefix %v", resolver.calls, declared)
 	}
 	if !git.createBranchCalled {
 		t.Error("expected branch creation for valid multi-repo run")

@@ -28,6 +28,7 @@ type Orchestrator struct {
 	blocking       BlockingStore          // optional, nil if not configured
 	collision      CollisionHandler       // optional, nil if not configured
 	repositories   RepositoryResolver     // optional, gates run start on repository availability
+	repoClients    RepositoryGitClients   // optional, resolves per-repo git clients for multi-repo branch creation
 	policy         branchprotect.Policy   // branch-protection guard for MergeRunBranch (ADR-009 §3)
 }
 
@@ -134,6 +135,18 @@ func (o *Orchestrator) WithCollisionHandler(c CollisionHandler) {
 // is created so a failed precondition leaves no orphan branch.
 func (o *Orchestrator) WithRepositoryResolver(r RepositoryResolver) {
 	o.repositories = r
+}
+
+// WithRepositoryGitClients enables multi-repository branch creation at
+// run start (INIT-014 EPIC-004 TASK-002). When a run's
+// AffectedRepositories includes any non-primary repo, the orchestrator
+// uses this resolver to fetch each code repo's git.GitClient and
+// create the same run branch there from that repo's default branch.
+// Without this resolver, multi-repo runs fail at start with a
+// precondition error so a partial wiring never silently degrades to
+// primary-only execution; primary-only runs are unaffected.
+func (o *Orchestrator) WithRepositoryGitClients(c RepositoryGitClients) {
+	o.repoClients = c
 }
 
 // WithBranchProtectPolicy installs the branch-protection policy consulted by

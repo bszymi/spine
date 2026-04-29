@@ -2,7 +2,7 @@
 id: TASK-002
 type: Task
 title: Create run branches across affected repositories
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation
