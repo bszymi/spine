@@ -25,8 +25,10 @@ type stubCodeRepoClient struct {
 	pushCalls         []pushCall
 	deleteRemoteCalls []pushCall
 
-	createErr error
-	pushErr   error
+	createErr       error
+	pushErr         error
+	deleteErr       error // optional: forces DeleteBranch to return this error
+	deleteRemoteErr error // optional: forces DeleteRemoteBranch to return this error
 }
 
 type branchCall struct {
@@ -52,7 +54,7 @@ func (s *stubCodeRepoClient) CreateBranch(_ context.Context, name, base string) 
 }
 func (s *stubCodeRepoClient) DeleteBranch(_ context.Context, name string) error {
 	s.deleteCalls = append(s.deleteCalls, name)
-	return nil
+	return s.deleteErr
 }
 func (s *stubCodeRepoClient) Diff(_ context.Context, _, _ string) ([]git.FileDiff, error) {
 	return nil, nil
@@ -77,7 +79,7 @@ func (s *stubCodeRepoClient) PushBranch(_ context.Context, remote, branch string
 }
 func (s *stubCodeRepoClient) DeleteRemoteBranch(_ context.Context, remote, branch string) error {
 	s.deleteRemoteCalls = append(s.deleteRemoteCalls, pushCall{remote: remote, branch: branch})
-	return nil
+	return s.deleteRemoteErr
 }
 
 // stubRepoGitClients fakes the gitpool.Pool. Maps repository ID to a

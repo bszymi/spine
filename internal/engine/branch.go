@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/observe"
@@ -11,18 +13,23 @@ import (
 
 // CleanupRunBranch deletes the local Git branch associated with a
 // completed run on every affected repository. Remote branch cleanup
-// runs when auto-push is enabled. Failure on the primary repo is
-// surfaced (it is the run's authoritative ref); per-repo cleanup
-// failures on code repos are logged best-effort so a transient git
-// error in one repo cannot mask the rest of the cleanup.
+// runs when auto-push is enabled.
 //
-// EPIC-005 TASK-002 refinement: code repos whose merge outcome is
-// `failed` keep their run branch so an operator can resolve the
-// conflict (or rotate creds, etc.) and re-merge from the same source
-// ref. Without this guard the code-repo-first merge order would
-// quietly destroy the only ref carrying the unmerged work the moment
-// the primary repo completes. Branch cleanup per repo (full TASK-004
-// scope) refines this further.
+// Per-repository semantics (EPIC-005 TASK-004):
+//   - A repository whose merge outcome is `failed` keeps its run
+//     branch — local AND remote — so the operator can resolve the
+//     failure against the unmodified source ref. Applies to the
+//     primary repo too: if a permanent primary push failure flipped
+//     the run to failed, deleting the branch would lose the only ref
+//     carrying the merged commits.
+//   - A repository with any other terminal outcome (merged, skipped,
+//     resolved-externally) gets its branch deleted.
+//   - Cleanup errors are recorded as EventRunBranchCleanupFailed and
+//     logged best-effort. They never flip a merge outcome to failed
+//     and they never block cleanup of other repos.
+//   - A primary cleanup error is also returned to the caller so paths
+//     like MergeRunBranch can surface it; per-repo (code repo) errors
+//     stay best-effort because no caller acts on them.
 func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error {
 	run, err := o.store.GetRun(ctx, runID)
 	if err != nil {
@@ -36,49 +43,53 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 	log := observe.Logger(ctx)
 	pushOn := autoPushEnabled()
 
-	// Hold onto the primary cleanup error but keep going — the code
-	// repos are independent working trees, so a primary-side failure
-	// (e.g. branch is checked out) must not leak refs in every code
-	// repo too. The primary error is returned at the end.
-	var primaryErr error
-	if err := o.git.DeleteBranch(ctx, run.BranchName); err != nil {
-		log.Warn("failed to delete run branch",
-			"run_id", runID,
-			"branch", run.BranchName,
-			"error", err,
-		)
-		primaryErr = fmt.Errorf("delete branch %s: %w", run.BranchName, err)
-	}
+	// preserveAll only governs the code-repo branches: when we cannot
+	// read merge outcomes, we keep every code-repo ref but still let
+	// the primary follow its own (run-state-derived) cleanup path —
+	// otherwise transient store errors would leave the primary branch
+	// behind on every successful run.
+	preserved, preserveAll := o.preservedRepoBranches(ctx, runID)
 
-	// Delete the remote branch as well (best-effort — it may already be gone).
-	if pushOn {
-		if err := o.git.DeleteRemoteBranch(ctx, "origin", run.BranchName); err != nil {
-			log.Warn("auto-push: failed to delete remote branch",
+	// seq disambiguates EventRunBranchCleanupFailed event IDs when
+	// multiple deletes fail in the same nanosecond — the event_log
+	// dedupes by event ID, so collapsing two distinct failures would
+	// hide one from operators.
+	var seq int
+
+	var primaryErr error
+	if preserved[repository.PrimaryRepositoryID] {
+		log.Info("cleanup: preserving primary run branch",
+			"run_id", runID, "repository_id", repository.PrimaryRepositoryID,
+			"branch", run.BranchName, "reason", "failed merge outcome")
+	} else {
+		if err := o.git.DeleteBranch(ctx, run.BranchName); err != nil {
+			log.Warn("failed to delete run branch",
 				"run_id", runID,
 				"branch", run.BranchName,
 				"error", err,
 			)
+			primaryErr = fmt.Errorf("delete branch %s: %w", run.BranchName, err)
+			o.recordCleanupFailure(ctx, run, repository.PrimaryRepositoryID, run.BranchName, "local", err, &seq)
+		}
+		if pushOn {
+			if err := o.git.DeleteRemoteBranch(ctx, "origin", run.BranchName); err != nil {
+				log.Warn("auto-push: failed to delete remote branch",
+					"run_id", runID,
+					"branch", run.BranchName,
+					"error", err,
+				)
+				o.recordCleanupFailure(ctx, run, repository.PrimaryRepositoryID, run.BranchName, "remote", err, &seq)
+			}
 		}
 	}
 
-	// Per-repo merge outcomes drive whether each code repo's branch can
-	// be deleted. A repo with a failed outcome keeps its branch — that
-	// is the only ref carrying the unmerged work the operator needs to
-	// resolve. Pending/Merged/Skipped/ResolvedExternally repos all get
-	// cleaned up. preserveAll is set when ListRepositoryMergeOutcomes
-	// errored: rather than risk deleting the only ref a recoverable
-	// failed-merge has, we err on the side of keeping every code-repo
-	// branch and let an operator clean up by hand. The primary cleanup
-	// is unaffected — its branch is on a separate working tree and a
-	// store hiccup does not change its merge status.
-	preserved, preserveAll := o.preservedRepoBranches(ctx, runID)
-
-	// Multi-repo cleanup (INIT-014 EPIC-004 TASK-002). Symmetric with
-	// createRunBranches: every non-primary affected repo received the
-	// same run branch (and an auto-push remote ref when enabled), so
-	// every one of them needs the same delete. Best-effort per repo —
-	// a code-repo cleanup failure must not mask the primary cleanup
-	// success the caller already observed.
+	// Multi-repo cleanup (INIT-014 EPIC-004 TASK-002, refined by
+	// EPIC-005 TASK-004). Symmetric with createRunBranches: every
+	// non-primary affected repo received the same run branch (and an
+	// auto-push remote ref when enabled), so every one of them needs
+	// the same delete. Per-repo failures stay best-effort and are
+	// recorded as EventRunBranchCleanupFailed; they must not mask the
+	// primary cleanup outcome the caller observed.
 	if o.repoClients != nil {
 		for _, repoID := range run.AffectedRepositories {
 			if repoID == "" || repoID == repository.PrimaryRepositoryID {
@@ -99,18 +110,21 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 				log.Warn("cleanup: failed to resolve code repo client",
 					"run_id", runID, "repository_id", repoID,
 					"branch", run.BranchName, "error", err)
+				o.recordCleanupFailure(ctx, run, repoID, run.BranchName, "local", err, &seq)
 				continue
 			}
 			if err := client.DeleteBranch(ctx, run.BranchName); err != nil {
 				log.Warn("cleanup: failed to delete run branch",
 					"run_id", runID, "repository_id", repoID,
 					"branch", run.BranchName, "error", err)
+				o.recordCleanupFailure(ctx, run, repoID, run.BranchName, "local", err, &seq)
 			}
 			if pushOn {
 				if err := client.DeleteRemoteBranch(ctx, "origin", run.BranchName); err != nil {
 					log.Warn("auto-push: failed to delete remote run branch",
 						"run_id", runID, "repository_id", repoID,
 						"branch", run.BranchName, "error", err)
+					o.recordCleanupFailure(ctx, run, repoID, run.BranchName, "remote", err, &seq)
 				}
 			}
 		}
@@ -119,7 +133,7 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 	if primaryErr != nil {
 		return primaryErr
 	}
-	log.Info("run branch cleaned up", "run_id", runID, "branch", run.BranchName)
+	log.Info("run branch cleanup complete", "run_id", runID, "branch", run.BranchName)
 	return nil
 }
 
@@ -127,13 +141,18 @@ func (o *Orchestrator) CleanupRunBranch(ctx context.Context, runID string) error
 //
 // preserved-set: the repository IDs whose merge outcome is `failed`
 // and whose run branch must therefore be kept after run completion.
+// The set may include the primary repository: a permanent primary
+// push failure flips the run to `failed` with primary outcome=failed,
+// and the run branch is the only ref carrying the merged commits.
 //
 // preserveAll: true when ListRepositoryMergeOutcomes errored. In that
 // case the caller must preserve every code-repo branch — a transient
 // store error at cleanup time would otherwise let CleanupRunBranch
 // delete the only ref carrying an unmerged failure's work, which is
-// strictly worse than leaving recoverable cruft. Operators can
-// reconcile by hand once the store recovers.
+// strictly worse than leaving recoverable cruft. The primary follows
+// the run-state-derived path (delete unless its own outcome row says
+// otherwise) so a store hiccup does not strand primary branches on
+// every successful run.
 func (o *Orchestrator) preservedRepoBranches(ctx context.Context, runID string) (map[string]bool, bool) {
 	preserved := map[string]bool{}
 	outcomes, err := o.store.ListRepositoryMergeOutcomes(ctx, runID)
@@ -148,6 +167,28 @@ func (o *Orchestrator) preservedRepoBranches(ctx context.Context, runID string) 
 		}
 	}
 	return preserved, false
+}
+
+// recordCleanupFailure emits EventRunBranchCleanupFailed for a single
+// per-repo cleanup error so operators see the failure in the event log
+// without the merge outcome being reclassified as failed. seq is bumped
+// before emission so each event in the same cleanup pass gets a unique
+// ID even when the wall clock has not advanced — the event_log dedupes
+// on event ID and would otherwise collapse simultaneous failures.
+func (o *Orchestrator) recordCleanupFailure(ctx context.Context, run *domain.Run, repoID, branch, scope string, cleanupErr error, seq *int) {
+	*seq++
+	payload, _ := json.Marshal(map[string]string{
+		"repository_id": repoID,
+		"branch":        branch,
+		"scope":         scope,
+		"error":         cleanupErr.Error(),
+	})
+	tracePrefix := run.TraceID
+	if len(tracePrefix) > 12 {
+		tracePrefix = tracePrefix[:12]
+	}
+	eventID := fmt.Sprintf("evt-%s-cleanup-failed-%d-%d", tracePrefix, time.Now().UnixNano(), *seq)
+	o.emitEvent(ctx, domain.EventRunBranchCleanupFailed, run.RunID, run.TraceID, eventID, payload)
 }
 
 // RunBranch returns the branch name for a run, or empty if not set.
