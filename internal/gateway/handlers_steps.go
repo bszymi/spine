@@ -14,7 +14,8 @@ func (s *Server) handleListStepExecutions(w http.ResponseWriter, r *http.Request
 	if !s.authorize(w, r, "execution.query") {
 		return
 	}
-	if s.stepExecutionLister == nil {
+	stepExecutionLister := s.stepExecutionListerFrom(r.Context())
+	if stepExecutionLister == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",
 			Errors: []ErrorDetail{{Code: "unavailable", Message: "step execution listing not available"}},
@@ -40,7 +41,7 @@ func (s *Server) handleListStepExecutions(w http.ResponseWriter, r *http.Request
 		limit = n
 	}
 
-	steps, err := s.stepExecutionLister.ListStepExecutions(r.Context(), engine.StepExecutionQuery{
+	steps, err := stepExecutionLister.ListStepExecutions(r.Context(), engine.StepExecutionQuery{
 		ActorID:   q.Get("actor_id"),
 		ActorType: q.Get("actor_type"),
 		Status:    status,

@@ -490,6 +490,51 @@ func (s *Server) wfPlanningStarterFrom(ctx context.Context) WorkflowPlanningRunS
 	}, s.wfPlanningStarter)
 }
 
+func (s *Server) stepAcknowledgerFrom(ctx context.Context) StepAcknowledger {
+	return resolve(ctx, func(ss *workspace.ServiceSet) StepAcknowledger {
+		if a, ok := ss.StepAcknowledger.(StepAcknowledger); ok {
+			return a
+		}
+		return nil
+	}, s.stepAcknowledger)
+}
+
+func (s *Server) candidateFinderFrom(ctx context.Context) CandidateFinder {
+	return resolve(ctx, func(ss *workspace.ServiceSet) CandidateFinder {
+		if cf, ok := ss.CandidateFinder.(CandidateFinder); ok {
+			return cf
+		}
+		return nil
+	}, s.candidateFinder)
+}
+
+func (s *Server) stepClaimerFrom(ctx context.Context) StepClaimer {
+	return resolve(ctx, func(ss *workspace.ServiceSet) StepClaimer {
+		if c, ok := ss.StepClaimer.(StepClaimer); ok {
+			return c
+		}
+		return nil
+	}, s.stepClaimer)
+}
+
+func (s *Server) stepReleaserFrom(ctx context.Context) StepReleaser {
+	return resolve(ctx, func(ss *workspace.ServiceSet) StepReleaser {
+		if r, ok := ss.StepReleaser.(StepReleaser); ok {
+			return r
+		}
+		return nil
+	}, s.stepReleaser)
+}
+
+func (s *Server) stepExecutionListerFrom(ctx context.Context) StepExecutionLister {
+	return resolve(ctx, func(ss *workspace.ServiceSet) StepExecutionLister {
+		if l, ok := ss.StepExecutionLister.(StepExecutionLister); ok {
+			return l
+		}
+		return nil
+	}, s.stepExecutionLister)
+}
+
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe() error {
 	return s.httpServer.ListenAndServe()

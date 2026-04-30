@@ -14,7 +14,8 @@ func (s *Server) handleExecutionCandidates(w http.ResponseWriter, r *http.Reques
 	if !s.authorize(w, r, "execution.candidates") {
 		return
 	}
-	if s.candidateFinder == nil {
+	candidateFinder := s.candidateFinderFrom(r.Context())
+	if candidateFinder == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",
 			Errors: []ErrorDetail{{Code: "unavailable", Message: "execution candidate discovery not available"}},
@@ -30,7 +31,7 @@ func (s *Server) handleExecutionCandidates(w http.ResponseWriter, r *http.Reques
 		filter.Skills = strings.Split(skills, ",")
 	}
 
-	candidates, err := s.candidateFinder.FindExecutionCandidates(r.Context(), filter)
+	candidates, err := candidateFinder.FindExecutionCandidates(r.Context(), filter)
 	if err != nil {
 		WriteError(w, err)
 		return

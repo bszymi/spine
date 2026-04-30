@@ -67,13 +67,18 @@ type ServiceSet struct {
 	// Typed as any to avoid a workspace → engine → scheduler → workspace
 	// import cycle. Consumers type-assert to the expected interface
 	// (e.g. gateway.RunStarter, gateway.PlanningRunStarter).
-	RunStarter         any
-	PlanningRunStarter any
-	WFPlanningStarter  any
-	RunCanceller       any
-	RunMergeResolver   any
-	StepAssigner       any
-	ResultHandler      any
+	RunStarter          any
+	PlanningRunStarter  any
+	WFPlanningStarter   any
+	RunCanceller        any
+	RunMergeResolver    any
+	StepAssigner        any
+	ResultHandler       any
+	StepAcknowledger    any
+	CandidateFinder     any
+	StepClaimer         any
+	StepReleaser        any
+	StepExecutionLister any
 
 	// close is called when the service set is evicted or the pool
 	// shuts down. The reason is recorded on the per-workspace pool
