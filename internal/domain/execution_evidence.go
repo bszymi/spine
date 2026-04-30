@@ -242,11 +242,24 @@ type ExecutionEvidence struct {
 	ChangedPaths ChangedPathsSummary `json:"changed_paths" yaml:"changed_paths"`
 
 	// RequiredChecks is the list of check IDs the governing policy /
-	// task declared. EPIC-006 AC #1 ("a task can require evidence for
+	// task declared as **blocking**. A failed or missing required check
+	// flips DeriveStatus to failed/pending, gating publication per
+	// EPIC-006 AC #4. EPIC-006 AC #1 ("a task can require evidence for
 	// each affected repository") is realized by populating this list
 	// from the task's repo-scoped requirements; CheckResults fills in
 	// as producers report.
 	RequiredChecks []string `json:"required_checks,omitempty" yaml:"required_checks,omitempty"`
+
+	// AdvisoryChecks is the list of check IDs the governing policy
+	// declared as **non-blocking** (warning severity / advisory
+	// interpretation, see architecture/validation-policy.md). Advisory
+	// checks still produce CheckResult rows so dashboards and audit
+	// surfaces can show their outcomes, but DeriveStatus does NOT
+	// aggregate their failures into the evidence status — a failed
+	// advisory check leaves the aggregate at passed. RequiredChecks and
+	// AdvisoryChecks MUST NOT overlap; a check is either blocking or
+	// advisory, not both.
+	AdvisoryChecks []string `json:"advisory_checks,omitempty" yaml:"advisory_checks,omitempty"`
 
 	CheckResults []CheckResult `json:"check_results,omitempty" yaml:"check_results,omitempty"`
 
@@ -314,6 +327,7 @@ func (e ExecutionEvidence) DeriveStatus() EvidenceStatus {
 //
 // Ordering rules:
 //   - RequiredChecks: lexicographic
+//   - AdvisoryChecks: lexicographic
 //   - CheckResults: by CheckID
 //   - ValidationPolicies: by (ADRPath, PolicyPath, PolicyID)
 //   - ChangedPaths.Paths: lexicographic
@@ -328,6 +342,7 @@ func (e ExecutionEvidence) DeriveStatus() EvidenceStatus {
 // which would otherwise break deterministic byte equality.
 func (e *ExecutionEvidence) Canonicalize() {
 	sort.Strings(e.RequiredChecks)
+	sort.Strings(e.AdvisoryChecks)
 	sort.Strings(e.ChangedPaths.Paths)
 	sort.Slice(e.CheckResults, func(i, j int) bool {
 		return e.CheckResults[i].CheckID < e.CheckResults[j].CheckID
@@ -449,6 +464,28 @@ func (e ExecutionEvidence) Validate() error {
 		}
 		requiredSet[id] = struct{}{}
 	}
+	advisorySet := make(map[string]struct{}, len(e.AdvisoryChecks))
+	for _, id := range e.AdvisoryChecks {
+		if id == "" {
+			return NewError(ErrInvalidParams, "evidence: advisory_checks entries must not be empty")
+		}
+		if strings.ContainsAny(id, "\n\r") {
+			return NewError(ErrInvalidParams,
+				"evidence: advisory_checks entries must not contain newlines")
+		}
+		if _, dup := advisorySet[id]; dup {
+			return NewError(ErrInvalidParams,
+				fmt.Sprintf("evidence: advisory_checks contains duplicate entry %q", id))
+		}
+		// A check is either blocking (RequiredChecks) or advisory
+		// (AdvisoryChecks); overlap is a schema violation because the
+		// CheckResult row would have ambiguous gate semantics.
+		if _, both := requiredSet[id]; both {
+			return NewError(ErrInvalidParams,
+				fmt.Sprintf("evidence: check_id %q appears in both required_checks and advisory_checks", id))
+		}
+		advisorySet[id] = struct{}{}
+	}
 
 	seenResultIDs := make(map[string]struct{}, len(e.CheckResults))
 	for i, r := range e.CheckResults {
@@ -465,13 +502,15 @@ func (e ExecutionEvidence) Validate() error {
 				fmt.Sprintf("evidence: check_results contains duplicate check_id %q", r.CheckID))
 		}
 		seenResultIDs[r.CheckID] = struct{}{}
-		// Orphan results — a result whose check_id is not in
-		// required_checks — are rejected so dashboards cannot show
-		// "passed" rows for checks the policy never asked for. The
-		// declared list is the contract.
-		if _, declared := requiredSet[r.CheckID]; !declared {
+		// Orphan results — a result whose check_id is not in either
+		// required_checks or advisory_checks — are rejected so
+		// dashboards cannot show rows for checks the policy never asked
+		// for. Either declaration list satisfies the contract.
+		_, declaredRequired := requiredSet[r.CheckID]
+		_, declaredAdvisory := advisorySet[r.CheckID]
+		if !declaredRequired && !declaredAdvisory {
 			return NewError(ErrInvalidParams,
-				fmt.Sprintf("evidence: check_results[%q] is not in required_checks", r.CheckID))
+				fmt.Sprintf("evidence: check_results[%q] is not in required_checks or advisory_checks", r.CheckID))
 		}
 		if !isValidCheckStatus(r.Status) {
 			return NewError(ErrInvalidParams,

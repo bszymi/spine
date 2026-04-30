@@ -280,8 +280,69 @@ func TestExecutionEvidence_Validate_RejectsOrphanCheckResult(t *testing.T) {
 	// Status no longer matches because we added an extra row, but the
 	// orphan guard fires first.
 	if err := e.Validate(); err == nil ||
-		!strings.Contains(err.Error(), "not in required_checks") {
+		!strings.Contains(err.Error(), "not in required_checks or advisory_checks") {
 		t.Fatalf("expected orphan check_result error, got: %v", err)
+	}
+}
+
+// TestExecutionEvidence_AdvisoryChecks_DoNotBlockStatus realizes the
+// codex pass-3 P1 fix: advisory check failures must produce evidence
+// rows without flipping the aggregate status to failed. Without
+// AdvisoryChecks the warning-severity contract from validation-policy
+// would be unrepresentable.
+func TestExecutionEvidence_AdvisoryChecks_DoNotBlockStatus(t *testing.T) {
+	e := validEvidence()
+	checkAt := evidenceFixedTime()
+	e.AdvisoryChecks = []string{"llm-review"}
+	e.CheckResults = append(e.CheckResults, domain.CheckResult{
+		CheckID:     "llm-review",
+		Name:        "LLM readability review",
+		Status:      domain.CheckStatusFailed,
+		Producer:    domain.CheckProducerAutomated,
+		ProducedBy:  "automation/llm",
+		Summary:     "complexity above threshold",
+		EvidenceURI: "https://reviews.example.com/run-1",
+		StartedAt:   ptrTime(checkAt.Add(-time.Minute)),
+		CompletedAt: ptrTime(checkAt),
+	})
+	if got, want := e.DeriveStatus(), domain.EvidenceStatusPassed; got != want {
+		t.Fatalf("DeriveStatus with failed advisory check: got %q, want %q", got, want)
+	}
+	if err := e.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestExecutionEvidence_AdvisoryChecks_RejectsRequiredAdvisoryOverlap(t *testing.T) {
+	e := validEvidence()
+	e.AdvisoryChecks = []string{"unit-tests"} // already in RequiredChecks
+	if err := e.Validate(); err == nil {
+		t.Fatal("expected required/advisory overlap rejection")
+	}
+}
+
+func TestExecutionEvidence_AdvisoryChecks_RejectsDuplicate(t *testing.T) {
+	e := validEvidence()
+	e.AdvisoryChecks = []string{"warn", "warn"}
+	if err := e.Validate(); err == nil {
+		t.Fatal("expected duplicate advisory_checks rejection")
+	}
+}
+
+func TestExecutionEvidence_AdvisoryChecks_RejectsNewlines(t *testing.T) {
+	e := validEvidence()
+	e.AdvisoryChecks = []string{"warn\nFAKE-TRAILER: x"}
+	if err := e.Validate(); err == nil {
+		t.Fatal("expected newline rejection in advisory_checks")
+	}
+}
+
+func TestExecutionEvidence_AdvisoryChecks_CanonicalizeSorts(t *testing.T) {
+	e := validEvidence()
+	e.AdvisoryChecks = []string{"zeta", "alpha"}
+	(&e).Canonicalize()
+	if e.AdvisoryChecks[0] != "alpha" || e.AdvisoryChecks[1] != "zeta" {
+		t.Errorf("AdvisoryChecks not sorted: %v", e.AdvisoryChecks)
 	}
 }
 

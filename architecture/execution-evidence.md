@@ -63,8 +63,9 @@ Why per-repo and not per-run: cross-repo merges are not atomic ([Multi-Repositor
 | `base_commit` | yes | string | Git commit SHA the run branched from. |
 | `head_commit` | yes | string | Git commit SHA at the tip of the run branch when this evidence was generated. |
 | `changed_paths` | yes | object | Deterministic, secret-free summary of the diff between `base_commit` and `head_commit`. See §4.2. |
-| `required_checks` | optional | string[] | IDs of checks the governing policy / task declared. Empty when no checks were required. |
-| `check_results` | optional | object[] | Per-check outcome rows. Each `check_id` MUST appear in `required_checks`. See §4.3. |
+| `required_checks` | optional | string[] | IDs of **blocking** checks the governing policy / task declared. Failed/missing entries flip aggregate status. Empty when no blocking checks were required. |
+| `advisory_checks` | optional | string[] | IDs of **non-blocking** checks (warning severity / advisory interpretation in [validation-policy.md](/architecture/validation-policy.md)). Failures here produce evidence rows but do NOT affect aggregate status. MUST NOT overlap with `required_checks`. |
+| `check_results` | optional | object[] | Per-check outcome rows. Each `check_id` MUST appear in either `required_checks` or `advisory_checks`. See §4.3. |
 | `validation_policies` | optional | object[] | ADR-linked policies that informed the required-check set. See §4.4. |
 | `actor` | yes | string | Principal that owns this evidence record. |
 | `trace_id` | yes | string | Observability correlation joining this record to engine / event logs. |
@@ -183,6 +184,7 @@ This rule is deliberately stricter than "any failure → failed": a missing requ
 `ExecutionEvidence.Canonicalize()` sorts every slice that has a natural deterministic key:
 
 - `required_checks` — lexicographic
+- `advisory_checks` — lexicographic
 - `check_results` — by `check_id`
 - `validation_policies` — by `(adr_path, policy_path, policy_id)`
 - `changed_paths.paths` — lexicographic
@@ -251,9 +253,11 @@ Producers wishing to attach detailed logs publish them to an external store and 
 | Required fields present | Schema cannot be partially populated. |
 | `status` is one of `ValidEvidenceStatuses` | Typo or unknown enum value. |
 | `status` equals `DeriveStatus()` | Stored aggregate cannot disagree with the rows. |
-| `check_results[*].check_id` ∈ `required_checks` | Orphan results cannot show "passed" rows for unrequired checks. |
+| `check_results[*].check_id` ∈ `required_checks` ∪ `advisory_checks` | Orphan results cannot show rows for undeclared checks. |
 | `check_results[*].check_id` is unique | No conflicting verdicts for the same check. |
 | `required_checks` has no duplicates | One declaration per check. |
+| `advisory_checks` has no duplicates | One declaration per check. |
+| `required_checks` ∩ `advisory_checks` is empty | A check is either blocking or advisory, not both. |
 | `producer` and `produced_by` set once status leaves pending | Anonymous non-pending evidence is rejected. |
 | `validation_policies[*].adr_path` non-empty | Every policy ref ties back to an ADR. |
 | Single-line fields reject `\n` / `\r` | Trailer-injection / log-bleed defense. |
