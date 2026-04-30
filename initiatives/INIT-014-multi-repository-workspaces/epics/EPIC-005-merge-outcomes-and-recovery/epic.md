@@ -2,7 +2,7 @@
 id: EPIC-005
 type: Epic
 title: "Merge Outcomes and Recovery"
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 owner: bszymi
 created: 2026-04-28
