@@ -2,7 +2,7 @@
 id: EPIC-006
 type: Epic
 title: "Cross-Repo Execution Evidence"
-status: Pending
+status: In Progress
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 owner: bszymi
 created: 2026-04-28
