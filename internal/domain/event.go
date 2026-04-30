@@ -59,6 +59,22 @@ const (
 	// retry budget treats it as low-priority delivery — losing one
 	// cleanup notification does not invalidate any merged commit.
 	EventRunBranchCleanupFailed EventType = "run_branch_cleanup_failed"
+
+	// EventRunRepositoryMergeResolved is emitted when an operator
+	// marks a failed per-repo merge outcome as resolved-externally
+	// (EPIC-005 TASK-006). Payload: repository_id, resolved_by,
+	// reason. Operational tier — the audit trail is the event log
+	// itself; a missed delivery does not change the recorded outcome
+	// row, which is the source of truth the scheduler consults.
+	EventRunRepositoryMergeResolved EventType = "run_repository_merge_resolved"
+
+	// EventRunRepositoryMergeRetryRequested is emitted when an
+	// operator requests a retry of a failed per-repo merge outcome
+	// (EPIC-005 TASK-006). Payload: repository_id, requested_by,
+	// reason. Operational tier — same rationale as
+	// EventRunRepositoryMergeResolved: the outcome row is the source
+	// of truth, the event records who asked and why.
+	EventRunRepositoryMergeRetryRequested EventType = "run_repository_merge_retry_requested"
 )
 
 // Event represents a domain or operational event emitted by the system.

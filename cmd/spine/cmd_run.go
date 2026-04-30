@@ -19,7 +19,78 @@ func runCmd() *cobra.Command {
 	cmd.AddCommand(runStatusCmd())
 	cmd.AddCommand(runCancelCmd())
 	cmd.AddCommand(runInspectCmd())
+	cmd.AddCommand(runMergeCmd())
 
+	return cmd
+}
+
+func runMergeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "merge",
+		Short: "Manage per-repository merge outcomes for a run",
+	}
+	cmd.AddCommand(runMergeResolveCmd())
+	cmd.AddCommand(runMergeRetryCmd())
+	return cmd
+}
+
+func runMergeResolveCmd() *cobra.Command {
+	var reason string
+	var commitSHA string
+	cmd := &cobra.Command{
+		Use:   "resolve <run_id> <repository_id>",
+		Short: "Mark a failed per-repo merge as resolved externally",
+		Long: "Mark a failed per-repo merge outcome as resolved-externally so the run\n" +
+			"can resume. The reason and optional upstream commit SHA are recorded on\n" +
+			"the outcome row, in a primary-repo ledger commit, and as an audit event.\n" +
+			"Operator role required.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if reason == "" {
+				return fmt.Errorf("--reason is required")
+			}
+			body := map[string]string{"reason": reason}
+			if commitSHA != "" {
+				body["target_commit_sha"] = commitSHA
+			}
+			c := newAPIClient()
+			path := "/api/v1/runs/" + args[0] + "/repositories/" + args[1] + "/resolve"
+			data, err := c.Post(context.Background(), path, body)
+			if err != nil {
+				return err
+			}
+			return printResponse(data)
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "Audit reason for the resolution (required)")
+	cmd.Flags().StringVar(&commitSHA, "commit-sha", "", "Upstream commit SHA the operator merged the fix to (optional)")
+	return cmd
+}
+
+func runMergeRetryCmd() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "retry <run_id> <repository_id>",
+		Short: "Retry a failed per-repo merge",
+		Long: "Reset a failed per-repo merge outcome to pending so the next scheduler\n" +
+			"tick re-attempts the merge. The reason is recorded as an audit event.\n" +
+			"Operator role required.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if reason == "" {
+				return fmt.Errorf("--reason is required")
+			}
+			body := map[string]string{"reason": reason}
+			c := newAPIClient()
+			path := "/api/v1/runs/" + args[0] + "/repositories/" + args[1] + "/retry"
+			data, err := c.Post(context.Background(), path, body)
+			if err != nil {
+				return err
+			}
+			return printResponse(data)
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "Audit reason for the retry (required)")
 	return cmd
 }
 

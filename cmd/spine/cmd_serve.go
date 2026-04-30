@@ -229,6 +229,7 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
 	ss.WFPlanningStarter = &workflowPlanningRunAdapter{orch: orch}
 	ss.RunCanceller = orch
+	ss.RunMergeResolver = orch
 	ss.StepAssigner = orch
 
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
@@ -607,6 +608,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		ServicePool:                deps.WSServicePool,
 		WSDBProvider:               deps.WSDBProvider,
 		RunCanceller:               orch,
+		RunMergeResolver:           orch,
 		CandidateFinder:            orch,
 		StepClaimer:                orch,
 		StepReleaser:               orch,

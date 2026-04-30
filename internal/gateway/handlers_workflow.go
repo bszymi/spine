@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
@@ -245,6 +246,110 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 		"run_id": runID,
 		"status": result.ToStatus,
 	})
+}
+
+// handleRunRepositoryResolve marks a failed per-repo merge outcome as
+// resolved-externally (EPIC-005 TASK-006). Body: {"reason": "..."}.
+// The engine verifies the outcome is in failed state and records the
+// authenticated actor + reason on the row plus an operational event.
+func (s *Server) handleRunRepositoryResolve(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "run.merge.resolve") {
+		return
+	}
+
+	resolver := s.runMergeResolverFrom(r.Context())
+	if resolver == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "run merge resolver not configured"))
+		return
+	}
+
+	req, ok := decodeBody[runMergeActionRequest](w, r)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "reason is required"))
+		return
+	}
+
+	runID := chi.URLParam(r, "run_id")
+	repoID := chi.URLParam(r, "repository_id")
+
+	result, err := resolver.ResolveRepositoryMergeExternally(r.Context(), runID, repoID, req.Reason, req.TargetCommitSHA)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, runMergeActionResponse(runID, repoID,
+		domain.RepositoryMergeStatusResolvedExternally, result))
+}
+
+// handleRunRepositoryRetry resets a failed per-repo merge outcome to
+// pending so the next scheduler tick re-attempts it (EPIC-005 TASK-006).
+// Body: {"reason": "..."}.
+func (s *Server) handleRunRepositoryRetry(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r, "run.merge.retry") {
+		return
+	}
+
+	resolver := s.runMergeResolverFrom(r.Context())
+	if resolver == nil {
+		WriteError(w, domain.NewError(domain.ErrUnavailable, "run merge resolver not configured"))
+		return
+	}
+
+	req, ok := decodeBody[runMergeActionRequest](w, r)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "reason is required"))
+		return
+	}
+
+	runID := chi.URLParam(r, "run_id")
+	repoID := chi.URLParam(r, "repository_id")
+
+	result, err := resolver.RetryRepositoryMerge(r.Context(), runID, repoID, req.Reason)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, runMergeActionResponse(runID, repoID,
+		domain.RepositoryMergeStatusPending, result))
+}
+
+// runMergeActionResponse builds the JSON response for resolve / retry.
+// blocking_repositories is always serialized (even when empty) so
+// clients have a stable shape; ready_to_resume is the boolean clients
+// actually branch on.
+func runMergeActionResponse(runID, repoID string, status domain.RepositoryMergeStatus, result *engine.MergeRecoveryResult) map[string]any {
+	resp := map[string]any{
+		"run_id":        runID,
+		"repository_id": repoID,
+		"status":        status,
+	}
+	if result != nil {
+		resp["ledger_commit_sha"] = result.LedgerCommitSHA
+		resp["ready_to_resume"] = result.ReadyToResume
+		blocking := result.BlockingRepositories
+		if blocking == nil {
+			blocking = []string{}
+		}
+		resp["blocking_repositories"] = blocking
+	}
+	return resp
+}
+
+// runMergeActionRequest is the JSON body for the resolve and retry
+// per-repo merge endpoints. Both share the same shape — only the
+// authentication-derived actor and the chosen route differ — so they
+// share a request struct. TargetCommitSHA is only meaningful on the
+// resolve path; the retry handler ignores it because the merge has
+// not happened yet.
+type runMergeActionRequest struct {
+	Reason          string `json:"reason"`
+	TargetCommitSHA string `json:"target_commit_sha,omitempty"`
 }
 
 func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
