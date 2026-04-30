@@ -71,6 +71,7 @@ type ServiceSet struct {
 	PlanningRunStarter any
 	WFPlanningStarter  any
 	RunCanceller       any
+	RunMergeResolver   any
 	StepAssigner       any
 
 	// close is called when the service set is evicted or the pool

@@ -106,6 +106,23 @@ type RunCanceller interface {
 	CancelRun(ctx context.Context, runID string) error
 }
 
+// RunMergeResolver lets an operator resolve or retry a per-repo merge
+// outcome on a partially-merged run (EPIC-005 TASK-006). Both methods
+// require an authenticated actor in the request context — the engine
+// reads it for the audit trail. targetCommitSHA on Resolve is the
+// upstream code-repo commit the operator merged the fix to; it is
+// optional but recorded in the primary-repo ledger when supplied so
+// audit queries can trace the run → recovery → upstream chain.
+//
+// The result describes the run's resume state AFTER the action so the
+// caller can tell the operator whether the scheduler will pick the
+// run back up on its next tick or whether other code repos still
+// block the resume.
+type RunMergeResolver interface {
+	ResolveRepositoryMergeExternally(ctx context.Context, runID, repositoryID, reason, targetCommitSHA string) (*engine.MergeRecoveryResult, error)
+	RetryRepositoryMerge(ctx context.Context, runID, repositoryID, reason string) (*engine.MergeRecoveryResult, error)
+}
+
 // PlanningRunResult contains the result of starting a planning run.
 // Mirrors engine.StartRunResult but avoids gateway importing engine.
 type PlanningRunResult struct {
@@ -145,6 +162,7 @@ type Server struct {
 	planningRunStarter         PlanningRunStarter         // optional, nil if not configured
 	wfPlanningStarter          WorkflowPlanningRunStarter // optional, nil if not configured
 	runCanceller               RunCanceller               // optional, nil if not configured
+	runMergeResolver           RunMergeResolver           // optional, nil if not configured
 	wsResolver                 workspace.Resolver         // optional, nil if not configured
 	servicePool                *workspace.ServicePool     // optional, nil if not configured
 	wsDBProvider               *workspace.DBProvider      // optional, nil in single mode
@@ -253,6 +271,7 @@ type ServerConfig struct {
 	PlanningRunStarter  PlanningRunStarter
 	WFPlanningStarter   WorkflowPlanningRunStarter
 	RunCanceller        RunCanceller
+	RunMergeResolver    RunMergeResolver
 	WorkspaceResolver   workspace.Resolver
 	ServicePool         *workspace.ServicePool
 	WSDBProvider        *workspace.DBProvider
@@ -310,6 +329,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		planningRunStarter:         cfg.PlanningRunStarter,
 		wfPlanningStarter:          cfg.WFPlanningStarter,
 		runCanceller:               cfg.RunCanceller,
+		runMergeResolver:           cfg.RunMergeResolver,
 		workflowResolver:           cfg.WorkflowResolver,
 		wsResolver:                 cfg.WorkspaceResolver,
 		servicePool:                cfg.ServicePool,
@@ -432,6 +452,15 @@ func (s *Server) runCancellerFrom(ctx context.Context) RunCanceller {
 		}
 		return nil
 	}, s.runCanceller)
+}
+
+func (s *Server) runMergeResolverFrom(ctx context.Context) RunMergeResolver {
+	return resolve(ctx, func(ss *workspace.ServiceSet) RunMergeResolver {
+		if rmr, ok := ss.RunMergeResolver.(RunMergeResolver); ok {
+			return rmr
+		}
+		return nil
+	}, s.runMergeResolver)
 }
 
 func (s *Server) planningRunStarterFrom(ctx context.Context) PlanningRunStarter {

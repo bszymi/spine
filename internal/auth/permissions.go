@@ -26,11 +26,13 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"workflow.validate": domain.RoleReader,
 
 	// Workflow execution
-	"run.start":   domain.RoleContributor,
-	"run.status":  domain.RoleReader,
-	"run.cancel":  domain.RoleOperator,
-	"step.assign": domain.RoleOperator,
-	"step.submit": domain.RoleContributor,
+	"run.start":         domain.RoleContributor,
+	"run.status":        domain.RoleReader,
+	"run.cancel":        domain.RoleOperator,
+	"run.merge.resolve": domain.RoleOperator,
+	"run.merge.retry":   domain.RoleOperator,
+	"step.assign":       domain.RoleOperator,
+	"step.submit":       domain.RoleContributor,
 
 	// Task governance
 	"task.accept":    domain.RoleReviewer,

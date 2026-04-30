@@ -75,6 +75,8 @@ func (s *Server) routes() http.Handler {
 			r.Post("/runs", s.handleRunStart)
 			r.Get("/runs/{run_id}", s.handleRunStatus)
 			r.Post("/runs/{run_id}/cancel", s.handleRunCancel)
+			r.Post("/runs/{run_id}/repositories/{repository_id}/resolve", s.handleRunRepositoryResolve)
+			r.Post("/runs/{run_id}/repositories/{repository_id}/retry", s.handleRunRepositoryRetry)
 			r.Post("/runs/{run_id}/steps/{step_id}/assign", s.handleStepAssign)
 
 			// Divergence
