@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: Define execution evidence schema
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: design
