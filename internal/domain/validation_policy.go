@@ -1,13 +1,37 @@
 package domain
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"path"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/bszymi/spine/internal/yamlsafe"
+	"gopkg.in/yaml.v3"
 )
+
+// ValidationPolicyCanonicalPathPrefix is the canonical directory under
+// which validation policy YAML documents live. ADR-014 / artifact-schema
+// §5.9 commit Spine to this location. Callers that resolve a policy
+// path SHOULD compare against this constant rather than the literal
+// string so a future relocation is a single edit.
+const ValidationPolicyCanonicalPathPrefix = "/governance/validation-policies/"
+
+// validationPolicyDocumentTopLevelKeys enumerates the YAML keys that
+// ParseValidationPolicyDocument accepts at the document root. The set
+// is intentionally narrow; any other key is rejected so a typo cannot
+// silently degrade into "no policies loaded" — the same defense-in-depth
+// pattern the repository catalog parser uses for entry-level keys.
+var validationPolicyDocumentTopLevelKeys = map[string]struct{}{
+	"schema_version": {},
+	"policies":       {},
+	"generated_at":   {},
+}
 
 // ValidationPolicySchemaVersion identifies the on-disk validation
 // policy document schema. Stored in every committed policy document so
@@ -732,4 +756,81 @@ func isValidPolicySeverity(s PolicySeverity) bool {
 		}
 	}
 	return false
+}
+
+// ParseValidationPolicyDocument decodes data into a fully validated
+// ValidationPolicyDocument. The pipeline is:
+//
+//  1. yamlsafe.Decode bounds the input (size, depth, node count, alias
+//     count) so a malformed or hostile file cannot exhaust memory.
+//  2. The decoded root is walked to reject any unknown top-level key
+//     with a specific "unknown top-level field" message. This catches
+//     typos like "polices:" or "generatedAt:" that would otherwise
+//     silently parse into a zero-valued document.
+//  3. yaml.NewDecoder + KnownFields(true) rejects unknown keys at every
+//     nesting level (`policies[*]`, `selector`, `checks[*]`). A typo
+//     like `timeout_second:` (missing the "s") in a check would
+//     otherwise drop silently to the zero value, and a blocking-policy
+//     misconfiguration would slip through committed governance.
+//  4. Validate() enforces every schema invariant from
+//     §4-§7 of /architecture/validation-policy.md.
+//
+// Errors are returned as domain.ErrInvalidParams so callers in the
+// validation service surface them with the same shape used by the
+// repository catalog parser (ADR-013).
+func ParseValidationPolicyDocument(data []byte) (*ValidationPolicyDocument, error) {
+	root, err := yamlsafe.Decode(data)
+	if err != nil {
+		return nil, NewError(ErrInvalidParams,
+			fmt.Sprintf("validation policy document: %v", err))
+	}
+
+	if root == nil || len(root.Content) == 0 {
+		return nil, NewError(ErrInvalidParams,
+			"validation policy document is empty")
+	}
+	doc := root.Content[0]
+	if doc.Kind != yaml.MappingNode {
+		return nil, NewError(ErrInvalidParams,
+			"validation policy document must be a YAML mapping")
+	}
+	if len(doc.Content)%2 != 0 {
+		return nil, NewError(ErrInvalidParams,
+			"validation policy document is malformed")
+	}
+	for i := 0; i < len(doc.Content); i += 2 {
+		key := doc.Content[i].Value
+		if _, ok := validationPolicyDocumentTopLevelKeys[key]; !ok {
+			return nil, NewError(ErrInvalidParams,
+				fmt.Sprintf("validation policy document: unknown top-level field %q", key))
+		}
+	}
+
+	// Strict decode catches unknown keys at every nested level
+	// (policies[*], selector, checks[*]). yaml.v3's node-level Decode
+	// does not honor KnownFields, so we route through a fresh
+	// Decoder. The bounds pass above means this second parse cannot
+	// be turned into a memory-exhaustion vector.
+	var out ValidationPolicyDocument
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&out); err != nil {
+		return nil, NewError(ErrInvalidParams,
+			fmt.Sprintf("validation policy document: %v", err))
+	}
+	// yaml.NewDecoder reads one document at a time. A file with a
+	// second document separated by `---` would have everything past
+	// the first separator silently dropped, so a typo introducing an
+	// accidental document break could hide whole policy entries from
+	// validation. Require EOF after the first document.
+	var trailing yaml.Node
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, NewError(ErrInvalidParams,
+			"validation policy document: only one YAML document per file is allowed; remove trailing `---` and following content")
+	}
+	if err := out.Validate(); err != nil {
+		return nil, NewError(ErrInvalidParams,
+			fmt.Sprintf("validation policy document: %v", err))
+	}
+	return &out, nil
 }

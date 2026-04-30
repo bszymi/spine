@@ -27,6 +27,26 @@ type Rule interface {
 // single-repo: only the implicit primary "spine" ID is valid.
 type CatalogSnapshot func(ctx context.Context) (*repository.Catalog, string, error)
 
+// GovernedFileResolver reports whether a canonical link target refers
+// to a known governed YAML artifact that lives outside the artifact
+// projection (e.g., /governance/validation-policies/<name>.yaml,
+// /.spine/repositories.yaml — see ADR-013, ADR-014, and
+// /governance/artifact-schema.md §5.8 / §5.9). LC-004 consults the
+// resolver as a fallback whenever the projection lookup misses, so an
+// ADR linking to a validation policy file is not flagged as a dangling
+// link if the file exists.
+//
+// `target` is the canonical, leading-slash path as it appears in the
+// artifact's `links[].target` field (LC-005 already enforces the
+// leading slash, so callers can rely on it).
+//
+// When no resolver is wired the engine preserves today's strict
+// behavior: any link whose target is not in the projection is
+// dangling. The resolver is opt-in plumbing for the validation-policy
+// registry that lands with TASK-004 (EPIC-006); workspaces that never
+// register a non-projection governed YAML need not wire it.
+type GovernedFileResolver func(ctx context.Context, target string) bool
+
 // Option configures Engine construction.
 type Option func(*Engine)
 
@@ -36,6 +56,25 @@ func WithCatalogSnapshot(snapshot CatalogSnapshot) Option {
 	return func(e *Engine) {
 		e.catalogSnapshot = snapshot
 	}
+}
+
+// WithGovernedFileResolver wires the resolver consulted by LC-004 as a
+// fallback when a link's target is not in the artifact projection.
+// Production wiring lands with TASK-004; until then NoopGovernedFileResolver
+// preserves today's behavior (every non-projection target is dangling).
+func WithGovernedFileResolver(resolver GovernedFileResolver) Option {
+	return func(e *Engine) {
+		e.governedFileResolver = resolver
+	}
+}
+
+// NoopGovernedFileResolver returns the default GovernedFileResolver:
+// it never resolves any path, so LC-004 falls through to its
+// projection-only behavior. Use this as the explicit production
+// placeholder while the policy registry wiring (TASK-004) is pending —
+// it makes the seam visible at the callsite without changing behavior.
+func NoopGovernedFileResolver() GovernedFileResolver {
+	return func(_ context.Context, _ string) bool { return false }
 }
 
 // PrimaryOnlyCatalogSnapshot returns a CatalogSnapshot that always
@@ -54,9 +93,10 @@ func PrimaryOnlyCatalogSnapshot(spec repository.PrimarySpec) CatalogSnapshot {
 
 // Engine runs cross-artifact validation rules against the Projection Store.
 type Engine struct {
-	store           store.Store
-	catalogSnapshot CatalogSnapshot
-	rules           []Rule
+	store                store.Store
+	catalogSnapshot      CatalogSnapshot
+	governedFileResolver GovernedFileResolver
+	rules                []Rule
 }
 
 // NewEngine creates a validation engine with all registered rules.
@@ -66,7 +106,7 @@ func NewEngine(st store.Store, opts ...Option) *Engine {
 		opt(e)
 	}
 	e.rules = append(e.rules, structuralRules()...)
-	e.rules = append(e.rules, linkRules()...)
+	e.rules = append(e.rules, linkRules(e.governedFileResolver)...)
 	e.rules = append(e.rules, statusRules()...)
 	e.rules = append(e.rules, scopeRules()...)
 	e.rules = append(e.rules, prereqRules()...)

@@ -9,11 +9,11 @@ import (
 	"github.com/bszymi/spine/internal/store"
 )
 
-func linkRules() []Rule {
+func linkRules(governedFileResolver GovernedFileResolver) []Rule {
 	return []Rule{&ruleLinkReciprocal{"LC-001", "parent", "contains"},
 		&ruleLinkReciprocal{"LC-002", "blocks", "blocked_by"},
 		&ruleLinkReciprocal{"LC-003", "supersedes", "superseded_by"},
-		&ruleLC004{}, &ruleLC005{}}
+		&ruleLC004{governedFileResolver: governedFileResolver}, &ruleLC005{}}
 }
 
 // ruleLinkReciprocal checks that for each link of sourceType,
@@ -85,7 +85,16 @@ func isInferredParentChild(childPath, parentPath string) bool {
 }
 
 // LC-004: Link targets must resolve to existing artifacts.
-type ruleLC004 struct{}
+//
+// The artifact projection covers Markdown front-matter artifacts only.
+// Pure-YAML governed artifacts (validation policies, the repository
+// catalog) live outside the projection but are still legitimate link
+// targets — see ADR-013 / ADR-014. When a GovernedFileResolver is
+// wired, LC-004 consults it as a fallback before flagging a missed
+// projection lookup as dangling.
+type ruleLC004 struct {
+	governedFileResolver GovernedFileResolver
+}
 
 func (r *ruleLC004) ID() string { return "LC-004" }
 func (r *ruleLC004) Classification() domain.ViolationClassification {
@@ -97,13 +106,23 @@ func (r *ruleLC004) Evaluate(ctx context.Context, proj *store.ArtifactProjection
 
 	for _, link := range links {
 		targetPath := strings.TrimPrefix(link.Target, "/")
-		if _, err := st.GetArtifactProjection(ctx, targetPath); err != nil {
-			errors = append(errors, domain.ValidationError{
-				RuleID:   r.ID(),
-				Severity: "error",
-				Message:  fmt.Sprintf("link target %s does not exist", link.Target),
-			})
+		if _, err := st.GetArtifactProjection(ctx, targetPath); err == nil {
+			continue
 		}
+		// The resolver contract requires a canonical, leading-slash
+		// target. LC-005 will flag non-canonical paths separately;
+		// don't hand them to a resolver that can rely on the
+		// canonical-path invariant. Empty targets fall through to
+		// the dangling-link error here as well.
+		if r.governedFileResolver != nil && strings.HasPrefix(link.Target, "/") &&
+			r.governedFileResolver(ctx, link.Target) {
+			continue
+		}
+		errors = append(errors, domain.ValidationError{
+			RuleID:   r.ID(),
+			Severity: "error",
+			Message:  fmt.Sprintf("link target %s does not exist", link.Target),
+		})
 	}
 	return errors
 }

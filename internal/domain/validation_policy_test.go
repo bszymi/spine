@@ -2,6 +2,7 @@ package domain_test
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,24 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"gopkg.in/yaml.v3"
 )
+
+// assertInvalidParams fails the test when err is nil or its
+// SpineError code is not ErrInvalidParams. Used by every parser
+// negative-path test to anchor "the same error shape as other
+// governed artifacts" (AC #3 of EPIC-006/TASK-007).
+func assertInvalidParams(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var se *domain.SpineError
+	if !errors.As(err, &se) {
+		t.Fatalf("error type = %T, want *domain.SpineError", err)
+	}
+	if se.Code != domain.ErrInvalidParams {
+		t.Errorf("error code = %v, want %v", se.Code, domain.ErrInvalidParams)
+	}
+}
 
 func policyFixedTime() time.Time {
 	return time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
@@ -871,5 +890,266 @@ func TestValidationPolicy_AdvisoryAIExample(t *testing.T) {
 	}
 	if err := doc.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// ── ParseValidationPolicyDocument ──
+//
+// Anchors AC #3 of EPIC-006/TASK-007: malformed validation policy
+// files are rejected with the same error shape as other governed
+// artifacts (domain.ErrInvalidParams). All negative cases below assert
+// that shape, not the prose of the message.
+
+func TestParseValidationPolicyDocument_HappyPath(t *testing.T) {
+	yamlBody := `schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policies:
+  - policy_id: api-contract
+    version: "1"
+    title: API contract checks
+    status: active
+    adr_paths:
+      - /architecture/adr/ADR-014-evidence.md
+    selector:
+      repository_roles: [code]
+    checks:
+      - check_id: contract-tests
+        name: Contract tests
+        kind: command
+        command: go test ./api/...
+        interpretation: deterministic
+        severity: blocking
+        timeout_seconds: 300
+`
+	doc, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err != nil {
+		t.Fatalf("ParseValidationPolicyDocument: %v", err)
+	}
+	if doc.SchemaVersion != domain.ValidationPolicySchemaVersion {
+		t.Errorf("schema_version = %q, want %q", doc.SchemaVersion, domain.ValidationPolicySchemaVersion)
+	}
+	if got := len(doc.Policies); got != 1 {
+		t.Fatalf("policies len = %d, want 1", got)
+	}
+	if doc.Policies[0].PolicyID != "api-contract" {
+		t.Errorf("policy_id = %q, want %q", doc.Policies[0].PolicyID, "api-contract")
+	}
+}
+
+func TestParseValidationPolicyDocument_RejectsUnknownTopLevelKey(t *testing.T) {
+	yamlBody := `schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policiez:
+  - policy_id: typo
+`
+	_, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err == nil {
+		t.Fatal("expected unknown-top-level-field error, got nil")
+	}
+	assertInvalidParams(t, err)
+	if !strings.Contains(err.Error(), "policiez") {
+		t.Errorf("error must name the offending key; got %v", err)
+	}
+}
+
+func TestParseValidationPolicyDocument_RejectsEmptyPayload(t *testing.T) {
+	_, err := domain.ParseValidationPolicyDocument(nil)
+	if err == nil {
+		t.Fatal("expected error for empty payload, got nil")
+	}
+	assertInvalidParams(t, err)
+}
+
+func TestParseValidationPolicyDocument_RejectsNonMappingRoot(t *testing.T) {
+	yamlBody := `- not-a-mapping
+`
+	_, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err == nil {
+		t.Fatal("expected error for non-mapping root, got nil")
+	}
+	assertInvalidParams(t, err)
+}
+
+func TestParseValidationPolicyDocument_PropagatesValidateErrors(t *testing.T) {
+	// advisory + blocking is rejected at the type-system layer per AC #4.
+	// Round-tripping through the parser must surface the same error.
+	yamlBody := `schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policies:
+  - policy_id: bad-mix
+    version: "1"
+    title: Mixed advisory + blocking
+    status: active
+    adr_paths: [/architecture/adr/ADR-014.md]
+    selector:
+      repository_roles: [code]
+    checks:
+      - check_id: human-review
+        name: Human review
+        kind: external
+        interpretation: advisory
+        severity: blocking
+`
+	_, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err == nil {
+		t.Fatal("expected Validate to reject advisory+blocking, got nil")
+	}
+	assertInvalidParams(t, err)
+}
+
+func TestParseValidationPolicyDocument_RejectsInvalidYAML(t *testing.T) {
+	_, err := domain.ParseValidationPolicyDocument([]byte("schema_version: \"1\"\n  : invalid"))
+	if err == nil {
+		t.Fatal("expected YAML decode error, got nil")
+	}
+	assertInvalidParams(t, err)
+}
+
+// Nested unknown keys (typos like `timeout_second` instead of
+// `timeout_seconds`, or `repo_ids` instead of `repository_ids`) MUST be
+// rejected — otherwise a misconfigured blocking-policy commit would
+// silently degrade. Codex pass-1 P2 caught the gap before this strict
+// decode landed; the cases below lock the contract in.
+func TestParseValidationPolicyDocument_RejectsNestedUnknownKey_Check(t *testing.T) {
+	yamlBody := `schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policies:
+  - policy_id: api-contract
+    version: "1"
+    title: API contract checks
+    status: active
+    adr_paths: [/architecture/adr/ADR-014.md]
+    selector:
+      repository_roles: [code]
+    checks:
+      - check_id: contract-tests
+        kind: command
+        command: go test ./api/...
+        interpretation: deterministic
+        severity: blocking
+        timeout_second: 300
+`
+	_, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err == nil {
+		t.Fatal("expected error for nested unknown key timeout_second, got nil")
+	}
+	assertInvalidParams(t, err)
+	if !strings.Contains(err.Error(), "timeout_second") {
+		t.Errorf("error must name the offending key; got %v", err)
+	}
+}
+
+func TestParseValidationPolicyDocument_RejectsNestedUnknownKey_Selector(t *testing.T) {
+	yamlBody := `schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policies:
+  - policy_id: api-contract
+    version: "1"
+    title: API contract checks
+    status: active
+    adr_paths: [/architecture/adr/ADR-014.md]
+    selector:
+      repo_ids: [payments-service]
+    checks:
+      - check_id: contract-tests
+        kind: command
+        command: go test ./api/...
+        interpretation: deterministic
+        severity: blocking
+`
+	_, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err == nil {
+		t.Fatal("expected error for nested unknown key repo_ids, got nil")
+	}
+	assertInvalidParams(t, err)
+	if !strings.Contains(err.Error(), "repo_ids") {
+		t.Errorf("error must name the offending key; got %v", err)
+	}
+}
+
+// A second YAML document inside one policy file would be silently
+// dropped by yaml.NewDecoder.Decode. Codex pass-2 P2 caught this — a
+// stray `---` could hide entire policy entries from validation. The
+// parser MUST require a single document.
+func TestParseValidationPolicyDocument_RejectsTrailingDocument(t *testing.T) {
+	yamlBody := `schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policies:
+  - policy_id: api-contract
+    version: "1"
+    title: API contract checks
+    status: active
+    adr_paths: [/architecture/adr/ADR-014.md]
+    selector:
+      repository_roles: [code]
+    checks:
+      - check_id: contract-tests
+        kind: command
+        command: go test ./api/...
+        interpretation: deterministic
+        severity: blocking
+---
+schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policies:
+  - policy_id: smuggled-policy
+    version: "1"
+    title: Hidden policy
+    status: active
+    adr_paths: [/architecture/adr/ADR-014.md]
+    selector:
+      repository_roles: [code]
+    checks:
+      - check_id: smuggled-check
+        kind: external
+        interpretation: deterministic
+        severity: blocking
+`
+	_, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err == nil {
+		t.Fatal("expected error for trailing YAML document, got nil")
+	}
+	assertInvalidParams(t, err)
+	if !strings.Contains(err.Error(), "one YAML document") {
+		t.Errorf("error must explain the constraint; got %v", err)
+	}
+}
+
+func TestParseValidationPolicyDocument_RejectsNestedUnknownKey_Policy(t *testing.T) {
+	yamlBody := `schema_version: "1"
+generated_at: 2026-04-30T10:00:00Z
+policies:
+  - policy_id: api-contract
+    version: "1"
+    title: API contract checks
+    status: active
+    adr_paths: [/architecture/adr/ADR-014.md]
+    selector:
+      repository_roles: [code]
+    checks:
+      - check_id: contract-tests
+        kind: command
+        command: go test ./api/...
+        interpretation: deterministic
+        severity: blocking
+    owner: ops
+`
+	_, err := domain.ParseValidationPolicyDocument([]byte(yamlBody))
+	if err == nil {
+		t.Fatal("expected error for nested unknown key owner on policy, got nil")
+	}
+	assertInvalidParams(t, err)
+	if !strings.Contains(err.Error(), "owner") {
+		t.Errorf("error must name the offending key; got %v", err)
+	}
+}
+
+// TestValidationPolicyCanonicalPathPrefix locks in the canonical
+// directory governed by ADR-014 / artifact-schema §5.9. If this
+// constant ever moves, the §5.9 entry and ADR-014 storage section
+// MUST move with it — the test is the failing canary.
+func TestValidationPolicyCanonicalPathPrefix(t *testing.T) {
+	if got, want := domain.ValidationPolicyCanonicalPathPrefix, "/governance/validation-policies/"; got != want {
+		t.Errorf("ValidationPolicyCanonicalPathPrefix = %q, want %q", got, want)
 	}
 }

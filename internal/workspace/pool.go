@@ -675,7 +675,10 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		// this single line is replaced with that loader and RE-001
 		// upgrades to full multi-repo enforcement automatically.
 		validator = validation.NewEngine(st,
-			validation.WithCatalogSnapshot(validation.PrimaryOnlyCatalogSnapshot(repository.PrimarySpec{})))
+			validation.WithCatalogSnapshot(validation.PrimaryOnlyCatalogSnapshot(repository.PrimarySpec{})),
+			// Validation policy registry wiring lands with TASK-004
+			// (EPIC-006); see cmd_serve.go for the matching seam.
+			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()))
 	}
 
 	// Divergence service (implements BranchCreator).
