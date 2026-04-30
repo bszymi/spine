@@ -2,7 +2,7 @@
 id: TASK-005
 type: Task
 title: Merge recovery tests and scenarios
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-005-merge-outcomes-and-recovery/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: testing
