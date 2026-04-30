@@ -6,6 +6,7 @@ import (
 
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/domain"
+	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/gitpool"
 	"github.com/bszymi/spine/internal/repository"
@@ -249,5 +250,240 @@ func TestAllAccessors_NilServiceSet(t *testing.T) {
 	}
 	if s.planningRunStarterFrom(ctx) != nil {
 		t.Error("expected nil planningRunStarter")
+	}
+	if s.stepAcknowledgerFrom(ctx) != nil {
+		t.Error("expected nil stepAcknowledger")
+	}
+	if s.candidateFinderFrom(ctx) != nil {
+		t.Error("expected nil candidateFinder")
+	}
+	if s.stepClaimerFrom(ctx) != nil {
+		t.Error("expected nil stepClaimer")
+	}
+	if s.stepReleaserFrom(ctx) != nil {
+		t.Error("expected nil stepReleaser")
+	}
+	if s.stepExecutionListerFrom(ctx) != nil {
+		t.Error("expected nil stepExecutionLister")
+	}
+}
+
+// Stubs and tests for the lifecycle-handler accessors that close the
+// platform-binding nil-deref gap (INIT-020 EPIC-001 TASK-002). Each
+// resolver follows the precedent of resultHandlerFrom: prefer the
+// workspace ServiceSet when populated, fall back to the server-level
+// field, return nil when neither is wired so handlers can degrade to
+// 503 instead of panicking on a nil orchestrator.
+
+type stubStepAcknowledger struct{ id string }
+
+func (s *stubStepAcknowledger) AcknowledgeStep(_ context.Context, _ engine.AcknowledgeRequest) (*engine.AcknowledgeResult, error) {
+	return &engine.AcknowledgeResult{ExecutionID: s.id}, nil
+}
+
+type stubCandidateFinder struct{ id string }
+
+func (s *stubCandidateFinder) FindExecutionCandidates(_ context.Context, _ engine.ExecutionCandidateFilter) ([]engine.ExecutionCandidate, error) {
+	return []engine.ExecutionCandidate{{TaskPath: s.id}}, nil
+}
+
+type stubStepClaimer struct{ id string }
+
+func (s *stubStepClaimer) ClaimStep(_ context.Context, _ engine.ClaimRequest) (*engine.ClaimResult, error) {
+	return &engine.ClaimResult{RunID: s.id}, nil
+}
+
+type stubStepReleaser struct{ id string }
+
+func (s *stubStepReleaser) ReleaseStep(_ context.Context, _ engine.ReleaseRequest) error {
+	return nil
+}
+
+type stubStepExecutionLister struct{ id string }
+
+func (s *stubStepExecutionLister) ListStepExecutions(_ context.Context, _ engine.StepExecutionQuery) ([]engine.StepExecutionItem, error) {
+	return []engine.StepExecutionItem{{ExecutionID: s.id}}, nil
+}
+
+func TestStepAcknowledgerFrom_FallsBackToServer(t *testing.T) {
+	srv := &stubStepAcknowledger{id: "server"}
+	s := &Server{stepAcknowledger: srv}
+	if got := s.stepAcknowledgerFrom(context.Background()); got != srv {
+		t.Error("expected server-level stepAcknowledger when no ServiceSet in context")
+	}
+}
+
+func TestStepAcknowledgerFrom_PrefersServiceSet(t *testing.T) {
+	serverA := &stubStepAcknowledger{id: "server"}
+	wsA := &stubStepAcknowledger{id: "workspace"}
+	s := &Server{stepAcknowledger: serverA}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepAcknowledger: wsA,
+	})
+	got := s.stepAcknowledgerFrom(ctx)
+	result, _ := got.AcknowledgeStep(context.Background(), engine.AcknowledgeRequest{})
+	if result.ExecutionID != "workspace" {
+		t.Errorf("expected workspace StepAcknowledger, got ExecutionID=%q", result.ExecutionID)
+	}
+}
+
+func TestStepAcknowledgerFrom_InvalidType_FallsBack(t *testing.T) {
+	srv := &stubStepAcknowledger{id: "server"}
+	s := &Server{stepAcknowledger: srv}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepAcknowledger: "not-a-StepAcknowledger",
+	})
+	if got := s.stepAcknowledgerFrom(ctx); got != srv {
+		t.Error("expected fallback to server-level when type assertion fails")
+	}
+}
+
+// Platform-binding regression: with no top-level field and a populated
+// ServiceSet, the resolver must dispatch to the workspace handler. This
+// is the exact shape of the bug TASK-002 fixes — handleStepAcknowledge
+// reading s.stepAcknowledger directly nil-derefed in production.
+func TestStepAcknowledgerFrom_PlatformBinding_NoTopLevel_ResolvesFromServiceSet(t *testing.T) {
+	wsA := &stubStepAcknowledger{id: "workspace"}
+	s := &Server{} // no top-level
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepAcknowledger: wsA,
+	})
+	got := s.stepAcknowledgerFrom(ctx)
+	if got == nil {
+		t.Fatal("expected workspace stepAcknowledger; resolver returned nil — handler would 503 in platform-binding mode")
+	}
+	result, _ := got.AcknowledgeStep(context.Background(), engine.AcknowledgeRequest{})
+	if result.ExecutionID != "workspace" {
+		t.Errorf("expected workspace dispatch, got ExecutionID=%q", result.ExecutionID)
+	}
+}
+
+func TestCandidateFinderFrom_FallsBackToServer(t *testing.T) {
+	cf := &stubCandidateFinder{id: "server"}
+	s := &Server{candidateFinder: cf}
+	if got := s.candidateFinderFrom(context.Background()); got != cf {
+		t.Error("expected server-level candidateFinder when no ServiceSet in context")
+	}
+}
+
+func TestCandidateFinderFrom_PrefersServiceSet(t *testing.T) {
+	serverCF := &stubCandidateFinder{id: "server"}
+	wsCF := &stubCandidateFinder{id: "workspace"}
+	s := &Server{candidateFinder: serverCF}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		CandidateFinder: wsCF,
+	})
+	got := s.candidateFinderFrom(ctx)
+	result, _ := got.FindExecutionCandidates(context.Background(), engine.ExecutionCandidateFilter{})
+	if len(result) != 1 || result[0].TaskPath != "workspace" {
+		t.Errorf("expected workspace CandidateFinder, got %+v", result)
+	}
+}
+
+func TestCandidateFinderFrom_InvalidType_FallsBack(t *testing.T) {
+	cf := &stubCandidateFinder{id: "server"}
+	s := &Server{candidateFinder: cf}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		CandidateFinder: "not-a-CandidateFinder",
+	})
+	if got := s.candidateFinderFrom(ctx); got != cf {
+		t.Error("expected fallback to server-level when type assertion fails")
+	}
+}
+
+func TestStepClaimerFrom_FallsBackToServer(t *testing.T) {
+	cl := &stubStepClaimer{id: "server"}
+	s := &Server{stepClaimer: cl}
+	if got := s.stepClaimerFrom(context.Background()); got != cl {
+		t.Error("expected server-level stepClaimer when no ServiceSet in context")
+	}
+}
+
+func TestStepClaimerFrom_PrefersServiceSet(t *testing.T) {
+	serverCL := &stubStepClaimer{id: "server"}
+	wsCL := &stubStepClaimer{id: "workspace"}
+	s := &Server{stepClaimer: serverCL}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepClaimer: wsCL,
+	})
+	got := s.stepClaimerFrom(ctx)
+	result, _ := got.ClaimStep(context.Background(), engine.ClaimRequest{})
+	if result.RunID != "workspace" {
+		t.Errorf("expected workspace StepClaimer, got RunID=%q", result.RunID)
+	}
+}
+
+func TestStepClaimerFrom_InvalidType_FallsBack(t *testing.T) {
+	cl := &stubStepClaimer{id: "server"}
+	s := &Server{stepClaimer: cl}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepClaimer: "not-a-StepClaimer",
+	})
+	if got := s.stepClaimerFrom(ctx); got != cl {
+		t.Error("expected fallback to server-level when type assertion fails")
+	}
+}
+
+func TestStepReleaserFrom_FallsBackToServer(t *testing.T) {
+	rl := &stubStepReleaser{id: "server"}
+	s := &Server{stepReleaser: rl}
+	if got := s.stepReleaserFrom(context.Background()); got != rl {
+		t.Error("expected server-level stepReleaser when no ServiceSet in context")
+	}
+}
+
+func TestStepReleaserFrom_PrefersServiceSet(t *testing.T) {
+	serverRL := &stubStepReleaser{id: "server"}
+	wsRL := &stubStepReleaser{id: "workspace"}
+	s := &Server{stepReleaser: serverRL}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepReleaser: wsRL,
+	})
+	if got := s.stepReleaserFrom(ctx); got != wsRL {
+		t.Error("expected workspace-scoped StepReleaser")
+	}
+}
+
+func TestStepReleaserFrom_InvalidType_FallsBack(t *testing.T) {
+	rl := &stubStepReleaser{id: "server"}
+	s := &Server{stepReleaser: rl}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepReleaser: "not-a-StepReleaser",
+	})
+	if got := s.stepReleaserFrom(ctx); got != rl {
+		t.Error("expected fallback to server-level when type assertion fails")
+	}
+}
+
+func TestStepExecutionListerFrom_FallsBackToServer(t *testing.T) {
+	ll := &stubStepExecutionLister{id: "server"}
+	s := &Server{stepExecutionLister: ll}
+	if got := s.stepExecutionListerFrom(context.Background()); got != ll {
+		t.Error("expected server-level stepExecutionLister when no ServiceSet in context")
+	}
+}
+
+func TestStepExecutionListerFrom_PrefersServiceSet(t *testing.T) {
+	serverLL := &stubStepExecutionLister{id: "server"}
+	wsLL := &stubStepExecutionLister{id: "workspace"}
+	s := &Server{stepExecutionLister: serverLL}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepExecutionLister: wsLL,
+	})
+	got := s.stepExecutionListerFrom(ctx)
+	steps, _ := got.ListStepExecutions(context.Background(), engine.StepExecutionQuery{})
+	if len(steps) != 1 || steps[0].ExecutionID != "workspace" {
+		t.Errorf("expected workspace StepExecutionLister, got %+v", steps)
+	}
+}
+
+func TestStepExecutionListerFrom_InvalidType_FallsBack(t *testing.T) {
+	ll := &stubStepExecutionLister{id: "server"}
+	s := &Server{stepExecutionLister: ll}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		StepExecutionLister: "not-a-StepExecutionLister",
+	})
+	if got := s.stepExecutionListerFrom(ctx); got != ll {
+		t.Error("expected fallback to server-level when type assertion fails")
 	}
 }

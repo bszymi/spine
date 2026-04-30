@@ -2,7 +2,9 @@
 id: TASK-002
 type: Task
 title: "Workspace-scoped step lifecycle handlers in platform-binding mode"
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: Five missing per-workspace resolvers (StepAcknowledger, CandidateFinder, StepClaimer, StepReleaser, StepExecutionLister) wired through workspace.ServiceSet and gateway *From(ctx) accessors, mirroring the resultHandler precedent (8af7b0d). All five handlers now degrade to 503 instead of nil-derefing in platform-binding mode. Audit comment added to cmd_serve.go documenting the contract. 11 new resolver tests cover fallback / prefer-ServiceSet / invalid-type-fallback per accessor plus an explicit platform-binding-no-top-level regression test. Quality gates green; codex review clean back-to-back.
 epic: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 work_type: bugfix

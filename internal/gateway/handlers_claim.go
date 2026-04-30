@@ -19,7 +19,8 @@ func (s *Server) handleExecutionClaim(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "execution.claim") {
 		return
 	}
-	if s.stepClaimer == nil {
+	stepClaimer := s.stepClaimerFrom(r.Context())
+	if stepClaimer == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",
 			Errors: []ErrorDetail{{Code: "unavailable", Message: "step claiming not available"}},
@@ -38,7 +39,7 @@ func (s *Server) handleExecutionClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.stepClaimer.ClaimStep(r.Context(), engine.ClaimRequest{
+	result, err := stepClaimer.ClaimStep(r.Context(), engine.ClaimRequest{
 		ActorID:     req.ActorID,
 		ExecutionID: req.ExecutionID,
 	})

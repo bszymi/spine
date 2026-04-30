@@ -20,7 +20,8 @@ func (s *Server) handleExecutionRelease(w http.ResponseWriter, r *http.Request) 
 	if !s.authorize(w, r, "execution.release") {
 		return
 	}
-	if s.stepReleaser == nil {
+	stepReleaser := s.stepReleaserFrom(r.Context())
+	if stepReleaser == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",
 			Errors: []ErrorDetail{{Code: "unavailable", Message: "step release not available"}},
@@ -39,7 +40,7 @@ func (s *Server) handleExecutionRelease(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err := s.stepReleaser.ReleaseStep(r.Context(), engine.ReleaseRequest{
+	err := stepReleaser.ReleaseStep(r.Context(), engine.ReleaseRequest{
 		ActorID:      req.ActorID,
 		AssignmentID: req.AssignmentID,
 		Reason:       req.Reason,

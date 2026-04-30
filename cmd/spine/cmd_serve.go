@@ -225,6 +225,12 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 		orch.WithWorkflowWriter(wfWriter)
 	}
 
+	// Contract: every gateway field the orchestrator owns must also live
+	// on ServiceSet and have a *From(ctx) resolver in gateway/server.go.
+	// In platform-binding mode the top-level gateway.ServerConfig has no
+	// orchestrator (deps.Store is nil), so handlers that reach for
+	// s.<field> directly nil-deref. Each per-workspace orch instance is
+	// stashed here and resolved through the request's ServiceSet.
 	ss.RunStarter = &runAdapter{orch: orch}
 	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
 	ss.WFPlanningStarter = &workflowPlanningRunAdapter{orch: orch}
@@ -232,6 +238,11 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	ss.RunMergeResolver = orch
 	ss.StepAssigner = orch
 	ss.ResultHandler = &resultAdapter{orch: orch}
+	ss.StepAcknowledger = orch
+	ss.CandidateFinder = orch
+	ss.StepClaimer = orch
+	ss.StepReleaser = orch
+	ss.StepExecutionLister = orch
 
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
 		return orch.MergeRunBranch(ctx, runID)

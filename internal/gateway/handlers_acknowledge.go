@@ -18,7 +18,8 @@ func (s *Server) handleStepAcknowledge(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "execution.claim") {
 		return
 	}
-	if s.stepAcknowledger == nil {
+	stepAcknowledger := s.stepAcknowledgerFrom(r.Context())
+	if stepAcknowledger == nil {
 		WriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{
 			Status: "error",
 			Errors: []ErrorDetail{{Code: "unavailable", Message: "step acknowledge not available"}},
@@ -43,7 +44,7 @@ func (s *Server) handleStepAcknowledge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.stepAcknowledger.AcknowledgeStep(r.Context(), engine.AcknowledgeRequest{
+	result, err := stepAcknowledger.AcknowledgeStep(r.Context(), engine.AcknowledgeRequest{
 		ActorID:     req.ActorID,
 		ExecutionID: executionID,
 	})
