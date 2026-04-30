@@ -527,7 +527,12 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		// this single line is replaced with that loader and RE-001
 		// upgrades to full multi-repo enforcement automatically.
 		validator = validation.NewEngine(deps.Store,
-			validation.WithCatalogSnapshot(validation.PrimaryOnlyCatalogSnapshot(repository.PrimarySpec{})))
+			validation.WithCatalogSnapshot(validation.PrimaryOnlyCatalogSnapshot(repository.PrimarySpec{})),
+			// Validation policy registry wiring lands with TASK-004
+			// (EPIC-006). The Noop resolver makes the seam visible
+			// without changing today's LC-004 behavior — every
+			// non-projection link target is still dangling.
+			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()))
 	}
 
 	wfResolver, wfProvider := buildWorkflowResolver(deps.Store, primaryClient)

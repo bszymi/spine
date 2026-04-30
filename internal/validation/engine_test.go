@@ -234,6 +234,121 @@ func TestLC005_NonCanonicalPath(t *testing.T) {
 	}
 }
 
+// LC-004 with a wired GovernedFileResolver: a link to a pure-YAML
+// governed artifact (validation policy, repository catalog) is not
+// flagged as dangling when the resolver claims it. Anchors AC #4 of
+// EPIC-006 TASK-007 — "ADRs can declare typed links to validation
+// policies and validation catches dangling links".
+func TestLC004_GovernedFileResolver_AcceptsKnownPolicyTarget(t *testing.T) {
+	const policyTarget = "/governance/validation-policies/api-contract.yaml"
+	fs := newFakeStore()
+	addArtifact(fs, "architecture/adr/ADR-099-test.md", "ADR", "Accepted", nil,
+		[]domain.Link{{Type: "related_to", Target: policyTarget}})
+
+	resolver := func(_ context.Context, target string) bool {
+		return target == policyTarget
+	}
+	e := validation.NewEngine(fs, validation.WithGovernedFileResolver(resolver))
+	result := e.Validate(context.Background(), "architecture/adr/ADR-099-test.md")
+	if hasRuleError(result, "LC-004") {
+		t.Errorf("LC-004 should not flag a target the resolver claims; got %+v", result.Errors)
+	}
+}
+
+func TestLC004_GovernedFileResolver_StillFlagsUnknownTarget(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "architecture/adr/ADR-099-test.md", "ADR", "Accepted", nil,
+		[]domain.Link{{Type: "related_to", Target: "/governance/validation-policies/typo.yaml"}})
+
+	// Resolver only accepts api-contract.yaml; the link points elsewhere.
+	resolver := func(_ context.Context, target string) bool {
+		return target == "/governance/validation-policies/api-contract.yaml"
+	}
+	e := validation.NewEngine(fs, validation.WithGovernedFileResolver(resolver))
+	result := e.Validate(context.Background(), "architecture/adr/ADR-099-test.md")
+	if !hasRuleError(result, "LC-004") {
+		t.Error("LC-004 must still flag a target neither the projection nor the resolver knows about")
+	}
+}
+
+// Default behavior (no resolver wired) is preserved: every
+// non-projection target is dangling, just as before TASK-007.
+func TestLC004_NoResolver_DefaultsToProjectionOnly(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "architecture/adr/ADR-099-test.md", "ADR", "Accepted", nil,
+		[]domain.Link{{Type: "related_to", Target: "/governance/validation-policies/api-contract.yaml"}})
+
+	e := validation.NewEngine(fs) // no WithGovernedFileResolver
+	result := e.Validate(context.Background(), "architecture/adr/ADR-099-test.md")
+	if !hasRuleError(result, "LC-004") {
+		t.Error("LC-004 must flag non-projection link targets when no resolver is wired (preserves pre-TASK-007 behavior)")
+	}
+}
+
+// NoopGovernedFileResolver is the explicit production placeholder while
+// the policy registry wiring (TASK-004) is pending. It MUST behave as if
+// no resolver were wired.
+func TestNoopGovernedFileResolver_NeverResolves(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "architecture/adr/ADR-099-test.md", "ADR", "Accepted", nil,
+		[]domain.Link{{Type: "related_to", Target: "/governance/validation-policies/api-contract.yaml"}})
+
+	e := validation.NewEngine(fs,
+		validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()))
+	result := e.Validate(context.Background(), "architecture/adr/ADR-099-test.md")
+	if !hasRuleError(result, "LC-004") {
+		t.Error("NoopGovernedFileResolver must preserve LC-004's projection-only behavior")
+	}
+}
+
+// LC-004 must not hand non-canonical (no leading-slash) paths to the
+// resolver — the resolver contract relies on canonical inputs. LC-005
+// flags non-canonical targets separately, so LC-004's job here is to
+// emit the standard dangling-link error and skip the resolver.
+func TestLC004_GovernedFileResolver_NotCalledForNonCanonicalTarget(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "architecture/adr/ADR-099-test.md", "ADR", "Accepted", nil,
+		[]domain.Link{{Type: "related_to", Target: "governance/validation-policies/api-contract.yaml"}})
+
+	resolverCalls := 0
+	resolver := func(_ context.Context, _ string) bool {
+		resolverCalls++
+		return true // would otherwise mask the failure
+	}
+	e := validation.NewEngine(fs, validation.WithGovernedFileResolver(resolver))
+	result := e.Validate(context.Background(), "architecture/adr/ADR-099-test.md")
+	if !hasRuleError(result, "LC-004") {
+		t.Error("LC-004 must still flag a non-canonical link target as dangling, even when a resolver would claim it")
+	}
+	if resolverCalls != 0 {
+		t.Errorf("resolver must not be consulted for non-canonical paths; got %d calls", resolverCalls)
+	}
+}
+
+// Projection lookup wins over the resolver: when the target IS in the
+// projection, the resolver is not even consulted. Guards against an
+// over-eager resolver masking projection truth.
+func TestLC004_GovernedFileResolver_ProjectionTakesPrecedence(t *testing.T) {
+	fs := newFakeStore()
+	addArtifact(fs, "architecture/adr/ADR-099-test.md", "ADR", "Accepted", nil,
+		[]domain.Link{{Type: "related_to", Target: "/architecture/some-doc.md"}})
+	addArtifact(fs, "architecture/some-doc.md", "Architecture", "Living Document", nil, nil)
+
+	resolverCalls := 0
+	resolver := func(_ context.Context, _ string) bool {
+		resolverCalls++
+		return false
+	}
+	e := validation.NewEngine(fs, validation.WithGovernedFileResolver(resolver))
+	result := e.Validate(context.Background(), "architecture/adr/ADR-099-test.md")
+	if hasRuleError(result, "LC-004") {
+		t.Error("LC-004 must trust the projection over the resolver")
+	}
+	if resolverCalls != 0 {
+		t.Errorf("resolver must not be consulted when the projection has the target; got %d calls", resolverCalls)
+	}
+}
+
 // ── SC Tests ──
 
 func TestSC001_CompletedTaskNoAcceptance(t *testing.T) {

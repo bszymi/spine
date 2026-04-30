@@ -2,16 +2,20 @@
 id: TASK-007
 type: Task
 title: Register validation policy as a governed artifact type
-status: Pending
+status: Completed
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: design
 created: 2026-04-28
+acceptance: Approved
+acceptance_rationale: ADR-014 drafted, /governance/artifact-schema.md §5.9 added, ParseValidationPolicyDocument shipped with strict-decode + single-document enforcement, LC-004 GovernedFileResolver hook landed with canonical-path guard, multi-repo integration cross-link added. All four deliverables verified; quality gates green.
 links:
   - type: parent
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/epic.md
   - type: blocked_by
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-002-adr-linked-validation-policy-format.md
+  - type: related_to
+    target: /architecture/adr/ADR-014-validation-policy-as-governed-artifact.md
 ---
 
 # TASK-007 - Register Validation Policy as a Governed Artifact Type

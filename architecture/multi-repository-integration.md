@@ -433,8 +433,11 @@ Soft deletion — flipping the binding row's `status` to `inactive` while leavin
 - [System Components](/architecture/components.md) — Artifact Service, Projection Service, Engine
 - [Product Definition: Multi-Repository Workspaces](/product/multi-repository-workspaces.md) — product model and use cases
 - [Security Model](/architecture/security-model.md) — credential management
-- [Artifact Front Matter Schema](/governance/artifact-schema.md) — catalog file as a governed artifact
+- [Artifact Front Matter Schema](/governance/artifact-schema.md) — catalog file (§5.8) and validation policy file (§5.9) as governed artifacts
+- [Validation Policy Format](/architecture/validation-policy.md) — schema for `/governance/validation-policies/<name>.yaml`, the deterministic enforcement recipe an ADR links to
+- [Execution Evidence Schema](/architecture/execution-evidence.md) — `RequiredChecks` / `AdvisoryChecks` lists that policy `severity` selects between
 - [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md) — identity model and catalog/binding split
+- [ADR-014](/architecture/adr/ADR-014-validation-policy-as-governed-artifact.md) — validation policy as a governed artifact type
 - [INIT-014](/initiatives/INIT-014-multi-repository-workspaces/initiative.md) — parent initiative
 - [INIT-009 TASK-006](/initiatives/INIT-009-workspace-runtime/epics/EPIC-001-core-runtime/tasks/TASK-006-git-http-serve-endpoint.md) — git HTTP serve endpoint (extended for repo routing)
 

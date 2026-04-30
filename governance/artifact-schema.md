@@ -413,6 +413,27 @@ Catalog changes (registering or deregistering a code repository) produce governa
 
 ---
 
+### 5.9 Validation Policy
+
+A validation policy at `/governance/validation-policies/<name>.yaml` is a governed artifact: it is committed to the primary Spine repository, parsed and validated by `internal/domain/validation_policy.go::ParseValidationPolicyDocument` whenever a loader reads it, and changed only through governance commits. Workspace-load and per-commit enforcement (i.e. invoking the parser as part of the validation pipeline) is wired in [TASK-004 of EPIC-006](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-004-validation-service-evidence-rules.md); the schema and the rejection contract land here so TASK-004's wiring is a one-line change rather than a redesign. Like §5.8 above, this is a pure YAML file with no Markdown body and no front matter, so the schema rules in §2 and §4 do not apply to it.
+
+| Property | Value |
+|----------|-------|
+| Canonical path | `/governance/validation-policies/<name>.yaml` |
+| Format | YAML `ValidationPolicyDocument` (no front matter, no Markdown body) |
+| Required when | A workspace wants to make one or more ADRs deterministically enforceable |
+| Optional when | Always — workspaces with no policies behave as before EPIC-006 |
+| Identity authority | The file path (canonical) plus the document's `policy_id` values. `policy_id` is unique within a single document; identity across the workspace is `(canonical document path, policy_id)` |
+| Schema and validation | Defined in [Validation Policy Format](/architecture/validation-policy.md) and [ADR-014](/architecture/adr/ADR-014-validation-policy-as-governed-artifact.md) |
+| Lifecycle | Each policy carries a `status` field: `draft`, `active`, `deprecated`, `superseded` (see ADR-014) |
+| ADR linkage | Each policy declares one or more `adr_paths` entries (mandatory). ADRs MAY add a `related_to` link back to the policy file; LC-004 catches dangling references when the policy registry is wired |
+
+Policy changes (drafting, activating, deprecating, or superseding a policy) produce governance commits using the standard commit format defined in [Git Integration §5](/architecture/git-integration.md). Schema-level malformations — including unknown keys at any nesting level — are rejected by the parser at `internal/domain/validation_policy.go::ParseValidationPolicyDocument` with the same `domain.ErrInvalidParams` error shape used by the repository catalog parser. Document-level invariants (`policy_id` unique within the document; `check_id` unique across all checks in the document) are enforced by `ValidationPolicyDocument.Validate`. Set-level invariants (`check_id` unique across every policy file in the workspace) are enforced by `ValidateAcrossDocuments`.
+
+The `name` segment is a short kebab-case label chosen by the author (e.g. `api-contract.yaml`, `migration-safety.yaml`); the validation pipeline treats the filename as opaque and resolves identity through `policy_id`. A single file MAY hold one or more policies — see [Validation Policy Format §3](/architecture/validation-policy.md).
+
+---
+
 ## 6. Status Enums
 
 Different artifact types use different status values:
@@ -426,6 +447,7 @@ Different artifact types use different status values:
 | Governance | `Living Document`, `Foundational`, `Superseded` |
 | Architecture | `Living Document`, `Stable`, `Superseded` |
 | Product | `Living Document`, `Stable`, `Superseded` |
+| Validation Policy | `draft`, `active`, `deprecated`, `superseded` (per-policy `status` field; lower-case to match the on-disk YAML enum) |
 
 ---
 
