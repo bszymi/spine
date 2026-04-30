@@ -463,6 +463,15 @@ func (s *Server) runMergeResolverFrom(ctx context.Context) RunMergeResolver {
 	}, s.runMergeResolver)
 }
 
+func (s *Server) resultHandlerFrom(ctx context.Context) ResultHandler {
+	return resolve(ctx, func(ss *workspace.ServiceSet) ResultHandler {
+		if rh, ok := ss.ResultHandler.(ResultHandler); ok {
+			return rh
+		}
+		return nil
+	}, s.resultHandler)
+}
+
 func (s *Server) planningRunStarterFrom(ctx context.Context) PlanningRunStarter {
 	return resolve(ctx, func(ss *workspace.ServiceSet) PlanningRunStarter {
 		if ps, ok := ss.PlanningRunStarter.(PlanningRunStarter); ok {

@@ -231,6 +231,7 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	ss.RunCanceller = orch
 	ss.RunMergeResolver = orch
 	ss.StepAssigner = orch
+	ss.ResultHandler = &resultAdapter{orch: orch}
 
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
 		return orch.MergeRunBranch(ctx, runID)

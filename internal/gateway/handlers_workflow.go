@@ -364,7 +364,8 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 
 	executionID := chi.URLParam(r, "assignment_id")
 
-	if s.resultHandler == nil {
+	resultHandler := s.resultHandlerFrom(r.Context())
+	if resultHandler == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "result handler not configured"))
 		return
 	}
@@ -395,7 +396,7 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 			artifactPaths = append(artifactPaths, a.Path)
 		}
 	}
-	resp, err := s.resultHandler.IngestResult(r.Context(), ResultSubmission{
+	resp, err := resultHandler.IngestResult(r.Context(), ResultSubmission{
 		ExecutionID:       executionID,
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: artifactPaths,

@@ -73,6 +73,7 @@ type ServiceSet struct {
 	RunCanceller       any
 	RunMergeResolver   any
 	StepAssigner       any
+	ResultHandler      any
 
 	// close is called when the service set is evicted or the pool
 	// shuts down. The reason is recorded on the per-workspace pool
