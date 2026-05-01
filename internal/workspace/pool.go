@@ -79,12 +79,50 @@ type ServiceSet struct {
 	StepClaimer         any
 	StepReleaser        any
 	StepExecutionLister any
+	// EventBroadcaster is the per-workspace SSE fan-out point owned by
+	// the workspace's DeliverySubscriber. Populated by the cmd/spine
+	// pool builder when SPINE_EVENT_DELIVERY is on; resolved by the
+	// gateway's /api/v1/events/stream handler via *From(ctx) so the
+	// per-workspace stream sees the same events that landed in
+	// runtime.event_log. Typed as any to keep this package free of the
+	// delivery import.
+	EventBroadcaster any
+
+	// Done is closed at the start of close() so long-lived observers
+	// (most importantly the SSE event stream) can detect that this
+	// ServiceSet is being torn down — idle eviction, binding
+	// invalidation, or pool shutdown — and disconnect promptly. After
+	// Done fires, the workspace's per-tenant store and event router
+	// are racing to shut down; observers must NOT issue further calls
+	// against ss.* and instead surrender so the pool can rebuild
+	// fresh services for the next pool.Get. Single-workspace test
+	// constructions that build a ServiceSet by hand without
+	// buildServiceSet leave Done nil, which selects-block forever —
+	// the desired non-pooled semantics.
+	Done <-chan struct{}
 
 	// close is called when the service set is evicted or the pool
 	// shuts down. The reason is recorded on the per-workspace pool
 	// close-reason metric (ADR-012). Callers pass one of:
 	// "shutdown", "idle", "invalidate", "init-error".
 	close func(reason string)
+}
+
+// AppendCloser registers a function to run when this ServiceSet is
+// closed. It runs BEFORE the existing closers, so callers can stop
+// dependents (e.g. cancel a per-workspace event-delivery context) ahead
+// of foundational teardown like queue.Stop / store close. Used by the
+// post-construction builder hook to attach engine-dependent goroutine
+// cancellation; buildServiceSet's intra-construction closers stay in
+// the original closeAll chain.
+func (ss *ServiceSet) AppendCloser(fn func(reason string)) {
+	prev := ss.close
+	ss.close = func(reason string) {
+		fn(reason)
+		if prev != nil {
+			prev(reason)
+		}
+	}
 }
 
 type poolEntry struct {
@@ -697,7 +735,15 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		divSvc.WithBranchProtectPolicy(branchprotect.New(bpprojection.New(st)))
 	}
 
+	// done fires at the START of teardown so long-lived workspace-bound
+	// observers (SSE streams, future watchers) can detect eviction
+	// before any closer runs. One-shot: the first close call signals
+	// done; defensive sync.Once guards against any future caller
+	// double-closing the same ServiceSet.
+	done := make(chan struct{})
+	var doneOnce sync.Once
 	closeAll := func(reason string) {
+		doneOnce.Do(func() { close(done) })
 		for i := len(closers) - 1; i >= 0; i-- {
 			closers[i](reason)
 		}
@@ -724,6 +770,7 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		GitPool:    gitPool,
 		Validator:  validator,
 		Divergence: divSvc,
+		Done:       done,
 		close:      closeAll,
 	}
 

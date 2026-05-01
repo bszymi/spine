@@ -535,6 +535,21 @@ func (s *Server) stepExecutionListerFrom(ctx context.Context) StepExecutionListe
 	}, s.stepExecutionLister)
 }
 
+// eventBroadcasterFrom resolves the per-workspace SSE broadcaster
+// installed by the cmd/spine pool builder when SPINE_EVENT_DELIVERY is
+// on. Falls back to the server-level broadcaster (single-workspace
+// mode wires it through ServerConfig.EventBroadcaster). Returns nil
+// only when no broadcaster is configured anywhere — handlers degrade
+// to 503 in that case rather than nil-derefing on Subscribe.
+func (s *Server) eventBroadcasterFrom(ctx context.Context) *delivery.EventBroadcaster {
+	return resolve(ctx, func(ss *workspace.ServiceSet) *delivery.EventBroadcaster {
+		if b, ok := ss.EventBroadcaster.(*delivery.EventBroadcaster); ok {
+			return b
+		}
+		return nil
+	}, s.eventBroadcaster)
+}
+
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe() error {
 	return s.httpServer.ListenAndServe()

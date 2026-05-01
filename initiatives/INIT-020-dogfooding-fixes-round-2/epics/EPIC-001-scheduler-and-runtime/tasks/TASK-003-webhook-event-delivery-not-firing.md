@@ -2,7 +2,9 @@
 id: TASK-003
 type: Task
 title: "Webhook event delivery not firing in platform-binding mode"
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: Per-workspace DeliverySubscriber + WebhookDispatcher + RetentionCleanup wired in newPooledWorkspaceBuilder against the workspace's own store and event router. SubscribeBroadcaster plumbed onto ServiceSet so SSE resolves per-workspace. Pool-ref-during-stream regression fixed via sync.Once-protected release and a new ServiceSet.Done eviction signal that lets long-lived SSE streams disconnect on workspace teardown. End-to-end captureStore tests verify event_log + delivery_queue writes; AppendCloser, Done, and resolver tests cover the wiring contract. All four ACs satisfied; quality gates green; codex 9 passes (3 with findings + 6 clean total; final 2 back-to-back).
 epic: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 work_type: bugfix
