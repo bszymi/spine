@@ -1024,3 +1024,114 @@ func TestServicePool_GetAfterEvict_ReResolves(t *testing.T) {
 		t.Errorf("expected resolver to be called again after evict; calls before=%d after=%d", callsBefore, got)
 	}
 }
+
+// AppendCloser is the seam used by the cmd/spine pool builder to
+// register per-workspace event delivery cancellation (TASK-003). The
+// contract: appended closers run BEFORE the existing chain so dependent
+// goroutines (subscriber/dispatcher/retention) cancel their context
+// ahead of foundational teardown like queue.Stop. Without this ordering
+// the dispatcher would observe a stopped queue mid-emit.
+func TestAppendCloser_RunsAppendedFnFirst(t *testing.T) {
+	var order []string
+	ss := &ServiceSet{
+		close: func(string) { order = append(order, "existing") },
+	}
+	ss.AppendCloser(func(string) { order = append(order, "appended") })
+
+	ss.close("shutdown")
+
+	if got, want := strings.Join(order, ","), "appended,existing"; got != want {
+		t.Errorf("close order = %q, want %q", got, want)
+	}
+}
+
+// AppendCloser also has to handle ServiceSets that have no prior close
+// — namely test-only constructions. Without the nil check the wrapper
+// would call (*ServiceSet)(nil)'s zero-value func and panic.
+func TestAppendCloser_NoPriorClose_FnRunsAlone(t *testing.T) {
+	ss := &ServiceSet{}
+	called := false
+	ss.AppendCloser(func(string) { called = true })
+
+	ss.close("shutdown")
+
+	if !called {
+		t.Error("appended closer should run when there is no prior close")
+	}
+}
+
+// Stacked AppendCloser calls compose in LIFO order: the most recently
+// registered closer runs first, then the previous, then the original
+// chain. Mirrors the in-construction LIFO closer behavior the rest of
+// buildServiceSet relies on.
+func TestAppendCloser_StacksLIFO(t *testing.T) {
+	var order []string
+	ss := &ServiceSet{
+		close: func(string) { order = append(order, "base") },
+	}
+	ss.AppendCloser(func(string) { order = append(order, "first-appended") })
+	ss.AppendCloser(func(string) { order = append(order, "second-appended") })
+
+	ss.close("shutdown")
+
+	if got, want := strings.Join(order, ","), "second-appended,first-appended,base"; got != want {
+		t.Errorf("close order = %q, want %q", got, want)
+	}
+}
+
+// The reason argument propagates to every closer in the chain.
+func TestAppendCloser_PropagatesReason(t *testing.T) {
+	var existingReason, appendedReason string
+	ss := &ServiceSet{
+		close: func(reason string) { existingReason = reason },
+	}
+	ss.AppendCloser(func(reason string) { appendedReason = reason })
+
+	ss.close("idle")
+
+	if appendedReason != "idle" || existingReason != "idle" {
+		t.Errorf("reason propagation: appended=%q existing=%q", appendedReason, existingReason)
+	}
+}
+
+// ServiceSet.Done is the eviction signal SSE relies on. Built at
+// buildServiceSet time and closed at the start of close() so observers
+// react before resources tear down — without this, a long-lived SSE
+// stream that already released the pool ref keeps streaming
+// heartbeats from a halted subscriber's broadcaster, silently missing
+// every event after eviction.
+func TestServiceSet_Done_ClosedOnClose(t *testing.T) {
+	t.Setenv("SPINE_WORKSPACE_ID", "ws-done")
+	t.Setenv("SPINE_DATABASE_URL", "")
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	cfg, err := NewFileProvider(nil).Resolve(ctx, "ws-done")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	ss, err := buildServiceSet(ctx, *cfg, nil, nil, nil, PoolPolicy{})
+	if err != nil {
+		t.Fatalf("buildServiceSet: %v", err)
+	}
+
+	if ss.Done == nil {
+		t.Fatal("ss.Done must be non-nil for buildServiceSet results")
+	}
+
+	select {
+	case <-ss.Done:
+		t.Fatal("ss.Done should not be closed before close() runs")
+	default:
+	}
+
+	ss.close("idle")
+
+	select {
+	case <-ss.Done:
+		// expected
+	case <-time.After(time.Second):
+		t.Fatal("ss.Done should be closed after close() runs")
+	}
+}
+

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
@@ -485,5 +486,59 @@ func TestStepExecutionListerFrom_InvalidType_FallsBack(t *testing.T) {
 	})
 	if got := s.stepExecutionListerFrom(ctx); got != ll {
 		t.Error("expected fallback to server-level when type assertion fails")
+	}
+}
+
+// EventBroadcaster resolver — TASK-003 SSE in platform-binding mode.
+// Same shape as the lifecycle-handler resolvers: prefer ServiceSet,
+// fall back to server, type-assert the any slot.
+
+func TestEventBroadcasterFrom_FallsBackToServer(t *testing.T) {
+	srv := delivery.NewEventBroadcaster()
+	s := &Server{eventBroadcaster: srv}
+	if got := s.eventBroadcasterFrom(context.Background()); got != srv {
+		t.Error("expected server-level eventBroadcaster when no ServiceSet in context")
+	}
+}
+
+func TestEventBroadcasterFrom_PrefersServiceSet(t *testing.T) {
+	serverB := delivery.NewEventBroadcaster()
+	wsB := delivery.NewEventBroadcaster()
+	s := &Server{eventBroadcaster: serverB}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		EventBroadcaster: wsB,
+	})
+	if got := s.eventBroadcasterFrom(ctx); got != wsB {
+		t.Error("expected workspace-scoped EventBroadcaster from ServiceSet")
+	}
+}
+
+func TestEventBroadcasterFrom_InvalidType_FallsBack(t *testing.T) {
+	srv := delivery.NewEventBroadcaster()
+	s := &Server{eventBroadcaster: srv}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		EventBroadcaster: "not-a-broadcaster",
+	})
+	if got := s.eventBroadcasterFrom(ctx); got != srv {
+		t.Error("expected fallback to server-level when type assertion fails")
+	}
+}
+
+// Platform-binding regression: nil top-level + populated ServiceSet
+// must dispatch to the workspace broadcaster. Without this resolver,
+// /api/v1/events/stream returned 503 in platform-binding mode even
+// after TASK-003 wired per-workspace delivery.
+func TestEventBroadcasterFrom_PlatformBinding_NoTopLevel_ResolvesFromServiceSet(t *testing.T) {
+	wsB := delivery.NewEventBroadcaster()
+	s := &Server{}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		EventBroadcaster: wsB,
+	})
+	got := s.eventBroadcasterFrom(ctx)
+	if got == nil {
+		t.Fatal("expected workspace EventBroadcaster; resolver returned nil — SSE would 503 in platform-binding")
+	}
+	if got != wsB {
+		t.Error("expected the workspace's broadcaster to be returned")
 	}
 }

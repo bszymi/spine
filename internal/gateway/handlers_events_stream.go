@@ -29,7 +29,8 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.eventBroadcaster == nil {
+	eventBroadcaster := s.eventBroadcasterFrom(r.Context())
+	if eventBroadcaster == nil {
 		WriteError(w, domain.NewError(domain.ErrUnavailable, "event delivery not configured"))
 		return
 	}
@@ -98,10 +99,38 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Capture the workspace's eviction signal BEFORE releasing the pool
+	// ref. After release the pool may evict the ServiceSet at any time;
+	// reading ss.Done from the (still pointer-valid) ServiceSet object
+	// lets the loop below disconnect promptly so the client reconnects
+	// against fresh per-workspace services. ssDone is nil in
+	// single-workspace mode (no ServiceSet on the request), where a
+	// nil channel selects-blocks forever — the desired behavior:
+	// nothing to react to.
+	var ssDone <-chan struct{}
+	if ss := serviceSetFromContext(r.Context()); ss != nil {
+		ssDone = ss.Done
+	}
+
+	// Release the workspace pool ref before entering the live loop. The
+	// rest of the handler operates on the captured eventBroadcaster
+	// reference only, never on ss.Store, so we no longer need to pin
+	// the pool entry. Without this, an open SSE stream would hold the
+	// pool entry's refCount > 0 for the entire stream lifetime; a
+	// concurrent ServicePool.Evict (binding invalidation, idle reaper)
+	// would mark the entry evicting and leave subsequent pool.Get
+	// calls for the same workspace blocked on the gone channel until
+	// the stream disconnects. Releasing here lets eviction complete
+	// promptly; the ssDone select branch above ensures we don't keep
+	// streaming heartbeats from a halted broadcaster after the
+	// workspace is rebuilt. The middleware release is sync.Once-
+	// protected, so its defer remains a safe no-op for this request.
+	releaseWorkspaceRef(r.Context())
+
 	// Subscribe to broadcaster — automatically cleaned up on disconnect
 	events := make(chan domain.Event, 100)
-	subID := s.eventBroadcaster.Subscribe(events)
-	defer s.eventBroadcaster.Unsubscribe(subID)
+	subID := eventBroadcaster.Subscribe(events)
+	defer eventBroadcaster.Unsubscribe(subID)
 
 	// Stream loop
 	heartbeat := time.NewTicker(sseHeartbeat)
@@ -111,6 +140,9 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			log.Info("SSE stream disconnected")
+			return
+		case <-ssDone:
+			log.Info("SSE stream closing: workspace evicted")
 			return
 		case evt := <-events:
 			if typeFilter != nil && !typeFilter[string(evt.Type)] {

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/internal/auth"
@@ -19,11 +20,25 @@ import (
 // Context keys are empty structs so they collide only with themselves and
 // their label never leaks when a context is formatted for debug output.
 type (
-	actorKey        struct{}
-	workspaceKey    struct{}
-	serviceSetKey   struct{}
-	workspaceErrKey struct{}
+	actorKey                 struct{}
+	workspaceKey             struct{}
+	serviceSetKey            struct{}
+	workspaceErrKey          struct{}
+	releaseWorkspaceRefKey   struct{}
 )
+
+// releaseWorkspaceRef invokes the request's pool-release function if
+// the workspace middleware installed one. Long-lived handlers (e.g.
+// SSE streams) call this after they've finished using the
+// ServiceSet's underlying store so a binding invalidation does not
+// have to wait on the entire request lifetime to evict and rebuild
+// the workspace's services. The middleware's deferred release is
+// idempotent (sync.Once-protected), so calling this early is safe.
+func releaseWorkspaceRef(ctx context.Context) {
+	if release, ok := ctx.Value(releaseWorkspaceRefKey{}).(func()); ok {
+		release()
+	}
+}
 
 // pendingWorkspaceErr returns the workspace-resolution error that
 // workspaceMiddleware deferred to authMiddleware (and ok=false if there is
@@ -102,7 +117,17 @@ func (s *Server) workspaceMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			ctx = context.WithValue(ctx, serviceSetKey{}, ss)
-			defer s.servicePool.Release(cfg.ID)
+			// sync.Once guards the release so a long-lived handler
+			// (e.g. handleEventStream) can call releaseWorkspaceRef
+			// once it no longer needs the ServiceSet's store, and
+			// this defer remains a safe no-op cleanup.
+			var releaseOnce sync.Once
+			workspaceID := cfg.ID
+			release := func() {
+				releaseOnce.Do(func() { s.servicePool.Release(workspaceID) })
+			}
+			ctx = context.WithValue(ctx, releaseWorkspaceRefKey{}, release)
+			defer release()
 		}
 
 		next.ServeHTTP(w, r.WithContext(ctx))

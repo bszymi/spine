@@ -231,6 +231,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	// orchestrator (deps.Store is nil), so handlers that reach for
 	// s.<field> directly nil-deref. Each per-workspace orch instance is
 	// stashed here and resolved through the request's ServiceSet.
+	// Per-workspace event delivery (subscriber + dispatcher) is wired
+	// alongside this in newPooledWorkspaceBuilder so it shares the same
+	// ServiceSet eviction lifecycle.
 	ss.RunStarter = &runAdapter{orch: orch}
 	ss.PlanningRunStarter = &planningRunAdapter{orch: orch}
 	ss.WFPlanningStarter = &workflowPlanningRunAdapter{orch: orch}
@@ -262,6 +265,130 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	}
 
 	return nil
+}
+
+// workspaceDeliveryConfig holds the env-derived delivery settings the
+// pooled workspace builder needs to start per-workspace event delivery.
+// Identical fields to the top-level startEventDelivery path; built once
+// in serveCmd so single-mode and pooled modes share the same source of
+// truth and the same parser quirks.
+type workspaceDeliveryConfig struct {
+	Enabled          bool
+	WebhookTargets   *delivery.TargetValidator
+	EventRetention   time.Duration
+	SMPEventURL      string
+	SMPInternalToken string
+}
+
+// loadWorkspaceDeliveryConfig reads the env vars that drive event
+// delivery into a single struct. Called once at boot so the pool builder
+// (db / platform-binding modes) and the top-level startEventDelivery
+// (file mode) agree on configuration. SMP_WORKSPACE_ID is intentionally
+// NOT here — in pooled modes it comes from the per-workspace binding
+// (ss.Config.SMPWorkspaceID), not the process env.
+func loadWorkspaceDeliveryConfig() workspaceDeliveryConfig {
+	cfg := workspaceDeliveryConfig{
+		Enabled:          os.Getenv("SPINE_EVENT_DELIVERY") == "true",
+		WebhookTargets:   delivery.NewTargetValidator(parseWebhookAllowedHosts(os.Getenv("SPINE_WEBHOOK_ALLOWED_HOSTS"))),
+		SMPEventURL:      os.Getenv("SMP_EVENT_URL"),
+		SMPInternalToken: os.Getenv("SMP_INTERNAL_TOKEN"),
+	}
+	if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.EventRetention = d
+		}
+	}
+	return cfg
+}
+
+// newPooledWorkspaceBuilder composes the orchestrator wiring with
+// optional per-workspace event delivery into a single
+// workspace.ServiceSetBuilder. Used by db and platform-binding pool
+// modes, where deps.Store is nil and the top-level startEventDelivery
+// guard skips delivery entirely.
+//
+// Without this, every workspace event (`step.assigned`, `step.completed`,
+// etc.) emitted onto the per-workspace ss.Events router has no
+// subscriber, so runtime.event_log stays empty and no webhook ever
+// fires. The fix routes the same DeliverySubscriber + WebhookDispatcher
+// pair through every workspace's per-tenant store and event router,
+// with cancellation tied to ServiceSet eviction.
+func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Logger) workspace.ServiceSetBuilder {
+	return func(ctx context.Context, ss *workspace.ServiceSet) error {
+		if err := workspaceOrchestratorBuilder(ctx, ss); err != nil {
+			return err
+		}
+		if deliveryCfg.Enabled && ss.Store != nil && ss.Events != nil {
+			wireWorkspaceDelivery(ctx, ss, deliveryCfg, log)
+		}
+		return nil
+	}
+}
+
+// wireWorkspaceDelivery starts a per-workspace DeliverySubscriber,
+// WebhookDispatcher, and retention cleanup loop, all bound to the
+// workspace's own store and event router. Cancellation is tied to
+// ServiceSet eviction via AppendCloser so a workspace going idle (or
+// the pool closing) tears the goroutines down cleanly.
+//
+// The workspace's SMP binding (ss.Config.SMPWorkspaceID) is the source
+// of truth for the bootstrap subscription's WorkspaceID — using the
+// process-level SMP_WORKSPACE_ID env var here would label every
+// workspace's internal subscription with the same SMP ID, which is
+// only correct in single-tenant dedicated mode.
+//
+// Idle-eviction trade-off: when the pool evicts an idle workspace its
+// dispatcher stops, but pending and scheduled-retry deliveries persist
+// in the per-workspace runtime.event_delivery_queue. The next pool.Get
+// for that workspace re-invokes this function, and the fresh dispatcher
+// claims any deliveries whose next_attempt_at is in the past — so a
+// retry scheduled past the idle window is still delivered the next
+// time the workspace sees traffic. The remaining failure mode is a
+// workspace that is permanently inactive after a retry is queued; for
+// the default backoff (max ~16s, well under the 10-min default
+// IdleTimeout) this is unreachable. Operators choosing a short
+// SPINE_WS_POOL_IDLE_TIMEOUT relative to peer Retry-After windows
+// should expect retry latency to extend until the next pool.Get for
+// the affected workspace.
+func wireWorkspaceDelivery(ctx context.Context, ss *workspace.ServiceSet, cfg workspaceDeliveryConfig, log *slog.Logger) {
+	deliveryCtx, cancel := context.WithCancel(ctx)
+
+	if cfg.SMPEventURL != "" {
+		if err := delivery.BootstrapInternalSubscription(deliveryCtx, ss.Store, delivery.BootstrapConfig{
+			EventURL:    cfg.SMPEventURL,
+			WorkspaceID: ss.Config.SMPWorkspaceID,
+			Token:       cfg.SMPInternalToken,
+		}); err != nil {
+			log.Error("workspace bootstrap internal subscription failed", "workspace", ss.Config.ID, "error", err)
+		}
+	}
+
+	subLister := delivery.NewStoreSubscriptionLister(ss.Store)
+	subscriber := delivery.NewDeliverySubscriber(ss.Store, subLister)
+	if err := subscriber.Subscribe(deliveryCtx, ss.Events); err != nil {
+		log.Error("workspace delivery subscriber failed", "workspace", ss.Config.ID, "error", err)
+		cancel()
+		return
+	}
+
+	subResolver := delivery.NewStoreSubscriptionResolver(ss.Store)
+	dispatcher := delivery.NewWebhookDispatcher(ss.Store, subResolver, delivery.DispatcherConfig{
+		Targets: cfg.WebhookTargets,
+	})
+	go dispatcher.Run(deliveryCtx)
+	go delivery.StartRetentionCleanup(deliveryCtx, ss.Store, cfg.EventRetention)
+
+	// Plumb the subscriber's broadcaster onto the ServiceSet so the
+	// gateway's /api/v1/events/stream handler can resolve a workspace-
+	// scoped SSE fan-out via *From(ctx). Without this hand-off,
+	// platform-binding stacks fail SSE with 503 even though delivery
+	// is wired — same nil-deref shape TASK-002 fixed for the lifecycle
+	// handlers.
+	ss.EventBroadcaster = subscriber.Broadcaster
+
+	log.Info("per-workspace event delivery started", "workspace", ss.Config.ID)
+
+	ss.AppendCloser(func(string) { cancel() })
 }
 
 // parsePositiveIntEnv returns the integer value of the named env var,
@@ -970,7 +1097,9 @@ func serveCmd() *cobra.Command {
 				port = "8080"
 			}
 
-			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log)
+			deliveryCfg := loadWorkspaceDeliveryConfig()
+
+			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log, deliveryCfg)
 			if err != nil {
 				return err
 			}
@@ -1046,13 +1175,6 @@ func serveCmd() *cobra.Command {
 				}
 			}
 
-			var eventRetention time.Duration
-			if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
-				if d, err := time.ParseDuration(v); err == nil {
-					eventRetention = d
-				}
-			}
-
 			deps := serveDeps{
 				Store:                      st,
 				RepoPath:                   repoPath,
@@ -1071,14 +1193,14 @@ func serveCmd() *cobra.Command {
 				TrustedProxyCIDRs:          trustedProxyCIDRs,
 				TrustedGitHTTPCIDRs:        parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS")),
 				GitReceivePackEnabled:      parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
-				EventDeliveryOn:            os.Getenv("SPINE_EVENT_DELIVERY") == "true",
-				SMPEventURL:                os.Getenv("SMP_EVENT_URL"),
+				EventDeliveryOn:            deliveryCfg.Enabled,
+				SMPEventURL:                deliveryCfg.SMPEventURL,
 				SMPWorkspaceID:             os.Getenv("SMP_WORKSPACE_ID"),
-				SMPInternalToken:           os.Getenv("SMP_INTERNAL_TOKEN"),
-				EventRetention:             eventRetention,
+				SMPInternalToken:           deliveryCfg.SMPInternalToken,
+				EventRetention:             deliveryCfg.EventRetention,
 				SSEMaxConn:                 parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
 				OrphanThreshold:            orphanThreshold,
-				WebhookTargets:             delivery.NewTargetValidator(parseWebhookAllowedHosts(os.Getenv("SPINE_WEBHOOK_ALLOWED_HOSTS"))),
+				WebhookTargets:             deliveryCfg.WebhookTargets,
 			}
 
 			rt, err := buildServerConfig(ctx, deps)
@@ -1159,10 +1281,16 @@ type resolverWiring struct {
 // SPINE_WORKSPACE_MODE was retired in ADR-011; if it is set without
 // WORKSPACE_RESOLVER, startup fails fast so a deployment that missed
 // the migration cannot silently fall back.
+//
+// deliveryCfg is threaded into the pool builder for db and
+// platform-binding modes so each workspace gets its own subscriber +
+// dispatcher pair (TASK-003). File mode is single-workspace and uses
+// the top-level startEventDelivery, so it ignores the value.
 func buildWorkspaceResolver(
 	ctx context.Context,
 	secretCipher *spinecrypto.SecretCipher,
 	log *slog.Logger,
+	deliveryCfg workspaceDeliveryConfig,
 ) (*resolverWiring, error) {
 	resolver := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER")))
 	legacyMode := os.Getenv("SPINE_WORKSPACE_MODE")
@@ -1218,7 +1346,7 @@ func buildWorkspaceResolver(
 			return nil, fmt.Errorf("connect to workspace registry: %w", err)
 		}
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      workspaceOrchestratorBuilder,
+			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
 			SecretCipher: secretCipher,
 			SecretClient: dbSecretClient,
 			DBPolicy:     dbPolicyFromEnv(),
@@ -1254,7 +1382,7 @@ func buildWorkspaceResolver(
 		// process-level store. EPIC-003 (TASK-006/007) refines pool
 		// sizing and invalidation for this mode.
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      workspaceOrchestratorBuilder,
+			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
 			SecretCipher: secretCipher,
 			SecretClient: secretClient,
 			DBPolicy:     dbPolicyFromEnv(),
