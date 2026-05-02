@@ -70,14 +70,23 @@ func (a *storeStepAssigner) AssignStep(ctx context.Context, req engine.AssignReq
 		return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
 	}
 
-	result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
-		Trigger: workflow.StepTriggerAssign,
-	})
-	if err != nil {
-		return nil, err
+	// Mirrors engine.AssignStep open-slot recovery for pre-Option-B
+	// phantom rows (status=assigned/in_progress with empty actor_id):
+	// bypass the state-machine transition and just bind the actor.
+	// Without this, the fallback path returns a conflict on the same
+	// recovery scenario the orchestrator path supports
+	// (INIT-020/EPIC-001/TASK-004).
+	openSlot := (exec.Status == domain.StepStatusAssigned || exec.Status == domain.StepStatusInProgress) && exec.ActorID == ""
+	if !openSlot {
+		result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
+			Trigger: workflow.StepTriggerAssign,
+		})
+		if err != nil {
+			return nil, err
+		}
+		exec.Status = result.ToStatus
 	}
 
-	exec.Status = result.ToStatus
 	exec.ActorID = req.ActorID
 	if len(req.EligibleActorIDs) > 0 {
 		exec.EligibleActorIDs = req.EligibleActorIDs

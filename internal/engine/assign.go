@@ -42,14 +42,27 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 		return nil, err
 	}
 
-	result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
-		Trigger: workflow.StepTriggerAssign,
-	})
-	if err != nil {
-		return nil, err
+	// Recovery for pre-Option-B phantom rows: a step persisted as
+	// `assigned` or `in_progress` with an empty `actor_id` is treated
+	// as an open slot. /assign binds an actor without invoking the
+	// state-machine transition (which rejects step.assign from those
+	// states). Both phantom shapes are reachable from old engine
+	// behavior — `assigned` from ActivateStep, `in_progress` if
+	// SubmitStepResult auto-acknowledged a phantom and the process
+	// crashed before completion. Without this, the operator has no
+	// recovery path beyond direct DB edits
+	// (INIT-020/EPIC-001/TASK-004).
+	openSlot := (exec.Status == domain.StepStatusAssigned || exec.Status == domain.StepStatusInProgress) && exec.ActorID == ""
+	if !openSlot {
+		result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
+			Trigger: workflow.StepTriggerAssign,
+		})
+		if err != nil {
+			return nil, err
+		}
+		exec.Status = result.ToStatus
 	}
 
-	exec.Status = result.ToStatus
 	exec.ActorID = req.ActorID
 	if len(req.EligibleActorIDs) > 0 {
 		exec.EligibleActorIDs = req.EligibleActorIDs

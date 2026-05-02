@@ -21,6 +21,17 @@ type StepResult struct {
 
 // ActivateStep evaluates preconditions for a step and, if they pass, requests
 // actor assignment. If preconditions fail, the step is blocked and the run is paused.
+//
+// Per INIT-020/EPIC-001/TASK-004 (Option B): the step transitions to `assigned`
+// only when the engine can resolve a concrete actor at activation time —
+// today, that means modes `automated_only` and `ai_only` with an actor
+// selector configured AND a match. Modes that require a human or AI agent
+// to opt in (`hybrid`, `human_only`) and steps with no execution config
+// remain in `waiting` until an explicit `POST /assign` (or pull-based
+// `/claim`) binds an actor. This avoids the prior "phantom assigned"
+// state where a step was `status=assigned` with `actor_id=NULL`, which
+// blocked recovery via `/assign` (state machine rejected the trigger)
+// and silently broke `/submit`.
 func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) error {
 	log := observe.Logger(ctx)
 
@@ -58,6 +69,21 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	}
 
 	exec.ErrorDetail = nil
+
+	actorID := o.tryResolveAutoActor(ctx, exec, stepDef)
+	if actorID == "" {
+		// Stay in waiting. Pull-based actors discover via
+		// ListStepExecutions and call /claim; operators bind via
+		// /assign. Either path moves the step out of waiting.
+		if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+			return fmt.Errorf("update step execution: %w", err)
+		}
+		log.Info("step ready for assignment",
+			"run_id", runID, "step_id", stepID, "mode", executionModeForLog(stepDef))
+		return nil
+	}
+
+	exec.ActorID = actorID
 	stepResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAssign,
 	})
@@ -65,8 +91,6 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		return err
 	}
 	exec.Status = stepResult.ToStatus
-
-	o.resolveAutoActor(ctx, exec, stepDef, runID, stepID)
 
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
@@ -95,6 +119,17 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	return nil
 }
 
+// executionModeForLog returns a stable string for the step's execution mode,
+// or "<unset>" when the step has no execution block. Used in structured
+// log records so operators can tell waiting-for-claim apart from
+// waiting-because-no-mode-configured at a glance.
+func executionModeForLog(stepDef *domain.StepDefinition) string {
+	if stepDef == nil || stepDef.Execution == nil || stepDef.Execution.Mode == "" {
+		return "<unset>"
+	}
+	return string(stepDef.Execution.Mode)
+}
+
 // preparePreconditionFailure persists validation errors (when present) on the
 // step execution and returns the appropriate domain error. Callers return the
 // result directly; the step stays in waiting because waiting→blocked is not
@@ -121,26 +156,28 @@ func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *dom
 		fmt.Sprintf("preconditions not met for step %s", stepID))
 }
 
-// resolveAutoActor sets exec.ActorID when the step declares an automated or
-// AI-only execution mode and a selector is configured. Missing selections
-// are logged but not fatal — the step simply waits.
-func (o *Orchestrator) resolveAutoActor(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition, runID, stepID string) {
+// tryResolveAutoActor returns the actor ID to bind for an engine-driven
+// auto-claim, or "" when the engine should not auto-claim. The caller
+// uses the empty result to keep the step in `waiting` so that explicit
+// /assign or pull-based /claim drives the next transition.
+//
+// Auto-claim only fires for `automated_only` and `ai_only` modes — those
+// are unambiguously machine-driven, so the engine selecting on the
+// actor's behalf is the right behavior. `hybrid`, `human_only`, and
+// steps with no execution block require a deliberate actor decision; we
+// defer to the assignment API rather than guess.
+func (o *Orchestrator) tryResolveAutoActor(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition) string {
 	if stepDef.Execution == nil {
-		return
+		return ""
 	}
 	mode := stepDef.Execution.Mode
 	if mode != domain.ExecModeAutomatedOnly && mode != domain.ExecModeAIOnly {
-		return
+		return ""
 	}
 	if o.actorSelector == nil {
-		return
+		return ""
 	}
-	if actorID := o.resolveAutoActorID(ctx, exec, stepDef); actorID != "" {
-		exec.ActorID = actorID
-		return
-	}
-	observe.Logger(ctx).Warn("auto-assignment: no eligible actor found, step will wait",
-		"run_id", runID, "step_id", stepID, "mode", mode)
+	return o.resolveAutoActorID(ctx, exec, stepDef)
 }
 
 // createAutoAssignmentRecord persists an assignment row for an auto-selected
@@ -215,6 +252,18 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	exec, err := o.store.GetStepExecution(ctx, executionID)
 	if err != nil {
 		return fmt.Errorf("get step execution: %w", err)
+	}
+
+	// Defense-in-depth ownership check: a result can only complete a
+	// step that has an actor bound. The IngestResult HTTP path already
+	// rejects empty actor_id, but engine-internal callers (e.g. the
+	// queue consumer's executeAndSubmit) call this method directly. A
+	// pre-Option-B phantom row delivered to the runner before the fix
+	// must NOT be silently completed here (INIT-020/EPIC-001/TASK-004).
+	if exec.ActorID == "" && !exec.Status.IsTerminal() {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("cannot submit result: step %s has no actor bound; call /assign or /claim before submitting",
+				executionID))
 	}
 
 	run, err := o.store.GetRun(ctx, exec.RunID)

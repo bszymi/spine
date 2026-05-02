@@ -134,8 +134,12 @@ func TestActivateStep_AutoAssign_ByEligibleActorIDs(t *testing.T) {
 }
 
 // TestActivateStep_AutoAssign_NoActorFound verifies graceful degradation when
-// no eligible actor of the required type exists — step is still assigned with
-// actor_id left empty so a runner can claim it manually later.
+// no eligible actor of the required type exists. Per INIT-020/EPIC-001/TASK-004
+// (Option B), the step now stays in `waiting` rather than transitioning to
+// `assigned` with an empty actor_id — that "phantom assigned" state was
+// unrecoverable through /assign because the state machine rejects
+// step.assign on an already-assigned step. Pull-based discovery still
+// works because ListStepExecutions includes waiting steps.
 func TestActivateStep_AutoAssign_NoActorFound(t *testing.T) {
 	now := time.Now()
 	st := &mockRunStore{
@@ -162,8 +166,8 @@ func TestActivateStep_AutoAssign_NoActorFound(t *testing.T) {
 	if exec.ActorID != "" {
 		t.Errorf("expected empty actor_id on graceful degradation, got %q", exec.ActorID)
 	}
-	if exec.Status != domain.StepStatusAssigned {
-		t.Errorf("expected step to still be assigned, got %s", exec.Status)
+	if exec.Status != domain.StepStatusWaiting {
+		t.Errorf("expected step to remain waiting until claim/assign, got %s", exec.Status)
 	}
 }
 
@@ -208,6 +212,11 @@ func TestActivateStep_AutoAssign_HumanStep(t *testing.T) {
 	exec, _ := st.GetStepExecution(context.Background(), "exec-1")
 	if exec.ActorID != "" {
 		t.Errorf("human step should not have actor_id auto-set, got %q", exec.ActorID)
+	}
+	// Per INIT-020/EPIC-001/TASK-004 (Option B), human-only steps stay in
+	// `waiting` until an explicit /assign or /claim binds an actor.
+	if exec.Status != domain.StepStatusWaiting {
+		t.Errorf("expected human-only step to remain waiting, got %s", exec.Status)
 	}
 }
 

@@ -84,6 +84,7 @@ func TestSubmitStepResult_EmitsStepStarted(t *testing.T) {
 
 	// Step is assigned — SubmitStepResult auto-acknowledges to in_progress, emitting step_started.
 	store.createdSteps[0].Status = domain.StepStatusAssigned
+	store.createdSteps[0].ActorID = "test-actor"
 
 	err := orch.SubmitStepResult(context.Background(), store.createdSteps[0].ExecutionID, StepResult{OutcomeID: "done"})
 	if err != nil {

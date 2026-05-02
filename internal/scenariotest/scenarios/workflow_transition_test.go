@@ -50,6 +50,9 @@ func TestWorkflow_RejectsInvalidOutcome(t *testing.T) {
 					Name: "submit-invalid-outcome",
 					Action: func(sc *engine.ScenarioContext) error {
 						execID := sc.MustGet("current_execution_id").(string)
+						if err := engine.EnsureStepAssignedForTest(sc, execID); err != nil {
+							return err
+						}
 						_, err := sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
 							ExecutionID: execID,
 							OutcomeID:   "nonexistent",
@@ -95,6 +98,9 @@ func TestWorkflow_RejectsMissingRequiredOutputs(t *testing.T) {
 					Name: "submit-without-outputs",
 					Action: func(sc *engine.ScenarioContext) error {
 						execID := sc.MustGet("current_execution_id").(string)
+						if err := engine.EnsureStepAssignedForTest(sc, execID); err != nil {
+							return err
+						}
 						_, err := sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
 							ExecutionID: execID,
 							OutcomeID:   "completed",

@@ -241,6 +241,9 @@ func TestWorkflow_ReworkCycleLimit(t *testing.T) {
 						for i := 0; i < domain.MaxReworkCycles; i++ {
 							// Submit work as done.
 							execID := sc.MustGet("current_execution_id").(string)
+							if err := engine.EnsureStepAssignedForTest(sc, execID); err != nil {
+								return err
+							}
 							_, err := sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
 								ExecutionID: execID,
 								OutcomeID:   "done",
@@ -267,6 +270,9 @@ func TestWorkflow_ReworkCycleLimit(t *testing.T) {
 							}
 
 							// Submit review as rework.
+							if err := engine.EnsureStepAssignedForTest(sc, reviewExecID); err != nil {
+								return err
+							}
 							_, err = sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
 								ExecutionID: reviewExecID,
 								OutcomeID:   "rework",

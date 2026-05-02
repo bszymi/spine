@@ -383,6 +383,9 @@ func submitBranchStep(stepID, outcomeID string) scenarioEngine.Step {
 			}
 			for i := range execs {
 				if execs[i].StepID == stepID && !execs[i].Status.IsTerminal() {
+					if err := scenarioEngine.EnsureStepAssignedForTest(sc, execs[i].ExecutionID); err != nil {
+						return err
+					}
 					_, err := sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
 						ExecutionID: execs[i].ExecutionID,
 						OutcomeID:   outcomeID,

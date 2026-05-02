@@ -2,12 +2,14 @@
 id: TASK-004
 type: Task
 title: "Auto-assigned execute step with null actor_id is unrecoverable"
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: "Option B implemented; docker-test/docker-vet/gosec gates green and codex review converged."
 epic: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 work_type: bugfix
 created: 2026-04-30
-last_updated: 2026-04-30
+last_updated: 2026-05-01
 links:
   - type: parent
     target: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-001-scheduler-and-runtime/epic.md

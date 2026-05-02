@@ -151,9 +151,16 @@ func (f *fakeStore) GetStepExecution(_ context.Context, execID string) (*domain.
 	if f.stepExecOverride != nil {
 		return f.stepExecOverride, nil
 	}
+	// Default fixture for the in-progress + actor-bound case used by most
+	// gateway tests. The Option B submit guard (TASK-004) rejects empty
+	// ActorID with 409, so we surface a default that lets the happy-path
+	// submit tests through; tests that exercise the unassigned-or-foreign
+	// branches set stepExecOverride explicitly.
 	return &domain.StepExecution{
 		ExecutionID: execID, RunID: "run-1", StepID: "step1",
-		Status: domain.StepStatusInProgress, Attempt: 1,
+		Status:  domain.StepStatusInProgress,
+		Attempt: 1,
+		ActorID: "admin-1",
 	}, nil
 }
 
@@ -1663,7 +1670,9 @@ type fakeStoreAssigned struct {
 func (f *fakeStoreAssigned) GetStepExecution(_ context.Context, execID string) (*domain.StepExecution, error) {
 	return &domain.StepExecution{
 		ExecutionID: execID, RunID: "run-1", StepID: "step1",
-		Status: domain.StepStatusAssigned, Attempt: 1,
+		Status:  domain.StepStatusAssigned,
+		Attempt: 1,
+		ActorID: "admin-1",
 	}, nil
 }
 
@@ -3141,6 +3150,53 @@ func TestWorkspaceMiddleware_InternalError(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("expected 500 for resolver error, got %d", resp.StatusCode)
+	}
+}
+
+// TestStepSubmit_RejectsUnassignedExec locks in the Option B guard from
+// INIT-020/EPIC-001/TASK-004: submitting a result against a step whose
+// actor_id is empty (no /assign or /claim has run yet) must be rejected
+// with 409 Conflict, not silently routed through IngestResult. The
+// previous behavior allowed the call to fall through, where it could
+// fail-with-retry the step and spawn a phantom retry execution.
+func TestStepSubmit_RejectsUnassignedExec(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["alice"] = &domain.Actor{
+		ActorID: "alice", Type: domain.ActorTypeHuman, Name: "Alice",
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	// The step is in `waiting` with no actor — the dogfooded TASK-004 case.
+	fs.stepExecOverride = &domain.StepExecution{
+		ExecutionID: "exec-unassigned", RunID: "run-1", StepID: "execute",
+		Status: domain.StepStatusWaiting, Attempt: 1,
+		ActorID: "",
+	}
+
+	authSvc := auth.NewService(fs)
+	aliceToken, _, err := authSvc.CreateToken(context.Background(), "alice", "test", nil)
+	if err != nil {
+		t.Fatalf("create alice token: %v", err)
+	}
+
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store:         fs,
+		Auth:          authSvc,
+		ResultHandler: &fakeResultHandler{},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"outcome_id":"completed"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-unassigned/submit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for unassigned-step submit, got %d", resp.StatusCode)
 	}
 }
 

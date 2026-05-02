@@ -87,6 +87,7 @@ func TestConsumer_HandleAssignment(t *testing.T) {
 				RunID:       "run-1",
 				StepID:      "start",
 				Status:      domain.StepStatusAssigned,
+				ActorID:     "test-actor",
 				Attempt:     1,
 			},
 		},

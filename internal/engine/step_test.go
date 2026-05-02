@@ -130,9 +130,22 @@ func TestActivateStep_HappyPath(t *testing.T) {
 	store, runID := testRunWithStep()
 	events := &mockEventEmitter{}
 	actors := &mockActorAssigner{}
-	loader := &mockWorkflowLoader{wfDef: testWorkflow()}
+	wf := testWorkflow()
+	// Configure the entry step as automated_only so the engine resolves
+	// an actor and delivers the assignment. Without this, Option B keeps
+	// the step in `waiting` (covered separately by
+	// TestActivateStep_NoExecutionConfig_StaysWaiting).
+	wf.Steps[0].Execution = &domain.ExecutionConfig{
+		Mode:               domain.ExecModeAutomatedOnly,
+		EligibleActorTypes: []string{"automated_system"},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
 
 	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+	orch.actorSelector = &mockActorSelector{
+		actor: &domain.Actor{ActorID: "bot-1", Type: domain.ActorTypeAutomated, Status: domain.ActorStatusActive},
+	}
+
 	err := orch.ActivateStep(context.Background(), runID, "start")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -160,6 +173,78 @@ func TestActivateStep_HappyPath(t *testing.T) {
 	}
 	if events.events[0].Type != domain.EventStepAssigned {
 		t.Errorf("expected step_assigned, got %s", events.events[0].Type)
+	}
+}
+
+// TestActivateStep_NoExecutionConfig_StaysWaiting locks in Option B for
+// steps without an execution block — ActivateStep should leave them in
+// waiting instead of flipping to phantom-assigned. Pull-based actors
+// then claim via /claim, or operators bind via /assign.
+func TestActivateStep_NoExecutionConfig_StaysWaiting(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+	loader := &mockWorkflowLoader{wfDef: testWorkflow()}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+
+	if err := orch.ActivateStep(context.Background(), runID, "start"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := store.createdSteps[0].Status; got != domain.StepStatusWaiting {
+		t.Errorf("expected step to remain waiting, got %s", got)
+	}
+	if store.createdSteps[0].ActorID != "" {
+		t.Errorf("expected empty actor_id, got %q", store.createdSteps[0].ActorID)
+	}
+	if len(actors.delivered) != 0 {
+		t.Errorf("expected no assignment delivery, got %d", len(actors.delivered))
+	}
+	for _, evt := range events.events {
+		if evt.Type == domain.EventStepAssigned {
+			t.Error("expected no step_assigned event for waiting step")
+		}
+	}
+}
+
+// TestActivateStep_HybridMode_StaysWaiting locks in the headline Option B
+// behavior: hybrid steps (the dogfooding case from TASK-004) stay in
+// waiting, so /assign and /submit have predictable, recoverable
+// semantics.
+func TestActivateStep_HybridMode_StaysWaiting(t *testing.T) {
+	store, runID := testRunWithStep()
+	events := &mockEventEmitter{}
+	actors := &mockActorAssigner{}
+	wf := testWorkflow()
+	wf.Steps[0].Execution = &domain.ExecutionConfig{
+		Mode:               domain.ExecModeHybrid,
+		EligibleActorTypes: []string{"human", "ai_agent"},
+	}
+	loader := &mockWorkflowLoader{wfDef: wf}
+
+	orch := stepTestOrchestrator(store, events, loader, nil, actors)
+	// Selector is configured but should NOT be consulted for hybrid.
+	sel := &mockActorSelector{
+		actor: &domain.Actor{ActorID: "should-not-be-picked", Type: domain.ActorTypeHuman, Status: domain.ActorStatusActive},
+	}
+	orch.actorSelector = sel
+
+	if err := orch.ActivateStep(context.Background(), runID, "start"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := store.createdSteps[0].Status; got != domain.StepStatusWaiting {
+		t.Errorf("expected hybrid step to remain waiting, got %s", got)
+	}
+	if store.createdSteps[0].ActorID != "" {
+		t.Errorf("expected empty actor_id on hybrid step, got %q", store.createdSteps[0].ActorID)
+	}
+	if len(sel.calls) != 0 {
+		t.Errorf("actor selector must not be consulted for hybrid mode, got %d calls", len(sel.calls))
+	}
+	if len(actors.delivered) != 0 {
+		t.Errorf("expected no assignment delivery for hybrid step, got %d", len(actors.delivered))
 	}
 }
 
@@ -242,6 +327,7 @@ func TestSubmitStepResult_HappyPath_NextStep(t *testing.T) {
 	store, _ := testRunWithStep()
 	// Set step to in_progress for submission.
 	store.createdSteps[0].Status = domain.StepStatusInProgress
+	store.createdSteps[0].ActorID = "test-actor"
 	events := &mockEventEmitter{}
 	loader := &mockWorkflowLoader{wfDef: testWorkflow()}
 
@@ -284,6 +370,7 @@ func TestSubmitStepResult_HappyPath_NextStep(t *testing.T) {
 func TestSubmitStepResult_Terminal(t *testing.T) {
 	store, _ := testRunWithStep()
 	store.createdSteps[0].Status = domain.StepStatusInProgress
+	store.createdSteps[0].ActorID = "test-actor"
 	events := &mockEventEmitter{}
 	loader := &mockWorkflowLoader{wfDef: testWorkflow()}
 
@@ -306,6 +393,7 @@ func TestSubmitStepResult_AutoAcknowledge(t *testing.T) {
 	store, _ := testRunWithStep()
 	// Step is assigned (not yet in_progress).
 	store.createdSteps[0].Status = domain.StepStatusAssigned
+	store.createdSteps[0].ActorID = "test-actor"
 	loader := &mockWorkflowLoader{wfDef: testWorkflow()}
 
 	orch := stepTestOrchestrator(store, &mockEventEmitter{}, loader, nil, nil)
@@ -578,9 +666,11 @@ func TestActivateStep_CrossArtifactValid_Passes(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Step should be assigned (precondition passed).
-	if store.createdSteps[0].Status != domain.StepStatusAssigned {
-		t.Errorf("expected assigned, got %s", store.createdSteps[0].Status)
+	// Per Option B (TASK-004), the step lands in waiting because the
+	// fixture has no execution config — the precondition passing means
+	// ActivateStep advanced past validation, not that an actor was bound.
+	if store.createdSteps[0].Status != domain.StepStatusWaiting {
+		t.Errorf("expected waiting after precondition pass, got %s", store.createdSteps[0].Status)
 	}
 }
 
@@ -672,8 +762,8 @@ func TestActivateStep_CrossArtifactValid_NoValidator(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if store.createdSteps[0].Status != domain.StepStatusAssigned {
-		t.Errorf("expected assigned (skipped validation), got %s", store.createdSteps[0].Status)
+	if store.createdSteps[0].Status != domain.StepStatusWaiting {
+		t.Errorf("expected waiting (precondition skipped, no auto-claim configured), got %s", store.createdSteps[0].Status)
 	}
 }
 
@@ -737,8 +827,8 @@ func TestActivateStep_CrossArtifactValid_WarningsPass(t *testing.T) {
 		t.Fatalf("unexpected error: warnings should not block: %v", err)
 	}
 
-	if store.createdSteps[0].Status != domain.StepStatusAssigned {
-		t.Errorf("expected assigned (warnings don't block), got %s", store.createdSteps[0].Status)
+	if store.createdSteps[0].Status != domain.StepStatusWaiting {
+		t.Errorf("expected waiting (warnings don't block, no auto-claim), got %s", store.createdSteps[0].Status)
 	}
 }
 
@@ -786,8 +876,9 @@ func TestActivateStep_CrossArtifactValid_ClearsErrorOnRetry(t *testing.T) {
 	if store.createdSteps[0].ErrorDetail != nil {
 		t.Error("expected ErrorDetail to be cleared after successful activation")
 	}
-	if store.createdSteps[0].Status != domain.StepStatusAssigned {
-		t.Errorf("expected assigned, got %s", store.createdSteps[0].Status)
+	// Step now lands in waiting since no auto-claim is wired (Option B).
+	if store.createdSteps[0].Status != domain.StepStatusWaiting {
+		t.Errorf("expected waiting, got %s", store.createdSteps[0].Status)
 	}
 }
 

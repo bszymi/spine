@@ -189,6 +189,17 @@ func (e *memEventEmitter) Emit(_ context.Context, event domain.Event) error {
 	return nil
 }
 
+// fixedActorSelector returns the same actor for every selection request.
+// Sufficient for end-to-end tests that just need the auto-claim path to
+// produce a non-empty actor_id.
+type fixedActorSelector struct {
+	actor *domain.Actor
+}
+
+func (s *fixedActorSelector) SelectActor(_ context.Context, _ actor.SelectionRequest) (*domain.Actor, error) {
+	return s.actor, nil
+}
+
 // mockActorGateway records assignments and allows simulating actor responses.
 type mockActorGateway struct {
 	assignments []actor.AssignmentRequest
@@ -208,6 +219,11 @@ func (g *mockActorGateway) ProcessResult(_ context.Context, _ actor.AssignmentRe
 // TestEndToEndExecution validates the complete execution loop:
 // task → workflow → run → step activation → actor result → next step → completion.
 // This is the Phase 0 "first working slice" — proof that all components integrate.
+//
+// Both steps declare an automated execution mode + eligible actor types so
+// the orchestrator's actor selector can resolve a concrete actor at
+// activation time. Without this, Option B (TASK-004) keeps the steps in
+// `waiting` and no assignment is delivered.
 func TestEndToEndExecution(t *testing.T) {
 	// 1. Define a two-step workflow: "implement" → "review" → done.
 	wfDef := &domain.WorkflowDefinition{
@@ -223,6 +239,10 @@ func TestEndToEndExecution(t *testing.T) {
 				ID:   "implement",
 				Name: "Implement",
 				Type: domain.StepTypeAutomated,
+				Execution: &domain.ExecutionConfig{
+					Mode:               domain.ExecModeAutomatedOnly,
+					EligibleActorTypes: []string{"automated_system"},
+				},
 				Outcomes: []domain.OutcomeDefinition{
 					{ID: "completed", Name: "Implementation Complete", NextStep: "review"},
 				},
@@ -231,6 +251,10 @@ func TestEndToEndExecution(t *testing.T) {
 				ID:   "review",
 				Name: "Review",
 				Type: domain.StepTypeReview,
+				Execution: &domain.ExecutionConfig{
+					Mode:               domain.ExecModeAutomatedOnly,
+					EligibleActorTypes: []string{"automated_system"},
+				},
 				Outcomes: []domain.OutcomeDefinition{
 					{ID: "accepted", Name: "Accepted"}, // terminal — no NextStep
 				},
@@ -269,6 +293,9 @@ func TestEndToEndExecution(t *testing.T) {
 		t.Fatalf("failed to create orchestrator: %v", err)
 	}
 	orch.WithBranchProtectPolicy(branchprotect.NewPermissive())
+	orch.WithActorSelector(&fixedActorSelector{
+		actor: &domain.Actor{ActorID: "bot-1", Type: domain.ActorTypeAutomated, Status: domain.ActorStatusActive},
+	})
 
 	ctx := context.Background()
 

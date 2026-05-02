@@ -53,6 +53,28 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 		}, nil
 	}
 
+	// State guard: a result can only be submitted once an actor has
+	// taken ownership of the step. The status check mirrors the
+	// workflow state machine — `step.submit` is invalid from `waiting`
+	// or `blocked`. The actor_id check covers in-flight rows from
+	// before the Option B fix that are persisted as `assigned` with
+	// `actor_id=""` (the phantom state TASK-004 fixes for new runs);
+	// rejecting here forces the operator down the /assign or /claim
+	// recovery path instead of validating outputs and fail-with-retry-
+	// ing a step nobody claimed. Both checks run BEFORE
+	// validateRequiredOutputs so a phantom submission can never
+	// mutate the execution into a failed state.
+	if exec.Status != domain.StepStatusAssigned && exec.Status != domain.StepStatusInProgress {
+		return nil, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("cannot submit result: step %s is in %q state, expected assigned or in_progress",
+				req.ExecutionID, exec.Status))
+	}
+	if exec.ActorID == "" {
+		return nil, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("cannot submit result: step %s has no actor bound; call /assign or /claim before submitting",
+				req.ExecutionID))
+	}
+
 	// Load the workflow to validate against step definition.
 	run, err := o.store.GetRun(ctx, exec.RunID)
 	if err != nil {
