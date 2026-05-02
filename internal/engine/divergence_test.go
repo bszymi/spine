@@ -76,6 +76,7 @@ func TestSubmitStepResult_TriggersDivergence(t *testing.T) {
 
 	// Transition step to assigned, then in_progress, then submit.
 	store.createdSteps[0].Status = domain.StepStatusInProgress
+	store.createdSteps[0].ActorID = "test-actor"
 
 	err := orch.SubmitStepResult(context.Background(), store.createdSteps[0].ExecutionID, StepResult{
 		OutcomeID: "done",
@@ -123,6 +124,7 @@ func TestSubmitStepResult_NoDivergenceWithoutHandler(t *testing.T) {
 	orch := stepTestOrchestrator(store, events, loader, nil, actors)
 
 	store.createdSteps[0].Status = domain.StepStatusInProgress
+	store.createdSteps[0].ActorID = "test-actor"
 
 	err := orch.SubmitStepResult(context.Background(), store.createdSteps[0].ExecutionID, StepResult{
 		OutcomeID: "done",
@@ -206,6 +208,7 @@ func TestCompleteBranchStep_TriggersConvergence(t *testing.T) {
 		StepID:      "review-a",
 		BranchID:    "branch-a",
 		Status:      domain.StepStatusInProgress,
+		ActorID:     "test-actor",
 		Attempt:     1,
 	}
 	store.createdSteps = append(store.createdSteps, branchExec)
@@ -267,7 +270,7 @@ func TestCompleteBranchStep_SkipsConvergenceWhenPolicyNotReady(t *testing.T) {
 	branchExec := &domain.StepExecution{
 		ExecutionID: runID + "-branch-a-review-a-1",
 		RunID:       runID, StepID: "review-a", BranchID: "branch-a",
-		Status: domain.StepStatusInProgress, Attempt: 1,
+		Status: domain.StepStatusInProgress, ActorID: "test-actor", Attempt: 1,
 	}
 	store.createdSteps = append(store.createdSteps, branchExec)
 
@@ -312,6 +315,7 @@ func TestCompleteBranchStep_AdvancesWithinBranch(t *testing.T) {
 		StepID:      "review-a",
 		BranchID:    "branch-a",
 		Status:      domain.StepStatusInProgress,
+		ActorID:     "test-actor",
 		Attempt:     1,
 	}
 	store.createdSteps = append(store.createdSteps, branchExec)
@@ -370,6 +374,7 @@ func TestCompleteBranchStep_MarksBranchCompleted(t *testing.T) {
 		StepID:      "review-a",
 		BranchID:    "branch-a",
 		Status:      domain.StepStatusInProgress,
+		ActorID:     "test-actor",
 		Attempt:     1,
 	}
 	store.createdSteps = append(store.createdSteps, branchExec)

@@ -382,14 +382,14 @@ func TestGateway_RunStart_StepQuery(t *testing.T) {
 				},
 			},
 
-			// GET /api/v1/execution/steps — after StartRun, ActivateStep transitions
-			// the entry step from waiting → assigned (step.assign trigger). Query with
-			// status=assigned (no actor_id filter, since hybrid steps have no actor
-			// auto-assigned) to verify the step is visible via the HTTP endpoint.
+			// GET /api/v1/execution/steps — per Option B (INIT-020/EPIC-001/
+			// TASK-004), the entry hybrid step stays in `waiting` until an
+			// explicit /assign or /claim binds an actor. Query with
+			// status=waiting to verify the step is visible via the HTTP endpoint.
 			{
-				Name: "get-execution-steps-shows-assigned-step",
+				Name: "get-execution-steps-shows-waiting-step",
 				Action: func(sc *scenarioEngine.ScenarioContext) error {
-					url := "/api/v1/execution/steps?status=assigned"
+					url := "/api/v1/execution/steps?status=waiting"
 					code, respBody, err := doGET(sc, url, "runner_token")
 					if err != nil {
 						return err

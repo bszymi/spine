@@ -248,6 +248,9 @@ func TestRunLifecycle_IdempotentIngestResult(t *testing.T) {
 				Name: "first-result-submission",
 				Action: func(sc *scenarioEngine.ScenarioContext) error {
 					execID := sc.MustGet("entry_execution_id").(string)
+					if err := scenarioEngine.EnsureStepAssignedForTest(sc, execID); err != nil {
+						return err
+					}
 					_, err := sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
 						ExecutionID: execID,
 						OutcomeID:   "completed",

@@ -293,6 +293,14 @@ func newStepSubmitServer(t *testing.T) (*httptest.Server, string) {
 		ActorID: "contrib-1", Type: domain.ActorTypeHuman, Name: "Dev",
 		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
 	}
+	// Bind the test execution to contrib-1 so the Option B ownership
+	// check (TASK-004) accepts the submit.
+	fs.stepExecOverride = &domain.StepExecution{
+		ExecutionID: "exec-123", RunID: "run-1", StepID: "step1",
+		Status:  domain.StepStatusInProgress,
+		Attempt: 1,
+		ActorID: "contrib-1",
+	}
 	authSvc := auth.NewService(fs)
 	token, _, _ := authSvc.CreateToken(context.Background(), "contrib-1", "test", nil)
 	srv := gateway.NewServer(":0", gateway.ServerConfig{

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -63,6 +64,7 @@ func TestIngestResult_HappyPath(t *testing.T) {
 				StepID:      "start",
 				Status:      domain.StepStatusInProgress,
 				Attempt:     1,
+				ActorID:     "test-actor",
 			},
 		},
 	}
@@ -103,6 +105,7 @@ func TestIngestResult_MissingRequiredOutputs(t *testing.T) {
 				StepID:      "start",
 				Status:      domain.StepStatusInProgress,
 				Attempt:     1,
+				ActorID:     "test-actor",
 			},
 		},
 	}
@@ -149,6 +152,7 @@ func TestIngestResult_InvalidOutcome(t *testing.T) {
 				StepID:      "start",
 				Status:      domain.StepStatusInProgress,
 				Attempt:     1,
+				ActorID:     "test-actor",
 			},
 		},
 	}
@@ -220,6 +224,153 @@ func TestIngestResult_EmptyOutcomeID(t *testing.T) {
 	}
 }
 
+// TestIngestResult_FromWaiting_ReturnsConflict locks in the Option B state
+// guard: a result submitted while the step is in `waiting` (no actor
+// claimed/assigned) returns ErrConflict and does NOT mutate the
+// execution. The previous behaviour silently routed through
+// validateRequiredOutputs and could fail the step into retry —
+// observed in the dogfooding bug report on TASK-004.
+func TestIngestResult_FromWaiting_ReturnsConflict(t *testing.T) {
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {
+				RunID:           "run-1",
+				Status:          domain.RunStatusActive,
+				TraceID:         "trace-1234567890ab",
+				WorkflowPath:    "workflows/test.yaml",
+				WorkflowVersion: "abc",
+			},
+		},
+		createdSteps: []*domain.StepExecution{
+			{
+				ExecutionID: "run-1-start-1",
+				RunID:       "run-1",
+				StepID:      "start",
+				Status:      domain.StepStatusWaiting,
+				Attempt:     1,
+			},
+		},
+	}
+	loader := &mockWorkflowLoader{wfDef: resultTestWorkflow()}
+	orch := resultTestOrchestrator(store, loader)
+
+	_, err := orch.IngestResult(context.Background(), SubmitRequest{
+		ExecutionID:       "run-1-start-1",
+		OutcomeID:         "done",
+		ArtifactsProduced: []string{"output.md"},
+	})
+	if err == nil {
+		t.Fatal("expected ErrConflict for submit-from-waiting")
+	}
+	var spineErr *domain.SpineError
+	if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrConflict {
+		t.Errorf("expected ErrConflict, got %v", err)
+	}
+
+	// Crucially: the step must remain in waiting, not fail-with-retry.
+	step, _ := store.GetStepExecution(context.Background(), "run-1-start-1")
+	if step.Status != domain.StepStatusWaiting {
+		t.Errorf("expected step to remain waiting, got %s", step.Status)
+	}
+	if step.ErrorDetail != nil {
+		t.Errorf("expected no error detail, got %+v", step.ErrorDetail)
+	}
+}
+
+// TestIngestResult_PhantomAssigned_ReturnsConflict locks in the actor_id
+// half of the Option B guard (TASK-004): a step persisted as
+// `assigned`/`in_progress` with `actor_id=""` (the phantom state from
+// pre-fix in-flight rows) is rejected with ErrConflict instead of
+// silently routing through validateRequiredOutputs and fail-with-retry-
+// ing.
+func TestIngestResult_PhantomAssigned_ReturnsConflict(t *testing.T) {
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {
+				RunID:           "run-1",
+				Status:          domain.RunStatusActive,
+				TraceID:         "trace-1234567890ab",
+				WorkflowPath:    "workflows/test.yaml",
+				WorkflowVersion: "abc",
+			},
+		},
+		createdSteps: []*domain.StepExecution{
+			{
+				ExecutionID: "run-1-start-1",
+				RunID:       "run-1",
+				StepID:      "start",
+				Status:      domain.StepStatusAssigned,
+				Attempt:     1,
+				ActorID:     "", // phantom — assigned but no actor bound
+			},
+		},
+	}
+	loader := &mockWorkflowLoader{wfDef: resultTestWorkflow()}
+	orch := resultTestOrchestrator(store, loader)
+
+	_, err := orch.IngestResult(context.Background(), SubmitRequest{
+		ExecutionID:       "run-1-start-1",
+		OutcomeID:         "done",
+		ArtifactsProduced: []string{"output.md"},
+	})
+	if err == nil {
+		t.Fatal("expected ErrConflict for submit on phantom-assigned step")
+	}
+	var spineErr *domain.SpineError
+	if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrConflict {
+		t.Errorf("expected ErrConflict, got %v", err)
+	}
+
+	step, _ := store.GetStepExecution(context.Background(), "run-1-start-1")
+	if step.Status != domain.StepStatusAssigned {
+		t.Errorf("expected step to remain assigned (no mutation), got %s", step.Status)
+	}
+	if step.ErrorDetail != nil {
+		t.Errorf("expected no error detail, got %+v", step.ErrorDetail)
+	}
+}
+
+// TestIngestResult_FromBlocked_ReturnsConflict mirrors the waiting guard
+// for the other non-claimable status; the production state machine
+// also rejects step.submit from blocked.
+func TestIngestResult_FromBlocked_ReturnsConflict(t *testing.T) {
+	store := &mockRunStore{
+		runs: map[string]*domain.Run{
+			"run-1": {
+				RunID:           "run-1",
+				Status:          domain.RunStatusActive,
+				TraceID:         "trace-1234567890ab",
+				WorkflowPath:    "workflows/test.yaml",
+				WorkflowVersion: "abc",
+			},
+		},
+		createdSteps: []*domain.StepExecution{
+			{
+				ExecutionID: "run-1-start-1",
+				RunID:       "run-1",
+				StepID:      "start",
+				Status:      domain.StepStatusBlocked,
+				Attempt:     1,
+			},
+		},
+	}
+	loader := &mockWorkflowLoader{wfDef: resultTestWorkflow()}
+	orch := resultTestOrchestrator(store, loader)
+
+	_, err := orch.IngestResult(context.Background(), SubmitRequest{
+		ExecutionID:       "run-1-start-1",
+		OutcomeID:         "done",
+		ArtifactsProduced: []string{"output.md"},
+	})
+	if err == nil {
+		t.Fatal("expected ErrConflict for submit-from-blocked")
+	}
+	var spineErr *domain.SpineError
+	if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrConflict {
+		t.Errorf("expected ErrConflict, got %v", err)
+	}
+}
+
 func TestIngestResult_NoRequiredOutputs(t *testing.T) {
 	store := &mockRunStore{
 		runs: map[string]*domain.Run{
@@ -238,6 +389,7 @@ func TestIngestResult_NoRequiredOutputs(t *testing.T) {
 				StepID:      "no-outputs",
 				Status:      domain.StepStatusInProgress,
 				Attempt:     1,
+				ActorID:     "test-actor",
 			},
 		},
 	}

@@ -211,26 +211,28 @@ func TestActorAPI_AIAgentGoldenPath(t *testing.T) {
 }
 
 // TestActorAPI_AutomatedSystemGoldenPath validates the automated actor polling loop.
-// Automated steps are auto-assigned when the run starts (no explicit claim needed).
-// The actor polls by type, finds the assigned step, and submits the result directly.
+// The actor polls by type, finds the waiting step, claims it, and submits.
 //
-// NOTE: The test harness has actorSelector=nil, so no actor_id is set during
-// auto-assignment. The automated actor therefore polls with actorType=automated_system
-// only (no actorID filter) to discover the step.
+// NOTE: The test harness has actorSelector=nil. Per INIT-020/EPIC-001/TASK-004
+// (Option B), automated_only steps with no resolvable actor stay in `waiting`
+// rather than transitioning to a phantom-assigned state. The automated actor
+// therefore polls with actorType=automated_system to discover and claim the
+// waiting step before submitting.
 //
-// Scenario: Automated system actor submits result for an auto-assigned step
+// Scenario: Automated system actor claims and submits a waiting step
 //
 //	Given an automated_only workflow
 //	  And an automated_system actor registered
+//	  And no actor selector configured (test harness)
 //	When a run is started
-//	Then the step is auto-assigned (status: assigned) without explicit claim
+//	Then the step is left in `waiting` (no auto-claim without selector)
 //	And the automated actor sees it via ListStepExecutions with actorType=automated_system
-//	When the actor submits "completed" directly
+//	When the actor claims and submits "completed"
 //	Then the run is completed
 func TestActorAPI_AutomatedSystemGoldenPath(t *testing.T) {
 	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
 		Name:        "actor-api-automated-golden-path",
-		Description: "Automated actor submits result for auto-assigned step without explicit claim",
+		Description: "Automated actor claims a waiting step and submits the result",
 		EnvOpts: []harness.EnvOption{
 			harness.WithGovernance(),
 			harness.WithRuntimeOrchestrator(),
@@ -247,14 +249,18 @@ func TestActorAPI_AutomatedSystemGoldenPath(t *testing.T) {
 			scenarioEngine.AssertRunStatus(domain.RunStatusActive),
 			scenarioEngine.AssertCurrentStep("execute"),
 
-			// Automated step transitions to "assigned" on run start (no explicit claim).
-			assertStepStatus("execute", domain.StepStatusAssigned),
+			// Step stays in waiting because actorSelector is nil — Option B
+			// keeps the step claimable rather than wedging it in an
+			// unrecoverable phantom-assigned state.
+			assertStepStatus("execute", domain.StepStatusWaiting),
 
 			// Automated actor discovers the step via type-based polling.
 			assertListStepExecutionsCount("automated_system", 1),
 
-			// Automated actor submits directly — SubmitStepResult auto-acknowledges
-			// assigned steps to in_progress before completing them.
+			// Automated actor claims, then submits — SubmitStepResult auto-
+			// acknowledges assigned steps to in_progress before completing.
+			claimCurrentStep("actor-auto-803"),
+			assertStepStatus("execute", domain.StepStatusAssigned),
 			scenarioEngine.SubmitStepResult("completed"),
 			scenarioEngine.AssertRunCompleted(),
 		},

@@ -174,10 +174,54 @@ func AddSiblingTaskToRun(parentDir, title, stateKey string, buildContent func(id
 	}
 }
 
+// EnsureStepAssignedForTest auto-assigns the named step execution to a
+// synthetic test actor if it is still in `waiting`. Used by
+// scenariotests that exercise IngestResult / SubmitStepResult directly
+// after StartRun: the Option B fix (INIT-020/EPIC-001/TASK-004) leaves
+// non-machine steps in waiting, so the engine's submit guard would
+// short-circuit before the test's intended assertion fires. This helper
+// recreates the historical "phantom assigned" precondition without
+// reintroducing the production bug.
+//
+// No-ops when the step is already assigned/in_progress or when the
+// store is not wired. Returns the underlying store error only if the
+// update itself fails.
+func EnsureStepAssignedForTest(sc *ScenarioContext, execID string) error {
+	if sc.Runtime.Store == nil {
+		return nil
+	}
+	exec, err := sc.Runtime.Store.GetStepExecution(sc.Ctx, execID)
+	if err != nil || exec == nil {
+		return nil
+	}
+	if exec.Status != domain.StepStatusWaiting {
+		return nil
+	}
+	exec.Status = domain.StepStatusAssigned
+	if exec.ActorID == "" {
+		exec.ActorID = "scenario-test-actor"
+	}
+	if uerr := sc.Runtime.Store.UpdateStepExecution(sc.Ctx, exec); uerr != nil {
+		return fmt.Errorf("auto-assign waiting step before submit: %w", uerr)
+	}
+	return nil
+}
+
 // SubmitStepResult returns a step that submits a result for the current
 // step execution with the given outcome ID. Uses IngestResult which validates
 // required outputs before routing, matching the production API path.
 // Optional outputs can be provided for steps with required_outputs.
+//
+// If the current step is in `waiting` (no auto-claim, no explicit /assign),
+// the helper performs an implicit assignment to a synthetic test actor
+// before submitting. This mirrors the historical "phantom assigned"
+// auto-claim behavior that scenariotests grew up with, so that fixtures
+// without an explicit claim/assign step continue to advance after the
+// Option B fix (INIT-020/EPIC-001/TASK-004) tightened production semantics.
+// Tests that want to assert the new state-machine semantics should call
+// the orchestrator's AssignStep / ClaimStep directly instead of relying
+// on this convenience. Tests that call IngestResult directly should use
+// EnsureStepAssignedForTest.
 func SubmitStepResult(outcomeID string, outputs ...string) Step {
 	return Step{
 		Name: "submit-step-result-" + outcomeID,
@@ -186,6 +230,10 @@ func SubmitStepResult(outcomeID string, outputs ...string) Step {
 				return fmt.Errorf("SubmitStepResult requires WithOrchestrator() on the runtime")
 			}
 			execID := sc.MustGet("current_execution_id").(string)
+
+			if err := EnsureStepAssignedForTest(sc, execID); err != nil {
+				return err
+			}
 
 			_, err := sc.Runtime.Orchestrator.IngestResult(sc.Ctx, spineEngine.SubmitRequest{
 				ExecutionID:       execID,

@@ -376,6 +376,12 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 	// we fall through to IngestResult rather than failing closed, so
 	// deployments without a fully wired store (e.g., some tests) still
 	// exercise the existing code path; actor == nil only in dev mode.
+	//
+	// An empty exec.ActorID means the step was never claimed/assigned —
+	// per Option B (INIT-020/EPIC-001/TASK-004), submitting from that
+	// state is a conflict, not a silent pass-through. We fail closed
+	// here so the operator gets a typed error pointing at the missing
+	// /assign call rather than a 200 + side-effects from IngestResult.
 	if actor := actorFromContext(r.Context()); actor != nil {
 		if st := s.storeFrom(r.Context()); st != nil {
 			exec, gerr := st.GetStepExecution(r.Context(), executionID)
@@ -383,7 +389,24 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 				WriteError(w, gerr)
 				return
 			}
-			if exec.ActorID != "" && exec.ActorID != actor.ActorID {
+			// Empty actor_id on a non-terminal exec means the step was
+			// never claimed/assigned; reject with 409 to surface the
+			// missing /assign step. On a terminal exec the empty
+			// actor_id is a legacy pre-Option-B row and we defer to
+			// IngestResult's idempotency path so a duplicate submit
+			// returns the persisted state rather than a misleading
+			// 409.
+			if exec.ActorID == "" {
+				if !exec.Status.IsTerminal() {
+					WriteError(w, domain.NewError(domain.ErrConflict,
+						"step is not assigned to any actor; call POST /assign or /claim before submitting"))
+					return
+				}
+			} else if exec.ActorID != actor.ActorID {
+				// Ownership check applies regardless of terminal state
+				// — actor B must not be able to submit (or duplicate-
+				// submit) against actor A's step, even after it has
+				// completed.
 				WriteError(w, domain.NewError(domain.ErrForbidden, "step is not assigned to the authenticated actor"))
 				return
 			}
