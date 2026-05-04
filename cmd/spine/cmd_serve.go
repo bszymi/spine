@@ -278,6 +278,12 @@ type workspaceDeliveryConfig struct {
 	EventRetention   time.Duration
 	SMPEventURL      string
 	SMPInternalToken string
+	// SMPAdminToken seeds the per-workspace bootstrap admin row
+	// (auth.actors / auth.tokens) so the platform's bearer
+	// authenticates against the workspace runtime DB on the first
+	// request. Empty disables the bootstrap (single-workspace and
+	// pre-platform-binding deployments).
+	SMPAdminToken string
 }
 
 // loadWorkspaceDeliveryConfig reads the env vars that drive event
@@ -292,6 +298,7 @@ func loadWorkspaceDeliveryConfig() workspaceDeliveryConfig {
 		WebhookTargets:   delivery.NewTargetValidator(parseWebhookAllowedHosts(os.Getenv("SPINE_WEBHOOK_ALLOWED_HOSTS"))),
 		SMPEventURL:      os.Getenv("SMP_EVENT_URL"),
 		SMPInternalToken: os.Getenv("SMP_INTERNAL_TOKEN"),
+		SMPAdminToken:    os.Getenv("SMP_ADMIN_TOKEN"),
 	}
 	if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -318,10 +325,29 @@ func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Lo
 		if err := workspaceOrchestratorBuilder(ctx, ss); err != nil {
 			return err
 		}
+		bootstrapInternalAdmin(ctx, ss, deliveryCfg, log)
 		if deliveryCfg.Enabled && ss.Store != nil && ss.Events != nil {
 			wireWorkspaceDelivery(ctx, ss, deliveryCfg, log)
 		}
 		return nil
+	}
+}
+
+// bootstrapInternalAdmin invokes auth.BootstrapInternalAdmin when
+// SMP_ADMIN_TOKEN is configured. Runs independently of the event-
+// delivery gate: a platform-binding deployment uses bearer auth on
+// every workspace request whether or not it subscribes to events, so
+// gating this on SPINE_EVENT_DELIVERY would leave the very 401 the
+// bootstrap exists to prevent. Errors are logged and swallowed so a
+// transient bootstrap failure does not block workspace activation.
+func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg workspaceDeliveryConfig, log *slog.Logger) {
+	if cfg.SMPAdminToken == "" || ss.Store == nil {
+		return
+	}
+	if err := auth.BootstrapInternalAdmin(ctx, ss.Store, auth.BootstrapAdminConfig{
+		Token: cfg.SMPAdminToken,
+	}); err != nil {
+		log.Error("workspace bootstrap internal admin failed", "workspace", ss.Config.ID, "error", err)
 	}
 }
 
