@@ -2,7 +2,7 @@
 id: TASK-001
 type: Task
 title: "BootstrapInternalAdmin: seed smp-admin actor + token on workspace load"
-status: Pending
+status: Completed
 epic: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-002-platform-binding-bootstrap/epic.md
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 work_type: feature

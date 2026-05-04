@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
@@ -272,6 +273,180 @@ func TestWireWorkspaceDelivery_EnqueuesDeliveryForActiveSubscription(t *testing.
 	}
 	if deliveries[0].EventType != string(domain.EventStepCompleted) {
 		t.Errorf("delivery event_type = %q, want step.completed", deliveries[0].EventType)
+	}
+}
+
+// authCaptureStore wraps stubStore with in-memory actor/token tracking
+// so the pooled-builder's BootstrapInternalAdmin call is observable
+// end-to-end at the cmd_serve gateway boundary.
+type authCaptureStore struct {
+	stubStore
+	mu     sync.Mutex
+	actors map[string]*domain.Actor
+	tokens map[string]*store.TokenRecord
+	subs   []store.EventSubscription
+}
+
+func newAuthCaptureStore() *authCaptureStore {
+	return &authCaptureStore{
+		actors: make(map[string]*domain.Actor),
+		tokens: make(map[string]*store.TokenRecord),
+	}
+}
+
+func (a *authCaptureStore) GetActor(_ context.Context, actorID string) (*domain.Actor, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	actor, ok := a.actors[actorID]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "actor not found")
+	}
+	clone := *actor
+	return &clone, nil
+}
+
+func (a *authCaptureStore) CreateActor(_ context.Context, actor *domain.Actor) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.actors[actor.ActorID]; ok {
+		return domain.NewError(domain.ErrConflict, "actor_id already exists")
+	}
+	clone := *actor
+	a.actors[actor.ActorID] = &clone
+	return nil
+}
+
+func (a *authCaptureStore) UpdateActor(_ context.Context, actor *domain.Actor) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	clone := *actor
+	a.actors[actor.ActorID] = &clone
+	return nil
+}
+
+func (a *authCaptureStore) GetActorByTokenHash(_ context.Context, hash string) (*domain.Actor, *domain.Token, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	rec, ok := a.tokens[hash]
+	if !ok {
+		return nil, nil, domain.NewError(domain.ErrUnauthorized, "invalid token")
+	}
+	actor, ok := a.actors[rec.ActorID]
+	if !ok {
+		return nil, nil, domain.NewError(domain.ErrUnauthorized, "actor not found")
+	}
+	actorClone := *actor
+	tok := &domain.Token{TokenID: rec.TokenID, ActorID: rec.ActorID, Name: rec.Name, CreatedAt: rec.CreatedAt}
+	return &actorClone, tok, nil
+}
+
+func (a *authCaptureStore) CreateToken(_ context.Context, rec *store.TokenRecord) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	clone := *rec
+	a.tokens[rec.TokenHash] = &clone
+	return nil
+}
+
+func (a *authCaptureStore) ListSubscriptions(_ context.Context, _ string) ([]store.EventSubscription, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]store.EventSubscription, len(a.subs))
+	copy(out, a.subs)
+	return out, nil
+}
+
+func (a *authCaptureStore) ListActiveSubscriptionsByEventType(_ context.Context, _ string) ([]store.EventSubscription, error) {
+	return nil, nil
+}
+
+func (a *authCaptureStore) tokenCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.tokens)
+}
+
+func (a *authCaptureStore) actorByID(id string) *domain.Actor {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.actors[id] == nil {
+		return nil
+	}
+	clone := *a.actors[id]
+	return &clone
+}
+
+// TestBootstrapInternalAdmin_RunsWhenTokenSet proves the admin
+// bootstrap seeds smp-admin rows regardless of the event-delivery gate:
+// a platform-binding deployment uses bearer auth on every workspace
+// request whether or not it subscribes to events, so gating the
+// bootstrap on SPINE_EVENT_DELIVERY would defeat the very 401 it
+// exists to prevent.
+func TestBootstrapInternalAdmin_RunsWhenTokenSet(t *testing.T) {
+	ctx := context.Background()
+	cs := newAuthCaptureStore()
+
+	cfg := workspaceDeliveryConfig{
+		Enabled:       false, // delivery off — admin bootstrap must still run
+		SMPAdminToken: "smp-bearer",
+	}
+	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-admin"}, Store: cs}
+
+	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+
+	if cs.actorByID(auth.InternalAdminActorID) == nil {
+		t.Fatalf("expected smp-admin actor seeded by bootstrap")
+	}
+	if got := cs.tokenCount(); got != 1 {
+		t.Fatalf("expected 1 token row, got %d", got)
+	}
+
+	// Re-running (idle eviction → re-load) must be idempotent.
+	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+	if got := cs.tokenCount(); got != 1 {
+		t.Errorf("expected token bootstrap to be idempotent, got %d rows", got)
+	}
+}
+
+// TestBootstrapInternalAdmin_NoOpWhenTokenUnset preserves the
+// single-workspace / pre-platform-binding default.
+func TestBootstrapInternalAdmin_NoOpWhenTokenUnset(t *testing.T) {
+	ctx := context.Background()
+	cs := newAuthCaptureStore()
+
+	cfg := workspaceDeliveryConfig{Enabled: true}
+	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-no-admin"}, Store: cs}
+
+	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+
+	if cs.actorByID(auth.InternalAdminActorID) != nil {
+		t.Errorf("expected no smp-admin actor when SMP_ADMIN_TOKEN unset")
+	}
+	if got := cs.tokenCount(); got != 0 {
+		t.Errorf("expected no token rows, got %d", got)
+	}
+}
+
+// TestBootstrapInternalAdmin_NoOpWhenStoreNil guards against the early-
+// bootstrap window where the workspace ServiceSet has no store yet.
+func TestBootstrapInternalAdmin_NoOpWhenStoreNil(t *testing.T) {
+	ctx := context.Background()
+	cfg := workspaceDeliveryConfig{SMPAdminToken: "bearer"}
+	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-nostore"}}
+
+	// Must not panic on a nil store.
+	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+}
+
+// TestLoadWorkspaceDeliveryConfig_ReadsAdminToken anchors the env
+// contract for the bootstrap admin path.
+func TestLoadWorkspaceDeliveryConfig_ReadsAdminToken(t *testing.T) {
+	t.Setenv("SPINE_EVENT_DELIVERY", "true")
+	t.Setenv("SMP_ADMIN_TOKEN", "platform-bearer")
+
+	cfg := loadWorkspaceDeliveryConfig()
+	if cfg.SMPAdminToken != "platform-bearer" {
+		t.Errorf("SMPAdminToken = %q, want platform-bearer", cfg.SMPAdminToken)
 	}
 }
 

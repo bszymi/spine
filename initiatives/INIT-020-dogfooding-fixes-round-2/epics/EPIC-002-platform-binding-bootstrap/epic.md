@@ -2,7 +2,7 @@
 id: EPIC-002
 type: Epic
 title: Platform-Binding Bootstrap Completeness
-status: Pending
+status: Completed
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 owner: bszymi
 created: 2026-05-04
