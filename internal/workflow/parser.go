@@ -2,11 +2,37 @@ package workflow
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/yamlsafe"
 )
+
+// stepRepositoryIDPattern matches the catalog ID format from ADR-013:
+// lowercase alphanumeric with single internal hyphens, max 64 chars.
+// Used by workflow schema validation to reject malformed `step.repository`
+// values BEFORE a workflow is committed (per ADR-015 *Validation*),
+// rather than waiting for run-start to surface the problem.
+var stepRepositoryIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// StepRepositoryIDMaxLen is the maximum length of a `step.repository`
+// value, matching the catalog ID length cap from ADR-013.
+const StepRepositoryIDMaxLen = 64
+
+// IsValidRepositoryID reports whether s is a syntactically valid
+// repository ID per ADR-013 / ADR-015. Run-start validation in the
+// engine reuses this so the workflow-load check and the run-start
+// check share one rule (no drift between layers).
+func IsValidRepositoryID(s string) bool {
+	if s == "" {
+		return false
+	}
+	if len(s) > StepRepositoryIDMaxLen {
+		return false
+	}
+	return stepRepositoryIDPattern.MatchString(s)
+}
 
 // validateDuration parses a duration string using the same function the
 // runtime scheduler uses (time.ParseDuration). Go's parser does not accept
@@ -25,10 +51,13 @@ func validateDuration(field, value string) *domain.ValidationError {
 
 // Parse parses a workflow YAML file into a domain WorkflowDefinition.
 // Input is bounded via yamlsafe so workflow bodies share the same
-// billion-laughs / deep-alias guards artifact front-matter has.
+// billion-laughs / deep-alias guards artifact front-matter has. Strict
+// field-name decoding rejects unknown keys at every nesting level —
+// without this, adding an optional schema field (e.g. step.repository per
+// ADR-015) silently misroutes any binary that doesn't yet declare it.
 func Parse(path string, content []byte) (*domain.WorkflowDefinition, error) {
 	var wf domain.WorkflowDefinition
-	if err := yamlsafe.DecodeInto(content, &wf); err != nil {
+	if err := yamlsafe.DecodeIntoStrict(content, &wf); err != nil {
 		return nil, fmt.Errorf("parse workflow %s: %w", path, err)
 	}
 	wf.Path = path
@@ -122,6 +151,16 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 	}
 
 	// §3.3 Conditional requirements
+	// step.repository (ADR-015): when present, must match the catalog
+	// ID format and length cap. Run-start validation additionally
+	// confirms the repository is registered, active, and in the task's
+	// opt-in set; the format check here rejects malformed values at
+	// commit time so a bad workflow can't be stored in the first place.
+	if step.Repository != "" && !IsValidRepositoryID(step.Repository) {
+		errors = append(errors, schemaError(prefix+".repository",
+			fmt.Sprintf("repository %q does not match the catalog ID format ^[a-z0-9]+(-[a-z0-9]+)*$ (max %d chars)", step.Repository, StepRepositoryIDMaxLen)))
+	}
+
 	if step.Type == domain.StepTypeAutomated {
 		if step.Retry == nil || step.Retry.Limit < 1 {
 			errors = append(errors, schemaError(prefix+".retry", "automated steps must have retry with limit >= 1"))

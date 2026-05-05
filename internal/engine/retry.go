@@ -76,12 +76,17 @@ func (o *Orchestrator) RetryStep(ctx context.Context, exec *domain.StepExecution
 
 	// Create a new step execution for the retry attempt.
 	// Preserve eligible_actor_ids so the same actor restriction applies on retry.
+	// RepositoryID is sticky across retry attempts: the resolution rule is
+	// applied once at the original activation, and retries inherit that
+	// resolved value rather than re-resolving (which would otherwise
+	// require re-loading the workflow definition).
 	nextExec := &domain.StepExecution{
 		ExecutionID:      fmt.Sprintf("%s-%s-%d", exec.RunID, exec.StepID, nextAttempt),
 		RunID:            exec.RunID,
 		StepID:           exec.StepID,
 		BranchID:         exec.BranchID,
 		EligibleActorIDs: exec.EligibleActorIDs,
+		RepositoryID:     exec.RepositoryID,
 		Status:           domain.StepStatusWaiting,
 		Attempt:          nextAttempt,
 		RetryAfter:       &retryAfter,

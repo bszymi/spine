@@ -61,13 +61,21 @@ func (t *postgresTx) CreateStepExecution(ctx context.Context, exec *domain.StepE
 	if eligibleActorIDs == nil {
 		eligibleActorIDs = []string{}
 	}
+	// See PostgresStore.CreateStepExecution for the rationale on the
+	// default-to-spine fallback. Production tx callers in the engine
+	// and scheduler always resolve RepositoryID explicitly per ADR-015;
+	// the default is the safety net for direct-store fixtures and
+	// any callers that haven't been updated to the new contract.
+	if exec.RepositoryID == "" {
+		exec.RepositoryID = domain.PrimaryRepositoryID
+	}
 	_, err := t.tx.Exec(ctx, `
-		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at, eligible_actor_ids)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at, eligible_actor_ids, repository_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 		exec.ExecutionID, exec.RunID, exec.StepID, nilIfEmpty(exec.BranchID),
 		nilIfEmpty(exec.ActorID), exec.Status, exec.Attempt, nilIfEmpty(exec.OutcomeID),
 		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.CreatedAt,
-		eligibleActorIDs,
+		eligibleActorIDs, exec.RepositoryID,
 	)
 	if err != nil {
 		return fmt.Errorf("create step execution in tx: %w", err)

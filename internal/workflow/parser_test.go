@@ -1,6 +1,9 @@
 package workflow_test
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -939,5 +942,93 @@ steps:
 	_, err := workflow.Parse("test.yaml", content)
 	if err == nil {
 		t.Fatal("expected error for invalid mode")
+	}
+}
+
+// TestParse_StrictDecode_AllCommittedWorkflows asserts every committed
+// workflow under workflows/ parses cleanly with strict (KnownFields(true))
+// decoding. Without this test, adding `step.repository` per ADR-015 could
+// land alongside an undeclared step field in a sibling workflow and the
+// rollout would only fail in production. Acts as the AC #(ix) anchor and
+// the ADR-015 *Schema versioning* rollout invariant guard.
+func TestParse_StrictDecode_AllCommittedWorkflows(t *testing.T) {
+	dir := "../../workflows"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+	parsed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		content, err := os.ReadFile(path) // #nosec G304 — fixed test directory.
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if _, err := workflow.Parse(e.Name(), content); err != nil {
+			t.Errorf("%s: strict decode failed: %v", e.Name(), err)
+		}
+		parsed++
+	}
+	if parsed == 0 {
+		t.Fatalf("no workflow YAMLs found under %s", dir)
+	}
+}
+
+// TestParse_StrictDecode_RejectsUnknownStepField pins the ADR-015 rollout
+// invariant: a typo or misnamed step field is rejected at parse time
+// rather than silently dropped (which would route the step to spine).
+func TestParse_StrictDecode_RejectsUnknownStepField(t *testing.T) {
+	content := []byte(`id: test-strict
+name: Test Strict
+version: "1.0"
+status: Active
+description: Trip the strict decoder.
+applies_to: [Task]
+entry_step: start
+steps:
+  - id: start
+    name: Start
+    type: manual
+    repositorY: payments-service
+    outcomes:
+      - id: done
+        name: Done
+        next_step: end
+`)
+	_, err := workflow.Parse("test.yaml", content)
+	if err == nil {
+		t.Fatal("expected error for unknown step field 'repositorY', got nil")
+	}
+}
+
+// TestParse_AcceptsStepRepositoryField asserts the new ADR-015 step.repository
+// field is accepted when present.
+func TestParse_AcceptsStepRepositoryField(t *testing.T) {
+	content := []byte(`id: test-repo
+name: Test Repo
+version: "1.0"
+status: Active
+description: Step with repository field.
+applies_to: [Task]
+entry_step: start
+steps:
+  - id: start
+    name: Start
+    type: manual
+    repository: payments-service
+    outcomes:
+      - id: done
+        name: Done
+        next_step: end
+`)
+	wf, err := workflow.Parse("test.yaml", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wf.Steps[0].Repository != "payments-service" {
+		t.Errorf("expected step.repository=payments-service, got %q", wf.Steps[0].Repository)
 	}
 }

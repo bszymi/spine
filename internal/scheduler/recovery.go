@@ -85,8 +85,14 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 			continue
 		}
 
-		// Look up the workflow's entry step to create the initial StepExecution.
-		entryStepID, err := s.lookupEntryStep(ctx, &runs[i])
+		// Look up the workflow's entry step (and its routed repository
+		// ID per ADR-015) so the recovered StepExecution carries the
+		// resolution the engine would have computed at run start.
+		// Without this, an entry step declared with `repository:
+		// payments-service` would crash-recover as `repository_id =
+		// spine` and silently route subsequent assignments to the
+		// wrong repository.
+		entryStepID, entryRepoID, err := s.lookupEntryStep(ctx, &runs[i])
 		if err != nil {
 			log.Error("lookup entry step failed", "run_id", runs[i].RunID, "error", err)
 			continue
@@ -115,12 +121,13 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 				return nil // entry step already exists, skip creation
 			}
 			return tx.CreateStepExecution(ctx, &domain.StepExecution{
-				ExecutionID: fmt.Sprintf("%s-%s-1", runs[i].RunID, entryStepID),
-				RunID:       runs[i].RunID,
-				StepID:      entryStepID,
-				Status:      domain.StepStatusWaiting,
-				Attempt:     1,
-				CreatedAt:   now,
+				ExecutionID:  fmt.Sprintf("%s-%s-1", runs[i].RunID, entryStepID),
+				RunID:        runs[i].RunID,
+				StepID:       entryStepID,
+				RepositoryID: entryRepoID,
+				Status:       domain.StepStatusWaiting,
+				Attempt:      1,
+				CreatedAt:    now,
 			})
 		}); err != nil {
 			log.Error("activate pending run failed", "run_id", runs[i].RunID, "error", err)
@@ -430,20 +437,33 @@ func findCurrentExecution(execs []domain.StepExecution, stepID string) *domain.S
 	return latest
 }
 
-// lookupEntryStep returns the workflow's entry_step ID for a given run.
-func (s *Scheduler) lookupEntryStep(ctx context.Context, run *domain.Run) (string, error) {
+// lookupEntryStep returns the workflow's entry_step ID and the repository
+// it is routed to per ADR-015 — `step.repository` if declared on the
+// entry step, else the primary repository (`spine`). The recovery path
+// uses the routed repo so a crash between CreateRun and entry-step
+// creation cannot lose the workflow author's `repository:` declaration.
+func (s *Scheduler) lookupEntryStep(ctx context.Context, run *domain.Run) (string, string, error) {
 	proj, err := s.store.GetWorkflowProjection(ctx, run.WorkflowPath)
 	if err != nil {
-		return "", fmt.Errorf("get workflow projection: %w", err)
+		return "", "", fmt.Errorf("get workflow projection: %w", err)
 	}
 
-	var wfDef domain.WorkflowDefinition
-	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
-		return "", fmt.Errorf("unmarshal workflow definition: %w", err)
+	wfDef, err := workflow.UnmarshalProjectionDefinition(proj.Definition)
+	if err != nil {
+		return "", "", fmt.Errorf("unmarshal workflow definition: %w", err)
 	}
 
 	if wfDef.EntryStep == "" {
-		return "", fmt.Errorf("workflow %s has no entry_step", run.WorkflowPath)
+		return "", "", fmt.Errorf("workflow %s has no entry_step", run.WorkflowPath)
 	}
-	return wfDef.EntryStep, nil
+	repoID := domain.PrimaryRepositoryID
+	for i := range wfDef.Steps {
+		if wfDef.Steps[i].ID == wfDef.EntryStep {
+			if wfDef.Steps[i].Repository != "" {
+				repoID = wfDef.Steps[i].Repository
+			}
+			break
+		}
+	}
+	return wfDef.EntryStep, repoID, nil
 }

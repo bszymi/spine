@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -106,8 +105,8 @@ func (a *storeStepAssigner) LookupStepDef(ctx context.Context, runID, stepID str
 	if err != nil {
 		return nil, run
 	}
-	var wfDef domain.WorkflowDefinition
-	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
+	wfDef, err := workflow.UnmarshalProjectionDefinition(proj.Definition)
+	if err != nil {
 		return nil, run
 	}
 	for i := range wfDef.Steps {

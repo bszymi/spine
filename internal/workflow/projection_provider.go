@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -68,11 +69,30 @@ func (p *ProjectionWorkflowProvider) ListActiveWorkflows(ctx context.Context) ([
 }
 
 func projectionToDefinition(proj *WorkflowProjection) (*domain.WorkflowDefinition, error) {
-	var wf domain.WorkflowDefinition
-	if err := json.Unmarshal(proj.Definition, &wf); err != nil {
+	wf, err := UnmarshalProjectionDefinition(proj.Definition)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal workflow %s: %w", proj.WorkflowPath, err)
 	}
 	wf.Path = proj.WorkflowPath
 	wf.CommitSHA = proj.SourceCommit
+	return wf, nil
+}
+
+// UnmarshalProjectionDefinition strict-decodes a workflow projection's
+// JSON definition into a domain.WorkflowDefinition. Unknown fields at
+// any nesting level (including step-level typos like `repositorY`) are
+// rejected rather than silently dropped — mirroring the YAML
+// strict-decode upgrade in Parse and closing the projection-load path
+// against the silent-drop misrouting risk in ADR-015 *Schema
+// versioning*. Every projection-backed loader (scheduler recovery,
+// timeout polling, gateway fallback assigner) routes through this
+// helper so they share one strictness contract.
+func UnmarshalProjectionDefinition(data []byte) (*domain.WorkflowDefinition, error) {
+	var wf domain.WorkflowDefinition
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wf); err != nil {
+		return nil, err
+	}
 	return &wf, nil
 }

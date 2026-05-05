@@ -5,6 +5,7 @@
 package yamlsafe
 
 import (
+	"bytes"
 	"fmt"
 
 	"gopkg.in/yaml.v3"
@@ -48,6 +49,27 @@ func DecodeInto(data []byte, target any) error {
 		return err
 	}
 	return node.Decode(target)
+}
+
+// DecodeIntoStrict decodes data into the given typed target with strict
+// field-name checking — yaml.Decoder.KnownFields(true). Unknown keys at any
+// nesting level fail with an error rather than being silently dropped. The
+// bounds check runs first, on the same input, so the strict pass cannot be
+// abused to amplify a bounds violation.
+//
+// Callers should prefer this over DecodeInto whenever the target is a
+// closed-shape struct (e.g., workflow definitions): silent drop of an
+// unknown step field is a documented misrouting risk per ADR-015.
+func DecodeIntoStrict(data []byte, target any) error {
+	if _, err := Decode(data); err != nil {
+		return err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(target); err != nil {
+		return fmt.Errorf("invalid YAML: %w", err)
+	}
+	return nil
 }
 
 func walk(n *yaml.Node, depth int, nodes, aliases *int) error {

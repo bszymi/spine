@@ -126,8 +126,8 @@ func (s *Scheduler) lookupStepDefinition(ctx context.Context, exec *domain.StepE
 		return nil, fmt.Errorf("get workflow projection: %w", err)
 	}
 
-	var wfDef domain.WorkflowDefinition
-	if err := json.Unmarshal(proj.Definition, &wfDef); err != nil {
+	wfDef, err := workflow.UnmarshalProjectionDefinition(proj.Definition)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal workflow definition: %w", err)
 	}
 

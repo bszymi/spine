@@ -30,7 +30,21 @@ type Orchestrator struct {
 	repositories   RepositoryResolver     // optional, gates run start on repository availability
 	repoClients    RepositoryGitClients   // optional, resolves per-repo git clients for multi-repo branch creation
 	policy         branchprotect.Policy   // branch-protection guard for MergeRunBranch (ADR-009 §3)
+	// cloneURLBuilder constructs the runner-facing clone URL for a
+	// resolved repository ID per ADR-015 *Assignment payload shape*.
+	// Production wires this to the workspace's git HTTP endpoint
+	// `<git-http-base>/git/{workspace_id}/{repository_id}`; tests
+	// pass nil and assert RepositoryID/BranchName without CloneURL.
+	cloneURLBuilder CloneURLBuilder
 }
+
+// CloneURLBuilder turns a resolved repository ID into the runner-facing
+// clone URL. The contract per ADR-015: always the workspace's git HTTP
+// endpoint, regardless of whether the repository has an external upstream
+// URL recorded on its runtime binding. The runtime binding's external
+// URL is consulted only by server-side clone/push paths and is never
+// published into assignment payloads in v0.x.
+type CloneURLBuilder func(repositoryID string) string
 
 // New creates an Orchestrator with all required dependencies.
 func New(
@@ -147,6 +161,17 @@ func (o *Orchestrator) WithRepositoryResolver(r RepositoryResolver) {
 // primary-only execution; primary-only runs are unaffected.
 func (o *Orchestrator) WithRepositoryGitClients(c RepositoryGitClients) {
 	o.repoClients = c
+}
+
+// WithCloneURLBuilder wires the runner-facing clone-URL builder for
+// step assignments (INIT-014 EPIC-004 TASK-004, governed by ADR-015).
+// Production wires this to a function that returns the workspace's git
+// HTTP endpoint for the resolved repository ID. Without it, assignment
+// payloads carry RepositoryID and BranchName but a blank CloneURL,
+// which keeps tests passing without needing a workspace ID; production
+// startup is responsible for wiring it.
+func (o *Orchestrator) WithCloneURLBuilder(b CloneURLBuilder) {
+	o.cloneURLBuilder = b
 }
 
 // WithBranchProtectPolicy installs the branch-protection policy consulted by
