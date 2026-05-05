@@ -89,6 +89,8 @@ func ExportPrometheus() string {
 	writeCounter(&b, "spine_timeouts_detected_total", m.TimeoutsDetected.Value())
 	writeCounter(&b, "spine_orphans_detected_total", m.OrphansDetected.Value())
 	writeCounter(&b, "spine_recoveries_executed_total", m.RecoveriesExecuted.Value())
+	writeCounter(&b, "spine_step_routing_explicit_total", m.StepRoutingExplicit.Value())
+	writeCounter(&b, "spine_step_routing_default_spine_total", m.StepRoutingDefaultSpine.Value())
 
 	// Gauges
 	writeGauge(&b, "spine_active_runs", m.ActiveRuns.Value())

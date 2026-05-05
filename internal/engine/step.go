@@ -209,6 +209,20 @@ func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.
 	}
 	excludeActors := o.unavailableActorsForStep(ctx, run.RunID, exec.StepID)
 
+	// Per ADR-015 *Assignment payload shape*: the resolved RepositoryID
+	// is sourced from the StepExecution row (set at activation), the
+	// CloneURL is constructed by the workspace-aware builder (always
+	// the workspace's git HTTP endpoint, never the runtime binding's
+	// external URL), and BranchName comes from the run.
+	repoID := exec.RepositoryID
+	if repoID == "" {
+		repoID = domain.PrimaryRepositoryID
+	}
+	var cloneURL string
+	if o.cloneURLBuilder != nil {
+		cloneURL = o.cloneURLBuilder(repoID)
+	}
+
 	return actor.AssignmentRequest{
 		AssignmentID: exec.ExecutionID,
 		RunID:        run.RunID,
@@ -222,6 +236,9 @@ func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.
 			WorkflowID:      run.WorkflowID,
 			RequiredInputs:  stepDef.RequiredInputs,
 			RequiredOutputs: stepDef.RequiredOutputs,
+			RepositoryID:    repoID,
+			CloneURL:        cloneURL,
+			BranchName:      run.BranchName,
 		},
 		Constraints: actor.AssignmentConstraints{
 			Timeout:          stepDef.Timeout,
@@ -353,7 +370,7 @@ func (o *Orchestrator) routeStepOutcome(ctx context.Context, stepDef *domain.Ste
 		return o.startDivergence(ctx, run, wfDef, stepDef, exec)
 	}
 	if exec.BranchID != "" {
-		return o.completeBranchStep(ctx, run, exec, outcome, now)
+		return o.completeBranchStep(ctx, run, exec, outcome, now, wfDef)
 	}
 
 	nextStepID := outcome.NextStep
@@ -373,11 +390,11 @@ func (o *Orchestrator) routeStepOutcome(ctx context.Context, stepDef *domain.Ste
 		}
 		return nil
 	}
-	return o.advanceToNextStep(ctx, exec, nextStepID, "", now)
+	return o.advanceToNextStep(ctx, exec, nextStepID, "", now, wfDef)
 }
 
 // advanceToNextStep creates the next step execution, updates current_step_id, and activates.
-func (o *Orchestrator) advanceToNextStep(ctx context.Context, exec *domain.StepExecution, nextStepID, branchID string, now time.Time) error {
+func (o *Orchestrator) advanceToNextStep(ctx context.Context, exec *domain.StepExecution, nextStepID, branchID string, now time.Time, wfDef *domain.WorkflowDefinition) error {
 	log := observe.Logger(ctx)
 
 	attempt := o.nextAttempt(ctx, exec.RunID, nextStepID)
@@ -388,18 +405,21 @@ func (o *Orchestrator) advanceToNextStep(ctx context.Context, exec *domain.StepE
 			fmt.Sprintf("rework cycle limit exceeded for step %s (attempt %d)", nextStepID, attempt))
 	}
 
+	nextRepoID := resolveStepRepoIDByStepID(wfDef, nextStepID)
 	nextExec := &domain.StepExecution{
-		ExecutionID: fmt.Sprintf("%s-%s-%d", exec.RunID, nextStepID, attempt),
-		RunID:       exec.RunID,
-		StepID:      nextStepID,
-		BranchID:    branchID,
-		Status:      domain.StepStatusWaiting,
-		Attempt:     attempt,
-		CreatedAt:   now,
+		ExecutionID:  fmt.Sprintf("%s-%s-%d", exec.RunID, nextStepID, attempt),
+		RunID:        exec.RunID,
+		StepID:       nextStepID,
+		BranchID:     branchID,
+		RepositoryID: nextRepoID,
+		Status:       domain.StepStatusWaiting,
+		Attempt:      attempt,
+		CreatedAt:    now,
 	}
 	if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
 		return fmt.Errorf("create next step: %w", err)
 	}
+	recordStepRoutingDecision(ctx, exec.RunID, nextStepID, findStepDef(wfDef, nextStepID), nextRepoID)
 
 	if err := o.store.UpdateCurrentStep(ctx, exec.RunID, nextStepID); err != nil {
 		return fmt.Errorf("update current step: %w", err)
@@ -460,18 +480,21 @@ func (o *Orchestrator) startDivergence(ctx context.Context, run *domain.Run, wfD
 		if branch.CurrentStepID == "" {
 			continue
 		}
+		branchRepoID := resolveStepRepoIDByStepID(wfDef, branch.CurrentStepID)
 		branchExec := &domain.StepExecution{
-			ExecutionID: fmt.Sprintf("%s-%s-%s-1", exec.RunID, branch.BranchID, branch.CurrentStepID),
-			RunID:       exec.RunID,
-			StepID:      branch.CurrentStepID,
-			BranchID:    branch.BranchID,
-			Status:      domain.StepStatusWaiting,
-			Attempt:     1,
-			CreatedAt:   now,
+			ExecutionID:  fmt.Sprintf("%s-%s-%s-1", exec.RunID, branch.BranchID, branch.CurrentStepID),
+			RunID:        exec.RunID,
+			StepID:       branch.CurrentStepID,
+			BranchID:     branch.BranchID,
+			RepositoryID: branchRepoID,
+			Status:       domain.StepStatusWaiting,
+			Attempt:      1,
+			CreatedAt:    now,
 		}
 		if err := o.store.CreateStepExecution(ctx, branchExec); err != nil {
 			return fmt.Errorf("create branch step %s: %w", branch.BranchID, err)
 		}
+		recordStepRoutingDecision(ctx, exec.RunID, branch.CurrentStepID, findStepDef(wfDef, branch.CurrentStepID), branchRepoID)
 
 		log.Info("branch step created",
 			"run_id", exec.RunID, "branch_id", branch.BranchID, "step_id", branch.CurrentStepID)
@@ -487,7 +510,7 @@ func (o *Orchestrator) startDivergence(ctx context.Context, run *domain.Run, wfD
 // completeBranchStep handles step completion within a divergence branch.
 // If the outcome is terminal (next_step == "end"), marks the branch as completed.
 // Otherwise advances to the next step within the branch and updates branch.CurrentStepID.
-func (o *Orchestrator) completeBranchStep(ctx context.Context, run *domain.Run, exec *domain.StepExecution, outcome *domain.OutcomeDefinition, now time.Time) error {
+func (o *Orchestrator) completeBranchStep(ctx context.Context, run *domain.Run, exec *domain.StepExecution, outcome *domain.OutcomeDefinition, now time.Time, wfDef *domain.WorkflowDefinition) error {
 	log := observe.Logger(ctx)
 
 	nextStepID := outcome.NextStep
@@ -528,7 +551,7 @@ func (o *Orchestrator) completeBranchStep(ctx context.Context, run *domain.Run, 
 	}
 
 	// Non-terminal — advance within the branch (skip run-level current_step_id update).
-	return o.advanceBranchStep(ctx, exec, nextStepID, exec.BranchID, now)
+	return o.advanceBranchStep(ctx, exec, nextStepID, exec.BranchID, now, wfDef)
 }
 
 // tryConvergence checks if all branches are ready and triggers convergence evaluation.
@@ -580,17 +603,20 @@ func (o *Orchestrator) tryConvergence(ctx context.Context, run *domain.Run, dive
 		}
 
 		attempt := o.nextAttempt(ctx, run.RunID, convergeStepID)
+		convergeRepoID := resolveStepRepoIDByStepID(wfDef, convergeStepID)
 		nextExec := &domain.StepExecution{
-			ExecutionID: fmt.Sprintf("%s-%s-%d", run.RunID, convergeStepID, attempt),
-			RunID:       run.RunID,
-			StepID:      convergeStepID,
-			Status:      domain.StepStatusWaiting,
-			Attempt:     attempt,
-			CreatedAt:   now,
+			ExecutionID:  fmt.Sprintf("%s-%s-%d", run.RunID, convergeStepID, attempt),
+			RunID:        run.RunID,
+			StepID:       convergeStepID,
+			RepositoryID: convergeRepoID,
+			Status:       domain.StepStatusWaiting,
+			Attempt:      attempt,
+			CreatedAt:    now,
 		}
 		if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
 			return fmt.Errorf("create post-convergence step: %w", err)
 		}
+		recordStepRoutingDecision(ctx, run.RunID, convergeStepID, findStepDef(wfDef, convergeStepID), convergeRepoID)
 
 		if err := o.ActivateStep(ctx, run.RunID, convergeStepID); err != nil {
 			log.Warn("post-convergence step activation failed", "step_id", convergeStepID, "error", err)
@@ -632,22 +658,25 @@ func findConvergenceForDivergence(wfDef *domain.WorkflowDefinition, divergenceID
 
 // advanceBranchStep creates the next step execution within a branch without updating
 // run.CurrentStepID (branch steps don't own the run cursor).
-func (o *Orchestrator) advanceBranchStep(ctx context.Context, exec *domain.StepExecution, nextStepID, branchID string, now time.Time) error {
+func (o *Orchestrator) advanceBranchStep(ctx context.Context, exec *domain.StepExecution, nextStepID, branchID string, now time.Time, wfDef *domain.WorkflowDefinition) error {
 	log := observe.Logger(ctx)
 
 	attempt := o.nextAttempt(ctx, exec.RunID, nextStepID)
+	nextRepoID := resolveStepRepoIDByStepID(wfDef, nextStepID)
 	nextExec := &domain.StepExecution{
-		ExecutionID: fmt.Sprintf("%s-%s-%s-%d", exec.RunID, branchID, nextStepID, attempt),
-		RunID:       exec.RunID,
-		StepID:      nextStepID,
-		BranchID:    branchID,
-		Status:      domain.StepStatusWaiting,
-		Attempt:     attempt,
-		CreatedAt:   now,
+		ExecutionID:  fmt.Sprintf("%s-%s-%s-%d", exec.RunID, branchID, nextStepID, attempt),
+		RunID:        exec.RunID,
+		StepID:       nextStepID,
+		BranchID:     branchID,
+		RepositoryID: nextRepoID,
+		Status:       domain.StepStatusWaiting,
+		Attempt:      attempt,
+		CreatedAt:    now,
 	}
 	if err := o.store.CreateStepExecution(ctx, nextExec); err != nil {
 		return fmt.Errorf("create branch step: %w", err)
 	}
+	recordStepRoutingDecision(ctx, exec.RunID, nextStepID, findStepDef(wfDef, nextStepID), nextRepoID)
 
 	log.Info("branch step progressed",
 		"run_id", exec.RunID, "branch_id", branchID, "completed_step", exec.StepID, "next_step", nextStepID)

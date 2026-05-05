@@ -213,6 +213,15 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	if ss.GitPool != nil {
 		orch.WithRepositoryGitClients(ss.GitPool)
 	}
+	// Runner-facing clone URL builder (INIT-014 EPIC-004 TASK-004,
+	// governed by ADR-015 *Assignment payload shape*). Always the
+	// workspace's git HTTP endpoint; the runtime binding's external
+	// upstream URL is never published into assignment payloads.
+	if base := os.Getenv("SPINE_RUNNER_GIT_BASE_URL"); base != "" {
+		if b := buildWorkspaceCloneURLBuilder(base, ss.Config.ID); b != nil {
+			orch.WithCloneURLBuilder(b)
+		}
+	}
 	// Workflow writer is required for ADR-008 planning runs. Fail fast at
 	// startup if ss.Workflows is populated but doesn't satisfy the
 	// interface — a silent skip here degrades workflow.create into 503 at
@@ -720,6 +729,25 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if orch != nil && gitPool != nil {
 		orch.WithRepositoryGitClients(gitPool)
 	}
+	// Runner-facing clone URL builder (INIT-014 EPIC-004 TASK-004,
+	// governed by ADR-015). Top-level (single-workspace) path uses
+	// the runtime workspace ID — the same value the gateway's git
+	// HTTP router resolves through workspace.Resolver. SMPWorkspaceID
+	// is the *external* SMP platform identifier and is not equivalent
+	// in deployments where the two diverge; using it would produce
+	// `/git/{smp_id}/{repo}` URLs that fail with workspace-not-found.
+	if orch != nil {
+		base := os.Getenv("SPINE_RUNNER_GIT_BASE_URL")
+		runtimeWS := os.Getenv("SPINE_WORKSPACE_ID")
+		if runtimeWS == "" {
+			runtimeWS = "default"
+		}
+		if base != "" {
+			if b := buildWorkspaceCloneURLBuilder(base, runtimeWS); b != nil {
+				orch.WithCloneURLBuilder(b)
+			}
+		}
+	}
 
 	var sched *scheduler.Scheduler
 	if deps.Store != nil {
@@ -835,6 +863,31 @@ func buildBranchProtectPolicy(st store.Store) branchprotect.Policy {
 		return branchprotect.NewPermissive()
 	}
 	return branchprotect.New(bpprojection.New(st))
+}
+
+// buildWorkspaceCloneURLBuilder returns an engine.CloneURLBuilder that
+// constructs runner-facing clone URLs against the workspace's git HTTP
+// endpoint per ADR-015 *Assignment payload shape*. The trailing slash
+// on `base` is normalized so callers can supply either form.
+//
+// `workspaceID` must be non-empty: the gateway's git HTTP router
+// (handlers_git.go::parseGitPath) parses `/git/{first_segment}/...` as
+// `{workspace_id}={first_segment}, {repository_id}=...`. A URL of the
+// form `/git/{repository_id}/info/refs` would therefore be resolved as
+// workspace=`{repository_id}` and fail with workspace-not-found. When
+// workspaceID is blank, this returns nil; callers must guard for nil
+// (or skip wiring) so the orchestrator never publishes a malformed
+// clone URL into an assignment payload.
+func buildWorkspaceCloneURLBuilder(base, workspaceID string) engine.CloneURLBuilder {
+	for len(base) > 0 && base[len(base)-1] == '/' {
+		base = base[:len(base)-1]
+	}
+	if workspaceID == "" {
+		return nil
+	}
+	return func(repoID string) string {
+		return fmt.Sprintf("%s/git/%s/%s", base, workspaceID, repoID)
+	}
 }
 
 // buildGitPushResolver returns a resolver the gateway calls on each

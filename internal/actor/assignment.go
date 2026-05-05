@@ -23,6 +23,22 @@ type AssignmentContext struct {
 	RequiredInputs  []string `json:"required_inputs,omitempty"`
 	RequiredOutputs []string `json:"required_outputs,omitempty"`
 	Instructions    string   `json:"instructions,omitempty"`
+
+	// RepositoryID is the resolved target repository for this step
+	// (per ADR-015). The runner clones exactly this repository at
+	// BranchName from CloneURL — no list, no fan-out.
+	RepositoryID string `json:"repository_id"`
+
+	// CloneURL is the URL the runner clones. Always the workspace's
+	// git HTTP endpoint (`<git-http-base>/git/{workspace_id}/{repository_id}`)
+	// per ADR-015 *Assignment payload shape*: the run branch is
+	// guaranteed to exist on the workspace's served copy, while
+	// external upstream URLs depend on best-effort auto-push.
+	CloneURL string `json:"clone_url"`
+
+	// BranchName is the run branch name. Same in every affected repo
+	// per Multi-Repository Integration §4.2.
+	BranchName string `json:"branch_name"`
 }
 
 // AssignmentConstraints define execution boundaries.

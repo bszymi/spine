@@ -14,18 +14,31 @@ func (s *PostgresStore) CreateStepExecution(ctx context.Context, exec *domain.St
 	if eligibleActorIDs == nil {
 		eligibleActorIDs = []string{}
 	}
+	// RepositoryID defaults to PrimaryRepositoryID when empty so direct
+	// Store callers (existing fixtures, simple primary-repo CRUD tests)
+	// keep working. The DB column also has NOT NULL DEFAULT 'spine'
+	// for the same reason — but the INSERT below always passes a value,
+	// so the column default never fires; this code-side default is the
+	// authoritative one. Production callers in the engine and scheduler
+	// always resolve and populate RepositoryID explicitly per ADR-015
+	// (see resolveStepRepoIDByStepID and Scheduler.lookupEntryStep);
+	// the default below is only the safety net for paths that have
+	// not yet been updated to the new contract.
+	if exec.RepositoryID == "" {
+		exec.RepositoryID = domain.PrimaryRepositoryID
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at, eligible_actor_ids)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		INSERT INTO runtime.step_executions (execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at, eligible_actor_ids, repository_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 		exec.ExecutionID, exec.RunID, exec.StepID, nilIfEmpty(exec.BranchID),
 		nilIfEmpty(exec.ActorID), exec.Status, exec.Attempt, nilIfEmpty(exec.OutcomeID),
 		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail, exec.CreatedAt,
-		eligibleActorIDs,
+		eligibleActorIDs, exec.RepositoryID,
 	)
 	return err
 }
 
-const stepExecColumns = `execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at, eligible_actor_ids`
+const stepExecColumns = `execution_id, run_id, step_id, branch_id, actor_id, status, attempt, outcome_id, retry_after, started_at, completed_at, error_detail, created_at, eligible_actor_ids, repository_id`
 
 func scanStepExecution(scanner interface{ Scan(dest ...any) error }) (domain.StepExecution, error) {
 	var exec domain.StepExecution
@@ -34,7 +47,7 @@ func scanStepExecution(scanner interface{ Scan(dest ...any) error }) (domain.Ste
 		&exec.ExecutionID, &exec.RunID, &exec.StepID, &branchID, &actorID,
 		&exec.Status, &exec.Attempt, &outcomeID, &exec.RetryAfter,
 		&exec.StartedAt, &exec.CompletedAt, &exec.ErrorDetail, &exec.CreatedAt,
-		&exec.EligibleActorIDs,
+		&exec.EligibleActorIDs, &exec.RepositoryID,
 	)
 	if err != nil {
 		return exec, err

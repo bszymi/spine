@@ -73,17 +73,20 @@ func (o *Orchestrator) startRunCommon(ctx context.Context, p startRunParams) (*S
 	// Create entry step execution BEFORE activation so that a failure here
 	// leaves the run in pending (recoverable by scheduler) rather than
 	// active with no step (unrecoverable).
+	entryRepoID := resolveStepRepoIDByStepID(wfDef, wfDef.EntryStep)
 	entryStep := &domain.StepExecution{
-		ExecutionID: fmt.Sprintf("%s-%s-1", run.RunID, wfDef.EntryStep),
-		RunID:       run.RunID,
-		StepID:      wfDef.EntryStep,
-		Status:      domain.StepStatusWaiting,
-		Attempt:     1,
-		CreatedAt:   now,
+		ExecutionID:  fmt.Sprintf("%s-%s-1", run.RunID, wfDef.EntryStep),
+		RunID:        run.RunID,
+		StepID:       wfDef.EntryStep,
+		RepositoryID: entryRepoID,
+		Status:       domain.StepStatusWaiting,
+		Attempt:      1,
+		CreatedAt:    now,
 	}
 	if err := o.store.CreateStepExecution(ctx, entryStep); err != nil {
 		return nil, fmt.Errorf("create entry step: %w", err)
 	}
+	recordStepRoutingDecision(ctx, run.RunID, wfDef.EntryStep, findStepDef(wfDef, wfDef.EntryStep), entryRepoID)
 
 	// Activate: pending → active.
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
@@ -160,6 +163,15 @@ func (o *Orchestrator) StartRun(ctx context.Context, taskPath string) (*StartRun
 		return nil, domain.NewError(domain.ErrInvalidParams, "workflow has no entry_step")
 	}
 
+	// Validate every step's resolved target repository against the
+	// catalog, runtime binding, and the task's opt-in set per ADR-015
+	// *Validation*. This runs before any branch creation so a
+	// misconfigured workflow / task pairing fails the run start cleanly
+	// without partial state.
+	if err := o.validateStepRouting(ctx, binding.Workflow, art); err != nil {
+		return nil, err
+	}
+
 	traceID, err := observe.GenerateTraceID()
 	if err != nil {
 		return nil, fmt.Errorf("generate trace ID: %w", err)
@@ -214,6 +226,16 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	}
 	if binding.Workflow.EntryStep == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "workflow has no entry_step")
+	}
+
+	// Planning runs only touch the primary Spine repo (per ADR-006);
+	// validate the creation workflow against an empty opt-in set so a
+	// `repository: <code-repo>` declaration is rejected up front rather
+	// than producing a clone-time failure on a non-existent run branch
+	// in the code repo. The synthesized artifact carries an empty
+	// Repositories list so the opt-in check resolves to {spine} only.
+	if err := o.validateStepRouting(ctx, binding.Workflow, &domain.Artifact{Path: artifactPath, Type: parsed.Type}); err != nil {
+		return nil, err
 	}
 
 	traceID, err := observe.GenerateTraceID()
@@ -298,6 +320,14 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 	}
 	if binding.Workflow.EntryStep == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "governing workflow has no entry_step")
+	}
+
+	// Workflow-creation planning runs only touch the primary Spine
+	// repo. Validate the governing workflow's step routing against an
+	// empty opt-in set so a `repository: <code-repo>` declaration is
+	// rejected here rather than producing a clone-time failure later.
+	if err := o.validateStepRouting(ctx, binding.Workflow, &domain.Artifact{Path: path, Type: domain.ArtifactTypeWorkflow}); err != nil {
+		return nil, err
 	}
 
 	traceID, err := observe.GenerateTraceID()

@@ -47,6 +47,14 @@ type Metrics struct {
 	OrphansDetected    Counter
 	RecoveriesExecuted Counter
 
+	// StepRoutingExplicit and StepRoutingDefaultSpine count routing
+	// decisions per ADR-015: a step that declared `repository: <id>`
+	// vs a step that took the implicit `spine` default. Watching the
+	// ratio across releases helps detect a regression where a workflow
+	// that should target a code repo silently defaults to spine.
+	StepRoutingExplicit     Counter
+	StepRoutingDefaultSpine Counter
+
 	// Gauges
 	ActiveRuns  Gauge
 	ActiveSteps Gauge

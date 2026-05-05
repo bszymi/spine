@@ -87,6 +87,8 @@ type StepDefinition struct {
 	ID              string              `json:"id" yaml:"id"`
 	Name            string              `json:"name" yaml:"name"`
 	Type            StepType            `json:"type" yaml:"type"`
+	Description     string              `json:"description,omitempty" yaml:"description,omitempty"`
+	Repository      string              `json:"repository,omitempty" yaml:"repository,omitempty"`
 	Execution       *ExecutionConfig    `json:"execution,omitempty" yaml:"execution,omitempty"`
 	Preconditions   []Precondition      `json:"preconditions,omitempty" yaml:"preconditions,omitempty"`
 	RequiredInputs  []string            `json:"required_inputs,omitempty" yaml:"required_inputs,omitempty"`
