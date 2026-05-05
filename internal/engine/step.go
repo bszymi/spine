@@ -214,6 +214,13 @@ func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.
 	// CloneURL is constructed by the workspace-aware builder (always
 	// the workspace's git HTTP endpoint, never the runtime binding's
 	// external URL), and BranchName comes from the run.
+	//
+	// TASK-005 extends the payload with WorkspaceID (the same runtime
+	// ID baked into CloneURL) and CommitBaseline (the SHA the resolved
+	// repo's run branch was cut from, captured by createRunBranches).
+	// Both are `omitempty` on AssignmentContext, so legacy runs created
+	// before TASK-005 (RepositoryBaselines empty) and tests that don't
+	// wire a workspace ID still produce valid payloads.
 	repoID := exec.RepositoryID
 	if repoID == "" {
 		repoID = domain.PrimaryRepositoryID
@@ -222,6 +229,7 @@ func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.
 	if o.cloneURLBuilder != nil {
 		cloneURL = o.cloneURLBuilder(repoID)
 	}
+	baseline := run.RepositoryBaselines[repoID]
 
 	return actor.AssignmentRequest{
 		AssignmentID: exec.ExecutionID,
@@ -236,9 +244,11 @@ func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.
 			WorkflowID:      run.WorkflowID,
 			RequiredInputs:  stepDef.RequiredInputs,
 			RequiredOutputs: stepDef.RequiredOutputs,
+			WorkspaceID:     o.workspaceID,
 			RepositoryID:    repoID,
 			CloneURL:        cloneURL,
 			BranchName:      run.BranchName,
+			CommitBaseline:  baseline,
 		},
 		Constraints: actor.AssignmentConstraints{
 			Timeout:          stepDef.Timeout,

@@ -303,6 +303,10 @@ func (f *fakeGitReader) Head(_ context.Context) (string, error) {
 	return "fake-head-sha", nil
 }
 
+func (f *fakeGitReader) RefSHA(_ context.Context, _ string) (string, error) {
+	return "fake-head-sha", nil
+}
+
 // ── Fake ProjectionQuerier ──
 
 type fakeProjectionQuerier struct{}

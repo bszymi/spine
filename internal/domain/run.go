@@ -73,6 +73,15 @@ type Run struct {
 	// only fills in once divergent state needs to be tracked (e.g. partial
 	// branch-creation cleanup or per-repo recovery).
 	RepositoryBranches map[string]string `json:"repository_branches,omitempty" yaml:"repository_branches,omitempty"`
+	// RepositoryBaselines records the SHA each affected repository's run
+	// branch was cut from. Captured at branch-creation time (the parent
+	// default branch's tip) and immutable for the lifetime of the row.
+	// Surfaced to runners via the assignment payload's `commit_baseline`
+	// (INIT-014 EPIC-004 TASK-005) so a runner can detect upstream drift
+	// or skip a clone when its cache already holds the baseline. Empty
+	// for repos whose tip lookup failed at branch creation; production
+	// tolerates the omission and emits an `omitempty` JSON field.
+	RepositoryBaselines map[string]string `json:"repository_baselines,omitempty" yaml:"repository_baselines,omitempty"`
 	TraceID            string            `json:"trace_id" yaml:"trace_id"`
 	CommitMeta         map[string]string `json:"commit_meta,omitempty" yaml:"commit_meta,omitempty"`
 	TimeoutAt          *time.Time        `json:"timeout_at,omitempty" yaml:"timeout_at,omitempty"`

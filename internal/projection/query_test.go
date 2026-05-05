@@ -72,6 +72,10 @@ func (g *queryFakeGit) Head(_ context.Context) (string, error) {
 	return g.head, g.headErr
 }
 
+func (g *queryFakeGit) RefSHA(_ context.Context, _ string) (string, error) {
+	return g.head, g.headErr
+}
+
 func (g *queryFakeGit) Log(_ context.Context, opts git.LogOpts) ([]git.CommitInfo, error) {
 	g.logOptsSeen = opts
 	return g.logResult, g.logErr

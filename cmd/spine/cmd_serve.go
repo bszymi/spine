@@ -222,6 +222,12 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 			orch.WithCloneURLBuilder(b)
 		}
 	}
+	// Runner-facing workspace ID (INIT-014 EPIC-004 TASK-005). Wired
+	// from the same source as buildWorkspaceCloneURLBuilder above so
+	// assignment payloads always pair the workspace_id field with a
+	// matching clone_url; the gateway's git HTTP router would reject a
+	// mismatch as workspace-not-found at clone time.
+	orch.WithWorkspaceID(ss.Config.ID)
 	// Workflow writer is required for ADR-008 planning runs. Fail fast at
 	// startup if ss.Workflows is populated but doesn't satisfy the
 	// interface — a silent skip here degrades workflow.create into 503 at
@@ -730,12 +736,13 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		orch.WithRepositoryGitClients(gitPool)
 	}
 	// Runner-facing clone URL builder (INIT-014 EPIC-004 TASK-004,
-	// governed by ADR-015). Top-level (single-workspace) path uses
-	// the runtime workspace ID — the same value the gateway's git
-	// HTTP router resolves through workspace.Resolver. SMPWorkspaceID
-	// is the *external* SMP platform identifier and is not equivalent
-	// in deployments where the two diverge; using it would produce
-	// `/git/{smp_id}/{repo}` URLs that fail with workspace-not-found.
+	// governed by ADR-015) and workspace ID (TASK-005). Top-level
+	// (single-workspace) path uses the runtime workspace ID — the
+	// same value the gateway's git HTTP router resolves through
+	// workspace.Resolver. SMPWorkspaceID is the *external* SMP
+	// platform identifier and is not equivalent in deployments where
+	// the two diverge; using it would produce `/git/{smp_id}/{repo}`
+	// URLs that fail with workspace-not-found.
 	if orch != nil {
 		base := os.Getenv("SPINE_RUNNER_GIT_BASE_URL")
 		runtimeWS := os.Getenv("SPINE_WORKSPACE_ID")
@@ -747,6 +754,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 				orch.WithCloneURLBuilder(b)
 			}
 		}
+		orch.WithWorkspaceID(runtimeWS)
 	}
 
 	var sched *scheduler.Scheduler

@@ -27,13 +27,17 @@ func (s *PostgresStore) CreateRun(ctx context.Context, run *domain.Run) error {
 	if branches == nil {
 		branches = map[string]string{}
 	}
+	baselines := run.RepositoryBaselines
+	if baselines == nil {
+		baselines = map[string]string{}
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO runtime.runs (run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode, affected_repositories, primary_repository, repository_branches)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+		INSERT INTO runtime.runs (run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode, affected_repositories, primary_repository, repository_branches, repository_baselines)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
 		run.RunID, run.TaskPath, run.WorkflowPath, run.WorkflowID, run.WorkflowVersion,
 		run.WorkflowVersionLabel, run.Status, nilIfEmpty(run.CurrentStepID), nilIfEmpty(run.BranchName), run.TraceID,
 		run.TimeoutAt, run.StartedAt, run.CompletedAt, run.CreatedAt, modeOrDefault(run.Mode),
-		affected, primary, branches,
+		affected, primary, branches, baselines,
 	)
 	return err
 }
@@ -41,7 +45,7 @@ func (s *PostgresStore) CreateRun(ctx context.Context, run *domain.Run) error {
 // runColumns is the standard column list for runtime.runs queries. It is
 // shared by every read path so a schema addition only requires updating
 // scanRun and this constant.
-const runColumns = `run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode, commit_meta, affected_repositories, primary_repository, repository_branches`
+const runColumns = `run_id, task_path, workflow_path, workflow_id, workflow_version, workflow_version_label, status, current_step_id, branch_name, trace_id, timeout_at, started_at, completed_at, created_at, mode, commit_meta, affected_repositories, primary_repository, repository_branches, repository_baselines`
 
 // scanRun scans a single row into a domain.Run, handling nullable columns.
 func scanRun(scanner interface{ Scan(dest ...any) error }) (domain.Run, error) {
@@ -50,11 +54,12 @@ func scanRun(scanner interface{ Scan(dest ...any) error }) (domain.Run, error) {
 	var commitMeta map[string]string
 	var affected []string
 	var branches map[string]string
+	var baselines map[string]string
 	err := scanner.Scan(
 		&run.RunID, &run.TaskPath, &run.WorkflowPath, &run.WorkflowID, &run.WorkflowVersion,
 		&run.WorkflowVersionLabel, &run.Status, &currentStepID, &branchName, &run.TraceID,
 		&run.TimeoutAt, &run.StartedAt, &run.CompletedAt, &run.CreatedAt, &run.Mode, &commitMeta,
-		&affected, &run.PrimaryRepository, &branches,
+		&affected, &run.PrimaryRepository, &branches, &baselines,
 	)
 	if err != nil {
 		return run, err
@@ -71,6 +76,9 @@ func scanRun(scanner interface{ Scan(dest ...any) error }) (domain.Run, error) {
 	}
 	if len(branches) > 0 {
 		run.RepositoryBranches = branches
+	}
+	if len(baselines) > 0 {
+		run.RepositoryBaselines = baselines
 	}
 	return run, nil
 }
