@@ -307,9 +307,18 @@ func startMultiRepoRunAndAssertBranches() scenarioEngine.Step {
 			// `repository: billing`, so the persisted execution row's
 			// RepositoryID must be `billing`. A regression that defaults
 			// to `spine` (the implicit fallback) would silently route
-			// the runner to the wrong repo.
-			if got := result.EntryStep.RepositoryID; got != "billing" {
-				return fmt.Errorf("EntryStep.RepositoryID: got %q, want %q (explicit routing)", got, "billing")
+			// the runner to the wrong repo. Re-read the row through the
+			// public store API rather than asserting on the in-memory
+			// return — runners consume the persisted record, and a
+			// CreateStepExecution / scan-path regression that defaulted
+			// the column would otherwise pass with the in-memory check
+			// alone.
+			persistedExec, err := sc.Runtime.Store.GetStepExecution(sc.Ctx, result.EntryStep.ExecutionID)
+			if err != nil {
+				return fmt.Errorf("GetStepExecution: %w", err)
+			}
+			if got := persistedExec.RepositoryID; got != "billing" {
+				return fmt.Errorf("persisted EntryStep.RepositoryID: got %q, want %q (explicit routing)", got, "billing")
 			}
 
 			sc.Set("run_id", run.RunID)
