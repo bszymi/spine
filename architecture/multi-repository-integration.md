@@ -238,11 +238,12 @@ The same branch name (`spine/run/{artifact-id}-{slug}-{hex}`) is used in all rep
 
 ### 4.3 Step Execution Routing
 
-Each step in a run targets a specific repository. The step's repository context is determined by:
+Per [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md), each step in a run targets exactly one repository. The step's repository context is determined by:
 
-1. Explicit `repository` field on the step definition (if supported by the workflow)
-2. The task's `repositories` list (if single repo, implicit)
-3. Default: the primary Spine repo
+1. Explicit `repository` field on the step definition.
+2. Default: the primary Spine repo (`spine`).
+
+There is no implicit "single code repository" default. Steps that operate on a code repo must declare `repository: <id>` explicitly. ADR-015 also specifies validation (the resolved repository must exist in the catalog, be active, and be a member of `task.repositories ∪ {spine}`), the assignment payload shape (`repository_id`, `clone_url`, `branch_name` per execution), and the `repository_id` field on the step execution row.
 
 The runner receives the repository context and clones accordingly:
 
@@ -438,6 +439,7 @@ Soft deletion — flipping the binding row's `status` to `inactive` while leavin
 - [Execution Evidence Schema](/architecture/execution-evidence.md) — `RequiredChecks` / `AdvisoryChecks` lists that policy `severity` selects between
 - [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md) — identity model and catalog/binding split
 - [ADR-014](/architecture/adr/ADR-014-validation-policy-as-governed-artifact.md) — validation policy as a governed artifact type
+- [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md) — multi-repo step routing model (governs §4.3)
 - [INIT-014](/initiatives/INIT-014-multi-repository-workspaces/initiative.md) — parent initiative
 - [INIT-009 TASK-006](/initiatives/INIT-009-workspace-runtime/epics/EPIC-001-core-runtime/tasks/TASK-006-git-http-serve-endpoint.md) — git HTTP serve endpoint (extended for repo routing)
 

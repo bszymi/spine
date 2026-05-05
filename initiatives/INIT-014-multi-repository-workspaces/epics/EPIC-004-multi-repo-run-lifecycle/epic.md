@@ -58,7 +58,9 @@ This epic makes execution multi-repo aware before merge coordination is added.
 
 1. Starting a run creates the same branch name in every affected repository.
 2. A branch-creation failure cleans up already-created branches.
-3. Step execution payloads identify the target repository.
+3. Step execution payloads identify the target repository (single `repository_id` per execution, per [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md)).
 4. Single-repo tasks keep the current behavior.
 5. Runner containers can clone the intended repo and branch.
+
+The step routing model is governed by [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md): every step targets exactly one repository, resolved as `step.repository` if set or `spine` otherwise. No fan-out in v0.x.
 

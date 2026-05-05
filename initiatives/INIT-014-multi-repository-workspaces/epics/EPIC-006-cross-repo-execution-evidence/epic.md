@@ -60,3 +60,5 @@ The primary repo remains the ledger. Code repos produce deterministic evidence: 
 3. Required checks produce structured results tied to repo, branch, and commit.
 4. Missing or failed required evidence blocks publication.
 5. Evidence is auditable from primary-repo history.
+
+Evidence is keyed by `(execution_id, repository_id)` where `repository_id` is the single value resolved per execution under [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md). One execution row attributes to exactly one repository — no N-way evidence aggregation across fanned-out step instances is required.

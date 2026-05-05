@@ -60,3 +60,5 @@ Spine must not pretend cross-repo merges are atomic. It should instead make part
 4. Failed repo branches are preserved for manual resolution.
 5. Completed runs require all affected repos to merge successfully.
 
+Merge ordering operates on `Run.AffectedRepositories` (the task-derived set), independent of which steps wrote to which repo. Step routing — which repo each step's commits land in — is governed by [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md). A repo in `AffectedRepositories` that received no step commits is still merged on schedule; the run branch carries no new commits relative to where it was cut, so the merge is a no-op (typically "Already up to date" against a possibly-advanced default branch tip). The exact ledger outcome assigned to that case is decided by this epic, but it must satisfy AC #5 (every affected repo merges successfully for a run to complete) — that is, a no-op merge counts as a successful merge.
+
