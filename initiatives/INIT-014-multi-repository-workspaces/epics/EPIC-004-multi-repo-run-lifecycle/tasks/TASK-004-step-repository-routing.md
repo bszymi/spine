@@ -2,11 +2,14 @@
 id: TASK-004
 type: Task
 title: Route steps to target repositories
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: ADR-015 implemented end-to-end. step.repository on StepDefinition + repository_id on StepExecution (migration 024). Strict YAML decoding (yamlsafe.DecodeIntoStrict) and strict JSON decoding (workflow.UnmarshalProjectionDefinition) close every workflow ingestion path against silent-drop misroute. validateStepRouting at run start AND for planning runs enforces existence + active + opt-in checks with the spine exception baked in. Assignment payload exposes RepositoryID, CloneURL (always workspace git HTTP), BranchName as single-value fields. Crash-recovery (Scheduler.lookupEntryStep) preserves the routed repo. AC (i)-(ix) covered; codex 5 passes (3 with findings, last 2 clean back-to-back).
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation
 created: 2026-04-28
+last_updated: 2026-05-05
 links:
   - type: parent
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
@@ -14,6 +17,8 @@ links:
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/tasks/TASK-002-create-run-branches-across-repositories.md
   - type: blocked_by
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/tasks/TASK-007-step-routing-decision-adr.md
+  - type: related_to
+    target: /architecture/adr/ADR-015-multi-repo-step-routing.md
 ---
 
 # TASK-004 - Route Steps to Target Repositories
