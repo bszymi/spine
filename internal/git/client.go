@@ -20,6 +20,12 @@ type GitClient interface {
 	ReadFile(ctx context.Context, ref, path string) ([]byte, error)
 	ListFiles(ctx context.Context, ref, pattern string) ([]string, error)
 	Head(ctx context.Context) (string, error)
+	// RefSHA resolves a named ref (branch, tag, or HEAD) to its commit
+	// SHA. Equivalent to `git rev-parse <ref>`. Used to capture the SHA
+	// of a specific branch independent of the current working-tree HEAD,
+	// e.g. when recording the cut-from baseline of a newly-created
+	// branch whose `base` argument is a branch name rather than HEAD.
+	RefSHA(ctx context.Context, ref string) (string, error)
 	Push(ctx context.Context, remote, ref string) error
 	PushBranch(ctx context.Context, remote, branch string) error
 	DeleteRemoteBranch(ctx context.Context, remote, branch string) error

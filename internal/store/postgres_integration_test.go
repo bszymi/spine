@@ -617,6 +617,10 @@ func TestRunAffectedRepositoriesRoundTrip(t *testing.T) {
 		RepositoryBranches: map[string]string{
 			"payments-service": "spine/run/multi-payments",
 		},
+		RepositoryBaselines: map[string]string{
+			"spine":            "deadbeefcafebabefacefeed1234567890abcdef",
+			"payments-service": "0123456789abcdef0123456789abcdef01234567",
+		},
 		TraceID:   "trace-multi",
 		CreatedAt: now,
 	}
@@ -638,6 +642,14 @@ func TestRunAffectedRepositoriesRoundTrip(t *testing.T) {
 	if got.RepositoryBranches["payments-service"] != "spine/run/multi-payments" {
 		t.Errorf("repository_branches[payments-service]: got %q, want spine/run/multi-payments",
 			got.RepositoryBranches["payments-service"])
+	}
+	if got.RepositoryBaselines["spine"] != "deadbeefcafebabefacefeed1234567890abcdef" {
+		t.Errorf("repository_baselines[spine]: got %q, want deadbeefcafebabefacefeed1234567890abcdef",
+			got.RepositoryBaselines["spine"])
+	}
+	if got.RepositoryBaselines["payments-service"] != "0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("repository_baselines[payments-service]: got %q, want 0123456789abcdef0123456789abcdef01234567",
+			got.RepositoryBaselines["payments-service"])
 	}
 
 	s.CleanupTestData(ctx, t)

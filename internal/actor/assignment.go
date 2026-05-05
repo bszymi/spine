@@ -24,6 +24,17 @@ type AssignmentContext struct {
 	RequiredOutputs []string `json:"required_outputs,omitempty"`
 	Instructions    string   `json:"instructions,omitempty"`
 
+	// WorkspaceID is the runtime workspace ID the runner targets when
+	// resolving CloneURL through the workspace's git HTTP router.
+	// Sourced from the orchestrator's wired workspace identity (the
+	// same value baked into CloneURL); included so a runner that has
+	// to construct an alternate URL — for example to authenticate
+	// against the same workspace through a different host alias —
+	// has the canonical ID without re-parsing CloneURL. Omitted from
+	// payloads when the orchestrator has no workspace ID wired
+	// (single-process embedded mode and tests).
+	WorkspaceID string `json:"workspace_id,omitempty"`
+
 	// RepositoryID is the resolved target repository for this step
 	// (per ADR-015). The runner clones exactly this repository at
 	// BranchName from CloneURL — no list, no fan-out.
@@ -39,6 +50,17 @@ type AssignmentContext struct {
 	// BranchName is the run branch name. Same in every affected repo
 	// per Multi-Repository Integration §4.2.
 	BranchName string `json:"branch_name"`
+
+	// CommitBaseline is the SHA the run branch was cut from in the
+	// resolved repository (i.e. the parent default-branch tip at
+	// run-cut time, captured by createRunBranches). Optional: set
+	// when the engine captured a baseline for the resolved repo at
+	// run start, omitted otherwise — primarily so legacy runs
+	// created before the field was added still produce valid
+	// payloads. Runners use it to detect upstream drift (compare
+	// against `git rev-parse HEAD~N` after their commits) and to
+	// skip a clone when their cache already holds the baseline.
+	CommitBaseline string `json:"commit_baseline,omitempty"`
 }
 
 // AssignmentConstraints define execution boundaries.

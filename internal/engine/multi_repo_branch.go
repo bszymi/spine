@@ -30,6 +30,15 @@ type branchCreationResult struct {
 // refs: every remote ref we placed gets a DeleteRemoteBranch alongside
 // its local DeleteBranch.
 //
+// As each branch is created, the parent SHA (the tip the new ref is cut
+// from) is captured into run.RepositoryBaselines so the assignment
+// payload can surface it to runners as `commit_baseline` per
+// [Multi-Repository Integration §5](/architecture/multi-repository-integration.md)
+// and INIT-014 EPIC-004 TASK-005. Baseline lookup is best-effort: a
+// failed Head() call logs a warning and proceeds without a baseline
+// for that repo (the assignment payload then omits commit_baseline,
+// matching the omitempty contract on AssignmentContext.CommitBaseline).
+//
 // On success it returns the branchCreationResult listing repos that
 // received local and remote refs respectively. Callers pass it to
 // rollbackRunBranches if a later step (e.g. store.CreateRun) fails.
@@ -64,6 +73,20 @@ func (o *Orchestrator) createRunBranches(ctx context.Context, run *domain.Run) (
 	log := observe.Logger(ctx)
 	pushOn := autoPushEnabled()
 
+	// Capture the primary repo's HEAD SHA *before* CreateBranch advances
+	// it, so the recorded baseline is the cut-from tip rather than the
+	// post-create tip. Best-effort: a Head() error is logged and the
+	// baseline is left unset for spine.
+	if sha, err := o.git.Head(ctx); err == nil && sha != "" {
+		captureRepoBaseline(run, repository.PrimaryRepositoryID, sha)
+	} else if err != nil {
+		log.Warn("baseline capture: failed to read primary HEAD",
+			"phase", "create",
+			"run_id", run.RunID,
+			"repository_id", repository.PrimaryRepositoryID,
+			"error", err)
+	}
+
 	if err := o.git.CreateBranch(ctx, run.BranchName, "HEAD"); err != nil {
 		return result, fmt.Errorf("create run branch on %q: %w", repository.PrimaryRepositoryID, err)
 	}
@@ -94,6 +117,25 @@ func (o *Orchestrator) createRunBranches(ctx context.Context, run *domain.Run) (
 			o.rollbackRunBranches(ctx, run, result)
 			return result, fmt.Errorf("create run branch on %q: %w", repoID, err)
 		}
+		// Baseline capture for the code repo's run branch. Resolve the
+		// configured `base` (the repo's default branch) to a SHA so
+		// the recorded baseline matches whatever `client.CreateBranch
+		// (ctx, run.BranchName, base)` cuts from in the next call —
+		// independent of where the cached repo's HEAD currently
+		// points. Falling back to Head() would mis-record the baseline
+		// when the cached repo is checked out to a non-default branch
+		// (e.g. a reused worktree from a prior run). Best-effort: a
+		// RefSHA() error is logged and the baseline left unset.
+		if sha, err := client.RefSHA(ctx, base); err == nil && sha != "" {
+			captureRepoBaseline(run, repoID, sha)
+		} else if err != nil {
+			log.Warn("baseline capture: failed to resolve code repo base ref",
+				"phase", "create",
+				"run_id", run.RunID,
+				"repository_id", repoID,
+				"base", base,
+				"error", err)
+		}
 		if err := client.CreateBranch(ctx, run.BranchName, base); err != nil {
 			o.rollbackRunBranches(ctx, run, result)
 			return result, fmt.Errorf("create run branch on %q: %w", repoID, err)
@@ -117,6 +159,16 @@ func (o *Orchestrator) createRunBranches(ctx context.Context, run *domain.Run) (
 	// only when divergent state needs to be tracked." Recovery and
 	// per-repo divergence are downstream tasks.
 	return result, nil
+}
+
+// captureRepoBaseline records the parent SHA the run's branch was cut
+// from in repoID. Allocates run.RepositoryBaselines lazily so primary-
+// only single-repo runs do not pay for an empty map.
+func captureRepoBaseline(run *domain.Run, repoID, sha string) {
+	if run.RepositoryBaselines == nil {
+		run.RepositoryBaselines = make(map[string]string, len(run.AffectedRepositories))
+	}
+	run.RepositoryBaselines[repoID] = sha
 }
 
 // resolveCodeRepoForBranch returns the per-repo client and that repo's
@@ -237,10 +289,13 @@ func (o *Orchestrator) codeRepoClient(ctx context.Context, repoID string) (codeR
 }
 
 // codeRepoBranchClient is the subset of git.GitClient the run-start
-// path needs against a code repository: create, delete, push, and
-// remote-delete the run branch. Defined locally so the engine does
-// not pin the wider git.GitClient surface across this single use site.
+// path needs against a code repository: resolve a ref (for baseline
+// capture against the cut-from base, independent of the working-tree
+// HEAD), create, delete, push, and remote-delete the run branch.
+// Defined locally so the engine does not pin the wider git.GitClient
+// surface across this single use site.
 type codeRepoBranchClient interface {
+	RefSHA(ctx context.Context, ref string) (string, error)
 	CreateBranch(ctx context.Context, name, base string) error
 	DeleteBranch(ctx context.Context, name string) error
 	PushBranch(ctx context.Context, remote, branch string) error

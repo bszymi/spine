@@ -68,6 +68,9 @@ func (c *trackingCodeRepoClient) ListFiles(_ context.Context, _, _ string) ([]st
 	return nil, nil
 }
 func (c *trackingCodeRepoClient) Head(_ context.Context) (string, error) { return "abc123", nil }
+func (c *trackingCodeRepoClient) RefSHA(_ context.Context, _ string) (string, error) {
+	return "base-sha-" + c.repoID, nil
+}
 func (c *trackingCodeRepoClient) Push(_ context.Context, remote, ref string) error {
 	c.pushCalls = append(c.pushCalls, pushCall{remote: remote, branch: ref})
 	if c.seq != nil {

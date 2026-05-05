@@ -71,7 +71,10 @@ func (s *stubCodeRepoClient) ReadFile(_ context.Context, _, _ string) ([]byte, e
 func (s *stubCodeRepoClient) ListFiles(_ context.Context, _, _ string) ([]string, error) {
 	return nil, nil
 }
-func (s *stubCodeRepoClient) Head(_ context.Context) (string, error)    { return "abc123", nil }
+func (s *stubCodeRepoClient) Head(_ context.Context) (string, error) { return "abc123", nil }
+func (s *stubCodeRepoClient) RefSHA(_ context.Context, _ string) (string, error) {
+	return "base-sha-" + s.repoID, nil
+}
 func (s *stubCodeRepoClient) Push(_ context.Context, _, _ string) error { return nil }
 func (s *stubCodeRepoClient) PushBranch(_ context.Context, remote, branch string) error {
 	s.pushCalls = append(s.pushCalls, pushCall{remote: remote, branch: branch})
@@ -203,6 +206,43 @@ func TestStartRun_MultiRepoCreatesBranchPerRepo(t *testing.T) {
 
 	if store.createdRun == nil {
 		t.Error("expected run persisted after successful multi-repo branching")
+	}
+}
+
+// TestStartRun_MultiRepoCapturesPerRepoBaselines pins the TASK-005 AC
+// "Commit baseline if available" plus the captureRepoBaseline contract:
+// before each CreateBranch, the engine reads the cut-from base SHA
+// (HEAD for the primary repo, RefSHA(base) for code repos) and stores
+// it on Run.RepositoryBaselines keyed by repository ID. The resulting
+// map is what buildAssignmentRequest reads to publish `commit_baseline`
+// in assignment payloads. The code-repo path uses RefSHA, not Head, so
+// baselines remain correct when a cached repo's working-tree HEAD has
+// drifted to a non-default branch (e.g. reused worktree from a prior
+// run).
+func TestStartRun_MultiRepoCapturesPerRepoBaselines(t *testing.T) {
+	art := taskWithRepos([]string{"payments-service"})
+	resolver := newRepoResolver(map[string]repoLookup{
+		"payments-service": activeRepoLookup("payments-service", "main"),
+	})
+	clients := newStubRepoGitClients("payments-service")
+	gitOp := &trackingGitOperator{}
+	orch, store := multiRepoOrchestrator(t, art, resolver, clients, gitOp)
+
+	if _, err := orch.StartRun(context.Background(), art.Path); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if store.createdRun == nil {
+		t.Fatal("expected run persisted")
+	}
+	baselines := store.createdRun.RepositoryBaselines
+	if got := baselines[domain.PrimaryRepositoryID]; got == "" {
+		t.Errorf("baseline for spine missing; got %v", baselines)
+	}
+	// The stub's RefSHA returns "base-sha-<repoID>" so a regression
+	// that re-routes baseline capture through Head ("abc123") would
+	// fail this assertion immediately.
+	if got, want := baselines["payments-service"], "base-sha-payments-service"; got != want {
+		t.Errorf("baseline for payments-service: got %q, want %q (RefSHA(base), not Head())", got, want)
 	}
 }
 

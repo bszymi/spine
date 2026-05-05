@@ -530,6 +530,18 @@ func (c *CLIClient) Head(ctx context.Context) (string, error) {
 	return strings.TrimSpace(output), nil
 }
 
+// RefSHA resolves a named ref (branch, tag, or HEAD) to its commit
+// SHA via `git rev-parse <ref>`. Returns an error when the ref is
+// unknown or ambiguous; callers that treat baseline capture as
+// best-effort should swallow the error.
+func (c *CLIClient) RefSHA(ctx context.Context, ref string) (string, error) {
+	output, err := c.run(ctx, "ref-sha", "rev-parse", ref)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(output), nil
+}
+
 // MergeBase returns the best common ancestor SHA between two refs.
 // Callers use this to scope diffs to "what a branch added since it diverged"
 // rather than "what differs from the current tip of the other ref", which

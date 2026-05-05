@@ -256,6 +256,7 @@ func (s *stubGitClient) ListFiles(_ context.Context, _, _ string) ([]string, err
 	return nil, nil
 }
 func (s *stubGitClient) Head(_ context.Context) (string, error)                  { return s.headSHA, nil }
+func (s *stubGitClient) RefSHA(_ context.Context, _ string) (string, error)       { return s.headSHA, nil }
 func (s *stubGitClient) Push(_ context.Context, _, _ string) error               { return nil }
 func (s *stubGitClient) PushBranch(_ context.Context, _, _ string) error         { return nil }
 func (s *stubGitClient) DeleteRemoteBranch(_ context.Context, _, _ string) error { return nil }

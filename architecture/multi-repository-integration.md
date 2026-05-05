@@ -252,6 +252,15 @@ git clone http://spine:8080/git/{workspace_id}/{repo_id} \
     --depth 1 --branch spine/run/task-042-rate-limiting-abc123 /workspace
 ```
 
+**Runner clone context (TASK-005).** The assignment payload extends ADR-015's `repository_id` / `clone_url` / `branch_name` triple with two more fields the runner consumes:
+
+| Field | Type | Source |
+|-------|------|--------|
+| `workspace_id` | string (`omitempty`) | The runtime workspace ID baked into `clone_url`. Wired via `Orchestrator.WithWorkspaceID` from `SPINE_WORKSPACE_ID` (top-level) or `ss.Config.ID` (pooled). Omitted in single-process embedded mode where no workspace ID is wired. |
+| `commit_baseline` | string (`omitempty`) | The SHA the resolved repository's run branch was cut from. Captured by `createRunBranches` against each repo's HEAD just before `CreateBranch` lands the new ref, persisted on `runtime.runs.repository_baselines`, and surfaced per-step at assignment-build time keyed by `repository_id`. Omitted when the engine could not capture a baseline (best-effort) or for legacy runs created before this column existed. |
+
+Both fields are advisory: a runner that ignores them still clones successfully via `clone_url` + `branch_name`. They exist so a runner can (a) reconstruct the workspace identity it routes through without re-parsing `clone_url`, and (b) detect upstream drift or skip a clone when its cache already holds the baseline.
+
 ### 4.4 Merge Coordination
 
 On run completion, Spine merges the run branch in each affected repo:
