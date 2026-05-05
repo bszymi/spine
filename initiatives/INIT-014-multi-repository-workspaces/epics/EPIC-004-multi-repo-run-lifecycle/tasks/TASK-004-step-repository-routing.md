@@ -22,25 +22,28 @@ links:
 
 ## Purpose
 
-Tell actors and automated runners which repository a step should operate in, implementing the routing model accepted in TASK-007's ADR.
+Tell actors and automated runners which repository a step should operate in, implementing the routing model accepted in [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md).
 
 ## Deliverable
 
-Implement repository context resolution for step execution exactly as specified in the routing ADR produced by TASK-007. No new design choices live in this task — it is implementation only.
+Implement repository context resolution for step execution exactly as specified in [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md). No new design choices live in this task — it is implementation only.
 
 The implementation must:
 
-- Resolve the target repository for each step using the order and rules defined in the ADR.
-- Surface the resolved repository in step assignment payloads.
-- Fail workflow validation when explicit step `repository` references unknown or inactive repos.
-- Emit structured logs/metrics on per-step routing decisions for observability.
+- Add an optional `repository` field to `StepDefinition` (per ADR-015 *Workflow step schema*).
+- Add a `repository_id` field to `StepExecution`, populated at step activation by applying the ADR-015 resolution rule (`step.repository` if set, otherwise `spine`). The field is immutable for the lifetime of the row.
+- Validate at run start (per ADR-015 *Validation*) that every step's resolved target repository (a) is registered in the workspace — a code repo via `/.spine/repositories.yaml`, or `spine` via the always-implicit primary entry (per [ADR-013 §2.1](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md), single-repo workspaces may omit the catalog file entirely), (b) is active — code repos require an active runtime binding, while `spine` is always considered active for as long as the workspace is, and (c) is a member of `task.repositories ∪ {spine}`. Return a typed `invalid_step_repository` error naming the offending step ID and unresolved repository when validation fails. The run is not created. The `spine` exception means default-spine runs in single-repo workspaces continue to start without any catalog file or binding row.
+- Validate at workflow load that any present `repository` field matches the catalog ID format `^[a-z0-9]+(-[a-z0-9]+)*$`, max 64 chars.
+- **Reconcile `domain.StepDefinition` with committed workflow YAMLs**, then **upgrade the workflow parser to strict-decode mode**. Several committed workflows (e.g., `workflows/adr-creation.yaml`, `workflows/document-creation.yaml`) already use step-level fields not present on `StepDefinition` — at minimum `description:`. Audit every committed workflow under `workflows/` and lift every used-but-undeclared step field onto `StepDefinition` (preferring declaration over stripping). Then enable `yaml.NewDecoder(...).KnownFields(true)` on the typed `StepDefinition` decode so unknown step fields are rejected at workflow load. The strict-decode upgrade MUST ship before any workflow YAML commits a `repository:` value — without strict decoding, a pre-TASK-004 binary silently drops the field and misroutes the step to `spine`. See ADR-015 *Schema versioning* for the full rollout invariant.
+- Surface the resolved `repository_id`, `clone_url`, and `branch_name` in step assignment payloads (single-value fields per ADR-015 *Assignment payload shape*).
+- Emit structured logs and a metric on each routing decision (step ID, resolved repository, source: explicit / default-spine).
 
 ## Acceptance Criteria
 
-- Behavior matches the routing model in the TASK-007 ADR (cite the ADR path in the PR).
-- Step assignments include target repository ID.
-- Primary-repo governance steps continue to target `spine`.
-- Workflow validation catches invalid explicit step repository IDs.
-- The "ambiguous" / unresolved branch (if any) behaves exactly as the ADR prescribes — not as an open implementation choice.
-- Tests cover every resolution branch the ADR defines.
+- Behavior matches [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md). The PR description cites the ADR path.
+- Step assignments include `repository_id`, `clone_url`, and `branch_name` as single-value fields.
+- Steps without an explicit `repository` resolve to `spine` (the primary repository ID reserved by ADR-013) — including in tasks with one or more code repos in `task.repositories`. The "implicit single code repo" default is **not** implemented.
+- Run start fails with `invalid_step_repository` (and the run is not created) when a step's resolved repository is unknown, inactive, or absent from `task.repositories ∪ {spine}`.
+- Single-repo workspaces and existing workflows continue to operate without any YAML change. Every existing workflow step omits `repository` and resolves to `spine`.
+- Tests cover: (i) explicit `repository: <code-repo>` resolves to that repo, (ii) omitted `repository` resolves to `spine`, (iii) explicit `repository: spine` is accepted as equivalent to omission, (iv) unknown repo ID at run start → `invalid_step_repository`, (v) inactive repo at run start → `invalid_step_repository`, (vi) repo not in `task.repositories ∪ {spine}` at run start → `invalid_step_repository`, (vii) malformed `repository` value at workflow load → workflow validation failure, (viii) single-repo workflow on a multi-code-repo task: every step resolves to `spine` (no implicit fan-out, no implicit single-code-repo default), (ix) workflow YAML with an unknown step field (e.g., `repositorY:` or `repos:`) is rejected at workflow load (proves the strict-decode upgrade landed).
 

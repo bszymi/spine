@@ -89,6 +89,7 @@ steps:
   - id: <string>                   # Unique step identifier within workflow
     name: <string>                 # Human-readable step name
     type: <enum>                   # manual, automated, review, convergence
+    repository: <string>           # Reserved (do not commit until TASK-004 ships). Optional target repository ID. Default: spine. Per ADR-015.
 
     execution:
       mode: <enum>                 # automated_only, ai_only, human_only, hybrid
@@ -126,6 +127,12 @@ steps:
     diverge: <divergence_ref>      # Optional: reference to divergence point
     converge: <convergence_ref>    # Optional: reference to convergence point
 ```
+
+**`repository` field** (per [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md)).
+
+**Reserved.** Authoring this field in committed workflow YAML is **not safe** until TASK-004 ships in every environment that parses workflows. Today's parser (`internal/workflow/parser.go` → `yamlsafe.DecodeInto`) silently drops keys that are not present on `StepDefinition`, and `StepDefinition` does not yet declare `repository`. A workflow that commits `repository: payments-service` against today's binary would silently route the step to `spine`. Wait for TASK-004 to (a) lift `repository` onto `StepDefinition`, (b) enable strict decoding (`KnownFields(true)`), and (c) deploy to every parser-bearing environment.
+
+Once TASK-004 is shipped: optional. Identifies the target repository for the step's execution. Format matches the catalog ID format from [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md): `^[a-z0-9]+(-[a-z0-9]+)*$`, max 64 chars. When omitted, the step targets `spine` (the primary repository ID). The "implicit single code repo" default is **not** in effect — a step that needs to operate on a code repository must declare `repository: <id>` explicitly. See ADR-015 *Resolution rule* and *Validation* for the run-start checks against the workspace catalog and `task.repositories`.
 
 **Step types:**
 
@@ -464,6 +471,7 @@ new execution attempt for that step while preserving the Run history.
 - [Task Lifecycle](/governance/task-lifecycle.md) — Governed states vs runtime states
 - [Divergence and Convergence](/architecture/divergence-and-convergence.md) — Parallel execution model
 - [Workflow Validation](/architecture/workflow-validation.md) — Validation rules and lifecycle
+- [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md) — Multi-repo step routing model (`repository` field)
 
 ---
 

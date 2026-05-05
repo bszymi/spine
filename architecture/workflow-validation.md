@@ -69,6 +69,7 @@ Schema validation ensures the workflow YAML conforms to the expected structure.
 | `timeout` is present | `timeout_outcome` must reference a valid outcome `id` |
 | `diverge` is present | Must reference a valid divergence point `id` |
 | `converge` is present | Must reference a valid convergence point `id` |
+| `repository` is present | Must match the catalog ID format `^[a-z0-9]+(-[a-z0-9]+)*$`, max 64 chars (per [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md)). When omitted, the step targets `spine`. At run start, the resolved repository must (a) be registered in the workspace — either as a catalog entry for code repos, or as the implicit primary entry for `spine` (per [ADR-013 §2.1](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md)), (b) be active — code repos require an active runtime binding, while `spine` is always considered active for as long as the workspace itself is, and (c) be a member of `task.repositories ∪ {spine}`. The full rule and its `spine` exception live in ADR-015 *Validation*. |
 
 ### 3.4 Outcome Required Fields
 
@@ -490,6 +491,8 @@ When a workflow is `Deprecated` or `Superseded`:
 - [Actor Model](/architecture/actor-model.md) §3 — Actor registration and skills
 - [Task Lifecycle](/governance/task-lifecycle.md) — Governed terminal states
 - [Validation Service](/architecture/validation-service.md) — Cross-artifact validation rules and extensibility
+- [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md) — Multi-repo step routing model (`repository` field schema and run-start validation)
+- [Multi-Repository Integration](/architecture/multi-repository-integration.md) §4.3 — Step execution routing
 
 ---
 

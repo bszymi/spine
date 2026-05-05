@@ -2,14 +2,19 @@
 id: TASK-007
 type: Task
 title: Decide multi-repo step routing model (ADR)
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: ADR-015 (Multi-repository step routing model) committed with status Accepted; explicit-with-default-spine routing decided; rejected alternatives (fan-out, hybrid by step kind, implicit single code repo, multi-repo step) documented with rationale; TASK-004 description and acceptance criteria updated to reference the ADR; EPIC-004/005/006 cross-references in place; architecture §4.3 updated to remove the implicit single-code-repo rule.
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: design
 created: 2026-04-28
+last_updated: 2026-05-02
 links:
   - type: parent
     target: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
+  - type: related_to
+    target: /architecture/adr/ADR-015-multi-repo-step-routing.md
 ---
 
 # TASK-007 - Decide Multi-Repo Step Routing Model (ADR)
