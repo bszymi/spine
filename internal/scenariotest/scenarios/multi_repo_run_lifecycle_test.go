@@ -393,15 +393,24 @@ func assertBranchExistsAt(repoDir, branchName string) error {
 	return nil
 }
 
-// assertBranchAbsentAt is the inverse of assertBranchExistsAt: a
-// `rev-parse --verify` against a deleted ref returns non-zero, which is
-// the success case here.
+// assertBranchAbsentAt is the inverse of assertBranchExistsAt. A clean
+// "branch deleted" outcome is exit 1 from `git rev-parse --verify
+// --quiet refs/heads/<name>`. Exit 0 means the ref still exists (test
+// fails). Any other exit (128 = repo missing / not a git dir, ENOENT =
+// git binary unavailable) is propagated as an error so a teardown
+// regression that removed the temp dir cannot masquerade as a
+// successful cleanup.
 func assertBranchAbsentAt(repoDir, branchName string) error {
-	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "refs/heads/"+branchName)
-	if err := cmd.Run(); err == nil {
+	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branchName)
+	err := cmd.Run()
+	if err == nil {
 		return fmt.Errorf("branch %q unexpectedly still exists in %s", branchName, filepath.Base(repoDir))
 	}
-	return nil
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return nil
+	}
+	return fmt.Errorf("git rev-parse --verify --quiet refs/heads/%s in %s: %w",
+		branchName, filepath.Base(repoDir), err)
 }
 
 // sameStringSlice compares two string slices for element-wise equality.
