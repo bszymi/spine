@@ -32,7 +32,7 @@ This document is the canonical reference for the evidence schema. Storage locati
 ### 2.2 Out of Scope
 
 - The validation policy artifact itself (defined by [TASK-002](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-002-adr-linked-validation-policy-format.md))
-- Check runner integration mechanics (defined by [TASK-003](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-003-check-runner-integration-boundary.md))
+- Check runner integration mechanics (defined by [TASK-003](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-003-check-runner-integration-boundary.md); see [check-runner.md](/architecture/check-runner.md))
 - Validation rules consumed by the Validation Service (defined by [TASK-004](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-004-validation-service-evidence-rules.md))
 - Query / reporting surfaces over evidence (defined by [TASK-005](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-005-evidence-query-and-reporting.md))
 - Source-code indexing or build orchestration (explicitly out of scope per the parent epic)
