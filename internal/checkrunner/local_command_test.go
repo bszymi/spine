@@ -675,6 +675,98 @@ func TestLocalCommandRunner_CancelledContext(t *testing.T) {
 	}
 }
 
+// TestLocalCommandRunner_TimeoutKillsGrandchildren is the regression
+// test for codex pass 1 P1. Without process-group kill, `sh -c "sleep
+// 30"` only loses the shell on timeout — the orphaned sleep keeps
+// running inside the workspace until 30s elapse. The test launches a
+// grandchild that writes a heartbeat to a temp file; after the runner
+// returns, the file must STOP growing within a short bound. If
+// process-group kill regresses, the heartbeats keep landing past the
+// deadline and the assertion fires.
+func TestLocalCommandRunner_TimeoutKillsGrandchildren(t *testing.T) {
+	requireSh(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is unix-only")
+	}
+	dir := t.TempDir()
+	heartbeat := filepath.Join(dir, "heartbeat")
+	r := checkrunner.LocalCommandRunner{}
+	res, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: dir,
+		Check: domain.PolicyCheck{
+			CheckID: "leaks-grandchild",
+			Kind:    domain.PolicyCheckKindCommand,
+			// Spawn a background sub-shell that ticks every 100ms.
+			// Without setpgid + pgkill, the parent sh dies on SIGKILL
+			// but the (sh -c "while ...") grandchild keeps writing.
+			Command:        fmt.Sprintf(`sh -c 'while true; do echo tick >> %q; sleep 0.1; done' & wait`, heartbeat),
+			TimeoutSeconds: 1,
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomeTimeout {
+		t.Fatalf("Outcome: got %q want timeout", res.Outcome)
+	}
+	// Wait for the heartbeat to settle, then verify it stops.
+	time.Sleep(500 * time.Millisecond)
+	info1, err := os.Stat(heartbeat)
+	if err != nil {
+		t.Fatalf("heartbeat stat (post-kill): %v", err)
+	}
+	time.Sleep(800 * time.Millisecond)
+	info2, err := os.Stat(heartbeat)
+	if err != nil {
+		t.Fatalf("heartbeat stat (post-settle): %v", err)
+	}
+	if info2.Size() != info1.Size() {
+		t.Fatalf("grandchild kept writing after timeout: %d → %d bytes — process-group kill regressed",
+			info1.Size(), info2.Size())
+	}
+}
+
+// TestLocalCommandRunner_LogSinkWriteError is the regression for
+// codex pass 1 P2. A sink whose Write returns an error must surface
+// that as a Run error, NOT as a silent OutcomeUnavailable + nil
+// error. Previously the latter let an audit row claim "the check is
+// unavailable" when the real cause was log storage failure — a
+// dangerous misclassification because the operator won't see the
+// infrastructure problem.
+func TestLocalCommandRunner_LogSinkWriteError(t *testing.T) {
+	requireSh(t)
+	wantErr := errors.New("sink-disk full")
+	r := checkrunner.LocalCommandRunner{
+		LogSink: checkrunner.LogSinkFunc(func(string) (io.WriteCloser, error) {
+			return &writeFailingCloser{err: wantErr}, nil
+		}),
+	}
+	res, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: t.TempDir(),
+		Check: domain.PolicyCheck{
+			CheckID:        "noisy",
+			Kind:           domain.PolicyCheckKindCommand,
+			Command:        "echo hello-world",
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected sink write error, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error must wrap sink write error: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomeUnavailable {
+		t.Fatalf("Outcome: got %q want unavailable (verdict cannot be trusted when logs failed)", res.Outcome)
+	}
+	if res.LogReference == "" {
+		t.Fatalf("LogReference should be preserved so the caller can identify the partial file")
+	}
+}
+
 // TestOutcome_IsTerminal locks the contract that every Outcome value
 // is terminal at the runner boundary. If a future revision adds a
 // non-terminal outcome (e.g. "running"), this test forces a deliberate
@@ -747,3 +839,13 @@ type erroringCloser struct {
 
 func (e *erroringCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (e *erroringCloser) Close() error                { return e.err }
+
+// writeFailingCloser implements io.WriteCloser; Write returns the
+// configured error so the runner sees a sink-side failure during
+// stdout/stderr copy.
+type writeFailingCloser struct {
+	err error
+}
+
+func (w *writeFailingCloser) Write(p []byte) (int, error) { return 0, w.err }
+func (w *writeFailingCloser) Close() error                { return nil }

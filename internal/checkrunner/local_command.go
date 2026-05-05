@@ -181,26 +181,74 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	args := append(append([]string{}, shell[1:]...), command)
 	cmd := exec.CommandContext(runCtx, shell[0], args...)
 	cmd.Dir = workingDir
-	cmd.Stdout = newCappedWriter(logWriter, r.MaxLogBytes)
-	cmd.Stderr = cmd.Stdout
+	// Wrap the sink writer so a sink-side Write failure is
+	// distinguishable from a normal exec error. Without this, a full
+	// disk or broken upload during stdout copy surfaces from cmd.Run
+	// as a generic error which classifyExit then collapses to
+	// OutcomeUnavailable + nil Run error — silently labelling an
+	// infrastructure logging outage as a routine check verdict.
+	// Codex pass 1 P2.
+	captured := &errCapturingWriter{w: newCappedWriter(logWriter, r.MaxLogBytes)}
+	cmd.Stdout = captured
+	cmd.Stderr = captured
 	cmd.WaitDelay = r.waitDelay()
+	configureProcessGroup(cmd)
+	// cmd.Cancel signals the whole process group on context done so
+	// `sh -c "sleep 30"` does not leak the orphan sleep after the
+	// shell dies. Without this, the runner returns within WaitDelay
+	// but descendants keep running in the workspace. Codex pass 1 P1.
+	cmd.Cancel = func() error { return cancelProcessGroup(cmd) }
 
 	runErr := cmd.Run()
 	res.CompletedAt = r.now()
 	res.LogReference = logRef
 
-	if closeErr := logWriter.Close(); closeErr != nil {
-		// We already have a verdict, but the log close failed — this
-		// is a runner-internal I/O issue. Report the verdict at the
-		// outcome layer, but surface the close error so operators know
-		// the log may be truncated.
-		res.Outcome = classifyExit(runCtx, runErr, &res)
-		return res, fmt.Errorf("checkrunner: close log sink %q: %w", logRef, closeErr)
+	// A sink write failure during stdout/stderr copy is a runner-
+	// internal problem (logs are unreliable), not a check verdict.
+	// Surface it via the error channel; preserve the LogReference so
+	// the caller can still identify the partial file. We do NOT call
+	// classifyExit here because runErr in this case IS the sink
+	// error, and reporting it as OutcomeFail / OutcomeUnavailable
+	// would conflate "log storage broken" with "check came back".
+	if sinkErr := captured.firstErr(); sinkErr != nil {
+		res.Outcome = OutcomeUnavailable
+		res.Reason = "log sink write failed"
+		_ = logWriter.Close()
+		return res, fmt.Errorf("checkrunner: log sink write %q: %w", logRef, sinkErr)
 	}
 
+	closeErr := logWriter.Close()
 	res.Outcome = classifyExit(runCtx, runErr, &res)
+	if closeErr != nil {
+		// Verdict survives the close failure (the process already
+		// produced its exit status); surface the close error so
+		// operators know the log may be truncated.
+		return res, fmt.Errorf("checkrunner: close log sink %q: %w", logRef, closeErr)
+	}
 	return res, nil
 }
+
+// errCapturingWriter wraps an io.Writer and records the first error
+// returned from Write. exec.Cmd's I/O goroutines call Write on
+// cmd.Stdout / cmd.Stderr; a sink-side failure there propagates as
+// the cmd.Run() return value, indistinguishable from any other
+// generic exec error. Capturing the original error lets Run discriminate
+// "logs are broken" (runner-internal, surface as Run error) from
+// "exec returned a strange status" (Unavailable verdict).
+type errCapturingWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errCapturingWriter) Write(p []byte) (int, error) {
+	n, err := e.w.Write(p)
+	if err != nil && e.err == nil {
+		e.err = err
+	}
+	return n, err
+}
+
+func (e *errCapturingWriter) firstErr() error { return e.err }
 
 // classifyExit is the boundary between os/exec semantics and the
 // runner's Outcome enum. Centralized so the rules are unit-testable
