@@ -158,7 +158,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	logRef := buildLogReference(req, now)
-	logWriter, sinkErr := r.openLog(logRef)
+	logWriter, hasRealSink, sinkErr := r.openLog(logRef)
 	if sinkErr != nil {
 		// Sink-open failure is a runner-internal problem the operator
 		// must see (the runner has nowhere to put the bytes); surface
@@ -201,7 +201,13 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 
 	runErr := cmd.Run()
 	res.CompletedAt = r.now()
-	res.LogReference = logRef
+	// LogReference is set only when a real LogSink received the bytes.
+	// With a nil LogSink the runner discards output via nopWriteCloser
+	// and exposing a generated reference would leave audit consumers
+	// holding an unresolvable pointer (codex pass 3 P2).
+	if hasRealSink {
+		res.LogReference = logRef
+	}
 	// Snapshot the context state at the moment cmd.Run returned —
 	// classification reads it later, after logWriter.Close, which can
 	// block. Without the snapshot a slow sink Close that pushes the
@@ -331,21 +337,27 @@ func (r LocalCommandRunner) waitDelay() time.Duration {
 	return r.WaitDelay
 }
 
-func (r LocalCommandRunner) openLog(ref string) (io.WriteCloser, error) {
+// openLog returns the writer that command stdout/stderr will be piped
+// into, plus a flag indicating whether a real sink received the bytes.
+// hasRealSink == false means the runner is discarding output via a
+// no-op writer; the caller uses this signal to keep Result.LogReference
+// empty so audit consumers do not chase a pointer that was never
+// resolved.
+func (r LocalCommandRunner) openLog(ref string) (io.WriteCloser, bool, error) {
 	if r.LogSink == nil {
-		return nopWriteCloser{}, nil
+		return nopWriteCloser{}, false, nil
 	}
 	w, err := r.LogSink.OpenLog(ref)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if w == nil {
 		// A LogSink that returns (nil, nil) would NPE inside the
 		// command's stdout pipe. Treat this as a contract violation
 		// rather than letting it fail later in obscure exec internals.
-		return nil, fmt.Errorf("LogSink.OpenLog returned nil writer with nil error")
+		return nil, false, fmt.Errorf("LogSink.OpenLog returned nil writer with nil error")
 	}
-	return w, nil
+	return w, true, nil
 }
 
 // nopWriteCloser drops everything written to it. Used when no LogSink

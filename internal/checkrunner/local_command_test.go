@@ -418,6 +418,10 @@ func TestLocalCommandRunner_LogReferenceIsSafePathSegment(t *testing.T) {
 // configured (embedded mode, tests) must still get a clean Result.
 // Without explicit coverage a future refactor could regress to
 // "panic on nil sink" — this test traps that.
+//
+// Also pins codex pass 3 P2: when output is discarded, Result.LogReference
+// MUST be empty so audit consumers cannot persist an unresolvable
+// pointer.
 func TestLocalCommandRunner_NoSinkDiscardsOutput(t *testing.T) {
 	requireSh(t)
 	r := checkrunner.LocalCommandRunner{}
@@ -436,6 +440,9 @@ func TestLocalCommandRunner_NoSinkDiscardsOutput(t *testing.T) {
 	}
 	if res.Outcome != checkrunner.OutcomePass {
 		t.Fatalf("Outcome: got %q want pass", res.Outcome)
+	}
+	if res.LogReference != "" {
+		t.Fatalf("LogReference must be empty when no sink is configured: got %q", res.LogReference)
 	}
 }
 
