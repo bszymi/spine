@@ -774,6 +774,97 @@ func TestLocalCommandRunner_LogSinkWriteError(t *testing.T) {
 	}
 }
 
+// TestLocalCommandRunner_CallerDeadlineNotPolicyTimeout is the
+// regression for codex pass 4 P2. When the caller passes a context
+// with its own deadline shorter than (or in absence of) the policy
+// TimeoutSeconds, a deadline-exceeded must be reported as
+// OutcomeUnavailable + "caller deadline exceeded" — not OutcomeTimeout.
+// Misclassifying a caller budget as a policy timeout would write
+// orchestrator-side decisions into evidence as if they were check
+// verdicts.
+func TestLocalCommandRunner_CallerDeadlineNotPolicyTimeout(t *testing.T) {
+	requireSh(t)
+	r := checkrunner.LocalCommandRunner{}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	res, err := r.Run(ctx, checkrunner.Request{
+		WorkingDir: t.TempDir(),
+		Check: domain.PolicyCheck{
+			CheckID:        "slow",
+			Kind:           domain.PolicyCheckKindCommand,
+			Command:        "sleep 30",
+			TimeoutSeconds: 60, // policy budget far exceeds the caller's
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomeUnavailable {
+		t.Fatalf("Outcome: got %q want unavailable (caller deadline)", res.Outcome)
+	}
+	if res.Reason != "caller deadline exceeded" {
+		t.Fatalf("Reason: got %q want %q", res.Reason, "caller deadline exceeded")
+	}
+}
+
+// TestLocalCommandRunner_BackgroundedGrandchildReapedOnSuccess pins
+// the codex pass 4 P2 #1 fix: even on the success path (no policy
+// timeout fires, sh exits 0), backgrounded descendants left in the
+// process group must be reaped before Run returns. Without the
+// end-of-Run sweep, `sh -c 'cmd & exit'` leaves the grandchild
+// running indefinitely.
+func TestLocalCommandRunner_BackgroundedGrandchildReapedOnSuccess(t *testing.T) {
+	requireSh(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is unix-only")
+	}
+	dir := t.TempDir()
+	heartbeat := filepath.Join(dir, "heartbeat")
+	r := checkrunner.LocalCommandRunner{
+		// Bound the wait for orphaned-pipe drain so the test does not
+		// pay the full default 5s WaitDelay.
+		WaitDelay: 200 * time.Millisecond,
+	}
+	_, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: dir,
+		Check: domain.PolicyCheck{
+			CheckID: "leaks-after-clean-exit",
+			Kind:    domain.PolicyCheckKindCommand,
+			// Subshell ticks every 100ms; sh backgrounds it and exits
+			// 0. Without the end-of-Run group sweep, the orphan keeps
+			// writing to heartbeat after Run returns.
+			Command: fmt.Sprintf(
+				`(while true; do echo tick >> %q; sleep 0.1; done) & exit 0`,
+				heartbeat,
+			),
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	// Run may surface a WaitDelay-driven error; we don't care about
+	// the exact verdict here, only the post-run process state.
+	_ = err
+
+	// Wait for any in-flight signals to settle, then check that the
+	// heartbeat file stops growing.
+	time.Sleep(500 * time.Millisecond)
+	info1, err := os.Stat(heartbeat)
+	if err != nil {
+		t.Fatalf("heartbeat stat (post-kill): %v — grandchild may not have started", err)
+	}
+	time.Sleep(800 * time.Millisecond)
+	info2, err := os.Stat(heartbeat)
+	if err != nil {
+		t.Fatalf("heartbeat stat (post-settle): %v", err)
+	}
+	if info2.Size() != info1.Size() {
+		t.Fatalf("backgrounded grandchild kept writing after Run: %d → %d bytes — group sweep regressed",
+			info1.Size(), info2.Size())
+	}
+}
+
 // TestLocalCommandRunner_SlowSinkCloseDoesNotMisreportTimeout is the
 // regression for codex pass 2 P2. A LogSink whose Close blocks past
 // the policy deadline can flip a successful verdict to OutcomeTimeout

@@ -201,6 +201,14 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 
 	runErr := cmd.Run()
 	res.CompletedAt = r.now()
+	// Sweep the process group regardless of how cmd.Run returned. A
+	// check that backgrounds work (e.g. `(while true; ...) &`) leaves
+	// orphaned descendants holding pipe FDs even on the success path;
+	// the deadline-driven cmd.Cancel only fires when the timeout
+	// fires, so a successful-but-leaks scenario would otherwise leak
+	// past Run. Best-effort: ESRCH on an already-empty group is a
+	// no-op (codex pass 4 P2).
+	_ = cancelProcessGroup(cmd)
 	// LogReference is set only when a real LogSink received the bytes.
 	// With a nil LogSink the runner discards output via nopWriteCloser
 	// and exposing a generated reference would leave audit consumers
@@ -214,7 +222,16 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	// deadline past TimeoutSeconds AFTER the command already exited
 	// successfully would flip res.Outcome to OutcomeTimeout, mis-
 	// labelling a completed verdict. Codex pass 2 P2.
+	//
+	// Snapshot the parent context separately so the runner can tell
+	// "policy timeout fired" (only runCtx done) from "caller deadline
+	// fired" (parent ctx done). If we collapsed them, a caller
+	// passing context.WithTimeout that happened to be shorter than
+	// the policy budget would have its requests reported as
+	// OutcomeTimeout (a check verdict) instead of OutcomeUnavailable
+	// (an orchestrator decision). Codex pass 4 P2.
 	runCtxErr := runCtx.Err()
+	parentCtxErr := ctx.Err()
 
 	// A sink write failure during stdout/stderr copy is a runner-
 	// internal problem (logs are unreliable), not a check verdict.
@@ -231,7 +248,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	closeErr := logWriter.Close()
-	res.Outcome = classifyExit(runCtxErr, runErr, &res)
+	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, &res)
 	if closeErr != nil {
 		// Verdict survives the close failure (the process already
 		// produced its exit status); surface the close error so
@@ -268,33 +285,52 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 // against constructed errors without spawning processes for every
 // classification edge.
 //
-// ctxErr is a snapshot of the run context's Err() taken at the moment
-// cmd.Run returned. Using a snapshot rather than ctx.Err() at call
-// time matters because the runner does post-Run work (sink close)
-// that can block past the policy deadline; if the snapshot were
-// dropped, slow sinks would re-classify completed verdicts as
-// timeouts. Snapshot is taken in Run().
+// runCtxErr is a snapshot of the run-context Err() (the runner's
+// timeout-wrapped context) taken at the moment cmd.Run returned.
+// parentCtxErr is the snapshot of the caller-supplied context's
+// Err(). Both are passed in because:
+//   - Snapshotting protects against post-Run latency (sink close)
+//     re-flipping context state by the time classifyExit runs
+//     (codex pass 2 P2).
+//   - Distinguishing parent vs runner context lets the runner tell
+//     "policy timeout fired" (runCtx only) from "caller deadline /
+//     cancellation" (parent ctx). Without the split a short caller
+//     deadline would be reported as a policy timeout — a check
+//     verdict where there really was none (codex pass 4 P2).
 //
 // Order matters:
 //
-//  1. Context deadline before any other check, so a child process that
-//     happens to exit non-zero on signal is still reported as Timeout
-//     (the operator's mental model of "we ran out of time" beats the
-//     post-mortem detail of "and the child returned 137").
-//  2. nil error → OutcomePass.
-//  3. *exec.ExitError → OutcomeFail with the exit code.
-//  4. Anything else (binary not found, permission denied, fork
+//  1. Parent context cancelled or deadline-exceeded → caller decided
+//     to stop the run; report as Unavailable. Caller signals take
+//     precedence over policy timeouts because the caller didn't want
+//     this check to keep running at all.
+//  2. Run context (policy timeout) deadline-exceeded → real check
+//     timeout. Reported BEFORE *exec.ExitError because a child killed
+//     by SIGKILL on timeout exits with a signal-style status that
+//     looks like a non-zero verdict — operators want "we ran out of
+//     time", not "and the child returned 137".
+//  3. nil error → OutcomePass.
+//  4. *exec.ExitError → OutcomeFail with the exit code.
+//  5. Anything else (binary not found, permission denied, fork
 //     failure) → OutcomeUnavailable so dashboards distinguish "config
 //     issue, retry won't help" from "real verdict".
-func classifyExit(ctxErr, runErr error, res *Result) Outcome {
-	if errors.Is(ctxErr, context.DeadlineExceeded) {
+func classifyExit(runCtxErr, parentCtxErr, runErr error, res *Result) Outcome {
+	if errors.Is(parentCtxErr, context.DeadlineExceeded) {
+		res.Reason = "caller deadline exceeded"
+		return OutcomeUnavailable
+	}
+	if errors.Is(parentCtxErr, context.Canceled) {
+		res.Reason = "context canceled"
+		return OutcomeUnavailable
+	}
+	if errors.Is(runCtxErr, context.DeadlineExceeded) {
 		res.Reason = "context deadline exceeded"
 		return OutcomeTimeout
 	}
-	if errors.Is(ctxErr, context.Canceled) {
-		// Caller cancellation (e.g. orchestrator shutdown) is treated
-		// as Unavailable — the verdict is unknown, the operator knows
-		// why, and a retry by a fresh caller is the right next move.
+	if errors.Is(runCtxErr, context.Canceled) {
+		// runCtx-only Canceled with parent still alive shouldn't
+		// happen in normal flow (we only wrap with timeout, not
+		// cancel), but treat defensively as Unavailable.
 		res.Reason = "context canceled"
 		return OutcomeUnavailable
 	}
