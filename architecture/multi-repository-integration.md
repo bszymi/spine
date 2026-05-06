@@ -282,7 +282,7 @@ for each repo in [spine, ...task.repositories]:
 - If repo A merges successfully but repo B has a conflict, repo A's merge stands.
 - The primary Spine repo records per-repo outcomes.
 - A run is considered fully complete only when all repos have merged successfully.
-- A run with partial merges enters a `partial_merge` state — the merged repos are done, the failed repos need manual intervention.
+- A run with partial merges enters the `partially-merged` run state (`domain.RunStatusPartiallyMerged`) — the merged repos are done, the failed repos need manual intervention.
 
 **Merge order:**
 1. Code repositories are merged first (the actual implementation)
@@ -292,7 +292,7 @@ This ordering ensures the Spine repo accurately records whether code merges succ
 
 ### 4.5 Branch Cleanup
 
-After successful merge in a repo, the run branch in that repo is deleted. If a repo's merge failed, its branch is preserved for manual resolution.
+When a run reaches the fully-completed state (every affected repo has merged successfully), Spine cleans up the run branches across all affected repos. While a run is in the `partially-merged` state, all run branches stay preserved — including the branches of repos that have already merged — so an operator resolving the conflict can inspect the merged work alongside the failed branch. Cleanup only runs once the run advances past `partially-merged` to fully completed (see `internal/engine/merge.go::transitionToPartiallyMerged` and `CleanupRunBranch`).
 
 ---
 
