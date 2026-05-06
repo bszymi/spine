@@ -292,7 +292,17 @@ This ordering ensures the Spine repo accurately records whether code merges succ
 
 ### 4.5 Branch Cleanup
 
-When a run reaches the fully-completed state (every affected repo has merged successfully), Spine cleans up the run branches across all affected repos. While a run is in the `partially-merged` state, all run branches stay preserved — including the branches of repos that have already merged — so an operator resolving the conflict can inspect the merged work alongside the failed branch. Cleanup only runs once the run advances past `partially-merged` to fully completed (see `internal/engine/merge.go::transitionToPartiallyMerged` and `CleanupRunBranch`).
+Branch cleanup is keyed off per-repo merge outcomes, not off run state, and runs on every terminal transition (`Orchestrator.CleanupRunBranch`):
+
+- A repository whose recorded outcome is `failed` keeps its run branch on both local and remote, so an operator can resolve the failure against the unmodified source ref.
+- A repository with any other terminal outcome (`merged`, `skipped`, `resolved-externally`) gets its run branch deleted.
+
+While a run is in the `partially-merged` state, no cleanup has run yet — every affected repo's run branch stays preserved, including branches of repos that have already merged. Cleanup runs when the run leaves `partially-merged`:
+
+- **Resolve-and-retry path.** The operator resolves the conflict on the failed branch and retries the merge. Once every repo has merged, the run advances to fully completed and `CleanupRunBranch` deletes the run branches across all affected repos.
+- **Cancel path.** The operator cancels the run from `partially-merged`. The run advances to cancelled and `CleanupRunBranch` runs against the recorded outcomes — already-merged repos have their branches deleted, repos still marked `failed` keep their branches preserved for forensic access.
+
+See `internal/engine/branch.go` (`CleanupRunBranch`), `internal/engine/run.go` (`CancelRun`), and `internal/engine/merge.go::transitionToPartiallyMerged`.
 
 ---
 
