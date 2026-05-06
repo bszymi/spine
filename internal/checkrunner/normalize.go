@@ -37,13 +37,24 @@ import (
 // The function does NOT default it because every audit consumer of
 // EPIC-006 wants a non-empty produced_by — silent fallbacks defeat
 // the audit guarantee.
+//
+// res.LogReference is copied into CheckResult.EvidenceURI verbatim so
+// audit readers can find the captured stdout/stderr from the evidence
+// row alone — without this, callers using Normalize as the documented
+// path into ExecutionEvidence would silently lose the log linkage
+// (codex pass 6 P2). When the runner ran with no sink configured,
+// LogReference is empty and EvidenceURI stays empty.  Callers that
+// need to transform the reference (wrap a filesystem path in a
+// `file://` URL, prefix with an object-store host) can overwrite
+// row.EvidenceURI after the call returns.
 func Normalize(req Request, res Result, producer string) domain.CheckResult {
 	row := domain.CheckResult{
-		CheckID:    req.Check.CheckID,
-		Name:       req.Check.Name,
-		Producer:   domain.CheckProducerAutomated,
-		ProducedBy: producer,
-		Summary:    res.Reason,
+		CheckID:     req.Check.CheckID,
+		Name:        req.Check.Name,
+		Producer:    domain.CheckProducerAutomated,
+		ProducedBy:  producer,
+		Summary:     res.Reason,
+		EvidenceURI: res.LogReference,
 	}
 	if !res.StartedAt.IsZero() {
 		t := res.StartedAt.UTC()

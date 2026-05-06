@@ -57,6 +57,24 @@ func TestNormalize_Pass(t *testing.T) {
 	if row.StartedAt == nil || row.CompletedAt == nil {
 		t.Fatalf("timestamps must be set")
 	}
+	// Codex pass 6 P2: log linkage must survive Normalize.
+	if row.EvidenceURI != "checkrunner/billing/run-1/unit-tests/deadbeef" {
+		t.Fatalf("EvidenceURI must mirror Result.LogReference: got %q", row.EvidenceURI)
+	}
+}
+
+// TestNormalize_NoLogSink_EmptyEvidenceURI complements the Pass test:
+// when the runner ran without a sink (LogReference empty), Normalize
+// MUST NOT invent an EvidenceURI. A non-empty value would point
+// nowhere — same audit-pollution failure mode as codex pass 3 P2 but
+// at the row construction layer.
+func TestNormalize_NoLogSink_EmptyEvidenceURI(t *testing.T) {
+	res := sampleResult(checkrunner.OutcomePass)
+	res.LogReference = ""
+	row := checkrunner.Normalize(sampleRequest(), res, "spine/runner@host-1")
+	if row.EvidenceURI != "" {
+		t.Fatalf("EvidenceURI should be empty when no log was captured: got %q", row.EvidenceURI)
+	}
 }
 
 func TestNormalize_Fail(t *testing.T) {

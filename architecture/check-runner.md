@@ -88,7 +88,7 @@ Routine outcomes — including a deterministic non-zero exit (`OutcomeFail`) and
 | `CompletedAt` | `time.Time` | UTC. |
 | `ExitCode` | int | Process exit status. Meaningful only when `Outcome == Pass / Fail`. |
 | `Reason` | string | Single-line classification tag (e.g. `"exit 1"`, `"context deadline exceeded"`, `"working_dir does not exist"`). MUST NOT contain newlines — it lands in `CheckResult.Summary`, which evidence `Validate` rejects with `\n`. |
-| `LogReference` | string | Opaque pointer to where the runner's log sink stored captured output. The caller decides whether to surface this as `CheckResult.EvidenceURI`. |
+| `LogReference` | string | Opaque pointer to where the runner's log sink stored captured output. Empty when no sink was configured. `Normalize` (§7) copies this into `CheckResult.EvidenceURI`. |
 
 ---
 
@@ -163,6 +163,8 @@ evidence.CheckResults = append(evidence.CheckResults, row)
 ```
 
 The `producer` parameter is required (no default). EPIC-006 audit consumers want a non-empty `produced_by` on every non-pending row; silent fallbacks defeat the audit guarantee.
+
+`Normalize` copies `Result.LogReference` into `CheckResult.EvidenceURI` so audit readers can find captured stdout/stderr from the evidence row alone — without that copy the log linkage would be silently lost. Callers that need a transformed reference (wrap a filesystem path in a `file://` URL, prefix with an object-store host) overwrite `row.EvidenceURI` after the call returns.
 
 `Normalize` produces a row that always passes `ExecutionEvidence.Validate` when slotted into a complete record (round-trip test in `normalize_test.go::TestNormalize_RoundTripIntoEvidence`). If the runner produces a Reason with a newline, it is rejected by the runner itself (`sanitizeReason`) before ever reaching Normalize.
 
