@@ -65,7 +65,70 @@ func InspectRun(ctx context.Context, client *Client, runID string, format Output
 		PrintTable(headers, rows)
 	}
 
+	if ev, ok := result["evidence"].(map[string]any); ok {
+		printEvidenceSummary(ev)
+	}
+
 	return nil
+}
+
+// printEvidenceSummary renders the evidence block returned by the
+// gateway's run.status response (INIT-014 EPIC-006 TASK-005). Output
+// is grouped by repository per AC #2; raw logs are referenced via
+// evidence_uri rather than embedded (AC #3).
+func printEvidenceSummary(ev map[string]any) {
+	fmt.Println()
+	fmt.Printf("Evidence: %s\n", ColorStatus(str(ev["status"])))
+	repos, _ := ev["repositories"].([]any)
+	if len(repos) == 0 {
+		return
+	}
+	for _, r := range repos {
+		repo, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		repoID := str(repo["repository_id"])
+		present, _ := repo["present"].(bool)
+		if !present {
+			fmt.Printf("  %s: %s — %s\n", colorize(repoID, colorBold), colorize("missing", colorRed), str(repo["reason"]))
+			continue
+		}
+		fmt.Printf("  %s: %s\n", colorize(repoID, colorBold), ColorStatus(str(repo["status"])))
+		if base := str(repo["base_commit"]); base != "" {
+			fmt.Printf("    base→head: %s..%s\n", truncate(base, 12), truncate(str(repo["head_commit"]), 12))
+		}
+		printChecks(repo["checks"])
+	}
+}
+
+func printChecks(raw any) {
+	checks, _ := raw.([]any)
+	if len(checks) == 0 {
+		return
+	}
+	for _, c := range checks {
+		chk, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		required, _ := chk["required"].(bool)
+		marker := "advisory"
+		if required {
+			marker = "required"
+		}
+		uri := str(chk["evidence_uri"])
+		uriPart := ""
+		if uri != "" {
+			uriPart = "  " + uri
+		}
+		fmt.Printf("    [%s] %s %s%s\n",
+			marker,
+			ColorStatus(str(chk["status"])),
+			str(chk["check_id"]),
+			uriPart,
+		)
+	}
 }
 
 // ValidateArtifact runs cross-artifact validation from the CLI.

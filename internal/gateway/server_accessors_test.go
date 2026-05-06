@@ -8,6 +8,7 @@ import (
 	"github.com/bszymi/spine/internal/divergence"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
+	"github.com/bszymi/spine/internal/evidence"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/gitpool"
 	"github.com/bszymi/spine/internal/repository"
@@ -266,6 +267,49 @@ func TestAllAccessors_NilServiceSet(t *testing.T) {
 	}
 	if s.stepExecutionListerFrom(ctx) != nil {
 		t.Error("expected nil stepExecutionLister")
+	}
+	if s.evidenceQuerierFrom(ctx) != nil {
+		t.Error("expected nil evidenceQuerier")
+	}
+}
+
+// stubEvidenceQuerier implements EvidenceQuerier for accessor tests.
+type stubEvidenceQuerier struct{ id string }
+
+func (s *stubEvidenceQuerier) SummarizeForRun(_ context.Context, _ *domain.Run) (*evidence.RunSummary, error) {
+	return &evidence.RunSummary{RunID: s.id}, nil
+}
+
+func TestEvidenceQuerierFrom_FallsBackToServer(t *testing.T) {
+	srv := &stubEvidenceQuerier{id: "server"}
+	s := &Server{evidenceQuerier: srv}
+	if got := s.evidenceQuerierFrom(context.Background()); got != srv {
+		t.Error("expected server-level evidenceQuerier when no ServiceSet in context")
+	}
+}
+
+func TestEvidenceQuerierFrom_PrefersServiceSet(t *testing.T) {
+	serverEQ := &stubEvidenceQuerier{id: "server"}
+	wsEQ := &stubEvidenceQuerier{id: "workspace"}
+	s := &Server{evidenceQuerier: serverEQ}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		EvidenceQuerier: wsEQ,
+	})
+	got := s.evidenceQuerierFrom(ctx)
+	result, _ := got.SummarizeForRun(context.Background(), &domain.Run{})
+	if result.RunID != "workspace" {
+		t.Errorf("expected workspace EvidenceQuerier, got RunID=%q", result.RunID)
+	}
+}
+
+func TestEvidenceQuerierFrom_InvalidType_FallsBack(t *testing.T) {
+	serverEQ := &stubEvidenceQuerier{id: "server"}
+	s := &Server{evidenceQuerier: serverEQ}
+	ctx := context.WithValue(context.Background(), serviceSetKey{}, &workspace.ServiceSet{
+		EvidenceQuerier: "not-a-querier",
+	})
+	if got := s.evidenceQuerierFrom(ctx); got != serverEQ {
+		t.Error("expected fallback to server-level evidenceQuerier when type assertion fails")
 	}
 }
 
