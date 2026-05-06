@@ -158,7 +158,7 @@ A workspace contains exactly one **primary repository** and zero-to-many **code 
 
 The primary repository is the governance authority and the coordination ledger. Code repositories are execution targets. Governance artifacts only live in the primary repo; Spine does not scan code repositories for initiatives, tasks, or ADRs. This split is enforced by the system, not by convention.
 
-Repository identity is workspace-scoped and immutable. The same upstream repository may be registered in different workspaces under different IDs, but a registered ID cannot be renamed within a workspace — only deregister and re-register changes it.
+Repository identity is workspace-scoped and immutable. A registered ID cannot be renamed within a workspace; only deregister and re-register changes it. Each workspace's repository topology is independent, consistent with the workspace isolation guarantee in §5.2.
 
 Detailed contracts: [Multi-Repository Workspaces](/product/multi-repository-workspaces.md), [Multi-Repository Integration](/architecture/multi-repository-integration.md), [Git Integration Contract](/architecture/git-integration.md).
 
