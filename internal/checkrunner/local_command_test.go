@@ -834,6 +834,44 @@ func TestLocalCommandRunner_LogSinkWriteError(t *testing.T) {
 	}
 }
 
+// TestLocalCommandRunner_LeaderCleanExitPreservedThroughPipeDrain is
+// the regression for codex pass 9 P2. When the leader exits cleanly
+// BEFORE the policy deadline but a backgrounded child holds
+// stdout/stderr open, cmd.Wait blocks on pipe drain. If the deadline
+// fires during that drain, the previous classifyExit ordering
+// reported OutcomeTimeout — erasing the leader's real exit verdict.
+// The fix: leader exit code (≥0) wins over context state.
+func TestLocalCommandRunner_LeaderCleanExitPreservedThroughPipeDrain(t *testing.T) {
+	requireSh(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is unix-only")
+	}
+	r := checkrunner.LocalCommandRunner{}
+	res, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: t.TempDir(),
+		Check: domain.PolicyCheck{
+			CheckID: "leader-clean-pipes-held",
+			Kind:    domain.PolicyCheckKindCommand,
+			// Leader exits 0 immediately; background sleep keeps
+			// stdout open for 10 seconds. Deadline at 1s would
+			// normally fire during pipe drain.
+			Command:        `(sleep 10) & exit 0`,
+			TimeoutSeconds: 1,
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomePass {
+		t.Fatalf("Outcome: got %q want pass — leader exit 0 must be preserved when deadline fires during post-run pipe drain", res.Outcome)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode: got %d want 0", res.ExitCode)
+	}
+}
+
 // TestLocalCommandRunner_CallerDeadlineNotPolicyTimeout is the
 // regression for codex pass 4 P2. When the caller passes a context
 // with its own deadline shorter than (or in absence of) the policy

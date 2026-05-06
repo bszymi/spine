@@ -320,25 +320,43 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 //
 // Order matters:
 //
-//  1. Parent context cancelled or deadline-exceeded → caller decided
-//     to stop the run; report as Unavailable. Caller signals take
-//     precedence over policy timeouts because the caller didn't want
-//     this check to keep running at all.
-//  2. Run context (policy timeout) deadline-exceeded → real check
-//     timeout. Reported BEFORE *exec.ExitError because a child killed
-//     by SIGKILL on timeout exits with a signal-style status that
+//  1. Leader exited cleanly (exit code ≥ 0) → honour the verdict
+//     regardless of subsequent context state. The leader's exit is
+//     the authoritative signal; if it ran to completion, post-run
+//     pipe drain crossing a deadline must not erase the verdict
+//     (codex pass 9 P2). exit code -1 means "killed by signal" — no
+//     verdict, fall through.
+//  2. Parent context cancelled or deadline-exceeded → caller decided
+//     to stop the run before the leader produced a verdict; report
+//     as Unavailable. Caller signals take precedence over policy
+//     timeouts because the caller didn't want this check to run.
+//  3. Run context (policy timeout) deadline-exceeded → real check
+//     timeout (the leader was killed mid-execution, no verdict).
+//     Reported BEFORE *exec.ExitError because a child killed by
+//     SIGKILL on timeout surfaces as a signal-style status that
 //     looks like a non-zero verdict — operators want "we ran out of
 //     time", not "and the child returned 137".
-//  3. exec.ErrWaitDelay with a known leader exit code → preserve the
-//     leader's real verdict. ErrWaitDelay only means "I/O drain
-//     bound out because a backgrounded descendant held the pipes";
-//     the leader itself exited cleanly (codex pass 8 P2).
-//  4. nil error → OutcomePass.
-//  5. *exec.ExitError → OutcomeFail with the exit code.
+//  4. nil error → OutcomePass (defensive; should be covered by #1).
+//  5. *exec.ExitError → OutcomeFail with the exit code (signalled).
 //  6. Anything else (binary not found, permission denied, fork
 //     failure) → OutcomeUnavailable so dashboards distinguish "config
 //     issue, retry won't help" from "real verdict".
 func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, res *Result) Outcome {
+	if leaderExitCode >= 0 {
+		// Leader exited cleanly — verdict is authoritative even when
+		// a deadline / WaitDelay / cancellation later shaped the
+		// post-run state. ErrWaitDelay or post-run context fires can
+		// happen after a successful leader exit; without honouring
+		// the leader's status here, those would erase the verdict.
+		res.ExitCode = leaderExitCode
+		suffix := classifySuffix(runCtxErr, parentCtxErr, runErr)
+		if leaderExitCode == 0 {
+			res.Reason = "exit 0" + suffix
+			return OutcomePass
+		}
+		res.Reason = fmt.Sprintf("exit %d", leaderExitCode) + suffix
+		return OutcomeFail
+	}
 	if errors.Is(parentCtxErr, context.DeadlineExceeded) {
 		res.Reason = "caller deadline exceeded"
 		return OutcomeUnavailable
@@ -352,25 +370,8 @@ func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, res
 		return OutcomeTimeout
 	}
 	if errors.Is(runCtxErr, context.Canceled) {
-		// runCtx-only Canceled with parent still alive shouldn't
-		// happen in normal flow (we only wrap with timeout, not
-		// cancel), but treat defensively as Unavailable.
 		res.Reason = "context canceled"
 		return OutcomeUnavailable
-	}
-	if errors.Is(runErr, exec.ErrWaitDelay) && leaderExitCode >= 0 {
-		// Background descendants kept stdout/stderr open past the
-		// leader's exit; cmd.Wait gave up on draining and forcibly
-		// closed the pipes. The leader still produced a real exit
-		// status — preserve the verdict instead of collapsing to
-		// Unavailable.
-		res.ExitCode = leaderExitCode
-		if leaderExitCode == 0 {
-			res.Reason = "exit 0 (background pipes drained by wait delay)"
-			return OutcomePass
-		}
-		res.Reason = fmt.Sprintf("exit %d (background pipes drained by wait delay)", leaderExitCode)
-		return OutcomeFail
 	}
 	if runErr == nil {
 		res.ExitCode = 0
@@ -385,6 +386,26 @@ func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, res
 	}
 	res.Reason = sanitizeReason(runErr.Error())
 	return OutcomeUnavailable
+}
+
+// classifySuffix annotates a leader-honoured Reason with the post-run
+// signal that shaped the wait. Without the suffix, an evidence row
+// for a clean `cmd & exit 0` would say "exit 0" with no hint that
+// the wait was bounded by WaitDelay or a deadline — operators
+// debugging slow runs would lose useful context. Suffix is empty in
+// the common case (no post-run signal).
+func classifySuffix(runCtxErr, parentCtxErr, runErr error) string {
+	switch {
+	case errors.Is(parentCtxErr, context.DeadlineExceeded):
+		return " (caller deadline fired during post-run drain)"
+	case errors.Is(parentCtxErr, context.Canceled):
+		return " (context canceled during post-run drain)"
+	case errors.Is(runCtxErr, context.DeadlineExceeded):
+		return " (deadline fired during post-run drain)"
+	case errors.Is(runErr, exec.ErrWaitDelay):
+		return " (background pipes drained by wait delay)"
+	}
+	return ""
 }
 
 func (r LocalCommandRunner) shell() []string {
