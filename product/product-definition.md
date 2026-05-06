@@ -147,9 +147,72 @@ Users address a workspace by its unique identifier:
 
 System-level operations (health checks, metrics) are not scoped to a workspace and do not require a workspace identifier.
 
+### 5.6 Repository Topology — Primary and Code Repositories
+
+A workspace contains exactly one **primary repository** and zero-to-many **code repositories**. Single-repository workspaces remain the default; a workspace with no registered code repositories operates exactly as it did before multi-repo support and requires no migration.
+
+| Type | Count | `kind` | Contains | Managed By |
+|------|-------|--------|----------|------------|
+| Primary | Exactly 1 | `spine` | Governance artifacts: initiatives, epics, tasks, ADRs, workflows, product and architecture documents | Spine (authoritative) |
+| Code | 0 to N | `code` | Implementation code, configs, infrastructure | Teams (Spine creates branches during execution) |
+
+The primary repository is the governance authority and the coordination ledger. Code repositories are execution targets. Governance artifacts only live in the primary repo; Spine does not scan code repositories for initiatives, tasks, or ADRs. This split is enforced by the system, not by convention.
+
+Repository identity is workspace-scoped and immutable. The same upstream repository may be registered in different workspaces under different IDs, but a registered ID cannot be renamed within a workspace — only deregister and re-register changes it.
+
+Detailed contracts: [Multi-Repository Workspaces](/product/multi-repository-workspaces.md), [Multi-Repository Integration](/architecture/multi-repository-integration.md), [Git Integration Contract](/architecture/git-integration.md).
+
+### 5.7 Multi-Repository Runs
+
+Tasks may declare which code repositories they affect via a `repositories` field. When the field is omitted, the task operates against the primary repo only and the run is single-repo.
+
+When a task declares affected code repositories, a run spans those repositories alongside the primary repo:
+
+1. The run creates a `spine/run/<artifact-id>-<slug>-<run-hex>` branch in the primary repo and in each affected code repo.
+2. Step actors clone the relevant repository over Spine's git endpoint and commit work to its run branch.
+3. On run completion, Spine merges the run branch in each code repository independently, then merges the primary repo's run branch last so the governance outcome reflects the code-side result.
+4. If a merge succeeds in repository A but fails in repository B, the run transitions to the `partially-merged` state. Repository A's merge stands; repository B's branch is preserved for manual resolution; the run remains open until B is resolved or the task is explicitly closed.
+
+The `partially-merged` state is a first-class run state surfaced by `run inspect` and the run API, with per-repo outcomes recorded in the primary repo. Operators see which repositories merged, which failed, and what conflicts remain.
+
+### 5.8 Multi-Repo Constraints
+
+These constraints are product invariants of the multi-repo model:
+
+- **No cross-repo atomic transactions.** Merges are per-repo. There is no distributed two-phase commit and no rollback of a successful merge if a sibling repo fails. The `partially-merged` state is the explicit outcome of this trade-off.
+- **Governance lives only in the primary repo.** Code repositories never become governance authorities. Initiatives, epics, tasks, ADRs, and workflow definitions are scanned only from the primary repo.
+- **Workspace-level RBAC.** Authorization is scoped to the workspace, not per-repo. An actor authorized to operate in a workspace operates against all repositories registered in it. Per-repository permissions are not part of the v0.x model.
+- **Workspace isolation extends to code repositories.** A code repo registered in workspace A is not visible to workspace B; the isolation guarantee in §5.2 holds for the full repository topology.
+
 ---
 
-## 6. How Spine Differs from Existing Tools
+## 6. Polyrepo Use Case — Payments Platform
+
+Consider a platform team that operates three repositories in production:
+
+- `api-gateway` — public API layer
+- `payments-service` — core payment processing
+- `notification-service` — email and webhook delivery
+
+Each repository has its own CI pipeline and release cadence. The team wants to govern product intent, execution traceability, and review through a single Spine workspace without consolidating into a monorepo.
+
+**Setup.** A platform engineer registers the three code repositories against a Spine workspace whose primary repo holds governance artifacts. The repository catalog gains three entries with `kind: code` alongside the primary `kind: spine` entry.
+
+**Intent.** A product owner authors an initiative ("Add rate limiting to checkout") and an epic with two tasks. One task — *Implement the rate limiter* — declares `repositories: [api-gateway, payments-service]`. A second task — *Notify on rate-limit rejections* — declares `repositories: [notification-service]`. Both tasks live as governed artifacts in the primary repo.
+
+**Execution.** When the rate-limiter task is started, Spine creates `spine/run/...` branches in the primary repo, in `api-gateway`, and in `payments-service`. The runner for each step clones the relevant code repo through Spine's git endpoint and commits work to its run branch. An AI agent implements the gateway plumbing; a human implements the service-side enforcement. Each commit lands on the corresponding run branch under the same workflow governance.
+
+**Convergence.** When the run completes, Spine merges the run branches in `api-gateway` and `payments-service` independently, then merges the primary repo's run branch to record the governance outcome. The primary repo's history references both code-side merges as evidence.
+
+**Partial-merge handling.** Suppose `api-gateway`'s merge succeeds but `payments-service` has a conflict. The run transitions to `partially-merged`. The primary repo records `api-gateway: merged`, `payments-service: conflict`. The `api-gateway` run branch is deleted; the `payments-service` run branch is preserved. The task remains open. An operator resolves the conflict on the preserved branch, retries the merge, and the run advances to fully completed.
+
+**Single-repo default still applies.** The notification task declared a single code repository; its run spans the primary repo and `notification-service` only. Tasks with no `repositories` field declared continue to operate against the primary repo alone, producing single-repo runs identical to v0.x behavior.
+
+This walkthrough is normative for product behavior. Implementation contracts live in [Multi-Repository Workspaces](/product/multi-repository-workspaces.md) and [Multi-Repository Integration](/architecture/multi-repository-integration.md).
+
+---
+
+## 7. How Spine Differs from Existing Tools
 
 | Tool Category | What It Does | How Spine Differs |
 |--------------|-------------|-------------------|
@@ -165,7 +228,7 @@ See [Non-Goals](/product/non-goals.md) for explicit boundaries.
 
 ---
 
-## 7. Key Principles
+## 8. Key Principles
 
 These principles are drawn from the [Charter](/governance/charter.md) and enforced by the [Constitution](/governance/constitution.md):
 
@@ -178,7 +241,7 @@ These principles are drawn from the [Charter](/governance/charter.md) and enforc
 
 ---
 
-## 8. Who Spine Is For
+## 9. Who Spine Is For
 
 Spine is designed for hybrid teams of humans and AI agents that need structural integrity between product intent and execution.
 
@@ -196,7 +259,7 @@ See [Users and Use Cases](/product/users-and-use-cases.md) for full persona defi
 
 ---
 
-## 9. Governance Hierarchy
+## 10. Governance Hierarchy
 
 Spine operates under a layered governance model:
 
@@ -210,7 +273,7 @@ See [Charter](/governance/charter.md), [Constitution](/governance/constitution.m
 
 ---
 
-## 10. Related Documents
+## 11. Related Documents
 
 This document is the authoritative product definition. It is supported by:
 
@@ -218,10 +281,11 @@ This document is the authoritative product definition. It is supported by:
 - [Non-Goals](/product/non-goals.md) — what Spine is not and will not do
 - [Success Metrics](/product/success-metrics.md) — how Spine's success is evaluated
 - [Boundaries and Constraints](/product/boundaries-and-constraints.md) — system boundaries and constitutional constraints
+- [Multi-Repository Workspaces](/product/multi-repository-workspaces.md) — full product model for primary and code repository topology
 
 ---
 
-## 11. Evolution Policy
+## 12. Evolution Policy
 
 This document is expected to evolve as the product matures.
 
