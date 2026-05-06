@@ -202,6 +202,13 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	runErr := cmd.Run()
 	res.CompletedAt = r.now()
 	res.LogReference = logRef
+	// Snapshot the context state at the moment cmd.Run returned —
+	// classification reads it later, after logWriter.Close, which can
+	// block. Without the snapshot a slow sink Close that pushes the
+	// deadline past TimeoutSeconds AFTER the command already exited
+	// successfully would flip res.Outcome to OutcomeTimeout, mis-
+	// labelling a completed verdict. Codex pass 2 P2.
+	runCtxErr := runCtx.Err()
 
 	// A sink write failure during stdout/stderr copy is a runner-
 	// internal problem (logs are unreliable), not a check verdict.
@@ -218,7 +225,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	closeErr := logWriter.Close()
-	res.Outcome = classifyExit(runCtx, runErr, &res)
+	res.Outcome = classifyExit(runCtxErr, runErr, &res)
 	if closeErr != nil {
 		// Verdict survives the close failure (the process already
 		// produced its exit status); surface the close error so
@@ -255,6 +262,13 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 // against constructed errors without spawning processes for every
 // classification edge.
 //
+// ctxErr is a snapshot of the run context's Err() taken at the moment
+// cmd.Run returned. Using a snapshot rather than ctx.Err() at call
+// time matters because the runner does post-Run work (sink close)
+// that can block past the policy deadline; if the snapshot were
+// dropped, slow sinks would re-classify completed verdicts as
+// timeouts. Snapshot is taken in Run().
+//
 // Order matters:
 //
 //  1. Context deadline before any other check, so a child process that
@@ -266,12 +280,12 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 //  4. Anything else (binary not found, permission denied, fork
 //     failure) → OutcomeUnavailable so dashboards distinguish "config
 //     issue, retry won't help" from "real verdict".
-func classifyExit(ctx context.Context, runErr error, res *Result) Outcome {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+func classifyExit(ctxErr, runErr error, res *Result) Outcome {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
 		res.Reason = "context deadline exceeded"
 		return OutcomeTimeout
 	}
-	if errors.Is(ctx.Err(), context.Canceled) {
+	if errors.Is(ctxErr, context.Canceled) {
 		// Caller cancellation (e.g. orchestrator shutdown) is treated
 		// as Unavailable — the verdict is unknown, the operator knows
 		// why, and a retry by a fresh caller is the right next move.

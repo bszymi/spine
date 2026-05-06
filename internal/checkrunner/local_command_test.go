@@ -767,6 +767,39 @@ func TestLocalCommandRunner_LogSinkWriteError(t *testing.T) {
 	}
 }
 
+// TestLocalCommandRunner_SlowSinkCloseDoesNotMisreportTimeout is the
+// regression for codex pass 2 P2. A LogSink whose Close blocks past
+// the policy deadline can flip a successful verdict to OutcomeTimeout
+// because runCtx.Err() reads DeadlineExceeded by the time
+// classifyExit runs. Snapshotting the context error at the moment
+// cmd.Run returned prevents the misclassification: a check that
+// finished cleanly stays Pass even when the sink is slow to flush.
+func TestLocalCommandRunner_SlowSinkCloseDoesNotMisreportTimeout(t *testing.T) {
+	requireSh(t)
+	r := checkrunner.LocalCommandRunner{
+		LogSink: checkrunner.LogSinkFunc(func(string) (io.WriteCloser, error) {
+			return &slowCloseCloser{closeDelay: 2 * time.Second}, nil
+		}),
+	}
+	res, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: t.TempDir(),
+		Check: domain.PolicyCheck{
+			CheckID:        "fast-check-slow-sink",
+			Kind:           domain.PolicyCheckKindCommand,
+			Command:        "true",
+			TimeoutSeconds: 1, // shorter than sink close
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomePass {
+		t.Fatalf("Outcome: got %q want pass — slow sink close must not flip a completed verdict to timeout", res.Outcome)
+	}
+}
+
 // TestOutcome_IsTerminal locks the contract that every Outcome value
 // is terminal at the runner boundary. If a future revision adds a
 // non-terminal outcome (e.g. "running"), this test forces a deliberate
@@ -849,3 +882,16 @@ type writeFailingCloser struct {
 
 func (w *writeFailingCloser) Write(p []byte) (int, error) { return 0, w.err }
 func (w *writeFailingCloser) Close() error                { return nil }
+
+// slowCloseCloser implements io.WriteCloser; Write succeeds but Close
+// blocks for closeDelay. Models a remote/log-flushing sink whose
+// Close latency can cross a short policy timeout.
+type slowCloseCloser struct {
+	closeDelay time.Duration
+}
+
+func (s *slowCloseCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (s *slowCloseCloser) Close() error {
+	time.Sleep(s.closeDelay)
+	return nil
+}
