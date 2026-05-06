@@ -887,7 +887,7 @@ func TestLocalCommandRunner_BackgroundedGrandchildReapedOnSuccess(t *testing.T) 
 		// pay the full default 5s WaitDelay.
 		WaitDelay: 200 * time.Millisecond,
 	}
-	_, err := r.Run(context.Background(), checkrunner.Request{
+	res, err := r.Run(context.Background(), checkrunner.Request{
 		WorkingDir: dir,
 		Check: domain.PolicyCheck{
 			CheckID: "leaks-after-clean-exit",
@@ -903,9 +903,15 @@ func TestLocalCommandRunner_BackgroundedGrandchildReapedOnSuccess(t *testing.T) 
 			Severity:       domain.PolicySeverityBlocking,
 		},
 	})
-	// Run may surface a WaitDelay-driven error; we don't care about
-	// the exact verdict here, only the post-run process state.
-	_ = err
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Codex pass 8 P2: WaitDelay-driven cmd.Run error must NOT mask
+	// a leader exit 0 as Unavailable. The shell exits cleanly here
+	// — the verdict belongs to the shell, not to the orphaned pipe.
+	if res.Outcome != checkrunner.OutcomePass {
+		t.Fatalf("Outcome: got %q want pass — WaitDelay drain must not flip a 0-exit verdict to unavailable", res.Outcome)
+	}
 
 	// Wait for any in-flight signals to settle, then check that the
 	// heartbeat file stops growing.

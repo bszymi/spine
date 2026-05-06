@@ -242,6 +242,16 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	// (an orchestrator decision). Codex pass 4 P2.
 	runCtxErr := runCtx.Err()
 	parentCtxErr := ctx.Err()
+	// Capture the leader's exit code BEFORE classifyExit. Needed for
+	// the cmd.WaitDelay path: when a background child holds pipes
+	// past leader exit, cmd.Run surfaces exec.ErrWaitDelay even
+	// though cmd.ProcessState carries the leader's real exit code.
+	// Without this snapshot classifyExit's catch-all would report
+	// the clean exit as OutcomeUnavailable. Codex pass 8 P2.
+	leaderExitCode := -1
+	if cmd.ProcessState != nil {
+		leaderExitCode = cmd.ProcessState.ExitCode()
+	}
 
 	// A sink write failure during stdout/stderr copy is a runner-
 	// internal problem (logs are unreliable), not a check verdict.
@@ -258,7 +268,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	closeErr := logWriter.Close()
-	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, &res)
+	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, leaderExitCode, &res)
 	if closeErr != nil {
 		// Verdict survives the close failure (the process already
 		// produced its exit status); surface the close error so
@@ -319,12 +329,16 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 //     by SIGKILL on timeout exits with a signal-style status that
 //     looks like a non-zero verdict — operators want "we ran out of
 //     time", not "and the child returned 137".
-//  3. nil error → OutcomePass.
-//  4. *exec.ExitError → OutcomeFail with the exit code.
-//  5. Anything else (binary not found, permission denied, fork
+//  3. exec.ErrWaitDelay with a known leader exit code → preserve the
+//     leader's real verdict. ErrWaitDelay only means "I/O drain
+//     bound out because a backgrounded descendant held the pipes";
+//     the leader itself exited cleanly (codex pass 8 P2).
+//  4. nil error → OutcomePass.
+//  5. *exec.ExitError → OutcomeFail with the exit code.
+//  6. Anything else (binary not found, permission denied, fork
 //     failure) → OutcomeUnavailable so dashboards distinguish "config
 //     issue, retry won't help" from "real verdict".
-func classifyExit(runCtxErr, parentCtxErr, runErr error, res *Result) Outcome {
+func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, res *Result) Outcome {
 	if errors.Is(parentCtxErr, context.DeadlineExceeded) {
 		res.Reason = "caller deadline exceeded"
 		return OutcomeUnavailable
@@ -343,6 +357,20 @@ func classifyExit(runCtxErr, parentCtxErr, runErr error, res *Result) Outcome {
 		// cancel), but treat defensively as Unavailable.
 		res.Reason = "context canceled"
 		return OutcomeUnavailable
+	}
+	if errors.Is(runErr, exec.ErrWaitDelay) && leaderExitCode >= 0 {
+		// Background descendants kept stdout/stderr open past the
+		// leader's exit; cmd.Wait gave up on draining and forcibly
+		// closed the pipes. The leader still produced a real exit
+		// status — preserve the verdict instead of collapsing to
+		// Unavailable.
+		res.ExitCode = leaderExitCode
+		if leaderExitCode == 0 {
+			res.Reason = "exit 0 (background pipes drained by wait delay)"
+			return OutcomePass
+		}
+		res.Reason = fmt.Sprintf("exit %d (background pipes drained by wait delay)", leaderExitCode)
+		return OutcomeFail
 	}
 	if runErr == nil {
 		res.ExitCode = 0
