@@ -834,6 +834,73 @@ func TestLocalCommandRunner_LogSinkWriteError(t *testing.T) {
 	}
 }
 
+// TestLocalCommandRunner_UnavailableShellCommandNotFound pins the
+// codex pass 10 P2 fix. POSIX shell exits 127 when a command is not
+// found in PATH; that's an environment failure (the runner image
+// lacks the tool), not an artifact policy violation. Reporting it
+// as OutcomeFail would record a check the artifact never had a
+// chance to satisfy as "the artifact failed" — defeating the
+// fail/error distinction.
+func TestLocalCommandRunner_UnavailableShellCommandNotFound(t *testing.T) {
+	requireSh(t)
+	r := checkrunner.LocalCommandRunner{}
+	res, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: t.TempDir(),
+		Check: domain.PolicyCheck{
+			CheckID:        "needs-missing-tool",
+			Kind:           domain.PolicyCheckKindCommand,
+			Command:        "spine-test-nonexistent-binary-xyz-12345",
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomeUnavailable {
+		t.Fatalf("Outcome: got %q want unavailable (shell exit 127)", res.Outcome)
+	}
+	if res.ExitCode != 127 {
+		t.Fatalf("ExitCode: got %d want 127", res.ExitCode)
+	}
+	if !strings.Contains(res.Reason, "command not found") {
+		t.Fatalf("Reason should describe missing-tool: got %q", res.Reason)
+	}
+}
+
+// TestLocalCommandRunner_UnavailableShellCommandNotExecutable covers
+// the 126 case: the binary exists but isn't executable. Same
+// classification as 127 — environment problem, not verdict.
+func TestLocalCommandRunner_UnavailableShellCommandNotExecutable(t *testing.T) {
+	requireSh(t)
+	dir := t.TempDir()
+	// Create a non-executable file and try to invoke it directly.
+	binary := filepath.Join(dir, "non-executable")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho hello\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	r := checkrunner.LocalCommandRunner{}
+	res, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: dir,
+		Check: domain.PolicyCheck{
+			CheckID:        "non-executable",
+			Kind:           domain.PolicyCheckKindCommand,
+			Command:        binary,
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomeUnavailable {
+		t.Fatalf("Outcome: got %q want unavailable (shell exit 126)", res.Outcome)
+	}
+	if res.ExitCode != 126 {
+		t.Fatalf("ExitCode: got %d want 126", res.ExitCode)
+	}
+}
+
 // TestLocalCommandRunner_LeaderCleanExitPreservedThroughPipeDrain is
 // the regression for codex pass 9 P2. When the leader exits cleanly
 // BEFORE the policy deadline but a backgrounded child holds

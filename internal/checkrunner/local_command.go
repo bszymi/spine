@@ -15,6 +15,18 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 )
 
+// POSIX shell exit-code conventions used to distinguish environment
+// failures (the runner image lacks a tool, a binary is non-executable)
+// from artifact policy verdicts. Mapping these to OutcomeUnavailable
+// keeps the failure/error distinction clean in evidence rows: a
+// missing `go` binary surfacing as CheckStatusFailed (not Error)
+// would falsely accuse the policy author's artifact of not satisfying
+// the check (codex pass 10 P2).
+const (
+	shellExitCommandNotExecutable = 126 // found but not executable / permission denied
+	shellExitCommandNotFound      = 127 // not found in PATH
+)
+
 // logRefSequence is a process-wide monotonic counter appended to every
 // LogReference. Wall-clock timestamps alone are not enough: two
 // concurrent Runs with identical (repository, branch, check_id) can
@@ -350,12 +362,26 @@ func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, res
 		// the leader's status here, those would erase the verdict.
 		res.ExitCode = leaderExitCode
 		suffix := classifySuffix(runCtxErr, parentCtxErr, runErr)
-		if leaderExitCode == 0 {
+		switch leaderExitCode {
+		case 0:
 			res.Reason = "exit 0" + suffix
 			return OutcomePass
+		case shellExitCommandNotFound:
+			// Shell convention: command not found in PATH. The check
+			// declared a tool the runner image doesn't have — that's
+			// an environment problem, not an artifact verdict.
+			res.Reason = "exit 127 (command not found)" + suffix
+			return OutcomeUnavailable
+		case shellExitCommandNotExecutable:
+			// Shell convention: command found but not executable
+			// (typically permission denied). Same environment-error
+			// classification as 127.
+			res.Reason = "exit 126 (command not executable)" + suffix
+			return OutcomeUnavailable
+		default:
+			res.Reason = fmt.Sprintf("exit %d", leaderExitCode) + suffix
+			return OutcomeFail
 		}
-		res.Reason = fmt.Sprintf("exit %d", leaderExitCode) + suffix
-		return OutcomeFail
 	}
 	if errors.Is(parentCtxErr, context.DeadlineExceeded) {
 		res.Reason = "caller deadline exceeded"

@@ -109,11 +109,16 @@ Why four runner outcomes for three evidence statuses: the evidence schema delibe
 
 Order matters in `classifyExit`:
 
-1. **Context deadline exceeded** → `Timeout`. Checked first so a child process that exits non-zero on signal (e.g. `137` from SIGKILL) still reports as `Timeout` — the operator's mental model of "we ran out of time" beats the post-mortem detail of "and the child returned 137".
-2. **Context canceled** (caller-driven) → `Unavailable` with reason `context canceled`.
-3. **`runErr == nil`** → `Pass`.
-4. **`*exec.ExitError`** → `Fail` with the exit code captured into `Result.ExitCode`.
-5. **Anything else** (binary not found, fork failure, permission denied) → `Unavailable`.
+1. **Leader exited cleanly** (`cmd.ProcessState.ExitCode() ≥ 0`) → honour the leader's verdict regardless of subsequent context state. Once the leader produced an exit code, post-run pipe drain that crosses a deadline or a `WaitDelay` only annotates the Reason; it does not erase the verdict. Within this branch:
+   - `0` → `Pass`.
+   - `127` (POSIX shell: command not found in PATH) → `Unavailable`. Environment failure: the runner image lacks the tool the policy declared.
+   - `126` (POSIX shell: command found but not executable) → `Unavailable`. Same classification.
+   - Anything else → `Fail`.
+2. **Parent context deadline / canceled** → `Unavailable`. Caller signals a stop before the leader produced a verdict; reported as `caller deadline exceeded` or `context canceled`. Caller signals take precedence over policy timeouts because the caller didn't want the check to keep running.
+3. **Run context deadline exceeded** (only when leader was killed mid-execution, no clean exit code) → `Timeout`. Checked BEFORE `*exec.ExitError` so a SIGKILLed leader (signal-style exit code) reports as `Timeout` rather than as a non-zero `Fail`.
+4. **`runErr == nil`** → `Pass` (defensive — should be covered by #1).
+5. **`*exec.ExitError`** (signalled, no clean exit code) → `Fail` with the signal-style exit code.
+6. **Anything else** (binary not found at exec time, fork failure) → `Unavailable`.
 
 ---
 
