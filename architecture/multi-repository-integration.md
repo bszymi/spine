@@ -282,7 +282,7 @@ for each repo in [spine, ...task.repositories]:
 - If repo A merges successfully but repo B has a conflict, repo A's merge stands.
 - The primary Spine repo records per-repo outcomes.
 - A run is considered fully complete only when all repos have merged successfully.
-- A run with partial merges enters a `partial_merge` state — the merged repos are done, the failed repos need manual intervention.
+- A run with partial merges enters the `partially-merged` run state (`domain.RunStatusPartiallyMerged`) — the merged repos are done, the failed repos need manual intervention.
 
 **Merge order:**
 1. Code repositories are merged first (the actual implementation)
@@ -292,7 +292,18 @@ This ordering ensures the Spine repo accurately records whether code merges succ
 
 ### 4.5 Branch Cleanup
 
-After successful merge in a repo, the run branch in that repo is deleted. If a repo's merge failed, its branch is preserved for manual resolution.
+Branch cleanup is keyed off per-repo merge outcomes, not off run state (`Orchestrator.CleanupRunBranch`):
+
+- A repository whose recorded outcome is `failed` keeps its run branch on both local and remote, so an operator can resolve the failure against the unmodified source ref.
+- A repository with any other terminal outcome (`merged`, `skipped`, `resolved-externally`) gets its run branch deleted.
+
+`CleanupRunBranch` is invoked from each Orchestrator method that drives a run into a terminal state — `MergeRunBranch` (full-completion path through the merge pipeline), `CompleteRun` (terminal step reached with no commit), `FailRun` (permanent step failure), and `CancelRun` (operator cancel, including from `partially-merged`). On every one of those paths the per-repo outcome rule above is what decides which branches are deleted and which stay preserved.
+
+While a run is in the `partially-merged` state, no cleanup has run yet — every affected repo's run branch stays preserved, including branches of repos that have already merged, so an operator resolving the conflict can inspect the merged work alongside the failed branch. Cleanup runs only when the run leaves `partially-merged` through one of the orchestrator methods above (resolve-and-retry → fully completed, or operator cancel → cancelled).
+
+**Path that does NOT invoke cleanup today (intentional gap).** Scheduler-driven run timeouts (`Scheduler.handleRunTimeout`) flip a run to cancelled but do not call `CleanupRunBranch`; their run branches stay behind until an operator deletes them or a future change adds cleanup to that path. This gap is documented here so doc readers do not assume cleanup is universal across every transition that ends in a terminal status.
+
+See `internal/engine/branch.go` (`CleanupRunBranch`), `internal/engine/run.go` (`CompleteRun`, `FailRun`, `CancelRun`), `internal/engine/merge.go` (`MergeRunBranch`, `transitionToPartiallyMerged`), and `internal/scheduler/run_timeout.go::handleRunTimeout`.
 
 ---
 
