@@ -601,6 +601,66 @@ func TestLocalCommandRunner_RunsInWorkingDir(t *testing.T) {
 	}
 }
 
+// TestLocalCommandRunner_ConcurrentRunsWithIdenticalRequestKeepsLogRefsUnique
+// is the regression for codex pass 5 P2. Two concurrent Runs that
+// share the same (repository, branch, check_id) AND happen to start
+// in the same wall-clock nanosecond would otherwise produce the same
+// LogReference, and a sink keyed by reference would overwrite one
+// invocation's log with the other's. The runner injects a
+// process-wide atomic counter to break the tie regardless of clock
+// resolution.
+func TestLocalCommandRunner_ConcurrentRunsWithIdenticalRequestKeepsLogRefsUnique(t *testing.T) {
+	requireSh(t)
+	sink := newFakeSink()
+	r := checkrunner.LocalCommandRunner{LogSink: sink}
+
+	const n = 32
+	var wg sync.WaitGroup
+	results := make([]checkrunner.Result, n)
+	errs := make([]error, n)
+	// All goroutines start as close to the same instant as possible
+	// to maximise the chance of identical-tick refs without the
+	// counter.
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = r.Run(context.Background(), checkrunner.Request{
+				// Deliberately identical across every goroutine.
+				RepositoryID: "billing",
+				BranchName:   "spine/run/run-1",
+				WorkingDir:   t.TempDir(),
+				Check: domain.PolicyCheck{
+					CheckID:        "duplicate-check",
+					Kind:           domain.PolicyCheckKindCommand,
+					Command:        "true",
+					Interpretation: domain.PolicyCheckInterpretationDeterministic,
+					Severity:       domain.PolicySeverityBlocking,
+				},
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	seen := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("Run #%d: %v", i, errs[i])
+		}
+		ref := results[i].LogReference
+		if ref == "" {
+			t.Fatalf("Run #%d: LogReference empty despite configured sink", i)
+		}
+		if _, dup := seen[ref]; dup {
+			t.Fatalf("LogReference collision across identical-request concurrent runs: %q", ref)
+		}
+		seen[ref] = struct{}{}
+	}
+}
+
 // TestLocalCommandRunner_ConcurrentRuns exercises the documented
 // stateless invariant. Two concurrent Run calls on the same instance
 // must not interfere with each other's outcomes or log sinks.

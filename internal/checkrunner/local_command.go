@@ -9,10 +9,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 )
+
+// logRefSequence is a process-wide monotonic counter appended to every
+// LogReference. Wall-clock timestamps alone are not enough: two
+// concurrent Runs with identical (repository, branch, check_id) can
+// land in the same nanosecond on systems whose clock has lower
+// effective resolution, producing colliding references that a
+// flat-file / object-store LogSink would silently merge or
+// overwrite. Codex pass 5 P2.
+var logRefSequence atomic.Uint64
 
 // LocalCommandRunner executes domain.PolicyCheckKindCommand checks
 // against a working tree on the local filesystem. It is the first
@@ -455,18 +465,25 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 
 // buildLogReference produces the stable identifier the LogSink sees.
 // Format is internal to the package; callers receive the same string
-// in Result.LogReference and treat it as opaque. Including
-// repository_id, branch, and a high-resolution start timestamp makes
-// per-invocation references unique enough that two parallel Runs do
-// not collide on a flat-file sink. A check_id keeps the same Run's
-// multiple checks separable.
+// in Result.LogReference and treat it as opaque.
+//
+// Uniqueness is layered:
+//   - repository_id / branch / check_id keep concurrent Runs of
+//     different checks distinguishable;
+//   - start timestamp keeps sequential Runs of the same check
+//     distinguishable;
+//   - a process-wide atomic counter forces uniqueness even when two
+//     concurrent Runs of the same (repo, branch, check_id) land in
+//     the same wall-clock nanosecond — a flat-file / object-store
+//     LogSink would otherwise overwrite one with the other.
 func buildLogReference(req Request, started time.Time) string {
-	return fmt.Sprintf("checkrunner/%s/%s/%s/%s/%d",
+	return fmt.Sprintf("checkrunner/%s/%s/%s/%s/%d/%016x",
 		safeSegment(req.RepositoryID),
 		safeSegment(req.BranchName),
 		safeSegment(req.Check.CheckID),
 		started.UTC().Format("20060102T150405.000000000Z"),
 		started.UnixNano(),
+		logRefSequence.Add(1),
 	)
 }
 
