@@ -119,7 +119,29 @@ These rules ensure required predecessor work is in place.
 | `PC-002` | When a Task transitions to `In Progress`, its parent Epic must be at least `In Progress` | Task | Warning |
 | `PC-003` | When an Epic transitions to `In Progress`, its parent Initiative must be at least `In Progress` | Epic | Warning |
 
-### 3.7 Skill Eligibility Rules
+### 3.7 Execution Evidence Rules
+
+These rules validate the multi-repository execution-evidence side of a Run before publication. They activate when the engine is wired with the resolvers documented in §6.4. They are skipped for planning runs and for tasks with no associated Run.
+
+| Rule ID | Description | Applies To | Severity |
+|---------|-------------|------------|----------|
+| `EV-001` | Every affected repository in `Run.AffectedRepositories` must produce execution evidence (one record per `(run_id, repository_id)` per [execution-evidence.md](/architecture/execution-evidence.md) §3) | Task | Error |
+| `EV-002` | Evidence's `branch_name` must match `Run.BranchName` (or the per-repo override in `Run.RepositoryBranches`); evidence's `base_commit` must match `Run.RepositoryBaselines[repo]` | Task | Error |
+| `EV-003` | For every applicable validation policy (per `PolicySelector`), every check declared with `severity: blocking` must appear in evidence's `check_results` | Task | Error |
+| `EV-004` | Every blocking check's `check_results[*].status` must be `passed` or `skipped`; warning-severity check failures emit warnings (do not block publish) per TASK-004 AC #4 | Task | Error / Warning |
+| `EV-005` | Evidence's `head_commit` must match the live branch tip when a `BranchTipResolver` is wired (no-op without it); a mismatch indicates new commits landed since evidence was produced | Task | Error |
+
+EV-* findings are classified `execution_evidence` (a new classification added with TASK-004; see §4). Each finding carries structured `repository_id`, `policy_id`, and `check_id` fields on `ValidationError` so audit dashboards can filter without text-parsing the message — TASK-004 AC #5: "Validation output names repo ID, policy ID, and failing check."
+
+EV-001 treats a resolver error as "evidence missing". The runner's evidence-write path is the authoritative producer; if the resolver cannot read it back, validation cannot let publication proceed without a verifiable record. Transient resolver errors are surfaced via `observe.Logger` so the operator can debug without losing the publish-block guarantee.
+
+EV-002 does not double-emit on absent evidence — that's EV-001's responsibility. The two rules are deliberately separate so a run that publishes evidence on the wrong branch surfaces as an EV-002 finding (regenerate from the right ref) rather than as an EV-001 (regenerate at all).
+
+EV-003 only flags missing **blocking** checks. Advisory checks are optional by definition; their absence is acceptable. EV-004 carries the symmetric rule: a present-but-failed advisory check emits a warning, not an error.
+
+EV-005 is the only EV-* rule that requires an external state source (the live branch tip). It is intentionally a no-op when no `BranchTipResolver` is wired, because the rule slot exists for the future production path that has access to a git client; until then EV-001 / EV-002 / EV-003 / EV-004 already cover the AC surface, and a false-positive staleness flag would block valid publishes.
+
+### 3.8 Skill Eligibility Rules
 
 These rules validate actor skill eligibility during workflow execution.
 
@@ -143,6 +165,7 @@ When validation fails, each failure is classified to guide resolution:
 | `status_conflict` | Status combination indicates a governance issue | Update the conflicting artifact's status or create follow-up work |
 | `scope_conflict` | Artifact content may not align with governed scope | Review and adjust scope, or create an ADR documenting the deviation |
 | `missing_prerequisite` | Required predecessor artifact is missing or not ready | Complete the prerequisite or remove the dependency |
+| `execution_evidence` | Multi-repo execution evidence is missing, mismatched, or stale (TASK-004 EPIC-006) | Regenerate evidence by re-running the runner against the current run branch, or reconcile branch/commit drift |
 
 ---
 
@@ -277,6 +300,25 @@ If the Projection Store is being rebuilt, validation should:
 
 - Wait for the rebuild to complete if invoked from a workflow precondition
 - Return an error indicating temporary unavailability if invoked as a system operation
+
+### 6.4 Evidence Resolvers (EV-* rules)
+
+The EV-* execution-evidence rules read state outside the projection store. The engine accepts four resolver types as construction-time options (see `WithRunResolver` / `WithEvidenceResolver` / `WithValidationPolicyResolver` / `WithBranchTipResolver` in `internal/validation/engine.go`):
+
+| Resolver | Returns | Used by | Behavior when nil |
+|----------|---------|---------|-------------------|
+| `RunResolver` | `*Run` for a Task path | every EV-* rule | every EV-* rule is a no-op |
+| `EvidenceResolver` | `*ExecutionEvidence` per `(run_id, repository_id)` | every EV-* rule | every EV-* rule is a no-op |
+| `ValidationPolicyResolver` | applicable policies per `(task, repository)` | EV-003, EV-004 | EV-003 / EV-004 are no-ops; EV-001 / EV-002 / EV-005 still run |
+| `BranchTipResolver` | live head SHA per `(repository, branch)` | EV-005 | EV-005 is a no-op; other EV-* rules still run |
+
+Resolver errors are surfaced via `observe.Logger` and degrade gracefully:
+
+- A `RunResolver` error skips evidence rules for that artifact (no false-positive blocks during transient errors).
+- An `EvidenceResolver` error in EV-001 is treated as "evidence missing" — the producer side is the authority, so a read-side outage cannot let publish proceed.
+- `ValidationPolicyResolver` and `BranchTipResolver` errors silently skip the affected check (their absence already represents an unwired surface).
+
+Production wiring of these resolvers lands in subsequent EPIC-006 tasks (TASK-005 evidence query / reporting wires the evidence + policy resolvers; the branch-tip resolver follows the existing `git.GitClient` plumbing). Until then the rule slots exist and tests provide stub resolvers.
 
 ---
 

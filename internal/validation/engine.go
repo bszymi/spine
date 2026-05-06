@@ -47,6 +47,62 @@ type CatalogSnapshot func(ctx context.Context) (*repository.Catalog, string, err
 // register a non-projection governed YAML need not wire it.
 type GovernedFileResolver func(ctx context.Context, target string) bool
 
+// RunResolver returns the active Run associated with a Task path, or
+// nil when no Run is attached. Used by the EV-* execution-evidence
+// rules to bridge the artifact-centric validation engine with the run
+// context that evidence is keyed by.
+//
+// Implementations SHOULD return the most recent non-terminal Run for
+// the task. If no Run exists for the task, return (nil, nil) — that is
+// not an error condition; it just means evidence rules have nothing to
+// validate yet. Returning a non-nil error stops evidence rule
+// evaluation for the artifact (the rule emits no findings to avoid
+// false-positive blocks while the resolver is in a transient bad
+// state); the orchestrator's existing precondition-failure path treats
+// engine errors separately.
+//
+// When no resolver is wired, evidence rules are no-ops.
+type RunResolver func(ctx context.Context, taskPath string) (*domain.Run, error)
+
+// EvidenceResolver returns the ExecutionEvidence for (runID,
+// repositoryID), or (nil, nil) when no evidence has been recorded yet.
+// EV-001 (missing evidence) treats the nil return as the failure
+// signal; the rule emits "evidence missing for repo X". Returning an
+// error stops evidence rule evaluation for THIS repo (the rule emits
+// no finding for it); EV-001 specifically downgrades a transient
+// resolver error into "evidence missing" so the runner-side bug is
+// surfaced rather than masked.
+//
+// When no resolver is wired, evidence rules are no-ops.
+type EvidenceResolver func(ctx context.Context, runID, repositoryID string) (*domain.ExecutionEvidence, error)
+
+// ValidationPolicyResolver returns the validation policies that apply
+// to a (taskPath, repositoryID) pair. The result is the set of
+// policies whose Selector matches BOTH the run's task and the given
+// repository — TASK-004 EPIC-006 evaluates these to determine which
+// blocking checks must be present in evidence.
+//
+// Empty slice MUST be returned when no policies apply (not nil). The
+// EV-003 / EV-004 rules treat (nil, nil) as "no policies apply, no
+// required checks expected" — same as an explicit empty slice — so
+// the difference does not change semantics.
+//
+// When no resolver is wired, EV-003 / EV-004 are no-ops; the other EV
+// rules continue to run because they don't depend on policy data.
+type ValidationPolicyResolver func(ctx context.Context, taskPath, repositoryID string) ([]domain.ValidationPolicy, error)
+
+// BranchTipResolver returns the current head SHA of a (repositoryID,
+// branchName) pair, or empty string when not resolvable. Used by
+// EV-005 (stale evidence) to compare evidence's recorded HeadCommit
+// against the actual current branch tip.
+//
+// Returning ("", nil) means "no current tip is available" — EV-005
+// skips the staleness check for that repo (no false positive on a
+// resolver gap). Returning a non-nil error has the same effect.
+//
+// When no resolver is wired, EV-005 is a no-op.
+type BranchTipResolver func(ctx context.Context, repositoryID, branchName string) (string, error)
+
 // Option configures Engine construction.
 type Option func(*Engine)
 
@@ -65,6 +121,46 @@ func WithCatalogSnapshot(snapshot CatalogSnapshot) Option {
 func WithGovernedFileResolver(resolver GovernedFileResolver) Option {
 	return func(e *Engine) {
 		e.governedFileResolver = resolver
+	}
+}
+
+// WithRunResolver wires the resolver that bridges Task validation to
+// the active Run context. Required to activate the EV-* evidence
+// rules; absent it, evidence rules emit nothing.
+func WithRunResolver(resolver RunResolver) Option {
+	return func(e *Engine) {
+		e.runResolver = resolver
+	}
+}
+
+// WithEvidenceResolver wires the resolver that returns per-repo
+// ExecutionEvidence rows. Required to activate EV-001 / EV-002 /
+// EV-003 / EV-004 / EV-005 — without it the rules cannot read the
+// evidence side of the comparison and emit nothing.
+func WithEvidenceResolver(resolver EvidenceResolver) Option {
+	return func(e *Engine) {
+		e.evidenceResolver = resolver
+	}
+}
+
+// WithValidationPolicyResolver wires the resolver that returns the
+// applicable validation policies for a (task, repository) pair.
+// Required to activate EV-003 (required checks present) and EV-004
+// (blocking checks pass); EV-001, EV-002, EV-005 still run without it.
+func WithValidationPolicyResolver(resolver ValidationPolicyResolver) Option {
+	return func(e *Engine) {
+		e.policyResolver = resolver
+	}
+}
+
+// WithBranchTipResolver wires the resolver consulted by EV-005 (stale
+// evidence) to compare an evidence record's recorded HeadCommit
+// against the live branch tip. Optional: without it EV-005 is a no-op
+// — the rule slot exists for the future wiring path that has access
+// to a git client.
+func WithBranchTipResolver(resolver BranchTipResolver) Option {
+	return func(e *Engine) {
+		e.branchTipResolver = resolver
 	}
 }
 
@@ -96,6 +192,10 @@ type Engine struct {
 	store                store.Store
 	catalogSnapshot      CatalogSnapshot
 	governedFileResolver GovernedFileResolver
+	runResolver          RunResolver
+	evidenceResolver     EvidenceResolver
+	policyResolver       ValidationPolicyResolver
+	branchTipResolver    BranchTipResolver
 	rules                []Rule
 }
 
@@ -111,6 +211,7 @@ func NewEngine(st store.Store, opts ...Option) *Engine {
 	e.rules = append(e.rules, scopeRules()...)
 	e.rules = append(e.rules, prereqRules()...)
 	e.rules = append(e.rules, repositoryRules(e.catalogSnapshot)...)
+	e.rules = append(e.rules, evidenceRules(e.runResolver, e.evidenceResolver, e.policyResolver, e.branchTipResolver)...)
 	return e
 }
 
