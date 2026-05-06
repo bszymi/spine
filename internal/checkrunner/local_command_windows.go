@@ -17,3 +17,14 @@ func cancelProcessGroup(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Kill()
 }
+
+// leaderClearlyKilled — on Windows, ProcessState gives no clean
+// signal that distinguishes "we Killed the process" from "process
+// exited with code 1". Trust runnerKilledLeader as the hint and
+// accept the resulting false positive for the rare case where the
+// leader exited cleanly first and Cancel ran during drain — better
+// than codex pass 15 P2's regression of timeouts being reported as
+// Fail.
+func leaderClearlyKilled(cmd *exec.Cmd, runnerKilledLeader bool) bool {
+	return runnerKilledLeader
+}

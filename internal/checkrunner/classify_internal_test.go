@@ -23,6 +23,7 @@ func TestClassifyExit_PolicyTimeoutFirst_BothDeadlinesFired(t *testing.T) {
 		context.DeadlineExceeded, // runErr surfaces ctx err
 		-1,                       // leader signalled (no clean exit)
 		true,                     // policy fired first
+		false,                    // leaderKilled — irrelevant when exit < 0
 		&res,
 	)
 	if got != OutcomeTimeout {
@@ -41,6 +42,7 @@ func TestClassifyExit_CallerDeadlineFirst_BothDeadlinesFired(t *testing.T) {
 		context.DeadlineExceeded,
 		-1,
 		false, // policy did NOT fire first
+		false,
 		&res,
 	)
 	if got != OutcomeUnavailable {
@@ -59,6 +61,7 @@ func TestClassifyExit_OnlyPolicyDeadlineFired(t *testing.T) {
 		context.DeadlineExceeded,
 		-1,
 		true,
+		false,
 		&res,
 	)
 	if got != OutcomeTimeout {
@@ -75,6 +78,7 @@ func TestClassifyExit_OnlyCallerDeadlineFired(t *testing.T) {
 		context.DeadlineExceeded,
 		context.DeadlineExceeded,
 		-1,
+		false,
 		false,
 		&res,
 	)
@@ -99,6 +103,7 @@ func TestClassifyExit_CallerCancellationWinsEvenIfPolicyFiredFirst(t *testing.T)
 		context.Canceled,
 		-1,
 		true,
+		false,
 		&res,
 	)
 	if got != OutcomeUnavailable {
@@ -115,8 +120,9 @@ func TestClassifyExit_LeaderCleanExitWinsOverDeadlines(t *testing.T) {
 		context.DeadlineExceeded,
 		context.DeadlineExceeded,
 		context.DeadlineExceeded,
-		0, // leader exited 0 cleanly
-		true,
+		0,     // leader exited 0 cleanly
+		true,  // policy timeout fired first (during pipe drain)
+		false, // but leader was NOT killed by us — exited cleanly first
 		&res,
 	)
 	if got != OutcomePass {
@@ -138,6 +144,7 @@ func TestClassifyExit_LeaderNonZeroExitWithPolicyFired(t *testing.T) {
 		context.DeadlineExceeded,
 		3,
 		true,
+		false,
 		&res,
 	)
 	if got != OutcomeFail {
@@ -145,6 +152,27 @@ func TestClassifyExit_LeaderNonZeroExitWithPolicyFired(t *testing.T) {
 	}
 	if res.ExitCode != 3 {
 		t.Fatalf("ExitCode: got %d want 3", res.ExitCode)
+	}
+}
+
+// TestClassifyExit_LeaderKilledWithNonNegativeExitCode is the codex
+// pass 15 P2 anchor. On Windows, Process.Kill leaves the leader
+// with a non-negative ExitCode (typically 1) that would otherwise
+// trigger the leader-exit branch and report Fail. leaderKilled=true
+// gates that branch off so context state classifies the verdict.
+func TestClassifyExit_LeaderKilledWithNonNegativeExitCode(t *testing.T) {
+	res := Result{}
+	got := classifyExit(
+		context.DeadlineExceeded,
+		nil,
+		context.DeadlineExceeded,
+		1,    // Windows Kill produces ExitCode 1
+		true, // policy fired
+		true, // runner killed the leader
+		&res,
+	)
+	if got != OutcomeTimeout {
+		t.Fatalf("Outcome: got %q want timeout — Windows Kill ExitCode must not masquerade as Fail", got)
 	}
 }
 
@@ -164,6 +192,7 @@ func TestClassifyExit_GenericExecErrorIsUnavailable(t *testing.T) {
 		nil,
 		errors.New("fork/exec /no/such/binary: no such file or directory"),
 		-1,
+		false,
 		false,
 		&res,
 	)

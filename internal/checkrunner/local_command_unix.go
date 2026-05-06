@@ -53,3 +53,24 @@ func cancelProcessGroup(cmd *exec.Cmd) error {
 	}
 	return nil
 }
+
+// leaderClearlyKilled reports whether the runner's cancel hook
+// actually terminated the leader (vs. simply running during post-run
+// drain after the leader had already exited cleanly). On POSIX,
+// ProcessState.Exited() returns false when the process was killed by
+// signal — distinguishing "killed by us" from "exited 0 then we
+// signalled the orphan group". This is the load-bearing distinction
+// for codex pass 9 (clean exit must be honoured) and pass 15
+// (Windows misclassification): both rely on knowing whether the
+// leader's verdict is real.
+func leaderClearlyKilled(cmd *exec.Cmd, runnerKilledLeader bool) bool {
+	if !runnerKilledLeader {
+		return false
+	}
+	if cmd.ProcessState == nil {
+		// Process never started; treat as "killed" so the verdict
+		// channel runs through the deadline / cancellation classifiers.
+		return true
+	}
+	return !cmd.ProcessState.Exited()
+}

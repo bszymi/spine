@@ -247,11 +247,24 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	cmd.Stderr = captured
 	cmd.WaitDelay = r.waitDelay()
 	configureProcessGroup(cmd)
+	// runnerKilledLeader flips when the context-watching goroutine
+	// calls cmd.Cancel — i.e. the leader was still alive when the
+	// deadline / cancellation fired and we killed it. Used by
+	// classifyExit to override the leader-exit branch on Windows,
+	// where Process.Kill produces a non-negative ExitCode that
+	// otherwise looks like a clean check verdict (codex pass 15 P2).
+	// On POSIX, killed processes get exit code -1 so the leader-exit
+	// branch isn't entered at all and this flag is informational; on
+	// Windows it is load-bearing.
+	var runnerKilledLeader atomic.Bool
 	// cmd.Cancel signals the whole process group on context done so
 	// `sh -c "sleep 30"` does not leak the orphan sleep after the
 	// shell dies. Without this, the runner returns within WaitDelay
 	// but descendants keep running in the workspace. Codex pass 1 P1.
-	cmd.Cancel = func() error { return cancelProcessGroup(cmd) }
+	cmd.Cancel = func() error {
+		runnerKilledLeader.Store(true)
+		return cancelProcessGroup(cmd)
+	}
 
 	runErr := cmd.Run()
 	res.CompletedAt = r.now()
@@ -312,7 +325,8 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	closeErr := logWriter.Close()
-	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, leaderExitCode, policyTimeoutFiredFirst, &res)
+	leaderKilled := leaderClearlyKilled(cmd, runnerKilledLeader.Load())
+	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, leaderExitCode, policyTimeoutFiredFirst, leaderKilled, &res)
 	if closeErr != nil {
 		// Verdict survives the close failure (the process already
 		// produced its exit status); surface the close error so
@@ -391,13 +405,21 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 //  6. Anything else (binary not found, permission denied, fork
 //     failure) → OutcomeUnavailable so dashboards distinguish "config
 //     issue, retry won't help" from "real verdict".
-func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, policyTimeoutFiredFirst bool, res *Result) Outcome {
-	if leaderExitCode >= 0 {
+func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, policyTimeoutFiredFirst, leaderKilled bool, res *Result) Outcome {
+	if leaderExitCode >= 0 && !leaderKilled {
 		// Leader exited cleanly — verdict is authoritative even when
 		// a deadline / WaitDelay / cancellation later shaped the
 		// post-run state. ErrWaitDelay or post-run context fires can
 		// happen after a successful leader exit; without honouring
 		// the leader's status here, those would erase the verdict.
+		//
+		// leaderKilled gates this branch off when the runner actively
+		// killed the leader: on POSIX a SIGKILL'd leader has
+		// ProcessState.Exited()=false (so leaderKilled=true even when
+		// ExitCode happens to be 0), and on Windows Process.Kill
+		// would otherwise let a non-negative ExitCode masquerade as
+		// a clean exit (codex pass 15 P2). Determination is platform-
+		// specific via leaderClearlyKilled.
 		res.ExitCode = leaderExitCode
 		suffix := classifySuffix(runCtxErr, parentCtxErr, runErr)
 		switch leaderExitCode {
