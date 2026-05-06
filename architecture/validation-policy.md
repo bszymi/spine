@@ -34,7 +34,7 @@ This document is the canonical reference for the policy format. Storage location
 ### 2.2 Out of Scope
 
 - Artifact-schema registration as a governed artifact type — owned by [TASK-007](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-007-validation-policy-governance-update.md)
-- Check runner integration mechanics (how runners discover and execute commands) — owned by [TASK-003](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-003-check-runner-integration-boundary.md)
+- Check runner integration mechanics (how runners discover and execute commands) — owned by [TASK-003](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-003-check-runner-integration-boundary.md); see [check-runner.md](/architecture/check-runner.md)
 - Validation rules consuming policy + evidence — owned by [TASK-004](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-004-validation-service-evidence-rules.md)
 - Query / reporting surfaces — owned by [TASK-005](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-005-evidence-query-and-reporting.md)
 - The execution evidence schema itself — see [Execution Evidence Schema](/architecture/execution-evidence.md)
@@ -137,7 +137,7 @@ checks:
 | `command` | The runner executes a shell command in a cloned repo working tree. Result rows are produced by the runner. |
 | `external` | The result row is produced by an external system (CI, human reviewer, security scanner). Whoever fills the row is out of scope for this schema. |
 
-The boundary between local commands and external integrations is split at the policy schema level (this document) and the runner integration boundary level (TASK-003). This document commits only to the **declaration** shape; runner mechanics are TASK-003.
+The boundary between local commands and external integrations is split at the policy schema level (this document) and the runner integration boundary level ([TASK-003](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/tasks/TASK-003-check-runner-integration-boundary.md) / [check-runner.md](/architecture/check-runner.md)). This document commits only to the **declaration** shape; runner mechanics are TASK-003.
 
 #### 4.4.2 interpretation
 
