@@ -206,6 +206,17 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 
 	runCtx := ctx
 	var cancel context.CancelFunc
+	// policyTimeoutFiredFirst is true when the runner-created
+	// timeout (from TimeoutSeconds) has an earlier deadline than the
+	// caller's parent context (or the caller has no deadline at all).
+	// classifyExit consults this so that when BOTH context errors
+	// have already settled to DeadlineExceeded by the time we
+	// classify, the proximate cause attributes correctly: the runner
+	// timeout if its deadline was earlier, the caller deadline
+	// otherwise. Without this, a slow-drain command (e.g. one that
+	// escaped the process group) could mask a real policy timeout
+	// as caller cancellation. Codex pass 13 P2.
+	var policyTimeoutFiredFirst bool
 	if req.Check.TimeoutSeconds > 0 {
 		seconds := req.Check.TimeoutSeconds
 		if seconds > maxPolicyTimeoutSeconds {
@@ -213,6 +224,11 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 		}
 		runCtx, cancel = context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
 		defer cancel()
+		runnerDeadline, _ := runCtx.Deadline()
+		parentDeadline, parentHasDeadline := ctx.Deadline()
+		if !parentHasDeadline || runnerDeadline.Before(parentDeadline) {
+			policyTimeoutFiredFirst = true
+		}
 	}
 
 	shell := r.shell()
@@ -296,7 +312,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	closeErr := logWriter.Close()
-	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, leaderExitCode, &res)
+	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, leaderExitCode, policyTimeoutFiredFirst, &res)
 	if closeErr != nil {
 		// Verdict survives the close failure (the process already
 		// produced its exit status); surface the close error so
@@ -356,8 +372,14 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 //     verdict, fall through.
 //  2. Parent context cancelled or deadline-exceeded → caller decided
 //     to stop the run before the leader produced a verdict; report
-//     as Unavailable. Caller signals take precedence over policy
-//     timeouts because the caller didn't want this check to run.
+//     as Unavailable. Caller signals normally take precedence over
+//     policy timeouts because the caller didn't want this check to
+//     run. EXCEPTION: policyTimeoutFiredFirst — when the runner's
+//     own deadline was strictly earlier than the caller's, the
+//     runner timeout was the proximate cause even if both deadlines
+//     have settled to DeadlineExceeded by the time we classify.
+//     Without this, a slow-drain command could mask a real policy
+//     timeout as caller cancellation (codex pass 13 P2).
 //  3. Run context (policy timeout) deadline-exceeded → real check
 //     timeout (the leader was killed mid-execution, no verdict).
 //     Reported BEFORE *exec.ExitError because a child killed by
@@ -369,7 +391,7 @@ func (e *errCapturingWriter) firstErr() error { return e.err }
 //  6. Anything else (binary not found, permission denied, fork
 //     failure) → OutcomeUnavailable so dashboards distinguish "config
 //     issue, retry won't help" from "real verdict".
-func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, res *Result) Outcome {
+func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, policyTimeoutFiredFirst bool, res *Result) Outcome {
 	if leaderExitCode >= 0 {
 		// Leader exited cleanly — verdict is authoritative even when
 		// a deadline / WaitDelay / cancellation later shaped the
@@ -399,12 +421,15 @@ func classifyExit(runCtxErr, parentCtxErr, runErr error, leaderExitCode int, res
 			return OutcomeFail
 		}
 	}
-	if errors.Is(parentCtxErr, context.DeadlineExceeded) {
-		res.Reason = "caller deadline exceeded"
-		return OutcomeUnavailable
-	}
+	// Caller cancellation always wins (it is an explicit "stop" the
+	// caller initiated). Caller deadline only wins when the runner's
+	// own deadline did NOT fire first.
 	if errors.Is(parentCtxErr, context.Canceled) {
 		res.Reason = "context canceled"
+		return OutcomeUnavailable
+	}
+	if errors.Is(parentCtxErr, context.DeadlineExceeded) && !policyTimeoutFiredFirst {
+		res.Reason = "caller deadline exceeded"
 		return OutcomeUnavailable
 	}
 	if errors.Is(runCtxErr, context.DeadlineExceeded) {
