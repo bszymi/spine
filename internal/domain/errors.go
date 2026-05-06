@@ -70,9 +70,23 @@ const (
 	ViolationStatusConflict    ViolationClassification = "status_conflict"
 	ViolationScopeConflict     ViolationClassification = "scope_conflict"
 	ViolationMissingPrereq     ViolationClassification = "missing_prerequisite"
+	// ViolationExecutionEvidence — a multi-repo execution-evidence rule
+	// failed (missing evidence, wrong branch/commit, missing/failed
+	// required check, stale evidence). Per validation-service.md §3.7
+	// (TASK-004 EPIC-006). Resolution path is operator action against
+	// the run / runner: regenerate evidence, re-run failed checks, or
+	// reconcile branch/commit drift.
+	ViolationExecutionEvidence ViolationClassification = "execution_evidence"
 )
 
 // ValidationError represents a single validation failure.
+//
+// RepositoryID, PolicyID, and CheckID are populated by execution-evidence
+// rules (EV-*). They are empty for every other rule category. Carrying
+// them as first-class fields rather than baked into Message lets audit
+// consumers and dashboards filter by "show me every EV-004 failure for
+// repo X" without text-parsing — TASK-004 AC #5: "Validation output
+// names repo ID, policy ID, and failing check."
 type ValidationError struct {
 	RuleID         string                  `json:"rule_id,omitempty" yaml:"rule_id,omitempty"`
 	Classification ViolationClassification `json:"classification,omitempty" yaml:"classification,omitempty"`
@@ -80,6 +94,9 @@ type ValidationError struct {
 	Field          string                  `json:"field,omitempty" yaml:"field,omitempty"`
 	Severity       string                  `json:"severity" yaml:"severity"` // "error" or "warning"
 	Message        string                  `json:"message" yaml:"message"`
+	RepositoryID   string                  `json:"repository_id,omitempty" yaml:"repository_id,omitempty"`
+	PolicyID       string                  `json:"policy_id,omitempty" yaml:"policy_id,omitempty"`
+	CheckID        string                  `json:"check_id,omitempty" yaml:"check_id,omitempty"`
 }
 
 // ValidationResult represents the outcome of a validation check.
