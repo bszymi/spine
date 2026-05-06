@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,17 @@ import (
 
 	"github.com/bszymi/spine/internal/domain"
 )
+
+// maxPolicyTimeoutSeconds is the largest TimeoutSeconds value we'll
+// translate into a time.Duration. The product
+// time.Duration(seconds)*time.Second is an int64 nanosecond count;
+// values above MaxInt64/1e9 (~292 years) overflow into a negative
+// duration, which context.WithTimeout interprets as an already-
+// expired deadline — fast checks would then be reported as
+// OutcomeTimeout (codex pass 12 P2). The policy validator only
+// rejects negative TimeoutSeconds, so the runner has to defend the
+// boundary itself.
+const maxPolicyTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // POSIX shell exit-code conventions used to distinguish environment
 // failures (the runner image lacks a tool, a binary is non-executable)
@@ -195,7 +207,11 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if req.Check.TimeoutSeconds > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, time.Duration(req.Check.TimeoutSeconds)*time.Second)
+		seconds := req.Check.TimeoutSeconds
+		if seconds > maxPolicyTimeoutSeconds {
+			seconds = maxPolicyTimeoutSeconds
+		}
+		runCtx, cancel = context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
 		defer cancel()
 	}
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -831,6 +832,34 @@ func TestLocalCommandRunner_LogSinkWriteError(t *testing.T) {
 	}
 	if res.LogReference == "" {
 		t.Fatalf("LogReference should be preserved so the caller can identify the partial file")
+	}
+}
+
+// TestLocalCommandRunner_HugeTimeoutDoesNotOverflow guards codex
+// pass 12 P2. A TimeoutSeconds value larger than MaxInt64/1e9 would
+// overflow when multiplied by time.Second, producing a negative
+// duration and an already-expired context — turning fast checks
+// into OutcomeTimeout for no reason. The runner caps the conversion
+// so a huge but legal-per-validator value stays harmless.
+func TestLocalCommandRunner_HugeTimeoutDoesNotOverflow(t *testing.T) {
+	requireSh(t)
+	r := checkrunner.LocalCommandRunner{}
+	res, err := r.Run(context.Background(), checkrunner.Request{
+		WorkingDir: t.TempDir(),
+		Check: domain.PolicyCheck{
+			CheckID:        "huge-timeout",
+			Kind:           domain.PolicyCheckKindCommand,
+			Command:        "true",
+			TimeoutSeconds: math.MaxInt64, // forces overflow without the cap
+			Interpretation: domain.PolicyCheckInterpretationDeterministic,
+			Severity:       domain.PolicySeverityBlocking,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != checkrunner.OutcomePass {
+		t.Fatalf("Outcome: got %q want pass — TimeoutSeconds overflow must not flip a fast check to timeout", res.Outcome)
 	}
 }
 
