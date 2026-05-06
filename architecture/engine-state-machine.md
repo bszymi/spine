@@ -84,7 +84,7 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 | `active` | Inspect current step; resume, retry, or timeout as appropriate |
 | `paused` | Remain paused; operator may resume or cancel |
 | `committing` | Re-attempt Git commit (idempotent) |
-| `partially-merged` | Scheduler periodically retries via `git.retry_partial_merge` (`Scheduler.retryCommittingRuns`). Per-tick gate: every non-primary `RepositoryMergeOutcome` must be non-`failed`. An operator clears the gate using the supported orchestrator recovery APIs (`Orchestrator.RetryRepositoryMerge` → `pending`; `Orchestrator.ResolveRepositoryMergeExternally` → `resolved-externally`) or by retracting the work to `skipped`. `merged` is reserved for Spine-driven merges; operator recovery does not write it directly. Mutating the code repo's branch tip alone does NOT clear the gate. Operators may alternatively cancel the run via `run.cancel`. |
+| `partially-merged` | Scheduler periodically retries via `git.retry_partial_merge` (`Scheduler.retryCommittingRuns`). Per-tick gate: every non-primary `RepositoryMergeOutcome` must be non-`failed`. An operator clears the gate using one of the two supported orchestrator recovery APIs: `Orchestrator.RetryRepositoryMerge` → `pending`, or `Orchestrator.ResolveRepositoryMergeExternally` → `resolved-externally`. Both write audit ledger commits. `merged` is reserved for Spine-driven merges; `skipped` is an internal-only outcome set by the merge loop. Mutating the code repo's branch tip alone does NOT clear the gate. Operators may alternatively cancel the run via `run.cancel`. |
 | `completed` | No action (terminal) |
 | `failed` | No action (terminal) |
 | `cancelled` | No action (terminal) |
