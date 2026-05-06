@@ -27,6 +27,7 @@ The [Domain Model](/architecture/domain-model.md) §5 provides informal lifecycl
 | `active` | At least one step is executing or ready for assignment |
 | `paused` | Execution suspended — waiting for external dependency, human input, or operator action |
 | `committing` | Terminal step completed; durable outcome is being committed to Git |
+| `partially-merged` | Multi-repo run where the primary repo merge succeeded but at least one affected code repo's merge failed permanently. Non-terminal: the run can be retried back to `committing` or cancelled. See [Multi-Repository Integration](/architecture/multi-repository-integration.md) §4.4 |
 | `completed` | All steps reached terminal outcomes; durable results committed to Git |
 | `failed` | A step failed permanently and the Run cannot proceed |
 | `cancelled` | Explicitly cancelled by an operator |
@@ -59,6 +60,9 @@ Both modes follow the same state machine. The mode does not introduce new states
 | `committing` | `completed` | `git.commit_succeeded` | Git commit and merge confirmed | Set `completed_at`; emit `run_completed` |
 | `committing` | `committing` | `git.commit_failed_transient` | Transient Git failure, retries remain | Retry commit |
 | `committing` | `failed` | `git.commit_failed_permanent` | Git commit failed permanently after retries | Preserve runtime state; emit `run_failed` |
+| `committing` | `partially-merged` | `git.code_repo_partial_failure` | Multi-repo run: primary merge landed, at least one code repo merge permanently failed | Preserve per-repo `RepositoryMergeOutcome` rows; emit `run_partially_merged` |
+| `partially-merged` | `committing` | `git.retry_partial_merge` | Operator resolved the failed code repo and requested retry | Re-enter merge pipeline; only repos with non-terminal outcomes are re-attempted |
+| `partially-merged` | `cancelled` | `run.cancel` | Operator cancels a partially-merged run instead of retrying | Set `completed_at`; `CleanupRunBranch` runs against per-repo outcomes (failed branches preserved, others deleted); emit `run_cancelled` |
 
 ### 2.3 Invalid Transitions
 
@@ -80,6 +84,7 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 | `active` | Inspect current step; resume, retry, or timeout as appropriate |
 | `paused` | Remain paused; operator may resume or cancel |
 | `committing` | Re-attempt Git commit (idempotent) |
+| `partially-merged` | No automatic action; operator must resolve the failed code repo and trigger `git.retry_partial_merge`, or cancel the run |
 | `completed` | No action (terminal) |
 | `failed` | No action (terminal) |
 | `cancelled` | No action (terminal) |

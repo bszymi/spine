@@ -202,14 +202,14 @@ CREATE TABLE runtime.runs (
     workflow_version    text        NOT NULL,       -- Git commit SHA of pinned workflow
     workflow_version_label text,                     -- semantic version (informational)
     status              text        NOT NULL DEFAULT 'pending',
-                                                    -- pending, active, paused, committing, completed, failed, cancelled
+                                                    -- pending, active, paused, committing, partially-merged, completed, failed, cancelled
     current_step_id     text,                       -- active step; null during divergence
     trace_id            text        NOT NULL,       -- observability correlation ID
     started_at          timestamptz,
     completed_at        timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
 
-    CONSTRAINT runs_status_check CHECK (status IN ('pending', 'active', 'paused', 'committing', 'completed', 'failed', 'cancelled'))
+    CONSTRAINT runs_status_check CHECK (status IN ('pending', 'active', 'paused', 'committing', 'partially-merged', 'completed', 'failed', 'cancelled'))
 );
 ```
 

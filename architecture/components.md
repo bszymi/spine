@@ -98,16 +98,16 @@ Manages all read and write operations on Git-backed artifacts.
 
 **Responsibilities:**
 
-- Read artifacts from the Git repository
+- Read artifacts from the primary Spine repository (governance authority) and from registered code repositories (execution targets)
 - Write artifact changes to Git (create, update, transition status)
 - Validate artifact structure against schemas defined in [Artifact Schema](/governance/artifact-schema.md)
 - Validate artifact front matter and linkage
 - Enforce immutability rules (IDs never reused, history never rewritten)
-- Manage task and divergence branches during workflow execution
-- Perform all merges into the authoritative branch (sole merge authority for governed work)
+- Manage task and divergence branches during workflow execution, fanned out across every repository a Run affects
+- Perform all merges into the authoritative branch (sole merge authority for governed work). For multi-repo Runs, coordinate per-repository merge attempts (code repos first, primary Spine repo last) and record per-repo `RepositoryMergeOutcome` rows; surface partial failures as the `partially-merged` Run state without rolling back successful repos
 - Emit domain events when artifacts change (artifact_created, artifact_updated, etc.)
 
-For the full Git operational contract (authentication, commit format, branch strategy, merge rules), see [Git Integration](/architecture/git-integration.md).
+For the full Git operational contract (authentication, commit format, branch strategy, merge rules), see [Git Integration](/architecture/git-integration.md). For the multi-repository extension — repository identity model, fan-out routing, merge coordination, partial-merge recovery — see [Multi-Repository Integration](/architecture/multi-repository-integration.md), [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md), and [ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md).
 
 **Does not own:**
 

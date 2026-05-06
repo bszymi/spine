@@ -239,6 +239,20 @@ If a step produces multiple artifact changes that must be committed atomically:
 - If any change fails validation, the entire commit is rejected
 - The step is marked as failed and follows normal retry/escalation
 
+### 5.4 Multi-Repo Partial Merge Failure
+
+For runs that span multiple repositories ([Multi-Repository Integration](/architecture/multi-repository-integration.md) §4.4), a permanent merge failure in one code repository does NOT propagate to the run as a `failed` state. Instead, the run transitions to the `partially-merged` non-terminal state defined in [Engine State Machine](/architecture/engine-state-machine.md) §2.1:
+
+1. Each affected repository's merge attempt is recorded as a `RepositoryMergeOutcome` row keyed by `(run_id, repository_id)` with a per-repo `status` (`merged`, `failed`, `skipped`, `resolved-externally`, or `pending`).
+2. If the primary repo merge succeeds and at least one code repo merge has `status: failed` after retries, the run transitions `committing` → `partially-merged` via `git.code_repo_partial_failure`.
+3. The run remains open. Already-merged repos keep their merges; failed repos retain their run branches for operator resolution. No code-side rollback is attempted (no cross-repo atomic transactions).
+4. Recovery is operator-driven. Two terminal exits exist:
+   - **Resolve and retry** — the operator fixes the failing code repo (manual merge, branch update, or `RepositoryMergeStatusResolvedExternally` annotation) and requests `git.retry_partial_merge`. The run re-enters `committing`; only repos without terminal outcomes are re-attempted (the terminal-skip guard in `internal/engine/multi_repo_merge.go` prevents double-merging).
+   - **Cancel** — the operator cancels the run via `run.cancel`. `CleanupRunBranch` runs against the recorded per-repo outcomes (failed branches preserved for forensic access, all others deleted). See [Multi-Repository Integration](/architecture/multi-repository-integration.md) §4.5.
+5. While in `partially-merged`, no run branch is cleaned up. An operator can inspect both the merged-repo work and the failed-repo branch in parallel.
+
+`partially-merged` is intentionally not a "failure" classification — operators are expected to resolve it forward, not abandon the work. Treating partial merges as cancellations would discard the already-merged repos' work.
+
 ---
 
 ## 6. Workflow Engine Recovery
