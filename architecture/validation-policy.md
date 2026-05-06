@@ -234,7 +234,7 @@ The committed default is **YAML** to match the rest of `/governance/` and the ar
 ADRs reference policies through typed links in the ADR's front matter. The reverse direction is recorded inside the policy's `adr_paths` field. The reference is by canonical path (artifact-schema §3.2):
 
 ```yaml
-# In /architecture/adr/ADR-014-evidence.md
+# In /architecture/adr/ADR-014-validation-policy-as-governed-artifact.md
 links:
   - type: related_to
     target: /governance/validation-policies/code-quality.yaml
@@ -381,7 +381,7 @@ policies:
     title: AI readability review
     status: active
     adr_paths:
-      - /architecture/adr/ADR-014-evidence.md
+      - /architecture/adr/ADR-014-validation-policy-as-governed-artifact.md
     selector:
       repository_roles:
         - code

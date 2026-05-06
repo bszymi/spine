@@ -15,6 +15,8 @@ This document defines the **execution evidence** record — the structured proof
 
 [EPIC-006](/initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-006-cross-repo-execution-evidence/epic.md) makes one architectural commitment explicit: code repositories produce evidence, they do not become governance authorities. The primary Spine repo remains the ledger; per-repo evidence files are committed into it so the audit trail is durable and queryable.
 
+The `kind: spine` / `kind: code` repository identity model that evidence records key off is defined in [ADR-013 — Repository Identity and Catalog/Binding Split](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md). The validation policies that evidence records cite are governed artifacts under [ADR-014 — Validation Policy as Governed Artifact](/architecture/adr/ADR-014-validation-policy-as-governed-artifact.md).
+
 This document is the canonical reference for the evidence schema. Storage location, validation behavior, query/reporting, and downstream consumers are governed by sibling tasks within EPIC-006.
 
 ---
@@ -148,7 +150,7 @@ For `producer: automated`, `produced_by` is the runner identity (e.g. `ci/github
 
 ```yaml
 validation_policies:
-  - adr_path: /architecture/adr/ADR-014-evidence.md
+  - adr_path: /architecture/adr/ADR-014-validation-policy-as-governed-artifact.md
     policy_path: /governance/validation-policies/code-quality.yaml
     policy_id: code-quality-v1
 ```
