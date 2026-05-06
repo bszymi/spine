@@ -2,7 +2,29 @@
 id: EPIC-006
 type: Epic
 title: "Cross-Repo Execution Evidence"
-status: In Progress
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  All seven tasks completed and approved on main: TASK-001 (evidence
+  schema + canonical YAML on-disk format), TASK-002 (validation
+  policy schema + ADR linkage), TASK-003 (check runner with
+  POSIX-process lifecycle + Result→CheckResult normalization),
+  TASK-004 (EV-* validation rule family wired into the engine),
+  TASK-005 (production query layer: loader, summary, querier,
+  gateway accessor, CLI inspect rendering), TASK-006 (scenariotest
+  end-to-end coverage of all five EV-* rule classes plus query
+  visibility), and TASK-007 (architecture/execution-evidence.md
+  with full schema + AC mapping). Cross-repo evidence is now
+  observable via run inspect, blocking-check failures gate publish,
+  warning-severity policy failures surface as warnings without
+  blocking, missing evidence is visible before publish, and the
+  governance authority remains on the primary repo while code repos
+  produce deterministic evidence. Production wiring of the EV-*
+  resolvers into the gateway validation engine is intentionally
+  deferred to a follow-on epic (EPIC-007) that will plumb resolver
+  construction through the workspace ServiceSet and surface
+  evidence-aware validation in the run.precondition path.
+last_updated: 2026-05-06
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 owner: bszymi
 created: 2026-04-28
