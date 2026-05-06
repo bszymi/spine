@@ -12,6 +12,7 @@ import (
 	"github.com/bszymi/spine/internal/delivery"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
+	"github.com/bszymi/spine/internal/evidence"
 	"github.com/bszymi/spine/internal/githttp"
 	"github.com/bszymi/spine/internal/gitpool"
 	"github.com/bszymi/spine/internal/observe"
@@ -106,6 +107,23 @@ type RunCanceller interface {
 	CancelRun(ctx context.Context, runID string) error
 }
 
+// EvidenceQuerier returns a deterministic evidence summary for a Run.
+// The gateway calls SummarizeForRun while building the run.status
+// response so the operator (CLI / external API) sees per-repository
+// evidence presence, blocking-check outcomes, and references to raw
+// logs without those logs being embedded in the response. INIT-014
+// EPIC-006 TASK-005 implements the surface; production wiring lives
+// in [evidence.Querier].
+//
+// Returning (nil, nil) is allowed and treated as "no evidence
+// summary available" — the handler omits the field rather than
+// failing the run.status lookup. A non-nil error is logged but does
+// NOT fail the response: the run state is the primary contract,
+// and an evidence-side outage must not break the inspect path.
+type EvidenceQuerier interface {
+	SummarizeForRun(ctx context.Context, run *domain.Run) (*evidence.RunSummary, error)
+}
+
 // RunMergeResolver lets an operator resolve or retry a per-repo merge
 // outcome on a partially-merged run (EPIC-005 TASK-006). Both methods
 // require an authenticated actor in the request context — the engine
@@ -163,6 +181,7 @@ type Server struct {
 	wfPlanningStarter          WorkflowPlanningRunStarter // optional, nil if not configured
 	runCanceller               RunCanceller               // optional, nil if not configured
 	runMergeResolver           RunMergeResolver           // optional, nil if not configured
+	evidenceQuerier            EvidenceQuerier            // optional, nil if not configured; surfaces per-repo evidence on run.status (INIT-014 EPIC-006 TASK-005)
 	wsResolver                 workspace.Resolver         // optional, nil if not configured
 	servicePool                *workspace.ServicePool     // optional, nil if not configured
 	wsDBProvider               *workspace.DBProvider      // optional, nil in single mode
@@ -272,6 +291,7 @@ type ServerConfig struct {
 	WFPlanningStarter   WorkflowPlanningRunStarter
 	RunCanceller        RunCanceller
 	RunMergeResolver    RunMergeResolver
+	EvidenceQuerier     EvidenceQuerier // optional; surfaces per-repo evidence on run.status (INIT-014 EPIC-006 TASK-005)
 	WorkspaceResolver   workspace.Resolver
 	ServicePool         *workspace.ServicePool
 	WSDBProvider        *workspace.DBProvider
@@ -330,6 +350,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		wfPlanningStarter:          cfg.WFPlanningStarter,
 		runCanceller:               cfg.RunCanceller,
 		runMergeResolver:           cfg.RunMergeResolver,
+		evidenceQuerier:            cfg.EvidenceQuerier,
 		workflowResolver:           cfg.WorkflowResolver,
 		wsResolver:                 cfg.WorkspaceResolver,
 		servicePool:                cfg.ServicePool,
@@ -461,6 +482,21 @@ func (s *Server) runMergeResolverFrom(ctx context.Context) RunMergeResolver {
 		}
 		return nil
 	}, s.runMergeResolver)
+}
+
+// evidenceQuerierFrom resolves the per-workspace EvidenceQuerier (INIT-014
+// EPIC-006 TASK-005). The ServiceSet field is typed `any` to avoid a
+// cycle (workspace cannot import gateway); the type-assert here drops
+// any value that doesn't satisfy the gateway's EvidenceQuerier
+// interface so a misconfigured workspace silently falls back to the
+// server-level querier rather than panicking on use.
+func (s *Server) evidenceQuerierFrom(ctx context.Context) EvidenceQuerier {
+	return resolve(ctx, func(ss *workspace.ServiceSet) EvidenceQuerier {
+		if eq, ok := ss.EvidenceQuerier.(EvidenceQuerier); ok {
+			return eq
+		}
+		return nil
+	}, s.evidenceQuerier)
 }
 
 func (s *Server) resultHandlerFrom(ctx context.Context) ResultHandler {

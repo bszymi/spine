@@ -26,6 +26,7 @@ import (
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/engine"
 	"github.com/bszymi/spine/internal/event"
+	"github.com/bszymi/spine/internal/evidence"
 	"github.com/bszymi/spine/internal/gateway"
 	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/githttp"
@@ -261,6 +262,21 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	ss.StepClaimer = orch
 	ss.StepReleaser = orch
 	ss.StepExecutionLister = orch
+	// Per-workspace evidence querier (INIT-014 EPIC-006 TASK-005). The
+	// querier reads /.spine/runs/{run_id}/evidence/{repository_id}.yaml
+	// from the workspace's primary repo via ss.GitClient at the
+	// authoritative branch — `main`, the same constant the engine
+	// merge step (internal/engine/merge.go::authoritativeBranch)
+	// writes to. Reader and writer MUST stay in sync; introducing a
+	// configurable reader override here while the merge target is
+	// hardcoded would create a silent missing-evidence trap for
+	// operators whose configuration drifts. Unset when GitClient is
+	// nil — the gateway's evidenceQuerierFrom accessor then resolves
+	// to nil and run.status omits the evidence field rather than
+	// 503-ing.
+	if ss.GitClient != nil {
+		ss.EvidenceQuerier = evidence.NewQuerier(ss.GitClient)
+	}
 
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
 		return orch.MergeRunBranch(ctx, runID)
@@ -815,6 +831,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		WSDBProvider:               deps.WSDBProvider,
 		RunCanceller:               orch,
 		RunMergeResolver:           orch,
+		EvidenceQuerier:            buildEvidenceQuerier(primaryClient),
 		CandidateFinder:            orch,
 		StepClaimer:                orch,
 		StepReleaser:               orch,
@@ -871,6 +888,28 @@ func buildBranchProtectPolicy(st store.Store) branchprotect.Policy {
 		return branchprotect.NewPermissive()
 	}
 	return branchprotect.New(bpprojection.New(st))
+}
+
+// buildEvidenceQuerier constructs the gateway-facing
+// EvidenceQuerier used by run.status (INIT-014 EPIC-006 TASK-005).
+// Returns nil when no primary git client is configured (single-mode
+// startup before deps.Store is wired, or platform-binding mode where
+// the per-workspace builder owns the wiring); the gateway's
+// evidenceQuerierFrom accessor then resolves to nil and run.status
+// silently omits the evidence field rather than 503-ing.
+//
+// The querier always reads from `main` — the same branch the engine
+// merge step writes to (internal/engine/merge.go::authoritativeBranch).
+// Reader and writer MUST stay in sync; a configurable reader override
+// while the merge target is hardcoded would create a silent
+// missing-evidence trap. When the engine path becomes configurable
+// (future epic), the reader's branch resolution can grow alongside
+// it via [evidence.Querier.WithPrimaryBranch].
+func buildEvidenceQuerier(primary git.GitClient) gateway.EvidenceQuerier {
+	if primary == nil {
+		return nil
+	}
+	return evidence.NewQuerier(primary)
 }
 
 // buildWorkspaceCloneURLBuilder returns an engine.CloneURLBuilder that

@@ -193,6 +193,27 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 	if len(run.AffectedRepositories) > 0 {
 		resp["affected_repositories"] = run.AffectedRepositories
 	}
+
+	// INIT-014 EPIC-006 TASK-005: attach the deterministic per-repo
+	// evidence summary when a querier is wired. Errors and empty
+	// summaries are intentionally non-fatal — the run state is the
+	// primary contract; an evidence-side outage must not break the
+	// inspect path. The error path is logged so operators can detect
+	// a systemic problem (e.g., the primary repo is unreadable) via
+	// trace logs without users noticing a 500 here.
+	if eq := s.evidenceQuerierFrom(r.Context()); eq != nil {
+		summary, sErr := eq.SummarizeForRun(r.Context(), run)
+		if sErr != nil {
+			observe.Logger(r.Context()).Warn("evidence summary failed",
+				"run_id", run.RunID,
+				"task_path", run.TaskPath,
+				"error", sErr,
+			)
+		} else if summary != nil {
+			resp["evidence"] = summary
+		}
+	}
+
 	WriteJSON(w, http.StatusOK, resp)
 }
 

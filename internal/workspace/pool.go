@@ -79,6 +79,11 @@ type ServiceSet struct {
 	StepClaimer         any
 	StepReleaser        any
 	StepExecutionLister any
+	// EvidenceQuerier surfaces per-repository ExecutionEvidence on the
+	// run.status response (INIT-014 EPIC-006 TASK-005). Typed as any so
+	// this package stays free of the evidence/gateway import; consumers
+	// type-assert to gateway.EvidenceQuerier.
+	EvidenceQuerier any
 	// EventBroadcaster is the per-workspace SSE fan-out point owned by
 	// the workspace's DeliverySubscriber. Populated by the cmd/spine
 	// pool builder when SPINE_EVENT_DELIVERY is on; resolved by the

@@ -231,6 +231,44 @@ Both placements use the identical schema and identical determinism rules. The me
 
 The committed default is **YAML** to match the rest of `/.spine/` and the artifact frontmatter convention. JSON is supported equivalently — every domain field carries both `json` and `yaml` struct tags — for API responses and tooling pipelines that prefer JSON. Producers and consumers MUST treat the two as interchangeable.
 
+### 6.4 Query API Surface (TASK-005)
+
+Operators and external integrations read evidence via the gateway's run inspect path:
+
+- **Endpoint**: `GET /api/v1/runs/{run_id}` — returns the existing run state plus an `evidence` block whose schema lives in [`internal/evidence`](../internal/evidence/).
+- **Output shape**: `evidence.RunSummary` carries the run-level rollup status (`missing`/`failed`/`pending`/`passed`/`unknown`) plus a deterministic per-repository list. Each `RepositorySummary` exposes `present`, `status`, `branch_name`, `base_commit`, `head_commit`, `actor`, `generated_at`, `policies`, `changed_paths`, and the projected check rows. Required-check rollups (`failing_checks`, `pending_checks`, `missing_checks`) are surfaced as flat string slices so dashboards can pin a known check ID without iterating row lists.
+- **Grouping**: the response is grouped by `repository_id` (lexically sorted) per EPIC-006 TASK-005 AC #2.
+- **Logs are referenced, not embedded**: `CheckSummary.evidence_uri` carries the producer's pointer to detailed logs; the response shape has no `stdout`/`stderr`/`output`/`logs` field. A wire-format test pins this contract (`internal/gateway/handlers_run_evidence_test.go`).
+- **Missing-evidence visibility**: a repo with no committed evidence appears as `present: false` with a human-readable `reason`. The aggregate `RunSummary.status` is `missing` whenever ANY affected repo lacks evidence — operators see the gap before publication (TASK-005 AC #4).
+
+#### 6.4.1 Read Ref Selection
+
+The querier passes a priority-ordered list of refs to the loader; the first ref that yields a found+valid evidence file wins per repository:
+
+The querier reads evidence from a NAMED authoritative branch — by spine convention, `main`. The branch is HARDCODED to match the engine merge step's destination (`internal/engine/merge.go::authoritativeBranch`); reader and writer cannot diverge. The query MUST NOT use the symbolic `HEAD` ref (HEAD is the working tree's mutable current branch and any concurrent run or operator-side `git checkout` flips it mid-query, surfacing stale or wrong-branch evidence — codex-pass-6 finding, iter 22). Per-workspace authoritative-branch configuration is a future epic that will reshape both the reader (via `evidence.Querier.WithPrimaryBranch`) AND the writer in lockstep; introducing a reader-only override now would create a silent missing-evidence trap (codex-pass-11 finding, iter 22).
+
+| Run state                                                | Refs tried (priority order)              | Rationale                                                                                                                                                                                                                                                                                                                                |
+|----------------------------------------------------------|------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Terminal: Completed / Failed / Cancelled                 | `[primaryBranch, Run.BranchName]`        | Completed runs durably committed evidence on the primary repo's authoritative branch via the merge step. Failed / cancelled runs typically have their branches DELETED by the engine cleanup path; the primary branch is the only place evidence might land. Run branch is fallback for the rare preserved-branch path.                  |
+| Non-terminal: Active / Paused / Committing / Partially-Merged | `[Run.BranchName, primaryBranch]` | In-flight evidence stages on the run branch (§6.2). Partially-merged in particular preserves the branch so operators can inspect cross-repo state. Primary-branch fallback covers partial-merge state already merged.                                                                                                                     |
+| Empty `BranchName`                                       | `[primaryBranch]`                        | Pre-branch-creation lookups never error.                                                                                                                                                                                                                                                                                                  |
+
+The resolver lives at `evidence.RefsForRun(run, primaryBranch)`. The querier resolves `primaryBranch` from its construction-time wiring; tests can override via `WithPrimaryBranch`.
+
+**Durability constraint** (codex-pass-3 finding, iter 22): when evidence is staged ONLY on a run branch and the engine cleanup path subsequently deletes that branch (the common step-failure / pre-merge-cancel path), the evidence is gone — the query layer correctly reports "missing" because nothing is there. Durability across cleanup is owned by the engine merge step's write to the primary branch, not by the query layer. EPIC-006 TASK-006 (cross-repo evidence scenario tests) is the place to assert end-to-end durability properties; TASK-005's contract is "report what is findable, deterministically."
+
+#### 6.4.2 Planning-Run Skip
+
+Planning runs (`Run.Mode == planning`) are short-circuited at the querier: `SummarizeForRun` returns `(nil, nil)` and the gateway handler omits the `evidence` field entirely. Planning runs govern artifact CREATION on the primary repo (§2.2) and never invoke the check runner, so no execution evidence is produced. This mirrors the TASK-004 EV-* rules' planning-run skip in `validation/rules_evidence.go::resolveRun` — the query layer enforces the same policy so dashboards do not surface a false "missing-evidence" signal for planning runs.
+
+#### 6.4.3 Error Tolerance
+
+The gateway run-status handler treats evidence loading as best-effort: a non-nil error from `EvidenceQuerier.SummarizeForRun` is logged via `observe.Logger` but does NOT fail the response. The run state is the primary contract; a transient evidence-side outage must not turn `run inspect` into a 500. Per-repository load failures show up as `present: false` with a `reason` field rather than dropping the repo from the summary, so partial state is always visible.
+
+#### 6.4.4 Identity Cross-Check
+
+The loader rejects an evidence file whose stored `run_id` / `repository_id` does not match the requested keys. A typo in producer-side path construction (writing to `.spine/runs/<wrong-id>/...`) would otherwise produce a summary that names the requested run while reporting checks from a different run; the cross-check surfaces the producer bug rather than masking it.
+
 ---
 
 ## 7. Secret and Log Exclusion
@@ -282,6 +320,11 @@ Producers wishing to attach detailed logs publish them to an external store and 
 | EPIC-006 AC #3: Required checks produce structured results tied to repo, branch, and commit | `CheckResult` + parent `ExecutionEvidence` carry repo/branch/commit context together. |
 | EPIC-006 AC #4: Missing or failed required evidence blocks publication | `DeriveStatus` returns `pending` for missing checks and `failed` for any failure/error — a non-`passed` status is the gate signal for downstream rules. |
 | EPIC-006 AC #5: Evidence is auditable from primary-repo history | Primary-repo storage (§6.1) means every change is a Git commit. |
+| TASK-005: `run inspect` or equivalent API includes evidence summary | §6.4 — gateway extends `GET /api/v1/runs/{run_id}` with the `evidence` block. |
+| TASK-005: Query output is grouped by repository | §6.4 — `RunSummary.Repositories` is a per-repo list (sorted lexically). |
+| TASK-005: Raw logs are linked or referenced, not embedded in large responses | §6.4 — `CheckSummary.EvidenceURI`; no log-content fields exist on the response shape. |
+| TASK-005: Missing evidence is visible before publish | §6.4 — `RunSummary.Status == missing` whenever any affected repo lacks evidence; per-repo `present=false` + `reason`. |
+| TASK-005: Tests cover evidence serialization and response shape | `internal/evidence/{loader,summary,querier}_test.go` + `internal/gateway/handlers_run_evidence_test.go`. |
 
 Downstream tasks (TASK-002…007) consume this schema; their ACs are realized in their own files.
 
