@@ -3,6 +3,17 @@ id: TASK-002
 type: Task
 title: Create run branches across affected repositories
 status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  StartRun shipped on main with branch fan-out: the orchestrator
+  creates a `spine/run/<artifact-id>-<slug>-<run-hex>` branch in the
+  primary Spine repo and in each affected code repo using the
+  repository pool from EPIC-003, using the same name across all
+  repos for traceability. The on-failure rollback path (TASK-003)
+  cleans up partial fan-out state. Acceptance was missing from
+  frontmatter when the task closed; backfilled here as part of the
+  post-INIT-014 status coherence sweep.
+last_updated: 2026-05-07
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation
