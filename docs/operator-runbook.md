@@ -1,6 +1,6 @@
 # Operator Runbook — Multi-Repository Lifecycle
 
-This runbook covers the operator-facing tasks introduced by [INIT-014](/initiatives/INIT-014-multi-repository-workspaces/initiative.md): registering code repositories, inspecting catalog and runtime binding state, recovering partial-merge runs, rotating credentials, and deregistering repositories. It assumes the deployment has applied migrations through `023_partially_merged_run_status` and `024_add_step_execution_repository_id`.
+This runbook covers the operator-facing tasks introduced by [INIT-014](/initiatives/INIT-014-multi-repository-workspaces/initiative.md): registering code repositories, inspecting catalog and runtime binding state, recovering partial-merge runs, rotating credentials, and deregistering repositories. It assumes the deployment has applied migrations through `023_partially_merged_run_status`, `024_add_step_execution_repository_id`, and `025_add_run_repository_baselines` — the run lifecycle and partial-merge recovery paths read columns added by all three.
 
 The product model is in [`/product/multi-repository-workspaces.md`](/product/multi-repository-workspaces.md). The architecture is in [`/architecture/multi-repository-integration.md`](/architecture/multi-repository-integration.md). Runbook entries link back into those for design rationale; the runbook focuses on what to type and what to expect back.
 
@@ -21,7 +21,11 @@ The product model is in [`/product/multi-repository-workspaces.md`](/product/mul
 
 Add a code repository (`kind: code`) to a workspace so it becomes a valid target for tasks that declare it in their `repositories:` field.
 
-### 2.2 What gets written
+### 2.2 v0.x deployment note
+
+The repository-management endpoints (`POST /api/v1/repositories`, `GET /api/v1/repositories`, etc.) require the gateway to be configured with a `RepositoryManager`. The default `spine serve` build in v0.x does NOT auto-wire one — calls to `/api/v1/repositories` return `503 Service Unavailable` with `repository manager not configured` until an operator-supplied serve configuration constructs and injects a `repository.Manager`. Operators running stock builds today either: (a) apply a serve configuration that wires the manager, or (b) edit the catalog file and the runtime `repositories` table directly (see §2.3 below for the catalog/binding split) until the auto-wire lands. The CLI commands documented in this runbook target the API surface and will return the same 503 against a stock build.
+
+### 2.3 What gets written
 
 Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-split.md), each registered repository has two records:
 
@@ -30,7 +34,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
 
 `POST /api/v1/repositories` writes both. If the binding write fails the catalog write is rolled back so the two stores stay consistent.
 
-### 2.3 Steps
+### 2.4 Steps
 
 1. **Pick an `id`.** Workspace-scoped, lowercase alphanumeric with single internal hyphens, max 64 chars. `spine` is reserved for the primary repo.
 2. **Provision the credential reference** (optional). If the clone URL needs authentication, configure your secret-client backend to hold the credential and note the reference path (e.g., `vault://spine/payments-service/git-token`). See [`docs/integration-guide.md`](/docs/integration-guide.md) §6 for credential helper protocol details and [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) / [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md) for the abstraction.
@@ -71,7 +75,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
 
 5. **Confirm.** A successful response is `201 Created` with the merged repository view (catalog identity + binding operational fields). Any userinfo embedded in the clone URL is redacted from the response — operators should prefer `credentials_ref` over `https://user:pw@host` URLs precisely because the catalog never carries the password.
 
-### 2.4 Failure modes
+### 2.5 Failure modes
 
 | Symptom | Cause | Remedy |
 |---------|-------|--------|
@@ -97,7 +101,7 @@ spine repository list
 GET /api/v1/repositories
 ```
 
-Response is an array of merged views. Each entry shows `id`, `kind`, `name`, `default_branch`, `clone_url` (redacted), `credentials_ref`, `local_path`, `status` (`active` or `inactive`), plus `role` / `description` when set. The primary `spine` repo always appears with `kind: spine` and `status: active`.
+Response is an object with an `items` array of merged views: `{"items": [{"id": "...", "kind": "...", ...}, ...]}`. Each entry shows `id`, `kind`, `name`, `default_branch`, `clone_url` (redacted), `credentials_ref`, `local_path`, `status` (`active` or `inactive`), plus `role` / `description` when set. The primary `spine` repo always appears with `kind: spine` and `status: active`.
 
 ### 3.3 Inspect a single repository
 
@@ -152,7 +156,7 @@ Both APIs write a primary-repo audit ledger commit and an audit event so the ope
    spine run inspect run-2026-05-07-abc123
    ```
 
-   The response includes `status: partially-merged`, the run branch, and a `repository_outcomes` block with one entry per affected repository. Each entry carries `status` (`merged`, `failed`, `pending`, `skipped`, `resolved-externally`), and for `failed` rows, `failure_class` and `failure_detail`.
+   The response includes `status: partially-merged`, the run branch, and a `merge_outcomes` block with one entry per affected repository. Each entry carries `status` (`merged`, `failed`, `pending`, `skipped`, `resolved-externally`), and for `failed` rows, `failure_class` and `failure_detail`.
 
 2. **Read the failure details.** A typical `failed` outcome looks like:
 
