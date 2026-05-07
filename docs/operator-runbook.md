@@ -156,13 +156,16 @@ Both APIs write a primary-repo audit ledger commit and an audit event so the ope
 
 ### 4.3 Walkthrough
 
-1. **Detect.** Either an alert fires on the `run_partially_merged` event, or `run inspect` shows the run status:
+1. **Detect.** Either an alert fires on the `run_partially_merged` event, or operators inspect the run state. The default `spine run inspect` table view does NOT include the per-repo merge outcomes; use the JSON output or a direct API call to see them:
 
    ```
-   spine run inspect run-2026-05-07-abc123
+   spine run inspect run-2026-05-07-abc123 -o json
+   # or
+   curl -H "Authorization: Bearer $SPINE_TOKEN" \
+        "$SPINE_URL/api/v1/runs/run-2026-05-07-abc123"
    ```
 
-   The response includes `status: partially-merged`, the run branch, and a `merge_outcomes` block with one entry per affected repository. Each entry carries `status` (`merged`, `failed`, `pending`, `skipped`, `resolved-externally`), and for `failed` rows, `failure_class` and `failure_detail`.
+   The JSON response includes `status: partially-merged`, the run branch, and a `merge_outcomes` block with one entry per affected repository. Each entry carries `status` (`merged`, `failed`, `pending`, `skipped`, `resolved-externally`), and for `failed` rows, `failure_class` and `failure_detail`.
 
 2. **Read the failure details.** A typical `failed` outcome looks like:
 
@@ -347,7 +350,7 @@ A consolidated cross-section, since some symptoms recur across operations.
 
 ## 8. Cross-References
 
-- API reference — [`/api/spec.yaml`](/api/spec.yaml). Repository endpoints under `/api/v1/repositories`; merge-recovery endpoints under `/api/v1/runs/{run_id}/repositories/{repository_id}/{retry,resolve}`.
+- API routes — [`/internal/gateway/routes.go`](/internal/gateway/routes.go) is the canonical map (repository endpoints under `/api/v1/repositories`; merge-recovery endpoints under `/api/v1/runs/{run_id}/repositories/{repository_id}/{retry,resolve}`). The OpenAPI spec at [`/api/spec.yaml`](/api/spec.yaml) does not yet describe the repository or merge-recovery surfaces — those entries are pending a follow-on documentation task. Until then, the route file plus this runbook are the authoritative contract.
 - CLI reference — `spine repository --help`, `spine run merge --help`.
 - Product model — [`/product/multi-repository-workspaces.md`](/product/multi-repository-workspaces.md), [`/product/product-definition.md`](/product/product-definition.md) §5.6–§6.
 - Architecture — [`/architecture/multi-repository-integration.md`](/architecture/multi-repository-integration.md), [`/architecture/engine-state-machine.md`](/architecture/engine-state-machine.md) §2, [`/architecture/error-handling-and-recovery.md`](/architecture/error-handling-and-recovery.md) §5.4.
