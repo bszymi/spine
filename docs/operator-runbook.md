@@ -43,7 +43,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
 ### 2.4 Steps
 
 1. **Pick an `id`.** Workspace-scoped, lowercase alphanumeric with single internal hyphens, max 64 chars. `spine` is reserved for the primary repo.
-2. **Provision the credential reference** (optional). If the clone URL needs authentication, configure your secret-client backend to hold the credential and note the reference path (e.g., `vault://spine/payments-service/git-token`). See [`docs/integration-guide.md`](/docs/integration-guide.md) §6 for credential helper protocol details and [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) / [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md) for the abstraction.
+2. **Provision the credential reference** (optional). If the clone URL needs authentication, configure your secret-client backend to hold the credential. The production `SecretCredentialResolver` parses `credentials_ref` via `secrets.ParseRef` and accepts only the canonical workspace-scoped scheme `secret-store://workspaces/{workspace_id}/{purpose}` (e.g., `secret-store://workspaces/acme/git`). Refs in any other format are stored verbatim by the API, but the next clone or push fails with `credentials_unavailable`. See [`docs/integration-guide.md`](/docs/integration-guide.md) §6 for the credential helper protocol and [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) / [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md) for the abstraction.
 3. **Pick a `local_path`.** The on-disk path Spine will clone into within the workspace's storage volume. It must not already exist.
 4. **Register.**
 
@@ -54,7 +54,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
      --name "Payments Service" \
      --default-branch main \
      --clone-url https://github.com/acme/payments-service.git \
-     --credentials-ref vault://spine/payments-service/git-token \
+     --credentials-ref secret-store://workspaces/acme/git \
      --local-path /var/spine/repos/payments-service \
      --role service \
      --description "Core payment processing API"
@@ -72,7 +72,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
      "name": "Payments Service",
      "default_branch": "main",
      "clone_url": "https://github.com/acme/payments-service.git",
-     "credentials_ref": "vault://spine/payments-service/git-token",
+     "credentials_ref": "secret-store://workspaces/acme/git",
      "local_path": "/var/spine/repos/payments-service",
      "role": "service",
      "description": "Core payment processing API"
@@ -241,10 +241,10 @@ Replace the credential a registered repository uses to clone or push, ideally wi
 
 ### 5.2 Two rotation models
 
-Per [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) and [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md), credentials are referenced by `credentials_ref` and dereferenced through the secret client per Git operation:
+Per [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) and [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md), credentials are referenced by `credentials_ref` and dereferenced through the secret client. There are two rotation models:
 
-- **Value rotation behind a stable ref.** The reference (e.g., `vault://spine/payments-service/git-token`) stays the same; the secret backend rotates the value. Spine resolves the new value on the next clone or push automatically. **No Spine action is required for this case.**
-- **Reference rotation.** The reference itself changes (new vault path, different secret store, etc.). Update the binding via `PUT /api/v1/repositories/{id}` with a new `credentials_ref`.
+- **Value rotation behind a stable ref.** The reference (e.g., `secret-store://workspaces/acme/git`) stays the same; the secret backend rotates the value. Important caveat: the gitpool caches the resolved CLI client by `(local_path, credentials_ref, binding.UpdatedAt)`. If only the secret value changed and none of those keys did, an already-cached client keeps using the old credential until the cache entry is evicted. Trigger eviction by issuing a no-op `PUT /api/v1/repositories/{id}` (e.g., re-setting the same `credentials_ref`) so the binding's `UpdatedAt` advances; the next Git operation rebuilds the client and resolves the new secret value.
+- **Reference rotation.** The reference itself changes (new purpose, new workspace path, etc.). Update the binding via `PUT /api/v1/repositories/{id}` with a new `credentials_ref`. The new `credentials_ref` AND the bumped `UpdatedAt` both invalidate the cache entry, so the next Git operation rebuilds the client.
 
 ### 5.3 Reference rotation steps
 
@@ -269,12 +269,12 @@ Per [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) and [ADR-0
 
 ### 5.4 In-flight runs
 
-The conservative procedure is: **rotate the secret backend value first, then (if the reference itself changed) update the binding, then verify on the next clone or push**. Two constraints worth knowing:
+The conservative procedure is: **rotate the secret backend value first, then issue a `PUT` on the binding to bump `UpdatedAt` (even if `credentials_ref` is unchanged) so the gitpool cache evicts, then verify on the next clone or push**. Two constraints worth knowing:
 
-- For value rotation behind a stable reference, no Spine-side action is needed. A push that is already in flight may still complete with the old value if it was already dereferenced; the next Git operation picks up the new value.
+- For value rotation behind a stable reference, the `PUT` is what evicts the gitpool cache entry — without it, an already-cached client keeps using the old credential. Do not skip the binding touch even though the reference is unchanged.
 - For reference rotation, the binding update lands atomically. A Git operation that began before the binding update completes uses the prior reference; an operation that begins after sees the new one. Spine does not pause runs through the rotation, so plan the new reference to be valid before the update lands.
 
-If a run's clone or push fails with `auth_failed` after rotation, the secret-client's `Invalidate(ref)` is the right next step — it drops any cached value for the affected reference so the next Git operation re-dereferences from the secret backend.
+If a run's clone or push fails with `auth_failed` after rotation despite the `PUT`, the secret-client's `Invalidate(ref)` is the next step — it drops any cached value for the affected reference inside the secret client itself (the layer beneath the gitpool's CLI-client cache), so the next Git operation re-dereferences from the secret backend.
 
 ### 5.5 Failure modes
 
