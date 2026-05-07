@@ -2,7 +2,17 @@
 id: TASK-003
 type: Task
 title: "Add internal/yamlsafe/decoder_test.go"
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  internal/yamlsafe/decoder_test.go added with twelve focused cases —
+  happy path, invalid YAML, MaxBytes (at-limit accept + over-limit
+  reject), MaxDepth, MaxNodes, MaxAliases, cyclic-alias-no-hang
+  (goroutine + 2s timeout regression bait), DecodeInto
+  happy/bound, DecodeIntoStrict happy/unknown-fields/bound. Coverage
+  on internal/yamlsafe/decoder.go: 97.2% of statements, well above
+  the 90% acceptance bar. `go test ./internal/yamlsafe` and
+  `go vet ./...` pass. Codex review clean (one pass).
 epic: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 work_type: test
