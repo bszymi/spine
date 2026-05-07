@@ -304,7 +304,7 @@ Remove a code repository from active use in a workspace. Because `id` is immutab
 
 The current API exposes `deactivate`, not delete. Deactivating flips the runtime binding row's `status` from `active` to `inactive`:
 
-- The catalog entry in `/.spine/repositories.yaml` stays. Inactive bindings can still be inspected but cannot resolve for execution — a task that declares a deactivated repo in `repositories:` will fail validation at run start.
+- The catalog entry in `/.spine/repositories.yaml` stays. RE-001 (the catalog-membership rule in `internal/validation/rules_repository.go`) still passes for a task that declares a deactivated ID, because RE-001 deliberately ignores binding active/inactive state. The failure surfaces later, at run-start time, when the orchestrator's repository precondition calls `Registry.Lookup` and gets `ErrRepositoryInactive` — that's the path operators should grep for when debugging post-deactivation fallout.
 - The on-disk clone at `local_path` is preserved.
 - **In-flight runs are NOT shielded from deactivation.** Subsequent code-repo operations within an open run resolve through `Registry.Lookup` / `repoClients.Client` on every step, and an inactive binding fails that lookup with `ErrRepositoryInactive`. Combined with the v0.x `NopRunReferenceChecker` caveat (§6.3 step 1), deactivating during a non-terminal run will succeed against a stock build and then break the run's next merge or cleanup attempt. Always verify no non-terminal run references the repo before deactivating.
 
