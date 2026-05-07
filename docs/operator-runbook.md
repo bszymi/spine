@@ -80,7 +80,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
    }
    ```
 
-   The `X-Workspace-ID` header is required in shared-mode deployments. Single-mode deployments may omit it — the runtime falls back to the configured workspace.
+   The `X-Workspace-ID` header is required in shared-mode deployments. Single-mode deployments may omit it — the runtime falls back to the configured workspace. **Important shared-mode caveat**: in v0.x, `gateway.ServerConfig.RepositoryManager` is a single process-level instance bound to one workspace. When a `WorkspaceResolver` is configured (shared mode), every `/api/v1/repositories...` request returns `503` with `repository manager is not yet wired for shared multi-workspace mode`. The header is necessary but not sufficient — until per-workspace manager resolution lands, repository management endpoints are usable in single-mode only.
 
 5. **Confirm.** A successful response is `201 Created` with the merged repository view (catalog identity + binding operational fields). Any userinfo embedded in the clone URL is redacted from the response — operators should prefer `credentials_ref` over `https://user:pw@host` URLs precisely because the catalog never carries the password.
 
@@ -243,19 +243,20 @@ spine run cancel run-2026-05-07-abc123
 
 Replace the credential a registered repository uses to clone or push, ideally without disrupting in-flight runs.
 
-### 5.2 Two rotation models
+### 5.2 Rotation model
 
-Per [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) and [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md), credentials are referenced by `credentials_ref` and dereferenced through the secret client. There are two rotation models:
+Per [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) and [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md), credentials are referenced by `credentials_ref` and dereferenced through the secret client. The production `SecretCredentialResolver` accepts only `secret-store://workspaces/<repo workspace>/git` — same workspace as the repository, purpose `git`. Refs for another workspace, another purpose (`runtime_db`, etc.), or with an extra path component are stored verbatim by `register` / `update` but fail on the next clone/push with `credentials_unavailable`.
 
-- **Value rotation behind a stable ref.** The reference (e.g., `secret-store://workspaces/acme/git`) stays the same; the secret backend rotates the value. Important caveat: the gitpool caches the resolved CLI client by `(local_path, credentials_ref, binding.UpdatedAt)`. If only the secret value changed and none of those keys did, an already-cached client keeps using the old credential until the cache entry is evicted. Trigger eviction by issuing a no-op `PUT /api/v1/repositories/{id}` (e.g., re-setting the same `credentials_ref`) so the binding's `UpdatedAt` advances; the next Git operation rebuilds the client and resolves the new secret value.
-- **Reference rotation.** The reference itself changes (new purpose, new workspace path, etc.). Update the binding via `PUT /api/v1/repositories/{id}` with a new `credentials_ref`. The new `credentials_ref` AND the bumped `UpdatedAt` both invalidate the cache entry, so the next Git operation rebuilds the client.
+In v0.x there is therefore really only one rotation operation:
 
-### 5.3 Reference rotation steps
+- **Rotate the secret value behind the canonical ref.** The reference (e.g., `secret-store://workspaces/acme/git`) does not change; the secret backend rotates the value. The gitpool caches the resolved CLI client by `(local_path, credentials_ref, binding.UpdatedAt)`, so even though `credentials_ref` is unchanged, an already-built client keeps using the old credential until the cache entry is evicted. Trigger eviction by issuing a no-op `PUT /api/v1/repositories/{id}` (e.g., re-setting the same `credentials_ref` value) so the binding's `UpdatedAt` advances; the next Git operation rebuilds the client and resolves the new secret value.
 
-1. **Provision the new secret reference** in the secret backend before touching Spine. Ensure it dereferences to the new credential.
-2. **Update the binding.**
+A future rotation that does change `credentials_ref` is structurally possible (the binding update mechanism exists), but the canonical-ref constraint above means there's nothing to rotate the ref to within the supported scheme. Treat ref rotation as a future operation; in v0.x, value rotation behind the stable ref is the supported path.
 
-   API:
+### 5.3 Steps — value rotation with cache eviction
+
+1. **Rotate the value in the secret backend.** Provision the new credential at `secret-store://workspaces/<workspace>/git` so the secret-client resolves to the new value when next dereferenced.
+2. **Bump the binding's `UpdatedAt` to evict the gitpool cache.** Issue a no-op `PUT` against the binding so the cache key changes:
 
    ```
    PUT /api/v1/repositories/payments-service
@@ -268,7 +269,7 @@ Per [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) and [ADR-0
    }
    ```
 
-   In shared-mode deployments the `X-Workspace-ID` header is required (the gateway resolves the tenant from it and rejects authenticated requests that omit it). Single-mode deployments may omit the header — the runtime falls back to the configured workspace.
+   The same `credentials_ref` value re-asserts the binding and advances `UpdatedAt`; on the next Git operation, the gitpool rebuilds the CLI client and the credential resolver re-dereferences to the new secret backend value. In shared-mode deployments the `X-Workspace-ID` header is required (and §2.2's caveats about the unwired manager apply — repository routes are single-mode-only in v0.x). Single-mode deployments may omit the header.
 
    The CLI does not currently expose a `repository update` command — use the API for credential reference rotation.
 
