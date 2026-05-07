@@ -2,10 +2,42 @@
 id: INIT-014
 type: Initiative
 title: Multi-Repository Workspaces
-status: In Progress
-owner: bszymi
-created: 2026-04-16
-last_updated: 2026-04-28
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  All seven epics closed with every task Completed/Approved on main:
+  EPIC-001 (repository catalog and operational bindings; ADR-013
+  identity / catalog-binding split; secret-client abstraction via
+  ADR-010/011); EPIC-002 (task schema + repository validation —
+  RE-001 catalog rule, repositories: frontmatter field);
+  EPIC-003 (Git client pool + repository routing — gitpool with
+  per-(local_path, credentials_ref, UpdatedAt) caching);
+  EPIC-004 (multi-repo run lifecycle; ADR-015 step routing);
+  EPIC-005 (merge outcomes + recovery — RepositoryMergeOutcome
+  schema, partially-merged RunStatus, RetryRepositoryMerge +
+  ResolveRepositoryMergeExternally orchestrator APIs,
+  Scheduler.retryCommittingRuns gated on
+  codeRepoOutcomesAllowResume); EPIC-006 (cross-repo execution
+  evidence — schema, EV-* validation rules, query layer, scenario
+  tests, ADR-014 validation policy as governed artifact);
+  EPIC-007 (documentation alignment — /product/product-definition.md
+  §5.6-§6, architecture docs synced with shipped multi-repo
+  behavior, /docs/operator-runbook.md). All six initiative-level
+  Success Criteria satisfied: code-repo registration via catalog
+  + binding (#1); tasks declaring affected repos via repositories:
+  field (#2); spine serve creates fanned-out run branches (#3);
+  runner clone via /git/{ws}/{repo} routing (#4); per-repo merge
+  with partially-merged state on partial failure (#5); single-repo
+  workspaces fully backward-compatible (#6); product +
+  architecture documentation reflects multi-repo (#7). Two
+  intentional v0.x deferrals documented in /docs/operator-runbook.md
+  §2.2 and architecture multi-repo docs: production wiring of the
+  RepositoryManager / Git-backed catalog loaders into the stock
+  `spine serve` binary, and a production RunReferenceChecker
+  implementation. Both are implementation-binding work, not
+  initiative-scope work — the contracts are stable and the test
+  suite exercises them via custom wiring.
+last_updated: 2026-05-07
 links:
   - type: related_to
     target: /architecture/git-integration.md
