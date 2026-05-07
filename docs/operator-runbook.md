@@ -29,7 +29,7 @@ This section of the runbook documents the operational contract for code-repo reg
 - **Validator catalog source.** The validation engine in default serve uses `validation.PrimaryOnlyCatalogSnapshot` rather than reading `/.spine/repositories.yaml`. RE-001 only accepts `repositories: [spine]`; any task declaring code-repo IDs is rejected at run start. Editing `/.spine/repositories.yaml` and the runtime `repositories` table directly does not help here — the validator's catalog snapshot is built independently and would still report code-repo IDs as unknown.
 - **Active-runs gate.** `repository.NewManager` defaults to `NopRunReferenceChecker`, so even if the manager is wired, deactivation does not block on in-flight runs. See §6.
 
-What that means in practice for v0.x: operators who need multi-repo workflows today must build a custom serve binary that (a) constructs and wires `repository.Manager`, (b) replaces `validation.PrimaryOnlyCatalogSnapshot` with the Git-backed catalog loader (a TODO inside the serve binary, see `cmd/spine/cmd_serve.go`), and (c) injects a production `RunReferenceChecker`. The runbook entries below describe the contract that surface presents; until the auto-wire lands in the stock build, none of the CLI/API examples will work against a default `spine serve`.
+What that means in practice for v0.x: operators who need multi-repo workflows today must build a custom serve binary that (a) constructs and wires `repository.Manager`, (b) replaces `validation.PrimaryOnlyCatalogSnapshot` with the Git-backed catalog loader (a TODO inside the serve binary, see `cmd/spine/cmd_serve.go`), (c) replaces the registry's catalog loader — `cmd/spine/cmd_serve.go` constructs `repoRegistry` with `repository.ParseCatalog(nil, repoSpec)`, so even after fixing the validator, the registry that `WithRepositoryResolver` and the Git pool consume still treats code repos as unknown until that loader reads `/.spine/repositories.yaml` for real, and (d) injects a production `RunReferenceChecker`. The runbook entries below describe the contract that surface presents; until the auto-wire lands in the stock build, none of the CLI/API examples will work against a default `spine serve`.
 
 ### 2.3 What gets written
 
@@ -85,7 +85,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
 
 | Symptom | Cause | Remedy |
 |---------|-------|--------|
-| `409 Conflict` with "repository already exists" | The `id` is already in the catalog (active or inactive) | Pick a different ID, or deregister and retry (§6) |
+| `409 Conflict` with "repository already exists" | The `id` is already in the catalog (active or inactive). Note: §6 deactivation does NOT remove the catalog entry, so re-registering the same ID after deactivation also returns this 409 in v0.x | Pick a different ID. Full removal is reserved for a future API ([`/architecture/multi-repository-integration.md`](/architecture/multi-repository-integration.md) §6.3) |
 | `400 Bad Request` with invalid clone URL | `clone_url` does not parse, or scheme is unsupported | Use `https://`, `ssh://`, `git://`, `file://`, or SCP-like (`user@host:path`) form |
 | `400 Bad Request` with invalid ID | `id` violates the catalog regex | Use `^[a-z0-9]+(-[a-z0-9]+)*$`; max 64 chars |
 | `403 Forbidden` | Token lacks `repository.create` capability | Issue a token with the `operator` role |
@@ -121,11 +121,13 @@ Returns the same merged view for one ID. Use this to confirm a registration or c
 
 ### 3.4 Reading the catalog directly
 
-The catalog is committed under governance. To see what was last written by Spine, read `/.spine/repositories.yaml` from the primary repo's `main` branch:
+The catalog is committed under governance. To see what was last written by Spine, read `/.spine/repositories.yaml` from the primary repository's authoritative branch. The engine merge target is hardcoded to `main` in v0.x (`internal/engine/merge.go::authoritativeBranch`), so for stock deployments the command is:
 
 ```
 git show main:.spine/repositories.yaml
 ```
+
+If your deployment has been customized so the primary repo's authoritative branch is something other than `main`, substitute that branch name in the `git show` invocation.
 
 The catalog file is the **identity** source of truth. The runtime binding row is the **operational** source of truth. The merged view returned by the API is the canonical operator-facing combination.
 
