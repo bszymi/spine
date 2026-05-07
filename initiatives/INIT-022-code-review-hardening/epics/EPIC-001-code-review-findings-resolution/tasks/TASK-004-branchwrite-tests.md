@@ -2,7 +2,26 @@
 id: TASK-004
 type: Task
 title: "Add internal/git/branchwrite_test.go"
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  internal/git/branchwrite_test.go added with nine TestBranchWrite_*
+  cases driving a real git binary via testutil.NewTempRepo:
+  EnterUnbranched, EnterCreatesWorktreeAtFreshPath (verifies 0700
+  parent perm + child name "wt" + HEAD match + worktree-list entry),
+  EnterValidatorRejects (errors.Is on sentinel), EnterCleanupSurvivesCancelledContext
+  (regression-bait — verified fails when cleanup is rewired to use
+  parent ctx, asserts .git/worktrees/wt removal AND worktree-list
+  absence), StageAndCommitTrailerOrdering (asserts TrailerOrder is
+  honored even when input map is shuffled, and unknown keys silently
+  drop), StageAndCommitNoTrailers, StageAndCommitRollbackOnFailure
+  (failing pre-commit hook + pinned core.hooksPath so global hook
+  config can't bypass), UnstageFile, CurrentBranch.
+  `go test ./internal/git -run TestBranchWrite` passes — matches the
+  acceptance command verbatim. branchwrite.go per-func coverage
+  83.3-100% (Cleanup 100%, StageAndCommit 92.3%, commitFile 93.3%).
+  Codex review: 2 P2 findings on pass 1 (test name prefix mismatch
+  + global core.hooksPath bypass), both fixed; pass 2 clean.
 epic: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 work_type: test
