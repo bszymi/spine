@@ -2,7 +2,8 @@
 id: TASK-002
 type: Task
 title: "Restrict repository.ValidateCloneURL to safe schemes"
-status: Pending
+status: Completed
+acceptance: Approved
 epic: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 work_type: bugfix
@@ -13,6 +14,46 @@ links:
     target: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
   - type: related_to
     target: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/tasks/TASK-001-validate-local-path-and-wire-repo-base.md
+acceptance_rationale: |
+  Replaced the permissive scheme switch in `internal/repository/clone_url.go`
+  with an explicit allowlist (https / ssh / git+ssh / SCP-like) and rejected
+  every other form, including `http://` (cleartext), `git://` (cleartext, no
+  auth), `file://` (local-FS exfiltration), `ext::` (smart-protocol command
+  execution), unknown schemes (ftp, rsync, smb, etc.), and any URL starting
+  with `-` (flag injection). Both `Manager.Register` and `Manager.Update`
+  exercise the single tightened validator.
+
+  Took the optional convergence path: tightened
+  `internal/git.ValidateCloneURL` to the same allowlist with a documented
+  carve-out for bare local paths (workspace provisioning seeds clones from
+  local bare repos in tests and bootstrap scripts; SCP-like remotes are
+  also accepted). Both validators now agree on what a "safe" clone URL is.
+
+  Codex iterative review surfaced two findings that were not in the
+  original task scope:
+    - **P2 git-validator coverage gap**: my first cut only added prefix-match
+      rejections for `git://` and `http://` to `internal/git`, leaving `ftp://`,
+      `rsync://`, etc. falling through to acceptance. Replaced with a
+      `schemeURLPrefix` regex + scheme switch so any URL with a scheme is
+      gated by the allowlist while non-URL forms (SCP-like, local paths)
+      remain accepted unconditionally.
+    - **P1 redaction-bypass via padded URLs**: an early version trimmed
+      whitespace before validating, but `Register`/`Update` persist the raw
+      string and downstream `RedactCloneURL` falls back to echoing the raw
+      input when `url.Parse` fails on a leading space — leaking embedded
+      `user:token` credentials. Fixed by rejecting any value where
+      `raw != strings.TrimSpace(raw)`.
+
+  The runbook §2.5 failure-modes table was updated to advertise the new
+  allowlist and the padding/leading-`-` rejections, so operators see the
+  authoritative list of accepted forms in the same place they look up the
+  400-error remedy.
+
+  17 new test cases across `clone_url_test.go` (per-form positive +
+  per-rejection-class negative, plus the padded-URL credential-leak case)
+  and `internal/git/credentials_test.go` (new scheme rejections + the
+  preserved-local-path case). Two consecutive clean codex passes after the
+  fixes.
 ---
 
 # TASK-002 — Restrict repository.ValidateCloneURL to safe schemes

@@ -168,12 +168,28 @@ func TestValidateCloneURL(t *testing.T) {
 		{name: "https ok", url: "https://github.com/org/repo.git"},
 		{name: "ssh ok", url: "ssh://git@github.com/org/repo.git"},
 		{name: "scp-like ssh ok", url: "git@github.com:org/repo.git"},
+		// Local absolute paths remain accepted — workspace
+		// provisioning seeds clones from local bare repos in tests
+		// and bootstrap scripts.
+		{name: "local absolute path ok", url: "/srv/git/seed.git"},
 		{name: "empty", url: "", wantErr: "empty"},
 		{name: "ext:: command execution", url: "ext::bash -c 'id'", wantErr: "ext::"},
 		{name: "ext:: case-insensitive", url: "EXT::bash", wantErr: "ext::"},
 		{name: "file:// scheme", url: "file:///etc/passwd", wantErr: "file://"},
 		{name: "File:// case-insensitive", url: "File:///etc/passwd", wantErr: "file://"},
 		{name: "leading dash (flag injection)", url: "--upload-pack=evil", wantErr: "starting with '-'"},
+		// New rejections from INIT-022 TASK-002 convergence.
+		{name: "git:// cleartext", url: "git://example.com/repo.git", wantErr: "git://"},
+		{name: "Git:// case-insensitive", url: "Git://example.com/repo.git", wantErr: "git://"},
+		{name: "http:// cleartext", url: "http://example.com/repo.git", wantErr: "http://"},
+		{name: "HTTP:// case-insensitive", url: "HTTP://example.com/repo.git", wantErr: "http://"},
+		// Allowlist-fall-through: any non-allowlisted scheme is now
+		// rejected with the scheme name in the error.
+		{name: "ftp scheme", url: "ftp://example.com/repo.git", wantErr: "ftp"},
+		{name: "rsync scheme", url: "rsync://example.com/repo.git", wantErr: "rsync"},
+		{name: "smb scheme", url: "smb://example.com/repo.git", wantErr: "smb"},
+		// Convergence on allowed forms — git+ssh:// is now explicit.
+		{name: "git+ssh ok", url: "git+ssh://git@example.com/repo.git"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
