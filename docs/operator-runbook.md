@@ -270,8 +270,8 @@ If a run's clone or push fails with `auth_failed` after rotation, the secret-cli
 | Symptom | Cause | Remedy |
 |---------|-------|--------|
 | Run pushes start failing with `auth_failed` after rotation | Old reference still in `credentials_ref` and old value rotated away | Update the reference (§5.3) so Spine dereferences the new secret |
-| Update returns `400 Bad Request` | New `credentials_ref` is malformed | Confirm the ref matches the secret-client's expected URI scheme |
-| `PUT` succeeds but pushes still fail | Secret backend returns the OLD value for the new reference | Verify the secret backend has the new credential at the new path; retry after fixing |
+| `PUT` succeeds, then pushes start failing with `credentials_unavailable` | The new `credentials_ref` is malformed or points at a path the secret-client cannot dereference. The PUT path stores the string as-is — validation happens later, on the next Git operation, when the secret resolver tries to read the secret. | Inspect the failed Git operation's classification; correct the `credentials_ref` (issue another `PUT`) so the next attempt resolves cleanly. |
+| `PUT` succeeds but pushes still fail with `auth_failed` | Secret backend returns the OLD value for the new reference, or the new value is wrong | Verify the secret backend has the new credential at the new path; if the old value is cached, call `Invalidate` on the secret-client (§5.4) and retry |
 
 ---
 
@@ -293,7 +293,7 @@ The primary `spine` repository cannot be deactivated. The API rejects the reques
 
 ### 6.3 Steps
 
-1. **Confirm no in-flight runs depend on the repository.** The Manager rejects deactivation when any non-terminal run (active / paused / committing / partially-merged) still references the repository, so the deactivate call itself acts as the gate. There is no built-in query for "all runs touching repo X" today; if you need to enumerate runs proactively, attempt the deactivation, observe a `412 Precondition Failed`, and resolve the offending runs (cancel, complete, or recover §4) before retrying.
+1. **Confirm no in-flight runs depend on the repository.** The Manager has a `RunReferenceChecker` hook that returns `412 Precondition Failed` when any non-terminal run (active / paused / committing / partially-merged) still references the target. **Important v0.x caveat**: the default checker is `NopRunReferenceChecker`, which always reports "no active runs", so a stock `spine serve` that wires the manager without a real checker will let `deactivate` succeed even when runs are still referencing the repo. Operators must either inject a production checker into the Manager construction or, until the production checker lands, perform a manual sweep — query open runs (`GET /api/v1/runs/{run_id}` for known runs) and confirm the target's `repository_id` does not appear in any of their `affected_repositories` lists before deactivating. There is no built-in API today for "all runs touching repo X".
 
 2. **Deactivate.**
 
@@ -319,7 +319,7 @@ The primary `spine` repository cannot be deactivated. The API rejects the reques
 | Symptom | Cause | Remedy |
 |---------|-------|--------|
 | `400 Bad Request` "primary 'spine' repository cannot be deactivated" | Operator targeted the primary repo by ID | Workspace lifecycle is the right tool for primary repo removal — see workspace administration |
-| `412 Precondition Failed` "repository … has active runs referencing it" | A non-terminal run (active / paused / committing / partially-merged) still references this repo | Wait for the run to complete, cancel it, or recover it (§4) |
+| `412 Precondition Failed` "repository … has active runs referencing it" | A non-terminal run still references this repo AND the Manager was constructed with a production `RunReferenceChecker` | Wait for the run to complete, cancel it, or recover it (§4); v0.x stock builds use `NopRunReferenceChecker` and never raise this 412, so manual sweeping per step 1 is required there |
 | `200 OK` returned but `inspect` already shows `inactive` | Repository was already deactivated; deactivation is idempotent | No-op; nothing to do |
 | Operator wants to re-activate after deactivation | No public reactivation API. The catalog entry persists, so re-registering the same ID returns `409 Conflict`; `Update` deliberately preserves the inactive flag | Plan deactivation as a one-way operation in v0.x. The "deregister" surface in [`multi-repository-integration.md`](/architecture/multi-repository-integration.md) §6.3 is reserved for a future full-removal API |
 
