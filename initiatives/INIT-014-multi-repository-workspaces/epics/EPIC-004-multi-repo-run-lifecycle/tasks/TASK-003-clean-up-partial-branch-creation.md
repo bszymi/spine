@@ -3,6 +3,18 @@ id: TASK-003
 type: Task
 title: Clean up partial branch creation failures
 status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  Partial-fan-out cleanup shipped on main: when StartRun's per-repo
+  branch creation fails after some repos have already received their
+  branches, the orchestrator deletes the branches it created on the
+  way in so the run does not leave operators with dangling
+  spine/run/* refs in arbitrary repos. The cleanup mirrors the
+  per-repo outcome semantics later refined in EPIC-005 §4.5.
+  Acceptance was missing from frontmatter when the task closed;
+  backfilled here as part of the post-INIT-014 status coherence
+  sweep.
+last_updated: 2026-05-07
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation

@@ -3,6 +3,16 @@ id: TASK-001
 type: Task
 title: Add affected repositories to the Run model
 status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  domain.Run.AffectedRepositories shipped on main: the field captures
+  the set of repository IDs (primary plus any task-declared code repos)
+  that a run touches, persisted via migration 021 and consumed by the
+  branch fan-out path (TASK-002), the merge ordering, and the cleanup
+  routine. Acceptance was missing from frontmatter when the task
+  closed; backfilled here as part of the post-INIT-014 status
+  coherence sweep.
+last_updated: 2026-05-07
 epic: /initiatives/INIT-014-multi-repository-workspaces/epics/EPIC-004-multi-repo-run-lifecycle/epic.md
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 work_type: implementation

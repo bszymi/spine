@@ -2,7 +2,27 @@
 id: EPIC-004
 type: Epic
 title: "Multi-Repo Run Lifecycle"
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  All seven tasks completed and approved on main: TASK-001
+  (run.affected_repositories model + persistence migration 021),
+  TASK-002 (create run branches across affected repositories with
+  partial-failure rollback), TASK-003 (clean up partial branch
+  creation on failed StartRun), TASK-004 (step repository routing
+  per ADR-015), TASK-005 (runner clone context — workspace_id /
+  repository_id / branch_name / commit_baseline in assignment
+  payloads, migration 025), TASK-006 (multi-repo run lifecycle
+  scenario tests via scenariotest framework), and TASK-007
+  (step-routing decision ADR-015 — single repository_id per
+  execution resolved at run start). The epic's primary outputs
+  all shipped: AffectedRepositories field on domain.Run, branch
+  fan-out across every affected repo, single-repo-per-step
+  assignment routing, end-to-end scenario coverage. Epic
+  frontmatter was left at Pending after PR-level task closures
+  landed; corrected here as part of the post-INIT-014 status
+  coherence sweep.
+last_updated: 2026-05-07
 initiative: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
 owner: bszymi
 created: 2026-04-28

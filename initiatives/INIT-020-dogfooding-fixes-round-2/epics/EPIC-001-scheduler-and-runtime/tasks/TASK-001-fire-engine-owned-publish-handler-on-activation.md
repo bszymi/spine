@@ -3,11 +3,24 @@ id: TASK-001
 type: Task
 title: "Fire engine-owned publish handler on step activation"
 status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  Task shipped on main: the engine-owned publish handler now fires
+  on step activation for `type: internal` + `execution.mode: spine_only`
+  steps, closing the wedge where runs sat at status: assigned on
+  the publish step until an operator merged manually. Validated
+  end-to-end against task-default workflow (execute → validate →
+  verify → review → publish → end) per the parent epic's success
+  criteria #1, with no runner dispatch events emitted for spine_only
+  steps. acceptance was omitted when the task closed in 2026-04;
+  backfilled here as part of the post-INIT-014 status coherence
+  sweep so the frontmatter conforms to the schema rule that
+  Completed tasks carry an explicit acceptance field.
+last_updated: 2026-05-07
 epic: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-001-scheduler-and-runtime/epic.md
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 work_type: bugfix
 created: 2026-04-23
-last_updated: 2026-04-23
 links:
   - type: parent
     target: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-001-scheduler-and-runtime/epic.md
