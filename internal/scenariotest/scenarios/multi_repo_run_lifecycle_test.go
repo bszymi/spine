@@ -3,18 +3,15 @@
 package scenarios_test
 
 import (
-	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/bszymi/spine/internal/git"
 	"github.com/bszymi/spine/internal/repository"
 	scenarioEngine "github.com/bszymi/spine/internal/scenariotest/engine"
 	"github.com/bszymi/spine/internal/scenariotest/harness"
-	"github.com/bszymi/spine/internal/testutil"
 )
 
 // TestMultiRepoRunLifecycle_AnchorsTASK006 is the scenario-level AC anchor
@@ -158,11 +155,15 @@ links:
 # Multi-Repo Lifecycle Task
 `
 
-// setupMultiRepoOrchestrator creates two real on-disk code repos and
-// wires them onto sc.Runtime.Orchestrator via WithRepositoryResolver +
-// WithRepositoryGitClients. The scenario harness's default orchestrator
-// has neither field populated, so without this step a multi-repo run
-// would silently degrade to primary-only.
+// setupMultiRepoOrchestrator wires two real on-disk code repos onto
+// sc.Runtime.Orchestrator via harness.WithCodeRepos. Without this step
+// the scenario harness's default orchestrator has neither
+// RepositoryResolver nor RepositoryGitClients populated and a
+// multi-repo run would silently degrade to primary-only.
+//
+// ParentT-anchoring is delegated to harness.WithCodeRepos: per-step
+// subtest tempdirs would be torn down when the step ends, orphaning
+// the working trees the run branches must land in during a later step.
 //
 // State keys set:
 //   - "billing_dir"   — filesystem path of the billing code repo
@@ -171,42 +172,12 @@ func setupMultiRepoOrchestrator() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-multi-repo-orchestrator",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
-			// Use ParentT so the temp dirs survive every step. sc.T is
-			// the per-step subtest, and its TempDirs are torn down when
-			// the step ends — which would orphan the working trees the
-			// run branches must land in during a later step.
-			billingDir := testutil.NewTempRepo(sc.ParentT)
-			shippingDir := testutil.NewTempRepo(sc.ParentT)
-
-			resolver := &multiRepoStubResolver{
-				repos: map[string]*repository.Repository{
-					"billing": {
-						ID:            "billing",
-						Kind:          repository.KindCode,
-						Status:        "active",
-						DefaultBranch: "main",
-						LocalPath:     billingDir,
-					},
-					"shipping": {
-						ID:            "shipping",
-						Kind:          repository.KindCode,
-						Status:        "active",
-						DefaultBranch: "main",
-						LocalPath:     shippingDir,
-					},
-				},
-			}
-			clients := &multiRepoStubGitClients{
-				clients: map[string]git.GitClient{
-					"billing":  git.NewCLIClient(billingDir),
-					"shipping": git.NewCLIClient(shippingDir),
-				},
-			}
-			sc.Runtime.Orchestrator.WithRepositoryResolver(resolver)
-			sc.Runtime.Orchestrator.WithRepositoryGitClients(clients)
-
-			sc.Set("billing_dir", billingDir)
-			sc.Set("shipping_dir", shippingDir)
+			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator,
+				harness.CodeRepoSpec{ID: "billing"},
+				harness.CodeRepoSpec{ID: "shipping"},
+			)
+			sc.Set("billing_dir", repos["billing"].Dir)
+			sc.Set("shipping_dir", repos["shipping"].Dir)
 			return nil
 		},
 	}
@@ -355,37 +326,6 @@ func cleanupMultiRepoRunAndAssertGone() scenarioEngine.Step {
 			return nil
 		},
 	}
-}
-
-// multiRepoStubResolver implements engine.RepositoryResolver against a
-// fixed map. The primary repo is intentionally absent — the engine
-// short-circuits primary lookups, and a Lookup("spine") here would
-// surface a misconfigured precondition path.
-type multiRepoStubResolver struct {
-	repos map[string]*repository.Repository
-}
-
-func (r *multiRepoStubResolver) Lookup(_ context.Context, id string) (*repository.Repository, error) {
-	repo, ok := r.repos[id]
-	if !ok {
-		return nil, repository.ErrRepositoryNotFound
-	}
-	return repo, nil
-}
-
-// multiRepoStubGitClients implements engine.RepositoryGitClients against
-// real git.CLIClient instances rooted at on-disk working trees, so
-// CreateBranch / DeleteBranch / RefSHA produce real ref-state changes.
-type multiRepoStubGitClients struct {
-	clients map[string]git.GitClient
-}
-
-func (c *multiRepoStubGitClients) Client(_ context.Context, repoID string) (git.GitClient, error) {
-	client, ok := c.clients[repoID]
-	if !ok {
-		return nil, fmt.Errorf("no client wired for repo %q", repoID)
-	}
-	return client, nil
 }
 
 // assertBranchExistsAt runs `git rev-parse --verify refs/heads/<name>`
