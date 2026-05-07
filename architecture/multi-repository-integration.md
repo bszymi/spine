@@ -154,6 +154,15 @@ Each workspace's repositories are stored under the workspace's base directory:
 
 The `spine` directory is the existing `RepoPath`. Code repos are cloned into sibling directories when registered.
 
+**Containment root.** Production deployments configure a deployment-wide containment root via `SPINE_CODE_REPO_BASE` — the **parent** of every workspace's tree (e.g. `/var/spine/workspaces`). At each layer the boundary is narrowed to the active workspace:
+
+1. `cmd/spine.loadCodeRepoBase` rejects relative or empty values when `SPINE_ENV=production`, then propagates the absolute root through `serveDeps.CodeRepoBase` and `workspace.PoolConfig.CodeRepoBase`.
+2. In shared multi-workspace mode (`WORKSPACE_RESOLVER=db|platform-binding`), `workspace.buildServiceSet` derives a **per-workspace** base — `filepath.Join(root, workspace_id)` — and passes that to `gitpool.WithRepoBase`. Workspace A's pool therefore refuses any LocalPath that resolves outside `<root>/A/`, even when workspace B's subtree sits next to it under the same root.
+3. `gitpool.Pool` re-checks the per-workspace base (with `filepath.EvalSymlinks` resolution) before any clone or open, so a binding row that bypassed the registration gate still cannot escape at runtime.
+4. `repository.Manager` validates each binding's `local_path` against the same boundary at registration / update time, rejecting `/etc`, `..` traversal, equal-to-base, and relative inputs with `domain.ErrInvalidParams`. The Manager's `codeRepoBase` is whatever the wiring layer hands in — same per-workspace narrowing in shared mode.
+
+Empty disables every check (single-workspace dev mode); `cmd/spine` fails fast at startup when the base is unset and `SPINE_ENV=production`.
+
 ---
 
 ## 3. Git Client Pool

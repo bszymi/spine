@@ -44,7 +44,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
 
 1. **Pick an `id`.** Workspace-scoped, lowercase alphanumeric with single internal hyphens, max 64 chars. The following IDs are reserved and rejected at registration: `spine` (the primary repo), and the Git HTTP path segments `info`, `objects`, `git-upload-pack`, `git-receive-pack`, `head` (a code repo with one of those IDs would be unreachable through the `/git/{workspace}/{repo}/...` routing). The full reserved list lives in `internal/repository/catalog.go::reservedRepositoryIDs`.
 2. **Provision the credential reference** (optional). If the clone URL needs authentication, configure your secret-client backend to hold the credential. The production `SecretCredentialResolver` parses `credentials_ref` via `secrets.ParseRef` and accepts only the canonical workspace-scoped scheme `secret-store://workspaces/{workspace_id}/{purpose}` (e.g., `secret-store://workspaces/acme/git`). Refs in any other format are stored verbatim by the API, but the next clone or push fails with `credentials_unavailable`. See [`docs/integration-guide.md`](/docs/integration-guide.md) §6 for the credential helper protocol and [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) / [ADR-011](/architecture/adr/ADR-011-workspace-resolver-secret-ref-dereference.md) for the abstraction.
-3. **Pick a `local_path`.** The on-disk path Spine will clone into within the workspace's storage volume. It must not already exist.
+3. **Pick a `local_path`.** The on-disk path Spine will clone into within the workspace's storage volume. It must not already exist. Production deployments pin a deployment-wide containment root via the `SPINE_CODE_REPO_BASE` environment variable. The configured root is the **parent of every workspace's tree** (e.g. `/var/spine/workspaces`); each workspace's pool further narrows enforcement to its own subtree (`<root>/<workspace_id>`), so a binding for workspace A cannot point inside workspace B's directory even when both share the same root. Every binding's `local_path` must be **absolute** and resolve under the active workspace's narrowed base or registration is rejected with `400 invalid_params`. Both `SPINE_CODE_REPO_BASE` and the operator-supplied `local_path` are required to be absolute so the binding row's stored string is stable across restarts — neither value can be re-anchored to a different process working directory. The check is required when `SPINE_ENV=production` (startup fails fast if unset) and optional in non-production. The same per-workspace base is enforced at clone time by the gitpool as a defense-in-depth gate, so a binding row that bypassed the registration check still cannot escape into an unrelated host directory.
 4. **Register.**
 
    CLI:
@@ -55,7 +55,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
      --default-branch main \
      --clone-url https://github.com/acme/payments-service.git \
      --credentials-ref secret-store://workspaces/acme/git \
-     --local-path /var/spine/repos/payments-service \
+     --local-path /var/spine/code-repos/acme/payments-service \
      --role service \
      --description "Core payment processing API"
    ```
@@ -74,7 +74,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
      "default_branch": "main",
      "clone_url": "https://github.com/acme/payments-service.git",
      "credentials_ref": "secret-store://workspaces/acme/git",
-     "local_path": "/var/spine/repos/payments-service",
+     "local_path": "/var/spine/code-repos/acme/payments-service",
      "role": "service",
      "description": "Core payment processing API"
    }
@@ -90,6 +90,9 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
 |---------|-------|--------|
 | `409 Conflict` with "repository already exists" | The `id` is already in the catalog (active or inactive). Note: §6 deactivation does NOT remove the catalog entry, so re-registering the same ID after deactivation also returns this 409 in v0.x | Pick a different ID. Full removal is reserved for a future API ([`/architecture/multi-repository-integration.md`](/architecture/multi-repository-integration.md) §6.3) |
 | `400 Bad Request` with invalid clone URL | `clone_url` does not parse, or scheme is unsupported | Use `https://`, `ssh://`, `git://`, `file://`, or SCP-like (`user@host:path`) form |
+| `400 Bad Request` with `local_path is outside the workspace code-repo base` | `local_path` resolves outside `SPINE_CODE_REPO_BASE` (or equals the base itself) | Pick a path under the configured base. The base is logged at startup as `code-repo containment base configured`; if startup logged `SPINE_CODE_REPO_BASE is not set` you are running in non-production with the check disabled |
+| `400 Bad Request` with `local_path must be an absolute path` | `local_path` is relative (e.g. `repos/payments`) and a `SPINE_CODE_REPO_BASE` is configured | Submit the absolute path (e.g. `/var/spine/code-repos/payments`). Relative paths are refused so the persisted binding cannot shift meaning if the server is restarted with a different working directory |
+| Startup fails with `SPINE_CODE_REPO_BASE is required when SPINE_ENV=production` | Production deployment without an explicit containment root | Set `SPINE_CODE_REPO_BASE=/var/spine/code-repos` (or whatever absolute directory the workspace owns) before starting `spine serve` |
 | `400 Bad Request` with invalid ID | `id` violates the catalog regex | Use `^[a-z0-9]+(-[a-z0-9]+)*$`; max 64 chars |
 | `403 Forbidden` | Token lacks `repository.create` capability | Issue a token with the `operator` role |
 | `500 Internal Server Error` followed by retry success | Binding write failed; catalog write was rolled back | The rollback already happened — the same call can safely be re-issued |

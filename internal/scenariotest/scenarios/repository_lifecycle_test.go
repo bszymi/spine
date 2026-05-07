@@ -51,7 +51,7 @@ func setupRepoEnv(t *testing.T) *repoTestEnv {
 		LocalPath:     "/var/spine/workspaces/scenario/spine",
 	}
 	cat := repository.NewInMemoryCatalogStore(primary)
-	mgr := repository.NewManager(workspaceID, primary, cat, env.DB.Store, nil)
+	mgr := repository.NewManager(workspaceID, primary, cat, env.DB.Store, nil, "")
 	reg := repository.New(workspaceID, primary, func(ctx context.Context) (*repository.Catalog, error) {
 		return cat.Load(ctx)
 	}, env.DB.Store)
