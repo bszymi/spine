@@ -23,7 +23,13 @@ Add a code repository (`kind: code`) to a workspace so it becomes a valid target
 
 ### 2.2 v0.x deployment note
 
-The repository-management endpoints (`POST /api/v1/repositories`, `GET /api/v1/repositories`, etc.) require the gateway to be configured with a `RepositoryManager`. The default `spine serve` build in v0.x does NOT auto-wire one — calls to `/api/v1/repositories` return `503 Service Unavailable` with `repository manager not configured` until an operator-supplied serve configuration constructs and injects a `repository.Manager`. Operators running stock builds today either: (a) apply a serve configuration that wires the manager, or (b) edit the catalog file and the runtime `repositories` table directly (see §2.3 below for the catalog/binding split) until the auto-wire lands. The CLI commands documented in this runbook target the API surface and will return the same 503 against a stock build.
+This section of the runbook documents the operational contract for code-repo registration. The stock v0.x `spine serve` binary does not yet wire all the pieces needed to make that contract end-to-end usable. Three independent gaps:
+
+- **Gateway endpoints unwired.** `gateway.ServerConfig.RepositoryManager` is optional and not constructed by the default serve path. `POST /api/v1/repositories` and the rest of `/api/v1/repositories/...` return `503 Service Unavailable` with `repository manager not configured` until an operator-supplied serve configuration constructs and injects a `repository.Manager`.
+- **Validator catalog source.** The validation engine in default serve uses `validation.PrimaryOnlyCatalogSnapshot` rather than reading `/.spine/repositories.yaml`. RE-001 only accepts `repositories: [spine]`; any task declaring code-repo IDs is rejected at run start. Editing `/.spine/repositories.yaml` and the runtime `repositories` table directly does not help here — the validator's catalog snapshot is built independently and would still report code-repo IDs as unknown.
+- **Active-runs gate.** `repository.NewManager` defaults to `NopRunReferenceChecker`, so even if the manager is wired, deactivation does not block on in-flight runs. See §6.
+
+What that means in practice for v0.x: operators who need multi-repo workflows today must build a custom serve binary that (a) constructs and wires `repository.Manager`, (b) replaces `validation.PrimaryOnlyCatalogSnapshot` with the Git-backed catalog loader (a TODO inside the serve binary, see `cmd/spine/cmd_serve.go`), and (c) injects a production `RunReferenceChecker`. The runbook entries below describe the contract that surface presents; until the auto-wire lands in the stock build, none of the CLI/API examples will work against a default `spine serve`.
 
 ### 2.3 What gets written
 
@@ -287,7 +293,7 @@ The current API exposes `deactivate`, not delete. Deactivating flips the runtime
 
 - The catalog entry in `/.spine/repositories.yaml` stays. Inactive bindings can still be inspected but cannot resolve for execution — a task that declares a deactivated repo in `repositories:` will fail validation at run start.
 - The on-disk clone at `local_path` is preserved.
-- Any in-flight runs that already resolved this repo continue to use the cached client until they reach a terminal state.
+- **In-flight runs are NOT shielded from deactivation.** Subsequent code-repo operations within an open run resolve through `Registry.Lookup` / `repoClients.Client` on every step, and an inactive binding fails that lookup with `ErrRepositoryInactive`. Combined with the v0.x `NopRunReferenceChecker` caveat (§6.3 step 1), deactivating during a non-terminal run will succeed against a stock build and then break the run's next merge or cleanup attempt. Always verify no non-terminal run references the repo before deactivating.
 
 The primary `spine` repository cannot be deactivated. The API rejects the request with `400 Bad Request`.
 
