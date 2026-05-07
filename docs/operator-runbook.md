@@ -65,6 +65,7 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
    ```
    POST /api/v1/repositories
    Authorization: Bearer <operator-token>
+   X-Workspace-ID: acme
    Content-Type: application/json
 
    {
@@ -78,6 +79,8 @@ Per [ADR-013](/architecture/adr/ADR-013-repository-identity-and-catalog-binding-
      "description": "Core payment processing API"
    }
    ```
+
+   The `X-Workspace-ID` header is required in shared-mode deployments. Single-mode deployments may omit it — the runtime falls back to the configured workspace.
 
 5. **Confirm.** A successful response is `201 Created` with the merged repository view (catalog identity + binding operational fields). Any userinfo embedded in the clone URL is redacted from the response — operators should prefer `credentials_ref` over `https://user:pw@host` URLs precisely because the catalog never carries the password.
 
@@ -162,8 +165,9 @@ Both APIs write a primary-repo audit ledger commit and an audit event so the ope
 
    ```
    spine run inspect run-2026-05-07-abc123 -o json
-   # or
+   # or (shared-mode also needs -H "X-Workspace-ID: <workspace-id>")
    curl -H "Authorization: Bearer $SPINE_TOKEN" \
+        -H "X-Workspace-ID: $SPINE_WORKSPACE_ID" \
         "$SPINE_URL/api/v1/runs/run-2026-05-07-abc123"
    ```
 
@@ -256,12 +260,15 @@ Per [ADR-010](/architecture/adr/ADR-010-secret-client-abstraction.md) and [ADR-0
    ```
    PUT /api/v1/repositories/payments-service
    Authorization: Bearer <operator-token>
+   X-Workspace-ID: acme
    Content-Type: application/json
 
    {
-     "credentials_ref": "vault://spine/payments-service/git-token-2026-rotated"
+     "credentials_ref": "secret-store://workspaces/acme/git"
    }
    ```
+
+   In shared-mode deployments the `X-Workspace-ID` header is required (the gateway resolves the tenant from it and rejects authenticated requests that omit it). Single-mode deployments may omit the header — the runtime falls back to the configured workspace.
 
    The CLI does not currently expose a `repository update` command — use the API for credential reference rotation.
 
@@ -321,7 +328,10 @@ The primary `spine` repository cannot be deactivated. The API rejects the reques
    ```
    POST /api/v1/repositories/payments-service/deactivate
    Authorization: Bearer <operator-token>
+   X-Workspace-ID: acme
    ```
+
+   The `X-Workspace-ID` header is required in shared-mode deployments. Single-mode deployments may omit it.
 
 3. **Confirm.** A successful response is `200 OK` with the merged view showing `status: inactive`. The catalog file in `/.spine/repositories.yaml` is unchanged.
 
