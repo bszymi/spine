@@ -2,7 +2,8 @@
 id: TASK-005
 type: Task
 title: "Build harness.WithCodeRepos helper for multi-repo scenarios"
-status: Pending
+status: Completed
+acceptance: Approved
 epic: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 work_type: refactor
@@ -94,3 +95,36 @@ Add a helper in `internal/scenariotest/harness/` (or a sibling
 
 Land this task FIRST. TASK-006/007/008 block on it. After it lands,
 the three downstream scenarios are 50-100 lines each.
+
+## Resolution (2026-05-07)
+
+**Helper:** `harness.WithCodeRepos(t, orch, specs...)` lives at
+`internal/scenariotest/harness/multirepo.go`. It returns a
+`map[string]*CodeRepo` keyed by repo ID with `Dir`, `Repository`,
+`Client()`, `SetNextMergeFailure(err)`, and `SetNextPushFailure(err)`.
+Single call replaces ~40 lines of resolver/clients boilerplate.
+
+**Migration validators:** both pre-existing multi-repo scenarios were
+moved to the helper (no API surface beyond `Dir` / `Client()` was
+needed for either): `multi_repo_run_lifecycle_test.go` (the AC anchor
+called out in the task body) and `cross_repo_evidence_test.go`. The
+ad-hoc `multiRepoStubResolver` / `multiRepoStubGitClients` types were
+deleted in favor of the helper's internal `fixedRepoResolver` /
+`fixedRepoGitClients`. Both migrated scenarios pass on a clean DB.
+
+**Behavior controls:** `SetNextMergeFailure` / `SetNextPushFailure`
+queue a single-shot override against the wrapped CLIClient — exactly
+what TASK-006's "fail then retry succeed" plan needs. `MergeOpts.Strategy
+== "abort"` always passes through so `engine.attemptCodeRepositoryMerge`'s
+post-failure `MERGE_HEAD` cleanup is never blocked by an injected
+failure. Queue mechanics + abort carve-out have unit-test pins so a
+regression that flipped either invariant would fail loudly rather than
+turn TASK-006's retry assertion into a tautology.
+
+**Codex iterative review:** 3 passes; one P2 surfaced and fixed:
+non-`main` `DefaultBranch` specs were accepted but not realised in the
+working tree. Fixed by extracting `newCodeRepoDir(t, branch)` which
+runs `git branch -m main <branch>` after `testutil.NewTempRepo`, with a
+unit-test pin asserting both that `refs/heads/<branch>` resolves and
+that `refs/heads/main` is gone. Two subsequent codex passes returned
+clean. Lint count unchanged at 206 pre-existing issues.

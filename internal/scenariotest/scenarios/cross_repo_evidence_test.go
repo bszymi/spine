@@ -17,7 +17,6 @@ import (
 	"github.com/bszymi/spine/internal/repository"
 	scenarioEngine "github.com/bszymi/spine/internal/scenariotest/engine"
 	"github.com/bszymi/spine/internal/scenariotest/harness"
-	"github.com/bszymi/spine/internal/testutil"
 	"github.com/bszymi/spine/internal/validation"
 	"gopkg.in/yaml.v3"
 )
@@ -176,53 +175,25 @@ const (
 	stateRun         = "run"
 )
 
-// setupEvidenceMultiRepo creates two real on-disk code repositories
-// (billing, shipping) and wires them onto sc.Runtime.Orchestrator. The
-// scenario harness's default orchestrator has no per-repo wiring — see
-// multi_repo_run_lifecycle_test.go for the same pattern; we duplicate
-// rather than share so the two scenario files stay independently
-// readable (each is the AC anchor for a different task).
+// setupEvidenceMultiRepo wires two real on-disk code repositories
+// (billing, shipping) onto sc.Runtime.Orchestrator via
+// harness.WithCodeRepos. Without this step the scenario harness's
+// default orchestrator has no per-repo wiring and a multi-repo run
+// would silently degrade to primary-only.
+//
+// State keys set:
+//   - stateBillingGit  — git.GitClient for the billing code repo
+//   - stateShippingGit — git.GitClient for the shipping code repo
 func setupEvidenceMultiRepo() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-evidence-multi-repo",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
-			// ParentT-scoped temp dirs: per-step T tempdirs are torn down
-			// at the end of the setup step, which would orphan the working
-			// trees the run branches must land in during a later step.
-			billingDir := testutil.NewTempRepo(sc.ParentT)
-			shippingDir := testutil.NewTempRepo(sc.ParentT)
-			billingGit := git.NewCLIClient(billingDir)
-			shippingGit := git.NewCLIClient(shippingDir)
-
-			resolver := &multiRepoStubResolver{
-				repos: map[string]*repository.Repository{
-					"billing": {
-						ID:            "billing",
-						Kind:          repository.KindCode,
-						Status:        "active",
-						DefaultBranch: "main",
-						LocalPath:     billingDir,
-					},
-					"shipping": {
-						ID:            "shipping",
-						Kind:          repository.KindCode,
-						Status:        "active",
-						DefaultBranch: "main",
-						LocalPath:     shippingDir,
-					},
-				},
-			}
-			clients := &multiRepoStubGitClients{
-				clients: map[string]git.GitClient{
-					"billing":  billingGit,
-					"shipping": shippingGit,
-				},
-			}
-			sc.Runtime.Orchestrator.WithRepositoryResolver(resolver)
-			sc.Runtime.Orchestrator.WithRepositoryGitClients(clients)
-
-			sc.Set(stateBillingGit, billingGit)
-			sc.Set(stateShippingGit, shippingGit)
+			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator,
+				harness.CodeRepoSpec{ID: "billing"},
+				harness.CodeRepoSpec{ID: "shipping"},
+			)
+			sc.Set(stateBillingGit, repos["billing"].Client())
+			sc.Set(stateShippingGit, repos["shipping"].Client())
 			return nil
 		},
 	}
