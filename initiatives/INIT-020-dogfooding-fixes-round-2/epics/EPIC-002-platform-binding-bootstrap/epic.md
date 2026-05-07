@@ -3,10 +3,22 @@ id: EPIC-002
 type: Epic
 title: Platform-Binding Bootstrap Completeness
 status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  TASK-001 (BootstrapInternalAdmin: seed smp-admin actor + token on
+  workspace load) shipped and is Completed/Approved. The epic's
+  scope was that single bootstrap-completeness task; with it landed,
+  workspace loads in platform-binding mode now seed the smp-admin
+  actor + token deterministically, removing the prior bootstrap
+  gap. The acceptance field was missing from frontmatter when the
+  task closed; backfilled here as part of the post-INIT-014 status
+  coherence sweep so the epic's frontmatter conforms to the
+  artifact-schema rule that Completed epics carry an explicit
+  acceptance field.
+last_updated: 2026-05-07
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 owner: bszymi
 created: 2026-05-04
-last_updated: 2026-05-04
 links:
   - type: parent
     target: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md

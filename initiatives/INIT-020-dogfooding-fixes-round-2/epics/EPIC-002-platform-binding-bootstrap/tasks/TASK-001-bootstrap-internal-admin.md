@@ -3,11 +3,21 @@ id: TASK-001
 type: Task
 title: "BootstrapInternalAdmin: seed smp-admin actor + token on workspace load"
 status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  Task shipped on main: workspace loads in platform-binding mode
+  now seed the smp-admin actor row and bootstrap token
+  deterministically on each load, closing the prior bootstrap gap
+  where workspaces lacked the admin identity until manual
+  provisioning. The acceptance field was omitted when the task
+  closed; backfilled here as part of the post-INIT-014 status
+  coherence sweep so the frontmatter conforms to the schema rule
+  that Completed tasks carry an explicit acceptance field.
+last_updated: 2026-05-07
 epic: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-002-platform-binding-bootstrap/epic.md
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 work_type: feature
 created: 2026-05-04
-last_updated: 2026-05-04
 links:
   - type: parent
     target: /initiatives/INIT-020-dogfooding-fixes-round-2/epics/EPIC-002-platform-binding-bootstrap/epic.md
