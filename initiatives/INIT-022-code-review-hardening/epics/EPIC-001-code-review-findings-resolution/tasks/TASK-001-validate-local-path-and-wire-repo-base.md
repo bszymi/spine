@@ -2,7 +2,41 @@
 id: TASK-001
 type: Task
 title: "Wire gitpool WithRepoBase and validate LocalPath containment"
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  Plumbed SPINE_CODE_REPO_BASE end-to-end through cmd/spine ->
+  workspace.PoolConfig -> gitpool.WithRepoBase. cmd/spine/cmd_serve.go
+  loadCodeRepoBase requires the env var when SPINE_ENV=production and
+  refuses relative values (codex pass 1: TOCTOU on launch CWD).
+  repository.Manager.NewManager takes codeRepoBase and validateLocalPath
+  rejects empty, relative (codex pass 2: persisted-string stability),
+  out-of-base, and equal-to-base inputs with ErrInvalidParams in both
+  Register and Update.
+
+  Per-workspace narrowing: workspace.PerWorkspaceCodeRepoBase joins the
+  deployment base with the workspace ID so each pool enforces
+  <base>/<workspace_id> as its boundary (codex pass 3: shared-mode
+  isolation). Helper hardened against: workspace-dir symlink to
+  /etc (pass 4), workspace-dir symlink to a sibling tree (pass 5),
+  TOCTOU on missing workspace dirs by mkdir-then-EvalSymlinks check
+  (pass 6), traversal-shaped workspace IDs via ValidateID (pass 7),
+  regular-file masquerading as workspace base (pass 8), and DB-pool
+  leak on derivation failure by hoisting the check above the DB open
+  (pass 9). Top-level pool in cmd_serve narrowing is gated to
+  single-workspace mode (pass 8) so shared-mode deployments don't
+  create an unused <base>/default. Codex pass 10 clean.
+
+  17 new tests across cmd/spine, internal/repository, internal/workspace
+  cover the loader (production-required, dev-allows-empty,
+  rejects-relative, accepts-and-cleans-absolute), Manager containment
+  (6 escape patterns + 3 happy + Update rejection + relative-rejection
+  + empty-base-skip), and per-workspace narrowing (empty-disables +
+  narrows-distinct + symlink-escape-3-cases + traversal-id +
+  regular-file + creates-missing + missing-base). Operator runbook §2.4
+  + failure modes table + architecture/multi-repository-integration.md
+  §2.5 updated with the four-layer enforcement chain and the
+  per-workspace contract. `go test ./...` and `go vet ./...` pass.
 epic: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 work_type: bugfix

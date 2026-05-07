@@ -3,6 +3,8 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -165,6 +167,7 @@ type ServicePool struct {
 	secretCipher *spinecrypto.SecretCipher
 	secretClient secrets.SecretClient
 	dbPolicy     PoolPolicy
+	codeRepoBase string
 	closed       bool
 	ctx          context.Context    // pool-lifetime context for background goroutines
 	cancel       context.CancelFunc // cancels pool-lifetime context on Close
@@ -210,6 +213,19 @@ type PoolConfig struct {
 	// DBPolicy is the per-workspace connection-pool policy from
 	// ADR-012. Zero-valued fields fall back to PoolPolicyDefault().
 	DBPolicy PoolPolicy
+
+	// CodeRepoBase is the absolute filesystem directory that contains
+	// all per-workspace code-repo subtrees, sourced from
+	// SPINE_CODE_REPO_BASE at startup. The pool narrows this to
+	// `<CodeRepoBase>/<workspace_id>` per ServiceSet before passing to
+	// gitpool.WithRepoBase, so each workspace's pool only accepts
+	// LocalPaths under its own subtree — workspace A cannot clone a
+	// binding whose LocalPath points inside workspace B's tree even
+	// though both pools share the same configured root. Empty
+	// disables the gitpool-side check; production deployments are
+	// expected to set it (cmd/spine fails fast when
+	// SPINE_ENV=production and this is unset).
+	CodeRepoBase string
 }
 
 // NewServicePool creates a service pool backed by the given resolver.
@@ -230,6 +246,7 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		secretCipher: cfg.SecretCipher,
 		secretClient: cfg.SecretClient,
 		dbPolicy:     cfg.DBPolicy,
+		codeRepoBase: cfg.CodeRepoBase,
 		ctx:          poolCtx,
 		cancel:       cancel,
 	}
@@ -412,7 +429,7 @@ func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
 // inserted the entry into p.entries with refCount=1 before releasing the
 // mutex.
 func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, cfg Config, entry *poolEntry) (*ServiceSet, error) {
-	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretClient, p.dbPolicy)
+	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretClient, p.dbPolicy, p.codeRepoBase)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -571,12 +588,116 @@ func (p *ServicePool) Close() {
 }
 
 // buildServiceSet creates a complete service set from a workspace config.
-func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, secretClient secrets.SecretClient, dbPolicy PoolPolicy) (*ServiceSet, error) {
+// PerWorkspaceCodeRepoBase is the public adapter around
+// perWorkspaceCodeRepoBase. cmd/spine uses it to narrow the file-mode
+// top-level pool's containment boundary by the runtime workspace ID,
+// matching the per-workspace narrowing applied to shared-mode pools
+// in buildServiceSet. Exported so the two narrowing call sites share
+// one implementation.
+func PerWorkspaceCodeRepoBase(base, workspaceID string) (string, error) {
+	return perWorkspaceCodeRepoBase(base, workspaceID)
+}
+
+// perWorkspaceCodeRepoBase narrows a deployment-wide code-repo
+// containment root to a single workspace's subtree by joining the
+// configured base with the workspace ID. Empty base = empty result
+// (containment disabled). The resulting path is used with
+// gitpool.WithRepoBase so per-workspace pools enforce
+// `<base>/<workspace_id>` as their boundary, preventing a binding for
+// workspace A from cloning into workspace B's tree under the same
+// configured root.
+//
+// To guarantee the directory we hand to gitpool is a real directory
+// (not a symlink that gitpool would later EvalSymlinks-resolve to an
+// unrelated tree), this helper creates `<base>/<workspaceID>` if it is
+// absent (MkdirAll, mode 0700) and then resolves it through
+// filepath.EvalSymlinks. The resolved path must match the expected
+// location `EvalSymlinks(base)/<workspaceID>` exactly. Strict equality
+// (rather than a prefix check) refuses two distinct misconfigurations:
+//
+//   - `<base>/acme` -> `/etc` (symlink outside the deployment root)
+//   - `<base>/acme` -> `<base>/globex` (symlink into a sibling
+//     workspace's subtree — still under the deployment root, but
+//     would let workspace A serve paths inside workspace B's tree)
+//
+// The mkdir-then-validate pattern closes the symlink race the codex
+// review flagged: if the directory is missing at startup, an
+// attacker could otherwise create it as a symlink before the first
+// clone/open and gitpool would resolve its `repoBase` to the
+// symlink's target. By creating the directory ourselves we own it,
+// and the subsequent EvalSymlinks check fails closed if it isn't a
+// real subdirectory of the deployment base.
+//
+// Returns an error so the workspace pool refuses to initialize rather
+// than silently widen the boundary.
+func perWorkspaceCodeRepoBase(base, workspaceID string) (string, error) {
+	if base == "" {
+		return "", nil
+	}
+	// Validate before joining: a traversal-shaped ID like ".." would
+	// otherwise let filepath.Join normalize both `narrowed` and the
+	// later `expected` value to the parent of base, silently bypassing
+	// containment. ValidateID is the same allowlist every workspace-ID
+	// entry point uses (see internal/workspace/validate.go).
+	if err := ValidateID(workspaceID); err != nil {
+		return "", fmt.Errorf("invalid workspace ID for code-repo containment: %w", err)
+	}
+	narrowed := filepath.Join(base, workspaceID)
+	info, statErr := os.Stat(narrowed)
+	switch {
+	case statErr == nil:
+		// Reject a regular file masquerading as the workspace base.
+		// EvalSymlinks below would still succeed and the helper would
+		// hand gitpool a path that fails ENOTDIR on every clone, so
+		// fail fast with a clear startup error instead.
+		if !info.IsDir() {
+			return "", fmt.Errorf("workspace code-repo subdirectory %q exists but is not a directory (mode %v)",
+				narrowed, info.Mode())
+		}
+	case os.IsNotExist(statErr):
+		// os.Mkdir (not MkdirAll) so we fail fast if the deployment
+		// base is missing — operators must own the configured base
+		// directory; auto-creating the entire chain would silently
+		// land a tree at an unintended location.
+		if err := os.Mkdir(narrowed, 0o700); err != nil {
+			return "", fmt.Errorf("create workspace code-repo subdirectory %q: %w", narrowed, err)
+		}
+	default:
+		return "", fmt.Errorf("stat workspace code-repo subdirectory %q: %w", narrowed, statErr)
+	}
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve deployment code-repo base %q: %w", base, err)
+	}
+	resolvedNarrowed, err := filepath.EvalSymlinks(narrowed)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace code-repo subdirectory %q: %w", narrowed, err)
+	}
+	expected := filepath.Join(resolvedBase, workspaceID)
+	if resolvedNarrowed != expected {
+		return "", fmt.Errorf("workspace code-repo subdirectory %q resolves to %q but must resolve to %q (its own subtree under deployment base %q resolved as %q); refusing to widen the containment boundary",
+			narrowed, resolvedNarrowed, expected, base, resolvedBase)
+	}
+	return narrowed, nil
+}
+
+func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, secretClient secrets.SecretClient, dbPolicy PoolPolicy, codeRepoBase string) (*ServiceSet, error) {
 	// Each closer accepts the reason the service set is being torn
 	// down so the workspace pool can record the per-reason
 	// close-counter (ADR-012). Closers that don't care about the
 	// reason simply ignore it.
 	var closers []func(reason string)
+
+	// Derive the per-workspace code-repo containment base BEFORE
+	// opening any database pool. perWorkspaceCodeRepoBase may
+	// fail closed (invalid workspace ID, non-directory, symlink
+	// outside the deployment root), and surfacing that failure here
+	// avoids leaking a pgx pool that NewWorkspaceDBPool would have
+	// otherwise opened in the block below.
+	wsCodeRepoBase, err := perWorkspaceCodeRepoBase(codeRepoBase, cfg.ID)
+	if err != nil {
+		return nil, fmt.Errorf("derive per-workspace code-repo base: %w", err)
+	}
 
 	// Database. Reveal the workspace credential only at this
 	// boundary; the pgxpool driver is the legitimate consumer of the
@@ -661,9 +782,23 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// empty Credential for repos with no CredentialsRef, so the
 	// public-repo path stays free of secret-store round-trips even
 	// when secretClient is nil.
+	// WithRepoBase enforces that every code-repo binding's LocalPath
+	// resolves under the workspace's containment subtree before the
+	// pool will clone or open it. Empty disables the check; production
+	// deployments pin SPINE_CODE_REPO_BASE.
+	//
+	// In shared multi-workspace mode the configured base is the
+	// PARENT of per-workspace trees: each ServiceSet lives under
+	// `<base>/<workspace_id>` so workspace A's pool cannot clone a
+	// binding whose LocalPath points inside workspace B's subtree.
+	// Without this per-workspace narrowing, a single shared base
+	// would only prove containment "under the common parent" — A's
+	// `/git/{workspace}/{repo}` endpoint could end up serving a path
+	// inside B's tree because validateRepoBase would still accept it.
 	gitPool, err := gitpool.New(gitClient, registry,
 		gitpool.NewCLIClientFactory(gitOpts...),
 		gitpool.WithCloner(gitpool.NewCLICloner(gitOpts...)),
+		gitpool.WithRepoBase(wsCodeRepoBase),
 		gitpool.WithCredentialResolver(&gitpool.SecretCredentialResolver{
 			Client: secretClient,
 		}),

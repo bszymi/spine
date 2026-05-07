@@ -211,6 +211,58 @@ func TestLoadSecretCipher_RejectsMalformedKey(t *testing.T) {
 	}
 }
 
+func TestLoadCodeRepoBase_ProductionRequiresValue(t *testing.T) {
+	t.Setenv("SPINE_CODE_REPO_BASE", "")
+	if _, err := loadCodeRepoBase("production"); err == nil {
+		t.Fatal("expected error in production without code repo base")
+	}
+}
+
+func TestLoadCodeRepoBase_DevAllowsMissing(t *testing.T) {
+	t.Setenv("SPINE_CODE_REPO_BASE", "")
+	got, err := loadCodeRepoBase("development")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("expected empty base in dev, got %q", got)
+	}
+}
+
+func TestLoadCodeRepoBase_RejectsRelativeInProduction(t *testing.T) {
+	// Relative paths would silently anchor the containment root to the
+	// process working directory — a deployment that "works" can shift
+	// to validating a different set of local_paths after a
+	// WorkingDirectory change. Refuse at startup rather than absorb
+	// the value via filepath.Abs.
+	t.Setenv("SPINE_CODE_REPO_BASE", "repos")
+	if _, err := loadCodeRepoBase("production"); err == nil {
+		t.Fatal("expected error for relative SPINE_CODE_REPO_BASE in production")
+	}
+}
+
+func TestLoadCodeRepoBase_RejectsRelativeInDev(t *testing.T) {
+	// Same rejection in dev — the contract is "absolute or empty",
+	// independent of environment, so a config that promotes to
+	// production cannot suddenly start refusing values it accepted in
+	// staging.
+	t.Setenv("SPINE_CODE_REPO_BASE", "./repos")
+	if _, err := loadCodeRepoBase("development"); err == nil {
+		t.Fatal("expected error for relative SPINE_CODE_REPO_BASE in dev")
+	}
+}
+
+func TestLoadCodeRepoBase_AcceptsAbsoluteAndCleans(t *testing.T) {
+	t.Setenv("SPINE_CODE_REPO_BASE", "/var/spine/repos/.")
+	got, err := loadCodeRepoBase("production")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/var/spine/repos" {
+		t.Fatalf("expected cleaned absolute path, got %q", got)
+	}
+}
+
 func TestLoadSecretCipher_RejectsShortKey(t *testing.T) {
 	short := base64.StdEncoding.EncodeToString(make([]byte, 16))
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", short)

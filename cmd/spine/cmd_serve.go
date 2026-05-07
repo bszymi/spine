@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -568,6 +569,33 @@ func validateOperatorToken(token string) error {
 	return nil
 }
 
+// loadCodeRepoBase reads SPINE_CODE_REPO_BASE and returns the absolute
+// directory under which every code-repo binding's LocalPath must
+// resolve. Required when SPINE_ENV=production — a production deployment
+// without an explicit base could let an Operator land
+// `local_path=/etc` in a binding and serve arbitrary host directories
+// through git-http-backend. Empty in non-production disables the
+// containment check (dev / single-workspace setups).
+func loadCodeRepoBase(env string) (string, error) {
+	v := strings.TrimSpace(os.Getenv("SPINE_CODE_REPO_BASE"))
+	if v == "" {
+		if env == "production" {
+			return "", fmt.Errorf("SPINE_CODE_REPO_BASE is required when SPINE_ENV=production; set it to the absolute directory under which every code-repo binding's local_path must resolve (e.g. /var/spine/code-repos)")
+		}
+		return "", nil
+	}
+	// Reject relative paths explicitly. filepath.Abs would silently
+	// anchor "repos" to the process CWD, making the containment root
+	// depend on how the service was launched — a deployment config
+	// that "works" can validate a different set of local_path values
+	// after a WorkingDirectory change. The error text and runbook
+	// promise an explicit absolute root; enforce it here.
+	if !filepath.IsAbs(v) {
+		return "", fmt.Errorf("SPINE_CODE_REPO_BASE %q must be an absolute path; relative values would anchor the containment root to the process working directory", v)
+	}
+	return filepath.Clean(v), nil
+}
+
 // loadSecretCipher builds the at-rest secret cipher from
 // SPINE_SECRET_ENCRYPTION_KEY. In production the key is required.
 func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
@@ -589,8 +617,21 @@ func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
 // a gateway.ServerConfig. serveCmd reads env and constructs these; the
 // serve-startup smoke test builds them in-memory.
 type serveDeps struct {
-	Store         store.Store
-	RepoPath      string
+	Store    store.Store
+	RepoPath string
+	// CodeRepoBase is the absolute filesystem directory under which
+	// every code-repo binding's LocalPath must resolve. Sourced from
+	// SPINE_CODE_REPO_BASE; required when SPINE_ENV=production, optional
+	// otherwise. The deployment-wide PARENT of all per-workspace
+	// trees; cmd/spine narrows this to `<base>/<WorkspaceID>` per
+	// pool before passing to gitpool.WithRepoBase so the file-mode
+	// top-level pool and shared-mode per-workspace pools enforce the
+	// same per-workspace boundary.
+	CodeRepoBase string
+	// WorkspaceID is the file-mode runtime workspace identifier
+	// (SPINE_WORKSPACE_ID or "default"). Used to narrow the top-level
+	// gitpool's CodeRepoBase to the file-mode workspace's subtree.
+	WorkspaceID   string
 	SpineCfg      *config.SpineConfig
 	GitClient     *git.CLIClient
 	Queue         *queue.MemoryQueue
@@ -689,9 +730,29 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if deps.SMPWorkspaceID != "" {
 		codeRepoOpts = append(codeRepoOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+deps.SMPWorkspaceID))
 	}
+	// WithRepoBase pins the code-repo containment check to this
+	// pool's per-workspace subtree (`<deps.CodeRepoBase>/<deps.WorkspaceID>`).
+	// In file (single-workspace) mode this top-level pool is the one
+	// routing code-repo Git operations, so per-workspace narrowing is
+	// applied here. In shared mode (deps.WSServicePool != nil) code-repo
+	// routes go through each workspace's ServiceSet.GitPool which
+	// applies its own narrowing in buildServiceSet — narrowing here too
+	// would create an unused `<base>/<runtime-ws>` (typically
+	// `<base>/default`) and could fail startup against a deployment
+	// root that's only writable per-tenant. Skip the narrowing when a
+	// service pool will serve code repos.
+	wsCodeRepoBase := ""
+	if deps.WSServicePool == nil {
+		var derr error
+		wsCodeRepoBase, derr = workspace.PerWorkspaceCodeRepoBase(deps.CodeRepoBase, deps.WorkspaceID)
+		if derr != nil {
+			return nil, fmt.Errorf("derive top-level code-repo base for workspace %q: %w", deps.WorkspaceID, derr)
+		}
+	}
 	gitPool, err := gitpool.New(deps.GitClient, repoRegistry,
 		gitpool.NewCLIClientFactory(codeRepoOpts...),
 		gitpool.WithCloner(gitpool.NewCLICloner(codeRepoOpts...)),
+		gitpool.WithRepoBase(wsCodeRepoBase),
 		gitpool.WithCredentialResolver(&gitpool.SecretCredentialResolver{
 			Client: deps.SecretClient,
 		}),
@@ -761,16 +822,12 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// URLs that fail with workspace-not-found.
 	if orch != nil {
 		base := os.Getenv("SPINE_RUNNER_GIT_BASE_URL")
-		runtimeWS := os.Getenv("SPINE_WORKSPACE_ID")
-		if runtimeWS == "" {
-			runtimeWS = "default"
-		}
 		if base != "" {
-			if b := buildWorkspaceCloneURLBuilder(base, runtimeWS); b != nil {
+			if b := buildWorkspaceCloneURLBuilder(base, deps.WorkspaceID); b != nil {
 				orch.WithCloneURLBuilder(b)
 			}
 		}
-		orch.WithWorkspaceID(runtimeWS)
+		orch.WithWorkspaceID(deps.WorkspaceID)
 	}
 
 	var sched *scheduler.Scheduler
@@ -1218,6 +1275,16 @@ func serveCmd() *cobra.Command {
 				log.Warn("SPINE_SECRET_ENCRYPTION_KEY is not set — webhook signing secrets will be stored in plaintext", "env", runtimeEnv)
 			}
 
+			codeRepoBase, err := loadCodeRepoBase(runtimeEnv)
+			if err != nil {
+				return err
+			}
+			if codeRepoBase == "" {
+				log.Warn("SPINE_CODE_REPO_BASE is not set — code-repo binding local paths are not containment-checked", "env", runtimeEnv)
+			} else {
+				log.Info("code-repo containment base configured", "code_repo_base", codeRepoBase)
+			}
+
 			port := os.Getenv("SPINE_SERVER_PORT")
 			if port == "" {
 				port = "8080"
@@ -1225,7 +1292,7 @@ func serveCmd() *cobra.Command {
 
 			deliveryCfg := loadWorkspaceDeliveryConfig()
 
-			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log, deliveryCfg)
+			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log, deliveryCfg, codeRepoBase)
 			if err != nil {
 				return err
 			}
@@ -1301,9 +1368,16 @@ func serveCmd() *cobra.Command {
 				}
 			}
 
+			runtimeWS := os.Getenv("SPINE_WORKSPACE_ID")
+			if runtimeWS == "" {
+				runtimeWS = "default"
+			}
+
 			deps := serveDeps{
 				Store:                      st,
 				RepoPath:                   repoPath,
+				CodeRepoBase:               codeRepoBase,
+				WorkspaceID:                runtimeWS,
 				SpineCfg:                   spineCfg,
 				GitClient:                  gitClient,
 				Queue:                      q,
@@ -1417,6 +1491,7 @@ func buildWorkspaceResolver(
 	secretCipher *spinecrypto.SecretCipher,
 	log *slog.Logger,
 	deliveryCfg workspaceDeliveryConfig,
+	codeRepoBase string,
 ) (*resolverWiring, error) {
 	resolver := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER")))
 	legacyMode := os.Getenv("SPINE_WORKSPACE_MODE")
@@ -1477,6 +1552,7 @@ func buildWorkspaceResolver(
 			SecretClient: dbSecretClient,
 			DBPolicy:     dbPolicyFromEnv(),
 			IdleTimeout:  poolIdleTimeoutFromEnv(),
+			CodeRepoBase: codeRepoBase,
 		})
 		log.Info("workspace resolver: db", "registry_url", "***")
 		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool, SecretClient: dbSecretClient}, nil
@@ -1513,6 +1589,7 @@ func buildWorkspaceResolver(
 			SecretClient: secretClient,
 			DBPolicy:     dbPolicyFromEnv(),
 			IdleTimeout:  poolIdleTimeoutFromEnv(),
+			CodeRepoBase: codeRepoBase,
 		})
 		invalidator := &workspace.CombinedBindingInvalidator{
 			Provider: provider,

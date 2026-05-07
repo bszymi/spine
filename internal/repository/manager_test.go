@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -89,7 +90,7 @@ func newTestManager(t *testing.T, runs repository.RunReferenceChecker, bs ...sto
 	t.Helper()
 	cat := repository.NewInMemoryCatalogStore(primarySpec())
 	bindings := newFakeManagerStore(bs...)
-	mgr := repository.NewManager(testWorkspaceID, primarySpec(), cat, bindings, runs)
+	mgr := repository.NewManager(testWorkspaceID, primarySpec(), cat, bindings, runs, "")
 	return mgr, cat, bindings
 }
 
@@ -460,5 +461,179 @@ func TestManagerGetReturnsInactiveForAdminViews(t *testing.T) {
 	}
 	if got.Status != store.RepositoryBindingStatusInactive {
 		t.Errorf("expected inactive status surfaced by Get, got %q", got.Status)
+	}
+}
+
+// newManagerWithBase builds a Manager bound to the given codeRepoBase.
+// Used by the LocalPath containment tests so each scenario runs with a
+// fresh fake store.
+func newManagerWithBase(t *testing.T, codeRepoBase string) (*repository.Manager, *fakeManagerStore) {
+	t.Helper()
+	cat := repository.NewInMemoryCatalogStore(primarySpec())
+	bindings := newFakeManagerStore()
+	mgr := repository.NewManager(testWorkspaceID, primarySpec(), cat, bindings, nil, codeRepoBase)
+	return mgr, bindings
+}
+
+// TestManagerRegisterRejectsLocalPathOutsideCodeRepoBase verifies the
+// containment guard rejects every recognized escape pattern with
+// ErrInvalidParams and leaves the binding store untouched. Mirrors
+// the P1 attack scenario: an Operator posting `local_path=/etc` (or
+// `<base>/../etc`) must not land a binding row that would later make
+// git-http-backend serve the host's /etc.
+func TestManagerRegisterRejectsLocalPathOutsideCodeRepoBase(t *testing.T) {
+	base := t.TempDir()
+	cases := map[string]string{
+		"absolute outside":         "/etc",
+		"parent traversal":         filepath.Join(base, "..", "etc"),
+		"sibling base":             base + "-other/repo",
+		"base itself (not subdir)": base,
+		"empty":                    "",
+		"whitespace only":          "   ",
+	}
+	for name, localPath := range cases {
+		t.Run(name, func(t *testing.T) {
+			mgr, bindings := newManagerWithBase(t, base)
+			_, err := mgr.Register(context.Background(), repository.RegisterRequest{
+				ID:            "payments-service",
+				Name:          "P",
+				DefaultBranch: "main",
+				CloneURL:      "https://example.com/p.git",
+				LocalPath:     localPath,
+			})
+			if err == nil {
+				t.Fatalf("expected ErrInvalidParams for local_path=%q", localPath)
+			}
+			var spineErr *domain.SpineError
+			if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrInvalidParams {
+				t.Errorf("expected ErrInvalidParams, got %v", err)
+			}
+			if len(bindings.bindings) != 0 {
+				t.Errorf("binding row should not be created on validation failure, got %d", len(bindings.bindings))
+			}
+		})
+	}
+}
+
+// TestManagerRegisterAcceptsLocalPathUnderCodeRepoBase confirms the
+// happy path: a LocalPath under the configured base goes through.
+// Both the cleaned-only form and the unclean form (with a redundant
+// "/./") are accepted because filepath.Clean normalizes them
+// identically.
+func TestManagerRegisterAcceptsLocalPathUnderCodeRepoBase(t *testing.T) {
+	base := t.TempDir()
+	cases := map[string]string{
+		"direct subdir":       filepath.Join(base, "payments"),
+		"nested subdir":       filepath.Join(base, "team-a", "payments"),
+		"redundant separator": filepath.Join(base, ".", "payments"),
+	}
+	for name, localPath := range cases {
+		t.Run(name, func(t *testing.T) {
+			mgr, _ := newManagerWithBase(t, base)
+			req := repository.RegisterRequest{
+				ID:            "payments-service",
+				Name:          "P",
+				DefaultBranch: "main",
+				CloneURL:      "https://example.com/p.git",
+				LocalPath:     localPath,
+			}
+			if _, err := mgr.Register(context.Background(), req); err != nil {
+				t.Errorf("expected accept for local_path=%q under base=%q, got %v",
+					localPath, base, err)
+			}
+		})
+	}
+}
+
+// TestManagerUpdateRejectsLocalPathOutsideCodeRepoBase confirms the
+// guard runs on Update too — an Operator cannot register a valid
+// LocalPath then PATCH it to point outside the base.
+func TestManagerUpdateRejectsLocalPathOutsideCodeRepoBase(t *testing.T) {
+	base := t.TempDir()
+	mgr, bindings := newManagerWithBase(t, base)
+	original := filepath.Join(base, "payments")
+	if _, err := mgr.Register(context.Background(), repository.RegisterRequest{
+		ID:            "payments-service",
+		Name:          "P",
+		DefaultBranch: "main",
+		CloneURL:      "https://example.com/p.git",
+		LocalPath:     original,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	bad := "/etc"
+	_, err := mgr.Update(context.Background(), "payments-service", repository.UpdateRequest{
+		LocalPath: &bad,
+	})
+	if err == nil {
+		t.Fatalf("expected ErrInvalidParams when patching local_path to %q", bad)
+	}
+	var spineErr *domain.SpineError
+	if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrInvalidParams {
+		t.Errorf("expected ErrInvalidParams, got %v", err)
+	}
+	if got := bindings.bindings["payments-service"].LocalPath; got != original {
+		t.Errorf("binding LocalPath should be unchanged after rejected update, got %q", got)
+	}
+}
+
+// TestManagerRegisterRejectsRelativeLocalPathWhenBaseConfigured
+// confirms a relative local_path is refused when a base is wired.
+// Without this check, filepath.Abs would silently anchor "repo-a" to
+// the current process CWD: validation would pass against the
+// CWD-relative path, but the binding row would persist the unresolved
+// relative string. After a restart with a different CWD the gitpool
+// re-resolves the same binding against a different directory, so an
+// accepted binding could clone the wrong repo (or fail on a path that
+// previously worked). Reject up front so the persisted string is
+// always the one validation saw.
+func TestManagerRegisterRejectsRelativeLocalPathWhenBaseConfigured(t *testing.T) {
+	base := t.TempDir()
+	cases := map[string]string{
+		"bare relative":   "repo-a",
+		"dot-prefixed":    "./repo-a",
+		"nested relative": "team-a/repo-a",
+		"parent relative": "../sibling/repo",
+	}
+	for name, localPath := range cases {
+		t.Run(name, func(t *testing.T) {
+			mgr, bindings := newManagerWithBase(t, base)
+			_, err := mgr.Register(context.Background(), repository.RegisterRequest{
+				ID:            "payments-service",
+				Name:          "P",
+				DefaultBranch: "main",
+				CloneURL:      "https://example.com/p.git",
+				LocalPath:     localPath,
+			})
+			if err == nil {
+				t.Fatalf("expected ErrInvalidParams for relative local_path=%q", localPath)
+			}
+			var spineErr *domain.SpineError
+			if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrInvalidParams {
+				t.Errorf("expected ErrInvalidParams, got %v", err)
+			}
+			if len(bindings.bindings) != 0 {
+				t.Errorf("binding row should not be created on validation failure, got %d", len(bindings.bindings))
+			}
+		})
+	}
+}
+
+// TestManagerEmptyCodeRepoBaseSkipsContainmentCheck confirms the
+// dev/test escape hatch: when no base is configured (the existing
+// newTestManager construction), any non-empty LocalPath is accepted —
+// matches gitpool.WithRepoBase semantics so the existing fixture-style
+// tests with paths like "/r/payments" keep working without changes.
+func TestManagerEmptyCodeRepoBaseSkipsContainmentCheck(t *testing.T) {
+	mgr, _ := newManagerWithBase(t, "")
+	_, err := mgr.Register(context.Background(), repository.RegisterRequest{
+		ID:            "payments-service",
+		Name:          "P",
+		DefaultBranch: "main",
+		CloneURL:      "https://example.com/p.git",
+		LocalPath:     "/anywhere/works",
+	})
+	if err != nil {
+		t.Errorf("expected accept when codeRepoBase is empty, got %v", err)
 	}
 }

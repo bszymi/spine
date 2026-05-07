@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/bszymi/spine/internal/domain"
@@ -79,26 +80,37 @@ type UpdateRequest struct {
 // stay consistent (per ADR-013 / multi-repository-integration.md
 // §6.1).
 type Manager struct {
-	workspaceID string
-	primary     PrimarySpec
-	catalog     CatalogStore
-	bindings    ManagerStore
-	runs        RunReferenceChecker
+	workspaceID  string
+	primary      PrimarySpec
+	catalog      CatalogStore
+	bindings     ManagerStore
+	runs         RunReferenceChecker
+	codeRepoBase string
 }
 
 // NewManager constructs a Manager. runs may be nil to use the no-op
 // reference checker (deactivation will not block on active runs
 // until per-run repository metadata exists).
-func NewManager(workspaceID string, primary PrimarySpec, catalog CatalogStore, bindings ManagerStore, runs RunReferenceChecker) *Manager {
+//
+// codeRepoBase is the absolute filesystem directory under which every
+// code-repo binding's LocalPath must resolve. Empty disables the
+// containment check (dev / single-workspace setups that don't isolate
+// code repos to a dedicated tree). When non-empty, Register/Update
+// reject a LocalPath that escapes the base with domain.ErrInvalidParams.
+// Defense-in-depth: the gitpool layer applies the same check (with
+// symlink resolution) before any clone or open, so a binding row that
+// somehow bypassed this gate still cannot escape at runtime.
+func NewManager(workspaceID string, primary PrimarySpec, catalog CatalogStore, bindings ManagerStore, runs RunReferenceChecker, codeRepoBase string) *Manager {
 	if runs == nil {
 		runs = NopRunReferenceChecker{}
 	}
 	return &Manager{
-		workspaceID: workspaceID,
-		primary:     primary,
-		catalog:     catalog,
-		bindings:    bindings,
-		runs:        runs,
+		workspaceID:  workspaceID,
+		primary:      primary,
+		catalog:      catalog,
+		bindings:     bindings,
+		runs:         runs,
+		codeRepoBase: codeRepoBase,
 	}
 }
 
@@ -120,8 +132,8 @@ func (m *Manager) Register(ctx context.Context, req RegisterRequest) (*Repositor
 	if strings.TrimSpace(req.DefaultBranch) == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "default_branch is required")
 	}
-	if strings.TrimSpace(req.LocalPath) == "" {
-		return nil, domain.NewError(domain.ErrInvalidParams, "local_path is required")
+	if err := m.validateLocalPath(req.LocalPath); err != nil {
+		return nil, err
 	}
 	if err := ValidateCloneURL(req.CloneURL); err != nil {
 		return nil, err
@@ -198,8 +210,10 @@ func (m *Manager) Update(ctx context.Context, id string, req UpdateRequest) (*Re
 	if req.DefaultBranch != nil && strings.TrimSpace(*req.DefaultBranch) == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "default_branch cannot be blank")
 	}
-	if req.LocalPath != nil && strings.TrimSpace(*req.LocalPath) == "" {
-		return nil, domain.NewError(domain.ErrInvalidParams, "local_path cannot be blank")
+	if req.LocalPath != nil {
+		if err := m.validateLocalPath(*req.LocalPath); err != nil {
+			return nil, err
+		}
 	}
 	if req.CloneURL != nil {
 		if err := ValidateCloneURL(*req.CloneURL); err != nil {
@@ -414,6 +428,43 @@ func primaryFromCatalog(cat *Catalog, workspaceID string, primary PrimarySpec) *
 		LocalPath:     primary.LocalPath,
 		Status:        store.RepositoryBindingStatusActive,
 	}
+}
+
+// validateLocalPath enforces that an operator-supplied LocalPath is
+// non-empty and (when CodeRepoBase is configured) is an absolute path
+// that resolves under the workspace's code-repo base. The base is
+// expected to be absolute (cmd/spine.loadCodeRepoBase rejects relative
+// values at startup); the LocalPath is required to be absolute too so
+// the binding row stores a stable string the gitpool can re-resolve
+// after a restart without depending on the process working directory.
+//
+// Symlink resolution is intentionally deferred to the gitpool layer so
+// this runs without filesystem I/O at request time; the second-line
+// check at clone/open time picks up any symlinked component a
+// malicious binding might reference.
+func (m *Manager) validateLocalPath(localPath string) error {
+	if strings.TrimSpace(localPath) == "" {
+		return domain.NewError(domain.ErrInvalidParams, "local_path is required")
+	}
+	if m.codeRepoBase == "" {
+		return nil
+	}
+	if !filepath.IsAbs(localPath) {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("local_path %q must be an absolute path", localPath))
+	}
+	cleanBase := filepath.Clean(m.codeRepoBase)
+	cleanLocal := filepath.Clean(localPath)
+	if cleanLocal == cleanBase {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("local_path %q must be a subdirectory of the workspace code-repo base", localPath))
+	}
+	prefix := cleanBase + string(filepath.Separator)
+	if !strings.HasPrefix(cleanLocal, prefix) {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("local_path %q is outside the workspace code-repo base", localPath))
+	}
+	return nil
 }
 
 func validateID(id string) error {

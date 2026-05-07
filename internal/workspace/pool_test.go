@@ -3,6 +3,8 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -237,7 +239,7 @@ func TestBuildServiceSet_NoStore_NilValidatorAndDivergence(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{ID: "ws-nostore", RepoPath: "."}
 
-	ss, err := buildServiceSet(ctx, cfg, nil, nil, nil, PoolPolicy{})
+	ss, err := buildServiceSet(ctx, cfg, nil, nil, nil, PoolPolicy{}, "")
 	if err != nil {
 		t.Fatalf("buildServiceSet: %v", err)
 	}
@@ -263,6 +265,190 @@ func TestBuildServiceSet_NoStore_NilValidatorAndDivergence(t *testing.T) {
 	}
 	if ss.GitPool != nil && ss.GitPool.PrimaryClient() == nil {
 		t.Error("GitPool.PrimaryClient must return a usable client")
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_EmptyBaseDisables confirms an empty
+// deployment base returns "" regardless of workspace ID — dev /
+// single-workspace setups without containment keep working.
+func TestPerWorkspaceCodeRepoBase_EmptyBaseDisables(t *testing.T) {
+	got, err := perWorkspaceCodeRepoBase("", "acme")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("expected empty result, got %q", got)
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_NarrowsToWorkspaceSubtree confirms two
+// workspace IDs under the same deployment base produce different
+// narrowed paths. This is the per-workspace isolation invariant
+// codex pass 3 flagged: workspace A and B share the same configured
+// root but their pools must enforce different boundaries.
+func TestPerWorkspaceCodeRepoBase_NarrowsToWorkspaceSubtree(t *testing.T) {
+	deployment := t.TempDir()
+	gotA, err := perWorkspaceCodeRepoBase(deployment, "acme")
+	if err != nil {
+		t.Fatalf("acme: %v", err)
+	}
+	gotB, err := perWorkspaceCodeRepoBase(deployment, "globex")
+	if err != nil {
+		t.Fatalf("globex: %v", err)
+	}
+	if gotA == gotB {
+		t.Fatalf("expected distinct narrowed paths, both = %q", gotA)
+	}
+	if gotA != filepath.Join(deployment, "acme") {
+		t.Fatalf("acme narrowed = %q, want %q", gotA, filepath.Join(deployment, "acme"))
+	}
+	if gotB != filepath.Join(deployment, "globex") {
+		t.Fatalf("globex narrowed = %q, want %q", gotB, filepath.Join(deployment, "globex"))
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_RejectsRegularFile is the regression
+// bait for codex pass 8: if `<base>/<workspaceID>` already exists as
+// a regular file, EvalSymlinks would still succeed and the helper
+// would silently accept it as the workspace base — every later
+// clone/open would then fail with ENOTDIR. Fail fast at startup
+// instead so the operator sees a clear "not a directory" error.
+func TestPerWorkspaceCodeRepoBase_RejectsRegularFile(t *testing.T) {
+	deployment := t.TempDir()
+	regular := filepath.Join(deployment, "acme")
+	if err := os.WriteFile(regular, []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if _, err := perWorkspaceCodeRepoBase(deployment, "acme"); err == nil {
+		t.Fatal("expected error when workspace base path is a regular file")
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_RejectsTraversalShapedID is the
+// regression bait for codex pass 7: a workspace ID like ".." would
+// otherwise let filepath.Join normalize both the narrowed path and
+// the expected check to the parent of the deployment base — escape
+// achieved without tripping the EvalSymlinks compare. Validate the
+// workspace ID through the package-wide allowlist before any join.
+func TestPerWorkspaceCodeRepoBase_RejectsTraversalShapedID(t *testing.T) {
+	deployment := t.TempDir()
+	cases := []string{"", "..", "../sibling", ".", "/abs", "ws..bad", "ws/with/slash"}
+	for _, id := range cases {
+		t.Run(id, func(t *testing.T) {
+			if _, err := perWorkspaceCodeRepoBase(deployment, id); err == nil {
+				t.Fatalf("expected error for invalid workspace ID %q", id)
+			}
+		})
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_RejectsSymlinkedSubdirEscape is the
+// regression bait for codex pass 4: when the workspace's subdirectory
+// is itself a symlink that points outside the deployment root (e.g.
+// `<base>/acme -> /etc`), the gitpool's EvalSymlinks-based
+// validateRepoBase would otherwise accept LocalPaths inside the
+// symlink's target — losing the deployment-root invariant. Refuse the
+// workspace pool init outright in that case.
+func TestPerWorkspaceCodeRepoBase_RejectsSymlinkedSubdirEscape(t *testing.T) {
+	root := t.TempDir()
+	deployment := filepath.Join(root, "deployment")
+	if err := os.Mkdir(deployment, 0o700); err != nil {
+		t.Fatalf("mkdir deployment: %v", err)
+	}
+	// Place the symlink target outside the deployment root so a join
+	// of `<deployment>/acme` resolves to `<elsewhere>` after EvalSymlinks.
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o700); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	link := filepath.Join(deployment, "acme")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	_, err := perWorkspaceCodeRepoBase(deployment, "acme")
+	if err == nil {
+		t.Fatal("expected error when workspace subdir resolves outside deployment root")
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_RejectsSymlinkedSiblingTree is the
+// regression bait for codex pass 5: even when `<base>/acme` is a
+// symlink pointing at another workspace's subtree (still under the
+// deployment root, e.g. `<base>/acme -> <base>/globex`), pool init
+// must refuse. A prefix-check against the deployment root would let
+// this pass and allow workspace A's pool to validate and serve paths
+// inside workspace B's tree. The strict-equality match against
+// `EvalSymlinks(base)/<workspaceID>` catches this.
+func TestPerWorkspaceCodeRepoBase_RejectsSymlinkedSiblingTree(t *testing.T) {
+	deployment := t.TempDir()
+	globex := filepath.Join(deployment, "globex")
+	if err := os.Mkdir(globex, 0o700); err != nil {
+		t.Fatalf("mkdir globex: %v", err)
+	}
+	acme := filepath.Join(deployment, "acme")
+	if err := os.Symlink(globex, acme); err != nil {
+		t.Fatalf("symlink acme -> globex: %v", err)
+	}
+	_, err := perWorkspaceCodeRepoBase(deployment, "acme")
+	if err == nil {
+		t.Fatal("expected error when workspace subdir symlinks into a sibling tree")
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_AcceptsRealSubdir confirms the static
+// check does NOT block the legitimate case (real subdirectory under
+// the deployment root, both present at startup).
+func TestPerWorkspaceCodeRepoBase_AcceptsRealSubdir(t *testing.T) {
+	deployment := t.TempDir()
+	if err := os.Mkdir(filepath.Join(deployment, "acme"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	got, err := perWorkspaceCodeRepoBase(deployment, "acme")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != filepath.Join(deployment, "acme") {
+		t.Fatalf("unexpected result %q", got)
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_CreatesMissingWorkspaceSubdir covers
+// the typical fresh-deployment case: the workspace subdir doesn't
+// exist yet at startup. The helper creates it (MkdirAll 0700) so we
+// own a real directory and the subsequent EvalSymlinks check passes.
+// This closes the symlink race that codex pass 6 flagged: if the
+// directory were left absent, an attacker could create it later as a
+// symlink to widen gitpool's boundary at first clone.
+func TestPerWorkspaceCodeRepoBase_CreatesMissingWorkspaceSubdir(t *testing.T) {
+	deployment := t.TempDir()
+	narrowed := filepath.Join(deployment, "acme")
+	got, err := perWorkspaceCodeRepoBase(deployment, "acme")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != narrowed {
+		t.Fatalf("unexpected result %q", got)
+	}
+	info, err := os.Lstat(narrowed)
+	if err != nil {
+		t.Fatalf("workspace subdir was not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected real directory, got mode %v", info.Mode())
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("expected real directory, got symlink — would defeat the containment guarantee")
+	}
+}
+
+// TestPerWorkspaceCodeRepoBase_FailsWhenDeploymentBaseAbsent confirms
+// we surface a clear startup error when the operator has misconfigured
+// SPINE_CODE_REPO_BASE to a path that doesn't exist at all. Better to
+// fail fast than to silently create a tree at an unintended location.
+func TestPerWorkspaceCodeRepoBase_FailsWhenDeploymentBaseAbsent(t *testing.T) {
+	deployment := filepath.Join(t.TempDir(), "missing", "deployment")
+	if _, err := perWorkspaceCodeRepoBase(deployment, "acme"); err == nil {
+		t.Fatal("expected error when deployment base is absent")
 	}
 }
 
@@ -1110,7 +1296,7 @@ func TestServiceSet_Done_ClosedOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	ss, err := buildServiceSet(ctx, *cfg, nil, nil, nil, PoolPolicy{})
+	ss, err := buildServiceSet(ctx, *cfg, nil, nil, nil, PoolPolicy{}, "")
 	if err != nil {
 		t.Fatalf("buildServiceSet: %v", err)
 	}
@@ -1134,4 +1320,3 @@ func TestServiceSet_Done_ClosedOnClose(t *testing.T) {
 		t.Fatal("ss.Done should be closed after close() runs")
 	}
 }
-

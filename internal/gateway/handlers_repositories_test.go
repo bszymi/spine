@@ -128,7 +128,7 @@ func setupRepoServer(t *testing.T, runs repository.RunReferenceChecker) (*httpte
 	}
 	cat := repository.NewInMemoryCatalogStore(primary)
 	bindings := newRepoBindingsFake()
-	mgr := repository.NewManager("acme", primary, cat, bindings, runs)
+	mgr := repository.NewManager("acme", primary, cat, bindings, runs, "")
 
 	srv := gateway.NewServer(":0", gateway.ServerConfig{
 		Store: st, Auth: authSvc, RepositoryManager: mgr,
@@ -360,7 +360,7 @@ func TestRepositoryRefusedInSharedMode(t *testing.T) {
 	}
 	primary := repository.PrimarySpec{Name: "Acme Spine", DefaultBranch: "main", LocalPath: "/r/spine"}
 	cat := repository.NewInMemoryCatalogStore(primary)
-	mgr := repository.NewManager("acme", primary, cat, newRepoBindingsFake(), nil)
+	mgr := repository.NewManager("acme", primary, cat, newRepoBindingsFake(), nil, "")
 
 	// Configure WorkspaceResolver — that flips the gateway into
 	// shared multi-workspace mode. The single process-level manager
