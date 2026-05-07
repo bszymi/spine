@@ -3,8 +3,18 @@ package git
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
+
+// schemeURLPrefix matches the "scheme://" head of an absolute URL per
+// RFC 3986. The capture group is the scheme. It is used by
+// ValidateCloneURL to decide whether a clone target is a URL (subject
+// to scheme allowlisting) or a non-URL form (SCP-like remote / local
+// path), which are accepted unconditionally because their safety is
+// enforced elsewhere — SCP-like remotes through SSH key-based auth,
+// local paths through the workspace base-directory containment.
+var schemeURLPrefix = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.\-]*)://`)
 
 // RewriteRemoteURL injects token-based authentication into an HTTPS remote URL.
 // The token is embedded as the password in the URL (e.g., https://user:token@host/repo.git).
@@ -66,23 +76,58 @@ func ValidateRef(ref string) error {
 	return nil
 }
 
-// ValidateCloneURL checks that a git URL uses a safe scheme.
-// Blocks ext:: (arbitrary command execution), file:// (local filesystem access),
-// and other dangerous schemes.
+// ValidateCloneURL checks that a git URL uses a safe form.
+//
+// Convergence with internal/repository.ValidateCloneURL (INIT-022
+// TASK-002): for any URL with an explicit scheme, both validators
+// allow only https / ssh / git+ssh and reject everything else,
+// including
+//   - ext:: (arbitrary command execution via git's smart ext helper)
+//   - file:// (clones operator-named local paths into the workspace
+//     tree, where they become readable through the gateway)
+//   - git:// (cleartext, no authentication)
+//   - http:// (cleartext credential transit)
+//   - any other scheme (ftp, rsync, smb, etc.)
+//   - any URL starting with "-" (flag injection through the git CLI)
+//
+// The repository validator is stricter in one respect — it does not
+// accept non-URL forms other than SCP-like remotes, because code-repo
+// bindings round-trip through API and storage. This function
+// additionally tolerates bare local paths (e.g. /tmp/seed-repo)
+// because workspace provisioning uses them for local-seed clones in
+// tests and bootstrap scripts; the workspace base directory provides
+// the containment envelope for that flow.
 func ValidateCloneURL(gitURL string) error {
 	if gitURL == "" {
 		return fmt.Errorf("git URL is empty")
 	}
-	lower := strings.ToLower(gitURL)
-	if strings.HasPrefix(lower, "ext::") {
-		return fmt.Errorf("refusing dangerous git URL scheme ext::")
-	}
-	if strings.HasPrefix(lower, "file://") {
-		return fmt.Errorf("refusing file:// git URL scheme")
-	}
-	if strings.HasPrefix(lower, "-") {
+	if strings.HasPrefix(gitURL, "-") {
 		return fmt.Errorf("refusing git URL starting with '-'")
 	}
-	// Allow https://, ssh://, git@host:path (SCP-like SSH)
+	// ext:: is git's smart-protocol external helper, which lets the
+	// URL specify an arbitrary command for git to exec. It uses a
+	// `scheme::arg` shape (single colon-pair, no `//`), so the URL
+	// regex below cannot catch it — handle it explicitly first.
+	if strings.HasPrefix(strings.ToLower(gitURL), "ext::") {
+		return fmt.Errorf("refusing dangerous git URL scheme ext::")
+	}
+	if m := schemeURLPrefix.FindStringSubmatch(gitURL); m != nil {
+		switch strings.ToLower(m[1]) {
+		case "https", "ssh", "git+ssh":
+			return nil
+		case "file":
+			return fmt.Errorf("refusing file:// git URL scheme")
+		case "git":
+			return fmt.Errorf("refusing cleartext git:// URL scheme; use https or ssh")
+		case "http":
+			return fmt.Errorf("refusing cleartext http:// URL scheme; use https or ssh")
+		default:
+			return fmt.Errorf("refusing git URL scheme %s://; allowed: https, ssh, git+ssh", m[1])
+		}
+	}
+	// No URL scheme — must be an SCP-like remote (user@host:path) or
+	// a local filesystem path. Both are accepted; their safety is
+	// enforced elsewhere (SSH key auth and workspace containment
+	// respectively).
 	return nil
 }
