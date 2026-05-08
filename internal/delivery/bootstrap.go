@@ -19,9 +19,11 @@ type BootstrapConfig struct {
 	Token       string // SMP_INTERNAL_TOKEN (used as signing secret)
 }
 
-// BootstrapInternalSubscription creates or updates the internal SMP subscription.
-// Idempotent: safe to call on every startup.
-func BootstrapInternalSubscription(ctx context.Context, st store.Store, cfg BootstrapConfig) error {
+// BootstrapInternalSubscription creates or updates the internal SMP
+// subscription. Idempotent: safe to call on every startup. Takes the
+// narrow store.SubscriptionStore role interface (INIT-022 EPIC-001
+// TASK-010).
+func BootstrapInternalSubscription(ctx context.Context, st store.SubscriptionStore, cfg BootstrapConfig) error {
 	log := observe.Logger(ctx)
 
 	// Check if subscription already exists by listing and matching name.

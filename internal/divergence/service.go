@@ -17,14 +17,16 @@ import (
 
 // Service manages divergence lifecycle and branch operations.
 type Service struct {
-	store  store.Store
+	store  store.BranchStore
 	git    git.GitClient
 	events event.EventRouter
 	policy branchprotect.Policy
 }
 
-// NewService creates a new divergence service.
-func NewService(st store.Store, gitClient git.GitClient, events event.EventRouter) *Service {
+// NewService creates a new divergence service. Takes the narrow
+// store.BranchStore role interface — divergence + branch persistence —
+// rather than the full store.Store union (INIT-022 EPIC-001 TASK-010).
+func NewService(st store.BranchStore, gitClient git.GitClient, events event.EventRouter) *Service {
 	return &Service{store: st, git: gitClient, events: events}
 }
 

@@ -421,10 +421,14 @@ func (s *Server) artifactsFrom(ctx context.Context) ArtifactService {
 
 func (s *Server) workflowsFrom(ctx context.Context) WorkflowService {
 	return resolve(ctx, func(ss *workspace.ServiceSet) WorkflowService {
-		if ws, ok := ss.Workflows.(WorkflowService); ok {
-			return ws
+		// ss.Workflows is now typed as *workflow.Service (INIT-022 EPIC-001
+		// TASK-010), which satisfies WorkflowService at compile time. The
+		// nil check guards a deliberately unconfigured ServiceSet — the
+		// smoke test path leaves Workflows nil so handlers fall through.
+		if ss.Workflows == nil {
+			return nil
 		}
-		return nil
+		return ss.Workflows
 	}, s.workflows)
 }
 

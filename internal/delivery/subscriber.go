@@ -26,14 +26,17 @@ type SubscriptionLister interface {
 // DeliverySubscriber subscribes to all event types on the EventRouter and
 // persists matching events to the delivery queue for async dispatch.
 type DeliverySubscriber struct {
-	store         store.Store
+	store         store.DeliveryStore
 	subscriptions SubscriptionLister
 	Broadcaster   *EventBroadcaster
 }
 
 // NewDeliverySubscriber creates a subscriber that bridges the internal
-// EventRouter to the persistent delivery queue.
-func NewDeliverySubscriber(st store.Store, subs SubscriptionLister) *DeliverySubscriber {
+// EventRouter to the persistent delivery queue. Takes a
+// store.DeliveryStore — the narrow role interface covering the delivery
+// queue and event log — rather than the full store.Store union
+// (INIT-022 EPIC-001 TASK-010).
+func NewDeliverySubscriber(st store.DeliveryStore, subs SubscriptionLister) *DeliverySubscriber {
 	return &DeliverySubscriber{
 		store:         st,
 		subscriptions: subs,

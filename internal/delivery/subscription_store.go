@@ -9,11 +9,13 @@ import (
 
 // StoreSubscriptionLister implements SubscriptionLister backed by the database.
 type StoreSubscriptionLister struct {
-	store store.Store
+	store store.SubscriptionStore
 }
 
-// NewStoreSubscriptionLister creates a subscription lister backed by the store.
-func NewStoreSubscriptionLister(st store.Store) *StoreSubscriptionLister {
+// NewStoreSubscriptionLister creates a subscription lister backed by
+// the store. Takes the narrow store.SubscriptionStore role interface
+// (INIT-022 EPIC-001 TASK-010).
+func NewStoreSubscriptionLister(st store.SubscriptionStore) *StoreSubscriptionLister {
 	return &StoreSubscriptionLister{store: st}
 }
 
@@ -34,11 +36,13 @@ func (s *StoreSubscriptionLister) ListActiveSubscriptions(ctx context.Context, e
 
 // StoreSubscriptionResolver implements SubscriptionResolver backed by the database.
 type StoreSubscriptionResolver struct {
-	store store.Store
+	store store.SubscriptionStore
 }
 
-// NewStoreSubscriptionResolver creates a subscription resolver backed by the store.
-func NewStoreSubscriptionResolver(st store.Store) *StoreSubscriptionResolver {
+// NewStoreSubscriptionResolver creates a subscription resolver backed
+// by the store. Takes the narrow store.SubscriptionStore role
+// interface (INIT-022 EPIC-001 TASK-010).
+func NewStoreSubscriptionResolver(st store.SubscriptionStore) *StoreSubscriptionResolver {
 	return &StoreSubscriptionResolver{store: st}
 }
 
