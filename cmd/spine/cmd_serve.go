@@ -230,16 +230,12 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	// matching clone_url; the gateway's git HTTP router would reject a
 	// mismatch as workspace-not-found at clone time.
 	orch.WithWorkspaceID(ss.Config.ID)
-	// Workflow writer is required for ADR-008 planning runs. Fail fast at
-	// startup if ss.Workflows is populated but doesn't satisfy the
-	// interface — a silent skip here degrades workflow.create into 503 at
-	// request time, which is much harder to notice in production logs.
+	// Workflow writer is required for ADR-008 planning runs. INIT-022
+	// EPIC-001 TASK-010 typed ss.Workflows as *workflow.Service which
+	// satisfies engine.WorkflowWriter at compile time, so the previous
+	// runtime type-assertion + fmt.Errorf path is no longer reachable.
 	if ss.Workflows != nil {
-		wfWriter, ok := ss.Workflows.(engine.WorkflowWriter)
-		if !ok {
-			return fmt.Errorf("engine orchestrator init: ss.Workflows (%T) does not satisfy engine.WorkflowWriter", ss.Workflows)
-		}
-		orch.WithWorkflowWriter(wfWriter)
+		orch.WithWorkflowWriter(ss.Workflows)
 	}
 
 	// Contract: every gateway field the orchestrator owns must also live

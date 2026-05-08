@@ -35,7 +35,7 @@ type SubscriptionResolver interface {
 // WebhookDispatcher reads pending entries from the delivery queue and
 // POSTs them to configured webhook URLs.
 type WebhookDispatcher struct {
-	store        store.Store
+	store        store.DeliveryStore
 	resolver     SubscriptionResolver
 	client       *http.Client
 	httpTimeout  time.Duration
@@ -77,8 +77,11 @@ type DispatcherConfig struct {
 	Targets *TargetValidator
 }
 
-// NewWebhookDispatcher creates a dispatcher that delivers events to webhook URLs.
-func NewWebhookDispatcher(st store.Store, resolver SubscriptionResolver, cfg DispatcherConfig) *WebhookDispatcher {
+// NewWebhookDispatcher creates a dispatcher that delivers events to
+// webhook URLs. Takes a store.DeliveryStore — the narrow role interface
+// covering the delivery queue and event log — rather than the full
+// store.Store union (INIT-022 EPIC-001 TASK-010).
+func NewWebhookDispatcher(st store.DeliveryStore, resolver SubscriptionResolver, cfg DispatcherConfig) *WebhookDispatcher {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 5
 	}

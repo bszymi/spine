@@ -45,7 +45,7 @@ type BootstrapAdminConfig struct {
 // the new hash inserts a new auth.tokens row; the stale row remains
 // until rotation cleanup is built (out of scope here — the live bearer
 // is the only one anyone uses).
-func BootstrapInternalAdmin(ctx context.Context, st store.Store, cfg BootstrapAdminConfig) error {
+func BootstrapInternalAdmin(ctx context.Context, st store.AuthStore, cfg BootstrapAdminConfig) error {
 	if cfg.Token == "" {
 		return nil
 	}
@@ -58,7 +58,7 @@ func BootstrapInternalAdmin(ctx context.Context, st store.Store, cfg BootstrapAd
 	return upsertInternalAdminToken(ctx, st, cfg.Token, log)
 }
 
-func upsertInternalAdminActor(ctx context.Context, st store.Store, log *slog.Logger) error {
+func upsertInternalAdminActor(ctx context.Context, st store.AuthStore, log *slog.Logger) error {
 	desired := &domain.Actor{
 		ActorID: InternalAdminActorID,
 		Type:    domain.ActorTypeAutomated,
@@ -90,7 +90,7 @@ func upsertInternalAdminActor(ctx context.Context, st store.Store, log *slog.Log
 	}
 }
 
-func upsertInternalAdminToken(ctx context.Context, st store.Store, rawToken string, log *slog.Logger) error {
+func upsertInternalAdminToken(ctx context.Context, st store.AuthStore, rawToken string, log *slog.Logger) error {
 	hash := HashToken(rawToken)
 	tokenID := internalAdminTokenID(hash)
 

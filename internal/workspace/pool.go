@@ -36,7 +36,14 @@ type ServiceSet struct {
 	Auth      *auth.Service
 	GitClient *git.CLIClient
 	Artifacts *artifact.Service
-	Workflows any // workspace-scoped workflow service; typed as any to avoid an import cycle (see gateway.WorkflowService)
+	// Workflows is the workspace-scoped workflow service. INIT-022
+	// EPIC-001 TASK-010: typed as the concrete *workflow.Service rather
+	// than the previous `any`. Consumers in gateway and engine
+	// type-assert to their own narrower interfaces (gateway.WorkflowService,
+	// engine.WorkflowWriter) — those assertions still work because the
+	// concrete type satisfies them, and now misuse fails at compile
+	// time instead of at the type-assert call site.
+	Workflows *workflow.Service
 	ProjQuery *projection.QueryService
 	ProjSync  *projection.Service
 	Queue     *queue.MemoryQueue

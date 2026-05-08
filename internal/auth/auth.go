@@ -11,11 +11,13 @@ import (
 
 // Service handles token validation and management.
 type Service struct {
-	store store.Store
+	store store.AuthStore
 }
 
-// NewService creates a new auth service.
-func NewService(st store.Store) *Service {
+// NewService creates a new auth service. Takes a store.AuthStore — the
+// narrow role interface covering Actor + Token persistence — rather
+// than the full store.Store union (INIT-022 EPIC-001 TASK-010).
+func NewService(st store.AuthStore) *Service {
 	return &Service{store: st}
 }
 
