@@ -146,7 +146,8 @@ type VersionID string
 type SecretClient interface {
 	// Get fetches the current value of ref. Implementations must map
 	// provider-specific errors to the sentinels in this package
-	// (ErrSecretNotFound, ErrAccessDenied, ErrSecretStoreDown).
+	// (ErrSecretNotFound, ErrAccessDenied, ErrSecretStoreDown,
+	// ErrInvalidRequest).
 	Get(ctx context.Context, ref SecretRef) (SecretValue, VersionID, error)
 
 	// Invalidate drops any cached value for ref so that the next Get
@@ -163,4 +164,5 @@ var (
 	ErrAccessDenied    = errors.New("secret access denied")
 	ErrSecretStoreDown = errors.New("secret store unreachable")
 	ErrInvalidRef      = errors.New("invalid secret ref")
+	ErrInvalidRequest  = errors.New("invalid secret request")
 )
