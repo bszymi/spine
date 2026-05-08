@@ -606,6 +606,15 @@ type cliCloner struct {
 }
 
 func (c *cliCloner) Clone(ctx context.Context, url, localPath string, cred Credential) error {
+	// Second line of defense (INIT-022 TASK-009): the entry-point
+	// validators in workspace and code-repo registration also call
+	// ValidateCloneURL, but a stored-then-poisoned binding row could
+	// reach this path. Re-validating here ensures `--upload-pack=cmd`
+	// and the other rejected forms cannot reach `git clone` even if a
+	// caller ever wires this cloner without the upstream gate.
+	if err := git.ValidateCloneURL(url); err != nil {
+		return fmt.Errorf("clone url: %w", err)
+	}
 	opts := append([]git.CLIOption{}, c.baseOpts...)
 	if !cred.IsEmpty() {
 		// Same per-binding-overrides-helper rule as the factory:

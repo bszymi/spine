@@ -3,6 +3,7 @@ package git_test
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/internal/git"
@@ -425,6 +426,71 @@ func TestPushToInvalidRemote(t *testing.T) {
 	}
 	if gitErr.Op != "push" {
 		t.Errorf("expected op=push, got %s", gitErr.Op)
+	}
+}
+
+// TestDiffRejectsPoisonedRef pins the TASK-009 flag-injection guard:
+// a ref that begins with `-` (or contains shell metacharacters) must be
+// rejected by Diff before the shellout, so a stored-then-poisoned ref
+// like `--upload-pack=cmd` cannot reach `git diff` as an option. We
+// run against /nonexistent/repo so any rejection that fell through to
+// the shellout would surface as an "exec git" error rather than the
+// validator error — the discriminator that proves the gate fired.
+func TestDiffRejectsPoisonedRef(t *testing.T) {
+	client := git.NewCLIClient("/nonexistent/repo")
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		from string
+		to   string
+	}{
+		{"flag-injection-from", "--upload-pack=cmd", "main"},
+		{"flag-injection-to", "main", "--upload-pack=cmd"},
+		{"shell-meta-from", "; rm -rf /", "main"},
+		{"shell-meta-to", "main", "; rm -rf /"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.Diff(ctx, tc.from, tc.to)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "invalid git ref") {
+				t.Fatalf("expected ValidateRef rejection, got %v", err)
+			}
+		})
+	}
+}
+
+// TestMergeBaseRejectsPoisonedRef is the MergeBase counterpart to
+// TestDiffRejectsPoisonedRef. Same `--` cannot save us here — `git
+// merge-base --` would interpret the trailing arguments as pathspecs,
+// not revisions — so the validator gate is the only defense.
+func TestMergeBaseRejectsPoisonedRef(t *testing.T) {
+	client := git.NewCLIClient("/nonexistent/repo")
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{"flag-injection-a", "--upload-pack=cmd", "main"},
+		{"flag-injection-b", "main", "--upload-pack=cmd"},
+		{"shell-meta-a", "; rm -rf /", "main"},
+		{"shell-meta-b", "main", "; rm -rf /"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.MergeBase(ctx, tc.a, tc.b)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "invalid git ref") {
+				t.Fatalf("expected ValidateRef rejection, got %v", err)
+			}
+		})
 	}
 }
 

@@ -290,7 +290,13 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		// lose to the still-on-disk helper.
 		args = append(args, "-c", "credential.helper="+c.credentialHelper)
 	}
-	args = append(args, "clone", url, path)
+	// `--` ends option parsing so a poisoned URL like `--upload-pack=cmd`
+	// cannot be re-interpreted as a flag. ValidateCloneURL already
+	// rejects `-`-prefixed URLs at the entry points (workspace/code-repo
+	// provisioning) and `gitpool.cliCloner.Clone` re-validates as a
+	// second line of defense, but the sentinel is the cheapest fix
+	// directly inside the shellout.
+	args = append(args, "clone", "--", url, path)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	// Build the clone environment when the client carries any auth
 	// state — askpass token, credential-helper env (e.g.
@@ -412,7 +418,21 @@ func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
 }
 
 // Diff returns the file differences between two refs.
+//
+// Refs are validated before the shellout so a poisoned ref like
+// `--upload-pack=cmd` cannot be re-interpreted as a `git diff` flag.
+// `--` is NOT inserted between the subcommand and the refs because in
+// `git diff` `--` ends option parsing AND switches the following
+// positionals from revisions to pathspecs, which would silently change
+// the semantics on every valid call. The right defense is the
+// ValidateRef gate.
 func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, error) {
+	if err := ValidateRef(from); err != nil {
+		return nil, fmt.Errorf("diff from: %w", err)
+	}
+	if err := ValidateRef(to); err != nil {
+		return nil, fmt.Errorf("diff to: %w", err)
+	}
 	output, err := c.run(ctx, "diff", "diff", "--name-status", from, to)
 	if err != nil {
 		return nil, err
@@ -546,7 +566,18 @@ func (c *CLIClient) RefSHA(ctx context.Context, ref string) (string, error) {
 // Callers use this to scope diffs to "what a branch added since it diverged"
 // rather than "what differs from the current tip of the other ref", which
 // would also flag files the other ref deleted or modified in the meantime.
+//
+// Same flag-injection guard as Diff: refs are validated before shellout
+// rather than relying on a `--` sentinel, because `git merge-base --
+// <a> <b>` would interpret a/b as pathspecs (which merge-base does not
+// accept anyway) instead of revisions.
 func (c *CLIClient) MergeBase(ctx context.Context, a, b string) (string, error) {
+	if err := ValidateRef(a); err != nil {
+		return "", fmt.Errorf("merge-base a: %w", err)
+	}
+	if err := ValidateRef(b); err != nil {
+		return "", fmt.Errorf("merge-base b: %w", err)
+	}
 	output, err := c.run(ctx, "merge-base", "merge-base", a, b)
 	if err != nil {
 		return "", err
