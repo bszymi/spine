@@ -178,7 +178,35 @@ type ServicePool struct {
 	closed       bool
 	ctx          context.Context    // pool-lifetime context for background goroutines
 	cancel       context.CancelFunc // cancels pool-lifetime context on Close
+
+	// activeResolves counts in-flight resolver.Resolve calls per
+	// workspaceID. Get increments on entry, decrements on return.
+	// Evict consults this to decide whether an invalidation could
+	// race a cold Get (count > 0 → race window open; count == 0 →
+	// no in-flight resolve, no stale-cache risk, true no-op).
+	// Tracking only the active-flight window keeps evictGen bounded
+	// — both maps are deleted for a workspaceID as soon as the last
+	// resolver drains.
+	//
+	// evictGen is the per-workspace eviction generation. Each Evict
+	// for a workspaceID with activeResolves > 0 bumps this counter.
+	// Get snapshots evictGen[workspaceID] before Resolve and
+	// rechecks after re-acquiring the mutex; a mismatch means an
+	// invalidation arrived during Resolve, the resolved cfg may be
+	// stale, and Get retries the whole Resolve+cache-insert
+	// sequence (bounded by maxGetAttempts so a hot workspace under
+	// continuous invalidation cannot livelock the caller). EvictIdle
+	// does NOT bump the gen because idle eviction is cleanup, not
+	// an invalidation signal. INIT-022 EPIC-001 TASK-015.
+	activeResolves map[string]int
+	evictGen       map[string]uint64
 }
+
+// maxGetAttempts caps how many times Get will retry resolver.Resolve
+// when an Evict for the same workspaceID races the in-flight call.
+// Three is generous; a hot workspace seeing >3 invalidations during a
+// single Resolve is a genuine outage signal worth surfacing.
+const maxGetAttempts = 3
 
 // ServiceSetBuilder is an optional post-construction hook that extends a
 // ServiceSet with engine-dependent services (orchestrator adapters, scheduler
@@ -246,16 +274,18 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 	}
 	poolCtx, cancel := context.WithCancel(ctx)
 	p := &ServicePool{
-		resolver:     resolver,
-		entries:      make(map[string]*poolEntry),
-		idleTimeout:  timeout,
-		builder:      cfg.Builder,
-		secretCipher: cfg.SecretCipher,
-		secretClient: cfg.SecretClient,
-		dbPolicy:     cfg.DBPolicy,
-		codeRepoBase: cfg.CodeRepoBase,
-		ctx:          poolCtx,
-		cancel:       cancel,
+		resolver:       resolver,
+		entries:        make(map[string]*poolEntry),
+		activeResolves: make(map[string]int),
+		evictGen:       make(map[string]uint64),
+		idleTimeout:    timeout,
+		builder:        cfg.Builder,
+		secretCipher:   cfg.SecretCipher,
+		secretClient:   cfg.SecretClient,
+		dbPolicy:       cfg.DBPolicy,
+		codeRepoBase:   cfg.CodeRepoBase,
+		ctx:            poolCtx,
+		cancel:         cancel,
 	}
 	if interval := resolveIdleCheckInterval(cfg.IdleCheckInterval, timeout); interval > 0 {
 		go p.runIdleEvictor(interval)
@@ -306,101 +336,156 @@ func (p *ServicePool) runIdleEvictor(interval time.Duration) {
 // its reference count. Call Release when done to allow idle eviction.
 // If no set exists, one is lazily created from the workspace config.
 //
-// Thread-safe. The pool mutex is released during the slow buildServiceSet
-// step so a long or stuck initialization for one workspace does not block
-// Get, Release, Evict, or Close on unrelated workspaces. Concurrent first
-// requests for the same workspace share a single initialization (and its
-// result or error) via the entry's ready channel; a failed initialization
-// is removed from the cache so later calls retry cleanly.
+// Thread-safe. The pool mutex is released across both slow steps —
+// resolver.Resolve (which performs network I/O in platform-binding
+// mode) and buildServiceSet — so a slow upstream or stuck
+// initialization for one workspace does not block Get, Release,
+// Evict, or Close on unrelated workspaces. Two concurrent Gets for
+// the same workspace ID may both call Resolve; they converge on the
+// same canonicalID below, where the entry-level singleflight
+// (entry.ready) deduplicates the actual initializeEntry work, so the
+// redundant Resolve cost is bounded to one extra call per
+// simultaneous miss. A failed initialization is removed from the
+// cache so later calls retry cleanly.
+//
+// Invalidation race: when an Evict for workspaceID fires while this
+// Get's Resolve is in flight, the in-flight cfg may reflect
+// pre-invalidation state. The pool snapshots evictGen[workspaceID]
+// before Resolve and rechecks after; a mismatch retries the whole
+// Get with a fresh Resolve. Bounded by maxGetAttempts to prevent
+// livelock under continuous invalidation. This restores the
+// pre-TASK-015 contract where the pool mutex implicitly serialized
+// Evict to run after the cache-insert.
 func (p *ServicePool) Get(ctx context.Context, workspaceID string) (*ServiceSet, error) {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("service pool is closed")
-	}
-
-	// Resolve first to canonicalize the workspace ID. This is expected to
-	// be fast; it stays under the mutex to keep cache lookups consistent
-	// across renames/aliases.
-	cfg, err := p.resolver.Resolve(ctx, workspaceID)
-	if err != nil {
-		p.mu.Unlock()
-		return nil, err
-	}
-
-	canonicalID := cfg.ID
-
-	for {
-		entry, ok := p.entries[canonicalID]
-		if !ok {
-			// No entry — start a new initialization ourselves. Register
-			// a placeholder so concurrent Get calls for the same
-			// workspace join this in-flight init instead of launching a
-			// duplicate.
-			newEntry := &poolEntry{
-				ready:      make(chan struct{}),
-				gone:       make(chan struct{}),
-				refCount:   1,
-				lastAccess: time.Now(),
-			}
-			p.entries[canonicalID] = newEntry
-			p.mu.Unlock()
-			return p.initializeEntry(ctx, canonicalID, *cfg, newEntry)
-		}
-
-		if entry.evicting {
-			// Entry is being phased out. Wait until it is fully removed
-			// from the map before starting a fresh initialization —
-			// otherwise the old initiator's Release(workspaceID) would
-			// decrement the wrong entry's refcount.
-			gone := entry.gone
-			p.mu.Unlock()
-			select {
-			case <-gone:
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			p.mu.Lock()
-			if p.closed {
-				p.mu.Unlock()
-				return nil, fmt.Errorf("service pool is closed")
-			}
-			continue
-		}
-
-		if entry.services != nil {
-			// Ready and cached — take a ref and return.
-			entry.lastAccess = time.Now()
-			entry.refCount++
-			p.mu.Unlock()
-			return entry.services, nil
-		}
-
-		// Init is in flight. Drop the lock and wait for the signal,
-		// then re-enter to re-read state under the lock.
-		ready := entry.ready
-		p.mu.Unlock()
-		select {
-		case <-ready:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-
+	for attempt := 0; attempt < maxGetAttempts; attempt++ {
+		// Per-attempt: fast-fail on a closed pool, snapshot
+		// evictGen, and register an in-flight Resolve so a
+		// concurrent Evict knows to bump the gen rather than
+		// silently no-op.
 		p.mu.Lock()
 		if p.closed {
 			p.mu.Unlock()
 			return nil, fmt.Errorf("service pool is closed")
 		}
-		if entry.initErr != nil {
-			// Share the initiator's error. The entry has already been
-			// removed from the map by the initiator, so a later Get will
-			// re-run init from scratch.
-			p.mu.Unlock()
-			return nil, entry.initErr
+		p.activeResolves[workspaceID]++
+		startGen := p.evictGen[workspaceID]
+		p.mu.Unlock()
+
+		// Resolve runs without the pool mutex. In platform-binding
+		// mode this performs network I/O (see
+		// internal/workspace/platform_binding_provider.go); holding
+		// the mutex would stall every other workspace's
+		// Get/Release/Evict/Close on a slow upstream, defeating the
+		// per-workspace isolation the pool promises (INIT-022
+		// EPIC-001 TASK-015).
+		cfg, resolveErr := p.resolver.Resolve(ctx, workspaceID)
+
+		p.mu.Lock()
+		// Drain the in-flight counter and clean up evictGen as soon
+		// as the last resolver leaves so the maps stay bounded —
+		// otherwise every distinct workspaceID ever resolved would
+		// retain an entry for the lifetime of the pool.
+		p.activeResolves[workspaceID]--
+		raced := p.evictGen[workspaceID] != startGen
+		if p.activeResolves[workspaceID] == 0 {
+			delete(p.activeResolves, workspaceID)
+			delete(p.evictGen, workspaceID)
 		}
-		// Otherwise loop: services should now be populated, or a new
-		// entry has been inserted by another path; re-check.
+		if resolveErr != nil {
+			p.mu.Unlock()
+			return nil, resolveErr
+		}
+		if p.closed {
+			p.mu.Unlock()
+			return nil, fmt.Errorf("service pool is closed")
+		}
+		if raced {
+			// An Evict for this workspaceID arrived during our
+			// Resolve. The cfg in hand may reflect the
+			// pre-invalidation binding (the Provider's cache was
+			// invalidated too, but only between our snapshot and
+			// the Provider's clear; a Resolve already in the
+			// fetch path completes against whatever the platform
+			// returned). Retry to get a fresh resolve.
+			p.mu.Unlock()
+			continue
+		}
+
+		canonicalID := cfg.ID
+
+		for {
+			entry, ok := p.entries[canonicalID]
+			if !ok {
+				// No entry — start a new initialization ourselves. Register
+				// a placeholder so concurrent Get calls for the same
+				// workspace join this in-flight init instead of launching a
+				// duplicate.
+				newEntry := &poolEntry{
+					ready:      make(chan struct{}),
+					gone:       make(chan struct{}),
+					refCount:   1,
+					lastAccess: time.Now(),
+				}
+				p.entries[canonicalID] = newEntry
+				p.mu.Unlock()
+				return p.initializeEntry(ctx, canonicalID, *cfg, newEntry)
+			}
+
+			if entry.evicting {
+				// Entry is being phased out. Wait until it is fully removed
+				// from the map before starting a fresh initialization —
+				// otherwise the old initiator's Release(workspaceID) would
+				// decrement the wrong entry's refcount.
+				gone := entry.gone
+				p.mu.Unlock()
+				select {
+				case <-gone:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				p.mu.Lock()
+				if p.closed {
+					p.mu.Unlock()
+					return nil, fmt.Errorf("service pool is closed")
+				}
+				continue
+			}
+
+			if entry.services != nil {
+				// Ready and cached — take a ref and return.
+				entry.lastAccess = time.Now()
+				entry.refCount++
+				p.mu.Unlock()
+				return entry.services, nil
+			}
+
+			// Init is in flight. Drop the lock and wait for the signal,
+			// then re-enter to re-read state under the lock.
+			ready := entry.ready
+			p.mu.Unlock()
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+
+			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				return nil, fmt.Errorf("service pool is closed")
+			}
+			if entry.initErr != nil {
+				// Share the initiator's error. The entry has already been
+				// removed from the map by the initiator, so a later Get will
+				// re-run init from scratch.
+				p.mu.Unlock()
+				return nil, entry.initErr
+			}
+			// Otherwise loop: services should now be populated, or a new
+			// entry has been inserted by another path; re-check.
+		}
 	}
+	return nil, fmt.Errorf("workspace %q: invalidation raced cold init for %d consecutive attempts", workspaceID, maxGetAttempts)
 }
 
 // publishReadyLocked closes entry.ready exactly once. Callers must hold
@@ -513,6 +598,19 @@ func (p *ServicePool) Release(workspaceID string) {
 func (p *ServicePool) Evict(workspaceID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Always bump the eviction generation when a Resolve is in
+	// flight for this workspaceID — both for the cold-miss case
+	// (no entry yet) and the hot-cache case (entry exists, but a
+	// Get's unlocked Resolve is concurrently fetching pre-
+	// invalidation cfg). Without bumping on the hot-cache path, an
+	// Evict that removes the existing entry would still let the
+	// in-flight Get cache a stale service set in its place. When
+	// no Resolve is in flight, no stale state could be in the
+	// resolver pipeline and the bump is unnecessary — keeping the
+	// no-op contract for unknown / cold workspaces.
+	if p.activeResolves[workspaceID] > 0 {
+		p.evictGen[workspaceID]++
+	}
 	if entry, ok := p.entries[workspaceID]; ok {
 		if entry.refCount > 0 {
 			// Mark for deferred close — Release will handle cleanup.

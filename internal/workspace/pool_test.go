@@ -651,6 +651,363 @@ func TestServicePool_Concurrent_DifferentWorkspaces_ParallelInit(t *testing.T) {
 	}
 }
 
+// slowResolver lets one workspace's first Resolve call block on a
+// release channel while every other call (including subsequent
+// resolves of slowID) returns immediately. It exists to prove the
+// two TASK-015 contracts: (1) the pool mutex is not held across
+// resolver.Resolve, so a slow upstream binding lookup for workspace
+// A does not stall Get on unrelated workspace B; (2) when an Evict
+// for workspaceID races a cold Get's Resolve, Get retries with a
+// fresh Resolve so the pre-invalidation cfg is never cached.
+type slowResolver struct {
+	configs   map[string]Config
+	slowID    string
+	enterOnce sync.Once
+	entered   chan struct{} // closed when slow Resolve enters its wait
+	release   chan struct{} // closed by the test to unblock slow Resolve
+
+	mu        sync.Mutex
+	callCount map[string]int // per-ID Resolve invocation count
+}
+
+func (r *slowResolver) Resolve(ctx context.Context, id string) (*Config, error) {
+	r.mu.Lock()
+	if r.callCount == nil {
+		r.callCount = map[string]int{}
+	}
+	r.callCount[id]++
+	first := r.callCount[id] == 1
+	r.mu.Unlock()
+
+	// Only the FIRST call for slowID blocks. Subsequent calls
+	// (including retries from the same Get) complete immediately so
+	// the test can assert the retry path was actually taken.
+	if id == r.slowID && first {
+		r.enterOnce.Do(func() { close(r.entered) })
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	cfg, ok := r.configs[id]
+	if !ok {
+		return nil, ErrWorkspaceNotFound
+	}
+	return &cfg, nil
+}
+
+func (r *slowResolver) calls(id string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.callCount[id]
+}
+
+func (r *slowResolver) List(_ context.Context) ([]Config, error) {
+	out := make([]Config, 0, len(r.configs))
+	for _, c := range r.configs {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// TestServicePool_Get_SlowResolveDoesNotBlockOtherWorkspaces locks
+// INIT-022 EPIC-001 TASK-015: Get must drop p.mu around
+// resolver.Resolve so that a slow platform-binding lookup for
+// workspace A cannot stall a Get for unrelated workspace B. Before
+// the fix, Resolve ran while holding p.mu and this test's fast Get
+// would wait on the release channel.
+func TestServicePool_Get_SlowResolveDoesNotBlockOtherWorkspaces(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &slowResolver{
+		configs: map[string]Config{
+			"ws-slow": {ID: "ws-slow", RepoPath: ".", Status: StatusActive},
+			"ws-fast": {ID: "ws-fast", RepoPath: ".", Status: StatusActive},
+		},
+		slowID:  "ws-slow",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	pool := NewServicePool(ctx, resolver, PoolConfig{IdleCheckInterval: -1})
+	defer pool.Close()
+
+	released := false
+	releaseSlow := func() {
+		if !released {
+			close(resolver.release)
+			released = true
+		}
+	}
+	defer releaseSlow()
+
+	slowDone := make(chan error, 1)
+	go func() {
+		_, err := pool.Get(ctx, "ws-slow")
+		slowDone <- err
+	}()
+
+	// Wait until the slow Resolve is in flight before issuing the fast
+	// Get; otherwise the test would race the slow goroutine's first
+	// Lock() and report a false negative.
+	select {
+	case <-resolver.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow Resolve did not enter within 2s")
+	}
+
+	// Fast Get must complete promptly. If the pool mutex were held
+	// across Resolve, this call would block until releaseSlow() runs.
+	fastCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ss, err := pool.Get(fastCtx, "ws-fast")
+	if err != nil {
+		t.Fatalf("fast Get blocked behind slow Resolve: %v", err)
+	}
+	if ss == nil || ss.Config.ID != "ws-fast" {
+		t.Fatalf("fast Get returned unexpected ServiceSet: %+v", ss)
+	}
+
+	// Release the slow Resolve and confirm it also completes.
+	releaseSlow()
+	select {
+	case err := <-slowDone:
+		if err != nil {
+			t.Fatalf("slow Get failed after release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow Get did not complete within 5s after release")
+	}
+}
+
+// TestServicePool_Evict_DuringColdResolve_RetriesResolve locks
+// INIT-022 EPIC-001 TASK-015's invalidation-race contract: an Evict
+// for workspaceID that fires while a cold Get's resolver.Resolve is
+// in flight must not be silently lost just because no cache entry
+// exists yet. The pool bumps an eviction generation under
+// activeResolves[workspaceID]>0; the Get observes the bump on its
+// post-Resolve recheck and retries with a fresh Resolve so the
+// pre-invalidation cfg is never cached. Without this, dropping the
+// mutex around Resolve would leave a stale cfg cached until idle
+// eviction or the next Evict.
+func TestServicePool_Evict_DuringColdResolve_RetriesResolve(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &slowResolver{
+		configs: map[string]Config{
+			"ws-evict-race": {ID: "ws-evict-race", RepoPath: ".", Status: StatusActive},
+		},
+		slowID:  "ws-evict-race",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	pool := NewServicePool(ctx, resolver, PoolConfig{IdleCheckInterval: -1})
+	defer pool.Close()
+
+	released := false
+	releaseSlow := func() {
+		if !released {
+			close(resolver.release)
+			released = true
+		}
+	}
+	defer releaseSlow()
+
+	type result struct {
+		ss  *ServiceSet
+		err error
+	}
+	getDone := make(chan result, 1)
+	go func() {
+		ss, err := pool.Get(ctx, "ws-evict-race")
+		getDone <- result{ss, err}
+	}()
+
+	// Wait for the slow Resolve to be in flight before issuing the
+	// concurrent Evict — that guarantees Evict sees no entry but
+	// activeResolves>0, so it bumps evictGen rather than no-op'ing.
+	select {
+	case <-resolver.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow Resolve did not enter within 2s")
+	}
+
+	pool.Evict("ws-evict-race")
+
+	// Let the cold Get's first Resolve return. The post-Resolve
+	// recheck observes the gen bump and retries; the retry's
+	// Resolve completes immediately (slowResolver only blocks the
+	// first call) and the fresh cfg is cached.
+	releaseSlow()
+
+	res := <-getDone
+	if res.err != nil {
+		t.Fatalf("Get during Evict race: %v", res.err)
+	}
+	if res.ss == nil {
+		t.Fatal("expected non-nil services from Get")
+	}
+
+	// The retry contract: Resolve must have been called more than
+	// once for this workspaceID. Exactly twice is the expected
+	// shape (one raced call, one retry); a future tightening of
+	// the bounded-retry policy could allow more, so accept >=2.
+	if got := resolver.calls("ws-evict-race"); got < 2 {
+		t.Fatalf("expected resolver to be retried after Evict race, call count=%d (want >=2)", got)
+	}
+
+	// The cached entry is the FRESH retry result — it is not
+	// marked evicting and stays in the pool until idle eviction.
+	// (Pre-TASK-015 with the mutex held across Resolve, the same
+	// scenario would have cached the stale cfg and only torn it
+	// down via the standard refCount/Release path; the gen+retry
+	// approach is strictly stronger because the stale cfg never
+	// makes it into the cache.)
+	if got := pool.RefCount("ws-evict-race"); got != 1 {
+		t.Fatalf("expected refCount=1 on fresh entry, got %d", got)
+	}
+	pool.Release("ws-evict-race")
+	if got := pool.RefCount("ws-evict-race"); got != 0 {
+		t.Fatalf("expected refCount=0 after Release, got %d", got)
+	}
+}
+
+// evictTriggerResolver invokes pool.Evict on its Nth Resolve call,
+// simulating an invalidation arriving while an unlocked Resolve is
+// in flight. Used to exercise the hot-cache invalidation race —
+// the entry-exists path of Evict must still bump evictGen so the
+// in-flight Get retries instead of caching stale cfg.
+type evictTriggerResolver struct {
+	cfg     Config
+	pool    *ServicePool
+	mu      sync.Mutex
+	calls   int
+	evictOn int
+}
+
+func (r *evictTriggerResolver) Resolve(_ context.Context, _ string) (*Config, error) {
+	r.mu.Lock()
+	r.calls++
+	n := r.calls
+	r.mu.Unlock()
+	if n == r.evictOn {
+		r.pool.Evict(r.cfg.ID)
+	}
+	cfg := r.cfg
+	return &cfg, nil
+}
+
+func (r *evictTriggerResolver) List(_ context.Context) ([]Config, error) {
+	return []Config{r.cfg}, nil
+}
+
+func (r *evictTriggerResolver) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+// TestServicePool_Evict_DuringResolve_HotCache_RetriesResolve
+// locks INIT-022 EPIC-001 TASK-015's hot-cache invalidation
+// contract: when an Evict races a Get whose unlocked Resolve is
+// in flight AND a cached entry already exists for the same
+// workspaceID, Evict must still bump evictGen so the in-flight
+// Get's post-Resolve recheck observes the invalidation and
+// retries. Without this, the hot-cache path of Evict would no-op
+// the gen bump (because an entry was found) and the Get would
+// proceed to cache a fresh entry built from the pre-invalidation
+// cfg.
+func TestServicePool_Evict_DuringResolve_HotCache_RetriesResolve(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	cfg := Config{ID: "ws-hot-evict", RepoPath: ".", Status: StatusActive}
+	resolver := &evictTriggerResolver{cfg: cfg, evictOn: 2}
+	pool := NewServicePool(ctx, resolver, PoolConfig{IdleCheckInterval: -1})
+	defer pool.Close()
+	resolver.pool = pool
+
+	// Pre-populate the cache. Resolve #1 runs without triggering Evict
+	// (evictOn=2). Release immediately so the entry has refCount=0.
+	if _, err := pool.Get(ctx, "ws-hot-evict"); err != nil {
+		t.Fatalf("pre-populate Get: %v", err)
+	}
+	pool.Release("ws-hot-evict")
+	if got := pool.ActiveCount(); got != 1 {
+		t.Fatalf("expected entry cached after pre-populate, ActiveCount=%d", got)
+	}
+
+	// Second Get triggers Evict on its Resolve (call #2). At that
+	// point the cached entry from pre-populate exists with
+	// refCount=0; Evict's hot-cache branch removes it AND must
+	// bump evictGen so this Get's post-Resolve recheck observes
+	// the race and retries (Resolve call #3, which does not
+	// trigger Evict because evictOn==2 is past).
+	if _, err := pool.Get(ctx, "ws-hot-evict"); err != nil {
+		t.Fatalf("racing Get: %v", err)
+	}
+
+	// Three Resolve calls total: pre-populate + raced + retry.
+	// Without the hot-cache bump, this would be two: pre-populate
+	// + raced (no retry, stale cache).
+	if got := resolver.callCount(); got != 3 {
+		t.Fatalf("expected 3 resolver calls (pre-populate + raced + retry), got %d", got)
+	}
+}
+
+// TestServicePool_Evict_NoActiveResolve_NoMapGrowth locks the
+// activeResolves gate on Evict's gen bump: an Evict for a workspace
+// with no in-flight Resolve must be a clean no-op and must NOT
+// leave a permanent marker behind. This bounds memory growth in
+// deployments that receive invalidations for unknown / cold /
+// deleted workspace IDs (e.g. misrouted webhooks).
+func TestServicePool_Evict_NoActiveResolve_NoMapGrowth(t *testing.T) {
+	t.Setenv("SPINE_REPO_PATH", ".")
+
+	ctx := context.Background()
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"ws-known": {ID: "ws-known", RepoPath: ".", Status: StatusActive},
+	}}
+	pool := NewServicePool(ctx, resolver, PoolConfig{IdleCheckInterval: -1})
+	defer pool.Close()
+
+	// Evict an unknown workspace ID 100 times. Each call must
+	// be a clean no-op — no map entry, no panic, no error.
+	for i := 0; i < 100; i++ {
+		pool.Evict("ws-unknown")
+	}
+
+	// A subsequent Get for a DIFFERENT, known workspace must not
+	// see any spurious evicting state from the prior Evicts.
+	ss, err := pool.Get(ctx, "ws-known")
+	if err != nil {
+		t.Fatalf("Get(ws-known): %v", err)
+	}
+	if ss == nil {
+		t.Fatal("expected non-nil services for ws-known")
+	}
+	if got := pool.RefCount("ws-known"); got != 1 {
+		t.Fatalf("expected refCount=1 on fresh ws-known, got %d", got)
+	}
+
+	// And a Get for the previously-Evicted (but never resolved) ID
+	// must succeed without inheriting any phantom evicting state —
+	// the no-op contract for unknown IDs is preserved.
+	resolver.configs["ws-unknown"] = Config{ID: "ws-unknown", RepoPath: ".", Status: StatusActive}
+	ss2, err := pool.Get(ctx, "ws-unknown")
+	if err != nil {
+		t.Fatalf("Get(ws-unknown) after prior Evicts: %v", err)
+	}
+	if ss2 == nil {
+		t.Fatal("expected non-nil services for ws-unknown")
+	}
+	if got := pool.RefCount("ws-unknown"); got != 1 {
+		t.Fatalf("expected refCount=1 on fresh ws-unknown after prior Evicts, got %d", got)
+	}
+}
+
 func TestServicePool_FailedInit_AllowsRetry(t *testing.T) {
 	t.Setenv("SPINE_REPO_PATH", ".")
 
