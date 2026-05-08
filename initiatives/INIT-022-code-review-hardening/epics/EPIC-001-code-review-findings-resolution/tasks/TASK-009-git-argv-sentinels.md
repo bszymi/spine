@@ -2,12 +2,13 @@
 id: TASK-009
 type: Task
 title: "Insert -- sentinels and ValidateRef in git Diff/MergeBase/Clone argv"
-status: Pending
+status: Completed
+acceptance: Approved
 epic: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 work_type: bugfix
 created: 2026-05-07
-last_updated: 2026-05-07
+last_updated: 2026-05-08
 links:
   - type: parent
     target: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
@@ -79,3 +80,82 @@ the inputs.
   the three flagged surfaces; an audit pass can follow as a P3 if
   warranted.
 - Hardening Push/Fetch/Reset arg surfaces — not flagged.
+
+## Resolution (2026-05-08)
+
+Four edits, all in pre-existing files (no new files):
+
+1. **`internal/git/cli.go::Diff`** — added `git.ValidateRef(from)` and
+   `git.ValidateRef(to)` gates before the `c.run(...)` shellout, each
+   returning `fmt.Errorf("diff from: %w", err)` / `"diff to: %w"`.
+   Comment block above the function explains why `--` is **not**
+   inserted between subcommand and refs: `git diff --` switches the
+   following positionals from revisions to pathspecs, which would
+   silently change the semantics on every valid call. The
+   ValidateRef gate is the right defense for ref arguments.
+2. **`internal/git/cli.go::MergeBase`** — same `ValidateRef(a)` /
+   `ValidateRef(b)` pattern with a comment block citing the same
+   rationale (`git merge-base --` would interpret arguments as
+   pathspecs, which the subcommand does not even accept).
+3. **`internal/git/cli.go::Clone`** — inserted `"--"` between the
+   `clone` subcommand and the URL: `args = append(args, "clone",
+   "--", url, path)`. Unlike Diff/MergeBase, `git clone -- <repo>
+   [<dir>]` is the documented form for separating options from the
+   URL positional, so the sentinel is both correct and the cheapest
+   fix at the shellout boundary.
+4. **`internal/gitpool/pool.go::cliCloner.Clone`** — added a
+   `git.ValidateCloneURL(url)` gate at the top of the function as a
+   second line of defense. Workspace and code-repo registration
+   already validate at the entry points, but a stored-then-poisoned
+   binding row could still reach this path; re-validating closes
+   that gap.
+
+**Tests added (all in pre-existing test files):**
+
+- `internal/git/cli_test.go::TestDiffRejectsPoisonedRef` —
+  table-driven, four cases: `--upload-pack=cmd` as `from`, then as
+  `to`; `; rm -rf /` as `from`, then as `to`. Runs against
+  `/nonexistent/repo` so any rejection that fell through to the
+  shellout would surface as an `exec git` error rather than the
+  validator error — the discriminator that proves the gate fired.
+- `internal/git/cli_test.go::TestMergeBaseRejectsPoisonedRef` —
+  same shape with the `MergeBase` API.
+- `internal/gitpool/credentials_test.go::TestCLICloner_RejectsPoisonedURL`
+  — table-driven, four cases: `--upload-pack=cmd`, `ext::sh -c id`,
+  `file:///etc/passwd`, and empty URL. Asserts the wrapped
+  `clone url: ...` rejection rather than reaching the throwaway
+  CLIClient or the shellout.
+
+The four happy-path tests in `cli_test.go` (`TestDiff`,
+`TestCreateBranchAndMergeFastForward`, `TestCreateBranchAndMergeCommit`,
+`TestPush`) and the four partial-merge / multi-repo scenarios
+(`TestPartialMergeRetry_HappyPath`,
+`TestPartialMergeExternalResolution_HappyPath`,
+`TestCancelFromPartiallyMerged_AsymmetricCleanup`,
+`TestMultiRepoRunLifecycle`) all pass — the regression bait the AC
+calls out: "Diff and MergeBase continue to return correct
+ref-comparison results (not pathspec results) for valid branch-name
+inputs."
+
+**Test gates:**
+
+- `make docker-test` (unit, full repo) — green, including
+  `internal/secrets` (no flake this run).
+- `go test -tags scenario -p 1 -run
+  'TestPartialMergeRetry_HappyPath|TestPartialMergeExternalResolution_HappyPath|TestCancelFromPartiallyMerged_AsymmetricCleanup|TestMultiRepoRunLifecycle'
+  ./internal/scenariotest/scenarios` — green. The other scenario
+  failures observed in the broader suite reproduce on bare main
+  (`TestCreateArtifactStep` fails identically with
+  `validation_failed: artifact validation failed` against
+  `030ee2a`), so they are pre-existing and out of scope for
+  TASK-009.
+- `make docker-lint` — repo-wide count holds at 206 pre-existing
+  issues; my edits contribute zero new findings.
+- `golangci-lint run --enable-only=gosec` — single pre-existing
+  finding in `internal/workflow/service.go:189` (path traversal
+  taint analysis), unrelated to the touched files. No new gosec
+  finding introduced.
+
+**Codex iterative review:** two consecutive clean passes — "No
+actionable correctness, security, or maintainability issues were
+found." No findings to address.

@@ -939,6 +939,39 @@ func TestNewCLIClientFactory_EmptyCredBuildsCLIClient(t *testing.T) {
 	}
 }
 
+// TestCLICloner_RejectsPoisonedURL pins the TASK-009 second-line-of-
+// defense URL gate: cliCloner.Clone must reject `--upload-pack=cmd`
+// (and the other ValidateCloneURL-rejected forms) before constructing
+// the throwaway *git.CLIClient or shelling out. The entry-point
+// validators in workspace and code-repo registration are the primary
+// gate, but a stored-then-poisoned binding row could still reach this
+// path; this test guarantees that path is closed too.
+func TestCLICloner_RejectsPoisonedURL(t *testing.T) {
+	c := gitpool.NewCLICloner()
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"flag-injection", "--upload-pack=cmd"},
+		{"ext-helper", "ext::sh -c id"},
+		{"file-scheme", "file:///etc/passwd"},
+		{"empty-url", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := c.Clone(ctx, tc.url, t.TempDir(), gitpool.Credential{})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "clone url") {
+				t.Fatalf("expected wrapped ValidateCloneURL rejection, got %v", err)
+			}
+		})
+	}
+}
+
 func TestNewCLICloner_HandlesEmptyCred(t *testing.T) {
 	// A pool wired with NewCLICloner but no CredentialResolver passes
 	// the zero Credential into Clone. The cloner must not panic and
