@@ -2,12 +2,13 @@
 id: TASK-006
 type: Task
 title: "Scenario: partial-merge retry happy path"
-status: Pending
+status: Completed
+acceptance: Approved
 epic: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 work_type: test
 created: 2026-05-07
-last_updated: 2026-05-07
+last_updated: 2026-05-08
 links:
   - type: parent
     target: /initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/epic.md
@@ -67,3 +68,62 @@ A new scenario file
 - Testing the `ResolveRepositoryMergeExternally` exit — that is
   TASK-007.
 - Testing the cancel-from-partially-merged exit — that is TASK-008.
+
+## Resolution (2026-05-08)
+
+**Scenario:** `internal/scenariotest/scenarios/partial_merge_retry_test.go`
+(`TestPartialMergeRetry_HappyPath`). One workspace + one code repo
+(`billing`, wired via `harness.WithCodeRepos`). The scenario drives a
+multi-repo run through:
+
+1. StartRun → SubmitStepResult("completed") → SubmitStepResult("accepted").
+2. The `accepted` outcome carries `commit: status: Completed`, so
+   `IngestResult` transitions the run to `committing` and immediately
+   fires `MergeRunBranch` (engine/run.go's "immediate merge" comment).
+3. A pre-queued `git.GitError{Kind: ErrKindPermanent, Message: "merge
+   conflict"}` on billing's wrapped client triggers the per-repo
+   failure → primary merges → `transitionToPartiallyMerged` runs.
+4. `assertPartiallyMergedShape` pins run.Status, primary outcome
+   merged with non-empty MergeCommitSHA, billing outcome failed with
+   FailureClass=`merge_conflict`.
+5. `assertGatedTickIsNoOp` (the regression-bait check called out in
+   the AC) constructs a real `scheduler.Scheduler` wired with
+   `orch.MergeRunBranch` as `commitRetryFn`, runs `RunRetryCycle`,
+   and asserts the primary outcome's Attempts counter has not grown.
+   I verified the bait fires by temporarily disabling the
+   `codeRepoOutcomesAllowResume` gate (`if status == ... && false`)
+   — the test failed with "primary attempts after gated tick: got 2,
+   want 1".
+6. `RetryRepositoryMerge` is invoked with a synthesised operator
+   actor in ctx (`domain.WithActor`). The recovery result is asserted
+   to have `ReadyToResume=true` and empty `BlockingRepositories`; the
+   billing outcome row is now `pending`.
+7. A second `RunRetryCycle` opens the gate, transitions
+   partially-merged → committing, MergeRunBranch re-attempts the
+   billing merge (queue empty now → falls through to the underlying
+   CLI client), succeeds, primary merge re-records, run completes.
+8. `assertRunCompletedWithMergedOutcomes` pins both outcomes at
+   `merged` with non-empty MergeCommitSHAs.
+
+**Why the Attempts assertion (not run.Status) for the regression-bait:**
+without the gate, the scheduler transitions partially-merged →
+committing, MergeRunBranch fires, billing's outcome is already
+terminal-failed so the per-repo loop short-circuits, primary merge
+runs (recordPrimaryMergeOutcome bumps Attempts), then
+`transitionToPartiallyMerged` puts the run right back. End-state
+status is partially-merged either way; only the inflated Attempts
+counter is observable.
+
+**Codex iterative review:** two consecutive clean passes (`codex
+review --uncommitted`); no findings raised.
+
+**Test gates:**
+
+- `go test ./...` (unit) — green
+- `go test -tags scenario ./internal/scenariotest/...` — my new
+  scenario passes; pre-existing parallel-cleanup failures in the
+  broader scenario suite reproduce identically without my change
+  (verified by stashing partial_merge_retry_test.go and re-running)
+  and are out of scope for TASK-006.
+- `golangci-lint run ./...` — repo-wide count holds at 206
+  pre-existing issues; my new file contributes zero.
