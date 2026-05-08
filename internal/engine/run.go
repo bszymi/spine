@@ -419,7 +419,19 @@ func (o *Orchestrator) CompleteRun(ctx context.Context, runID string, hasCommit 
 			proj.Status = string(domain.StatusCompleted)
 		})
 		// Clean up the run branch after successful completion.
-		_ = o.CleanupRunBranch(ctx, runID)
+		// Per-repo cleanup failures are already recorded as
+		// EventRunBranchCleanupFailed inside CleanupRunBranch; the only
+		// signal the call site adds is when the *primary* delete fails
+		// (the only condition that makes CleanupRunBranch return non-nil).
+		// Logging that here keeps orphan-branch troubleshooting attached
+		// to the originating run-completion line.
+		if err := o.CleanupRunBranch(ctx, runID); err != nil {
+			log.Warn("cleanup_run_branch failed",
+				"run_id", runID,
+				"branch", run.BranchName,
+				"error", err,
+			)
+		}
 	} else {
 		log.Info("run entering commit phase", "run_id", runID)
 
@@ -458,8 +470,15 @@ func (o *Orchestrator) FailRun(ctx context.Context, runID, reason string) error 
 	o.emitEvent(ctx, domain.EventRunFailed, runID, run.TraceID,
 		fmt.Sprintf("evt-%s-failed", run.TraceID[:12]), payload)
 
-	observe.Logger(ctx).Info("run failed", "run_id", runID, "reason", reason)
-	_ = o.CleanupRunBranch(ctx, runID)
+	log := observe.Logger(ctx)
+	log.Info("run failed", "run_id", runID, "reason", reason)
+	if err := o.CleanupRunBranch(ctx, runID); err != nil {
+		log.Warn("cleanup_run_branch failed",
+			"run_id", runID,
+			"branch", run.BranchName,
+			"error", err,
+		)
+	}
 	return nil
 }
 
@@ -484,8 +503,15 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
 	o.emitEvent(ctx, domain.EventRunCancelled, runID, run.TraceID,
 		fmt.Sprintf("evt-%s-cancelled", run.TraceID[:12]), nil)
 
-	observe.Logger(ctx).Info("run cancelled", "run_id", runID)
-	_ = o.CleanupRunBranch(ctx, runID)
+	log := observe.Logger(ctx)
+	log.Info("run cancelled", "run_id", runID)
+	if err := o.CleanupRunBranch(ctx, runID); err != nil {
+		log.Warn("cleanup_run_branch failed",
+			"run_id", runID,
+			"branch", run.BranchName,
+			"error", err,
+		)
+	}
 	return nil
 }
 
