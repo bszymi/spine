@@ -175,8 +175,8 @@ func mapAWSError(err error, ref SecretRef) error {
 		case "AccessDeniedException", "UnauthorizedOperation", "UnauthorizedException":
 			return fmt.Errorf("%w: %s", ErrAccessDenied, ref)
 		case "InvalidParameterException", "InvalidRequestException":
-			return fmt.Errorf("aws secrets manager: invalid request for %s: %s: %s",
-				ref, apiErr.ErrorCode(), apiErr.ErrorMessage())
+			return fmt.Errorf("%w: %s: %s: %s",
+				ErrInvalidRequest, ref, apiErr.ErrorCode(), apiErr.ErrorMessage())
 		}
 	}
 	return fmt.Errorf("%w: %s: %v", ErrSecretStoreDown, ref, err)

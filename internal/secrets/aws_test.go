@@ -193,6 +193,18 @@ func TestAWSClient_ErrorMapping(t *testing.T) {
 			want:   secrets.ErrAccessDenied,
 		},
 		{
+			name:    "InvalidParameterException → ErrInvalidRequest",
+			apiErr:  &fakeAPIError{code: "InvalidParameterException", message: "bad input"},
+			want:    secrets.ErrInvalidRequest,
+			notWant: secrets.ErrSecretStoreDown,
+		},
+		{
+			name:    "InvalidRequestException → ErrInvalidRequest",
+			apiErr:  &fakeAPIError{code: "InvalidRequestException", message: "secret is scheduled for deletion"},
+			want:    secrets.ErrInvalidRequest,
+			notWant: secrets.ErrSecretNotFound,
+		},
+		{
 			name:   "ThrottlingException → ErrSecretStoreDown",
 			apiErr: &fakeAPIError{code: "ThrottlingException", message: "rate limited"},
 			want:   secrets.ErrSecretStoreDown,
