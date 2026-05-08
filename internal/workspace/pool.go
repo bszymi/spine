@@ -835,7 +835,11 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	artifactSvc := artifact.NewService(primaryClient, eventRouter, repoPath)
 	artifactSvc.WithArtifactsDir(spineCfg.ArtifactsDir)
 	if st != nil {
-		artifactSvc.WithPolicy(branchprotect.New(bpprojection.New(st)))
+		rs, err := bpprojection.New(st)
+		if err != nil {
+			return nil, fmt.Errorf("artifact branch-protect policy: %w", err)
+		}
+		artifactSvc.WithPolicy(branchprotect.New(rs))
 	} else {
 		artifactSvc.WithPolicy(branchprotect.NewPermissive())
 	}
@@ -879,7 +883,11 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		// and Orchestrator above. spine/* divergence branches never
 		// match user rules, so the check is audit-consistency only,
 		// but wiring it keeps the guard symmetric (ADR-009 §3).
-		divSvc.WithBranchProtectPolicy(branchprotect.New(bpprojection.New(st)))
+		rs, err := bpprojection.New(st)
+		if err != nil {
+			return nil, fmt.Errorf("divergence branch-protect policy: %w", err)
+		}
+		divSvc.WithBranchProtectPolicy(branchprotect.New(rs))
 	}
 
 	// done fires at the START of teardown so long-lived workspace-bound
