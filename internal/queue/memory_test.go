@@ -3,6 +3,7 @@ package queue_test
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -324,6 +325,129 @@ func TestLateSubscriber(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for late-subscribed entry")
+	}
+}
+
+// TestNoHandlerGoroutineBounded verifies INIT-022 EPIC-001 TASK-011: a
+// noisy publisher with no subscriber registered yet must not fan out
+// arbitrarily many goroutines. Pre-fix, dispatch() spawned one goroutine
+// per re-queue; post-fix the dispatcher parks unhandled entries on a
+// deferred list owned by Start()'s loop, so total goroutine count stays
+// bounded regardless of inbound rate. The test also verifies the
+// boot-race window is preserved — every deferred entry is delivered once
+// a handler is finally registered.
+func TestNoHandlerGoroutineBounded(t *testing.T) {
+	q := queue.NewMemoryQueue(1000)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const publishCount = 200
+
+	// Capture baseline before starting the dispatcher.
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+
+	go q.Start(ctx)
+	defer q.Stop()
+
+	for i := 0; i < publishCount; i++ {
+		if err := q.Publish(ctx, queue.Entry{
+			EntryID:   fmt.Sprintf("orphan-%03d", i),
+			EntryType: "no_subscriber",
+		}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+
+	// Let the dispatcher cycle through the deferred list several times.
+	// The pre-fix code would spawn ~publishCount goroutines, each of
+	// which itself re-publishes and triggers another spawn. Post-fix,
+	// Start()'s single goroutine handles all of them via the ticker.
+	time.Sleep(500 * time.Millisecond)
+
+	runtime.GC()
+	current := runtime.NumGoroutine()
+
+	// Generous bound: we expect baseline + 1 (Start's loop) +
+	// a small slack for runtime/test infra. Definitely not +200.
+	if delta := current - baseline; delta > 20 {
+		t.Fatalf("goroutine count grew unbounded: baseline=%d current=%d delta=%d (publishCount=%d)",
+			baseline, current, delta, publishCount)
+	}
+
+	// Boot-race semantics preserved: register a handler now and every
+	// deferred entry is delivered.
+	var received atomic.Int32
+	if err := q.Subscribe(ctx, "no_subscriber", func(ctx context.Context, entry queue.Entry) error {
+		received.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && received.Load() < publishCount {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if got := received.Load(); got != publishCount {
+		t.Fatalf("expected %d deferred deliveries after subscribe, got %d", publishCount, got)
+	}
+}
+
+// TestNoHandlerDoesNotBlockOtherTypes verifies that entries piling up
+// on the deferred list (no subscriber registered for their type) do not
+// stall dispatch of entries for types that *do* have a handler. This is
+// the head-of-line guarantee from INIT-022 EPIC-001 TASK-011: pre-fix,
+// orphaned entries spawned unbounded goroutines but didn't head-of-line
+// block; the fix preserves that property by always draining q.entries
+// regardless of deferred-list size.
+func TestNoHandlerDoesNotBlockOtherTypes(t *testing.T) {
+	q := queue.NewMemoryQueue(8)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var handledCount atomic.Int32
+	if err := q.Subscribe(ctx, "handled", func(ctx context.Context, entry queue.Entry) error {
+		handledCount.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	go q.Start(ctx)
+	defer q.Stop()
+
+	// Pile orphaned entries (no subscriber) onto the deferred list at
+	// well over the channel buffer size, then publish handled entries
+	// interleaved. The handled ones must reach their handler promptly
+	// even though the deferred list is large.
+	const orphanCount = 200
+	for i := 0; i < orphanCount; i++ {
+		if err := q.Publish(ctx, queue.Entry{
+			EntryID:   fmt.Sprintf("orphan-%03d", i),
+			EntryType: "no_subscriber",
+		}); err != nil {
+			t.Fatalf("Publish orphan: %v", err)
+		}
+	}
+
+	const handledTarget = int32(50)
+	for i := int32(0); i < handledTarget; i++ {
+		if err := q.Publish(ctx, queue.Entry{
+			EntryID:   fmt.Sprintf("h-%03d", i),
+			EntryType: "handled",
+		}); err != nil {
+			t.Fatalf("Publish handled: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && handledCount.Load() < handledTarget {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := handledCount.Load(); got != handledTarget {
+		t.Fatalf("handled entries head-of-line blocked: want %d, got %d", handledTarget, got)
 	}
 }
 
