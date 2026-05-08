@@ -13,6 +13,7 @@ import (
 
 	"github.com/bszymi/spine/internal/branchprotect"
 	"github.com/bszymi/spine/internal/branchprotect/config"
+	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/store"
 )
 
@@ -34,15 +35,19 @@ type RuleSource struct {
 	reader ListReader
 }
 
-// New returns a RuleSource that reads through r. A nil r panics — the
-// adapter is not useful without a store, and silently degrading to
-// "no rules" (which the policy would interpret as bootstrap defaults)
-// would hide a misconfiguration.
-func New(r ListReader) *RuleSource {
+// New returns a RuleSource that reads through r. A nil r returns an
+// invalid-params SpineError — the adapter is not useful without a
+// store, and silently degrading to "no rules" (which the policy would
+// interpret as bootstrap defaults) would hide a misconfiguration. The
+// error path is exercised by wiring callers in cmd/spine and
+// internal/workspace, which thread the error to startup or per-
+// workspace builder failure rather than killing the process.
+func New(r ListReader) (*RuleSource, error) {
 	if r == nil {
-		panic("branchprotect/projection: nil ListReader")
+		return nil, domain.NewError(domain.ErrInvalidParams,
+			"branchprotect/projection: nil ListReader")
 	}
-	return &RuleSource{reader: r}
+	return &RuleSource{reader: r}, nil
 }
 
 // Rules implements branchprotect.RuleSource. It translates the JSONB

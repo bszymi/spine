@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/internal/branchprotect/config"
+	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/store"
 )
 
@@ -38,7 +39,10 @@ func TestRuleSource_HappyPath(t *testing.T) {
 			},
 		},
 	}
-	rs := New(reader)
+	rs, err := New(reader)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	got, err := rs.Rules(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -58,7 +62,10 @@ func TestRuleSource_EmptyTableReturnsEmptySliceNotNil(t *testing.T) {
 	// (nil, nil) because that's the policy's bootstrap-fallback
 	// signal; bootstrap is already written to the table by the
 	// projection handler when the file is missing.
-	rs := New(fakeReader{rows: nil})
+	rs, err := New(fakeReader{rows: nil})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	got, err := rs.Rules(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -72,8 +79,11 @@ func TestRuleSource_EmptyTableReturnsEmptySliceNotNil(t *testing.T) {
 }
 
 func TestRuleSource_StoreErrorPropagates(t *testing.T) {
-	rs := New(fakeReader{err: errors.New("db unavailable")})
-	_, err := rs.Rules(context.Background())
+	rs, err := New(fakeReader{err: errors.New("db unavailable")})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = rs.Rules(context.Background())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -91,7 +101,11 @@ func TestRuleSource_MalformedProtectionsJSON(t *testing.T) {
 			{BranchPattern: "main", Protections: []byte(`not json`)},
 		},
 	}
-	_, err := New(reader).Rules(context.Background())
+	rs, err := New(reader)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = rs.Rules(context.Background())
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
 	}
@@ -100,13 +114,23 @@ func TestRuleSource_MalformedProtectionsJSON(t *testing.T) {
 	}
 }
 
-func TestNew_NilReaderPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("New(nil) did not panic")
-		}
-	}()
-	New(nil)
+// TestNew_NilReaderReturnsError locks INIT-022 EPIC-001 TASK-014: the
+// constructor must return a SpineError(ErrInvalidParams) instead of
+// panicking, so a missed nil-check in DI surfaces as a startup or
+// per-workspace builder failure rather than a process kill.
+func TestNew_NilReaderReturnsError(t *testing.T) {
+	rs, err := New(nil)
+	if err == nil {
+		t.Fatal("New(nil) returned nil error; want ErrInvalidParams")
+	}
+	if rs != nil {
+		t.Errorf("New(nil) returned non-nil RuleSource; want nil")
+	}
+	var spineErr *domain.SpineError
+	if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrInvalidParams {
+		t.Errorf("New(nil): expected SpineError code=%q, got %v",
+			domain.ErrInvalidParams, err)
+	}
 }
 
 func TestRuleSource_PreservesOrderingAcrossCalls(t *testing.T) {
@@ -120,7 +144,11 @@ func TestRuleSource_PreservesOrderingAcrossCalls(t *testing.T) {
 			{BranchPattern: "staging", RuleOrder: 2, Protections: []byte(`["no-delete"]`)},
 		},
 	}
-	got, err := New(reader).Rules(context.Background())
+	rs, err := New(reader)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := rs.Rules(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

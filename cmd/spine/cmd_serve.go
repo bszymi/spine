@@ -198,7 +198,11 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	// Branch-protection guard for MergeRunBranch (ADR-009 §3). Same
 	// projection-backed policy wired into the Artifact Service above, so
 	// both API writes and governed merges share a single decision point.
-	orch.WithBranchProtectPolicy(buildBranchProtectPolicy(ss.Store))
+	bpPolicy, err := buildBranchProtectPolicy(ss.Store)
+	if err != nil {
+		return fmt.Errorf("workspace orchestrator branch-protect policy: %w", err)
+	}
+	orch.WithBranchProtectPolicy(bpPolicy)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Mirrors the wiring on the process-level orchestrator so shared
 	// workspace deployments enforce the same invariants. The
@@ -758,7 +762,10 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	}
 	primaryClient := gitPool.PrimaryClient()
 
-	artifactSvc := buildArtifactService(primaryClient, deps.Events, deps.RepoPath, deps.SpineCfg, deps.Store)
+	artifactSvc, err := buildArtifactService(primaryClient, deps.Events, deps.RepoPath, deps.SpineCfg, deps.Store)
+	if err != nil {
+		return nil, fmt.Errorf("artifact service: %w", err)
+	}
 	workflowSvc := workflow.NewService(primaryClient, deps.RepoPath)
 
 	var projQuery *projection.QueryService
@@ -860,7 +867,11 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		eventBroadcaster = deliverySubscriber.Broadcaster
 	}
 
-	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, buildBranchProtectPolicy(deps.Store), log)
+	gitHTTPPolicy, err := buildBranchProtectPolicy(deps.Store)
+	if err != nil {
+		return nil, fmt.Errorf("git-http branch-protect policy: %w", err)
+	}
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, log)
 	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events)
 
 	cfg := gateway.ServerConfig{
@@ -922,13 +933,17 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 // nothing — there are no rules to match — but the Service remains
 // "policy-wired" and any future rule, once the Store is online, flows
 // through the same code path.
-func buildArtifactService(gitClient git.GitClient, events event.EventRouter, repoPath string, cfg *config.SpineConfig, st store.Store) *artifact.Service {
+func buildArtifactService(gitClient git.GitClient, events event.EventRouter, repoPath string, cfg *config.SpineConfig, st store.Store) (*artifact.Service, error) {
 	svc := artifact.NewService(gitClient, events, repoPath)
 	if cfg != nil {
 		svc.WithArtifactsDir(cfg.ArtifactsDir)
 	}
-	svc.WithPolicy(buildBranchProtectPolicy(st))
-	return svc
+	policy, err := buildBranchProtectPolicy(st)
+	if err != nil {
+		return nil, fmt.Errorf("artifact service branch-protect policy: %w", err)
+	}
+	svc.WithPolicy(policy)
+	return svc, nil
 }
 
 // buildBranchProtectPolicy returns a branchprotect.Policy suitable for
@@ -936,11 +951,20 @@ func buildArtifactService(gitClient git.GitClient, events event.EventRouter, rep
 // reads the projection-backed rules; otherwise it falls back to a
 // rules-less source, which evaluates to "no matching rule, allow" for
 // every branch and keeps early-bootstrap paths functional.
-func buildBranchProtectPolicy(st store.Store) branchprotect.Policy {
+//
+// Returns an error if the projection adapter rejects its inputs (today,
+// only on a nil ListReader — the st != nil guard above shields this in
+// production, but the error path lets a missed nil-check surface as a
+// startup failure rather than a panic; INIT-022 EPIC-001 TASK-014).
+func buildBranchProtectPolicy(st store.Store) (branchprotect.Policy, error) {
 	if st == nil {
-		return branchprotect.NewPermissive()
+		return branchprotect.NewPermissive(), nil
 	}
-	return branchprotect.New(bpprojection.New(st))
+	rs, err := bpprojection.New(st)
+	if err != nil {
+		return nil, fmt.Errorf("branchprotect projection: %w", err)
+	}
+	return branchprotect.New(rs), nil
 }
 
 // buildEvidenceQuerier constructs the gateway-facing
@@ -1006,8 +1030,12 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 	return func(ctx context.Context, workspaceID string) (gateway.GitPushResources, func(), error) {
 		noop := func() {}
 		if pool == nil {
+			policy, err := buildBranchProtectPolicy(fallbackStore)
+			if err != nil {
+				return gateway.GitPushResources{}, noop, fmt.Errorf("git-push fallback branch-protect policy: %w", err)
+			}
 			return gateway.GitPushResources{
-				Policy: buildBranchProtectPolicy(fallbackStore),
+				Policy: policy,
 				Events: fallbackEvents,
 			}, noop, nil
 		}
@@ -1026,7 +1054,11 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 			// nothing to record).
 			policy = branchprotect.NewPermissive()
 		} else {
-			policy = buildBranchProtectPolicy(ss.Store)
+			policy, err = buildBranchProtectPolicy(ss.Store)
+			if err != nil {
+				release()
+				return gateway.GitPushResources{}, noop, fmt.Errorf("git-push branch-protect policy: %w", err)
+			}
 		}
 		var events event.Emitter
 		if ss.Events != nil {
@@ -1123,10 +1155,20 @@ func buildOrchestrator(
 	// Branch-protection guard for MergeRunBranch (ADR-009 §3). Uses the
 	// same projection-backed policy the Artifact Service installs, so
 	// API-path writes and governed merges share a single decision point.
-	orch.WithBranchProtectPolicy(buildBranchProtectPolicy(st))
+	bpPolicy, err := buildBranchProtectPolicy(st)
+	if err != nil {
+		log.Error("branch-protect policy init failed", "error", err)
+		return nil
+	}
+	orch.WithBranchProtectPolicy(bpPolicy)
 
 	divSvc := divergence.NewService(st, gitClient, events)
-	divSvc.WithBranchProtectPolicy(buildBranchProtectPolicy(st))
+	divPolicy, err := buildBranchProtectPolicy(st)
+	if err != nil {
+		log.Error("branch-protect policy init failed", "error", err)
+		return nil
+	}
+	divSvc.WithBranchProtectPolicy(divPolicy)
 	orch.WithDivergence(divSvc)
 	orch.WithConvergence(divSvc)
 
