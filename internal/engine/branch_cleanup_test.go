@@ -390,6 +390,10 @@ func TestCleanupRunBranch_MultipleFailuresGetUniqueEventIDs(t *testing.T) {
 		cleanupOutcome(runID, "api-gateway", domain.RepositoryMergeStatusMerged),
 	}
 
+	// Return value intentionally discarded: this test asserts on the
+	// emitted EventRunBranchCleanupFailed events, not the return value.
+	// (CleanupRunBranch returns the primary error; the assertions below
+	// cover the same condition via the event payload.)
 	_ = h.orch.CleanupRunBranch(context.Background(), runID)
 
 	events := h.findCleanupEvents(t)

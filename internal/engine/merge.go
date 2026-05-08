@@ -285,7 +285,8 @@ func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run, 
 	o.emitEvent(ctx, domain.EventRunCompleted, run.RunID, run.TraceID,
 		fmt.Sprintf("evt-%s-completed", run.TraceID[:12]), nil)
 
-	observe.Logger(ctx).Info("run completed after merge", "run_id", run.RunID)
+	log := observe.Logger(ctx)
+	log.Info("run completed after merge", "run_id", run.RunID)
 	if run.StartedAt != nil {
 		observe.GlobalMetrics.RunDuration.ObserveDuration(time.Since(*run.StartedAt))
 	}
@@ -294,7 +295,13 @@ func (o *Orchestrator) completeAfterMerge(ctx context.Context, run *domain.Run, 
 	// When main push fails, the remote run branch is the only ref containing
 	// the merged commits — preserve it for collaborators.
 	if cleanupBranch {
-		_ = o.CleanupRunBranch(ctx, run.RunID)
+		if err := o.CleanupRunBranch(ctx, run.RunID); err != nil {
+			log.Warn("cleanup_run_branch failed",
+				"run_id", run.RunID,
+				"branch", run.BranchName,
+				"error", err,
+			)
+		}
 	}
 	return nil
 }

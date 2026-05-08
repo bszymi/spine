@@ -229,8 +229,17 @@ func (s *Service) createBranchRecord(ctx context.Context, run *domain.Run, divCt
 	}
 
 	if err := s.store.CreateBranch(ctx, branch); err != nil {
-		// Clean up the Git branch on DB failure.
-		_ = s.git.DeleteBranch(ctx, gitBranchName)
+		// Clean up the Git branch on DB failure. Best-effort by design:
+		// the store error is what the caller acts on, so a rollback
+		// failure here is logged as a hint that an orphan ref may need
+		// manual cleanup but is not propagated.
+		if delErr := s.git.DeleteBranch(ctx, gitBranchName); delErr != nil {
+			observe.Logger(ctx).Warn("delete_branch rollback failed",
+				"run_id", run.RunID,
+				"branch", gitBranchName,
+				"error", delErr,
+			)
+		}
 		return nil, err
 	}
 
