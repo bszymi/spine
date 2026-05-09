@@ -112,7 +112,22 @@ func RequiredRole(op Operation) (domain.ActorRole, bool) {
 
 // Authorize checks whether the actor has sufficient privileges for the operation.
 // Returns nil if authorized, or a SpineError with ErrForbidden if not.
+//
+// Defence-in-depth: rejects non-Active actors here even though
+// ValidateToken already does (auth.go:43). A future caller that
+// constructs an *Actor and calls Authorize directly — or a regression
+// that loosens the token path — would otherwise let suspended /
+// deactivated actors slip through.
 func Authorize(actor *domain.Actor, op Operation) error {
+	if actor.Status != domain.ActorStatusActive {
+		return domain.NewErrorWithDetail(domain.ErrForbidden,
+			"actor is not active",
+			map[string]string{
+				"actor_id":     actor.ActorID,
+				"actor_status": string(actor.Status),
+				"operation":    string(op),
+			})
+	}
 	required, ok := RequiredRole(op)
 	if !ok {
 		return domain.NewError(domain.ErrForbidden, "unknown operation")

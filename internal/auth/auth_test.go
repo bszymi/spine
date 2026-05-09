@@ -290,7 +290,7 @@ func TestAuthorizeAllOperations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.op)+"/"+string(tt.role), func(t *testing.T) {
-			actor := &domain.Actor{Role: tt.role}
+			actor := &domain.Actor{Role: tt.role, Status: domain.ActorStatusActive}
 			err := auth.Authorize(actor, tt.op)
 			if tt.allowed && err != nil {
 				t.Errorf("expected allowed, got error: %v", err)
@@ -303,7 +303,7 @@ func TestAuthorizeAllOperations(t *testing.T) {
 }
 
 func TestAuthorizeUnknownOperation(t *testing.T) {
-	actor := &domain.Actor{Role: domain.RoleAdmin}
+	actor := &domain.Actor{Role: domain.RoleAdmin, Status: domain.ActorStatusActive}
 	err := auth.Authorize(actor, "unknown.op")
 	if err == nil {
 		t.Error("expected error for unknown operation")
