@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/bszymi/spine/internal/observe"
@@ -31,13 +32,26 @@ func StartRetentionCleanup(ctx context.Context, st store.DeliveryStore, retentio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			before := time.Now().Add(-retention)
-			deleted, err := st.DeleteExpiredDeliveries(ctx, before)
-			if err != nil {
-				log.Error("retention cleanup failed", "error", err)
-			} else if deleted > 0 {
-				log.Info("retention cleanup complete", "deleted", deleted)
-			}
+			runRetentionPass(ctx, st, retention, log)
 		}
+	}
+}
+
+// runRetentionPass executes one cleanup sweep: compute the cutoff as
+// `now - retention` and delete deliveries older than that. Extracted
+// from StartRetentionCleanup so the per-tick logic is unit-testable
+// without driving the hardcoded 1h ticker (INIT-022 EPIC-001 TASK-019).
+// The `before = now - retention` direction is the load-bearing
+// invariant: a sign flip would push the cutoff into the future and
+// delete every live row.
+func runRetentionPass(ctx context.Context, st store.DeliveryStore, retention time.Duration, log *slog.Logger) {
+	before := time.Now().Add(-retention)
+	deleted, err := st.DeleteExpiredDeliveries(ctx, before)
+	if err != nil {
+		log.Error("retention cleanup failed", "error", err)
+		return
+	}
+	if deleted > 0 {
+		log.Info("retention cleanup complete", "deleted", deleted)
 	}
 }
