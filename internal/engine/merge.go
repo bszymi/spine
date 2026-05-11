@@ -25,22 +25,59 @@ const authoritativeBranch = "main"
 // MergeRunBranch merges the run's branch to the authoritative branch (main)
 // and transitions the run from committing to completed. If the merge fails,
 // the run transitions to failed (permanent) or stays in committing (transient).
+//
+// The body delegates to four phase helpers — preflightCheck loads the run
+// and runs branch-protection / commit-status; mergeCodeRepos drives the
+// per-repo loop; mergePrimary performs the primary merge + push; and
+// verifyAndComplete handles the post-merge code-repo completeness check
+// and the committing → completed transition. Each helper signals "done,
+// caller should return" through its first return so MergeRunBranch
+// itself stays a flat orchestrator and every retry / permanent-fail /
+// success path remains in the same order as before extraction.
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
+	run, done, err := o.preflightCheck(ctx, runID)
+	if err != nil || done {
+		return err
+	}
+	if retried, err := o.mergeCodeRepos(ctx, run); err != nil || retried {
+		return err
+	}
+	if done, err := o.mergePrimary(ctx, run); err != nil || done {
+		return err
+	}
+	return o.verifyAndComplete(ctx, run)
+}
+
+// preflightCheck loads the run, validates its state, runs branch protection,
+// and applies commit-status metadata on the run branch.
+//
+// Returns:
+//   - (run, false, nil)         — ready for the code-repo loop.
+//   - (nil, true, nil) / (nil, true, err) — empty-branch fast path: the
+//     run was driven directly to completed via completeAfterMerge; the
+//     caller returns the wrapped err (nil on success).
+//   - (nil, false, err)         — fatal preflight error (GetRun failed,
+//     run not in committing state, branch-protection denied).
+//
+// applyCommitStatus failures are logged and swallowed — exactly as in the
+// pre-extraction code — because the merge itself is the contract: a
+// failed status rewrite must not block the merge.
+func (o *Orchestrator) preflightCheck(ctx context.Context, runID string) (*domain.Run, bool, error) {
 	log := observe.Logger(ctx)
 
 	run, err := o.store.GetRun(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("get run: %w", err)
+		return nil, false, fmt.Errorf("get run: %w", err)
 	}
 
 	if run.Status != domain.RunStatusCommitting {
-		return domain.NewError(domain.ErrConflict,
+		return nil, false, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("run %s is in %s state, expected committing", runID, run.Status))
 	}
 
 	if run.BranchName == "" {
 		// No branch to merge — transition directly to completed.
-		return o.completeAfterMerge(ctx, run, false)
+		return nil, true, o.completeAfterMerge(ctx, run, false)
 	}
 
 	// Branch-protection check (ADR-009 §3). Runs before any ref-advancing
@@ -57,7 +94,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	// Rule-source errors for governed merges do NOT surface here: the
 	// evaluator short-circuits before loading rules, by design.
 	if err := o.checkBranchProtectMerge(ctx, run); err != nil {
-		return err
+		return nil, false, err
 	}
 
 	// Apply commit metadata (e.g., rewrite artifact status) on the branch
@@ -69,33 +106,62 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		}
 	}
 
-	// Code-repo-first merge order (INIT-014 EPIC-005 TASK-002). Every
-	// affected non-primary repository merges and records its outcome
-	// before the primary ledger update advances. This intentionally
-	// runs after applyCommitStatus — the cascade only touches files in
-	// the primary repo, so its placement does not gate code-repo
-	// merges, but keeping the existing primary-prep step before any
-	// per-repo work preserves the ordering operators already debug
-	// against. A non-nil error here means the orchestrator could not
-	// even attempt the chain (missing wiring, registry lookup
-	// failure); per-repo merge failures are recorded as failed
-	// outcomes and never bubble up.
+	return run, false, nil
+}
+
+// mergeCodeRepos drives the per-repo merge loop for every affected
+// non-primary repository (INIT-014 EPIC-005 TASK-002). Code-repo-first
+// ordering is preserved: every affected repo merges and records its
+// outcome before the primary ledger update advances. This intentionally
+// runs after applyCommitStatus — the cascade only touches files in the
+// primary repo, so its placement does not gate code-repo merges, but
+// keeping the existing primary-prep step before any per-repo work
+// preserves the ordering operators already debug against. A non-nil
+// error from mergeAffectedCodeRepositories means the orchestrator could
+// not even attempt the chain (missing wiring, registry lookup failure);
+// per-repo merge failures are recorded as failed outcomes and never
+// bubble up.
+//
+// Returns (true, nil) when the run was placed on the transient retry
+// track (caller returns nil), (false, err) on hard error, (false, nil)
+// on success.
+func (o *Orchestrator) mergeCodeRepos(ctx context.Context, run *domain.Run) (bool, error) {
 	if err := o.mergeAffectedCodeRepositories(ctx, run); err != nil {
 		// A non-terminal code-repo outcome (transient failure, pending)
 		// routes through retryMerge so the run stays in committing and
 		// the scheduler picks it up again. Anything else is treated as
 		// a hard error and bubbles up.
 		if errors.Is(err, errPendingCodeRepoRetry) {
-			log.Warn("code repo merge has non-terminal outcomes, retrying",
-				"run_id", runID, "branch", run.BranchName)
-			return o.retryMerge(ctx, run)
+			observe.Logger(ctx).Warn("code repo merge has non-terminal outcomes, retrying",
+				"run_id", run.RunID, "branch", run.BranchName)
+			return true, o.retryMerge(ctx, run)
 		}
-		return err
+		return false, err
 	}
+	return false, nil
+}
+
+// mergePrimary performs the primary merge into the authoritative branch
+// and pushes it (when auto-push is enabled). The retry / renumber /
+// permanent-fail decisions on merge and push errors live here so the
+// outer MergeRunBranch keeps a single orchestration shape.
+//
+// Returns:
+//   - (false, recErr) — outcome-record persistence failure. The caller
+//     returns this error so the run stays in committing for retry,
+//     matching the symmetric treatment in the code-repo path.
+//   - (true, nil) / (true, err) — the run was placed on a retry track
+//     (transient failure, ID-collision renumber) or routed through
+//     handlePermanentMergeFailure; caller returns the wrapped err.
+//   - (false, nil) — merge AND push (when enabled) both succeeded and
+//     the primary outcome row is recorded; caller advances to
+//     verifyAndComplete.
+func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run) (bool, error) {
+	log := observe.Logger(ctx)
 
 	// Perform the merge into the authoritative branch explicitly.
 	trailers := map[string]string{
-		"Run-ID":   runID,
+		"Run-ID":   run.RunID,
 		"Trace-ID": run.TraceID,
 	}
 
@@ -103,7 +169,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		Source:   run.BranchName,
 		Target:   authoritativeBranch,
 		Strategy: "merge-commit",
-		Message:  fmt.Sprintf("Merge run %s: %s", runID, run.TaskPath),
+		Message:  fmt.Sprintf("Merge run %s: %s", run.RunID, run.TaskPath),
 		Trailers: trailers,
 	})
 
@@ -119,14 +185,14 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		// classifier-driven retry/fail logic below only runs when the
 		// row is safely recorded.
 		if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", mergeErr, ""); recErr != nil {
-			return recErr
+			return false, recErr
 		}
 
 		var gitErr *git.GitError
 		if errors.As(mergeErr, &gitErr) && gitErr.IsRetryable() {
 			log.Warn("transient merge failure, will retry",
-				"run_id", runID, "branch", run.BranchName, "error", mergeErr)
-			return o.retryMerge(ctx, run)
+				"run_id", run.RunID, "branch", run.BranchName, "error", mergeErr)
+			return true, o.retryMerge(ctx, run)
 		}
 
 		// For planning runs with a collision handler, check if this is an
@@ -134,19 +200,19 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		if run.Mode == domain.RunModePlanning && o.collision != nil {
 			if newPath, renErr := o.collision.DetectAndRenumber(ctx, run, 2); renErr == nil && newPath != "" {
 				log.Info("artifact renumbered after ID collision, retrying merge",
-					"run_id", runID, "old_path", run.TaskPath, "new_path", newPath)
+					"run_id", run.RunID, "old_path", run.TaskPath, "new_path", newPath)
 				run.TaskPath = newPath
-				return o.retryMerge(ctx, run)
+				return true, o.retryMerge(ctx, run)
 			}
 		}
 
 		log.Error("permanent merge failure",
-			"run_id", runID, "branch", run.BranchName, "error", mergeErr)
-		return o.handlePermanentMergeFailure(ctx, run, mergeErr)
+			"run_id", run.RunID, "branch", run.BranchName, "error", mergeErr)
+		return true, o.handlePermanentMergeFailure(ctx, run, mergeErr)
 	}
 
 	log.Info("run branch merged",
-		"run_id", runID,
+		"run_id", run.RunID,
 		"branch", run.BranchName,
 		"merge_sha", mergeResult.SHA,
 		"fast_forward", mergeResult.FastForward,
@@ -162,7 +228,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	if autoPushEnabled() {
 		if pushErr := o.git.Push(ctx, "origin", "main"); pushErr != nil {
 			if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, pushErr, "push"); recErr != nil {
-				return recErr
+				return false, recErr
 			}
 
 			// Classify push error: auth failures are permanent (don't retry),
@@ -170,12 +236,12 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 			var gitErr *git.GitError
 			if errors.As(pushErr, &gitErr) && !gitErr.IsRetryable() {
 				log.Error("auto-push: permanent push failure (auth or rejected), failing run",
-					"run_id", runID, "error", pushErr)
-				return o.handlePermanentMergeFailure(ctx, run, pushErr)
+					"run_id", run.RunID, "error", pushErr)
+				return true, o.handlePermanentMergeFailure(ctx, run, pushErr)
 			}
 			log.Warn("auto-push: transient push failure, staying in committing for retry",
-				"run_id", runID, "error", pushErr)
-			return o.retryMerge(ctx, run)
+				"run_id", run.RunID, "error", pushErr)
+			return true, o.retryMerge(ctx, run)
 		}
 	}
 
@@ -186,20 +252,32 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	// the run in committing so the scheduler retries, and a no-op
 	// merge on the second attempt re-records cleanly.
 	if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, nil, ""); recErr != nil {
-		return recErr
+		return false, recErr
 	}
+	return false, nil
+}
 
-	// EPIC-005 AC #5: completed runs require every affected
-	// repository to merge successfully. The primary merge has
-	// already landed (its outcome is recorded above), but a code
-	// repo that ended in a permanent-failed state — typically a
-	// merge conflict, branch protection rejection, or auth error —
-	// must NOT let the run flip to completed. Per TASK-003 the run
-	// transitions committing → partially-merged instead of failed:
-	// the run is blocked until an operator resolves the failed code
-	// repo, but the work that has merged stays preserved and the
-	// scheduler keeps the run resumable so a retry after manual
-	// resolution promotes it back to committing.
+// verifyAndComplete enforces the EPIC-005 AC #5 rule (every affected
+// repository must merge before the run completes), then transitions the
+// run to its terminal state. The primary merge has already landed and
+// its outcome is recorded by mergePrimary; this helper checks the
+// per-repo outcomes for permanent failures and routes accordingly:
+//
+//   - Lookup error  → propagate so the run stays in committing and the
+//     scheduler retries when the store recovers (fail-closed).
+//   - Permanent code-repo failure → transitionToPartiallyMerged: the
+//     run is blocked until an operator resolves the failed code repo,
+//     but the work that has merged stays preserved and the scheduler
+//     keeps the run resumable so a retry after manual resolution
+//     promotes it back to committing (per TASK-003).
+//   - All clean   → completeAfterMerge with branch cleanup, then
+//     advancePublishStepIfAny so workflows with a publish step (type:
+//     internal, handler: merge) advance via the "published" outcome.
+//     No-op on workflows that model commit via terminal-outcome
+//     metadata — the merge has landed either way.
+func (o *Orchestrator) verifyAndComplete(ctx context.Context, run *domain.Run) error {
+	log := observe.Logger(ctx)
+
 	if failed, listErr := o.firstPermanentCodeRepoFailure(ctx, run.RunID); listErr != nil {
 		// Fail-closed: surface the lookup error so the run stays in
 		// committing and the scheduler retries when the store
@@ -207,7 +285,7 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 		return fmt.Errorf("verify code repo merge completion: %w", listErr)
 	} else if failed != nil {
 		log.Error("code repo merge permanently failed; transitioning run to partially-merged",
-			"run_id", runID,
+			"run_id", run.RunID,
 			"repository_id", failed.RepositoryID,
 			"failure_class", string(failed.FailureClass),
 			"failure_detail", failed.FailureDetail,
@@ -219,9 +297,6 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	if err := o.completeAfterMerge(ctx, run, true); err != nil {
 		return err
 	}
-	// Advance the publish step (type: internal, handler: merge) for
-	// workflows that have one. No-op on workflows that model commit via
-	// terminal-outcome metadata — the merge has landed either way.
 	return o.advancePublishStepIfAny(ctx, run, "published")
 }
 

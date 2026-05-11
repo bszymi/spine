@@ -142,28 +142,68 @@ func (f LogSinkFunc) OpenLog(ref string) (io.WriteCloser, error) { return f(ref)
 // that ran and returned a non-zero exit is a successful Run with
 // OutcomeFail; the error channel stays nil. This split keeps caller
 // code from special-casing routine outcomes as errors.
+//
+// The body delegates to three phase helpers — prepareCommand validates
+// the request and opens the log sink; runAndCapture builds the
+// timeout-bounded sub-context, runs the command, and snapshots every
+// post-run signal classify needs; classify finalises the Result by
+// closing the log writer and routing the captured signals through
+// classifyExit. Run itself stays a flat shell so the lifecycle reads
+// as "prepare → execute → classify".
 func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error) {
-	now := r.now()
-	res := Result{StartedAt: now}
+	started := r.now()
+	prep, earlyRes, earlyErr := r.prepareCommand(req, started)
+	if prep == nil {
+		return earlyRes, earlyErr
+	}
+	capture := r.runAndCapture(ctx, prep, req)
+	res := Result{StartedAt: started}
+	classifyErr := r.classify(&res, prep, capture)
+	return res, classifyErr
+}
+
+// commandPrep is the bundle of values runAndCapture and classify need
+// from the prepare phase. Held by pointer so a nil value signals
+// "prepare short-circuited; the caller should return the early result".
+type commandPrep struct {
+	workingDir  string
+	command     string
+	logRef      string
+	logWriter   io.WriteCloser
+	hasRealSink bool
+}
+
+// prepareCommand validates the request, resolves the working directory,
+// and opens the log sink for this invocation. Validation failures route
+// to a Result with OutcomeUnavailable + Reason + CompletedAt (the
+// caller returns it as a non-error Run result); a sink-open failure
+// routes to the same Result shape plus a wrapped error (the caller
+// surfaces it as a Run error).
+//
+// Returns (prep, _, _) when ready to execute. Returns (nil, res, nil)
+// for validation early exits and (nil, res, err) for sink-open early
+// exits — both terminal for the caller.
+func (r LocalCommandRunner) prepareCommand(req Request, started time.Time) (*commandPrep, Result, error) {
+	res := Result{StartedAt: started}
 
 	if req.Check.Kind != domain.PolicyCheckKindCommand {
 		res.Outcome = OutcomeUnavailable
 		res.Reason = fmt.Sprintf("kind=%q not supported by local command runner", req.Check.Kind)
 		res.CompletedAt = r.now()
-		return res, nil
+		return nil, res, nil
 	}
 	command := strings.TrimSpace(req.Check.Command)
 	if command == "" {
 		res.Outcome = OutcomeUnavailable
 		res.Reason = "policy check command is empty"
 		res.CompletedAt = r.now()
-		return res, nil
+		return nil, res, nil
 	}
 	if req.WorkingDir == "" {
 		res.Outcome = OutcomeUnavailable
 		res.Reason = "working_dir is empty"
 		res.CompletedAt = r.now()
-		return res, nil
+		return nil, res, nil
 	}
 	// Resolve the working tree to an absolute path before stat'ing so
 	// a relative path resolved against the runner's CWD does not race
@@ -175,7 +215,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 		res.Outcome = OutcomeUnavailable
 		res.Reason = fmt.Sprintf("working_dir resolve failed: %s", sanitizeReason(absErr.Error()))
 		res.CompletedAt = r.now()
-		return res, nil
+		return nil, res, nil
 	}
 	if info, err := os.Stat(workingDir); err != nil || !info.IsDir() {
 		res.Outcome = OutcomeUnavailable
@@ -188,10 +228,10 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 			res.Reason = "working_dir is not a directory"
 		}
 		res.CompletedAt = r.now()
-		return res, nil
+		return nil, res, nil
 	}
 
-	logRef := buildLogReference(req, now)
+	logRef := buildLogReference(req, started)
 	logWriter, hasRealSink, sinkErr := r.openLog(logRef)
 	if sinkErr != nil {
 		// Sink-open failure is a runner-internal problem the operator
@@ -201,9 +241,43 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 		// ran". StartedAt is left set so traces still show when the
 		// attempt began.
 		res.CompletedAt = r.now()
-		return res, fmt.Errorf("checkrunner: open log sink %q: %w", logRef, sinkErr)
+		return nil, res, fmt.Errorf("checkrunner: open log sink %q: %w", logRef, sinkErr)
 	}
 
+	return &commandPrep{
+		workingDir:  workingDir,
+		command:     command,
+		logRef:      logRef,
+		logWriter:   logWriter,
+		hasRealSink: hasRealSink,
+	}, Result{}, nil
+}
+
+// captureResult bundles every signal classify needs from the execute
+// phase. Held as a value (not pointer) because every field is set on
+// every path of runAndCapture and the struct is consumed exactly once.
+type captureResult struct {
+	runErr                  error
+	runCtxErr               error
+	parentCtxErr            error
+	leaderExitCode          int
+	leaderKilled            bool
+	policyTimeoutFiredFirst bool
+	sinkWriteErr            error
+	completedAt             time.Time
+}
+
+// runAndCapture builds the timeout-bounded sub-context, executes the
+// command with merged stdout/stderr piped to the cap-bounded log
+// writer, sweeps the process group, and snapshots every post-run
+// signal classify needs. The log writer is not closed here — classify
+// owns the close so a Close failure can be reported alongside the
+// final Outcome.
+//
+// All side effects on prep.logWriter happen before this function
+// returns (writes during cmd.Run, possible cmd.Cancel-triggered
+// process-group kill); the returned captureResult is read-only state.
+func (r LocalCommandRunner) runAndCapture(ctx context.Context, prep *commandPrep, req Request) captureResult {
 	runCtx := ctx
 	var cancel context.CancelFunc
 	// policyTimeoutFiredFirst is true when the runner-created
@@ -232,9 +306,9 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	shell := r.shell()
-	args := append(append([]string{}, shell[1:]...), command)
+	args := append(append([]string{}, shell[1:]...), prep.command)
 	cmd := exec.CommandContext(runCtx, shell[0], args...)
-	cmd.Dir = workingDir
+	cmd.Dir = prep.workingDir
 	// Wrap the sink writer so a sink-side Write failure is
 	// distinguishable from a normal exec error. Without this, a full
 	// disk or broken upload during stdout copy surfaces from cmd.Run
@@ -242,7 +316,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	// OutcomeUnavailable + nil Run error — silently labelling an
 	// infrastructure logging outage as a routine check verdict.
 	// Codex pass 1 P2.
-	captured := &errCapturingWriter{w: newCappedWriter(logWriter, r.MaxLogBytes)}
+	captured := &errCapturingWriter{w: newCappedWriter(prep.logWriter, r.MaxLogBytes)}
 	cmd.Stdout = captured
 	cmd.Stderr = captured
 	cmd.WaitDelay = r.waitDelay()
@@ -267,7 +341,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	}
 
 	runErr := cmd.Run()
-	res.CompletedAt = r.now()
+	completedAt := r.now()
 	// Sweep the process group regardless of how cmd.Run returned. A
 	// check that backgrounds work (e.g. `(while true; ...) &`) leaves
 	// orphaned descendants holding pipe FDs even on the success path;
@@ -276,13 +350,7 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	// past Run. Best-effort: ESRCH on an already-empty group is a
 	// no-op (codex pass 4 P2).
 	_ = cancelProcessGroup(cmd)
-	// LogReference is set only when a real LogSink received the bytes.
-	// With a nil LogSink the runner discards output via nopWriteCloser
-	// and exposing a generated reference would leave audit consumers
-	// holding an unresolvable pointer (codex pass 3 P2).
-	if hasRealSink {
-		res.LogReference = logRef
-	}
+
 	// Snapshot the context state at the moment cmd.Run returned —
 	// classification reads it later, after logWriter.Close, which can
 	// block. Without the snapshot a slow sink Close that pushes the
@@ -309,6 +377,37 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	if cmd.ProcessState != nil {
 		leaderExitCode = cmd.ProcessState.ExitCode()
 	}
+	leaderKilled := leaderClearlyKilled(cmd, runnerKilledLeader.Load())
+
+	return captureResult{
+		runErr:                  runErr,
+		runCtxErr:               runCtxErr,
+		parentCtxErr:            parentCtxErr,
+		leaderExitCode:          leaderExitCode,
+		leaderKilled:            leaderKilled,
+		policyTimeoutFiredFirst: policyTimeoutFiredFirst,
+		sinkWriteErr:            captured.firstErr(),
+		completedAt:             completedAt,
+	}
+}
+
+// classify finalises the Result given the captured execute-phase
+// signals. It is the last step in the lifecycle and owns the log
+// writer's Close: a sink-write failure short-circuits the Outcome to
+// Unavailable (the verdict is untrustworthy if logs are broken);
+// otherwise the log writer is closed and classifyExit is consulted to
+// translate ctx / exec state into an Outcome. A non-nil close error
+// surfaces alongside the resolved Outcome so operators see truncation
+// without losing the verdict.
+func (r LocalCommandRunner) classify(res *Result, prep *commandPrep, capture captureResult) error {
+	res.CompletedAt = capture.completedAt
+	// LogReference is set only when a real LogSink received the bytes.
+	// With a nil LogSink the runner discards output via nopWriteCloser
+	// and exposing a generated reference would leave audit consumers
+	// holding an unresolvable pointer (codex pass 3 P2).
+	if prep.hasRealSink {
+		res.LogReference = prep.logRef
+	}
 
 	// A sink write failure during stdout/stderr copy is a runner-
 	// internal problem (logs are unreliable), not a check verdict.
@@ -317,23 +416,22 @@ func (r LocalCommandRunner) Run(ctx context.Context, req Request) (Result, error
 	// classifyExit here because runErr in this case IS the sink
 	// error, and reporting it as OutcomeFail / OutcomeUnavailable
 	// would conflate "log storage broken" with "check came back".
-	if sinkErr := captured.firstErr(); sinkErr != nil {
+	if capture.sinkWriteErr != nil {
 		res.Outcome = OutcomeUnavailable
 		res.Reason = "log sink write failed"
-		_ = logWriter.Close()
-		return res, fmt.Errorf("checkrunner: log sink write %q: %w", logRef, sinkErr)
+		_ = prep.logWriter.Close()
+		return fmt.Errorf("checkrunner: log sink write %q: %w", prep.logRef, capture.sinkWriteErr)
 	}
 
-	closeErr := logWriter.Close()
-	leaderKilled := leaderClearlyKilled(cmd, runnerKilledLeader.Load())
-	res.Outcome = classifyExit(runCtxErr, parentCtxErr, runErr, leaderExitCode, policyTimeoutFiredFirst, leaderKilled, &res)
+	closeErr := prep.logWriter.Close()
+	res.Outcome = classifyExit(capture.runCtxErr, capture.parentCtxErr, capture.runErr, capture.leaderExitCode, capture.policyTimeoutFiredFirst, capture.leaderKilled, res)
 	if closeErr != nil {
 		// Verdict survives the close failure (the process already
 		// produced its exit status); surface the close error so
 		// operators know the log may be truncated.
-		return res, fmt.Errorf("checkrunner: close log sink %q: %w", logRef, closeErr)
+		return fmt.Errorf("checkrunner: close log sink %q: %w", prep.logRef, closeErr)
 	}
-	return res, nil
+	return nil
 }
 
 // errCapturingWriter wraps an io.Writer and records the first error
