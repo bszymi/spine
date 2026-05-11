@@ -43,27 +43,17 @@ func ResolveBindingWithMode(ctx context.Context, provider WorkflowProvider, gitC
 		return nil, fmt.Errorf("list active workflows: %w", err)
 	}
 
-	// Step 3: Find candidates matching the artifact type and mode
-	// Separate general matches from work_type-specific matches
-	var generalCandidates []*domain.WorkflowDefinition
-	var specificCandidates []*domain.WorkflowDefinition
+	// Step 3: Find candidates matching the artifact type and mode.
+	// work_type-level filtering is not yet implemented at the
+	// applies_to clause (needs structured applies_to support); the
+	// workType parameter still flows into the error messages below
+	// so the failure surface stays specific.
+	var candidates []*domain.WorkflowDefinition
 
 	for _, wf := range workflows {
 		if matchesTypeGeneral(wf, artifactType) && matchesMode(wf, mode) {
-			generalCandidates = append(generalCandidates, wf)
+			candidates = append(candidates, wf)
 		}
-	}
-
-	// Step 4: If work_type specified, try specific match first
-	candidates := generalCandidates
-	if workType != "" {
-		// In v0.x, work_type filtering is not yet implemented at the
-		// applies_to clause level (needs structured applies_to support).
-		// For now, all type-matching workflows are candidates.
-		// When structured applies_to is implemented, specificCandidates
-		// will be filtered here and take precedence over generalCandidates.
-		_ = specificCandidates
-		candidates = generalCandidates
 	}
 
 	// Step 5: No match
