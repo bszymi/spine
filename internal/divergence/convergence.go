@@ -208,7 +208,6 @@ func (s *Service) CommitConvergence(ctx context.Context, divCtx *domain.Divergen
 	}
 
 	// Emit convergence_completed event
-	evalRecord, _ := json.Marshal(output.Result)
 	payload, _ := json.Marshal(map[string]any{
 		"divergence_id":     divCtx.DivergenceID,
 		"strategy":          output.Result.StrategyApplied,
@@ -223,7 +222,6 @@ func (s *Service) CommitConvergence(ctx context.Context, divCtx *domain.Divergen
 		Payload:   payload,
 	})
 
-	_ = evalRecord // stored in event payload
 	log.Info("convergence committed",
 		"divergence_id", divCtx.DivergenceID,
 		"strategy", output.Result.StrategyApplied,
