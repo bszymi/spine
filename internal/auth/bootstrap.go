@@ -34,6 +34,16 @@ type BootstrapAdminConfig struct {
 	Token string
 }
 
+// ErrAdminTokenHashCollision is the matchable sentinel returned when
+// SMP_ADMIN_TOKEN's hash is already bound to an actor other than
+// smp-admin. With a 256-bit hash this branch is reachable only via
+// deliberate token reuse (an operator pasted the platform bearer onto a
+// human or service actor) — never random collision. The caller decides
+// whether to fail workspace load (production strict-startup) or
+// log-and-continue (dev): wrapping ensures both paths can identify the
+// failure mode without parsing log text.
+var ErrAdminTokenHashCollision = errors.New("bootstrap admin token hash bound to non-bootstrap actor")
+
 // BootstrapInternalAdmin idempotently inserts the platform's bootstrap
 // admin actor + token row into the workspace runtime DB so the
 // platform's bearer authenticates on the first workspace request.
@@ -105,13 +115,15 @@ func upsertInternalAdminToken(ctx context.Context, st store.AuthStore, rawToken 
 		// actor. The spec's literal ON CONFLICT semantics would rebind
 		// it to smp-admin, but doing so silently re-maps an operator's
 		// bearer to admin without their knowledge — strictly worse
-		// than a 401 they will notice. Surface it loudly and require
-		// manual cleanup of the colliding row instead. With a 256-bit
-		// hash this branch is reachable only via deliberate token
-		// reuse, never random collision.
-		log.Warn("internal admin token hash already bound to non-bootstrap actor; manual cleanup required",
-			"actor_id", InternalAdminActorID, "bound_actor", actorIDOrEmpty(actor))
-		return nil
+		// than a 401 they will notice. Return a typed error so the
+		// caller can fail workspace load loudly in production (matching
+		// SPINE_ENV=production strict-startup philosophy) while
+		// non-production callers still get a matchable cause to
+		// log-and-continue with operator-actionable context. With a
+		// 256-bit hash this branch is reachable only via deliberate
+		// token reuse, never random collision.
+		return fmt.Errorf("bootstrap admin token hash already bound to actor %q; manual cleanup of colliding auth.tokens row required: %w",
+			actorIDOrEmpty(actor), ErrAdminTokenHashCollision)
 	case isUnauthorized(err) || isNotFound(err):
 		// Fall through to insert.
 	default:

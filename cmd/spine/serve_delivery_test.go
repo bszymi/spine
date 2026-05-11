@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -392,7 +394,9 @@ func TestBootstrapInternalAdmin_RunsWhenTokenSet(t *testing.T) {
 	}
 	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-admin"}, Store: cs}
 
-	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+	if err := bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx)); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
 
 	if cs.actorByID(auth.InternalAdminActorID) == nil {
 		t.Fatalf("expected smp-admin actor seeded by bootstrap")
@@ -402,7 +406,9 @@ func TestBootstrapInternalAdmin_RunsWhenTokenSet(t *testing.T) {
 	}
 
 	// Re-running (idle eviction → re-load) must be idempotent.
-	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+	if err := bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx)); err != nil {
+		t.Fatalf("re-bootstrap: %v", err)
+	}
 	if got := cs.tokenCount(); got != 1 {
 		t.Errorf("expected token bootstrap to be idempotent, got %d rows", got)
 	}
@@ -417,7 +423,9 @@ func TestBootstrapInternalAdmin_NoOpWhenTokenUnset(t *testing.T) {
 	cfg := workspaceDeliveryConfig{Enabled: true}
 	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-no-admin"}, Store: cs}
 
-	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+	if err := bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx)); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
 
 	if cs.actorByID(auth.InternalAdminActorID) != nil {
 		t.Errorf("expected no smp-admin actor when SMP_ADMIN_TOKEN unset")
@@ -435,7 +443,134 @@ func TestBootstrapInternalAdmin_NoOpWhenStoreNil(t *testing.T) {
 	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-nostore"}}
 
 	// Must not panic on a nil store.
-	bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+	if err := bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx)); err != nil {
+		t.Fatalf("bootstrap on nil store should be a no-op, got %v", err)
+	}
+}
+
+// TestBootstrapInternalAdmin_StrictProductionFailsOnCollision verifies
+// that under SPINE_ENV=production (cfg.ProductionStrict=true), an
+// auth.ErrAdminTokenHashCollision is surfaced so the pool builder
+// fails workspace load loudly — matching the strict-startup philosophy
+// that gates SPINE_DEV_MODE / SPINE_SECRET_ENCRYPTION_KEY at boot.
+//
+// The historical warn-and-continue behaviour hid this under sampled
+// logging while leaving every workspace request 401-ing; the strict
+// failure points operators at the colliding auth.tokens row directly.
+func TestBootstrapInternalAdmin_StrictProductionFailsOnCollision(t *testing.T) {
+	ctx := context.Background()
+	cs := newAuthCaptureStore()
+
+	const bearer = "platform-bearer"
+	hash := auth.HashToken(bearer)
+	// Pre-seed a non-bootstrap actor + token row whose hash collides
+	// with SMP_ADMIN_TOKEN. This is the deliberate-reuse case (an
+	// operator pasted the platform bearer onto a human/service actor);
+	// with a 256-bit hash, random collision is unreachable.
+	collidingActor := "human-operator-42"
+	cs.actors[collidingActor] = &domain.Actor{
+		ActorID: collidingActor,
+		Type:    domain.ActorTypeHuman,
+		Name:    "Operator",
+		Role:    domain.RoleReader,
+		Status:  domain.ActorStatusActive,
+	}
+	cs.tokens[hash] = &store.TokenRecord{
+		TokenID:   "operator-token",
+		ActorID:   collidingActor,
+		TokenHash: hash,
+		Name:      "operator personal bearer",
+	}
+
+	cfg := workspaceDeliveryConfig{
+		SMPAdminToken:    bearer,
+		ProductionStrict: true,
+	}
+	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-prod"}, Store: cs}
+
+	err := bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx))
+	if err == nil {
+		t.Fatalf("expected collision to surface as error in production, got nil")
+	}
+	if !errors.Is(err, auth.ErrAdminTokenHashCollision) {
+		t.Fatalf("expected ErrAdminTokenHashCollision, got %v", err)
+	}
+	// Workspace ID must appear in the error so the workspace.ServicePool
+	// log line ("workspace X failed to load: ...") names the offender.
+	if msg := err.Error(); !strings.Contains(msg, "ws-prod") {
+		t.Errorf("error message %q should name the workspace ID", msg)
+	}
+	// Strict failure must not have rebound the colliding row — that's
+	// the whole point of returning instead of overwriting.
+	if cs.tokens[hash].ActorID != collidingActor {
+		t.Errorf("colliding row was rebound: %q -> %q", collidingActor, cs.tokens[hash].ActorID)
+	}
+}
+
+// TestBootstrapInternalAdmin_NonProductionLogsCollision: outside
+// production, the same collision must be logged but NOT bubble up,
+// preserving the dev-convenience swallow behaviour BootstrapInternal-
+// Subscription also uses (see wireWorkspaceDelivery). This keeps dev
+// stacks runnable when an operator re-uses a token for testing.
+func TestBootstrapInternalAdmin_NonProductionLogsCollision(t *testing.T) {
+	ctx := context.Background()
+	cs := newAuthCaptureStore()
+
+	const bearer = "platform-bearer"
+	hash := auth.HashToken(bearer)
+	collidingActor := "service-x"
+	cs.actors[collidingActor] = &domain.Actor{
+		ActorID: collidingActor,
+		Type:    domain.ActorTypeAutomated,
+		Name:    "Service X",
+		Role:    domain.RoleReader,
+		Status:  domain.ActorStatusActive,
+	}
+	cs.tokens[hash] = &store.TokenRecord{
+		TokenID:   "service-x-token",
+		ActorID:   collidingActor,
+		TokenHash: hash,
+	}
+
+	cfg := workspaceDeliveryConfig{
+		SMPAdminToken:    bearer,
+		ProductionStrict: false,
+	}
+	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-dev"}, Store: cs}
+
+	if err := bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx)); err != nil {
+		t.Fatalf("non-production collision must not bubble up: %v", err)
+	}
+	if cs.tokens[hash].ActorID != collidingActor {
+		t.Errorf("colliding row was rebound: %q -> %q", collidingActor, cs.tokens[hash].ActorID)
+	}
+}
+
+// TestLoadWorkspaceDeliveryConfig_ProductionStrictFromEnv anchors that
+// the env-derived workspaceDeliveryConfig sets ProductionStrict from
+// SPINE_ENV. Without this, the bootstrapInternalAdmin strict path would
+// only be exercised through a struct-literal — operators changing
+// SPINE_ENV at runtime would silently lose the strict-fail behaviour.
+func TestLoadWorkspaceDeliveryConfig_ProductionStrictFromEnv(t *testing.T) {
+	cases := []struct {
+		env  string
+		want bool
+	}{
+		{"production", true},
+		{"PRODUCTION", true},
+		{"staging", false},
+		{"development", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv("SPINE_ENV", tc.env)
+			cfg := loadWorkspaceDeliveryConfig()
+			if cfg.ProductionStrict != tc.want {
+				t.Errorf("SPINE_ENV=%q: ProductionStrict = %v, want %v", tc.env, cfg.ProductionStrict, tc.want)
+			}
+		})
+	}
 }
 
 // TestLoadWorkspaceDeliveryConfig_ReadsAdminToken anchors the env

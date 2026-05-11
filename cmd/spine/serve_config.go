@@ -37,6 +37,13 @@ type workspaceDeliveryConfig struct {
 	// request. Empty disables the bootstrap (single-workspace and
 	// pre-platform-binding deployments).
 	SMPAdminToken string
+	// ProductionStrict mirrors SPINE_ENV=production. The pooled
+	// workspace builder uses it to escalate bootstrap-admin token-hash
+	// collisions (auth.ErrAdminTokenHashCollision) from "log and
+	// continue" to "fail workspace load", matching the strict-startup
+	// philosophy that gates SPINE_DEV_MODE, SPINE_CODE_REPO_BASE, and
+	// SPINE_SECRET_ENCRYPTION_KEY at boot.
+	ProductionStrict bool
 }
 
 // loadWorkspaceDeliveryConfig reads the env vars that drive event
@@ -52,6 +59,7 @@ func loadWorkspaceDeliveryConfig() workspaceDeliveryConfig {
 		SMPEventURL:      os.Getenv("SMP_EVENT_URL"),
 		SMPInternalToken: os.Getenv("SMP_INTERNAL_TOKEN"),
 		SMPAdminToken:    os.Getenv("SMP_ADMIN_TOKEN"),
+		ProductionStrict: resolveRuntimeEnv() == "production",
 	}
 	if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
