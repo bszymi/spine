@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/event"
@@ -17,7 +16,7 @@ func (s *Scheduler) ScanRunTimeouts(ctx context.Context) error {
 	log := observe.Logger(ctx)
 	observe.GlobalMetrics.SchedulerScans.Inc()
 
-	now := time.Now()
+	now := s.now()
 	runs, err := s.store.ListTimedOutRuns(ctx, now)
 	if err != nil {
 		return fmt.Errorf("list timed out runs: %w", err)

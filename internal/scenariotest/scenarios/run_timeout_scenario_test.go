@@ -21,13 +21,13 @@ import (
 
 // runTimeoutWorkflowYAML is a minimal single-step workflow with a
 // workflow-level `timeout` so StartRun populates `runtime.runs.timeout_at`.
-// The 24h value is irrelevant — the scenario stamps the column directly
-// to the past via ExecRaw, simulating "the deadline arrived" without
-// waiting on wall-clock time. TASK-028 will replace the ExecRaw stamp
-// with a harness clock primitive; this scenario is forward-compatible
-// with that swap because the assertion contract (run cancelled +
-// run_timeout event emitted + branch preserved) does not depend on how
-// `timeout_at` was advanced past `now`.
+// The 1h value paired with harness.Clock.Advance(2h) is what drives the
+// scenario: at construction the harness clock matches wall time, so each
+// run's natural timeout_at sits 1h ahead of the clock; advancing by 2h
+// crosses that deadline for any run still on the workflow-derived value.
+// The fresh-run stamp below pushes that run's timeout_at past the
+// advance window, so only the expired run is selected by
+// `ListTimedOutRuns` after the tick.
 const runTimeoutWorkflowYAML = `id: task-runtime-timeout
 name: Run Timeout Test Workflow
 version: "1.0"
@@ -36,7 +36,7 @@ description: Minimal single-step workflow for run-timeout scenarios. Workflow-le
 applies_to:
   - Task
 entry_step: execute
-timeout: "24h"
+timeout: "1h"
 steps:
   - id: execute
     name: Execute Task
@@ -63,14 +63,17 @@ steps:
 //     proves `handleRunTimeout` against a fake store. It does NOT
 //     exercise `ListTimedOutRuns` against real Postgres or assert that
 //     the timeout predicate isolates timed-out runs from healthy ones.
-//   - This scenario seeds two active runs side-by-side: one with
-//     `timeout_at` stamped to the past, one with `timeout_at` left at
-//     its workflow-derived `now + 24h`. After one tick, the past run
-//     must be cancelled with a `run_timeout` event, and the future run
-//     must remain active with no event — a regression that drops the
+//   - This scenario seeds two active runs side-by-side: one carrying
+//     the workflow-derived `timeout_at = now + 1h`, one stamped to
+//     `timeout_at = now + 168h` so it sits past the advance window.
+//     `harness.Clock.Advance(2h)` then drives the scheduler tick (via
+//     an `OnAdvance` handler registered on the clock — see TASK-028).
+//     After the tick, the 1h-deadline run must be cancelled with a
+//     `run_timeout` event, and the future-stamped run must remain
+//     active with no event — a regression that drops the
 //     `AND timeout_at <= $1` predicate from `ListTimedOutRuns` would
-//     return both rows, causing the future run to be cancelled too,
-//     and this scenario fails on the "fresh run still active" assertion
+//     return both rows, cancelling the fresh run too, and this
+//     scenario fails on the "fresh run still active" assertion
 //     (mutation-test target per AC bullet 2).
 //   - The branch-cleanup contract for the timeout path is the
 //     intentional gap documented in
@@ -87,16 +90,21 @@ steps:
 // scenario's mutation target therefore is the `timeout_at` predicate,
 // matching the implementation that ships today.
 //
-// Note on TASK-028: TASK-028 (harness.AdvanceClock) is still pending,
-// so the scenario stamps the row directly via `Store.ExecRaw`. AC
-// bullet 3 explicitly accepts this fallback and asks for it to be
-// documented — see `runTimeoutWorkflowYAML`'s comment above.
+// TASK-028 update: the scenario now drives the tick via
+// `harness.Clock.Advance` instead of stamping the expired run's
+// `timeout_at` to the past + calling `ScanRunTimeouts` manually. The
+// scheduler is constructed with `scheduler.WithClock(clock.Now)` and
+// registered as an `OnAdvance` handler, so advancing the clock both
+// (a) moves the scheduler's observed `now` past the workflow-derived
+// deadline and (b) fires the scan synchronously in the same call. The
+// fresh run is stamped to a far-future `timeout_at` to keep the
+// predicate-mutation contract intact across the advance.
 func TestRunTimeout_ScannerCancelsExpiredRunAndPreservesFresh(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 
 	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
 		Name:        "run-timeout-cancellation",
-		Description: "ScanRunTimeouts cancels timed-out runs, emits run_timeout, preserves the run branch (per §4.5 documented gap), and leaves fresh runs untouched",
+		Description: "harness.Clock.Advance drives ScanRunTimeouts to cancel timed-out runs, emit run_timeout, preserve the run branch (per §4.5 documented gap), and leave fresh runs untouched",
 		EnvOpts: []harness.EnvOption{
 			harness.WithGovernance(),
 			harness.WithRuntimeOrchestrator(),
@@ -110,8 +118,16 @@ func TestRunTimeout_ScannerCancelsExpiredRunAndPreservesFresh(t *testing.T) {
 			startRunNamed("expired_run", "initiatives/init-916/epics/epic-916/tasks/task-916.md"),
 			startRunNamed("fresh_run", "initiatives/init-917/epics/epic-917/tasks/task-917.md"),
 
-			stampRunTimeoutAtPast("expired_run"),
-			runScanRunTimeoutsWithRecorder(),
+			// Push the fresh run's deadline past the advance window so
+			// the predicate-isolation assertion below still has bite.
+			stampRunTimeoutAt("fresh_run", 168*time.Hour),
+
+			// Wire a clock-driven scheduler + recorder; subsequent
+			// Advance calls both bump the observed time and fire
+			// ScanRunTimeouts in the same call.
+			registerRunTimeoutScannerOnClock(),
+
+			advanceHarnessClock(2 * time.Hour),
 
 			assertRunStatusByKey("expired_run", domain.RunStatusCancelled),
 			assertRunStatusByKey("fresh_run", domain.RunStatusActive),
@@ -145,44 +161,68 @@ func startRunNamed(stateKey, taskPath string) scenarioEngine.Step {
 	}
 }
 
-// stampRunTimeoutAtPast forces the named run's `timeout_at` to one hour
-// in the past so `ListTimedOutRuns(now)` selects it on the next tick.
-// Uses `Store.ExecRaw` (the existing test-only escape hatch in
-// `internal/store/testutil.go`) rather than introducing a new store
-// method — the scenario harness already relies on this surface.
-func stampRunTimeoutAtPast(stateKey string) scenarioEngine.Step {
+// stampRunTimeoutAt overwrites the named run's `timeout_at` to
+// `time.Now() + offset` so the harness can pin a deadline that survives
+// a known clock advance. Uses `Store.ExecRaw` (the existing test-only
+// escape hatch in `internal/store/testutil.go`) rather than introducing
+// a new store method — the scenario harness already relies on this
+// surface. Used here to push the fresh run beyond the advance window
+// without changing the workflow's natural 1h deadline that drives the
+// expired run.
+func stampRunTimeoutAt(stateKey string, offset time.Duration) scenarioEngine.Step {
 	return scenarioEngine.Step{
-		Name: "stamp-timeout-at-past-" + stateKey,
+		Name: "stamp-timeout-at-" + stateKey,
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
 			runID := sc.MustGet(stateKey + "_id").(string)
-			past := time.Now().Add(-1 * time.Hour)
+			target := time.Now().Add(offset)
 			if err := sc.Runtime.Store.ExecRaw(sc.Ctx,
 				`UPDATE runtime.runs SET timeout_at = $1 WHERE run_id = $2`,
-				past, runID,
+				target, runID,
 			); err != nil {
-				return fmt.Errorf("stamp timeout_at past for %s: %w", runID, err)
+				return fmt.Errorf("stamp timeout_at for %s: %w", runID, err)
 			}
 			return nil
 		},
 	}
 }
 
-// runScanRunTimeoutsWithRecorder runs one scheduler tick of
-// `ScanRunTimeouts` against the test-database store, capturing emitted
-// events on a recordingEventRouter so downstream steps can assert on
-// the run_timeout signal. Using a recorder (rather than the runtime's
-// QueueRouter) keeps the assertion synchronous and avoids racing the
-// MemoryQueue's background dispatch.
-func runScanRunTimeoutsWithRecorder() scenarioEngine.Step {
+// registerRunTimeoutScannerOnClock constructs a clock-aware scheduler
+// + recording event router and hooks `ScanRunTimeouts` onto the
+// harness clock's `OnAdvance` callback. The recorder (rather than the
+// runtime's QueueRouter) keeps event assertions synchronous, avoiding
+// a race against the MemoryQueue's background dispatch. After this
+// step runs, every subsequent `clock.Advance(d)` both bumps the
+// observed time and fires the scanner.
+func registerRunTimeoutScannerOnClock() scenarioEngine.Step {
 	return scenarioEngine.Step{
-		Name: "run-scan-run-timeouts",
+		Name: "register-run-timeout-scanner-on-clock",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
 			recorder := &recordingEventRouter{}
-			sched := scheduler.New(sc.Runtime.Store, recorder)
-			if err := sched.ScanRunTimeouts(sc.Ctx); err != nil {
-				return fmt.Errorf("ScanRunTimeouts: %w", err)
-			}
+			sched := scheduler.New(
+				sc.Runtime.Store,
+				recorder,
+				scheduler.WithClock(sc.Runtime.Clock.Now),
+			)
 			sc.Set(stateRecorderRouter, recorder)
+			sc.Runtime.Clock.OnAdvance("scan-run-timeouts", func() error {
+				return sched.ScanRunTimeouts(sc.Ctx)
+			})
+			return nil
+		},
+	}
+}
+
+// advanceHarnessClock bumps the harness clock by d and fires every
+// registered tick handler synchronously. The signal handlers see is
+// the new `clock.Now()` value, so the scheduler's predicate compares
+// against the advanced time without sleeping.
+func advanceHarnessClock(d time.Duration) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: fmt.Sprintf("advance-clock-%s", d),
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			if err := sc.Runtime.Clock.Advance(d); err != nil {
+				return fmt.Errorf("advance harness clock by %s: %w", d, err)
+			}
 			return nil
 		},
 	}

@@ -22,7 +22,16 @@ type Scheduler struct {
 	commitThreshold  time.Duration
 	stepRecoveryFn   StepRecoveryFunc
 	runFailFn        RunFailFunc
-	done             chan struct{}
+	// now is the clock source for scan-loop time reads (run timeouts,
+	// step timeouts, orphan threshold). Production keeps the default
+	// time.Now; scenario tests inject a controllable clock via
+	// WithClock so harness.Clock.Advance moves the scheduler's
+	// observed time deterministically. Recovery paths still use
+	// time.Now directly — those write CreatedAt timestamps and event
+	// IDs rather than gating policy on a comparison, so injecting a
+	// clock there would only add a seam tests don't need.
+	now  func() time.Time
+	done chan struct{}
 }
 
 // New creates a Scheduler with the given options.
@@ -33,10 +42,14 @@ func New(s store.Store, events event.EventRouter, opts ...Option) *Scheduler {
 		timeoutInterval: 30 * time.Second,
 		orphanInterval:  60 * time.Second,
 		orphanThreshold: 30 * 24 * time.Hour, // 30 days — Spine workflows are human-paced
+		now:             time.Now,
 		done:            make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(sched)
+	}
+	if sched.now == nil {
+		sched.now = time.Now
 	}
 	return sched
 }

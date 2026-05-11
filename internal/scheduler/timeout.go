@@ -48,7 +48,7 @@ func (s *Scheduler) ScanTimeouts(ctx context.Context) error {
 			continue
 		}
 
-		if time.Since(refTime) <= timeout {
+		if s.now().Sub(refTime) <= timeout {
 			continue // not yet expired
 		}
 
@@ -72,7 +72,7 @@ func (s *Scheduler) handleStepTimeout(ctx context.Context, exec *domain.StepExec
 		return fmt.Errorf("evaluate step transition: %w", err)
 	}
 
-	now := time.Now()
+	now := s.now()
 	exec.Status = result.ToStatus
 	exec.CompletedAt = &now
 	if !hasTimeoutOutcome {

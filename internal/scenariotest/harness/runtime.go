@@ -30,6 +30,13 @@ type TestRuntime struct {
 	Events       event.EventRouter
 	Queue        *queue.MemoryQueue
 	Orchestrator *engine.Orchestrator
+	// Clock is the controllable time source for scenarios that want
+	// to drive scheduler-tick side effects deterministically. It is
+	// seeded to wall-clock at construction so timestamps written by
+	// production code remain comparable. Scenarios that don't touch
+	// time can ignore it; per TASK-028 only callers that explicitly
+	// pass Clock.Now into a scheduler observe the advance.
+	Clock *Clock
 }
 
 // RuntimeOption configures optional components of the TestRuntime.
@@ -81,6 +88,7 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 
 	rt := &TestRuntime{
 		Store: db.Store,
+		Clock: NewClock(time.Now()),
 	}
 
 	var eventRouter event.EventRouter
