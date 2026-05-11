@@ -16,12 +16,12 @@ import (
 	"github.com/bszymi/spine/internal/workspace"
 )
 
-// tokenStubStore is a minimal store.Store implementation for token-handler
-// routing tests. It embeds the interface so any unused method panics on a
-// nil call — the tests below exercise only GetActor / CreateToken /
-// RevokeToken paths.
+// tokenStubStore is a typed minimal store.AuthStore implementation for
+// token-handler routing tests (INIT-022 EPIC-001 TASK-029). It depends
+// on the narrowest role auth.NewService needs, so adding a method to
+// AuthStore fails the var _ assertion at the bottom of this file rather
+// than silently leaving a runtime panic in these tests.
 type tokenStubStore struct {
-	store.Store
 	actors  map[string]*domain.Actor
 	tokens  map[string]*store.TokenRecord
 	revoked map[string]bool
@@ -55,6 +55,25 @@ func (s *tokenStubStore) RevokeToken(_ context.Context, tokenID string) error {
 	s.revoked[tokenID] = true
 	return nil
 }
+
+// Remaining store.AuthStore methods are no-ops; the token routing tests
+// never exercise them. Listing them here keeps the var _ store.AuthStore
+// assertion below truthful and forces an explicit decision (override vs.
+// stay no-op) whenever AuthStore grows.
+func (s *tokenStubStore) CreateActor(_ context.Context, _ *domain.Actor) error { return nil }
+func (s *tokenStubStore) UpdateActor(_ context.Context, _ *domain.Actor) error { return nil }
+func (s *tokenStubStore) ListActors(_ context.Context) ([]domain.Actor, error) { return nil, nil }
+func (s *tokenStubStore) ListActorsByStatus(_ context.Context, _ domain.ActorStatus) ([]domain.Actor, error) {
+	return nil, nil
+}
+func (s *tokenStubStore) GetActorByTokenHash(_ context.Context, _ string) (*domain.Actor, *domain.Token, error) {
+	return nil, nil, nil
+}
+func (s *tokenStubStore) ListTokensByActor(_ context.Context, _ string) ([]domain.Token, error) {
+	return nil, nil
+}
+
+var _ store.AuthStore = (*tokenStubStore)(nil)
 
 func seedAdminActor(s *tokenStubStore, id string) {
 	s.actors[id] = &domain.Actor{
