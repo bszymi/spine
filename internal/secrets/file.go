@@ -2,6 +2,8 @@ package secrets
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,9 +56,11 @@ func NewFileClient(cfg FileConfig) (*FileClient, error) {
 }
 
 // Get reads the file backing ref. The file's content is parsed as a
-// top-level JSON string; the decoded value is the secret. The file's
-// modification time (UnixNano) is returned as the VersionID so that
-// callers can detect updates.
+// top-level JSON string; the decoded value is the secret. The VersionID
+// is a composite of a content-hash prefix, the file size, and the
+// mtime in nanoseconds so that two rotations within the same second on
+// a coarse-mtime filesystem (some NFS, FAT, older ext) still produce
+// distinct IDs whenever the content differs.
 func (c *FileClient) Get(_ context.Context, ref SecretRef) (SecretValue, VersionID, error) {
 	path, err := c.refPath(ref)
 	if err != nil {
@@ -103,7 +107,20 @@ func (c *FileClient) Get(_ context.Context, ref SecretRef) (SecretValue, Version
 		return SecretValue{}, "", fmt.Errorf("file secret client: %s: malformed JSON (expected top-level string): %w", ref, err)
 	}
 
-	vid := VersionID(fmt.Sprintf("%d", info.ModTime().UnixNano()))
+	// Hash the raw file bytes (not the decoded string) so the
+	// VersionID changes whenever any byte of the on-disk file
+	// changes — including whitespace, quoting, or trailing newline
+	// edits — and so the hashed input matches what we actually read
+	// from disk. 32 hex chars (128 bits) of the SHA-256 prefix puts
+	// the accidental-collision probability for an opaque, equality-
+	// only identifier well below any other failure mode in the stack,
+	// and the extra 20 bytes per VersionID string are free at this
+	// scale. Size and mtime stay in the composite so callers reading
+	// two IDs back-to-back can still distinguish a content-preserving
+	// rotation (touch with new mtime) from a true no-op, matching the
+	// pre-existing "mtime moved means new version" behaviour.
+	sum := sha256.Sum256(data)
+	vid := VersionID(fmt.Sprintf("%s-%d-%d", hex.EncodeToString(sum[:16]), len(data), info.ModTime().UnixNano()))
 	return NewSecretValue([]byte(value)), vid, nil
 }
 
