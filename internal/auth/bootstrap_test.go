@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/internal/auth"
@@ -183,6 +184,60 @@ func TestBootstrapInternalAdmin_RotatedTokenInsertsNewRow(t *testing.T) {
 
 	if len(fs.tokens) != 2 {
 		t.Errorf("expected old + new token rows, got %d", len(fs.tokens))
+	}
+}
+
+func TestBootstrapInternalAdmin_TokenHashCollision(t *testing.T) {
+	// A non-smp-admin actor whose token row hashes to the same value
+	// as SMP_ADMIN_TOKEN must surface auth.ErrAdminTokenHashCollision
+	// so the workspace-load wireup can fail loudly in production. The
+	// historical behaviour (warn-and-return-nil) hid this under
+	// sampled logging — see TASK-027.
+	fs := newFakeStore()
+	const collidingToken = "platform-bearer"
+	hash := auth.HashToken(collidingToken)
+
+	colliding := &domain.Actor{
+		ActorID: "human-operator-42",
+		Type:    domain.ActorTypeHuman,
+		Name:    "Operator",
+		Role:    domain.RoleReader,
+		Status:  domain.ActorStatusActive,
+	}
+	fs.actors[colliding.ActorID] = colliding
+	fs.tokens[hash] = &fakeTokenEntry{
+		actor: colliding,
+		token: &domain.Token{TokenID: "operator-token", ActorID: colliding.ActorID},
+	}
+
+	err := auth.BootstrapInternalAdmin(context.Background(), fs, auth.BootstrapAdminConfig{Token: collidingToken})
+	if err == nil {
+		t.Fatalf("expected collision error, got nil")
+	}
+	if !errors.Is(err, auth.ErrAdminTokenHashCollision) {
+		t.Fatalf("expected ErrAdminTokenHashCollision, got %v", err)
+	}
+	// The bound actor's ID is operator-actionable context — it tells
+	// the operator which auth.tokens row needs manual cleanup. Lock it
+	// into the error message so log scrapers and on-call dashboards
+	// surface it without parsing structured fields.
+	if msg := err.Error(); !strings.Contains(msg, colliding.ActorID) {
+		t.Errorf("error message %q should name the colliding actor %q", msg, colliding.ActorID)
+	}
+
+	// The collision must NOT rebind the existing token row — the whole
+	// point of returning is to require manual cleanup. Asserting both
+	// the unchanged ActorID and the unchanged TokenID guards against a
+	// future refactor that "fixes" the collision by overwriting in place.
+	got := fs.tokens[hash]
+	if got == nil {
+		t.Fatalf("colliding token row was deleted")
+	}
+	if got.token.ActorID != colliding.ActorID {
+		t.Errorf("colliding actor was rebound: %q -> %q", colliding.ActorID, got.token.ActorID)
+	}
+	if got.token.TokenID != "operator-token" {
+		t.Errorf("colliding token_id was overwritten: %q", got.token.TokenID)
 	}
 }
 

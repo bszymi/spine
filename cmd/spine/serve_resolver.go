@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -200,7 +201,9 @@ func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Lo
 		if err := workspaceOrchestratorBuilder(ctx, ss); err != nil {
 			return err
 		}
-		bootstrapInternalAdmin(ctx, ss, deliveryCfg, log)
+		if err := bootstrapInternalAdmin(ctx, ss, deliveryCfg, log); err != nil {
+			return err
+		}
 		if deliveryCfg.Enabled && ss.Store != nil && ss.Events != nil {
 			wireWorkspaceDelivery(ctx, ss, deliveryCfg, log)
 		}
@@ -213,17 +216,38 @@ func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Lo
 // delivery gate: a platform-binding deployment uses bearer auth on
 // every workspace request whether or not it subscribes to events, so
 // gating this on SPINE_EVENT_DELIVERY would leave the very 401 the
-// bootstrap exists to prevent. Errors are logged and swallowed so a
-// transient bootstrap failure does not block workspace activation.
-func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg workspaceDeliveryConfig, log *slog.Logger) {
+// bootstrap exists to prevent.
+//
+// Error policy:
+//
+//   - auth.ErrAdminTokenHashCollision under SPINE_ENV=production
+//     (cfg.ProductionStrict) is returned so the pool builder fails
+//     workspace load. The bearer would otherwise be silently bound to
+//     the wrong actor on every workspace request, and the symptom
+//     ("401 unauthorized") points operators at the platform side
+//     rather than the colliding auth.tokens row. Strict-startup is
+//     the same policy that gates SPINE_DEV_MODE,
+//     SPINE_CODE_REPO_BASE, and SPINE_SECRET_ENCRYPTION_KEY at boot.
+//   - All other errors (and the same collision off-production) are
+//     logged and swallowed so a transient store blip does not knock a
+//     workspace out of rotation. The collision specifically is also
+//     logged before being returned so the production failure has a
+//     structured log breadcrumb alongside the workspace-load error.
+func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg workspaceDeliveryConfig, log *slog.Logger) error {
 	if cfg.SMPAdminToken == "" || ss.Store == nil {
-		return
+		return nil
 	}
-	if err := auth.BootstrapInternalAdmin(ctx, ss.Store, auth.BootstrapAdminConfig{
+	err := auth.BootstrapInternalAdmin(ctx, ss.Store, auth.BootstrapAdminConfig{
 		Token: cfg.SMPAdminToken,
-	}); err != nil {
-		log.Error("workspace bootstrap internal admin failed", "workspace", ss.Config.ID, "error", err)
+	})
+	if err == nil {
+		return nil
 	}
+	log.Error("workspace bootstrap internal admin failed", "workspace", ss.Config.ID, "error", err)
+	if cfg.ProductionStrict && errors.Is(err, auth.ErrAdminTokenHashCollision) {
+		return fmt.Errorf("workspace %q: %w", ss.Config.ID, err)
+	}
+	return nil
 }
 
 // wireWorkspaceDelivery starts a per-workspace DeliverySubscriber,
