@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/bszymi/spine/internal/observe"
 )
@@ -14,7 +13,8 @@ func (s *Scheduler) ScanOrphans(ctx context.Context) error {
 	log := observe.Logger(ctx)
 	observe.GlobalMetrics.SchedulerScans.Inc()
 
-	threshold := time.Now().Add(-s.orphanThreshold)
+	now := s.now()
+	threshold := now.Add(-s.orphanThreshold)
 	runs, err := s.store.ListStaleActiveRuns(ctx, threshold)
 	if err != nil {
 		return fmt.Errorf("list stale active runs: %w", err)
@@ -32,7 +32,7 @@ func (s *Scheduler) ScanOrphans(ctx context.Context) error {
 		// Only fail runs that have been stale for 3x the orphan threshold.
 		// Single-threshold orphans are logged as warnings but may just be slow;
 		// persistent orphans are truly stuck and should be failed.
-		if s.runFailFn != nil && time.Since(runs[i].CreatedAt) > 3*s.orphanThreshold {
+		if s.runFailFn != nil && now.Sub(runs[i].CreatedAt) > 3*s.orphanThreshold {
 			if err := s.runFailFn(ctx, runs[i].RunID,
 				fmt.Sprintf("orphaned: no activity for %s", s.orphanThreshold)); err != nil {
 				log.Error("failed to fail orphaned run", "run_id", runs[i].RunID, "error", err)

@@ -51,3 +51,11 @@ func WithStepRecovery(fn StepRecoveryFunc) Option {
 func WithRunFail(fn RunFailFunc) Option {
 	return func(s *Scheduler) { s.runFailFn = fn }
 }
+
+// WithClock overrides the time source used by scan-loop policy reads
+// (run timeouts, step timeouts, orphan threshold). The scenario
+// harness uses this to drive deterministic time advance via
+// harness.Clock.Advance — passing nil restores the time.Now default.
+func WithClock(now func() time.Time) Option {
+	return func(s *Scheduler) { s.now = now }
+}
