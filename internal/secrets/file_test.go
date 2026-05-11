@@ -111,6 +111,56 @@ func TestFileClient_VersionChangesOnEdit(t *testing.T) {
 	}
 }
 
+func TestFileClient_VersionDiffersSameSecond(t *testing.T) {
+	// On filesystems with second-resolution mtime (some NFS, FAT,
+	// older ext), two rotations within the same second produce
+	// identical ModTime().UnixNano() values, which the original
+	// implementation surfaced as identical VersionIDs. The composite
+	// content-hash VersionID must still distinguish the two writes.
+	//
+	// We pin mtime on both versions to the same exact timestamp via
+	// os.Chtimes so the test triggers the failure mode deterministically
+	// regardless of the host filesystem's mtime resolution.
+	c, root := newFileClient(t)
+	ref := secrets.WorkspaceRef("acme", secrets.PurposeRuntimeDB)
+	path := filepath.Join(root, "workspaces", "acme", "runtime_db.json")
+	pinned := time.Unix(1_700_000_000, 0)
+
+	writeSecret(t, root, ref, "v1")
+	if err := os.Chtimes(path, pinned, pinned); err != nil {
+		t.Fatalf("Chtimes v1: %v", err)
+	}
+	_, ver1, err := c.Get(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Get v1: %v", err)
+	}
+
+	writeSecret(t, root, ref, "v2")
+	if err := os.Chtimes(path, pinned, pinned); err != nil {
+		t.Fatalf("Chtimes v2: %v", err)
+	}
+	_, ver2, err := c.Get(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Get v2: %v", err)
+	}
+
+	if ver1 == ver2 {
+		t.Fatalf("VersionIDs collided across distinct contents with identical mtime: %s", ver1)
+	}
+
+	// Re-reading the same content with the same mtime must yield the
+	// same VersionID — callers compare opaquely, and a churning
+	// VersionID for an unchanged file would defeat any downstream
+	// cache keyed on it.
+	_, ver2Again, err := c.Get(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Get v2 (re-read): %v", err)
+	}
+	if ver2 != ver2Again {
+		t.Fatalf("VersionID changed across two reads of the same file: %s vs %s", ver2, ver2Again)
+	}
+}
+
 func TestFileClient_GetMissingRefReturnsNotFound(t *testing.T) {
 	c, _ := newFileClient(t)
 	_, _, err := c.Get(context.Background(), secrets.WorkspaceRef("ghost", secrets.PurposeRuntimeDB))
