@@ -16,9 +16,12 @@ import (
 )
 
 // ── Discussion-aware Fake Store ──
+//
+// Composes the per-role no-op stubs from stubstore_test.go and overrides
+// only the methods the discussion handlers exercise.
 
 type discussionStore struct {
-	store.Store
+	stubRoleStore
 	actors      map[string]*domain.Actor
 	tokens      map[string]*fakeTokenEntry
 	threads     map[string]*domain.DiscussionThread

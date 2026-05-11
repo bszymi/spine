@@ -22,9 +22,16 @@ import (
 )
 
 // ── Fake Store ──
+//
+// fakeStore composes the per-role no-op stubs from stubstore_test.go and
+// overrides only the methods exercised by gateway handler tests. The
+// per-role stubs guarantee store.Store satisfaction at compile time, so
+// adding a method to any role interface breaks the per-role stub's
+// var _ store.X assertion rather than silently leaving runtime panics
+// in handler tests.
 
 type fakeStore struct {
-	store.Store
+	stubRoleStore
 	pingErr            error
 	actors             map[string]*domain.Actor
 	tokens             map[string]*fakeTokenEntry // keyed by token_hash
@@ -197,7 +204,7 @@ func (t *fakeTx) TransitionRunStatus(_ context.Context, _ string, _, _ domain.Ru
 	return true, nil
 }
 func (t *fakeTx) CreateStepExecution(_ context.Context, _ *domain.StepExecution) error { return nil }
-func (t *fakeTx) UpdateStepExecution(_ context.Context, _ *domain.StepExecution) error  { return nil }
+func (t *fakeTx) UpdateStepExecution(_ context.Context, _ *domain.StepExecution) error { return nil }
 
 // ── Fake ArtifactService ──
 
