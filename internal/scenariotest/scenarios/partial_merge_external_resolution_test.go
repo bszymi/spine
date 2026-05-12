@@ -523,9 +523,17 @@ func assertLedgerCommitOnMain() scenarioEngine.Step {
 				return fmt.Errorf("ledger commit subject: got %q, want %q", firstLine(rec), expectSubject)
 			}
 
+			// Actor-ID is the §5-required canonical actor trailer (per
+			// architecture/git-integration.md §5.1). Resolved-By is the
+			// operation-specific synonym that already exists on this
+			// commit; both carry the same actor here. Reverting the
+			// Actor-ID emission in writeMergeRecoveryLedgerCommit while
+			// leaving Resolved-By intact would skip §5 compliance —
+			// this assertion is the regression gate for that drift.
 			wantTrailers := map[string]string{
 				"Operation":         "merge_recovery_resolve",
 				"Run-ID":            runID,
+				"Actor-ID":          externalResolutionActorID,
 				"Repository-ID":     "billing",
 				"Resolved-By":       externalResolutionActorID,
 				"Target-Commit-SHA": externalResolutionTargetSHA,

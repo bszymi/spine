@@ -533,10 +533,18 @@ func (o *Orchestrator) writeMergeRecoveryLedgerCommit(
 	// newline-bearing reason cannot forge a Resolved-By trailer.
 	// Operator-supplied single-line fields (Target-Commit-SHA) are
 	// validated before we get here — see ResolveRepositoryMergeExternally.
+	//
+	// Actor-ID is the §5-required canonical actor trailer that every
+	// Spine commit carries. Resolved-By / Requested-By are operation-
+	// specific synonyms (audit semantics: "who pressed the resolve
+	// button" vs "who pressed retry") and carry the same value here
+	// only by coincidence; downstream queries that key on Actor-ID
+	// (per architecture/git-integration.md §5) must still resolve.
 	trailers := map[string]string{
 		"Operation":     action.Operation,
 		"Run-ID":        run.RunID,
 		"Trace-ID":      run.TraceID,
+		"Actor-ID":      action.ActorID,
 		"Repository-ID": repositoryID,
 	}
 	switch action.Operation {
