@@ -30,10 +30,28 @@ func TestServeHTTP_CGIEnvWhitelist(t *testing.T) {
 	// Stub host-process env with sensitive sentinels that must NOT
 	// reach the CGI subprocess. t.Setenv restores prior state at
 	// teardown so this test cannot leak the sentinels to siblings.
+	//
+	// Two layers of seeding:
+	//
+	// 1. Broad-leak sentinels (SMP_ADMIN_TOKEN, AWS_SECRET_ACCESS_KEY)
+	//    — these have explicit by-name checks below and catch
+	//    `Env: os.Environ()` / wholesale-leak regressions.
+	// 2. Narrow-leak seeds (AWS_SESSION_TOKEN, HTTP_PROXY) — these
+	//    are the canonical "innocent-looking single-key InheritEnv"
+	//    regression vectors called out in the comment block at the
+	//    strict-subset check below. The strict-subset assertion can
+	//    only see them if they are actually present in the host env;
+	//    on a clean CI runner neither would be set, so a future
+	//    `InheritEnv: []string{"AWS_SESSION_TOKEN"}` would otherwise
+	//    leak through silently. Seeding them here closes that gap.
 	const adminSentinel = "host-sentinel-admin-token"
 	const awsSentinel = "host-sentinel-aws-key"
+	const awsSessionSentinel = "host-sentinel-aws-session"
+	const httpProxySentinel = "host-sentinel-http-proxy"
 	t.Setenv("SMP_ADMIN_TOKEN", adminSentinel)
 	t.Setenv("AWS_SECRET_ACCESS_KEY", awsSentinel)
+	t.Setenv("AWS_SESSION_TOKEN", awsSessionSentinel)
+	t.Setenv("HTTP_PROXY", httpProxySentinel)
 
 	// Stub binary that dumps its environment to a fixed capture path
 	// before producing a minimal valid CGI response. The path is
@@ -127,7 +145,14 @@ func TestServeHTTP_CGIEnvWhitelist(t *testing.T) {
 	// Strict-subset check: the captured environment must contain ONLY
 	// the documented whitelist. This catches narrower regressions like
 	// `InheritEnv: []string{"AWS_SESSION_TOKEN"}` that a sentinel-name
-	// list cannot see. The allowed set is:
+	// list cannot see — but only when the named var is set in the
+	// host process, which is why AWS_SESSION_TOKEN and HTTP_PROXY are
+	// t.Setenv-seeded at the top of this test. Without that seeding a
+	// `InheritEnv: []string{"AWS_SESSION_TOKEN"}` regression would
+	// pass silently on a clean CI runner where AWS_SESSION_TOKEN is
+	// unset.
+	//
+	// The allowed set is:
 	//   - The handler's explicit Env entries (GIT_PROJECT_ROOT,
 	//     GIT_HTTP_EXPORT_ALL).
 	//   - The CGI-standard variables Go's net/http/cgi always sets —
