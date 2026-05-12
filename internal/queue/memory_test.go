@@ -451,6 +451,80 @@ func TestNoHandlerDoesNotBlockOtherTypes(t *testing.T) {
 	}
 }
 
+// TestDeferredEntryNotBlockedByOtherTypeBacklog verifies INIT-022
+// EPIC-001 TASK-033: a deferred entry whose handler arrives must be
+// delivered within a small constant number of ticker intervals even
+// when a different type has piled up a large no-handler backlog ahead
+// of it on the deferred list. Pre-fix the deferred list was a flat
+// slice processed in 256-entry prefixes per tick; an entry parked at
+// the tail behind N noisy orphans was reached only after ⌈N/256⌉
+// rotation ticks. Post-fix redispatchDeferred walks the handlers map
+// and looks up each handled type's bucket directly, so unhandled
+// buckets are not visited and the handled bucket is drained on the
+// very next tick regardless of N.
+//
+// With N = 2048, pre-fix delivery takes ≥ ⌈2048/256⌉ × 50 ms = 400 ms
+// of rotation ticks, while post-fix delivery lands within one tick
+// (~50 ms) plus scheduler slack. The 200 ms timeout sits comfortably
+// between the two and tolerates a 2× scheduling penalty before
+// false-failing the post-fix code.
+func TestDeferredEntryNotBlockedByOtherTypeBacklog(t *testing.T) {
+	q := queue.NewMemoryQueue(4096)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go q.Start(ctx)
+	defer q.Stop()
+
+	const noisyCount = 2048
+	for i := 0; i < noisyCount; i++ {
+		if err := q.Publish(ctx, queue.Entry{
+			EntryID:   fmt.Sprintf("noisy-%04d", i),
+			EntryType: "noisy_no_handler",
+		}); err != nil {
+			t.Fatalf("Publish noisy: %v", err)
+		}
+	}
+	if err := q.Publish(ctx, queue.Entry{
+		EntryID:   "target-001",
+		EntryType: "needs_handler",
+	}); err != nil {
+		t.Fatalf("Publish target: %v", err)
+	}
+
+	// Wait until q.entries has drained into the deferred map so the
+	// target is parked there before we subscribe. The dispatcher reads
+	// the channel in O(1) per entry; this loop converges in a few
+	// milliseconds under normal scheduling. The 2 s safety cap is far
+	// above any plausible drain time on a healthy or loaded CI runner —
+	// it only fires if the dispatcher is genuinely stalled, in which
+	// case the timing analysis below is moot anyway.
+	drainCap := time.Now().Add(2 * time.Second)
+	for q.Len() > 0 {
+		if time.Now().After(drainCap) {
+			t.Fatalf("dispatcher stalled: q.entries still has %d items after 2s", q.Len())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	received := make(chan queue.Entry, 1)
+	if err := q.Subscribe(ctx, "needs_handler", func(ctx context.Context, entry queue.Entry) error {
+		received <- entry
+		return nil
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	select {
+	case got := <-received:
+		if got.EntryID != "target-001" {
+			t.Fatalf("expected target-001, got %s", got.EntryID)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("target-001 not delivered within 200ms after Subscribe — head-of-line blocked behind noisy_no_handler bucket")
+	}
+}
+
 func TestMultipleEntryTypes(t *testing.T) {
 	q := queue.NewMemoryQueue(100)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
