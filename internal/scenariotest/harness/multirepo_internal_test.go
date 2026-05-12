@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/internal/git"
+	"github.com/bszymi/spine/internal/repository"
 )
 
 // stubGitClient records every call routed through it so the wrapper's
@@ -217,5 +218,94 @@ func TestCodeRepoBehaviorClearsWithNilError(t *testing.T) {
 	}
 	if got := len(stub.mergeCalls); got != 1 {
 		t.Fatalf("Merge after clear: underlying called %d times, want 1", got)
+	}
+}
+
+// TestFixedRepoResolverReturnsPrimary pins the post-TASK-031 invariant
+// that the resolver installed by WithCodeRepos answers
+// Lookup(PrimaryRepositoryID) with the primary record rather than
+// ErrRepositoryNotFound. Without this, a task that explicitly declares
+// `repositories: [spine, ...]` fails at engine.checkRepositoryPreconditions
+// even though the primary working tree is always available via the
+// scenario harness. The test exercises the resolver directly because
+// the engine path is already covered by
+// engine.TestRepoPrecondition_AllActiveSucceeds — what's specific to
+// this helper is that the primary record is constructed from the
+// harness's TestRepo (not the task frontmatter) and held alongside the
+// code-repo map so it survives even when zero code specs are passed.
+func TestFixedRepoResolverReturnsPrimary(t *testing.T) {
+	primary := &repository.Repository{
+		ID:            repository.PrimaryRepositoryID,
+		Kind:          repository.KindSpine,
+		DefaultBranch: "main",
+		LocalPath:     "/tmp/primary-fixture",
+	}
+	billing := &repository.Repository{
+		ID:            "billing",
+		Kind:          repository.KindCode,
+		Status:        "active",
+		DefaultBranch: "main",
+		LocalPath:     "/tmp/billing-fixture",
+	}
+	r := &fixedRepoResolver{
+		primary: primary,
+		repos:   map[string]*repository.Repository{"billing": billing},
+	}
+
+	got, err := r.Lookup(context.Background(), repository.PrimaryRepositoryID)
+	if err != nil {
+		t.Fatalf("Lookup(spine): err = %v, want nil", err)
+	}
+	if got != primary {
+		t.Fatalf("Lookup(spine): returned %p, want %p (primary record installed at construction)", got, primary)
+	}
+
+	got, err = r.Lookup(context.Background(), "billing")
+	if err != nil {
+		t.Fatalf("Lookup(billing): err = %v, want nil", err)
+	}
+	if got != billing {
+		t.Fatalf("Lookup(billing): returned %p, want %p (code-repo map miss)", got, billing)
+	}
+
+	if _, err := r.Lookup(context.Background(), "ghost"); !errors.Is(err, repository.ErrRepositoryNotFound) {
+		t.Fatalf("Lookup(ghost): err = %v, want ErrRepositoryNotFound", err)
+	}
+}
+
+// TestFixedRepoGitClientsReturnsPrimary mirrors the resolver pin for
+// the git-clients view: Client(PrimaryRepositoryID) returns the
+// harness's primary git.GitClient rather than ErrRepositoryNotFound.
+// The engine currently routes primary branch operations through
+// Orchestrator.git directly, so the production hot path does not
+// consult this method for the primary — the wiring is symmetric
+// defence in depth so a future engine path that does consult it cannot
+// silently degrade.
+func TestFixedRepoGitClientsReturnsPrimary(t *testing.T) {
+	primaryClient := &stubGitClient{}
+	billingClient := &stubGitClient{}
+	c := &fixedRepoGitClients{
+		primary: primaryClient,
+		clients: map[string]git.GitClient{"billing": billingClient},
+	}
+
+	got, err := c.Client(context.Background(), repository.PrimaryRepositoryID)
+	if err != nil {
+		t.Fatalf("Client(spine): err = %v, want nil", err)
+	}
+	if got != primaryClient {
+		t.Fatalf("Client(spine): returned %p, want %p", got, primaryClient)
+	}
+
+	got, err = c.Client(context.Background(), "billing")
+	if err != nil {
+		t.Fatalf("Client(billing): err = %v, want nil", err)
+	}
+	if got != billingClient {
+		t.Fatalf("Client(billing): returned %p, want %p", got, billingClient)
+	}
+
+	if _, err := c.Client(context.Background(), "ghost"); !errors.Is(err, repository.ErrRepositoryNotFound) {
+		t.Fatalf("Client(ghost): err = %v, want ErrRepositoryNotFound", err)
 	}
 }

@@ -183,7 +183,7 @@ func setupExternalResolutionOrchestrator() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-external-resolution-orchestrator",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
-			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator,
+			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator, sc.Repo,
 				harness.CodeRepoSpec{ID: "billing"},
 			)
 			sc.Set(stateExternalBillingRepo, repos["billing"])
