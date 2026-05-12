@@ -4,6 +4,7 @@ package scenarios_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,11 +13,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/gateway"
 	scenarioEngine "github.com/bszymi/spine/internal/scenariotest/engine"
+	"github.com/bszymi/spine/internal/secrets"
+	"github.com/bszymi/spine/internal/store"
+	"github.com/bszymi/spine/internal/workspace"
 )
 
 // State keys for the bootstrap-admin scenario. The bundle in
@@ -438,4 +443,406 @@ func redactBearer(bearer string) string {
 		return "[redacted]"
 	}
 	return bearer[:4] + "..."
+}
+
+// ─── Pooled-builder bootstrap scenario (INIT-022 EPIC-001 TASK-035) ───
+//
+// The test above drives BootstrapInternalAdmin via direct calls and
+// asserts the contract through sc.Runtime.Store + an unpooled gateway.
+// That keeps coverage of the single-workspace fallback (non-platform
+// mode) but does NOT exercise the platform-binding wiring this
+// bootstrap exists for: in production, cmd/spine's
+// newPooledWorkspaceBuilder invokes BootstrapInternalAdmin from inside
+// the workspace.ServicePool's ServiceSetBuilder on every workspace
+// activation, and the gateway resolves auth through the resulting
+// ServiceSet rather than through process-level Store/Auth handles.
+//
+// TestBootstrapInternalAdmin_PooledBuilderIdempotencyAndRotation
+// covers the same three-phase contract (first-create, idempotent
+// re-resolve, rotation insertion) but through that production-shaped
+// chain end-to-end:
+//
+//   1. workspace.ServicePool with a builder that calls
+//      auth.BootstrapInternalAdmin against the workspace's own
+//      ServiceSet.Store (a per-workspace pgx pool over the same test
+//      Postgres instance the harness uses).
+//   2. Gateway wired with WorkspaceResolver + ServicePool and NO
+//      direct Store/Auth handles, so the auth middleware can only
+//      succeed through the pooled ServiceSet's auth service.
+//   3. Idle "reload" simulated by pool.Evict between requests, so the
+//      next request fans through workspace.Resolve + ServiceSet
+//      construction + builder invocation again — the same chain a
+//      real workspace's idle eviction would re-run.
+//
+// AC bait (TASK-035 AC #1): reverting any link in that chain breaks
+// the HTTP authentication assertion. Verified manually for two
+// links before checking in:
+//
+//   - Replacing the builder's BootstrapInternalAdmin call with a
+//     no-op fails phase=first with a 401 (no smp-admin actor in
+//     ss.Store → bearer rejected).
+//   - Pointing the builder at a token of "" (env-derived plumbing
+//     reverted) also fails phase=first with a 401 (BootstrapInternalAdmin
+//     no-ops on empty token).
+func TestBootstrapInternalAdmin_PooledBuilderIdempotencyAndRotation(t *testing.T) {
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "bootstrap-admin-pooled-idempotency-and-rotation",
+		Description: "Locks BootstrapInternalAdmin's three-state contract end-to-end through the production-shaped WorkspaceResolver + ServicePool + builder chain.",
+		Steps: []scenarioEngine.Step{
+			setupPooledBootstrapAdminEnv(bootstrapBearerInitial),
+			drivePooledAuthenticatedRequestExpectingOK(bootstrapBearerInitial, "phase=first"),
+			assertSingleActorAndTokenAfterPooledFirstBootstrap(),
+			resetPooledLogBufAndEvictWorkspace(),
+			drivePooledAuthenticatedRequestExpectingOK(bootstrapBearerInitial, "phase=after-idle-reload"),
+			assertNoRowDuplicationAfterPooledSecondBootstrap(),
+			assertPooledDebugIdempotentLogPresent(),
+			rotatePooledAdminTokenTo(bootstrapBearerRotated),
+			resetPooledLogBufAndEvictWorkspace(),
+			drivePooledAuthenticatedRequestExpectingOK(bootstrapBearerRotated, "phase=after-rotation-new-bearer"),
+			drivePooledAuthenticatedRequestExpectingOK(bootstrapBearerInitial, "phase=after-rotation-old-bearer"),
+			assertRotationRowCountsAfterPooledBootstrap(),
+		},
+	})
+}
+
+// statePooledBootstrapEnv is the scenario-state key for the pooled
+// scenario's environment bundle. Separate from stateBootstrapEnv so the
+// direct-bootstrap helpers and the pool-backed helpers can coexist in
+// one file without colliding on state.
+const (
+	statePooledBootstrapEnv = "pooled_bootstrap_admin_env"
+	pooledWorkspaceID       = "ws-bootstrap-pool"
+)
+
+// pooledBootstrapAdminEnv bundles the platform-binding-shaped wiring
+// the pool-backed scenario drives. AdminTokenRef is a pointer so the
+// rotation step can flip the value the builder closure reads on each
+// invocation — mirroring the env-derived SMP_ADMIN_TOKEN plumbing that
+// cmd/spine's newPooledWorkspaceBuilder closes over.
+type pooledBootstrapAdminEnv struct {
+	Server        *httptest.Server
+	BaseURL       string
+	LogBuf        *syncBuffer
+	Pool          *workspace.ServicePool
+	Resolver      *fixedWorkspaceResolver
+	AdminTokenRef *string
+}
+
+// fixedWorkspaceResolver is the minimal workspace.Resolver
+// implementation the scenario needs: it returns one configured
+// workspace.Config for the well-known scenario workspace ID and
+// ErrWorkspaceNotFound for everything else. Production uses
+// workspace.PlatformBindingProvider / workspace.DBProvider; for the
+// scope of this scenario the interface contract is what matters, not
+// the lookup substrate.
+type fixedWorkspaceResolver struct {
+	workspaceID string
+	cfg         *workspace.Config
+}
+
+func (r *fixedWorkspaceResolver) Resolve(_ context.Context, id string) (*workspace.Config, error) {
+	if id != r.workspaceID {
+		return nil, workspace.ErrWorkspaceNotFound
+	}
+	return r.cfg, nil
+}
+
+func (r *fixedWorkspaceResolver) List(_ context.Context) ([]workspace.Config, error) {
+	return []workspace.Config{*r.cfg}, nil
+}
+
+// setupPooledBootstrapAdminEnv wires the platform-binding-shaped stack:
+// fixedWorkspaceResolver → workspace.ServicePool → ServiceSetBuilder
+// that calls auth.BootstrapInternalAdmin against each per-workspace
+// ServiceSet's own Store. The gateway is constructed with
+// WorkspaceResolver+ServicePool and NO direct Store/Auth — the only
+// path to successful authentication is through a fully-built ServiceSet.
+//
+// initialToken is the value the builder reads on its first invocation.
+// Subsequent rotations are realised by overwriting *AdminTokenRef in
+// rotatePooledAdminTokenTo; the builder re-reads the pointee on every
+// invocation, so the next pool.Get-after-Evict produces a builder call
+// with the new value (matching what a redeployed cmd/spine process
+// with a rotated SMP_ADMIN_TOKEN would observe).
+//
+// IdleCheckInterval is set to -1 (disabled) so the background eviction
+// loop cannot evict between scenario steps; the scenario drives
+// pool.Evict explicitly to simulate idle reload.
+func setupPooledBootstrapAdminEnv(initialToken string) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "setup-pooled-bootstrap-admin-env",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			cfg := &workspace.Config{
+				ID:          pooledWorkspaceID,
+				DisplayName: "Bootstrap Pool",
+				DatabaseURL: secrets.NewSecretValue([]byte(store.TestDSN())),
+				RepoPath:    sc.Repo.Dir,
+				Status:      workspace.StatusActive,
+			}
+			resolver := &fixedWorkspaceResolver{workspaceID: pooledWorkspaceID, cfg: cfg}
+
+			adminToken := initialToken
+			adminTokenRef := &adminToken
+			builder := func(ctx context.Context, ss *workspace.ServiceSet) error {
+				return auth.BootstrapInternalAdmin(ctx, ss.Store, auth.BootstrapAdminConfig{
+					Token: *adminTokenRef,
+				})
+			}
+
+			pool := workspace.NewServicePool(sc.Ctx, resolver, workspace.PoolConfig{
+				Builder:           builder,
+				IdleTimeout:       time.Hour,
+				IdleCheckInterval: -1,
+			})
+			sc.ParentT.Cleanup(pool.Close)
+
+			srv := gateway.NewServer(":0", gateway.ServerConfig{
+				WorkspaceResolver: resolver,
+				ServicePool:       pool,
+			})
+			ts := httptest.NewServer(srv.Handler())
+			sc.ParentT.Cleanup(ts.Close)
+
+			logBuf := &syncBuffer{}
+			prevSlog := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			sc.ParentT.Cleanup(func() { slog.SetDefault(prevSlog) })
+
+			sc.Set(statePooledBootstrapEnv, &pooledBootstrapAdminEnv{
+				Server:        ts,
+				BaseURL:       ts.URL,
+				LogBuf:        logBuf,
+				Pool:          pool,
+				Resolver:      resolver,
+				AdminTokenRef: adminTokenRef,
+			})
+			return nil
+		},
+	}
+}
+
+// drivePooledAuthenticatedRequestExpectingOK issues a GET against the
+// auth-protected /api/v1/system/metrics endpoint with both an
+// X-Workspace-ID header and a Bearer token. A 200 here proves the
+// entire chain succeeded: workspaceMiddleware resolved the workspace,
+// servicePool.Get triggered the builder, the builder bootstrapped
+// smp-admin into ss.Store, and authMiddleware validated the bearer
+// against ss.Auth (the per-workspace auth.Service the pool installed).
+//
+// Compared to driveAuthenticatedRequestExpectingOK in the direct
+// scenario, this helper sets the X-Workspace-ID header — without it,
+// workspaceMiddleware would surface ErrInvalidParams via the deferred
+// workspace-resolve error path and the test would fail the same way
+// as an unbuilt ServiceSet would, blurring the regression signal.
+func drivePooledAuthenticatedRequestExpectingOK(bearer, phase string) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "pooled-drive-authenticated-request-" + phase,
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			env := sc.MustGet(statePooledBootstrapEnv).(*pooledBootstrapAdminEnv)
+			req, err := http.NewRequestWithContext(sc.Ctx, http.MethodGet,
+				env.BaseURL+"/api/v1/system/metrics", http.NoBody)
+			if err != nil {
+				return fmt.Errorf("build request (%s): %w", phase, err)
+			}
+			req.Header.Set("Authorization", "Bearer "+bearer)
+			req.Header.Set(gateway.WorkspaceHeader, pooledWorkspaceID)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("issue request (%s): %w", phase, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("phase %s: bearer=%s got status %d, want 200 (pooled chain broken — workspace resolve / pool.Get / builder / ss.Auth); body=%s",
+					phase, redactBearer(bearer), resp.StatusCode, string(body))
+			}
+			return nil
+		},
+	}
+}
+
+// assertSingleActorAndTokenAfterPooledFirstBootstrap mirrors
+// assertSingleActorAndTokenAfterFirstBootstrap for the pool-backed
+// scenario. The assertion reads through sc.Runtime.Store (the harness's
+// own per-test connection) rather than the workspace's per-pool pgx
+// pool — both point at the same Postgres database, and the helper
+// pin-points the row-counts contract independently of whatever
+// connection happened to write the rows.
+func assertSingleActorAndTokenAfterPooledFirstBootstrap() scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "assert-actor-and-token-after-pooled-first-bootstrap",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			actor, err := sc.Runtime.Store.GetActor(sc.Ctx, auth.InternalAdminActorID)
+			if err != nil {
+				return fmt.Errorf("GetActor(%s): %w", auth.InternalAdminActorID, err)
+			}
+			if actor.Role != domain.RoleAdmin || actor.Status != domain.ActorStatusActive {
+				return fmt.Errorf("smp-admin actor shape: role=%q status=%q, want %q/%q",
+					actor.Role, actor.Status, domain.RoleAdmin, domain.ActorStatusActive)
+			}
+			tokens, err := sc.Runtime.Store.ListTokensByActor(sc.Ctx, auth.InternalAdminActorID)
+			if err != nil {
+				return fmt.Errorf("ListTokensByActor: %w", err)
+			}
+			if len(tokens) != 1 {
+				return fmt.Errorf("token count after first pooled bootstrap: got %d, want 1", len(tokens))
+			}
+			expectHash := auth.HashToken(bootstrapBearerInitial)
+			gotActor, gotToken, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, expectHash)
+			if err != nil {
+				return fmt.Errorf("GetActorByTokenHash(initial): %w", err)
+			}
+			if gotActor.ActorID != auth.InternalAdminActorID {
+				return fmt.Errorf("token hash bound to %q, want %q",
+					gotActor.ActorID, auth.InternalAdminActorID)
+			}
+			wantTokenID := "bootstrap-" + expectHash[:12]
+			if gotToken.TokenID != wantTokenID {
+				return fmt.Errorf("token_id: got %q, want %q", gotToken.TokenID, wantTokenID)
+			}
+			return nil
+		},
+	}
+}
+
+// resetPooledLogBufAndEvictWorkspace clears the captured log buffer
+// and evicts the cached ServiceSet in one atomic step so the next
+// pool.Get forces a fresh builder invocation against an empty buffer.
+// Combining the two avoids a "reset → request triggers no rebuild
+// because the entry is still cached" silent miss.
+//
+// pool.Evict is a no-op when refCount > 0 (the entry is just marked
+// evicting and freed on the last Release). The previous step's
+// http.DefaultClient.Do blocks until the response is read, so by the
+// time control returns here, workspaceMiddleware's deferred release
+// has fired and refCount is 0 — Evict frees the entry immediately.
+func resetPooledLogBufAndEvictWorkspace() scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "reset-log-buf-and-evict-pooled-workspace",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			env := sc.MustGet(statePooledBootstrapEnv).(*pooledBootstrapAdminEnv)
+			env.LogBuf.Reset()
+			env.Pool.Evict(pooledWorkspaceID)
+			return nil
+		},
+	}
+}
+
+// assertNoRowDuplicationAfterPooledSecondBootstrap is the pool-backed
+// counterpart to assertNoRowDuplicationAfterSecondBootstrap: with the
+// builder re-invoked on a fresh ServiceSet, the second bootstrap call
+// must remain a no-op against the existing auth.tokens row — no extra
+// rows, no actor row re-stamping.
+func assertNoRowDuplicationAfterPooledSecondBootstrap() scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "assert-no-row-duplication-after-pooled-second-bootstrap",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			tokens, err := sc.Runtime.Store.ListTokensByActor(sc.Ctx, auth.InternalAdminActorID)
+			if err != nil {
+				return fmt.Errorf("ListTokensByActor: %w", err)
+			}
+			if len(tokens) != 1 {
+				return fmt.Errorf("token count after pooled second bootstrap: got %d, want 1 (idempotency broken through the builder)", len(tokens))
+			}
+			return nil
+		},
+	}
+}
+
+// assertPooledDebugIdempotentLogPresent locates the same DEBUG line as
+// the direct-scenario assertion in the log buffer captured during the
+// pool-backed re-resolve. The log emission happens inside
+// auth.BootstrapInternalAdmin → observe.Logger(ctx) → slog.Default(),
+// which is the buffer-backed handler the setup step installed; the
+// pool's internal goroutine that runs the builder picks up the same
+// global slog handler. Same record-level level-check as the direct
+// variant: split per-record then require level=DEBUG on the matching
+// record.
+func assertPooledDebugIdempotentLogPresent() scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "assert-pooled-debug-idempotent-log-present",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			env := sc.MustGet(statePooledBootstrapEnv).(*pooledBootstrapAdminEnv)
+			logged := env.LogBuf.String()
+			const wantMsg = "internal admin token already configured"
+			var matched string
+			for _, line := range strings.Split(strings.TrimRight(logged, "\n"), "\n") {
+				if strings.Contains(line, wantMsg) {
+					matched = line
+					break
+				}
+			}
+			if matched == "" {
+				return fmt.Errorf("expected log line containing %q in pooled re-resolve output; full log:\n%s",
+					wantMsg, logged)
+			}
+			if !strings.Contains(matched, "level=DEBUG") {
+				return fmt.Errorf("expected level=DEBUG on pooled token-already-configured record; got line:\n%s\nfull log:\n%s",
+					matched, logged)
+			}
+			return nil
+		},
+	}
+}
+
+// rotatePooledAdminTokenTo flips the value the builder closure reads
+// on its next invocation. The builder was constructed in
+// setupPooledBootstrapAdminEnv with a pointer to a token variable, so
+// updating *AdminTokenRef here is what a redeployed cmd/spine process
+// with a rotated SMP_ADMIN_TOKEN env var would do: same builder shape,
+// new token at builder-invocation time.
+func rotatePooledAdminTokenTo(newToken string) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "rotate-pooled-admin-token",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			env := sc.MustGet(statePooledBootstrapEnv).(*pooledBootstrapAdminEnv)
+			*env.AdminTokenRef = newToken
+			return nil
+		},
+	}
+}
+
+// assertRotationRowCountsAfterPooledBootstrap mirrors
+// assertRotationRowCounts for the pool-backed scenario: the rotated
+// bootstrap must leave the initial-bearer hash row intact and add a
+// second row bound to the same smp-admin actor. The two HTTP requests
+// preceding this step (new bearer then old bearer, both expecting 200)
+// already proved the dual-bearer contract authenticates end-to-end;
+// this step pins the underlying row shape so a regression that swapped
+// row-counts for an unrelated assertion would still surface.
+func assertRotationRowCountsAfterPooledBootstrap() scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "assert-rotation-row-counts-after-pooled-bootstrap",
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			tokens, err := sc.Runtime.Store.ListTokensByActor(sc.Ctx, auth.InternalAdminActorID)
+			if err != nil {
+				return fmt.Errorf("ListTokensByActor: %w", err)
+			}
+			if len(tokens) != 2 {
+				return fmt.Errorf("token count after pooled rotation: got %d, want 2 (old + new)", len(tokens))
+			}
+
+			oldHash := auth.HashToken(bootstrapBearerInitial)
+			newHash := auth.HashToken(bootstrapBearerRotated)
+			oldActor, _, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, oldHash)
+			if err != nil {
+				return fmt.Errorf("GetActorByTokenHash(old): %w", err)
+			}
+			if oldActor.ActorID != auth.InternalAdminActorID {
+				return fmt.Errorf("old hash bound to %q, want %q",
+					oldActor.ActorID, auth.InternalAdminActorID)
+			}
+			newActor, _, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, newHash)
+			if err != nil {
+				return fmt.Errorf("GetActorByTokenHash(new): %w", err)
+			}
+			if newActor.ActorID != auth.InternalAdminActorID {
+				return fmt.Errorf("new hash bound to %q, want %q",
+					newActor.ActorID, auth.InternalAdminActorID)
+			}
+			return nil
+		},
+	}
 }
