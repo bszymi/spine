@@ -15,12 +15,20 @@ const idempotencyTTL = 10 * time.Minute
 // per-entry sleep so end-to-end latency on the boot-race path is unchanged.
 const deferredRedispatchInterval = 50 * time.Millisecond
 
-// maxRedispatchPerTick bounds the number of deferred entries processed per
-// ticker tick so a large backlog cannot head-of-line block reads from
-// q.entries. With a 50ms tick the worst-case rescan cadence stays under
-// a tick interval even for thousands of orphaned entries; the rest wait
-// for the next tick. Picked to be plenty larger than typical boot-race
-// volumes (single digits) while keeping pathological-case stall bounded.
+// maxRedispatchPerTick bounds the number of deferred entries dispatched
+// per ticker tick so a large backlog cannot head-of-line block reads
+// from q.entries. With a 50ms tick the worst-case rescan cadence stays
+// under a tick interval even for thousands of orphaned entries; the
+// rest wait for the next tick. Picked to be plenty larger than typical
+// boot-race volumes (single digits) while keeping pathological-case
+// stall bounded.
+//
+// Budget is total across all handled buckets; no-handler buckets are
+// never visited (see redispatchDeferred), so a publisher dumping many
+// distinct unhandled types cannot inflate the per-tick scan. Map
+// iteration order over handled types is randomised by the runtime,
+// which gives natural fairness across ticks when several handled
+// buckets are non-empty.
 const maxRedispatchPerTick = 256
 
 // MemoryQueue implements Queue using Go channels for in-process async processing.
@@ -36,10 +44,15 @@ type MemoryQueue struct {
 	done           chan struct{}
 
 	// deferred holds entries dispatched while no handler was registered
-	// for their type. Owned exclusively by Start()'s goroutine — accessed
-	// only from dispatch and redispatchDeferred, which run within that
-	// loop, so no mutex is needed.
-	deferred []Entry
+	// for their type, bucketed by EntryType. Owned exclusively by Start()'s
+	// goroutine — accessed only from dispatch and redispatchDeferred, which
+	// run within that loop, so no mutex is needed. Bucketing (INIT-022
+	// EPIC-001 TASK-033) means redispatchDeferred can skip whole noisy
+	// no-handler buckets and only spend its per-tick budget on buckets
+	// whose handlers are registered, so a B entry parked behind N A entries
+	// is no longer delayed by ⌈N/maxRedispatchPerTick⌉ ticks once B's
+	// handler arrives.
+	deferred map[string][]Entry
 }
 
 // NewMemoryQueue creates a new in-process queue.
@@ -54,6 +67,7 @@ func NewMemoryQueue(bufferSize int) *MemoryQueue {
 		idempotencySet: make(map[string]time.Time),
 		bufferSize:     bufferSize,
 		done:           make(chan struct{}),
+		deferred:       make(map[string][]Entry),
 	}
 }
 
@@ -165,31 +179,37 @@ func (q *MemoryQueue) IsAcknowledged(entryID string) bool {
 }
 
 // dispatch sends an entry to all registered handlers for its type.
-// If no handlers are registered yet, the entry is parked on the deferred
-// list and retried by redispatchDeferred on the next ticker tick.
+// If no handlers are registered yet, the entry is parked in the
+// per-type deferred bucket and retried by redispatchDeferred on the
+// next ticker tick.
 //
 // INIT-022 EPIC-001 TASK-011: replaced the per-requeue goroutine spawn —
 // a noisy publisher with no subscriber registered yet could otherwise
 // fan out arbitrarily many sleeping goroutines all racing to write back
-// to q.entries. The deferred list bounds the dispatcher to a single
+// to q.entries. The deferred map bounds the dispatcher to a single
 // goroutine (Start's loop) regardless of inbound rate.
+//
+// INIT-022 EPIC-001 TASK-033: deferred is bucketed per EntryType so that
+// a noisy no-handler type cannot head-of-line block a different type
+// whose handler has just arrived. redispatchDeferred only consumes
+// budget against buckets with a registered handler.
 //
 // Memory tradeoff: q.deferred is unbounded — pathological "no
 // subscriber ever registers" workloads cause memory growth proportional
 // to publish volume. Pre-fix the same workload spawned unbounded
 // goroutines (≈8KB stack each), so this is strictly an improvement on
-// memory cost; bounding the slice would either drop items (forbidden
-// by the AC's boot-race retention) or block head-of-line for unrelated
-// entry types. Per ADR-005 the in-process queue is not durable — a
-// misconfigured caller publishing without a handler is an operator
-// bug, not a steady-state condition.
+// memory cost; bounding the buckets would either drop items (forbidden
+// by the AC's boot-race retention) or invite per-type policy decisions
+// the in-process queue is not the right place to make. Per ADR-005 the
+// in-process queue is not durable — a misconfigured caller publishing
+// without a handler is an operator bug, not a steady-state condition.
 func (q *MemoryQueue) dispatch(ctx context.Context, entry Entry) {
 	q.mu.RLock()
 	handlers := q.handlers[entry.EntryType]
 	q.mu.RUnlock()
 
 	if len(handlers) == 0 {
-		q.deferred = append(q.deferred, entry)
+		q.deferred[entry.EntryType] = append(q.deferred[entry.EntryType], entry)
 		return
 	}
 
@@ -202,45 +222,73 @@ func (q *MemoryQueue) dispatch(ctx context.Context, entry Entry) {
 	}
 }
 
-// redispatchDeferred drains a bounded prefix of the deferred list,
-// attempting to dispatch each entry against currently registered
-// handlers. Entries whose type still has no handler are re-parked for
-// the next tick; entries beyond the per-tick bound stay deferred so a
-// large backlog does not head-of-line block reads from q.entries. Runs
-// on the Start goroutine so no synchronisation is needed for q.deferred.
+// redispatchDeferred consumes a bounded total budget across the per-type
+// deferred buckets, dispatching entries from buckets whose handler has
+// since registered. The walk iterates the *handlers* map rather than
+// q.deferred, so no-handler buckets are never visited — a publisher
+// dumping many distinct unhandled types cannot inflate the per-tick
+// scan, and a noisy no-handler type cannot starve a handled type within
+// the per-tick budget. This is the head-of-line fairness guarantee
+// from INIT-022 EPIC-001 TASK-033. Map iteration order is randomised
+// by the runtime, so across ticks several handled buckets share the
+// budget roughly proportionally. Runs on the Start goroutine so no
+// synchronisation is needed for q.deferred itself; q.handlers is read
+// once under RLock to snapshot which types have handlers.
+//
+// Handler removal is not part of the queue API (Subscribe only appends),
+// so a type captured in the snapshot is guaranteed to still have a
+// handler by the time q.dispatch re-reads handlers — every entry
+// drained from a handled bucket reaches its handler this tick and does
+// not re-park.
 func (q *MemoryQueue) redispatchDeferred(ctx context.Context) {
 	if len(q.deferred) == 0 {
 		return
 	}
 
-	n := len(q.deferred)
-	if n > maxRedispatchPerTick {
-		n = maxRedispatchPerTick
-	}
-
-	// Take pending as a 3-index slice so a stray append could not write
-	// into q.deferred's backing array; dispatch only ever appends to
-	// q.deferred so this is defensive but free.
-	pending := q.deferred[:n:n]
-	q.deferred = q.deferred[n:]
-
-	// When the deferred list is fully drained on this tick, drop the
-	// slice header so the backing array becomes GC-eligible immediately
-	// rather than lingering on the next-tick fast-path. (For a non-empty
-	// remainder, the next dispatch append-back triggers a realloc that
-	// frees the original array on its own.)
-	if len(q.deferred) == 0 {
-		q.deferred = nil
-	}
-
-	for _, entry := range pending {
-		select {
-		case <-ctx.Done():
-			return
-		case <-q.done:
-			return
-		default:
+	q.mu.RLock()
+	handledTypes := make([]string, 0, len(q.handlers))
+	for typ, hs := range q.handlers {
+		if len(hs) > 0 {
+			handledTypes = append(handledTypes, typ)
 		}
-		q.dispatch(ctx, entry)
+	}
+	q.mu.RUnlock()
+
+	budget := maxRedispatchPerTick
+	for _, typ := range handledTypes {
+		if budget <= 0 {
+			break
+		}
+		entries, ok := q.deferred[typ]
+		if !ok || len(entries) == 0 {
+			continue
+		}
+
+		n := len(entries)
+		if n > budget {
+			n = budget
+		}
+
+		// 3-index slice so a stray append could not write into entries'
+		// backing array. Defensive — dispatch only writes back to the
+		// bucket via append on q.deferred[typ], not via this slice.
+		pending := entries[:n:n]
+		if n == len(entries) {
+			delete(q.deferred, typ)
+		} else {
+			q.deferred[typ] = entries[n:]
+		}
+		budget -= n
+
+		for _, entry := range pending {
+			select {
+			case <-ctx.Done():
+				return
+			case <-q.done:
+				return
+			default:
+			}
+			q.dispatch(ctx, entry)
+		}
 	}
 }
