@@ -385,6 +385,9 @@ func TestResolveRepositoryMergeExternally_WritesLedgerCommit(t *testing.T) {
 	if got.Trailers["Operation"] != "merge_recovery_resolve" {
 		t.Fatalf("expected Operation=merge_recovery_resolve, got %q", got.Trailers["Operation"])
 	}
+	if got.Trailers["Actor-ID"] != fix.actorID {
+		t.Fatalf("expected Actor-ID=%s (architecture/git-integration.md §5.1), got %q", fix.actorID, got.Trailers["Actor-ID"])
+	}
 	if got.Trailers["Resolved-By"] != fix.actorID {
 		t.Fatalf("expected Resolved-By=%s, got %q", fix.actorID, got.Trailers["Resolved-By"])
 	}
@@ -423,6 +426,9 @@ func TestRetryRepositoryMerge_WritesLedgerCommit(t *testing.T) {
 	got := gitOp.commits[0]
 	if got.Trailers["Operation"] != "merge_recovery_retry" {
 		t.Fatalf("expected Operation=merge_recovery_retry, got %q", got.Trailers["Operation"])
+	}
+	if got.Trailers["Actor-ID"] != fix.actorID {
+		t.Fatalf("expected Actor-ID=%s (architecture/git-integration.md §5.1), got %q", fix.actorID, got.Trailers["Actor-ID"])
 	}
 	if got.Trailers["Requested-By"] != fix.actorID {
 		t.Fatalf("expected Requested-By=%s, got %q", fix.actorID, got.Trailers["Requested-By"])
