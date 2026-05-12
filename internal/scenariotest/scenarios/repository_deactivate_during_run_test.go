@@ -287,7 +287,7 @@ func setupBillingCodeRepo() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-billing-code-repo",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
-			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator,
+			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator, sc.Repo,
 				harness.CodeRepoSpec{ID: "billing"},
 			)
 			sc.Set(stateBillingRepoDir, repos["billing"].Dir)

@@ -79,10 +79,21 @@ func (r *CodeRepo) Client() git.GitClient {
 // or equivalent — this helper does not own orchestrator construction,
 // only its multi-repo wiring.
 //
-// The temp directories are anchored to t so they outlive per-step
-// subtests; pass sc.ParentT (not sc.T) from a scenario step or branch
-// creation will land in a working tree that has already been torn down
-// by the time later steps assert against it.
+// primary is the scenario harness's own TestRepo (sc.Repo). The
+// installed resolver answers Lookup(repository.PrimaryRepositoryID)
+// with a record pointing at primary.Dir so a task that explicitly
+// declares the primary in `repositories: [spine, ...]` clears
+// checkRepositoryPreconditions instead of failing with
+// ErrRepositoryNotFound. The git-clients view returns primary.Git for
+// the same ID even though the engine routes primary branch operations
+// through Orchestrator.git directly today — symmetric wiring keeps the
+// helper from accidentally producing a half-wired resolver if a future
+// engine path consults RepositoryGitClients for the primary.
+//
+// The temp directories for code repos are anchored to t so they
+// outlive per-step subtests; pass sc.ParentT (not sc.T) from a
+// scenario step or branch creation will land in a working tree that
+// has already been torn down by the time later steps assert against it.
 //
 // Calling WithCodeRepos twice on the same orchestrator replaces the
 // previous wiring — engine.WithRepositoryResolver and
@@ -91,16 +102,19 @@ func (r *CodeRepo) Client() git.GitClient {
 //
 // Example:
 //
-//	repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator,
+//	repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator, sc.Repo,
 //	    harness.CodeRepoSpec{ID: "billing"},
 //	    harness.CodeRepoSpec{ID: "shipping"},
 //	)
 //	billingDir := repos["billing"].Dir
 //	repos["billing"].SetNextMergeFailure(errors.New("conflict"))
-func WithCodeRepos(t *testing.T, orch *engine.Orchestrator, specs ...CodeRepoSpec) map[string]*CodeRepo {
+func WithCodeRepos(t *testing.T, orch *engine.Orchestrator, primary *TestRepo, specs ...CodeRepoSpec) map[string]*CodeRepo {
 	t.Helper()
 	if orch == nil {
 		t.Fatalf("harness.WithCodeRepos: orch is nil; build the runtime with WithRuntimeOrchestrator first")
+	}
+	if primary == nil {
+		t.Fatalf("harness.WithCodeRepos: primary is nil; pass the scenario harness's TestRepo (sc.Repo) so the resolver can answer Lookup(%q)", repository.PrimaryRepositoryID)
 	}
 	if len(specs) == 0 {
 		t.Fatalf("harness.WithCodeRepos: at least one CodeRepoSpec is required")
@@ -113,11 +127,12 @@ func WithCodeRepos(t *testing.T, orch *engine.Orchestrator, specs ...CodeRepoSpe
 			t.Fatalf("harness.WithCodeRepos: CodeRepoSpec.ID is required")
 		}
 		if spec.ID == repository.PrimaryRepositoryID {
-			// The primary repo is provisioned by the scenario harness
-			// itself (sc.Repo); accepting it here would shadow that
-			// wiring with a fresh tempdir and silently desynchronise
-			// every assertion that reads through sc.Repo.
-			t.Fatalf("harness.WithCodeRepos: spec ID %q is reserved for the primary repo", spec.ID)
+			// The primary repo is owned by the scenario harness itself
+			// (primary / sc.Repo). Accepting it as a code spec here
+			// would either shadow that wiring with a fresh tempdir or
+			// silently override the primary record built below — both
+			// are configuration errors, not silent merges.
+			t.Fatalf("harness.WithCodeRepos: spec ID %q is reserved for the primary repo; primary working tree is taken from the primary argument", spec.ID)
 		}
 		if _, dup := handles[spec.ID]; dup {
 			t.Fatalf("harness.WithCodeRepos: duplicate CodeRepoSpec.ID %q", spec.ID)
@@ -144,8 +159,14 @@ func WithCodeRepos(t *testing.T, orch *engine.Orchestrator, specs ...CodeRepoSpe
 		repos[spec.ID] = repoRecord
 		clients[spec.ID] = behavior
 	}
-	orch.WithRepositoryResolver(&fixedRepoResolver{repos: repos})
-	orch.WithRepositoryGitClients(&fixedRepoGitClients{clients: clients})
+	primaryRecord := &repository.Repository{
+		ID:            repository.PrimaryRepositoryID,
+		Kind:          repository.KindSpine,
+		DefaultBranch: "main",
+		LocalPath:     primary.Dir,
+	}
+	orch.WithRepositoryResolver(&fixedRepoResolver{primary: primaryRecord, repos: repos})
+	orch.WithRepositoryGitClients(&fixedRepoGitClients{primary: primary.Git, clients: clients})
 	return handles
 }
 
@@ -171,15 +192,21 @@ func newCodeRepoDir(t *testing.T, defaultBranch string) string {
 }
 
 // fixedRepoResolver is the engine.RepositoryResolver shape backing
-// WithCodeRepos. The primary repo is intentionally absent — the engine
-// short-circuits primary lookups, and a Lookup("spine") here would
-// surface a misconfigured precondition path rather than silently
-// substituting the primary working tree.
+// WithCodeRepos. The primary record is held separately from the code
+// repos map so a task that explicitly declares the primary in
+// `repositories: [spine, ...]` resolves through the same call site as
+// the (implicit) primary baseline capture, and so a caller that
+// accidentally registers an extra "spine" code spec is rejected at
+// intake rather than silently overriding the primary view.
 type fixedRepoResolver struct {
-	repos map[string]*repository.Repository
+	primary *repository.Repository
+	repos   map[string]*repository.Repository
 }
 
 func (r *fixedRepoResolver) Lookup(_ context.Context, id string) (*repository.Repository, error) {
+	if id == repository.PrimaryRepositoryID {
+		return r.primary, nil
+	}
 	repo, ok := r.repos[id]
 	if !ok {
 		return nil, repository.ErrRepositoryNotFound
@@ -188,16 +215,22 @@ func (r *fixedRepoResolver) Lookup(_ context.Context, id string) (*repository.Re
 }
 
 // fixedRepoGitClients is the engine.RepositoryGitClients shape backing
-// WithCodeRepos. The map values are *codeRepoBehavior so injected
-// failures stay routable on the same handle the test holds; if the
-// engine ever asked for a repo that was not wired the helper would
-// have failed at setup time, but the lookup is fail-closed in case a
-// future caller mutates the map after construction.
+// WithCodeRepos. The primary client is held alongside the code-repo
+// map for the same reason fixedRepoResolver carries the primary
+// record: future engine paths that consult RepositoryGitClients for
+// the primary (today the engine uses Orchestrator.git directly) must
+// see the harness's primary working tree rather than ErrRepositoryNotFound.
+// The map values are *codeRepoBehavior so injected failures stay
+// routable on the same handle the test holds.
 type fixedRepoGitClients struct {
+	primary git.GitClient
 	clients map[string]git.GitClient
 }
 
 func (c *fixedRepoGitClients) Client(_ context.Context, repoID string) (git.GitClient, error) {
+	if repoID == repository.PrimaryRepositoryID {
+		return c.primary, nil
+	}
 	client, ok := c.clients[repoID]
 	if !ok {
 		return nil, repository.ErrRepositoryNotFound

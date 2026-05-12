@@ -172,7 +172,7 @@ func setupMultiRepoOrchestrator() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-multi-repo-orchestrator",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
-			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator,
+			repos := harness.WithCodeRepos(sc.ParentT, sc.Runtime.Orchestrator, sc.Repo,
 				harness.CodeRepoSpec{ID: "billing"},
 				harness.CodeRepoSpec{ID: "shipping"},
 			)
