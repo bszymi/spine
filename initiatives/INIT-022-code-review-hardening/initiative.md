@@ -5,7 +5,7 @@ title: Code Review Hardening
 status: Pending
 owner: bszymi
 created: 2026-05-07
-last_updated: 2026-05-07
+last_updated: 2026-05-12
 links:
   - type: related_to
     target: /initiatives/INIT-014-multi-repository-workspaces/initiative.md
@@ -102,8 +102,9 @@ This initiative is successful when:
 
 ## 4. Primary Artifacts Produced
 
-- 29 task files under
+- 37 task files under
   `/initiatives/INIT-022-code-review-hardening/epics/EPIC-001-code-review-findings-resolution/tasks/`
+  (29 original + 8 post-merge codex follow-ups)
 - Code changes across `internal/repository`, `internal/git`,
   `internal/gitpool`, `internal/yamlsafe`, `internal/queue`,
   `internal/engine`, `internal/divergence`, `internal/workspace`,
@@ -176,7 +177,10 @@ Additional constraints:
 |------|-------|--------------|
 | EPIC-001 | Code Review Findings Resolution | — |
 
-EPIC-001 holds 29 tasks (8 P1, 13 P2, 8 P3) — see the epic file for
+EPIC-001 holds 37 tasks total: 29 from the 2026-05-07 review (8 P1,
+13 P2, 8 P3, all Completed/Approved as of 2026-05-11) and 8 follow-
+ups (TASK-030 — TASK-037) from a 2026-05-12 `codex review --commit`
+pass over the merged INIT-022 batch (all P2). See the epic file for
 the full table.
 
 ---

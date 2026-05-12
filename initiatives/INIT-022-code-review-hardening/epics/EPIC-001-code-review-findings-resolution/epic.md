@@ -6,7 +6,7 @@ status: Pending
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 owner: bszymi
 created: 2026-05-07
-last_updated: 2026-05-07
+last_updated: 2026-05-12
 links:
   - type: parent
     target: /initiatives/INIT-022-code-review-hardening/initiative.md
@@ -35,7 +35,9 @@ Finding severity follows the convention used elsewhere in this repo:
 
 ### In Scope
 
-- 29 tasks resolving every finding flagged by the 2026-05-07 review.
+- 37 tasks total: 29 resolving findings from the 2026-05-07 review
+  and 8 follow-ups (TASK-030 — TASK-037) resolving findings from the
+  2026-05-12 codex re-review of the INIT-022 batch itself.
 - Each task is independently scoped: cite a single file:line surface,
   carry its own deliverable, acceptance criteria, and rollback note.
 - Tasks SHOULD ship as one PR each; P3 polish tasks MAY bundle when
@@ -98,12 +100,31 @@ Finding severity follows the convention used elsewhere in this repo:
 | TASK-028 | Build `harness.AdvanceClock` primitive | `internal/scenariotest/harness/` |
 | TASK-029 | Per-handler typed minimal-store for gateway tests | `internal/gateway/` |
 
+### Post-merge codex pass (8 tasks, 2026-05-12)
+
+Findings surfaced by `codex review --commit <sha>` run across all 29
+merged INIT-022 commits. All P2; no P0/P1 introduced. Each cites the
+INIT-022 commit it follows up on.
+
+| ID | Title | Surface |
+|---|---|---|
+| TASK-030 | Normalise worktree paths in branchwrite_test on macOS | `internal/git/branchwrite_test.go` |
+| TASK-031 | Accept explicit primary repo in harness.WithCodeRepos resolver | `internal/scenariotest/harness/multirepo.go` |
+| TASK-032 | Assert Actor-ID trailer in partial-merge external resolution scenario | `internal/scenariotest/scenarios/partial_merge_external_resolution_test.go` |
+| TASK-033 | Avoid head-of-line blocking in internal/queue deferred list | `internal/queue/memory.go` |
+| TASK-034 | Couple run resolver to registered binding in repository-deactivate scenario | `internal/scenariotest/scenarios/repository_deactivate_during_run_test.go` |
+| TASK-035 | Drive bootstrap-admin scenario through workspace-scoped gateway | `internal/scenariotest/scenarios/bootstrap_admin_idempotency_test.go` |
+| TASK-036 | Seed narrow inherited vars before asserting cgi.Handler.Env whitelist | `internal/githttp/cgi_env_test.go` |
+| TASK-037 | Thread injected clock into run-timeout side-effect timestamps | `internal/scheduler/run_timeout.go` |
+
 ## 4. Success Criteria
 
 - All 8 P1 tasks Completed/Approved.
 - All 13 P2 tasks Completed/Approved OR explicitly Cancelled with a recorded rationale.
 - All 8 P3 tasks resolved (Completed, Cancelled, or forwarded).
+- All 8 post-merge codex tasks (TASK-030 — TASK-037) resolved.
 - Re-running the four-lens review reports zero P1 findings on the same surfaces.
+- Re-running `codex review` over the new TASK-030 — TASK-037 commits surfaces no P1 findings.
 
 ## 5. Cross-Repo Coordination
 
