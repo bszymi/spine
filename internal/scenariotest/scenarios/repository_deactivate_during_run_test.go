@@ -47,17 +47,90 @@ type repoDeactivateEnv struct {
 	Server      *httptest.Server
 }
 
-// strictRunReferenceChecker is the regression bait the AC mutation case
-// pins. It always reports an active run, so swapping it in for the v0.x
-// NopRunReferenceChecker default forces Manager.Deactivate to surface
-// the precondition_failed sentinel. The NoOp variant is the production
-// default — without that contract this scenario would be testing
-// nothing, so the strict-checker test is what proves the scenario is
-// load-bearing.
-type strictRunReferenceChecker struct{}
+// storeBackedRunReferenceChecker is the regression bait the AC mutation
+// case pins. It consults the same sc.Runtime.Store the orchestrator
+// writes run rows into, so reporting an active reference depends on a
+// run actually existing for the queried repository — i.e. the run row
+// the orchestrator created at StartRun time, against the binding row
+// the deactivate API call is operating on. With this checker wired,
+// reverting Manager.Deactivate's m.runs.AnyActiveRunReferences call
+// site (the production-side binding/run coupling check) makes the
+// strict-checker scenario fail at the deactivation assertion: without
+// the call, Deactivate succeeds and the test's "want ErrPrecondition"
+// expectation fires.
+//
+// The pre-TASK-034 stub returned true unconditionally, so an active
+// run was assumed rather than verified. Under that wiring a regression
+// where the orchestrator never wrote the run row, or where the
+// deactivate path consulted the wrong binding source, still produced
+// the assertion-passing answer — exactly the divergence flagged by the
+// 2026-05-12 codex re-review.
+//
+// Scoping: the checker queries `ListRunsByTask(scopedTaskPath())`
+// rather than `ListRunsByStatus`, so the scan is restricted to runs
+// for the scenario's exact task path. The scenariotest harness runs
+// against a SHARED Postgres test database (with per-scenario cleanup
+// via t.Cleanup), so an unscoped repository-ID match could otherwise
+// be satisfied by a non-terminal run for the same repo ID created by
+// a different test that has not yet run its cleanup. The task-path
+// scope makes the assertion robust against that cross-scenario
+// pollution.
+type storeBackedRunReferenceChecker struct {
+	store          *store.PostgresStore
+	scopedTaskPath func() string
+}
 
-func (strictRunReferenceChecker) AnyActiveRunReferences(_ context.Context, _, _ string) (bool, error) {
-	return true, nil
+func (c storeBackedRunReferenceChecker) AnyActiveRunReferences(ctx context.Context, _, repositoryID string) (bool, error) {
+	taskPath := c.scopedTaskPath()
+	if taskPath == "" {
+		// task_path not yet seeded — no run can exist for this scenario,
+		// so the answer is definitively false. Returning here avoids a
+		// store query that could only return the empty set anyway.
+		return false, nil
+	}
+	runs, err := c.store.ListRunsByTask(ctx, taskPath)
+	if err != nil {
+		return false, err
+	}
+	for i := range runs {
+		if runs[i].Status.IsTerminal() {
+			continue
+		}
+		for _, repo := range runs[i].AffectedRepositories {
+			if repo == repositoryID {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// runReferenceCheckerProvider is a deferred constructor: setupDeactivateEnv
+// invokes it inside its Action so the checker can close over the
+// scenario context (sc.Runtime.Store + sc.State, both only available
+// at scenario-step time). A nil provider routes through Manager.NewManager's
+// NopRunReferenceChecker default — exactly what the permissive-contract
+// NopChecker scenario needs.
+type runReferenceCheckerProvider func(*scenarioEngine.ScenarioContext) repository.RunReferenceChecker
+
+// newStoreBackedRunReferenceChecker is the strict-checker scenario's
+// provider. Kept as a named function so its identity at the call site
+// signals "store-backed" rather than "literal struct". The returned
+// checker reads sc.State["task_path"] lazily on each invocation —
+// the task path is seeded by seedDeactivateTaskHierarchy which runs
+// after setupDeactivateEnv, so we cannot snapshot it at provider time.
+func newStoreBackedRunReferenceChecker(sc *scenarioEngine.ScenarioContext) repository.RunReferenceChecker {
+	return storeBackedRunReferenceChecker{
+		store: sc.Runtime.Store,
+		scopedTaskPath: func() string {
+			raw, ok := sc.State["task_path"]
+			if !ok {
+				return ""
+			}
+			s, _ := raw.(string)
+			return s
+		},
+	}
 }
 
 // deactivateWorkflowYAML defines a single-step manual workflow whose
@@ -141,8 +214,8 @@ func TestRepositoryDeactivate_NopChecker_AllowsDeactivationDuringActiveRun(t *te
 			harness.WithRuntimeOrchestrator(),
 		},
 		Steps: []scenarioEngine.Step{
-			// nil -> NewManager substitutes NopRunReferenceChecker{} via
-			// its constructor default. Passing the no-op checker
+			// nil provider -> NewManager substitutes NopRunReferenceChecker{}
+			// via its constructor default. Passing the no-op checker
 			// explicitly here would mask a regression where a future
 			// commit changes NewManager's default to a strict checker,
 			// which is exactly the contract this scenario claims to lock
@@ -163,12 +236,24 @@ func TestRepositoryDeactivate_NopChecker_AllowsDeactivationDuringActiveRun(t *te
 }
 
 // TestRepositoryDeactivate_StrictChecker_RefusesDuringActiveRun is the
-// AC mutation target. A strict RunReferenceChecker that reports any
-// active run blocks deactivation with domain.ErrPrecondition; this
-// test proves the same scenario shape catches a regression where a
-// future strict checker is wired into the Manager. If that ever lands
-// without updating Manager.NewManager's default, both this test and
-// the NopChecker variant above must change in lockstep.
+// AC mutation target. A strict RunReferenceChecker that finds an
+// active run referencing the repo blocks deactivation with
+// domain.ErrPrecondition; this test proves the same scenario shape
+// catches a regression where a future strict checker is wired into
+// the Manager. If that ever lands without updating Manager.NewManager's
+// default, both this test and the NopChecker variant above must
+// change in lockstep.
+//
+// Per TASK-034 the checker here is storeBackedRunReferenceChecker,
+// which actually queries sc.Runtime.Store for non-terminal runs
+// referencing the repository ID — not an unconditional stub. That
+// keeps the deactivation assertion load-bearing on three coupled
+// invariants in the production-equivalent wiring: (1) the orchestrator
+// resolves billing through env.Registry at StartRun (so the run row
+// genuinely carries billing in AffectedRepositories), (2) the run row
+// is persisted before Manager.Deactivate runs, and (3) Manager.Deactivate
+// consults its m.runs.AnyActiveRunReferences hook. Removing any one of
+// those — including the m.runs call site itself — breaks this test.
 //
 // We bypass the HTTP layer for the assertion because cli.Client surfaces
 // non-2xx responses as an opaque "API error (412): ..." string. The
@@ -187,7 +272,7 @@ func TestRepositoryDeactivate_StrictChecker_RefusesDuringActiveRun(t *testing.T)
 			harness.WithRuntimeOrchestrator(),
 		},
 		Steps: []scenarioEngine.Step{
-			setupDeactivateEnv("ws-deactivate-strict", "op-deactivate-strict", "reader-deactivate-strict", strictRunReferenceChecker{}),
+			setupDeactivateEnv("ws-deactivate-strict", "op-deactivate-strict", "reader-deactivate-strict", newStoreBackedRunReferenceChecker),
 			setupBillingCodeRepo(),
 			scenarioEngine.WriteAndCommit("workflows/task-default.yaml", deactivateWorkflowYAML, "seed deactivate workflow"),
 			seedDeactivateTaskHierarchy(),
@@ -208,11 +293,18 @@ func TestRepositoryDeactivate_StrictChecker_RefusesDuringActiveRun(t *testing.T)
 // single test database.
 //
 // codeRepoBase="" disables the Manager's local-path containment check;
-// the scenario uses a synthetic /var/spine/... path because the
-// orchestrator's resolver is the in-memory fixedRepoResolver from
-// harness.WithCodeRepos rather than the binding row, so the path string
-// is purely metadata for the deactivation flow.
-func setupDeactivateEnv(workspaceID, opActor, readerActor string, runs repository.RunReferenceChecker) scenarioEngine.Step {
+// registerBillingViaAPI registers billing with the actual temp repo
+// dir from setupBillingCodeRepo so the binding row points at the same
+// working tree the orchestrator branches against. After TASK-034 the
+// orchestrator's RepositoryResolver is also wired to env.Registry (see
+// setupBillingCodeRepo), so the run and the deactivate operation
+// touch the exact binding row, not two decoupled stores.
+//
+// mkChecker is a deferred constructor: it runs inside Action so the
+// checker can close over sc.Runtime.Store. A nil provider routes
+// through NewManager's NopRunReferenceChecker default (the v0.x
+// permissive contract).
+func setupDeactivateEnv(workspaceID, opActor, readerActor string, mkChecker runReferenceCheckerProvider) scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-deactivate-env-" + workspaceID,
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
@@ -222,6 +314,10 @@ func setupDeactivateEnv(workspaceID, opActor, readerActor string, runs repositor
 				LocalPath:     "/var/spine/workspaces/deactivate/spine",
 			}
 			cat := repository.NewInMemoryCatalogStore(primary)
+			var runs repository.RunReferenceChecker
+			if mkChecker != nil {
+				runs = mkChecker(sc)
+			}
 			mgr := repository.NewManager(workspaceID, primary, cat, sc.Runtime.Store, runs, "")
 			reg := repository.New(workspaceID, primary, func(ctx context.Context) (*repository.Catalog, error) {
 				return cat.Load(ctx)
@@ -278,11 +374,26 @@ func setupDeactivateEnv(workspaceID, opActor, readerActor string, runs repositor
 }
 
 // setupBillingCodeRepo wires a single on-disk billing code repo into
-// sc.Runtime.Orchestrator's resolver via harness.WithCodeRepos. The
-// orchestrator needs this for run start to fan the run branch out to
-// billing's working tree; the scenario's deactivate API call operates
-// on the separate runtime.repositories binding row, so the in-memory
-// resolver here and the persisted binding row co-exist.
+// sc.Runtime.Orchestrator's RepositoryGitClients via harness.WithCodeRepos
+// (so run start can branch against the temp working tree), then
+// overrides the orchestrator's RepositoryResolver with env.Registry so
+// run-start precondition checks resolve through the same runtime.repositories
+// binding row the deactivate API call mutates — matching production
+// wiring (gateway, engine, projection, and git HTTP routing all consult
+// the workspace Registry per internal/repository/registry.go).
+//
+// Pre-TASK-034 the scenario left the in-memory fixedRepoResolver
+// installed by WithCodeRepos in place, so the run resolved through a
+// fixture map decoupled from runtime.repositories. The deactivation
+// assertions still passed because each test happened to hit a separate
+// binding source — exactly the divergence the 2026-05-12 codex
+// re-review flagged as making the regression unreachable from this
+// scenario shape.
+//
+// We keep the git-clients wiring intact: branch creation must hit the
+// temp repo's working tree, and env.Registry has no on-disk concept.
+// Out of scope (per TASK-034): generalising WithCodeRepos to consume a
+// registry handle — this fix is scoped to the one scenario.
 func setupBillingCodeRepo() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-billing-code-repo",
@@ -291,6 +402,8 @@ func setupBillingCodeRepo() scenarioEngine.Step {
 				harness.CodeRepoSpec{ID: "billing"},
 			)
 			sc.Set(stateBillingRepoDir, repos["billing"].Dir)
+			env := sc.MustGet(stateDeactivateEnv).(*repoDeactivateEnv)
+			sc.Runtime.Orchestrator.WithRepositoryResolver(env.Registry)
 			return nil
 		},
 	}
@@ -321,8 +434,12 @@ func seedDeactivateTaskHierarchy() scenarioEngine.Step {
 
 // registerBillingViaAPI exercises the operator-side registration path
 // through the same handler the deactivate test will reuse. After this
-// step the runtime.repositories table has an active billing binding the
-// Registry can resolve.
+// step the runtime.repositories table has an active billing binding
+// the Registry can resolve, with local_path pinned to the actual temp
+// repo directory from setupBillingCodeRepo. Per TASK-034 the
+// orchestrator's RepositoryResolver is wired to env.Registry as well,
+// so the run and the deactivate operation read and mutate the exact
+// same binding row.
 func registerBillingViaAPI() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "register-billing-via-api",
@@ -333,7 +450,7 @@ func registerBillingViaAPI() scenarioEngine.Step {
 				"name":           "Billing",
 				"default_branch": "main",
 				"clone_url":      "https://example.com/billing.git",
-				"local_path":     "/var/spine/workspaces/deactivate/repos/billing",
+				"local_path":     sc.MustGet(stateBillingRepoDir).(string),
 			}
 			if _, err := env.OpClient.Post(sc.Ctx, "/api/v1/repositories", body); err != nil {
 				return fmt.Errorf("register billing: %w", err)
