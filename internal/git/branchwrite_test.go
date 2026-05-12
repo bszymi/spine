@@ -44,6 +44,22 @@ func listWorktrees(t *testing.T, repoDir string) string {
 	return string(out)
 }
 
+// canonicalPath resolves all symlinks in path so it can be compared
+// against `git worktree list --porcelain` output. On macOS,
+// os.MkdirTemp returns /var/folders/... while git always reports the
+// canonical /private/var/folders/... form, so a raw strings.Contains
+// against the unresolved path falsely fails on darwin even though the
+// worktree was added correctly. On Linux the path is already canonical
+// and EvalSymlinks is a no-op.
+func canonicalPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", path, err)
+	}
+	return resolved
+}
+
 func stagedFiles(t *testing.T, repoDir string) string {
 	t.Helper()
 	cmd := exec.Command("git", "diff", "--cached", "--name-only")
@@ -109,8 +125,9 @@ func TestBranchWrite_EnterCreatesWorktreeAtFreshPath(t *testing.T) {
 		t.Errorf("worktree HEAD=%s, want %s", got, want)
 	}
 
-	if listing := listWorktrees(t, repo); !strings.Contains(listing, scope.RepoDir) {
-		t.Errorf("worktree list does not contain %s:\n%s", scope.RepoDir, listing)
+	wantPath := canonicalPath(t, scope.RepoDir)
+	if listing := listWorktrees(t, repo); !strings.Contains(listing, wantPath) {
+		t.Errorf("worktree list does not contain %s:\n%s", wantPath, listing)
 	}
 }
 
@@ -144,6 +161,9 @@ func TestBranchWrite_EnterCleanupSurvivesCancelledContext(t *testing.T) {
 		t.Fatalf("EnterBranch: %v", err)
 	}
 	parent := filepath.Dir(scope.RepoDir)
+	// Canonicalise before cleanup so the post-cleanup listing check
+	// compares like-for-like (EvalSymlinks needs the path to exist).
+	canonicalRepoDir := canonicalPath(t, scope.RepoDir)
 
 	// Cancel BEFORE cleanup. With the regression in place, the cleanup
 	// exec would refuse to start.
@@ -162,9 +182,9 @@ func TestBranchWrite_EnterCleanupSurvivesCancelledContext(t *testing.T) {
 		t.Errorf(".git/worktrees/wt should be removed, got err=%v", err)
 	}
 
-	if listing := listWorktrees(t, repo); strings.Contains(listing, scope.RepoDir) {
+	if listing := listWorktrees(t, repo); strings.Contains(listing, canonicalRepoDir) {
 		t.Errorf("worktree %s still registered after cleanup; list:\n%s",
-			scope.RepoDir, listing)
+			canonicalRepoDir, listing)
 	}
 }
 
