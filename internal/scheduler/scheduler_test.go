@@ -109,6 +109,21 @@ func (f *fakeStore) UpdateRunStatus(_ context.Context, runID string, status doma
 	return domain.NewError(domain.ErrNotFound, "run not found")
 }
 
+func (f *fakeStore) UpdateRunStatusAt(_ context.Context, runID string, status domain.RunStatus, completedAt time.Time) error {
+	f.updatedRuns[runID] = status
+	for i := range f.runs {
+		if f.runs[i].RunID == runID {
+			f.runs[i].Status = status
+			if status.IsTerminal() && f.runs[i].CompletedAt == nil {
+				ct := completedAt
+				f.runs[i].CompletedAt = &ct
+			}
+			return nil
+		}
+	}
+	return domain.NewError(domain.ErrNotFound, "run not found")
+}
+
 func (f *fakeStore) TransitionRunStatus(_ context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
 	for i := range f.runs {
 		if f.runs[i].RunID == runID {
