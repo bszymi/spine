@@ -2,10 +2,15 @@
 id: INIT-022
 type: Initiative
 title: Code Review Hardening
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  Sole epic (EPIC-001 Code Review Findings Resolution) shipped all
+  37 tasks Completed/Approved across the 2026-05-07 — 2026-05-14
+  span. With the epic closed, the initiative's scope is fulfilled.
 owner: bszymi
 created: 2026-05-07
-last_updated: 2026-05-12
+last_updated: 2026-05-14
 links:
   - type: related_to
     target: /initiatives/INIT-014-multi-repository-workspaces/initiative.md

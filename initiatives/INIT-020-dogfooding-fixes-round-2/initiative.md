@@ -2,10 +2,17 @@
 id: INIT-020
 type: Initiative
 title: Dogfooding Fixes Round 2
-status: In Progress
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  Both epics shipped: EPIC-001 (Scheduler & Runtime Round 2, 4
+  tasks) and EPIC-002 (Platform-Binding Bootstrap Completeness, 1
+  task) are Completed/Approved. With both epics closed, the
+  initiative's scope is fulfilled; subsequent scheduler/runtime
+  findings rolled into INIT-022.
 owner: bszymi
 created: 2026-04-23
-last_updated: 2026-04-23
+last_updated: 2026-05-14
 links:
   - type: related_to
     target: /governance/constitution.md
