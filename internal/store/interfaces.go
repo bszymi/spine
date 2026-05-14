@@ -40,6 +40,16 @@ type RunStore interface {
 	CreateRun(ctx context.Context, run *domain.Run) error
 	GetRun(ctx context.Context, runID string) (*domain.Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error
+	// UpdateRunStatusAt is UpdateRunStatus with a caller-supplied
+	// completion timestamp. Callers that drive a scan loop with an
+	// injectable clock (e.g. Scheduler.ScanRunTimeouts) must use this
+	// so the persisted `completed_at` reflects the scan's observed
+	// `now` instead of Postgres' transaction-time `now()`. Without this
+	// seam an `Advance(2h)` test scenario flips a run to cancelled
+	// before its own `completed_at` reaches `timeout_at`, breaking
+	// time-based assertions and the audit-log invariant that a
+	// cancelled-for-timeout run was alive past the deadline.
+	UpdateRunStatusAt(ctx context.Context, runID string, status domain.RunStatus, completedAt time.Time) error
 	TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error)
 	UpdateCurrentStep(ctx context.Context, runID, stepID string) error
 	SetCommitMeta(ctx context.Context, runID string, meta map[string]string) error

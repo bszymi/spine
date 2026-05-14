@@ -320,6 +320,123 @@ func assertRunBranchPreserved(stateKey string) scenarioEngine.Step {
 	}
 }
 
+// TestRunTimeout_CancellationTimestampsTrackInjectedClock is the
+// scenario-level AC anchor for INIT-022 EPIC-001 TASK-037. It pins the
+// three reads in `Scheduler.ScanRunTimeouts` to the injected clock so
+// they remain coherent under `harness.Clock.Advance`:
+//
+//   1. The `ListTimedOutRuns(ctx, now)` predicate selects the run
+//      (this is what the predicate-isolation test above already
+//      covers — replayed here only as a precondition for the
+//      timestamp assertions).
+//   2. The persisted `completed_at` on the cancelled run.
+//   3. The emitted `run_timeout` event's `Timestamp` field.
+//
+// Pre-TASK-037 the first read used `s.now()` but the latter two used
+// wall time (Postgres' transaction-time `now()` for completed_at,
+// `time.Now()` via `event.EmitLogged`'s zero-Timestamp fallback for
+// the event). An `Advance(2h)` scenario then produced a run flipped
+// to cancelled at the advanced clock but with `completed_at` still in
+// real time — i.e. cancelled BEFORE its own recorded completion. This
+// scenario fails the moment any one of the three reads returns to
+// wall time (covered by the bait-checks in the PR description).
+//
+// Clock comparison: `harness.Clock` is monotonic and only `Advance`
+// changes its value, so reading `clock.Now()` at assertion time
+// returns the exact same `time.Time` value the scheduler's `s.now()`
+// captured during the OnAdvance handler. `completed_at` is asserted
+// after a `.Truncate(time.Microsecond)` because the Postgres
+// round-trip loses nanoseconds; the event Timestamp has no DB
+// round-trip and compares at full precision.
+func TestRunTimeout_CancellationTimestampsTrackInjectedClock(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "run-timeout-timestamp-clock-consistency",
+		Description: "Advance(2h) drives ScanRunTimeouts; cancelled run's completed_at and run_timeout event Timestamp both equal the advanced clock — not wall time.",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+			harness.WithRuntimeOrchestrator(),
+		},
+		Steps: []scenarioEngine.Step{
+			seedWorkflow("task-runtime-timeout", runTimeoutWorkflowYAML),
+			scenarioEngine.SeedHierarchy("INIT-918", "EPIC-918", "TASK-918"),
+			scenarioEngine.SyncProjections(),
+
+			startRunNamed("clocked_run", "initiatives/init-918/epics/epic-918/tasks/task-918.md"),
+
+			registerRunTimeoutScannerOnClock(),
+			advanceHarnessClock(2 * time.Hour),
+
+			assertRunStatusByKey("clocked_run", domain.RunStatusCancelled),
+			assertRunCompletedAtEqualsClock("clocked_run"),
+			assertRunTimeoutEventTimestampEqualsClock("clocked_run"),
+		},
+	})
+}
+
+// assertRunCompletedAtEqualsClock is the half of TASK-037's contract
+// that catches a regression in the store-side write — e.g. reverting
+// `UpdateRunStatusAt(scanNow)` to `UpdateRunStatus()` (which lets the
+// DB's transaction-time `now()` fill `completed_at`). The harness
+// clock is microsecond-stable across Advance/Now reads, so the only
+// way this assertion fires is if the stored timestamp came from a
+// different clock than the harness one.
+func assertRunCompletedAtEqualsClock(stateKey string) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "assert-completed-at-equals-clock-" + stateKey,
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			runID := sc.MustGet(stateKey + "_id").(string)
+			run, err := sc.Runtime.Store.GetRun(sc.Ctx, runID)
+			if err != nil {
+				return fmt.Errorf("get run %s: %w", runID, err)
+			}
+			if run.CompletedAt == nil {
+				return fmt.Errorf("run %s has no completed_at; scheduler did not persist a cancellation timestamp", runID)
+			}
+			got := run.CompletedAt.UTC().Truncate(time.Microsecond)
+			want := sc.Runtime.Clock.Now().UTC().Truncate(time.Microsecond)
+			if !got.Equal(want) {
+				return fmt.Errorf(
+					"completed_at=%s; want clock.Now()=%s (diff %s) — run-timeout side effect bypassed the injected clock",
+					got, want, got.Sub(want),
+				)
+			}
+			return nil
+		},
+	}
+}
+
+// assertRunTimeoutEventTimestampEqualsClock is the other half: it
+// catches a regression in the event-emit path — e.g. clearing the
+// `Timestamp: scanNow` field on the emitted event so `EmitLogged`
+// falls back to `time.Now()`. No DB round-trip, so the comparison
+// is at full nanosecond precision.
+func assertRunTimeoutEventTimestampEqualsClock(stateKey string) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "assert-event-ts-equals-clock-" + stateKey,
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			runID := sc.MustGet(stateKey + "_id").(string)
+			recorder := sc.MustGet(stateRecorderRouter).(*recordingEventRouter)
+			for _, ev := range recorder.snapshot() {
+				if ev.Type == domain.EventRunTimeout && ev.RunID == runID {
+					got := ev.Timestamp.UTC()
+					want := sc.Runtime.Clock.Now().UTC()
+					if !got.Equal(want) {
+						return fmt.Errorf(
+							"event Timestamp=%s; want clock.Now()=%s (diff %s) — EmitLogged fell back to wall time instead of the scan-time clock",
+							got, want, got.Sub(want),
+						)
+					}
+					return nil
+				}
+			}
+			return fmt.Errorf("no run_timeout event recorded for run %s; recorded: %s",
+				runID, summarizeEvents(recorder.snapshot()))
+		},
+	}
+}
+
 // recordingEventRouter satisfies event.EventRouter and captures every
 // emitted event for synchronous post-tick assertions. Subscribe is a
 // no-op — the scheduler emits but never subscribes.

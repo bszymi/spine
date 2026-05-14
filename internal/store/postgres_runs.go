@@ -121,6 +121,22 @@ func (s *PostgresStore) UpdateRunStatus(ctx context.Context, runID string, statu
 	return mustAffect(tag, "run not found")
 }
 
+// UpdateRunStatusAt records a status transition with a caller-supplied
+// `completed_at` timestamp instead of Postgres' transaction-time `now()`.
+// See RunStore.UpdateRunStatusAt for the seam rationale.
+func (s *PostgresStore) UpdateRunStatusAt(ctx context.Context, runID string, status domain.RunStatus, completedAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.runs
+		SET status = $1,
+			started_at = CASE WHEN $1 = 'active' AND started_at IS NULL THEN now() ELSE started_at END,
+			completed_at = CASE WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN $3 ELSE completed_at END
+		WHERE run_id = $2`, status, runID, completedAt)
+	if err != nil {
+		return err
+	}
+	return mustAffect(tag, "run not found")
+}
+
 func (s *PostgresStore) TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE runtime.runs

@@ -66,6 +66,9 @@ func (stubRunStore) GetRun(_ context.Context, _ string) (*domain.Run, error) {
 func (stubRunStore) UpdateRunStatus(_ context.Context, _ string, _ domain.RunStatus) error {
 	return nil
 }
+func (stubRunStore) UpdateRunStatusAt(_ context.Context, _ string, _ domain.RunStatus, _ time.Time) error {
+	return nil
+}
 func (stubRunStore) TransitionRunStatus(_ context.Context, _ string, _, _ domain.RunStatus) (bool, error) {
 	return false, nil
 }

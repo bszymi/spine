@@ -82,6 +82,9 @@ func (stubRunStore) GetRun(ctx context.Context, runID string) (*domain.Run, erro
 func (stubRunStore) UpdateRunStatus(ctx context.Context, runID string, status domain.RunStatus) error {
 	return nil
 }
+func (stubRunStore) UpdateRunStatusAt(ctx context.Context, runID string, status domain.RunStatus, completedAt time.Time) error {
+	return nil
+}
 func (stubRunStore) TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
 	return false, nil
 }
