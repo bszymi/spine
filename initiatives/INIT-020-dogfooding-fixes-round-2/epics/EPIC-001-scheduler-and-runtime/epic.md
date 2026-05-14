@@ -2,11 +2,18 @@
 id: EPIC-001
 type: Epic
 title: Scheduler & Runtime (Round 2)
-status: In Progress
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  All 4 tasks Completed/Approved. The scheduler/runtime gaps
+  surfaced during round-2 dogfooding are resolved; subsequent
+  scheduler-side findings (run-timeout clock coherence, deferred
+  queue head-of-line, pool mutex around resolver, etc.) rolled
+  into INIT-022 EPIC-001.
 initiative: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md
 owner: bszymi
 created: 2026-04-23
-last_updated: 2026-04-23
+last_updated: 2026-05-14
 links:
   - type: parent
     target: /initiatives/INIT-020-dogfooding-fixes-round-2/initiative.md

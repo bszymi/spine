@@ -2,11 +2,23 @@
 id: EPIC-001
 type: Epic
 title: Code Review Findings Resolution
-status: Pending
+status: Completed
+acceptance: Approved
+acceptance_rationale: |
+  All 37 tasks (TASK-001 through TASK-037) are Completed/Approved.
+  Coverage spans P1/P2 findings from the 2026-05-07 — 2026-05-12
+  codex review passes against the INIT-014/-021 batch and the
+  follow-up INIT-022 batch itself: governance/ID hygiene, store
+  interface partitioning, run lifecycle clock seams, scenario-test
+  load-bearing assertions, CGI env whitelist, secrets-cipher
+  validation, scheduler timeouts, branchprotect rule_source error
+  handling, pooled workspace bootstrap, and run-timeout side-effect
+  timestamp coherence. No follow-up tasks queued; further findings
+  would land in a new initiative.
 initiative: /initiatives/INIT-022-code-review-hardening/initiative.md
 owner: bszymi
 created: 2026-05-07
-last_updated: 2026-05-12
+last_updated: 2026-05-14
 links:
   - type: parent
     target: /initiatives/INIT-022-code-review-hardening/initiative.md
