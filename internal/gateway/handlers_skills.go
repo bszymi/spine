@@ -9,6 +9,7 @@ import (
 )
 
 type createSkillRequest struct {
+	SkillID     string `json:"skill_id,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Category    string `json:"category"`
@@ -39,7 +40,18 @@ func (s *Server) handleSkillCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	skillID := req.SkillID
+	if skillID == "" {
+		id, err := generateID("skill")
+		if err != nil {
+			WriteError(w, domain.NewError(domain.ErrInternal, "failed to generate skill_id"))
+			return
+		}
+		skillID = id
+	}
+
 	skill := &domain.Skill{
+		SkillID:     skillID,
 		Name:        req.Name,
 		Description: req.Description,
 		Category:    req.Category,

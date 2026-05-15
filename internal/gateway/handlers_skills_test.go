@@ -68,12 +68,17 @@ func (s *skillStore) CreateToken(_ context.Context, record *store.TokenRecord) e
 	return nil
 }
 
-var skillIDCounter int
-
 func (s *skillStore) CreateSkill(_ context.Context, skill *domain.Skill) error {
+	// Mirror prod schema: auth.skills.skill_id is PRIMARY KEY NOT NULL,
+	// so an empty skill_id would duplicate-PK on the second insert.
+	// Reject it here so the fake fails the same way prod would when a
+	// handler forgets to populate the column (regression fence for the
+	// INIT-008 / EPIC-003 / TASK-018 onboarding-seed-skills 500s).
 	if skill.SkillID == "" {
-		skillIDCounter++
-		skill.SkillID = "sk-" + strings.Repeat("0", 5) + string(rune('0'+skillIDCounter))
+		return domain.NewError(domain.ErrInvalidParams, "skill_id required")
+	}
+	if _, exists := s.skills[skill.SkillID]; exists {
+		return domain.NewError(domain.ErrConflict, "skill already exists")
 	}
 	now := time.Now()
 	skill.CreatedAt = now
@@ -239,6 +244,55 @@ func TestSkillCreate(t *testing.T) {
 	}
 	if body["status"] != "active" {
 		t.Errorf("expected status 'active', got %v", body["status"])
+	}
+}
+
+// TestSkillCreate_GeneratesSkillID is the regression fence for the
+// INIT-008 / EPIC-003 / TASK-018 finding: the handler used to build a
+// domain.Skill with an empty SkillID, which the fake test store
+// papered over by auto-numbering and prod auth.skills.skill_id PRIMARY
+// KEY blew up on the second insert. Two sequential creates must yield
+// distinct, non-empty skill_ids, and an explicitly-supplied skill_id
+// must pass through unchanged.
+func TestSkillCreate_GeneratesSkillID(t *testing.T) {
+	ts, _, token := setupSkillServer(t)
+
+	first := skillRequest(t, "POST", ts.URL+"/api/v1/skills", token,
+		`{"name":"Generated A","description":"x","category":"y"}`)
+	defer first.Body.Close()
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first: expected 201, got %d", first.StatusCode)
+	}
+	firstBody := decodeBody(t, first)
+	firstID, _ := firstBody["skill_id"].(string)
+	if firstID == "" {
+		t.Fatalf("first response has empty skill_id; handler must generate one")
+	}
+
+	second := skillRequest(t, "POST", ts.URL+"/api/v1/skills", token,
+		`{"name":"Generated B","description":"x","category":"y"}`)
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusCreated {
+		t.Fatalf("second: expected 201, got %d", second.StatusCode)
+	}
+	secondBody := decodeBody(t, second)
+	secondID, _ := secondBody["skill_id"].(string)
+	if secondID == "" {
+		t.Fatalf("second response has empty skill_id")
+	}
+	if firstID == secondID {
+		t.Fatalf("two sequential creates produced the same skill_id %q — would duplicate-PK in prod", firstID)
+	}
+
+	explicit := skillRequest(t, "POST", ts.URL+"/api/v1/skills", token,
+		`{"skill_id":"sk-explicit","name":"Explicit","description":"x","category":"y"}`)
+	defer explicit.Body.Close()
+	if explicit.StatusCode != http.StatusCreated {
+		t.Fatalf("explicit: expected 201, got %d", explicit.StatusCode)
+	}
+	explicitBody := decodeBody(t, explicit)
+	if got, _ := explicitBody["skill_id"].(string); got != "sk-explicit" {
+		t.Fatalf("explicit skill_id not honored: got %q, want %q", got, "sk-explicit")
 	}
 }
 
