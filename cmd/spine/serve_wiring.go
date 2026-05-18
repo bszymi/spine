@@ -183,6 +183,7 @@ type serveRuntime struct {
 	Config         gateway.ServerConfig
 	Scheduler      *scheduler.Scheduler
 	ProjSync       *projection.Service
+	MultiProjSync  *workspace.MultiProjectionSync
 	DeliveryCancel context.CancelFunc
 }
 
@@ -277,6 +278,40 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		projQuery = projection.NewQueryService(deps.Store, primaryClient)
 		projSync = projection.NewService(primaryClient, deps.Store, deps.Events, 30*time.Second)
 		projSync.WithArtifactsDir(deps.SpineCfg.ArtifactsDir)
+	}
+
+	// In platform-binding mode the global projSync above is moot: every
+	// workspace has its own projection store inside its ServiceSet, and
+	// the top-level ProjSync has no notion of "which workspace". Wire the
+	// multi-workspace driver that iterates over resolved bindings and
+	// calls each ServiceSet's own IncrementalSync.
+	//
+	// The driver is best-effort and skips workspaces whose binding is not
+	// yet cached on the PlatformBindingProvider (no enumeration endpoint
+	// exists yet on the platform — see PlatformBindingProvider.List).
+	// New workspaces enter the rotation as soon as the first request
+	// resolves them, which the customer-app's provisioner already does
+	// during seed_governance / seed_skills.
+	//
+	// Poll interval comes from SPINE_PROJECTION_POLLING_INTERVAL with a
+	// 30s default. The dev/test compose files set this env explicitly so
+	// scenariotests don't have to poll for projection convergence over
+	// the full 30s window.
+	var multiProjSync *workspace.MultiProjectionSync
+	if deps.WSServicePool != nil && deps.WSResolver != nil {
+		interval := 30 * time.Second
+		if raw := os.Getenv("SPINE_PROJECTION_POLLING_INTERVAL"); raw != "" {
+			if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+				interval = parsed
+			} else {
+				log.Warn("invalid SPINE_PROJECTION_POLLING_INTERVAL; falling back to default",
+					"value", raw, "default", interval)
+			}
+		}
+		multiProjSync = workspace.NewMultiProjectionSync(
+			deps.WSServicePool, deps.WSResolver,
+			workspace.MultiProjectionSyncConfig{PollInterval: interval},
+		)
 	}
 
 	var validator *validation.Engine
@@ -420,6 +455,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		Config:         cfg,
 		Scheduler:      sched,
 		ProjSync:       projSync,
+		MultiProjSync:  multiProjSync,
 		DeliveryCancel: deliveryCancel,
 	}, nil
 }

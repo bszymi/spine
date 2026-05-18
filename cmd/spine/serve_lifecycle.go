@@ -38,6 +38,9 @@ func runServer(ctx context.Context, srv *gateway.Server, rt *serveRuntime, log *
 	if rt.ProjSync != nil {
 		go rt.ProjSync.StartSyncLoop(ctx)
 	}
+	if rt.MultiProjSync != nil {
+		go rt.MultiProjSync.Start(ctx)
+	}
 
 	listenErr := make(chan error, 1)
 	go func() {
@@ -62,6 +65,9 @@ func runServer(ctx context.Context, srv *gateway.Server, rt *serveRuntime, log *
 	}
 	if rt.Scheduler != nil {
 		rt.Scheduler.Stop()
+	}
+	if rt.MultiProjSync != nil {
+		rt.MultiProjSync.Stop()
 	}
 	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
