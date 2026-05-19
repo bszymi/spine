@@ -218,4 +218,3 @@ Examples:
 	cmd.Flags().StringVar(&title, "title", "", "Artifact title")
 	return cmd
 }
-

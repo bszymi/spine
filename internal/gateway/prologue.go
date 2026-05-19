@@ -83,7 +83,6 @@ func (s *Server) needGit(w http.ResponseWriter, r *http.Request) (GitReader, boo
 	return g, true
 }
 
-
 func (s *Server) needBranchCreator(w http.ResponseWriter, r *http.Request) (BranchCreator, bool) {
 	bc := s.branchCreatorFrom(r.Context())
 	if bc == nil {
@@ -93,7 +92,6 @@ func (s *Server) needBranchCreator(w http.ResponseWriter, r *http.Request) (Bran
 	return bc, true
 }
 
-
 func (s *Server) needPlanningRunStarter(w http.ResponseWriter, r *http.Request) (PlanningRunStarter, bool) {
 	p := s.planningRunStarterFrom(r.Context())
 	if p == nil {
@@ -102,7 +100,6 @@ func (s *Server) needPlanningRunStarter(w http.ResponseWriter, r *http.Request) 
 	}
 	return p, true
 }
-
 
 // decodeAuthedJSON combines the three-line "authorize → decode body → 400"
 // prologue into a single call. T is the request struct; callers dereference

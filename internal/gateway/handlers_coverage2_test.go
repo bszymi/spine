@@ -137,7 +137,6 @@ func TestQueryRuns_WithStatusFilter(t *testing.T) {
 
 // ── handleSkillCreate auth fail / error paths ──
 
-
 // TestSkillCreate_Unauthorized verifies that an unauthenticated request returns 401.
 func TestSkillCreate_Unauthorized(t *testing.T) {
 	ts, _, _ := setupSkillServer(t)

@@ -166,8 +166,8 @@ func ValidateCredentialHelper(name string) error {
 // scrubbing done in LoadPushAuthFromEnv, so subsequent callers read
 // from this cache instead.
 var (
-	authMu     sync.Mutex
-	authLoaded bool
+	authMu         sync.Mutex
+	authLoaded     bool
 	cachedAuthOpts []CLIOption
 )
 
