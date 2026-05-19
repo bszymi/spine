@@ -362,10 +362,7 @@ func (s PolicySelector) MatchesAnyPath(summary ChangedPathsSummary) bool {
 			}
 		}
 	}
-	if summary.Truncated {
-		return true
-	}
-	return false
+	return summary.Truncated
 }
 
 // Canonicalize sorts every keyed slice and normalizes timestamps to

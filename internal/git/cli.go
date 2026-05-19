@@ -166,10 +166,9 @@ func ValidateCredentialHelper(name string) error {
 // scrubbing done in LoadPushAuthFromEnv, so subsequent callers read
 // from this cache instead.
 var (
-	authMu                sync.Mutex
-	authLoaded            bool
-	cachedAuthOpts        []CLIOption
-	cachedCredentialAllow bool
+	authMu     sync.Mutex
+	authLoaded bool
+	cachedAuthOpts []CLIOption
 )
 
 // LoadPushAuthFromEnv reads SPINE_GIT_CREDENTIAL_HELPER,
@@ -200,7 +199,6 @@ func LoadPushAuthFromEnv() (warnings []string, err error) {
 			return warnings, err
 		}
 		opts = append(opts, WithCredentialHelper(helper))
-		cachedCredentialAllow = true
 		if token != "" {
 			warnings = append(warnings, "SPINE_GIT_CREDENTIAL_HELPER and SPINE_GIT_PUSH_TOKEN are both set; credential helper wins and the token is ignored — unset SPINE_GIT_PUSH_TOKEN to silence this warning")
 			_ = os.Unsetenv("SPINE_GIT_PUSH_TOKEN")
@@ -242,7 +240,6 @@ func resetPushAuthForTest() {
 	defer authMu.Unlock()
 	authLoaded = false
 	cachedAuthOpts = nil
-	cachedCredentialAllow = false
 }
 
 // Clone clones a remote repository to a local path.

@@ -219,10 +219,3 @@ Examples:
 	return cmd
 }
 
-func str(v any) string {
-	if v == nil {
-		return ""
-	}
-	return fmt.Sprintf("%v", v)
-}
-

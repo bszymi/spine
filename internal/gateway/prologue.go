@@ -6,7 +6,6 @@ import (
 	"github.com/bszymi/spine/internal/auth"
 	"github.com/bszymi/spine/internal/domain"
 	"github.com/bszymi/spine/internal/store"
-	"github.com/bszymi/spine/internal/validation"
 )
 
 // Handler prologue helpers.
@@ -84,14 +83,6 @@ func (s *Server) needGit(w http.ResponseWriter, r *http.Request) (GitReader, boo
 	return g, true
 }
 
-func (s *Server) needValidator(w http.ResponseWriter, r *http.Request) (*validation.Engine, bool) {
-	v := s.validatorFrom(r.Context())
-	if v == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "validation engine not configured"))
-		return nil, false
-	}
-	return v, true
-}
 
 func (s *Server) needBranchCreator(w http.ResponseWriter, r *http.Request) (BranchCreator, bool) {
 	bc := s.branchCreatorFrom(r.Context())
@@ -102,23 +93,6 @@ func (s *Server) needBranchCreator(w http.ResponseWriter, r *http.Request) (Bran
 	return bc, true
 }
 
-func (s *Server) needRunStarter(w http.ResponseWriter, r *http.Request) (RunStarter, bool) {
-	rs := s.runStarterFrom(r.Context())
-	if rs == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "run starter not configured"))
-		return nil, false
-	}
-	return rs, true
-}
-
-func (s *Server) needRunCanceller(w http.ResponseWriter, r *http.Request) (RunCanceller, bool) {
-	rc := s.runCancellerFrom(r.Context())
-	if rc == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "run canceller not configured"))
-		return nil, false
-	}
-	return rc, true
-}
 
 func (s *Server) needPlanningRunStarter(w http.ResponseWriter, r *http.Request) (PlanningRunStarter, bool) {
 	p := s.planningRunStarterFrom(r.Context())
@@ -129,14 +103,6 @@ func (s *Server) needPlanningRunStarter(w http.ResponseWriter, r *http.Request) 
 	return p, true
 }
 
-func (s *Server) needWorkflowPlanningStarter(w http.ResponseWriter, r *http.Request) (WorkflowPlanningRunStarter, bool) {
-	p := s.wfPlanningStarterFrom(r.Context())
-	if p == nil {
-		WriteError(w, domain.NewError(domain.ErrUnavailable, "workflow planning starter not configured"))
-		return nil, false
-	}
-	return p, true
-}
 
 // decodeAuthedJSON combines the three-line "authorize → decode body → 400"
 // prologue into a single call. T is the request struct; callers dereference

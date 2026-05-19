@@ -50,11 +50,6 @@ func (s *PostgresStore) SetSecretCipher(c *spinecrypto.SecretCipher) {
 	s.cipher = c
 }
 
-// secretCipher returns the installed cipher or nil.
-func (s *PostgresStore) secretCipher() *spinecrypto.SecretCipher {
-	return s.cipher
-}
-
 // NewPostgresStore creates a new PostgreSQL store with connection pooling.
 // The returned store owns the pgxpool and tears it down on Close.
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {

@@ -56,10 +56,10 @@ func decodeJSON(r *http.Request, v any) error {
 	// trailing whitespace, which the underlying scanner skips before
 	// looking for the next token.
 	var trailing json.RawMessage
-	switch err := dec.Decode(&trailing); {
-	case err == io.EOF:
+	switch err := dec.Decode(&trailing); err {
+	case io.EOF:
 		return nil
-	case err == nil:
+	case nil:
 		// Second value decoded — a duplicate JSON payload, the
 		// classic case (e.g. `{...}{...}`). Distinct from the
 		// trailing-garbage case below: there's no decode error to

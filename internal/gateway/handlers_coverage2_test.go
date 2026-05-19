@@ -137,18 +137,6 @@ func TestQueryRuns_WithStatusFilter(t *testing.T) {
 
 // ── handleSkillCreate auth fail / error paths ──
 
-func newSkillServerWithReader(t *testing.T) (*httptest.Server, string, string) {
-	t.Helper()
-	ts, ss, contribToken := setupSkillServer(t)
-	// Create a reader token using the same server's authSvc via authSvc.CreateToken.
-	// But we don't have access to authSvc here. Instead, directly register a reader.
-	// We need to call CreateToken on the skillStore's auth service.
-	// Since the skillStore is returned by setupSkillServer and already has "reader-1",
-	// we can use auth.NewService again to generate a token that the skillStore recognizes.
-	authSvc := auth.NewService(ss)
-	readerToken, _, _ := authSvc.CreateToken(context.Background(), "reader-1", "test-reader", nil)
-	return ts, contribToken, readerToken
-}
 
 // TestSkillCreate_Unauthorized verifies that an unauthenticated request returns 401.
 func TestSkillCreate_Unauthorized(t *testing.T) {

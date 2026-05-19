@@ -109,7 +109,7 @@ func ValidateCloneURL(gitURL string) error {
 	// `scheme::arg` shape (single colon-pair, no `//`), so the URL
 	// regex below cannot catch it — handle it explicitly first.
 	if strings.HasPrefix(strings.ToLower(gitURL), "ext::") {
-		return fmt.Errorf("refusing dangerous git URL scheme ext::")
+		return fmt.Errorf("refusing dangerous ext:: git URL scheme")
 	}
 	if m := schemeURLPrefix.FindStringSubmatch(gitURL); m != nil {
 		switch strings.ToLower(m[1]) {

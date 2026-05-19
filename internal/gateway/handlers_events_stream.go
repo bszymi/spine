@@ -80,10 +80,8 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	lastEventID := r.Header.Get("Last-Event-ID")
 	if lastEventID != "" {
 		var typeList []string
-		if typeFilter != nil {
-			for t := range typeFilter {
-				typeList = append(typeList, t)
-			}
+		for t := range typeFilter {
+			typeList = append(typeList, t)
 		}
 		missed, err := st.ListEventsAfter(r.Context(), lastEventID, typeList, sseReplayCap)
 		if err != nil {
