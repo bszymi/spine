@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bszymi/spine/internal/domain"
-	"github.com/bszymi/spine/internal/workflow"
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/workflow"
 )
 
 func TestTaskDefaultWorkflow_Parses(t *testing.T) {
