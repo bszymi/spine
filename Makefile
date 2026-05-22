@@ -3,7 +3,7 @@
 # ── Build ──
 
 build:
-	go build -o bin/spine ./cmd/spine
+	go build -o bin/spine ./service/cmd/spine
 
 clean:
 	rm -rf bin/
@@ -17,7 +17,7 @@ test-integration:
 	go test -tags integration ./...
 
 test-scenario:
-	go test -tags scenario ./internal/scenariotest/...
+	go test -tags scenario ./scenariotest/...
 
 # ── Lint ──
 

@@ -26,7 +26,7 @@ linters:
         # service, every subprocess launch here is a git-CLI call with
         # validated arguments (refs, paths) passed positionally. The
         # allowlisted credential helper and the git-ref validator
-        # (internal/git/cli.go + internal/artifact/refname.go) are the
+        # (adapters/git/cli.go + core/artifact/refname.go) are the
         # real shell-injection gates.
         - G204
         # G301: directory created with 0755 — intentional default for
@@ -67,13 +67,13 @@ linters:
         text: G115
       - linters:
           - gosec
-        path: internal/(store|testutil)/testutil\.go|internal/testutil/db\.go
+        path: adapters/store/testutil\.go|testutil/(testutil|db)\.go
         text: G101
       # math/rand is fine for the scheduler's backoff jitter — this is
       # not a security context.
       - linters:
           - gosec
-        path: internal/scheduler/backoff\.go
+        path: adapters/scheduler/backoff\.go
         text: G404
     paths:
       - third_party$
