@@ -4,9 +4,15 @@ FROM golang:1.26-bookworm AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-COPY cmd/ cmd/
-COPY internal/ internal/
-RUN CGO_ENABLED=0 go build -o spine ./cmd/spine
+COPY core/ core/
+COPY adapters/ adapters/
+COPY service/ service/
+# testutil/ is a build dependency because adapters/git/testutil.go
+# (mis-named — predates the extraction) imports it. Tracked as a
+# TASK-004 follow-up to rename to _test.go and drop testutil from
+# production build context.
+COPY testutil/ testutil/
+RUN CGO_ENABLED=0 go build -o spine ./service/cmd/spine
 
 # ── Runtime stage ──
 FROM debian:bookworm-slim
