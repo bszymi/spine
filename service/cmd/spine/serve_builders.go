@@ -117,8 +117,8 @@ func buildWorkspaceCloneURLBuilder(base, workspaceID string) engine.CloneURLBuil
 	if workspaceID == "" {
 		return nil
 	}
-	return func(repoID string) string {
-		return fmt.Sprintf("%s/git/%s/%s", base, workspaceID, repoID)
+	return func(repoID string) (wsID, cloneURL string) {
+		return workspaceID, fmt.Sprintf("%s/git/%s/%s", base, workspaceID, repoID)
 	}
 }
 

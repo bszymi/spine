@@ -368,7 +368,8 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 				orch.WithCloneURLBuilder(b)
 			}
 		}
-		orch.WithWorkspaceID(deps.WorkspaceID)
+		// TASK-004 (ADR-018 §6.1): no separate WithWorkspaceID — the
+		// workspace ID rides on the CloneURLBuilder's return value.
 	}
 
 	var sched *scheduler.Scheduler

@@ -225,9 +225,14 @@ func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.
 	if repoID == "" {
 		repoID = domain.PrimaryRepositoryID
 	}
-	var cloneURL string
+	// TASK-004 (ADR-018 §6.1): WorkspaceID is sourced from the
+	// CloneURLBuilder return rather than from a static field on the
+	// Orchestrator. The production builder closes over the env-var
+	// workspace ID; tests that don't wire a builder produce empty
+	// strings, kept `omitempty` on AssignmentContext.
+	var workspaceID, cloneURL string
 	if o.cloneURLBuilder != nil {
-		cloneURL = o.cloneURLBuilder(repoID)
+		workspaceID, cloneURL = o.cloneURLBuilder(repoID)
 	}
 	baseline := run.RepositoryBaselines[repoID]
 
@@ -244,7 +249,7 @@ func (o *Orchestrator) buildAssignmentRequest(ctx context.Context, exec *domain.
 			WorkflowID:      run.WorkflowID,
 			RequiredInputs:  stepDef.RequiredInputs,
 			RequiredOutputs: stepDef.RequiredOutputs,
-			WorkspaceID:     o.workspaceID,
+			WorkspaceID:     workspaceID,
 			RepositoryID:    repoID,
 			CloneURL:        cloneURL,
 			BranchName:      run.BranchName,

@@ -17,8 +17,8 @@ import (
 func TestBuildAssignmentRequest_PopulatesADR015Fields(t *testing.T) {
 	o := &Orchestrator{
 		store: &mockRunStore{},
-		cloneURLBuilder: func(repoID string) string {
-			return "https://spine.test/git/ws-1/" + repoID
+		cloneURLBuilder: func(repoID string) (wsID, cloneURL string) {
+			return "ws-1", "https://spine.test/git/ws-1/" + repoID
 		},
 	}
 	exec := &domain.StepExecution{
@@ -62,9 +62,9 @@ func TestBuildAssignmentRequest_FallsBackToSpineWhenRepoIDEmpty(t *testing.T) {
 	captured := ""
 	o := &Orchestrator{
 		store: &mockRunStore{},
-		cloneURLBuilder: func(repoID string) string {
+		cloneURLBuilder: func(repoID string) (wsID, cloneURL string) {
 			captured = repoID
-			return "https://spine.test/git/ws-1/" + repoID
+			return "ws-1", "https://spine.test/git/ws-1/" + repoID
 		},
 	}
 	exec := &domain.StepExecution{ExecutionID: "x", StepID: "s", RepositoryID: ""}
@@ -106,13 +106,21 @@ func TestBuildAssignmentRequest_NoCloneURLBuilderLeavesURLEmpty(t *testing.T) {
 }
 
 // TestBuildAssignmentRequest_PopulatesWorkspaceID_AnchorsTASK005 pins
-// the TASK-005 contract: when the orchestrator is wired with a
-// workspace ID via WithWorkspaceID, the assignment payload publishes
-// it as the `workspace_id` field. The same value pairs with the
-// CloneURL the runner targets, so the gateway's git HTTP router never
-// sees a workspace_id-vs-CloneURL mismatch.
+// the TASK-005 contract: when the orchestrator's CloneURLBuilder
+// returns a workspace ID, the assignment payload publishes it as the
+// `workspace_id` field. The same value pairs with the CloneURL the
+// runner targets, so the gateway's git HTTP router never sees a
+// workspace_id-vs-CloneURL mismatch — they come from one source.
+//
+// TASK-004 (ADR-018 §6.1): the workspace ID arrives via the builder
+// return rather than a separate Orchestrator field/setter.
 func TestBuildAssignmentRequest_PopulatesWorkspaceID_AnchorsTASK005(t *testing.T) {
-	o := &Orchestrator{store: &mockRunStore{}, workspaceID: "ws-1"}
+	o := &Orchestrator{
+		store: &mockRunStore{},
+		cloneURLBuilder: func(_ string) (wsID, cloneURL string) {
+			return "ws-1", ""
+		},
+	}
 	exec := &domain.StepExecution{ExecutionID: "x", StepID: "s", RepositoryID: "spine"}
 	stepDef := &domain.StepDefinition{ID: "s", Outcomes: []domain.OutcomeDefinition{{ID: "o", NextStep: "end"}}}
 	run := &domain.Run{RunID: "r", TraceID: "t", BranchName: "spine/run/x"}

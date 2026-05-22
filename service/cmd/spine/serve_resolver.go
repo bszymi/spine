@@ -113,12 +113,11 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 			orch.WithCloneURLBuilder(b)
 		}
 	}
-	// Runner-facing workspace ID (INIT-014 EPIC-004 TASK-005). Wired
-	// from the same source as buildWorkspaceCloneURLBuilder above so
-	// assignment payloads always pair the workspace_id field with a
-	// matching clone_url; the gateway's git HTTP router would reject a
-	// mismatch as workspace-not-found at clone time.
-	orch.WithWorkspaceID(ss.Config.ID)
+	// TASK-004 (ADR-018 §6.1): no separate WithWorkspaceID — the
+	// workspace ID rides on the CloneURLBuilder's return value
+	// alongside the matching clone URL, so the gateway's git HTTP
+	// router and the runner-facing payload always agree by
+	// construction.
 	// Workflow writer is required for ADR-008 planning runs. INIT-022
 	// EPIC-001 TASK-010 typed ss.Workflows as *workflow.Service which
 	// satisfies engine.WorkflowWriter at compile time, so the previous

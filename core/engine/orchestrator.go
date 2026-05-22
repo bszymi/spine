@@ -36,23 +36,23 @@ type Orchestrator struct {
 	// `<git-http-base>/git/{workspace_id}/{repository_id}`; tests
 	// pass nil and assert RepositoryID/BranchName without CloneURL.
 	cloneURLBuilder CloneURLBuilder
-	// workspaceID is the runtime workspace ID this orchestrator runs
-	// against — the same value baked into cloneURLBuilder. Surfaced
-	// to runners via the assignment payload's `workspace_id` field
-	// (INIT-014 EPIC-004 TASK-005). Empty in tests and single-process
-	// embedded mode where no workspace ID is wired; the field is
-	// `omitempty` on AssignmentContext so the empty case does not
-	// publish a misleading blank value.
-	workspaceID string
 }
 
 // CloneURLBuilder turns a resolved repository ID into the runner-facing
-// clone URL. The contract per ADR-015: always the workspace's git HTTP
-// endpoint, regardless of whether the repository has an external upstream
-// URL recorded on its runtime binding. The runtime binding's external
-// URL is consulted only by server-side clone/push paths and is never
-// published into assignment payloads in v0.x.
-type CloneURLBuilder func(repositoryID string) string
+// workspace ID and clone URL. The contract per ADR-015: the clone URL
+// is always the workspace's git HTTP endpoint, regardless of whether
+// the repository has an external upstream URL recorded on its runtime
+// binding. The runtime binding's external URL is consulted only by
+// server-side clone/push paths and is never published into assignment
+// payloads in v0.x.
+//
+// Per ADR-018 §6.1, the runtime workspace ID must NOT live as a field
+// on the Orchestrator. The builder closure is the single source of
+// truth: production wires it to a closure over the env-var workspace
+// ID and the configured git HTTP base; tests pass nil and accept
+// empty `WorkspaceID` / `CloneURL` on the assignment payload (both
+// `omitempty` on AssignmentContext).
+type CloneURLBuilder func(repositoryID string) (workspaceID, cloneURL string)
 
 // New creates an Orchestrator with all required dependencies.
 func New(
@@ -180,17 +180,6 @@ func (o *Orchestrator) WithRepositoryGitClients(c RepositoryGitClients) {
 // startup is responsible for wiring it.
 func (o *Orchestrator) WithCloneURLBuilder(b CloneURLBuilder) {
 	o.cloneURLBuilder = b
-}
-
-// WithWorkspaceID records the runtime workspace ID this orchestrator
-// runs against (INIT-014 EPIC-004 TASK-005). Production wires this to
-// the same value baked into the CloneURLBuilder (`SPINE_WORKSPACE_ID`
-// for top-level, `ss.Config.ID` for the pool path) so assignment
-// payloads expose `workspace_id` and `clone_url` from one source. Tests
-// and single-process embedded mode may omit it; AssignmentContext's
-// WorkspaceID field is `omitempty` to avoid publishing a blank.
-func (o *Orchestrator) WithWorkspaceID(id string) {
-	o.workspaceID = id
 }
 
 // WithBranchProtectPolicy installs the branch-protection policy consulted by
