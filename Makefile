@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-scenario lint clean docker-build docker-up docker-down docker-reset docker-test docker-lint docker-vet
+.PHONY: build test test-integration test-scenario lint lint-boundaries lint-security clean docker-build docker-up docker-down docker-reset docker-test docker-lint docker-vet
 
 # ── Build ──
 
@@ -21,8 +21,15 @@ test-scenario:
 
 # ── Lint ──
 
-lint:
+lint: lint-boundaries
 	golangci-lint run
+
+# INIT-011 / TASK-005: ADR-017 dependency-direction guard.
+# Refuses core/ -> service/, adapters/ -> service/, and any tier ->
+# spine-management-platform. core/ -> adapters/ crossings are
+# allowlisted to the documented TASK-004 follow-up surface.
+lint-boundaries:
+	./dev/lint-boundaries.sh
 
 # Security-only lint: runs gosec in isolation. This is the gate for
 # TASK-011 — any new security finding must be triaged and either fixed
