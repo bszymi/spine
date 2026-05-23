@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# INIT-011 / EPIC-001 / TASK-005: minimum-viable CI that enforces the
+# ADR-017 boundary on every PR. The boundary lint runs first so a
+# tier violation is the most obvious failure surfaced.
+#
+# Standalone build is exercised in two forms:
+#   1. `make build` — the production service binary at service/cmd/spine
+#   2. `go build ./cmd/embed-smoketest` — the library-consumer smoke test
+#      (ADR-022 Option A enforcement: Spine Core must remain linkable
+#      without the service tier).
+# A standalone build that pulls in SMP via a future drive-by import
+# would fail to link, complementing the lint as a secondary guard.
+
+jobs:
+  boundary-lint:
+    name: ADR-017 boundary lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Dependency-direction guard
+        run: ./dev/lint-boundaries.sh
+
+  build:
+    name: Build (service + embed-smoketest)
+    runs-on: ubuntu-latest
+    needs: boundary-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build service binary
+        run: make build
+
+      - name: Build embed-smoketest (library-consumer)
+        run: go build -o bin/embed-smoketest ./cmd/embed-smoketest
+
+      - name: Run embed-smoketest
+        run: ./bin/embed-smoketest
+
+  test:
+    name: go test ./...
+    runs-on: ubuntu-latest
+    needs: boundary-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test ./...
