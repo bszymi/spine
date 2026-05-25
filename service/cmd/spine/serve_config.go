@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/adapters/secrets"
+	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -129,6 +129,20 @@ func parseGitHTTPTrustedCIDRs(raw string) []string {
 // turn push on. Unrecognised values fall back to false so a typo never
 // silently enables the endpoint.
 func parseGitReceivePackEnabled(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// parseEventLogNotifyBridge reads SPINE_EVENT_LOG_NOTIFY_BRIDGE
+// (INIT-011/EPIC-003/TASK-006 sub-PR 10a). Default false so the
+// listener doesn't hold a dedicated pgxpool connection on
+// deployments that haven't enabled the SMP-side notify emitter yet
+// (sub-PR 10b). Unrecognised values fall back to false so a typo
+// never silently enables the bridge.
+func parseEventLogNotifyBridge(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "1", "true", "yes", "on":
 		return true

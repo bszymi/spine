@@ -83,6 +83,16 @@ func (s *PostgresStore) Close() {
 	}
 }
 
+// RawPool returns the underlying *pgxpool.Pool, or nil when the store
+// was constructed via NewPostgresStoreWithQuerier (the per-workspace
+// gated-pool path). Callers that need raw pool features pgx exposes
+// only on *pgxpool.Pool itself — Acquire for long-lived dedicated
+// connections (LISTEN), Stat for diagnostics — fall back gracefully
+// when this returns nil.
+func (s *PostgresStore) RawPool() *pgxpool.Pool {
+	return s.rawPool
+}
+
 // Ping checks database connectivity.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
