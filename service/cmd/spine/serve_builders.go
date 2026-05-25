@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -386,9 +387,61 @@ func startEventDelivery(ctx context.Context, deps serveDeps, log *slog.Logger) (
 		log.Info("event delivery system started")
 	}
 
+	// NotifyListener bridges out-of-process event_log writes (today:
+	// SMP's spinecore.EventEmitter, INIT-011/EPIC-003/TASK-006 sub-PR
+	// 10b) into the in-process EventBroadcaster so connected
+	// /events/stream clients see SMP-originated events live, without
+	// waiting for the SSE reconnect-replay path to catch up. Opt-in
+	// via SPINE_EVENT_LOG_NOTIFY_BRIDGE so operators can roll the
+	// listener in independently of the SMP-side notify (sub-PR 10b),
+	// and back it out without a redeploy if it misbehaves. When
+	// disabled the seam doc's accepted reconnect-replay semantics
+	// continue to apply.
+	if deps.NotifyBridgeEnabled {
+		maybeStartNotifyListener(deliveryCtx, deps.Store, subscriber.Broadcaster, log)
+	}
+
 	go delivery.StartRetentionCleanup(deliveryCtx, deps.Store, deps.EventRetention)
 
 	return cancel, subscriber
+}
+
+// maybeStartNotifyListener launches the LISTEN goroutine when the
+// store exposes a raw *pgxpool.Pool. The per-workspace gated-pool
+// path (NewPostgresStoreWithQuerier) returns nil from RawPool, in
+// which case the listener is silently skipped — those deployments
+// run the listener at the pool level instead (out of scope for this
+// PR; the live-broadcast bridge under sub-PR 10a targets the
+// single-workspace file mode that ships first).
+func maybeStartNotifyListener(ctx context.Context, st store.Store, b *delivery.EventBroadcaster, log *slog.Logger) {
+	pgStore, ok := st.(*store.PostgresStore)
+	if !ok {
+		log.Info("event notify listener: store is not *PostgresStore; skipping")
+		return
+	}
+	pool := pgStore.RawPool()
+	if pool == nil {
+		log.Info("event notify listener: store has no raw pgxpool; skipping")
+		return
+	}
+	listener := delivery.NewNotifyListener(pool, b)
+	go func() {
+		if err := listener.Run(ctx); err != nil && !errIsCancellation(err) {
+			log.Error("event notify listener exited unexpectedly", "error", err)
+		}
+	}()
+}
+
+// errIsCancellation reports whether the error is the context-cancel
+// shape NotifyListener.Run returns at shutdown. Uses errors.Is so a
+// wrapped context.Canceled (e.g. `wait for notification: context
+// canceled` from inside runSession) still reads as a clean shutdown
+// and doesn't fire the "exited unexpectedly" log line.
+func errIsCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // buildStore connects to the workspace database in single-workspace

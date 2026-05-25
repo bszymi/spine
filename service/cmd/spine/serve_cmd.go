@@ -6,12 +6,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/bszymi/spine/service/internal/config"
-	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/queue"
+	"github.com/bszymi/spine/service/internal/config"
+	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/service/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -181,6 +181,7 @@ func serveCmd() *cobra.Command {
 				SSEMaxConn:                 parsePositiveIntEnv("SPINE_SSE_MAX_CONN_PER_ACTOR"),
 				OrphanThreshold:            orphanThreshold,
 				WebhookTargets:             deliveryCfg.WebhookTargets,
+				NotifyBridgeEnabled:        parseEventLogNotifyBridge(os.Getenv("SPINE_EVENT_LOG_NOTIFY_BRIDGE")),
 			}
 
 			rt, err := buildServerConfig(ctx, deps)

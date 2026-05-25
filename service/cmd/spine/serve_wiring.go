@@ -8,25 +8,25 @@ import (
 	"os"
 	"time"
 
-	"github.com/bszymi/spine/core/auth"
-	"github.com/bszymi/spine/service/internal/config"
-	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/adapters/delivery"
-	"github.com/bszymi/spine/core/divergence"
-	"github.com/bszymi/spine/core/engine"
-	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/gitpool"
-	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/adapters/projection"
-	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/adapters/scheduler"
 	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/auth"
+	spinecrypto "github.com/bszymi/spine/core/crypto"
+	"github.com/bszymi/spine/core/divergence"
+	"github.com/bszymi/spine/core/engine"
+	"github.com/bszymi/spine/core/event"
+	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/config"
+	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -168,6 +168,14 @@ type serveDeps struct {
 	EventRetention        time.Duration
 	SSEMaxConn            int
 	OrphanThreshold       time.Duration
+
+	// NotifyBridgeEnabled gates the runtime.event_log NOTIFY listener
+	// that forwards out-of-process event_log writes into the in-process
+	// EventBroadcaster (INIT-011/EPIC-003/TASK-006 sub-PR 10a). Sourced
+	// from SPINE_EVENT_LOG_NOTIFY_BRIDGE. Default off so deployments
+	// without an SMP-side notify-emitter (sub-PR 10b) don't burn a
+	// pgxpool connection on a noop loop.
+	NotifyBridgeEnabled bool
 
 	// WebhookTargets is the SSRF gate applied to every subscription
 	// target_url on create / update / test and to every webhook
