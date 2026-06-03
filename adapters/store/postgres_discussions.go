@@ -131,6 +131,43 @@ func (s *PostgresStore) ListComments(ctx context.Context, threadID string) ([]do
 	)
 }
 
+// UpdateComment persists an edit to an existing comment: it overwrites
+// the content and stamps edited_at. The caller assembles the edited
+// `*domain.Comment` (setting Content + EditedAt); this method does the
+// DB write only, mirroring CreateComment. Scoped by (thread_id,
+// comment_id) so a comment can only be edited within its own thread.
+// Returns a domain NotFound error when no comment matches.
+func (s *PostgresStore) UpdateComment(ctx context.Context, comment *domain.Comment) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.comments
+		SET content = $1, edited_at = $2
+		WHERE thread_id = $3 AND comment_id = $4`,
+		comment.Content, comment.EditedAt, comment.ThreadID, comment.CommentID,
+	)
+	if err != nil {
+		return err
+	}
+	return mustAffect(tag, "comment not found")
+}
+
+// DeleteComment soft-deletes a comment by setting its `deleted` flag —
+// the row and its content are retained (the `domain.Comment.Deleted`
+// model), so a thread keeps a stable reply structure and audit trail.
+// Scoped by (thread_id, comment_id); idempotent on an already-deleted
+// comment. Returns a domain NotFound error when no comment matches.
+func (s *PostgresStore) DeleteComment(ctx context.Context, threadID, commentID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.comments
+		SET deleted = true
+		WHERE thread_id = $1 AND comment_id = $2`,
+		threadID, commentID,
+	)
+	if err != nil {
+		return err
+	}
+	return mustAffect(tag, "comment not found")
+}
+
 func (s *PostgresStore) HasOpenThreads(ctx context.Context, anchorType domain.AnchorType, anchorID string) (bool, error) {
 	var count int
 	err := s.pool.QueryRow(ctx, `
