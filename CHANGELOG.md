@@ -6,6 +6,43 @@ release is cut — this file is a staging area.
 
 ---
 
+## Spine Core library packaging — dual-target (standalone + embedded)
+
+Disposition: **Option A** — Spine remains available both as a standalone
+service and as an embeddable library. Driven by the Spine Management Platform's
+move to run Spine Core in-process (SMP INIT-011); the standalone control-plane
+HTTP transport SMP previously consumed is retired on the consumer side, while
+the standalone service binary, its git smart-HTTP endpoint, and the bootstrap
+bearer path are all retained.
+
+### Added
+
+- **`cmd/embed-smoketest`** — a library-consumer smoke test that imports
+  `core/...`, builds a complete `Engine` with in-binary stub ports, and exits
+  0. Proves Spine Core is linkable and constructible without the `service/`
+  tier. Built and run on every PR.
+- **`dev/lint-boundaries.sh`** dependency-direction guard, run as the
+  `ADR-017 boundary lint` CI job ahead of build/test — fails the PR if `core/`
+  reaches into `service/` or `adapters/`. The standalone build doubling as a
+  link-time guard makes a boundary violation a build failure, not just a lint.
+
+### Changed
+
+- **README** now documents the two deployment forms and the boundary that
+  makes the embedded form possible (see "Consuming Spine Core as a Library"):
+  the `core/ → adapters/ → service/` dependency direction, the two CI gates,
+  and how an external consumer supplies its own ports.
+
+### Not yet implemented (follow-up)
+
+- `core/engine`'s `GitOperator` signature still references DTO types from
+  `adapters/git`, so a library consumer transitively pulls `adapters/git` for
+  those type names. Relocating the git operation DTOs into `core/` (e.g.
+  `core/git/`) removes the last library-surface leak; `embed-smoketest`
+  surfaces it today rather than hiding it.
+
+---
+
 ## INIT-018 — Branch Protection (EPIC-002 policy + EPIC-003 API enforcement)
 
 ### Added

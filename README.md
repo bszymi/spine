@@ -60,6 +60,57 @@ spine validate --all
 
 ---
 
+## Consuming Spine Core as a Library
+
+Spine ships in **two forms** (the standalone-disposition decision is **Option A**
+— both are supported):
+
+1. **Standalone service** — the `spine` binary (`spine serve`), as shown in
+   Quick Start above. Run it as its own process with its own PostgreSQL.
+2. **Spine Core library** — the `github.com/bszymi/spine/core/...` packages,
+   imported and run **in-process** by an external consumer. The
+   [Spine Management Platform](https://github.com/bszymi/spine-management-platform)
+   embeds Spine this way: it constructs a Core `engine.Engine` against its own
+   per-workspace PostgreSQL and supplies its own port implementations (store,
+   git, actor runner) instead of starting a separate Spine service.
+
+### The boundary that makes the library form possible
+
+Spine Core depends on **nothing outside `core/`**. The dependency direction is:
+
+```
+core/        ← pure domain + engine + ports (no service/, no adapters/)
+adapters/    → implement core/ ports (postgres, git, …)
+service/     → wire adapters into the standalone binary
+```
+
+This is the contract an embedder relies on: importing `core/` must never drag
+in the service tier or a specific adapter. Two CI gates enforce it on every PR:
+
+- **`dev/lint-boundaries.sh`** (CI job `ADR-017 boundary lint`) — a
+  dependency-direction guard that fails if `core/` imports `service/` or
+  `adapters/`.
+- **`cmd/embed-smoketest`** (CI job `Build (service + embed-smoketest)`) — a
+  tiny library consumer that imports `core/...`, constructs a complete `Engine`
+  with in-binary stub ports, and exits 0. If it builds and runs, the library
+  surface is genuinely usable from outside. A standalone build that reached
+  across the boundary via a drive-by import would fail to link, complementing
+  the lint as a secondary guard.
+
+```bash
+# Prove the library surface links and constructs standalone:
+go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest
+# → "embed-smoketest: engine constructed and exercised; library surface is sound."
+```
+
+> **Known leak (tracked):** `core/engine`'s `GitOperator` interface signature
+> still names DTO types from `adapters/git` (`CommitOpts`, `MergeOpts`,
+> `MergeResult`, …), so a library consumer transitively pulls `adapters/git`
+> for those type names until they relocate into `core/`. `embed-smoketest`
+> surfaces this rather than hiding it.
+
+---
+
 ## Start Here
 
 If you're new to the project:
