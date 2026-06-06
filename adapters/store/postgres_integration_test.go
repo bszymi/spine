@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 func TestPing(t *testing.T) {
@@ -431,6 +431,115 @@ func TestCommentCRUD(t *testing.T) {
 	}
 
 	// Cleanup
+	s.CleanupTestData(ctx, t)
+}
+
+func TestCommentEditDelete(t *testing.T) {
+	s := store.NewTestStore(t)
+	ctx := context.Background()
+	s.CleanupTestData(ctx, t)
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	thread := &domain.DiscussionThread{
+		ThreadID:   "thread-edit-del",
+		AnchorType: domain.AnchorTypeStepExecution,
+		AnchorID:   "exec-ed-001",
+		Status:     domain.ThreadStatusOpen,
+		CreatedBy:  "actor-001",
+		CreatedAt:  now,
+	}
+	if err := s.CreateThread(ctx, thread); err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	comment := &domain.Comment{
+		CommentID:  "comment-ed-001",
+		ThreadID:   "thread-edit-del",
+		AuthorID:   "actor-001",
+		AuthorType: "human",
+		Content:    "original content",
+		CreatedAt:  now,
+	}
+	if err := s.CreateComment(ctx, comment); err != nil {
+		t.Fatalf("CreateComment: %v", err)
+	}
+
+	// ── Edit: overwrite content + stamp edited_at ──
+	editedAt := now.Add(time.Minute)
+	comment.Content = "edited content"
+	comment.EditedAt = &editedAt
+	if err := s.UpdateComment(ctx, comment); err != nil {
+		t.Fatalf("UpdateComment: %v", err)
+	}
+	got, err := s.ListComments(ctx, "thread-edit-del")
+	if err != nil {
+		t.Fatalf("ListComments after edit: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(got))
+	}
+	if got[0].Content != "edited content" {
+		t.Errorf("expected edited content, got %q", got[0].Content)
+	}
+	if got[0].EditedAt == nil || !got[0].EditedAt.Equal(editedAt) {
+		t.Errorf("expected edited_at %v, got %v", editedAt, got[0].EditedAt)
+	}
+	if got[0].Deleted {
+		t.Errorf("comment should not be deleted after edit")
+	}
+
+	// Edit of a nonexistent comment → not found.
+	missing := &domain.Comment{CommentID: "no-such", ThreadID: "thread-edit-del", Content: "x"}
+	if err := s.UpdateComment(ctx, missing); err == nil {
+		t.Errorf("expected not-found error editing missing comment, got nil")
+	}
+	// Edit scoped to the wrong thread → not found (the comment exists,
+	// but the (thread_id, comment_id) pair does not match).
+	wrongThread := &domain.Comment{CommentID: "comment-ed-001", ThreadID: "other-thread", Content: "x"}
+	if err := s.UpdateComment(ctx, wrongThread); err == nil {
+		t.Errorf("expected not-found error editing comment via wrong thread, got nil")
+	}
+	// The failed wrong-thread edit must leave the real row untouched —
+	// proves the (thread_id, comment_id) scoping actually protected it.
+	if cur, err := s.ListComments(ctx, "thread-edit-del"); err != nil {
+		t.Fatalf("ListComments after wrong-thread edit: %v", err)
+	} else if len(cur) != 1 || cur[0].Content != "edited content" {
+		t.Errorf("wrong-thread edit must not touch the real comment; got %+v", cur)
+	}
+
+	// ── Soft delete: row retained, deleted flag set ──
+	if err := s.DeleteComment(ctx, "thread-edit-del", "comment-ed-001"); err != nil {
+		t.Fatalf("DeleteComment: %v", err)
+	}
+	got, err = s.ListComments(ctx, "thread-edit-del")
+	if err != nil {
+		t.Fatalf("ListComments after delete: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("soft delete must retain the row; expected 1 comment, got %d", len(got))
+	}
+	if !got[0].Deleted {
+		t.Errorf("comment should be marked deleted")
+	}
+
+	// Delete is idempotent on an already-deleted comment.
+	if err := s.DeleteComment(ctx, "thread-edit-del", "comment-ed-001"); err != nil {
+		t.Errorf("DeleteComment should be idempotent, got %v", err)
+	}
+	// Delete of a nonexistent comment → not found.
+	if err := s.DeleteComment(ctx, "thread-edit-del", "no-such"); err == nil {
+		t.Errorf("expected not-found error deleting missing comment, got nil")
+	}
+	// After the idempotent re-delete + a missing-id delete, the row is
+	// still present and still soft-deleted with content intact — no
+	// resurrection, no corruption from the repeated/failed operations.
+	if cur, err := s.ListComments(ctx, "thread-edit-del"); err != nil {
+		t.Fatalf("ListComments final: %v", err)
+	} else if len(cur) != 1 || !cur[0].Deleted || cur[0].Content != "edited content" {
+		t.Errorf("comment must remain present + soft-deleted with content intact; got %+v", cur)
+	}
+
 	s.CleanupTestData(ctx, t)
 }
 
