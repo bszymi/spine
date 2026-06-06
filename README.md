@@ -76,20 +76,26 @@ Spine ships in **two forms** (the standalone-disposition decision is **Option A*
 
 ### The boundary that makes the library form possible
 
-Spine Core depends on **nothing outside `core/`**. The dependency direction is:
+The load-bearing invariant is that **`core/` never imports `service/`** — the
+standalone HTTP/CLI host — so embedding `core/` cannot drag in the standalone
+server. No Spine tier may import the embedding host (SMP) either. The dependency
+direction is:
 
 ```
-core/        ← pure domain + engine + ports (no service/, no adapters/)
-adapters/    → implement core/ ports (postgres, git, …)
+core/        ← pure domain + engine + ports (must not import service/)
+adapters/    → implement core/ ports (postgres, git, …); must not import service/
 service/     → wire adapters into the standalone binary
 ```
 
-This is the contract an embedder relies on: importing `core/` must never drag
-in the service tier or a specific adapter. Two CI gates enforce it on every PR:
+This is the contract an embedder relies on: importing `core/` never drags in the
+service tier. (`core/` does still reach into a small **allowlisted** set of
+`adapters/` packages for port/DTO types — tracked debt, see *Known debt* below.)
+Two CI gates enforce the boundary on every PR:
 
 - **`dev/lint-boundaries.sh`** (CI job `ADR-017 boundary lint`) — a
-  dependency-direction guard that fails if `core/` imports `service/` or
-  `adapters/`.
+  dependency-direction guard. It hard-fails if `core/` or `adapters/` imports
+  `service/`, if `core/` imports any `adapters/` package **outside the documented
+  allowlist**, or if any tier imports the SMP host module.
 - **`cmd/embed-smoketest`** (CI job `Build (service + embed-smoketest)`) — a
   tiny library consumer that imports `core/...`, constructs a complete `Engine`
   with in-binary stub ports, and exits 0. If it builds and runs, the library
@@ -103,11 +109,17 @@ go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest
 # → "embed-smoketest: engine constructed and exercised; library surface is sound."
 ```
 
-> **Known leak (tracked):** `core/engine`'s `GitOperator` interface signature
-> still names DTO types from `adapters/git` (`CommitOpts`, `MergeOpts`,
-> `MergeResult`, …), so a library consumer transitively pulls `adapters/git`
-> for those type names until they relocate into `core/`. `embed-smoketest`
-> surfaces this rather than hiding it.
+> **Known debt (tracked, allowlisted):** the clean form would have `core/`
+> depend on nothing but `core/`. Today several `core/` packages still reach into
+> a small allowlisted set of `adapters/` packages — `adapters/store`,
+> `adapters/git` (+`/refname`), `adapters/repository`, `adapters/scheduler` —
+> for port/DTO types not yet relocated into `core/` (e.g. `core/engine`'s
+> `GitOperator` signature names `adapters/git`'s `CommitOpts`, `MergeOpts`,
+> `MergeResult`). A library consumer therefore transitively pulls those adapter
+> packages — but never `service/`. `dev/lint-boundaries.sh` allowlists exactly
+> these crossings and rejects any new one; the EPIC-001 follow-up (ADR-017 /
+> TASK-004 item 5) tracks plumbing the types through `core/` to remove them.
+> `embed-smoketest` surfaces this rather than hiding it.
 
 ---
 
