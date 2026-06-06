@@ -60,6 +60,69 @@ spine validate --all
 
 ---
 
+## Consuming Spine Core as a Library
+
+Spine ships in **two forms** (the standalone-disposition decision is **Option A**
+— both are supported):
+
+1. **Standalone service** — the `spine` binary (`spine serve`), as shown in
+   Quick Start above. Run it as its own process with its own PostgreSQL.
+2. **Spine Core library** — the `github.com/bszymi/spine/core/...` packages,
+   imported and run **in-process** by an external consumer. The
+   [Spine Management Platform](https://github.com/bszymi/spine-management-platform)
+   embeds Spine this way: it constructs a Core `engine.Engine` against its own
+   per-workspace PostgreSQL and supplies its own port implementations (store,
+   git, actor runner) instead of starting a separate Spine service.
+
+### The boundary that makes the library form possible
+
+The load-bearing invariant is that **`core/` never imports `service/`** — the
+standalone HTTP/CLI host — so embedding `core/` cannot drag in the standalone
+server. No Spine tier may import the embedding host (SMP) either. The dependency
+direction is:
+
+```
+core/        ← pure domain + engine + ports (must not import service/)
+adapters/    → implement core/ ports (postgres, git, …); must not import service/
+service/     → wire adapters into the standalone binary
+```
+
+This is the contract an embedder relies on: importing `core/` never drags in the
+service tier. (`core/` does still reach into a small **allowlisted** set of
+`adapters/` packages for port/DTO types — tracked debt, see *Known debt* below.)
+Two CI gates enforce the boundary on every PR:
+
+- **`dev/lint-boundaries.sh`** (CI job `ADR-017 boundary lint`) — a
+  dependency-direction guard. It hard-fails if `core/` or `adapters/` imports
+  `service/`, if `core/` imports any `adapters/` package **outside the documented
+  allowlist**, or if any tier imports the SMP host module.
+- **`cmd/embed-smoketest`** (CI job `Build (service + embed-smoketest)`) — a
+  tiny library consumer that imports `core/...`, constructs a complete `Engine`
+  with in-binary stub ports, and exits 0. If it builds and runs, the library
+  surface is genuinely usable from outside. A standalone build that reached
+  across the boundary via a drive-by import would fail to link, complementing
+  the lint as a secondary guard.
+
+```bash
+# Prove the library surface links and constructs standalone:
+go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest
+# → "embed-smoketest: engine constructed and exercised; library surface is sound."
+```
+
+> **Known debt (tracked, allowlisted):** the clean form would have `core/`
+> depend on nothing but `core/`. Today several `core/` packages still reach into
+> a small allowlisted set of `adapters/` packages — `adapters/store`,
+> `adapters/git` (+`/refname`), `adapters/repository`, `adapters/scheduler` —
+> for port/DTO types not yet relocated into `core/` (e.g. `core/engine`'s
+> `GitOperator` signature names `adapters/git`'s `CommitOpts`, `MergeOpts`,
+> `MergeResult`). A library consumer therefore transitively pulls those adapter
+> packages — but never `service/`. `dev/lint-boundaries.sh` allowlists exactly
+> these crossings and rejects any new one; the EPIC-001 follow-up (ADR-017 /
+> TASK-004 item 5) tracks plumbing the types through `core/` to remove them.
+> `embed-smoketest` surfaces this rather than hiding it.
+
+---
+
 ## Start Here
 
 If you're new to the project:
