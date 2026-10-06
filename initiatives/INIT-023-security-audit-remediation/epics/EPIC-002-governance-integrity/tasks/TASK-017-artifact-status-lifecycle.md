@@ -1,0 +1,1225 @@
+---
+id: TASK-017
+type: Task
+title: "Declared artifact-status lifecycle and run-owned merge cascade (opt-in)"
+status: Pending
+epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
+initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
+work_type: security
+created: 2026-10-06
+last_updated: 2026-10-06
+links:
+  - type: parent
+    target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
+  - type: related_to
+    target: /governance/task-lifecycle.md
+  - type: related_to
+    target: /governance/artifact-schema.md
+  - type: related_to
+    target: /architecture/workflow-validation.md
+  - type: related_to
+    target: /initiatives/INIT-008-dogfooding-fixes/epics/EPIC-005-code-quality-2026-04/tasks/TASK-016-cascade-commit-status-to-branch-artifacts.md
+---
+
+# TASK-017 — Declared artifact-status lifecycle and run-owned merge cascade (opt-in)
+
+---
+
+## Purpose
+
+This task closes audit finding **P3-21** (Spine half). The finding is "artifact status transitions
+aren't a state machine, the status-conflict rules only warn, and the merge-time cascade rewrites
+`status:` to whatever the outcome says" (security audit 2026-10-06, Spine `61994fe`, SMP
+`80995559`). The SMP half (P3-21.smp) is adopted by SMP INIT-027 EPIC-004 TASK-011.
+
+Line numbers refer to Spine `61994fe` unless stated. "SMP" means `spine-management-platform` at
+`80995559`. "Bound SHA" means the run-branch commit that TASK-005 binds the governed merge to.
+
+### The defect
+
+1. **Status is a plain front-matter field with no transition rules.**
+   - Runs, steps, divergences and branches have explicit machines (`core/workflow/*_machine.go`).
+     Artifact status has only an allowed-values list, `domain.ValidStatusesForType`
+     (`core/domain/artifact.go:81-99`). Nothing says which status may follow which.
+   - `governance/task-lifecycle.md` §4 (`:76-117`) states the rules in prose ("Completed → any",
+     "Cancelled → any", "Abandoned → any" and "Draft → terminal" are prohibited). No code enforces
+     them.
+2. **A governed merge publishes any status change on the run branch.**
+   - `MergeRunBranch` → `preflightCheck` (`core/engine/merge.go:65-110`) → `mergePrimary` merges
+     the whole branch (`:166-172`).
+   - No step compares an artifact's status on `main` with its status on the branch. A run author
+     can reopen a Completed task, complete a sibling task or an initiative, or retire an ADR. The
+     review approved the run's work, not these side edits.
+3. **The cascade stamps artifacts the run does not govern.**
+   - `applyCommitStatus` (`merge.go:599-684`) rewrites `status:` on `run.TaskPath` plus every `.md`
+     artifact *added* on the branch (`cascadePaths`, `:688-719`, `d.Status == "added"` at `:704`).
+     It does this in standard (execution) runs as well as planning runs.
+   - The rewrite is a regex (`rewriteStatusField`, `:723-735`) with no check that the new status
+     exists for that artifact's type, or that the old status may move to it.
+   - The cascade was designed for planning runs: one creation review promotes the planned package
+     Draft → Pending (INIT-008 TASK-016). A task-default run that adds a follow-up Task or an ADR
+     therefore mints it `Completed`, and an ADR cannot hold that status.
+   - *Correction to the plan summary:* today's cascade does **not** rewrite every artifact the
+     author touched. Modified artifacts are not cascaded. Their direct status edits merge
+     unchecked (item 2).
+4. **Status-conflict rules never block.**
+   - SC-001..SC-005 all emit `Severity: "warning"` (`core/validation/rules_status.go:34`, `:111`,
+     `:144`, `:181`).
+   - `Engine.Validate` (`core/validation/engine.go:233-251`) and `EvaluatePreconditions`
+     (`core/validation/precondition.go:43-63`) only fail on errors. The engine's
+     `cross_artifact_valid` check (`core/engine/step.go:758-783`) blocks only on
+     `Status == "failed"`.
+   - So a Completed epic with open tasks (SC-002), or a Completed initiative with open epics
+     (SC-003), is never refused anywhere.
+5. **Workflows can declare impossible targets.**
+   - `workflow.Service.Create/Update` (`core/workflow/service.go:76-105`, `writeAndCommit`
+     `:119-197`) run `workflow.Validate` (`:133-136`). `Validate` (`core/workflow/parser.go:490-508`)
+     never looks at `commit.status`.
+   - `architecture/workflow-validation.md` §5.5 (`:245-251`) and §7.1 (`:297-301`) already list
+     "invalid `commit.status` for the governed artifact type" as an **error** (`:409`). It was
+     never implemented.
+
+**Reproduced (design-phase PoC, real `git.CLIClient` + real `MergeRunBranch`, via
+`go test -overlay` on `61994fe`):**
+
+- `TestPOC_P321_StandardRunPublishesAnyStatus`: standard run on `task-001` (Pending, outcome
+  commit `Completed`). The branch also edits `task-002` Completed → Draft and `INIT-001`
+  Pending → Completed, and adds `task-003` (Draft) and `ADR-0099` (Proposed).
+  - Result: the merge completes.
+  - `main` ends with `task-002` = **Draft**, `INIT-001` = **Completed**, `task-003` =
+    **Completed** and `ADR-0099` = **Completed**.
+- `TestPOC_P321_OwnedIllegalTransition`: a Completed task with outcome commit `Pending` lands on
+  `main` as `Pending`.
+- `TestPOC_P321_WorkflowCreateAcceptsForeignCommitStatus`: `workflow.Service.Create` commits an
+  `applies_to: [Task]` workflow whose outcomes set `commit.status: Accepted` and `Shipped`, and
+  `ValidateBody` returns `passed`.
+- `TestPOC_P321_PlanningCascadeSequence`: the legitimate planning cascade (epic + 2 tasks, Draft →
+  Pending) touches exactly the three added artifacts. This is the shape that must keep working.
+- The audit's `poc/gap2-git-state-concurrenc/smp_cascade_sequence` was re-run against SMP
+  `80995559`. It fails at `Merge pre-fetch: git fetch: exit status 1`, which is P3-2
+  (`internal/customer/spinecore/gitplumbing.go:193`, owned by SMP TASK-002), not P3-21. It is used
+  here only as the shape of the cascade-scope check (AC 8).
+
+### Attackers and reach
+
+- **A1 (run-branch content author: agent, runner job, contributor)** writes the status edits or
+  the new artifacts.
+- **A2 (workspace member)** in SMP can drive a run end to end (P3-3 self-assign; separate tasks).
+- **Both surfaces.** SMP embeds the same `MergeRunBranch`, the same cascade and the same rules
+  (`internal/customer/spinecore/factory.go:109-252`, `:275-295`). Standalone is the same code.
+
+### Impact
+
+- Integrity of the governed lifecycle only. There is no confidentiality and no availability
+  impact.
+- The status on `main` is what boards, blocking (`blocked_by` resolution), SC rules, workflow
+  binding preconditions (`artifact_status`) and humans rely on.
+- A run can therefore:
+  - un-block or re-block other tasks;
+  - make a task eligible for another run (Completed → Pending);
+  - mark an initiative done;
+  - mint "Completed" work that never had its own review.
+- Severity P3 (corrected): it needs run-branch write access and a merged run. Combined with F2/F3
+  it removes any independent guarantee that lifecycle status reflects a governance decision.
+
+---
+
+## Design
+
+### 0. Invariants
+
+1. **Opt-in.** Every behaviour below is gated by one of three options whose zero value is today's
+   behaviour, byte for byte: a nil lifecycle on the orchestrator, a nil lifecycle on
+   `workflow.Service`, and an empty blocking set on `validation.Engine`. The existing tests in
+   `core/engine/merge_test.go:513-750` and `core/validation/engine_test.go:386` stay unchanged and
+   green.
+2. **Standalone `spine serve` turns all three on** (§6). SMP turns them on in SMP TASK-011.
+3. **One choke point.** Everything a run changes reaches `main` through `MergeRunBranch`. The
+   lifecycle is enforced there, against the **bound SHA** (TASK-005), before any ref advances.
+   Write-time checks in `artifact.Service` cannot see runner pushes through the git gateway.
+
+   > **Design-check note (2026-10-06) — DC-2: the lifecycle requires merge binding.**
+   > TASK-005 is itself opt-in (`EnableMergeBinding`). With binding on, it moves the cascade out of
+   > `preflightCheck` into `resolveMergeSource` step 3 (`applyCommitStatusAt`, which degrades to a
+   > Warn on error and runs only when `status` is set). With binding off, the plan below would
+   > read the run-branch tip while `mergePrimary` merges whatever the tip is later, so a push
+   > between the two bypasses every rule (the F2 window). Therefore:
+   > - The lifecycle plugs into TASK-005 §6 step 3, not into `preflightCheck` (§5 below is amended).
+   > - `MergeRunBranch` with `o.lifecycle != nil` and binding off refuses with
+   >   `domain.ErrUnavailable` ("status lifecycle requires merge binding"), like a nil policy. The
+   >   run stays `committing`; nothing is merged. This is a configuration error, not a violation.
+   > - Standalone `serve` already enables binding (TASK-005 §6/AC). SMP TASK-011 already depends on
+   >   SMP TASK-009 (binding). So the requirement costs no adoption step.
+4. **The "from" status is authoritative.** It is the status at the merge-base with `main`, never
+   the run branch's own value, which the run author controls.
+5. **Fail closed when on.** A git read, merge-base or diff failure, or a cascade write failure,
+   keeps the run in `committing` for a retry. It never degrades to "merge without checking". TASK-012
+   bounds the retries (P3-27).
+
+   > **Design-check note (2026-10-06) — DC-6: only retryable errors are transient.**
+   > "Any read failure retries" turns content the author controls into an endless `committing`
+   > loop: TASK-003's `BlobTooLargeError` (a `.md` over 4 MiB, `ErrKindPermanent`), a gitlink or
+   > other non-blob at a `.md` path, or a not-found for a path the diff itself lists. Rule:
+   > `errors.As(*git.GitError)` with `IsRetryable()` (and non-git store/transport errors) keep the
+   > run in `committing`. Every other read failure on a diff-listed path is a violation
+   > `unreadable_artifact` (permanent, routed like any refusal). A `CommitFilesOnto` (binding-on
+   > write) error stays transient.
+6. **Create/update only for workflows.** The `commit.status` check runs in
+   `workflow.Service.Create/Update/ValidateBody` only. It never runs in `workflow.Validate`, the
+   projection or the loaders (the TASK-011 rule): a stricter projection-time check could drop a
+   workflow that is already on `main`.
+7. **No runtime schema change.**
+   - The new step classification is a JSONB string (`step_executions.error_detail`, no CHECK).
+   - The merge-outcome row reuses the existing `precondition` class. A new class would need
+     `migrations/022_repository_merge_outcomes.sql:45-50` changed.
+8. **No interface additions SMP must implement.** `GitOperator`, `RunStore` and
+   `CrossArtifactValidator` are unchanged. The new validator hook is an optional interface found by
+   type assertion.
+9. **The status that is validated is the status that lands.** *(Added by design check, DC-1/DC-8.)*
+
+   > **Design-check note (2026-10-06).** The plan validates parsed YAML (`LifecycleFields`), but
+   > the bytes that land are written by the regex `rewriteStatusField` (`merge.go:723-735`) and
+   > then combined by `git merge`. Both can disagree with the parse (design-check PoCs, Design
+   > check section). The design therefore re-parses every rewritten file before the cascade commit
+   > (R1, §5) and checks the merge result before any push (V1, §5).
+10. **Same path scope as the projection.** *(Added by design check, DC-5.)* The lifecycle judges
+    exactly the paths the projection treats as artifacts, keyed the same way (§5 "Path scope").
+
+### 1. `core/domain/artifact_lifecycle.go` (new): the declared table
+
+```go
+// StatusLifecycle declares, per Markdown artifact type, the statuses an
+// artifact may be created with and the status transitions a governed change
+// may make. Immutable; safe for concurrent use. A nil *StatusLifecycle is
+// "no enforcement" wherever it is accepted as an option.
+type StatusLifecycle struct{ types map[ArtifactType]typeLifecycle }
+
+type StatusTransition struct{ From, To ArtifactStatus }
+
+func DefaultStatusLifecycle() *StatusLifecycle                       // the seeded table below
+func (l *StatusLifecycle) Types() []ArtifactType                     // sorted
+func (l *StatusLifecycle) States(t ArtifactType) []ArtifactStatus    // declared states, sorted
+func (l *StatusLifecycle) IsState(t ArtifactType, s ArtifactStatus) bool
+func (l *StatusLifecycle) IsInitial(t ArtifactType, s ArtifactStatus) bool
+// Allows reports whether from -> to is a declared edge. Identity (from == to)
+// is allowed when from is a declared state. Unknown types and undeclared
+// statuses are never allowed.
+func (l *StatusLifecycle) Allows(t ArtifactType, from, to ArtifactStatus) bool
+func (l *StatusLifecycle) Transitions(t ArtifactType) []StatusTransition // sorted, for docs and golden tests
+```
+
+**Seeded table.** It is seeded so that every `commit.status` effect in both shipped corpora (§7)
+is accepted. Prohibitions follow `governance/task-lifecycle.md` §4.3. Every terminal status is
+final.
+
+| Type | Initial (may be created with) | Transitions |
+|---|---|---|
+| Initiative, Epic | Draft, Pending | Draft → Pending, Superseded · Pending → In Progress, Completed, Superseded · In Progress → Completed, Superseded |
+| Task | Draft, Pending | Draft → Pending, Cancelled · Pending → In Progress, Completed, Cancelled, Rejected, Superseded, Abandoned · In Progress → Completed, Cancelled, Rejected, Superseded, Abandoned |
+| ADR | Proposed | Proposed → Accepted, Deprecated, Superseded · Accepted → Deprecated, Superseded |
+| Governance | Living Document, Foundational | Living Document ↔ Foundational · Living Document → Superseded · Foundational → Superseded |
+| Architecture, Product | Living Document, Stable | Living Document ↔ Stable · Living Document → Superseded · Stable → Superseded |
+
+- **Final statuses:** Completed, Cancelled, Rejected, Abandoned, Superseded and Deprecated have no
+  outbound edge.
+- **`Workflow` is not in the table.** Workflow definitions carry no status front matter.
+- **Task `In Progress`.**
+  - It is declared because SMP's `task-default` commits it
+    (`workflows/task-default.yaml:41-45` in SMP) and SMP's board maps it
+    (`internal/customer/board/seeder.go:59`).
+  - It is **not** in `ValidStatusesForType(Task)` (`artifact.go:87`), and
+    `governance/task-lifecycle.md` §3.3 calls it runtime-only. This task does not change either
+    (Owner question 3).
+- **States ⊇ `ValidStatusesForType(t)`** for every type, so no status that validates today
+  becomes undeclared.
+
+> **Design-check note (2026-10-06) — DC-9: undeclared statuses already on `main`.** "Validates
+> today" is not "present today": `artifact.Parse` never checks status values, so real repositories
+> hold undeclared ones. Counted on the two repos at the audited commits (`.md` with front matter,
+> `templates/` and `tmp/` excluded): Spine has `Product: Draft` (1); SMP's own repo has
+> `Architecture: Active` (7), `Product: Draft for Review` (2) and `ADR: Superseded by ADR-027` (1).
+> Customer workspaces can hold the same. Consequences, by rule:
+> - N1 compares raw values, so a run that edits such an artifact's body without touching its
+>   status merges (pinned by AC 25 so an implementation does not refuse undeclared bases).
+> - A run that normalises the status (e.g. `Active` → `Living Document`) is refused
+>   `non_owned_status_change`; a run that *owns* such an artifact is refused `undeclared_status`.
+>   Normalisation goes through a direct authoritative write (out of scope, follow-up 2).
+> - `KNOWN-LIMITATIONS.md` gets this residual (§10).
+
+### 2. `core/artifact/parser.go`: one reader for type and status
+
+Add `LifecycleFields(content []byte) (domain.ArtifactType, domain.ArtifactStatus, bool)` next to
+`IsArtifact` (`:249-272`).
+
+- It uses the same `splitFrontMatter` + `yamlsafe.Decode` + struct decode as `Parse`, so the
+  lifecycle reads exactly what the projection reads. No second parser and no regex read.
+- `ok` is false when there is no front matter or `type` is not in `ValidMarkdownArtifactTypes()`.
+- The status may be `""` (status line removed). The caller treats that as a status change.
+
+> **Design-check note (2026-10-06).** `LifecycleFields` is also the reader for R1 (re-parse of
+> every rewritten file) and V1 (merge-result check) in §5, so all three judgements use one
+> decoder. Verified on `61994fe`: yaml.v3 rejects a duplicate `status:` key ("mapping key already
+> defined"), so such a file is `ok == false`; with DC-3 that is a refusal for a non-owned artifact
+> that existed at base, not "stopped being an artifact, ignored".
+
+### 3. `core/workflow`: commit-status check at create/update
+
+- **New `commit_status.go`:**
+  ```go
+  // ValidateCommitStatuses implements architecture/workflow-validation.md §5.5
+  // rule 1: every outcome's commit.status must be a declared lifecycle status of
+  // every applies_to type. nil lifecycle → nil. Never called from Validate.
+  func ValidateCommitStatuses(wf *domain.WorkflowDefinition, l *domain.StatusLifecycle) []domain.ValidationError
+  ```
+  - Every step's outcomes are walked, and `commit["status"]` is checked when it is non-empty.
+  - `applies_to: Workflow` with a `commit.status` is an error. The `merge` key is ignored.
+  - Error shape: `RuleID: "commit_status"`, `Severity: "error"`,
+    `Field: "steps[i].outcomes[j].commit.status"`. Message:
+    `commit.status "Accepted" is not a status of Task (declared: …)`.
+- **`Service`** (`service.go:44-52`) gets a `lifecycle *domain.StatusLifecycle` field and a
+  setter, `func (s *Service) WithStatusLifecycle(l *domain.StatusLifecycle)`.
+  - This is the setter style of `artifact.Service.WithPolicy` and `Orchestrator.With*`.
+    `NewService`'s signature is unchanged (TASK-014 also edits this type, see §9).
+- **`writeAndCommit`** (`:133-136`): after `Validate(wf)` passes, refuse with
+  `ErrValidationFailed` + detail when `ValidateCommitStatuses` returns errors. This happens
+  **before** `enterBranch` (`:138`), so nothing is written or committed.
+- **`ValidateBody`** (`:273-287`): append the same errors when `s.lifecycle != nil`, so the
+  validate preview matches create.
+- **Untouched:** `Validate` / `ValidateSemantic` (`parser.go:470-508`), the projection, and the
+  binding/loader paths.
+
+### 4. `core/validation`: blocking status conflicts
+
+- **`engine.go`:**
+  ```go
+  var DefaultBlockingStatusConflicts = []string{"SC-002", "SC-003"}
+  // WithBlockingStatusConflicts promotes the named SC-* findings from warning
+  // to error. Unknown IDs are ignored (a unit test pins the default list).
+  func WithBlockingStatusConflicts(ids ...string) Option
+  func (e *Engine) BlockingStatusConflicts() []string // for wiring tests
+  ```
+- **Promotion is engine-level.** In the `Validate` loop (`:233-243`), a result whose rule ID is
+  in the set and whose severity is `"warning"` becomes `"error"`.
+  - `rules_status.go` is unchanged.
+  - `ValidateAll`, `EvaluatePreconditions` and `cross_artifact_valid` inherit the promotion.
+- **New merge-time hook:**
+  ```go
+  // ValidateStatusChange evaluates the SC-* rules against the projected artifact
+  // as if its status were newStatus (promotion applied). Not found in the
+  // projection → passed, nil. Store failure → error. Nil engine → passed.
+  func (e *Engine) ValidateStatusChange(ctx context.Context, artifactPath string, newStatus domain.ArtifactStatus) (domain.ValidationResult, error)
+  ```
+  It copies the `ArtifactProjection`, sets `Status`, and runs only the status-conflict rules.
+  Children's statuses come from the projection. That is exact because the merge refuses
+  non-owned status edits (§5, rule N1).
+
+### 5. `core/engine`: run-owned cascade and the merge-time lifecycle
+
+**Option.**
+
+- `orchestrator.go:12-38` gets a field `lifecycle *domain.StatusLifecycle`.
+- Setter `func (o *Orchestrator) WithStatusLifecycle(l *domain.StatusLifecycle)`, and accessor
+  `StatusLifecycle()`.
+
+**Optional validator hook** (`interfaces.go`, next to `CrossArtifactValidator` at `:85-87`):
+
+```go
+// StatusChangeValidator is implemented by *validation.Engine. When the
+// orchestrator's validator implements it and the lifecycle option is on, owned
+// status changes are also checked against the blocking SC rules.
+type StatusChangeValidator interface {
+	ValidateStatusChange(ctx context.Context, artifactPath string, newStatus domain.ArtifactStatus) (domain.ValidationResult, error)
+}
+```
+
+**New file `status_lifecycle.go`.**
+
+```go
+var ErrStatusLifecycleViolation = errors.New("status lifecycle violation")
+
+type StatusLifecycleViolation struct {
+	Path     string
+	Type     domain.ArtifactType
+	From, To domain.ArtifactStatus
+	Reason   string   // stable codes below
+	Rules    []string // SC rule IDs for reason "status_conflict"
+}
+
+type StatusLifecycleError struct{ Violations []StatusLifecycleViolation }
+
+func (e *StatusLifecycleError) Error() string // "status_lifecycle_violation: <path>: <reason> (<type> <from> -> <to>); …" (first 20, then "and N more")
+func (e *StatusLifecycleError) Is(target error) bool // == ErrStatusLifecycleViolation
+
+// planStatusLifecycle evaluates the bound diff. It returns the owned paths to
+// rewrite (with the content it read at the bound SHA) or the violations. A git
+// error is returned as-is (transient; the caller keeps the run in committing).
+func (o *Orchestrator) planStatusLifecycle(ctx context.Context, run *domain.Run, newStatus string) (*lifecyclePlan, error)
+```
+
+**Inputs.**
+
+- `tip` is the ref TASK-005's `applyCommitStatus` reads, the bound SHA.
+- `base := MergeBase(main, tip)`.
+- `diffs := Diff(base, tip)`.
+- Both use the existing `GitOperator` methods (`interfaces.go:161-175`).
+
+> **Design-check note (2026-10-06) — DC-2: `tip` is `bound`, always.** With DC-2 the lifecycle
+> runs only under binding, so `tip` is `run.CommitMeta["spine.bound_sha"]` as validated by
+> TASK-005 `resolveMergeSource` steps 1–2 (`VerifyCommit`). It is never `run.BranchName`.
+
+> **Design-check note (2026-10-06) — DC-5: path scope and `artifacts_dir`.** `run.TaskPath` is
+> *artifact-relative*: `StartRun` reads it through `artifact.Service.Read`
+> (`core/engine/run.go:132`), which prefixes `artifacts_dir` (`core/artifact/service.go:84-92`).
+> `Diff` paths are *repo-relative*. Today's cascade reads `run.TaskPath` raw
+> (`merge.go:606`), so with `artifacts_dir: spine` (the `spine init-repo` default,
+> `service/cmd/spine/cmd_init_repo.go:27`) the TaskPath read fails, the error is swallowed, and
+> `commit.status` is silently not applied (design-check PoC `artifacts_dir_test.go`). With the
+> lifecycle on, the same miss would become `not_an_artifact` on every such run, and the run's own
+> repo-relative file would be judged non-owned. Therefore:
+> - New setter `Orchestrator.WithArtifactsDir(dir string)` (zero value = repo root, today's
+>   behaviour; SMP sets no `ArtifactsDir`, so SMP needs no call). Standalone wiring passes
+>   `spineCfg.ArtifactsDir` in `buildOrchestrator` and the per-workspace orchestrator (§6).
+> - `ownedKey := repoRelative(run.TaskPath)`; reads and rewrites use repo-relative paths.
+> - Only diff paths the projection treats as artifacts are judged: inside `<dir>/` when a dir is
+>   set, ending `.md`, and not under `templates/` (`artifact.IsTemplatePath` on the stripped
+>   path). This is TASK-011 §5's `pathScope.artifactKey`; to share it without an
+>   `adapters/projection` import from `core/engine`, TASK-011 or this task moves the predicate to
+>   `core/artifact` (exported, e.g. `artifact.ScopeKey(artifactsDir, repoPath)`). Out-of-scope
+>   paths are ignored because the projection never reads them.
+> - **Depends on TASK-011 (P3-23).** Until incremental sync is scoped, an out-of-tree
+>   `initiatives/…/task.md` collides with the governed `spine/initiatives/…/task.md` row, so an
+>   *ignored* out-of-scope addition could rewrite a governed status in the projection.
+
+**Ownership** (Owner question 2):
+
+- `run.TaskPath` is always owned.
+- In a **planning** run (`run.Mode == domain.RunModePlanning`), every `.md` artifact with diff
+  status `added` is also owned (the TASK-016 package cascade).
+- In a **standard** run, added artifacts are **not** owned and are not cascaded.
+- Renamed, modified and deleted paths are never owned.
+
+> **Design-check note (2026-10-06) — DC-7: renames onto the TaskPath.** "Renamed paths are never
+> owned" and "`run.TaskPath` is always owned" collide when the diff reports the TaskPath as a
+> rename target. Example (planning run): the branch deletes its drafted TaskPath and
+> `git mv`s a non-owned `Completed` task onto it; `git diff --name-status` reports
+> `R100 task-002.md → <TaskPath>`. Rule: the TaskPath stays owned, but whether it "exists at
+> `base`" is judged through `OldPath` when the entry is a rename. So this case is O1 with
+> `S_base = Completed` and `final = Pending` → `illegal_transition`, not O2 (which would stamp the
+> completed task `Pending` under a new path). The `OldPath` side is also checked by DC-3 (N3).
+
+**Rules.** For each `.md` path that is a lifecycle artifact (`LifecycleFields` ok) at `tip`
+(type `T`, tip status `S_tip`). `S_base` is its status at `base`; for a rename, that is
+`OldPath`'s status. `final` is `newStatus` if the path is owned and `newStatus != ""`, else
+`S_tip`.
+
+| # | Case | Rule | Reason code on failure |
+|---|---|---|---|
+| O1 | Owned, exists at `base` | `T` unchanged and `Allows(T, S_base, final)` | `type_changed`, `undeclared_status`, `illegal_transition` |
+| O2 | Owned, new (planning additions; TaskPath absent at `base`) | `IsState(T, final)` | `status_not_in_type` |
+| O3 | `run.TaskPath` with `newStatus != ""` but not a lifecycle artifact at `tip` | — | `not_an_artifact` |
+| O4 | O1 transition with `S_base != final`, validator implements `StatusChangeValidator` | no blocking (`Severity: error`) finding | `status_conflict` (+ rule IDs) |
+| N1 | Not owned, exists at `base` (modified/renamed) | `T` unchanged and `S_tip == S_base` | `type_changed`, `non_owned_status_change` |
+| N2 | Not owned, new (standard-run additions; a modified file that becomes an artifact) | `IsInitial(T, S_tip)` | `illegal_initial_status` |
+| Q | Diff path that is C-quoted and ends `.md"` | — (transitional guard until TASK-003 / SMP TASK-003 land `-z`) | `unparseable_path` |
+
+> **Design-check note (2026-10-06) — rows added or changed by the design check.**
+>
+> | # | Case | Rule | Reason code on failure |
+> |---|---|---|---|
+> | O1′ (DC-4) | Owned, exists at `base`, `newStatus == ""` | `T` unchanged and `S_tip == S_base`: with no declared effect, the run may not change its own artifact's status either | `status_change_without_effect` |
+> | O2′ (DC-4) | Owned, new, `newStatus == ""` | `IsInitial(T, S_tip)` (the N2 rule) | `illegal_initial_status` |
+> | O3′ (DC-3) | `run.TaskPath` (`.md`) that is a lifecycle artifact at `base` but not at `tip` (deleted, unparseable, retyped), whatever `newStatus` is | — | `not_an_artifact` |
+> | N3 (DC-3) | Not owned, a lifecycle artifact at `base`, and at `tip` deleted, renamed to an out-of-scope or non-`.md` path, or no longer `LifecycleFields`-ok (unparseable — e.g. a duplicate `status:` key —, retyped to an unknown type, replaced by a symlink or gitlink) | — | `non_owned_removal` |
+> | R1 (DC-1) | Owned path rewritten to `final` | `LifecycleFields(rewritten)` is ok, same `T`, status `== final`; and a rewrite that leaves the bytes unchanged while `final != S_tip` is a failure | `status_rewrite_failed` |
+> | U (DC-6) | Any diff-listed path whose read at `base` or `tip` fails non-retryably | — | `unreadable_artifact` |
+> | Q′ (DC-7) | Rule Q also applies to a C-quoted `OldPath` | — | `unparseable_path` |
+>
+> - **Why O2 needs O2′.** O2 only asks `IsState(T, final)`. With no `commit.status`, `final` is
+>   the author's own `S_tip`, so a planning run whose workflow declares no status effect
+>   (`workflow-lifecycle` is planning mode, `core/engine/run.go:349`, `merge` only) could add a
+>   Task authored `Completed` and land it `Completed` — exactly the "mint Completed work" impact.
+>   D6's "normalised to the declared target" argument only holds when a target exists.
+> - **Why O1′.** Likewise, an owned TaskPath under a workflow whose merging path sets no
+>   `commit.status` could move itself along any legal edge (e.g. `Pending → Completed`) that the
+>   workflow never declared. No shipped workflow merges a `.md` TaskPath without a status effect
+>   (§7 corpus), so this costs nothing today. Owner question 7.
+> - **Why N3.** "Deleted, or stopped being an artifact → ignored" (below) leaves three P3-21
+>   impacts open: (a) *reopen by recreate* — delete a `Completed` task and re-add the same `id` at
+>   another path with < 50 % similarity, so `git diff` reports `D` + `A` instead of `R`; the add
+>   passes N2 as `Draft`, or in a planning run is owned and stamped `Pending`; (b) *re-block* — a
+>   missing blocker counts as blocking (`core/engine/blocking.go:62-66`,
+>   `adapters/projection/service.go:478-482`), so deleting one blocker re-blocks every dependent;
+>   (c) *freeze* — an unparseable file is skipped by `DiscoverChanges`, leaving a stale projection
+>   row. Deletion of an artifact *added on the same branch* has no base and is unaffected; the
+>   owned TaskPath is covered by O3′. No shipped Spine or SMP flow deletes governed artifacts on a
+>   run branch (checked: no delete call in `core/engine`, none in SMP `internal/`). Owner
+>   question 6.
+
+**Further rules.**
+
+- Deleted paths, and paths that stop being artifacts, are ignored (follow-up 1).
+  - **Design-check note (2026-10-06):** superseded by N3 for non-owned artifacts that existed at
+    `base`. Still ignored: paths with no lifecycle artifact at `base`.
+- Non-`.md` paths are ignored, except that a non-`.md` TaskPath is skipped silently when
+  `newStatus == ""` (workflow-lifecycle).
+- A `ValidateStatusChange` store error is transient, not a violation.
+
+**`applyCommitStatus` (`merge.go:599-684`), as TASK-005 leaves it.**
+
+- When `o.lifecycle != nil`:
+  - The path set and contents come from `planStatusLifecycle` instead of `cascadePaths` and the
+    per-path read loop.
+  - Violations return `*StatusLifecycleError` **before** any checkout or write.
+  - The rewrite (`rewriteStatusField`) and the single cascade commit (message and trailers
+    unchanged) run only for owned paths whose `final != S_tip`.
+- When `o.lifecycle == nil`, today's code path runs unchanged (`cascadePaths`, best-effort
+  degrade).
+
+> **Design-check note (2026-10-06) — DC-2: the hook is `applyCommitStatusAt`, not
+> `applyCommitStatus`.** Under binding, TASK-005 §7 replaces the cascade with
+> `applyCommitStatusAt(ctx, run, status, bound)` (paths from `cascadePathsAt(bound)`, reads at
+> `bound`, writes through `CommitFilesOnto(bound, …)`, branch ref never moves), called from
+> `resolveMergeSource` step 3, and leaves `applyCommitStatus` for binding-off only. With the
+> lifecycle on:
+> - `resolveMergeSource` step 3 calls the lifecycle variant **even when `status == ""`**, and does
+>   not apply TASK-005's "on error, log at Warn and use `bound`": a `*StatusLifecycleError` goes to
+>   `refuseStatusLifecycle`; any other error returns (run stays `committing`).
+> - The paths and contents come from `planStatusLifecycle(…, bound)`; the cascade commit is
+>   `CommitFilesOnto(bound, updates)` with today's message and trailers, so `src.sha`'s parent is
+>   `bound` and the merge source is exactly the evaluated tree plus the verified rewrites.
+> - **R1** runs on each rewrite before `CommitFilesOnto`: `rewriteStatusField` output must
+>   re-parse through `LifecycleFields` to the same type and `final`. Verified on `61994fe`
+>   (design-check PoCs `rewrite_differential_test.go`, `owned_quoted_key_test.go`): the regex
+>   `(?m)^status:\s*.*$` (`merge.go:585`) does not touch `"status": X`, `'status': X`,
+>   `status : X` or `? status\n: X`, which yaml.v3 reads as the status; a continuation line
+>   (`status: Pending\n  Completed`) parses as `"In Progress Completed"` after the rewrite. Through
+>   the real `MergeRunBranch`, an owned task authored `"status": Completed` with outcome
+>   `commit.status: In Progress` (SMP `task-default` ≤ 8.0) lands **`Completed`**; O1 alone checks
+>   only `Pending → In Progress` and passes. SMP's task-action rewrite
+>   (`internal/customer/spineembedded/embedded_tasks.go:314-340`) has the same regex; it is a
+>   direct write (follow-up 2).
+> - `applyCommitStatus` (binding off) is untouched, so `merge_test.go:513-750` stays green.
+
+> **Design-check note (2026-10-06) — DC-8: V1, the merge-result check.** D3 says a main-side
+> status change since the merge-base "makes git conflict on the `status:` line anyway". That is
+> false when `main` carries `*.md merge=union` in `.gitattributes`: git keeps both lines, the
+> merge succeeds, and the file lands with two `status:` keys (unparseable, so it freezes in the
+> projection). Design-check PoC `union_merge_test.go` reproduces it through the real
+> `MergeRunBranch` on `61994fe` (owned task `Pending` at base, `Cancelled` on `main` after the
+> fork, outcome `Completed`). A `.gitattributes` on `main` needs a reviewed merge (TASK-006 does
+> not list it as a governed path), so this is defence in depth, but it is cheap:
+> - In TASK-005's `verifyBoundMerge`, after `IsAncestor(src.sha, M)` and **before any push**, for
+>   every path the plan judged: `E(p)` is `final` for an owned path that is new at `base` or whose
+>   status the plan changes (`final != S_base`), `S_tip` for a non-owned path new at `base`, and
+>   otherwise the status of `p` at `mergeResult.BaseSHA` (main before the merge). `LifecycleFields(M:p)` must be ok, with the
+>   plan's type and status `E(p)`.
+> - A mismatch is a `*StatusLifecycleError` with reason `merge_result_mismatch`, handled exactly
+>   like TASK-005's post-merge violations (outcome recorded, `handlePermanentMergeFailure`, nothing
+>   pushed). Its standalone caveat (the local `main` already holds `M` when auto-push is off) is
+>   TASK-005's and TASK-012's to resolve, not a new one.
+> - Cost: one read at `M` and at most one at `BaseSHA` per judged path. It also catches any
+>   residual rewrite/merge differential and a criss-cross history where `git merge-base` returns a
+>   different base than the one `git merge` uses. Owner question 8.
+
+**`preflightCheck` (`merge.go:100-107`).**
+
+> **Design-check note (2026-10-06):** with DC-2 this hunk applies only if the owner rejects the
+> binding requirement (Owner question 9). Under binding, TASK-005 already restricts
+> `preflightCheck`'s cascade block to binding-off, and the lifecycle lives in
+> `resolveMergeSource` (note above). The ordering claim of §9 ("lifecycle after the
+> branch-protection/path guard") still holds: TASK-006's guard runs in `preflightCheck`, before
+> `resolveMergeSource`.
+
+```go
+if o.lifecycle != nil {
+	if err := o.applyCommitStatus(ctx, run, run.CommitMeta["status"]); err != nil {
+		if le := (*StatusLifecycleError)(nil); errors.As(err, &le) {
+			return nil, true, o.refuseStatusLifecycle(ctx, run, le)
+		}
+		return nil, false, fmt.Errorf("apply commit status: %w", err) // fail closed: stays committing
+	}
+} else if newStatus := run.CommitMeta["status"]; newStatus != "" {
+	// unchanged: log.Warn and proceed (contract at :62-64)
+}
+```
+
+- With the option on, the evaluation runs even when there is no `commit.status`, because non-owned
+  edits still have to be checked.
+- The doc comment at `:52-64` is updated.
+- TASK-004 OQ3 decides the option-off swallow. This task only changes the option-on path.
+
+**Refusal (`refuseStatusLifecycle`).**
+
+1. `log.Warn` and `observe.AuditLog(ctx, "status_lifecycle_refused", "run_id", …, "violations", …)`.
+2. `recordPrimaryMergeOutcome(ctx, run, "", le, "")`. If that errors, return the error (the run
+   stays committing).
+3. `handlePermanentMergeFailure(ctx, run, le)` (`:309-322`).
+   - With a publish step: `merge_failed` → the run is routed back (`handlers.go:206-236`).
+   - Without one: the run fails (`failRunOnMergeError`).
+   - No ref has advanced. Code-repo merges have not started, because preflight runs before
+     `mergeCodeRepos`.
+
+> **Design-check note (2026-10-06) — refusal routing.**
+> - Under DC-2 the refusal happens in `resolveMergeSource`, which also runs before
+>   `mergeCodeRepos` (TASK-005 §6 order), so the "nothing advanced" claim holds. A V1
+>   (`merge_result_mismatch`) refusal happens after the local merge and before any push, with
+>   TASK-005's post-merge handling.
+> - Only Spine's `task-default` has a publish step (`workflows/task-default.yaml:106-111`). Every
+>   other Spine workflow (`epic-lifecycle`, `artifact-creation`, `adr*`, `document-creation`,
+>   `task-spike`) therefore **fails the run** on any refusal; the author starts a new run.
+> - Liveness (Owner question 10): a violation the author cannot fix on the branch — the workflow's
+>   own target is illegal from `main`'s state (e.g. `task-default` started on a task that was
+>   `Completed` on `main`), or `S_base` is undeclared (DC-9) — routes back to `execute` on every
+>   attempt in a publish-step workflow. Default: keep the route-back (the classification and
+>   detail are visible); the alternative is to fail the run for violations whose `To` is the
+>   workflow's `newStatus` and whose `From` is `S_base`.
+> - SC gate lag: O4 reads the projection, so within one sync interval after the last child merges
+>   (standalone polls every 30 s, `serve_wiring.go:287`) an epic completion can be refused
+>   `status_conflict` although `main` is consistent. For `epic-lifecycle` (no publish step) that
+>   fails the run. Recorded in `KNOWN-LIMITATIONS.md` (§10); follow-up 7 removes it.
+
+**Distinct classification.**
+
+- `core/domain/step.go:42-48`: add `FailureStatusLifecycle FailureClassification =
+  "status_lifecycle_violation"` (not retryable).
+- `recordGitConflictOnStep` (`merge.go:471-509`): `errors.As(*StatusLifecycleError)` →
+  `FailureStatusLifecycle`.
+- `classifyMergeFailure` (`multi_repo_merge.go:293-341`): first branch, `*StatusLifecycleError` →
+  `(domain.MergeFailurePrecondition, err.Error())`. The detail therefore starts
+  `status_lifecycle_violation:`. There is no new `MergeFailureClass` and no migration.
+
+### 6. Standalone wiring (`service/`)
+
+- `serve_wiring.go:281` and `internal/workspace/pool.go:948`:
+  `workflowSvc.WithStatusLifecycle(domain.DefaultStatusLifecycle())`.
+- `serve_wiring.go:334-340` and `pool.go:969-974`: add
+  `validation.WithBlockingStatusConflicts(validation.DefaultBlockingStatusConflicts...)`.
+- `serve_builders.go:249-283` (`buildOrchestrator`) and `serve_resolver.go:64-90` (per-workspace
+  orchestrator): `orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())`.
+- The gateway's workflow create/update/validate and reviewer planning-run workflow writes go
+  through these services, so they inherit the check. No new environment variable (Decision D9).
+- **Scenario harness.** Add a `harness.WithStatusLifecycle()` `EnvOption`
+  (`scenariotest/harness/environment.go`) that sets all three on the runtime it builds
+  (`runtime.go:108-170`). The default stays off, so existing scenarios are unchanged.
+- `cmd/embed-smoketest` is unchanged (zero value).
+
+> **Design-check note (2026-10-06) — wiring additions.**
+> - DC-5: `buildOrchestrator` and the per-workspace orchestrator also call
+>   `orch.WithArtifactsDir(<that workspace's spineCfg.ArtifactsDir>)` (`serve_wiring.go:288` and
+>   `pool.go:956` already pass the same value to the projection). That makes eight wiring lines;
+>   AC 13 covers all of them.
+> - DC-2: both orchestrators must also have binding on (TASK-005 wires it). AC 13 asserts
+>   `MergeBindingEnabled()` alongside `StatusLifecycle() != nil`.
+> - `harness.WithStatusLifecycle()` must also enable binding (TASK-005's harness option, or the
+>   same call), or every scenario using it refuses with the DC-2 configuration error.
+> - Behaviour change to record in `CHANGELOG.md`: with the blocking set on, standalone
+>   `GET /system/validate` (`service/internal/gateway/handlers_system.go:151`) and `spine validate`
+>   report SC-002/SC-003 as errors (status `failed`) where they reported warnings. No shipped
+>   workflow declares a `cross_artifact_valid` precondition (checked in both corpora), so step
+>   activation is unaffected by the promotion.
+
+### 7. Compatibility gate (both shipped corpora)
+
+Every `commit.status` effect and the transition it produces at merge must pass with the options
+on.
+
+- `workflows/*.yaml` are parsed at test time for Spine.
+- SMP's corpus is pinned as table rows, with its `file:line`, because Spine CI does not check out
+  SMP. SMP TASK-011 re-runs the same gate against SMP's live files.
+
+| Corpus | Workflow (applies_to) | `commit.status` (file:line) | Merge-time transition checked |
+|---|---|---|---|
+| Spine | adr-creation (ADR, planning) | Accepted `:68-72`, Deprecated `:76-80` | new Proposed → Accepted / Deprecated (O2) |
+| Spine | adr-review `adr.yaml` (ADR) | Accepted `:47-51`, Deprecated `:52-56` | Proposed → Accepted / Deprecated (O1) |
+| Spine | artifact-creation (Initiative, Epic, Task; planning) | Pending `:79-83` | new Draft → Pending, TaskPath + children (O2) |
+| Spine | document-creation (Governance, Architecture, Product; planning) | Living Document `:72-76` | new Living Document → identity, no cascade commit (O2) |
+| Spine | epic-lifecycle (Epic) | In Progress `:31-35`, Completed `:69-73` | Pending → In Progress / Completed; In Progress → Completed (O1) |
+| Spine | task-default (Task) | Completed `:83-87` | Pending → Completed (O1) |
+| Spine | task-spike (Task) | Completed `:31-35`, `:74-78` | Pending → Completed (O1) |
+| Spine | workflow-lifecycle (Workflow) | `merge` only `:57-65` | no status; TaskPath `.yaml` skipped |
+| SMP | adr-creation | Accepted `:70-74`, Deprecated `:78-82` | as Spine |
+| SMP | artifact-creation | Pending `:108-112` | new Draft → Pending; CreateEntry authors `status: Draft` (`internal/customer/spineembedded/artifact_entry_helpers.go:160`) |
+| SMP | document-creation | Living Document `:74-78` | identity; authored `Living Document` (`artifact_entry_helpers.go:288`) |
+| SMP | epic-lifecycle | In Progress `:30-34`, Completed `:66-70` | as Spine |
+| SMP | task-default (Task) | In Progress `:41-45`, Completed `:155-159` | **Pending → In Progress** (see note) |
+| SMP | task-spike | Completed `:30-34`, `:78-82` | Pending → Completed |
+
+**Note on SMP `task-default`.** This is pre-existing and outside this finding, but it matters to
+SMP TASK-011.
+
+- `commit.status: Completed` sits on the engine-owned `publish.published` outcome. That outcome
+  is advanced *after* the merge, by `advancePublishStepIfAny` (`core/engine/handlers.go:238-243`).
+  Only `merge_failed` is routed through `routeStepOutcome`, the one place that calls
+  `SetCommitMeta` (`core/engine/step.go:396-401`).
+- So the merge applies the `In Progress` that `execute.completed` set. Once SMP TASK-002 fixes
+  P3-2, SMP tasks will land on `main` as **In Progress**, not Completed.
+- Spine's own `task-default` puts `Completed` on `review.accepted` and does not have this problem.
+- The table accepts SMP's actual transition. The consequence for blocking SC-002 is handed to SMP
+  TASK-011 (§8).
+
+### 8. SMP: effect and what SMP TASK-011 must change
+
+**Without SMP TASK-011, nothing changes for SMP.**
+
+- All three options are off, `workflow.NewService`'s signature is unchanged, and no interface SMP
+  implements gains a method.
+- SMP `80995559` builds against this commit unchanged (AC 15).
+- The new `status_lifecycle_violation` string has no SMP enum to update (SMP has no switch over
+  classifications).
+
+**SMP TASK-011 (adopts P3-21.smp) must do the following.**
+
+1. **Orchestrator.** Call `orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())` in
+   `newOrchestratorWithRunStore` (`internal/customer/spinecore/factory.go:69-252`, next to
+   `WithBranchProtectPolicy` at `:209`).
+   - This one site covers `NewOrchestrator`, `Cache.Get` and `NewPlanningOrchestrator`
+     (`planningwriter.go:141-175`).
+2. **Workflow writes.** Call `svc.WithStatusLifecycle(domain.DefaultStatusLifecycle())` after
+   `workflow.NewService` in `NewWorkflowWriter` (`workflowwriter.go:343`).
+3. **Workflow validate preview.** `embeddedWorkflowValidate`
+   (`internal/customer/spineembedded/workflows.go:317-331`) mirrors `ValidateBody`. It must append
+   `workflow.ValidateCommitStatuses(wf, domain.DefaultStatusLifecycle())` errors so the validate
+   preview matches create.
+4. **Blocking set.** Choose it in `NewValidator` (`factory.go:275-295`).
+   - Promoting SC-002 while `task-default` leaves tasks `In Progress` (§7 note) would refuse every
+     `epic-lifecycle` completion.
+   - SMP TASK-011 either fixes `task-default` first, or ships with SC-003 only / no promotion and
+     records why. The fix is: move `commit: {status: Completed}` to `review.accepted` as Spine
+     does, bump the version and backfill through INIT-020 seeding.
+5. **SMP-side gate.**
+   - Every SMP `workflows/*.yaml` passes `ValidateCommitStatuses` with no errors (10
+     `commit.status` outcomes).
+   - Drive the real `MergeRunBranch` over `RealGitOperator` with the option on:
+     - an artifact-creation planning run (Epic + 2 Tasks, Draft → Pending) merges and cascades
+       exactly those three files;
+     - the `task-default` shape (Pending → In Progress) merges;
+     - a run that edits a non-owned task's status is refused, and `main` is unchanged.
+   - Build this on the audit's `smp_cascade_sequence` PoC, which SMP TASK-002 commits as the P3-2
+     regression.
+6. **Revision bump.** Move `.spine-revision` to a Spine commit that contains this task. SMP
+   TASK-012 does the closing bump.
+
+> **Design-check note (2026-10-06) — SMP references and additions.**
+> - SMP TASK-003 (wave 1, `batch7/E4-TASK-003-validation-path-correctness.md`) deletes
+>   `factory.go:275-295`; the blocking set is then chosen in `newValidationEngine`
+>   (`internal/customer/spinecore/validator.go`), and the orchestrator's validator becomes a
+>   `*spinecore.Validator` that embeds `*validation.Engine`. `StatusChangeValidator` and
+>   `BlockingStatusConflicts()` are promoted through the embedding, so item 4 still works; SMP
+>   TASK-011's draft already records this.
+> - SMP has two validator instances (the orchestrator's, `factory.go:179`, and the
+>   `EmbeddedEngine`'s, `spineembedded/attach.go:111`, used by assign/automation-recovery
+>   `EvaluatePreconditions`). Both come from the same constructor, so one option site covers both.
+> - DC-2: SMP must enable binding (SMP TASK-009) before item 1; SMP TASK-011 already depends on it.
+> - DC-5: SMP sets no `ArtifactsDir`, so no `WithArtifactsDir` call is needed in SMP.
+> - The SMP-side gate (item 5) should add the DC-1 quoted-key case and the DC-3 delete case on the
+>   real `RealGitOperator` (SMP TASK-011 AC 12 is the natural home).
+> - Gate command: build SMP with `go build ./cmd/... ./internal/...` (a root `./...` also
+>   compiles ignored `tmp/` prototypes) and without a stale untracked `vendor/`.
+
+### 9. Coordination and ordering
+
+- **Depends on TASK-005.**
+  - That task moves `applyCommitStatus` and the cascade diff onto the bound SHA. This task reads,
+    diffs and writes at the ref TASK-005 uses, and adds no binding of its own.
+  - If TASK-005 names the ref differently, substitute it.
+- **TASK-006 (F3)** also refuses in `preflightCheck` (path guard), next to
+  `checkBranchProtectMerge` (`merge.go:84-98`).
+  - The hunks are adjacent but distinct.
+  - Whichever lands second reuses the same "refuse → record outcome → handlePermanentMergeFailure"
+    shape. Lifecycle evaluation runs **after** the branch-protection/path guard.
+- **TASK-004 (F5)** changes `CLIClient.WriteAndStageFile`, which the cascade uses.
+  - Its OQ3 governs the option-off swallow of cascade write errors.
+  - With the lifecycle on, this task already makes those errors fail closed.
+- **TASK-014 (F7)** adds a branch-protection call in `workflow.Service.writeAndCommit`.
+  - This task inserts only at `:133-136` and adds a setter, not a constructor parameter.
+- **TASK-003 (P3-9)** gives `Diff` `-z`. After it lands, rule Q is dead code (follow-up 6).
+- **TASK-007 / TASK-008** do not touch these functions. TASK-007 owns P3-4 (`EvaluatePreconditions`
+  fail-open), and TASK-008 owns compare-and-swap writes (P3-24).
+
+> **Design-check note (2026-10-06) — coordination corrections.**
+> - **TASK-005 is a hard dependency, and the insertion point is `resolveMergeSource` step 3 /
+>   `applyCommitStatusAt` (TASK-005 §6–§7), not `preflightCheck` and not `applyCommitStatus`**
+>   (DC-2). TASK-005's `applyCommitStatusAt` "on error, log at Warn and use `bound`" must not
+>   apply with the lifecycle on. V1 (DC-8) extends TASK-005's `verifyBoundMerge`.
+> - **TASK-004**: under binding the cascade writes through `CommitFilesOnto` (no working tree), so
+>   TASK-004's `WriteAndStageFile` change and its OQ3 concern only the binding-off path, which the
+>   lifecycle no longer uses.
+> - **TASK-006**: the lifecycle narrows the cascade's write set to owned paths, a subset of the
+>   diff plus `run.TaskPath`, so TASK-006 §3.2's changed-path set stays correct with no change.
+>   TASK-006's guard runs in `preflightCheck`, i.e. before the lifecycle.
+> - **TASK-003**: besides `-z` (rule Q), its `BlobTooLargeError` / `ErrKindPermanent` read errors
+>   are classified `unreadable_artifact` by DC-6, never retried.
+> - **TASK-011 (P3-23)** is a dependency for standalone deployments with `artifacts_dir` (DC-5),
+>   and the source of the shared path-scope predicate.
+> - **TASK-012** bounds retries; lifecycle refusals are permanent and must not count as retries.
+
+### 10. Documentation
+
+- `architecture/workflow-validation.md` §5.5: rule 1 is implemented by
+  `workflow.ValidateCommitStatuses` (create/update/validate only, opt-in; standalone on). Rules 2–3
+  are not enforced (follow-up 3).
+- `architecture/engine-state-machine.md`:
+  - §3.3.1: add the `status_lifecycle_violation` row.
+  - New §5.4 "Artifact status lifecycle (declared)": the table, the owned/non-owned rules and the
+    reason codes.
+- `architecture/git-integration.md` §5.3 (`:204-212`): the status cascade touches only owned
+  artifacts. With the lifecycle on, a refused cascade aborts the merge before any commit.
+- `KNOWN-LIMITATIONS.md`: residuals.
+  - Deletions are not lifecycle-checked.
+  - Direct authoritative writes (artifact API, task actions) are not checked.
+  - The SC merge gate reads the projection and can lag `main` by one sync.
+- `CHANGELOG.md` staging section: a "Security" entry naming the three options and that `serve`
+  enables them.
+
+> **Design-check note (2026-10-06) — documentation corrections.**
+> - `engine-state-machine.md` §5 is the *Branch* (divergence) state machine (§5.1–§5.3). Put the
+>   lifecycle in a new top-level section after §5 instead of "§5.4", without renumbering existing
+>   sections (cross-references point at them).
+> - That section also lists the design-check reason codes: `status_change_without_effect`,
+>   `non_owned_removal`, `status_rewrite_failed`, `unreadable_artifact`, `merge_result_mismatch`,
+>   and states that the lifecycle requires merge binding and uses the projection's path scope.
+> - `KNOWN-LIMITATIONS.md`: replace "Deletions are not lifecycle-checked" with "deleting an
+>   artifact owned by the run, or one added on the same branch, is not lifecycle-checked"; add
+>   undeclared statuses already on `main` (DC-9); keep the projection-lag item and add that an
+>   `epic-lifecycle` run refused within that window fails.
+> - `CHANGELOG.md`: also note the `/system/validate` and `spine validate` severity change (§6
+>   note), and that with the lifecycle on `commit.status` is applied under `artifacts_dir` (DC-5
+>   fixes today's silent miss there; the binding-off path is unchanged).
+
+---
+
+## Decisions
+
+- **D1 — The table is in code (`core/domain`), not in the repository.**
+  - *Rejected:* a `.spine/artifact-lifecycle.yaml` read through the projection.
+  - *Reason:* a run branch could rewrite the file and ride it into `main`. That is the same
+    slippage as F3, and it would need provenance checks before it could be trusted. A table in
+    code changes only with a Spine release.
+- **D2 — Enforce at the governed merge, on the bound diff.**
+  - *Rejected:* checks in `artifact.Service` writes.
+  - *Reason:* runners push run branches through the git gateway. Only the merge sees every change.
+- **D3 — The "from" status is the merge-base status.**
+  - *Rejected:* the run-branch tip.
+  - *Reason:* the tip is author-controlled. A merge-base/`main` difference that would matter makes
+    git conflict on the `status:` line anyway.
+  - **Design-check note (2026-10-06):** not unconditionally — a `*.md merge=union` attribute on
+    `main` merges both `status:` lines without a conflict (DC-8 PoC). The merge-base choice stays;
+    V1 checks the merge result so the reason no longer has to hold.
+- **D4 — Ownership is TaskPath, plus additions in planning runs.**
+  - *Rejected:* today's "TaskPath + every added `.md`" (it stamps foreign types and mints Completed
+    artifacts in execution runs).
+  - *Rejected:* "added and type ∈ `applies_to`" (it still mints terminal statuses in task runs).
+  - *Reason:* the cascade's design intent (INIT-008 TASK-016) is the creation-review package.
+- **D5 — Non-owned status edits are refused outright.**
+  - *Rejected:* "allowed if the transition is legal". The audit's exploit (sibling Pending →
+    Completed) is a legal transition.
+  - Owner question 1.
+- **D6 — Planning-owned additions need only a valid status for their type (O2).**
+  - *Rejected:* "authored status must be initial".
+  - *Reason:* the reviewed package is normalised to the workflow's declared target. Today an
+    authored Completed child already lands as Pending, and refusing that would regress SMP's
+    verify-children-less flows for no integrity gain.
+  - **Design-check note (2026-10-06):** holds only when the workflow declares a target. With
+    `newStatus == ""` there is nothing to normalise to, so O2′ applies the N2 rule (DC-4).
+- **D7 — The distinct classification lives in the step's JSONB `error_detail` and the existing
+  `precondition` merge class.**
+  - *Rejected:* a new `MergeFailureClass`. It needs a CHECK change in migration 022, which breaks
+    the no-runtime-schema rule.
+- **D8 — "Block" means two things:** severity promotion in the validation engine, and a
+  merge-time evaluation through an optional validator interface.
+  - *Rejected:* promotion only. Validation reads the projection of `main`, so a parent is never
+    "Completed" there before its own merge; promotion alone would only change reporting.
+  - *Rejected:* walking children at the bound SHA. It needs `ListFiles` on `GitOperator`, an
+    interface change SMP would have to implement.
+- **D9 — No standalone environment kill switch.**
+  - The library zero value is the rollback for embedders. Standalone operators pin the previous
+    release.
+  - Owner question 5 offers a switch.
+- **D10 — The `commit.status` check stays out of `workflow.Validate`.**
+  - *Reason:* TASK-011 adds `Parse`+`Validate` to projection sync. Putting the check there would
+    drop already-merged workflows at load (the TASK-011 rule).
+- **D11 — Fail closed on git errors when on.**
+  - *Rejected:* today's degrade to primary-only (`merge.go:689-701`). Non-owned edits would
+    then merge unchecked whenever `Diff` hiccups.
+  - **Design-check note (2026-10-06):** "fail closed" means *retry* only for retryable errors;
+    non-retryable read failures are permanent `unreadable_artifact` refusals (DC-6).
+- **D12 — The lifecycle requires merge binding.** *(Added by design check, DC-2.)*
+  - *Rejected:* evaluating the run-branch tip without binding. The tip can move between the
+    evaluation and `mergePrimary`, so every rule is bypassable by a well-timed push.
+  - *Rejected:* a second, lifecycle-only SHA pin. It duplicates TASK-005.
+- **D13 — Validate what lands, not only what was planned.** *(Added by design check, DC-1/DC-8.)*
+  - The regex writer and `git merge` are separate from the YAML reader. R1 re-parses each rewrite;
+    V1 re-reads the merge result. *Rejected:* a YAML-node writer instead of R1 — it would reformat
+    front matter on every cascade; R1 keeps today's byte-preserving rewrite and refuses the
+    exotic encodings it cannot handle.
+
+## Owner questions
+
+The design works without answers, using the stated defaults.
+
+1. **Non-owned status edits in a run.** Refuse every status change on an artifact the run does not
+   own, or allow those that are legal transitions? *Default:* refuse (D5).
+   - The lenient variant leaves the audit's "complete a sibling task" exploit open.
+2. **Execution-run additions.** Should a standard run's cascade stamp the artifacts it adds?
+   *Default:* no.
+   - Only planning runs cascade their additions.
+   - A standard run's new artifacts land with their authored status, which must be an initial
+     status: Draft/Pending for Initiative/Epic/Task, Proposed for ADR, Living Document /
+     Foundational / Stable for documents.
+3. **Task `In Progress`.** *Default:* declared in the table (so SMP's `task-default` passes).
+   `ValidStatusesForType(Task)`, artifact-schema §6 and task-lifecycle §3.3 are unchanged here.
+   - *Alternative:* leave it undeclared, and require SMP TASK-011 to drop
+     `commit.status: In Progress` from its `task-default` (seed + backfill).
+4. **Default blocking SC rules.** *Default:* SC-002 and SC-003 (a completed parent with open
+   children).
+   - SC-001 (acceptance missing) stays a warning: acceptance is recorded by a separate API after
+     the merge.
+   - SC-004 (superseded link) and SC-005 (in-progress task with an open blocker) stay warnings.
+5. **Standalone kill switch.** Add `SPINE_STATUS_LIFECYCLE=off` to `serve`? *Default:* no (D9).
+
+*Added by the design check (2026-10-06):*
+
+6. **Deleting governed artifacts the run does not own (N3, DC-3).** *Default:* refuse
+   (`non_owned_removal`), including "stops parsing" and retype-to-unknown.
+   - *Alternative:* allow deletions and accept the residuals: reopen-by-recreate (same `id`, new
+     path), re-blocking every dependent of a deleted blocker, and frozen projection rows.
+   - Runs that must retire an artifact set `Superseded` through a run that owns it.
+7. **Owned status change with no declared effect (O1′, DC-4).** *Default:* refuse
+   (`status_change_without_effect`); no shipped workflow merges a `.md` TaskPath without
+   `commit.status`.
+   - *Alternative:* allow any legal transition the author writes.
+8. **Merge-result check V1 (DC-8).** *Default:* include. *Alternative:* follow-up, relying on R1
+   plus git conflicts (accepting the `merge=union` gap).
+9. **Lifecycle without binding (DC-2).** *Default:* refuse to merge (configuration error).
+   - *Alternative:* evaluate the tip anyway and document the push-race bypass. Not recommended.
+10. **Violations the author cannot fix on the branch.** *Default:* route back like every refusal.
+    - *Alternative:* fail the run when the workflow's own `newStatus` is illegal from `S_base`, or
+      `S_base` is undeclared, so a publish-step workflow does not loop.
+
+## Acceptance Criteria
+
+1. **Declared table** (`core/domain/artifact_lifecycle_test.go`).
+   - `TestDefaultStatusLifecycle_Golden`: `Initial` and `Transitions(t)` for every type equal the
+     §1 table exactly. Adding or removing any edge fails it.
+   - `TestDefaultStatusLifecycle_Invariants`:
+     - every `ValidMarkdownArtifactTypes()` type is present and `Workflow` is not;
+     - `States(t) ⊇ ValidStatusesForType(t)`;
+     - every state is reachable from an initial state;
+     - Completed/Cancelled/Rejected/Abandoned/Superseded/Deprecated have no outbound edge;
+     - `Allows(t,s,s)` is true only for declared `s`;
+     - an unknown type is never allowed.
+   - A prohibited table is false, for example: Task Completed → Pending, Cancelled → Pending,
+     Draft → Completed, Draft → Superseded; ADR Accepted → Proposed; Epic Completed → In Progress.
+2. **Compatibility gate** (`core/workflow/commit_status_compat_test.go`).
+   - Every `workflows/*.yaml` in the repo parses and returns zero `ValidateCommitStatuses` errors.
+     The test asserts it saw **11** `commit.status` outcomes, so an empty glob cannot pass.
+   - Each §7 row (Spine and pinned SMP, **10** SMP outcomes) is accepted by the merge rule named in
+     its last column.
+   - Deleting Task `Pending → In Progress` from the table fails the SMP `task-default` row.
+3. **Workflow service** (`core/workflow/commit_status_test.go`, real temp repo). The design-phase
+   PoC body is `applies_to: [Task]` with outcomes `commit.status: Accepted` and `Shipped`. With
+   `WithStatusLifecycle(Default)`:
+   - `Create` → `ErrValidationFailed` with exactly 2 `commit_status` errors on fields
+     `steps[0].outcomes[0|1].commit.status`. `HEAD` is unchanged and the file is absent.
+   - `Update` is refused the same way, and the file is unchanged.
+   - `ValidateBody` → `failed`, with the same 2 errors.
+   - `applies_to: [Workflow]` + `commit.status` → 1 error. `commit.merge` only → passes.
+   - Without the option, the same `Create` succeeds (zero-value control).
+   - `workflow.Validate(wf)` still passes the same body (the TASK-011 rule).
+   - Removing the `writeAndCommit` call fails the Create case. Moving the check into `Validate`
+     fails the control.
+4. **Validation** (`core/validation/engine_test.go`). With
+   `WithBlockingStatusConflicts(DefaultBlockingStatusConflicts...)`:
+   - a Completed epic with a Pending child → `Status == "failed"` and SC-002 in `Errors`;
+   - a Completed task without acceptance → SC-001 still in `Warnings`;
+   - the existing no-option assertion at `engine_test.go:386` is unchanged and green;
+   - `DefaultBlockingStatusConflicts == [SC-002 SC-003]`, and each is a registered rule ID.
+   - `ValidateStatusChange`:
+     - Pending epic with a Pending child, new status Completed → an SC-002 error when promoted, a
+       warning when not;
+     - an unknown path → `passed, nil`;
+     - a store error → non-nil error;
+     - a nil engine → `passed`.
+5. **P3-21 PoC as the regression** (`core/engine/status_lifecycle_test.go`, real `git.CLIClient`,
+   the design-phase repo). The run is standard, outcome commit `Completed`, and the branch edits
+   `task-002` Completed → Draft and `INIT-001` Pending → Completed. With
+   `WithStatusLifecycle(Default)`:
+   - `MergeRunBranch` returns nil.
+   - The `main` SHA and the run-branch tip are unchanged (no cascade commit).
+   - The run is `failed` (`stubWorkflowLoader` has no publish step).
+   - The primary merge outcome is `failed` / `precondition`, and its detail starts
+     `status_lifecycle_violation:`.
+   - The violations are exactly `{task-002: non_owned_status_change Completed->Draft,
+     initiative.md: non_owned_status_change Pending->Completed}`.
+   - The same test against a build where `planStatusLifecycle` returns no violations fails. The
+     design-phase PoC (pre-fix assertions) passes on `61994fe`.
+   - **Design-check note (2026-10-06):** the orchestrator also has binding on (DC-2):
+     `EnableMergeBinding` on the `CLIClient` and `CommitMeta["spine.bound_sha"]` = the run-branch
+     tip, `spine.bound_by` set. A twin with binding off and the lifecycle on returns the DC-2
+     configuration error, leaves the run `committing` and never calls `Merge`/`MergeBound`.
+6. **Run-owned cascade** (same file, real git).
+   - The same repo without the two non-owned edits merges with the option on.
+   - `main` then has `task-001` Completed, `task-003` **Draft** and `ADR-0099` **Proposed**. The
+     cascade commit touches exactly `task-001`.
+   - A control with the option off reproduces today's result (`task-003` and `ADR-0099` stamped
+     Completed).
+   - Dropping the `run.Mode == planning` condition fails the option-on case.
+   - **Design-check note (2026-10-06):** under binding the cascade commit is not on the run
+     branch; find it as the merge commit's second parent (`main^2`) and assert its parent is the
+     bound SHA.
+7. **Rule coverage** (table-driven; `cascadeGitOperator`-style mocks are acceptable).
+   - Each reason code fires on its case:
+     - `illegal_transition`: TaskPath Completed, commit Pending.
+     - `illegal_initial_status`: a standard run adds a Task authored Completed.
+     - `status_not_in_type`: a planning run adds an ADR, commit Pending.
+     - `type_changed`: Task → Epic.
+     - `not_an_artifact`: TaskPath without front matter, commit Completed.
+     - `undeclared_status`: TaskPath status `Done`, commit Completed.
+   - These merge:
+     - Task Pending → In Progress (the SMP `task-default` shape);
+     - Epic Pending → Completed and In Progress → Completed;
+     - an ADR planning run Proposed → Accepted / Deprecated;
+     - document-creation Living Document identity, with no cascade commit.
+   - **Design-check note (2026-10-06):** the design-check reason codes are covered by ACs 17–24
+     (`status_rewrite_failed`, `non_owned_removal`, `status_change_without_effect`,
+     `unreadable_artifact`, `merge_result_mismatch`); `type_changed` is asserted for both an owned
+     and a non-owned path.
+8. **Cascade-sequence check** (the audit's `smp_cascade_sequence` shape, ported to Spine with real
+   git).
+   - A planning run adds an Epic + 2 Draft Tasks and edits a non-artifact `README.md`; commit is
+     Pending and the option is on.
+   - It merges. `git show --name-only <cascade commit>` lists exactly the 3 artifacts, and all are
+     `Pending` on `main`.
+   - The five existing `TestApplyCommitStatus_*` tests (`merge_test.go:513-750`) pass unchanged.
+9. **Fail closed when on** (mocks).
+   - A `Diff`, `MergeBase` or bound-SHA `ReadFile` error, or a cascade `WriteAndStageFile` error:
+     `MergeRunBranch` returns an error, the run stays `committing`, and `Merge` is never called.
+   - With the option off, the same `Diff` error degrades as today (the merge proceeds).
+   - **Design-check note (2026-10-06):** under binding the write is `CommitFilesOnto`, so the
+     write-failure case is a `CommitFilesOnto` error (no `WriteAndStageFile` is called at all).
+     "Error" here means a retryable `*git.GitError`; non-retryable read errors are AC 22.
+10. **Quoted-path guard.** With the option on, a `Diff` entry `"tasks/\303\251.md"` (added) is
+    refused `unparseable_path`. `"src/\303\251.go"` is ignored.
+11. **Refusal routing and classification.** The workflow loader returns a `task-default`-shaped
+    definition with a publish step. A refusal then:
+    - completes the publish execution with `merge_failed`;
+    - returns the run to `active`, with the next `execute` execution created;
+    - sets `ErrorDetail.Classification == "status_lifecycle_violation"` on the last completed step;
+    - records the merge-outcome class `precondition`.
+    - `git diff --stat 61994fe -- migrations/` is empty, and `domain.ValidMergeFailureClasses()` is
+      unchanged.
+12. **SC merge gate** (fake validator).
+    - A validator implementing `StatusChangeValidator` that returns an SC-002 error for an Epic
+      Pending → Completed: refused `status_conflict` with `Rules == [SC-002]`.
+    - Warnings only: the merge proceeds.
+    - A returned error: the run stays committing.
+    - A validator without the interface: the gate is skipped.
+13. **Standalone wiring.**
+    - `buildOrchestrator` and the per-workspace orchestrator return `StatusLifecycle() != nil`.
+    - A workspace `ServiceSet`'s workflow service returns `failed` from `ValidateBody` on the AC 3
+      body.
+    - Its validator's `BlockingStatusConflicts()` equals the default.
+    - Deleting any one of the six wiring lines (§6) fails a test.
+    - **Design-check note (2026-10-06):** both orchestrators also return
+      `MergeBindingEnabled() == true` and carry the workspace's `artifacts_dir` (DC-5): a
+      workspace configured with `artifacts_dir: spine` yields an orchestrator whose plan resolves
+      `initiatives/x.md` to `spine/initiatives/x.md`. There are eight wiring lines; deleting any
+      one fails a test.
+14. **Scenarios** (`-tags scenario`, Postgres).
+    - `TestPlanningRun_StatusCascadesToChildren` (`planning_run_test.go:417-451`) passes with
+      `harness.WithStatusLifecycle()` (a variant is added).
+    - New `TestStandardRun_StatusLifecycleRefusesNonOwnedStatusEdit`: the run is not completed,
+      `main` is unchanged, and the step classification is `status_lifecycle_violation`.
+    - **Design-check note (2026-10-06):** `harness.WithStatusLifecycle()` enables binding too.
+      Add `TestStandardRun_StatusLifecycleArtifactsDir` with `harness.WithArtifactsDir("spine")`:
+      a `task-default` run on `spine/…/task.md` completes and `main` shows the task `Completed`
+      (today the status is silently not applied, design-check PoC `artifacts_dir_test.go`).
+15. **Zero-value compatibility and gates.**
+    - SMP `80995559`, with `replace => ` this branch: `go build ./...` and `go vet ./...` pass
+      with no SMP code change.
+    - Spine passes `go test ./...`, `go vet ./...`, `dev/lint-boundaries.sh` (no new allowlist
+      entry), golangci-lint and the `cmd/embed-smoketest` build.
+    - Every pre-existing test is unchanged.
+    - **Design-check note (2026-10-06):** run the SMP build as `go build ./cmd/... ./internal/...`
+      and `go vet ./cmd/... ./internal/...` with no untracked `vendor/` (a root `./...` compiles the
+      ignored `tmp/` prototypes). The new `Orchestrator.WithArtifactsDir` setter is not an
+      interface method, so SMP still needs no code change.
+16. **Documentation.** The §10 edits are present, and the §1 table in
+    `architecture/engine-state-machine.md` is identical to the golden in AC 1.
+    - **Design-check note (2026-10-06):** including the §10 design-check corrections (new
+      top-level section, not §5.4; the added reason codes; the `KNOWN-LIMITATIONS.md` and
+      `CHANGELOG.md` items).
+
+*ACs 17–25 were added by the design check (2026-10-06). All run with the lifecycle and binding on,
+real `git.CLIClient` unless stated, and assert `main` (and the bound SHA) unchanged on refusal.*
+
+17. **R1 — rewrite verification (DC-1).** Owned TaskPath `Pending` at base, outcome
+    `commit.status: In Progress`, TaskPath at the bound SHA authored with each of:
+    `"status": Completed`, `'status': Completed`, `status : Completed`,
+    `? status` / `: Completed`, and `status: Pending` + continuation line `  Completed`.
+    - Each is refused `status_rewrite_failed`; nothing is merged.
+    - A planning-run addition authored `"status": Completed` with outcome `Pending` is refused the
+      same way.
+    - Control: plain `status: Pending` merges and lands `In Progress`.
+    - Mutation: removing the re-parse makes the `"status": Completed` case land `Completed` (the
+      shape of design-check PoC `owned_quoted_key_test.go`, which passes on `61994fe`).
+18. **Binding (DC-2).**
+    - Lifecycle on, binding off: `MergeRunBranch` returns an `ErrUnavailable` error naming merge
+      binding; the run stays `committing`; no `Merge`/`MergeBound`; no outcome row is written.
+    - Lifecycle and binding on: after the bound SHA is captured, a commit pushed to the run branch
+      changes `task-002` `Completed → Draft`. The run merges with **no** refusal (the plan judged
+      the bound SHA), `task-002` is still `Completed` on `main`, and the pushed commit is not an
+      ancestor of `main`.
+    - The lifecycle runs with no `commit.status`: `CommitMeta` without `status` and a non-owned
+      status edit is refused `non_owned_status_change`.
+19. **N3 — removal guard (DC-3).** Non-owned `task-002`, `Completed` at base. Each of these is
+    refused `non_owned_removal`:
+    - deleted;
+    - given a second `status:` key;
+    - retyped `type: Taskx`;
+    - replaced by a symlink;
+    - deleted and re-added at another path with the same `id`, < 50 % similarity, `status: Draft`
+      (git reports `D` + `A`), in a standard run and in a planning run (where it would be stamped
+      `Pending`).
+    - Controls that merge: deleting a non-artifact `.md`; deleting an artifact added earlier on the
+      same branch; `git mv` of `task-002` with unchanged status (reported `R`, judged by N1).
+    - Mutation: restoring "deleted → ignored" lets the recreate case land a `Pending`/`Draft`
+      `TASK-002`.
+    - O3′: a standard run with no `commit.status` that deletes its own `.md` TaskPath is refused
+      `not_an_artifact`.
+20. **O1′/O2′ — no declared effect (DC-4).**
+    - Planning run with `CommitMeta = {merge: …}` (the `workflow-lifecycle` shape, TaskPath
+      `workflows/x.yaml`) that adds a Task authored `Completed`: refused `illegal_initial_status`.
+      Authored `Draft`: merges, lands `Draft`.
+    - Standard run with no `commit.status` whose branch changes its own TaskPath `Pending →
+      Completed`: refused `status_change_without_effect`.
+21. **Path scope (DC-5).** `Orchestrator.WithArtifactsDir("spine")`, TaskPath
+    `initiatives/i/epics/e/tasks/t.md`, file at `spine/initiatives/i/epics/e/tasks/t.md`, outcome
+    `Completed`.
+    - It merges and `main:spine/…/t.md` is `Completed` (design-check PoC `artifacts_dir_test.go`
+      shows `Pending` on `61994fe`).
+    - A non-owned status edit under `spine/` is refused; a status edit to a `.md` outside `spine/`
+      and to `spine/templates/x.md` is ignored (merges).
+    - Mutation: comparing the raw TaskPath with diff paths fails the first case.
+22. **Error classes (DC-6).** With mocks:
+    - a retryable `ReadFile` / `Diff` / `MergeBase` error keeps the run `committing` (AC 9);
+    - a `*git.BlobTooLargeError` (TASK-003) on a modified non-owned `.md`, a non-retryable
+      permanent read error, and a not-found for a diff-listed path are each refused
+      `unreadable_artifact` and leave the run **not** `committing` (routed or failed per AC 11).
+23. **Renames onto the TaskPath (DC-7).** Planning run: the branch removes its drafted TaskPath
+    and renames non-owned `task-002` (`Completed`) onto it (git reports `R100`). Refused
+    `illegal_transition` with `From == Completed`. A `Diff` entry whose `OldPath` is C-quoted and
+    ends `.md"` is refused `unparseable_path`.
+24. **V1 — merge-result check (DC-8).** `main` carries `.gitattributes` `*.md merge=union`; owned
+    TaskPath `Pending` at base; `main` changes it to `Cancelled` after the fork; outcome
+    `Completed`.
+    - Refused `merge_result_mismatch`; nothing is pushed (auto-push on with a bare origin:
+      `origin/main` unchanged).
+    - Mutation: removing the V1 call merges with two `status:` lines (the shape of design-check PoC
+      `union_merge_test.go`, which passes on `61994fe`).
+    - Control: the same repo without the `main`-side change merges.
+25. **Undeclared base data (DC-9).** A standard run edits the body (not the status) of a non-owned
+    `Architecture` artifact whose status is `Active`: it merges. Changing that status to
+    `Living Document`: refused `non_owned_status_change`.
+
+## Out of scope / follow-ups
+
+1. **Deleting governed artifacts.** This covers deleting a file, or making it stop being an
+   artifact, inside a run. It is not a status transition, so this task ignores it. Deciding whether
+   runs may delete governed artifacts (vs. `Superseded`) is a separate policy.
+   - **Design-check note (2026-10-06):** narrowed by N3 (DC-3). Non-owned artifacts that existed
+     at `base` can no longer be deleted or made unparseable by a run, and O3′ covers the run's
+     own TaskPath. What remains out of scope is the policy question whether *any* run may
+     retire an artifact by deletion.
+2. **Direct authoritative writes.** These are artifact API create/update on `main` and the task
+   governance actions (Spine `service/internal/gateway/handlers_tasks.go:112-149`, SMP
+   `internal/customer/spineembedded/embedded_tasks.go:220-249`). They are not lifecycle-checked.
+   - They are operator-authority paths behind branch protection.
+   - A later task can call `StatusLifecycle.Allows` there (for example, cancel on a Completed task).
+   - **Design-check note (2026-10-06):** both task-action writers use the same
+     `(?m)^status:\s*.*$` regex (Spine `handlers_tasks.go:155`, SMP `embedded_tasks.go:314`), so
+     the DC-1 differential applies there too; the later task should re-parse after rewriting.
+3. **Rules 2–3 of `workflow-validation.md` §5.5** are not enforced: no skipping governed
+   intermediates, and terminal statuses only on `end`-routing outcomes. Rule 3 conflicts with
+   Spine's own `task-default` (`Completed` on `review.accepted` → `publish`).
+4. **Reconcile Task `In Progress`.** Bring `ValidStatusesForType(Task)`, artifact-schema §6 and
+   task-lifecycle §3.3 in line with the table (Owner question 3).
+5. **SMP workflow defects** found while building the gate. They belong to SMP TASK-011 or an SMP
+   follow-up:
+   - `task-default`'s dead `publish.published` commit (§7 note);
+   - `epic-lifecycle`'s `execute` precondition reads `main`, where the planned `In Progress` is
+     never merged (`core/engine/step.go:808-813`).
+6. **Remove rule Q** once TASK-003 and SMP TASK-003 ship NUL-delimited diffs.
+7. **Evaluate SC rules from the bound tree** instead of the projection, to remove the one-sync
+   lag. This needs a listing port on `GitOperator`.
+8. **A repository-configurable lifecycle table** (D1), only with provenance checks.
+
+*Added by the design check (2026-10-06):*
+
+9. **Link edits that change blocking.** A run can still edit a non-owned task's `blocked_by` links
+   (a content edit, not a status change), which un-blocks or re-blocks it without any status
+   transition. It is visible to the reviewer; a later task could treat `blocked_by`/`blocks` edits
+   on non-owned artifacts like N1.
+10. **Duplicate artifact `id`s across paths.** A run can add a new path carrying an existing `id`
+    (with an initial status, so N2 passes). Nothing in this task enforces `id` uniqueness; the
+    projection is path-keyed. Track with the ID-allocation work.
+11. **A YAML-node status writer** to replace `rewriteStatusField`, so R1 never refuses an exotic
+    but valid encoding (D13).
+12. **Children added in the same run are invisible to the SC gate.** O4 reads the projection, so
+    an `epic-lifecycle` run that also adds a `Pending` child under the epic completes the epic
+    (SC-002 after the fact). Follow-up 7 removes it.
+
+## Design check (2026-10-06)
+
+An adversarial check of this design against Spine `61994fe` and SMP `80995559`. The designer's
+text is kept; every change is marked **Design-check note (2026-10-06)** in place.
+
+**Reproduced first.** The four design-phase PoCs in `tmp/init027-orchestration/spine-init023/_work/task017/`
+pass on `61994fe` via `go test -overlay` (standard run publishes any status; owned illegal
+transition; workflow create accepts foreign `commit.status`; planning cascade touches exactly the 3
+added artifacts). The corpus check counts 11 Spine and 10 SMP `commit.status` outcomes, all inside
+the proposed table.
+
+**New design-check PoCs** (`tmp/init027-orchestration/spine-init023/_work/task017-check/`, run
+from `../spine` with `go test -overlay <overlay>.json -run TestDesignCheck_ -v ./core/engine/`; no
+file is written to either repository, and the Spine tree stays clean):
+
+| PoC | Overlay | What it shows on `61994fe` |
+|---|---|---|
+| `rewrite_differential_test.go` | `overlay-rewrite.json` | `rewriteStatusField` leaves `"status":`, `'status':`, `status :` and `? status` untouched while `artifact.Parse` reads them; a continuation line becomes `In Progress Completed`; `status:` with an empty value swallows the next line. |
+| `dup_test.go` | `overlay-dup.json` | A duplicate `status:` key fails `Parse` and `IsArtifact` (so "stops being an artifact → ignored" is an escape hatch). |
+| `owned_quoted_key_test.go` | `overlay-owned.json` | Through the real `MergeRunBranch`: owned task authored `"status": Completed`, outcome `In Progress` → `main` parses `Completed`. |
+| `artifacts_dir_test.go` | `overlay-adir.json` | With `artifacts_dir: spine`, `commit.status` is silently not applied today (TaskPath read raw). |
+| `union_merge_test.go` | `overlay-union.json` | `*.md merge=union` on `main` merges a concurrent status change with no conflict; the file lands with two `status:` keys. |
+
+**What changed and why.**
+
+| ID | Change | Why (attacker path or breakage) |
+|---|---|---|
+| DC-1 | R1: re-parse each rewrite; refuse `status_rewrite_failed` | **Bypass.** The plan validates `final` with YAML but the regex writer can no-op; the author's `S_tip` lands unvalidated on the owned path (PoC). |
+| DC-2 | Lifecycle requires merge binding; hook moves to TASK-005 `resolveMergeSource` step 3 / `applyCommitStatusAt`; runs with no `status`; no warn-and-degrade; D12 | **Bypass / wrong seam.** TASK-005 is opt-in and moves the cascade out of `preflightCheck`; without binding the tip can move between plan and merge. The original `preflightCheck` hunk would never run under binding. |
+| DC-3 | N3 `non_owned_removal`; O3′ for the owned TaskPath | **Bypass of the stated impacts.** Delete-and-recreate reopens a `Completed` task under the same `id`; deleting a blocker re-blocks dependents; unparse (duplicate key) freezes the projection row. All were "ignored". |
+| DC-4 | O1′ `status_change_without_effect`; O2′ `IsInitial` when `newStatus == ""` | **Bypass.** A `workflow-lifecycle` planning run (no `commit.status`) could mint `Completed` tasks; an owned TaskPath could take any legal edge the workflow never declared. |
+| DC-5 | `Orchestrator.WithArtifactsDir`; projection path scope (no `templates/`, in-dir only); TASK-011 dependency | **Breakage.** TaskPath is artifact-relative, diff paths repo-relative: with `artifacts_dir: spine` every standalone run would be refused or stall, and its own file judged non-owned. |
+| DC-6 | Only retryable errors retry; others `unreadable_artifact` | **Self-DoS.** A > 4 MiB `.md` (TASK-003 `BlobTooLargeError`) or a gitlink would keep the run `committing` forever. |
+| DC-7 | Renames onto the TaskPath judged through `OldPath`; rule Q on `OldPath` | **Ambiguity → bypass.** Read as O2, a `Completed` task renamed onto a planning TaskPath is stamped `Pending`. |
+| DC-8 | V1 merge-result check in TASK-005 `verifyBoundMerge`; D3 note; D13 | **D3 is false under `merge=union`** (PoC); V1 also covers criss-cross bases and any residual writer/merge differential. |
+| DC-9 | Undeclared statuses already on `main` documented; AC 25 | **Compatibility.** Real repos hold `Architecture: Active`, `Product: Draft for Review`, etc.; N1 must keep comparing raw values. |
+| — | §6/§8/§9/§10 corrections; ACs 5, 6, 7, 9, 13–16 amended; ACs 17–25 added; owner questions 6–10; follow-ups 9–12 | Wiring (binding, artifacts dir, harness), SMP TASK-003's validator rename, routing liveness, projection lag, doc placement (`engine-state-machine.md` §5 is the Branch machine), SMP build command. |
+
+**Checked and found correct.** Every `file:line` cited in Purpose and §1–§9 at `61994fe` / `80995559`
+(merge.go function ranges, `ValidStatusesForType`, SC rule severities, `Engine.Validate`,
+`EvaluatePreconditions`, `cross_artifact_valid`, `SetCommitMeta` at `step.go:396-401`, the publish
+handler at `handlers.go:206-236`, `workflow.Service` ranges, `classifyMergeFailure`, migration 022's
+CHECK, the standalone wiring lines, the scenario test, all 21 corpus `commit.status` lines, and the
+SMP references). The SMP `task-default` note (merge applies `In Progress`; `publish.published` is
+dead) is right. SC promotion has no step-activation effect today: no shipped workflow declares
+`cross_artifact_valid`. SMP has no switch over failure classifications, so the new string needs no
+SMP change. Compile compatibility holds: no interface SMP implements gains a method.
+
+**Residual risks after the amendments.** Direct authoritative writes (follow-up 2, same regex);
+`blocked_by` link edits (follow-up 9); duplicate `id`s (follow-up 10); SC gate projection lag and
+same-run children (follow-ups 7, 12); V1's standalone caveat that the local `main` already holds
+the merge when auto-push is off (TASK-005/TASK-012).
+
+## Implementation Notes
