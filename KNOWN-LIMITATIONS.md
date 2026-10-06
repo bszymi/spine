@@ -73,6 +73,26 @@ The following limitations have been resolved:
 - `GIT_LITERAL_PATHSPECS=1` prevents Git pathspec injection
 - Scoped commits use `-- path` to prevent accidental broader commits
 
+### Git Push Gate: Served Repositories Need Case- and Normalization-Sensitive Storage
+- **Requirement:** with `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, every repository the git endpoint
+  serves must live on a **case-sensitive, normalization-sensitive** filesystem: a Linux
+  filesystem or the shipped compose named volume (`repo:/repo`). Do not serve pushes from a
+  native macOS (APFS/HFS+) or Windows `spine serve`, from a bind mount of such a host directory,
+  or from an SMB-backed or other case-folding volume.
+- **Why:** branch protection matches the ref name byte-for-byte, exactly as the client sent it
+  (INIT-023 TASK-001 makes the gate evaluate the same bytes git writes). A case- or
+  normalization-insensitive filesystem then aliases two different names onto one ref file. With
+  `main` packed (any `git clone --bare` repository, or after `git gc`/`pack-refs`), a plain
+  `git push origin HEAD:refs/heads/MAIN` matches no rule, is allowed, and git's loose
+  `refs/heads/MAIN` file *is* `refs/heads/main` on such storage — `main` moves without review
+  and without an override event. `refs/HEADS/main` takes the non-branch allow the same way, and
+  the aliasing is not ASCII-only (APFS also folds the Kelvin sign onto `k` and NFD onto NFC).
+  `core.ignorecase` does not prevent it for packed refs.
+- **Status:** a documented deployment requirement, not yet enforced. Fail-closed handling (a
+  per-repository case-sensitivity probe that refuses receive-pack, or fold-and-normalize rule
+  matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,
+  paired with SMP's equivalent follow-up.
+
 ## Architecture Deviations
 
 ### Convergence Evaluation Step

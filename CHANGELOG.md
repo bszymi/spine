@@ -6,6 +6,55 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-001 TASK-001: pre-receive ref validation)
+
+### Security
+
+- **Git push gate evaluates the ref git actually updates (audit F1, P1).** The
+  pre-receive parser split the `\0<capabilities>` suffix off the first command
+  line only, while `git receive-pack` ends *every* command's ref at its first
+  NUL. A NUL after the ref on a later command line therefore made the gate
+  evaluate a different ref than git updated, so a pusher could write to or
+  delete a literal-protected branch (`main: [no-direct-write]`,
+  `develop: [no-delete]`) with no override event. Every command line is now
+  validated: hex object ids of one hash length, and a ref that passes git's
+  refname grammar (new `refname.ValidateQualified`) — no NUL or other control
+  byte, `refs/` prefix, no `..`/`@{`/`.lock`, and the rest. A NUL on any line
+  but the first is refused, and the first line's capability list must be
+  printable ASCII so the gate and git read the same feature set. Such a push is
+  refused whole as `branch-protection: malformed push: command N: …`. No push
+  that git would apply as written is refused; well-formed pushes, push options
+  and deletes are unchanged.
+- **SHA-256 deletes are classified as deletes.** The gate recognised only the
+  SHA-1 null object id (40 zeros), so in a SHA-256 repository a delete (64
+  zeros) was evaluated as a direct write and passed a `no-delete`-only rule.
+
+### Changed
+
+- **Message text:** parse-error denials now read
+  `branch-protection: malformed push: command N: …`. The documented
+  `malformed push` prefix is unchanged. Such a denial carries no per-ref `ng`
+  lines (it never did); `docs/git-push-guide.md` §5 now says so and lists the
+  causes.
+- **Deployment requirement documented:** with pushes enabled, served
+  repositories must live on case- and normalization-sensitive storage
+  (`KNOWN-LIMITATIONS.md` → Security Notes). Enforcing it is a follow-up.
+
+### For embedders
+
+- **`branchprotect.Policy.Evaluate` contract change.** `Evaluate` now returns
+  `(DecisionDeny, nil, err)` for a `Request.Branch` containing an ASCII control
+  byte (0x00–0x1f, 0x7f), for every operation kind and rule set, ahead of every
+  allow path (governed merge, non-branch ref, no matching rule). A non-nil error
+  now also means *malformed request (caller bug)*, not only *rule source
+  unavailable*; callers already treat any error as a refusal. This is a second
+  layer behind the parser: an embedder that passes a pushed ref to `Evaluate`
+  raw (SMP's gateway does) is protected from F1 by this guard alone.
+- **New:** `adapters/git/refname.ValidateQualified(ref string) error`, git's
+  refname grammar for fully-qualified refs, returning `ErrInvalidParams`.
+
+---
+
 ## Spine Core library packaging — dual-target (standalone + embedded)
 
 Disposition: **Option A** — Spine remains available both as a standalone
