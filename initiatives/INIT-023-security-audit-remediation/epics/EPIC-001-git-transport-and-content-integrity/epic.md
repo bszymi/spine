@@ -59,6 +59,15 @@ Make the git surface trustworthy:
 - Binding the merge to a commit (EPIC-002 TASK-005). This epic decides *who may push* and
   *how refs are named*, not *what merges*.
 - Git-endpoint authentication (trusted CIDRs, dev mode). That is EPIC-004 TASK-015.
+- **Follow-up (recorded by TASK-001, 2026-10-07): case- and normalization-insensitive repository
+  storage.** On such storage branch protection can be bypassed with a case or normalization
+  variant of a protected ref (`refs/heads/MAIN`, `refs/HEADS/main`), even after TASK-001: the gate
+  evaluates the bytes git writes, and the filesystem then aliases the name (TASK-001 Design §6).
+  TASK-001 documents the deployment requirement only (`KNOWN-LIMITATIONS.md` → Security Notes;
+  TASK-001 owner question 1, default pending the owner). Fail-closed handling — a per-repository
+  case-sensitivity probe that refuses receive-pack, or fold-plus-NFC matching in `Evaluate` that
+  also covers the `refs/heads/` prefix test — needs a new EPIC-001 task, paired with SMP's
+  follow-up (SMP EPIC-004 TASK-001 owner question 2). It is not yet created.
 
 ---
 

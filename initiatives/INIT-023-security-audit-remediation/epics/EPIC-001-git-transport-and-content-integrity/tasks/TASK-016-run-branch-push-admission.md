@@ -732,6 +732,9 @@ The design works without answers, using the stated defaults.
        whose spelling differs from it.
    - Severity is dev-only, because Linux production is case-sensitive. Reach: macOS/Windows
      hosts and the documented `./:/repo` bind mount on Docker Desktop for Mac.
+   - *Disposition (TASK-001, 2026-10-07):* not folded into TASK-001 §3. TASK-001 owner question 1
+     (default, pending the owner) documents the storage requirement and routes fail-closed
+     handling to a new INIT-023 EPIC-001 follow-up task (see the corrected Out-of-scope bullet).
 6. **Exploratory divergence branches are a binding entry point that no task owns.**
    - `divergence.create_branch` is `contributor` (`core/auth/permissions.go:65`). Its
      `branch_id` is unvalidated (`handlers_divergence.go:35-46`), and nothing ties the caller to
@@ -1032,6 +1035,17 @@ The design works without answers, using the stated defaults.
       unaffected.
     - Not this task's surface, but it needs an owner: see owner question 5 (recommended: TASK-001
       §3).
+  - *Correction by TASK-001 (2026-10-07):*
+    - The gap is wider than case-variant updates: with `main` **packed** (any
+      `git clone --bare` repository, or after `git gc`), even a *create* of `refs/heads/MAIN` lands
+      on `main`, `core.ignorecase=true` notwithstanding. `refs/HEADS/main` takes the non-branch
+      allow the same way, and the aliasing is not ASCII-only (Kelvin sign, NFD/NFC). See TASK-001
+      Design §6.
+    - It is **not** owned by TASK-001 §3. Under TASK-001 owner question 1 (default, pending the
+      owner) TASK-001 only documents the requirement (`KNOWN-LIMITATIONS.md` → Security Notes:
+      served repositories need case- and normalization-sensitive storage), and fail-closed
+      handling is a **new INIT-023 EPIC-001 follow-up task**, paired with SMP's follow-up (epic
+      Out of scope).
 - *Added by the design check (2026-10-06):*
   - **The API write path to the same run branches** (P3-6: `write_context`,
     `POST /artifacts/add`) is TASK-014 §4. It must call this task's predicate (DC-6) so the two
