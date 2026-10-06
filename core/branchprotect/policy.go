@@ -12,9 +12,15 @@ import (
 // Policy evaluates branch-protection rules against a Request.
 //
 // Both enforcement points (Git push, Spine write path — ADR-009 §3)
-// construct a Request and call Evaluate. A non-nil error signals an
-// infrastructure failure (rule source unavailable) and must be treated
-// as a Deny by the caller — fail closed, not open.
+// construct a Request and call Evaluate. A non-nil error must be
+// treated as a Deny by the caller — fail closed, not open (New's
+// implementation returns it together with DecisionDeny). It signals
+// either:
+//
+//   - an infrastructure failure (rule source unavailable), or
+//   - a malformed request, which is a caller bug: an unclassified
+//     operation Kind, or a Branch carrying an ASCII control byte
+//     (0x00-0x1f, 0x7f) such as NUL (INIT-023 TASK-001).
 type Policy interface {
 	Evaluate(ctx context.Context, req Request) (Decision, []Reason, error)
 }
@@ -48,6 +54,13 @@ type policy struct {
 //
 // Multiple rules can match a single branch (e.g. "main" and "*"); the
 // union of their kinds applies.
+//
+// Malformed requests are refused before any of the rows above, for
+// every kind and every rule set (including bootstrap defaults and an
+// explicit `rules: []`), with (DecisionDeny, nil, non-nil error):
+//
+//   - an unrecognised Kind;
+//   - a Branch carrying an ASCII control byte (0x00-0x1f, 0x7f).
 func (p *policy) Evaluate(ctx context.Context, req Request) (Decision, []Reason, error) {
 	// Classify before anything else. An enforcement point that forgets
 	// to set Kind — or sets a value we don't recognise — is a caller
@@ -59,6 +72,22 @@ func (p *policy) Evaluate(ctx context.Context, req Request) (Decision, []Reason,
 		// ok
 	default:
 		return DecisionDeny, nil, fmt.Errorf("branchprotect: unknown operation kind %q (caller must classify as %q, %q, or %q)", req.Kind, OpDelete, OpDirectWrite, OpGovernedMerge)
+	}
+
+	// A branch carrying NUL or another ASCII control byte is never a
+	// real ref, and comparing it to a rule pattern is meaningless: git
+	// ends a pushed ref at its first NUL, so "main\x00" would match no
+	// rule here and fall through to Allow(no_matching_rule) while git
+	// writes "main" (audit F1, INIT-023 TASK-001). Reaching this is a
+	// caller bug — the git push parser refuses such refs, and every
+	// other caller builds Branch from stored or constant names — so
+	// fail closed with the same Deny + error shape as an unclassified
+	// kind. It sits before EVERY allow path (governed merge, non-branch
+	// refs, no matching rule) so it covers every kind and every rule
+	// set, and it is a byte loop so core/branchprotect gains no import.
+	// %q keeps the byte escaped in the error and in any log of it.
+	if i := indexControlByte(req.Branch); i >= 0 {
+		return DecisionDeny, nil, fmt.Errorf("branchprotect: branch %q contains control byte 0x%02x (malformed ref from caller)", req.Branch, req.Branch[i])
 	}
 
 	// OpGovernedMerge is unconditional — even if an operator happens to
@@ -192,6 +221,18 @@ func allowOverrideReasons(kinds []config.RuleKind, req Request) []Reason {
 // branch rule by coincidence.
 func normalizeBranch(branch string) string {
 	return strings.TrimPrefix(branch, "refs/heads/")
+}
+
+// indexControlByte returns the index of the first ASCII control byte
+// (0x00-0x1f or 0x7f) in s, or -1. Byte-wise, so invalid UTF-8 cannot
+// hide one.
+func indexControlByte(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return i
+		}
+	}
+	return -1
 }
 
 func denyMessage(code ReasonCode, k config.RuleKind, branch string) string {
