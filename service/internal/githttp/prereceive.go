@@ -2,9 +2,13 @@ package githttp
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/bszymi/spine/adapters/git/refname"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // RefUpdate is one ref change in a git push — the triple the client
@@ -16,18 +20,26 @@ type RefUpdate struct {
 	Ref    string
 }
 
-// IsDelete reports whether the update deletes the ref (new SHA is all
-// zeros). Classification follows ADR-009 §3: delete → OpDelete,
-// otherwise → OpDirectWrite (every git push is a direct write from the
-// policy's perspective; governed merges happen inside Spine, not over
-// the wire).
+// IsDelete reports whether the update deletes the ref (new SHA is the
+// null object id of either hash algorithm). Classification follows
+// ADR-009 §3: delete → OpDelete, otherwise → OpDirectWrite (every git
+// push is a direct write from the policy's perspective; governed merges
+// happen inside Spine, not over the wire).
+//
+// Both null ids must be recognised: a SHA-256 repository sends 64 zeros
+// for a delete, and classifying that as a direct write would let a
+// no-delete-only rule wave the delete through (INIT-023 TASK-001).
 func (u RefUpdate) IsDelete() bool {
-	return u.NewSHA == zeroSHA
+	return u.NewSHA == zeroSHA || u.NewSHA == zeroSHA256
 }
 
 // zeroSHA is Git's "empty" object id — 40 zeros for SHA-1. Pushes that
 // encode a ref deletion send this as the new SHA.
 const zeroSHA = "0000000000000000000000000000000000000000"
+
+// zeroSHA256 is the null object id of a SHA-256 repository (64 zeros),
+// which a delete sends as the new SHA there.
+const zeroSHA256 = zeroSHA + "000000000000000000000000"
 
 // flushPkt is the Git flush packet that terminates the ref-update
 // section of a receive-pack request before the PACK data.
@@ -35,26 +47,45 @@ const flushPkt = "0000"
 
 // parseRefUpdates reads the command section of a receive-pack request
 // body and returns the list of ref updates and the capability set
-// advertised by the client on the first frame. The body starts with
+// advertised by the client on the first command. The body starts with
 // one or more pkt-line frames carrying "<old> <new> <ref>[\0caps]\n"
-// and ends with a flush-pkt ("0000"); what follows is the PACK and
-// is not consumed here (unless caps include "push-options", in which
-// case an options section sits between the flush and the PACK — see
-// readPreamble).
+// and ends with a flush-pkt ("0000"); what follows is the PACK and is
+// not consumed here (unless caps include "push-options", in which case
+// an options section sits between the flush and the PACK — see
+// Handler.prereceive).
 //
 // Pkt-line format (Git protocol): each frame is a 4-byte hex length
 // (including the 4 length bytes themselves) followed by that many
 // bytes of payload. A length of "0000" is the flush packet and has no
 // payload.
 //
-// The parser is deliberately strict: a malformed length, a frame that
-// does not match the command shape, or EOF before the flush returns an
-// error. The caller must treat a parse error as a hard reject — we
-// cannot evaluate ref updates we could not parse.
+// The parser is deliberately strict, because its one job is to hand the
+// policy exactly the refs git will update (INIT-023 TASK-001, audit F1):
+//
+//   - Exactly one trailing LF is stripped per frame, as git's
+//     PACKET_READ_CHOMP_NEWLINE does; anything else stays in the line.
+//   - Capabilities are accepted on the first command only, after its
+//     first NUL, and must be printable ASCII (isCapabilityList). git
+//     send-pack never sends them anywhere else. git receive-pack, by
+//     contrast, ends EVERY command's ref at its first NUL and reads the
+//     rest as a feature list, so a NUL tolerated on a later line would
+//     let the gate evaluate "refs/heads/main\x00" while git updates
+//     "refs/heads/main". On lines 2+ a NUL therefore stays in the ref
+//     and validateRefUpdate refuses it.
+//   - Every command's object ids and ref are validated
+//     (validateRefUpdate), so nothing after the parser ever sees a ref
+//     git could read differently.
+//
+// A malformed length, a frame that does not match the command shape, a
+// command that fails validation, or EOF before the flush returns an
+// error naming the 1-based command number. The caller must treat a
+// parse error as a hard reject of the whole push — we cannot evaluate
+// ref updates we could not parse. Error text quotes untrusted bytes
+// with %q so no raw control byte reaches a log or the client.
 func parseRefUpdates(r io.Reader) ([]RefUpdate, map[string]struct{}, error) {
 	var updates []RefUpdate
 	caps := map[string]struct{}{}
-	first := true
+	n := 0 // 1-based index of the command being parsed
 	for {
 		lenBuf := make([]byte, 4)
 		if _, err := io.ReadFull(r, lenBuf); err != nil {
@@ -74,32 +105,110 @@ func parseRefUpdates(r io.Reader) ([]RefUpdate, map[string]struct{}, error) {
 		if _, err := io.ReadFull(r, payload); err != nil {
 			return nil, nil, fmt.Errorf("read pkt-line payload: %w", err)
 		}
-		line := string(payload)
-		// First frame may carry capabilities after a NUL byte.
-		// Capabilities are space-separated; we keep them as a set
-		// so `push-options` presence is an O(1) lookup in the
-		// caller.
-		if first {
+		n++
+		// git's packet reader strips exactly one trailing LF
+		// (PACKET_READ_CHOMP_NEWLINE). TrimSuffix, not TrimRight: a
+		// second LF stays in the ref, where validateRefUpdate refuses
+		// it, instead of being silently folded into the same ref.
+		line := strings.TrimSuffix(string(payload), "\n")
+		// Capabilities ride after a NUL on the FIRST command only. They
+		// are space-separated; we keep them as a set so `push-options`
+		// presence is an O(1) lookup in the caller. Split them off line
+		// 1 and nowhere else: on a later line the NUL stays in the ref
+		// and is refused below (see the doc comment for why).
+		if n == 1 {
 			if idx := strings.IndexByte(line, 0); idx >= 0 {
-				for _, c := range strings.Fields(line[idx+1:]) {
+				capList := line[idx+1:]
+				// git reads the feature list as a C string (it ends at
+				// a second NUL) and splits it on its own isspace;
+				// strings.Fields also splits on \v, \f and Unicode
+				// spaces. Refusing anything but printable ASCII makes
+				// the two token sets identical, so the gate and git
+				// agree on whether a push-options section follows (and
+				// so on whether `spine.override` was requested).
+				if !isCapabilityList(capList) {
+					return nil, nil, fmt.Errorf("command %d: malformed capability list %q", n, capList)
+				}
+				for _, c := range strings.Fields(capList) {
 					caps[c] = struct{}{}
 				}
 				line = line[:idx]
 			}
-			first = false
 		}
-		line = strings.TrimRight(line, "\n")
 
 		parts := strings.SplitN(line, " ", 3)
 		if len(parts) != 3 {
-			return nil, nil, fmt.Errorf("malformed ref update %q", line)
+			return nil, nil, fmt.Errorf("command %d: malformed ref update %q", n, line)
 		}
-		updates = append(updates, RefUpdate{
-			OldSHA: parts[0],
-			NewSHA: parts[1],
-			Ref:    parts[2],
-		})
+		u := RefUpdate{OldSHA: parts[0], NewSHA: parts[1], Ref: parts[2]}
+		if err := validateRefUpdate(u); err != nil {
+			return nil, nil, fmt.Errorf("command %d: %w", n, err)
+		}
+		updates = append(updates, u)
 	}
+}
+
+// validateRefUpdate refuses a command the gate could evaluate
+// differently from git receive-pack:
+//
+//   - object ids that are not hex of one hash length (40 for SHA-1, 64
+//     for SHA-256; either case, as git's parser accepts both), or whose
+//     lengths differ;
+//   - a ref that fails git's refname grammar (refname.ValidateQualified):
+//     control bytes including NUL, a missing refs/ prefix, "..", "@{",
+//     ".lock" components, and the rest.
+//
+// Every such command is one git would refuse itself ("funny refname",
+// or a protocol error on the ids), or one git would read as a different
+// ref; refusing it never refuses a push git would have applied as
+// written.
+func validateRefUpdate(u RefUpdate) error {
+	if !isHexOID(u.OldSHA) || !isHexOID(u.NewSHA) || len(u.OldSHA) != len(u.NewSHA) {
+		return fmt.Errorf("malformed object ids in ref update for %q", u.Ref)
+	}
+	if err := refname.ValidateQualified(u.Ref); err != nil {
+		// Surface the grammar's message without its error-code prefix
+		// so the wire text matches SMP's copy of this gate. The
+		// message already %q-quotes the ref.
+		msg := err.Error()
+		var se *domain.SpineError
+		if errors.As(err, &se) {
+			msg = se.Message
+		}
+		return fmt.Errorf("invalid ref name: %s", msg)
+	}
+	return nil
+}
+
+// isHexOID reports whether s is a SHA-1 (40) or SHA-256 (64) object id
+// in hex. Either case is accepted, as git's own parser accepts both.
+func isHexOID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isCapabilityList reports whether s is printable ASCII (0x20-0x7e), as
+// every git client's capability list is (git sanitises agent= and
+// session-id= to printable ASCII; JGit, libgit2 and go-git send ASCII
+// tokens). A second NUL, a control byte or a non-ASCII space would make
+// this gate's token set differ from the feature list git receive-pack
+// reads — a C string split on git's isspace.
+func isCapabilityList(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // parsePushOptions reads the options section of a receive-pack body.
