@@ -40,7 +40,8 @@ release is cut — this file is a staging area.
   `POST /runs/{run_id}/divergences/{divergence_id}/branches` now refuses, with `400`, a `branch_id`
   outside the workflow ID grammar (`^[a-z0-9][a-z0-9_\-.]*$`, at most 128 bytes, no `..`, no
   trailing `.`/`.lock`) — a control byte was a `500` before — and, with `403`, a caller who is
-  neither an operator nor holding a live cursor of the run. Before, any contributor could attach a
+  neither an operator nor bound to the run: the actor who submitted the step that triggered the
+  divergence, or one holding a live cursor of the run. Before, any contributor could attach a
   branch to another actor's run and then become the actor allowed to push its divergence ref.
 
 ### Changed
@@ -52,13 +53,23 @@ release is cut — this file is a staging area.
   sees no actor. Refusals arrive as `remote: ref-admission: …` lines with per-ref `ng` status
   (catalogue: `docs/git-push-guide.md` §5; how to push a run branch: §6). Pre-receive stays
   all-or-nothing.
-- **Exploratory divergence branches** are effectively operator-only to create, because an
-  exploratory divergence leaves its run with no live step execution (`KNOWN-LIMITATIONS.md`).
+- **Exploratory divergence branches** can be created only by an operator or by the actor bound to
+  the run (in practice, the one who submitted the step that triggered the divergence), and their
+  divergence refs are pushable by operators only, since the API creates no step execution for them
+  (`KNOWN-LIMITATIONS.md`).
+- **`spine init-repo`** run with a non-operator token against a Spine gateway now prints the
+  server's refusal of `spine/init` (`Note: origin refused the push; spine/init exists only
+  locally:` with the `ref-admission:` line and the operator-token remedy) instead of "remote may
+  not be configured". It still exits 0, as for any push failure.
 - **Logs:** each refused ref is logged at Warn (`pre-receive ref admission denied`, with class and
   reason); an operator's push to a reserved or non-branch ref is logged at Info. No event type,
   schema, migration, endpoint or environment variable is added.
-- **Startup warnings** when receive-pack is on but no run store or no step-definition lookup is
-  wired (`run-branch pushes are operator-only: …`).
+- **Startup warnings** in single mode when receive-pack is on but no run store or no
+  step-definition lookup is wired (`run-branch pushes are operator-only: …`). In shared mode each
+  workspace's pair is resolved per push and an Info line says so.
+- **Admission is a push-start check.** git writes the ref after the pack is uploaded and
+  processed; the upload is bounded by `ReadTimeout` but the processing is not, so a push started
+  while bound can land after the step is submitted, during review (`KNOWN-LIMITATIONS.md`).
 
 ### Upgrade note
 
@@ -78,7 +89,8 @@ CI that pushes release tags must use an operator token.
 ### For embedders
 
 - **New package `core/refadmit`** (imports `core/domain` and stdlib only): `Classify`,
-  `NewEvaluator(RunReader).WithStepDefs(StepDefLookup).Decide`, `DecideBoundToRun`,
+  `NewEvaluator(RunReader).WithStepDefs(StepDefLookup).Decide`, `DecideBoundToRun` (which also
+  binds the actor who submitted a diverged run's triggering step, `ReasonDivergenceTrigger`),
   `FrozenStepType`, `EvaluationErrorMessage`. `RunReader` is satisfied as is by
   `*store.PostgresStore`, `store.Store` and SMP's `spinecore.RunStore` (whose run-not-found error
   needs mapping to `domain.ErrNotFound` to read as "unresolved" rather than an evaluation error);

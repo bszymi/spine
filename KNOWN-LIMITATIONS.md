@@ -46,23 +46,30 @@ This document tracks known gaps and deferred functionality.
 - With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a run, planning or divergence branch is pushable only
   by the actor bound to its current step, or an operator (INIT-023 TASK-016). Three limits remain:
   - **Admission time, not write time.** The gate decides when the push's command section arrives;
-    git writes the ref after the pack is received. A push started while bound can land after the
-    actor submits the step, bounded by the HTTP `ReadTimeout` (30 s in `spine serve`). Binding the
-    governed merge to the reviewed commit (INIT-023 TASK-005) is the content control for that
-    window; until it lands, the bound actor can still move the tip after validation (except
-    during a `review` or `internal` step, which is frozen).
+    git writes the ref only after the pack has been received and processed. A push started while
+    bound can land after the actor submits the step. The window is the upload (at most the HTTP
+    `ReadTimeout`, 30 s in `spine serve`) **plus** git's processing of the received pack (index,
+    delta resolution, connectivity check), which nothing bounds: `net/http/cgi` ignores the request
+    context and does not bound `git-http-backend`, and the pusher influences the processing time
+    through the pack it sends. The review freeze is checked at the same moment, so a push started
+    before the step was submitted can still land during review. Binding the governed merge to the
+    reviewed commit (INIT-023 TASK-005) is the content control for that window; until it lands,
+    the bound actor can still move the tip after validation. A real bound needs `git-http-backend`
+    run in its own process group under a deadline (a deadline would also cut legitimate large
+    pushes and clones, which today outlive `OpTimeout`), or a post-unpack re-check; both are
+    INIT-023 EPIC-001 follow-ups.
   - **Force-push by the bound actor is allowed.** Fast-forward-only cannot be enforced per actor
     before the pack is unpacked, and `receive.denyNonFastForwards` would also block operators.
   - **Dev mode pushes are anonymous.** `SPINE_DEV_MODE` skips git authentication, so dev pushes
     reach the gate with no actor and can write ordinary branches only. Validating a presented
     bearer in dev mode belongs to INIT-023 TASK-015.
-- **Exploratory divergence branches are effectively operator-only.** Creating one
-  (`POST /runs/{run_id}/divergences/{divergence_id}/branches`) now needs an operator or an actor
-  holding a live cursor of the run, and an exploratory divergence leaves the run with none (its
-  cursor is `divergence:<id>` and the API creates no step execution for the new branch). So only
-  operators create them, and only operators can push their divergence refs. This is the
-  fail-closed outcome of TASK-016 owner question 6; wiring step executions for exploratory
-  branches is a follow-up.
+- **Exploratory divergence branches: creation is bound to the run, their refs are operator-only.**
+  Creating one (`POST /runs/{run_id}/divergences/{divergence_id}/branches`) needs an operator, or
+  the actor who submitted the run-level step that triggered the divergence (while the run's cursor
+  is `divergence:<id>`, the engine's state for an open exploratory window), or an actor holding a
+  live cursor of the run. The API creates no step execution for the new branch, so nobody below
+  operator can then push its divergence ref (pushes need a live execution). Wiring step
+  executions for exploratory branches is a follow-up (TASK-016 owner question 6).
 - **Case-insensitive storage.** The admission folds the `spine` namespace with Unicode simple case
   folding, so case-variant spellings are operator-only on any filesystem. Branch-protection rule
   matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
