@@ -301,7 +301,12 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 
 	path := workflow.WorkflowsDir + "/" + workflowID + ".yaml"
 
-	parsed, err := workflow.Parse(path, []byte(body))
+	// ProjectionDefinition, not bare Parse: the body is what the
+	// projection will read after the planning run merges, so a body it
+	// would refuse (strict-parse or round-trip failure) is refused here
+	// with the same ErrInvalidParams a parse failure returns
+	// (INIT-023 TASK-011 §7).
+	parsed, _, err := workflow.ProjectionDefinition(path, []byte(body))
 	if err != nil {
 		return nil, domain.NewError(domain.ErrInvalidParams, fmt.Sprintf("invalid workflow body: %v", err))
 	}

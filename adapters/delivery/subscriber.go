@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // Subscription describes an active event delivery target.
@@ -158,6 +158,7 @@ func allEventTypes() []domain.EventType {
 		domain.EventConvergenceCompleted,
 		domain.EventEngineRecovered,
 		domain.EventProjectionSynced,
+		domain.EventProjectionWorkflowRejected,
 		domain.EventThreadCreated,
 		domain.EventCommentAdded,
 		domain.EventThreadResolved,

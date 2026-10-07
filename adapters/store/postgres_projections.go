@@ -285,6 +285,28 @@ func (s *PostgresStore) ListActiveWorkflowProjections(ctx context.Context) ([]Wo
 	if err != nil {
 		return nil, err
 	}
+	return scanWorkflowProjections(rows)
+}
+
+// ListWorkflowProjections returns every projected workflow row,
+// regardless of status, ordered by path. It is an optional capability
+// the projection's workflow-row sweep asserts for (INIT-023 TASK-011):
+// in-flight runs load their pinned workflow by path or id with no status
+// filter, so the sweep must see non-Active rows too. It is deliberately
+// not part of the store.Store interface, so stores that implement the
+// full interface need no change.
+func (s *PostgresStore) ListWorkflowProjections(ctx context.Context) ([]WorkflowProjection, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT workflow_path, workflow_id, name, version, status, applies_to, definition, source_commit
+		FROM projection.workflows ORDER BY workflow_path`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return scanWorkflowProjections(rows)
+}
+
+func scanWorkflowProjections(rows pgx.Rows) ([]WorkflowProjection, error) {
 	defer rows.Close()
 	var projections []WorkflowProjection
 	for rows.Next() {

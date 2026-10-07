@@ -772,6 +772,145 @@ CI that pushes release tags must use an operator token.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-003 TASK-011: projection sync integrity)
+
+### Security
+
+- **Workflow parser differential closed (audit P3-13, narrowed).** The projection stored a workflow
+  as JSON that every loader decodes with `encoding/json`, which matches keys case-insensitively
+  (including Unicode folding: `ſteps` reads as `steps`), while the governed path parses strictly. A
+  file carrying a look-alike key was refused by `workflow.Parse`, shown benign by a YAML viewer and
+  executed with the hidden steps. A workflow row is now written only when strict `workflow.Parse`
+  accepts the file *and* its stored JSON reads back to exactly the parsed definition. The stored
+  JSON of every accepted file is byte-identical to before.
+- **A dropped `Diff` error no longer skips governance changes (P3-14).** `IncrementalSync` computes
+  one diff per sync for artifacts, workflows and branch protection. A diff, head-resolution or store
+  failure, a failed workflow-rename delete, and a failed read of a changed file that git itself
+  caused (a lock, a git process that was killed, could not start or exited without a message) now
+  set `sync_state = error` without advancing `last_synced_commit`, so the next tick retries. Whether
+  a read failure is git's or the commit's is decided from the commit's tree, never from git's error
+  text, which echoes the committed — attacker-chosen — path.
+- **Standalone projection follows `refs/heads/main`, not the checked-out branch (P3-22).** `spine
+  serve` (single- and multi-workspace) pins the projection to the governed-merge target, so a run
+  branch checked out in the shared working tree is never projected as live state.
+- **`artifacts_dir` is applied by incremental sync too (P3-23).** Both entry points now use one
+  path scope, so an out-of-tree `.md` file can no longer overwrite a governed artifact's row,
+  `<artifacts_dir>/workflows/` edits are projected incrementally, and `templates/` are never
+  projected.
+
+### Changed
+
+- **Rejected workflow files.** A workflow that fails strict parsing or the round trip is not
+  projected and is reported as a Warn log line `projection: workflow file rejected` (fields
+  `workflow_path`, `commit`, `check`, `action`, `kept_source_commit`, `quarantined`, `error`) and a
+  new operational event `projection_workflow_rejected`. A rejection never sets `sync_state = error`.
+  The file's last verified row is kept for runs already pinned to it, but its `status` column becomes
+  `Quarantined`, so **new runs of that workflow fail with "no active workflow" until the file is
+  fixed**. A previously valid file that the stricter reading now refuses — for example an unquoted
+  `version: 2026-10-06` — stops binding new runs after the upgrade; search the logs for the Warn line
+  and quote the value. An unverifiable stored row is removed. `workflow.Validate` stays advisory at
+  projection (Info log); `WithStrictWorkflowValidation(true)` makes it a rejection and is off.
+  Content the projection row cannot store is a rejection too (check `round_trip`): U+0000 anywhere,
+  or a workflow path, `id` or `status` over 1024 bytes (PostgreSQL refuses an index entry over
+  about 2.7 KB, which used to hold the sync in `error` with the previous row still bindable). An
+  entry at a workflow path that is not a file — a gitlink, a directory — is a rejection with check
+  `not_a_file`. The entry is typed from the commit's tree **before** the file is read, so a gitlink
+  is refused even when the id it records names a blob in the repository: `git show` prints that
+  blob, and before this release the projection accepted it — a body no diff shows (the diff and
+  repository viewers show only a submodule pointer). A gitlink whose id names nothing used to hold
+  the sync in `error` on every tick.
+- **A non-file entry at `.spine/branch-protection.yaml`** (a gitlink) is treated like a malformed
+  config (ADR-009 §1): the projected rules stay as they are and the sync is held in `error` until
+  the path holds a file again. Before, a gitlink recording the id of a `rules: []` blob projected
+  the relaxed rules while the diff showed only a submodule pointer.
+- **The first sync after the upgrade reconciles every stored workflow row** against head, once per
+  projection instance: rows outside the workflow locations or absent at head are removed, stale rows
+  are replaced, unchanged rows keep their `source_commit`. A row whose file was deleted after the
+  last synced commit is removed as the pending diff would remove it, with an Info line, not reported
+  as a rejection. If the reconciliation fails (a git or store error) the sync is held in `error` and
+  retries it on the next tick, but the changes in the window are still applied.
+- **Only direct children of `workflows/` (and `<artifacts_dir>/workflows/`) are workflows.** Nested
+  files such as runner step profiles under `workflows/steps/` are no longer projected; existing rows
+  for them are deleted on the first sync (Info log only when they are not Active).
+- **`projection_synced` payload** gains `workflows_rejected` and `read_skipped` (changed artifact
+  files git cannot read because the commit's tree holds no file at the path — a gitlink whose
+  recorded id is not an object in the repository, a directory — are still skipped, but now logged
+  at Warn with the entry type and counted). Changed artifacts are not typed before a read that
+  succeeds; see `KNOWN-LIMITATIONS.md`.
+- **`sync_state.error_detail`** names the cause of an infrastructure failure (for example
+  `resolve sync target: resolve authoritative ref refs/heads/main: …`), sanitised to one line of at
+  most 512 bytes, instead of a bare label. A `FullRebuild` that fails now records `error` with the
+  cause and keeps the previous commit (before, it returned leaving `rebuilding`, or on an empty
+  store no row at all); a failed wipe records no commit, so the next sync rebuilds instead of
+  diffing from a commit that no longer describes the store.
+- **Workflow API:** create, update and `POST /workflows/{id}/validate` refuse a body the projection
+  would refuse, with `validation_failed` (validate reports rule `projection_round_trip`); a workflow
+  planning run refuses it with `invalid_params`.
+- **Standalone upgrade notes.**
+  - A repository with no `refs/heads/main` (a fresh `init-repo` before the `spine/init` branch is
+    merged, or one governed on another branch) logs one startup Warn and reports
+    `sync_state = error` (with `refs/heads/main` in `error_detail`, on an empty store too) until
+    `main` exists; the first sync after that rebuilds. The engine cannot merge there either.
+  - A store whose `last_synced_commit` is a run-branch SHA left by the old behaviour heals on the
+    next sync while that commit exists. If it was pruned (`git cat-file -e <sha>^{commit}` fails),
+    the sync stays in `error`; run `POST /api/v1/system/rebuild`.
+  - Deployments with `artifacts_dir` set should run `POST /api/v1/system/rebuild` once to repair
+    rows the old incremental handling corrupted.
+  - A full rebuild now discovers and plans workflow rows before it wipes, so a git failure in
+    discovery no longer leaves an empty projection. A workflow file git fails to read during a
+    rebuild keeps its previous row, quarantined, until the next sync's reconciliation reads the file
+    (an incremental sync that fails the same way leaves the row as it was and holds the sync).
+
+### For embedders
+
+- **New:** `workflow.ProjectionDefinition`, `workflow.VerifyProjectionDefinition`,
+  `workflow.ErrProjectionRoundTrip`, `workflow.ProjectionRoundTripRuleID`. An embedder that mirrors
+  `workflow.Service.ValidateBody` (SMP's validate preview) should switch its `Parse` call to
+  `ProjectionDefinition` with the same rule id.
+- **New options on `projection.Service`:** `WithAuthoritativeBranch(branch) error` (zero value keeps
+  `Head()`, which is right for bare repositories), `AuthoritativeBranch()`,
+  `ProbeAuthoritativeRef(ctx)`, `WithStrictWorkflowValidation(bool)` (off). `projection.WorkflowDirs`
+  and `projection.WorkflowRejection` are exported.
+- **New:** `artifact.DiscoverChangesFromDiffs`, `ChangeSet.ReadErrors`, and `Ref` / `Err` fields on
+  `artifact.DiscoveryError` (additive). `engine.AuthoritativeBranch`, `domain.WorkflowStatusQuarantined`,
+  `domain.EventProjectionWorkflowRejected`, and the optional store capability
+  `(*store.PostgresStore).ListWorkflowProjections` (not added to `store.Store`).
+- **New optional git capability:** `git.TreeEntryTyper` (`TreeEntryType(ctx, ref, path)`, with
+  `git.TreeEntryBlob` / `TreeEntryTree` / `TreeEntryCommit`), implemented by `*git.CLIClient` and not
+  added to `git.GitClient`. The projection asks it what a commit's tree holds at a path before
+  every workflow and branch-protection read, and after a failed changed-artifact read. **A
+  `GitClient` decorator passed to `projection.NewService` should forward it:** without it the
+  projection keeps the historical read — a successful read is trusted, so a gitlink recording the
+  id of a blob in the repository is read as that blob — and no read failure can be proved
+  deterministic, so a dangling gitlink holds the sync in `error` (fail closed) instead of being
+  skipped or rejected.
+- **Shared behaviour for an embedder that runs `projection.Service` (SMP).** Without opting in to
+  anything:
+  - rejected workflow files (including `not_a_file` entries and over-long indexed fields) are
+    quarantined or not projected instead of projected; every workflow read and the
+    branch-protection read cost one extra `git ls-tree` process (the entry is typed first);
+  - a gitlink at `.spine/branch-protection.yaml` holds the sync in `error` with the rules unchanged,
+    even when the id it records names a blob;
+  - the first sync's reconciliation deletes **every** stored row outside the workflow definition
+    locations — every nested `workflows/**` row, not only the empty-status `workflows/steps/*`
+    step profiles: an Active nested definition (for example in an imported repository) is removed
+    and reported, and in-flight runs pinned to it lose their row;
+  - incremental sync no longer projects `templates/`;
+  - a `Diff` failure, a `Head()` failure (previously the state was left untouched), and a read of a
+    changed file that git itself failed (a lock, a killed or unspawnable process) are each an
+    `error` tick, so a document index gated on `idle` pauses for that tick; `error_detail` now
+    carries the cause, and a failed `FullRebuild` records `error`;
+  - the write path the embedder wraps refuses what the projection refuses: `workflow.Service`
+    `Create` / `Update` (SMP's `WorkflowWriter`) return `validation_failed` and
+    `engine.StartWorkflowPlanningRun` returns `invalid_params` for a round-trip-failing body, U+0000,
+    or a path, `id` or `status` over 1024 bytes.
+
+  A canonical workflow whose file is rejected (or is not a file) and has no row stays
+  without a row — an embedder that rebuilds whenever a canonical workflow row is missing must exclude
+  such paths from that probe, or it rebuilds on every pass (SMP TASK-012).
+
+---
+
 ## Spine Core library packaging — dual-target (standalone + embedded)
 
 Disposition: **Option A** — Spine remains available both as a standalone

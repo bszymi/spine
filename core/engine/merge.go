@@ -22,6 +22,12 @@ import (
 // either changes, they change together.
 const authoritativeBranch = "main"
 
+// AuthoritativeBranch exports the governed-merge target so wiring that
+// must follow the same branch — the projection's
+// WithAuthoritativeBranch (INIT-023 TASK-011, audit P3-22) — cannot
+// drift from it. It is a short branch name, not a qualified ref.
+const AuthoritativeBranch = authoritativeBranch
+
 // MergeRunBranch merges the run's branch to the authoritative branch (main)
 // and transitions the run from committing to completed. If the merge fails,
 // the run transitions to failed (permanent) or stays in committing (transient).

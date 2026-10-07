@@ -5,19 +5,23 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
 	bpconfig "github.com/bszymi/spine/core/branchprotect/config"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
-	"github.com/bszymi/spine/core/yamlsafe"
+	"github.com/bszymi/spine/core/workflow"
 )
 
 // BranchProtectionConfigPath is the fixed repo path the projection
@@ -30,7 +34,21 @@ type Service struct {
 	store        store.Store
 	events       event.EventRouter
 	pollInterval time.Duration
-	artifactsDir string // restricts artifact scanning to a subdirectory
+	// scope is the one path classifier both entry points use
+	// (artifacts_dir; INIT-023 TASK-011, audit P3-23).
+	scope pathScope
+	// authoritativeBranch, when set, pins every sync to
+	// refs/heads/<branch> instead of the working tree's HEAD (P3-22).
+	authoritativeBranch string
+	// strictWorkflowValidation turns a workflow.Validate failure into a
+	// rejection; off by default (owner question 7).
+	strictWorkflowValidation bool
+	// workflowsVerified records that this instance has reconciled every
+	// stored workflow row against the sync head (the sweep, §6). Atomic
+	// because the sync loop and the event handlers run IncrementalSync
+	// concurrently; sweepMu makes the sweep single-flight.
+	workflowsVerified atomic.Bool
+	sweepMu           sync.Mutex
 }
 
 // NewService creates a new Projection Service.
@@ -46,47 +64,99 @@ func NewService(gitClient git.GitClient, s store.Store, events event.EventRouter
 	}
 }
 
-// WithArtifactsDir configures the projection service to scope artifact
-// discovery to the given directory (matching .spine.yaml artifacts_dir).
+// WithArtifactsDir configures the projection to scope artifact discovery
+// to the given directory (matching .spine.yaml artifacts_dir). Both
+// FullRebuild and IncrementalSync apply it through one classifier:
+// artifacts are exactly <dir>/**.md minus templates/, keyed by the path
+// relative to <dir>; workflows are the direct *.yaml / *.yml children of
+// the root workflows/ and of <dir>/workflows/. "", ".", "./" and "/"
+// mean the repository root.
 func (s *Service) WithArtifactsDir(dir string) {
-	s.artifactsDir = dir
+	s.scope = newPathScope(dir)
 }
 
-// FullRebuild scans the entire repository at HEAD and rebuilds all projections.
-// Per Data Model §4.1.
+// workflowPlan is FullRebuild's decision for one workflow path, taken
+// before the delete-all window so nothing it needs is lost to the wipe.
+type workflowPlan struct {
+	path string
+	row  *store.WorkflowProjection // accepted row to upsert, or the previous row to restore
+	rej  *WorkflowRejection        // non-nil for a content rejection
+	// action for a rejection: kept (row is the verified previous row,
+	// restored quarantined), removed or not_projected (row is nil).
+	action string
+	// infraErr is a git read failure for this path. A verified previous
+	// row (in row) is restored QUARANTINED: kept for runs pinned to its
+	// source_commit and visible to the next sync's sweep, which retries
+	// the file (and restores the row's status when the read succeeds),
+	// but not bindable while the file at head cannot be checked (I6).
+	infraErr error
+}
+
+// FullRebuild scans the entire repository at the sync head and rebuilds
+// all projections. Per Data Model §4.1.
+//
+// Workflow rows obey the same rejection rule as IncrementalSync
+// (INIT-023 TASK-011): every workflow row and the previous row of every
+// rejected file are captured BEFORE the delete-all window, and a
+// verified previous row is restored quarantined with its own
+// source_commit. Discovery also runs before the wipe, so a git failure
+// there no longer leaves an empty projection.
 func (s *Service) FullRebuild(ctx context.Context) error {
 	log := observe.Logger(ctx)
 	log.Info("starting full projection rebuild")
 
-	head, err := s.git.Head(ctx)
-	if err != nil {
-		return fmt.Errorf("get HEAD: %w", err)
-	}
+	// Single-flight against the sweep: a rebuild re-derives every
+	// workflow row, so it must not interleave with a sweep on this
+	// instance.
+	s.sweepMu.Lock()
+	defer s.sweepMu.Unlock()
 
-	// Mark as rebuilding but keep previous commit until rebuild succeeds
+	// Keep the previous commit until the rebuild succeeds.
 	existingState, _ := s.store.GetSyncState(ctx)
 	prevCommit := ""
 	if existingState != nil {
 		prevCommit = existingState.LastSyncedCommit
 	}
+	// Every failure before the wipe left the projection exactly as it
+	// was: record status error with the cause, last_synced_commit
+	// unchanged. A store with no synced commit yet records "" — the next
+	// IncrementalSync then rebuilds (there is no baseline to diff from).
+	// Before INIT-023 TASK-011 review round 1 these returned without
+	// touching the state: a fresh store (spine init-repo before its
+	// spine/init branch is merged) reported nothing at all, and a failed
+	// discovery left "rebuilding" behind.
+	prev := &store.SyncState{LastSyncedCommit: prevCommit}
+
+	head, err := s.resolveHead(ctx)
+	if err != nil {
+		return s.markSyncError(ctx, prev, "resolve sync target", err)
+	}
+
 	_ = s.store.UpdateSyncState(ctx, &store.SyncState{
 		LastSyncedCommit: prevCommit,
 		Status:           "rebuilding",
 	})
 
-	// Clear existing projections
-	if err := s.store.DeleteAllProjections(ctx); err != nil {
-		return fmt.Errorf("delete projections: %w", err)
+	// Discover all artifacts (scoped to artifacts_dir if configured) and
+	// plan every workflow row before the wipe.
+	result, err := artifact.DiscoverAll(ctx, s.git, head, s.scope.dir)
+	if err != nil {
+		return s.markSyncError(ctx, prev, "discover artifacts", err)
+	}
+	wfPaths, err := s.workflowPathsAt(ctx, head, result.Workflows)
+	if err != nil {
+		return s.markSyncError(ctx, prev, "discover workflows", err)
+	}
+	plans, err := s.planWorkflowRows(ctx, wfPaths, head)
+	if err != nil {
+		return s.markSyncError(ctx, prev, "plan workflow rows", err)
 	}
 
-	// Discover all artifacts (scoped to artifacts_dir if configured)
-	var discoverOpts []string
-	if s.artifactsDir != "" {
-		discoverOpts = append(discoverOpts, s.artifactsDir)
-	}
-	result, err := artifact.DiscoverAll(ctx, s.git, head, discoverOpts...)
-	if err != nil {
-		return fmt.Errorf("discover artifacts: %w", err)
+	// Clear existing projections. The wipe is several statements, so a
+	// failure can leave it partial: no commit describes the store any
+	// more, so none is recorded and the next sync rebuilds.
+	if err := s.store.DeleteAllProjections(ctx); err != nil {
+		return s.markSyncError(ctx, &store.SyncState{}, "delete projections", err)
 	}
 
 	// Count discovery errors as projection failures
@@ -106,15 +176,8 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	}
 
 	// Project workflows
-	for _, wfPath := range result.Workflows {
-		if err := s.projectWorkflow(ctx, wfPath, head); err != nil {
-			log.Warn("failed to project workflow",
-				"path", wfPath,
-				"error", err,
-			)
-			projErrors++
-		}
-	}
+	wfInfraErrors, rejected := s.applyWorkflowPlans(ctx, plans)
+	projErrors += wfInfraErrors
 
 	// Project branch-protection config (ADR-009 §1). Always runs on
 	// rebuild so bootstrap defaults land even when the file is absent.
@@ -143,10 +206,15 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 			return fmt.Errorf("update sync state: %w", err)
 		}
 	}
+	// A rebuild re-derived every workflow row from head, which is what
+	// the sweep would do — unless a workflow read or write failed, in
+	// which case the next IncrementalSync sweeps again.
+	s.workflowsVerified.Store(wfInfraErrors == 0)
 
 	log.Info("full rebuild complete",
 		"artifacts", len(result.Artifacts),
-		"workflows", len(result.Workflows),
+		"workflows", len(wfPaths),
+		"workflows_rejected", rejected,
 		"skipped", len(result.Skipped),
 		"errors", len(result.Errors),
 		"commit", head,
@@ -156,8 +224,156 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	return nil
 }
 
+// workflowPathsAt returns the sorted, de-duplicated workflow definition
+// paths at head: DiscoverAll's workflow list (under artifacts_dir) plus,
+// when artifacts_dir is a subdirectory, the root workflows/ directory
+// (owner question 3), each filtered to direct children of a workflows/
+// directory.
+func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(discovered))
+	var out []string
+	add := func(paths []string) {
+		for _, p := range paths {
+			if !s.scope.isWorkflow(p) {
+				continue
+			}
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	add(discovered)
+	if s.scope.dir != "" {
+		root, err := artifact.DiscoverWorkflows(ctx, s.git, head)
+		if err != nil {
+			return nil, err
+		}
+		add(root)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// planWorkflowRows builds every workflow row at head and captures the
+// previous row of each rejected (or unreadable) file. It runs before
+// FullRebuild's wipe; a store error while capturing a previous row aborts
+// the rebuild before anything is deleted.
+func (s *Service) planWorkflowRows(ctx context.Context, paths []string, head string) ([]workflowPlan, error) {
+	plans := make([]workflowPlan, 0, len(paths))
+	for _, p := range paths {
+		row, rej, err := s.buildWorkflowRow(ctx, p, head)
+		if err == nil && rej == nil {
+			plans = append(plans, workflowPlan{path: p, row: row})
+			continue
+		}
+		prev, getErr := s.getWorkflowRow(ctx, p)
+		if getErr != nil {
+			return nil, fmt.Errorf("capture previous workflow row before rebuild: %w", getErr)
+		}
+		verified := prev != nil && workflow.VerifyProjectionDefinition(prev.Definition) == nil
+		if err != nil {
+			plan := workflowPlan{path: p, infraErr: err}
+			if verified {
+				plan.row = prev
+			}
+			plans = append(plans, plan)
+			continue
+		}
+		plan := workflowPlan{path: p, rej: rej}
+		switch {
+		case verified:
+			plan.row, plan.action = prev, actionKept
+		case prev != nil:
+			plan.action = actionRemoved
+		default:
+			plan.action = actionNotProjected
+		}
+		plans = append(plans, plan)
+	}
+	return plans, nil
+}
+
+// applyWorkflowPlans writes FullRebuild's workflow rows after the wipe
+// and reports every rejection. It returns the number of workflow
+// infrastructure errors (counted as projection errors) and of content
+// rejections (never counted).
+func (s *Service) applyWorkflowPlans(ctx context.Context, plans []workflowPlan) (infraErrors, rejected int) {
+	log := observe.Logger(ctx)
+	for i := range plans {
+		plan := &plans[i]
+		switch {
+		case plan.infraErr != nil:
+			log.Warn("failed to project workflow", "path", plan.path, "error", plan.infraErr)
+			infraErrors++
+			if plan.row != nil {
+				restored := *plan.row
+				restored.Status = string(domain.WorkflowStatusQuarantined)
+				if err := s.store.UpsertWorkflowProjection(ctx, &restored); err != nil {
+					log.Warn("failed to restore previous workflow row", "path", plan.path, "error", err)
+				}
+			}
+		case plan.rej == nil:
+			if err := s.store.UpsertWorkflowProjection(ctx, plan.row); err != nil {
+				log.Warn("failed to project workflow", "path", plan.path, "error", err)
+				infraErrors++
+			}
+		default:
+			rejected++
+			if plan.action == actionKept {
+				// The wipe removed the row; write the verified previous
+				// row back, quarantined, with its own source_commit.
+				restored := *plan.row
+				restored.Status = string(domain.WorkflowStatusQuarantined)
+				if err := s.store.UpsertWorkflowProjection(ctx, &restored); err != nil {
+					log.Warn("failed to restore quarantined workflow row", "path", plan.path, "error", err)
+					infraErrors++
+					continue
+				}
+				s.reportWorkflowRejection(ctx, plan.rej, actionKept, &restored)
+				continue
+			}
+			s.reportWorkflowRejection(ctx, plan.rej, plan.action, nil)
+		}
+	}
+	return infraErrors, rejected
+}
+
+// markSyncError records an infrastructure failure: status error,
+// last_synced_commit left where it was, so the next tick retries even
+// when head has not moved. error_detail carries the label and the cause
+// ("resolve sync target: resolve authoritative ref refs/heads/main: …"),
+// sanitised to one bounded line — git error text can echo committed
+// paths. It returns the wrapped cause, joined with any error from writing
+// the state.
+func (s *Service) markSyncError(ctx context.Context, state *store.SyncState, detail string, cause error) error {
+	err := fmt.Errorf("%s: %w", detail, cause)
+	if upErr := s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: state.LastSyncedCommit,
+		Status:           "error",
+		ErrorDetail:      sanitizeForLog(err.Error()),
+	}); upErr != nil {
+		err = errors.Join(err, fmt.Errorf("update sync state: %w", upErr))
+	}
+	return err
+}
+
 // IncrementalSync updates projections based on changes since the last sync.
 // Per Data Model §4.2.
+//
+// INIT-023 TASK-011 (audit P3-14, P3-22, P3-23):
+//   - one Diff per sync feeds both artifact discovery and the governance
+//     (branch-protection, workflow) loop, and its error is a sync error —
+//     a dropped second Diff used to skip governance changes while the
+//     state still advanced to idle@head, so they were never retried;
+//   - head is the authoritative ref when one is configured;
+//   - artifacts and workflows go through the same scope as FullRebuild;
+//   - a workflow content rejection advances the sync (reported, never
+//     counted), every infrastructure error holds it (status error,
+//     last_synced_commit unchanged);
+//   - the first sync on an instance reconciles every stored workflow row
+//     against head before the up-to-date early return.
 func (s *Service) IncrementalSync(ctx context.Context) error {
 	log := observe.Logger(ctx)
 
@@ -170,14 +386,43 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		// No sync state — do a full rebuild
 		return s.FullRebuild(ctx)
 	}
+	if state.LastSyncedCommit == "" {
+		// No baseline commit to diff from (`git diff "" <head>` can never
+		// succeed). A failed first rebuild records exactly this with
+		// status error: rebuild again. "rebuilding" means a first rebuild
+		// is in flight — on another instance, SMP's provisioning — or was
+		// interrupted; starting a second wipe-and-reload under it could
+		// let a reader see the other one's "idle" over a half-written
+		// projection, so leave it alone (an interrupted one is cleared by
+		// an operator rebuild, as before).
+		if state.Status == "rebuilding" {
+			return errors.New("projection has no synced commit yet: a first full rebuild is in progress or was interrupted")
+		}
+		return s.FullRebuild(ctx)
+	}
 
-	head, err := s.git.Head(ctx)
+	head, err := s.resolveHead(ctx)
 	if err != nil {
-		return fmt.Errorf("get HEAD: %w", err)
+		return s.markSyncError(ctx, state, "resolve sync target", err)
+	}
+
+	// The sweep runs before the early return: a store already idle at
+	// head is exactly the state an upgrade starts from. A failed sweep
+	// does not stop the rest of the sync — it is counted below, so the
+	// state ends error without advancing and the next tick sweeps again
+	// — but the artifact, branch-protection and workflow changes in the
+	// window are still applied, as they were before the sweep existed:
+	// one row that cannot be reconciled must not freeze the projection.
+	sweepErr := s.ensureWorkflowsVerified(ctx, head, state.LastSyncedCommit)
+	if sweepErr != nil {
+		log.Warn("projection: workflow row reconciliation failed; the sync is held in error and retries it",
+			"head", shortSHA(head),
+			"error", sanitizeForLog(sweepErr.Error()),
+		)
 	}
 
 	// Retry if previous sync failed, even at the same commit
-	if head == state.LastSyncedCommit && state.Status == "idle" {
+	if sweepErr == nil && head == state.LastSyncedCommit && state.Status == "idle" {
 		return nil // already up to date and healthy
 	}
 
@@ -187,25 +432,45 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		Status:           "syncing",
 	})
 
-	changeset, err := artifact.DiscoverChanges(ctx, s.git, state.LastSyncedCommit, head)
+	// One Diff for the whole sync.
+	diffs, err := s.git.Diff(ctx, state.LastSyncedCommit, head)
 	if err != nil {
-		return fmt.Errorf("discover changes: %w", err)
+		return s.markSyncError(ctx, state,
+			fmt.Sprintf("diff %s..%s", shortSHA(state.LastSyncedCommit), shortSHA(head)), err)
 	}
 
-	// When artifactsDir is set, strip the prefix from changeset paths so
-	// they match the projection keys produced by FullRebuild.
-	prefix := ""
-	if s.artifactsDir != "" && s.artifactsDir != "/" {
-		prefix = s.artifactsDir + "/"
+	changeset, err := artifact.DiscoverChangesFromDiffs(ctx, s.git, state.LastSyncedCommit, head, s.scope.artifactDiffs(diffs))
+	if err != nil {
+		return s.markSyncError(ctx, state, "discover changes", err)
+	}
+	readSkipped, readErr := s.classifyReadErrors(ctx, changeset.ReadErrors)
+	if readErr != nil {
+		return s.markSyncError(ctx, state, "read changed artifact", readErr)
 	}
 
 	var syncErrors int
+	if sweepErr != nil {
+		syncErrors++ // logged above
+	}
+
+	// scopeViolation guards the invariant that artifactDiffs passed only
+	// in-scope paths to discovery. A path outside the scope here means a
+	// filter regressed; refuse to advance rather than silently skip, so
+	// the regression is loud (and the equivalence tests catch it).
+	scopeViolation := func(repoPath string) {
+		log.Warn("projection: changed artifact outside the projection scope; not applied",
+			"path", repoPath, "artifacts_dir", s.scope.dir)
+		syncErrors++
+	}
 
 	// Process created artifacts
 	for _, a := range changeset.Created {
-		if prefix != "" {
-			a.Path = strings.TrimPrefix(a.Path, prefix)
+		key, ok := s.scope.artifactKey(a.Path)
+		if !ok {
+			scopeViolation(a.Path)
+			continue
 		}
+		a.Path = key
 		if err := s.projectArtifact(ctx, a, head); err != nil {
 			log.Warn("failed to project created artifact",
 				"path", a.Path,
@@ -217,9 +482,12 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 
 	// Process modified artifacts
 	for _, a := range changeset.Modified {
-		if prefix != "" {
-			a.Path = strings.TrimPrefix(a.Path, prefix)
+		key, ok := s.scope.artifactKey(a.Path)
+		if !ok {
+			scopeViolation(a.Path)
+			continue
 		}
+		a.Path = key
 		if err := s.projectArtifact(ctx, a, head); err != nil {
 			log.Warn("failed to project modified artifact",
 				"path", a.Path,
@@ -230,9 +498,11 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	}
 
 	// Process deleted artifacts
-	for _, path := range changeset.Deleted {
-		if prefix != "" {
-			path = strings.TrimPrefix(path, prefix)
+	for _, repoPath := range changeset.Deleted {
+		path, ok := s.scope.artifactKey(repoPath)
+		if !ok {
+			scopeViolation(repoPath)
+			continue
 		}
 		if err := s.store.DeleteArtifactProjection(ctx, path); err != nil {
 			log.Warn("failed to delete projection",
@@ -249,9 +519,6 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 			syncErrors++
 		}
 	}
-
-	// Sync workflow + branch-protection changes from the diff.
-	diffs, _ := s.git.Diff(ctx, state.LastSyncedCommit, head)
 
 	// Branch-protection.yaml: a single file at a fixed path — any diff
 	// touching it triggers a re-projection. Both adds/modifies and
@@ -281,30 +548,43 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		}
 	}
 
-	for _, diff := range diffs {
-		if !artifact.IsWorkflowPath(diff.Path) && (diff.OldPath == "" || !artifact.IsWorkflowPath(diff.OldPath)) {
-			continue
+	// Workflows: the same raw diff, classified with the shared scope.
+	var workflowsRejected int
+	syncWorkflow := func(path string) {
+		rejected, err := s.syncWorkflowFile(ctx, path, head)
+		if err != nil {
+			log.Warn("failed to project workflow", "path", path, "error", err)
+			syncErrors++
+			return
 		}
+		if rejected {
+			workflowsRejected++
+		}
+	}
+	deleteWorkflow := func(path string) {
+		if err := s.store.DeleteWorkflowProjection(ctx, path); err != nil {
+			log.Warn("failed to delete workflow", "path", path, "error", err)
+			syncErrors++
+		}
+	}
+	for _, diff := range diffs {
 		switch diff.Status {
 		case "added", "modified":
-			if err := s.projectWorkflow(ctx, diff.Path, head); err != nil {
-				log.Warn("failed to project workflow", "path", diff.Path, "error", err)
-				syncErrors++
+			if s.scope.isWorkflow(diff.Path) {
+				syncWorkflow(diff.Path)
 			}
 		case "deleted":
-			if err := s.store.DeleteWorkflowProjection(ctx, diff.Path); err != nil {
-				log.Warn("failed to delete workflow", "path", diff.Path, "error", err)
-				syncErrors++
+			if s.scope.isWorkflow(diff.Path) {
+				deleteWorkflow(diff.Path)
 			}
 		case "renamed":
-			if diff.OldPath != "" {
-				_ = s.store.DeleteWorkflowProjection(ctx, diff.OldPath)
+			// The old row's delete error is counted: dropping it left
+			// the old Active row bindable while the sync advanced.
+			if diff.OldPath != "" && s.scope.isWorkflow(diff.OldPath) {
+				deleteWorkflow(diff.OldPath)
 			}
-			if artifact.IsWorkflowPath(diff.Path) {
-				if err := s.projectWorkflow(ctx, diff.Path, head); err != nil {
-					log.Warn("failed to project renamed workflow", "path", diff.Path, "error", err)
-					syncErrors++
-				}
+			if s.scope.isWorkflow(diff.Path) {
+				syncWorkflow(diff.Path)
 			}
 		}
 	}
@@ -331,6 +611,8 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		"created", len(changeset.Created),
 		"modified", len(changeset.Modified),
 		"deleted", len(changeset.Deleted),
+		"workflows_rejected", workflowsRejected,
+		"read_skipped", readSkipped,
 		"errors", syncErrors,
 		"from", shortSHA(state.LastSyncedCommit),
 		"to", shortSHA(head),
@@ -343,12 +625,14 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		return nil
 	}
 	payload, _ := json.Marshal(map[string]any{
-		"from_commit": shortSHA(state.LastSyncedCommit),
-		"to_commit":   shortSHA(head),
-		"created":     len(changeset.Created),
-		"modified":    len(changeset.Modified),
-		"deleted":     len(changeset.Deleted),
-		"errors":      syncErrors,
+		"from_commit":        shortSHA(state.LastSyncedCommit),
+		"to_commit":          shortSHA(head),
+		"created":            len(changeset.Created),
+		"modified":           len(changeset.Modified),
+		"deleted":            len(changeset.Deleted),
+		"errors":             syncErrors,
+		"workflows_rejected": workflowsRejected,
+		"read_skipped":       readSkipped,
 	})
 	event.EmitLogged(ctx, s.events, domain.Event{
 		EventID: fmt.Sprintf("sync-%s", head[:12]),
@@ -496,62 +780,6 @@ func isTerminalProjectionStatus(status string) bool {
 	return false
 }
 
-// projectWorkflow reads and projects a workflow YAML file.
-func (s *Service) projectWorkflow(ctx context.Context, wfPath, commitSHA string) error {
-	content, err := s.git.ReadFile(ctx, commitSHA, wfPath)
-	if err != nil {
-		return fmt.Errorf("read workflow %s: %w", wfPath, err)
-	}
-
-	// Bound size / depth / alias count once via yamlsafe so a hostile
-	// workflow file can't stall projection with a billion-laughs payload,
-	// then decode twice off the same parsed node: once for the typed
-	// projection fields, once as `any` for the JSONB definition column.
-	node, err := yamlsafe.Decode(content)
-	if err != nil {
-		return fmt.Errorf("parse workflow %s: %w", wfPath, err)
-	}
-
-	var wf struct {
-		ID        string   `yaml:"id" json:"id"`
-		Name      string   `yaml:"name" json:"name"`
-		Version   string   `yaml:"version" json:"version"`
-		Status    string   `yaml:"status" json:"status"`
-		AppliesTo []string `yaml:"applies_to" json:"applies_to"`
-	}
-	if err := node.Decode(&wf); err != nil {
-		return fmt.Errorf("parse workflow %s: %w", wfPath, err)
-	}
-
-	appliesTo, err := json.Marshal(wf.AppliesTo)
-	if err != nil {
-		return fmt.Errorf("marshal workflow applies_to: %w", err)
-	}
-
-	// Convert YAML to JSON for the JSONB definition column.
-	var rawDef any
-	if err := node.Decode(&rawDef); err != nil {
-		return fmt.Errorf("parse workflow raw definition %s: %w", wfPath, err)
-	}
-	definition, err := json.Marshal(rawDef)
-	if err != nil {
-		return fmt.Errorf("marshal workflow definition: %w", err)
-	}
-
-	proj := &store.WorkflowProjection{
-		WorkflowPath: wfPath,
-		WorkflowID:   wf.ID,
-		Name:         wf.Name,
-		Version:      wf.Version,
-		Status:       wf.Status,
-		AppliesTo:    appliesTo,
-		Definition:   definition,
-		SourceCommit: commitSHA,
-	}
-
-	return s.store.UpsertWorkflowProjection(ctx, proj)
-}
-
 // projectBranchProtection reads /.spine/branch-protection.yaml at the
 // given commit, parses it, and atomically replaces the effective ruleset
 // in projection.branch_protection_rules.
@@ -582,9 +810,20 @@ func (s *Service) projectBranchProtection(ctx context.Context, commitSHA string)
 		return s.store.UpsertBranchProtectionRules(ctx, bootstrapRows(), "bootstrap")
 	}
 
-	content, readErr := s.git.ReadFile(ctx, commitSHA, BranchProtectionConfigPath)
+	// The entry is typed before it is read (INIT-023 TASK-011 review
+	// round 2, readFileEntry): a gitlink recording the id of a blob in
+	// this repository reads successfully, so a `rules: []` blob behind a
+	// submodule pointer used to relax protection with nothing visible in
+	// the diff. An entry that is not a file is treated like a malformed
+	// config — the rules stay as they are and the sync is held — never
+	// as "absent", which would seed bootstrap defaults.
+	content, unreadable, readErr := s.readFileEntry(ctx, commitSHA, BranchProtectionConfigPath)
 	if readErr != nil {
 		return fmt.Errorf("read branch-protection config at %s: %w", shortSHA(commitSHA), readErr)
+	}
+	if unreadable != nil {
+		return fmt.Errorf("branch-protection config at %s is not readable: %w; rules left unchanged",
+			shortSHA(commitSHA), unreadable.cause())
 	}
 	if len(bytes.TrimSpace(content)) == 0 {
 		// A committed-but-empty file is treated as a malformed config,

@@ -115,6 +115,60 @@ This document tracks known gaps and deferred functionality.
   never hold mid-run (see `workflow.DeferredStatusPreconditions`). Custom workflows with such a
   precondition strand under the strict policy until it is removed.
 
+### Projection Sync: What INIT-023 TASK-011 Leaves Open
+- **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
+  enforced (a file that fails either is not projected), but a workflow that fails the full
+  `workflow.Validate` suite is still projected, with one Info log line. 6 of Spine's 8 shipped
+  workflow files (and 4 of SMP's 7) fail `Validate` today, so `WithStrictWorkflowValidation` stays
+  off in both repositories until a corpus-repair task (INIT-023 owner question 7).
+- **A full rebuild re-stamps `source_commit`** on every accepted workflow row. An embedder that pins
+  runs to a row's `source_commit` (SMP) strands in-flight runs on every `FullRebuild`.
+  Preserving `source_commit` for unchanged rows is a recorded follow-up (TASK-011 owner question 5).
+- **Rows corrupted before the upgrade by the old `artifacts_dir` handling** (an out-of-tree `.md`
+  file overwriting a governed artifact's row) are not repaired automatically. Standalone deployments
+  with `artifacts_dir` set should run `POST /api/v1/system/rebuild` once after upgrading.
+- **Non-Active workflow rows are only swept on stores with the all-rows capability.**
+  `*store.PostgresStore` has it; a custom `store.Store` without `ListWorkflowProjections` gets an
+  Active-only sweep.
+- **Incremental deletes leave the task's execution projection row** (`projection.execution_projections`)
+  until the next full rebuild. This predates INIT-023; incremental sync never called
+  `DeleteExecutionProjection`.
+- **Artifact content PostgreSQL cannot store** — U+0000 in front matter or body, or a path or id
+  longer than a btree index entry allows (about 2.7 KB) — keeps incremental sync in `error` until the
+  file changes. Workflow files of either kind are rejected instead (TASK-011: U+0000, and a path,
+  `id` or `status` over 1024 bytes); the artifact side is a follow-up.
+- **`QueryService.CheckFreshness` still compares against the working tree's `HEAD`**, not the
+  authoritative branch. It has no production caller.
+- **A workflow file git fails to read** (a lock, a git process killed or unable to start, a missing
+  object) is an infrastructure error. An incremental sync holds in `error` and leaves the previous
+  row as it was — still Active, like every other change in the unapplied window; a full rebuild
+  restores a verified previous row quarantined, and the next sync's reconciliation retries the file
+  (the rest of the window is applied meanwhile). A missing blob is repository corruption — a push
+  cannot plant one, receive-pack's connectivity check refuses it — and holds the sync until the
+  repository is repaired. An entry that is not a file (a gitlink — the one non-file entry at a file
+  path a push can carry — or a directory) is a `not_a_file` rejection instead, decided from the
+  commit's tree before the file is read. Oversized blobs become `read_bounds` rejections once the
+  bounded-read work (TASK-003) registers its sentinel in `isContentReadError`
+  (`adapters/projection/workflow_rows.go`).
+- **Entries are typed from the commit's tree** (`git.TreeEntryTyper`, implemented by
+  `*git.CLIClient`): before every workflow and branch-protection read, and after a failed
+  changed-artifact read. A `GitClient` decorator passed to `projection.NewService` that does not
+  forward it gets the historical read: a successful read is trusted (a gitlink recording the id of
+  a blob in the repository is read as that blob), and every read failure is infrastructure (a
+  dangling gitlink holds the sync in `error`, fail closed, instead of being skipped or rejected).
+- **A gitlink at an artifact path whose recorded id names a blob in the repository is read as that
+  blob** — by artifact discovery in both projection entry points and by every other artifact
+  reader (`artifact.Service` reads, branch validation) — while diffs and repository viewers show a
+  submodule pointer. Workflow files and `.spine/branch-protection.yaml` are typed before they are
+  read, so this cannot change a run's workflow or the branch rules (TASK-011 review round 2).
+  Typing every artifact in the projection alone would not close it for the other readers and would
+  add a git process per artifact to every full rebuild; refusing gitlink entries in a governed
+  repository at the push and merge boundary closes it for every reader at once (follow-up).
+- **A first full rebuild that was interrupted** (the process stopped while `sync_state` was
+  `rebuilding` with no synced commit) is not retried automatically, because it cannot be told apart
+  from a first rebuild still running on another instance; run `POST /api/v1/system/rebuild`. A first
+  rebuild that *fails* records `error` and is retried by the next sync.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

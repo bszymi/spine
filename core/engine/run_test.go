@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1468,5 +1469,37 @@ func TestStartWorkflowPlanningRun_RunPinning(t *testing.T) {
 	}
 	if stored.WorkflowVersion != "pinned-sha-v1" {
 		t.Errorf("run must remain pinned to v1 after resolver change; got %s", stored.WorkflowVersion)
+	}
+}
+
+// INIT-023 TASK-011 §7 / AC 23: a body that strict Parse accepts but the
+// projection would refuse (an unquoted float or date version reads back
+// from the stored JSON as a number / an RFC 3339 timestamp) is refused
+// with the same ErrInvalidParams a parse failure returns, and no run
+// branch or workflow write happens.
+func TestStartWorkflowPlanningRun_RejectsProjectionRoundTripBody(t *testing.T) {
+	for _, version := range []string{"1.0", "2026-10-06"} {
+		t.Run(version, func(t *testing.T) {
+			writer := &mockWorkflowWriter{}
+			store := &mockRunStore{}
+			events := &mockEventEmitter{}
+			orch := workflowPlanningOrchestrator(writer, workflowPlanningResolver(), store, events, &stubGitOperator{})
+
+			body := strings.Replace(validWorkflowBody, `version: "1.0"`, "version: "+version, 1)
+			if _, err := workflow.Parse("workflows/new-workflow.yaml", []byte(body)); err != nil {
+				t.Fatalf("precondition: Parse accepts the body, got %v", err)
+			}
+			_, err := orch.StartWorkflowPlanningRun(context.Background(), "new-workflow", body)
+			var de *domain.SpineError
+			if !errors.As(err, &de) || de.Code != domain.ErrInvalidParams {
+				t.Fatalf("expected ErrInvalidParams, got %v", err)
+			}
+			if !errors.Is(err, workflow.ErrProjectionRoundTrip) && !strings.Contains(err.Error(), "round-trip") {
+				t.Errorf("error should name the round trip: %v", err)
+			}
+			if writer.createdID != "" {
+				t.Fatalf("workflow writer must not be called, got %q", writer.createdID)
+			}
+		})
 	}
 }

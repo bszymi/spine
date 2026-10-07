@@ -294,6 +294,14 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		projQuery = projection.NewQueryService(deps.Store, primaryClient)
 		projSync = projection.NewService(primaryClient, deps.Store, deps.Events, 30*time.Second)
 		projSync.WithArtifactsDir(deps.SpineCfg.ArtifactsDir)
+		// The single-workspace repository is a non-bare working tree
+		// the engine checks run branches out in: follow the
+		// governed-merge target, not HEAD (INIT-023 TASK-011, audit
+		// P3-22). One startup Warn when the branch does not resolve.
+		if err := projSync.WithAuthoritativeBranch(engine.AuthoritativeBranch); err != nil {
+			return nil, fmt.Errorf("projection authoritative branch: %w", err)
+		}
+		_ = projSync.ProbeAuthoritativeRef(ctx)
 	}
 
 	// In platform-binding mode the global projSync above is moot: every
