@@ -1604,8 +1604,10 @@ Test files are in `adapters/projection` unless named otherwise.
     row deleted with one Info line and no Warn/event; (e) no upsert, `source_commit` unchanged;
     (f) no second listing; (g) Deprecated smuggled row removed with the capability, documented
     survivor without it; (h) two concurrent first syncs make exactly one listing (`-race` clean);
-    (i) quarantined. Also `TestSweep_FailureMarksErrorAndRetries` and, on PostgreSQL,
-    `TestIntegration_SweepRemovesDeprecatedSmuggledRow`.
+    (i) quarantined. Also `TestSweep_FailureHoldsTheSyncButDoesNotFreezeIt` (review round 1's
+    replacement for `TestSweep_FailureMarksErrorAndRetries`, removed in `e7b1a3c`: a failed sweep
+    holds the sync in `error` and retries, while the window's changes are applied) and, on
+    PostgreSQL, `TestIntegration_SweepRemovesDeprecatedSmuggledRow`.
 11. `TestProjection_NestedWorkflowFilesAreNotWorkflows`: only the top-level row; no rejection, no Warn.
 12. `sync_errors_test.go` `TestIncrementalSync_DiffFailureIsErrorAndRetried` (store holds no rows, so
     the sweep is a no-op; the fake implements `ListFiles`/`ReadFile`): error returned, `{error, c1}`,
@@ -1672,7 +1674,13 @@ Test files are in `adapters/projection` unless named otherwise.
     `discovery_read_errors_test.go` pins the recording; `core/engine`
     `TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore` passes **unchanged at `main`** and at HEAD.
     **Superseded in review round 1:** the classification no longer reads the `GitError` Kind; see
-    "Review round 1" — real-client tests in `read_errors_test.go`.
+    "Review round 1" — real-client tests in `read_errors_test.go`. Cases 1 and 2 of
+    `TestIncrementalSync_ArtifactReadErrorsAreClassified` still pass, but only because that fake
+    does not implement `git.TreeEntryTyper`, so every failure is infrastructure; the proof of
+    AC 28 is now `TestIncrementalSync_GitlinkWithTransientLookingNameIsSkipped`,
+    `TestIncrementalSync_KilledGitReadHoldsTheSync` (real `CLIClient`) and the table
+    `TestClassifyReadErrors_OnlyAProvedNonBlobIsSkipped` (a typed blob and a client without the
+    capability both hold).
 29. `workflow_integrity_integration_test.go` `TestIntegration_NULWorkflowIsRejectionNotWedge` (written
     against the pre-existing API only). **HEAD:** `idle@c2`, row kept at `c1`, `Quarantined`, not
     Active, one `round_trip` / `kept` rejection. **`main` (same file run in a `git archive main`
@@ -1822,6 +1830,12 @@ obligations of §10 (above all the backfill probe) remain SMP TASK-012's.
   sync in `error`), stale execution projections after incremental deletes, `workflow_id` not unique
   across paths in SMP's step-mode reads, `QueryService.CheckFreshness` still on `Head()`, surfacing
   rejections in SMP beyond logs.
+- **Gitlink entries in a governed repository (review round 2).** Refuse a gitlink (mode 160000) at
+  the push and merge boundary — Spine's pre-receive and SMP's `/git/{workspace_id}` gateway — so a
+  gitlink recording the id of a blob in the repository cannot reach any reader. The projection now
+  types workflow and branch-protection entries before reading them, but every artifact reader
+  (projection discovery, `artifact.Service`, branch validation) still reads such an entry as the
+  blob it names (`KNOWN-LIMITATIONS.md`).
 
 ### Review round 1 (2026-10-07)
 
@@ -1928,3 +1942,95 @@ over `5753b16`):
 
 Databases used this round (`s011_r1`, `s011_r1_main`, `s011_r1_scen`, `s011_smp_it`,
 `s011_smp_spine_rt`) were dropped at the end.
+
+### Review round 2 (2026-10-07)
+
+One reviewer re-examined `01c0e90` after round 1. They confirmed F1–F11 fixed, re-ran the
+PostgreSQL tests for F4 and AC 29 and found them passing, and re-ran every gate with no failures.
+They reported one finding and six gaps. The finding was checked against the code first and
+reproduced. Commits: `9166d5c` (code and tests), `f60a4f1` (docs), and these notes.
+
+**Finding:**
+
+| # | Finding | Disposition | What changed / why | Regression tests |
+|---|---|---|---|---|
+| R2-1 | P3: the `not_a_file` rule ran only when `ReadFile` failed. `git show <c>:<path>` prints whatever object a gitlink's recorded id names, so a gitlink whose id is an existing blob read successfully. The projection then accepted a hidden review-less workflow, or a `rules: []` branch-protection file, while diffs and repository viewers show only `Subproject commit <id>`. This contradicted CHANGELOG, event-schemas and KNOWN-LIMITATIONS. The same behaviour exists at `main`, so this is a bypass of the documented guarantee, not a regression | **FIXED** for workflow files and `.spine/branch-protection.yaml`. Artifacts are **documented, not typed** (Deviation 21) | Reproduced at `01c0e90` with the new tests. Incremental: the row was `Active` at `c2`, version `0.9`, with no review step. Branch protection: `idle@c2` with the relaxed rules. The new `readFileEntry` (`adapters/projection/read_errors.go`) types the entry with `git.TreeEntryTyper` **before** every workflow and branch-protection read: <br>• a gitlink, a directory or no entry at that exact path is an `unreadableEntry`; <br>• a typing failure, or a type outside the documented set, is infrastructure, so the sync holds; <br>• only a blob is read. A read failure on a blob is `read_bounds` when `isContentReadError` matches, otherwise infrastructure. <br>`buildWorkflowRow` turns `unreadableEntry` into a `not_a_file` rejection (or `read_bounds`), which covers incremental sync, the sweep and `FullRebuild`. `projectBranchProtection` turns it into a sync error with the rules unchanged (Deviation 22). A client without the capability keeps the historical read (Deviation 23). The ref is a commit SHA on every projection path, so the tree read and the blob read see the same entry. Cost: one `git ls-tree` per workflow read and per branch-protection projection | `gitlink_blob_test.go`, all on the real `CLIClient`: <br>`TestProjection_GitlinkToExistingBlobAtWorkflowPathIsRejection`. Its preconditions assert that `ls-tree` records `160000 commit <blob id>`, that `cat-file -t` is `blob`, that `git show` prints the hidden body, and that the diff is `T`. It covers incremental sync (`kept` quarantined at `c1`, plus `not_projected` for a new hidden workflow, `idle@c2`), a fresh instance's sweep, `FullRebuild` over the same store, `FullRebuild` into an empty store (no row for either path), and then a regular file at `c3`, which projects. <br>`TestProjection_GitlinkToExistingBlobAtBranchProtectionIsHeld`: 2 ticks `error@c1` with the strict rules kept and a Warn naming `tree entry: gitlink`; a rebuild keeps them; an empty store writes no rules; the same relaxation committed as a regular file projects. <br>Fake tables: `TestBuildWorkflowRow_TypesTheEntryBeforeEveryRead` (non-blob entries are not read at all) and `TestProjectBranchProtection_TypesTheEntryBeforeReading` |
+
+**Gaps:**
+
+| # | Gap | Disposition |
+|---|---|---|
+| G1 | Round-1 dispositions F1–F11 confirmed, including tree-shape probes (root `..`, `/` in a name, unsorted tree) | Confirmed. No action |
+| G2 | Gates green at `01c0e90`, lint 0 new | Confirmed; re-run at this round's code (below) |
+| G3 | AC 18 (third bullet) and AC 26: "`make test-scenario` passes" is not met as written. The reviewer did not re-verify that the sets match `main` | **Re-verified this round** with `go test -json` on both trees: HEAD and a `main` export each give **190 pass / 30 fail / 6 skip** (subtests 1285 / 27), **0 differences** in any test's outcome; `TestGitHTTP_*` 19 / 0 / 0 on both. Not a TASK-011 defect. Closing the AC as written **needs an owner waiver or an amended AC**; it stays an open question |
+| G4 | AC 24: SMP `TEST_PROVISIONING_DSN` suites not run | Still unmet as written; it is an environment limit (Deviation 11). The literal suites run at SMP TASK-012's gate. **Owner waiver or deferral** needed; open question |
+| G5 | AC 10 evidence cited the removed `TestSweep_FailureMarksErrorAndRetries` | **FIXED**: the evidence now cites `TestSweep_FailureHoldsTheSyncButDoesNotFreezeIt` |
+| G6 | AC 28 cases 1–2 pass only because the fake has no `TreeEntryTyper` | **FIXED** in the evidence: it now says so and names the real-client tests as the proof |
+
+**New deviations (closest safe alternative):**
+
+21. **Artifact reads are not typed before a successful read** (the reviewer marked this optional).
+    A gitlink at an artifact path whose id names a blob is still read as that blob. That is true of
+    projection discovery and of every other artifact reader: `artifact.Service` Read/List and
+    branch validation. A projection-only guard therefore would not close the class. It would also
+    break the `FullRebuild` ≡ `IncrementalSync` equivalence (AC 20) unless both entry points typed
+    every artifact, which adds a git process per artifact to every full rebuild. Artifact semantics
+    for gitlinks already differ between the entry points at `main`. The CHANGELOG / event-schemas
+    `read_skipped` wording is narrowed to reads git could not perform. KNOWN-LIMITATIONS records the
+    gap, and the follow-up refuses gitlinks at the push and merge boundary, which covers every
+    reader. Workflow files are fully covered: run binding goes only through the projection
+    (`ProjectionWorkflowProvider`, the only `WorkflowProvider`), and the loader reads at the bound
+    row's `source_commit`. Branch-protection enforcement reads only the projection
+    (`core/branchprotect/projection`).
+22. **A non-file entry at `.spine/branch-protection.yaml` is a held sync error, not a new
+    rejection kind.** This matches ADR-009 §1's rule for a malformed config: the rules stay as they
+    are, the sync does not advance, and the forced re-projection on `error` retries every tick. It
+    is never treated as "absent", which would seed bootstrap defaults. A dangling gitlink there was
+    already held (read error) at `main` and in round 1.
+23. **A git client without `TreeEntryTyper` keeps the historical read.** A successful read is
+    trusted, and a failure goes through `classifyReadFailure` (infrastructure). Refusing every read
+    would stop the projection for an embedder whose decorator does not forward the capability, and
+    for every test double. `*git.CLIClient` implements it, and Spine standalone (`gitpool` primary
+    client), the scenario harness and both SMP call sites (`projectionwriter/worker.go`,
+    `workspace/provision_steps_runtime.go`) pass a `CLIClient`. Documented in CHANGELOG (embedders)
+    and KNOWN-LIMITATIONS.
+24. **Symlinks stay blobs.** `TreeEntryBlob` covers mode 120000. A symlink's stored content is its
+    link text, which is what the diff shows and what the projection reads. A link-text body is
+    therefore not hidden, and a real symlinked workflow never parses. The docs say "file (blob)"
+    rather than "regular file".
+
+**Mutation runs** (`go test -overlay`, worktree untouched):
+- reading the entry anyway after a non-file answer fails all four new tests and
+  `TestProjection_GitlinkAtWorkflowPathIsRejection`;
+- treating an unknown type as a blob fails both fake tables.
+
+**Gates (review round 2)** — Spine at `f60a4f1` (code at `9166d5c`):
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | ok; `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | exit 0, 38 packages ok, 0 FAIL |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
+| `go test -race -p 4 -count=1` on `adapters/projection`, `adapters/git`, `adapters/store`, `adapters/delivery`, `core/workflow`, `core/artifact`, `core/domain`, `core/engine`, `service/cmd/spine`, `service/internal/workspace`, `service/scenariotest/harness` | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s011_r2 go test -race -p 1 -count=1 -tags integration` on projection, git, workflow, artifact, engine, store, delivery, workspace | all ok except store `TestRunModeDatabaseDefault` (`cannot scan NULL into *string` on `workflow_version_label`); the same test fails the same way in a `main` export on `s011_r2_main` |
+| `SPINE_TEST_DATABASE_URL=…/s011_r2_scen go test -p 1 -count=1 -tags scenario -json ./service/scenariotest/...`, and the same in a `main` export on `s011_r2_scen_main` | 190 / 30 / 6 on both, 0 outcome differences (G3); `TestGitHTTP_*` 19 / 0 / 0 |
+| `golangci-lint run` (v2, `--allow-parallel-runners`) on the 11 touched packages, plain / `--build-tags integration` / `--build-tags scenario`, vs the `main` export as (linter, file, message) multisets | 0 new each (144 vs 154, 146 vs 156, 145 vs 155) |
+| `golangci-lint run --enable-only=gosec`, plain and integration, same packages | 1 and 2 issues, identical to `main`; 0 new |
+| `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
+| `codex review --base main` (at `f60a4f1`, with these notes' AC 10/28 edits uncommitted) | "No actionable regressions were identified"; no findings to reject |
+| SMP gate (SMP `7d4e7cc9`, `../spine` at `f60a4f1`, no SMP file modified): `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` | all ok |
+| SMP `go test -race -p 4 -count=1` on the 31 packages depending on a changed Spine package (`go list -deps`) plus `internal/docmemory` | 31 ok, 1 `[no test files]`, 0 FAIL |
+| SMP testgate, Spine-runtime step (`s011_smp_spine_rt`, `-set spine-runtime`, 26 versions) | PASS — 1536 passed, 0 failed, 4 allowed skips |
+| SMP testgate, shared step + `docindex` (`s011_smp_it`, platform set, 115 versions) | PASS — 1111 passed, 0 failed, 36 allowed skips (`TEST_PROVISIONING_DSN`, MinIO, live AWS) |
+| SMP testgate `-tags integration ./internal/customer/githttp/` | PASS — 140 passed |
+
+SMP needs no edit: both of its `NewService` call sites pass a `*git.CLIClient`, so they get the
+typed read. The only behaviour change for SMP-produced input is the extra `ls-tree` per read.
+The SMP TASK-012 backfill-probe obligation from §10 covers the new case unchanged: a canonical
+path whose entry at `HEAD` is a gitlink, now including one that names a blob, is a `not_a_file`
+rejection.
+
+Databases used this round (`s011_r2`, `s011_r2_main`, `s011_r2_scen`, `s011_r2_scen_main`,
+`s011_smp_it`, `s011_smp_spine_rt`) were dropped at the end. Both repositories' `git status` was
+clean apart from this artifact.
