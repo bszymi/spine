@@ -197,6 +197,28 @@ func UnstageFile(ctx context.Context, repoDir, path string) error {
 	return nil
 }
 
+// TrackedInHEAD reports whether path (repo-relative, slash-separated, as
+// staged) names an entry of the HEAD commit of the repository or worktree
+// rooted at repoDir. The match is literal (GIT_LITERAL_PATHSPECS: no glob
+// or pathspec magic); a directory entry counts as tracked.
+//
+// Rollback paths use it to decide whether a file left at a path whose
+// create failed to commit may be deleted (INIT-023 TASK-004 review round
+// 2), so every doubt is an error: an unborn HEAD or any other git failure
+// returns a non-nil error, never "untracked", and the caller keeps the file.
+func TrackedInHEAD(ctx context.Context, repoDir, path string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "ls-tree", "-z", "--name-only", "HEAD", "--", path)
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git ls-tree HEAD %s: %w: %s", path, err, strings.TrimSpace(stderr.String()))
+	}
+	return len(out) > 0, nil
+}
+
 // CurrentBranch returns the currently-checked-out branch name for repoDir.
 // Used by auto-push helpers to know which branch to push.
 //

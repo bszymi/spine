@@ -2,14 +2,17 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 // RenumberResult contains the result of a successful renumber operation.
@@ -39,11 +42,26 @@ func IsIDCollision(ctx context.Context, gitClient git.GitClient, branchRef, targ
 // markdown heading. Returns the old and new paths.
 //
 // The caller must be on the correct branch and commit the changes after.
+//
+// All file I/O goes through worktreefs (INIT-023 TASK-004): artifactPath
+// and the derived new path must be clean repo-relative paths, and a
+// symbolic link anywhere in either is refused rather than followed. The
+// function has no production caller today; it is guarded so the sink does
+// not come back when one is wired.
 func RenumberArtifact(repoRoot, artifactPath string, artifactType domain.ArtifactType, oldID, newID string) (*RenumberResult, error) {
-	fullOldPath := filepath.Join(repoRoot, artifactPath)
+	tree, err := worktreefs.Open(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open repository: %w", err)
+	}
+	defer func() { _ = tree.Close() }()
+
+	oldRel, err := worktreefs.Clean(artifactPath)
+	if err != nil {
+		return nil, fmt.Errorf("artifact path: %w", err)
+	}
 
 	// Read the current content.
-	content, err := os.ReadFile(fullOldPath)
+	content, err := tree.ReadFile(oldRel)
 	if err != nil {
 		return nil, fmt.Errorf("read artifact %s: %w", artifactPath, err)
 	}
@@ -53,25 +71,23 @@ func RenumberArtifact(repoRoot, artifactPath string, artifactType domain.Artifac
 
 	// Compute the new path.
 	newPath := renamePathForNewID(artifactPath, oldID, newID)
-	fullNewPath := filepath.Join(repoRoot, newPath)
-
-	// Create parent directory if needed.
-	if err := os.MkdirAll(filepath.Dir(fullNewPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create directory for %s: %w", newPath, err)
+	newRel, err := worktreefs.Clean(newPath)
+	if err != nil {
+		return nil, fmt.Errorf("new artifact path: %w", err)
 	}
 
-	// Write to the new path.
-	if err := os.WriteFile(fullNewPath, []byte(updated), 0o644); err != nil { //nolint:gosec // G703: path is repo-joined from validated slug; 0644 required for git tracking
+	// Write to the new path (creating parent directories as needed).
+	if err := tree.WriteFile(newRel, []byte(updated), 0o644); err != nil {
 		return nil, fmt.Errorf("write artifact %s: %w", newPath, err)
 	}
 
 	// Remove the old file if the path changed.
-	if artifactPath != newPath {
-		if err := os.Remove(fullOldPath); err != nil && !os.IsNotExist(err) {
+	if oldRel != newRel {
+		if err := tree.Remove(oldRel); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("remove old artifact %s: %w", artifactPath, err)
 		}
 		// Clean up empty parent directories left behind.
-		cleanEmptyParents(filepath.Dir(fullOldPath), repoRoot)
+		cleanEmptyParents(tree, path.Dir(oldRel))
 	}
 
 	return &RenumberResult{
@@ -84,31 +100,38 @@ func RenumberArtifact(repoRoot, artifactPath string, artifactType domain.Artifac
 
 // UpdateLinksToRenamedArtifact scans all markdown files in a directory tree
 // and updates any links that reference the old path to point to the new path.
+//
+// searchDir is repo-relative ("", "." and "/" mean the repository root).
+// The scan goes through worktreefs.WalkRegularFiles: it never enters or
+// rewrites anything under .git, and a symbolic link (file or directory) is
+// skipped, never read or written through. Unreadable or oversized files are
+// skipped, as before.
 func UpdateLinksToRenamedArtifact(repoRoot, searchDir, oldPath, newPath string) error {
-	fullSearchDir := filepath.Join(repoRoot, searchDir)
+	tree, err := worktreefs.Open(repoRoot)
+	if err != nil {
+		return fmt.Errorf("open repository: %w", err)
+	}
+	defer func() { _ = tree.Close() }()
 
-	// G122/G703: filepath.Walk hands us paths inside the caller-owned
-	// repository root. Artifact trees are operator-governed and the
-	// walk never crosses out via symlinks in normal operation; on-disk
-	// files are the source of truth here.
-	return filepath.Walk(fullSearchDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
-			return err
+	dir := strings.Trim(filepath.ToSlash(searchDir), "/")
+	if dir == "." {
+		dir = ""
+	}
+
+	// Links use absolute paths with leading / (e.g., /initiatives/...)
+	oldRef := "/" + oldPath
+	newRef := "/" + newPath
+	return tree.WalkRegularFiles(dir, func(rel string) error {
+		if !strings.HasSuffix(rel, ".md") {
+			return nil
 		}
-
-		content, err := os.ReadFile(path) //nolint:gosec // G122/G304: repo-owned path produced by filepath.Walk over trusted tree
+		content, err := tree.ReadFile(rel)
 		if err != nil {
 			return nil // skip unreadable files
 		}
-
-		// Replace references to the old path with the new path.
-		// Links use absolute paths with leading / (e.g., /initiatives/...)
-		oldRef := "/" + oldPath
-		newRef := "/" + newPath
 		updated := strings.ReplaceAll(string(content), oldRef, newRef)
-
 		if updated != string(content) {
-			return os.WriteFile(path, []byte(updated), 0o644) //nolint:gosec // G122/G306: artifact files must be 0644 so git tracks them across checkouts
+			return tree.Replace(rel, []byte(updated))
 		}
 		return nil
 	})
@@ -133,14 +156,16 @@ func renamePathForNewID(artifactPath, oldID, newID string) string {
 	return strings.Replace(artifactPath, strings.ToLower(oldID), strings.ToLower(newID), 1)
 }
 
-// cleanEmptyParents removes empty parent directories up to (but not including) stopAt.
-func cleanEmptyParents(dir, stopAt string) {
-	for dir != stopAt && dir != "." && dir != "/" {
-		entries, err := os.ReadDir(dir)
-		if err != nil || len(entries) > 0 {
+// cleanEmptyParents removes empty parent directories of a repo-relative
+// directory, deepest first, up to (but not including) the repository root.
+// It stops at the first directory that is not empty (or cannot be
+// removed); removal goes through the tree, so a symlinked directory is
+// never followed.
+func cleanEmptyParents(tree *worktreefs.Tree, dir string) {
+	for dir != "." && dir != "" && dir != "/" {
+		if err := tree.RemoveEmptyDir(dir); err != nil {
 			return
 		}
-		os.Remove(dir)
-		dir = filepath.Dir(dir)
+		dir = path.Dir(dir)
 	}
 }

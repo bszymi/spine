@@ -107,6 +107,119 @@ CI that pushes release tags must use an operator token.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-001 TASK-004: worktree write containment)
+
+### Security
+
+- **Worktree file I/O can no longer be redirected by a committed symlink (audit
+  F5, P2).** `artifact.Service` resolved paths with `filepath.EvalSymlinks` up to
+  the nearest existing ancestor and re-appended the unresolved leaf, so a
+  *dangling* symlink as the last component passed the containment check and
+  `Create` wrote the file at the link target, outside the repository or
+  worktree; the rollback then removed the link, not the file. An in-root link
+  such as `governance/a.md -> ../.git/info/attributes` passed too and planted
+  attacker lines in `.git/info/attributes` of the standalone main tree, which
+  git applies to every later merge. The workflow writer, the governed-merge
+  status cascade (`CLIClient.WriteAndStageFile`), the acceptance/successor
+  reads and the dormant renumber helpers had no containment check at all.
+  Every one of them now goes through the new `core/worktreefs` package: each
+  path component is `Lstat`-checked from a directory handle opened without
+  following symlinks, inside an `os.Root`; any symbolic link component
+  (dangling or not, leaf or parent) and any component git treats as `.git`
+  (case, NTFS and HFS spellings, `git~1`) is refused before any filesystem
+  change; new files are created `O_CREAT|O_EXCL` and updates replace by
+  rename. A symlink pushed to a run branch between the cascade's read and its
+  checkout is refused instead of overwriting its target.
+- **Worktree reads are bounded.** A workflow update through a committed
+  `workflows/<id>.yaml -> /dev/zero` read without end (the F4 cross-tenant OOM
+  through a filesystem path). Links are now refused before any read, and every
+  worktree read is capped at 4 MiB (the same value as TASK-003's git blob cap).
+- **Failed creates clean up.** A create whose commit fails now removes the
+  directories it made as well as the file (they leaked before). That includes
+  a file a failing pre-commit hook rewrote in place or replaced through a temp
+  file and a rename (`sed -i`, formatters), as long as the path is still
+  untracked in HEAD, so a retry fails the same way instead of with
+  `already_exists`. A file that is tracked in HEAD by then (a concurrent
+  writer committed it) is kept; before, the rollback removed it by name. A
+  failed update restores the original bytes and mode, re-creating the file
+  (and its directory) if a failing hook deleted it; a symlink a hook put in
+  its place is refused, not written through as before.
+
+### Changed
+
+- **HTTP status of refused paths** (standalone gateway; SMP's embedded
+  endpoints map the same codes):
+  - a write through a symlink, a path with a `.git` component (including the
+    spellings git's NTFS rule treats as `.git` on every platform, such as
+    `GIT~1/…`, `.git./…` and the backslash forms `.git\x.md`,
+    `governance/a\.git`), or a path over 4096 bytes / a component over 255
+    bytes: **500 `git_error` / `internal_error` → 400 `invalid_params`**,
+    refused before any side effect (these previously failed at `git add`, or
+    with an OS error, after the file was written);
+  - a non-canonical path (`a//b.md`, `a/./b.md`, a trailing `/`), which was
+    folded and written before: **now 400 `invalid_params`** (SMP's
+    `validateRepoRelativePath` already refuses these);
+  - `Create` at a path that is an in-repo symlink to an existing file, or an
+    existing directory: **409 `already_exists` → 400 `invalid_params`**;
+  - artifact `Update` / accept / reject of an existing worktree file over
+    4 MiB: **previously succeeded (2xx) → now 413 `payload_too_large`**.
+    This is a working flow that is now refused, not a remapped error: the
+    old code read and rewrote the file with no cap. The cap applies to the
+    existing file, read for the rewrite and for the rollback copy, not to
+    the new content (which the standalone gateway already caps at 512 KiB);
+    such a file can only reach a branch by a push or an import. The
+    best-effort `follow_up_from` link a successor task adds to such a file
+    is skipped and logged, like any failure of that step.
+  - workflow `Update` of an existing workflow file over 4 MiB: **500
+    `internal_error` → 413 `payload_too_large`** (yamlsafe's 64 KiB parse
+    cap already refused it).
+  - Messages read `unsafe path: component "<repo-relative prefix>" is a
+    symbolic link` (or `names the git directory`, `is not a directory`, …);
+    they never echo the raw input or an absolute path.
+  - In-repo symlinked directories on a write path (for example a `workflows/`
+    that links to `ci/workflows/`) are refused rather than resolved (owner
+    question 1 default). Such writes already failed (500) at `git add`.
+- `CLIClient.WriteAndStageFile` stages with `--literal-pathspecs`.
+
+### For embedders
+
+- **New:** `core/worktreefs` (stdlib-only): `Clean`, `Open`/`Tree`
+  (`Lstat`, `ReadFile`, `ReadFileLimit`, `Create` + `Undo` (`Rollback`,
+  `RollbackClaiming`, `Release`), `Replace`, `WriteFile`, `Remove`,
+  `RemoveEmptyDir`, `WalkRegularFiles`), `PathError` (unwraps to
+  `ErrUnsafePath`), `SizeError` (unwraps to `ErrTooLarge`),
+  `DefaultMaxReadBytes`. SMP may use it for its own sinks (SMP TASK-004/008).
+  An `Undo` holds at most three descriptors until it is resolved, whatever
+  the path's depth; `Rollback` then opens one more directory handle per
+  directory the create made, all at once and only while it runs, and
+  `WalkRegularFiles` holds one per level it is inside (both bounded by the
+  4096-byte path cap). `Create`'s `perm` must leave the file readable by the
+  process (the `Undo` pins it with a read-only descriptor; `git add` reads
+  it anyway).
+- **New:** `git.TrackedInHEAD(ctx, repoDir, path)` — whether a path is an
+  entry of HEAD (literal match; an unborn HEAD or any git failure is an
+  error). The artifact and workflow create rollbacks use it to claim a file a
+  failing hook left in place of the one they created.
+- No exported signature changes in `artifact`, `workflow`, `git`,
+  `engine.GitOperator` (the two functions above are additions); no
+  migration, environment variable or config.
+- Behaviour changes reachable from SMP: the status codes above at the embedded
+  artifact and workflow endpoints (SMP TASK-008 adopts them). One of them is
+  a **newly refused flow**, not a status remap, and SMP TASK-008 must look
+  for callers that expect success rather than for 500 expectations: an
+  artifact `WriteContent`/`Update`, accept or reject of an existing worktree
+  file over 4 MiB (pushed by a runner or imported) succeeded before and is
+  now 413.
+  `CLIClient.WriteAndStageFile` (not used by SMP, whose `RealGitOperator`
+  implements its own) refuses unclean paths and symlinks with an error that
+  wraps `worktreefs.ErrUnsafePath`; the cascade logs it and proceeds with the
+  merge, as for any status-rewrite failure (owner question 3 default).
+- `artifact.RenumberArtifact` / `UpdateLinksToRenamedArtifact` (no caller)
+  take clean repo-relative paths, refuse symlinks, and the link rewrite skips
+  `.git` and symlinked files.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-001: pre-receive ref validation)
 
 ### Security

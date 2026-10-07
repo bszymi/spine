@@ -2,12 +2,12 @@
 id: TASK-004
 type: Task
 title: "Confine worktree writes against symlinked path components and .git/"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -618,6 +618,13 @@ func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string)
 > - **Status-change list for SMP TASK-008 item 2:** 500 `git_error` → 400 `invalid_params`
 >   (unsafe paths); 409 `already_exists` → 400 (Create at an in-root symlink to an existing file);
 >   500 → 413 `payload_too_large` (a worktree file over the read cap on Update / Accept / Reject).
+>   *Review round 1 correction (2026-10-07):* the before-state of the oversized case was wrong
+>   for artifacts. Artifact Update / Accept / Reject of an existing worktree file over the read
+>   cap **succeeded** before this task (no cap; yamlsafe bounds only the front matter), so it is
+>   **2xx → 413**, a newly refused flow, not a status remap: SMP TASK-008 must look for callers
+>   that expect success (`WriteContent`, accept/reject of a large pushed or imported task), not
+>   only for 500 expectations. Workflow Update is **500 → 413** (yamlsafe's 64 KiB parse cap
+>   already failed it). The cap applies to the existing file read, not to the new content.
 > - **The `CreateEntry` regression (item 3)** also asserts that the refused planning run leaves no
 >   run branch locally or on origin. `StartPlanningRun` deletes the branch when the writer's
 >   `Create` fails (`core/engine/run.go:271-278`), and the test pins that.
@@ -911,6 +918,8 @@ The design works without answers to these, using the stated defaults.
       tests that need no Docker or Postgres; set `TEST_PLATFORM_DB` if it is available).
       - Either the run is green, or every failure is listed in the Implementation Notes as a
         status-code expectation (500→400, 409→400, 500→413) handed to SMP TASK-008.
+        *(Review round 1: the oversized-file case is 2xx→413 for artifacts, 500→413 for
+        workflows; see the §6 design-check note.)*
       - Any other failure blocks the merge. This catches an SMP break before the
         `.spine-revision` bump rather than after it.
 13. **AC5 — documentation.**
@@ -1030,6 +1039,8 @@ designer's text is kept. Every change is marked *Design-check note / addition / 
 7. **Compatibility list completed:** 409→400 (Create at an in-root link to an existing file) and
    500→413 (oversized) are added to the status changes SMP TASK-008 must absorb. AC12 also runs
    SMP's `spinecore` / `spineembedded` unit tests against the branch before the bump.
+   *(Review round 1 correction: oversized is 2xx→413 for artifact Update / Accept / Reject — a
+   newly refused flow — and 500→413 for workflow Update.)*
 
 **Coordination impact.** Still no hard dependency. I7's 4 MiB must equal TASK-003's
 `git.DefaultMaxBlobBytes`. Whichever task lands second adds a test asserting the two constants are
@@ -1041,3 +1052,437 @@ value is governed by TASK-003's owner question 1.
 
 ## Implementation Notes
 
+Implemented 2026-10-07 on branch `init/INIT-023-TASK-004-worktree-write-containment` (from Spine
+local `main` `ee3c249` = origin `61994fe` + the INIT-023 scaffold + merged TASK-001). TASK-001
+did not touch any file this task changes (`git diff --stat 61994fe ee3c249 -- core/artifact
+core/workflow adapters/git/cli.go adapters/git/branchwrite.go core/engine/merge.go` is empty), so
+every "fails on 61994fe" claim below was measured against `main` and holds for `61994fe`.
+
+### Orchestrator rulings (recorded as defaults pending the owner)
+
+- **Owner question 1 — default taken: refuse.** A write through an in-repo symlinked directory
+  (for example `workflows -> ci/wf`) is refused `invalid_params` (`ReasonSymlink`); it is never
+  resolved to the target. Pinned by `TestF5_WorkflowCreate_SymlinkedWorkflowsDir_TypedRefusal`
+  and the `dir in-root` rows of `TestTree_RefusesSymlinkComponents`.
+- **Owner question 2 — default taken: only `.git` and its variants are refused.**
+  `.gitignore`, `.gitattributes`, `.gitmodules`, `.github/…`, `a.git/…`, `git/…` stay writable
+  (`TestClean` accepted rows). **Recommendation for TASK-006:** add `.gitattributes` and
+  `.gitmodules` (any depth) to its merge-time governance-path guard.
+- **Owner question 3 — default taken: best-effort.** A cascade path refused at merge time is
+  logged by `preflightCheck` and the merge proceeds; `core/engine/merge.go` is unchanged
+  (`TestPreflightCheck_SymlinkSwappedCascade_ProceedsToMerge`). TASK-005 / TASK-017 own any change.
+- **Read cap = TASK-003's constant.** `worktreefs.DefaultMaxReadBytes = 4 << 20` is defined in
+  `core/worktreefs` (stdlib-only, so it cannot import `adapters/git`). TASK-003 is not started:
+  it should define `git.DefaultMaxBlobBytes` **as** `worktreefs.DefaultMaxReadBytes`
+  (`adapters/git` may import `core/`, ADR-017) or add the equality test the design-check note
+  asks for; TASK-003 owner question 1 then governs both.
+
+### What was built (commits)
+
+| Commit | Content |
+|---|---|
+| `dc8b73e` | `core/worktreefs` (path.go, tree.go) + `path_test.go`, `tree_test.go` |
+| `08b5cf2` | `artifact.Service` (service/acceptance/successor/renumber) on worktreefs; artifact + gateway regression tests |
+| `db11466` | `workflow.Service` on worktreefs; workflow regression tests (incl. `/dev/zero`) |
+| `2db3aeb` | `CLIClient.WriteAndStageFile` on worktreefs + `--literal-pathspecs`; AC8 cascade tests; AC9 AST scan |
+| `af73bc6` | KNOWN-LIMITATIONS, go-coding-guidelines §4.1, CHANGELOG |
+| `3f7a7c3` | Test reorganisation so the PoC port compiles against `61994fe`; guards renamed |
+| `946456f` | `Undo.Rollback` matches size + mtime of the written version (inode reuse found on Linux) — superseded by `d278b86` |
+| `ae4fb95` | Review round 1: git's backslash spellings of `.git` refused by `Clean` |
+| `3b1a1fc` | Review round 1: `ReadFileLimit` clamp; tests pinning the read and walk `SameFile` checks |
+| `d278b86` | Review round 1: `Undo` pins the created leaf (identity-only rollback); O(1) handles per walk/Undo |
+| `7ff33a4` | Review round 1: `TMPDIR` pinned in the absolute-link PoC port |
+| `04e7486` | Review round 1: CHANGELOG / KNOWN-LIMITATIONS corrections (oversized file is 2xx→413 for artifacts) |
+| `676814d` | Review round 1: I8 package doc states the handle bound |
+| `9aba2fd` | Review round 2: `Undo.RollbackClaiming` + `git.TrackedInHEAD`; create rollbacks claim a hook-replaced file that is untracked in HEAD |
+| `a4c6cac` | Review round 2: I8 names the transient Rollback / WalkRegularFiles handle peaks; the depth test measures them |
+| `3b6f542` | Review round 2: CHANGELOG / KNOWN-LIMITATIONS / go-coding-guidelines for the two above |
+| `55d6863` | Review round 2 (codex P2): update rollbacks re-create a file a failing hook deleted (`Tree.WriteFile`, original mode) |
+
+- **`core/worktreefs`** (stdlib-only): `Clean`; `Open`/`Tree` with `Lstat`, `ReadFile`,
+  `ReadFileLimit`, `Create` (+ `Undo.Rollback`/`Release`), `Replace`, `WriteFile`, `Remove`,
+  `RemoveEmptyDir`, `WalkRegularFiles`; `PathError`/`ErrUnsafePath`; `SizeError`/`ErrTooLarge`;
+  `DefaultMaxReadBytes`, `MaxPathBytes`, `MaxComponentBytes`. Every operation descends from a
+  private duplicate of the root handle (`OpenRoot(".")`), `Lstat`s each component on the held
+  handle (symlink / not-dir refused), opens it with `OpenRoot` and binds it with `os.SameFile`;
+  leaf ops are single-component on the held parent. Errors carry only repo-relative paths (`relErr`
+  rewrites the absolute names `os.Root` files carry).
+- **`artifact.Service`**: `cleanPath` (absolute check, `Clean(path)` **before**
+  `repoRelativePath`, then `Clean` of the joined path), `safePathIn` = `cleanPath` + `Tree.Lstat`
+  (missing is fine), returning the repo-relative path that is also staged; `worktreeError` maps
+  `PathError` → `ErrInvalidParams`, `SizeError` → `ErrPayloadTooLarge`, else logged + generic
+  `ErrInternal`; `writeAndCommit` validates lexically before `enterBranch`, then
+  `Lstat`/`ReadFile`/`Replace` (update) or `Create` (create), rollback via `Replace(original)` /
+  `undo.Rollback()`; `readRepoFile` for acceptance/successor; renumber on the tree.
+  `resolveToExistingAncestor`, the `EvalSymlinks` root resolution and the G703 `//nolint` are gone.
+- **`workflow.Service`**: `Clean` before `enterBranch`; one capped `ReadFile` serves the prior
+  parse and the rollback copy (`readFromDisk` → `parseExisting`); `Create`/`Replace`/rollback as
+  above; local `worktreeError` with the same contract.
+- **`CLIClient.WriteAndStageFile`**: exactly the design §4 body (`Clean`, `Open`, `WriteFile`,
+  `git --literal-pathspecs add -- rel`). `core/engine` unchanged.
+
+### Per-AC evidence
+
+1. **AC1** — `core/worktreefs` exists; `go list -deps ./core/worktreefs` lists only the standard
+   library; `./dev/lint-boundaries.sh` → `OK` with no allowlist change; `go build -o
+   bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` → `library surface is
+   sound`. `GOOS=linux` and `GOOS=windows go vet ./core/worktreefs/` clean.
+2. **AC2** — `TestClean`: every listed `ReasonInvalid` row (incl. 4097-byte path, 256-byte
+   component, `"a/"`), every `ReasonGitDir` row (incl. `".git:x/y"`, `".git. :z/y"`, the HFS row
+   written `".g‌it/x"`, plus `"﻿.git/x"`, `GIT~1/x`), every accepted row; all refusals
+   `errors.Is(err, ErrUnsafePath)`; no `ReasonInvalid` message contains its input.
+   Artifacts-dir row: `TestF5_Create_ArtifactsDirTraversal_Refused` (+ internal
+   `TestCleanPath_ArtifactsDirTraversal`). Mutation checks (all run with `go test -overlay`, all
+   **killed**): dropping the `.git` comparison, the HFS fold, the NTFS trailing-dot/space strip;
+   cleaning only after `repoRelativePath`.
+3. **AC3 (design AC1)** — `TestTree_RefusesSymlinkComponents`: 12 link shapes × 7 operations (84
+   subtests) incl. the design-check rows `gitlink -> .git/info` (Create) and `gov/samedir.md ->
+   x.md` (ReadFile asserts no bytes); `Reason == ReasonSymlink`, exact `Component`; recursive
+   before/after snapshot (paths, contents, link targets, modes, mtimes, directories included) of
+   the tree and the outside dir. Mutation "`Stat` instead of `Lstat` in the walk" **killed by side
+   effect**: `.git/info/attributes` added, `ReadFile returned bytes through a link: x`.
+4. **AC4** — `TestTree_ComponentSwappedBetweenCheckAndOpen` uses `testHookAfterComponentLstat`
+   (`rename(gov, gov.bak); symlink(target, gov)`, targets `other` and `.git/info`; Create, Replace,
+   WriteFile): `ReasonChanged`, nothing written at either target. Mutation "remove the `SameFile`
+   comparison" **killed** (the swap writes `other/attributes` / `.git/info/attributes`).
+   Leaf-hook row: `TestTree_ComponentSwappedAfterWalk` (lands in `gov.bak`, never in `.git/`).
+5. **AC5 (design AC3)** — `TestTree_RootConfinementWithoutWalk`, 15 rows with
+   `testHookSkipComponentChecks` disabling every walk check (symlink, not-dir, `SameFile`, leaf
+   `Lstat`/regular/size): Create on leaf links → `fs.ErrExist`; dir links, `gov/sib -> ../other`,
+   leaf reads → "path escapes from parent"; Replace/Remove on a leaf link replace/unlink the link
+   entry only. Every row asserts no change outside the root, in `.git/` or in `other/`.
+   `TestTree_RootAloneFollowsInRootLinks` pins why the walk is needed (with the walk off, os.Root
+   follows `gitlink -> .git/info`). *Review round 1:* the "replace `os.Root` with
+   `os.OpenFile(filepath.Join(...))`" mutation **was run** (`openSubRoot` →
+   `os.OpenRoot(filepath.Join(parent.Name(), name))`, `openFileIn` →
+   `os.OpenFile(filepath.Join(parent.Name(), name), …)`, via `-overlay`): **killed**, 10 of 15 rows
+   fail by side effect (every dir-link row and every `ReadFile` row). The 5 surviving rows are the
+   leaf-link rows of `Create` (×3), `Replace` and `Remove`, where `O_EXCL`, `renameat` and
+   `unlinkat` never follow a leaf link whatever the opener — the design's "defence in depth by
+   construction" case (AC3 note), not a gap.
+6. **AC6** — (a) `TestTree_CreateExistingLeaf`; (b) `TestTree_CreateLeafSwappedForLinkAfterCheck`
+   (same-directory `gov/new.md -> victim.md`; mutation `O_TRUNC` for `O_EXCL` **killed**);
+   (c) `TestTree_CreateWriteFailureRemovesLeafAndDirs` (`testHookAfterLeafOpen`; mutation "no
+   deferred Rollback" **killed**); (d) `TestTree_UndoRollback` (exact leaf + dirs; a dir that
+   gained content is kept; a replaced leaf is kept — same and different size; usable after
+   `Tree.Close`); (e) `TestTree_ReplaceKeepsModeNoTemp` (0755 kept, no `.spine-tmp-*` after
+   success or injected failure); (f) `TestTree_ReplaceLeafSwappedBeforeRename`.
+7. **AC7** — the four files exist with the named tests (plus `TestF5_Create_SymlinkedParentDir_NoEscape`,
+   `TestF5_Create_InRootSymlinkToExistingFile_Is400Not409`, `TestF5_WriteAndStageFile_SymlinkedParentDir_Refused`).
+   **Fail-first:** the committed test files plus `core/worktreefs` (as a library only) copied into
+   a `git archive main` export: **every `TestF5_*` fails** except the designated
+   `TestF5_WriteAndStageFile_RegularFile_ContentAndModePreserved` mode guard (passes). The three
+   guards that pass before and after (`TestWorktreeContract_ExistingAndMissing`,
+   `TestUpdate_CommitFailure_RestoresBytesAndMode`, `TestWorkflowUpdate_CommitFailure_RestoresBytes`)
+   carry no `TestF5_` prefix. The same run also fails the AC8, AC9, gateway, renumber and
+   `TestWriteAndStageFile_LiteralPathspec` tests on `main`. *Review round 1:* the three
+   `TestF5_*` tests it added (`…_BackslashDotGitPath_RefusedBeforeWrite`,
+   `…_CommitFailure_HookRewritesFile_StillRemoved`, and the `TMPDIR`-pinned
+   `…_DanglingSymlinkAbsolute_NoEscape`) fail on the same `main` export too.
+8. **AC8** — `TestApplyCommitStatus_SymlinkSwappedAfterRead`: a real `CLIClient` wrapped so that
+   inside `Checkout(run.BranchName)` and before delegating it commits `run.TaskPath` → outside
+   victim onto the branch tip with plumbing (`hash-object`, private `GIT_INDEX_FILE`,
+   `update-index --cacheinfo 120000`, `write-tree`, `commit-tree`, `update-ref`). Asserts
+   `errors.Is(err, worktreefs.ErrUnsafePath)`, victim content + mtime unchanged, `git status
+   --porcelain` empty, `git symbolic-ref HEAD` = `refs/heads/main`. Split from the preflight half
+   (`TestPreflightCheck_SymlinkSwappedCascade_ProceedsToMerge`, fresh scenario: in one test the
+   second cascade would re-read the already-swapped blob and fail at the read, not the write).
+   Fail-first on `main`: both fail (victim overwritten).
+9. **AC9** — `core/worktreefs/scan_test.go` `TestNoUnconfinedWorktreeIO` scans the non-test
+   files of `core/artifact`, `core/workflow`, `adapters/git`, `core/engine`, `core/divergence`,
+   `adapters/projection` (import-alias aware, dot-imports flagged) for the design set plus
+   `os.{Open,CreateTemp,MkdirTemp,Readlink,OpenRoot,OpenInRoot}`, `filepath.Glob`,
+   `syscall.{Rmdir,Symlink,Link,Truncate,Chmod}`; exceptions `createAskpassScript`,
+   `CLIClient.Close`, `EnterBranch`; asserts `resolveToExistingAncestor` is gone. On `main` it
+   lists all 32 sinks. Mutation (re-adding `os.WriteFile` in `writeAndCommit`) **killed** — run as
+   a real temporary edit, restored byte-identical, because the scan parses source from disk and
+   `-overlay` does not apply to it.
+10. **AC10** — unsafe paths → `ErrInvalidParams` with repo-relative text; the existing
+    `TestSafePath_ErrorDoesNotLeakFilesystemPaths` passes **unchanged**; symlink case added as
+    `TestSafePath_SymlinkErrorDoesNotLeakFilesystemPaths`; `ErrAlreadyExists` / `ErrNotFound`
+    pinned (`TestWorktreeContract_ExistingAndMissing`); 409→400 pinned
+    (`TestF5_Create_InRootSymlinkToExistingFile_Is400Not409`); gateway
+    `TestF5_Gateway_CreateThroughDanglingSymlink_400` (`POST /api/v1/artifacts` with
+    `write_context` on a planning run whose branch carries the link → 400 `invalid_params`, no
+    outside file, no absolute path in the message).
+11. **AC11** — `TestF5_Create_CommitFailure_RemovesFileAndCreatedDirs` (failing `pre-commit`
+    hook; file and both created dirs gone, pre-existing dir kept, `git status` clean; fails on
+    `main` — dirs leaked), `TestUpdate_CommitFailure_RestoresBytesAndMode` (0755 + bytes, no temp
+    file); workflow equivalents. *Review round 1:* plus
+    `TestF5_Create_CommitFailure_HookRewritesFile_StillRemoved` (the hook appends to the staged
+    file before failing; file and dirs gone, a retry fails the same way, not `already_exists`;
+    fails on `main` — dirs leaked — and on `82a55dc` — file left behind). *Review round 2:* plus
+    `TestF5_Create_CommitFailure_HookReplacesFileByRename_Removed` and the workflow equivalent
+    (the hook replaces the staged file through a temp file and `mv`; file and dirs gone, the
+    retry is not `already_exists`; fail on `main` — dirs leaked — and on `524d306` — file left
+    behind), `TestF5_Create_CommitFailure_HookCommitsReplacedFile_Kept` and the workflow
+    equivalent (a file tracked in HEAD by the time of the rollback is kept; fail on `main`, which
+    removed it by name), and for updates `TestUpdate_CommitFailure_HookDeletesFile_Restored`,
+    `TestWorkflowUpdate_CommitFailure_HookDeletesFile_Restored` and
+    `TestF5_Update_CommitFailure_HookPlantsLink_NotFollowed` (see Review round 2).
+12. **AC12** — see Gates. *Review round 1 reading of "`make lint` passes":* `make lint` runs
+    `golangci-lint run` over the whole module, which is red on `main` too (324 pre-existing
+    issues: gofmt, errcheck, gocritic, staticcheck, one gosec). The criterion is met as "no new
+    issues": `golangci-lint run --new-from-rev main ./...` → 0 issues; whole module 319 on the
+    branch vs 324 on a `git archive main` export; `make lint-security`
+    (`--enable-only=gosec ./...`) → 0 issues (main: 1, removed here). No exported signature
+    changed outside the new package (`git diff main...HEAD` on non-test files: only unexported
+    funcs change); no migration, env var or config. The obsolete G703/G122 `//nolint` comments
+    are gone. *Review round 2:* one exported **addition** outside the new package,
+    `git.TrackedInHEAD` (plus `worktreefs.Undo.RollbackClaiming` inside it); no exported
+    signature changed. Whole module still 319 on the branch vs 324 on `main`.
+13. **AC13** — KNOWN-LIMITATIONS "Path Traversal" carries the §5 text (plus the read cap); the old
+    claim is gone; go-coding-guidelines §4.1 rewritten (and the `EvalSymlinks` anti-pattern row);
+    CHANGELOG staging section has the TASK-004 Security / Changed / For embedders entry.
+14. **AC14** — original audit PoCs via `go test -overlay` (overlay mapping the three PoC files
+    into `core/artifact/`) against the branch head (the merge commit does not exist yet; the
+    orchestrator re-runs it there): `poc/git` logs `err=invalid_params: unsafe path: component
+    "a.md" is a symbolic link`; `poc/parsing` **passes**; `poc/verify-r1-8` stops at
+    `NOT REPRODUCED` for both the absolute and relative variants. Re-run after review round 1 at
+    `04e7486` with the same result, and after review round 2 at `55d6863` with the same result
+    (`poc/git` and `poc/parsing` pass with the non-nil refusal logged). **Still partial:** it
+    must be re-run on the merge commit.
+15. **AC15** — (a) `TestF5_WorkflowUpdate_LeafLinkToDevZero_RefusedWithoutRead`: refused
+    `ErrInvalidParams`/`ErrUnsafePath` in < 0.1 s, `TotalAlloc` growth < 16 MiB; on `main` its
+    watchdog ends the process at 0.19 s with HeapAlloc 264 MiB. (b) `TestTree_ReadFileOverLimit`:
+    a `limit+1` file is refused without being read (`TotalAlloc` < 1 MiB); a file grown after the
+    `Lstat` is read exactly `limit+1` bytes (`testHookObserveRead`); mutations "drop the size
+    pre-check" and "drop the LimitReader" both **killed**. (c)
+    `TestF5_Update_OversizedWorktreeFile_PayloadTooLarge` + gateway
+    `TestF5_Gateway_UpdateOversizedWorktreeFile_413` (413 `payload_too_large`); workflow
+    `TestF5_WorkflowUpdate_OversizedFile_PayloadTooLarge`.
+16. **AC16** — `TestTree_NoHandleLeak`: 1 000 mixed operations; the package handle counter
+    returns to its baseline (a double close would drive it below); `Rollback`+`Release`, double
+    `Release`, nil `Undo` are no-ops. Run on Linux (below) the `/proc/self/fd` count is unchanged.
+    *Review round 2:* `TestTree_HandlesBoundedByDepth` also measures the transient peaks I8 now
+    names (Rollback ≤ 2 + created − 1; WalkRegularFiles ≤ depth + 2).
+
+### Deviations and design points resolved against the real code
+
+1. **`safePathIn` returns the repo-relative path**, not `filepath.Join(root, rel)`: it is what the
+   caller stages, so the checked path is the staged path; no production caller used the absolute
+   form for I/O any more. The PoC ports only check the error, `TestSafePath_Valid` still passes.
+2. **Lexical validation moved before `enterBranch`** (artifact and workflow), so a lexically
+   refused path never creates a worktree; the filesystem check still runs on the worktree.
+3. **`Create` on an existing non-regular leaf** (a directory) is `ReasonNotRegular` (400), per the
+   design's leaf rule; it was 409 before. Listed with the other status changes in the CHANGELOG.
+4. **Added `Tree.RemoveEmptyDir`** (exported, additive): the design's API had no way for
+   `cleanEmptyParents` to remove empty directories "through the tree".
+5. **`WalkRegularFiles` is an fd-anchored recursive walk** (each directory opened by `OpenRoot`
+   from its held parent + `SameFile`, entries `Lstat`ed on the held handle, sorted) instead of
+   `fs.WalkDir(Root.FS())`: `Root.FS()` re-resolves each directory by name from the root and
+   follows an in-root link swapped in mid-walk. Every read/write re-walks anyway; this keeps I1
+   for enumeration too.
+6. **Each operation starts from a private `OpenRoot(".")` duplicate of the root**, so an `Undo`
+   owns all its handles and stays usable after `Tree.Close` (tested).
+7. **Generic `ErrInternal` text for non-path I/O failures** (`"<action> <path> failed"`, cause
+   logged server-side): the old messages embedded `os` errors with absolute paths.
+8. **Rollback identity** (found by the Linux run): `os.SameFile` alone is unsafe after inode
+   reuse, so after a successful write `Undo` also matched size + mtime (commit `946456f`).
+   *Superseded in review round 1 (`d278b86`):* the size/mtime match also kept a file a failing
+   hook had rewritten in place. `Create` now pins the created inode with a read-only descriptor
+   the `Undo` holds until it is resolved; an inode that is still open cannot be freed, so its
+   number cannot be reused and `os.SameFile` alone is exact. On Linux the "drop the pin" mutation
+   is **killed** by all three replaced-leaf rows (incl. a same-size, same-mtime replacement); on
+   macOS it survives (APFS does not reuse an inode number at once).
+9. **Extra test hooks**: `testHookAfterLeafOpen` (failure injection, AC6(c)/(e)) and
+   `testHookObserveRead` (AC15(b) byte count), beside the design's three.
+10. **Guard tests renamed** off the `TestF5_` prefix (see AC7).
+
+### Gates (final head; every command run from the Spine worktree unless noted)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | ok |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | rc 0, 39 packages `ok`, no FAIL |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -race -p 4 -count=1 ./core/worktreefs/ ./core/artifact/ ./core/workflow/ ./adapters/git/... ./core/engine/ ./service/internal/gateway/` | all `ok` |
+| Linux: same packages, `-race -p 4`, ×3, in `golang:1.26-bookworm` (`docker run --rm`, worktree + module cache mounted read-only, `GOPROXY=off`) | all `ok` ×3 (after `946456f`; before it, the replaced-leaf rollback row failed — deviation 8); `TestTree_NoHandleLeak` with the `/proc/self/fd` check passes |
+| `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (CI scenario-git-http job), DB `s004_scen` | rc 0, 19 `TestGitHTTP_*` PASS, no SKIP |
+| Full scenario suites `go test -tags scenario -count=1 -p 1 -v ./service/scenariotest/...` on the branch (`s004_scen`; run at `af73bc6` and again at `946456f`) **and** on a `git archive main` export (`s004_scenmain`) | all rc 1 with **identical** per-test results (1 538 PASS/FAIL/SKIP lines incl. subtests: 190 PASS, 30 FAIL, 6 SKIP top-level); the 30 failures are pre-existing on `main` (fixture `validation_failed`, `TestSchemaMatchesProduction`; CI runs only `TestGitHTTP_*` for this reason) |
+| `go test -tags integration -count=1 ./adapters/projection/` (`s004_proj`; no touched package has integration-tagged tests) | `ok` |
+| `golangci-lint run` on `core/artifact core/workflow adapters/git/... core/engine service/internal/gateway` (+ `core/worktreefs`) vs the same on the `main` export, normalised without line numbers | **0 new issues**; 5 fewer (the workflow G703 gosec finding, a `renumber.go` errcheck, three gofmt import-order findings in touched files); `core/worktreefs` 0 issues |
+| `golangci-lint run --enable-only=gosec ./...` | branch **0 issues** (main: 1, the workflow G703 this task removes) |
+| `gofmt -l` on every changed `.go` file (`git diff main...HEAD --name-only -- '*.go'`) | empty |
+| `codex review --base main` (round 1 after `3f7a7c3`, round 2 after `946456f`) | both: "No actionable regressions were identified" — no P1/P2/P3 findings to fix or reject |
+
+### SMP compatibility gate
+
+SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T004/smp` (detached at SMP `main` `7d4e7cc9`,
+`../spine` = this worktree, no `vendor/`, `go.mod`/`go.sum` unchanged after every run). Build,
+vet, unit and Spine-runtime suites were run twice, at `3f7a7c3` and again at `946456f` (same
+results); the platform-DB suites at `3f7a7c3`:
+
+- `go build ./... && go vet ./... && go vet -tags integration ./...` → OK.
+- `go test -p 4 -count=1` on the **37** SMP packages whose test dependency graph contains
+  `core/artifact`, `core/workflow`, `adapters/git` or `core/worktreefs` (`go list -test -deps`;
+  the 6 direct importers are `executionreadiness`, `projectionwriter`, `proposals`, `spinecore`,
+  `spineembedded`, `workspace`), DB env unset → all `ok` (one `[no test files]`).
+- CI's "Spine runtime integration suites" step through `go run ./dev/testgate` with
+  `TEST_SPINE_DB` = `s004_spine_rt` (Spine runtime migrations) and `TEST_PLATFORM_DB` =
+  `s004_smp_it` (platform migrations + `vector`), `-race -count=1 -p 4` on `spinecore`,
+  `spineembedded`, `runner`, `executionreadiness` → **PASS: 1 536 tests passed, 0 failed**, 4
+  allowed skips (the parked `TestRealGitOperator_Promoted_FullSequence` and three
+  `TEST_PROVISIONING_DSN` dispatch-store tests).
+- Platform-DB suites of the dependent packages that need no provisioning DSN (`automation`,
+  `brain`, `discovery`, `notification`, `profileinventory`, `provenance`, `opshealth`,
+  `recovery`) through testgate → 707 passed, 0 failed; testgate exits 1 only on the
+  `TestObjectsCopyModeLiveMinIO` skip (no MinIO here).
+- No SMP status-code expectation broke, so nothing had to be listed for SMP TASK-008 beyond the
+  CHANGELOG list (500→400, 409→400; oversized existing file: artifact 2xx→413, workflow
+  500→413 — corrected in review round 1, see below).
+
+### Not run (exact commands)
+
+- `TEST_PROVISIONING_DSN`-gated SMP suites (`internal/customer/workspace`, `spineruntime`,
+  `eventdelivery`, `projectionwriter`, `workspace/workspacetest`, the three spinecore
+  dispatch-store tests, the three `internal/recovery` provisioning tests): they allocate one
+  database per test with names outside the `s004_*` namespace this task may create.
+  `TEST_PROVISIONING_DSN=postgres://smp_prov:…@localhost:5432/postgres go run ./dev/testgate --
+  -race -count=1 ./internal/customer/workspace/ ./internal/customer/spineruntime/
+  ./internal/customer/eventdelivery/ ./internal/customer/projectionwriter/
+  ./internal/customer/workspace/workspacetest/` (SMP CI runs them).
+- `TestObjectsCopyModeLiveMinIO` (needs `TEST_MINIO_*`).
+- AC14 against the merge commit: run against the branch head; re-run with the same overlay after
+  the merge.
+- Databases used: `s004_scen`, `s004_scenmain`, `s004_scenh` (unused), `s004_proj`, `s004_smp_it`,
+  `s004_spine_rt` on the shared PostgreSQL 17.10 (CI uses 18); all dropped after the gates.
+
+### Review round 1 (2026-10-07)
+
+Three reviewers (correctness + SMP compatibility, adversarial security, completeness/tests)
+examined `82a55dc`. Each finding was first reproduced or checked against the code. Commits
+`ae4fb95`…`676814d` (see the commit table) carry the fixes. Every new test was shown to fail
+against the code it guards (go test `-overlay` mutants, or a `git archive main` export for the
+`TestF5_*` additions).
+
+**Findings.**
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P2 | CHANGELOG / handoff list said the 4 MiB read cap turned artifact Update / accept / reject from 500 into 413 | **Fixed** (`04e7486`, this commit). Verified: on `main` these calls succeeded, because there was no cap and yamlsafe bounds only the front matter. The CHANGELOG now reads **2xx → 413 (a newly refused flow)** for artifact Update / accept / reject, and **500 → 413** for workflow Update, where yamlsafe's 64 KiB parse cap already failed the file. It also says the cap applies to the existing file, not to the new content, and that a successor's best-effort `follow_up_from` link is skipped and logged. The "For embedders" note tells SMP TASK-008 to look for callers that expect success. KNOWN-LIMITATIONS names the refused flow. The §6 design-check note, the AC12 note, design-check item 7 and the SMP-gate line carry *review round 1 corrections*. The behaviour itself is unchanged: AC15(c) requires it, and it matches TASK-003's blob cap. |
+| 2 | P3 | `Undo.Rollback`'s size+mtime match left a file a failing hook had rewritten in place, plus its directories, so the retry became `already_exists` | **Fixed** (`d278b86`). Rather than return to the inode-only match (which reopens the inode-reuse hole `946456f` closed; the reviewer was right that the window is short, but the standalone shared tree can still interleave there) or check "not tracked in HEAD" (worktreefs is stdlib-only and knows no git), `Create` now **pins** the created inode with a read-only descriptor that the `Undo` holds until it is resolved. An open inode cannot be freed, so its number cannot be reused, and `os.SameFile` alone is exact: an in-place rewrite is removed and a re-created file never matches. Tests: `TestTree_UndoRollback/removes_a_leaf_modified_in_place_since`, a `same size and mtime` replacement row, `TestTree_CreateLeafSwappedBeforePin`, and `TestF5_Create_CommitFailure_HookRewritesFile_StillRemoved` (AC11 with a hook that appends to the staged file; fails on `82a55dc` and on `main`). Linux: dropping the pin fails all three replaced-leaf rows. `Create`'s `perm` must now leave the file readable by the process; every caller uses `0o644`, and `git add` must read the file anyway. |
+| 3 | P3 | `isGitDirName` did not stop at `\`, so `.git\x.md`, `GIT~1\x.md` and `governance/.git\x.md` passed `Clean` and became a 500 after a write | **Fixed** (`ae4fb95`). Verified with git 2.54 `git add`: with core.protectNTFS on, git refuses `.git\x.md`, `GIT~1\x.md`, `a\.git`, `a:b\.git`, `x\git~1.`, `x\.git.\y` and `x\.GIT :s`, and accepts `a\b.md`, `.github\x.md` and `a\.gitignore`. Each component is now split at `\` **before** the `:` cut (otherwise `a:b\.git` is cut to `a`). The doc comment is corrected. Tests: `TestClean` backslash rows, `TestClean_BackslashGitDirNamesComponent`, and `TestF5_Create_BackslashDotGitPath_RefusedBeforeWrite` (400 `ReasonGitDir`, clean working tree). The old `path.go` fails all of them, and the ":-cut-first" mutant fails the `a:b\.git` row. |
+| 4 | P3 | `ReadFileLimit(…, math.MaxInt64)` overflowed `limit+1` and returned empty content with a nil error | **Fixed** (`3b1a1fc`): the limit is clamped to `math.MaxInt64-1`. Test: `TestTree_ReadFileOverLimit/math.MaxInt64_limit_reads_the_whole_file`; the mutant without the clamp returns `""`. |
+| 5 | P3 | Descriptor amplification: one `os.Root` per component held by the `Undo` across the commit | **Fixed** (`d278b86`). A walk now keeps only `cur` and, if it created directories, `anchor` (the parent of the first one). Intermediate handles are closed as the descent passes them. Rollback re-opens the created levels from `anchor`, each bound by Lstat (directory, not a link) and `os.SameFile` to the identity recorded on the way down (`openBound`), and closes them again. Measured at 2 044 components: walk peak 2 (was 2 044) and `Undo` holds 3 (was 2 045). Test: `TestTree_HandlesBoundedByDepth` (300 components: ≤ 2 during the walk, ≤ 3 held by the `Undo` (≤ 2 when no directory is created), baseline after `Rollback`); the pre-review `tree.go` fails it. `TestTree_UndoRollback/does_not_follow_a_created_dir_swapped_for_a_link` covers the re-walk. **No component-count cap added in `Clean`**: the cost left is O(depth) syscalls while the request runs, and on Linux it is the same order as `main` (2 040–2 044 levels, Linux container: branch create 1.06 s / rollback 0.24 s; `main`'s `os.MkdirAll`+`os.WriteFile` 0.57 s / `RemoveAll` 0.14 s). A cap would be a new refusal for embedder input with no security gain left (initiative: opt-in or provably identical). APFS is slow at this depth (create 7.7 s, rollback 16 s; the pre-review code was 8.0 s / 13.9 s). There `main` refused such paths with ENAMETOOLONG (macOS PATH_MAX 1024 on the absolute path), but macOS is not a deployment target. |
+| 6 | P2 | Same as 1, from the second reviewer (gateway test gets HTTP 200 on `main`) | **Fixed** with 1. The reviewer's observation is correct: on `main`, `TestF5_Gateway_UpdateOversizedWorktreeFile_413` gets 200, which is why that test is `TestF5_` (fails on `main`). |
+| 7 | P3 | No test for `ReadFileLimit`'s post-open `os.SameFile` | **Fixed** (`3b1a1fc`): `TestTree_ReadLeafSwappedForLinkAfterCheck`. The mutant without the check returns `"secret"`. |
+| 8 | P3 | No test for `walkDir`'s per-directory `os.SameFile` | **Fixed** (`3b1a1fc`). `walkDir` calls `testHookAfterComponentLstat("walk", rel)` between Lstat and OpenRoot. `TestTree_WalkSubdirSwappedForLinkMidWalk` swaps `gov` for a link to `.git/info`; the mutant without the check yields `gov/exclude` with no error. |
+| 9 | P3 | `TestF5_Create_DanglingSymlinkAbsolute_NoEscape` did not pin `TMPDIR` or check for leaked `spine-wt-parent-*` | **Fixed** (`7ff33a4`). It still fails on `main` (outside file written). |
+
+**Acceptance-criteria gaps.**
+
+- **AC5 mutation not run / not recorded** → **Done.** It killed 10 of 15 rows; the 5 survivors are leaf-link rows, safe by construction. Recorded in AC5 above.
+- **AC14 against the merge commit** → re-run at `04e7486`: `poc/git` logs a non-nil error (`component "a.md" is a symbolic link`), `poc/parsing` passes, and `poc/verify-r1-8` stops at NOT REPRODUCED for both variants. It stays **partial** until it is re-run on the merge commit.
+- **AC13 / "No silent behaviour changes"** → fixed with finding 1.
+- **AC11 with a file-modifying hook** → fixed with finding 2.
+- **AC10 backslash spellings** → fixed with finding 3.
+- **AC12 "`make lint` passes"** → read as "no new issues" (see AC12): `--new-from-rev main` gives 0, the whole module has 319 issues against 324 on `main`, and gosec gives 0.
+- **AC16 `/proc/self/fd` only on Linux** → re-run in `golang:1.26-bookworm` (below). `TestTree_NoHandleLeak` and `TestTree_HandlesBoundedByDepth` pass with the `/proc/self/fd` check active.
+
+**Gates (round 1; code at `676814d`, which differs from `04e7486` only in a comment).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `OK`; ok; `library surface is sound` |
+| `go vet ./...`; `-tags integration`; `-tags scenario`; `GOOS=linux` / `GOOS=windows go vet ./core/worktreefs/` | all clean |
+| `go test -p 4 -count=1 ./...` | every package `ok`, no FAIL |
+| `go test -race -p 4 -count=1 ./core/worktreefs/ ./core/artifact/ ./core/workflow/ ./adapters/git/... ./core/engine/ ./service/internal/gateway/` (macOS) | all `ok` |
+| The same in `golang:1.26-bookworm` (`docker run --rm`, sources and module cache read-only, `GOPROXY=off`), 3 times | all `ok` 3 times; `/proc/self/fd` leak check passes |
+| Intermediate commit states (`ae4fb95`, `3b1a1fc`, `d278b86`) through `go vet` / `go test -overlay` on worktreefs, artifact, workflow and adapters/git | all `ok` |
+| `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (`s004_r1scen`) | 19 `TestGitHTTP_*` PASS |
+| Full `go test -tags scenario -count=1 -p 1 -v ./service/scenariotest/...` (`s004_r1scenfull`) | Same as the recorded baseline: 190 PASS / 30 FAIL / 6 SKIP top-level and 1 538 result lines. The failures are the pre-existing fixture-content errors (`validation_failed`, `missing required field: initiative`, `TestSchemaMatchesProduction`). |
+| Integration-tagged suites | none in the packages touched this round (`core/worktreefs`, `core/artifact` tests) |
+| `golangci-lint run --new-from-rev main ./...` / `--enable-only=gosec ./...` / `./core/worktreefs/...` | 0 / 0 / 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| Mutants (`-overlay`) | All killed: no read `SameFile`; no walk `SameFile`; no clamp; pre-review `path.go`; `:` cut before the `\` split; pre-review `tree.go` (in-place rewrite, depth bound, hook test); no pin (Linux, 3 rows); `os.Root` → `filepath.Join` opens (10/15). |
+| `codex review --base main` (at `04e7486`) | "No actionable regressions were identified": no P1/P2/P3 to fix or reject |
+
+**SMP compatibility gate (round 1).** Checkout `/Users/bartoszszymichowski/42sid/i23/s-T004/smp`
+(SMP `7d4e7cc9`, `../spine` = this worktree). `go.mod`/`go.sum` were byte-identical after every run.
+
+- `go build ./... && go vet ./... && go vet -tags integration ./...` → OK.
+- `go test -p 4 -count=1` on the 37 SMP packages whose test dependency graph contains
+  `core/worktreefs`, `core/artifact`, `core/workflow` or `adapters/git`, with DB env unset →
+  36 `ok`, 1 `[no test files]`.
+- `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip
+  TEST_PROVISIONING_DSN -- -race -count=1 -p 4 ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/`
+  with `TEST_SPINE_DB` = `s004_r1_spine_rt` (spine-runtime migrations) and `TEST_PLATFORM_DB` =
+  `s004_r1_smp_it` (platform migrations + `vector`) → **PASS: 1 536 passed, 0 failed**, 4 allowed
+  skips.
+- testgate on `automation`, `brain`, `discovery`, `notification`, `profileinventory`,
+  `provenance`, `opshealth`, `recovery` (`TEST_PLATFORM_DB` = `TEST_DATABASE_URL` =
+  `s004_r1_smp_it`) → 707 passed, 0 failed. testgate exits 1 only on the
+  `TestObjectsCopyModeLiveMinIO` skip (no MinIO).
+- No SMP expectation broke. The SMP TASK-008 handoff now names one newly refused flow (artifact
+  Update / accept / reject of an existing file over 4 MiB: 2xx → 413).
+- Databases created and dropped this round: `s004_r1scen`, `s004_r1scenfull`, `s004_r1_smp_it`,
+  `s004_r1_spine_rt`. Containers: `s004-t004r1-linux`, `s004-t004r1-deep`, `s004-t004r1-deep2`,
+  all run with `--rm`, from the image already present.
+
+### Review round 2 (2026-10-07)
+
+A second-round reviewer examined `524d306`. Both findings were reproduced before they were fixed.
+Commits `9aba2fd`…`55d6863` carry the fixes (see the commit table).
+
+**Findings.**
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P3 | Round-1 finding 2 was only partly fixed. A failing hook that replaces the staged file through a temp file and a rename (`sed -i`, formatters) gives the path a new inode. The pinned identity match then kept the file and every directory the Create made, so the retry got `already_exists` (main: `git_error` twice, clean tree). | **Fixed, option (b)** (`9aba2fd`). Reproduced first: `TestF5_Create_CommitFailure_HookReplacesFileByRename_Removed` and the workflow row fail on `524d306` (file and `workflows/` left). **Change:** `worktreefs.Undo.RollbackClaiming(claim)`. `claim` is asked only when the leaf exists, is a regular file (never for a link or a directory) and is not the pinned inode. On true, the file is unlinked through the held parent, but only while the name still refers to the inode `claim` was asked about (`claim` runs git). Then, as before, the created directories are removed while they are empty, so they go too. `Rollback` = `RollbackClaiming(nil)`. **Callers:** the artifact and workflow create rollbacks pass `claimUntracked`, which claims while `git.TrackedInHEAD` (new: `git ls-tree -z --name-only HEAD -- path`, literal pathspecs) reports the path untracked. An unborn HEAD or any git failure is an error, and the file is kept. The check runs on `context.WithoutCancel` with a 10 s timeout, so a client that disconnects does not turn the rollback into "keep". **Why (b), not (a):** the residual only exists in the shared standalone tree (a private worktree is force-removed by `Cleanup`), and there it dirties the server checkout and turns every retry into a misleading 409. The claim is decided in the callers because worktreefs is stdlib-only and knows no git. Doing it inside the rollback, before the directories are removed, means the directories go too; the reviewer's "after Rollback" would leave them. **Accepted race,** recorded in KNOWN-LIMITATIONS: a concurrent update of the same still-uncommitted path that lands just before the rollback is removed with it. **Tests:** `TestTree_UndoRollbackClaiming` (8 rows: leaf ours, claim not asked; leaf already gone; replaced + claimed; replaced + not claimed; nil claim; replaced by a symlink or a directory, claim not asked and entry kept; replaced again while `claim` ran, newer file kept; handles back to baseline, second call a no-op). `TestBranchWrite_TrackedInHEAD` (HEAD only, not index or worktree; directory entry; glob characters and `:(glob)` magic literal; linked worktree's own HEAD; unborn HEAD is an error). AC11 rows for artifact and workflow: rename → removed; rename + committed onto HEAD by the hook through plumbing → kept, `git status` clean. **Mutants (`-overlay`), all killed:** claim ignored; no post-claim re-check; claim asked for any kind of entry; artifact or workflow `claimUntracked` always true; workflow on plain `Rollback`; `TrackedInHEAD` without `GIT_LITERAL_PATHSPECS`; `TrackedInHEAD` returning "untracked" on error. All four new `TestF5_*` fail on a `git archive main` export (with `core/worktreefs` copied in as a library). |
+| 2 | P3 | The I8 doc said the number of handles held does not grow with depth. `rollbackDirs` holds one handle per created level until it returns, and so does `descend`'s error path; `WalkRegularFiles` holds one per level. The depth test sampled only inside the walk hook. | **Fixed by correcting the doc** (`a4c6cac`), the reviewer's primary option. I8 now says that what is held across a caller's own work is bounded (a descent: 2; an `Undo` across `git add` + `git commit`: 3). It also says that `Undo.Rollback` (and a `Create` whose descent fails after making directories) re-opens one directory handle per directory made, all open until it returns, and that `WalkRegularFiles` holds one per level it is inside, including while `fn` runs. Both are bounded by `MaxPathBytes` at about 2 000. The `walk`, `rollbackDirs` and `Undo` comments and the CHANGELOG "For embedders" note say the same. **Falsifiable:** new test hook `testHookHandleOpened` (called with the counter after every open). `TestTree_HandlesBoundedByDepth` asserts Rollback peak ≤ 2 + (created − 1) = 301 at 300 levels (≤ 2 when nothing was created), and adds a `WalkRegularFiles` row asserting ≤ depth + 2 = 302. Both bounds are tight: "unpin after the directory removals" (302) and "keep the listing handle open while descending" (602) both fail them. **No depth cap and no O(√depth) re-walk:** the peak is transient, under a second on Linux at the maximum depth, and the same order as `main`'s `os.RemoveAll`. A component cap would be a new refusal for embedder input (round 1 already declined it, and the reviewer agreed). |
+| codex | P2 | `codex review --base main` (at `3b6f542`): when a failing hook **deleted** the updated file, the update rollback's `Tree.Replace` failed on the missing leaf, so the rejected Update left the artifact or workflow deleted in the standalone tree, where `main`'s `os.WriteFile` re-created it. | **Fixed** (`55d6863`). Reproduced first (codex's probe, and `TestUpdate_CommitFailure_HookDeletesFile_Restored` failing on `3b6f542`). Both update rollbacks now restore with `Tree.WriteFile(rel, original, originalMode)`, where the mode comes from the pre-update `Lstat`: `Replace` when the file is there, otherwise an O_EXCL create with that mode, re-creating a removed directory as well. A symlink a hook put in its place is still refused and logged, never followed; `main` wrote through it. **Tests:** `TestUpdate_CommitFailure_HookDeletesFile_Restored` (deleted file; deleted 0755 file keeps its exec bit; removed directory; `git status` clean), `TestWorkflowUpdate_CommitFailure_HookDeletesFile_Restored`, and `TestF5_Update_CommitFailure_HookPlantsLink_NotFollowed` (outside victim untouched, link left in place; fails on `main`). On `main` the plain-delete rows pass (guards), and the 0755 and removed-directory rows fail (`main` restored with 0644 and could not re-create the directory). Mutant "restore with 0644": the 0755 row fails. A second `codex review --base main` at `55d6863`: "No actionable regressions were identified". |
+
+**Gaps.**
+
+- **AC14 partial** → still partial. Re-run at `55d6863` with the same overlay and the same result: `poc/git` and `poc/parsing` pass (the refusal is logged), and `poc/verify-r1-8` stops at NOT REPRODUCED for both variants. It must be re-run on the merge commit.
+- **AC12 "`make lint` passes" read as "no new issues"** → unchanged and confirmed. `--new-from-rev main ./...` gives 0. The touched packages have 162 issues against 167 on a `main` export, with none new after line-number normalisation. The whole module has 319 against 324. gosec-only gives 0. CI does not run golangci-lint.
+- **AC11 rename-rewriting hook** → fixed with finding 1, plus the update-side rows from the codex finding.
+- **Round-1 dispositions** → the reviewer's verification is recorded; no action.
+
+**Gates (code at `55d6863`; this notes commit changes only this file).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `OK`; ok; `library surface is sound` |
+| `go vet ./...`; `-tags integration`; `-tags scenario`; `GOOS=linux go vet` (worktreefs, adapters/git, artifact, workflow); `GOOS=windows go vet ./core/worktreefs/` | all clean |
+| `go test -p 4 -count=1 ./...` | rc 0, 39 packages `ok` |
+| `go test -race -p 4 -count=1 ./core/worktreefs/ ./core/artifact/ ./core/workflow/ ./adapters/git/... ./core/engine/ ./service/internal/gateway/` | all `ok` |
+| The same four Spine packages + `adapters/git/refname`, `-race -p 4`, 3 times, in `golang:1.26-bookworm` (`docker run --rm`, sources and module cache read-only, `GOPROXY=off`, git 2.39.5) | all `ok` 3 times |
+| `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (`s004_r2scen2`) | rc 0, 19 `TestGitHTTP_*` PASS, no SKIP |
+| Full `go test -tags scenario -count=1 -p 1 -v ./service/scenariotest/...` on the branch (`s004_r2scen`, then `s004_r2scen2` at `55d6863`) and on a `git archive main` export (`s004_r2scenmain`) | per-test results **identical** to `main`: 190 PASS / 30 FAIL / 6 SKIP top-level, 1 538 result lines; the failures are the pre-existing fixture-content errors |
+| Integration-tagged suites of touched packages | none (no `integration`-tagged tests in worktreefs, artifact, workflow or adapters/git) |
+| `golangci-lint run --new-from-rev main ./...` / `--enable-only=gosec ./...` / `./core/worktreefs/...` | 0 / 0 / 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| Mutants (`-overlay`) | all killed (finding 1: 8 mutants; finding 2: 2 bound mutants; codex: mode mutant) |
+| `codex review --base main` | at `3b6f542`: one P2 (fixed in `55d6863`); at `55d6863`: "No actionable regressions were identified" |
+
+**SMP compatibility gate (round 2).** Checkout `/Users/bartoszszymichowski/42sid/i23/s-T004/smp`
+(SMP `7d4e7cc9`, `../spine` = this worktree). `go.mod` and `go.sum` were byte-identical after every
+run, and the checkout stayed clean. The gate was run at `3b6f542` and again at `55d6863`, with
+the same results:
+
+- `go build ./... && go vet ./... && go vet -tags integration ./...` → OK.
+- `go test -p 4 -count=1` on the **37** SMP packages whose test dependency graph contains
+  `core/worktreefs`, `core/artifact`, `core/workflow` or `adapters/git` (direct importers:
+  `projectionwriter`, `proposals`, `spinecore`, `spineembedded`, `workspace`), with DB env unset →
+  36 `ok`, 1 `[no test files]`.
+- `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip
+  TEST_PROVISIONING_DSN -- -race -count=1 -p 4 ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/`
+  with `TEST_SPINE_DB` (spine-runtime migrations via `dev/apply-migrations`) and `TEST_PLATFORM_DB`
+  (platform migrations + `vector`) → **PASS: 1 536 passed, 0 failed**, 4 allowed skips.
+- testgate on `automation`, `customer/brain`, `customer/discovery`, `customer/notification`,
+  `customer/profileinventory`, `customer/provenance`, `observability/opshealth`, `recovery`
+  (`-allow-skip TEST_PROVISIONING_DSN -allow-skip TEST_MINIO`) → **PASS: 707 passed, 0 failed**,
+  4 allowed skips. A first run that also allowed `TEST_AWS_OBJECT_STORE_` exited 1 only because
+  that allowance matched nothing (stale), with the same 707 passing.
+- No SMP expectation broke. Behaviour reachable from SMP changes only on a failed commit: a file
+  a hook replaced is removed while it is untracked in HEAD, and a file a hook deleted on update
+  is re-created. Both are closer to `main` than `524d306` was. Nothing new for SMP TASK-008.
+- Not run, as in round 1: the `TEST_PROVISIONING_DSN`-gated suites (they allocate databases
+  outside `s004_*`) and `TestObjectsCopyModeLiveMinIO`.
+- Databases created and dropped this round: `s004_r2scen`, `s004_r2scenmain`, `s004_r2scen2`,
+  `s004_r2_spine_rt`, `s004_r2_smp_it`, `s004_r2_spine_rt2`, `s004_r2_smp_it2`. Containers:
+  `s004-t004r2-linux`, `s004-t004r2-linux2`, both run with `--rm` from the image already present.

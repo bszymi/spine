@@ -3,7 +3,6 @@ package artifact
 import (
 	"context"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
@@ -77,16 +76,12 @@ func (s *Service) setAcceptance(ctx context.Context, path string, acceptance dom
 			fmt.Sprintf("task already has acceptance: %s", art.Acceptance))
 	}
 
-	// Read the raw file to modify front matter.
-	fullPath, err := s.safePath(path)
+	// Read the raw file to modify front matter. readRepoFile goes through
+	// worktreefs: a symlink anywhere in the path is refused (400), a file
+	// over the worktree read cap is refused (413) — INIT-023 TASK-004.
+	raw, err := s.readRepoFile(ctx, path)
 	if err != nil {
 		return nil, err
-	}
-
-	raw, err := os.ReadFile(fullPath)
-	if err != nil {
-		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("read file %s: %v", path, err))
 	}
 
 	// Determine target status based on acceptance type.

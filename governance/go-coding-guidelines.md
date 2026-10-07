@@ -145,18 +145,34 @@ This produces deterministic trailer ordering: Trace-ID, Actor-ID, Run-ID, Operat
 
 ## 4. Git Operation Safety
 
-### 4.1 Path Validation
+### 4.1 Path Validation and Working-Tree I/O
 
-All artifact paths must be validated before file or Git operations:
+All file I/O inside a git working tree (main repo or worktree) goes through
+`core/worktreefs` (INIT-023 TASK-004). Never call `os.*` (or `filepath.Walk*`,
+`filepath.EvalSymlinks`, `io/ioutil`, `syscall` file calls) on a repo-joined path;
+`TestNoUnconfinedWorktreeIO` enforces this for `core/artifact`, `core/workflow`,
+`adapters/git`, `core/engine`, `core/divergence` and `adapters/projection`.
 
 ```go
-fullPath, err := s.safePath(path)
-if err != nil {
-    return nil, err
-}
+rel, err := worktreefs.Clean(path) // lexical: no "..", no absolute, no .git, length caps
+tree, err := worktreefs.Open(scope.RepoDir)
+defer tree.Close()
+undo, err := tree.Create(rel, data, 0o644) // O_EXCL; undo.Rollback() if the commit fails,
+defer undo.Release()                       // else Release (it holds up to 3 descriptors)
+err = tree.Replace(rel, data)              // temp file + rename; keeps the mode
+data, err := tree.ReadFile(rel)            // capped at worktreefs.DefaultMaxReadBytes
 ```
 
-`safePath` resolves symlinks via `filepath.EvalSymlinks` walking up to the nearest existing ancestor.
+A `Tree` walks each component with `Lstat` from a held directory handle and refuses any
+symbolic link (leaf included, dangling or not), any non-directory parent and any component that
+names the git directory; `os.Root` underneath is the containment backstop. Map refusals to
+`domain.ErrInvalidParams` (`errors.Is(err, worktreefs.ErrUnsafePath)`) and the read cap to
+`domain.ErrPayloadTooLarge`. In `artifact.Service`, `safePath` / `safePathIn` are validation
+only (they return the repo-relative path to stage); the I/O itself still goes through the tree.
+A caller that can run git rolls a failed create back with `undo.RollbackClaiming(claim)`, where
+`claim` reports whether a file a failing hook put in place of the created one (a rename gives it
+a new inode) is still its own — `artifact` and `workflow` claim it while the path is untracked
+in HEAD (`git.TrackedInHEAD`), and keep it on any git error.
 
 ### 4.2 Pathspec Safety
 
@@ -477,7 +493,7 @@ These were found repeatedly during code reviews. Avoid them to pass spine-valida
 | Missing `--` in git commands | Always use `--` separator before paths |
 | Missing `GIT_LITERAL_PATHSPECS` | Set on all git commands with user paths |
 | Advancing sync state on partial failure | Only advance when all operations succeed |
-| Not checking `filepath.EvalSymlinks` | Always resolve symlinks for path safety |
+| `os.*` / `filepath.EvalSymlinks` on a repo-joined path | Use `core/worktreefs` (symlinks refused, not resolved) |
 | `range` over large structs by value | Use `for i := range` with pointer access |
 | Missing `yaml:` tags on domain types | Always add both `json:` and `yaml:` tags |
 | `len(s) > 0` instead of `s != ""` | Use string comparison for clarity |

@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 // CLIClient implements GitClient by shelling out to the git CLI.
@@ -709,15 +710,33 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 }
 
 // WriteAndStageFile writes content to a file in the working tree and stages it.
+//
+// This is the governed-merge status cascade's sink (engine.applyCommitStatus
+// reads each blob with `git show`, then checks the run branch out and writes
+// here). The write goes through worktreefs (INIT-023 TASK-004, audit F5):
+// path must be a clean repo-relative path ("..", absolute paths and every
+// git-dir spelling are refused lexically), and a symbolic link anywhere in
+// it — for example one pushed to the run branch between the read and the
+// checkout — is refused before any filesystem change instead of being
+// followed out of the repository. Refusals unwrap to worktreefs.ErrUnsafePath.
+// An existing file is replaced by rename (its mode is kept); a new one is
+// created O_EXCL with mode 0644.
 func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string) error {
-	fullPath := filepath.Join(c.repoPath, path)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		return fmt.Errorf("mkdir for %s: %w", path, err)
-	}
-	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+	rel, err := worktreefs.Clean(path)
+	if err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if _, err := c.run(ctx, "add", "add", "--", path); err != nil {
+	tree, err := worktreefs.Open(c.repoPath)
+	if err != nil {
+		return fmt.Errorf("open worktree: %w", err)
+	}
+	defer func() { _ = tree.Close() }()
+	if err := tree.WriteFile(rel, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	// --literal-pathspecs (go-coding-guidelines §4.2): the path is a file
+	// name, never a pathspec pattern.
+	if _, err := c.run(ctx, "add", "--literal-pathspecs", "add", "--", rel); err != nil {
 		return fmt.Errorf("stage %s: %w", path, err)
 	}
 	return nil
