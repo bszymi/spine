@@ -132,7 +132,11 @@ release is cut — this file is a staging area.
   process, two concurrent binds into the same run (assign, claim or
   auto-selection) run their separation-of-duties check and bind write one after
   the other, so one actor cannot win a review and an author branch step of the
-  same divergence run by racing two requests.
+  same divergence run by racing two requests. The lock covers only a re-run of
+  that check and the write: workflow loads, actor lookups and precondition git
+  reads happen outside it, so a slow read in one run does not hold up binds in
+  others. A request whose context ends while it waits answers `503` and binds
+  nothing.
 - **Run status:** acknowledge, result submission, step activation and retry on a
   run that is not `active` answer `409`; the step-execution candidate listing no
   longer offers executions of non-active runs.
@@ -201,6 +205,16 @@ release is cut — this file is a staging area.
   sharing one database are not serialised; an embedder that runs several
   replicas with `SeparationOfDuties` on keeps that race (see
   `KNOWN-LIMITATIONS.md`).
+- **The bind lock is narrow and context-aware.** It is striped by run ID and
+  shared by every orchestrator in the process, so in a multi-tenant embedder
+  unrelated runs of different workspaces can share a stripe. It is held only
+  while check 7 is re-run (the run's executions and the assignment-ledger rows
+  are read again) and the bind is written. Workflow loads, the `Actors`
+  resolver, skill lookups and precondition git reads run before it is taken.
+  The checks themselves still run in the documented order first. A waiter whose
+  context ends gets `ErrUnavailable` wrapping `ctx.Err()`, and nothing is bound.
+  Under `SeparationOfDuties` each assign or claim therefore reads the run's
+  executions and ledger rows twice.
 - **Run gate:** `EnforceRunStatus` refuses every non-`active` status (including
   `pending`, `paused`, `committing`, `partially-merged`), stricter than a gate
   that refuses only terminal runs.

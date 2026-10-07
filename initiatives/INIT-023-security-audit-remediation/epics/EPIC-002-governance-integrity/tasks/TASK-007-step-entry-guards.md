@@ -710,6 +710,15 @@ The zero value keeps the forward-compatible skips.
 >   replicas are not serialised (divergence workflows only); that needs a database-level lock
 >   per run, which this task does not add.
 
+> **Review-round-2 note (2026-10-07): the bind lock is shared by every workspace, but narrow.**
+>
+> - The stripes are package-level, so every workspace orchestrator in `customer-app` shares them,
+>   and runs of different workspaces can hash to one stripe.
+> - A stripe is held only while check 7 is re-run and the bind is written. The `workspace_roles`
+>   resolver, workflow loads and precondition git reads run before it is taken, so a slow query in
+>   one workspace delays another workspace's bind by at most one check-7 read and one write.
+> - A waiter whose context ends gets `ErrUnavailable` (503) and nothing is bound.
+
 ### 16. Coordination with sibling tasks
 
 - **TASK-008** (submit ownership, CAS; depends on this task) also edits `IngestResult`. This task adds only the `requireActiveRun` call after `GetRun`. TASK-008 may add submit-side fields to `StepEntryPolicy` or define its own policy, and should reuse `requireActiveRun`.

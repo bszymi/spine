@@ -575,7 +575,8 @@ paths:
         `active` (403), allow-list (403) and `eligible_actor_types` (409),
         `required_skills` (409), separation of duties (403), preconditions (412).
         A check that cannot run (no skill lookup, unreadable assignment ledger,
-        no orchestrator wired) answers 503.
+        no orchestrator wired) answers 503, as does a request whose context
+        ends while it waits for the run's separation-of-duties bind lock.
       responses:
         '200':
           description: Actor assigned
