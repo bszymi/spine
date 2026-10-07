@@ -244,7 +244,8 @@ func TestQueuePG_FairClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotB := false
-	for _, e := range claimed {
+	for i := range claimed {
+		e := &claimed[i]
 		if e.DeliveryID == bRow {
 			gotB = true
 		}
@@ -261,9 +262,9 @@ func TestQueuePG_FairClaim(t *testing.T) {
 	// A's rows in the claim are A's oldest (RETURNING order is not
 	// claim order, so compare as a set).
 	var aIDs []string
-	for _, e := range claimed {
-		if e.SubscriptionID == a {
-			aIDs = append(aIDs, e.DeliveryID)
+	for i := range claimed {
+		if claimed[i].SubscriptionID == a {
+			aIDs = append(aIDs, claimed[i].DeliveryID)
 		}
 	}
 	sort.Strings(aIDs)
@@ -341,8 +342,8 @@ func TestQueuePG_DeferDelivery(t *testing.T) {
 
 func ids(es []store.DeliveryEntry) []string {
 	out := make([]string, len(es))
-	for i, e := range es {
-		out[i] = e.DeliveryID
+	for i := range es {
+		out[i] = es[i].DeliveryID
 	}
 	return out
 }

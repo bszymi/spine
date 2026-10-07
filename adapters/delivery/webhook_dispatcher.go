@@ -405,9 +405,13 @@ const resolveUnavailableReason = "resolve subscription: temporarily unavailable"
 // It stays replayable. A row with no created_at is never treated as
 // aged out.
 func (d *WebhookDispatcher) holdForCircuit(ctx context.Context, log *slog.Logger, entry store.DeliveryEntry) {
-	if !entry.CreatedAt.IsZero() && d.clock().Sub(entry.CreatedAt) > d.maxCircuitHold {
-		reason := "circuit open: held longer than " + d.maxCircuitHold.String()
-		log.Warn("circuit held delivery past MaxCircuitHold; dead-lettering", "max_circuit_hold", d.maxCircuitHold.String())
+	maxHold := d.maxCircuitHold
+	if maxHold <= 0 {
+		maxHold = DefaultMaxCircuitHold
+	}
+	if !entry.CreatedAt.IsZero() && d.clock().Sub(entry.CreatedAt) > maxHold {
+		reason := "circuit open: held longer than " + maxHold.String()
+		log.Warn("circuit held delivery past MaxCircuitHold; dead-lettering", "max_circuit_hold", maxHold.String())
 		d.deadLetter(ctx, entry, reason)
 		return
 	}

@@ -84,6 +84,12 @@ func renderRedacted(err error) string {
 	return ue.Op + " " + strconv.Quote(RedactURL(ue.URL)) + ": " + inner
 }
 
+// minScrubPart is the shortest URL part the backstop replaces on its
+// own. Shorter parts ("/v1", "a=1", a one-letter fragment) carry no
+// meaningful secret, and replacing every occurrence of them would garble
+// the message; the full URL and every *url.Error are redacted regardless.
+const minScrubPart = 4
+
 // scrubURL replaces the secret-bearing parts of raw wherever they appear
 // in msg. Over-redaction is harmless; a missed token is not.
 func scrubURL(msg, raw string) string {
@@ -100,7 +106,7 @@ func scrubURL(msg, raw string) string {
 		return msg
 	}
 	for _, part := range []string{u.EscapedPath(), u.Path, u.RawQuery, u.Query().Encode(), u.EscapedFragment(), u.Fragment} {
-		if part != "" && part != "/" {
+		if len(part) >= minScrubPart {
 			msg = strings.ReplaceAll(msg, part, "[redacted]")
 		}
 	}

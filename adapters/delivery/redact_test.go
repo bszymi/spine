@@ -76,6 +76,13 @@ func TestRedactError(t *testing.T) {
 		t.Fatalf("wrapper text lost: %q", got)
 	}
 
+	// Short parts are not scrubbed on their own (they would garble the
+	// text), but the URL itself is still redacted.
+	short := "https://hooks.example/v1?a=1#x"
+	if got := RedactError(errors.New("failed for "+short+": dial tcp: x a=1 refused"), short); got != "failed for https://hooks.example/[redacted]: dial tcp: x a=1 refused" {
+		t.Fatalf("short-part scrub = %q", got)
+	}
+
 	// Backstop: a plain error quoting the raw target or its parts.
 	for _, e := range []error{
 		errors.New("failed for " + target),
