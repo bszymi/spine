@@ -102,9 +102,11 @@ func TestIncrementalSync_GitlinkWithTransientLookingNameIsSkipped(t *testing.T) 
 }
 
 // killingGit puts a `git` wrapper first on PATH that, while the flag
-// file exists, makes every `git show <ref>:<path>` of the given path fail
-// the way an OOM kill or a silent git failure does — no stderr — and
-// otherwise runs the real git. It returns the flag file path.
+// file exists, makes every git command with a `<ref>:<path>` argument
+// for the given path (the blob read: `show`, or `cat-file`) fail the way
+// an OOM kill or a silent git failure does — no stderr — and otherwise
+// runs the real git (`ls-tree … -- <path>` has no such argument). It
+// returns the flag file path.
 func killingGit(t *testing.T, path, how string) string {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
@@ -118,8 +120,10 @@ func killingGit(t *testing.T, path, how string) string {
 		action = "exit 1"
 	}
 	script := "#!/bin/sh\n" +
-		"if [ -e '" + flag + "' ] && [ \"$1\" = show ]; then\n" +
-		"  case \"$2\" in *:" + path + ") " + action + " ;; esac\n" +
+		"if [ -e '" + flag + "' ]; then\n" +
+		"  for a in \"$@\"; do\n" +
+		"    case \"$a\" in *:" + path + ") " + action + " ;; esac\n" +
+		"  done\n" +
 		"fi\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	//nolint:gosec // G306: the wrapper must be executable; it lives under t.TempDir().
