@@ -506,12 +506,15 @@ func TestActorCreate_RoleCeiling(t *testing.T) {
 // ── Review round 1: concurrent skill writes ──
 
 // racingSkillStore returns copies from GetSkill, as Postgres does, and
-// runs a concurrent change once, right after the handler's first read:
-// another admin request committing between that read and the write.
+// runs a concurrent change once, right after the handler's afterRead-th
+// read (the first when zero): another admin request committing between
+// that read and the write.
 type racingSkillStore struct {
 	*skillStore
-	once           sync.Once
-	afterFirstRead func(stored *domain.Skill)
+	mu        sync.Mutex
+	reads     int
+	afterRead int
+	change    func(stored *domain.Skill)
 }
 
 func (r *racingSkillStore) GetSkill(ctx context.Context, skillID string) (*domain.Skill, error) {
@@ -520,11 +523,16 @@ func (r *racingSkillStore) GetSkill(ctx context.Context, skillID string) (*domai
 		return nil, err
 	}
 	read := *sk
-	r.once.Do(func() {
-		if r.afterFirstRead != nil {
-			r.afterFirstRead(sk)
-		}
-	})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reads++
+	at := r.afterRead
+	if at == 0 {
+		at = 1
+	}
+	if r.reads == at && r.change != nil {
+		r.change(sk)
+	}
 	return &read, nil
 }
 
@@ -541,7 +549,7 @@ func TestSkillMutations_ConcurrentChangeIsNotOverwritten(t *testing.T) {
 		ss.actors["admin-1"] = &domain.Actor{ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
 			Role: domain.RoleAdmin, Status: domain.ActorStatusActive}
 		ss.skills["sk-x"] = &domain.Skill{SkillID: "sk-x", Name: "x", Description: "old", Status: domain.SkillStatusActive}
-		rs := &racingSkillStore{skillStore: ss, afterFirstRead: change}
+		rs := &racingSkillStore{skillStore: ss, change: change}
 		tok, _, err := auth.NewService(rs).CreateToken(context.Background(), "admin-1", "t", nil)
 		if err != nil {
 			t.Fatal(err)
@@ -586,6 +594,61 @@ func TestSkillMutations_ConcurrentChangeIsNotOverwritten(t *testing.T) {
 			got := ss.skills["sk-x"]
 			if got.Name != c.want.Name || got.Description != c.want.Description || got.Status != c.want.Status {
 				t.Fatalf("stored skill {name %q, description %q, status %q}, want {%q, %q, %q}",
+					got.Name, got.Description, got.Status, c.want.Name, c.want.Description, c.want.Status)
+			}
+		})
+	}
+}
+
+// The re-read narrows the window but does not close it (review round 2):
+// a change committed between the re-read and UpdateSkill, which writes
+// every column, is still overwritten. This pins the documented residue
+// (KNOWN-LIMITATIONS "Skill Eligibility Is Matched by Name", CHANGELOG,
+// api-operations.md §3.6), so closing it — a conditional UPDATE in the
+// store — fails here and prompts the docs to be updated with it.
+func TestSkillMutations_ChangeAfterRereadIsStillOverwritten(t *testing.T) {
+	deprecate := func(sk *domain.Skill) { sk.Status = domain.SkillStatusDeprecated }
+	rename := func(sk *domain.Skill) { sk.Name = "y" }
+	for _, c := range []struct {
+		name   string
+		change func(*domain.Skill)
+		method string
+		path   string
+		body   string
+		want   domain.Skill
+	}{
+		{"description edit writes a stale active status back", deprecate, "PATCH", "/api/v1/skills/sk-x", `{"description":"new"}`,
+			domain.Skill{Name: "x", Description: "new", Status: domain.SkillStatusActive}},
+		{"deprecation writes a stale name back", rename, "POST", "/api/v1/skills/sk-x/deprecate?force=true", "",
+			domain.Skill{Name: "x", Description: "old", Status: domain.SkillStatusDeprecated}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ss := newSkillStore()
+			ss.actors["admin-1"] = &domain.Actor{ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+				Role: domain.RoleAdmin, Status: domain.ActorStatusActive}
+			ss.skills["sk-x"] = &domain.Skill{SkillID: "sk-x", Name: "x", Description: "old", Status: domain.SkillStatusActive}
+			// Read 1 is the handler's first read, read 2 the re-read.
+			rs := &racingSkillStore{skillStore: ss, afterRead: 2, change: c.change}
+			admin, _, err := auth.NewService(rs).CreateToken(context.Background(), "admin-1", "t", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := gateway.NewServer(":0", gateway.ServerConfig{Store: rs, Auth: auth.NewService(rs)})
+			ts := httptest.NewServer(srv.Handler())
+			t.Cleanup(ts.Close)
+
+			resp := skillRequest(t, c.method, ts.URL+c.path, admin, c.body)
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s %s: %d (%s), want 200", c.method, c.path, resp.StatusCode, b)
+			}
+			if rs.reads != 2 {
+				t.Fatalf("handler read the skill %d times, want 2 (first read and re-read)", rs.reads)
+			}
+			got := ss.skills["sk-x"]
+			if got.Name != c.want.Name || got.Description != c.want.Description || got.Status != c.want.Status {
+				t.Fatalf("stored skill {name %q, description %q, status %q}, want {%q, %q, %q}: the residual window changed — update KNOWN-LIMITATIONS, the CHANGELOG and api-operations.md",
 					got.Name, got.Description, got.Status, c.want.Name, c.want.Description, c.want.Status)
 			}
 		})
