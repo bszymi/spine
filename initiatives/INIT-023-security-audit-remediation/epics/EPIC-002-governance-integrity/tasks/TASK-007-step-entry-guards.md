@@ -2,12 +2,12 @@
 id: TASK-007
 type: Task
 title: "Opt-in step-entry policy for assign and claim: run state, eligibility, mode, preconditions, separation of duties"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
@@ -1170,3 +1170,209 @@ TASK-005 (SHA-bound merge) and TASK-008 (submit identity, CAS) would turn this t
 
 ## Implementation Notes
 
+Implemented on branch `init/INIT-023-TASK-007-step-entry-guards` (base: Spine local `main`
+`ee3c249` = origin `61994fe` + the INIT-023 scaffold + merged TASK-001). Diff base:
+`git diff main...HEAD`.
+
+### Orchestrator rulings recorded (owner questions take their defaults, pending the owner)
+
+- Scope: audit P3-3, P3-4 (Spine halves), P3-15, P3-16, plus separation of duties, as an
+  **opt-in** `engine.StepEntryPolicy` whose zero value is exactly today's behaviour.
+  `validation.EvaluatePreconditions` keeps its semantics (SMP's `embeddedRuns.AssignStep` depends on
+  it; AC 4 and the AC 1 r1-7 pin assert it still answers `passed`, AC 16 pins SMP's task-default
+  execute assign).
+- **OQ1** (default, pending owner): SoD disqualifies any status of a `manual` or `automated`
+  execution of the same run, plus `actor_assignments` rows in any status of such an execution.
+- **OQ2** (default, pending owner): `spine serve` installs the strict policy;
+  `SPINE_STEP_ENTRY_POLICY=legacy` is a logged escape hatch; any other value refuses to start.
+- **OQ3** (default, pending owner): keep "main is truth"; Spine's `epic-lifecycle.yaml` execute loses
+  its unsatisfiable precondition (v1.1); `workflow.DeferredStatusPreconditions` + the reference
+  test guard against new ones.
+- **OQ4** (default, pending owner): strict mode fails closed on unknown/`custom` types,
+  `cross_artifact_valid` without a validator and `discussions_resolved` without a checker.
+- **OQ5** (default, pending owner): an assigner may replace a stored `eligible_actor_ids` list
+  (pinned by the AC 2 design-check row).
+- **OQ6** (default, pending owner): the recovery re-bind SoD residual (an `AssignStep` binding writes
+  no assignment row) is accepted and documented (`architecture/actor-model.md` §7.3,
+  `KNOWN-LIMITATIONS.md`, the `runAuthor` doc comment).
+- **OQ7**: SMP's decision (SMP TASK-011). Spine only provides the `SeparationOfDuties` switch.
+
+### What was built
+
+| Commit | Content |
+|---|---|
+| `21efe1e` | Red before green: inert plumbing (`StepEntryPolicy`, `EntryActorResolver`, `StrictStepEntryPolicy`, `IsZero`, `WithStepEntryPolicy` (stores only), `StepEntryPolicy()`, no-op `TerminateLiveSteps`, `workflow.StepTriggerRunTerminated`, `domain.FailureRunTerminated`, `scheduler.WithRunTerminated` (stored, never called)) plus the AC 1 legacy pins and the AC 2-12, 14, 16, 23-27 tests and the AC 9 parser-contract test. |
+| `baac09b` | `run.terminated` in `EvaluateStepTransition` (live → `skipped`, terminal refuses) + AC 13 tests. |
+| `a863286` | `workflow.DeferredStatusPreconditions` / `DeferredStatusPrecondition` (pinned shape), Spine `epic-lifecycle.yaml` v1.1, AC 15 tests incl. `workflows/` reference test. |
+| `c56d5be` | The engine enforcement (`core/engine/step_entry.go` and the guards in assign, claim, acknowledge, result, step, retry, run, merge, step_executions) and the scheduler hook (`run_timeout.go`, `multi.go`). |
+| `3ba7e76` | `(*store.PostgresStore).CancelActiveAssignmentsForExecution` + AC 17 integration test; compile-time pin that `PostgresStore` provides every optional step-entry port. |
+| `fdf623b` | `spine serve` wiring: `SPINE_STEP_ENTRY_POLICY`, both orchestrator builders, `WithRunTerminated` / `ServiceSet.RunTerminatedFn`, `gateway.ServerConfig.DisableStepAssignFallback`; AC 18 tests. |
+| `9902467` | Docs (§14), `api/spec.yaml`, `CHANGELOG.md`, `KNOWN-LIMITATIONS.md`. |
+| `97d5cc7` | gocritic fix in a test (0 new lint issues). |
+
+Engine shape (`core/engine/step_entry.go`): `gatesBinding()` (any of the six entry bools),
+`requireActiveRun`, `entryActor` (= `loadActor` with a nil resolver), `policyActor` (typed,
+fail-closed lookup for the checks), `checkResolvedActor` (exact `ActorID` echo, typed errors keep
+their code, `ErrNotFound` re-issued naming the ID, untyped → `ErrInternal`), `modeActorType`,
+`checkStepEntryActor` (checks 1-7 in the Design §2 order), `requireSkillsOnAssign`,
+`checkSeparationOfDuties` / `runAuthor` (ledger read through the optional `assignmentHistory`),
+`checkStepEntryPreconditions` (read-only), `preconditionField`, `terminateLiveSteps` /
+`TerminateLiveSteps` (optional `activeAssignmentCanceller`), `isRunTerminated`,
+`runTerminatedConflict`.
+
+### Red before green (AC "Red before green")
+
+Recorded on `21efe1e` by running each top-level test alone
+(`go test -c ./core/engine` then `engine.test -test.run '^<name>$'`, and
+`go test ./adapters/scheduler -run TestScheduler_RunTimeoutTerminatesLiveSteps`):
+
+- PASS (legacy pins, AC 1): all seven `TestStepEntryLegacy_*`.
+- FAIL: AC 2 `TestStepEntry_AssignRefusesIneligibleActor`, AC 3 `…PreconditionFailedStepNotBindable`,
+  AC 4 `…R17_SMPFunnelRefusesDraftTask`, AC 5 `…SpineOnlyStepNotBindable`, AC 6 `…ModeTable`,
+  AC 7 `…SeparationOfDuties`, AC 8 `…GovernanceSelfApprovalRefused`, AC 9
+  `…FieldValueReadsTypedFields`, AC 10 `…StrictPreconditionsFailClosed`, AC 11
+  `…RunStatusGuards`, AC 12 `…TerminateStepsOnRunEnd` and `…TerminateWithoutRunStatusWarns`,
+  AC 14 `…ReferenceWorkflowsUnderStrictPolicy`, AC 16 `…SMPTaskDefaultContract`, AC 23
+  `…SoDAuthorLedger`, AC 24 `…CandidateListingHidesDeadRuns`, AC 25
+  `…LateSubmitOnTerminatedExecution`, AC 26 `TestScheduler_RunTimeoutTerminatesLiveSteps` (the
+  hook and end-to-end sub-tests), AC 27 `…ResolverContract` (red as a nil-pointer panic on the
+  `&Orchestrator{}` row — exactly the panic the AC forbids).
+- All of them pass from `c56d5be` on (AC 14 needs `a863286`'s workflow edit as well).
+- AC 13, 15, 17 and 18 test API that did not exist in inert form (the transition, the lint, the
+  store method, the serve helpers), so their tests landed with their implementation commits; they
+  are outside the AC's red list.
+
+### Mutations checked (each must turn its test red)
+
+A scripted mutation pass (one source edit at a time, the named test re-run, the edit reverted)
+killed all 30 mutants: `gatesBinding()` true for the zero value (AC 1); dropping the resolver
+`ActorID` echo (AC 27); reading only `step_executions` for SoD (AC 23); dropping the symmetric
+guard, the `Type == review` condition, the manual/automated author filter, the auto-selection SoD
+check (AC 7); deleting `requireActiveRun` from each of IngestResult, SubmitStepResult,
+ActivateStep, AcknowledgeStep, RetryStep and the bind path (AC 11); deleting `terminateLiveSteps`
+from CancelRun, FailRun, failRunOnMergeError (AC 12); the WARN (AC 12); the `status` case of
+`preconditionField` (AC 9 and AC 14 task-default); the precondition call in ClaimStep and in
+AssignStep (AC 3); a `modeActorType` entry (AC 6); check 2 (AC 5); checks 4, 5 and 6 (AC 2);
+the listing filter (AC 24); the late-submit rule (AC 25); bypassing the resolver (AC 8 (b));
+the unknown-type fail-closed (AC 10); the scheduler hook call (AC 26). Reverting the
+epic-lifecycle edit fails AC 14 (epic execute, `ErrPrecondition`) and the AC 15 reference test.
+
+### Per-AC evidence
+
+- **AC 1** — `core/engine/step_entry_legacy_test.go` (5 PoCs, `package engine`) and
+  `step_entry_legacy_ext_test.go` (governance + verify-r1-6, `package engine_test`). Binding
+  assertions only; review executions are created directly in the store (no submit routing), no
+  merge assertions.
+- **AC 2** — all rows incl. the two design-check rows; each row is built so exactly one check
+  refuses it and asserts code + message; exec still waiting with no actor; zero merges.
+- **AC 3, 4, 5 (+ design-check ActivateStep merge row), 6, 7 (+ design-check rows), 8, 9, 10, 11
+  (incl. `partially-merged` and `pending`), 12 (incl. `CancelRun` from `partially-merged`, WARN
+  with captured logger, quiescent post-state only), 13, 14, 15 (full struct, real `Index`), 16,
+  23, 24, 25, 26, 27** — tests named as in the AC, in `core/engine/step_entry_*_test.go`,
+  `core/workflow/step_machine_test.go`, `core/workflow/precondition_lint_test.go`,
+  `workflows/reference_workflows_test.go`, `adapters/scheduler/run_timeout_terminated_test.go`.
+- **AC 9 parser contract** — `core/artifact/parser_typed_fields_test.go`.
+- **AC 17** — `adapters/store/postgres_assignments_cancel_test.go` (`-tags integration`).
+- **AC 18** — `service/cmd/spine/serve_step_entry_test.go` (`stepEntryPolicyFromEnv` table;
+  `buildOrchestrator(...).StepEntryPolicy()` and the orchestrator `workspaceOrchestratorBuilder`
+  stores on `ss.StepAssigner` equal the env-selected policy for `""`, `strict`, `legacy`;
+  `buildScheduler` installs the hook — a run-timeout scan terminates under strict and leaves
+  executions unchanged under legacy; `ss.RunTerminatedFn` likewise) and
+  `service/internal/gateway/step_assign_fallback_policy_test.go` (503 + no `UpdateStepExecution`
+  with `DisableStepAssignFallback`; the default still binds). Existing gateway assign tests are
+  unchanged and pass.
+- **AC 19** — see the SMP compatibility gate below.
+- **AC 20** — `git diff 61994fe -- migrations/` is empty (0 lines). No new migration, column or
+  table; new values only in existing unconstrained/allowed columns (`skipped`, `cancelled`,
+  `run_terminated` in JSONB).
+- **AC 21, 22** — gates and docs below.
+
+### Deviations and design points resolved against the real code
+
+1. **`AcknowledgeStep` run guard placement.** Design §9 says "before the transition". It is placed
+   after the existing actor-ownership check and **before the idempotent `in_progress` early
+   return**, so a runner re-acknowledging on a dead run is told 409 rather than "carry on". Still
+   flag-guarded; the run is loaded only when `EnforceRunStatus` is on.
+2. **`ClaimStep` with a gating policy and no workflow loader** returns `ErrUnavailable` (it used to
+   nil-dereference). Zero value unchanged (it still dereferences, as before).
+3. **`AssignStep` partial-wiring guard** also covers a nil store (AC 27 uses a literal
+   `&Orchestrator{}`), not only a nil workflow loader. Message: "step-entry policy needs a run
+   store and a workflow loader".
+4. **Unknown-actor errors from the store/resolver** are re-issued as `ErrNotFound` "actor %q not
+   found" (naming the ID) rather than passed through with the store's generic text; every other
+   typed error keeps its code and text (Design §1/§2 notes).
+5. **SoD fail-closed details** beyond the design text: a ledger row in the run whose execution the
+   run does not list counts as authorship; in the symmetric guard a live execution whose step is
+   missing from the pinned workflow counts like a review. Both are anomalies that cannot occur
+   with pinned workflows; failing closed matches the design's "missing step counts" rule.
+6. **Scheduler hook vs TASK-008's CAS.** TASK-008 has not landed, so the hook fires after a
+   *successful* `UpdateRunStatusAt` (and not when the run already progressed to terminal or
+   `committing`, or when the write errors). When TASK-008 turns the write into a CAS, the call must
+   move behind its `applied` result (comment in `run_timeout.go`).
+7. **Policy threading in `spine serve`.** Parsed once in `serveCmd` and passed explicitly:
+   `serveDeps.StepEntryPolicy` → `buildOrchestrator(..., policy, log)` and
+   `DisableStepAssignFallback: !policy.IsZero()`; `buildWorkspaceResolver(..., policy)` →
+   `newPooledWorkspaceBuilder(cfg, policy, log)` → `workspaceOrchestratorBuilder(ctx, ss, policy)`.
+   The env value is matched case-insensitively after trimming. The serve smoke test now mirrors
+   the strict default.
+8. **AC 14 actor skills.** Executors also hold `review` (a skill the workflows declare) so that
+   separation of duties — not the skills check, which runs earlier — is what refuses them on
+   review; the test asserts `ErrForbidden`.
+9. **gofmt.** Several touched files were not gofmt-clean on `main` (import order from an earlier
+   mass rename, one struct alignment). Running `gofmt -w` on touched files reorders those import
+   blocks; no other unrelated change.
+10. Docs: besides §14, `docs/integration-guide.md` documents `SPINE_STEP_ENTRY_POLICY` and
+    `api/spec.yaml` documents the assign endpoint's `eligible_actor_ids` and 404/412/503.
+
+### Gates (run on this branch; 2026-10-07)
+
+Spine (worktree `i23/s-T007/spine`):
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` (no new `core_to_adapters_allowlist` entry) |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go test -p 4 -count=1 ./...` | exit 0 (all packages ok) |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -race -p 4 -count=1` on every touched package (`adapters/scheduler adapters/store core/artifact core/domain core/engine core/workflow service/cmd/spine service/internal/gateway service/internal/workspace workflows`) | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s007_store go test -tags integration -p 1 -count=1 ./adapters/store/...` | 1 failure, `TestRunModeDatabaseDefault` ("cannot scan NULL into *string", `workflow_version_label`) — **pre-existing**: identical on `main` (`git archive main`, `s007_storemain`). `TestCancelActiveAssignmentsForExecution` (AC 17) passes. |
+| `SPINE_TEST_DATABASE_URL=…/s007_scen go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 failures, **identical set on `main`** (`s007_scenmain`; fixture/validation drift such as "create fixture …: artifact validation failed"; CI runs only `TestGitHTTP_*` because the rest is not green on main). The harness uses the zero-value policy, so nothing changes. |
+| CI scenario-git-http job: `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` | exit 0; 19 `--- PASS: TestGitHTTP_*`, 0 skips |
+| `golangci-lint run --allow-parallel-runners --max-issues-per-linter=0 --max-same-issues=0` on the touched packages, branch vs `main` | 193 vs 206 issues; **0 new** (the diff of issue lines without positions is empty; the count drops because touched files are now gofmt-clean) |
+| same with `--enable-only=gosec` | 1 issue on both (pre-existing `core/workflow/service.go` G703); 0 new |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | "No actionable regressions were identified against the supplied merge base." No P1/P2 reported; nothing to fix or reject. |
+
+Not run, with reason: nothing in the Spine CI list was skipped.
+
+### SMP compatibility gate (AC 19)
+
+SMP checkout `i23/s-T007/smp` detached at SMP `main` `7d4e7cc9`, `../spine` resolving to this
+worktree, no `vendor/`, no `tmp/`, tree left clean (`git status` empty afterwards); no SMP change.
+
+| Command (in SMP) | Result |
+|---|---|
+| `go build ./...` | OK |
+| `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `go test -p 4 -count=1` on every SMP package that imports a changed Spine package (`go list` direct imports of `core/engine`, `core/workflow`, `core/domain`, `adapters/store`, `adapters/scheduler`: `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`) plus `./internal/customer/spineembedded/... ./internal/customer/spinecore/... ./internal/customer/run/... ./internal/engine/...` | all ok. One timing-sensitive failure under load, `spinecore` `TestProfileSnapshot_StalledFetchIsKilledWithItsHelper` ("the fake fetch never started"), passed standalone and on a full `go test -p 4 ./internal/customer/spinecore/...` re-run. |
+| `TEST_SPINE_DB=…/s007_smpspine` (spine-runtime set applied with `go run ./dev/apply-migrations -set spine-runtime`) `TEST_PLATFORM_DB=…/s007_smpplatform` (platform set) `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip 'TEST_PROVISIONING_DSN unset' -- -race -count=1 -timeout 10m -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (SMP ci.yml "Spine runtime integration suites") | `testgate: 4 packages, 1536 tests passed, 0 failed, 4 skipped (4 allowed)`, PASS. Includes `TestAssignGate_Integration` ("hybrid step to a human is unchanged", "agent claims an ai_only entry step"), `TestRecoverAutomation_Integration`, `TestRecoverUnavailableOwner_Integration` (also run by name with `-v`: all PASS). |
+
+Not run, exact command: the three `spinecore` dispatch-store tests gated on
+`TEST_PROVISIONING_DSN` (`TestListStuckStepDispatches_SelectsExactlyTheStuckSet`,
+`TestRedriveStepDispatches_ResetsOnlyEligibleRows_Idempotent`,
+`TestRedrive_RedeliversThroughSpineDispatcher`) — they need a CREATEROLE/CREATEDB DSN that
+allocates `ws_*` databases and roles, which this shared server's rules forbid
+(`TEST_PROVISIONING_DSN=postgres://smp_prov:smp_prov@localhost:5432/postgres go run ./dev/testgate
+… ./internal/customer/spinecore/`). They exercise Spine's delivery queue, which this task does
+not touch. The first testgate run without that allowance failed only on those three skips.
+
+All `s007_*` databases created for these gates were dropped afterwards.
+
+### Follow-ups (unchanged from Out of scope)
+
+TASK-008 must keep the run-terminated `ErrConflict` first in `IngestResult`'s terminal branch,
+move the scheduler hook behind its CAS `applied` result, and route `terminateLiveSteps`' write
+through its `writeStepExecution`. SMP TASK-011 adopts the policy (resolver, workflow fixes /
+legacy loader using `DeferredStatusPreconditions`, the SoD decision). An append-only binding
+ledger (OQ6) and a one-shot sweep of pre-upgrade live executions remain follow-ups.
