@@ -184,15 +184,21 @@ F3 separation-of-duties amplifier). The engine now enforces these through an
 | `EnforceRunStatus` | Assign, claim, acknowledge, result submission, step activation and retry refuse (409) a run that is not `active`; the candidate listing hides such runs; a late submit on an execution terminated with its run answers 409. |
 | `EnforceEligibility` | The actor must exist and be `active` (404 / 403); on assign it must also be in the effective `eligible_actor_ids` list (403) and match `eligible_actor_types` (409). |
 | `EnforceExecutionMode` | Engine-owned steps (`type: internal` or `mode: spine_only`) can never be assigned or claimed (409); `automated_only` / `ai_only` / `human_only` bind only `automated_system` / `ai_agent` / `human` actors (409). |
-| `EnforcePreconditions` | The engine evaluates the step's preconditions at assign and claim (412), strictly ([Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2). |
+| `EnforcePreconditions` | The engine evaluates the step's preconditions at assign and claim (412), strictly ([Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2); activation uses the same strict evaluator, so a failing step stays `waiting` and is not dispatched. |
 | `RequireSkillsOnAssign` | `required_skills` on assign (409; 503 if no skill lookup is wired). |
-| `SeparationOfDuties` | A run author cannot be bound to the run's `review` steps, and a live reviewer cannot take its author steps (403; 503 if the assignment ledger cannot be read). See [Actor Model](/architecture/actor-model.md) §7.3. |
+| `SeparationOfDuties` | A run author cannot be bound to the run's `review` steps, and a live reviewer cannot take its author steps (403; 503 if the assignment ledger cannot be read) — by assignment, claim or engine auto-selection (which leaves the step `waiting`). The candidate listing does not offer an actor what this rule would refuse. Within a process a run's check and bind are serialised. See [Actor Model](/architecture/actor-model.md) §7.3. |
 | `TerminateStepsOnCancel` | Cancelling or failing a run (including the scheduler's run timeout) moves its live executions to `skipped` / `run_terminated` and cancels their active assignments. Safe only together with `EnforceRunStatus`. |
 
 Checks run in a fixed order and nothing is written before a bind is refused.
 An embedder whose actors are not all rows in Spine's actor table supplies an
-`Actors` resolver; the engine requires its answer to echo the requested actor ID
-exactly, so no alias can defeat the exact-string separation-of-duties compare.
+`Actors` resolver. The engine requires its answer to echo the requested actor ID
+exactly, which stops a resolver from mapping one ID to a different identity. It
+cannot tell a canonical handle from a variant the resolver chose to accept, so
+the resolver must also refuse (not found) every input that is not byte for byte
+a stored canonical handle — no case folding, trimming or lenient UUID parsing.
+Only then can no alias of an actor defeat the exact-string separation-of-duties
+and ownership compares. Standalone needs no resolver: actor lookup is an exact
+match on `auth.actors`.
 
 - **Standalone (`spine serve`)** installs `StrictStepEntryPolicy()` (every switch
   on) by default. `SPINE_STEP_ENTRY_POLICY=legacy` restores the pre-INIT-023

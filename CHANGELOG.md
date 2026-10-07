@@ -106,10 +106,41 @@ release is cut — this file is a staging area.
     claim, strictly: `custom`/unknown types, `cross_artifact_valid` without a
     validator and `discussions_resolved` without a checker fail, and
     `field_value`/`field_present` on `status`, `id`, `type`, `title` read the
-    typed front-matter fields (so `field_value status` can now pass).
+    typed front-matter fields (so `field_value status` can now pass);
+  - a run that is not `active` answers the `409` above even after its live
+    executions were closed with it (the run status is checked before the
+    execution is looked up, so a cancelled run never answers `404 no active
+    execution`).
+- **Strict preconditions also govern step activation.** The same strict
+  evaluator runs when the engine activates a step, so a step whose
+  precondition used to be skipped (a `custom` or unknown type,
+  `cross_artifact_valid` with no validator, `discussions_resolved` with no
+  checker) now stays `waiting` with a precondition failure and is neither
+  dispatched nor auto-assigned — and, since assign and claim evaluate it too,
+  cannot be bound until the condition holds. In the other direction a
+  `field_value`/`field_present` condition on `status`, `id`, `type` or `title`,
+  which could never pass before, now passes when the artifact matches.
+- **Separation of duties also governs engine auto-selection.** When the engine
+  auto-selects an actor for an `automated_only` or `ai_only` step and the
+  selected actor authored the run (for a `review` step) or holds the run's live
+  review (for a `manual`/`automated` step), the step stays `waiting` with an
+  info log ("auto-selected actor refused by separation of duties"); no other
+  candidate is tried, so a non-author must claim it or an operator assign one.
+  A workflow whose only eligible runner or agent also executed an author step
+  stalls at that review.
+- **Separation of duties is serialised per run.** Within one `spine serve`
+  process, two concurrent binds into the same run (assign, claim or
+  auto-selection) run their separation-of-duties check and bind write one after
+  the other, so one actor cannot win a review and an author branch step of the
+  same divergence run by racing two requests.
 - **Run status:** acknowledge, result submission, step activation and retry on a
   run that is not `active` answer `409`; the step-execution candidate listing no
   longer offers executions of non-active runs.
+- **Candidate listing and separation of duties:** `GET /execution/steps` with
+  `actor_id` no longer offers that actor a `waiting` execution its claim would
+  refuse under separation of duties (a review of a run it authored, or an
+  author step of a run whose review it holds). A candidate whose check cannot
+  run (unreadable assignment ledger) stays listed; its claim answers `503`.
 - **Run end:** cancelling, failing (including a permanent merge failure) or
   timing out a run moves its `waiting`/`assigned`/`in_progress`/`blocked`
   executions to `skipped` with `error_detail.classification: run_terminated`
@@ -142,15 +173,34 @@ release is cut — this file is a staging area.
   (`run_terminated`, not retryable); `workflow.DeferredStatusPreconditions` and
   `workflow.DeferredStatusPrecondition` (pinned shape: StepID, Index, Type,
   Status, SetBy); `(*store.PostgresStore).CancelActiveAssignmentsForExecution`;
+  `(*store.PostgresStore).ListAssignmentsByRunAndActor`;
   `scheduler.WithRunTerminated`, `scheduler.RunTerminatedFunc`,
   `scheduler.ServiceSet.RunTerminatedFn`. No exported signature changes and no
-  interface gains a method: the SoD ledger read (`ListAssignmentsByActor`) and
-  the assignment cancel are optional ports type-asserted on the assignment
-  store; `*store.PostgresStore` provides both.
+  interface gains a method: the SoD ledger reads (`ListAssignmentsByRunAndActor`,
+  falling back to `ListAssignmentsByActor`) and the assignment cancel are
+  optional ports type-asserted on the assignment store; `*store.PostgresStore`
+  provides all three.
 - **Resolver contract:** the `Actors` resolver's answer must have `ActorID`
   equal to the requested ID, or the bind answers `ErrNotFound`; a
   `*domain.SpineError` keeps its code (`ErrUnavailable` stays 503); an untyped
-  error becomes `ErrInternal`.
+  error becomes `ErrInternal`. The echo check only stops a resolver from
+  answering for a *different* ID. The resolver itself must be canonical: it
+  answers `ErrNotFound` for any input that is not byte for byte a stored actor
+  handle (no case folding, trimming, brace/`urn:` UUID forms or other lenient
+  parsing). A resolver that builds the actor from the requested ID lets a
+  variant of a run author's handle bind as a second identity and defeats
+  separation of duties. The engine passes the requested ID to the resolver
+  unmodified.
+- **Separation-of-duties ledger:** the engine prefers a run-scoped ledger read,
+  `ListAssignmentsByRunAndActor(ctx, runID, actorID)`, type-asserted on the
+  assignment store (`*store.PostgresStore` provides it; one indexed query, no
+  schema change), and falls back to `ListAssignmentsByActor` filtered in memory.
+- **Bind serialisation is per process.** Under `SeparationOfDuties` the engine
+  serialises each run's SoD check and bind write with an in-process lock shared
+  by every orchestrator in the process. Binds made by different processes
+  sharing one database are not serialised; an embedder that runs several
+  replicas with `SeparationOfDuties` on keeps that race (see
+  `KNOWN-LIMITATIONS.md`).
 - **Run gate:** `EnforceRunStatus` refuses every non-`active` status (including
   `pending`, `paused`, `committing`, `partially-merged`), stricter than a gate
   that refuses only terminal runs.

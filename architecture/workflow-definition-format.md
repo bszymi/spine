@@ -347,7 +347,9 @@ Validation Service.
 step-entry policy with `EnforcePreconditions` (the `spine serve` default, see
 [Security Model](/architecture/security-model.md) "Step-entry policy"),
 preconditions are evaluated by the engine when an actor is assigned to or claims
-a step, not only at activation, and evaluation is strict:
+a step, not only at activation, and evaluation — at activation too — is strict
+(a step that fails at activation stays `waiting` and is neither dispatched nor
+auto-assigned):
 
 - `field_value` and `field_present` on `status`, `id`, `type` and `title` read
   the artifact's typed front-matter fields. (The parser keeps those four keys out

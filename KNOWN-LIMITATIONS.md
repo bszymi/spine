@@ -57,6 +57,20 @@ This document tracks known gaps and deferred functionality.
   bound, the first actor leaves no record and is not treated as a run author. Closing it needs an
   append-only binding ledger (a schema change; follow-up). SoD also cannot see git authorship
   directly; INIT-023 TASK-016 limits run-branch pushes to the bound actor.
+- **Separation-of-duties bind race across processes:** the SoD check reads state and the bind
+  writes it later. Within one process the engine serialises a run's check-and-bind (an in-process
+  lock shared by every orchestrator), so one actor cannot win a live review and an author branch
+  step of the same divergence run by racing two requests. Processes that share one database are not
+  serialised: an embedder running several replicas with `SeparationOfDuties` on keeps that race
+  (linear workflows are unaffected — the review execution exists only after the author step was
+  submitted). Closing it needs a database-level lock per run around check and bind; TASK-008's
+  per-row compare-and-swap does not, because the two binds write different execution rows.
+- **Actor resolvers must be canonical:** the engine requires an `Actors` resolver to echo the
+  requested ID, which stops it answering for a different identity, but it cannot tell a canonical
+  handle from a variant the resolver chose to accept. A resolver that accepts case, whitespace or
+  alternate UUID spellings of a handle lets the variant bind as a second identity and defeats
+  separation of duties; embedders (SMP TASK-011's `human-<uuid>` resolver) must refuse every
+  non-canonical input. Standalone has no resolver: actor lookup is an exact `auth.actors` match.
 - **Stored data:** runs that were cancelled or failed before the upgrade keep their live
   executions. They are inert under `EnforceRunStatus` (every entry point refuses them, and the
   candidate listing hides them); a one-shot sweep is a follow-up.
