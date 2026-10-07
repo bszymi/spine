@@ -55,6 +55,19 @@ type TargetValidator struct {
 	// the scheme restriction and the private-address rejection. Empty
 	// entries are ignored at construction.
 	allowedHosts map[string]struct{}
+
+	// lookupIPAddr resolves host names; nil means
+	// net.DefaultResolver.LookupIPAddr. A field so tests can drive the
+	// resolver-failure and private-answer paths deterministically.
+	lookupIPAddr func(ctx context.Context, host string) ([]net.IPAddr, error)
+}
+
+// lookup resolves host through the configured resolver.
+func (v *TargetValidator) lookup(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if v != nil && v.lookupIPAddr != nil {
+		return v.lookupIPAddr(ctx, host)
+	}
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
 }
 
 // NewTargetValidator builds a validator with an optional allowlist of
@@ -160,7 +173,7 @@ func (v *TargetValidator) ValidateURL(rawURL string) error {
 	// resolver answers we got.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ips, err := v.lookup(ctx, host)
 	if err != nil {
 		return nil
 	}
@@ -432,7 +445,7 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 		// Resolve all addresses so we reject any that point at private
 		// space — for hosts with mixed answers we fail closed rather
 		// than racing the dialer to pick a public one.
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		ips, err := v.lookup(ctx, host)
 		if err != nil {
 			observe.Logger(ctx).Debug("webhook target resolve failed", "host", host, "error", err)
 			return nil, fmt.Errorf("target_url: resolve %s: %s", host, dnsFailureReason(err))

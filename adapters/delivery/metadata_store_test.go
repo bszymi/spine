@@ -76,7 +76,7 @@ func (f *subscriptionsDB) QueryRow(_ context.Context, _ string, args ...any) pgx
 // assign copies vals into the Scan destinations, converting the few
 // shapes PostgresStore writes (a *string workspace id) into what it
 // reads back.
-func assign(dest []any, vals []any) error {
+func assign(dest, vals []any) error {
 	if len(dest) != len(vals) {
 		return fmt.Errorf("scan arity %d != %d", len(dest), len(vals))
 	}

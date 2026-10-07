@@ -57,10 +57,7 @@ func isRetryable(statusCode int, isNetworkError bool) bool {
 	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
 		return true
 	}
-	if statusCode >= 500 {
-		return true
-	}
-	return false
+	return statusCode >= 500
 }
 
 // nextRetryDelay returns the backoff delay for the given attempt count.

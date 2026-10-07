@@ -118,11 +118,46 @@ func TestDNSFailureOmitsResolverAddress(t *testing.T) {
 			t.Errorf("dnsFailureReason(%v) = %q, want %q", tc.err, got, tc.want)
 		}
 	}
-	// End to end through the dialer: an unresolvable name.
+	// End to end through the dialer, with a resolver failure that names
+	// the resolver (as Go's pure-Go resolver does).
+	v := NewTargetValidator(nil)
+	v.lookupIPAddr = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: host, Server: "10.0.0.2:53", IsNotFound: true}
+	}
+	_, err := v.SafeDialContext(&net.Dialer{Timeout: time.Second})(context.Background(), "tcp", "x.example:443")
+	if err == nil || err.Error() != "target_url: resolve x.example: no such host" {
+		t.Errorf("resolver failure through the dialer = %v", err)
+	}
+	// And with the real resolver: an unresolvable name never echoes a
+	// resolver address.
 	dial := NewTargetValidator(nil).SafeDialContext(&net.Dialer{Timeout: time.Second})
-	_, err := dial(context.Background(), "tcp", "nonexistent.invalid:443")
+	_, err = dial(context.Background(), "tcp", "nonexistent.invalid:443")
 	if err == nil || !strings.HasPrefix(err.Error(), "target_url: resolve nonexistent.invalid: ") || strings.Contains(err.Error(), " on ") {
 		t.Errorf("unresolvable host error = %v", err)
+	}
+}
+
+// A DNS-named target whose answer is private is refused without the
+// address or its class, at create time and at connect time.
+func TestPrivateAnswerNotReported(t *testing.T) {
+	v := NewTargetValidator(nil)
+	v.lookupIPAddr = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}, {IP: net.ParseIP("10.1.2.3")}}, nil
+	}
+	err := v.ValidateURL("https://internal.example/hook")
+	if err == nil || err.Error() != "invalid_params: "+msgNonPublicHost {
+		t.Fatalf("ValidateURL = %v, want the generic refusal", err)
+	}
+	_, derr := v.SafeDialContext(&net.Dialer{Timeout: time.Second})(context.Background(), "tcp", "internal.example:443")
+	if !errors.Is(derr, ErrBlockedDestination) {
+		t.Fatalf("dial = %v, want ErrBlockedDestination", derr)
+	}
+	for _, e := range []error{err, derr} {
+		for _, leak := range []string{"10.1.2.3", "private"} {
+			if strings.Contains(e.Error(), leak) {
+				t.Fatalf("%q reveals %q", e, leak)
+			}
+		}
 	}
 }
 

@@ -81,10 +81,10 @@ func metadataDispatcher(srv *httptest.Server, metadata, secret string) (*Webhook
 func deliverOnce(d *WebhookDispatcher, st *queueStore, id string) {
 	st.add(id, "sub-1", time.Now())
 	entries, _ := st.ClaimDeliveries(context.Background(), 1)
-	for _, e := range entries {
-		e.EventID = "evt-1"
-		e.Payload = []byte(`{"event_id":"evt-1","type":"step_assigned"}`)
-		d.deliver(context.Background(), e)
+	for i := range entries {
+		entries[i].EventID = "evt-1"
+		entries[i].Payload = []byte(`{"event_id":"evt-1","type":"step_assigned"}`)
+		d.deliver(context.Background(), entries[i])
 	}
 }
 
