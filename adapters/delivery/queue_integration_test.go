@@ -551,3 +551,31 @@ func TestQueuePG_DeadLetteredBacklogsOfManySubscriptionsDoNotStarve(t *testing.T
 		}
 	}
 }
+
+// Review round 2, against real Postgres: rows queued 25 hours ago (older
+// than MaxCircuitHold) meet a circuit that has just opened. They are held
+// to the probe time, not dead-lettered: the hold is measured from the
+// later of created_at and the moment the circuit opened.
+func TestQueuePG_FreshOutageHoldsAgedBacklog(t *testing.T) {
+	ctx := context.Background()
+	s, p := queuePG(t)
+	_, good, _, gh := queuePGServers(t, http.StatusOK)
+	sub := p + "aged"
+	queuePGSub(t, s, sub, good.URL)
+	base := time.Now().Add(-25 * time.Hour)
+	for i := 0; i < 20; i++ {
+		queuePGEnqueue(t, s, sub, fmt.Sprintf("a%02d", i), base.Add(time.Duration(i)*time.Second))
+	}
+	d := NewWebhookDispatcher(s, NewStoreSubscriptionResolver(s), DispatcherConfig{})
+	tripOpen(d.breaker, sub, time.Now())
+	d.poll(ctx)
+	if atomic.LoadInt64(gh) != 0 {
+		t.Fatalf("held rows reached the endpoint")
+	}
+	if n := queuePGCount(t, s, `subscription_id = $1 AND status = 'dead'`, sub); n != 0 {
+		t.Fatalf("%d aged rows dead-lettered by an outage that has just begun", n)
+	}
+	if n := queuePGCount(t, s, `subscription_id = $1 AND status = 'pending' AND attempt_count = 0 AND last_error = 'circuit open' AND next_retry_at > now()`, sub); n != 20 {
+		t.Fatalf("%d of 20 aged rows held to the probe time", n)
+	}
+}

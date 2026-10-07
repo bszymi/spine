@@ -162,3 +162,66 @@ func TestCircuitBreaker_NextAttemptAt(t *testing.T) {
 		t.Fatalf("half-open circuit: %v, want now+fallback", got)
 	}
 }
+
+// TestCircuitOpenedAt (review round 2): OpenedAt is the start of the
+// current outage — set when the circuit goes from closed to open, kept
+// across failed and released probes (so MaxCircuitHold spans every probe
+// cycle of one outage), and zero while the circuit is closed. A later
+// outage starts afresh.
+func TestCircuitOpenedAt(t *testing.T) {
+	ctx := context.Background()
+	cb, now := newClockedBreaker()
+	if got := cb.OpenedAt("s"); !got.IsZero() {
+		t.Fatalf("unknown circuit: OpenedAt = %v, want zero", got)
+	}
+	for i := 0; i < circuitFailureThreshold-1; i++ {
+		cb.RecordFailure(ctx, "s")
+		*now = now.Add(time.Second)
+	}
+	if got := cb.OpenedAt("s"); !got.IsZero() {
+		t.Fatalf("closed circuit with failures: OpenedAt = %v, want zero", got)
+	}
+	cb.RecordFailure(ctx, "s")
+	opened := *now
+	if cb.State("s") != CircuitOpen || !cb.OpenedAt("s").Equal(opened) {
+		t.Fatalf("after the threshold: state %s OpenedAt %v, want open at %v", cb.State("s"), cb.OpenedAt("s"), opened)
+	}
+
+	// A failed probe re-opens the circuit: same outage.
+	*now = now.Add(circuitRecoveryTimeout)
+	probe, ok := cb.Acquire(ctx, "s")
+	if !ok || !probe.probe {
+		t.Fatal("expected a probe")
+	}
+	if !cb.OpenedAt("s").Equal(opened) {
+		t.Fatalf("half-open: OpenedAt = %v, want %v", cb.OpenedAt("s"), opened)
+	}
+	probe.Failure(ctx)
+	if cb.State("s") != CircuitOpen || !cb.OpenedAt("s").Equal(opened) {
+		t.Fatalf("after a failed probe: state %s OpenedAt %v, want open since %v", cb.State("s"), cb.OpenedAt("s"), opened)
+	}
+
+	// A released probe re-opens it too: same outage.
+	*now = now.Add(circuitRecoveryTimeout)
+	probe, _ = cb.Acquire(ctx, "s")
+	probe.Release(ctx)
+	if cb.State("s") != CircuitOpen || !cb.OpenedAt("s").Equal(opened) {
+		t.Fatalf("after a released probe: state %s OpenedAt %v, want open since %v", cb.State("s"), cb.OpenedAt("s"), opened)
+	}
+
+	// A successful probe closes it: no outage.
+	probe, _ = cb.Acquire(ctx, "s")
+	probe.Success(ctx)
+	if got := cb.OpenedAt("s"); cb.State("s") != CircuitClosed || !got.IsZero() {
+		t.Fatalf("after a successful probe: state %s OpenedAt %v, want closed/zero", cb.State("s"), got)
+	}
+
+	// The next outage starts when it opens.
+	*now = now.Add(time.Hour)
+	for i := 0; i < circuitFailureThreshold; i++ {
+		cb.RecordFailure(ctx, "s")
+	}
+	if !cb.OpenedAt("s").Equal(*now) {
+		t.Fatalf("second outage: OpenedAt = %v, want %v", cb.OpenedAt("s"), *now)
+	}
+}

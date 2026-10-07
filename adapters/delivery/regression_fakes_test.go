@@ -269,9 +269,16 @@ func sharedClock(d *WebhookDispatcher, st *queueStore) {
 }
 
 // tripOpen puts sub's circuit into the open state with its last failure
-// at lastFailure.
+// at lastFailure; the outage began then too.
 func tripOpen(cb *CircuitBreaker, sub string, lastFailure time.Time) {
+	tripOpenSince(cb, sub, lastFailure, lastFailure)
+}
+
+// tripOpenSince puts sub's circuit into the open state for an outage that
+// began at openedAt (CircuitBreaker.OpenedAt), its last failure at
+// lastFailure.
+func tripOpenSince(cb *CircuitBreaker, sub string, openedAt, lastFailure time.Time) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	cb.circuits[sub] = &circuitEntry{state: CircuitOpen, consecutiveFailures: circuitFailureThreshold, lastFailureAt: lastFailure}
+	cb.circuits[sub] = &circuitEntry{state: CircuitOpen, consecutiveFailures: circuitFailureThreshold, lastFailureAt: lastFailure, openedAt: openedAt}
 }

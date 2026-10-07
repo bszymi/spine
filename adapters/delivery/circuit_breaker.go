@@ -40,6 +40,12 @@ type circuitEntry struct {
 	state               CircuitState
 	consecutiveFailures int
 	lastFailureAt       time.Time
+	// openedAt is when the circuit last went from closed to open: the
+	// start of the current outage episode. A failed or released probe
+	// re-opens the circuit without moving it, so it spans every probe
+	// cycle of one outage. Meaningful only while the state is not closed
+	// (see OpenedAt).
+	openedAt time.Time
 }
 
 // CircuitBreaker tracks per-subscription failure state and prevents
@@ -182,6 +188,24 @@ func (cb *CircuitBreaker) NextAttemptAt(subscriptionID string, fallback time.Dur
 	return now.Add(fallback)
 }
 
+// OpenedAt reports when subscriptionID's circuit went from closed to open
+// for the current outage, while it is open or half-open; the zero time
+// when it is closed or unknown. Re-opening after a failed or released
+// probe keeps the original instant, so it is the start of the outage as
+// this process observed it — the breaker is in memory, so a restart
+// starts it again. The dispatcher measures MaxCircuitHold from it (with
+// the row's created_at, whichever is later), so a backlog queued long
+// before an outage is not dead-lettered the moment the outage begins
+// (INIT-023 TASK-010 review round 2).
+func (cb *CircuitBreaker) OpenedAt(subscriptionID string) time.Time {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if entry, ok := cb.circuits[subscriptionID]; ok && entry.state != CircuitClosed {
+		return entry.openedAt
+	}
+	return time.Time{}
+}
+
 // AllowDelivery returns true if the circuit allows a delivery attempt
 // for the given subscription. If the circuit is open and the recovery
 // timeout has elapsed, it transitions to half-open.
@@ -259,6 +283,7 @@ func (cb *CircuitBreaker) RecordFailure(ctx context.Context, subscriptionID stri
 
 	if entry.consecutiveFailures >= circuitFailureThreshold && entry.state == CircuitClosed {
 		entry.state = CircuitOpen
+		entry.openedAt = entry.lastFailureAt
 		observe.Logger(ctx).Info("circuit opened",
 			"subscription_id", subscriptionID,
 			"failures", entry.consecutiveFailures)

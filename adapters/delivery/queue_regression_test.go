@@ -161,9 +161,13 @@ func TestCircuitOpenDefersWithoutStarvingOrInflating(t *testing.T) {
 	}
 }
 
-// TestCircuitHoldCapDeadLetters (AC9): a held row older than
-// MaxCircuitHold (from created_at) is dead-lettered without an HTTP
-// attempt; a younger one is deferred.
+// TestCircuitHoldCapDeadLetters (AC9, amended by review round 2): a row
+// held longer than MaxCircuitHold is dead-lettered without an HTTP
+// attempt; a younger one is deferred. The hold is measured from the later
+// of the row's created_at and the moment the circuit opened, so while the
+// outage itself is younger than the cap the old row is deferred too — a
+// backlog queued long before an outage is not dead-lettered the moment
+// the outage begins (round 2: it used to be, from created_at alone).
 func TestCircuitHoldCapDeadLetters(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -173,32 +177,46 @@ func TestCircuitHoldCapDeadLetters(t *testing.T) {
 		{name: "default 24h", cfg: 0, effect: DefaultMaxCircuitHold},
 		{name: "configured 1h", cfg: time.Hour, effect: time.Hour},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, hits := statusServer(t, http.StatusOK)
-			st := newQueueStore()
-			st.add("old", "sub-x", st.now().Add(-tc.effect-time.Minute))
-			st.add("young", "sub-x", st.now().Add(-tc.effect+time.Minute))
-			res := &mapResolver{subs: map[string]*SubscriptionDetail{"sub-x": {SubscriptionID: "sub-x", TargetURL: srv.URL}}}
-			d := NewWebhookDispatcher(st, res, DispatcherConfig{MaxCircuitHold: tc.cfg})
-			sharedClock(d, st)
-			tripOpen(d.breaker, "sub-x", st.now())
-			d.poll(context.Background())
-			if hits.Load() != 0 {
-				t.Fatalf("held rows reached the endpoint (%d hits)", hits.Load())
-			}
-			old := st.row("old")
-			wantReason := "circuit open: held longer than " + tc.effect.String()
-			if old.Status != "dead" || old.LastError != wantReason {
-				t.Fatalf("old row = %q/%q, want dead/%q", old.Status, old.LastError, wantReason)
-			}
-			if logs := st.logsFor("old"); len(logs) != 1 || logs[0].Error != wantReason || logs[0].StatusCode != nil {
-				t.Fatalf("old row's dead-letter not logged: %+v", logs)
-			}
-			young := st.row("young")
-			if young.Status != "pending" || young.AttemptCount != 0 || young.NextRetryAt == nil {
-				t.Fatalf("young row = %+v, want deferred", young)
-			}
-		})
+		for _, outage := range []struct {
+			name    string
+			age     time.Duration // how long the circuit has been open
+			oldDead bool
+		}{
+			{name: "outage longer than the cap", age: tc.effect + time.Minute, oldDead: true},
+			{name: "outage younger than the cap", age: tc.effect - time.Minute, oldDead: false},
+			{name: "outage just began", age: 0, oldDead: false},
+		} {
+			t.Run(tc.name+"/"+outage.name, func(t *testing.T) {
+				srv, hits := statusServer(t, http.StatusOK)
+				st := newQueueStore()
+				st.add("old", "sub-x", st.now().Add(-tc.effect-2*time.Minute))
+				st.add("young", "sub-x", st.now().Add(-tc.effect+2*time.Minute))
+				res := &mapResolver{subs: map[string]*SubscriptionDetail{"sub-x": {SubscriptionID: "sub-x", TargetURL: srv.URL}}}
+				d := NewWebhookDispatcher(st, res, DispatcherConfig{MaxCircuitHold: tc.cfg})
+				sharedClock(d, st)
+				tripOpenSince(d.breaker, "sub-x", st.now().Add(-outage.age), st.now())
+				d.poll(context.Background())
+				if hits.Load() != 0 {
+					t.Fatalf("held rows reached the endpoint (%d hits)", hits.Load())
+				}
+				old := st.row("old")
+				wantReason := "circuit open: held longer than " + tc.effect.String()
+				if outage.oldDead {
+					if old.Status != "dead" || old.LastError != wantReason {
+						t.Fatalf("old row = %q/%q, want dead/%q", old.Status, old.LastError, wantReason)
+					}
+					if logs := st.logsFor("old"); len(logs) != 1 || logs[0].Error != wantReason || logs[0].StatusCode != nil {
+						t.Fatalf("old row's dead-letter not logged: %+v", logs)
+					}
+				} else if old.Status != "pending" || old.AttemptCount != 0 || old.LastError != circuitOpenReason || old.NextRetryAt == nil {
+					t.Fatalf("old row = %+v, want deferred: the outage is younger than the cap", old)
+				}
+				young := st.row("young")
+				if young.Status != "pending" || young.AttemptCount != 0 || young.NextRetryAt == nil {
+					t.Fatalf("young row = %+v, want deferred", young)
+				}
+			})
+		}
 	}
 }
 
@@ -469,27 +487,64 @@ func TestUnreadableSubscriptionHoldsBacklog(t *testing.T) {
 		t.Fatalf("held backlog was claimed before its retry instant")
 	}
 
-	// Past MaxCircuitHold the row is dead-lettered with the hold reason.
+	// Review round 2: rows queued longer ago than MaxCircuitHold are not
+	// dead-lettered by the first failure — the hold starts when the
+	// subscription became unreadable — but once it has been unreadable
+	// for longer than the cap, the tried row and the aged rest of the
+	// backlog go dead with the hold reason, and a younger row stays held.
 	old := newQueueStore()
-	old.add("o1", "sub-x", old.now().Add(-DefaultMaxCircuitHold-time.Minute))
-	d = NewWebhookDispatcher(old, res, DispatcherConfig{})
+	old.add("o1", "sub-x", old.now().Add(-DefaultMaxCircuitHold-2*time.Minute))
+	old.add("o2", "sub-x", old.now().Add(-DefaultMaxCircuitHold-time.Minute))
+	d = NewWebhookDispatcher(old, res, DispatcherConfig{Concurrency: 1})
 	sharedClock(d, old)
 	d.poll(context.Background())
-	want := resolveUnavailableReason + ": held longer than " + DefaultMaxCircuitHold.String()
-	if r := old.row("o1"); r.Status != "dead" || r.LastError != want {
-		t.Fatalf("aged row = %q/%q, want dead/%q", r.Status, r.LastError, want)
+	if r := old.row("o1"); r.Status != "failed" || r.AttemptCount != 1 || r.NextRetryAt == nil {
+		t.Fatalf("aged row after the first failure = %+v, want failed/attempt 1/scheduled (not dead)", r)
 	}
-	if logs := old.logsFor("o1"); len(logs) != 1 || logs[0].Error != want {
-		t.Fatalf("aged row's dead-letter not logged: %+v", logs)
+	if r := old.row("o2"); r.Status != "pending" || r.AttemptCount != 0 || r.LastError != resolveUnavailableReason {
+		t.Fatalf("aged backlog row after the first failure = %+v, want held (not dead)", r)
+	}
+	old.advance(DefaultMaxCircuitHold + time.Minute)
+	old.add("y1", "sub-x", old.now().Add(-time.Minute))
+	d.poll(context.Background())
+	want := resolveUnavailableReason + ": held longer than " + DefaultMaxCircuitHold.String()
+	for _, id := range []string{"o1", "o2"} {
+		if r := old.row(id); r.Status != "dead" || r.LastError != want {
+			t.Fatalf("%s after %v unreadable = %q/%q, want dead/%q", id, DefaultMaxCircuitHold+time.Minute, r.Status, r.LastError, want)
+		}
+	}
+	if logs := old.logsFor("o2"); len(logs) != 1 || logs[0].Error != want {
+		t.Fatalf("aged backlog row's dead-letter not logged: %+v", logs)
+	}
+	if r := old.row("y1"); r.Status != "pending" || r.AttemptCount != 0 || r.NextRetryAt == nil {
+		t.Fatalf("young row = %+v, want held", r)
 	}
 }
 
-// TestCircuitHoldExpiresUnclaimedBacklog (review round 1): the hold cap
-// reaches rows the dispatcher was never handed. One claimed row of an
-// open circuit dead-letters itself if it is too old, holds the younger
-// rest of the backlog without attempts, and dead-letters (with a
-// delivery-log row each) the backlog rows older than MaxCircuitHold.
+// TestCircuitHoldExpiresUnclaimedBacklog (review round 1, amended by
+// round 2): the hold cap reaches rows the dispatcher was never handed.
+// With the circuit open for longer than MaxCircuitHold, one claimed row
+// dead-letters itself if it is too old, holds the younger rest of the
+// backlog without attempts, and dead-letters (with a delivery-log row
+// each) the backlog rows older than MaxCircuitHold. With an outage that
+// has just begun, nothing is expired however old the rows are.
 func TestCircuitHoldExpiresUnclaimedBacklog(t *testing.T) {
+	t.Run("outage just began", func(t *testing.T) {
+		srv, _ := statusServer(t, http.StatusOK)
+		st := newQueueStore()
+		st.add("old-a", "sub-x", st.now().Add(-DefaultMaxCircuitHold-2*time.Minute))
+		st.add("old-b", "sub-x", st.now().Add(-DefaultMaxCircuitHold-time.Minute))
+		res := &mapResolver{subs: map[string]*SubscriptionDetail{"sub-x": {SubscriptionID: "sub-x", TargetURL: srv.URL}}}
+		d := NewWebhookDispatcher(st, res, DispatcherConfig{Concurrency: 1})
+		sharedClock(d, st)
+		tripOpen(d.breaker, "sub-x", st.now())
+		d.poll(context.Background())
+		for _, id := range []string{"old-a", "old-b"} {
+			if r := st.row(id); r.Status != "pending" || r.LastError != circuitOpenReason || len(st.logsFor(id)) != 0 {
+				t.Fatalf("%s = %+v, want held without a dead-letter", id, r)
+			}
+		}
+	})
 	srv, hits := statusServer(t, http.StatusOK)
 	st := newQueueStore()
 	st.add("old-a", "sub-x", st.now().Add(-DefaultMaxCircuitHold-2*time.Minute))
@@ -501,7 +556,7 @@ func TestCircuitHoldExpiresUnclaimedBacklog(t *testing.T) {
 	res := &mapResolver{subs: map[string]*SubscriptionDetail{"sub-x": {SubscriptionID: "sub-x", TargetURL: srv.URL}}}
 	d := NewWebhookDispatcher(st, res, DispatcherConfig{Concurrency: 1})
 	sharedClock(d, st)
-	tripOpen(d.breaker, "sub-x", st.now())
+	tripOpenSince(d.breaker, "sub-x", st.now().Add(-DefaultMaxCircuitHold-time.Hour), st.now())
 	d.poll(context.Background())
 
 	if hits.Load() != 0 {

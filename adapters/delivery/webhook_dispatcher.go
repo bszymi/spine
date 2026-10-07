@@ -50,9 +50,19 @@ type WebhookDispatcher struct {
 	concurrency  int
 	pollInterval time.Duration
 	breaker      *CircuitBreaker
-	// maxCircuitHold bounds how long an open circuit may keep deferring
-	// a delivery, measured from the row's created_at.
+	// maxCircuitHold bounds how long a delivery may be held (open
+	// circuit, unreadable subscription); see DispatcherConfig.
 	maxCircuitHold time.Duration
+
+	// unreadableSince records, per subscription, when this dispatcher
+	// first failed to read it in the current run of transient resolver
+	// failures; a successful read (or a permanent verdict) removes the
+	// entry. It is to an unreadable subscription what
+	// CircuitBreaker.OpenedAt is to an open circuit: the start of the
+	// hold that MaxCircuitHold is measured from. In memory, like the
+	// breaker; at most one entry per subscription.
+	unreadableMu    sync.Mutex
+	unreadableSince map[string]time.Time
 
 	// tlsClients caches per-subscription http.Clients keyed by
 	// subscription ID so we don't rebuild an x509 pool / Transport
@@ -97,9 +107,15 @@ type DispatcherConfig struct {
 	// MaxCircuitHold bounds how long a delivery may be held without a
 	// terminal outcome because its subscription cannot be delivered to —
 	// an open circuit, or a subscription that cannot be read (database,
-	// decrypt) — measured from the row's created_at. A held row older
-	// than this is dead-lettered (and stays replayable) instead of being
-	// held again. Zero selects DefaultMaxCircuitHold.
+	// decrypt). The hold is measured from the later of the row's
+	// created_at and the start of the subscription's current hold as
+	// this dispatcher observed it (the circuit opening, or the first of
+	// the current run of resolver failures), so a row queued long before
+	// a fault is not dead-lettered the moment the fault begins. That
+	// start is kept in memory: a restart starts it again, which only
+	// ever delays a dead-letter. A row held longer than this is
+	// dead-lettered (and stays replayable) instead of being held again.
+	// Zero selects DefaultMaxCircuitHold.
 	MaxCircuitHold time.Duration
 }
 
@@ -127,18 +143,19 @@ func NewWebhookDispatcher(st store.DeliveryStore, resolver SubscriptionResolver,
 	}
 
 	return &WebhookDispatcher{
-		store:          st,
-		resolver:       resolver,
-		client:         cfg.Targets.HTTPClient(cfg.HTTPTimeout),
-		httpTimeout:    cfg.HTTPTimeout,
-		concurrency:    cfg.Concurrency,
-		pollInterval:   cfg.PollInterval,
-		breaker:        NewCircuitBreaker(),
-		maxCircuitHold: cfg.MaxCircuitHold,
-		tlsClients:     make(map[string]*tlsClientEntry),
-		targets:        cfg.Targets,
-		now:            time.Now,
-		rand:           rand.Reader,
+		store:           st,
+		resolver:        resolver,
+		client:          cfg.Targets.HTTPClient(cfg.HTTPTimeout),
+		httpTimeout:     cfg.HTTPTimeout,
+		concurrency:     cfg.Concurrency,
+		pollInterval:    cfg.PollInterval,
+		breaker:         NewCircuitBreaker(),
+		maxCircuitHold:  cfg.MaxCircuitHold,
+		unreadableSince: make(map[string]time.Time),
+		tlsClients:      make(map[string]*tlsClientEntry),
+		targets:         cfg.Targets,
+		now:             time.Now,
+		rand:            rand.Reader,
 	}
 }
 
@@ -259,6 +276,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 			// re-claimed forever. No retry can bring the row back, nor
 			// any other row of the subscription: its whole due queue
 			// goes in one statement (deadLetterQueue).
+			d.clearUnreadable(entry.SubscriptionID)
 			log.Warn("subscription no longer exists; dead-lettering its due deliveries")
 			d.deadLetterQueue(ctx, log, entry, "subscription not found")
 		case errors.Is(err, ErrInvalidSubscriptionMetadata):
@@ -266,6 +284,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 			// malformed metadata): no retry can fix it. The parse reason
 			// names keys and values the operator wrote, never
 			// infrastructure detail.
+			d.clearUnreadable(entry.SubscriptionID)
 			log.Warn("subscription metadata invalid; dead-lettering its due deliveries", "error", err.Error())
 			d.deadLetterQueue(ctx, log, entry, err.Error())
 		default:
@@ -281,6 +300,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		}
 		return
 	}
+	d.clearUnreadable(entry.SubscriptionID)
 
 	// Re-validate the persisted URL before every delivery so
 	// subscriptions predating the SSRF hardening are rejected here,
@@ -411,10 +431,35 @@ func (d *WebhookDispatcher) holdCap() time.Duration {
 	return d.maxCircuitHold
 }
 
-// heldTooLong reports whether entry has been queued for longer than
-// maxHold. A row with no created_at is never treated as aged out.
-func (d *WebhookDispatcher) heldTooLong(entry store.DeliveryEntry, maxHold time.Duration) bool {
-	return !entry.CreatedAt.IsZero() && d.clock().Sub(entry.CreatedAt) > maxHold
+// holdStartedAt is when the dispatcher began holding entry: the later of
+// its created_at and since, the start of its subscription's current hold
+// as this process observed it (CircuitBreaker.OpenedAt for an open
+// circuit, unreadableSince for an unreadable subscription). A zero since
+// (unknown) means the hold starts now.
+//
+// Why not created_at alone (INIT-023 TASK-010 review round 2): the queue
+// has no "held since" column, and measuring from created_at dead-lettered
+// a row queued more than MaxCircuitHold ago at the first fault it met,
+// without one retry — after a dispatcher had been down for a day, or when
+// an SMP workspace whose pair was cold for a day warmed up, a one-poll
+// resolver blip or a fresh outage dead-lettered the whole aged backlog.
+// The start is in memory, so a restart starts it again: the cap can come
+// late, never early.
+func (d *WebhookDispatcher) holdStartedAt(entry store.DeliveryEntry, since time.Time) time.Time {
+	if since.IsZero() {
+		since = d.clock()
+	}
+	if entry.CreatedAt.After(since) {
+		return entry.CreatedAt
+	}
+	return since
+}
+
+// heldTooLong reports whether entry has been held for longer than maxHold
+// (see holdStartedAt). A row with no created_at is never treated as aged
+// out.
+func (d *WebhookDispatcher) heldTooLong(entry store.DeliveryEntry, since time.Time, maxHold time.Duration) bool {
+	return !entry.CreatedAt.IsZero() && d.clock().Sub(d.holdStartedAt(entry, since)) > maxHold
 }
 
 // heldTooLongReason is the dead-letter reason of a row held past the cap:
@@ -437,15 +482,15 @@ func heldTooLongReason(reason string, maxHold time.Duration) string {
 // claimable between probes and cannot take claim slots from other
 // subscriptions, however many subscriptions are held.
 //
-// A row held longer than MaxCircuitHold (measured from created_at — the
-// queue has no "held since" column) is dead-lettered instead, so a
-// permanently failing endpoint cannot keep rows non-terminal forever.
-// It stays replayable. A row with no created_at is never treated as
-// aged out.
+// A row held longer than MaxCircuitHold — measured from the later of its
+// created_at and the moment the circuit opened (heldTooLong) — is
+// dead-lettered instead, so a permanently failing endpoint cannot keep
+// rows non-terminal forever. It stays replayable.
 func (d *WebhookDispatcher) holdForCircuit(ctx context.Context, log *slog.Logger, entry store.DeliveryEntry) {
 	maxHold := d.holdCap()
+	since := d.breaker.OpenedAt(entry.SubscriptionID)
 	until := d.breaker.NextAttemptAt(entry.SubscriptionID, d.pollInterval)
-	if d.heldTooLong(entry, maxHold) {
+	if d.heldTooLong(entry, since, maxHold) {
 		log.Warn("circuit held delivery past MaxCircuitHold; dead-lettering", "max_circuit_hold", maxHold.String())
 		d.deadLetter(ctx, entry, heldTooLongReason(circuitOpenReason, maxHold))
 	} else {
@@ -454,7 +499,7 @@ func (d *WebhookDispatcher) holdForCircuit(ctx context.Context, log *slog.Logger
 			log.Error("failed to defer circuit-held delivery", "error", err)
 		}
 	}
-	d.holdBacklog(ctx, log, entry.SubscriptionID, circuitOpenReason, until)
+	d.holdBacklog(ctx, log, entry.SubscriptionID, circuitOpenReason, until, since)
 }
 
 // retryUnresolved handles a transient failure to read the delivery's
@@ -472,8 +517,10 @@ func (d *WebhookDispatcher) holdForCircuit(ctx context.Context, log *slog.Logger
 // INIT-023 TASK-010 such rows were retried on every poll until the fault
 // cleared, and dead-lettering them after ~15 s would have turned a
 // fixable misconfiguration into lost deliveries that each need a manual
-// replay. Rows older than MaxCircuitHold are dead-lettered, as for an
-// open circuit.
+// replay. A row held longer than MaxCircuitHold — measured from the later
+// of its created_at and this dispatcher's first failure to read the
+// subscription in the current run of failures — is dead-lettered, as for
+// an open circuit.
 //
 // The subscription's other due rows are held to the same retry instant
 // without consuming attempts (holdBacklog), so an unreadable
@@ -481,10 +528,11 @@ func (d *WebhookDispatcher) holdForCircuit(ctx context.Context, log *slog.Logger
 // backlog.
 func (d *WebhookDispatcher) retryUnresolved(ctx context.Context, log *slog.Logger, entry store.DeliveryEntry) {
 	maxHold := d.holdCap()
-	if d.heldTooLong(entry, maxHold) {
+	since := d.markUnreadable(entry.SubscriptionID)
+	if d.heldTooLong(entry, since, maxHold) {
 		log.Warn("subscription unreadable past MaxCircuitHold; dead-lettering", "max_circuit_hold", maxHold.String())
 		d.deadLetter(ctx, entry, heldTooLongReason(resolveUnavailableReason, maxHold))
-		d.holdBacklog(ctx, log, entry.SubscriptionID, resolveUnavailableReason, d.clock().Add(resolveRetryInterval))
+		d.holdBacklog(ctx, log, entry.SubscriptionID, resolveUnavailableReason, d.clock().Add(resolveRetryInterval), since)
 		return
 	}
 	delay := nextRetryDelay(entry.AttemptCount)
@@ -505,13 +553,42 @@ func (d *WebhookDispatcher) retryUnresolved(ctx context.Context, log *slog.Logge
 	})
 	log.Info("subscription unreadable; scheduling retry", "attempt", entry.AttemptCount+1, "retry_at", retryAt)
 	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", resolveUnavailableReason, &retryAt)
-	d.holdBacklog(ctx, log, entry.SubscriptionID, resolveUnavailableReason, retryAt)
+	d.holdBacklog(ctx, log, entry.SubscriptionID, resolveUnavailableReason, retryAt, since)
+}
+
+// markUnreadable records that subscriptionID could not be read and
+// returns when its current run of read failures began (now, for the
+// first failure of a run).
+func (d *WebhookDispatcher) markUnreadable(subscriptionID string) time.Time {
+	d.unreadableMu.Lock()
+	defer d.unreadableMu.Unlock()
+	if since, ok := d.unreadableSince[subscriptionID]; ok {
+		return since
+	}
+	if d.unreadableSince == nil {
+		d.unreadableSince = make(map[string]time.Time)
+	}
+	now := d.clock()
+	d.unreadableSince[subscriptionID] = now
+	return now
+}
+
+// clearUnreadable ends subscriptionID's run of read failures: it was read,
+// or found to be gone or misconfigured (a permanent verdict, not a hold).
+func (d *WebhookDispatcher) clearUnreadable(subscriptionID string) {
+	d.unreadableMu.Lock()
+	delete(d.unreadableSince, subscriptionID)
+	d.unreadableMu.Unlock()
 }
 
 // holdBacklog takes the subscription's other due deliveries off the
 // claimable set until `until`, in one attempt-free statement
-// (DeliveryStore.HoldDueDeliveries); those older than MaxCircuitHold are
-// dead-lettered there and get their delivery-log row here.
+// (DeliveryStore.HoldDueDeliveries). Once the hold itself is older than
+// MaxCircuitHold (since, as for heldTooLong), the rows queued before
+// now - MaxCircuitHold are dead-lettered in that statement and get their
+// delivery-log row here; while the hold is younger nothing is expired,
+// however old the rows are — exactly heldTooLong's rule applied to rows
+// the dispatcher was never handed.
 //
 // Why: the fair claim gives each subscription's oldest due row a slot
 // ahead of any newer row. If only the rows the dispatcher was handed were
@@ -528,14 +605,18 @@ func (d *WebhookDispatcher) retryUnresolved(ctx context.Context, log *slog.Logge
 // every replica until its probe time. A replica-local fault therefore
 // delays the subscription's due backlog by up to the recovery timeout
 // per probe cycle; rows that arrive after the hold are claimable at once.
-func (d *WebhookDispatcher) holdBacklog(ctx context.Context, log *slog.Logger, subscriptionID, reason string, until time.Time) {
+func (d *WebhookDispatcher) holdBacklog(ctx context.Context, log *slog.Logger, subscriptionID, reason string, until, since time.Time) {
 	maxHold := d.holdCap()
 	expiredReason := heldTooLongReason(reason, maxHold)
+	var expireBefore time.Time
+	if now := d.clock(); !since.IsZero() && now.Sub(since) > maxHold {
+		expireBefore = now.Add(-maxHold)
+	}
 	expired, err := d.store.HoldDueDeliveries(ctx, store.DeliveryHold{
 		SubscriptionID: subscriptionID,
 		Until:          until,
 		Reason:         reason,
-		ExpireBefore:   d.clock().Add(-maxHold),
+		ExpireBefore:   expireBefore,
 		ExpiredReason:  expiredReason,
 	})
 	if err != nil {
