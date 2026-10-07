@@ -627,3 +627,195 @@ func TestMemAuthRevokeContract(t *testing.T) {
 		t.Fatalf("second revoke: %v, want ErrNotFound", err)
 	}
 }
+
+// ── Sweep rules the insert branch never reaches (review round 1) ──
+
+func seedActiveInternalAdmin(m *memAuth) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.actors[auth.InternalAdminActorID] = domain.Actor{ActorID: auth.InternalAdminActorID, Type: domain.ActorTypeAutomated,
+		Name: "SMP Bootstrap Admin", Role: domain.RoleAdmin, Status: domain.ActorStatusActive}
+}
+
+func (m *memAuth) tokenIDOf(bearer string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tokens[auth.HashToken(bearer)].TokenID
+}
+
+// The sweep also runs when the current bearer's row already exists
+// (upsertInternalAdminToken's "hash found, live" branch), not only
+// after an insert. That is the path the upgrade takes in a deployment
+// that rotated SMP_ADMIN_TOKEN under an earlier version, which never
+// revoked: rows for the old bearer A and the current bearer B are both
+// live, and the first load by this version must revoke A. Every other
+// rotation test reaches the sweep through the insert branch, so a
+// regression that returned early when the row exists (as the code
+// before TASK-013 did) would pass them all.
+func TestBootstrapSecurity_SweepRunsWhenCurrentRowExists(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		cutoff time.Time
+	}{
+		{"no cutoff (embedders)", time.Time{}},
+		{"process-start cutoff after both rows (spine serve)", time.Now().UTC()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMemAuth()
+			seedActiveInternalAdmin(m)
+			a, b := randomBearer(t), randomBearer(t)
+			now := time.Now().UTC()
+			m.seedLegacyBootstrapRow("bootstrap-aaaaaaaaaaaa", auth.HashToken(a), now.Add(-2*time.Hour))
+			m.seedLegacyBootstrapRow("bootstrap-bbbbbbbbbbbb", auth.HashToken(b), now.Add(-time.Hour))
+			svc := auth.NewService(m)
+			for _, bearer := range []string{a, b} {
+				if _, err := svc.ValidateToken(ctx, bearer); err != nil {
+					t.Fatalf("precondition: both bearers live, got %v", err)
+				}
+			}
+
+			if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: tc.cutoff}); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := svc.ValidateToken(ctx, a); err == nil || !strings.Contains(err.Error(), "token revoked") {
+				t.Fatalf("older bootstrap bearer A after a load with B's existing row: err=%v, want \"token revoked\"", err)
+			}
+			if _, err := svc.ValidateToken(ctx, b); err != nil {
+				t.Fatalf("current bearer B refused: %v", err)
+			}
+			if n := len(m.tokens); n != 2 {
+				t.Fatalf("%d token rows, want 2: an existing current row must not be re-inserted", n)
+			}
+		})
+	}
+}
+
+// A bootstrap row created after the current bearer's row is never
+// revoked, whatever the cutoff. With the zero cutoff (SMP and every
+// other embedder) this rule is the only thing that stops a process
+// still carrying an older bearer A from revoking the newer bearer B —
+// permanently, since revocation is never undone. Such a row is logged
+// at Warn with its token id when no rollout explains it.
+func TestBootstrapSecurity_NeverRevokesRowNewerThanCurrent(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		cutoff time.Time
+	}{
+		{"no cutoff (embedders)", time.Time{}},
+		{"cutoff after both rows (a restarted stale replica)", time.Now().UTC()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureBootstrapLog(t)
+			m := newMemAuth()
+			seedActiveInternalAdmin(m)
+			a, b := randomBearer(t), randomBearer(t)
+			now := time.Now().UTC()
+			m.seedLegacyBootstrapRow("bootstrap-aaaaaaaaaaaa", auth.HashToken(a), now.Add(-2*time.Hour))
+			m.seedLegacyBootstrapRow("bootstrap-bbbbbbbbbbbb", auth.HashToken(b), now.Add(-time.Hour))
+
+			// A process still configured with the older bearer A loads
+			// the workspace.
+			if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: a, SupersededBefore: tc.cutoff}); err != nil {
+				t.Fatal(err)
+			}
+
+			svc := auth.NewService(m)
+			if _, err := svc.ValidateToken(ctx, b); err != nil {
+				t.Fatalf("a process carrying the older bearer revoked the newer one: %v", err)
+			}
+			if _, err := svc.ValidateToken(ctx, a); err != nil {
+				t.Fatalf("current bearer A refused: %v", err)
+			}
+			warn := warnLineNaming(logs.String(), "bootstrap-bbbbbbbbbbbb")
+			if warn == "" || !strings.Contains(warn, "level=WARN") {
+				t.Fatalf("the newer live row was left in place silently; log:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// warnLineNaming returns the first "newer than the current" log line
+// that names tokenID, or "".
+func warnLineNaming(log, tokenID string) string {
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "is newer than the current SMP_ADMIN_TOKEN") && strings.Contains(line, "token_id="+tokenID) {
+			return line
+		}
+	}
+	return ""
+}
+
+// The rollout residue the review found (documented, owner question 5):
+// the new bearer B is seeded first, and a replica still carrying the old
+// bearer A then loads the same workspace for the first time and
+// inserts A. A's row is newer than B's, so no B-carrying replica ever
+// revokes it — not even one that boots after the rollout. A stays live
+// until the next rotation or an admin's DELETE. This pins both the
+// residue (so a change to it is a decision, not an accident) and the
+// Warn that makes it visible once the rollout is over, while the
+// expected rolling-deploy case stays quiet.
+func TestBootstrapSecurity_StaleBearerInsertedAfterCurrentIsFlagged(t *testing.T) {
+	ctx := context.Background()
+	logs := captureBootstrapLog(t)
+	m := newMemAuth()
+	a, b := randomBearer(t), randomBearer(t)
+	// created_at is the inserting process's wall clock; keep each step
+	// strictly later than the one before it on coarse clocks.
+	tick := func() { time.Sleep(2 * time.Millisecond) }
+
+	r1Start := time.Now().UTC().Add(-time.Hour) // old replica, bearer A
+	r2Start := time.Now().UTC()                 // new replica, bearer B
+	tick()
+
+	// R2 seeds B into a workspace that has no row for A.
+	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: r2Start}); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	// R1 loads it for the first time and inserts A. B is past R1's
+	// cutoff, so R1 revokes nothing.
+	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: a, SupersededBefore: r1Start}); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	// R2 reloads it (idle eviction): A is newer than B but after R2's
+	// cutoff — a rolling deploy in progress. Left in place, quietly.
+	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: r2Start}); err != nil {
+		t.Fatal(err)
+	}
+	aID := m.tokenIDOf(a)
+	if warnLineNaming(logs.String(), aID) != "" {
+		t.Fatalf("Warn during the rollout, where a newer row is expected:\n%s", logs.String())
+	}
+
+	// After the rollout, a new-config replica R3 boots and loads it.
+	tick()
+	r3Start := time.Now().UTC()
+	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: r3Start}); err != nil {
+		t.Fatal(err)
+	}
+	svc := auth.NewService(m)
+	if _, err := svc.ValidateToken(ctx, b); err != nil {
+		t.Fatalf("current bearer B refused: %v", err)
+	}
+	if _, err := svc.ValidateToken(ctx, a); err != nil {
+		t.Fatalf("residue changed: A is no longer live after R3's load (%v) — update KNOWN-LIMITATIONS, the runbook §5.6 and the CHANGELOG", err)
+	}
+	if warnLineNaming(logs.String(), aID) == "" {
+		t.Fatalf("the surviving old bearer's row was not logged at Warn by R3; log:\n%s", logs.String())
+	}
+
+	// The runbook's remedy: an admin revokes A's row. Revocation sticks.
+	if err := m.RevokeToken(ctx, aID); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: r3Start}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ValidateToken(ctx, a); err == nil {
+		t.Fatal("revoked old bearer A authenticates again")
+	}
+}

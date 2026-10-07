@@ -43,6 +43,16 @@ type BootstrapAdminConfig struct {
 	// can never revoke the newer bearer a newer replica seeded during a
 	// rolling deploy. The zero value adds no bound: every bootstrap row
 	// older than the current bearer's row is revoked.
+	//
+	// The zero value is therefore NOT the pre-INIT-023 behaviour (which
+	// never revoked): this is a shared-behaviour change (INIT-023 §7b
+	// rule 4), inert in an embedder that never validates the rows this
+	// function writes. An embedder that does validate them (anything
+	// that calls auth.Service.ValidateToken, or reads auth.tokens, for
+	// a bootstrap bearer) should pass its process start here, and must
+	// accept that revocation is never undone: a re-run with a mistyped
+	// bearer revokes the real one, and a later rollback to it stays
+	// refused until the bearer is rotated to a fresh value.
 	SupersededBefore time.Time
 }
 
@@ -59,8 +69,9 @@ var ErrAdminTokenHashCollision = errors.New("bootstrap admin token hash bound to
 // BootstrapInternalAdmin idempotently inserts the platform's bootstrap
 // admin actor + token row into the workspace runtime DB so the
 // platform's bearer authenticates on the first workspace request.
-// Mirror of delivery.BootstrapInternalSubscription — runs from
-// wireWorkspaceDelivery on every workspace load and is safe to re-run.
+// Mirror of delivery.BootstrapInternalSubscription — spine serve runs
+// it on every workspace load (bootstrapInternalAdmin in the pooled
+// workspace builder) and it is safe to re-run.
 //
 // An empty cfg.Token is the no-op path (single-workspace /
 // pre-platform-binding deployments stay green). It does not retire an
@@ -75,7 +86,18 @@ var ErrAdminTokenHashCollision = errors.New("bootstrap admin token hash bound to
 // after the rotation, instead of keeping admin forever. Revocation is
 // never undone: a rollback to a revoked bearer is refused and logged at
 // Error, not re-enabled. Tokens an admin minted for smp-admin through
-// the token API carry "tok_" ids and are never touched.
+// the token API carry "tok_" ids and are never touched. The sweep runs
+// on every call that has a live current row — also when that row
+// already existed — so the first call by this version also revokes
+// bearers from rotations made before it, and a call that failed half
+// way is completed by the next one. revokeSupersededAdminTokens
+// documents the two rollout residues that ordering by time leaves.
+//
+// Errors. Any store error is returned (wrapped), the sweep's included;
+// the function is idempotent, so the caller retries by calling it
+// again. A failed sweep leaves the superseded bearer live until a call
+// succeeds: spine serve therefore retries in the background for as
+// long as the workspace stays loaded.
 //
 // Status (P3-31). The bootstrap heals smp-admin's name and role, but
 // never re-activates a suspended or deactivated smp-admin: those are
@@ -262,11 +284,28 @@ func newInternalAdminTokenID() (string, error) {
 // the row first (Postgres' RevokeToken matches only live rows); it is
 // skipped. Any other error is returned, naming the token id.
 //
-// Ordering is by created_at, which the inserting process stamps. One
-// residue is inherent to ordering by time (INIT-023 TASK-013 owner
-// question 5): an old-config replica that restarts mid-rollout gets a
-// fresh cutoff and, in a workspace first seeded during the overlap,
-// revokes the new bearer. The recovery is to rotate forward.
+// Ordering is by created_at, which the inserting process stamps. Two
+// residues are inherent to ordering by time (INIT-023 TASK-013 owner
+// question 5); both are confined to workspaces first loaded during a
+// rollout, so the workspace had a row for one bearer and none for the
+// other:
+//
+//   - New bearer first, old bearer re-inserted later by a replica that
+//     still carries it (an old-config replica, or old code during the
+//     upgrade): the old row is newer than the current one, so no
+//     replica carrying the new bearer ever revokes it, restarts
+//     included. It stays live until the next rotation, or until an
+//     admin revokes it. The sweep logs such a row at Warn, with its
+//     token id, once no rollout can explain it any more (no cutoff, or
+//     created before the cutoff).
+//   - An old-config replica that restarts mid-rollout gets a fresh
+//     cutoff and, where the new bearer's row is the only one, inserts
+//     the old bearer and revokes the new one. The recovery is to
+//     rotate forward.
+//
+// A row newer than the current one is never revoked, whatever the
+// cutoff: from the data alone it is indistinguishable from a newer
+// bearer that this process (a stale replica) must not revoke.
 func revokeSupersededAdminTokens(ctx context.Context, st store.AuthStore, current *domain.Token, cutoff time.Time, log *slog.Logger) error {
 	tokens, err := st.ListTokensByActor(ctx, InternalAdminActorID)
 	if err != nil {
@@ -281,6 +320,17 @@ func revokeSupersededAdminTokens(ctx context.Context, st store.AuthStore, curren
 			continue
 		}
 		if t.CreatedAt.After(current.CreatedAt) {
+			// Never revoked (see above). A row created after the cutoff
+			// is the expected rolling-deploy case — a newer replica's
+			// bearer — and stays quiet. One with no cutoff, or created
+			// before it, is either a superseded bearer that was
+			// re-inserted after the current one, or a sign that this
+			// process carries a stale SMP_ADMIN_TOKEN: either way an
+			// operator has to look, so say which row.
+			if cutoff.IsZero() || t.CreatedAt.Before(cutoff) {
+				log.Warn("a live bootstrap admin token is newer than the current SMP_ADMIN_TOKEN's row and is left in place; if it belongs to a rotated-away bearer, revoke it (DELETE /api/v1/tokens/{token_id}), otherwise this process carries a stale SMP_ADMIN_TOKEN",
+					"actor_id", InternalAdminActorID, "token_id", t.TokenID)
+			}
 			continue
 		}
 		if !cutoff.IsZero() && !t.CreatedAt.Before(cutoff) {
