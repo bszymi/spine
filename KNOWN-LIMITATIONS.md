@@ -145,9 +145,12 @@ The following limitations have been resolved:
     and a replica still carrying the old bearer (an old-config replica, or pre-upgrade code during
     the upgrade rollout) then loads the workspace, the old bearer's row is newer than the new
     one's. No replica carrying the new bearer revokes it, restarts included, so the **old bearer
-    stays valid until the next rotation**. After the rollout each load of such a workspace logs
-    at Warn with the row's `token_id`; revoke it with `DELETE /api/v1/tokens/{token_id}` (runbook
-    §5.6 (e)).
+    stays valid until the next rotation**. Only a replica that started after that row was
+    written logs it at Warn (with the row's `token_id`), on each load of such a workspace. A
+    replica already running when the row was written cannot tell it from a rollout still in
+    progress and stays quiet on every load, idle-eviction reloads included, so the Warn appears
+    only once every replica is restarted after the rollout. Revoke the named row with
+    `DELETE /api/v1/tokens/{token_id}` (runbook §5.6 (e)).
 - **A failed bootstrap leaves the old bearer live until a retry succeeds:** `spine serve`
   retries a failed admin bootstrap in the background (from 1s, up to 1 min apart) for as long as
   the workspace stays loaded; each failure is logged at Error.

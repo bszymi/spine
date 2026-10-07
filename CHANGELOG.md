@@ -33,10 +33,15 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
     answers **409** unless `?force=true` is passed (was 200), with the same body shape as
     deprecation and `hint: "use ?force=true to rename anyway"`.
   - `PATCH /api/v1/skills/{id}` and `POST /api/v1/skills/{id}/deprecate` re-read the skill right
-    before writing it, so a concurrent admin request is no longer silently undone (a description
-    edit used to write a stale `active` status back over a forced deprecation, and a deprecation
-    used to revert a concurrent rename). If the skill was renamed in between, the request answers
-    **409 `conflict`** ("skill was renamed by a concurrent request; retry") and writes nothing.
+    before writing it, which **narrows, but does not close,** the window in which a concurrent
+    admin request is silently undone (a description edit could write a stale `active` status back
+    over a forced deprecation, and a deprecation could revert a concurrent rename, across the
+    whole request including its workflow scans). If the re-read finds the skill renamed since the
+    request first read it, the request answers **409 `conflict`** ("skill was renamed by a
+    concurrent request; retry") and writes nothing. A change another admin commits between the
+    re-read and the write is still overwritten, because the write replaces every column; a
+    conditional `UPDATE` is a recorded follow-up (`KNOWN-LIMITATIONS.md`, "Skill Eligibility Is
+    Matched by Name").
 - **Actor role ceiling (audit P3-33).** `POST /api/v1/actors` by an operator with role
   `operator` or `admin` answers **403** with `reason=role_ceiling_exceeded` (was 201). A
   non-admin may register only roles strictly below its own; `actor.create` itself stays an
@@ -71,9 +76,13 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
   - If the new bearer is seeded first and a replica still carrying the old bearer (an old-config
     replica, or pre-upgrade code during the upgrade rollout) then loads the workspace, the *old*
     bearer is inserted after the new one and **stays valid until the next rotation**: no replica
-    carrying the new bearer ever revokes a row newer than its own, restarts included. Each load
-    of such a workspace after the rollout logs at Warn ("a live bootstrap admin token is newer
-    than the current SMP_ADMIN_TOKEN's row …") with the row's `token_id`; revoke it with
+    carrying the new bearer ever revokes a row newer than its own, restarts included. Only a
+    replica that **started after** that row was written logs it, at Warn ("a live bootstrap admin
+    token is newer than the current SMP_ADMIN_TOKEN's row …") with the row's `token_id`, on each
+    load of such a workspace. A replica that was already running when the row was written stays
+    quiet on every load of it, idle-eviction reloads included, because its data looks the same as
+    a rollout still in progress. So **restart every replica once more after a rolling rotation**
+    (idle eviction is not enough), watch for the Warn, and revoke each named row with
     `DELETE /api/v1/tokens/{token_id}` (`docs/operator-runbook.md` §5.6 (e)).
 - **A failed admin bootstrap is retried in the background.** If a workspace load's bootstrap
   fails with a store error (for example while revoking a superseded bearer), `spine serve` logs
@@ -99,8 +108,10 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
   revoked, so every older bootstrap row of `smp-admin` that still authenticates is revoked by the
   first load of each workspace by the new code. Make sure the platform uses the current
   `SMP_ADMIN_TOKEN`. A row inserted by pre-upgrade code *after* the current bearer's row (a
-  workspace first loaded during the upgrade rollout) is newer than it and is not revoked; it is
-  logged at Warn, see "Rollout residues".
+  workspace first loaded during the upgrade rollout) is newer than it and is not revoked. Only a
+  replica started after that row was written logs it at Warn, so **restart every replica once
+  more when the upgrade rollout has finished** (idle eviction is not enough); see "Rollout
+  residues".
 - **Review pre-existing actor-skill grants.** Grants made by non-admins before the upgrade stay in
   place, and `auth.actor_skills` records no grantor. Review holders of `review`,
   `workflow_review` and `architecture` (for example `GET /api/v1/actors/{id}/skills` per actor,
