@@ -43,6 +43,12 @@ type AssignResult struct {
 // admits itself (Owner question 5 default): step.assign is the only writer
 // of the list, so this widens nothing a stronger control granted, and
 // separation of duties applies whatever list is passed.
+//
+// Under SeparationOfDuties the bind write is made inside sodBindSection:
+// check 7 runs once in its place in the order and again under the run's
+// bind stripe, which is held only for that re-check and the write. A caller
+// whose context ends while waiting for the stripe gets ErrUnavailable and
+// nothing is bound.
 func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*AssignResult, error) {
 	if req.ActorID == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "actor_id is required")
@@ -58,18 +64,15 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 		return nil, domain.NewError(domain.ErrUnavailable, "step-entry policy needs a run store and a workflow loader")
 	}
 
-	// SeparationOfDuties: hold the run's bind stripe from before check 7
-	// until the bind is written, so a concurrent bind of the same actor
-	// into the same run cannot pass its own check in between (see
-	// sodBindStripes). A no-op unless the policy sets SeparationOfDuties.
-	unlock := o.lockSoDBind(req.RunID)
-	defer unlock()
-
 	// Under a gating policy the run is loaded first and its status checked
 	// before the execution lookup: a run cancelled under
 	// TerminateStepsOnCancel has no live execution left, and the caller
 	// must hear "run R is cancelled" (409), not "no active execution" (404).
-	var run *domain.Run
+	var (
+		run     *domain.Run
+		wfDef   *domain.WorkflowDefinition
+		stepDef *domain.StepDefinition
+	)
 	if gated {
 		r, err := o.store.GetRun(ctx, req.RunID)
 		if err != nil {
@@ -87,11 +90,11 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 	}
 
 	if gated {
-		wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+		wfDef, err = o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
 		if err != nil {
 			return nil, fmt.Errorf("load workflow: %w", err)
 		}
-		stepDef := findStepDef(wfDef, req.StepID)
+		stepDef = findStepDef(wfDef, req.StepID)
 		if stepDef == nil {
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("step %q not found in workflow %s", req.StepID, wfDef.ID))
@@ -133,6 +136,17 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 	if len(req.EligibleActorIDs) > 0 {
 		exec.EligibleActorIDs = req.EligibleActorIDs
 	}
+
+	// SeparationOfDuties: the critical section is only check 7, re-run
+	// under the run's bind stripe, and the write (see sodBindStripes). The
+	// reads above — run, workflow (`git show`), actor resolution, skills,
+	// preconditions — ran without it. A no-op unless the policy sets
+	// SeparationOfDuties.
+	unlock, err := o.sodBindSection(ctx, run, wfDef, stepDef, exec, req.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}

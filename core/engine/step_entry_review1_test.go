@@ -292,7 +292,10 @@ func (e *syncEmitter) Emit(_ context.Context, ev domain.Event) error {
 // takes — AssignStep, ClaimStep or ActivateStep's auto-selection.
 // Mutation: making lockSoDBind take no lock (or dropping it from any one
 // path) lets the second bind pass its check during the pause and complete,
-// and the actor ends up bound to both.
+// and the actor ends up bound to both. Since review round 2 the second bind
+// runs its checks without the stripe and waits for it only to re-run
+// check 7 and write (sodBindSection): dropping that re-check, or running it
+// before the stripe is taken, fails every case the same way.
 func TestStepEntry_SoDBindsSerialisePerRun(t *testing.T) {
 	ctx := context.Background()
 	const review, branch, aiReview = "run-1-review-1", "run-1-b1-branch-work-1", "run-1-ai-review-1"

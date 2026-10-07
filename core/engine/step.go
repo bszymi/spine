@@ -82,20 +82,27 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 
 	actorID := o.tryResolveAutoActor(ctx, exec, stepDef)
 	// SeparationOfDuties: an auto-selected bind holds the run's bind stripe
-	// from its check until its write, like AssignStep and ClaimStep (see
-	// sodBindStripes). A no-op unless the policy sets SeparationOfDuties.
+	// for its check and its write only, like AssignStep and ClaimStep (see
+	// sodBindStripes); the actor selection above ran without it. A caller
+	// whose context ends while waiting for the stripe gets ErrUnavailable
+	// and the step is left as it was. A no-op unless the policy sets
+	// SeparationOfDuties.
 	unlock := func() {}
-	if actorID != "" {
-		unlock = o.lockSoDBind(runID)
-	}
-	defer unlock()
 	if actorID != "" && o.entryPolicy.SeparationOfDuties {
+		u, err := o.lockSoDBind(ctx, runID)
+		if err != nil {
+			return err
+		}
+		unlock = u
+		defer u()
 		// Separation of duties also governs engine auto-selection. A
 		// selected run author (or, for an author step, a live reviewer) is
 		// never bound: the step stays waiting, exactly as for "no match",
 		// and a non-author can claim it. actor.SelectionRequest has no
 		// exclusion list, so the engine does not retry with another
-		// candidate. A ledger failure fails closed the same way.
+		// candidate. A ledger failure fails closed the same way. Check 7
+		// runs only here, under the stripe: a refusal is not an error, so
+		// there is no check order to keep.
 		if err := o.checkSeparationOfDuties(ctx, run, wfDef, stepDef, exec, actorID); err != nil {
 			log.Info("auto-selected actor refused by separation of duties; step stays waiting",
 				"run_id", runID, "step_id", stepID, "actor_id", actorID, "reason", err.Error())

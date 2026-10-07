@@ -450,34 +450,101 @@ func isAuthorStepType(t domain.StepType) bool {
 // she authors (divergence workflows only: in a linear workflow the review
 // execution exists only after the author step was submitted).
 //
+// The critical section is check 7 and the bind write, nothing else
+// (sodBindSection). AssignStep and ClaimStep run all their checks first
+// without a stripe — check 7 included, so the first failure is still the
+// one the documented order names — then take the stripe, re-run check 7
+// against fresh reads of the run's executions and the assignment ledger,
+// write, and release. Workflow loads (a `git show`), actor resolution (an
+// embedder's resolver query), skill lookups and precondition git reads
+// therefore never hold a stripe, and a slow one in one run — in a
+// multi-tenant embedder, one workspace — does not delay binds of the
+// unrelated runs that share its stripe. ActivateStep runs check 7 only
+// under the stripe: its refusal leaves the step waiting instead of
+// answering an error, so it has no error order to keep. The price is a
+// second read of the run's executions and ledger rows per bind under
+// SeparationOfDuties.
+//
+// Each stripe is a one-slot semaphore, not a sync.Mutex, so a waiter
+// honours its context: a caller that gives up while another bind of a run
+// on its stripe is writing gets ErrUnavailable (wrapping ctx.Err()) and
+// binds nothing, rather than binding after its own deadline.
+//
 // Package level, not per Orchestrator: `spine serve` builds a process-level
 // orchestrator and one per workspace, and the pool rebuilds them on
 // eviction, so the lock must not depend on which instance serves a call.
-// Striped by run ID; two runs sharing a stripe only serialise needlessly.
-// A holder never takes a second stripe, and the stripe is released right
-// after the bind write — before events are emitted or assignments are
-// delivered — so a synchronous event handler that binds again cannot
-// deadlock on it.
+// Striped by run ID; two runs sharing a stripe only serialise needlessly,
+// and only for the length of a check-7 read and a write. A holder never
+// takes a second stripe, and the stripe is released right after the bind
+// write — before events are emitted or assignments are delivered — so a
+// synchronous event handler that binds again cannot deadlock on it.
 //
 // Residual (documented in KNOWN-LIMITATIONS.md): this does not serialise
 // binds made by different processes sharing one database (an embedder that
 // runs several replicas with SeparationOfDuties on); closing that needs a
 // database-level lock per run.
-var sodBindStripes [64]sync.Mutex
+var sodBindStripes = func() (s [64]chan struct{}) {
+	for i := range s {
+		s[i] = make(chan struct{}, 1)
+	}
+	return s
+}()
+
+// sodStripe is the index of the bind stripe a run ID hashes to.
+func sodStripe(runID string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(runID))
+	return int(h.Sum32() % uint32(len(sodBindStripes)))
+}
 
 // lockSoDBind takes the run's bind stripe when SeparationOfDuties is on and
 // returns an idempotent release. With the policy off it takes nothing, so
-// the zero value is unchanged.
-func (o *Orchestrator) lockSoDBind(runID string) (unlock func()) {
+// the zero value is unchanged. A free stripe is taken even when ctx is
+// already done (the write that follows fails on its own); a contended one
+// is waited for only until ctx ends, and then the error is ErrUnavailable
+// wrapping ctx.Err(), with nothing held. unlock is never nil.
+func (o *Orchestrator) lockSoDBind(ctx context.Context, runID string) (unlock func(), err error) {
 	if !o.entryPolicy.SeparationOfDuties {
-		return func() {}
+		return func() {}, nil
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(runID))
-	m := &sodBindStripes[h.Sum32()%uint32(len(sodBindStripes))]
-	m.Lock()
+	sem := sodBindStripes[sodStripe(runID)]
+	select {
+	case sem <- struct{}{}:
+	default:
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return func() {}, domain.NewErrorWithCause(domain.ErrUnavailable,
+				fmt.Sprintf("separation of duties: gave up waiting to bind into run %s", runID), ctx.Err())
+		}
+	}
 	var once sync.Once
-	return func() { once.Do(m.Unlock) }
+	return func() { once.Do(func() { <-sem }) }, nil
+}
+
+// sodBindSection opens the critical section of an AssignStep or ClaimStep
+// bind under SeparationOfDuties: it takes the run's stripe and re-runs
+// check 7 against fresh reads, because the caller's own check 7 ran without
+// the stripe and a concurrent bind into the run may have been written
+// since. On success the caller writes the bind and then calls unlock; on a
+// refusal nothing is held and nothing has been written. Without
+// SeparationOfDuties it takes nothing and checks nothing. run, wfDef and
+// stepDef are the ones the caller's checks used (non-nil: the policy gates
+// binding, so both callers loaded them).
+func (o *Orchestrator) sodBindSection(ctx context.Context, run *domain.Run, wfDef *domain.WorkflowDefinition,
+	stepDef *domain.StepDefinition, exec *domain.StepExecution, actorID string) (unlock func(), err error) {
+	if !o.entryPolicy.SeparationOfDuties {
+		return func() {}, nil
+	}
+	unlock, err = o.lockSoDBind(ctx, run.RunID)
+	if err != nil {
+		return unlock, err
+	}
+	if err := o.checkSeparationOfDuties(ctx, run, wfDef, stepDef, exec, actorID); err != nil {
+		unlock()
+		return func() {}, err
+	}
+	return unlock, nil
 }
 
 // checkSeparationOfDuties is check 7.
@@ -493,8 +560,10 @@ func (o *Orchestrator) lockSoDBind(runID string) (unlock func()) {
 //
 // Step types come from the workflow version the run is pinned to; an
 // execution whose step is missing from it counts against the candidate
-// (fail closed). Callers that bind hold lockSoDBind from before this check
-// until their bind write.
+// (fail closed). A bind runs it twice: once without the stripe, in its place
+// in the check order, and again inside sodBindSection (ActivateStep: once,
+// under lockSoDBind), so the decision that admits a bind is made under the
+// run's stripe and held until the bind is written.
 func (o *Orchestrator) checkSeparationOfDuties(ctx context.Context, run *domain.Run,
 	wfDef *domain.WorkflowDefinition, stepDef *domain.StepDefinition, exec *domain.StepExecution, actorID string) error {
 	if stepDef.Type != domain.StepTypeReview && !isAuthorStepType(stepDef.Type) {

@@ -28,6 +28,12 @@ type ClaimResult struct {
 // pull-based complement to the push-based DeliverAssignment. The claim is
 // atomic — if two actors claim simultaneously, one succeeds and the other
 // gets a conflict error.
+//
+// Under SeparationOfDuties the assignment row and the execution update are
+// written inside sodBindSection: check 7 runs once in its place in the
+// order and again under the run's bind stripe, which is held only for that
+// re-check and the two writes. A caller whose context ends while waiting for
+// the stripe gets ErrUnavailable and nothing is claimed.
 func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimResult, error) {
 	log := observe.Logger(ctx)
 
@@ -77,12 +83,6 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 		return nil, domain.NewError(domain.ErrNotFound,
 			fmt.Sprintf("step %q not found in workflow %s", exec.StepID, wfDef.ID))
 	}
-
-	// SeparationOfDuties: hold the run's bind stripe from before check 7
-	// until the bind is written (see sodBindStripes). A no-op unless the
-	// policy sets SeparationOfDuties.
-	unlock := o.lockSoDBind(exec.RunID)
-	defer unlock()
 
 	// Step-entry policy (INIT-023 TASK-007): run status, engine-owned step,
 	// mode-implied actor type, actor existence + active status, and
@@ -169,6 +169,17 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	if err := o.checkStepEntryPreconditions(ctx, run, stepDef); err != nil {
 		return nil, err
 	}
+
+	// SeparationOfDuties: the critical section is only check 7, re-run
+	// under the run's bind stripe, and the two writes below (see
+	// sodBindStripes). The workflow load, actor resolution, skill lookup
+	// and precondition reads above ran without it. A no-op unless the
+	// policy sets SeparationOfDuties.
+	unlock, err := o.sodBindSection(ctx, run, wfDef, stepDef, exec, req.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	now := time.Now()
 
