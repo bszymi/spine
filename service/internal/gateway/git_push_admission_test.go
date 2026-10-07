@@ -12,7 +12,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -569,34 +568,22 @@ func TestGitPush_InitAndReservedNamespace(t *testing.T) {
 	} {
 		t.Setenv(k, v)
 	}
-	// initRepoAs runs cli.InitRepo in a clone authenticated as who and
-	// returns what it wrote to stderr (InitRepo writes its push note to
-	// os.Stderr; this test is not parallel, so swapping it is safe).
+	// initRepoAs runs cli.InitRepo (its defaults: artifacts under spine/,
+	// commit on spine/init) in a clone authenticated as who and returns
+	// what it wrote to stderr. The note is captured through
+	// InitOpts.Stderr, never by reassigning os.Stderr: the in-process
+	// gateway's net/http/cgi host reads os.Stderr on its own goroutine
+	// for every request (review round 2: the swap was a data race).
 	initRepoAs := func(who string) string {
 		t.Helper()
 		parent := t.TempDir()
 		dir := filepath.Join(parent, "c")
 		admMust(t, parent, "clone", "-q", "-c", "http.extraHeader=Authorization: Bearer "+g.tokens[who], g.url, dir)
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
+		var stderr bytes.Buffer
+		if err := cli.InitRepo(dir, cli.InitOpts{ArtifactsDir: "spine", Stderr: &stderr}); err != nil {
+			t.Fatalf("InitRepo as %s: %v\n%s", who, err, stderr.String())
 		}
-		stderr := make(chan string, 1)
-		go func() {
-			b, _ := io.ReadAll(r)
-			stderr <- string(b)
-		}()
-		orig := os.Stderr
-		os.Stderr = w
-		initErr := func() error {
-			defer func() { os.Stderr = orig; w.Close() }()
-			return cli.InitRepo(dir)
-		}()
-		out := <-stderr
-		if initErr != nil {
-			t.Fatalf("InitRepo as %s: %v\n%s", who, initErr, out)
-		}
-		return out
+		return stderr.String()
 	}
 	// The contributor's push of spine/init is refused, and init-repo
 	// says why instead of "remote may not be configured" (review round

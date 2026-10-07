@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,12 @@ import (
 type InitOpts struct {
 	ArtifactsDir string // Target directory for artifacts (default: "spine")
 	NoBranch     bool   // If true, commit directly to current branch
+	// Stderr receives init-repo's notes, such as a refused push of
+	// spine/init (nil: os.Stderr). A caller that captures the note sets
+	// it instead of reassigning the global os.Stderr, which other
+	// goroutines read (net/http/cgi reads it per request when its
+	// Handler.Stderr is nil; INIT-023 TASK-016 review round 2).
+	Stderr io.Writer
 }
 
 // InitRepo initializes a Spine repository at the given path.
@@ -113,7 +120,11 @@ func InitRepo(repoPath string, opts ...InitOpts) error {
 
 	// Commit on a branch unless --no-branch.
 	if !opt.NoBranch {
-		if err := commitOnBranch(absPath); err != nil {
+		stderr := opt.Stderr
+		if stderr == nil {
+			stderr = os.Stderr
+		}
+		if err := commitOnBranch(absPath, stderr); err != nil {
 			return err
 		}
 	}
@@ -132,8 +143,10 @@ func normalizeArtifactsDir(dir string) string {
 	return dir
 }
 
-// commitOnBranch creates a spine/init branch, commits all changes, and pushes.
-func commitOnBranch(repoDir string) error {
+// commitOnBranch creates a spine/init branch, commits all changes, and
+// pushes, writing a push-failure note to stderr. With nothing to commit
+// (a re-run in the same clone) it returns before the push.
+func commitOnBranch(repoDir string, stderr io.Writer) error {
 	run := func(args ...string) (string, error) {
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = repoDir
@@ -165,7 +178,7 @@ func commitOnBranch(repoDir string) error {
 			// Push failure is non-fatal — remote may not exist. When the
 			// remote is a Spine gateway that refused the push, say so:
 			// spine/init is operator-only there (INIT-023 TASK-016).
-			fmt.Fprintln(os.Stderr, pushFailureNote(out))
+			fmt.Fprintln(stderr, pushFailureNote(out))
 		}
 	}
 
