@@ -54,10 +54,15 @@ release is cut — this file is a staging area.
   `(DecisionDeny, nil, err)` for a `Request.Branch` containing an ASCII control
   byte (0x00–0x1f, 0x7f), for every operation kind and rule set, ahead of every
   allow path (governed merge, non-branch ref, no matching rule). A non-nil error
-  now also means *malformed request (caller bug)*, not only *rule source
-  unavailable*; callers already treat any error as a refusal. This is a second
-  layer behind the parser: an embedder that passes a pushed ref to `Evaluate`
-  raw (SMP's gateway does) is protected from F1 by this guard alone.
+  now also means *malformed request*, not only *rule source unavailable*;
+  callers already treat any error as a refusal. A malformed `Branch` is not
+  always a caller bug: when `Branch` embeds client input, validate that input
+  first and report it as invalid input, because this error cannot tell bad input
+  from an outage. Spine's own divergence branch API does not do that yet, so a
+  `branch_id` carrying a control byte is refused with HTTP 500 rather than 400
+  (INIT-023 TASK-016 owner question 6). This is a second layer behind the
+  parser: an embedder that passes a pushed ref to `Evaluate` raw (SMP's gateway
+  does) is protected from F1 by this guard alone.
 - **New:** `adapters/git/refname.ValidateQualified(ref string) error`, git's
   refname grammar for fully-qualified refs, returning `ErrInvalidParams`.
 

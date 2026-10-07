@@ -284,6 +284,22 @@ The guard is reachable only through a caller bug:
 - The engine merges into the constant `authoritativeBranch = "main"` (`core/engine/merge.go:23`).
 - Divergence branch names are generated.
 
+> **Cross-task review note (wave 1, 2026-10-07): the divergence row is client-reachable.**
+> - **The premise was wrong.** Divergence branch names are generated only for structured
+>   divergences, from the workflow definition. `POST /runs/{run_id}/divergences/{divergence_id}/branches`
+>   (`divergence.create_branch`, contributor) passes the request's `branch_id` unvalidated into
+>   `spine/<run>/<div>/<branch_id>` (`handlers_divergence.go:35-46` →
+>   `core/divergence/service.go:221-224`). So a client can reach the guard with its own bytes.
+> - **The guard still fails closed:** no git branch and no branch record. But the refusal is
+>   classified as an evaluation failure: an ERROR log and HTTP 500 `internal_error` instead of a
+>   400.
+> - **Disposition.** The `policy.go` comments and the CHANGELOG "For embedders" entry no longer
+>   call a control-byte `Branch` only a caller bug, and they name this path. A new test,
+>   `TestCreateExploratoryBranch_ControlByteBranchIDFailsClosed`, pins the fail-closed refusal on
+>   it. Validating `branch_id` at the entry point would touch a fourth non-test Go file, which
+>   AC 11 forbids. It is recorded under TASK-016 owner question 6, which already owns that
+>   unvalidated `branch_id`. See "Cross-task review (wave 1)", finding 2.
+
 `core/branchprotect` gains **no** import. The check is a byte loop, so there is no new
 `core → adapters` crossing for the ADR-017 lint.
 
@@ -718,6 +734,10 @@ without answers, using the stated defaults.)*
     aliasing.
 - **`receive.denyCurrentBranch` on standalone non-bare repos.** It is incidental and nothing relies
   on it (see the Purpose note).
+- **Validating the divergence `branch_id` (cross-task review, wave 1).** A control byte in it reaches
+  the §3 guard and is refused as HTTP 500 instead of 400 (Design §3 note). The entry-point check
+  belongs to whichever task takes TASK-016 owner question 6 (recommended: TASK-007). This task
+  only corrects the stated premise and pins the fail-closed refusal.
 
 ## Implementation Notes
 

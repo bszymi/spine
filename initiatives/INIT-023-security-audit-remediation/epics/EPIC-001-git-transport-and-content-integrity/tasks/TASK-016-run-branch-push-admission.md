@@ -746,6 +746,24 @@ The design works without answers, using the stated defaults.
      - the caller must be bound to the run, or be an operator;
      - `branch_id` must match the workflow ID grammar (`core/workflow/service.go:23`).
    - Until then, this task's divergence binding is only as strong as that endpoint.
+   - *Addition (TASK-001 cross-task review, wave 1, 2026-10-07): the same `branch_id` reaches the
+     control-byte guard.*
+     - `createBranchRecord` builds `spine/<run>/<div>/<branch_id>` (`core/divergence/service.go:221`)
+       and passes it to `Policy.Evaluate` (`:224`) before anything checks its bytes.
+     - So `{"branch_id":"a\u0001"}` is refused fail-closed by TASK-001's guard (Design §3), but it is
+       reported as an evaluation failure, not as bad input:
+       - an ERROR log, `branch-protection evaluation failed on divergence` (`:64`);
+       - HTTP 500 `internal_error`, `branch-protection evaluation failed: branchprotect: branch
+         "spine/…/a\x01" contains control byte 0x01 (malformed ref from caller)`.
+     - Reproduced through the gateway route with the real divergence service and policy. Before
+       TASK-001 the same request also returned 500, from the git branch failure, so the status did not
+       get worse.
+     - **Whichever task takes this entry point** (recommended above: TASK-007) must validate
+       `branch_id` before `Evaluate` and return `ErrInvalidParams` (HTTP 400). The workflow ID grammar
+       recommended above refuses every control byte, so it covers this.
+     - TASK-001's `TestCreateExploratoryBranch_ControlByteBranchIDFailsClosed`
+       (`core/divergence/service_controlbyte_test.go`) asserts only that the refusal is fail-closed,
+       so it stays valid after that change.
 
 ---
 

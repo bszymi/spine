@@ -18,9 +18,13 @@ import (
 // either:
 //
 //   - an infrastructure failure (rule source unavailable), or
-//   - a malformed request, which is a caller bug: an unclassified
-//     operation Kind, or a Branch carrying an ASCII control byte
-//     (0x00-0x1f, 0x7f) such as NUL (INIT-023 TASK-001).
+//   - a malformed request: an unclassified operation Kind (a caller
+//     bug), or a Branch carrying an ASCII control byte (0x00-0x1f,
+//     0x7f) such as NUL (INIT-023 TASK-001). The latter is not only a
+//     caller bug, because a Branch can embed client input. A caller
+//     that builds Branch from a client-supplied component should
+//     validate it first and report it as invalid input: this error
+//     cannot tell bad input from an outage.
 type Policy interface {
 	Evaluate(ctx context.Context, req Request) (Decision, []Reason, error)
 }
@@ -78,14 +82,18 @@ func (p *policy) Evaluate(ctx context.Context, req Request) (Decision, []Reason,
 	// real ref, and comparing it to a rule pattern is meaningless: git
 	// ends a pushed ref at its first NUL, so "main\x00" would match no
 	// rule here and fall through to Allow(no_matching_rule) while git
-	// writes "main" (audit F1, INIT-023 TASK-001). Reaching this is a
-	// caller bug — the git push parser refuses such refs, and every
-	// other caller builds Branch from stored or constant names — so
-	// fail closed with the same Deny + error shape as an unclassified
-	// kind. It sits before EVERY allow path (governed merge, non-branch
-	// refs, no matching rule) so it covers every kind and every rule
-	// set, and it is a byte loop so core/branchprotect gains no import.
-	// %q keeps the byte escaped in the error and in any log of it.
+	// writes "main" (audit F1, INIT-023 TASK-001). The git push parser
+	// refuses such refs first, and the API write path and the engine
+	// merge pass stored or constant names, but client input can still
+	// get here: the divergence API builds
+	// spine/<run>/<divergence>/<branch_id> from a client-supplied,
+	// unvalidated branch_id (core/divergence; INIT-023 TASK-016 owner
+	// question 6). Either way, fail closed with the same Deny + error
+	// shape as an unclassified kind. It sits before EVERY allow path
+	// (governed merge, non-branch refs, no matching rule) so it covers
+	// every kind and every rule set, and it is a byte loop so
+	// core/branchprotect gains no import. %q keeps the byte escaped in
+	// the error and in any log of it.
 	if i := indexControlByte(req.Branch); i >= 0 {
 		return DecisionDeny, nil, fmt.Errorf("branchprotect: branch %q contains control byte 0x%02x (malformed ref from caller)", req.Branch, req.Branch[i])
 	}
