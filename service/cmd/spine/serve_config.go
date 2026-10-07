@@ -44,6 +44,9 @@ type workspaceDeliveryConfig struct {
 	// philosophy that gates SPINE_DEV_MODE, SPINE_CODE_REPO_BASE, and
 	// SPINE_SECRET_ENCRYPTION_KEY at boot.
 	ProductionStrict bool
+	// ProcessStart is when this spine serve process booted. Inert
+	// plumbing: not yet set or read.
+	ProcessStart time.Time
 }
 
 // loadWorkspaceDeliveryConfig reads the env vars that drive event
@@ -201,6 +204,12 @@ func validateOperatorToken(token string) error {
 		return fmt.Errorf("SPINE_OPERATOR_TOKEN is %d characters; minimum is %d. Generate a stronger secret (e.g. `openssl rand -hex 32`) before starting spine serve", len(token), operatorTokenMinLength)
 	}
 	return nil
+}
+
+// validateSMPAdminToken checks SMP_ADMIN_TOKEN strength.
+// Inert plumbing: accepts everything.
+func validateSMPAdminToken(token, env string) (warning string, err error) {
+	return "", nil
 }
 
 // loadCodeRepoBase reads SPINE_CODE_REPO_BASE and returns the absolute

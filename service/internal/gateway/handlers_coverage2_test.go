@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
-	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/validation"
+	"github.com/bszymi/spine/service/internal/gateway"
 )
 
 // ── handleArtifactLinks with actual link data ──
@@ -155,7 +155,7 @@ func TestSkillCreate_Unauthorized(t *testing.T) {
 
 // TestSkillCreate_InvalidJSON verifies that invalid JSON body returns 400.
 func TestSkillCreate_InvalidJSON(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	resp := skillRequest(t, "POST", ts.URL+"/api/v1/skills", token, "not json")
 	defer resp.Body.Close()
@@ -203,7 +203,7 @@ func TestSkillUpdate_Unauthorized(t *testing.T) {
 
 // TestSkillUpdate_InvalidJSON verifies that invalid JSON body returns 400.
 func TestSkillUpdate_InvalidJSON(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "Go", Status: domain.SkillStatusActive}
 
 	resp := skillRequest(t, "PATCH", ts.URL+"/api/v1/skills/sk-1", token, "not json")
@@ -910,7 +910,7 @@ func TestStepAcknowledge_InvalidJSON(t *testing.T) {
 
 // TestSkillUpdate_WithCategory verifies that a category field in the request updates the skill.
 func TestSkillUpdate_WithCategory(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "Go", Status: domain.SkillStatusActive}
 
 	resp := skillRequest(t, "PATCH", ts.URL+"/api/v1/skills/sk-1", token,

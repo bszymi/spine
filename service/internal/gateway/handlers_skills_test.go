@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // ── Skill-aware Fake Store ──
@@ -202,6 +202,26 @@ func setupSkillServer(t *testing.T) (*httptest.Server, *skillStore, string) {
 	return ts, ss, contributorToken
 }
 
+// setupSkillServerAdmin is setupSkillServer plus an admin-1 actor, and
+// returns that actor's token. Skill catalogue mutations and actor-skill
+// grants are admin-only (INIT-023 TASK-013, audit F6), so the CRUD and
+// association tests drive them as admin; setupSkillServer keeps
+// returning the contributor token the regression tests use as the
+// attacker.
+func setupSkillServerAdmin(t *testing.T) (*httptest.Server, *skillStore, string) {
+	t.Helper()
+	ts, ss, _ := setupSkillServer(t)
+	ss.actors["admin-1"] = &domain.Actor{
+		ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+		Role: domain.RoleAdmin, Status: domain.ActorStatusActive,
+	}
+	adminToken, _, err := auth.NewService(ss).CreateToken(context.Background(), "admin-1", "test", nil)
+	if err != nil {
+		t.Fatalf("create admin token: %v", err)
+	}
+	return ts, ss, adminToken
+}
+
 func skillRequest(t *testing.T, method, url, token, body string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(method, url, strings.NewReader(body))
@@ -229,7 +249,7 @@ func decodeBody(t *testing.T, resp *http.Response) map[string]any {
 // ── Skill CRUD Tests ──
 
 func TestSkillCreate(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	resp := skillRequest(t, "POST", ts.URL+"/api/v1/skills", token,
 		`{"name":"Go Development","description":"Writes Go","category":"development"}`)
@@ -255,7 +275,7 @@ func TestSkillCreate(t *testing.T) {
 // distinct, non-empty skill_ids, and an explicitly-supplied skill_id
 // must pass through unchanged.
 func TestSkillCreate_GeneratesSkillID(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	first := skillRequest(t, "POST", ts.URL+"/api/v1/skills", token,
 		`{"name":"Generated A","description":"x","category":"y"}`)
@@ -297,7 +317,7 @@ func TestSkillCreate_GeneratesSkillID(t *testing.T) {
 }
 
 func TestSkillCreate_MissingName(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	resp := skillRequest(t, "POST", ts.URL+"/api/v1/skills", token,
 		`{"description":"No name"}`)
@@ -390,7 +410,7 @@ func TestSkillGet_NotFound(t *testing.T) {
 }
 
 func TestSkillUpdate(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "Go", Description: "old", Category: "dev", Status: domain.SkillStatusActive}
 
@@ -415,7 +435,7 @@ func TestSkillUpdate(t *testing.T) {
 }
 
 func TestSkillUpdate_NotFound(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	resp := skillRequest(t, "PATCH", ts.URL+"/api/v1/skills/nonexistent", token,
 		`{"name":"nope"}`)
@@ -427,7 +447,7 @@ func TestSkillUpdate_NotFound(t *testing.T) {
 }
 
 func TestSkillDeprecate(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "Go", Category: "dev", Status: domain.SkillStatusActive}
 
@@ -448,7 +468,7 @@ func TestSkillDeprecate(t *testing.T) {
 }
 
 func TestSkillDeprecate_NotFound(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	resp := skillRequest(t, "POST", ts.URL+"/api/v1/skills/nonexistent/deprecate", token, "")
 	defer resp.Body.Close()
@@ -459,7 +479,7 @@ func TestSkillDeprecate_NotFound(t *testing.T) {
 }
 
 func TestSkillDeprecate_BlockedByWorkflow(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "execution", Category: "dev", Status: domain.SkillStatusActive}
 	ss.workflowProjections = []store.WorkflowProjection{
@@ -483,7 +503,7 @@ func TestSkillDeprecate_BlockedByWorkflow(t *testing.T) {
 }
 
 func TestSkillDeprecate_ForceOverride(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "execution", Category: "dev", Status: domain.SkillStatusActive}
 	ss.workflowProjections = []store.WorkflowProjection{
@@ -514,7 +534,7 @@ func TestSkillDeprecate_ForceOverride(t *testing.T) {
 }
 
 func TestSkillDeprecate_UnrelatedSkillSucceeds(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "unused-skill", Category: "dev", Status: domain.SkillStatusActive}
 	ss.workflowProjections = []store.WorkflowProjection{
@@ -532,7 +552,7 @@ func TestSkillDeprecate_UnrelatedSkillSucceeds(t *testing.T) {
 // ── Actor-Skill Association Tests ──
 
 func TestActorSkillAssign(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "Go", Category: "dev", Status: domain.SkillStatusActive}
 
@@ -549,7 +569,7 @@ func TestActorSkillAssign(t *testing.T) {
 }
 
 func TestActorSkillAssign_Idempotent(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "Go", Category: "dev", Status: domain.SkillStatusActive}
 
@@ -568,7 +588,7 @@ func TestActorSkillAssign_Idempotent(t *testing.T) {
 }
 
 func TestActorSkillAssign_SkillNotFound(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	resp := skillRequest(t, "POST", ts.URL+"/api/v1/actors/contributor-1/skills/nonexistent", token, "")
 	defer resp.Body.Close()
@@ -579,7 +599,7 @@ func TestActorSkillAssign_SkillNotFound(t *testing.T) {
 }
 
 func TestActorSkillRemove(t *testing.T) {
-	ts, ss, token := setupSkillServer(t)
+	ts, ss, token := setupSkillServerAdmin(t)
 
 	ss.skills["sk-1"] = &domain.Skill{SkillID: "sk-1", Name: "Go", Category: "dev", Status: domain.SkillStatusActive}
 	ss.actorSkills["contributor-1"] = map[string]bool{"sk-1": true}
@@ -593,7 +613,7 @@ func TestActorSkillRemove(t *testing.T) {
 }
 
 func TestActorSkillRemove_NotFound(t *testing.T) {
-	ts, _, token := setupSkillServer(t)
+	ts, _, token := setupSkillServerAdmin(t)
 
 	resp := skillRequest(t, "DELETE", ts.URL+"/api/v1/actors/contributor-1/skills/nonexistent", token, "")
 	defer resp.Body.Close()

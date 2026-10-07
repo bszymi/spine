@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // InternalAdminActorID is the well-known actor_id seeded by the
@@ -32,6 +32,10 @@ type BootstrapAdminConfig struct {
 	// empty value disables the bootstrap, preserving single-workspace
 	// and pre-platform-binding deployments.
 	Token string
+
+	// SupersededBefore bounds rotation revocation. Inert plumbing:
+	// stored, not yet read.
+	SupersededBefore time.Time
 }
 
 // ErrAdminTokenHashCollision is the matchable sentinel returned when
