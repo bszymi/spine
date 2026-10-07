@@ -8,6 +8,18 @@
 #
 # Caution: Both you and Spine can modify the repository simultaneously.
 # Avoid editing files involved in active Runs.
+#
+# Security: do NOT set SPINE_GIT_RECEIVE_PACK_ENABLED=true with this bind
+# mount on a macOS or Windows host. Docker Desktop shares the host
+# directory with the host's case-insensitive (and, on macOS,
+# normalization-insensitive) semantics, so a push to a case variant of a
+# protected ref (refs/heads/MAIN) passes branch protection and, whenever
+# the protected ref is packed (any clone, or after git gc), moves the
+# protected ref itself (refs/heads/main).
+# Serve pushes only from the shipped named volume (repo:/repo) or a Linux
+# host directory. See KNOWN-LIMITATIONS.md -> Security Notes ("Git Push
+# Gate: Served Repositories Need Case- and Normalization-Sensitive
+# Storage").
 
 services:
   spine:

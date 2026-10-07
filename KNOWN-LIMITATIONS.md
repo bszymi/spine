@@ -78,7 +78,11 @@ The following limitations have been resolved:
   serves must live on a **case-sensitive, normalization-sensitive** filesystem: a Linux
   filesystem or the shipped compose named volume (`repo:/repo`). Do not serve pushes from a
   native macOS (APFS/HFS+) or Windows `spine serve`, from a bind mount of such a host directory,
-  or from an SMB-backed or other case-folding volume.
+  or from an SMB-backed or other case-folding volume. That includes the repository's own dev
+  override, `docker-compose.override.yaml.example` (`./:/repo`, also shown in
+  `architecture/docker-runtime.md` §9.2), on Docker Desktop for Mac or Windows: both files carry
+  this warning. On such a bind mount, Linux git inside the container sees the host's
+  case-insensitive filesystem.
 - **Why:** branch protection matches the ref name byte-for-byte, exactly as the client sent it
   (INIT-023 TASK-001 makes the gate evaluate the same bytes git writes). A case- or
   normalization-insensitive filesystem then aliases two different names onto one ref file. With

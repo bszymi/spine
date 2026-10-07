@@ -67,7 +67,10 @@ Make the git surface trustworthy:
   TASK-001 owner question 1, default pending the owner). Fail-closed handling — a per-repository
   case-sensitivity probe that refuses receive-pack, or fold-plus-NFC matching in `Evaluate` that
   also covers the `refs/heads/` prefix test — needs a new EPIC-001 task, paired with SMP's
-  follow-up (SMP EPIC-004 TASK-001 owner question 2). It is not yet created.
+  follow-up (SMP EPIC-004 TASK-001 owner question 2). It is not yet created. Its probe must cover
+  the repository's own dev override (`docker-compose.override.yaml.example`, `./:/repo`) on Docker
+  Desktop: TASK-001 review round 1 reproduced the aliasing there, with Linux git inside the
+  container moving a packed `main` through `refs/heads/MAIN` on a macOS bind mount.
 
 ---
 
