@@ -109,8 +109,10 @@ jobs:
         shell: bash
         run: |
           go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-git-http.log
-          if grep -E '^--- SKIP: TestGitHTTP_' scenario-git-http.log; then
-            echo "::error::TestGitHTTP_ scenarios skipped — the database is not reachable"
+          # Any skip fails the job: a top-level one (the database is not
+          # reachable) or an indented one inside a scenario step.
+          if grep -E '^[[:space:]]*--- SKIP: TestGitHTTP_' scenario-git-http.log; then
+            echo "::error::a TestGitHTTP_ scenario or step skipped — they must pass, never skip"
             exit 1
           fi
           if ! grep -qE '^--- PASS: TestGitHTTP_Push' scenario-git-http.log; then
