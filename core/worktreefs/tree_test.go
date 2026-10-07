@@ -731,6 +731,169 @@ func TestTree_UndoRollback(t *testing.T) {
 	})
 }
 
+// TestTree_UndoRollbackClaiming pins RollbackClaiming (review round 2): a
+// failing hook that replaces the created file through a rename gives the
+// path a new inode, which the identity match keeps; the caller's claim
+// then decides. claim is asked only for a regular file that is not the
+// created one, and a claimed file is removed only while it is still the
+// inode claim was asked about; the created directories go with it.
+//
+// Mutation checks: ignoring claim (RollbackClaiming == Rollback) fails
+// "claimed"; dropping the post-claim identity re-check fails "replaced
+// again while claim ran"; asking claim for a link or a directory fails
+// those rows (the link or directory entry is removed).
+func TestTree_UndoRollbackClaiming(t *testing.T) {
+	const leaf = "gov/a/b/new.md"
+	replaceByRename := func(t *testing.T, f *fixture, data string) {
+		t.Helper()
+		mustWrite(t, f.path("gov/a/b/new.md.tmp"), data, 0o644)
+		if err := os.Rename(f.path("gov/a/b/new.md.tmp"), f.path(leaf)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// after runs between Create and the rollback (the failing hook).
+		after func(t *testing.T, f *fixture)
+		// claim is the caller's answer; it may act on the tree (f) too.
+		claim     func(t *testing.T, f *fixture) bool
+		nilClaim  bool
+		wantAsked int
+		// gone and kept are checked after the rollback.
+		gone, kept []string
+		keptData   map[string]string
+	}{
+		{
+			name:      "leaf still the created file: removed, claim not asked",
+			after:     func(*testing.T, *fixture) {},
+			claim:     func(*testing.T, *fixture) bool { return false },
+			wantAsked: 0,
+			gone:      []string{leaf, "gov/a/b", "gov/a"},
+		},
+		{
+			name:      "leaf removed already: dirs removed, claim not asked",
+			after:     func(t *testing.T, f *fixture) { _ = os.Remove(f.path(leaf)) },
+			claim:     func(*testing.T, *fixture) bool { return true },
+			wantAsked: 0,
+			gone:      []string{"gov/a/b", "gov/a"},
+		},
+		{
+			name:      "replaced by rename, claimed: removed with the created dirs",
+			after:     func(t *testing.T, f *fixture) { replaceByRename(t, f, "data\nfixed by a hook\n") },
+			claim:     func(*testing.T, *fixture) bool { return true },
+			wantAsked: 1,
+			gone:      []string{leaf, "gov/a/b", "gov/a"},
+		},
+		{
+			name:      "replaced by rename, not claimed: file and dirs kept",
+			after:     func(t *testing.T, f *fixture) { replaceByRename(t, f, "someone else") },
+			claim:     func(*testing.T, *fixture) bool { return false },
+			wantAsked: 1,
+			keptData:  map[string]string{leaf: "someone else"},
+			kept:      []string{"gov/a/b", "gov/a"},
+		},
+		{
+			name:     "replaced by rename, nil claim: kept (Rollback)",
+			after:    func(t *testing.T, f *fixture) { replaceByRename(t, f, "someone else") },
+			nilClaim: true,
+			keptData: map[string]string{leaf: "someone else"},
+			kept:     []string{"gov/a/b", "gov/a"},
+		},
+		{
+			name: "replaced by a symlink: kept, claim not asked",
+			after: func(t *testing.T, f *fixture) {
+				if err := os.Remove(f.path(leaf)); err != nil {
+					t.Fatal(err)
+				}
+				f.link(t, leaf, "../../x.md")
+			},
+			claim:     func(*testing.T, *fixture) bool { return true },
+			wantAsked: 0,
+			kept:      []string{leaf, "gov/a/b", "gov/a"},
+			keptData:  map[string]string{"gov/x.md": "x"},
+		},
+		{
+			name: "replaced by a directory: kept, claim not asked",
+			after: func(t *testing.T, f *fixture) {
+				if err := os.Remove(f.path(leaf)); err != nil {
+					t.Fatal(err)
+				}
+				mustMkdir(t, f.path(leaf))
+			},
+			claim:     func(*testing.T, *fixture) bool { return true },
+			wantAsked: 0,
+			kept:      []string{leaf, "gov/a/b", "gov/a"},
+		},
+		{
+			name:  "replaced again while claim ran: the newer file kept",
+			after: func(t *testing.T, f *fixture) { replaceByRename(t, f, "hook output") },
+			claim: func(t *testing.T, f *fixture) bool {
+				// A writer replaces the path between claim's check and the
+				// unlink; claim's answer was about the file before it.
+				replaceByRename(t, f, "concurrent writer")
+				return true
+			},
+			wantAsked: 1,
+			keptData:  map[string]string{leaf: "concurrent writer"},
+			kept:      []string{"gov/a/b", "gov/a"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			baseline := openHandles.Load()
+			u, err := f.tree.Create(leaf, []byte("data"), 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.after(t, f)
+			asked := 0
+			var claim func() bool
+			if !tc.nilClaim {
+				claim = func() bool {
+					asked++
+					return tc.claim(t, f)
+				}
+			}
+			if err := u.RollbackClaiming(claim); err != nil {
+				t.Fatalf("RollbackClaiming: %v", err)
+			}
+			if asked != tc.wantAsked {
+				t.Errorf("claim asked %d times, want %d", asked, tc.wantAsked)
+			}
+			for _, p := range tc.gone {
+				if exists(f.path(p)) {
+					t.Errorf("%s left behind", p)
+				}
+			}
+			for _, p := range tc.kept {
+				if !exists(f.path(p)) {
+					t.Errorf("%s removed", p)
+				}
+			}
+			for p, want := range tc.keptData {
+				if !exists(f.path(p)) {
+					t.Errorf("%s removed", p)
+					continue
+				}
+				if fi, _ := os.Lstat(f.path(p)); fi.Mode().IsRegular() {
+					if got := readString(t, f.path(p)); got != want {
+						t.Errorf("%s = %q, want %q", p, got, want)
+					}
+				}
+			}
+			if !exists(f.path("gov/x.md")) || readString(t, f.path("gov/x.md")) != "x" {
+				t.Error("sibling gov/x.md changed")
+			}
+			if got := openHandles.Load(); got != baseline {
+				t.Errorf("open handles after RollbackClaiming: %d, want baseline %d", got, baseline)
+			}
+			if err := u.RollbackClaiming(claim); err != nil {
+				t.Errorf("second RollbackClaiming: %v", err)
+			}
+		})
+	}
+}
+
 // TestTree_ReplaceKeepsModeNoTemp is AC6(e).
 func TestTree_ReplaceKeepsModeNoTemp(t *testing.T) {
 	resetHooks(t)

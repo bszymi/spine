@@ -193,6 +193,80 @@ func TestF5_WorkflowCreate_CommitFailure_RemovesFileAndDir(t *testing.T) {
 	}
 }
 
+// The same with a failing hook that replaces the staged file by a rename
+// (`sed -i` shape, review round 2): the file is no longer the inode Create
+// made, but it is untracked in HEAD, so the rollback removes it and the
+// workflows/ directory, and a retry is not already_exists. After review
+// round 1 both were left behind; on 61994fe the directory leaked.
+func TestF5_WorkflowCreate_CommitFailure_HookReplacesFileByRename_Removed(t *testing.T) {
+	svc, repo := newSvc(t)
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nset -e\nf=workflows/wf-a.yaml\ncp \"$f\" \"$f.tmp\"\n" +
+		"printf '# fixed by a hook\\n' >> \"$f.tmp\"\nmv \"$f.tmp\" \"$f\"\nexit 1\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, err := svc.Create(ctxWithActor(), "wf-a", fmtYAML("wf-a", "1.0"))
+		var se *domain.SpineError
+		if !errors.As(err, &se) || se.Code != domain.ErrGit {
+			t.Fatalf("attempt %d: want ErrGit, got %v", attempt, err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(repo, "workflows")); statErr == nil {
+			t.Fatalf("attempt %d: workflows/ left behind after a failed create", attempt)
+		}
+	}
+}
+
+// The other side of the vouching rule: a path tracked in HEAD by the time
+// the rollback runs is never removed. The hook stands in for a concurrent
+// writer in the shared standalone tree: it replaces the staged file by a
+// rename and commits that version onto HEAD with plumbing (private index)
+// before failing the outer commit. On 61994fe the rollback removed the
+// path by name and left the committed workflow deleted in the working tree.
+func TestF5_WorkflowCreate_CommitFailure_HookCommitsReplacedFile_Kept(t *testing.T) {
+	svc, repo := newSvc(t)
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+set -e
+f=workflows/wf-a.yaml
+cp "$f" "$f.tmp"
+printf '# fixed by a hook\n' >> "$f.tmp"
+mv "$f.tmp" "$f"
+idx="$(git rev-parse --git-dir)/spine-test-index"
+GIT_INDEX_FILE="$idx" git read-tree HEAD
+blob=$(git hash-object -w "$f")
+GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$f"
+tree=$(GIT_INDEX_FILE="$idx" git write-tree)
+c=$(git commit-tree "$tree" -p HEAD -m concurrent)
+git update-ref HEAD "$c"
+rm -f "$idx"
+exit 1
+`
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.Create(ctxWithActor(), "wf-a", fmtYAML("wf-a", "1.0"))
+	var se *domain.SpineError
+	if !errors.As(err, &se) || se.Code != domain.ErrGit {
+		t.Fatalf("want ErrGit, got %v", err)
+	}
+	b, readErr := os.ReadFile(filepath.Join(repo, "workflows", "wf-a.yaml"))
+	if readErr != nil || !strings.HasSuffix(string(b), "# fixed by a hook\n") {
+		t.Fatalf("the workflow committed meanwhile was removed or changed by the rollback: %v", readErr)
+	}
+	out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("working tree does not match HEAD after rollback:\n%s", out)
+	}
+}
+
 // An Update whose commit fails restores the original bytes (a guard: passes
 // before and after the fix).
 func TestWorkflowUpdate_CommitFailure_RestoresBytes(t *testing.T) {

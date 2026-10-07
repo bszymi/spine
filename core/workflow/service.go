@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/git/refname"
@@ -209,16 +210,37 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 	})
 	if err != nil {
 		// Restore the original bytes and mode (update), or remove the file
-		// and every directory this call created (create).
+		// and every directory this call created (create) — including a file
+		// a failing hook put in its place by a rename, when the path is
+		// still untracked in HEAD (claimUntracked).
 		if op.requireExists {
 			_ = tree.Replace(rel, originalBody)
 		} else {
-			_ = undo.Rollback()
+			_ = undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, rel))
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
 	return &WriteResult{Workflow: wf, Path: path, CommitSHA: commit.SHA}, nil
+}
+
+// claimUntracked is the worktreefs.Undo.RollbackClaiming callback for a
+// create whose commit failed; see the artifact package's claimUntracked,
+// which it mirrors (INIT-023 TASK-004 review round 2). A file a failing
+// hook left in place of the one Create made is removed only while rel is
+// untracked in HEAD; a tracked path or any git failure keeps it.
+func claimUntracked(ctx context.Context, repoDir, rel string) func() bool {
+	return func() bool {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		tracked, err := git.TrackedInHEAD(cctx, repoDir, rel)
+		if err != nil {
+			observe.Logger(ctx).Warn("workflow rollback: cannot tell whether the replaced file is tracked; keeping it",
+				"path", rel, "error", err)
+			return false
+		}
+		return !tracked
+	}
 }
 
 // Read returns the executable workflow definition at the given ref. Empty ref

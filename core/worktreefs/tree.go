@@ -254,8 +254,9 @@ func (w *walk) rollbackDirs() error {
 //
 // Identity by inode number is exact only while the inode cannot be freed
 // and its number handed to a new file (ext4, overlayfs and tmpfs reuse a
-// freed number at once). For a created leaf, Undo guarantees that by
-// keeping a descriptor on it open (Undo.pin) until it is resolved.
+// freed number at once). For a created leaf, an open descriptor
+// guarantees that: Create's own write handle, then Undo.pin until the Undo
+// is resolved (removeLeaf).
 // Directories are only ever removed while empty, so a reused directory
 // inode costs at most an empty directory.
 func removeIfSame(parent *os.Root, name string, info fs.FileInfo) error {
@@ -569,8 +570,37 @@ type Undo struct {
 // (deepest first, only while empty), and releases the handles. A leaf or
 // directory that has since been replaced by something else is left alone;
 // the leaf is matched by identity only (see Undo.pin), so a leaf modified
-// in place is still removed.
+// in place is still removed. Rollback is RollbackClaiming(nil).
+//
+// Rollback re-opens one directory handle per directory the Create made,
+// all open at once until it returns (see rollbackDirs and I8).
 func (u *Undo) Rollback() error {
+	return u.RollbackClaiming(nil)
+}
+
+// RollbackClaiming is Rollback for a caller that can tell, by means this
+// package does not have, whether a file that replaced the created leaf is
+// still its own leftover. A failing git pre-commit hook that rewrites the
+// staged file through a temp file and a rename (`sed -i`, formatters that
+// `mv tmp f`) gives the path a new inode: the identity match alone then
+// keeps that file, and with it every directory the Create made, so a retry
+// of the same create fails with fs.ErrExist. The artifact and workflow
+// services claim such a file when the path is untracked in HEAD after the
+// failed commit.
+//
+// claim is asked only when the leaf exists, is no longer the file Create
+// made, and is a regular file (never for a symbolic link or anything that
+// is not a regular file, which stay where they are). When it returns true
+// the file is unlinked through the held parent handle — unlinkat, which
+// never follows a link — but only while the name still refers to the inode
+// that was there when claim was asked, so a file replaced again while
+// claim ran is left alone. Then, as in Rollback, the directories the Create
+// made are removed while empty, so they go too. A nil claim never claims.
+//
+// Unlike the identity match, a claimed file is not pinned: the decision is
+// the caller's, and it accepts the narrow race of a writer that replaces
+// and commits the path between its check and the unlink.
+func (u *Undo) RollbackClaiming(claim func() bool) error {
 	if u == nil || u.w == nil {
 		return nil
 	}
@@ -578,7 +608,7 @@ func (u *Undo) Rollback() error {
 	if u.leafInfo != nil {
 		// Unlinked while the pin is still open, so the identity check and
 		// the unlink both see an inode no other file can have.
-		first = removeIfSame(u.w.parent(), u.w.leaf, u.leafInfo)
+		first = removeLeaf(u.w.parent(), u.w.leaf, u.leafInfo, claim)
 		if first != nil {
 			first = relErr(first, u.w.rel)
 		}
@@ -590,6 +620,42 @@ func (u *Undo) Rollback() error {
 	u.w.close()
 	u.w = nil
 	return first
+}
+
+// removeLeaf unlinks the created leaf name from parent if it is still the
+// file described by info — the pinned identity, so the os.SameFile match is
+// exact (Undo.pin). If a regular file has replaced it, claim decides (see
+// RollbackClaiming): on true, that file is unlinked while the name still
+// refers to the inode claim was asked about.
+func removeLeaf(parent *os.Root, name string, info fs.FileInfo, claim func() bool) error {
+	fi, err := parent.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(fi, info) {
+		if claim == nil || isSymlink(fi) || !fi.Mode().IsRegular() || !claim() {
+			return nil
+		}
+		// claim may run a subprocess (git): re-check that the name still
+		// refers to the file it was asked about before unlinking it.
+		now, err := parent.Lstat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(now, fi) || isSymlink(now) || !now.Mode().IsRegular() {
+			return nil
+		}
+	}
+	if err := parent.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Release closes the held handles without removing anything.

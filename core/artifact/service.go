@@ -328,12 +328,14 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 		// Rollback. StageAndCommit already unstaged on failure, so we only
 		// have to restore file state here: the original bytes (and mode,
 		// which Replace keeps) for an update; the file and every directory
-		// this call created for a create.
+		// this call created for a create — including a file a failing hook
+		// put in its place by a rename, when the path is still untracked
+		// in HEAD (claimUntracked).
 		if op.requireExists {
 			if rbErr := tree.Replace(repoPath, originalContent); rbErr != nil {
 				log.Warn("artifact rollback: restore failed", "path", path, "error", rbErr)
 			}
-		} else if rbErr := undo.Rollback(); rbErr != nil {
+		} else if rbErr := undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, repoPath, path)); rbErr != nil {
 			log.Warn("artifact rollback: remove failed", "path", path, "error", rbErr)
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
@@ -354,6 +356,32 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	}
 
 	return &WriteResult{Artifact: artifact, CommitSHA: commitResult.SHA}, nil
+}
+
+// claimUntracked returns the worktreefs.Undo.RollbackClaiming callback for
+// a create whose commit failed (INIT-023 TASK-004 review round 2). It is
+// asked only when the file at rel is a regular file that is no longer the
+// one Create made: a failing pre-commit hook rewrote it through a temp file
+// and a rename (`sed -i`, formatters). Such a file is this call's leftover
+// when rel is untracked in HEAD — StageAndCommit has already unstaged it —
+// so it is claimed and removed with the directories Create made, as the
+// pre-TASK-004 remove-by-name did, and a retry is not already_exists. A
+// path tracked in HEAD (a concurrent writer in the shared standalone tree
+// committed it meanwhile) or any git failure keeps the file. The check runs
+// on a context detached from the request's cancellation, so a client that
+// gave up does not turn the rollback into "keep".
+func claimUntracked(ctx context.Context, repoDir, rel, path string) func() bool {
+	return func() bool {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		tracked, err := git.TrackedInHEAD(cctx, repoDir, rel)
+		if err != nil {
+			observe.Logger(ctx).Warn("artifact rollback: cannot tell whether the replaced file is tracked; keeping it",
+				"path", path, "error", err)
+			return false
+		}
+		return !tracked
+	}
 }
 
 // Read reads an artifact from Git at the specified ref (or HEAD if empty).

@@ -384,6 +384,96 @@ func TestF5_Create_CommitFailure_HookRewritesFile_StillRemoved(t *testing.T) {
 	}
 }
 
+// installPreCommit installs body as the repository's pre-commit hook.
+func installPreCommit(t *testing.T, repo, body string) {
+	t.Helper()
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nset -e\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// hookReplaceByRename is the fixer shape of `sed -i`, `clang-format -i` and
+// any tool that writes a temp file and renames it over the original: the
+// staged file gets a new inode, so the Undo's identity match no longer
+// names it.
+const hookReplaceByRename = `f=governance/a/b/doc.md
+cp "$f" "$f.tmp"
+printf '\nfixed by a hook\n' >> "$f.tmp"
+mv "$f.tmp" "$f"
+`
+
+// AC11 with a failing pre-commit hook that replaces the staged file by a
+// rename before it exits non-zero (review round 2). The file at the path is
+// no longer the inode Create made, so the identity match alone keeps it;
+// the caller then vouches for it — the path is untracked in HEAD after the
+// failed commit — and the rollback removes it and the directories Create
+// made. A retry fails the same way instead of with already_exists. After
+// review round 1 the rewritten file (and its directories) were left
+// behind; on 61994fe the directories leaked.
+func TestF5_Create_CommitFailure_HookReplacesFileByRename_Removed(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, "governance"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installPreCommit(t, repo, hookReplaceByRename+"exit 1\n")
+	svc := f5OpenSvc(repo)
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, err := svc.Create(f5Ctx(""), "governance/a/b/doc.md", f5Doc)
+		f5RequireCode(t, err, domain.ErrGit)
+		for _, p := range []string{"governance/a/b/doc.md", "governance/a/b", "governance/a"} {
+			if _, statErr := os.Lstat(filepath.Join(repo, p)); statErr == nil {
+				t.Fatalf("attempt %d: %s left behind after a failed create", attempt, p)
+			}
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(repo, "governance")); statErr != nil {
+		t.Errorf("pre-existing directory removed: %v", statErr)
+	}
+	out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("working tree not clean after rollback:\n%s", out)
+	}
+}
+
+// The other side of the vouching rule (review round 2): a file at the path
+// that is tracked in HEAD by the time the rollback runs is never removed,
+// even though Create made a file there. The hook stands in for a concurrent
+// writer in the shared standalone tree — it replaces the staged file by a
+// rename and commits that version onto HEAD with plumbing (a private index,
+// so the outer commit's index is untouched) before failing the outer
+// commit. On 61994fe the rollback removed the path by name and left the
+// committed file deleted in the working tree.
+func TestF5_Create_CommitFailure_HookCommitsReplacedFile_Kept(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, "governance"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installPreCommit(t, repo, hookReplaceByRename+`idx="$(git rev-parse --git-dir)/spine-test-index"
+GIT_INDEX_FILE="$idx" git read-tree HEAD
+blob=$(git hash-object -w "$f")
+GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,$f"
+tree=$(GIT_INDEX_FILE="$idx" git write-tree)
+c=$(git commit-tree "$tree" -p HEAD -m concurrent)
+git update-ref HEAD "$c"
+rm -f "$idx"
+exit 1
+`)
+	_, err := f5OpenSvc(repo).Create(f5Ctx(""), "governance/a/b/doc.md", f5Doc)
+	f5RequireCode(t, err, domain.ErrGit)
+	b, readErr := os.ReadFile(filepath.Join(repo, "governance", "a", "b", "doc.md"))
+	if readErr != nil || !strings.HasSuffix(string(b), "fixed by a hook\n") {
+		t.Fatalf("the file committed meanwhile was removed or changed by the rollback: %v", readErr)
+	}
+	out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("working tree does not match HEAD after rollback:\n%s", out)
+	}
+}
+
 // AC11: an Update whose commit fails restores the original bytes and mode
 // (a guard: os.WriteFile on an existing file kept the mode on 61994fe too;
 // the fix must not lose it by replacing through a rename).
