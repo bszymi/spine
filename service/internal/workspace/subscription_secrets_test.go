@@ -453,3 +453,19 @@ func TestPrepareSubscriptionSecrets_LogsEachConversionWithoutSecrets(t *testing.
 		}
 	}
 }
+
+// Review round 1: PoolConfig.SecretEnvelopeMode reaches the ServicePool
+// field that initializeEntry passes to buildServiceSet ("" would compile
+// and mean migrate). The integration test
+// TestServicePool_BindsStoresInConfiguredMode covers the rest of the path
+// through Get.
+func TestNewServicePool_CarriesSecretEnvelopeMode(t *testing.T) {
+	for _, mode := range []store.SecretEnvelopeMode{store.SecretEnvelopeStrict, store.SecretEnvelopeDowngrade} {
+		p := NewServicePool(context.Background(), &multiConfigResolver{}, PoolConfig{SecretEnvelopeMode: mode, IdleTimeout: time.Minute})
+		got := p.secretEnvelopeMode
+		p.Close()
+		if got != mode {
+			t.Fatalf("PoolConfig.SecretEnvelopeMode %q not carried into the pool: %q", mode, got)
+		}
+	}
+}

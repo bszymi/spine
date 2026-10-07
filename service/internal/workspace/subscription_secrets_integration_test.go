@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/adapters/store"
@@ -108,5 +109,50 @@ func TestBuildServiceSet_SweepsBeforeBuilderHook(t *testing.T) {
 	// A bad mode is a binding error: the build fails closed.
 	if _, err := buildServiceSet(context.Background(), cfg, nil, c, "bogus", nil, PoolPolicy{}, ""); !errors.Is(err, ErrSubscriptionSecretBinding) {
 		t.Fatalf("binding error not surfaced: %v", err)
+	}
+}
+
+// Review round 1: the configured mode reaches every per-workspace store
+// through the real pool path — PoolConfig → NewServicePool → Get →
+// initializeEntry → buildServiceSet → PrepareSubscriptionSecrets. With
+// strict configured, the store is bound strict: the pre-seeded plaintext
+// row is refused and left untouched. A store silently bound in migrate
+// (the zero value) would convert it instead.
+func TestServicePool_BindsStoresInConfiguredMode(t *testing.T) {
+	dsn := t009WorkspaceDB(t, "t009_pool")
+	key := make([]byte, spinecrypto.EncryptionKeySize)
+	for i := range key {
+		key[i] = 0x30 + byte(i)
+	}
+	c, err := spinecrypto.NewSecretCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"ws-pool": {ID: "ws-pool", DatabaseURL: secrets.NewSecretValue([]byte(dsn)), RepoPath: ".", Status: StatusActive},
+	}}
+	ctx := context.Background()
+	pool := NewServicePool(ctx, resolver, PoolConfig{SecretCipher: c, SecretEnvelopeMode: store.SecretEnvelopeStrict, IdleTimeout: time.Minute})
+	t.Cleanup(pool.Close)
+	ss, err := pool.Get(ctx, "ws-pool")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	t.Cleanup(func() { pool.Release("ws-pool") })
+
+	pg, ok := ss.Store.(*store.PostgresStore)
+	if !ok {
+		t.Fatal("store is not a PostgresStore")
+	}
+	b, bound := pg.SubscriptionSecretBinding()
+	if !bound || b.Mode != store.SecretEnvelopeStrict || b.WorkspaceID != "ws-pool" {
+		t.Fatalf("pooled store binding = %+v (bound %v), want strict for ws-pool", b, bound)
+	}
+	var raw string
+	if err := pg.QueryRowSecret(ctx, "sub-svc", &raw); err != nil || raw != "whsec-plain-svc" {
+		t.Fatalf("strict sweep converted the legacy row (raw is plaintext: %v): %v", raw == "whsec-plain-svc", err)
+	}
+	if _, err := ss.Store.GetSubscription(ctx, "sub-svc"); !errors.Is(err, store.ErrLegacySecretRefused) {
+		t.Fatalf("legacy row not refused by the pooled strict store: %v", err)
 	}
 }

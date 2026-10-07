@@ -335,6 +335,32 @@ type resolverWiring struct {
 	SecretClient secrets.SecretClient
 }
 
+// sharedModePoolConfig is the ServicePool configuration of both shared
+// resolvers (db and platform-binding). It is one constructor so the
+// subscription-secret cipher and envelope mode — every per-workspace store
+// is bound and swept with them (INIT-023 TASK-009) — cannot be dropped
+// from one branch: "" means migrate, so a dropped mode would compile, log
+// the configured mode at startup, and still bind every store in migrate,
+// converting the legacy rows strict exists to refuse.
+func sharedModePoolConfig(
+	deliveryCfg workspaceDeliveryConfig,
+	log *slog.Logger,
+	secretCipher *spinecrypto.SecretCipher,
+	secretEnvelopeMode store.SecretEnvelopeMode,
+	secretClient secrets.SecretClient,
+	codeRepoBase string,
+) workspace.PoolConfig {
+	return workspace.PoolConfig{
+		Builder:            newPooledWorkspaceBuilder(deliveryCfg, log),
+		SecretCipher:       secretCipher,
+		SecretEnvelopeMode: secretEnvelopeMode,
+		SecretClient:       secretClient,
+		DBPolicy:           dbPolicyFromEnv(),
+		IdleTimeout:        poolIdleTimeoutFromEnv(),
+		CodeRepoBase:       codeRepoBase,
+	}
+}
+
 // buildWorkspaceResolver initializes the workspace resolver based on
 // the WORKSPACE_RESOLVER env var (file | db | platform-binding).
 //
@@ -407,15 +433,8 @@ func buildWorkspaceResolver(
 		if err != nil {
 			return nil, fmt.Errorf("connect to workspace registry: %w", err)
 		}
-		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:            newPooledWorkspaceBuilder(deliveryCfg, log),
-			SecretCipher:       secretCipher,
-			SecretEnvelopeMode: secretEnvelopeMode,
-			SecretClient:       dbSecretClient,
-			DBPolicy:           dbPolicyFromEnv(),
-			IdleTimeout:        poolIdleTimeoutFromEnv(),
-			CodeRepoBase:       codeRepoBase,
-		})
+		pool := workspace.NewServicePool(ctx, provider,
+			sharedModePoolConfig(deliveryCfg, log, secretCipher, secretEnvelopeMode, dbSecretClient, codeRepoBase))
 		log.Info("workspace resolver: db", "registry_url", "***")
 		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool, SecretClient: dbSecretClient}, nil
 
@@ -445,15 +464,8 @@ func buildWorkspaceResolver(
 		// resolver so requests don't fall through to the
 		// process-level store. EPIC-003 (TASK-006/007) refines pool
 		// sizing and invalidation for this mode.
-		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:            newPooledWorkspaceBuilder(deliveryCfg, log),
-			SecretCipher:       secretCipher,
-			SecretEnvelopeMode: secretEnvelopeMode,
-			SecretClient:       secretClient,
-			DBPolicy:           dbPolicyFromEnv(),
-			IdleTimeout:        poolIdleTimeoutFromEnv(),
-			CodeRepoBase:       codeRepoBase,
-		})
+		pool := workspace.NewServicePool(ctx, provider,
+			sharedModePoolConfig(deliveryCfg, log, secretCipher, secretEnvelopeMode, secretClient, codeRepoBase))
 		invalidator := &workspace.CombinedBindingInvalidator{
 			Provider: provider,
 			Pool:     pool,

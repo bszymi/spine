@@ -160,6 +160,43 @@ func TestBuildStore_FileResolverBindsAndSweeps(t *testing.T) {
 	}
 }
 
+// Review round 1: buildStore binds in the mode it is given, not the zero
+// value. With strict, the pre-seeded plaintext row is refused and left
+// untouched; a store silently bound in migrate would convert it.
+func TestBuildStore_FileResolverBindsConfiguredMode(t *testing.T) {
+	dsn := t009CreateDB(t, "t009_bsm")
+	admin := t009Migrate(t, dsn, store.FindMigrationsDir())
+	t009Insert(t, admin, "sub-file", "whsec-plain-file")
+
+	clearSecretBackendEnv(t)
+	t.Setenv("SPINE_WORKSPACE_ID", "ws-int")
+	t.Setenv("SPINE_DATABASE_URL", dsn)
+	ctx := context.Background()
+	sc, err := buildFileResolverSecretClient(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := spinecrypto.NewSecretCipher(t009Key(0x20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := buildStore(ctx, workspace.NewFileProvider(sc), c, store.SecretEnvelopeStrict, slog.New(slog.DiscardHandler))
+	if err != nil || st == nil {
+		t.Fatalf("buildStore: %v", err)
+	}
+	pg := st.(*store.PostgresStore)
+	t.Cleanup(pg.Close)
+	if b, ok := pg.SubscriptionSecretBinding(); !ok || b.Mode != store.SecretEnvelopeStrict || b.WorkspaceID != "ws-int" {
+		t.Fatalf("buildStore binding = %+v (bound %v), want strict for ws-int", b, ok)
+	}
+	if raw := t009Raw(t, admin, "sub-file"); raw != "whsec-plain-file" {
+		t.Fatal("a strict buildStore converted the legacy row")
+	}
+	if _, err := st.GetSubscription(ctx, "sub-file"); !errors.Is(err, store.ErrLegacySecretRefused) {
+		t.Fatalf("legacy row not refused: %v", err)
+	}
+}
+
 // captureDefaultLog routes slog.Default (observe.Logger) into buf for the
 // test's duration.
 func captureDefaultLog(t *testing.T, buf *bytes.Buffer) {

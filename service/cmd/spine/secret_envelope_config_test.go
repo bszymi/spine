@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -285,5 +286,23 @@ func TestSweepOneWorkspace_QuotesDatabaseText(t *testing.T) {
 	// A registry id that is not a valid workspace id is printed quoted.
 	if l := (sweepTarget{id: "bad\nid", inactive: true}).label(); l != `"bad\nid" (inactive)` {
 		t.Fatalf("label: %q", l)
+	}
+}
+
+// Review round 1: both shared resolvers (db and platform-binding) build
+// their ServicePool through sharedModePoolConfig, so this pins that the
+// configured cipher and envelope mode reach the pool. A dropped field
+// would compile ("" means migrate) while the startup log still printed the
+// configured mode, and every per-workspace store would be bound in migrate.
+func TestSharedModePoolConfig_CarriesSecretEnvelope(t *testing.T) {
+	c, err := spinecrypto.NewSecretCipher(make([]byte, spinecrypto.EncryptionKeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []store.SecretEnvelopeMode{store.SecretEnvelopeStrict, store.SecretEnvelopeDowngrade, store.SecretEnvelopeMigrate} {
+		cfg := sharedModePoolConfig(workspaceDeliveryConfig{}, slog.New(slog.DiscardHandler), c, mode, nil, "")
+		if cfg.SecretCipher != c || cfg.SecretEnvelopeMode != mode || cfg.Builder == nil {
+			t.Fatalf("mode %s: pool config does not carry the secret envelope: cipher=%v mode=%q", mode, cfg.SecretCipher == c, cfg.SecretEnvelopeMode)
+		}
 	}
 }
