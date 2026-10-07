@@ -323,6 +323,29 @@ func TestBoundUpdate_RealPostgresKeepsUnchangedSecret(t *testing.T) {
 		t.Fatalf("the sweep must convert and record the plant: %+v %v", rep, err)
 	}
 
+	// codex review: a rotation between the caller's read and its update
+	// survives the update; the stale secret the caller read is not
+	// re-sealed over it.
+	stale, err := s.GetSubscription(ctx, "t009-sub-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceSubscriptionSecret(ctx, "t009-sub-1", "whsec_rotated"); err != nil {
+		t.Fatal(err)
+	}
+	rotatedRaw := t009RawSecret(t, admin)
+	stale.Status = "active"
+	if err := s.UpdateSubscription(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if t009RawSecret(t, admin) != rotatedRaw {
+		t.Fatal("the update re-sealed a stale secret over a concurrent rotation")
+	}
+	got, err = s.GetSubscription(ctx, "t009-sub-1")
+	if err != nil || got.SigningSecret != "whsec_rotated" || got.Status != "active" {
+		t.Fatalf("after the racing update: %v", err)
+	}
+
 	// A changed secret is written (sealed for the binding) by the full
 	// UPDATE.
 	got.SigningSecret = "whsec_new"

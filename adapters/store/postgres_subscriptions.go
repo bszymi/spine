@@ -75,38 +75,51 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID stri
 		return nil, fmt.Errorf("decrypt signing_secret: %w", err)
 	}
 	sub.SigningSecret = secret
+	s.recordSecretRead(&sub)
 	return &sub, nil
 }
 
 // UpdateSubscription replaces a subscription's mutable columns.
 //
-// Under a binding (SetSubscriptionSecretBinding), when the stored signing
-// secret already opens to exactly sub.SigningSecret — the common
-// read-modify-write case: PATCH, pause, activate, a target-URL realign —
-// the signing_secret column is left untouched and only the other columns
-// are written. Re-sealing an unchanged secret would let a read-modify-write
-// convert a legacy (plaintext or enc:v1) value into this row's enc:v2
-// silently: in migrate mode a planted copy of another workspace's
-// pre-upgrade enc:v1 value opens (enc:v1 binds nothing), and re-sealing
-// what was read would make it a valid enc:v2 row that strict later
-// accepts, with no conversion record (INIT-023 TASK-009 review round 1).
-// Leaving the bytes alone keeps the re-encryption sweep, which records
-// every conversion, the only path from a legacy value to enc:v2; a write
-// that changes the secret replaces the stored value outright, so nothing
-// read from the row is carried over. A side effect: a metadata-only update
-// can no longer revert a concurrent rotate-secret. With no binding the
-// historical single UPDATE is unchanged.
+// Under a binding (SetSubscriptionSecretBinding) the signing_secret column
+// is written only when the caller set a secret; when it kept the one it
+// read — the common read-modify-write: PATCH, pause, activate, a
+// target-URL realign — only the other columns are written. Re-sealing a
+// kept secret would let a read-modify-write convert a legacy (plaintext
+// or enc:v1) value into this row's enc:v2 silently: in migrate mode a
+// planted copy of another workspace's pre-upgrade enc:v1 value opens
+// (enc:v1 binds nothing), and re-sealing what was read would make it a
+// valid enc:v2 row that strict later accepts, with no conversion record
+// (INIT-023 TASK-009 review round 1). Leaving the bytes alone keeps the
+// re-encryption sweep, which records every conversion, the only path from
+// a legacy value to enc:v2; a set secret replaces the stored value
+// outright, so nothing read from the row is carried over.
+//
+// "Kept" is decided from what the caller read, never from a later read
+// of the row (codex review): for a value returned by a bound read,
+// SigningSecret is compared with the secret that read returned, so a
+// rotation that lands between the caller's read and this update is
+// neither reverted nor replaced by the stale (possibly planted) secret.
+// Only a value that did not come from a bound read (a struct the caller
+// built) falls back to comparing against the stored value — one extra
+// SELECT, and a caller that copies a secret it read into a new struct
+// while a rotation races it can still write that copy; build updates from
+// the value the store returned.
+//
+// A side effect: an update that keeps the secret no longer reverts a
+// concurrent rotate-secret. With no binding the historical single UPDATE
+// is unchanged.
 func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscription) error {
 	secret, err := s.sealSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
 		return err
 	}
 	if s.secretBinding != nil {
-		unchanged, err := s.boundSecretUnchanged(ctx, sub.SubscriptionID, sub.SigningSecret)
+		kept, err := s.boundSecretKept(ctx, sub)
 		if err != nil {
 			return err
 		}
-		if unchanged {
+		if kept {
 			_, err = s.pool.Exec(ctx, `
 				UPDATE runtime.event_subscriptions SET
 					name = $2, target_type = $3, target_url = $4, event_types = $5,
@@ -190,6 +203,7 @@ func (s *PostgresStore) scanSubscriptions(rows pgx.Rows) ([]EventSubscription, e
 			return nil, fmt.Errorf("decrypt signing_secret: %w", err)
 		}
 		sub.SigningSecret = secret
+		s.recordSecretRead(&sub)
 		results = append(results, sub)
 	}
 	return results, rows.Err()

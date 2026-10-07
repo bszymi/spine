@@ -287,30 +287,47 @@ func (s *PostgresStore) sealSubscriptionSecret(subscriptionID, secret string) (s
 	return s.sealTarget(subscriptionID, secret)
 }
 
-// boundSecretUnchanged reports whether subscriptionID's stored signing
-// secret opens under the binding and mode to exactly secret, in which case
-// a bound UpdateSubscription leaves the column untouched. A missing row or
-// a stored value that does not open (refused) is "changed": the caller's
-// secret then replaces it, as a bound write always did. The comparison is
-// constant-time; neither value appears in an error.
-func (s *PostgresStore) boundSecretUnchanged(ctx context.Context, subscriptionID, secret string) (bool, error) {
+// recordSecretRead stamps a value returned by a bound read with the secret
+// that read returned (see EventSubscription.secretRead). Unbound reads
+// leave the value untouched.
+func (s *PostgresStore) recordSecretRead(sub *EventSubscription) {
+	if s.secretBinding == nil {
+		return
+	}
+	sub.secretRead = true
+	sub.readSecret = sub.SigningSecret
+}
+
+// boundSecretKept reports whether a bound UpdateSubscription keeps the
+// stored signing secret (writes the other columns only). For a value
+// returned by a bound read it is decided from that read alone: kept when
+// SigningSecret still equals the secret the read returned, whatever the
+// row holds now. For any other value it falls back to the stored value:
+// kept when that opens under the binding and mode to exactly
+// SigningSecret; a missing row or a stored value that does not open is
+// "set", so the caller's secret replaces it, as a bound write always did.
+// Comparisons are constant-time; no value appears in an error.
+func (s *PostgresStore) boundSecretKept(ctx context.Context, sub *EventSubscription) (bool, error) {
+	if sub.secretRead {
+		return subtle.ConstantTimeCompare([]byte(sub.SigningSecret), []byte(sub.readSecret)) == 1, nil
+	}
 	var stored string
 	err := s.pool.QueryRow(ctx,
 		`SELECT signing_secret FROM runtime.event_subscriptions WHERE subscription_id = $1`,
-		subscriptionID).Scan(&stored)
+		sub.SubscriptionID).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read subscription %q signing secret: %w", subscriptionID, err)
+		return false, fmt.Errorf("read subscription %q signing secret: %w", sub.SubscriptionID, err)
 	}
-	r, err := s.openBound(subscriptionID, stored)
+	r, err := s.openBound(sub.SubscriptionID, stored)
 	if err != nil {
 		// A refused stored value is replaced by the caller's secret; it
 		// is not an update error.
 		return false, nil
 	}
-	return subtle.ConstantTimeCompare([]byte(r.plaintext), []byte(secret)) == 1, nil
+	return subtle.ConstantTimeCompare([]byte(r.plaintext), []byte(sub.SigningSecret)) == 1, nil
 }
 
 // ReplaceSubscriptionSecret sets a subscription's signing secret to
@@ -454,8 +471,8 @@ func (r SecretSweepReport) Clean() bool { return len(r.Refused) == 0 && r.Confli
 // valid enc:v2 row for this workspace; nothing can distinguish it from a
 // genuine row. Every conversion is listed in Converted so it can be
 // audited, and the sweep is the only bound path that turns a legacy value
-// into enc:v2: a bound UpdateSubscription that does not change the secret
-// leaves the stored bytes alone (see UpdateSubscription). Strict mode (or
+// into enc:v2: a bound UpdateSubscription that keeps the secret the caller
+// read leaves the stored bytes alone (see UpdateSubscription). Strict mode (or
 // retiring every key that sealed enc:v1) closes the path for values
 // planted from then on; values converted before stay valid, which is why
 // the strict runbook reviews the conversion log first.

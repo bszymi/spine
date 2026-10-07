@@ -152,8 +152,9 @@ release is cut — this file is a staging area.
   Under the new envelope, `PATCH`, `pause`, `activate` and a bootstrap that
   only realigns the target URL write the other columns and leave the stored
   secret's bytes untouched, so only the (logged) sweep converts legacy
-  values; a metadata-only update also no longer reverts a concurrent
-  `rotate-secret`.
+  values. "Keeps" is judged against the secret the caller read, so a
+  `rotate-secret` that lands between a `PATCH`'s read and its write is
+  neither reverted nor replaced by the stale secret.
 - **`POST /subscriptions/{id}/rotate-secret` no longer reads the old
   secret.** It replaces the stored value directly
   (`PostgresStore.ReplaceSubscriptionSecret`), so it is the repair for a
@@ -191,10 +192,14 @@ release is cut — this file is a staging area.
   `ErrLegacySecretRefused`, `ErrEnvelopeInput`, `ErrNestedEnvelope`. Under a
   binding, writes take plaintext secrets only (an envelope input is refused)
   and every store that touches one workspace's subscriptions must use the
-  same workspace id and mode. A bound `UpdateSubscription` first reads the
-  stored secret (one extra `SELECT`) and, when it already opens to the
-  given secret, leaves the `signing_secret` column untouched and writes the
-  other columns only. SMP adopts this in SMP INIT-027 EPIC-004 TASK-006.
+  same workspace id and mode. A bound `UpdateSubscription` writes the
+  `signing_secret` column only when the caller set a secret: for a value
+  returned by a bound read (`GetSubscription`, the list calls — the value
+  remembers the secret that read returned, in unexported fields) it
+  compares `SigningSecret` with that; for a value the caller built it
+  compares with the stored value (one extra `SELECT`). Build updates from
+  the value the store returned. SMP adopts this in SMP INIT-027 EPIC-004
+  TASK-006.
 - **Deltas reachable without a binding** (none is reachable from SMP's
   current inputs: its credentials are hex and it produces no `enc:v2`
   value):

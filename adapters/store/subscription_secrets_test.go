@@ -371,6 +371,9 @@ func TestLegacyMode_Unchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if sub1.secretRead || sub1.readSecret != "" {
+		t.Fatal("an unbound read recorded read provenance; unbound values must be exactly as before")
+	}
 	if err := s.UpdateSubscription(ctxBG, sub1); err != nil || db.secretWrites != 1 || !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v1:") {
 		t.Fatalf("unbound update no longer rewrites the secret column: %v", err)
 	}
@@ -975,6 +978,91 @@ func TestBoundUpdate_UnchangedSecretKeepsStoredBytes(t *testing.T) {
 			}
 		})
 	}
+
+	// codex review: "kept" is decided from the caller's read, not from a
+	// later read of the row. A rotation that lands between the PATCH's
+	// read (which returned the plant) and its update must survive, and the
+	// stale planted secret must not be re-sealed as enc:v2. Deciding from
+	// a fresh read would see "rotated ≠ plant" and write the plant.
+	t.Run("rotation between read and update", func(t *testing.T) {
+		c := testRing(t, testKey(t))
+		plantFromA := encryptV1(t, c, "whsec_A_receiver_key")
+		db := newMemSubs()
+		s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+		mustCreate(t, s, "sub-1", "whsec_B")
+		setRaw(db, "sub-1", plantFromA)
+		sub, err := s.GetSubscription(ctxBG, "sub-1")
+		if err != nil || sub.SigningSecret != "whsec_A_receiver_key" {
+			t.Fatalf("fixture read: %v", err)
+		}
+		if err := s.ReplaceSubscriptionSecret(ctxBG, "sub-1", "whsec_rotated"); err != nil {
+			t.Fatal(err)
+		}
+		rotated := rawSecret(db, "sub-1")
+		writes := db.secretWrites
+		sub.Status = "paused"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil {
+			t.Fatal(err)
+		}
+		if rawSecret(db, "sub-1") != rotated || db.secretWrites != writes {
+			t.Fatal("the update re-sealed the stale planted secret over a concurrent rotation")
+		}
+		got, err := s.GetSubscription(ctxBG, "sub-1")
+		if err != nil || got.SigningSecret != "whsec_rotated" || got.Status != "paused" {
+			t.Fatalf("after the update: %v", err)
+		}
+		if rep, err := s.ReencryptSubscriptionSecrets(ctxBG); err != nil || rep.Current != 1 || rep.Rewritten != 0 {
+			t.Fatalf("sweep: %+v %v", rep, err)
+		}
+	})
+
+	// SMP's ensureScopedTargetURL pattern: list, mutate subs[i], update
+	// &subs[i]. The listed value carries its read too.
+	t.Run("list then update", func(t *testing.T) {
+		c := testRing(t, testKey(t))
+		db := newMemSubs()
+		s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+		mustCreate(t, s, "sub-1", "whsec_B")
+		plant := encryptV1(t, c, "whsec_A")
+		setRaw(db, "sub-1", plant)
+		subs, err := s.ListSubscriptions(ctxBG, "")
+		if err != nil || len(subs) != 1 {
+			t.Fatalf("list: %v", err)
+		}
+		subs[0].TargetURL = "https://hook.invalid/scoped"
+		if err := s.UpdateSubscription(ctxBG, &subs[0]); err != nil {
+			t.Fatal(err)
+		}
+		if rawSecret(db, "sub-1") != plant || db.secretWrites != 0 {
+			t.Fatal("a listed value's update re-sealed the kept secret")
+		}
+	})
+
+	// A value that did not come from a bound read (a struct the caller
+	// built) falls back to comparing against the stored value.
+	t.Run("caller-built value falls back to the stored value", func(t *testing.T) {
+		c := testRing(t, testKey(t))
+		db := newMemSubs()
+		s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+		mustCreate(t, s, "sub-1", "whsec_B")
+		plant := encryptV1(t, c, "whsec_A")
+		setRaw(db, "sub-1", plant)
+		built := newSub("sub-1", "whsec_A")
+		built.Status = "paused"
+		if err := s.UpdateSubscription(ctxBG, built); err != nil {
+			t.Fatal(err)
+		}
+		if rawSecret(db, "sub-1") != plant || db.secretWrites != 0 || db.rows["sub-1"][7] != "paused" {
+			t.Fatal("a caller-built update with the stored secret rewrote it")
+		}
+		built.SigningSecret = "whsec_set"
+		if err := s.UpdateSubscription(ctxBG, built); err != nil || db.secretWrites != 1 {
+			t.Fatalf("a caller-built update that sets a secret did not write it: %v", err)
+		}
+		if got, err := s.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_set" {
+			t.Fatalf("read-back: %v", err)
+		}
+	})
 
 	// An unchanged secret on a current row is not rewritten either (no
 	// fresh nonce, no needless write); a changed secret replaces the
