@@ -1590,6 +1590,9 @@ Test files are in `adapters/projection` unless named otherwise.
    `idle@c2`, exactly one event `parse` / `kept` / `kept_source_commit: c1` / `quarantined: true`.
 6. `TestFullRebuild_KeepsVerifiedRowOfRejectedFileQuarantined` (restored at `c1`, `Quarantined`,
    `idle`), `TestFullRebuild_RejectedFileWithNoPreviousRowIsNotProjected` (`not_projected`, `idle`).
+   Review round 1 added the `VerifyProjectionDefinition` gate on both branches:
+   `TestFullRebuild_UnverifiableRowOfRejectedFileIsRemoved` and
+   `TestFullRebuild_ReadFailureDoesNotRestoreAnUnverifiableRow` (mutation-checked).
 7. `TestIncrementalSync_UnverifiableRowIsRemovedOnRejection`, run with the instance already swept
    (diff path) and fresh (sweep path): row deleted, first event `removed`.
 8. `TestProjection_ValidateIsAdvisoryUnlessStrict`: a `Draft` file failing `Validate` is projected
@@ -1616,7 +1619,10 @@ Test files are in `adapters/projection` unless named otherwise.
 17. `TestWithAuthoritativeBranch_ArgumentValidation` (` main`, `main `, `-x`, `refs/heads/main`,
     `a..b`, NUL, `\x01`, `\n`, `m:a` refused; `""` restores the default),
     `TestAuthoritativeBranch_UnbornMainIsSyncError` (both entry points name `refs/heads/main`; state
-    `error`, commit held), `TestAuthoritativeBranch_ShadowRefsDoNotWin` (`refs/tags/refs/heads/main`,
+    `error`, commit held, `error_detail` names the ref), review round 1's
+    `TestAuthoritativeBranch_UnbornMainOnFreshStoreReportsError` (the empty-store case: `error` with
+    the ref in `error_detail`, then `idle@main` once the branch exists),
+    `TestAuthoritativeBranch_ShadowRefsDoNotWin` (`refs/tags/refs/heads/main`,
     `refs/refs/heads/main`, `refs/heads/refs/heads/main`, `refs/remotes/refs/heads/main`, tracked files
     `refs/heads/main` and `HEAD`, the relaxing branch checked out), `TestIsHexSHA`.
 18. `service/cmd/spine/serve_projection_wiring_test.go` (unit) and
@@ -1665,11 +1671,14 @@ Test files are in `adapters/projection` unless named otherwise.
     one Warn names `x.md`, `projection_synced` carries `read_skipped: 1`. `core/artifact`
     `discovery_read_errors_test.go` pins the recording; `core/engine`
     `TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore` passes **unchanged at `main`** and at HEAD.
+    **Superseded in review round 1:** the classification no longer reads the `GitError` Kind; see
+    "Review round 1" — real-client tests in `read_errors_test.go`.
 29. `workflow_integrity_integration_test.go` `TestIntegration_NULWorkflowIsRejectionNotWedge` (written
     against the pre-existing API only). **HEAD:** `idle@c2`, row kept at `c1`, `Quarantined`, not
     Active, one `round_trip` / `kept` rejection. **`main` (same file run in a `git archive main`
     export):** `state=&{LastSyncedCommit:<c1> Status:error ErrorDetail:1 sync errors}`, commit not
-    advanced.
+    advanced. Review round 1 added the over-long indexed field case
+    (`TestIntegration_OverLongIndexedFieldIsRejectionNotWedge`).
 
 **Before/after for the new tests.** Run in a `git archive main` export with the new test files
 copied in: every new test package fails to build at `main` (`svc.WithAuthoritativeBranch undefined`,
@@ -1705,7 +1714,9 @@ committed):
    restored **quarantined** and the sweep stays pending (the design only said such errors count as
    today; at `61994fe` the wipe simply lost the row and nothing retried it). Kept for pinned runs,
    not bindable while head cannot be checked (I6), restored by the next sync's sweep once the file
-   reads. `TestFullRebuild_WorkflowReadFailureKeepsRowQuarantinedAndSweepRetries`.
+   reads. `TestFullRebuild_WorkflowReadFailureKeepsRowQuarantinedAndSweepRetries`. Review round 1:
+   this now applies only to failures git causes; a gitlink (or other non-file entry) at the path is
+   a `not_a_file` rejection on every entry point, and a failing sweep no longer stops the sync.
 4. **`FullRebuild` holds the sweep mutex**, so a sweep and a rebuild on one instance never interleave
    workflow writes (the design made only the sweep single-flight).
 5. **An out-of-scope path after scoped discovery is a counted sync error** instead of the
@@ -1790,15 +1801,130 @@ obligations of §10 (above all the backfill probe) remain SMP TASK-012's.
   decide on `WithStrictWorkflowValidation`.
 - **SMP TASK-012 obligations from §10** (all still required): validate-mirror switch to
   `ProjectionDefinition` with rule `projection_round_trip`; SMP corpus test; worker test assertions
-  (7 rows, 0 `workflows/steps/%`, quarantine); **the mandatory backfill-probe change**; release notes
-  (nested rows deleted on first sync; quarantined workflows show non-Active).
+  (7 rows, 0 `workflows/steps/%`, quarantine); **the mandatory backfill-probe change** — review
+  round 1: it must also exempt a canonical path whose entry at `HEAD` is not a regular file (a
+  gitlink, now a `not_a_file` rejection; `git.TreeEntryTyper` answers it), not only bodies
+  `ProjectionDefinition` refuses; release notes (nested rows — every nested `workflows/**` row,
+  Active ones included — deleted on first sync; quarantined workflows show non-Active; a git-caused
+  read failure is an `error` tick).
 - **Spine TASK-003:** register `ErrBlobTooLarge` in `isContentReadError`
-  (`adapters/projection/workflow_rows.go`) and amend its I4 as §11 says. Until then an unreadable
-  workflow entry (oversize, or a gitlink at a workflow path) holds the sync in `error`, as before
-  (`KNOWN-LIMITATIONS.md`).
+  (`adapters/projection/workflow_rows.go`) and amend its I4 as §11 says. Since review round 1 the
+  same hook is also consulted for changed-artifact reads, where it makes an oversize artifact a
+  counted `read_skipped` skip (wedge-safe); TASK-003 confirms that is the artifact semantics it
+  wants. A gitlink at a workflow path no longer needs TASK-003 (`not_a_file`).
+- **Spine TASK-012 (working-tree serialisation):** if it wraps the `GitClient` handed to
+  `projection.NewService`, the wrapper must forward `git.TreeEntryTyper`; otherwise every read
+  failure is infrastructure and a gitlink holds the sync in `error` (fail closed, recorded in
+  `KNOWN-LIMITATIONS.md`).
 - **Spine TASK-006:** guard every directory in `projection.WorkflowDirs(artifactsDir)` and default its
   guard to `AuthoritativeBranch()`.
 - Artifact-side U+0000 wedge (verified on PostgreSQL: an artifact title with `\0` keeps incremental
   sync in `error`), stale execution projections after incremental deletes, `workflow_id` not unique
   across paths in SMP's step-mode reads, `QueryService.CheckFreshness` still on `Head()`, surfacing
   rejections in SMP beyond logs.
+
+### Review round 1 (2026-10-07)
+
+Three reviewers (correctness and SMP compatibility, adversarial security, completeness and tests)
+reviewed `0aeff8c`. Every finding was checked against the code first, and reproduced where it could
+be; all were real. Commits: `bb61148` (git tree-entry typing), `7d1d34b` (indexed-field cap),
+`4cc06b8` (sanitiser and event-id tests), `e7b1a3c` (read-failure classification, sync-state
+recording, sweep), `5753b16` (docs), `a0adf30` (test-wrapper robustness), and these notes.
+
+**Findings** (duplicates merged; the reviewers' severities):
+
+| # | Finding | Disposition | What changed / why | Regression tests |
+|---|---|---|---|---|
+| F1 | P1 (two reviewers): `classifyReadErrors` took "transient, hold" from `GitError.Kind`, which `classifyGitError` derives from stderr substrings; `git show <sha>:<path>` echoes the attacker-chosen path, so a gitlink named `initiatives/blocked.md` or `docs/timeout.md` wedged the sync | **FIXED** | Reproduced before the fix: `read docs/Could not resolve.md …: git read_file: network error`, state `error@c1` every tick. A read failure is now deterministic only when the commit's **tree** proves there is no regular file at the path: new optional capability `git.TreeEntryTyper` (`*CLIClient.TreeEntryType`: `git --literal-pathspecs ls-tree -z --full-tree <ref> -- <path>`, exact-path match, tree objects only). stderr is never consulted (`adapters/projection/read_errors.go`) | `TestIncrementalSync_GitlinkWithTransientLookingNameIsSkipped` (gitlinks `initiatives/blocked.md`, `docs/timeout.md`, `docs/Could not resolve.md`, `docs/x.lock.md`; 3 ticks `idle@c2`, the real change applied, `read_skipped: 4`); `TestTreeEntryType` (its precondition asserts the stderr misclassification) |
+| F2 | P2 (two reviewers): with the real client, a killed, unspawnable or silently failing git is a `*GitError` with empty stderr, Kind `permanent`, so it was skipped and the sync advanced past the change; the "not a `*GitError`" branch never fired | **FIXED** | Reproduced before the fix with a `PATH` wrapper (SIGKILL / `exit 1` on the blob read): `idle@c2`, change lost. Now a blob at the path means git failed → infrastructure; a client without the capability, an untypable tree or a cancelled context also hold | `TestIncrementalSync_KilledGitReadHoldsTheSync` (real `CLIClient`; signal and silent exit × modified and deleted), `TestClassifyReadErrors_OnlyAProvedNonBlobIsSkipped`, `TestIncrementalSync_KilledWorkflowReadIsInfrastructure`, `TestTreeEntryType_Errors` (git unavailable is an error, never "absent") |
+| F3 | P2: a gitlink at a stored workflow path froze the projection — the pre-diff sweep returned the read error every tick, a `FullRebuild` restored the row quarantined and left the sweep pending, so a rebuild no longer healed it | **FIXED** | (a) A non-file entry at a workflow path is a new `not_a_file` rejection on every entry point (kept quarantined / `not_projected` / `removed`, sync advances). (b) A failed sweep is now **counted**, not returned: the state holds in `error` and the sweep retries, but the window's artifact, branch-protection and workflow changes are applied, as before the sweep existed | `TestProjection_GitlinkAtWorkflowPathIsRejection` (incremental, a fresh instance's sweep, `FullRebuild` then incremental; all advance and apply later commits), `TestSweep_FailureHoldsTheSyncButDoesNotFreezeIt` |
+| F4 | P2: a Parse-accepted body whose indexed column overflows PostgreSQL's btree entry limit (an incompressible 6000-character `id`) failed the upsert → `error@c1` forever, previous row Active (I6 downgrade shape) | **FIXED** | Reproduced on PostgreSQL before the fix (`error@c1`, "1 sync errors"). `ProjectionDefinition` refuses a workflow path, `id` or `status` over 1024 bytes (`ErrProjectionRoundTrip`, value not echoed); the write path inherits it. `name` / `version` are not capped: their columns are unindexed, so PostgreSQL stores any length, and a cap would refuse legitimate text for no storage reason | `TestProjectionDefinition_RefusesOverLongIndexedFields` (1024 accepted, 1025 and 6000 refused, the `id: *desc` alias form), `TestService_ValidateBody_ReportsProjectionRoundTripRule` (long `status`), `TestIntegration_OverLongIndexedFieldIsRejectionNotWedge` (PostgreSQL: **before** `error@c1`; **after** `idle@c2`, `c1` row `Quarantined`, no Active row, one `round_trip`/`kept`) |
+| F5 | P2: `FullRebuild`'s `VerifyProjectionDefinition` gate (rejection and infra-error branches) and Deviation 2 untested | **FIXED** | Mutation `… == nil \|\| true` now fails both new tests | `TestFullRebuild_UnverifiableRowOfRejectedFileIsRemoved` (row gone, one `parse`/`removed`, `idle`, sweep done), `TestFullRebuild_ReadFailureDoesNotRestoreAnUnverifiableRow` |
+| F6 | P3: KNOWN-LIMITATIONS said an unreadable workflow's previous row is "kept quarantined"; only `FullRebuild` did that | **FIXED** | The plantable case (a gitlink) is now a `not_a_file` rejection that quarantines on every path. For a git-caused failure the limitation now says what happens: incremental holds with the row as it was (every change in the window is unapplied too); only a rebuild restores it quarantined. Not quarantining on a git failure is deliberate: no author can cause one (a push cannot plant a missing blob — receive-pack's connectivity check), and quarantining on every lock blip would deny new runs | (F3 tests) |
+| F7 | P3 (two reviewers): docs promised `sync_state = error` for an unborn `main`, but an empty store got no row (the hand-off to `FullRebuild` returned before writing); `markSyncError` stored only the label | **FIXED** | `FullRebuild` records every failure (`error`, sanitised cause, previous commit kept; no commit after a failed — possibly partial — wipe). `IncrementalSync` rebuilds a store with no synced commit, except while it is `rebuilding` (a first rebuild in flight elsewhere, e.g. SMP provisioning — a second wipe could expose a half-written projection under the other's `idle`). `error_detail` = label + cause, through `sanitizeForLog` | `TestAuthoritativeBranch_UnbornMainOnFreshStoreReportsError`, `TestAuthoritativeBranch_UnbornMainIsSyncError` (detail), `TestFullRebuild_FailuresAreRecorded`, `TestIncrementalSync_NoBaselineWhileRebuildingIsLeftAlone`, `TestMarkSyncError_DetailCarriesTheSanitisedCause` |
+| F8 | P3: CHANGELOG embedder list incomplete (write path SMP wraps; `Head()` failure now an `error` tick; the sweep deletes every nested `workflows/**` row, Active ones included); INIT-023 Rule 4 row narrowed the same way | **FIXED** | All three verified in the code; CHANGELOG embedder section and the Rule 4 row rewritten | — |
+| F9 | P3: Deviation 3 made the sweep re-read an unreadable blob forever; "as before INIT-023" was wrong | **FIXED** | By F3 (a) and (b); docs corrected | (F3 tests) |
+| F10 | P3: the sweep reported a legitimate deletion inside the pending window (`head` ahead of `last_synced_commit`, after a restart) as an `absent_at_head` rejection | **FIXED** | The sweep lists `last_synced_commit` lazily; a row whose file existed there is removed exactly as the diff would, with an Info line and no event. If that listing fails, the row is reported (the louder outcome); the delete happens either way | `TestSweep_DeletionInsidePendingWindowIsNotARejection` |
+| F11 | P3: `sanitizeForLog` and the deterministic event id untested | **FIXED** | Mutations (identity sanitiser, raw error text in the event, a randomised id) each fail | `TestSanitizeForLog`, `TestReportWorkflowRejection_SanitisedAndDeterministicID` |
+
+**Acceptance-criteria gaps:**
+
+- **AC 28** (F1, F2) — FIXED. The fakes-only evidence is replaced by real-client tests.
+- **AC 17 / §4 note 4** (F7) — FIXED.
+- **AC 29** (F4) — FIXED, on PostgreSQL.
+- **I6** — FIXED for every case an author can produce (an over-long indexed field → `round_trip`, a
+  non-file entry → `not_a_file`; both quarantine). A git-caused failure on a real blob leaves the row
+  as it was while the sync is held — not an I6 breach: nobody can make it happen through a commit,
+  and under I3 the whole projection stays at `last_synced_commit` until the retry succeeds.
+- **I2 / D2** (F3) — FIXED. `isContentReadError` still returns false for blob reads (TASK-003 adds
+  its sentinel); non-blob entries no longer need it.
+- **AC 6** (F5) — FIXED.
+- **AC 18 "`make test-scenario` passes"** — NOT REAL as a TASK-011 defect: re-run at this round's
+  code on `s011_r1_scen`, the suite gives 190 pass / 30 fail / 6 skip with pass and fail sets
+  **identical** to `main`'s run (subtests too: 1475 / 57 / 6), and CI's `TestGitHTTP_*` 19 / 0 / 0.
+  The 30 failures exist on `main` (fixture creation "artifact validation failed",
+  `TestSchemaMatchesProduction` NOT NULL `metadata`, gateway connection refused) and are outside this
+  task.
+- **AC 24 (SMP `TEST_PROVISIONING_DSN` suites)** — NOT REAL as a defect, an environment limit: those
+  suites create `ws_*` databases and roles, and the shared server allows only `s011_*` databases. The
+  overlay twins (same fixture, real `Worker`) were re-run against this round's code and pass; the
+  literal suites run in SMP TASK-012's gate at the bump (Deviation 11 stands).
+- **AC 26** — re-run this round: `codex review --base main` reports no findings (its sandbox could not
+  bind ports for one unrelated service test). The five audit PoCs (identifiers renamed to avoid
+  clashes, the three-method shim for the diff-drop one) behave exactly as the table above records.
+  The reviewers' own PoCs (`TestPOCSEC_GitlinkNamedLockWedgesSync`,
+  `…WorkflowGitlinkSweepWedgeSurvivesRebuild`, `…KilledGitReadIsSkippedNotRetried`,
+  `…Integration_LongIDWedges`, `…ProjectionDefinitionExactKeys`) all pass now; each failed (reported
+  the vulnerability) before.
+
+**New deviations (closest safe alternative):**
+
+14. **Read failures are classified positively from the tree**, not with the §3 note's rule (not a
+    `*GitError`, or Kind transient, or cancelled → infrastructure; everything else skipped). That rule
+    was F1 and F2. `git.TreeEntryTyper` is an optional capability, not a `GitClient` method (no
+    interface break for SMP or test doubles); a client without it fails closed.
+15. **New rejection check `not_a_file`** (the design listed six checks); documented in
+    `event-schemas.md` §4.14.
+16. **A failed sweep is counted, not returned** (§3 step 2 said `markSyncError` and return), so it
+    cannot freeze the rest of the sync.
+17. **`FullRebuild` records its failures**, an empty `last_synced_commit` is rebuilt, and an empty
+    one while `rebuilding` is left alone (the design wrote nothing on a rebuild failure).
+18. **In-window deletions found by the sweep are not rejections** (§6 reported every absent row).
+19. **Workflow path, `id` and `status` are capped at 1024 bytes** in `ProjectionDefinition` (the §1
+    note covered U+0000 and encoder failures only); the write path inherits it.
+20. **`isContentReadError` is consulted for changed-artifact reads too**, so TASK-003's sentinel will
+    make an oversize artifact a counted skip rather than a wedge (no-op today).
+
+**Mutation runs** (overlays, worktree untouched; each made the named tests fail): the `|| true`
+verify gate; no in-window check; identity sanitiser; raw error text in the event; randomised event
+id; stderr-Kind classification (`GitlinkWithTransientLookingName`, `KilledGitReadHoldsTheSync`); a
+blob treated as skippable (`KilledGitReadHoldsTheSync`, `OnlyAProvedNonBlobIsSkipped`,
+`KilledWorkflowReadIsInfrastructure`); workflow reads not classified (`GitlinkAtWorkflowPath`); the
+sweep returning early (`FailureHoldsTheSyncButDoesNotFreezeIt`). The new classification and
+workflow-gitlink tests were also run against `0aeff8c`'s code first: all failed.
+
+**Gates (review round 1)** — Spine at `a0adf30` unless stated (`a0adf30` changes one test file
+over `5753b16`):
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | ok; `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` (at `5753b16`) | exit 0, 38 packages ok, 0 FAIL |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
+| `go test -race -p 4 -count=1 ./adapters/git/ ./adapters/projection/ ./core/workflow/ ./core/artifact/ ./core/engine/` | all ok (projection and git re-run at `a0adf30`) |
+| `SPINE_TEST_DATABASE_URL=…/s011_r1 go test -race -p 1 -count=1 -tags integration` on projection, git, workflow, artifact, engine, store, delivery, workspace | all ok except store `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`), the pre-existing failure identical at `main` (round 0) |
+| `SPINE_TEST_DATABASE_URL=…/s011_r1_scen go test -p 1 -count=1 -tags scenario -v ./service/scenariotest/...` | 190 / 30 / 6, sets identical to `main`; `TestGitHTTP_*` 19 / 0 / 0 |
+| `golangci-lint run` on `adapters/git`, `adapters/projection`, `core/workflow`, `core/artifact`, plain / `--build-tags integration` / `--build-tags scenario`, vs the `main` export as (linter, file, message) sets | 0 new issues each (28 vs 31) |
+| `golangci-lint run --enable-only=gosec` (plain and integration) on the same packages | 1 issue, the pre-existing G703 in `core/workflow/service.go` |
+| `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
+| `codex review --base main` (at `5753b16`) | no findings |
+| SMP gate (SMP `7d4e7cc9`, `../spine` at `5753b16`, the last commit SMP compiles): `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` | all ok |
+| SMP `go test -race -p 4 -count=1` on the 31 packages depending on a changed Spine package plus `internal/docmemory` | 31 ok, 0 FAIL |
+| SMP testgate, Spine-runtime step (`s011_smp_spine_rt`) | PASS — 1536 passed, 0 failed, 4 allowed skips |
+| SMP testgate, shared step + `docindex` (`s011_smp_it`) | PASS — 1111 passed, 0 failed, 36 allowed skips |
+| SMP testgate `-tags integration ./internal/customer/githttp/` | PASS — 140 passed |
+| AC 25 overlay corpus; overlay worker twins (`ProjectsSeededRepo`, `SurfacesMalformedArtifact`, `RejectedWorkflowIsQuarantined`) | all PASS; SMP `git status` clean |
+
+Databases used this round (`s011_r1`, `s011_r1_main`, `s011_r1_scen`, `s011_smp_it`,
+`s011_smp_spine_rt`) were dropped at the end.
