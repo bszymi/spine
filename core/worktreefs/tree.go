@@ -43,18 +43,29 @@ var (
 	// testHookObserveRead receives the number of bytes ReadFileLimit pulled
 	// from the file (before the limit check).
 	testHookObserveRead func(rel string, n int64)
+
+	// testHookHandleOpened receives openHandles right after every open, so
+	// a test can record the peak an operation reaches (I8).
+	testHookHandleOpened func(open int64)
 )
 
 // openHandles counts the directory and file handles this package holds
 // open. It exists so tests can prove I8 (no handle leaks).
 var openHandles atomic.Int64
 
+func countOpen() {
+	n := openHandles.Add(1)
+	if hook := testHookHandleOpened; hook != nil {
+		hook(n)
+	}
+}
+
 func openRootDir(dir string) (*os.Root, error) {
 	r, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	openHandles.Add(1)
+	countOpen()
 	return r, nil
 }
 
@@ -63,7 +74,7 @@ func openSubRoot(parent *os.Root, name string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	openHandles.Add(1)
+	countOpen()
 	return r, nil
 }
 
@@ -77,7 +88,7 @@ func openFileIn(parent *os.Root, name string, flag int, perm fs.FileMode) (*os.F
 	if err != nil {
 		return nil, err
 	}
-	openHandles.Add(1)
+	countOpen()
 	return f, nil
 }
 
@@ -143,8 +154,9 @@ var errTreeClosed = errors.New("worktreefs: tree is closed")
 // past it. An Undo keeps its walk across a whole `git add` + `git commit`,
 // so a path of a couple of thousand components (MaxPathBytes allows ~2 000)
 // must not pin one descriptor per component for that long; rollback
-// re-opens the levels it needs from anchor instead (rollbackDirs). Before
-// the descent first moves below it, anchor is the same handle as cur.
+// re-opens the levels it needs from anchor instead (rollbackDirs), which
+// holds one handle per created level, but only while it runs. Before the
+// descent first moves below it, anchor is the same handle as cur.
 type walk struct {
 	rel    string
 	leaf   string // final component; "" for a directory walk
@@ -211,7 +223,9 @@ func openBound(parent *os.Root, name string, info fs.FileInfo) (*os.Root, error)
 // identity recorded when the walk passed it. A level that is gone or no
 // longer matches ends the re-walk: nothing below it is reachable through
 // the directories this walk made, and the levels above are removed only if
-// they are empty. The re-opened handles are closed before returning; they
+// they are empty. Every re-opened level stays open until the removals are
+// done — one directory handle per directory the walk created, on top of
+// the two the walk holds (I8) — and all are closed before returning: they
 // are transient, never held across a commit.
 func (w *walk) rollbackDirs() error {
 	below := w.below
@@ -548,7 +562,8 @@ func readCapped(f io.Reader, rel string, sizeHint, limit int64) ([]byte, error) 
 // handle of the parent of the first directory the Create made (if any) and
 // a read-only descriptor on the created file — at most three descriptors
 // whatever the path's depth (I8) — so it stays usable after the Tree is
-// closed. Exactly one of Rollback or Release should be called; both are
+// closed. Rollback transiently opens one more directory handle per
+// directory the Create made (rollbackDirs). Exactly one of Rollback or Release should be called; both are
 // idempotent and nil-safe, so `defer undo.Release()` after an explicit
 // Rollback is safe.
 type Undo struct {

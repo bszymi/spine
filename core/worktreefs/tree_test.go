@@ -96,6 +96,7 @@ func resetHooks(t *testing.T) {
 		testHookBeforeLeafOp = nil
 		testHookAfterLeafOpen = nil
 		testHookObserveRead = nil
+		testHookHandleOpened = nil
 	})
 }
 
@@ -1399,7 +1400,10 @@ func TestTree_WalkSubdirSwappedForLinkMidWalk(t *testing.T) {
 // which callers keep across git add + git commit — holds at most three
 // descriptors (leaf parent, the anchor above the first created directory,
 // the leaf pin), however many components the path has. Rollback re-opens
-// the levels it needs transiently and leaves nothing open.
+// one handle per directory the Create made, all at once, and leaves
+// nothing open; WalkRegularFiles holds one per level it is inside. Those
+// two depth-proportional peaks are the ones the I8 package doc names, and
+// are measured here (review round 2) so the documented bound is falsifiable.
 //
 // Mutation check: keeping one handle per component (the pre-review walk)
 // fails both the during-walk and the held-by-Undo bounds.
@@ -1415,9 +1419,13 @@ func TestTree_HandlesBoundedByDepth(t *testing.T) {
 		name     string
 		existing bool // the directories exist before Create
 		maxUndo  int64
+		// maxRollback: the walk's two handles plus one re-opened handle
+		// per created directory below the first (the first one's parent
+		// is the anchor the Undo already holds).
+		maxRollback int64
 	}{
-		{"creates every directory", false, 3},
-		{"directories exist", true, 2},
+		{"creates every directory", false, 3, 2 + depth - 1},
+		{"directories exist", true, 2, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetHooks(t)
@@ -1442,8 +1450,18 @@ func TestTree_HandlesBoundedByDepth(t *testing.T) {
 			if held := openHandles.Load() - baseline; held > tc.maxUndo {
 				t.Errorf("Undo holds %d handles across the commit, want <= %d", held, tc.maxUndo)
 			}
+			var rbPeak int64
+			testHookHandleOpened = func(n int64) {
+				if n-baseline > rbPeak {
+					rbPeak = n - baseline
+				}
+			}
 			if err := u.Rollback(); err != nil {
 				t.Fatalf("Rollback: %v", err)
+			}
+			testHookHandleOpened = nil
+			if rbPeak > tc.maxRollback {
+				t.Errorf("Rollback held %d handles at once, want <= %d", rbPeak, tc.maxRollback)
 			}
 			if got := openHandles.Load(); got != baseline {
 				t.Fatalf("open handles after Rollback: %d, want baseline %d", got, baseline)
@@ -1456,4 +1474,40 @@ func TestTree_HandlesBoundedByDepth(t *testing.T) {
 			}
 		})
 	}
+
+	// WalkRegularFiles: the descent's start handle, one per level it is
+	// inside, and the directory being listed.
+	t.Run("WalkRegularFiles holds one handle per level", func(t *testing.T) {
+		resetHooks(t)
+		f := newFixture(t)
+		mustMkdir(t, f.path(deepDir))
+		mustWrite(t, f.path(deepDir+"/leaf.md"), "leaf", 0o644)
+		baseline := openHandles.Load()
+		var walkPeak int64
+		testHookHandleOpened = func(n int64) {
+			if n-baseline > walkPeak {
+				walkPeak = n - baseline
+			}
+		}
+		var seen []string
+		err := f.tree.WalkRegularFiles("", func(rel string) error {
+			if strings.HasPrefix(rel, "d/") {
+				seen = append(seen, rel)
+			}
+			return nil
+		})
+		testHookHandleOpened = nil
+		if err != nil {
+			t.Fatalf("WalkRegularFiles: %v", err)
+		}
+		if len(seen) != 1 || seen[0] != deepDir+"/leaf.md" {
+			t.Fatalf("walk yielded %d deep files, want the one leaf", len(seen))
+		}
+		if walkPeak > depth+2 {
+			t.Errorf("WalkRegularFiles held %d handles at once, want <= %d", walkPeak, depth+2)
+		}
+		if got := openHandles.Load(); got != baseline {
+			t.Fatalf("open handles after the walk: %d, want baseline %d", got, baseline)
+		}
+	})
 }

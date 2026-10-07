@@ -24,10 +24,17 @@
 //   - I7. Reads are capped (DefaultMaxReadBytes) and refused with *SizeError
 //     beyond it; paths are capped at MaxPathBytes / MaxComponentBytes.
 //   - I8. Every directory and file handle an operation opens is closed on
-//     every return path; Undo.Rollback and Undo.Release are idempotent. The
-//     number held does not grow with the path's depth: a walk holds at most
-//     two directory handles, and an Undo — kept across a commit — at most
-//     three descriptors until it is resolved.
+//     every return path; Undo.Rollback and Undo.Release are idempotent.
+//     What is held across a caller's own work does not grow with the
+//     path's depth: a descent holds at most two directory handles, and an
+//     Undo — kept across a whole `git add` + `git commit` — at most three
+//     descriptors until it is resolved. Two calls hold one handle per level
+//     for their own duration only: Undo.Rollback (and a Create whose descent
+//     fails after making directories) re-opens one directory handle per
+//     directory the Create made, all open at once until it returns, to
+//     remove them deepest first; WalkRegularFiles holds one per directory
+//     level it is inside, including while fn runs. MaxPathBytes bounds both
+//     at about two thousand.
 //
 // The tree root itself is trusted: it is chosen by the server (the
 // repository path, a `git worktree` directory, an embedder's scope dir), and
