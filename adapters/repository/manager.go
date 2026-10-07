@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // ManagerStore is the binding-side surface the Manager needs. It
@@ -114,6 +115,19 @@ func NewManager(workspaceID string, primary PrimarySpec, catalog CatalogStore, b
 	}
 }
 
+// validateDefaultBranch refuses a default_branch that is not a git
+// branch name (INIT-023 TASK-002, P3-36): the value later reaches `git
+// switch`, `git branch` and `git push` argv for the code repository, so
+// "--force" or "HEAD" must never be stored. The engine re-checks at use
+// time for rows written before this guard.
+func validateDefaultBranch(branch string) error {
+	if err := git.ValidateBranchName(branch); err != nil {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("default_branch is not a valid branch name: %v", err))
+	}
+	return nil
+}
+
 // Register validates the request, writes the catalog entry, then
 // writes the binding row. If the binding insert fails the catalog
 // entry is rolled back so the same ID can be re-registered without
@@ -131,6 +145,9 @@ func (m *Manager) Register(ctx context.Context, req RegisterRequest) (*Repositor
 	}
 	if strings.TrimSpace(req.DefaultBranch) == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "default_branch is required")
+	}
+	if err := validateDefaultBranch(req.DefaultBranch); err != nil {
+		return nil, err
 	}
 	if err := m.validateLocalPath(req.LocalPath); err != nil {
 		return nil, err
@@ -209,6 +226,11 @@ func (m *Manager) Update(ctx context.Context, id string, req UpdateRequest) (*Re
 	}
 	if req.DefaultBranch != nil && strings.TrimSpace(*req.DefaultBranch) == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "default_branch cannot be blank")
+	}
+	if req.DefaultBranch != nil {
+		if err := validateDefaultBranch(*req.DefaultBranch); err != nil {
+			return nil, err
+		}
 	}
 	if req.LocalPath != nil {
 		if err := m.validateLocalPath(*req.LocalPath); err != nil {

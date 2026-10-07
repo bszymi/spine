@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 )
 
 type fakeManagerStore struct {
@@ -635,5 +635,51 @@ func TestManagerEmptyCodeRepoBaseSkipsContainmentCheck(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("expected accept when codeRepoBase is empty, got %v", err)
+	}
+}
+
+// TestManagerDefaultBranchMustBeABranchName is INIT-023 TASK-002 AC 11
+// (input guard, P3-36): default_branch reaches git argv for the code
+// repository, so Register and Update refuse anything that is not a git
+// branch name with ErrInvalidParams (HTTP 400 invalid_params), and keep
+// accepting ordinary branch names.
+func TestManagerDefaultBranchMustBeABranchName(t *testing.T) {
+	ctx := context.Background()
+	for _, bad := range []string{"--force", "a..b", "HEAD", "x y", "refs/tags/v1", "-x"} {
+		mgr, _, _ := newTestManager(t, nil)
+		_, err := mgr.Register(ctx, repository.RegisterRequest{
+			ID: "code-a", Name: "A", DefaultBranch: bad,
+			CloneURL: "https://example.com/a.git", LocalPath: "/r/a",
+		})
+		var spineErr *domain.SpineError
+		if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrInvalidParams {
+			t.Errorf("Register(default_branch=%q) = %v, want ErrInvalidParams", bad, err)
+		}
+
+		if _, err := mgr.Register(ctx, repository.RegisterRequest{
+			ID: "code-b", Name: "B", DefaultBranch: "main",
+			CloneURL: "https://example.com/b.git", LocalPath: "/r/b",
+		}); err != nil {
+			t.Fatalf("Register(main): %v", err)
+		}
+		v := bad
+		_, err = mgr.Update(ctx, "code-b", repository.UpdateRequest{DefaultBranch: &v})
+		if !errors.As(err, &spineErr) || spineErr.Code != domain.ErrInvalidParams {
+			t.Errorf("Update(default_branch=%q) = %v, want ErrInvalidParams", bad, err)
+		}
+	}
+	for i, good := range []string{"main", "release/2026.10", "trunk"} {
+		mgr, _, _ := newTestManager(t, nil)
+		id := []string{"code-a", "code-b", "code-c"}[i]
+		if _, err := mgr.Register(ctx, repository.RegisterRequest{
+			ID: id, Name: "X", DefaultBranch: good,
+			CloneURL: "https://example.com/x.git", LocalPath: "/r/" + id,
+		}); err != nil {
+			t.Errorf("Register(default_branch=%q): %v", good, err)
+		}
+		v := good
+		if _, err := mgr.Update(ctx, id, repository.UpdateRequest{DefaultBranch: &v}); err != nil {
+			t.Errorf("Update(default_branch=%q): %v", good, err)
+		}
 	}
 }
