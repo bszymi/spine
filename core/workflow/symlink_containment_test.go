@@ -193,8 +193,9 @@ func TestF5_WorkflowCreate_CommitFailure_RemovesFileAndDir(t *testing.T) {
 	}
 }
 
-// An Update whose commit fails restores the original bytes.
-func TestF5_WorkflowUpdate_CommitFailure_RestoresBytes(t *testing.T) {
+// An Update whose commit fails restores the original bytes (a guard: passes
+// before and after the fix).
+func TestWorkflowUpdate_CommitFailure_RestoresBytes(t *testing.T) {
 	svc, repo := newSvc(t)
 	if _, err := svc.Create(ctxWithActor(), "wf-b", fmtYAML("wf-b", "1.0")); err != nil {
 		t.Fatalf("Create: %v", err)

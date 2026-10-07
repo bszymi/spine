@@ -242,8 +242,9 @@ func TestF5_Create_InRootSymlinkToExistingFile_Is400Not409(t *testing.T) {
 	f5RequireUnsafePath(t, err)
 }
 
-// AC10: the unchanged halves of the contract.
-func TestF5_ErrorContract_ExistingAndMissing(t *testing.T) {
+// AC10: the unchanged halves of the contract (a guard: passes before and
+// after the fix).
+func TestWorktreeContract_ExistingAndMissing(t *testing.T) {
 	repo := testutil.NewTempRepo(t)
 	svc := f5OpenSvc(repo)
 	ctx := f5Ctx("")
@@ -315,8 +316,10 @@ func TestF5_Create_CommitFailure_RemovesFileAndCreatedDirs(t *testing.T) {
 	}
 }
 
-// AC11: an Update whose commit fails restores the original bytes and mode.
-func TestF5_Update_CommitFailure_RestoresBytesAndMode(t *testing.T) {
+// AC11: an Update whose commit fails restores the original bytes and mode
+// (a guard: os.WriteFile on an existing file kept the mode on 61994fe too;
+// the fix must not lose it by replacing through a rename).
+func TestUpdate_CommitFailure_RestoresBytesAndMode(t *testing.T) {
 	repo := testutil.NewTempRepo(t)
 	p := filepath.Join(repo, "governance", "tool.md")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
