@@ -78,6 +78,12 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 			fmt.Sprintf("step %q not found in workflow %s", exec.StepID, wfDef.ID))
 	}
 
+	// SeparationOfDuties: hold the run's bind stripe from before check 7
+	// until the bind is written (see sodBindStripes). A no-op unless the
+	// policy sets SeparationOfDuties.
+	unlock := o.lockSoDBind(exec.RunID)
+	defer unlock()
+
 	// Step-entry policy (INIT-023 TASK-007): run status, engine-owned step,
 	// mode-implied actor type, actor existence + active status, and
 	// separation of duties. The allow-list, eligible_actor_types and
@@ -191,6 +197,9 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
+	// Bound: release the stripe before emitting (a synchronous event
+	// handler that binds again must not wait on it).
+	unlock()
 
 	// Emit event.
 	payload, _ := json.Marshal(map[string]any{

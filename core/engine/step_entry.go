@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/core/domain"
@@ -399,11 +401,20 @@ func (o *Orchestrator) requireSkillsOnAssign(ctx context.Context, stepDef *domai
 }
 
 // assignmentHistory is the optional ledger read behind the separation-of-
-// duties author check. *store.PostgresStore provides it (one indexed query
-// on actor_assignments.actor_id); the engine type-asserts it on
-// o.assignments so no interface an embedder implements grows a method.
+// duties author check: every row one actor ever held, in any run. The engine
+// type-asserts it on o.assignments so no interface an embedder implements
+// grows a method. It is the fallback for runAssignmentHistory.
 type assignmentHistory interface {
 	ListAssignmentsByActor(ctx context.Context, actorID string, status *domain.AssignmentStatus) ([]domain.Assignment, error)
+}
+
+// runAssignmentHistory is the narrower ledger read the engine prefers: one
+// actor's rows in one run, any status. *store.PostgresStore provides it (one
+// indexed query, `WHERE actor_id = $1 AND run_id = $2`), so a long-lived
+// runner or agent with a large assignment history is not loaded in full on
+// every review bind. A store offering only assignmentHistory still works.
+type runAssignmentHistory interface {
+	ListAssignmentsByRunAndActor(ctx context.Context, runID, actorID string) ([]domain.Assignment, error)
 }
 
 // isAuthorStepType reports whether executing a step of this type makes an
@@ -411,6 +422,45 @@ type assignmentHistory interface {
 // so one actor may both verify and review (Owner question 1 default).
 func isAuthorStepType(t domain.StepType) bool {
 	return t == domain.StepTypeManual || t == domain.StepTypeAutomated
+}
+
+// sodBindStripes serialises, within one process, the separation-of-duties
+// check and the bind write of every binding path (AssignStep, ClaimStep and
+// ActivateStep's auto-selection) for the same run. Without it two binds of
+// one actor into one run can both pass check 7 before either writes — the
+// review half reads "no author execution bound to erin" while the author
+// half reads "erin holds no live review" — and erin ends up reviewing work
+// she authors (divergence workflows only: in a linear workflow the review
+// execution exists only after the author step was submitted).
+//
+// Package level, not per Orchestrator: `spine serve` builds a process-level
+// orchestrator and one per workspace, and the pool rebuilds them on
+// eviction, so the lock must not depend on which instance serves a call.
+// Striped by run ID; two runs sharing a stripe only serialise needlessly.
+// A holder never takes a second stripe, and the stripe is released right
+// after the bind write — before events are emitted or assignments are
+// delivered — so a synchronous event handler that binds again cannot
+// deadlock on it.
+//
+// Residual (documented in KNOWN-LIMITATIONS.md): this does not serialise
+// binds made by different processes sharing one database (an embedder that
+// runs several replicas with SeparationOfDuties on); closing that needs a
+// database-level lock per run.
+var sodBindStripes [64]sync.Mutex
+
+// lockSoDBind takes the run's bind stripe when SeparationOfDuties is on and
+// returns an idempotent release. With the policy off it takes nothing, so
+// the zero value is unchanged.
+func (o *Orchestrator) lockSoDBind(runID string) (unlock func()) {
+	if !o.entryPolicy.SeparationOfDuties {
+		return func() {}
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(runID))
+	m := &sodBindStripes[h.Sum32()%uint32(len(sodBindStripes))]
+	m.Lock()
+	var once sync.Once
+	return func() { once.Do(m.Unlock) }
 }
 
 // checkSeparationOfDuties is check 7.
@@ -426,12 +476,27 @@ func isAuthorStepType(t domain.StepType) bool {
 //
 // Step types come from the workflow version the run is pinned to; an
 // execution whose step is missing from it counts against the candidate
-// (fail closed).
+// (fail closed). Callers that bind hold lockSoDBind from before this check
+// until their bind write.
 func (o *Orchestrator) checkSeparationOfDuties(ctx context.Context, run *domain.Run,
 	wfDef *domain.WorkflowDefinition, stepDef *domain.StepDefinition, exec *domain.StepExecution, actorID string) error {
+	if stepDef.Type != domain.StepTypeReview && !isAuthorStepType(stepDef.Type) {
+		return nil
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return domain.NewErrorWithCause(domain.ErrUnavailable, "separation of duties: cannot list the run's executions", err)
+	}
+	return o.separationOfDuties(ctx, run, wfDef, stepDef, exec, actorID, execs)
+}
+
+// separationOfDuties is checkSeparationOfDuties over an already-read list
+// of the run's executions (the candidate listing reads it once per run).
+func (o *Orchestrator) separationOfDuties(ctx context.Context, run *domain.Run, wfDef *domain.WorkflowDefinition,
+	stepDef *domain.StepDefinition, exec *domain.StepExecution, actorID string, execs []domain.StepExecution) error {
 	switch {
 	case stepDef.Type == domain.StepTypeReview:
-		authored, err := o.runAuthor(ctx, run, wfDef, exec, actorID)
+		authored, err := o.runAuthor(ctx, run, wfDef, exec, actorID, execs)
 		if err != nil {
 			return err
 		}
@@ -441,10 +506,6 @@ func (o *Orchestrator) checkSeparationOfDuties(ctx context.Context, run *domain.
 					actorID, authored, run.RunID, stepDef.ID))
 		}
 	case isAuthorStepType(stepDef.Type):
-		execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
-		if err != nil {
-			return domain.NewErrorWithCause(domain.ErrUnavailable, "separation of duties: cannot list the run's executions", err)
-		}
 		for i := range execs {
 			e := &execs[i]
 			if e.ExecutionID == exec.ExecutionID || e.ActorID != actorID || e.Status.IsTerminal() {
@@ -482,11 +543,7 @@ func (o *Orchestrator) checkSeparationOfDuties(ctx context.Context, run *domain.
 // someone else leaves no record of the first actor. Closing it needs an
 // append-only binding ledger (a schema change).
 func (o *Orchestrator) runAuthor(ctx context.Context, run *domain.Run, wfDef *domain.WorkflowDefinition,
-	target *domain.StepExecution, actorID string) (string, error) {
-	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
-	if err != nil {
-		return "", domain.NewErrorWithCause(domain.ErrUnavailable, "separation of duties: cannot list the run's executions", err)
-	}
+	target *domain.StepExecution, actorID string, execs []domain.StepExecution) (string, error) {
 	known := make(map[string]bool, len(execs))
 	authorExecs := make(map[string]string, len(execs)) // execution ID → step ID
 	for i := range execs {
@@ -507,17 +564,24 @@ func (o *Orchestrator) runAuthor(ctx context.Context, run *domain.Run, wfDef *do
 	if o.assignments == nil {
 		return "", nil
 	}
-	history, ok := o.assignments.(assignmentHistory)
-	if !ok {
+	var rows []domain.Assignment
+	var err error
+	switch h := o.assignments.(type) {
+	case runAssignmentHistory:
+		rows, err = h.ListAssignmentsByRunAndActor(ctx, run.RunID, actorID)
+	case assignmentHistory:
+		rows, err = h.ListAssignmentsByActor(ctx, actorID, nil)
+	default:
 		return "", domain.NewError(domain.ErrUnavailable,
-			"separation of duties needs the assignment ledger (ListAssignmentsByActor), which the configured assignment store does not provide")
+			"separation of duties needs the assignment ledger (ListAssignmentsByRunAndActor or ListAssignmentsByActor), which the configured assignment store does not provide")
 	}
-	rows, err := history.ListAssignmentsByActor(ctx, actorID, nil)
 	if err != nil {
 		return "", domain.NewErrorWithCause(domain.ErrUnavailable, "separation of duties: cannot read the assignment ledger", err)
 	}
 	for i := range rows {
 		a := &rows[i]
+		// The run filter stays even for the narrow read: it is the whole
+		// filter for the fallback, and costs nothing otherwise.
 		if a.RunID != run.RunID || a.ExecutionID == target.ExecutionID {
 			continue
 		}

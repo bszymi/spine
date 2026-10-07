@@ -644,6 +644,37 @@ func TestStepEntry_SoDAuthorLedger(t *testing.T) {
 		requireCode(t, err, domain.ErrUnavailable, "assign with a failing ledger")
 		requireExecsUnchanged(t, f.st, before, "refused assign")
 	})
+	// Review round 1: the engine prefers the run-scoped ledger read and
+	// never loads the actor's whole history when it is offered.
+	t.Run("run-scoped ledger read is preferred", func(t *testing.T) {
+		var narrow *narrowLedgerAssignments
+		f := prepare(t, StepEntryPolicy{SeparationOfDuties: true}, func(m *memAssignmentStore) AssignmentStore {
+			narrow = &narrowLedgerAssignments{memAssignmentStore: m}
+			return narrow
+		})
+		_, err := f.orch.AssignStep(ctx, AssignRequest{RunID: "run-1", StepID: "review", ActorID: "carol"})
+		requireCode(t, err, domain.ErrForbidden, "assign of the released executor (run-scoped ledger)")
+		if !strings.Contains(err.Error(), `"execute"`) {
+			t.Fatalf("refusal %q must name the executed step", err.Error())
+		}
+		_, err = f.orch.ClaimStep(ctx, ClaimRequest{ActorID: "carol", ExecutionID: "run-1-review-1"})
+		requireCode(t, err, domain.ErrForbidden, "claim of the released executor (run-scoped ledger)")
+		if len(narrow.calls) == 0 || narrow.calls[0] != [2]string{"run-1", "carol"} {
+			t.Fatalf("run-scoped ledger calls = %v, want (run-1, carol)", narrow.calls)
+		}
+		if narrow.wideCalls != 0 {
+			t.Fatalf("the whole-history read ran %d times although the run-scoped port exists", narrow.wideCalls)
+		}
+	})
+	t.Run("run-scoped ledger read error fails closed", func(t *testing.T) {
+		f := prepare(t, StepEntryPolicy{SeparationOfDuties: true}, func(m *memAssignmentStore) AssignmentStore {
+			return &narrowLedgerAssignments{memAssignmentStore: m, failNarrow: true}
+		})
+		before := snapshotExecs(f.st)
+		_, err := f.orch.AssignStep(ctx, AssignRequest{RunID: "run-1", StepID: "review", ActorID: "carol"})
+		requireCode(t, err, domain.ErrUnavailable, "assign with a failing run-scoped ledger")
+		requireExecsUnchanged(t, f.st, before, "refused assign")
+	})
 	t.Run("zero value binds the released executor as today", func(t *testing.T) {
 		f := prepare(t, StepEntryPolicy{}, nil)
 		res, err := f.orch.AssignStep(ctx, AssignRequest{RunID: "run-1", StepID: "review", ActorID: "carol"})

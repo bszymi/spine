@@ -81,6 +81,14 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	exec.ErrorDetail = nil
 
 	actorID := o.tryResolveAutoActor(ctx, exec, stepDef)
+	// SeparationOfDuties: an auto-selected bind holds the run's bind stripe
+	// from its check until its write, like AssignStep and ClaimStep (see
+	// sodBindStripes). A no-op unless the policy sets SeparationOfDuties.
+	unlock := func() {}
+	if actorID != "" {
+		unlock = o.lockSoDBind(runID)
+	}
+	defer unlock()
 	if actorID != "" && o.entryPolicy.SeparationOfDuties {
 		// Separation of duties also governs engine auto-selection. A
 		// selected run author (or, for an author step, a live reviewer) is
@@ -95,6 +103,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		}
 	}
 	if actorID == "" {
+		unlock()
 		// Stay in waiting. Pull-based actors discover via
 		// ListStepExecutions and call /claim; operators bind via
 		// /assign. Either path moves the step out of waiting.
@@ -118,6 +127,9 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
+	// Bound: release the stripe before the assignment record, the runner
+	// dispatch and the events.
+	unlock()
 
 	o.createAutoAssignmentRecord(ctx, exec, runID)
 

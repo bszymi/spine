@@ -8,6 +8,7 @@ import "github.com/bszymi/spine/adapters/store"
 // assignment and blocking store).
 var (
 	_ assignmentHistory         = (*store.PostgresStore)(nil)
+	_ runAssignmentHistory      = (*store.PostgresStore)(nil)
 	_ activeAssignmentCanceller = (*store.PostgresStore)(nil)
 	_ entryActorLoader          = (*store.PostgresStore)(nil)
 	_ entrySkillLister          = (*store.PostgresStore)(nil)

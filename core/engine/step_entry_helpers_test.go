@@ -58,6 +58,37 @@ func (f failingHistoryAssignments) ListAssignmentsByActor(context.Context, strin
 	return nil, errors.New("assignment ledger unreachable")
 }
 
+// narrowLedgerAssignments offers the run-scoped ledger read
+// (runAssignmentHistory) on top of memAssignmentStore and records its calls;
+// its whole-history read fails, so a test sees at once if the engine skips
+// the narrow port.
+type narrowLedgerAssignments struct {
+	*memAssignmentStore
+	failNarrow bool
+	calls      [][2]string // (runID, actorID)
+	wideCalls  int
+}
+
+func (n *narrowLedgerAssignments) ListAssignmentsByRunAndActor(_ context.Context, runID, actorID string) ([]domain.Assignment, error) {
+	n.calls = append(n.calls, [2]string{runID, actorID})
+	if n.failNarrow {
+		return nil, errors.New("run-scoped ledger unreachable")
+	}
+	var out []domain.Assignment
+	for _, a := range n.assignments {
+		if a.RunID == runID && a.ActorID == actorID {
+			out = append(out, *a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AssignedAt.After(out[j].AssignedAt) })
+	return out, nil
+}
+
+func (n *narrowLedgerAssignments) ListAssignmentsByActor(context.Context, string, *domain.AssignmentStatus) ([]domain.Assignment, error) {
+	n.wideCalls++
+	return nil, errors.New("whole-history ledger read must not be used when the run-scoped port exists")
+}
+
 // cancellingAssignments records CancelActiveAssignmentsForExecution calls
 // (the optional activeAssignmentCanceller port).
 type cancellingAssignments struct {

@@ -33,8 +33,9 @@ type AssignResult struct {
 // exec update, and loads neither the run nor the workflow.
 //
 // When the installed policy gates binding (any entry check on), the engine
-// owns them: it loads the run and the pinned workflow (a step missing from
-// it is ErrNotFound, so the bind fails closed) and runs
+// owns them: it loads the run (and, under EnforceRunStatus, refuses a
+// non-active one before looking for the execution) and the pinned workflow
+// (a step missing from it is ErrNotFound, so the bind fails closed) and runs
 // checkStepEntryActor and checkStepEntryPreconditions before anything is
 // written. The effective allow-list is req.EligibleActorIDs when non-empty,
 // otherwise the stored exec.EligibleActorIDs — the list the call leaves in
@@ -57,16 +58,35 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 		return nil, domain.NewError(domain.ErrUnavailable, "step-entry policy needs a run store and a workflow loader")
 	}
 
+	// SeparationOfDuties: hold the run's bind stripe from before check 7
+	// until the bind is written, so a concurrent bind of the same actor
+	// into the same run cannot pass its own check in between (see
+	// sodBindStripes). A no-op unless the policy sets SeparationOfDuties.
+	unlock := o.lockSoDBind(req.RunID)
+	defer unlock()
+
+	// Under a gating policy the run is loaded first and its status checked
+	// before the execution lookup: a run cancelled under
+	// TerminateStepsOnCancel has no live execution left, and the caller
+	// must hear "run R is cancelled" (409), not "no active execution" (404).
+	var run *domain.Run
+	if gated {
+		r, err := o.store.GetRun(ctx, req.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("get run: %w", err)
+		}
+		if err := o.requireActiveRun(r, "assigned"); err != nil {
+			return nil, err
+		}
+		run = r
+	}
+
 	exec, err := o.findStepExecution(ctx, req.RunID, req.StepID)
 	if err != nil {
 		return nil, err
 	}
 
 	if gated {
-		run, err := o.store.GetRun(ctx, req.RunID)
-		if err != nil {
-			return nil, fmt.Errorf("get run: %w", err)
-		}
 		wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
 		if err != nil {
 			return nil, fmt.Errorf("load workflow: %w", err)
@@ -116,6 +136,7 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
+	unlock()
 
 	return &AssignResult{Exec: exec}, nil
 }
