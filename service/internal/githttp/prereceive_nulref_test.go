@@ -418,11 +418,15 @@ func TestPreReceive_Line1CapabilityListRefused(t *testing.T) {
 }
 
 // TestPreReceive_CapabilityListStricterThanGit pins the one deliberate
-// exception to "no push git would apply as written is refused" (the
-// CHANGELOG entry and Design §5 state it): a first-command capability
-// list that is not printable ASCII. git reads the list as a C string,
-// splits it on its own isspace (which includes TAB) and accepts any
-// byte >= 0x80, so it applies the pushes below; the gate refuses them
+// exception to "no push git would apply as written is newly refused"
+// (the CHANGELOG entry and Design §5 state it): a first-command
+// capability list that is not printable ASCII. It is the only place
+// INIT-023 TASK-001 makes the gate stricter than git; shallow and
+// push-cert lines were already refused before it, and still are
+// (TestPreReceive_ShallowClonePushStillRefused pins the shallow case,
+// a push from a `git clone --depth` clone). git reads the list as a C
+// string, splits it on its own isspace (which includes TAB) and accepts
+// any byte >= 0x80, so it applies the pushes below; the gate refuses them
 // as a malformed capability list (isCapabilityList), because that is
 // what lets the two token sets be proven identical. No git, JGit,
 // libgit2 or go-git client sends such a list (git rewrites a

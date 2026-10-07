@@ -105,3 +105,90 @@ func TestPreReceive_RealGitClientPushesUnchanged(t *testing.T) {
 		t.Errorf("override events = %d, want exactly 1", n)
 	}
 }
+
+// TestPreReceive_ShallowClonePushStillRefused pins the other place the
+// gate is stricter than git, one INIT-023 TASK-001 did not introduce: a
+// push from a shallow clone. git send-pack sends a `shallow <oid>`
+// pkt-line ahead of the commands whenever the pushing repository is
+// shallow, and git receive-pack applies the push when the pushed
+// commits connect to history it already has. The gate's parser takes
+// that line for a command, finds two fields and refuses the whole push
+// as `command 1: malformed ref update` — exactly as it did before this
+// task (Design §5 lists shallow among the shapes already refused; owner
+// question 2 keeps it, and docs/git-push-guide.md §5 names it as a
+// cause). The CHANGELOG and isCapabilityList's doc comment state it
+// beside the one exception this task did add.
+//
+// The same shallow clone pushes the same commit to plain git (a bare
+// copy of the repository, over the local transport) and through
+// Handler.ServeHTTP with the real git client. If git ever stops
+// applying such a push, or the gate starts admitting it (TASK-016 may
+// widen it), this test fails and those statements must change with it.
+func TestPreReceive_ShallowClonePushStillRefused(t *testing.T) {
+	repo, base, _, _ := nulRepo(t, "")
+	// A second commit on main, so a depth-1 clone has a shallow
+	// boundary (a root commit has no parents to cut off).
+	tip := nulGit(t, repo, nil, "commit-tree", base+"^{tree}", "-p", base, "-m", "second")
+	nulGit(t, repo, nil, "update-ref", "refs/heads/main", tip, base)
+	gitRepo := t.TempDir()
+	clone := exec.Command("git", "clone", "-q", "--bare", repo, gitRepo)
+	clone.Env = nulGitEnv(t)
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, out)
+	}
+
+	work := t.TempDir()
+	// --depth needs a transport; a plain path would hard-link a full
+	// local clone instead.
+	shallow := exec.Command("git", "clone", "-q", "--depth", "1", "file://"+repo, work)
+	shallow.Env = nulGitEnv(t)
+	if out, err := shallow.CombinedOutput(); err != nil {
+		t.Fatalf("shallow clone: %v %s", err, out)
+	}
+	if got := nulGit(t, work, nil, "rev-parse", "--is-shallow-repository"); got != "true" {
+		t.Fatalf("clone is not shallow (%s); the test would prove nothing", got)
+	}
+	nulGit(t, work, nil, "commit", "-q", "--allow-empty", "-m", "work")
+	head := nulGit(t, work, nil, "rev-parse", "HEAD")
+	push := func(url string) (string, error) {
+		cmd := exec.Command("git", "-C", work, "push", "--porcelain", url, "HEAD:refs/heads/feature")
+		cmd.Env = nulGitEnv(t)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	if out, err := push(gitRepo); err != nil {
+		t.Fatalf("plain git refused the shallow-clone push (the statement is no longer needed?): %v\n%s", err, out)
+	}
+	if got := nulGit(t, gitRepo, nil, "rev-parse", "refs/heads/feature"); got != head {
+		t.Fatalf("plain git: feature = %s, want %s", got, head)
+	}
+
+	h := nulHandler(t, repo)
+	em := &nulEmitter{}
+	actor := &domain.Actor{ActorID: "actor-contributor", Role: domain.RoleContributor}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := WithRepoPath(r.Context(), repo)
+		ctx = WithEvents(ctx, em)
+		ctx = domain.WithActor(ctx, actor)
+		h.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	defer srv.Close()
+
+	out, err := push(srv.URL + "/")
+	if err == nil {
+		t.Fatalf("shallow-clone push was admitted through the gate:\n%s", out)
+	}
+	if want := `branch-protection: malformed push: command 1: malformed ref update "shallow `; !strings.Contains(out, want) {
+		t.Errorf("expected %q in the refusal, got:\n%s", want, out)
+	}
+	if nulRefExists(t, repo, "refs/heads/feature") {
+		t.Error("feature was created through the gate")
+	}
+	if got := nulGit(t, repo, nil, "rev-parse", "refs/heads/main"); got != tip {
+		t.Errorf("main moved: %s -> %s", tip, got)
+	}
+	if n := em.count(); n != 0 {
+		t.Errorf("events emitted = %d, want 0", n)
+	}
+}

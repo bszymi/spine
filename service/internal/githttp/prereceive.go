@@ -203,12 +203,17 @@ func isHexOID(s string) bool {
 // this gate's token set differ from the feature list git receive-pack
 // reads — a C string split on git's isspace.
 //
-// This is the one place the gate is deliberately stricter than git:
-// receive-pack itself accepts a TAB separator or a byte >= 0x80 in the
-// list and applies the push. Refusing those costs no real client and is
-// what keeps the token-set proof simple; the exception is documented
-// (CHANGELOG) and pinned against real git by
-// TestPreReceive_CapabilityListStricterThanGit.
+// This is the one place INIT-023 TASK-001 makes the gate stricter than
+// git: receive-pack itself accepts a TAB separator or a byte >= 0x80 in
+// the list and applies the push. Refusing those costs no real client
+// and is what keeps the token-set proof simple; the exception is
+// documented (CHANGELOG) and pinned against real git by
+// TestPreReceive_CapabilityListStricterThanGit. The gate was already
+// stricter than git before this change on `shallow <oid>` and
+// `push-cert` frames, which do not have the command shape and stay
+// refused as malformed ref updates. The shallow case is a real one, a
+// push from a `git clone --depth` clone, and is pinned by
+// TestPreReceive_ShallowClonePushStillRefused.
 func isCapabilityList(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] > 0x7e {
