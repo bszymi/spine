@@ -1358,6 +1358,139 @@ the suites above were re-run anyway.
 - The probe container `s001-r2-bindmount` ran with `--rm`; no `s001-r2*` container remains.
 - The throwaway probe test file was deleted before the first round-2 commit.
 
+### Cross-task review (wave 1) (2026-10-07)
+
+The wave-1 cross-task review read this branch alongside the SMP INIT-027 EPIC-004 wave-1
+integration branch (SMP TASK-001 to TASK-003).
+- **No P1 or P2 against this branch.** None survived the review's two adversarial skeptics.
+- **Two P3 findings.** Each was checked against the code and reproduced before anything changed.
+- **Toolchain:** git 2.54.0, go 1.26.8.
+
+#### Findings
+
+1. **P3 (push-gate parity): CGI refuses a chunked receive-pack body, and neither TASK-001 artifact
+   records the difference from SMP. RECORDED and pinned, not fixed (`9ce54d4`).**
+   - **The finding is real.**
+     - `Handler.ServeHTTP` passes the stitched body to `cgi.Handler` unchanged
+       (`handler.go:281`). `net/http/cgi` refuses every chunked request body with HTTP 400
+       ("Chunked request bodies are not supported by CGI").
+     - git sends every push body larger than `http.postBuffer` (1 MiB by default) chunked.
+     - **Reproduced** through `Handler.ServeHTTP` and the real `git-http-backend`, with the real
+       client. A commit carries 2 MiB of random bytes, and no rule matches `feature-big`.
+       - `git push … HEAD:refs/heads/feature-big` printed `error: RPC failed; HTTP 400 curl 22
+         The requested URL returned error: 400`.
+       - The ref was not created.
+       - The recorded POST was chunked.
+     - **It predates this task.** `handler.go` is byte-identical to `main`.
+     - **The gate is not involved.** `prereceive` parses a chunked body's command section the same
+       way, and CGI refuses afterwards.
+     - **SMP spools** chunked bodies before CGI (`internal/customer/githttp/handler.go`,
+       `spoolBody`), so it accepts the same push. The SMP code was read; the finding's SMP-side run
+       was not repeated.
+   - **Why it is not fixed here.**
+     - AC 11 keeps `handler.go` untouched, and this task is the small wave-1 P1 fix.
+     - The port is not a copy:
+       - SMP spools into `repoPath`, which is a bare repository. Spine's served repositories are
+         non-bare (Purpose note), so the same call would put the temp file in the working tree.
+       - The cap needs a configuration knob.
+       - Its relation to `OpTimeout` needs a decision.
+
+       Those choices belong to a follow-up, not to a review fix.
+   - **What changed.**
+     - **New test: `TestHandler_ChunkedPushBodyRefusedByCGI`** (`handler_chunkedpush_test.go`).
+       It pins the limitation with the real client:
+       - the 2 MiB push is refused with HTTP 400 and not applied;
+       - it fails if git sent no chunked POST, so it cannot pass vacuously;
+       - the same push with `-c http.postBuffer=16777216` goes out as one Content-Length body over
+         1 MiB and applies, which proves the documented workaround.
+     - **Mutant.** A scratch overlay of `handler.go` that spools the body before CGI made the push
+       apply, and the pin failed with its "flip this test" message. This also shows that the
+       suggested fix works.
+     - **Platforms.** The test passes on macOS git 2.54, and in `golang:1.26-bookworm` with Linux
+       git 2.39.5 and `CI=true`.
+     - **Documentation:**
+       - `KNOWN-LIMITATIONS.md` → Remaining Limitations: a new entry with the cause, the
+         `http.postBuffer` workaround and the status;
+       - `docs/git-push-guide.md` §5: a `400 Bad Request` row in the table of status codes that are
+         not pre-receive rejections;
+       - Parity with SMP and Out of scope: one new bullet each;
+       - the PR description draft: one line.
+     - **Follow-up.** The EPIC-001 Out of scope gains it, owned by bszymi and not yet created. Its
+       design inputs:
+       - spool outside the working tree;
+       - a capped, configurable size, and the timeout;
+       - a push over 1 MiB in `scenario-git-http`;
+       - flip the pin.
+2. **P3 (Spine branch): the guard's documented premise, that reaching it is always a caller bug,
+   is false for the divergence API. Premise FIXED; status code RECORDED (`e796a16`).**
+   - **The finding is real.**
+     - `handleCreateBranch` (`handlers_divergence.go:35-46`) checks only that `branch_id` is
+       non-empty. Its permission, `divergence.create_branch`, is granted to contributors.
+     - `createBranchRecord` builds `spine/<run>/<div>/<branch_id>` (`core/divergence/service.go:221`)
+       and evaluates it (`:224`) before anything checks the bytes.
+     - **Reproduced** with a throwaway gateway test, added through `-overlay` and never written to
+       the worktree. It used the real route, the real divergence service and `branchprotect.New`.
+       - `{"branch_id":"a\u0001","start_step":"s"}` returned HTTP 500 `internal_error`:
+         `branch-protection evaluation failed: branchprotect: branch "spine/run-1/div-1/a\x01"
+         contains control byte 0x01 (malformed ref from caller)`.
+       - The ERROR log line was `branch-protection evaluation failed on divergence`.
+       - No git branch and no branch record were created.
+       - `ok-1` in the same harness returned 201.
+     - **Not a bypass.** The guard fails closed, and before this task the same request also
+       returned 500, from the git branch failure.
+   - **Fix (the premise).**
+     - **`policy.go`:**
+       - the `Policy` interface doc no longer calls a control-byte `Branch` only a caller bug. A
+         `Branch` can embed client input, so a caller that builds it from a client-supplied
+         component should validate that component first: the error cannot tell bad input from an
+         outage;
+       - the guard comment names the divergence path;
+       - the change is comment-only, and the error text is unchanged.
+     - **CHANGELOG "For embedders":** the same correction.
+     - **Design §3:** a cross-task review note under the caller list.
+   - **New test: `TestCreateExploratoryBranch_ControlByteBranchIDFailsClosed`**
+     (`core/divergence/service_controlbyte_test.go`).
+     - With the real policy, `branch_id` values carrying 0x00, 0x01, LF, 0x1f and 0x7f are
+       refused, and no git branch or record is created.
+     - A well-formed id in the same wiring succeeds.
+     - **Mutant (killed):** with the guard disabled through an overlay, all five rows create the
+       git branch and the record.
+     - The test asserts no error class, so it stays valid once the entry point validates
+       `branch_id`.
+   - **Recorded (the status code).**
+     - Returning 400 needs `branch_id` validated at the entry point. That is a fourth non-test Go
+       file, which AC 11 forbids.
+     - TASK-016 owner question 6 already owns that unvalidated `branch_id` (recommended home:
+       TASK-007, with the workflow ID grammar). It gains an addition with the 400 requirement and
+       the reproduction.
+     - TASK-001 Out of scope gains a bullet.
+
+#### Gates (cross-task review, wave 1; code at `9ce54d4`)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | exit 0 |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | exit 0, 38 ok, 0 FAIL |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | all exit 0 |
+| `go test -race -p 4 -count=1 ./service/internal/githttp/... ./core/divergence/... ./core/branchprotect/...` | all ok (5 packages) |
+| The same three packages in `golang:1.26-bookworm` (Linux git 2.39.5, go 1.26.8, `CI=true`, host module cache read-only, `--rm`) | ok (3 packages) |
+| The CI `scenario-git-http` step script, extracted from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`) against `s1f_scenario` (PostgreSQL 17.10) | step exit 0; 19/19 `TestGitHTTP_*` PASS, 0 SKIP and 0 FAIL at any depth |
+| Integration-tagged tests in the touched packages | none exist |
+| `golangci-lint run` on `core/branchprotect/...`, `core/divergence/...` and `service/internal/githttp/...`, branch vs a `main` export | 26 vs 26, identical sets (file, linter, message): 0 new. The 4 beyond round 2's 22 are `core/divergence`'s gofmt issues, which also exist on `main` (this round adds a test to that package) |
+| `golangci-lint run --enable-only=gosec` on the same packages | 0 issues |
+| `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
+| **SMP gate** (`s-T001/smp`, SMP `7d4e7cc9`, `../spine` = this worktree): `go build ./...`, `go vet ./...`, `go test -p 4 ./internal/customer/githttp/...` | exit 0, exit 0, ok. The SMP checkout was left clean |
+| `codex review --base main` on `9ce54d4` | "No actionable regressions were identified. The ref validation and fail-closed policy changes are consistent with their callers." No P1, P2 or P3, so nothing to fix or reject |
+
+**Cleanup.**
+- `s1f_scenario` was dropped.
+- The Linux test container ran with `--rm`, and no `s1f-*` container remains.
+- The overlay files (the spool mutant, the guard mutant and the gateway probe) live only in the
+  session scratchpad.
+- The CI step's `scenario-git-http.log` was moved out of the worktree.
+
 ### PR description (draft, AC 13)
 
 > **INIT-023 EPIC-001 TASK-001 — Reject NUL/control-byte and invalid refs on every pre-receive
@@ -1369,6 +1502,9 @@ the suites above were re-run anyway.
 > - `branchprotect.Policy.Evaluate` fails closed on control-byte branch names (embedder-visible
 >   contract change; see CHANGELOG).
 > - A new CI job runs the `TestGitHTTP_*` scenarios against Postgres.
+> - Records, without changing it, a pre-existing transport gap: a standalone push larger than
+>   1 MiB is sent chunked and refused by the CGI bridge with HTTP 400 (`KNOWN-LIMITATIONS.md`,
+>   with the `http.postBuffer` workaround; an EPIC-001 follow-up).
 >
 > SMP counterpart: SMP INIT-027 EPIC-004 TASK-001 (`nul-ref-push-gate`), listed in
 > `smp:/initiatives/INIT-027-pilot-readiness/epics/EPIC-004-security-remediation/epic.md` (the
