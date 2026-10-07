@@ -211,9 +211,11 @@ type DeliveryStore interface {
 	// caller can write their delivery-log rows. Rows another transaction
 	// holds locked (being claimed or written) are skipped. The webhook
 	// dispatcher uses it when a subscription cannot be delivered to at
-	// all for a while (open circuit, unreadable subscription), so its
-	// backlog stops taking claim slots from other subscriptions
-	// (INIT-023 TASK-010, audit P3-5).
+	// all for a while (open circuit, unreadable subscription), and, with
+	// ExpireBefore = Until, to dead-letter the due queue of a subscription
+	// whose deliveries can never succeed (deleted, invalid metadata,
+	// refused target URL), so neither backlog keeps taking claim slots
+	// from other subscriptions (INIT-023 TASK-010, audit P3-5).
 	HoldDueDeliveries(ctx context.Context, hold DeliveryHold) ([]DeliveryEntry, error)
 	MarkDelivered(ctx context.Context, deliveryID string) error
 	LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error

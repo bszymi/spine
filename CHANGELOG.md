@@ -32,11 +32,14 @@ release is cut — this file is a staging area.
   ahead of every newer row, so a few of them stalled every other
   subscription's deliveries for good. Every claimed delivery now ends
   `delivered`, `dead`, or scheduled in the future; the queue is claimed
-  round-robin across subscriptions; and a subscription that cannot be
-  delivered to (open circuit, unreadable subscription) has its whole queue
-  held until its next attempt, so it takes about two claim slots per probe
-  cycle however large its backlog — also when five or more subscriptions are
-  held at once.
+  round-robin across subscriptions; a subscription that cannot be
+  delivered to for a while (open circuit, unreadable subscription) has its
+  whole due queue held until its next attempt, so it takes about two claim
+  slots per probe cycle however large its backlog; and a subscription whose
+  deliveries can never succeed (deleted, invalid metadata, refused target
+  URL, unusable TLS or signing configuration) has its whole due queue
+  dead-lettered at once, so it takes one claim slot — also when five or
+  more such subscriptions have backlogs at once.
 - **No address oracle in webhook target validation (P3-25).** Create, update,
   the subscription test, `last_error` and the delivery log no longer reveal a
   resolved IP address, an address class for a DNS name, Spine's own source
@@ -57,24 +60,30 @@ release is cut — this file is a staging area.
 - **Delivery outcomes.** Non-retryable failures go `dead` on their first
   attempt (they used to be `failed` and retried forever). `408` and `425` are
   now retryable, like `429` and 5xx. Rows whose subscription was deleted, whose
-  metadata is invalid, whose target URL is refused or whose TLS configuration
-  cannot be built go `dead` at once, each with a delivery-log row giving the
-  reason. HTTP-status outcomes keep the exact text `HTTP <code>`.
+  metadata is invalid, whose target URL is refused or whose TLS or signing
+  configuration cannot be used go `dead` at once — the first such row
+  dead-letters every other row of the subscription that is due by the next
+  poll in the same step — each with a delivery-log row giving the reason.
+  HTTP-status outcomes keep the exact text `HTTP <code>`.
 - **Unreadable subscription.** A transient failure to read the subscription
   (database, decryption) used to re-try the delivery on every poll until the
   fault cleared. It is now retried on the backoff schedule and then every
   minute, recorded as `resolve subscription: temporarily unavailable` (the
   database error goes to the operator log only), still counts its attempts,
   and is delivered automatically once the subscription can be read; it goes
-  `dead` only after 24 hours from when it was queued
-  (`resolve subscription: temporarily unavailable: held longer than 24h0m0s`).
-  The subscription's other due deliveries wait for the same retry without
-  spending attempts.
+  `dead` only once it has been held for 24 hours
+  (`resolve subscription: temporarily unavailable: held longer than 24h0m0s`),
+  counted from the first failed read of the current run of failures, or from
+  when it was queued if that is later — a delivery queued days earlier is
+  not dead-lettered by a fault that has just begun. The subscription's other
+  due deliveries wait for the same retry without spending attempts.
 - **Circuit holds.** A delivery held by an open circuit is deferred to the next
   probe time without consuming an attempt (it used to burn one per poll),
   together with the rest of its subscription's due queue, and goes `dead`
-  after 24 hours from when it was queued
-  (`circuit open: held longer than 24h0m0s`).
+  once it has been held for 24 hours (`circuit open: held longer than
+  24h0m0s`), counted from when the circuit opened, or from when it was
+  queued if that is later. The start of a hold is kept in memory by the
+  dispatcher process, so a restart starts the 24 hours again.
 - **Claim order.** Due deliveries are claimed round-robin across subscriptions,
   oldest first within each; global cross-subscription FIFO was never
   documented. A single-subscription queue is claimed in the old order.
@@ -104,17 +113,23 @@ release is cut — this file is a staging area.
   `store.DeliveryHold`); `*store.PostgresStore` implements both, with no
   schema change. Types that embed the `store.Store` / `store.DeliveryStore`
   interface compile unchanged; a type that implements `DeliveryStore` method
-  by method must add them.
+  by method must add them (the SMP v2 contract test's `contractQueue` fake
+  needs `HoldDueDeliveries`; a no-op is enough for it).
 - **Shared behaviour at the first bump past this change, whatever the
   opt-in** (SMP owner: SMP TASK-006 R1/R2 must land first):
   - a 4xx from the receiver dead-letters the delivery on its first attempt;
   - orphaned, malformed and URL-rejected rows go `dead`, and so does a row
     whose per-subscription TLS configuration cannot be built (it used to be
-    `failed` and retried on every poll);
+    `failed` and retried on every poll); the first such row of a
+    subscription dead-letters the subscription's whole due queue in one
+    statement (every row due by the next poll), not one row per claim;
   - a row held by an open circuit, or whose subscription cannot be read, goes
-    `dead` once it has been queued for `DispatcherConfig.MaxCircuitHold`
-    (zero, the default, means 24 hours); before, held rows never became
-    terminal from holding alone;
+    `dead` once it has been held for `DispatcherConfig.MaxCircuitHold`
+    (zero, the default, means 24 hours), counted from the later of its
+    `created_at` and the start of the hold on that dispatcher process — the
+    circuit opening, or the first failed read of the current run — which is
+    kept in memory and starts again after a restart; before, held rows never
+    became terminal from holding alone;
   - a transient failure to read the subscription (database, decryption, for
     example a replica without its encryption key) is retried with backoff and
     then every minute instead of on every poll, still counts attempts (so
@@ -136,7 +151,7 @@ release is cut — this file is a staging area.
   `BootstrapConfig.SignatureVersion` (empty — the zero value — leaves the
   stored metadata alone), `DispatcherConfig.MaxCircuitHold` and
   `DefaultMaxCircuitHold`, `CircuitBreaker.Acquire` / `Permit` /
-  `NextAttemptAt`, `RedactURL`, `RedactError`, `BlockedAddressError`,
+  `NextAttemptAt` / `OpenedAt`, `RedactURL`, `RedactError`, `BlockedAddressError`,
   `ErrBlockedDestination`, `DialError`.
 - **`TargetValidator.CheckAddr`** now returns a `*BlockedAddressError`
   (text without the address) and `SafeDialContext` returns

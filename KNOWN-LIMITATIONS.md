@@ -46,6 +46,18 @@ This document tracks known gaps and deferred functionality.
   example one started without its encryption key), holds that subscription's due queue in the
   database until its next attempt, up to 60 s per cycle; rows that arrive between holds are
   still claimable by the healthy replica. A shared (database-backed) breaker would remove this.
+- **The start of a hold is kept in memory.** `MaxCircuitHold` (24 h) counts from when the
+  dispatcher process saw the circuit open, or first failed to read the subscription, so a
+  restart (or a replica that has just started) starts it again. A subscription that stays
+  unreadable while its dispatcher restarts more often than every 24 hours never has its rows
+  dead-lettered by the cap: they stay `failed` (at the attempt budget, so SMP's run banner
+  shows them) and are retried every minute. A "held since" column (a schema change) would
+  remove this.
+- **A refused target URL dead-letters the whole due queue.** A permanent verdict on a
+  subscription (deleted, invalid metadata, refused URL, unusable TLS or signing configuration)
+  dead-letters every delivery of it that is due, not only the one being tried. A host name is
+  refused on what it resolves to at that moment, so a DNS answer that points at a non-public
+  address even briefly costs the subscription its due deliveries; they stay replayable.
 - **Re-holding a very large backlog is one large write per probe cycle.** When an open circuit's
   probe time arrives, the whole held backlog becomes due and the first hold after the probe
   re-schedules it in one statement: about 70 ms for 2 000 rows and 1.6 s for 100 000 rows on a

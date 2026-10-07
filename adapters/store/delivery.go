@@ -54,7 +54,10 @@ type DeliveryHold struct {
 	// ExpireBefore, when non-zero, dead-letters instead of holding every
 	// due row created before it, with ExpiredReason as last_error. This is
 	// how an age cap on holds (the webhook dispatcher's MaxCircuitHold)
-	// reaches rows the caller never claimed.
+	// reaches rows the caller never claimed. With ExpireBefore = Until the
+	// call dead-letters the subscription's whole due queue: the webhook
+	// dispatcher does that on a permanent verdict on the subscription
+	// (deleted, invalid metadata, refused target URL).
 	ExpireBefore  time.Time
 	ExpiredReason string
 }

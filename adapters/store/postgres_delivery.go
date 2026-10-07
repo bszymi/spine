@@ -38,8 +38,10 @@ func (s *PostgresStore) EnqueueDelivery(ctx context.Context, entry *DeliveryEntr
 // bound the case of limit or more subscriptions each holding an old
 // backlog: their oldest rows would take every slot. The dispatcher closes
 // that by holding the whole due backlog of a subscription it cannot
-// deliver to (HoldDueDeliveries), so such a backlog is not claimable at
-// all between holds. A single-subscription queue — SMP's shape, one
+// deliver to for a while, and by dead-lettering the whole due backlog of
+// one it can never deliver to (both through HoldDueDeliveries), so such a
+// backlog is not claimable at all between holds. A single-subscription
+// queue — SMP's shape, one
 // subscription per runtime DB — is claimed in exactly the old order.
 //
 // Postgres refuses FOR UPDATE beside a window function at the same query
@@ -131,7 +133,9 @@ func (s *PostgresStore) DeferDelivery(ctx context.Context, deliveryID, reason st
 // and every other subscription starved (INIT-023 TASK-010 review round
 // 1). Holding the whole due backlog at once leaves such a subscription
 // with nothing claimable until the hold ends, so it takes about one slot
-// per hold, however many rows it has.
+// per hold, however many rows it has. Called with ExpireBefore = Until it
+// dead-letters the whole due backlog instead, which the dispatcher does
+// for a subscription whose deliveries can never succeed (review round 2).
 //
 // The candidate rows are locked FOR UPDATE SKIP LOCKED in a CTE: a row a
 // dispatcher is claiming (or another hold is writing) is skipped, never
