@@ -124,8 +124,9 @@ release is cut — this file is a staging area.
     the sync stays in `error`; run `POST /api/v1/system/rebuild`.
   - Deployments with `artifacts_dir` set should run `POST /api/v1/system/rebuild` once to repair
     rows the old incremental handling corrupted.
-  - A full rebuild now discovers before it wipes, so a git failure no longer leaves an empty
-    projection.
+  - A full rebuild now discovers and plans workflow rows before it wipes, so a git failure in
+    discovery no longer leaves an empty projection, and a workflow file it cannot read keeps its
+    previous row (quarantined) until the next sync retries the file.
 
 ### For embedders
 
