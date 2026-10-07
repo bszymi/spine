@@ -1,6 +1,7 @@
 package workflow_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/bszymi/spine/core/domain"
@@ -303,5 +304,38 @@ func assertStepTransition(t *testing.T, r *workflow.StepTransitionResult, err er
 	}
 	if r.ToStatus != expected {
 		t.Errorf("expected %s, got %s", expected, r.ToStatus)
+	}
+}
+
+// ── run.terminated (INIT-023 TASK-007) ──
+
+// A run that is cancelled or failed closes its live executions as skipped;
+// terminal executions refuse the trigger.
+func TestRunTerminatedClosesLiveSteps(t *testing.T) {
+	for _, from := range []domain.StepExecutionStatus{
+		domain.StepStatusWaiting, domain.StepStatusAssigned,
+		domain.StepStatusInProgress, domain.StepStatusBlocked,
+	} {
+		r, err := workflow.EvaluateStepTransition(from, workflow.StepTransitionRequest{
+			Trigger: workflow.StepTriggerRunTerminated,
+		})
+		assertStepTransition(t, r, err, domain.StepStatusSkipped)
+		if r.FromStatus != from || r.Trigger != workflow.StepTriggerRunTerminated {
+			t.Errorf("from %s: result metadata = %+v", from, r)
+		}
+	}
+}
+
+func TestRunTerminatedRefusedOnTerminalSteps(t *testing.T) {
+	for _, from := range []domain.StepExecutionStatus{
+		domain.StepStatusCompleted, domain.StepStatusFailed, domain.StepStatusSkipped,
+	} {
+		_, err := workflow.EvaluateStepTransition(from, workflow.StepTransitionRequest{
+			Trigger: workflow.StepTriggerRunTerminated,
+		})
+		var se *domain.SpineError
+		if !errors.As(err, &se) || se.Code != domain.ErrConflict {
+			t.Errorf("run.terminated from %s: expected ErrConflict, got %v", from, err)
+		}
 	}
 }
