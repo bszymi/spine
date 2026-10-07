@@ -3,8 +3,8 @@ package delivery
 import (
 	"context"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // StoreSubscriptionLister implements SubscriptionLister backed by the database.
@@ -51,14 +51,19 @@ func (s *StoreSubscriptionResolver) GetSubscription(ctx context.Context, subscri
 	if err != nil {
 		return nil, err
 	}
-	tlsCfg, err := parseSubscriptionTLS(sub.Metadata)
+	// One parse for everything the dispatcher reads from metadata (tls
+	// block, signature_version). A failure wraps
+	// ErrInvalidSubscriptionMetadata, which the dispatcher treats as a
+	// permanent configuration error.
+	md, err := parseSubscriptionMetadata(sub.Metadata)
 	if err != nil {
 		return nil, err
 	}
 	return &SubscriptionDetail{
-		SubscriptionID: sub.SubscriptionID,
-		TargetURL:      sub.TargetURL,
-		SigningSecret:  sub.SigningSecret,
-		TLS:            tlsCfg,
+		SubscriptionID:   sub.SubscriptionID,
+		TargetURL:        sub.TargetURL,
+		SigningSecret:    sub.SigningSecret,
+		SignatureVersion: md.SignatureVersion,
+		TLS:              md.TLS,
 	}, nil
 }

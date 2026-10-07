@@ -3,17 +3,17 @@ package delivery
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/observe"
 )
 
 // SubscriptionDetail contains the delivery target info for a subscription.
@@ -21,6 +21,12 @@ type SubscriptionDetail struct {
 	SubscriptionID string
 	TargetURL      string
 	SigningSecret  string
+	// SignatureVersion selects the signature format: "" or "v1" (the
+	// body-only HMAC, default) or "v2" (timestamp + nonce + body, see
+	// signature.go). StoreSubscriptionResolver fills it from
+	// metadata.signature_version. Any other value is refused at send
+	// time and the delivery is dead-lettered (fail closed).
+	SignatureVersion string
 	// TLS is optional per-subscription TLS hardening. When non-nil,
 	// the dispatcher builds a dedicated http.Client honoring the
 	// SPKI pin and/or custom CA bundle.
@@ -56,6 +62,13 @@ type WebhookDispatcher struct {
 	// deliver() can re-validate the persisted target_url before
 	// issuing the request.
 	targets *TargetValidator
+
+	// now and rand are the clock and entropy source for signing and
+	// scheduling. Production uses time.Now and crypto/rand.Reader; they
+	// are fields so tests can pin the v2 timestamp / nonce and drive a
+	// simulated clock.
+	now  func() time.Time
+	rand io.Reader
 }
 
 type tlsClientEntry struct {
@@ -102,7 +115,18 @@ func NewWebhookDispatcher(st store.DeliveryStore, resolver SubscriptionResolver,
 		breaker:      NewCircuitBreaker(),
 		tlsClients:   make(map[string]*tlsClientEntry),
 		targets:      cfg.Targets,
+		now:          time.Now,
+		rand:         rand.Reader,
 	}
+}
+
+// clock returns the dispatcher's current time (time.Now unless a test
+// replaced it).
+func (d *WebhookDispatcher) clock() time.Time {
+	if d.now == nil {
+		return time.Now()
+	}
+	return d.now()
 }
 
 // clientFor returns an http.Client tailored to the subscription's TLS
@@ -189,6 +213,16 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 
 	sub, err := d.resolver.GetSubscription(ctx, entry.SubscriptionID)
 	if err != nil {
+		if errors.Is(err, ErrInvalidSubscriptionMetadata) {
+			// Permanent configuration error (unknown signature_version,
+			// malformed metadata): no retry can fix it, so the row is
+			// dead-lettered instead of being re-claimed forever. The
+			// parse reason names keys and values the operator wrote,
+			// never infrastructure detail.
+			log.Warn("subscription metadata invalid; dead-lettering delivery", "error", err.Error())
+			d.deadLetter(ctx, entry, err.Error())
+			return
+		}
 		log.Error("failed to resolve subscription", "error", err)
 		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", err.Error(), nil)
 		return
@@ -215,12 +249,6 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	req.Header.Set("X-Spine-Event", entry.EventType)
 	req.Header.Set("X-Spine-Delivery", entry.DeliveryID)
 
-	// HMAC signing
-	if sub.SigningSecret != "" {
-		sig := computeHMAC(entry.Payload, sub.SigningSecret)
-		req.Header.Set("X-Spine-Signature", "sha256="+sig)
-	}
-
 	// Execute. Per-subscription TLS (pinned SPKI / custom CA) — if
 	// configured — uses a dedicated client cached by subscription ID.
 	client, err := d.clientFor(sub)
@@ -231,6 +259,26 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		d.handleFailure(ctx, entry, tlsLogID, 0, 0, false, err.Error(), nil)
 		return
 	}
+
+	// Sign last, immediately before the send, so a v2 timestamp is send
+	// time and every attempt (retry, operator replay, SMP redrive)
+	// carries a fresh nonce. Nothing about the signature is persisted.
+	// The body signed is entry.Payload, the exact bytes the request
+	// carries.
+	if err := signRequest(req.Header, sub.SignatureVersion, sub.SigningSecret, entry.Payload, d.clock(), d.rand); err != nil {
+		if errors.Is(err, errV2WithoutSecret) || errors.Is(err, ErrInvalidSubscriptionMetadata) {
+			// Permanent: never send unsigned, never fall back to v1.
+			log.Warn("delivery cannot be signed as configured; dead-lettering", "error", err.Error())
+			d.deadLetter(ctx, entry, err.Error())
+			return
+		}
+		// Entropy read failure: transient, ride the backoff.
+		log.Error("failed to sign delivery", "error", err.Error())
+		signLogID, _ := generateDeliveryID()
+		d.handleFailure(ctx, entry, signLogID, 0, 0, true, "sign delivery: "+err.Error(), nil)
+		return
+	}
+
 	start := time.Now()
 	resp, err := client.Do(req)
 	durationMs := int(time.Since(start).Milliseconds())
@@ -277,6 +325,30 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	})
 }
 
+// deadLetter is the one terminal write for failures that never produced
+// an HTTP outcome (configuration errors, a deleted subscription, a
+// rejected target, an over-long circuit hold). It writes an
+// event_delivery_log row carrying the reason, so the delivery-history
+// API always explains a dead row, then moves the row to 'dead' — the
+// existing terminal status (no schema change), which retention reaps and
+// the replay endpoint can re-queue. reason must already be safe to show
+// to a subscription reader (no URL path/query, no resolved address, no
+// infrastructure error text).
+func (d *WebhookDispatcher) deadLetter(ctx context.Context, entry store.DeliveryEntry, reason string) {
+	logID, _ := generateDeliveryID()
+	zero := 0
+	_ = d.store.LogDeliveryAttempt(ctx, &store.DeliveryLogEntry{
+		LogID:          logID,
+		DeliveryID:     entry.DeliveryID,
+		SubscriptionID: entry.SubscriptionID,
+		EventID:        entry.EventID,
+		DurationMs:     &zero,
+		Error:          reason,
+		CreatedAt:      d.clock().UTC(),
+	})
+	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "dead", reason, nil)
+}
+
 // handleFailure processes a delivery failure, deciding whether to retry or dead-letter.
 func (d *WebhookDispatcher) handleFailure(ctx context.Context, entry store.DeliveryEntry, logID string, durationMs int, statusCode int, retryable bool, errMsg string, resp *http.Response) {
 	log := observe.Logger(ctx)
@@ -321,9 +393,9 @@ func (d *WebhookDispatcher) handleFailure(ctx context.Context, entry store.Deliv
 	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", errMsg, &retryAt)
 }
 
-// computeHMAC returns the hex-encoded HMAC-SHA256 of the payload.
+// computeHMAC returns the hex-encoded HMAC-SHA256 of the payload — the
+// v1 signature without its "sha256=" prefix. Kept as a thin wrapper over
+// SignV1 so there is one MAC implementation.
 func computeHMAC(payload []byte, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	return hex.EncodeToString(mac.Sum(nil))
+	return strings.TrimPrefix(SignV1(secret, payload), "sha256=")
 }

@@ -2,11 +2,13 @@ package delivery
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // InternalSubscriptionName is the well-known name for the SMP bootstrap subscription.
@@ -17,6 +19,32 @@ type BootstrapConfig struct {
 	EventURL    string // SMP_EVENT_URL
 	WorkspaceID string // SMP_WORKSPACE_ID (optional)
 	Token       string // SMP_INTERNAL_TOKEN (used as signing secret)
+
+	// SignatureVersion opts the internal subscription into a webhook
+	// signature version (INIT-023 TASK-010): "v1" or "v2". Empty — the
+	// zero value every existing caller passes — leaves the stored
+	// metadata exactly as it is (a fresh row gets today's
+	// {"source":"bootstrap"}), so behaviour is unchanged until the
+	// embedder opts in. Any other value is an error.
+	SignatureVersion string
+}
+
+// bootstrapMetadata is the metadata of a freshly created internal
+// subscription. Field order is the JSON key order.
+type bootstrapMetadata struct {
+	Source           string `json:"source"`
+	SignatureVersion string `json:"signature_version,omitempty"`
+}
+
+// freshBootstrapMetadata renders {"source":"bootstrap"} plus, when
+// version is set, "signature_version".
+func freshBootstrapMetadata(version string) []byte {
+	b, err := json.Marshal(bootstrapMetadata{Source: "bootstrap", SignatureVersion: version})
+	if err != nil {
+		// Two plain strings cannot fail to marshal.
+		panic("marshal bootstrap metadata: " + err.Error())
+	}
+	return b
 }
 
 // BootstrapInternalSubscription creates or updates the internal SMP
@@ -25,6 +53,11 @@ type BootstrapConfig struct {
 // TASK-010).
 func BootstrapInternalSubscription(ctx context.Context, st store.SubscriptionStore, cfg BootstrapConfig) error {
 	log := observe.Logger(ctx)
+
+	if cfg.SignatureVersion != "" && cfg.SignatureVersion != SignatureVersionV1 && cfg.SignatureVersion != SignatureVersionV2 {
+		return fmt.Errorf("bootstrap internal subscription: signature version must be %q or %q, got %q",
+			SignatureVersionV1, SignatureVersionV2, cfg.SignatureVersion)
+	}
 
 	// Check if subscription already exists by listing and matching name.
 	subs, err := st.ListSubscriptions(ctx, "")
@@ -64,6 +97,18 @@ func BootstrapInternalSubscription(ctx context.Context, st store.SubscriptionSto
 			existing.Status != "active" ||
 			!stringSlicesEqual(existing.EventTypes, eventTypes)
 
+		// Signature-version opt-in (INIT-023 TASK-010). Only when the
+		// caller names a version: an empty cfg.SignatureVersion never
+		// reads or rewrites the metadata. A row whose metadata does not
+		// parse counts as drifted, so the rewrite below heals it.
+		rewriteMetadata := false
+		if cfg.SignatureVersion != "" {
+			if cur, err := SignatureVersionOf(existing.Metadata); err != nil || cur != cfg.SignatureVersion {
+				rewriteMetadata = true
+				changed = true
+			}
+		}
+
 		if !changed {
 			log.Info("internal subscription already configured", "subscription_id", existing.SubscriptionID)
 			return nil
@@ -74,6 +119,21 @@ func BootstrapInternalSubscription(ctx context.Context, st store.SubscriptionSto
 		existing.WorkspaceID = cfg.WorkspaceID
 		existing.EventTypes = eventTypes
 		existing.Status = "active"
+		if rewriteMetadata {
+			md, err := WithSignatureVersion(existing.Metadata, cfg.SignatureVersion)
+			if err != nil {
+				// The stored metadata is not a JSON object, so nothing in
+				// it is readable (the dispatcher dead-letters every
+				// delivery on it). Replace it with the canonical bootstrap
+				// metadata rather than returning the error: SMP's
+				// pre-dispatch ensure blocks a workspace's step dispatch on
+				// any bootstrap error, and this row would never self-heal.
+				log.Warn("internal subscription metadata unparseable; replacing it",
+					"subscription_id", existing.SubscriptionID, "error", err.Error())
+				md = freshBootstrapMetadata(cfg.SignatureVersion)
+			}
+			existing.Metadata = md
+		}
 		if err := st.UpdateSubscription(ctx, existing); err != nil {
 			return err
 		}
@@ -97,7 +157,7 @@ func BootstrapInternalSubscription(ctx context.Context, st store.SubscriptionSto
 		EventTypes:     eventTypes,
 		SigningSecret:  cfg.Token,
 		Status:         "active",
-		Metadata:       []byte(`{"source":"bootstrap"}`),
+		Metadata:       freshBootstrapMetadata(cfg.SignatureVersion),
 		CreatedBy:      "system",
 		CreatedAt:      now,
 		UpdatedAt:      now,
