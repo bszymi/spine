@@ -9,14 +9,14 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/auth"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
-	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
