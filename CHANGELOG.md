@@ -114,6 +114,9 @@ release is cut — this file is a staging area.
 - **Keys rotate.** `SPINE_SECRET_PREVIOUS_KEYS` adds decrypt-only keys to the
   ring; the sweep re-keys every row to the primary key, after which the old
   key can be removed. Previously rotation was a manual decrypt-and-re-save.
+  With overlapping processes, rotate in two rollouts: first add the new key
+  to every ring as a previous key, then promote it (a process without the
+  new key refuses rows re-keyed to it, and its webhook fan-out fails).
 
 ### Added
 
@@ -231,7 +234,8 @@ release is cut — this file is a staging area.
   `429`, so those events are lost. Deploy every replica with
   `SPINE_SECRET_ENVELOPE_MODE=downgrade` first, then, once no old replica
   remains, switch to `migrate`.
-- **Rollback below this release:** set `downgrade`, verify every workspace
+- **Rollback below this release:** set `downgrade` (from `strict` with
+  overlapping processes, via a `migrate` rollout first), verify every workspace
   (`spine secrets reencrypt [--all-workspaces]` with
   `SPINE_SECRET_ENVELOPE_MODE=downgrade`, or the platform-binding log
   check), confirm every workspace is clean, then roll back. A rollback

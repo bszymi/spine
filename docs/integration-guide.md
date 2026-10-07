@@ -194,19 +194,20 @@ Every `spine secrets reencrypt` run below uses the same `SPINE_SECRET_ENCRYPTION
 2. Once no old replica remains, switch to `migrate`. The first clean `migrate` sweep is each workspace's conversion-log baseline: it converts the `enc:v1` rows `downgrade` wrote, as expected.
 3. Later, switch to `strict` as in step 3 of the one-replica procedure.
 
-**Key rotation.**
+**Key rotation.** Every process that reads a workspace must hold every key its rows may be sealed under. A process whose ring lacks K2 refuses a row sealed under K2 (`ErrUnknownKeyID`), and the webhook fan-out then fails for that workspace: events are not enqueued and queued deliveries fail permanently. The first process that runs with K2 as primary re-keys rows to K2 as soon as it opens a workspace, so **K2 must be in every process's ring before any process makes it primary**.
 
 1. Generate K2 (`openssl rand -base64 32`).
-2. Set `SPINE_SECRET_ENCRYPTION_KEY=K2` and `SPINE_SECRET_PREVIOUS_KEYS=K1`, and restart. The sweep re-keys every row to K2 (in shared mode, as each workspace loads).
-3. Verify every workspace (above): every workspace clean under `primary_key_id=kid(K2)`.
-4. If K1 ever sealed `enc:v1` values and the deployment is not yet `strict`, review the conversion log against its baseline and `rotate-secret` every flagged subscription **before** dropping K1 (see *When P3-10 Is Closed*): a plant converted earlier was re-keyed to K2 in step 2 and survives the drop.
-5. Remove K1 from `SPINE_SECRET_PREVIOUS_KEYS`. This also makes every `enc:v1` value written under K1 unopenable — the second way to close P3-10 for future plants.
-6. Keep K1 in escrow for as long as a backup taken before step 2 may be restored. To restore such a backup, put K1 back in the ring and run `migrate` until the sweep is clean.
-7. Rotating a subscription's *webhook signing secret* is a separate operation: `POST /subscriptions/{id}/rotate-secret`.
+2. **Distribute K2 (read-only).** Set `SPINE_SECRET_PREVIOUS_KEYS=K2` (K1 stays `SPINE_SECRET_ENCRYPTION_KEY`) and roll it out to **every** process, including any job that runs `spine secrets reencrypt`. Nothing is re-keyed yet. Skip this step only if old and new processes never run at the same time (a stop-the-world restart; with one replica, Kubernetes `strategy: Recreate`).
+3. **Promote K2.** Once no process without K2 remains, set `SPINE_SECRET_ENCRYPTION_KEY=K2` and `SPINE_SECRET_PREVIOUS_KEYS=K1`, and roll it out. The sweep re-keys every row to K2 (in shared mode, as each workspace loads). While this rollout overlaps step 2's processes, a process from step 2 may re-key a row back to K1 when it sweeps; both rings read both keys, so nothing fails, and the rows settle on K2 once the rollout completes.
+4. Verify every workspace (above): every workspace clean under `primary_key_id=kid(K2)`.
+5. If K1 ever sealed `enc:v1` values and the deployment is not yet `strict`, review the conversion log against its baseline and `rotate-secret` every flagged subscription **before** dropping K1 (see *When P3-10 Is Closed*): a plant converted earlier was re-keyed to K2 in step 3 and survives the drop.
+6. Remove K1 from `SPINE_SECRET_PREVIOUS_KEYS` and roll it out. This also makes every `enc:v1` value written under K1 unopenable — the second way to close P3-10 for future plants.
+7. Keep K1 in escrow for as long as a backup taken before step 3 may be restored. To restore such a backup, put K1 back in the ring and run `migrate` until the sweep is clean.
+8. Rotating a subscription's *webhook signing secret* is a separate operation: `POST /subscriptions/{id}/rotate-secret`.
 
 **Rollback below this release.**
 
-1. Set `SPINE_SECRET_ENVELOPE_MODE=downgrade` and restart.
+1. Set `SPINE_SECRET_ENVELOPE_MODE=downgrade` and restart. If the deployment runs `strict` and old and new processes can overlap, first roll out `migrate` everywhere: a `strict` process refuses the `enc:v1` rows a `downgrade` process writes and sweeps to.
 2. Verify every workspace (above) with `SPINE_SECRET_ENVELOPE_MODE=downgrade`: every workspace reports `current` equal to its number of non-empty rows, and `refused=0`.
 3. Roll back the binary.
 

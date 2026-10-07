@@ -667,6 +667,47 @@ func TestP310_RotationRekeysToPrimary(t *testing.T) {
 	}
 }
 
+// codex review (round 3): the key-rotation runbook's two rollouts. A
+// process whose ring lacks K2 refuses a row the first K2-primary process
+// re-keyed (so K2 must reach every ring before it is promoted); once K2 is
+// in every ring, processes of the "distribute" phase (K1 primary, K2
+// previous) and the "promote" phase (K2 primary, K1 previous) read each
+// other's rows, even while their sweeps re-key rows back and forth.
+func TestP310_TwoPhaseRotationOverlapReads(t *testing.T) {
+	k1, k2 := testKey(t), testKey(t)
+	db := newMemSubs()
+	old := boundStore(t, db, testRing(t, k1), "ws-X", SecretEnvelopeMigrate)
+	mustCreate(t, old, "sub-1", "whsec_1")
+
+	promoted := boundStore(t, db, testRing(t, k2, k1), "ws-X", SecretEnvelopeMigrate)
+	if rep, err := promoted.ReencryptSubscriptionSecrets(ctxBG); err != nil || rep.Rekeyed != 1 {
+		t.Fatalf("promote sweep: %+v %v", rep, err)
+	}
+	if _, err := old.GetSubscription(ctxBG, "sub-1"); !errors.Is(err, spinecrypto.ErrUnknownKeyID) {
+		t.Fatalf("a K1-only process must refuse a K2 row (why K2 is distributed first): %v", err)
+	}
+
+	distributed := boundStore(t, db, testRing(t, k1, k2), "ws-X", SecretEnvelopeMigrate)
+	for i := 0; i < 2; i++ {
+		for name, st := range map[string]*PostgresStore{"distributed": distributed, "promoted": promoted} {
+			if got, err := st.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_1" {
+				t.Fatalf("round %d: %s process cannot read the row: %v", i, name, err)
+			}
+		}
+		// The distribute-phase sweep re-keys back to K1; the promote-phase
+		// sweep re-keys to K2 again. Both stay readable throughout.
+		if rep, err := distributed.ReencryptSubscriptionSecrets(ctxBG); err != nil || !rep.Clean() {
+			t.Fatalf("round %d: distribute sweep: %+v %v", i, rep, err)
+		}
+		if rep, err := promoted.ReencryptSubscriptionSecrets(ctxBG); err != nil || !rep.Clean() {
+			t.Fatalf("round %d: promote sweep: %+v %v", i, rep, err)
+		}
+	}
+	if !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v2:"+testRing(t, k2).PrimaryKeyID()+":") {
+		t.Fatal("rows do not settle on K2 once only promote-phase processes sweep")
+	}
+}
+
 func TestP310_DowngradeRewritesV2ToV1(t *testing.T) {
 	c := testRing(t, testKey(t))
 	db := newMemSubs()
