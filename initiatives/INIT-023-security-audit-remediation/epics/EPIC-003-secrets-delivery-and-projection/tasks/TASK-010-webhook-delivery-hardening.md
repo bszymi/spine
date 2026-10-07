@@ -230,6 +230,23 @@ The design-phase prototype and regression tests are under
 >   log row's `error` stay exactly `HTTP <code>` (`webhook_dispatcher.go:257`). SMP TASK-006's
 >   rotation requeue matches `LastError == "HTTP 401"` and pins it in its AC12.
 
+> **Review-round-1 note (2026-10-07) — I5 and I7 as built did not hold in full.**
+> - **I5(d) extends past connect.** A read or write failure after a successful connect (a reset,
+>   a broken pipe, a reset during the TLS handshake) is a `*net.OpError` reading
+>   `read tcp <spine-ip:port>-><resolved-ip:port>: …`. `SafeDialContext` now returns a wrapped
+>   connection whose errors name the caller's `host:port` instead, and `RedactError` re-renders
+>   any other `*net.OpError` in the chain. The dialer's Debug line keeps the address for the
+>   operator, as §4 intends.
+> - **I7 restated.** The fair claim alone bounds the delay only while fewer than `concurrency`
+>   (5) subscriptions are held: each held subscription re-deferred only the row it was handed, so
+>   it always had a due row older than any healthy row, and five of them took every slot.
+>   Amended: a subscription the dispatcher cannot deliver to (open circuit, unreadable
+>   subscription) has its **whole due queue** held in one attempt-free statement
+>   (`DeliveryStore.HoldDueDeliveries`), so it costs about two claim slots per probe cycle
+>   however many rows it holds. A healthy subscription's due row waits at most one poll while
+>   fewer than `concurrency` subscriptions are held, and at most `ceil(2 × held / concurrency)`
+>   polls otherwise.
+
 ### 1. P3-11 — opt-in v2 signatures (`adapters/delivery/signature.go`, new)
 
 **Opt-in.** The opt-in is a per-subscription key in the existing
@@ -432,6 +449,26 @@ WHERE delivery_id = $1 AND status = 'delivering'
 >     a 5xx would then be re-chosen as the probe forever (it is the oldest), and it would keep
 >     the circuit open for every other row until `MaxCircuitHold`.
 >   - The SMP consequence is in §7 B2.
+
+> **Review-round-1 note (2026-10-07) — two rows of the outcome table changed.**
+> - **Circuit holds the row.** Besides deferring the claimed row, the dispatcher holds the
+>   subscription's other due rows (pending/failed, `next_retry_at` NULL or before the probe
+>   time) to the same instant through the new `DeliveryStore.HoldDueDeliveries`, without
+>   touching `attempt_count`; rows of the subscription older than `MaxCircuitHold` are
+>   dead-lettered in the same statement and get a delivery-log row each. This closes the I7 gap
+>   above. Decision 16 had rejected a bulk deferral *instead of* the fair claim; both are now
+>   kept, because neither alone covers both shapes.
+> - **Resolver: any other error (DB, decrypt).** Not `dead` at the budget any more. The row
+>   still records an attempt per failure and follows the backoff (1, 2, 4, 8 s), so once the
+>   budget is spent it is `failed` with `attempt_count` at the budget — what SMP's
+>   stuck-dispatch banner shows — but it is then retried every minute and delivered as soon as
+>   the subscription can be read again; it goes `dead` only after `MaxCircuitHold`
+>   (`resolve subscription: temporarily unavailable: held longer than 24h0m0s`). The rest of the
+>   subscription's due queue is held to the same retry instant. Reason: before this task such
+>   rows were retried every poll and delivered once the fault cleared; dead-lettering them after
+>   ~15 s turned a fixable operator-side fault (an SMP replica without its encryption key, a
+>   TASK-009 key-ring rollout) into lost dispatches that each need a manual redrive, a
+>   shared-behaviour change Rule 4 did not sanction (cross-repo rule 2).
 
 #### 2a. Fair claim (design-check addition, 2026-10-06; closes the residual P3-5 starvation)
 
@@ -739,6 +776,23 @@ whatever the opt-in:**
 >   Answering 503 for the skew case is an option for TASK-006: the status code shown to a
 >   rejected attacker replay does not matter.
 > - **B6 (new) — fair claim (§2a).** No effect on SMP: there is one subscription per runtime DB.
+> - **B7 (review round 1) — whole-queue holds.** An open circuit, or an unreadable subscription,
+>   holds the subscription's whole due queue in the runtime DB until the next attempt. With
+>   several SMP replicas the breaker is per replica, so a replica-local fault (its circuit open,
+>   or no encryption key) delays `smp-internal`'s due rows for the other replicas too, by up to
+>   the 60 s recovery time per cycle; rows that arrive between holds stay claimable at once.
+> - **B8 (review round 1) — unreadable subscription.** A transient resolver failure is retried
+>   with backoff and then every minute (today: every poll), still counts attempts (so the run
+>   banner shows it once `attempt_count` reaches the budget, as today), and is delivered
+>   automatically when the fault clears; it goes `dead` only after 24 h. R2 needs no extension.
+> - **B9 (review round 1) — listed in Rule 4.** A TLS-config error dead-letters (today: `failed`,
+>   retried every poll), and the 24 h `MaxCircuitHold` cap makes held rows terminal (today they
+>   never became terminal from holding alone). Both, with B7 and B8, are now in the initiative's
+>   Rule 4 TASK-010 row and in the CHANGELOG's "For embedders" list.
+> - **R5 contract test (review round 1).** Its `contractQueue` fake implements
+>   `store.DeliveryStore` method by method, so the committed copy must add
+>   `HoldDueDeliveries` (a no-op `return nil, nil` is enough for the contract). SMP's own tree
+>   implements no `DeliveryStore` and is unaffected.
 > - **Line reference.** The periodic re-align tick is `worker.go:407` (SMP). `:508` is
 >   `ensureSigningSecret`'s definition. The blocking pre-dispatch ensure is `:375-390`.
 > - **R2 and R3 status in SMP TASK-006** (`batch7/E4-TASK-006-…md`).
@@ -1067,11 +1121,20 @@ The design works without answers, using the stated defaults.
    - No held row's `attempt_count` exceeds `MaxRetriesDomain`.
    - Mutation: reverting the fake and `ClaimDeliveries` to `ORDER BY created_at` fails it at
      N = 400. (The prototype as designed starves all 900 polls at N = 400.)
+   - *Review-round-1 addition (2026-10-07):* the test also runs 4×100, 5×61, 5×80, 6×60, 10×40
+     and 10×400 held subscriptions × rows. Every healthy row is delivered within one poll below
+     `concurrency` held subscriptions and within `ceil(2 × held / 5)` polls otherwise. Controls:
+     FIFO claim with per-row deferral starves at 1×400, and the fair claim with per-row deferral
+     starves at 5×61 (0/900, the reviewers' reproduction). A real-Postgres scenario with 6×100
+     held rows delivers a new row within 3 polls.
 10. **Orphans and resolver errors.**
     - `TestOrphanedRowsDeadLetter`: a `not_found` resolver for five rows ⇒ all five are `dead`,
       the healthy row is delivered, and the resolver is called at most six times over 100 polls.
     - A transient resolver error schedules backoff (`next_retry_at` in the future) and is `dead`
       once `MaxRetriesDomain` is reached.
+      *Review-round-1 amendment (2026-10-07):* it is not `dead` at the budget; past it the row
+      stays `failed` with `attempt_count` ≥ the budget, is retried every minute, is delivered once
+      the resolver recovers, and goes `dead` only after `MaxCircuitHold` (§2 review-round-1 note).
     - Invalid metadata ⇒ `dead`.
     - Mutation: retrying `not_found` fails this AC.
     - *Design-check addition (2026-10-06):* a transient resolver error carries the text
@@ -1168,6 +1231,12 @@ The design works without answers, using the stated defaults.
       The prototype as designed leaks `dial tcp 127.0.0.1:<port>`
       (`TestDC_DialErrorLeaksResolvedAddress`). Mutation: returning the dialer's `lastErr` fails
       this AC.
+    - *Review-round-1 addition (2026-10-07):* a target that accepts the connection, reads the
+      request and resets it gives no `127.0.0.1` / `[::1]` in the validator client's own error,
+      `last_error`, the delivery log, the non-Debug operator log lines (default and
+      per-subscription TLS client) or the gateway subscription-test JSON and log line; the error
+      names `localhost:<port>`, is still a `*net.OpError` and unwraps to `ECONNRESET`.
+      Mutation: returning the raw connection fails it.
 
 **Redaction (P3-26)**
 
@@ -1625,23 +1694,26 @@ lists TASK-010): SMP TASK-006 R1 and R2 must be on SMP `main` first.
 ### OQ2: one-off scrub of rows written before this task
 
 Optional; run per runtime database by an operator. It redacts the path/query/fragment of any
-http(s) URL quoted in the error text, and the resolved / resolver addresses of the old dial and DNS
-errors (checked on PostgreSQL 17 against sample texts):
+http(s) URL quoted in the error text, and the resolved / source / resolver addresses of the old
+dial, post-connect (`read|write tcp <a>-><b>: `, added in review round 1) and DNS errors
+(checked on PostgreSQL 17 against sample texts, including an IPv6 `write tcp [fd00::5]:…->…`):
 
 ```sql
 UPDATE runtime.event_delivery_queue
-SET last_error = regexp_replace(regexp_replace(regexp_replace(last_error,
+SET last_error = regexp_replace(regexp_replace(regexp_replace(regexp_replace(last_error,
       '(https?://[^/?#"[:space:]]+)[/?#][^"[:space:]]*', '\1/[redacted]', 'g'),
       '(dial tcp[46]? )[^[:space:]]+?(: )', '\1[address]\2', 'g'),
+      '((read|write) tcp[46]? )[^[:space:]]+->[^[:space:]]+?(: )', '\1[address]\3', 'g'),
       '(lookup [^[:space:]]+ on )[^[:space:]]+?(: )', '\1[resolver]\2', 'g')
-WHERE last_error ~ 'https?://|dial tcp|lookup .* on ';
+WHERE last_error ~ 'https?://|dial tcp|(read|write) tcp|lookup .* on ';
 
 UPDATE runtime.event_delivery_log
-SET error = regexp_replace(regexp_replace(regexp_replace(error,
+SET error = regexp_replace(regexp_replace(regexp_replace(regexp_replace(error,
       '(https?://[^/?#"[:space:]]+)[/?#][^"[:space:]]*', '\1/[redacted]', 'g'),
       '(dial tcp[46]? )[^[:space:]]+?(: )', '\1[address]\2', 'g'),
+      '((read|write) tcp[46]? )[^[:space:]]+->[^[:space:]]+?(: )', '\1[address]\3', 'g'),
       '(lookup [^[:space:]]+ on )[^[:space:]]+?(: )', '\1[resolver]\2', 'g')
-WHERE error ~ 'https?://|dial tcp|lookup .* on ';
+WHERE error ~ 'https?://|dial tcp|(read|write) tcp|lookup .* on ';
 ```
 
 ### Follow-ups recorded (not taken)
@@ -1650,3 +1722,123 @@ Signed test pings; not following redirects on deliveries (a 307 forwards a fresh
 nonce); a capped response drain; operator replay resetting `attempt_count`; batch-barrier
 head-of-line blocking (per-subscription in-flight caps); a `claimed_at` column (schema); NAT64
 network-specific prefixes (egress policy). All are in `KNOWN-LIMITATIONS.md` → "Webhook Delivery".
+
+### Review round 1 (2026-10-07)
+
+Three reviewers (correctness and SMP compatibility, adversarial security, completeness and
+tests) sent ten findings and ten acceptance-criteria gap notes, with heavy overlap. Deduplicated,
+they are seven issues. Each was checked against the code before anything changed. All seven are
+real. Fix commits: `3e1b634` (queue), `3d2a584` (addresses), `7e195c9` (metadata), `ee05da1`
+(documentation). The design-text amendments are marked *Review-round-1 note / addition /
+amendment* in I5/I7, §2, §7 and ACs 9a, 10 and 16.
+
+**Per-finding disposition**
+
+| # | Finding (severity, reporters) | Verdict | Disposition |
+|---|---|---|---|
+| 1 | Fair claim starves when `concurrency` or more subscriptions are held (P2, two reviewers; AC gaps I7/AC9a ×3) | Real. Reproduced with the regression fake: fair claim plus per-row deferral at 5×61 held rows delivers 0/900. That run is now a control subtest. | **Fixed** in `3e1b634`. New `DeliveryStore.HoldDueDeliveries` holds the subscription's whole due queue in one attempt-free statement (CTE with `FOR UPDATE SKIP LOCKED`, no schema change). Rows past `MaxCircuitHold` are dead-lettered in the same statement, each with a delivery-log row. Measured lag: 0 polls at 1–4 held subscriptions, 2 at 5–6, 4 at 10. The asserted bound is 1 below `concurrency` and `ceil(2 × held / 5)` otherwise. Guide and CHANGELOG overclaims are corrected. |
+| 2 | Post-connect `*net.OpError` names the resolved and source addresses (P2, three reviewers; AC gaps I5/AC16 ×4) | Real. Reproduced here: `read tcp 127.0.0.1:52912->127.0.0.1:52908: read: connection reset by peer`. | **Fixed** in `3d2a584`. `SafeDialContext` returns `safeConn`, which re-renders Read/Write/Close `*net.OpError`s with no `Source` and with `Addr` = the caller's `host:port`. Type, Op, inner error and `Timeout()` are kept. `RedactError` adds a backstop for any other address-bearing `*net.OpError`. Tests cover the validator client directly, the dispatcher (default and TLS client) and the gateway test endpoint. |
+| 3 | Transient resolver failure dead at the budget (~15 s) is an unsanctioned SMP behaviour change (P2) | Real. Rule 4's TASK-010 row did not list it, and cross-repo rule 2 forbids it. | **Fixed** in `3e1b634`, using a variant of the reviewer's first option. The row is not terminal before `MaxCircuitHold`: it is retried on backoff, then every minute, and delivered automatically once readable. Attempts are still counted (deviation R1-2), so SMP's banner predicate (`failed AND attempt_count >= budget`) shows it as it does today. The rest of the subscription's due queue is held to the same retry instant. AC10 is amended, R2 needs no extension, and §7 B8 records it. |
+| 4 | CHANGELOG "For embedders" list incomplete (P3) | Real. Items (a)–(d) were all missing. | **Fixed.** (a)–(c) are listed in `ee05da1`, along with the whole-queue hold and its multi-replica effect, `HoldDueDeliveries`/`DeliveryHold` and the post-connect error shape. The initiative's Rule 4 row now lists them too. (d) is fixed in code (`3d2a584`) rather than documented as a break: `resolveError` omits the resolver address from its text but unwraps to the `*net.DNSError` and delegates `Timeout`/`Temporary`, so `errors.As` and `url.Error.Timeout()` work again. |
+| 5 | `signature_version` derived from the version key only (P3, two reviewers) | Real. A base64 pin from the old docs was reported `"v1"` while every delivery went dead. | **Fixed** in `7e195c9`. The value is `"invalid"` whenever `ValidateSubscriptionMetadata` fails. Gateway cases cover a base64 pin, a non-hex v2 pin, an empty CA bundle and an ambiguous `tls` key. |
+| 6 | `tls` block decoded case-insensitively through a struct, so its meaning depended on jsonb key order (P3) | Real. jsonb sorts keys shorter first, then bytewise, so `"TLS"` comes before `"tls"` and the gateway and the dispatcher read different values. | **Fixed** in `7e195c9`. The block is decoded from the single key that folds to `tls`. Two or more such keys, at the top level or for a field inside the block, are refused in either order. A single variant in any case is still accepted (deviation R1-3). |
+| 7 | AC11: `make test-integration` red (completeness gap) | Not a defect of this task. | `TestRunModeDatabaseDefault` fails identically on `main` `ee3c249`: exported with `git archive main`, run on a fresh database, same `GetRun: … cannot scan NULL into *string` at `postgres_integration_test.go:702`. The rest of `adapters/store` integration passes with `-race` on a fresh database (`-skip '^TestRunModeDatabaseDefault$'`), and `adapters/delivery` integration passes in full. AC19 scopes `make test-integration` to those two packages. |
+| — | SMP provisioning-gated suites never run (completeness gap) | Gap closed. | Run against a throwaway `pgvector/pgvector:pg18` container (local image, data on tmpfs, removed afterwards), provisioned exactly like SMP CI's integration job: roles `platform`, `platform_audit_retention` and `smp_prov` (NOSUPERUSER CREATEROLE CREATEDB), `smp_it` with `vector`, platform and spine-runtime migrations applied. Results are below. |
+| — | "Verified, no gap" note (AC7, P3-12, I3, AC15) | Acknowledged. | No action. |
+
+**Additional compatibility point found during the gate.** The design-phase AC7 contract test
+(SMP TASK-006 R5 will commit it) has a `contractQueue` fake that implements
+`store.DeliveryStore` method by method. It must add `HoldDueDeliveries`; a no-op is enough. A
+scratch copy with that one method passes against this branch (below). SMP's own tree implements
+no `DeliveryStore` and builds unchanged. This is recorded in §7.
+
+**Deviations in this round, with reasons**
+
+- **R1-1. `HoldDueDeliveries` is a required `DeliveryStore` method**, as `DeferDelivery` is
+  (Decision 8). An optional interface would let a fake, or an embedder's store, silently fall
+  back to per-row deferral and hide the I7 regression. The cost is that the contract-test fake
+  above needs one method.
+- **R1-2. The unreadable-subscription retry counts attempts.** The reviewer suggested consuming
+  none. Counting keeps today's SMP visibility: before this task the hot loop drove
+  `attempt_count` past the budget, and the run banner showed it. With no attempts consumed, the
+  row would be invisible for 24 h. As today, an endpoint failure after the fault clears then
+  dead-letters it. The guide says so.
+- **R1-3. A single case variant of `tls` (or of a field inside it) is still accepted.** The
+  reviewer suggested refusing every non-exact spelling, as for `signature_version`. Rows stored
+  as `{"TLS":…}` keep their pre-task meaning. Only ambiguity changes meaning by key order, and
+  ambiguity is refused.
+- **R1-4. The whole-queue hold also covers the resolver path.** Without it, five unreadable
+  subscriptions with backlogs would starve the queue the same way as finding 1.
+- **R1-5. A held `failed` row keeps its `last_error`** (its last real outcome, for example
+  `HTTP 503`). A held `pending` row gets the hold reason. `attempt_count` is never touched.
+- **R1-6. Multi-replica effect (B7).** The breaker is per process. A replica-local fault holds
+  the subscription's due queue for every replica, for up to 60 s per cycle. This is recorded in
+  `KNOWN-LIMITATIONS.md` and in the CHANGELOG embedder list. SMP has one subscription per runtime
+  database, so the starvation fix itself is neutral for SMP.
+- **R1-7. The initiative's Rule 4 TASK-010 row is edited** (one table row in `initiative.md`).
+  Rule 4 is the authoritative list of what SMP inherits. Owner and ordering are unchanged.
+
+**Hold-statement cost** (PostgreSQL 17.10, rolled-back transactions, load average ≈ 12): a
+first hold of 2 000 due rows of one subscription, beside 100 000 delivered rows of it and
+98 000 other claimable rows, takes 67 ms. A repeat hold in the same cycle (nothing newly due)
+takes 17 ms. A 100 000-row held backlog takes 1.6 s, once per probe cycle; per-row deferral
+would instead do 100 000 single-row writes per cycle. Recorded in `KNOWN-LIMITATIONS.md`.
+
+**Mutation results (round 1).** All are killed by the named tests. Each was a textual mutation
+that was then restored. SQL mutations ran against real Postgres.
+
+| Mutation | Killed by |
+|---|---|
+| `holdBacklog` made a no-op | `TestHeldBacklogDoesNotStarveOtherSubscriptions`, `TestUnreadableSubscriptionHoldsBacklog`, `TestCircuitHoldExpiresUnclaimedBacklog` |
+| circuit path skips the backlog hold | `TestHeldBacklogDoesNotStarveOtherSubscriptions`, `TestCircuitHoldExpiresUnclaimedBacklog` |
+| resolver path skips the backlog hold | `TestUnreadableSubscriptionHoldsBacklog` |
+| resolver row dead at the budget (the pre-round-1 rule) | `TestTransientResolverErrorBacksOffWithFixedText` |
+| bulk-expired rows get no delivery-log row | `TestCircuitHoldExpiresUnclaimedBacklog` |
+| no `ExpireBefore` (no bulk expiry) | `TestCircuitHoldExpiresUnclaimedBacklog` |
+| Postgres `HoldDueDeliveries` a no-op | `TestQueuePG_HoldDueDeliveries`, `TestQueuePG_HeldBacklogsOfManySubscriptionsDoNotStarve` |
+| SQL: `FOR UPDATE` without `SKIP LOCKED` (blocks on a locked row) | `TestQueuePG_HoldDueDeliveries` |
+| SQL: `failed` rows' `last_error` overwritten | `TestQueuePG_HoldDueDeliveries` |
+| SQL: `attempt_count` bumped | `TestQueuePG_HoldDueDeliveries`, `TestQueuePG_HeldBacklogsOfManySubscriptionsDoNotStarve` |
+| SQL: rows scheduled at or after `Until` also held | `TestQueuePG_HoldDueDeliveries` |
+| SQL: subscription filter dropped | `TestQueuePG_HoldDueDeliveries`, `TestQueuePG_HeldBacklogsOfManySubscriptionsDoNotStarve` |
+| SQL: nothing expired | `TestQueuePG_HoldDueDeliveries` |
+| `SafeDialContext` returns the raw connection | `TestPostConnectErrorOmitsAddresses` (the validator client's own error; the backstop protects the dispatcher path) |
+| `RedactError` `*net.OpError` backstop removed | `TestRedactErrorRewritesOpErrorAddresses` |
+| `resolveError` renders the inner `*net.DNSError` | `TestDNSFailureOmitsResolverAddress`, `TestResolveErrorKeepsDNSErrorInChain` |
+| `tls` decoded through the old whole-document struct | `TestTLSBlockDecodingIsOrderIndependent` |
+| `signature_version` from the version key only | `TestSubscriptionUpdate_MetadataValidationAndSignatureVersion` |
+
+**Gates (round 1; code at `ee05da1`, and the closing commit changes only this file)**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | OK |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK ("library surface is sound") |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | PASS (38 packages ok) |
+| `go test -race -p 4 -count=1 ./adapters/delivery/ ./adapters/store/ ./service/internal/gateway/ ./service/cmd/spine/` | PASS |
+| `SPINE_TEST_DATABASE_URL=…/s010_delivery go test -tags integration -race -count=1 ./adapters/delivery/` | PASS (all `TestQueuePG_*`, including the two new tests) |
+| same on `s010_gw`: `./service/internal/gateway/ ./service/cmd/spine/` | PASS |
+| same on a fresh `s010_store`: `./adapters/store/` | only `TestRunModeDatabaseDefault` fails, which is pre-existing on `main` (row 7 above); with `-race -skip '^TestRunModeDatabaseDefault$'`: PASS |
+| `SPINE_TEST_DATABASE_URL=…/s010_scenario go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` | 19 PASS, 0 SKIP |
+| `golangci-lint run --allow-parallel-runners` on the four touched packages | 125 issues against 136 on `main` (exported copy); 0 new (diffed ignoring line numbers); 11 fixed |
+| same with `--build-tags integration` on `adapters/delivery`, `adapters/store` | 29 against 37; 0 new |
+| `golangci-lint run --enable-only=gosec` on the four packages | 0 issues |
+| `gofmt -l $(git diff --name-only main -- '*.go')` | empty |
+| `codex review --base main` (after the four fix commits) | "No actionable regressions were identified" |
+
+All `s010_*` databases (`s010_delivery`, `s010_store`, `s010_gw`, `s010_scenario`,
+`s010_storemain`, `s010_perf`) were dropped afterwards.
+
+**SMP compatibility gate (round 1).** The SMP checkout is `/Users/bartoszszymichowski/42sid/i23/s-T010/smp`
+at `7d4e7cc9`, with `../spine` = this worktree. Its tree was clean afterwards.
+
+| Command | Result |
+|---|---|
+| `go build ./...` | OK |
+| `go vet ./...`; `-tags integration`; `-tags scenario`; `-tags faultinject` | all clean |
+| `go test -p 4 -count=1` on the 29 packages whose non-test deps include `adapters/delivery` or `adapters/store`, plus the 7 more whose tests import them (`brain`, `clarity`, `notification`, `provenance`, `spineruntime`, `opshealth`, `recovery`) | all PASS (`workspace/faultharness` has no tests) |
+| AC7 contract test via `-overlay` (scratch copy plus `HoldDueDeliveries` on its fake) | `TestSpineV2Contract_DispatcherToEventReceiver` PASS, `TestSpineV2Contract_V1DefaultStillAccepted` PASS |
+| Container as above; `TEST_SPINE_DB=…/spine_runtime_it TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=smp_prov@…/postgres go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -timeout 20m -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (CI's "Spine runtime integration suites", now with the provisioning DSN, so spinecore's dispatch-store tests and `TestRedrive_RedeliversThroughSpineDispatcher` run) | PASS: 1539 tests, 1 allowed skip |
+| `TEST_DATABASE_URL=TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=… go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -allow-skip 'TEST_MINIO_' -- -race -count=1 -timeout 20m -p 4` on `eventdelivery` (all `TestWorker_Integration_*`, including `RequiresCipherToDecrypt` on the changed resolver path), `stepevents`, `workspace`, `workspace/workspacetest`, `projectionwriter`, `spineruntime`, `brain`, `notification`, `provenance`, `opshealth`, `recovery` | PASS: 998 tests, 7 allowed skips (MinIO and live AWS only; the live dev stack's MinIO was deliberately not used) |
