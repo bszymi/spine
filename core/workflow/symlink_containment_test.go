@@ -286,3 +286,28 @@ func TestWorkflowUpdate_CommitFailure_RestoresBytes(t *testing.T) {
 		t.Fatalf("original not restored: %v", err)
 	}
 }
+
+// The same when the failing hook deleted the workflow file (codex review,
+// round 2): the rollback re-creates it through the tree instead of failing
+// on the missing leaf. A guard: on 61994fe os.WriteFile re-created it.
+func TestWorkflowUpdate_CommitFailure_HookDeletesFile_Restored(t *testing.T) {
+	svc, repo := newSvc(t)
+	if _, err := svc.Create(ctxWithActor(), "wf-b", fmtYAML("wf-b", "1.0")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nrm workflows/wf-b.yaml\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Update(ctxWithActor(), "wf-b", fmtYAML("wf-b", "2.0")); err == nil {
+		t.Fatal("expected the commit to fail")
+	}
+	b, err := os.ReadFile(filepath.Join(repo, "workflows", "wf-b.yaml"))
+	if err != nil || string(b) != fmtYAML("wf-b", "1.0") {
+		t.Fatalf("original not restored after the hook deleted it: %v", err)
+	}
+	out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("working tree not clean after rollback:\n%s", out)
+	}
+}

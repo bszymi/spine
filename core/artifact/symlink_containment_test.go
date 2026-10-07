@@ -508,6 +508,87 @@ func TestUpdate_CommitFailure_RestoresBytesAndMode(t *testing.T) {
 	}
 }
 
+// An Update whose commit fails because a pre-commit hook deleted the file
+// (or its directory) still restores the original (codex review, round 2).
+// A guard: on 61994fe the rollback's os.WriteFile re-created the file (the
+// 0644 rows pass there; it dropped the exec bit of the 0755 row and could
+// not re-create a removed directory). The restore goes through the tree's
+// confined create-or-replace, so the original mode comes back too.
+func TestUpdate_CommitFailure_HookDeletesFile_Restored(t *testing.T) {
+	for _, tc := range []struct {
+		name, rel, hook string
+		mode            os.FileMode
+	}{
+		{"file deleted", "governance/tool.md", "rm governance/tool.md\n", 0o644},
+		{"exec file deleted keeps its mode", "governance/tool.md", "rm governance/tool.md\n", 0o755},
+		{"directory removed", "governance/sub/tool.md", "rm -r governance/sub\n", 0o644},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewTempRepo(t)
+			p := filepath.Join(repo, filepath.FromSlash(tc.rel))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(f5Doc), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			f5Git(t, repo, "add", "-A")
+			f5Git(t, repo, "commit", "-q", "-m", "doc")
+			installPreCommit(t, repo, tc.hook+"exit 1\n")
+
+			_, err := f5OpenSvc(repo).Update(f5Ctx(""), tc.rel, strings.Replace(f5Doc, "Attacker Controlled", "Changed", 2))
+			f5RequireCode(t, err, domain.ErrGit)
+			b, readErr := os.ReadFile(p)
+			if readErr != nil || string(b) != f5Doc {
+				t.Fatalf("original not restored after the hook deleted it: %v", readErr)
+			}
+			if fi, _ := os.Lstat(p); !fi.Mode().IsRegular() || fi.Mode().Perm()&0o100 != tc.mode&0o100 {
+				t.Errorf("restored mode = %v, want the exec bit of %v", fi.Mode(), tc.mode)
+			}
+			out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").CombinedOutput()
+			if strings.TrimSpace(string(out)) != "" {
+				t.Errorf("working tree not clean after rollback:\n%s", out)
+			}
+		})
+	}
+}
+
+// The update restore re-creates a deleted file but never writes through a
+// link: a failing hook that swaps the updated file for a symlink to a file
+// outside the tree leaves the target untouched, and the rollback reports
+// the refusal instead (logged). On 61994fe the rollback's os.WriteFile
+// followed the link and wrote the original bytes over the target.
+func TestF5_Update_CommitFailure_HookPlantsLink_NotFollowed(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim.md")
+	if err := os.WriteFile(victim, []byte("victim"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(repo, "governance", "tool.md")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(f5Doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f5Git(t, repo, "add", "-A")
+	f5Git(t, repo, "commit", "-q", "-m", "doc")
+	installPreCommit(t, repo, "rm governance/tool.md\nln -s '"+victim+"' governance/tool.md\nexit 1\n")
+
+	_, err := f5OpenSvc(repo).Update(f5Ctx(""), "governance/tool.md", strings.Replace(f5Doc, "Attacker Controlled", "Changed", 2))
+	f5RequireCode(t, err, domain.ErrGit)
+	if b, _ := os.ReadFile(victim); string(b) != "victim" {
+		t.Fatal("the rollback wrote through a link a hook planted")
+	}
+	if fi, lerr := os.Lstat(p); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("want the planted link left in place, not replaced or followed: %v", lerr)
+	}
+}
+
 // AC15(c): an Update whose worktree file is over the read cap is refused
 // with ErrPayloadTooLarge (413), the status TASK-003 uses for an oversized
 // git blob, and the file is left alone.

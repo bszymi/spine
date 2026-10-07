@@ -39,7 +39,10 @@ release is cut — this file is a staging area.
   file and a rename (`sed -i`, formatters), as long as the path is still
   untracked in HEAD, so a retry fails the same way instead of with
   `already_exists`. A file that is tracked in HEAD by then (a concurrent
-  writer committed it) is kept; before, the rollback removed it by name.
+  writer committed it) is kept; before, the rollback removed it by name. A
+  failed update restores the original bytes and mode, re-creating the file
+  (and its directory) if a failing hook deleted it; a symlink a hook put in
+  its place is refused, not written through as before.
 
 ### Changed
 

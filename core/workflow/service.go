@@ -163,14 +163,17 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 
 	var prior *domain.WorkflowDefinition
 	var originalBody []byte
+	var originalMode fs.FileMode
 	var undo *worktreefs.Undo
 	if op.requireExists {
-		if _, err := tree.Lstat(rel); errors.Is(err, fs.ErrNotExist) {
+		fi, err := tree.Lstat(rel)
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("workflow not found: %s", path))
 		} else if err != nil {
 			return nil, worktreeError(ctx, path, "check", err)
 		}
+		originalMode = fi.Mode().Perm()
 		// One confined, capped read serves both the prior-version check
 		// and the rollback copy.
 		original, readErr := tree.ReadFile(rel)
@@ -209,12 +212,14 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		Author:   workflowAuthor(ctx),
 	})
 	if err != nil {
-		// Restore the original bytes and mode (update), or remove the file
-		// and every directory this call created (create) — including a file
-		// a failing hook put in its place by a rename, when the path is
-		// still untracked in HEAD (claimUntracked).
+		// Restore the original bytes and mode (update; WriteFile also
+		// re-creates a file a failing hook deleted, and still refuses a
+		// link in its place), or remove the file and every directory this
+		// call created (create) — including a file a failing hook put in
+		// its place by a rename, when the path is still untracked in HEAD
+		// (claimUntracked).
 		if op.requireExists {
-			_ = tree.Replace(rel, originalBody)
+			_ = tree.WriteFile(rel, originalBody, originalMode)
 		} else {
 			_ = undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, rel))
 		}

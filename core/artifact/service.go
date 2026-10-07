@@ -277,14 +277,17 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	defer func() { _ = tree.Close() }()
 
 	var originalContent []byte
+	var originalMode fs.FileMode
 	var undo *worktreefs.Undo
 	if op.requireExists {
-		if _, err := tree.Lstat(repoPath); errors.Is(err, fs.ErrNotExist) {
+		fi, err := tree.Lstat(repoPath)
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("artifact not found: %s", path))
 		} else if err != nil {
 			return nil, worktreeError(ctx, path, "check", err)
 		}
+		originalMode = fi.Mode().Perm()
 		originalContent, err = tree.ReadFile(repoPath)
 		if err != nil {
 			return nil, worktreeError(ctx, path, "read original", err)
@@ -326,13 +329,16 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	})
 	if err != nil {
 		// Rollback. StageAndCommit already unstaged on failure, so we only
-		// have to restore file state here: the original bytes (and mode,
-		// which Replace keeps) for an update; the file and every directory
-		// this call created for a create — including a file a failing hook
-		// put in its place by a rename, when the path is still untracked
-		// in HEAD (claimUntracked).
+		// have to restore file state here: the original bytes and mode for
+		// an update; the file and every directory this call created for a
+		// create — including a file a failing hook put in its place by a
+		// rename, when the path is still untracked in HEAD
+		// (claimUntracked). The update restore is WriteFile, not Replace:
+		// a failing hook may have deleted the file (or its directory), and
+		// WriteFile re-creates it O_EXCL with the original mode, while a
+		// link put in its place is still refused, never followed.
 		if op.requireExists {
-			if rbErr := tree.Replace(repoPath, originalContent); rbErr != nil {
+			if rbErr := tree.WriteFile(repoPath, originalContent, originalMode); rbErr != nil {
 				log.Warn("artifact rollback: restore failed", "path", path, "error", rbErr)
 			}
 		} else if rbErr := undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, repoPath, path)); rbErr != nil {
