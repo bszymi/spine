@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bszymi/spine/service/internal/cli"
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/service/internal/cli"
 	"github.com/spf13/cobra"
 )
 
