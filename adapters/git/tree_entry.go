@@ -47,7 +47,7 @@ type TreeEntryTyper interface {
 var _ TreeEntryTyper = (*CLIClient)(nil)
 
 // TreeEntryType implements TreeEntryTyper with
-// `git --literal-pathspecs ls-tree -z --full-tree <ref> -- <path>`:
+// `git --literal-pathspecs ls-tree -z --full-tree --end-of-options <rev> <path>`:
 //   - ls-tree reads only tree objects, so a gitlink whose commit is not
 //     in this repository, or a blob that is missing, is still typed;
 //   - --literal-pathspecs keeps `*`, `?` and `:(magic)` in a committed
@@ -56,20 +56,30 @@ var _ TreeEntryTyper = (*CLIClient)(nil)
 //   - --full-tree makes the path repository-relative wherever the
 //     command runs.
 //
+// ref is a Rev-class argument of the CLIClient ref grammar (INIT-023
+// TASK-002): it is validated before git starts, a name that is an
+// existing branch is looked up exactly and reaches git as its object id
+// (so a pushed refs/tags/<branch> cannot stand in for the branch), and it
+// follows --end-of-options. Nothing follows the path: after
+// --end-of-options ls-tree takes every argument as a non-option, so a
+// "--" there would be read as a second pathspec (git 2.39 and 2.54), and
+// a path that starts with "-" is already a path.
+//
 // git normalises the pathspec (a `..` component, for example), so only
 // an output record whose path is byte-equal to the requested one counts;
 // anything else is "no entry at that path".
 func (c *CLIClient) TreeEntryType(ctx context.Context, ref, path string) (string, error) {
-	if ref == "" {
-		return "", errors.New("tree entry: empty ref")
-	}
-	if err := ValidateRef(ref); err != nil {
-		return "", fmt.Errorf("tree entry: %w", err)
+	if err := checkRev("tree_entry", "ref", ref); err != nil {
+		return "", err
 	}
 	if path == "" {
 		return "", errors.New("tree entry: empty path")
 	}
-	output, err := c.run(ctx, "tree_entry", "--literal-pathspecs", "ls-tree", "-z", "--full-tree", ref, "--", path)
+	rev, err := c.resolveRev(ctx, "tree_entry", "ref", ref)
+	if err != nil {
+		return "", err
+	}
+	output, err := c.run(ctx, "tree_entry", "--literal-pathspecs", "ls-tree", "-z", "--full-tree", "--end-of-options", rev, path)
 	if err != nil {
 		return "", err
 	}

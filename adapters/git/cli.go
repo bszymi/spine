@@ -29,9 +29,9 @@ import (
 //	Commit  MergeOpts.Source; CreateBranch base        a full object id; HEAD (base   the object id or HEAD; a branch
 //	                                                   only); otherwise Branch        as its exact object id; as a
 //	                                                                                  CreateBranch base, with ^{commit}
-//	Rev     ReadFile/ListFiles/RefSHA ref; Diff        non-empty and ValidateRef      branch-first: an existing branch
-//	        from/to; MergeBase a/b; LogOpts.Since                                     as its exact object id, anything
-//	                                                                                  else unchanged (see resolveRev)
+//	Rev     ReadFile/ListFiles/RefSHA/TreeEntryType    non-empty and ValidateRef      branch-first: an existing branch
+//	        ref; Diff from/to; MergeBase a/b;                                         as its exact object id, anything
+//	        LogOpts.Since                                                             else unchanged (see resolveRev)
 //	Remote  remote of Push, PushBranch,                ^[A-Za-z0-9][A-Za-z0-9._-]*    unchanged
 //	        DeleteRemoteBranch                         (/[A-Za-z0-9._-]+)*, no ".."
 //
@@ -67,6 +67,7 @@ import (
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
 //	ReadFile            show [eoo] <ref'>:<path> --
 //	ListFiles           ls-tree -r --name-only [eoo] <ref'>
+//	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
 //	RefSHA              rev-parse --verify [eoo] <ref'>   (no call at all for an existing branch)
 //	MergeBase           merge-base [eoo] <a'> <b'>
 //	Push, PushBranch    push [eoo] <remote> <oid>^{commit}:refs/heads/<n>
@@ -84,8 +85,8 @@ import (
 // reason. A doubly-qualified ref on the REMOTE
 // (refs/heads/refs/heads/<n> and siblings) still breaks every client's
 // push to <n> ("dst refspec ... matches more than one"); no argv can
-// avoid that, and push admission must refuse such names
-// (KNOWN-LIMITATIONS.md, "Git ref arguments").
+// avoid that, and push admission refuses to create or update such names
+// (core/refadmit rule 0b; KNOWN-LIMITATIONS.md, "Git ref arguments").
 //
 // The client requires git >= MinGitVersion (2.30); hosts call
 // CheckGitVersion at startup.
