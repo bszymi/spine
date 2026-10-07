@@ -2,12 +2,12 @@
 id: TASK-010
 type: Task
 title: "Opt-in v2 webhook signatures matching SMP's receiver, plus delivery-queue, breaker, SSRF and redaction fixes"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
@@ -1349,3 +1349,304 @@ addition (2026-10-06)* in place. Probes are in `_work/task010/designcheck/`:
 
 ## Implementation Notes
 
+*(Implementation, 2026-10-07. Branch `init/INIT-023-TASK-010-webhook-delivery-hardening`, cut
+from Spine local `main` `ee3c249` (`61994fe` + the INIT-023 scaffold + the merged TASK-001). Run on
+macOS, go 1.26.5. The local PostgreSQL is 17.10 (pgvector); CI uses 18 — no pg18-only feature is
+used. The orchestrator closes the task after merge.)*
+
+### Orchestrator rulings and owner-question defaults
+
+Recorded as **defaults pending the owner**:
+
+- **Scope.** Audit P3-11 (Spine half), P3-12, P3-5, P3-25, P3-26. v2 is opt-in per subscription in
+  `event_subscriptions.metadata` jsonb; no schema change (`git diff main...HEAD -- migrations` is
+  empty).
+- **OQ1** — `MaxCircuitHold` is 24 h measured from `created_at`: `DefaultMaxCircuitHold`, overridable
+  only in code through `DispatcherConfig.MaxCircuitHold`. No environment variable.
+- **OQ2** — rows written before this task are not rewritten. The one-off statements an operator
+  can run are below.
+- **OQ3** — v1 stays the default signature for new standalone subscriptions; the integration guide
+  recommends v2.
+- **Batch-barrier head-of-line blocking** is a recorded follow-up (`KNOWN-LIMITATIONS.md` →
+  "Webhook Delivery"), not fixed here.
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `8dd4b9b` | §1 (P3-11). `adapters/delivery/signature.go` (new): constants, `ErrInvalidSubscriptionMetadata`, `SignV1`/`SignV2`, `ValidateSubscriptionMetadata`, `SignatureVersionOf`, `WithSignatureVersion`, `parseSubscriptionMetadata`, `signRequest`. `SubscriptionDetail.SignatureVersion`; the resolver fills it; `parseSubscriptionTLS` delegates; `computeHMAC` wraps `SignV1`; the dispatcher signs immediately before `client.Do` with injectable `now`/`rand`; `BootstrapConfig.SignatureVersion`. Tests: `signature_test.go` (golden vectors), `signature_regression_test.go`, `metadata_store_test.go`, `bootstrap_signature_test.go`, `regression_fakes_test.go` |
+| `13b8779` | §3 (P3-12). `CircuitBreaker.Acquire`, `Permit` (`Success`/`Failure`/`Release`, first resolution wins, `Release` conditional on half-open), `NextAttemptAt`, injectable clock; the dispatcher defers `permit.Release`. Tests: `circuit_breaker_permit_test.go`, `breaker_regression_test.go` |
+| `3e4b11c` | §2 + §2a (P3-5). `DeliveryStore.DeferDelivery` + Postgres implementation; fair `ClaimDeliveries`; the outcome table (one `deadLetter` path with a log row; fixed resolver text; circuit holds deferred and capped); 408/425 retryable; every `DeliveryStore` fake updated. Tests: `queue_regression_test.go`, `queue_integration_test.go` (`//go:build integration`); `TestWebhookDispatcher_RejectsPersistedUnsafeURL` now expects `dead`; `retry_test.go` rows |
+| `403a37f` | §4 (P3-25). `BlockedAddressError`, `ErrBlockedDestination`, `DialError`, `blockedClass`/`classifyOne`/`embeddedIPv4`, generic DNS-name refusal, DNS-failure formatter, parse errors without the URL. Tests: `ssrf_regression_test.go`; `targeturl_test.go:46` and `:175-176` updated as §8 states |
+| `829dc7b` | §5 (P3-26). `adapters/delivery/redact.go` (new): `RedactURL`, `RedactError`; applied in the dispatcher, the gateway subscription test (JSON and log) and the bootstrap log. Tests: `redact_test.go`, gateway `handlers_subscriptions_hardening_test.go` |
+| `b6b36b0` | §1 gateway half: `Metadata` is `json.RawMessage`; `decodeSubscriptionMetadata` (object or legacy base64, compacted, validated → 400 `invalid_params`); `subscriptionResponse` reports `signature_version` |
+| `b7f76ac` | §6: `docs/integration-guide.md` §2.1 (TLS keys) and §6.1; `CHANGELOG.md`; `KNOWN-LIMITATIONS.md` |
+| `1b223ec`, `a884d8c`, `d082e97` | Hardening found in self-review and by the mutation run (below), plus golangci-lint fixes in new code |
+
+### Per-AC evidence
+
+1. **v2 wire format.** `TestV2OptInSignsFreshTimestampAndNonce` (`signature_regression_test.go`): two
+   attempts through the real `StoreSubscriptionResolver` with `{"source":"bootstrap","signature_version":"v2"}`;
+   canonical decimal timestamp within ±5 s, nonce hex of ≥16 bytes, `v2=` MAC equal to an
+   independent oracle (`smpV2MAC`, not `SignV2`), distinct nonces and signatures, rows `delivered`.
+   Mutations killed: nonce dropped from the MAC, constant nonce, timestamp an hour early.
+2. **Golden vectors.** `TestSignatureGoldenVectors` (`signature_test.go`) pins both values;
+   `TestSignRequest/v2` re-derives the v2 vector through `signRequest`.
+3. **v1 unchanged.** `TestV1RemainsDefault` (absent, `{}`, `{"source":"bootstrap"}`,
+   `{"signature_version":"v1"}`). `TestWebhookDispatcher_SuccessfulDelivery`,
+   `TestWebhookDispatcher_NoSignatureWithoutSecret`, `TestComputeHMAC` pass with their bodies
+   unmodified (the file's fake gained `DeferDelivery`; gofmt realigned its struct).
+4. **Fail closed.** `TestUnknownSignatureVersionFailsClosed` (`"v3"` and `2`: nothing sent, `dead`,
+   log row explains), `TestV2WithoutSecretFailsClosed`; gateway `TestSubscriptionCreate_MetadataForms`
+   (object and base64 stored byte-identically; 9 invalid forms → 400 `invalid_params`, nothing
+   stored) and `TestSubscriptionUpdate_MetadataValidationAndSignatureVersion` (PATCH 400 leaves the
+   row unchanged; `signature_version` `v1`/`v2`/`invalid`). The pre-existing base64 test
+   `TestSubscriptionUpdate` passes unmodified. Mutations killed: v2 without secret sends unsigned;
+   unknown version falls back to v1.
+5. **Metadata helpers.** `TestWithSignatureVersion` (AC5 input preserves `source` and `tls`),
+   `TestSignatureVersionOf` (absent/empty → `v1`), `TestStoreBackedResolverReportsV2`
+   (`metadata_store_test.go`: real `PostgresStore` over the PoC's fake-querier pattern, bootstrap
+   → resolver → `SignatureVersion == "v2"`).
+6. **Bootstrap.** `bootstrap_signature_test.go`: fresh row writes
+   `{"source":"bootstrap","signature_version":"v2"}`; an unchanged config issues no update; v1→v2
+   rewrites only the key (and v2→v1); `SignatureVersion = ""` never touches metadata; unparseable
+   metadata (`{not json`, `[]`, `"v2"`) is replaced and bootstrap returns nil; an unknown version is
+   refused before the store is touched. `bootstrap_test.go` is untouched and passes. Mutation
+   killed: empty version rewrites metadata.
+7. **Contract with SMP's receiver.** The design-phase contract test
+   (`_work/task010/smp/spine_webhook_v2_contract_test.go`) was run from the SMP checkout
+   (`/Users/bartoszszymichowski/42sid/i23/s-T010/smp`, SMP `7d4e7cc9`, `../spine` = this worktree)
+   with `go test -overlay <scratch>/overlay-contract.json -count=1 -run TestSpineV2Contract -v
+   ./internal/customer/runner/` — the overlay adds the file without writing into SMP's tree:
+   `TestSpineV2Contract_DispatcherToEventReceiver` PASS (two attempts accepted, two nonces
+   recorded, verbatim replay 401 `replay_nonce_reused`, tampered body 401) and
+   `TestSpineV2Contract_V1DefaultStillAccepted` PASS. With a second overlay that swaps `main`'s
+   `adapters/delivery` sources back in, the same test FAILS with `not a v2 delivery`. No vendor
+   directory exists in that checkout, so no `-mod=mod` was needed. SMP commits the file in its
+   TASK-006 (§7 R5).
+8. **Non-retryable → dead.** `TestNonRetryable4xxDeadLettersAndDoesNotStarve` (50 polls: healthy 1
+   POST, 410 endpoint exactly 5, every 410 row `dead`/attempt 1/`HTTP 410`);
+   `TestTLSConfigErrorDeadLetters` (dead, no request, breaker failure recorded);
+   `TestWebhookDispatcher_RejectsPersistedUnsafeURL` expects `dead`. Mutation killed: `failed` for
+   non-retryable.
+9. **Circuit holds.** `TestCircuitOpenDefersWithoutStarvingOrInflating` (15×503 + 1 healthy,
+   concurrency 1 so the order is exact: circuit open, healthy delivered, the 5 held rows `pending`
+   with attempt 0 and `next_retry_at` after the store clock); `TestCircuitHoldCapDeadLetters`
+   (default 24 h and a configured 1 h: the aged row is `dead` with
+   `circuit open: held longer than …` and a log row, no HTTP attempt; the younger row is
+   deferred). Mutations killed: hold via `UpdateDeliveryStatus` (bumps the attempt); defer with a
+   zero time; no cap. SQL mutation: `DeferDelivery` bumping `attempt_count` is killed by
+   `TestQueuePG_DeferDelivery` and `TestQueuePG_CircuitOpenDoesNotStarve`.
+   **9a.** `TestHeldBacklogDoesNotStarveOtherSubscriptions`: N ∈ {100, 400, 5000}, one shared fake
+   clock, one healthy row per simulated second for 900 polls — asserted: at least 899/900
+   delivered, each within one poll of being enqueued, no held row over `MaxRetriesDomain`. The
+   `control: fifo claim starves at held=400` subtest runs the same scenario with the old global
+   `created_at` order in the fake and asserts it starves, so the scenario keeps discriminating.
+   Mutation killed: fair fake reverted to FIFO. SQL: the old `ORDER BY created_at` claim fails
+   `TestQueuePG_FairClaim` (first claim of 5 is all A rows).
+10. **Orphans and resolver errors.** `TestOrphanedRowsDeadLetter` (5 orphans `dead` with
+    `subscription not found`, healthy delivered, resolver called ≤ 6 times in 100 polls);
+    `TestTransientResolverErrorBacksOffWithFixedText` (future retry, `dead` at
+    `MaxRetriesDomain`; `last_error` and every log row equal
+    `resolve subscription: temporarily unavailable`, none contains `10.9.8.7`, `user=`,
+    `database=`; the full text is in the captured operator log); invalid metadata → `dead`
+    (AC4 tests). Mutations killed: retrying `not_found`; `err.Error()` in the columns.
+11. **Real Postgres.** `adapters/delivery/queue_integration_test.go`: `TestQueuePG_Permanent4xxDeadLettersAndIsReaped`
+    (5+5 POSTs, partner rows `dead`/attempt 1, retention deletes 10), `TestQueuePG_CircuitOpenDoesNotStarve`
+    (circuit opens, ≥5 rows held, 5 new internal rows delivered, max attempt ≤ budget, the sum of
+    partner `attempt_count` equals the partner's real POSTs, no partner row claimable at once),
+    `TestQueuePG_OrphanedRowsDeadLetter`, `TestQueuePG_FairClaim` (scenario 4: B's newer row in the
+    first claim of 5, the deferred row never claimed, single-subscription claim = the 5 oldest).
+    `RETURNING` order is not claim order, so claimed ids are compared as sets. All pass on
+    `s010_delivery` and `s010_all`.
+12. **`DeferDelivery`.** `TestQueuePG_DeferDelivery`: `pending`, the given instant, the reason,
+    attempt count unchanged; `pending`/`failed`/`dead`/`delivered` rows untouched (an SQL mutation
+    dropping the `status = 'delivering'` guard is killed). Fakes updated: `webhook_dispatcher_test.go`
+    (both), `subscriber_test.go`, `retention_test.go`, `service/cmd/spine/stubstore_test.go`,
+    `service/internal/gateway/stubstore_test.go` (the gateway's `subFakeStore` inherits it). `go build ./...`
+    passes; SMP builds against the branch (below).
+13. **408/425.** `TestIsRetryable` gained `408`, `425` (true) and `410` (false) rows; 400/401/403/404
+    stay false. Mutation killed.
+14. **Probe resolution.** `TestHalfOpenProbeEarlyReturnDoesNotWedge` (delivered, breaker `closed`),
+    `TestHalfOpenProbeRejectedURLReleasesProbe` (not half-open, row `dead`); `circuit_breaker_permit_test.go`:
+    `Release` after `Success`/`Failure` is a no-op, non-probe `Release` is a no-op, probe `Release` →
+    `open` with `lastFailureAt` and the failure count unchanged and an immediate re-probe,
+    `NextAttemptAt` (open → probe time, half-open and unknown → now+fallback),
+    `TestPermitReleaseAfterOtherPermitClosed` (stays `closed`). `circuit_breaker_test.go` is
+    untouched and passes. Mutations killed: removing `defer permit.Release(ctx)` fails both
+    regression tests; unconditional `Release` fails the guard.
+15. **Transition addresses.** `TestTransitionAddressesBlocked`: every listed form plus the SIIT forms
+    and `fec0::1` refused (each a `*BlockedAddressError` whose text omits the address);
+    `8.8.8.8`, `64:ff9b::808:808`, `2002:808:808::1`, `2606:4700:4700::1111`, `::ffff:0:808:808`
+    allowed; the NAT64 IMDS literal is refused by `ValidateURL`. The existing
+    `TestTargetValidator_CheckAddr_RejectsDangerousRanges` is unmodified. Mutations killed:
+    removing the embedded-IPv4 step; dropping `fec0::/10`.
+16. **No address in caller-facing errors.** `TestValidatorDoesNotReportResolvedAddresses`
+    (`https://localhost/hook`, `10.11.12.13`, dial to `localhost:443` → `ErrBlockedDestination`);
+    `TestPrivateAnswerNotReported` (injected resolver answering a private address: the generic
+    refusal from `ValidateURL` and `ErrBlockedDestination` from the dialer, neither names the address
+    nor the class); `TestDNSFailureOmitsResolverAddress` (formatter table with
+    `Server: "10.0.0.2:53"`, plus the same failure driven through the dialer);
+    `TestDialErrorOmitsResolvedAddress` (allowlisted `localhost`, closed port: `last_error` and log
+    rows name `localhost:<port>`, never `127.0.0.1`/`[::1]`; `*DialError` unwraps to
+    `ECONNREFUSED`; a dial timeout injected through `net.Dialer.Control` keeps `Timeout() == true`);
+    gateway `TestSubscriptionTest_DialErrorOmitsResolvedAddress` and
+    `TestSubscriptionTest_LoopbackHostRefusedWithoutAddress`. Mutations killed: the detail back in
+    `ValidateURL`; the dialer returning the `CheckAddr` detail; the dialer returning `lastErr`; the
+    DNS error wrapped with `%w` (this one survived the first run, see Deviations 8).
+17. **Redaction.** `TestSecretURLPartsRedacted` (`http://127.0.0.1:1/services/T000/B000/s3cr3tPathToken?token=s3cr3tQueryToken`:
+    neither secret in `last_error`, any log row or the captured `slog` output; `last_error` keeps
+    `http://127.0.0.1:1/[redacted]`; parse and `%`-escape errors do not echo the path);
+    `TestRedactURL` table (path, query, query with `/`, fragment, userinfo, userinfo+path, port, IPv6
+    host, no path, root `/` kept, escaped path, unparseable, no host, empty); `TestRedactError`
+    (client.Do shape, redirect URL, wrapped `*url.Error`, backstop forms, short parts);
+    `TestRedirectTargetRedacted`; `TestBootstrapLogRedactsTargetURL`; gateway
+    `TestSubscriptionTest_RedactsSecretURLParts` (JSON `error` and the Warn line). Mutation killed:
+    `err.Error()` on the `client.Do` path.
+18. **Documentation.** `docs/integration-guide.md` §6.1: signature versions (table, exact MAC input,
+    golden vector, opt-in in object form, receiver checklist incl. "distinct secret per
+    subscription"), corrected retry/failure handling (`dead` for non-retryable and misconfigured;
+    408/425; redacted texts; exact `HTTP <code>`), circuit holds with both edges, the round-robin
+    claim, target validation incl. the NAT64 network-specific-prefix residual, the metadata forms,
+    and the unsigned test ping. `grep -n 'spki_sha256' docs/integration-guide.md` → only
+    `pinned_spki_sha256`, hex, at `:115` and `:359` (the CA key is fixed to `ca_bundle_pem` too).
+    `CHANGELOG.md` has a Security / Changed / For embedders entry.
+19. **Gates.** See below. `migrations/` is unchanged.
+20. **Stable HTTP text.** `TestHTTPOutcomeTextIsStable`: 401 → `dead`, 503 → `failed` and
+    scheduled, 503 at the budget → `dead`; `last_error` and the log row are exactly `HTTP 401` /
+    `HTTP 503`. Mutation killed: changed format string.
+
+### Fair-claim timing (§2a)
+
+100 000 claimable rows across 50 subscriptions, PostgreSQL 17.10, each statement in a rolled-back
+transaction, on the shared (loaded) development machine:
+
+| Run | Old claim (`61994fe`) | Fair claim as shipped |
+|---|---|---|
+| quiet machine | 19.5–20.4 ms | 38.7–40.0 ms for the shipped ranking, measured without the outer `next_retry_at` re-check (which evaluates at most 5 rows); 47 ms with a `delivery_id` tiebreak, which was dropped |
+| under load (load avg ≈ 7.5) | 21–29 ms | 68–89 ms (exact shipped statement) |
+
+Acceptable for a 1 s poll; a normal queue holds a handful of rows.
+
+### Mutation results
+
+All 24 code mutations plus 3 SQL mutations listed in the per-AC evidence are killed by the named
+tests (script in the scratchpad: apply one textual mutation, run the named tests, restore). One
+mutation — the DNS error wrapped with `%w` — first survived; see Deviations 8.
+
+### Deviations and additions, with reasons
+
+1. **`ClaimDeliveries` re-checks `next_retry_at` under the lock too**, not only `status`. A row
+   another claimer took and deferred into the future between the ranking snapshot and the lock is
+   then skipped rather than claimed early. No `delivery_id` tiebreak in the ranking (it cost ~8 ms
+   at 100k rows and ordering ties carries no guarantee).
+2. **Test placement.** The half-open regressions are in `breaker_regression_test.go` and
+   `TestPermitReleaseAfterOtherPermitClosed` in `circuit_breaker_permit_test.go`, so
+   `circuit_breaker_test.go` stays unmodified; `TestDialErrorOmitsResolvedAddress` is in
+   `ssrf_regression_test.go` and `TestSecretURLPartsRedacted` in `redact_test.go`. The real-Postgres
+   `DeferDelivery` test lives in `adapters/delivery/queue_integration_test.go`, not in
+   `adapters/store`: the claim is queue-wide, `go test ./...` runs packages in parallel against one
+   database, and keeping every queue-touching integration test in one package (which empties the
+   queue per scenario, uses unique subscription ids and cleans them up) avoids cross-package
+   interference.
+3. **Case-variant `signature_version` keys are refused** (`ErrInvalidSubscriptionMetadata`;
+   `WithSignatureVersion` removes them). `encoding/json` matches struct tags case-insensitively, so
+   a struct reader and a map reader could otherwise disagree about one row. The `tls` block keeps
+   its pre-existing (case-insensitive) decoding, so no stored TLS config changes meaning.
+4. **`ValidateSubscriptionMetadata` also refuses a `tls.ca_bundle_pem` that holds no certificate**
+   — a create-time 400 for a configuration the dispatcher would dead-letter at every send. The
+   dispatcher's own parse is unchanged (it still fails at `clientFor`).
+5. **Bootstrap heal.** When the existing metadata is a JSON object (even with a bad version value)
+   it is rewritten in place, so a `tls` pin is never dropped; only non-object or unparseable
+   metadata is replaced with the canonical value.
+6. **Gateway.** Supplied metadata is compacted, so object and base64 forms store identical bytes;
+   a base64 string that decodes to a non-object is a 400.
+7. **`DialError`** also implements `Temporary()` (the `net.Error` interface needs it). The
+   literal-IP refusal lost its doubled `target_url: target_url:` prefix.
+8. **`TargetValidator` gained an unexported resolver hook** (`lookupIPAddr`, nil = system
+   resolver). The cgo resolver on macOS reports no resolver address, so a regression back to
+   `%w`-wrapping `*net.DNSError` survived the first mutation run; the hook lets the tests drive a
+   resolver failure that names its server.
+9. **`RedactError`'s backstop skips URL parts shorter than 4 bytes** (`/v1`, `a=1`, a one-letter
+   fragment): replacing every occurrence garbled operator text, and such parts carry no meaningful
+   secret; the URL itself and every `*url.Error` are always redacted.
+10. **Hold-cap guards.** A row with no `created_at` is never aged out (deferred instead), and an
+    unset cap falls back to the default, so a hand-built dispatcher cannot dead-letter every held row.
+11. **Operator-supplied values echoed in metadata errors are truncated** to 32 runes.
+12. **gofmt** was applied to every changed Go file; several were unformatted on `main` (import
+    order), so their diffs include that.
+
+### Gates (final run at `d082e97`)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | OK |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK ("library surface is sound") |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | PASS (38 packages ok) |
+| `go test -race -p 4 -count=1 ./adapters/delivery/ ./adapters/store/ ./service/internal/gateway/ ./service/cmd/spine/` | PASS |
+| `SPINE_TEST_DATABASE_URL=…/s010_all go test -tags integration -race -count=1 ./adapters/delivery/` | PASS |
+| same, `./service/internal/gateway/ ./service/cmd/spine/` | PASS |
+| same on a fresh `s010_store`, `./adapters/store/` | 1 FAIL, pre-existing: `TestRunModeDatabaseDefault` (`GetRun: cannot scan NULL into *string` for `workflow_version_label`) — fails identically with `main`'s store sources swapped in by `-overlay`; not touched by this task. On a reused database `TestEventSubscription_SigningSecretEncryption` also fails (fixed id `sub-enc-001` is never cleaned up), on `main` too |
+| `SPINE_TEST_DATABASE_URL=…/s010_scenario go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (CI job `scenario-git-http`) | 19 PASS, 0 SKIP |
+| `golangci-lint run` on the four touched packages | 126 issues against 136 on `main`; 0 new (diffed ignoring line numbers), 10 fixed (gofmt on touched files, one gocritic) |
+| `golangci-lint run --enable-only=gosec` on the same | 0 issues |
+| `golangci-lint run --build-tags integration ./adapters/delivery/...` | no issue in the new files |
+| `gofmt -l $(git diff --name-only main...HEAD -- '*.go')` | empty |
+| `codex review --base main` (round 1 at `1b223ec`, round 2 at `d082e97`) | no findings either round |
+
+No scenario suite exercises webhook delivery, so none beyond `scenario-git-http` was run.
+
+### SMP compatibility gate
+
+SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T010/smp` at `7d4e7cc9` (no `vendor/`, no
+`tmp/`), `../spine` = this worktree at `d082e97` (final run; an earlier run at `1b223ec` gave the
+same results); its tree stayed clean (`git status --short` empty).
+
+| Command | Result |
+|---|---|
+| `go build ./...` | OK |
+| `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `go test -p 4 -count=1` on the 31 SMP packages that depend on `adapters/delivery` or `adapters/store` (`go list -deps`) — incl. `eventdelivery`, `stepevents`, `runner`, `spinecore`, `workspace`, `projectionwriter`, `spineembedded`, `cmd/customer-app` | all PASS (30 ok; `workspace/faultharness` has no tests) |
+| AC7 contract test via `-overlay` (above) | PASS on the branch; FAIL (`not a v2 delivery`) with `main`'s delivery sources |
+| `TEST_SPINE_DB=…/s010_spine_rt TEST_PLATFORM_DB=…/s010_smp_it go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip 'TEST_PROVISIONING_DSN' -- -race -count=1 -timeout 20m -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (databases migrated with `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime`) | PASS: 1536 tests, 4 allowed skips |
+
+**Not run, with the exact command.** SMP's provisioning-gated suites allocate one `ws_<id>_*`
+database (and roles) per test through `TEST_PROVISIONING_DSN`, which the shared-database rules of
+this run forbid (only `s010_*` databases). They include the suites that drive Spine's dispatcher
+against a real runtime database (`eventdelivery` `TestWorker_Integration_*`, `spinecore`
+`TestRedrive_RedeliversThroughSpineDispatcher` and the dispatch-store tests). SMP CI runs them as:
+`TEST_DATABASE_URL=… TEST_PLATFORM_DB=… TEST_PROVISIONING_DSN=postgres://smp_prov:smp_prov@localhost:5432/postgres?sslmode=disable go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -- -race -count=1 -timeout 20m ./internal/customer/eventdelivery/ ./internal/customer/stepevents/ ./internal/customer/workspace/ ./internal/customer/workspace/workspacetest/ ./internal/customer/projectionwriter/ …` (ci.yml "Platform-DB integration suites") and the `spinecore` run above with `TEST_PROVISIONING_DSN` set. Read-through: none of those tests depends on the hot loop — `TestWorker_Integration_RequiresCipherToDecrypt` asserts the row never reaches `delivered`, which still holds when the 401 now dead-letters it; the redrive test answers 200. SMP's stuck-dispatch predicate (`status = 'dead' OR (failed AND attempt_count >= budget) OR stale delivering`) keeps working: permanent failures now arrive as `dead`.
+
+Behaviour SMP inherits at its first bump past this task is exactly §7 B1–B6 (initiative §7b Rule 4
+lists TASK-010): SMP TASK-006 R1 and R2 must be on SMP `main` first.
+
+### OQ2: one-off scrub of rows written before this task
+
+Optional; run per runtime database by an operator. It redacts the path/query/fragment of any
+http(s) URL quoted in the error text, and the resolved / resolver addresses of the old dial and DNS
+errors (checked on PostgreSQL 17 against sample texts):
+
+```sql
+UPDATE runtime.event_delivery_queue
+SET last_error = regexp_replace(regexp_replace(regexp_replace(last_error,
+      '(https?://[^/?#"[:space:]]+)[/?#][^"[:space:]]*', '\1/[redacted]', 'g'),
+      '(dial tcp[46]? )[^[:space:]]+?(: )', '\1[address]\2', 'g'),
+      '(lookup [^[:space:]]+ on )[^[:space:]]+?(: )', '\1[resolver]\2', 'g')
+WHERE last_error ~ 'https?://|dial tcp|lookup .* on ';
+
+UPDATE runtime.event_delivery_log
+SET error = regexp_replace(regexp_replace(regexp_replace(error,
+      '(https?://[^/?#"[:space:]]+)[/?#][^"[:space:]]*', '\1/[redacted]', 'g'),
+      '(dial tcp[46]? )[^[:space:]]+?(: )', '\1[address]\2', 'g'),
+      '(lookup [^[:space:]]+ on )[^[:space:]]+?(: )', '\1[resolver]\2', 'g')
+WHERE error ~ 'https?://|dial tcp|lookup .* on ';
+```
+
+### Follow-ups recorded (not taken)
+
+Signed test pings; not following redirects on deliveries (a 307 forwards a fresh v2 signature and
+nonce); a capped response drain; operator replay resetting `attempt_count`; batch-barrier
+head-of-line blocking (per-subscription in-flight caps); a `claimed_at` column (schema); NAT64
+network-specific prefixes (egress policy). All are in `KNOWN-LIMITATIONS.md` → "Webhook Delivery".
