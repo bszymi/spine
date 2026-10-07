@@ -5,14 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/projection"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
 )
@@ -114,6 +114,12 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 	rt.Artifacts.WithPolicy(branchprotect.NewPermissive())
 	rt.Workflows = workflow.NewService(repo.Git, repo.Dir)
 	rt.Projections = projection.NewService(repo.Git, db.Store, eventRouter, 1*time.Second)
+	// Production standalone wiring pins the projection to the
+	// governed-merge target (INIT-023 TASK-011); harness repositories
+	// are created on main, so scenarios run with the same option.
+	if err := rt.Projections.WithAuthoritativeBranch(engine.AuthoritativeBranch); err != nil {
+		t.Fatalf("projection authoritative branch: %v", err)
+	}
 
 	if cfg.withValidation {
 		rt.Validator = validation.NewEngine(db.Store)

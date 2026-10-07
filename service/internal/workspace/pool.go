@@ -8,24 +8,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/gitpool"
+	"github.com/bszymi/spine/adapters/projection"
+	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/branchprotect"
 	bpprojection "github.com/bszymi/spine/core/branchprotect/projection"
-	"github.com/bszymi/spine/service/internal/config"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/core/divergence"
+	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/gitpool"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/repository"
-	"github.com/bszymi/spine/adapters/secrets"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/config"
 )
 
 // ServiceSet holds all per-workspace service instances.
@@ -954,6 +955,19 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		projQuery = projection.NewQueryService(st, primaryClient)
 		projSync = projection.NewService(primaryClient, st, eventRouter, 30*time.Second)
 		projSync.WithArtifactsDir(spineCfg.ArtifactsDir)
+		// Standalone repositories are non-bare working trees the engine
+		// checks run branches out in, so the projection must follow the
+		// governed-merge target, not HEAD (INIT-023 TASK-011, audit
+		// P3-22). The probe logs one startup Warn when the branch does
+		// not resolve; the projection then reports sync_state=error
+		// rather than projecting whatever is checked out.
+		if err := projSync.WithAuthoritativeBranch(engine.AuthoritativeBranch); err != nil {
+			for i := len(closers) - 1; i >= 0; i-- {
+				closers[i]("init-error")
+			}
+			return nil, fmt.Errorf("projection authoritative branch: %w", err)
+		}
+		_ = projSync.ProbeAuthoritativeRef(ctx)
 	}
 
 	// Validation engine.
