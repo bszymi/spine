@@ -10,6 +10,11 @@ import (
 
 // ── Event Subscriptions ──
 
+// CreateSubscription inserts a subscription. Under a binding a successful
+// insert also records SigningSecret as the secret sub last saw (as a bound
+// read does), so a later UpdateSubscription of the same value judges
+// "kept" from it rather than from a fresh read of the row (see
+// UpdateSubscription).
 func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
 	secret, err := s.sealSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
@@ -24,6 +29,9 @@ func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscr
 		sub.EventTypes, secret, sub.Status, sub.Metadata,
 		sub.CreatedBy, sub.CreatedAt, sub.UpdatedAt,
 	)
+	if err == nil {
+		s.recordSecretRead(sub)
+	}
 	return err
 }
 
@@ -106,9 +114,19 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID stri
 // while a rotation races it can still write that copy; build updates from
 // the value the store returned.
 //
+// After a successful bound update, SigningSecret becomes the secret sub
+// last saw, whichever branch ran (codex review, round 2): the value just
+// written, or the value just found kept. A caller that reuses sub for a
+// further update is then judged against what this update left, not
+// against its original read. Without that, reading A, setting B, then
+// setting A back would be judged "kept" against the stale A and silently
+// leave B in the row; and after setting B, a metadata-only update would
+// see B ≠ A, write B again, and revert a rotation that landed in between.
+// A failed update records nothing.
+//
 // A side effect: an update that keeps the secret no longer reverts a
 // concurrent rotate-secret. With no binding the historical single UPDATE
-// is unchanged.
+// is unchanged and nothing is recorded.
 func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscription) error {
 	secret, err := s.sealSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
@@ -128,6 +146,9 @@ func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscr
 				sub.SubscriptionID, sub.Name, sub.TargetType, sub.TargetURL,
 				sub.EventTypes, sub.Status, sub.Metadata,
 			)
+			if err == nil {
+				s.recordSecretRead(sub)
+			}
 			return err
 		}
 	}
@@ -139,6 +160,10 @@ func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscr
 		sub.SubscriptionID, sub.Name, sub.TargetType, sub.TargetURL,
 		sub.EventTypes, secret, sub.Status, sub.Metadata,
 	)
+	if err == nil {
+		// No-op without a binding (recordSecretRead checks).
+		s.recordSecretRead(sub)
+	}
 	return err
 }
 

@@ -208,9 +208,12 @@ release is cut — this file is a staging area.
   returned by a bound read (`GetSubscription`, the list calls — the value
   remembers the secret that read returned, in unexported fields) it
   compares `SigningSecret` with that; for a value the caller built it
-  compares with the stored value (one extra `SELECT`). Build updates from
-  the value the store returned. SMP adopts this in SMP INIT-027 EPIC-004
-  TASK-006.
+  compares with the stored value (one extra `SELECT`). A successful bound
+  `CreateSubscription` or `UpdateSubscription` refreshes what the value
+  remembers to the secret it left in the row, so a value reused for a
+  further update is judged against that, not against its first read. Build
+  updates from the value the store returned. SMP adopts this in SMP
+  INIT-027 EPIC-004 TASK-006.
 - **Deltas reachable without a binding** (none is reachable from SMP's
   current inputs: its credentials are hex and it produces no `enc:v2`
   value):

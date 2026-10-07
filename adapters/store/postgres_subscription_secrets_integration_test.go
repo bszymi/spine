@@ -358,4 +358,16 @@ func TestBoundUpdate_RealPostgresKeepsUnchangedSecret(t *testing.T) {
 	if again, err := s.GetSubscription(ctx, "t009-sub-1"); err != nil || again.SigningSecret != "whsec_new" {
 		t.Fatalf("read-back: %v", err)
 	}
+
+	// codex review (round 2): the same value, reused after that set, is
+	// judged against what the set wrote. Setting the secret back to the
+	// value the read returned writes it (a stale snapshot judged it kept
+	// and left whsec_new in the row).
+	got.SigningSecret = "whsec_rotated"
+	if err := s.UpdateSubscription(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := s.GetSubscription(ctx, "t009-sub-1"); err != nil || again.SigningSecret != "whsec_rotated" {
+		t.Fatalf("setting the secret back did not write it: %v", err)
+	}
 }

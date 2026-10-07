@@ -44,6 +44,8 @@ type memSubs struct {
 	queryErr error
 	// execErr, when set, fails every compare-and-swap Exec.
 	execErr error
+	// updateErr, when set, fails every UpdateSubscription statement.
+	updateErr error
 }
 
 func newMemSubs() *memSubs { return &memSubs{rows: map[string][]any{}} }
@@ -85,6 +87,8 @@ func (m *memSubs) Exec(_ context.Context, sql string, a ...any) (pgconn.CommandT
 		}
 		r[colSecret] = a[1]
 		return pgconn.NewCommandTag("UPDATE 1"), nil
+	case strings.HasPrefix(s, "UPDATE runtime.event_subscriptions SET name") && m.updateErr != nil:
+		return pgconn.CommandTag{}, m.updateErr
 	case strings.HasPrefix(s, "UPDATE runtime.event_subscriptions SET name") && strings.Contains(s, "signing_secret = $6"):
 		m.execs++
 		m.secretWrites++
@@ -377,6 +381,14 @@ func TestLegacyMode_Unchanged(t *testing.T) {
 	if err := s.UpdateSubscription(ctxBG, sub1); err != nil || db.secretWrites != 1 || !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v1:") {
 		t.Fatalf("unbound update no longer rewrites the secret column: %v", err)
 	}
+	created := newSub("sub-new", "whsec-new")
+	if err := s.CreateSubscription(ctxBG, created); err != nil {
+		t.Fatal(err)
+	}
+	if sub1.secretRead || sub1.readSecret != "" || created.secretRead || created.readSecret != "" {
+		t.Fatal("an unbound create or update recorded read provenance; unbound values must be exactly as before")
+	}
+	delete(db.rows, "sub-new")
 	before := db.execs
 	if _, err := s.ReencryptSubscriptionSecrets(ctxBG); !errors.Is(err, ErrNoSecretBinding) {
 		t.Fatalf("sweep without binding: %v", err)
@@ -1126,6 +1138,120 @@ func TestBoundUpdate_UnchangedSecretKeepsStoredBytes(t *testing.T) {
 		}
 		if got, err := s.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_set" {
 			t.Fatalf("read-back: %v", err)
+		}
+	})
+
+	// codex review (round 2): a value the caller reuses after a
+	// successful bound write is judged against what that write left in the
+	// row, not against its original read. Read A, set B, set A back: the
+	// last update must write A (a stale snapshot judged it "kept" and left
+	// B in the row while reporting success).
+	t.Run("reused value: set, then set back", func(t *testing.T) {
+		c := testRing(t, testKey(t))
+		db := newMemSubs()
+		s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+		mustCreate(t, s, "sub-1", "whsec_A")
+		sub, err := s.GetSubscription(ctxBG, "sub-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub.SigningSecret = "whsec_B"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil || db.secretWrites != 1 {
+			t.Fatalf("set B: %v", err)
+		}
+		sub.SigningSecret = "whsec_A"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil || db.secretWrites != 2 {
+			t.Fatalf("set A back: writes=%d %v", db.secretWrites, err)
+		}
+		if got, err := s.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_A" {
+			t.Fatal("setting the secret back to its first value reported success but left the row unchanged")
+		}
+	})
+
+	// After a successful set, a metadata-only update of the same value
+	// keeps what the set wrote, so it does not write it again over a
+	// rotation that landed in between.
+	t.Run("reused value: update after a set keeps a later rotation", func(t *testing.T) {
+		c := testRing(t, testKey(t))
+		db := newMemSubs()
+		s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+		mustCreate(t, s, "sub-1", "whsec_A")
+		sub, err := s.GetSubscription(ctxBG, "sub-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub.SigningSecret = "whsec_B"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ReplaceSubscriptionSecret(ctxBG, "sub-1", "whsec_rotated"); err != nil {
+			t.Fatal(err)
+		}
+		rotated, writes := rawSecret(db, "sub-1"), db.secretWrites
+		sub.Status = "paused"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil {
+			t.Fatal(err)
+		}
+		if rawSecret(db, "sub-1") != rotated || db.secretWrites != writes {
+			t.Fatal("a metadata update after a set reverted a concurrent rotation")
+		}
+	})
+
+	// The same holds for a value the caller created, and for a
+	// caller-built value whose first update was judged kept against the
+	// stored value: each later update of it keeps a rotation that landed
+	// in between instead of reverting it.
+	t.Run("created or caller-built value reused keeps a later rotation", func(t *testing.T) {
+		for _, name := range []string{"created", "caller-built"} {
+			c := testRing(t, testKey(t))
+			db := newMemSubs()
+			s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+			sub := newSub("sub-1", "whsec_A")
+			if err := s.CreateSubscription(ctxBG, sub); err != nil {
+				t.Fatal(err)
+			}
+			if name == "caller-built" {
+				sub = newSub("sub-1", "whsec_A")
+				sub.Name = "renamed"
+				if err := s.UpdateSubscription(ctxBG, sub); err != nil || db.secretWrites != 0 {
+					t.Fatalf("%s: first update: %v", name, err)
+				}
+			}
+			if err := s.ReplaceSubscriptionSecret(ctxBG, "sub-1", "whsec_rotated"); err != nil {
+				t.Fatal(err)
+			}
+			rotated := rawSecret(db, "sub-1")
+			sub.Status = "paused"
+			if err := s.UpdateSubscription(ctxBG, sub); err != nil {
+				t.Fatal(err)
+			}
+			if rawSecret(db, "sub-1") != rotated || db.secretWrites != 0 {
+				t.Fatalf("%s: a reused value's update reverted a concurrent rotation", name)
+			}
+		}
+	})
+
+	// A failed update records nothing: retrying the same set still writes.
+	t.Run("failed update records nothing", func(t *testing.T) {
+		c := testRing(t, testKey(t))
+		db := newMemSubs()
+		s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+		mustCreate(t, s, "sub-1", "whsec_A")
+		sub, err := s.GetSubscription(ctxBG, "sub-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub.SigningSecret = "whsec_B"
+		db.updateErr = errors.New("connection reset")
+		if err := s.UpdateSubscription(ctxBG, sub); err == nil {
+			t.Fatal("injected update error not returned")
+		}
+		db.updateErr = nil
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil || db.secretWrites != 1 {
+			t.Fatalf("retrying a failed set did not write it: writes=%d %v", db.secretWrites, err)
+		}
+		if got, err := s.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_B" {
+			t.Fatalf("read-back after the retry: %v", err)
 		}
 	})
 

@@ -17,14 +17,16 @@ type EventSubscription struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 
-	// secretRead and readSecret are set only by a read through a store
-	// bound with SetSubscriptionSecretBinding (GetSubscription,
-	// ListSubscriptions, ListActiveSubscriptionsByEventType): the secret
-	// that read returned. A bound UpdateSubscription compares
-	// SigningSecret with it to tell "the caller kept the secret it read"
-	// (write the other columns only) from "the caller set a secret"
-	// (INIT-023 TASK-009). Unbound reads leave them zero, so values from
-	// an unbound store are exactly as before.
+	// secretRead and readSecret are set only through a store bound with
+	// SetSubscriptionSecretBinding: by a read (GetSubscription,
+	// ListSubscriptions, ListActiveSubscriptionsByEventType) to the secret
+	// it returned, and refreshed by a successful CreateSubscription or
+	// UpdateSubscription of this value to the secret it left in the row. A
+	// bound UpdateSubscription compares SigningSecret with it to tell "the
+	// caller kept the secret it last saw" (write the other columns only)
+	// from "the caller set a secret" (INIT-023 TASK-009). Unbound stores
+	// leave them zero, so values from an unbound store are exactly as
+	// before.
 	secretRead bool
 	readSecret string
 }
