@@ -143,6 +143,13 @@ func admRefSHA(t *testing.T, repo, ref string) string {
 
 // admServerRepo builds the served repository: main and the reviewed
 // branches (all at one commit holding task.md = "reviewed content").
+//
+// The commit's dates are pinned, so every call makes the same commit
+// object. TestGitPush_RepositoryScopedBinding builds two repositories
+// and pushes one clone's HEAD to both; with real-clock dates the two
+// "init" commits differed whenever the calls straddled a second, the
+// client then refused the push as non-fast-forward ("fetch first")
+// before it reached the gate, and the test flaked (review round 2).
 func admServerRepo(t *testing.T, branches ...string) (repo, reviewed string) {
 	t.Helper()
 	repo = t.TempDir()
@@ -151,7 +158,13 @@ func admServerRepo(t *testing.T, branches ...string) (repo, reviewed string) {
 		t.Fatal(err)
 	}
 	admMust(t, repo, "add", ".")
-	admMust(t, repo, "commit", "-q", "-m", "init")
+	commit := exec.Command("git", "commit", "-q", "-m", "init")
+	commit.Dir = repo
+	commit.Env = append(admGitEnv(repo),
+		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z")
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
 	for _, b := range branches {
 		admMust(t, repo, "branch", b)
 	}
@@ -437,6 +450,12 @@ func (r admCodeRepos) ListActive(context.Context) ([]repository.Repository, erro
 func TestGitPush_RepositoryScopedBinding(t *testing.T) {
 	primary, primaryReviewed := admServerRepo(t, admRunBranch)
 	payments, paymentsReviewed := admServerRepo(t, admRunBranch)
+	// The pusher clones payments and pushes the same HEAD to both, so the
+	// fixtures must share their commit; otherwise git refuses the primary
+	// pushes client-side and they never reach the gate.
+	if primaryReviewed != paymentsReviewed {
+		t.Fatalf("fixtures do not share history: primary %s, payments %s", primaryReviewed, paymentsReviewed)
+	}
 	runs := &admRuns{
 		runs: map[string]*domain.Run{admRunID: {
 			RunID: admRunID, Status: domain.RunStatusActive, CurrentStepID: "build", BranchName: admRunBranch,
