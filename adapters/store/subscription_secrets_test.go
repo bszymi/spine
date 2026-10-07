@@ -35,6 +35,9 @@ const (
 type memSubs struct {
 	rows  map[string][]any
 	execs int
+	// secretWrites counts UpdateSubscription statements that write the
+	// signing_secret column.
+	secretWrites int
 	// beforeCAS runs just before a sweep compare-and-swap is applied.
 	beforeCAS func(id string)
 	// queryErr, when set, fails every Query.
@@ -82,10 +85,24 @@ func (m *memSubs) Exec(_ context.Context, sql string, a ...any) (pgconn.CommandT
 		}
 		r[colSecret] = a[1]
 		return pgconn.NewCommandTag("UPDATE 1"), nil
-	case strings.HasPrefix(s, "UPDATE runtime.event_subscriptions SET name"):
+	case strings.HasPrefix(s, "UPDATE runtime.event_subscriptions SET name") && strings.Contains(s, "signing_secret = $6"):
 		m.execs++
-		r := m.rows[a[0].(string)]
+		m.secretWrites++
+		r, ok := m.rows[a[0].(string)]
+		if !ok {
+			return pgconn.NewCommandTag("UPDATE 0"), nil
+		}
 		r[2], r[3], r[4], r[5], r[6], r[7], r[8] = a[1], a[2], a[3], a[4], a[5], a[6], a[7]
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	case strings.HasPrefix(s, "UPDATE runtime.event_subscriptions SET name") && !strings.Contains(s, "signing_secret"):
+		// The bound update that keeps the stored secret: every mutable
+		// column except signing_secret.
+		m.execs++
+		r, ok := m.rows[a[0].(string)]
+		if !ok {
+			return pgconn.NewCommandTag("UPDATE 0"), nil
+		}
+		r[2], r[3], r[4], r[5], r[7], r[8] = a[1], a[2], a[3], a[4], a[5], a[6]
 		return pgconn.NewCommandTag("UPDATE 1"), nil
 	}
 	return pgconn.CommandTag{}, fmt.Errorf("memSubs: unsupported exec %q", s)
@@ -117,10 +134,13 @@ func (m *memSubs) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, erro
 	return &memRows{d: out, i: -1}, nil
 }
 
-func (m *memSubs) QueryRow(_ context.Context, _ string, a ...any) pgx.Row {
+func (m *memSubs) QueryRow(_ context.Context, sql string, a ...any) pgx.Row {
 	r, ok := m.rows[a[0].(string)]
 	if !ok {
 		return memRow{err: pgx.ErrNoRows}
+	}
+	if strings.HasPrefix(strings.TrimSpace(sql), "SELECT signing_secret FROM") {
+		return memRow{v: []any{r[colSecret]}}
 	}
 	return memRow{v: r}
 }
@@ -336,6 +356,24 @@ func TestLegacyMode_Unchanged(t *testing.T) {
 	if rawSecret(db, "sub-env") != v1 {
 		t.Fatal("unbound write no longer passes an envelope through")
 	}
+	// Documented embedder delta (CHANGELOG "For embedders"): IsEncrypted
+	// now covers enc:v2:, so an unbound write passes an enc:v2:-prefixed
+	// input through verbatim too, where 61994fe sealed it as enc:v1.
+	v2In := sealFor(t, c, "ws", "sub-env2", "x")
+	mustCreate(t, s, "sub-env2", v2In)
+	if rawSecret(db, "sub-env2") != v2In {
+		t.Fatal("unbound write of an enc:v2 input: documented pass-through changed")
+	}
+	delete(db.rows, "sub-env2")
+	// Unbound updates keep the historical single UPDATE that always
+	// writes the secret column (no extra read).
+	sub1, err := s.GetSubscription(ctxBG, "sub-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateSubscription(ctxBG, sub1); err != nil || db.secretWrites != 1 || !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v1:") {
+		t.Fatalf("unbound update no longer rewrites the secret column: %v", err)
+	}
 	before := db.execs
 	if _, err := s.ReencryptSubscriptionSecrets(ctxBG); !errors.Is(err, ErrNoSecretBinding) {
 		t.Fatalf("sweep without binding: %v", err)
@@ -343,7 +381,7 @@ func TestLegacyMode_Unchanged(t *testing.T) {
 	if db.execs != before {
 		t.Fatal("sweep without binding wrote")
 	}
-	// The one unbound delta: an enc:v2 row is an error, not "plaintext".
+	// The unbound read delta: an enc:v2 row is an error, not "plaintext".
 	setRaw(db, "sub-p", sealFor(t, c, "ws", "sub-p", "x"))
 	if _, err := s.GetSubscription(ctxBG, "sub-p"); !errors.Is(err, spinecrypto.ErrMissingAAD) {
 		t.Fatalf("unbound read of enc:v2: %v", err)
@@ -858,6 +896,130 @@ func TestSweep_X2TrustBoundaryPinned(t *testing.T) {
 	if got, err := strict.GetSubscription(ctxBG, "sub-x"); err != nil || got.SigningSecret != "whsec_A" {
 		t.Fatalf("documented boundary changed: %v", err)
 	}
+}
+
+// Review round 1 (P2, Decision 15): a bound read-modify-write that does
+// not change the secret — the gateway's PATCH, pause and activate
+// handlers (GetSubscription → mutate → UpdateSubscription), a bootstrap
+// that only realigns the target URL, SMP's ensureScopedTargetURL — must
+// not convert a legacy value into enc:v2 behind the sweep's back. Before
+// the fix, in migrate mode GetSubscription opened a copy of workspace A's
+// pre-upgrade enc:v1 value planted after B's first clean sweep, and
+// UpdateSubscription re-sealed it as B's enc:v2: the next sweep saw a
+// current row and recorded nothing, and strict then accepted A's secret
+// indefinitely with no audit trail. Now the stored bytes are left alone,
+// so the next sweep converts the plant AND records it.
+func TestBoundUpdate_UnchangedSecretKeepsStoredBytes(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*EventSubscription)
+		check  func(*testing.T, *EventSubscription)
+	}{
+		{"patch", func(s *EventSubscription) {
+			s.Name, s.TargetURL, s.EventTypes, s.Metadata = "renamed", "https://hook.invalid/new", []string{"run_failed"}, []byte(`{"k":1}`)
+		}, func(t *testing.T, s *EventSubscription) {
+			if s.Name != "renamed" || s.TargetURL != "https://hook.invalid/new" || !reflect.DeepEqual(s.EventTypes, []string{"run_failed"}) || string(s.Metadata) != `{"k":1}` {
+				t.Fatalf("patched columns not written: %+v", s)
+			}
+		}},
+		{"pause", func(s *EventSubscription) { s.Status = "paused" }, func(t *testing.T, s *EventSubscription) {
+			if s.Status != "paused" {
+				t.Fatalf("status not written: %q", s.Status)
+			}
+		}},
+		{"activate", func(s *EventSubscription) { s.Status = "active" }, func(t *testing.T, s *EventSubscription) {
+			if s.Status != "active" {
+				t.Fatalf("status not written: %q", s.Status)
+			}
+		}},
+	}
+	for _, m := range mutations {
+		t.Run(m.name, func(t *testing.T) {
+			c := testRing(t, testKey(t))
+			plantFromA := encryptV1(t, c, "whsec_A_receiver_key")
+			db := newMemSubs()
+			s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+			mustCreate(t, s, "sub-1", "whsec_B")
+			if rep, err := s.ReencryptSubscriptionSecrets(ctxBG); err != nil || !rep.Clean() || rep.Current != 1 {
+				t.Fatalf("first clean sweep: %+v %v", rep, err)
+			}
+			if m.name == "activate" {
+				db.rows["sub-1"][7] = "paused"
+			}
+			setRaw(db, "sub-1", plantFromA) // planted after B's first clean sweep
+
+			// migrate accepts the plant on read (the documented X2 boundary).
+			sub, err := s.GetSubscription(ctxBG, "sub-1")
+			if err != nil || sub.SigningSecret != "whsec_A_receiver_key" {
+				t.Fatalf("fixture read: %v", err)
+			}
+			m.mutate(sub)
+			if err := s.UpdateSubscription(ctxBG, sub); err != nil {
+				t.Fatalf("update: %v", err)
+			}
+			if rawSecret(db, "sub-1") != plantFromA || db.secretWrites != 0 {
+				t.Fatal("a read-modify-write re-sealed the stored secret: an unrecorded legacy→enc:v2 conversion")
+			}
+			got, err := s.GetSubscription(ctxBG, "sub-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.check(t, got)
+
+			// The next sweep converts the plant and records it, so the
+			// operator's conversion-log review finds it.
+			rep, err := s.ReencryptSubscriptionSecrets(ctxBG)
+			if err != nil || rep.Rewritten != 1 || rep.FromV1 != 1 || len(rep.Converted) != 1 ||
+				rep.Converted[0].SubscriptionID != "sub-1" || rep.Converted[0].From != spinecrypto.EnvelopeV1 {
+				t.Fatalf("the plant must be converted by the sweep, with a record: %+v %v", rep, err)
+			}
+		})
+	}
+
+	// An unchanged secret on a current row is not rewritten either (no
+	// fresh nonce, no needless write); a changed secret replaces the
+	// stored value outright, carrying nothing over; a refused stored value
+	// is replaced by the caller's secret as before; a missing row is not an
+	// error, as before.
+	t.Run("current row, changed secret, refused row, missing row", func(t *testing.T) {
+		c := testRing(t, testKey(t))
+		db := newMemSubs()
+		s := boundStore(t, db, c, "ws-B", SecretEnvelopeMigrate)
+		mustCreate(t, s, "sub-1", "whsec_B")
+		current := rawSecret(db, "sub-1")
+		sub, err := s.GetSubscription(ctxBG, "sub-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub.Name = "renamed"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil || rawSecret(db, "sub-1") != current || db.secretWrites != 0 {
+			t.Fatalf("unchanged secret on a current row was rewritten: %v", err)
+		}
+		sub.SigningSecret = "whsec_new"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil || db.secretWrites != 1 {
+			t.Fatalf("changed secret not written: %v", err)
+		}
+		if raw := rawSecret(db, "sub-1"); raw == current || !strings.HasPrefix(raw, "enc:v2:"+c.PrimaryKeyID()+":") {
+			t.Fatal("changed secret not sealed for the binding")
+		}
+		if got, err := s.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_new" || got.Name != "renamed" {
+			t.Fatalf("read-back: %v", err)
+		}
+		setRaw(db, "sub-1", sealFor(t, c, "ws-A", "sub-1", "whsec_A")) // refused transplant
+		sub.SigningSecret = "whsec_fresh"
+		if err := s.UpdateSubscription(ctxBG, sub); err != nil {
+			t.Fatalf("update over a refused row: %v", err)
+		}
+		if got, err := s.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_fresh" {
+			t.Fatalf("refused row not replaced: %v", err)
+		}
+		if err := s.UpdateSubscription(ctxBG, newSub("missing", "whsec_x")); err != nil {
+			t.Fatalf("update of a missing row: %v", err)
+		}
+		if _, ok := db.rows["missing"]; ok {
+			t.Fatal("update created a row")
+		}
+	})
 }
 
 // ── AC15: no secret material in reports or errors (I6) ──

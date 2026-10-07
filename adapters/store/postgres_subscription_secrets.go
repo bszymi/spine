@@ -29,7 +29,10 @@ package store
 //   - I3: a value that does not open under the binding is an error. It is
 //     never treated as plaintext, blanked, or re-sealed.
 //   - I4: nothing rewrites a row it could not open; strict converts no
-//     legacy row; an envelope is never accepted as a write input.
+//     legacy row; an envelope is never accepted as a write input; an
+//     update that keeps the secret leaves the stored bytes alone, so the
+//     sweep — which records every conversion — is the only path from a
+//     legacy value to enc:v2.
 //   - I5: the sweep never overwrites a value that changed after it read it.
 //   - I6: no plaintext or stored value appears in an error or a report.
 //   - I8: under a binding, no read returns an envelope as the secret, and
@@ -37,11 +40,13 @@ package store
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"strings"
 
 	spinecrypto "github.com/bszymi/spine/core/crypto"
+	"github.com/jackc/pgx/v5"
 )
 
 // SecretEnvelopeMode selects how a bound store treats legacy values.
@@ -282,6 +287,32 @@ func (s *PostgresStore) sealSubscriptionSecret(subscriptionID, secret string) (s
 	return s.sealTarget(subscriptionID, secret)
 }
 
+// boundSecretUnchanged reports whether subscriptionID's stored signing
+// secret opens under the binding and mode to exactly secret, in which case
+// a bound UpdateSubscription leaves the column untouched. A missing row or
+// a stored value that does not open (refused) is "changed": the caller's
+// secret then replaces it, as a bound write always did. The comparison is
+// constant-time; neither value appears in an error.
+func (s *PostgresStore) boundSecretUnchanged(ctx context.Context, subscriptionID, secret string) (bool, error) {
+	var stored string
+	err := s.pool.QueryRow(ctx,
+		`SELECT signing_secret FROM runtime.event_subscriptions WHERE subscription_id = $1`,
+		subscriptionID).Scan(&stored)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read subscription %q signing secret: %w", subscriptionID, err)
+	}
+	r, err := s.openBound(subscriptionID, stored)
+	if err != nil {
+		// A refused stored value is replaced by the caller's secret; it
+		// is not an update error.
+		return false, nil
+	}
+	return subtle.ConstantTimeCompare([]byte(r.plaintext), []byte(secret)) == 1, nil
+}
+
 // ReplaceSubscriptionSecret sets a subscription's signing secret to
 // secret WITHOUT reading or opening the stored value, and bumps
 // updated_at. It is the repair path for a row whose stored secret is
@@ -422,8 +453,12 @@ func (r SecretSweepReport) Clean() bool { return len(r.Refused) == 0 && r.Confli
 // value planted at any time before the strict flip is converted into a
 // valid enc:v2 row for this workspace; nothing can distinguish it from a
 // genuine row. Every conversion is listed in Converted so it can be
-// audited; strict mode (or retiring every key that sealed enc:v1) closes
-// the path.
+// audited, and the sweep is the only bound path that turns a legacy value
+// into enc:v2: a bound UpdateSubscription that does not change the secret
+// leaves the stored bytes alone (see UpdateSubscription). Strict mode (or
+// retiring every key that sealed enc:v1) closes the path for values
+// planted from then on; values converted before stay valid, which is why
+// the strict runbook reviews the conversion log first.
 func (s *PostgresStore) ReencryptSubscriptionSecrets(ctx context.Context) (SecretSweepReport, error) {
 	var rep SecretSweepReport
 	if s.secretBinding == nil {

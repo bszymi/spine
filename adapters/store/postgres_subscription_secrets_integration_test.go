@@ -272,3 +272,67 @@ func TestReplaceSubscriptionSecret_RealPostgres(t *testing.T) {
 		t.Fatal("replacing a missing subscription succeeded")
 	}
 }
+
+// Review round 1 (P2) against real Postgres: a bound read-modify-write
+// that keeps the secret (the gateway's pause handler) writes the other
+// columns with the keep-secret UPDATE and leaves a planted legacy value's
+// bytes alone, so the next sweep — not the update — converts it, and
+// records it.
+func TestBoundUpdate_RealPostgresKeepsUnchangedSecret(t *testing.T) {
+	admin, pool, c := t009Setup(t)
+	ctx := context.Background()
+	s := store.NewPostgresStoreWithQuerier(pool)
+	s.SetSecretCipher(c)
+	if err := s.SetSubscriptionSecretBinding(store.SubscriptionSecretBinding{WorkspaceID: "ws-int"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReencryptSubscriptionSecrets(ctx); err != nil {
+		t.Fatal(err)
+	}
+	plant, err := c.Encrypt("whsec_A_receiver_key") // another workspace's pre-upgrade enc:v1 value
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.ExecRaw(ctx, `UPDATE runtime.event_subscriptions SET signing_secret = $1 WHERE subscription_id = 't009-sub-1'`, plant); err != nil {
+		t.Fatal(err)
+	}
+	var before time.Time
+	if err := pool.QueryRow(ctx, `SELECT updated_at FROM runtime.event_subscriptions WHERE subscription_id = 't009-sub-1'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+
+	sub, err := s.GetSubscription(ctx, "t009-sub-1")
+	if err != nil || sub.SigningSecret != "whsec_A_receiver_key" {
+		t.Fatalf("fixture read (migrate accepts legacy): %v", err)
+	}
+	sub.Status = "paused"
+	sub.Name = "t009-cas-renamed"
+	if err := s.UpdateSubscription(ctx, sub); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if raw := t009RawSecret(t, admin); raw != plant {
+		t.Fatal("a read-modify-write re-sealed the planted legacy value: an unrecorded conversion")
+	}
+	got, err := s.GetSubscription(ctx, "t009-sub-1")
+	if err != nil || got.Status != "paused" || got.Name != "t009-cas-renamed" || !got.UpdatedAt.After(before) {
+		t.Fatalf("other columns not written: %+v %v", got, err)
+	}
+
+	rep, err := s.ReencryptSubscriptionSecrets(ctx)
+	if conv, ok := t009Converted(rep); err != nil || !ok || conv.From != spinecrypto.EnvelopeV1 {
+		t.Fatalf("the sweep must convert and record the plant: %+v %v", rep, err)
+	}
+
+	// A changed secret is written (sealed for the binding) by the full
+	// UPDATE.
+	got.SigningSecret = "whsec_new"
+	if err := s.UpdateSubscription(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if raw := t009RawSecret(t, admin); !strings.HasPrefix(raw, "enc:v2:"+c.PrimaryKeyID()+":") {
+		t.Fatal("changed secret not sealed as enc:v2")
+	}
+	if again, err := s.GetSubscription(ctx, "t009-sub-1"); err != nil || again.SigningSecret != "whsec_new" {
+		t.Fatalf("read-back: %v", err)
+	}
+}
