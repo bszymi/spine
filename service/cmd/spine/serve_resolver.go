@@ -9,21 +9,24 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/auth"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
-	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
 // workspaceOrchestratorBuilder constructs per-workspace engine orchestrator,
 // run starters, and scheduler callbacks from the ServiceSet's basic services.
-func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet) error {
+// stepEntryPolicy is the process-wide SPINE_STEP_ENTRY_POLICY selection, so
+// every workspace's orchestrator enforces the same step-entry checks as the
+// process-level one.
+func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet, stepEntryPolicy engine.StepEntryPolicy) error {
 	if ss.Store == nil {
 		return nil
 	}
@@ -88,6 +91,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 		return fmt.Errorf("workspace orchestrator branch-protect policy: %w", err)
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// Engine step-entry policy (INIT-023 TASK-007), same selection as the
+	// process-level orchestrator.
+	orch.WithStepEntryPolicy(stepEntryPolicy)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Mirrors the wiring on the process-level orchestrator so shared
 	// workspace deployments enforce the same invariants. The
@@ -179,6 +185,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	ss.RunFailFn = func(ctx context.Context, runID, reason string) error {
 		return orch.FailRun(ctx, runID, reason)
 	}
+	// Run-timeout hook for the multi-workspace scheduler (INIT-023
+	// TASK-007); mirrors buildScheduler's WithRunTerminated.
+	ss.RunTerminatedFn = orch.TerminateLiveSteps
 
 	return nil
 }
@@ -195,9 +204,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 // fires. The fix routes the same DeliverySubscriber + WebhookDispatcher
 // pair through every workspace's per-tenant store and event router,
 // with cancellation tied to ServiceSet eviction.
-func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Logger) workspace.ServiceSetBuilder {
+func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, stepEntryPolicy engine.StepEntryPolicy, log *slog.Logger) workspace.ServiceSetBuilder {
 	return func(ctx context.Context, ss *workspace.ServiceSet) error {
-		if err := workspaceOrchestratorBuilder(ctx, ss); err != nil {
+		if err := workspaceOrchestratorBuilder(ctx, ss, stepEntryPolicy); err != nil {
 			return err
 		}
 		if err := bootstrapInternalAdmin(ctx, ss, deliveryCfg, log); err != nil {
@@ -351,6 +360,7 @@ func buildWorkspaceResolver(
 	log *slog.Logger,
 	deliveryCfg workspaceDeliveryConfig,
 	codeRepoBase string,
+	stepEntryPolicy engine.StepEntryPolicy,
 ) (*resolverWiring, error) {
 	resolver := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER")))
 	legacyMode := os.Getenv("SPINE_WORKSPACE_MODE")
@@ -406,7 +416,7 @@ func buildWorkspaceResolver(
 			return nil, fmt.Errorf("connect to workspace registry: %w", err)
 		}
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
+			Builder:      newPooledWorkspaceBuilder(deliveryCfg, stepEntryPolicy, log),
 			SecretCipher: secretCipher,
 			SecretClient: dbSecretClient,
 			DBPolicy:     dbPolicyFromEnv(),
@@ -443,7 +453,7 @@ func buildWorkspaceResolver(
 		// process-level store. EPIC-003 (TASK-006/007) refines pool
 		// sizing and invalidation for this mode.
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
+			Builder:      newPooledWorkspaceBuilder(deliveryCfg, stepEntryPolicy, log),
 			SecretCipher: secretCipher,
 			SecretClient: secretClient,
 			DBPolicy:     dbPolicyFromEnv(),

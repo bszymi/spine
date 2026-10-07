@@ -9,11 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bszymi/spine/service/internal/config"
-	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/engine"
+	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/queue"
+	"github.com/bszymi/spine/service/internal/config"
+	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/testutil"
 	"github.com/go-chi/chi/v5"
 )
@@ -82,6 +83,9 @@ func bootSmokeServer(t *testing.T, mutate func(*gateway.ServerConfig)) (*gateway
 		Events:     event.NewQueueRouter(q),
 		DevMode:    true,
 		RuntimeEnv: "development",
+		// Mirror `spine serve`'s default (SPINE_STEP_ENTRY_POLICY unset):
+		// a policy is installed and the engine-less assign fallback is off.
+		StepEntryPolicy: engine.StrictStepEntryPolicy(),
 	}
 
 	rt, err := buildServerConfig(ctx, deps)

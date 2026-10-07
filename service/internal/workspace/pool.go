@@ -8,24 +8,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/gitpool"
+	"github.com/bszymi/spine/adapters/projection"
+	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/branchprotect"
 	bpprojection "github.com/bszymi/spine/core/branchprotect/projection"
-	"github.com/bszymi/spine/service/internal/config"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/gitpool"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/repository"
-	"github.com/bszymi/spine/adapters/secrets"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/config"
 )
 
 // ServiceSet holds all per-workspace service instances.
@@ -71,6 +71,9 @@ type ServiceSet struct {
 	CommitRetryFn  func(ctx context.Context, runID string) error
 	StepRecoveryFn func(ctx context.Context, executionID string) error
 	RunFailFn      func(ctx context.Context, runID, reason string) error
+	// RunTerminatedFn closes a timed-out run's live step executions
+	// (INIT-023 TASK-007); mirrors scheduler.ServiceSet.RunTerminatedFn.
+	RunTerminatedFn func(ctx context.Context, runID, message string)
 
 	// RunStarter and PlanningRunStarter hold workspace-scoped run adapters.
 	// Typed as any to avoid a workspace → engine → scheduler → workspace

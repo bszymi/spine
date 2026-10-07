@@ -72,7 +72,16 @@ func serveCmd() *cobra.Command {
 
 			deliveryCfg := loadWorkspaceDeliveryConfig()
 
-			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log, deliveryCfg, codeRepoBase)
+			// Engine step-entry policy (INIT-023 TASK-007): strict unless
+			// SPINE_STEP_ENTRY_POLICY=legacy; any other value refuses to
+			// start. Parsed once and threaded to both orchestrator builders.
+			stepEntryPolicy, err := stepEntryPolicyFromEnv()
+			if err != nil {
+				return err
+			}
+			logStepEntryPolicy(log, stepEntryPolicy)
+
+			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log, deliveryCfg, codeRepoBase, stepEntryPolicy)
 			if err != nil {
 				return err
 			}
@@ -182,6 +191,7 @@ func serveCmd() *cobra.Command {
 				OrphanThreshold:            orphanThreshold,
 				WebhookTargets:             deliveryCfg.WebhookTargets,
 				NotifyBridgeEnabled:        parseEventLogNotifyBridge(os.Getenv("SPINE_EVENT_LOG_NOTIFY_BRIDGE")),
+				StepEntryPolicy:            stepEntryPolicy,
 			}
 
 			rt, err := buildServerConfig(ctx, deps)

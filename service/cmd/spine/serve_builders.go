@@ -7,26 +7,26 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/scheduler"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
 	bpprojection "github.com/bszymi/spine/core/branchprotect/projection"
-	"github.com/bszymi/spine/service/internal/config"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
-	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/scheduler"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/config"
+	"github.com/bszymi/spine/service/internal/gateway"
+	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -236,6 +236,7 @@ func buildOrchestrator(
 	q *queue.MemoryQueue,
 	artifactSvc *artifact.Service,
 	validator *validation.Engine,
+	stepEntryPolicy engine.StepEntryPolicy,
 	log *slog.Logger,
 ) *engine.Orchestrator {
 	if st == nil || wfProvider == nil {
@@ -270,6 +271,9 @@ func buildOrchestrator(
 		return nil
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
+	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
+	orch.WithStepEntryPolicy(stepEntryPolicy)
 
 	divSvc := divergence.NewService(st, gitClient, events)
 	divPolicy, err := buildBranchProtectPolicy(st)
@@ -310,6 +314,11 @@ func buildScheduler(
 			scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
 				return orch.FailRun(ctx, runID, reason)
 			}),
+			// The run-timeout cancel writes the run row directly; this
+			// hook closes the run's live executions afterwards (INIT-023
+			// TASK-007). A no-op unless the step-entry policy sets
+			// TerminateStepsOnCancel.
+			scheduler.WithRunTerminated(orch.TerminateLiveSteps),
 			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
 				return orch.MergeRunBranch(ctx, runID)
 			}, 3, 2*time.Minute),
