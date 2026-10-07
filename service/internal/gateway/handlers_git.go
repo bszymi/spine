@@ -9,24 +9,34 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bszymi/spine/adapters/gitpool"
+	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/service/internal/githttp"
-	"github.com/bszymi/spine/adapters/gitpool"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/core/refadmit"
+	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
 // GitPushResources bundles per-workspace state the pre-receive gate
-// needs: the branch-protection policy for evaluating ref updates and
-// the event emitter for honored-override governance events (ADR-009
-// §4). Both come off the target workspace's ServiceSet so shared-mode
-// deployments evaluate and audit against the right workspace.
+// needs: the branch-protection policy for evaluating ref updates, the
+// event emitter for honored-override governance events (ADR-009 §4),
+// and the run reader plus step-definition lookup the ref-class
+// admission uses for run, plan and divergence branches (INIT-023
+// TASK-016). All of them come off the target workspace's ServiceSet so
+// shared-mode deployments evaluate, admit and audit against the right
+// workspace.
+//
+// Runs and StepDefs are a pair: a nil Runs (a workspace with no
+// database yet) or a nil StepDefs (no engine wired) makes run, plan and
+// divergence branches operator-only for that push, which fails closed.
 type GitPushResources struct {
-	Policy branchprotect.Policy
-	Events event.Emitter
+	Policy   branchprotect.Policy
+	Events   event.Emitter
+	Runs     refadmit.RunReader
+	StepDefs refadmit.StepDefLookup
 }
 
 // GitPushResolverFunc resolves the per-workspace push resources. Callers
@@ -194,6 +204,11 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// caller identity on every ref update (EPIC-004 TASK-002).
 	ctx := githttp.WithRepoPath(r.Context(), repoPath)
 	ctx = observe.WithWorkspaceID(ctx, cfg.ID)
+	// The repository segment of the URL ("" or "spine" for the primary)
+	// rides along for the ref-class admission, which requires a run
+	// branch's bound execution to target the same repository (INIT-023
+	// TASK-016). Only the push path reads it.
+	ctx = githttp.WithRepositoryID(ctx, repositoryID)
 	if actor != nil {
 		ctx = domain.WithActor(ctx, actor)
 	}
@@ -225,6 +240,14 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 		}
 		if res.Events != nil {
 			ctx = githttp.WithEvents(ctx, res.Events)
+		}
+		// The admission's run reader and step-definition lookup travel
+		// as a pair (githttp prefers the per-request pair whenever a
+		// reader is attached). The resolver's release is deferred past
+		// ServeHTTP above, so a pooled workspace store outlives the push.
+		if res.Runs != nil {
+			ctx = githttp.WithRunRefs(ctx, res.Runs)
+			ctx = githttp.WithStepDefs(ctx, res.StepDefs)
 		}
 	}
 
