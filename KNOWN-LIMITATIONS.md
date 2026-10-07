@@ -87,8 +87,17 @@ The following limitations have been resolved:
 - Production deployments MUST configure database and auth
 
 ### Path Traversal
-- `safePath` in artifact service resolves symlinks and validates prefix
-- `GIT_LITERAL_PATHSPECS=1` prevents Git pathspec injection
+- Worktree file I/O (artifact create/update and their rollbacks, acceptance/successor reads,
+  workflow create/update, the merge-time status cascade, renumber) goes through
+  `core/worktreefs`. Each path component is checked with `Lstat` from a directory handle opened
+  without following symlinks, inside an `os.Root`. Any symbolic link component is refused
+  (`invalid_params`), and so is any `.git` component (including git's case, NTFS and HFS
+  variants). New files are created `O_CREAT|O_EXCL` and updates replace by rename. A failed
+  create removes what it made. Reads of worktree files are capped at 4 MiB
+  (`payload_too_large`). (INIT-023 TASK-004, audit F5.)
+- Residual: committed symlinks are still checked out as links (Spine does not set
+  `core.symlinks=false`), and reads through `git show` never follow them.
+- `GIT_LITERAL_PATHSPECS=1` / `--literal-pathspecs` prevents Git pathspec injection
 - Scoped commits use `-- path` to prevent accidental broader commits
 
 ### Git Push Gate: Served Repositories Need Case- and Normalization-Sensitive Storage
