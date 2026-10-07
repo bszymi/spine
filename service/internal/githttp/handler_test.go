@@ -444,13 +444,36 @@ func TestServeHTTP_PreReceiveMixedRefsRejectsEntirePush(t *testing.T) {
 	}
 }
 
-func TestServeHTTP_PreReceiveAllowsSpineRefsWithoutPolicy(t *testing.T) {
-	// spine/* refs are out of scope for user-authored rules. They
-	// skip Policy.Evaluate entirely and flow through to CGI. We
-	// assert this by wiring a deny-everything policy and still
-	// getting past the gate (the request then fails at CGI, but the
-	// 403 denial body is NOT produced — proving the gate did not
-	// reject).
+// admPush posts a receive-pack body with the given ref updates through
+// h, after letting prep decorate the request context (actor, run
+// reader), and returns the response body. The gate's verdict is all a
+// caller asserts: an admitted push then reaches CGI with fake object
+// ids, which may fail there, but never with the pre-receive denial body.
+func admPush(t *testing.T, h *Handler, prep func(context.Context) context.Context, updates ...RefUpdate) string {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/git-receive-pack", bytes.NewReader(buildPushBody(t, updates...)))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	ctx := WithRepoPath(req.Context(), initBareIshRepo(t))
+	if prep != nil {
+		ctx = prep(ctx)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req.WithContext(ctx))
+	return w.Body.String()
+}
+
+func withActor(a *domain.Actor) func(context.Context) context.Context {
+	return func(ctx context.Context) context.Context { return domain.WithActor(ctx, a) }
+}
+
+// TestServeHTTP_SpineRefsSkipPolicyButNotAdmission replaces
+// TestServeHTTP_PreReceiveAllowsSpineRefsWithoutPolicy (INIT-023
+// TASK-016 AC 7a). spine/** refs are still out of scope for
+// user-authored branch-protection rules and never reach
+// Policy.Evaluate, so an operator's push passes even a deny-everything
+// `*` rule. They no longer skip the gate itself: the same push with no
+// actor is refused by the ref-class admission.
+func TestServeHTTP_SpineRefsSkipPolicyButNotAdmission(t *testing.T) {
 	policy := staticRulePolicy(config.Rule{
 		Branch:      "*",
 		Protections: []config.RuleKind{config.KindNoDirectWrite},
@@ -463,25 +486,141 @@ func TestServeHTTP_PreReceiveAllowsSpineRefsWithoutPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	u := RefUpdate{OldSHA: strings.Repeat("0", 40), NewSHA: strings.Repeat("a", 40), Ref: "refs/heads/spine/run/abc"}
 
-	old := strings.Repeat("0", 40)
-	new := strings.Repeat("a", 40)
-	body := buildPushBody(t,
-		RefUpdate{OldSHA: old, NewSHA: new, Ref: "refs/heads/spine/run/abc"},
+	body := admPush(t, h, withActor(&domain.Actor{ActorID: "op-1", Role: domain.RoleOperator}), u)
+	if strings.Contains(body, "pre-receive hook declined") || strings.Contains(body, "branch-protection:") {
+		t.Errorf("operator push of a spine/* ref must skip the policy, got denial: %s", body)
+	}
+
+	body = admPush(t, h, nil, u)
+	if !strings.Contains(body, "ng refs/heads/spine/run/abc pre-receive hook declined") {
+		t.Errorf("anonymous push of a spine/* ref must be ng'd, got: %s", body)
+	}
+	if !strings.Contains(body, "ref-admission: spine/run/abc is in the reserved spine namespace; operator role required") {
+		t.Errorf("anonymous push should carry the ref-admission line, got: %s", body)
+	}
+	if strings.Contains(body, "branch-protection:") {
+		t.Errorf("a spine/* ref must never reach the policy, got: %s", body)
+	}
+}
+
+// TestServeHTTP_RefAdmissionRunsWithoutPolicy pins TASK-016 I1: the
+// admission runs with no branch-protection policy at all (early
+// bootstrap, no store), where the old gate let every ref land.
+// Mutation check: re-wrapping the admission loop in `if policy != nil`
+// fails it.
+func TestServeHTTP_RefAdmissionRunsWithoutPolicy(t *testing.T) {
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contributor := withActor(&domain.Actor{ActorID: "c-1", Role: domain.RoleContributor})
+	z, n := strings.Repeat("0", 40), strings.Repeat("a", 40)
+
+	body := admPush(t, h, contributor, RefUpdate{OldSHA: z, NewSHA: n, Ref: "refs/tags/x"})
+	if !strings.Contains(body, "ng refs/tags/x pre-receive hook declined") ||
+		!strings.Contains(body, "ref-admission: refs/tags/x is not a branch; only operators may push tags or other non-branch refs") {
+		t.Errorf("contributor tag push with no policy must be refused by admission, got: %s", body)
+	}
+
+	// An ordinary branch still passes with no policy, as before.
+	body = admPush(t, h, contributor, RefUpdate{OldSHA: z, NewSHA: n, Ref: "refs/heads/feature/x"})
+	if strings.Contains(body, "pre-receive hook declined") {
+		t.Errorf("ordinary branch with no policy must pass the gate, got: %s", body)
+	}
+}
+
+// TestServeHTTP_RefAdmissionMixedPushAllOrNothing: one admission
+// refusal refuses the whole push, so the ordinary branch riding with a
+// contributor's tag is ng'd too (TASK-016 AC 7c).
+func TestServeHTTP_RefAdmissionMixedPushAllOrNothing(t *testing.T) {
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             branchprotect.NewPermissive(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, n := strings.Repeat("0", 40), strings.Repeat("a", 40)
+	body := admPush(t, h, withActor(&domain.Actor{ActorID: "c-1", Role: domain.RoleContributor}),
+		RefUpdate{OldSHA: z, NewSHA: n, Ref: "refs/heads/feature/x"},
+		RefUpdate{OldSHA: z, NewSHA: n, Ref: "refs/tags/x"},
 	)
+	for _, ref := range []string{"refs/heads/feature/x", "refs/tags/x"} {
+		if !strings.Contains(body, "ng "+ref+" pre-receive hook declined") {
+			t.Errorf("%s must be ng'd on a mixed push, got: %s", ref, body)
+		}
+	}
+}
 
-	req := httptest.NewRequest("POST", "/git-receive-pack", bytes.NewReader(body))
-	req = req.WithContext(WithRepoPath(req.Context(), initBareIshRepo(t)))
-	w := httptest.NewRecorder()
+// TestServeHTTP_RefAdmissionPerRequestReaderWins (TASK-016 AC 7d): the
+// run reader the gateway attaches per request (WithRunRefs) wins over
+// Config.RunRefs, and the step-definition lookup travels with it. With
+// both readers nil a bound push is refused (fail closed).
+func TestServeHTTP_RefAdmissionPerRequestReaderWins(t *testing.T) {
+	const branch = "spine/run/task-001-x-0a1b2c3d"
+	alice := &domain.Actor{ActorID: "alice", Role: domain.RoleContributor}
+	u := RefUpdate{OldSHA: strings.Repeat("0", 40), NewSHA: strings.Repeat("a", 40), Ref: "refs/heads/" + branch}
 
-	h.ServeHTTP(w, req)
+	// Config reader: the step is held by bob, so alice is unbound there.
+	configReader := boundRun("bob", "task-001-x", "0a1b2c3d")
+	h, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             branchprotect.NewPermissive(),
+		RunRefs:            configReader,
+		StepDefs:           admStepDefs{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxReader := boundRun("alice", "task-001-x", "0a1b2c3d")
+	body := admPush(t, h, func(ctx context.Context) context.Context {
+		ctx = domain.WithActor(ctx, alice)
+		ctx = WithRunRefs(ctx, ctxReader)
+		return WithStepDefs(ctx, admStepDefs{})
+	}, u)
+	if strings.Contains(body, "pre-receive hook declined") {
+		t.Errorf("alice is bound in the per-request reader; push must pass the gate, got: %s", body)
+	}
+	if ctxReader.calls == 0 || configReader.calls != 0 {
+		t.Errorf("reader calls: per-request=%d config=%d, want the per-request reader only", ctxReader.calls, configReader.calls)
+	}
 
-	// The gate must not short-circuit with a denial body. What
-	// happens after the gate (CGI invocation) is out of scope here —
-	// it may succeed or fail depending on CGI env, but the response
-	// must not be the pre-receive denial body.
-	if strings.Contains(w.Body.String(), "pre-receive hook declined") {
-		t.Errorf("spine/* ref should bypass policy, but body contains denial: %s", w.Body.String())
+	// The halves never mix: a per-request reader with no per-request
+	// lookup does not borrow Config.StepDefs, so the push is refused.
+	body = admPush(t, h, func(ctx context.Context) context.Context {
+		return WithRunRefs(domain.WithActor(ctx, alice), boundRun("alice", "task-001-x", "0a1b2c3d"))
+	}, u)
+	if !strings.Contains(body, "ref-admission: run-branch admission is not configured on this server") {
+		t.Errorf("per-request reader without a per-request lookup must fail closed, got: %s", body)
+	}
+
+	// Config reader only: alice is unbound there.
+	body = admPush(t, h, withActor(alice), u)
+	if !strings.Contains(body, "ref-admission: "+branch+" is a run branch") {
+		t.Errorf("config reader binds bob, so alice must be refused, got: %s", body)
+	}
+
+	// Both readers nil: refused.
+	bare, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             branchprotect.NewPermissive(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = admPush(t, bare, withActor(alice), u)
+	if !strings.Contains(body, "ng refs/heads/"+branch+" pre-receive hook declined") ||
+		!strings.Contains(body, "ref-admission: run-branch admission is not configured on this server; operator role required for "+branch) {
+		t.Errorf("with no reader the bound push must be refused, got: %s", body)
 	}
 }
 

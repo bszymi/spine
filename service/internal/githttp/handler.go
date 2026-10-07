@@ -1,8 +1,10 @@
 // Package githttp provides a Git smart HTTP endpoint that wraps
 // git-http-backend CGI. Upload-pack (clone/fetch) is always served;
 // receive-pack (push) is gated by a config flag and, when enabled,
-// wrapped with an HTTP-layer pre-receive check that consults
-// branchprotect.Policy on every ref update (ADR-009 / EPIC-004).
+// wrapped with an HTTP-layer pre-receive check that admits every ref
+// update by ref class (core/refadmit, INIT-023 TASK-016) and then
+// consults branchprotect.Policy on ordinary branches and admitted
+// non-branch refs (ADR-009 / EPIC-004).
 package githttp
 
 import (
@@ -29,6 +31,7 @@ import (
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/refadmit"
 )
 
 // Handler serves Git repositories over HTTP using git-http-backend CGI.
@@ -63,6 +66,13 @@ type Handler struct {
 	// pushes pass through unchecked. Production wires the
 	// projection-backed policy; tests install whatever shape they need.
 	policy branchprotect.Policy
+
+	// runRefs and stepDefs back the ref-class admission of run, plan
+	// and divergence branches (INIT-023 TASK-016). They are the
+	// fallback pair: a per-request pair attached with WithRunRefs wins.
+	// Either nil makes those refs operator-only (fail closed).
+	runRefs  refadmit.RunReader
+	stepDefs refadmit.StepDefLookup
 
 	// maxPushBody caps the buffered portion of a receive-pack request
 	// body at the command-section boundary. The full push body can be
@@ -108,7 +118,26 @@ type Config struct {
 	// through with no protection — appropriate for local development
 	// and early-bootstrap deployments, but production should always
 	// wire a real policy or pushes to `main` will succeed unchecked.
+	//
+	// The policy is not the only gate: every ref update is first
+	// admitted by ref class (core/refadmit, INIT-023 TASK-016), with or
+	// without a policy. Tags and other non-branch refs and the reserved
+	// spine/** namespace are operator-only, and run, plan and divergence
+	// branches admit only the actor bound to their current step.
 	Policy branchprotect.Policy
+
+	// RunRefs reads runs, step executions and divergence branches for
+	// the run-branch admission (INIT-023 TASK-016). A per-request reader
+	// attached with WithRunRefs wins. With both nil, run, plan and
+	// divergence refs are operator-only.
+	RunRefs refadmit.RunReader
+
+	// StepDefs resolves a run's step definitions for the review freeze
+	// (TASK-016 owner question 4). It is paired with RunRefs: when a
+	// per-request reader is attached, the per-request lookup (or none)
+	// is used, never this one. With no lookup, run, plan and divergence
+	// refs are operator-only.
+	StepDefs refadmit.StepDefLookup
 }
 
 // NewHandler creates a new git HTTP handler.
@@ -145,6 +174,8 @@ func NewHandler(cfg Config) (*Handler, error) {
 		trustedCIDRs:        trustedCIDRs,
 		receivePackEnabled:  cfg.ReceivePackEnabled,
 		policy:              cfg.Policy,
+		runRefs:             cfg.RunRefs,
+		stepDefs:            cfg.StepDefs,
 		maxPushCommandBytes: defaultMaxPushCommandBytes,
 		ensuredRepos:        make(map[string]bool),
 	}, nil
@@ -302,10 +333,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // non-zero so Git clients render the rejection as "remote: ..." lines
 // plus per-ref "ng" results.
 //
-// A nil policy is treated as permissive — we still parse the command
-// section (so a malformed push is rejected), but we do not gate any
-// update. This keeps early-bootstrap deployments functional and
-// matches how the API-path policy guards behave.
+// Every update is first admitted by ref class (core/refadmit, INIT-023
+// TASK-016), always, whatever the policy. A nil policy is then treated
+// as permissive for the updates admission lets through: ordinary
+// branches, and the non-branch refs an operator pushes. This keeps
+// early-bootstrap deployments functional for branch pushes and
+// matches how the API-path policy guards behave, while tags, notes,
+// the reserved spine/** namespace and run branches stay gated with no
+// policy at all.
 func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.Logger) (io.ReadCloser, bool) {
 	// Buffer up to maxPushCommandBytes looking for the flush that
 	// terminates the command section. Anything after the flush is
@@ -375,12 +410,6 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 
 	override := pushOptions["spine.override"] == "true"
 
-	// Evaluate every non-spine/* ref. spine/* refs are out of scope
-	// for user-authored rules (ADR-009 §3) but still flow through CGI
-	// for audit/logging on the read side; we pass them through here
-	// without calling Policy.Evaluate so the API-path and Git-path
-	// audit surfaces remain consistent.
-	//
 	// Override-honored refs collected for governance-event emission
 	// after the loop: ADR-009 §4 requires exactly one event per
 	// overridden ref update (not per push), with rule_kinds carrying
@@ -395,56 +424,120 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 	// without gateway trace middleware (e.g. direct-embed tests).
 	traceID := traceIDForPush(r.Context())
 
-	if policy != nil {
-		actor := actorForPush(r.Context())
-		var messages []string
-		for _, u := range updates {
-			if strings.HasPrefix(u.Ref, "refs/heads/spine/") || strings.HasPrefix(u.Ref, "spine/") {
-				continue
-			}
-			kind := branchprotect.OpDirectWrite
-			if u.IsDelete() {
-				kind = branchprotect.OpDelete
-			}
-			dec, reasons, err := policy.Evaluate(r.Context(), branchprotect.Request{
-				Branch:   u.Ref,
-				Kind:     kind,
-				Actor:    actor,
-				Override: override,
-				TraceID:  traceID,
-			})
-			if err != nil {
-				log.Error("branch-protection evaluation failed, rejecting push",
-					"ref", u.Ref, "error", err)
+	// Ref-class admission (INIT-023 TASK-016) runs on EVERY ref update,
+	// before and independently of the branch-protection policy (I1):
+	// with a nil policy (early bootstrap, no store) the old loop let
+	// every ref land, and even with a policy it skipped spine/** refs
+	// and allowed every non-branch ref (ADR-009 §3/§6 scope branch
+	// protection to user-authored branch rules, so nothing else gated
+	// them). The run reader and the step-definition lookup travel as a
+	// pair: the per-request pair the gateway attaches for the target
+	// workspace wins, and the handler's Config pair is the fallback for
+	// single mode and tests. Never mix the two halves, or a shared-mode
+	// push could resolve its run in one workspace and its step
+	// definition in another.
+	admActor := domain.ActorFromContext(r.Context())
+	runs, defs := runRefsFromContext(r.Context()), stepDefsFromContext(r.Context())
+	if runs == nil {
+		runs, defs = h.runRefs, h.stepDefs
+	}
+	adm := refadmit.NewEvaluator(runs).WithStepDefs(defs)
+	repositoryID := repositoryIDFromContext(r.Context())
+	admActorID := ""
+	if admActor != nil {
+		admActorID = admActor.ActorID
+	}
+
+	policyActor := actorForPush(r.Context())
+	var messages []string
+	for _, u := range updates {
+		dec, err := adm.Decide(r.Context(), refadmit.Request{
+			Ref:          u.Ref,
+			Delete:       u.IsDelete(),
+			Actor:        admActor,
+			RepositoryID: repositoryID,
+		})
+		if err != nil {
+			log.Error("ref admission evaluation failed, rejecting push",
+				"ref", u.Ref, "actor_id", admActorID, "error", err)
+			messages = append(messages, refadmit.EvaluationErrorMessage(u.Ref))
+			continue
+		}
+		if !dec.Allow {
+			// The precise reason goes to the log only; the wire text
+			// (dec.Message) never names who holds the step. slog quotes
+			// a value carrying a control byte (an invalid-class ref),
+			// so none reaches the log raw.
+			log.Warn("pre-receive ref admission denied",
+				"ref", u.Ref, "class", dec.Class, "reason", dec.Reason,
+				"actor_id", admActorID, "run_id", dec.RunID)
+			messages = append(messages, dec.Message())
+			continue
+		}
+		switch dec.Class {
+		case refadmit.ClassRunBranch, refadmit.ClassDivergenceBranch,
+			refadmit.ClassInitBranch, refadmit.ClassReserved:
+			// Admitted spine/** ref (bound actor or operator). These
+			// still never reach Policy.Evaluate, which keeps ADR-009
+			// §3's "rules never name spine/*". Operator admissions are
+			// audited by this log line only (owner question 3).
+			log.Info("pre-receive admitted reserved ref",
+				"ref", u.Ref, "class", dec.Class, "reason", dec.Reason,
+				"actor_id", admActorID, "run_id", dec.RunID, "execution_id", dec.ExecutionID)
+			continue
+		case refadmit.ClassNonBranch:
+			// Operator-only; logged for the same audit reason, then the
+			// policy below sees it as before (it allows non-branch refs).
+			log.Info("pre-receive admitted non-branch ref",
+				"ref", u.Ref, "reason", dec.Reason, "actor_id", admActorID)
+		}
+		if policy == nil {
+			continue
+		}
+		kind := branchprotect.OpDirectWrite
+		if u.IsDelete() {
+			kind = branchprotect.OpDelete
+		}
+		bpDec, reasons, err := policy.Evaluate(r.Context(), branchprotect.Request{
+			Branch:   u.Ref,
+			Kind:     kind,
+			Actor:    policyActor,
+			Override: override,
+			TraceID:  traceID,
+		})
+		if err != nil {
+			log.Error("branch-protection evaluation failed, rejecting push",
+				"ref", u.Ref, "error", err)
+			messages = append(messages,
+				fmt.Sprintf("branch-protection: evaluation error on %s", trimRefsHeads(u.Ref)))
+			continue
+		}
+		if bpDec == branchprotect.DecisionDeny {
+			for _, rc := range reasons {
 				messages = append(messages,
-					fmt.Sprintf("branch-protection: evaluation error on %s", trimRefsHeads(u.Ref)))
-				continue
+					fmt.Sprintf("branch-protection: %s", rc.Message))
 			}
-			if dec == branchprotect.DecisionDeny {
-				for _, rc := range reasons {
-					messages = append(messages,
-						fmt.Sprintf("branch-protection: %s", rc.Message))
-				}
-				continue
-			}
-			// Allowed. If the allow was because of an honored
-			// override, record it for the audit event; a plain
-			// "no matching rule" allow is not overridable and
-			// emits nothing (per ADR-009 §4: avoid log pollution
-			// from unused overrides).
-			if kinds := overrideHonouredKinds(reasons); len(kinds) > 0 {
-				honoredOverrides = append(honoredOverrides, honored{update: u, ruleKinds: kinds})
-			}
+			continue
 		}
-		if len(messages) > 0 {
-			log.Warn("pre-receive rejected push",
-				"remote_addr", r.RemoteAddr,
-				"refs", refPaths(updates),
-				"reasons", messages,
-			)
-			h.writeReceivePackDenial(w, messages, updates)
-			return nil, false
+		// Allowed. If the allow was because of an honored
+		// override, record it for the audit event; a plain
+		// "no matching rule" allow is not overridable and
+		// emits nothing (per ADR-009 §4: avoid log pollution
+		// from unused overrides).
+		if kinds := overrideHonouredKinds(reasons); len(kinds) > 0 {
+			honoredOverrides = append(honoredOverrides, honored{update: u, ruleKinds: kinds})
 		}
+	}
+	if len(messages) > 0 {
+		// Pre-receive stays all-or-nothing: one refused ref refuses the
+		// whole push.
+		log.Warn("pre-receive rejected push",
+			"remote_addr", r.RemoteAddr,
+			"refs", refPaths(updates),
+			"reasons", messages,
+		)
+		h.writeReceivePackDenial(w, messages, updates)
+		return nil, false
 	}
 
 	// Allow path: emit one governance event per overridden ref
@@ -808,6 +901,62 @@ func WithEvents(ctx context.Context, e event.Emitter) context.Context {
 func eventsFromContext(ctx context.Context) event.Emitter {
 	e, _ := ctx.Value(eventsKey{}).(event.Emitter)
 	return e
+}
+
+// runRefsKey, stepDefsKey and repositoryIDKey are the context keys for
+// the per-request ref-admission inputs (INIT-023 TASK-016). Like
+// policyKey they are per-request, so a shared-mode deployment admits
+// each push against the target workspace's own runs.
+type (
+	runRefsKey      struct{}
+	stepDefsKey     struct{}
+	repositoryIDKey struct{}
+)
+
+// WithRunRefs returns a copy of ctx carrying the run reader the
+// pre-receive admission uses for run, plan and divergence refs. It
+// wins over the handler's Config.RunRefs, and once it is set the
+// step-definition lookup is taken from the context too (WithStepDefs),
+// never from Config.StepDefs. A nil reader is not attached.
+func WithRunRefs(ctx context.Context, rr refadmit.RunReader) context.Context {
+	if rr == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, runRefsKey{}, rr)
+}
+
+func runRefsFromContext(ctx context.Context) refadmit.RunReader {
+	rr, _ := ctx.Value(runRefsKey{}).(refadmit.RunReader)
+	return rr
+}
+
+// WithStepDefs returns a copy of ctx carrying the step-definition
+// lookup for the review freeze (TASK-016 owner question 4). It is read
+// only together with a reader attached by WithRunRefs. A nil lookup is
+// not attached.
+func WithStepDefs(ctx context.Context, l refadmit.StepDefLookup) context.Context {
+	if l == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, stepDefsKey{}, l)
+}
+
+func stepDefsFromContext(ctx context.Context) refadmit.StepDefLookup {
+	l, _ := ctx.Value(stepDefsKey{}).(refadmit.StepDefLookup)
+	return l
+}
+
+// WithRepositoryID returns a copy of ctx carrying the repository the
+// git request targets, as the gateway parsed it from the URL ("" and
+// "spine" both mean the workspace primary). The run-branch admission
+// requires the bound execution to target the same repository.
+func WithRepositoryID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, repositoryIDKey{}, id)
+}
+
+func repositoryIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(repositoryIDKey{}).(string)
+	return id
 }
 
 // repoPathKey is the context key for the resolved repo filesystem path.
