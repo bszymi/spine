@@ -44,12 +44,12 @@ func (r *pgRecorder) rejections(t *testing.T) []map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []map[string]any
-	for _, e := range r.events {
-		if e.Type != "projection_workflow_rejected" {
+	for i := range r.events {
+		if r.events[i].Type != "projection_workflow_rejected" {
 			continue
 		}
 		var p map[string]any
-		if err := json.Unmarshal(e.Payload, &p); err != nil {
+		if err := json.Unmarshal(r.events[i].Payload, &p); err != nil {
 			t.Fatal(err)
 		}
 		out = append(out, p)

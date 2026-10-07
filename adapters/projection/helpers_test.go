@@ -307,9 +307,9 @@ func (r *recordingRouter) ofType(t domain.EventType) []domain.Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []domain.Event
-	for _, e := range r.events {
-		if e.Type == t {
-			out = append(out, e)
+	for i := range r.events {
+		if r.events[i].Type == t {
+			out = append(out, r.events[i])
 		}
 	}
 	return out
@@ -318,9 +318,10 @@ func (r *recordingRouter) ofType(t domain.EventType) []domain.Event {
 func (r *recordingRouter) rejections(t *testing.T) []map[string]any {
 	t.Helper()
 	var out []map[string]any
-	for _, e := range r.ofType(domain.EventProjectionWorkflowRejected) {
+	events := r.ofType(domain.EventProjectionWorkflowRejected)
+	for i := range events {
 		var p map[string]any
-		if err := json.Unmarshal(e.Payload, &p); err != nil {
+		if err := json.Unmarshal(events[i].Payload, &p); err != nil {
 			t.Fatalf("rejection payload: %v", err)
 		}
 		out = append(out, p)
@@ -372,7 +373,8 @@ func (r *scratchRepo) write(rel, body string) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		r.t.Fatal(err)
 	}
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+	// rel is a test-authored literal under t.TempDir().
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil { //nolint:gosec // G703: test fixture path, not external input
 		r.t.Fatal(err)
 	}
 }

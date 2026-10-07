@@ -62,8 +62,8 @@ func assertKeptQuarantined(t *testing.T, st allRowsStore, c1 string) *store.Work
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range active {
-		if a.WorkflowPath == wfPath {
+	for i := range active {
+		if active[i].WorkflowPath == wfPath {
 			t.Fatal("a quarantined row must not be returned as Active")
 		}
 	}
@@ -421,8 +421,9 @@ func sweepFixture(t *testing.T, files map[string]string, rows func(head string) 
 	}
 	head := repo.commit("head")
 	ms := newMapStore()
-	for _, r := range rows(head) {
-		ms.putRow(r)
+	seed := rows(head)
+	for i := range seed {
+		ms.putRow(seed[i])
 	}
 	ms.setState(head, "idle")
 	router := &recordingRouter{}

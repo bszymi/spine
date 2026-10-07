@@ -1,6 +1,7 @@
 package workflow_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -87,7 +88,7 @@ func TestService_Update_RejectsRoundTripBodies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(now) != string(original) {
+			if !bytes.Equal(now, original) {
 				t.Fatal("the existing file must be left untouched")
 			}
 		})
