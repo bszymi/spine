@@ -2,8 +2,11 @@ package branchprotect
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/bszymi/spine/core/branchprotect/config"
 	"github.com/bszymi/spine/core/domain"
@@ -86,13 +89,40 @@ func TestEvaluate_WellFormedBranchesUnchanged(t *testing.T) {
 	// an editor that folded it into an ASCII space would leave the row
 	// passing (a space is allowed here) while the coverage silently
 	// vanished. Pin that both rows are still in the table.
-	for _, want := range []string{"feat/é", "feat/a b"} {
+	for _, want := range []string{"feat/\u00e9", "feat/a\u00a0b"} {
 		found := false
 		for _, tc := range cases {
 			found = found || tc.branch == want
 		}
 		if !found {
 			t.Errorf("table lost its non-ASCII row %q", want)
+		}
+	}
+}
+
+// TestNoLiteralInvisibleCharactersInTestSources keeps the non-ASCII table rows
+// reviewable at the byte level. An invisible character written
+// literally (U+00A0 NBSP, a zero-width space, a BOM, U+2028) cannot be
+// told apart from its visible look-alike, and an editor may silently
+// fold it into an ASCII space, so a row could lose its coverage without
+// failing. Such characters must be written as escapes (\u00a0).
+// INIT-023 TASK-001 review round 1 found exactly that, twice.
+func TestNoLiteralInvisibleCharactersInTestSources(t *testing.T) {
+	files, err := filepath.Glob("*_test.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no test sources found (%v)", err)
+	}
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			for _, r := range line {
+				if r > 0x7f && (unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)) {
+					t.Errorf("%s:%d: literal U+%04X; write it as an escape", f, i+1, r)
+				}
+			}
 		}
 	}
 }
