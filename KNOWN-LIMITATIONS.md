@@ -134,10 +134,23 @@ The following limitations have been resolved:
   workspace's first load after the Spine restart until the platform switches. Switch both in one
   change window (`docs/operator-runbook.md` §5.6). A two-phase `SMP_ADMIN_TOKEN_PREVIOUS` grace
   is a recorded follow-up (TASK-013 owner question 2).
-- **Restart-during-rollout residue:** an old-config replica that restarts mid-rollout and then
-  loads a workspace first seeded during the overlap revokes the *new* bearer there. Recovery is
-  to rotate forward to a fresh value. Only bearer generation numbers would remove this (owner
-  question 5); the default accepts it.
+- **Rollout residues:** rows are ordered by time, which cannot tell a stale bearer re-inserted
+  late from a newer one. Both residues are confined to workspaces first loaded during a
+  rotation's rollout (a row for one bearer and none for the other); only bearer generation
+  numbers would remove them (owner question 5), and the default accepts them.
+  - *Restart during the rollout:* an old-config replica that restarts mid-rollout and then loads
+    such a workspace revokes the *new* bearer there. Recovery is to rotate forward to a fresh
+    value.
+  - *Old bearer inserted after the new one:* if a new-config replica seeds the new bearer first
+    and a replica still carrying the old bearer (an old-config replica, or pre-upgrade code during
+    the upgrade rollout) then loads the workspace, the old bearer's row is newer than the new
+    one's. No replica carrying the new bearer revokes it, restarts included, so the **old bearer
+    stays valid until the next rotation**. After the rollout each load of such a workspace logs
+    at Warn with the row's `token_id`; revoke it with `DELETE /api/v1/tokens/{token_id}` (runbook
+    §5.6 (e)).
+- **A failed bootstrap leaves the old bearer live until a retry succeeds:** `spine serve`
+  retries a failed admin bootstrap in the background (from 1s, up to 1 min apart) for as long as
+  the workspace stays loaded; each failure is logged at Error.
 - **Clock dependence:** rows are ordered by the `created_at` the inserting replica stamps, so the
   rollout cutoff assumes replica clocks agree to well within the deploy's duration.
 - **Legacy token ids:** bootstrap rows written before TASK-013 keep their
@@ -156,6 +169,10 @@ The following limitations have been resolved:
   superseded workflow version that names the skill is not detected.
 - `auth.actor_skills` records no grantor, so grants made by non-admins before the upgrade are not
   distinguishable. Review `review`, `workflow_review` and `architecture` holders after upgrading.
+- `PATCH /skills/{id}` and `POST /skills/{id}/deprecate` are read-modify-write. They re-read the
+  skill right before writing (a rename in between is a 409), but a change another admin commits
+  between that re-read and the write is still overwritten. Closing the window needs a
+  conditional `UPDATE` in the store (a follow-up).
 
 ## Architecture Deviations
 
