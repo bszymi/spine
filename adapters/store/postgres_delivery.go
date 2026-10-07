@@ -20,16 +20,58 @@ func (s *PostgresStore) EnqueueDelivery(ctx context.Context, entry *DeliveryEntr
 	return err
 }
 
+// ClaimDeliveries moves up to limit due deliveries (pending, or failed
+// with next_retry_at reached) to 'delivering' and returns them.
+//
+// The claim is fair across subscriptions (INIT-023 TASK-010 §2a, audit
+// P3-5): claimable rows are ranked within their subscription by
+// created_at and claimed in (rank, created_at) order — round-robin across
+// subscriptions, FIFO within each. With the old global ORDER BY
+// created_at, any subscription's old claimable rows took every claim slot
+// ahead of every other subscription's newer rows: a backlog held behind
+// an open circuit (all deferred to one probe instant) larger than
+// concurrency x (recovery timeout / poll interval) = 300 rows starved
+// every other subscription in the workspace indefinitely. Now each
+// subscription's oldest due row competes for a slot on its own age, so
+// while fewer than limit subscriptions have due rows, none waits more
+// than one poll behind another's backlog. The fair claim alone does not
+// bound the case of limit or more subscriptions each holding an old
+// backlog: their oldest rows would take every slot. The dispatcher closes
+// that by holding the whole due backlog of a subscription it cannot
+// deliver to for a while, and by dead-lettering the whole due backlog of
+// one it can never deliver to (both through HoldDueDeliveries), so such a
+// backlog is not claimable at all between holds. A single-subscription
+// queue — SMP's shape, one
+// subscription per runtime DB — is claimed in exactly the old order.
+//
+// Postgres refuses FOR UPDATE beside a window function at the same query
+// level, so the ranking sits in a subquery and the row lock is taken one
+// level up. LIMIT applies before SKIP LOCKED: when dispatchers race (SMP
+// replicas) one may claim fewer than limit rows in a poll, never a row
+// twice. The outer status and due-time re-check is re-evaluated under
+// the lock (READ COMMITTED), so a row another claimer took — or took and
+// deferred into the future — in between is skipped. Measured on
+// PostgreSQL 17 with 100 000 claimable rows across 50 subscriptions:
+// about 40 ms per claim against about 20 ms for the old query.
 func (s *PostgresStore) ClaimDeliveries(ctx context.Context, limit int) ([]DeliveryEntry, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE runtime.event_delivery_queue
 		SET status = 'delivering'
 		WHERE delivery_id IN (
 			SELECT delivery_id FROM runtime.event_delivery_queue
-			WHERE status IN ('pending', 'failed')
-			  AND (next_retry_at IS NULL OR next_retry_at <= now())
-			ORDER BY created_at
-			LIMIT $1
+			WHERE delivery_id IN (
+				SELECT delivery_id FROM (
+					SELECT delivery_id, created_at,
+					       row_number() OVER (PARTITION BY subscription_id ORDER BY created_at) AS rn
+					FROM runtime.event_delivery_queue
+					WHERE status IN ('pending', 'failed')
+					  AND (next_retry_at IS NULL OR next_retry_at <= now())
+				) ranked
+				ORDER BY rn, created_at
+				LIMIT $1
+			)
+			AND status IN ('pending', 'failed')
+			AND (next_retry_at IS NULL OR next_retry_at <= now())
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING delivery_id, subscription_id, event_id, event_type, payload,
@@ -64,6 +106,92 @@ func (s *PostgresStore) UpdateDeliveryStatus(ctx context.Context, deliveryID, st
 		WHERE delivery_id = $1`,
 		deliveryID, status, nilIfEmpty(lastError), nextRetryAt)
 	return err
+}
+
+// DeferDelivery re-schedules a claimed delivery without consuming an
+// attempt (see DeliveryStore.DeferDelivery). Unlike UpdateDeliveryStatus
+// it does not bump attempt_count — nothing was sent — and it only
+// touches a row still in 'delivering'.
+func (s *PostgresStore) DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE runtime.event_delivery_queue
+		SET status = 'pending', last_error = $2, next_retry_at = $3
+		WHERE delivery_id = $1 AND status = 'delivering'`,
+		deliveryID, nilIfEmpty(reason), until)
+	return err
+}
+
+// HoldDueDeliveries takes a subscription's due deliveries off the
+// claimable set (see DeliveryStore.HoldDueDeliveries).
+//
+// Why it exists: the fair claim gives each subscription's oldest due row
+// a slot ahead of any newer row. A subscription the dispatcher cannot
+// deliver to (open circuit, unreadable subscription) used to have only
+// the rows it was handed deferred, one per poll, while the rest of its
+// backlog stayed due — so once `concurrency` (5) such subscriptions each
+// had a backlog, their oldest rows took every claim slot on every poll
+// and every other subscription starved (INIT-023 TASK-010 review round
+// 1). Holding the whole due backlog at once leaves such a subscription
+// with nothing claimable until the hold ends, so it takes about one slot
+// per hold, however many rows it has. Called with ExpireBefore = Until it
+// dead-letters the whole due backlog instead, which the dispatcher does
+// for a subscription whose deliveries can never succeed (review round 2).
+//
+// The candidate rows are locked FOR UPDATE SKIP LOCKED in a CTE: a row a
+// dispatcher is claiming (or another hold is writing) is skipped, never
+// waited on, so two replicas holding the same subscription cannot
+// deadlock. Locked rows are re-checked against the predicate under READ
+// COMMITTED, so a row claimed or rescheduled in between is not touched.
+// The scan uses idx_delivery_queue_subscription (subscription_id,
+// created_at).
+func (s *PostgresStore) HoldDueDeliveries(ctx context.Context, hold DeliveryHold) ([]DeliveryEntry, error) {
+	var expireBefore *time.Time
+	if !hold.ExpireBefore.IsZero() {
+		t := hold.ExpireBefore
+		expireBefore = &t
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH due AS (
+			SELECT delivery_id FROM runtime.event_delivery_queue
+			WHERE subscription_id = $1
+			  AND status IN ('pending', 'failed')
+			  AND (next_retry_at IS NULL OR next_retry_at < $2)
+			FOR UPDATE SKIP LOCKED
+		), held AS (
+			UPDATE runtime.event_delivery_queue q
+			SET status = CASE WHEN q.created_at < $4 THEN 'dead' ELSE q.status END,
+			    last_error = CASE WHEN q.created_at < $4 THEN $5
+			                      WHEN q.status = 'pending' THEN $3
+			                      ELSE q.last_error END,
+			    next_retry_at = CASE WHEN q.created_at < $4 THEN NULL ELSE $2 END
+			FROM due
+			WHERE q.delivery_id = due.delivery_id
+			RETURNING q.delivery_id, q.subscription_id, q.event_id, q.event_type,
+			          q.status, q.attempt_count, q.last_error, q.created_at
+		)
+		SELECT delivery_id, subscription_id, event_id, event_type,
+		       status, attempt_count, last_error, created_at
+		FROM held WHERE status = 'dead'`,
+		hold.SubscriptionID, hold.Until, nilIfEmpty(hold.Reason), expireBefore, nilIfEmpty(hold.ExpiredReason))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var expired []DeliveryEntry
+	for rows.Next() {
+		var e DeliveryEntry
+		var lastError *string
+		if err := rows.Scan(&e.DeliveryID, &e.SubscriptionID, &e.EventID, &e.EventType,
+			&e.Status, &e.AttemptCount, &lastError, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		if lastError != nil {
+			e.LastError = *lastError
+		}
+		expired = append(expired, e)
+	}
+	return expired, rows.Err()
 }
 
 func (s *PostgresStore) MarkDelivered(ctx context.Context, deliveryID string) error {

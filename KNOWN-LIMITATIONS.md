@@ -24,6 +24,54 @@ This document tracks known gaps and deferred functionality.
 - Zero implementation — planned feature
 - Thread creation, comments, resolution not yet built
 
+### Webhook Delivery (after INIT-023 TASK-010)
+- **v1 signatures stay replayable.** v1 (the default) signs the body only. Opt a subscription
+  into v2 (`metadata.signature_version: "v2"`, integration guide §6.1) for a timestamp and
+  single-use nonce inside the MAC. Making v2 the default for new subscriptions is an open
+  owner question.
+- **The subscription test ping is unsigned**, so a receiver that enforces signatures rejects
+  it. Follow-up: sign it in the subscription's version.
+- **Redirects are followed with the signature headers.** Each hop is re-validated, but Go's
+  client copies the headers (a fresh v2 signature and nonce included) to the redirect target.
+  Not changed here: refusing redirects would dead-letter receivers that rely on an
+  http→https or trailing-slash redirect today.
+- **A slow endpoint throttles its workspace.** The dispatcher waits for a whole batch
+  (default 5 deliveries) before claiming again, so an endpoint that answers just under the
+  10 s timeout — even with a success — limits every subscription in the workspace to about
+  5 deliveries per 10 s. The fair claim does not help; per-subscription in-flight limits are
+  the follow-up.
+- **A replica-local fault holds a subscription for every replica.** The circuit breaker is in
+  memory per process. With several dispatchers on one runtime database (SMP replicas), a
+  replica whose circuit for a subscription is open, or which cannot read the subscription (for
+  example one started without its encryption key), holds that subscription's due queue in the
+  database until its next attempt, up to 60 s per cycle; rows that arrive between holds are
+  still claimable by the healthy replica. A shared (database-backed) breaker would remove this.
+- **The start of a hold is kept in memory.** `MaxCircuitHold` (24 h) counts from when the
+  dispatcher process saw the circuit open, or first failed to read the subscription, so a
+  restart (or a replica that has just started) starts it again. A subscription that stays
+  unreadable while its dispatcher restarts more often than every 24 hours never has its rows
+  dead-lettered by the cap: they stay `failed` (at the attempt budget, so SMP's run banner
+  shows them) and are retried every minute. A "held since" column (a schema change) would
+  remove this.
+- **A refused target URL dead-letters the whole due queue.** A permanent verdict on a
+  subscription (deleted, invalid metadata, refused URL, unusable TLS or signing configuration)
+  dead-letters every delivery of it that is due, not only the one being tried. A host name is
+  refused on what it resolves to at that moment, so a DNS answer that points at a non-public
+  address even briefly costs the subscription its due deliveries; they stay replayable.
+- **Re-holding a very large backlog is one large write per probe cycle.** When an open circuit's
+  probe time arrives, the whole held backlog becomes due and the first hold after the probe
+  re-schedules it in one statement: about 70 ms for 2 000 rows and 1.6 s for 100 000 rows on a
+  loaded development machine (PostgreSQL 17), once a minute, inside one poll.
+- **A lost status write strands a row in `delivering`.** Without a `claimed_at` column (a
+  schema change) such a row is never re-claimed.
+- **NAT64 with a network-specific prefix** (RFC 6052 §2.2) cannot be recognised from the
+  address; egress policy is the control there.
+- **Rows written before TASK-010 keep their unredacted `last_error`** until retention deletes
+  them; the task's Implementation Notes give a one-off `UPDATE` an operator can run.
+- **Operator replay keeps `attempt_count`**, so a replayed exhausted delivery is
+  dead-lettered by its first failure. The response body of a delivery is drained without a
+  size cap (bounded only by the 10 s client timeout).
+
 ### Git Push: Bodies Larger Than the Client's `http.postBuffer` Are Refused
 - With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a push whose request body is larger than the client's
   `http.postBuffer` (1 MiB by default) fails with `error: RPC failed; HTTP 400`. Nothing is

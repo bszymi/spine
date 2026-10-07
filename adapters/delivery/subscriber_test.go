@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // fakeStore captures enqueued deliveries.
@@ -498,6 +498,12 @@ func (m *minimalStore) ClaimDeliveries(context.Context, int) ([]store.DeliveryEn
 	panic("not used")
 }
 func (m *minimalStore) UpdateDeliveryStatus(context.Context, string, string, string, *time.Time) error {
+	panic("not used")
+}
+func (m *minimalStore) DeferDelivery(context.Context, string, string, time.Time) error {
+	panic("not used")
+}
+func (m *minimalStore) HoldDueDeliveries(context.Context, store.DeliveryHold) ([]store.DeliveryEntry, error) {
 	panic("not used")
 }
 func (m *minimalStore) MarkDelivered(context.Context, string) error { panic("not used") }

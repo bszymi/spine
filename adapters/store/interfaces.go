@@ -194,6 +194,29 @@ type DeliveryStore interface {
 	EnqueueDelivery(ctx context.Context, entry *DeliveryEntry) error
 	ClaimDeliveries(ctx context.Context, limit int) ([]DeliveryEntry, error)
 	UpdateDeliveryStatus(ctx context.Context, deliveryID, status string, lastError string, nextRetryAt *time.Time) error
+	// DeferDelivery re-schedules a claimed delivery without consuming an
+	// attempt: the row returns to 'pending' with last_error = reason and
+	// next_retry_at = until, attempt_count unchanged. It touches the row
+	// only while it is still 'delivering', so a row an operator replayed
+	// (or an embedder redrove) in the meantime is never overwritten. The
+	// webhook dispatcher uses it for deliveries its circuit breaker held
+	// (INIT-023 TASK-010).
+	DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error
+	// HoldDueDeliveries takes every due delivery of one subscription off
+	// the claimable set in one statement, without consuming an attempt
+	// (attempt_count is never touched): 'pending'/'failed' rows whose
+	// next_retry_at is NULL or before hold.Until get next_retry_at =
+	// hold.Until, except rows created before a non-zero hold.ExpireBefore,
+	// which go 'dead' with hold.ExpiredReason and are returned so the
+	// caller can write their delivery-log rows. Rows another transaction
+	// holds locked (being claimed or written) are skipped. The webhook
+	// dispatcher uses it when a subscription cannot be delivered to at
+	// all for a while (open circuit, unreadable subscription), and, with
+	// ExpireBefore = Until, to dead-letter the due queue of a subscription
+	// whose deliveries can never succeed (deleted, invalid metadata,
+	// refused target URL), so neither backlog keeps taking claim slots
+	// from other subscriptions (INIT-023 TASK-010, audit P3-5).
+	HoldDueDeliveries(ctx context.Context, hold DeliveryHold) ([]DeliveryEntry, error)
 	MarkDelivered(ctx context.Context, deliveryID string) error
 	LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error
 	ListDeliveryHistory(ctx context.Context, query DeliveryHistoryQuery) ([]DeliveryLogEntry, error)
