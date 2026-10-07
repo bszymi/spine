@@ -60,7 +60,9 @@ release is cut — this file is a staging area.
 - **`spine init-repo`** run with a non-operator token against a Spine gateway now prints the
   server's refusal of `spine/init` (`Note: origin refused the push; spine/init exists only
   locally:` with the `ref-admission:` line and the operator-token remedy) instead of "remote may
-  not be configured". It still exits 0, as for any push failure.
+  not be configured". It still exits 0, as for any push failure. Re-running `spine init-repo` in
+  that clone does not retry the push (with nothing left to commit it stops before pushing), so the
+  remedy is `git push -u origin spine/init` with an operator token (`docs/git-push-guide.md` §5).
 - **Logs:** each refused ref is logged at Warn (`pre-receive ref admission denied`, with class and
   reason); an operator's push to a reserved or non-branch ref is logged at Info. No event type,
   schema, migration, endpoint or environment variable is added.
