@@ -8,15 +8,18 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/auth"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/evidence"
+	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
@@ -227,32 +230,109 @@ func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Lo
 //     rather than the colliding auth.tokens row. Strict-startup is
 //     the same policy that gates SPINE_DEV_MODE,
 //     SPINE_CODE_REPO_BASE, and SPINE_SECRET_ENCRYPTION_KEY at boot.
-//   - All other errors (and the same collision off-production) are
-//     logged and swallowed so a transient store blip does not knock a
-//     workspace out of rotation. That includes a failure to revoke a
-//     superseded bootstrap bearer after a rotation: the sweep re-runs on
-//     the next workspace load. The collision specifically is also
-//     logged before being returned so the production failure has a
-//     structured log breadcrumb alongside the workspace-load error.
+//     Off production the collision is logged and swallowed, and not
+//     retried: it is deterministic until an operator cleans up the
+//     colliding row. It is logged before being returned too, so the
+//     production failure has a structured log breadcrumb alongside the
+//     workspace-load error.
+//   - All other errors are logged at Error and swallowed, so a
+//     transient store blip does not knock a workspace out of rotation,
+//     and the bootstrap is retried in the background
+//     (retryInternalAdminBootstrap) until it succeeds or this
+//     ServiceSet closes. The retry matters for security, not just
+//     availability: a failed bootstrap may have left a superseded
+//     bootstrap bearer live after an SMP_ADMIN_TOKEN rotation, and this
+//     builder only runs again when the ServiceSet is rebuilt — after an
+//     idle eviction, a binding invalidation or a restart, which a busy
+//     workspace may not see for as long as the process lives.
 func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg workspaceDeliveryConfig, log *slog.Logger) error {
 	if cfg.SMPAdminToken == "" || ss.Store == nil {
 		return nil
 	}
-	err := auth.BootstrapInternalAdmin(ctx, ss.Store, auth.BootstrapAdminConfig{
+	// The builder runs on the pool's context, which names no workspace;
+	// core/auth logs (a revoked current bearer, a superseded row left in
+	// place, each revocation and its audit line) must say which
+	// workspace they concern, because the operator acts per workspace.
+	ctx = observe.WithWorkspaceID(ctx, ss.Config.ID)
+	err := runInternalAdminBootstrap(ctx, ss.Store, cfg)
+	if err == nil {
+		return nil
+	}
+	log.Error("workspace bootstrap internal admin failed", "workspace", ss.Config.ID, "error", err)
+	if errors.Is(err, auth.ErrAdminTokenHashCollision) {
+		if cfg.ProductionStrict {
+			return fmt.Errorf("workspace %q: %w", ss.Config.ID, err)
+		}
+		return nil
+	}
+	// ctx is the pool's lifetime context. The retry stops when this
+	// ServiceSet closes: AppendCloser cancels an attempt in flight on a
+	// normal close, and Done also covers a builder failure, whose
+	// teardown skips appended closers. The next build of the workspace
+	// runs the bootstrap afresh.
+	retryCtx, cancel := context.WithCancel(ctx)
+	ss.AppendCloser(func(string) { cancel() })
+	go retryInternalAdminBootstrap(retryCtx, ss.Store, ss.Done, ss.Config.ID, cfg, log,
+		internalAdminRetryInitialDelay, internalAdminRetryMaxDelay)
+	return nil
+}
+
+// runInternalAdminBootstrap is the one auth.BootstrapInternalAdmin call
+// shape, shared by the first attempt and the retries.
+func runInternalAdminBootstrap(ctx context.Context, st store.AuthStore, cfg workspaceDeliveryConfig) error {
+	return auth.BootstrapInternalAdmin(ctx, st, auth.BootstrapAdminConfig{
 		Token: cfg.SMPAdminToken,
 		// A rotation revokes only bootstrap rows created before this
 		// process booted (INIT-023 TASK-013): an old replica in a
 		// rolling deploy never revokes the newer bearer.
 		SupersededBefore: cfg.ProcessStart,
 	})
-	if err == nil {
-		return nil
+}
+
+// Pacing of the background admin-bootstrap retry: exponential from the
+// initial delay, capped at the maximum, unbounded in count. Variables
+// so tests can shorten them; read once, by the goroutine that starts
+// the retry, so a retry in flight never reads them.
+var (
+	internalAdminRetryInitialDelay = time.Second
+	internalAdminRetryMaxDelay     = time.Minute
+)
+
+// retryInternalAdminBootstrap re-runs the idempotent admin bootstrap
+// after a failed first attempt (INIT-023 TASK-013 review round 1). It
+// returns on the first success, when ctx is cancelled or done closes
+// (the ServiceSet is closing), or on a hash collision, which retrying
+// cannot fix. Every failed attempt is logged at Error with its attempt
+// number: while it lasts, a superseded bootstrap bearer may still be
+// live in this workspace.
+func retryInternalAdminBootstrap(ctx context.Context, st store.AuthStore, done <-chan struct{}, workspaceID string,
+	cfg workspaceDeliveryConfig, log *slog.Logger, initialDelay, maxDelay time.Duration) {
+	delay := initialDelay
+	for attempt := 2; ; attempt++ {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-done:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		err := runInternalAdminBootstrap(ctx, st, cfg)
+		if err == nil {
+			log.Info("workspace bootstrap internal admin succeeded on retry", "workspace", workspaceID, "attempt", attempt)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.Error("workspace bootstrap internal admin failed", "workspace", workspaceID, "attempt", attempt, "error", err)
+		if errors.Is(err, auth.ErrAdminTokenHashCollision) {
+			return
+		}
+		delay = min(delay*2, maxDelay)
 	}
-	log.Error("workspace bootstrap internal admin failed", "workspace", ss.Config.ID, "error", err)
-	if cfg.ProductionStrict && errors.Is(err, auth.ErrAdminTokenHashCollision) {
-		return fmt.Errorf("workspace %q: %w", ss.Config.ID, err)
-	}
-	return nil
 }
 
 // wireWorkspaceDelivery starts a per-workspace DeliverySubscriber,
