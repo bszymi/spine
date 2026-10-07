@@ -35,9 +35,12 @@ import (
 //
 // Everything else is refused, before any git process starts, with a
 // *GitError{Kind: ErrKindPermanent, Err: ErrInvalidRef}: HEAD, "@" and
-// any refs/* other than refs/heads/<n> as a branch; abbreviated ids,
-// tags and rev expressions as a commit; "", a leading "-", ~ ^ : \ "..",
-// space and control bytes as a rev; URLs, ext:: and options as a remote.
+// any refs/* other than refs/heads/<n> as a branch; tags, remote refs
+// and rev expressions as a commit (an abbreviated id is a valid branch
+// NAME there, so it is looked up as a branch and is ErrKindNotFound
+// unless such a branch exists — never read as an object); "", a leading
+// "-", ~ ^ : \ "..", space and control bytes as a rev; URLs, ext:: and
+// options as a remote.
 // Each method checks ALL of its arguments first, then resolves (two
 // phases), so an invalid second argument never follows a lookup of the
 // first.

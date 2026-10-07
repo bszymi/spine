@@ -32,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -171,6 +172,12 @@ func checkRemote(op, remote string) error {
 func lookupBranch(ctx context.Context, dir, op, short string) (string, bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--hash", headsPrefix+short)
 	cmd.Dir = dir
+	// "not a valid ref" is a translatable message: force the C locale so
+	// a host with a translated git still reports a missing branch as
+	// missing (a localized message would otherwise fail closed and break
+	// every read of a tag, abbreviated id or remote-tracking name). The
+	// later duplicates override the inherited values.
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -499,6 +499,44 @@ func TestRefGrammar_ExportedPredicates(t *testing.T) {
 	}
 }
 
+// TestRefGrammar_LookupIgnoresHostLocale pins the codex review fix: the
+// exact branch lookup recognises a missing branch by git's English
+// "not a valid ref" marker, so it must run in the C locale. The shim
+// below behaves like a translated git (it answers show-ref with a
+// German message unless LC_ALL=C); with the lookup inheriting the host
+// locale, every read of a tag-only name would fail closed.
+func TestRefGrammar_LookupIgnoresHostLocale(t *testing.T) {
+	c, _, _, _, featOID := grammarRepo(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip(err)
+	}
+	dir := t.TempDir()
+	shim := "#!/bin/sh\n" +
+		"if [ \"$1\" = show-ref ] && [ \"$LC_ALL\" != C ]; then\n" +
+		"  echo \"fatal: '$4' - keine gueltige Referenz\" >&2\n" +
+		"  exit 128\n" +
+		"fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(shim), 0o755); err != nil { //nolint:gosec // G306: test shim must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+	ctx := context.Background()
+	if got, err := c.ReadFile(ctx, "t1", "f.txt"); err != nil || string(got) != "feat\n" {
+		t.Fatalf("ReadFile(tag-only name) under a translated git = %q, %v", got, err)
+	}
+	if got, err := c.RefSHA(ctx, "feat"); err != nil || got != featOID {
+		t.Fatalf("RefSHA(branch) under a translated git = %q, %v", got, err)
+	}
+	var ge *git.GitError
+	if _, err := c.RefSHA(ctx, "refs/heads/no-such-branch"); !errors.As(err, &ge) || ge.Kind != git.ErrKindNotFound {
+		t.Fatalf("RefSHA(missing qualified branch) under a translated git = %v, want ErrKindNotFound", err)
+	}
+}
+
 // installFakeGitVersion puts a `git` on PATH that prints only a version
 // line, for the CheckGitVersion tests.
 func installFakeGitVersion(t *testing.T, line string) {
