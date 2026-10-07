@@ -754,9 +754,13 @@ func warnLineNaming(log, tokenID string) string {
 // inserts A. A's row is newer than B's, so no B-carrying replica ever
 // revokes it — not even one that boots after the rollout. A stays live
 // until the next rotation or an admin's DELETE. This pins both the
-// residue (so a change to it is a decision, not an accident) and the
-// Warn that makes it visible once the rollout is over, while the
-// expected rolling-deploy case stays quiet.
+// residue (so a change to it is a decision, not an accident) and who
+// logs the Warn that makes it visible: only a replica that started
+// after A's row was written. R2, already running when A was inserted,
+// stays quiet on every reload — during the rollout and after it — so
+// idle eviction never surfaces it and the docs (CHANGELOG, KNOWN-
+// LIMITATIONS, runbook §5.6 (e)) tell operators to restart every
+// replica after a rolling rotation (review round 2).
 func TestBootstrapSecurity_StaleBearerInsertedAfterCurrentIsFlagged(t *testing.T) {
 	ctx := context.Background()
 	logs := captureBootstrapLog(t)
@@ -782,7 +786,8 @@ func TestBootstrapSecurity_StaleBearerInsertedAfterCurrentIsFlagged(t *testing.T
 	}
 	tick()
 	// R2 reloads it (idle eviction): A is newer than B but after R2's
-	// cutoff — a rolling deploy in progress. Left in place, quietly.
+	// cutoff — from R2's data, a rolling deploy in progress. Left in
+	// place, quietly.
 	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: r2Start}); err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +796,25 @@ func TestBootstrapSecurity_StaleBearerInsertedAfterCurrentIsFlagged(t *testing.T
 		t.Fatalf("Warn during the rollout, where a newer row is expected:\n%s", logs.String())
 	}
 
-	// After the rollout, a new-config replica R3 boots and loads it.
+	// The rollout ends (R1 is gone) and R2, never restarted, reloads the
+	// workspace after another idle eviction. Its data is unchanged, so
+	// it is still quiet: idle eviction is not enough to surface A. If
+	// this starts logging, the docs' "restart every replica" advice is
+	// stale — update KNOWN-LIMITATIONS, the runbook §5.6 (e) and the
+	// CHANGELOG.
+	tick()
+	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: r2Start}); err != nil {
+		t.Fatal(err)
+	}
+	if warnLineNaming(logs.String(), aID) != "" {
+		t.Fatalf("a replica started before A's row logged it on reload; the docs say only a restarted replica does:\n%s", logs.String())
+	}
+	if _, err := auth.NewService(m).ValidateToken(ctx, a); err != nil {
+		t.Fatalf("residue changed: A is no longer live after R2's post-rollout reload (%v)", err)
+	}
+
+	// After the rollout, a new-config replica R3 boots (a restart) and
+	// loads it: R3 started after A's row was written, so it logs it.
 	tick()
 	r3Start := time.Now().UTC()
 	if err := auth.BootstrapInternalAdmin(ctx, m, auth.BootstrapAdminConfig{Token: b, SupersededBefore: r3Start}); err != nil {

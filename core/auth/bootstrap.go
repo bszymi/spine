@@ -296,8 +296,12 @@ func newInternalAdminTokenID() (string, error) {
 //     replica carrying the new bearer ever revokes it, restarts
 //     included. It stays live until the next rotation, or until an
 //     admin revokes it. The sweep logs such a row at Warn, with its
-//     token id, once no rollout can explain it any more (no cutoff, or
-//     created before the cutoff).
+//     token id, only when it was created before the cutoff (or there is
+//     no cutoff): in spine serve, only a replica that started after the
+//     row was written. A replica already running then sees exactly the
+//     data of a rollout still in progress and stays quiet on every
+//     reload, idle eviction included, so operators must restart every
+//     replica after a rolling rotation to surface it (runbook §5.6 (e)).
 //   - An old-config replica that restarts mid-rollout gets a fresh
 //     cutoff and, where the new bearer's row is the only one, inserts
 //     the old bearer and revokes the new one. The recovery is to
@@ -321,12 +325,14 @@ func revokeSupersededAdminTokens(ctx context.Context, st store.AuthStore, curren
 		}
 		if t.CreatedAt.After(current.CreatedAt) {
 			// Never revoked (see above). A row created after the cutoff
-			// is the expected rolling-deploy case — a newer replica's
-			// bearer — and stays quiet. One with no cutoff, or created
-			// before it, is either a superseded bearer that was
-			// re-inserted after the current one, or a sign that this
-			// process carries a stale SMP_ADMIN_TOKEN: either way an
-			// operator has to look, so say which row.
+			// may be the expected rolling-deploy case — a newer
+			// replica's bearer — and stays quiet; this process cannot
+			// tell it from a stale bearer re-inserted after its own
+			// row, whether or not the rollout has finished. One with no
+			// cutoff, or created before it, is either a superseded
+			// bearer that was re-inserted after the current one, or a
+			// sign that this process carries a stale SMP_ADMIN_TOKEN:
+			// either way an operator has to look, so say which row.
 			if cutoff.IsZero() || t.CreatedAt.Before(cutoff) {
 				log.Warn("a live bootstrap admin token is newer than the current SMP_ADMIN_TOKEN's row and is left in place; if it belongs to a rotated-away bearer, revoke it (DELETE /api/v1/tokens/{token_id}), otherwise this process carries a stale SMP_ADMIN_TOKEN",
 					"actor_id", InternalAdminActorID, "token_id", t.TokenID)
