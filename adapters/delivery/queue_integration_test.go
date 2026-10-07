@@ -503,3 +503,51 @@ func ids(es []store.DeliveryEntry) []string {
 	}
 	return out
 }
+
+// Review round 2, against real Postgres: six deleted subscriptions each
+// leave 100 old due rows (more such subscriptions than the dispatcher's
+// concurrency of 5). One claimed row per subscription dead-letters its
+// whole due queue, so a new smp-internal row is delivered within
+// ceil(6 / 5) = 2 polls, every orphaned row is dead with exactly one
+// delivery-log row, and none reached an endpoint. Before, each poll
+// dead-lettered one row per orphaned subscription and the five oldest
+// took every slot until their backlogs drained (100 polls).
+func TestQueuePG_DeadLetteredBacklogsOfManySubscriptionsDoNotStarve(t *testing.T) {
+	ctx := context.Background()
+	s, p := queuePG(t)
+	_, good, _, gh := queuePGServers(t, http.StatusOK)
+	internal := p + "smp-internal"
+	queuePGSub(t, s, internal, good.URL)
+	base := time.Now().Add(-time.Hour)
+	var deleted []string
+	for j := 0; j < 6; j++ {
+		sub := fmt.Sprintf("%sdeleted-%d", p, j)
+		deleted = append(deleted, sub)
+		for i := 0; i < 100; i++ {
+			queuePGEnqueue(t, s, sub, fmt.Sprintf("x%03d", i), base.Add(time.Duration(i*6+j)*time.Millisecond))
+		}
+	}
+	queuePGEnqueue(t, s, internal, "g0", time.Now())
+	d := NewWebhookDispatcher(s, NewStoreSubscriptionResolver(s), DispatcherConfig{})
+	polls := 0
+	for polls < 2 && atomic.LoadInt64(gh) == 0 {
+		d.poll(ctx)
+		polls++
+	}
+	if atomic.LoadInt64(gh) != 1 {
+		t.Fatalf("smp-internal row not delivered within %d polls behind 6 orphaned backlogs", polls)
+	}
+	for _, sub := range deleted {
+		if n := queuePGCount(t, s, `subscription_id = $1 AND status = 'dead' AND last_error = 'subscription not found'`, sub); n != 100 {
+			t.Fatalf("%s: %d of 100 orphaned rows dead", sub, n)
+		}
+		var logged, distinct int
+		if err := s.RawPool().QueryRow(ctx, `SELECT count(*), count(DISTINCT delivery_id) FROM runtime.event_delivery_log
+			WHERE subscription_id = $1 AND error = 'subscription not found' AND status_code IS NULL`, sub).Scan(&logged, &distinct); err != nil {
+			t.Fatal(err)
+		}
+		if logged != 100 || distinct != 100 {
+			t.Fatalf("%s: %d delivery-log rows for %d deliveries, want one per dead row (100)", sub, logged, distinct)
+		}
+	}
+}

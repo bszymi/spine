@@ -256,16 +256,18 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 			// The subscription was deleted. Queue rows have no foreign
 			// key to event_subscriptions and DeleteSubscription leaves
 			// them behind, so without this the orphans would be
-			// re-claimed forever. No retry can bring the row back.
-			log.Warn("subscription no longer exists; dead-lettering delivery")
-			d.deadLetter(ctx, entry, "subscription not found")
+			// re-claimed forever. No retry can bring the row back, nor
+			// any other row of the subscription: its whole due queue
+			// goes in one statement (deadLetterQueue).
+			log.Warn("subscription no longer exists; dead-lettering its due deliveries")
+			d.deadLetterQueue(ctx, log, entry, "subscription not found")
 		case errors.Is(err, ErrInvalidSubscriptionMetadata):
 			// Permanent configuration error (unknown signature_version,
 			// malformed metadata): no retry can fix it. The parse reason
 			// names keys and values the operator wrote, never
 			// infrastructure detail.
-			log.Warn("subscription metadata invalid; dead-lettering delivery", "error", err.Error())
-			d.deadLetter(ctx, entry, err.Error())
+			log.Warn("subscription metadata invalid; dead-lettering its due deliveries", "error", err.Error())
+			d.deadLetterQueue(ctx, log, entry, err.Error())
 		default:
 			// Transient (DB, decrypt, pool): retried with backoff and
 			// never dead-lettered for it before MaxCircuitHold (see
@@ -282,15 +284,16 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 
 	// Re-validate the persisted URL before every delivery so
 	// subscriptions predating the SSRF hardening are rejected here,
-	// not at the socket. Failures are permanent: dead-letter.
+	// not at the socket. Failures are permanent for the subscription:
+	// dead-letter its due queue.
 	//
 	// From here on every error text that reaches a log line or an error
 	// column goes through RedactError: the target URL's path and query
 	// may carry the receiver's credential (P3-26).
 	if err := d.targets.ValidateURL(sub.TargetURL); err != nil {
 		msg := RedactError(err, sub.TargetURL)
-		log.Warn("webhook target_url rejected by validator", "error", msg)
-		d.deadLetter(ctx, entry, msg)
+		log.Warn("webhook target_url rejected by validator; dead-lettering its due deliveries", "error", msg)
+		d.deadLetterQueue(ctx, log, entry, msg)
 		return
 	}
 
@@ -298,8 +301,8 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sub.TargetURL, bytes.NewReader(entry.Payload))
 	if err != nil {
 		msg := RedactError(err, sub.TargetURL)
-		log.Error("failed to build request", "error", msg)
-		d.deadLetter(ctx, entry, msg)
+		log.Error("failed to build request; dead-lettering its due deliveries", "error", msg)
+		d.deadLetterQueue(ctx, log, entry, msg)
 		return
 	}
 
@@ -312,10 +315,11 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	client, err := d.clientFor(sub)
 	if err != nil {
 		msg := RedactError(err, sub.TargetURL)
-		log.Error("subscription TLS config invalid", "error", msg)
+		log.Error("subscription TLS config invalid; dead-lettering its due deliveries", "error", msg)
 		permit.Failure(ctx)
 		tlsLogID, _ := generateDeliveryID()
 		d.handleFailure(ctx, entry, tlsLogID, 0, 0, false, msg, nil)
+		d.deadLetterRest(ctx, log, entry.SubscriptionID, msg)
 		return
 	}
 
@@ -327,8 +331,8 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	if err := signRequest(req.Header, sub.SignatureVersion, sub.SigningSecret, entry.Payload, d.clock(), d.rand); err != nil {
 		if errors.Is(err, errV2WithoutSecret) || errors.Is(err, ErrInvalidSubscriptionMetadata) {
 			// Permanent: never send unsigned, never fall back to v1.
-			log.Warn("delivery cannot be signed as configured; dead-lettering", "error", err.Error())
-			d.deadLetter(ctx, entry, err.Error())
+			log.Warn("delivery cannot be signed as configured; dead-lettering its due deliveries", "error", err.Error())
+			d.deadLetterQueue(ctx, log, entry, err.Error())
 			return
 		}
 		// Entropy read failure: transient, ride the backoff.
@@ -543,6 +547,55 @@ func (d *WebhookDispatcher) holdBacklog(ctx context.Context, log *slog.Logger, s
 	}
 	if len(expired) > 0 {
 		log.Warn("held deliveries past MaxCircuitHold dead-lettered", "count", len(expired), "max_circuit_hold", maxHold.String())
+	}
+}
+
+// deadLetterQueue dead-letters the claimed row (deadLetter) and the rest
+// of its subscription's due queue (deadLetterRest), for a permanent
+// verdict on the subscription rather than on the row: it was deleted, its
+// metadata is invalid, its target URL is refused or cannot make a
+// request, or it cannot be signed as configured.
+func (d *WebhookDispatcher) deadLetterQueue(ctx context.Context, log *slog.Logger, entry store.DeliveryEntry, reason string) {
+	d.deadLetter(ctx, entry, reason)
+	d.deadLetterRest(ctx, log, entry.SubscriptionID, reason)
+}
+
+// deadLetterRest dead-letters, in one statement, every other delivery of
+// the subscription that the claim could hand the dispatcher by its next
+// poll (pending or failed, next_retry_at NULL or before then), each with
+// reason and a delivery-log row; the claimed row is the caller's. It is
+// HoldDueDeliveries with ExpireBefore = Until = the next poll: every due
+// row queued before then is expired, which is every row the next claims
+// would take (a row stamped further ahead by a skewed clock is only held
+// to the next poll). Rows scheduled later are left alone; each meets the
+// same verdict, and this, when it comes due.
+//
+// Why (INIT-023 TASK-010 review round 2): the verdict holds for every row
+// of the subscription, but dead-lettering only the claimed one left the
+// rest due. Under the fair claim each such subscription's oldest due row
+// is older than any healthy row, so once `concurrency` (5) or more of them
+// had a backlog — five subscriptions deleted after their circuits had held
+// an hour of events, say — they took every claim slot on every poll, and
+// every other subscription waited until those backlogs drained at one row
+// per poll each. Now such a subscription costs one claim slot, once.
+func (d *WebhookDispatcher) deadLetterRest(ctx context.Context, log *slog.Logger, subscriptionID, reason string) {
+	cutoff := d.clock().Add(d.pollInterval)
+	expired, err := d.store.HoldDueDeliveries(ctx, store.DeliveryHold{
+		SubscriptionID: subscriptionID,
+		Until:          cutoff,
+		Reason:         reason,
+		ExpireBefore:   cutoff,
+		ExpiredReason:  reason,
+	})
+	if err != nil {
+		log.Error("failed to dead-letter the subscription's due deliveries", "error", err)
+		return
+	}
+	for i := range expired {
+		d.logDeadLetter(ctx, expired[i], reason)
+	}
+	if len(expired) > 0 {
+		log.Warn("subscription's due deliveries dead-lettered", "count", len(expired))
 	}
 }
 
