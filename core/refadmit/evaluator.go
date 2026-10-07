@@ -199,11 +199,13 @@ func echo(s string) string {
 const maxDivergenceSplits = 8
 
 // Evaluator admits the ref updates of ONE push. It memoizes run,
-// execution and step-definition reads by key for the life of the push
-// and, once a store-backed ref has been refused, refuses the remaining
-// run and divergence refs without further reads (Decision 9), so an
-// unbound pusher costs about two reads per push whatever the number of
-// refs. It is not safe for concurrent use.
+// execution, divergence-branch and step-definition reads by key for the
+// life of the push and, once a store-backed ref has been refused,
+// refuses the remaining run and divergence refs without further reads
+// (Decision 9), so an unbound pusher costs about two reads per push
+// whatever the number of refs, and a bound pusher repeating the refs it
+// is admitted for costs no read after the first. It is not safe for
+// concurrent use.
 type Evaluator struct {
 	rr   RunReader
 	defs StepDefLookup
@@ -211,6 +213,14 @@ type Evaluator struct {
 	runs  map[string]*domain.Run
 	execs map[string][]domain.StepExecution
 	steps map[string]*domain.StepDefinition
+	// branches memoizes findBranch by run ID and divergence path,
+	// including "no such branch" (a nil entry). Without it a push that
+	// repeats an admitted divergence ref thousands of times (the
+	// command section allows ~8,000 within its 1 MiB cap, and the
+	// parser does not dedupe) cost one GetBranch per repetition, since
+	// the not_evaluated short-circuit only trips after a refusal
+	// (TASK-016 review round 1).
+	branches map[string]*domain.Branch
 
 	// denied is set once a store-backed ref is refused (or errors).
 	denied bool
@@ -224,10 +234,11 @@ type Evaluator struct {
 // divergence refs are operator-only (owner question 4, fail closed).
 func NewEvaluator(rr RunReader) *Evaluator {
 	return &Evaluator{
-		rr:    rr,
-		runs:  map[string]*domain.Run{},
-		execs: map[string][]domain.StepExecution{},
-		steps: map[string]*domain.StepDefinition{},
+		rr:       rr,
+		runs:     map[string]*domain.Run{},
+		execs:    map[string][]domain.StepExecution{},
+		steps:    map[string]*domain.StepDefinition{},
+		branches: map[string]*domain.Branch{},
 	}
 }
 
@@ -409,8 +420,24 @@ func (e *Evaluator) decideBound(ctx context.Context, c Ref, req Request) (Decisi
 // whose divergence part has the "<run-id>-div-" prefix the engine
 // gives it (core/divergence/service.go) is tried in order, at most
 // maxDivergenceSplits of them (DC-5). A match must belong to this run
-// and divergence: the branch ID alone does not identify the ref.
+// and divergence: the branch ID alone does not identify the ref. The
+// outcome, found or not, is memoized for the push; a store error is
+// not (it refuses the rest of the push anyway).
 func (e *Evaluator) findBranch(ctx context.Context, runID, path string) (*domain.Branch, error) {
+	k := runID + "\x00" + path
+	if b, ok := e.branches[k]; ok {
+		return b, nil
+	}
+	b, err := e.resolveBranch(ctx, runID, path)
+	if err != nil {
+		return nil, err
+	}
+	e.branches[k] = b
+	return b, nil
+}
+
+// resolveBranch is findBranch's uncached lookup.
+func (e *Evaluator) resolveBranch(ctx context.Context, runID, path string) (*domain.Branch, error) {
 	prefix := runID + "-div-"
 	tried := 0
 	for i := 0; i < len(path); i++ {

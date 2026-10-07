@@ -474,6 +474,55 @@ func TestDecide_FailClosed(t *testing.T) {
 		}
 	})
 
+	// Review round 1: the parser does not dedupe refs and the
+	// not_evaluated short-circuit only trips after a refusal, so a
+	// bound actor repeating their own divergence ref (~8,000 times fit
+	// the 1 MiB command section) cost one GetBranch per repetition.
+	// Mutation check: dropping findBranch's memo fails the counts.
+	t.Run("bound actor's repeated divergence refs are memoized", func(t *testing.T) {
+		dave := actor("dave", domain.RoleContributor)
+		for _, tc := range []struct {
+			name, ref     string
+			actor         *domain.Actor
+			wantGetBranch int
+		}{
+			{"one split", fxDivRef, dave, 1},
+			{"suffix with a '/'", "refs/heads/spine/" + fxRun + "/" + fxRun + "-div-d/b/1", actor("fay", domain.RoleContributor), 1},
+		} {
+			rr := divergenceFixture()
+			defs := defsFixture()
+			ev := NewEvaluator(rr).WithStepDefs(defs)
+			for i := 0; i < 1000; i++ {
+				if d, err := ev.Decide(context.Background(), Request{Ref: tc.ref, Actor: tc.actor}); err != nil || !d.Allow {
+					t.Fatalf("%s, repetition %d: %+v %v, want allow", tc.name, i, d, err)
+				}
+			}
+			if rr.getBranch != tc.wantGetBranch || rr.getRun != 1 || rr.listExecs != 1 || defs.calls != 1 {
+				t.Errorf("%s, 1000 repetitions: GetBranch=%d GetRun=%d ListStepExecutionsByRun=%d LookupStepDef=%d, want %d/1/1/1",
+					tc.name, rr.getBranch, rr.getRun, rr.listExecs, defs.calls, tc.wantGetBranch)
+			}
+		}
+
+		// A miss is memoized too: two splits are tried once, then the
+		// second split's hit is reused.
+		rr := divergenceFixture()
+		const nested = fxRun + "-div-d/x"
+		rr.branches[nested+"-y"] = &domain.Branch{BranchID: nested + "-y", RunID: fxRun, DivergenceID: nested, Status: domain.BranchStatusInProgress, CurrentStepID: "explore"}
+		ev := NewEvaluator(rr)
+		for i := 0; i < 3; i++ {
+			b, err := ev.findBranch(context.Background(), fxRun, nested+"/y")
+			if err != nil || b == nil || b.BranchID != nested+"-y" {
+				t.Fatalf("findBranch(%s/y) = %+v, %v", nested, b, err)
+			}
+			if b, err := ev.findBranch(context.Background(), fxRun, fxRun+"-div-d/zz"); err != nil || b != nil {
+				t.Fatalf("findBranch(unknown) = %+v, %v; want nil, nil", b, err)
+			}
+		}
+		if rr.getBranch != 3 {
+			t.Errorf("GetBranch calls = %d, want 3 (two splits, one miss, each once)", rr.getBranch)
+		}
+	})
+
 	t.Run("DC-5 split cap", func(t *testing.T) {
 		// A long divergence path under the DC-4 bound: every '/' is a
 		// candidate split, every GetBranch misses.
