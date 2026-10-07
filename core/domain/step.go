@@ -46,6 +46,10 @@ const (
 	FailureGitConflict      FailureClassification = "git_conflict"
 	FailureTimeout          FailureClassification = "timeout"
 	FailureValidation       FailureClassification = "validation_failed"
+	// FailureRunTerminated marks a live execution the engine closed
+	// (as `skipped`) because its run was cancelled or failed
+	// (INIT-023 TASK-007). Not retryable.
+	FailureRunTerminated FailureClassification = "run_terminated"
 )
 
 // IsRetryable returns true if this failure classification allows retry.
@@ -82,12 +86,12 @@ func (e *ErrorDetail) Scan(src any) error {
 
 // StepExecution represents a single execution attempt of a workflow step.
 type StepExecution struct {
-	ExecutionID      string              `json:"execution_id" yaml:"execution_id"`
-	RunID            string              `json:"run_id" yaml:"run_id"`
-	StepID           string              `json:"step_id" yaml:"step_id"`
-	BranchID         string              `json:"branch_id,omitempty" yaml:"branch_id,omitempty"`
-	ActorID          string              `json:"actor_id,omitempty" yaml:"actor_id,omitempty"`
-	EligibleActorIDs []string            `json:"eligible_actor_ids,omitempty" yaml:"eligible_actor_ids,omitempty"`
+	ExecutionID      string   `json:"execution_id" yaml:"execution_id"`
+	RunID            string   `json:"run_id" yaml:"run_id"`
+	StepID           string   `json:"step_id" yaml:"step_id"`
+	BranchID         string   `json:"branch_id,omitempty" yaml:"branch_id,omitempty"`
+	ActorID          string   `json:"actor_id,omitempty" yaml:"actor_id,omitempty"`
+	EligibleActorIDs []string `json:"eligible_actor_ids,omitempty" yaml:"eligible_actor_ids,omitempty"`
 	// RepositoryID is the resolved target repository for this execution
 	// (per ADR-015): step.repository if set, otherwise PrimaryRepositoryID.
 	// Set at activation; immutable for the lifetime of the row.

@@ -19,6 +19,9 @@ const (
 	StepTriggerSubmitInvalid StepTrigger = "step.submit_invalid"
 	StepTriggerBlocked       StepTrigger = "step.blocked"
 	StepTriggerUnblocked     StepTrigger = "step.unblocked"
+	// StepTriggerRunTerminated closes a live execution of a run that
+	// was cancelled or failed (INIT-023 TASK-007).
+	StepTriggerRunTerminated StepTrigger = "run.terminated"
 )
 
 // StepTransitionRequest describes a requested step state transition.
