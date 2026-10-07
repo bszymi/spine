@@ -2,12 +2,12 @@
 id: TASK-009
 type: Task
 title: "enc:v2 secret envelope (key id + AAD + key ring) and subscription-secret re-encryption sweep"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
@@ -799,6 +799,13 @@ The design works without answers, using the stated defaults.
    - Alternative: drop it, and document that a rollback below this release requires rotating every
      API-created webhook secret.
 
+> **Orchestrator ruling (2026-10-07) — owner questions take their defaults, pending the owner.**
+> 1. **Q1:** `SPINE_SECRET_ENVELOPE_MODE` defaults to `migrate` for standalone in this release. The
+>    CHANGELOG states plainly that P3-10 closes only after `strict` or old-key retirement;
+>    strict-by-default is a recorded follow-up (KNOWN-LIMITATIONS, Out of scope).
+> 2. **Q2:** `spine secrets reencrypt [--all-workspaces]` is included (AC23).
+> 3. **Q3:** the `downgrade` mode is included.
+
 ## Acceptance Criteria
 
 Every new test runs in plain `go test ./...` (CI runs only that, `.github/workflows/ci.yml`),
@@ -1163,3 +1170,239 @@ AC1 build path). The things that still had to change are below; each is amended 
 
 ## Implementation Notes
 
+*(Implementation, 2026-10-07. Branch `init/INIT-023-TASK-009-secret-envelope-v2`, cut from Spine
+local `main` `ee3c249` (`61994fe` + the INIT-023 scaffold + merged TASK-001). Diff base
+`git diff main...HEAD`. macOS, go 1.26.5, golangci-lint 2.11.4. Spine integration and scenario
+runs used the shared PostgreSQL 17.10 (`s009_*` databases); the SMP DB suites ran in a disposable
+`pgvector/pgvector:pg18` container (PG 18.4, CI's image), removed afterwards.)*
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `c3e43a6` | `core/crypto`: `SecretCipher` becomes a key ring in place (`NewSecretCipherRing`, `KeyID`, `PrimaryKeyID`, `KeyIDs`; raw key bytes not retained; zero value returns errors). New `envelope.go`: `enc:v2` (`Seal`/`Open`, `AssociatedData`, `Opened`, `Envelope`/`ClassifyEnvelope`, the six sentinels). `Decrypt` opens v1 with every ring key and refuses v2; `IsEncrypted` covers v2. Tests: `envelope_test.go`, `envelope_internal_test.go`. |
+| `38bbe03` | `adapters/store`: `postgres_subscription_secrets.go` (binding, modes, `ParseSecretEnvelopeMode`, bound read/write paths with the §2 design-check rules, nested-envelope repair, the CAS sweep with `Converted`/`Repaired`); `secretBinding` field; read/write paths routed through it; stale comments fixed. Tests: `subscription_secrets_test.go` (in-memory), `postgres_subscription_secrets_integration_test.go` (real Postgres CAS). |
+| `fab0abb` | `adapters/delivery/p31_sweep_test.go`: port of the r2-1 PoC (test-only; no `adapters/delivery` production file touched). |
+| `6c4f3f5`, `ad2fd0d`, `8406f1b` | Hygiene only: `gofmt` of the unsorted import blocks of `pool.go`, `serve_resolver.go`, `serve_builders.go`, `main.go`, `gateway/handlers_subscriptions.go` (unformatted on `main`), split out so the functional diffs stay minimal and the changed-files `gofmt -l` gate is empty. |
+| `912b51a` | Standalone wiring: `SPINE_SECRET_PREVIOUS_KEYS`, `SPINE_SECRET_ENVELOPE_MODE`, the `secret envelope configured` log, `workspace.PrepareSubscriptionSecrets` (bind + sweep under a 10 s limit + per-row logs + strict hint), `buildStore` and `buildServiceSet` call sites, `PoolConfig.SecretEnvelopeMode`, and `spine secrets reencrypt [--all-workspaces]` (`cmd_secrets.go`). Tests: `secret_envelope_config_test.go`, `subscription_secrets_test.go` (workspace), `secrets_integration_test.go`, `subscription_secrets_integration_test.go`. |
+| `fc1c856` | Docs: integration guide §2.1 rewrite + env table, `.env.example`, README (variables, CLI, `core/crypto`), security-model §5.3, CHANGELOG Security entry, KNOWN-LIMITATIONS. |
+| `dfd85cc` | codex round 1 fixes (see *Review*): inactive workspaces swept (`DBProvider.ResolveAnyStatus`); `PostgresStore.ReplaceSubscriptionSecret` and a `rotate-secret` handler that does not read the refused value. |
+| `0c9925c` | `DBProvider.ResolveAnyStatus` registry test. |
+
+No migration, column or table (AC17). `go.mod`/`go.sum` unchanged; `core/crypto` stays stdlib-only.
+
+### Per-AC evidence
+
+1. **API and compatibility.** Every §1 identifier exists with the stated signature; `NewSecretCipher`,
+   `Encrypt`, `Decrypt`, `ParseEncryptionKey`, `EncryptionKeySize`, `SetSecretCipher`,
+   `NewPostgresStoreWithQuerier`, `SubscriptionStore` and `BootstrapInternalSubscription` are
+   unchanged (SMP builds and vets unmodified, below). `core/crypto` imports only the standard
+   library (`crypto/hkdf`, `crypto/subtle`, …). `./dev/lint-boundaries.sh` → `lint-boundaries: OK`;
+   embed-smoketest passes. `TestSecretCipher_ZeroValueNeverPanics`: no panic and an error from
+   `Encrypt`, `Decrypt` (v1, v2), `Seal`, `Open` (v1, v2); `PrimaryKeyID()==""`, `KeyIDs()==nil`.
+   Key bytes: the ring keeps only the derived AEADs and the id; the duplicate check compares the
+   input slices during `NewSecretCipherRing` (`subtle.ConstantTimeCompare`) and keeps nothing.
+2. **Golden vector.** `TestV2_GoldenVector` opens a committed envelope that was computed
+   **independently** with Python `cryptography` (HKDF-SHA256 + AESGCM over the documented labels),
+   checks `KeyID(00..1f) == ada7649825e43683`, the `AssociatedData` byte encoding and the documented
+   regex. `TestV2_GoldenVectorSeal` (internal) reproduces the envelope byte for byte from the fixed
+   nonce. Mutations: each HKDF info string and the GCM-AAD label → both golden tests FAIL.
+3. **P3-10 crypto ports.** `TestV2_TransplantAcrossWorkspacesFails` (port of
+   `cipher_transplant_test.go`), `TestV2_SwapAcrossSubscriptionsFails` (port of
+   `TestPoC_CiphertextSwapAcrossRowsDecrypts`), `TestAssociatedData_Canonical` (four ambiguity
+   pairs, multi-byte uvarint). Mutation "`v2AAD` ignores the caller AAD" → both ports FAIL.
+4. **AAD mandatory; legacy API strict about v2.** `TestV2_RequiresAAD` (`Seal(nil)`, `Seal([]byte{})`,
+   `Open(v2,nil)` → `ErrMissingAAD`; `Decrypt(v2)` errors wrapping `ErrMissingAAD`; nil cipher →
+   `ErrNoCipher`). `TestLegacy_EncryptStillV1AndDecryptPassesThrough`, `TestClassifyEnvelope`
+   (incl. `enc:v10:`, `ENC:v2:`, ` enc:v2:`), `TestOpen_FormatTable` (13 rows incl. `enc:v9` →
+   `ErrUnsupportedEnvelope`, short/uppercase kid, non-canonical base64, no value echo in errors).
+   Mutation "Decrypt v2 pass-through" → `TestV2_RequiresAAD` FAILS.
+5. **Key ring.** `TestV2_KeyRing` (K1 v1 and v2 open under `(K2,K1)` with `Primary==false` and
+   `KeyID==kid(K1)`; `Seal` embeds the primary kid; `(K2)` alone → `ErrUnknownKeyID` / `ErrEnvelopeAuth`;
+   duplicates de-duplicated), `TestV2_KeyIDRelabelFails`, `TestNewSecretCipherRing_Errors`
+   (positions named, no key bytes), `TestNewSecretCipherRing_RefusesKeyIDCollision` (unexported
+   `keyIDFunc` hook; identical keys are not a collision), `TestV2_NonceUniqueness` (20 000).
+6. **Binding and legacy mode.** `TestSetSubscriptionSecretBinding_Validation`,
+   `TestParseSecretEnvelopeMode`, `TestLegacyMode_Unchanged` (unbound: `enc:v1` writes, v1 + plaintext
+   list, envelope pass-through, sweep → `ErrNoSecretBinding` with zero Execs),
+   `TestBoundStore_NilCipherFailsClosed`. *Integration:* `TestEventSubscription_SigningSecretEncryption`
+   passes unmodified (on a fresh database — see *Pre-existing*).
+7. **P3-10 store level.** `TestP310_CrossWorkspaceTransplantRefused` (two in-memory DBs, one key,
+   B's `workspace_id` column rewritten to `ws-A`): Get/List/ListActive fail with `ErrEnvelopeAuth`; the
+   sweep refuses and leaves the bytes. Mutations "AAD binds `""`" and "seal `enc:v1` under a binding
+   (61994fe)" → FAIL.
+8. **Strict.** `TestP310_StrictRefusesLegacyEnvelopes`; mutation "strict check removed" → FAIL.
+9. **Envelope inputs refused.** `TestBoundWrite_RefusesEnvelopeInput` (3 modes × {foreign v1, own-row
+   v2, `enc:v9:x`} × {Create, Update}; plaintext sealed per mode; `""` stored as `""`). Mutation "open
+   with this row's AAD, then re-seal" (probe X4) → FAIL.
+10. **P3-1 sweep.** `TestP31_SweepEncryptsPlaintextAndV1` (Rewritten 2, Empty 1, Clean; second sweep
+    Current 2 with zero Execs) and `TestP31_KeyAddedLater_SweepEncryptsBootstrapRow` (delivery; also
+    asserts the keyed bootstrap alone writes nothing, the dump no longer forges, the bound bootstrap
+    issues no UPDATE, the resolver hands the token to the signer). Mutations "no-op sweep (61994fe)"
+    → both FAIL; "already-current check removed" → `TestP31_SweepEncryptsPlaintextAndV1` FAILS.
+11. **Compare-and-swap.** Unit `TestP31_SweepLosesToConcurrentWrite`; *integration*
+    `TestSweepCAS_ConcurrentCommitWins` and `TestSweepCAS_LockWaitThenConcurrentCommitWins` (the second
+    connection commits only once `pg_stat_activity` shows the sweep's UPDATE waiting on a `Lock`).
+    Mutation "drop `AND signing_secret = $3`" (and its argument) → both integration tests FAIL. Also
+    `TestSweep_RealPostgresConvertsAndIsIdempotent` (and `updated_at` not bumped).
+12. **Rotation and downgrade.** `TestP310_RotationRekeysToPrimary` (Rewritten 2, Rekeyed 1, FromV1 1;
+    strict `(K2)` reads both), `TestP310_DowngradeRewritesV2ToV1` (ToV1 1; an unbound legacy store
+    reads it; second downgrade sweep Current 1).
+13. **Configuration.** `TestLoadSecretCipher_PreviousKeysBuildRing` (3-key ring, `KeyIDs()[0]` is the
+    primary, whitespace and empty entries ignored), `TestLoadSecretCipher_MalformedPreviousKeyNamesIndexNotValue`
+    (index named, no key material), `TestLoadSecretCipher_PreviousKeysRequirePrimary`,
+    `TestLoadSecretEnvelopeMode` (`Strict` ok, `bogus` fails naming the variable),
+    `TestLoadSecretCipher_ProductionGateUnchanged`.
+14. **Wiring.** Unit (`service/internal/workspace`): `TestPrepareSubscriptionSecrets_ConvertsAndBinds`,
+    `_NilCipherIsNoOp`, `_QueryErrorReturnedAndLogged`, `_TimesOutOnBlockedWrite` (Exec blocks until
+    ctx done → `context.DeadlineExceeded` within the limit + 1 s; store bound and readable),
+    `_LogsEachConversionWithoutSecrets` (one `Info` record per conversion with exactly
+    `subscription_id`/`from`/`from_key_id`/`repaired`), `_BindingErrorIsTyped`, `_ProductionHintIsWarn`,
+    `TestSubscriptionSweepTimeout_Default` (10 s). *Integration:* `TestBuildStore_FileResolverBindsAndSweeps`
+    (`SPINE_WORKSPACE_ID=ws-int`: row is v2 after `buildStore`, opens for `ws-int`, not for `default`)
+    and `TestBuildServiceSet_SweepsBeforeBuilderHook` (the builder hook observes `enc:v2`; a bad mode
+    fails the build). Mutations: removing either `PrepareSubscriptionSecrets` call → its integration
+    test FAILS; removing the timeout → the blocked-write test hits the `go test` timeout.
+15. **No secret material.** `TestSweep_NoSecretMaterialInReportOrErrors` (22 fixtures in strict:
+    report + every `GetSubscription` error), the workspace log test above (captured JSON `slog`), and
+    the AC23 integration test (command output + captured default logger) contain no fixture plaintext,
+    stored payload or key.
+16. **Docs.** Integration guide §2.1 rewritten (wire formats and binding, ring and kid, both
+    variables, modes table, sweep + trust boundary, *When P3-10 Is Closed*, *Deployment Assumptions*
+    with the one-database-per-workspace and distinct-key/`SPINE_WORKSPACE_ID` statements, all §6
+    runbooks with the design-check amendments); the "no data migration is required / re-encrypted on
+    next update" text is gone; env table gains both variables. `.env.example`, README (`:51` variables,
+    `core/crypto` row, CLI), security-model §5.3 bullet, CHANGELOG Security entry naming P3-10 and P3-1
+    and stating that `migrate` does not close P3-10, comments at `postgres_subscriptions.go`
+    corrected. KNOWN-LIMITATIONS gains two Security Notes.
+17. **No schema change.** `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- migrations/`
+    (merge base `61994fe`) is empty.
+18. **SMP gate** — see below.
+19. **Spine gates** — see below.
+20. **Fail-first and PoC parity.** The committed ports do not compile against `61994fe` (additive
+    API); their behaviour on `61994fe` semantics is shown by the mutations above, all run with
+    `go test -overlay` (no source reverted): 18 mutations, every one FAILS exactly the intended
+    test(s) (table in *Gates*). The original audit PoCs, overlaid unchanged on this branch, **still
+    pass**, as the design predicted, because they exercise the deliberately retained AAD-less /
+    unbound API: `TestPoC_CiphertextTransplantAcrossWorkspaces`; gap1 `TestPoC_CiphertextSwapAcrossRowsDecrypts`,
+    `TestPoC_PlaintextAcceptedWithCipherConfigured` (also `_AllZeroKeyAccepted`, `_NonceUniqueness`);
+    gap1 store-level `TestPoC_StoreLevelCiphertextSwap`, `TestPoC_LegacyPlaintextRowNeverReencrypted`,
+    `TestPoC_NilCipherPersistsSigningSecretPlaintext`; r2-1 `TestR21_DumpedColumnForgesDispatcherSignature`,
+    `TestR21_KeyAddedLaterLeavesPlaintext`. Their bound counterparts are AC3/AC7 (v2 path), AC10 (sweep)
+    and SMP TASK-006 respectively. This is not "fix ineffective".
+21. **Nested envelopes.** `TestNested_OwnRowV2Repaired` (Get returns the secret; sweep Rewritten 1,
+    Repaired 1, single-level v2 under the primary; second sweep writes nothing),
+    `TestNested_ForeignV2Refused`, `TestNested_StrictRefusesOuterV1`, `TestNested_NeverReturnsEnvelope`
+    (3 modes × 22 fixtures = 66 subtests: no bound read returns an envelope; no sweep writes a value
+    whose plaintext is an envelope). Mutations: nested check removed → `TestNested_NeverReturnsEnvelope`
+    FAILS; unwrap without the AAD check → `TestNested_ForeignV2Refused` FAILS.
+22. **Per-row record.** `TestSweep_ReportsEachConversion` (exactly the four rewritten ids with the right
+    `From`/`FromKeyID`, `len(Converted)==Rewritten`, current row absent, breakdown and Scanned
+    invariant); `TestSweep_X2TrustBoundaryPinned` (a foreign `enc:v1` plant in migrate is converted and
+    recorded with `From==EnvelopeV1`; strict then reads it) — its comment names the §3 design-check
+    note.
+23. **`spine secrets reencrypt`.** *Integration* `TestSecretsReencrypt_AllWorkspaces`: registry +
+    three workspace databases (ws-one plaintext + v1; ws-two a v2 transplant sealed for ws-one; ws-three
+    **inactive** with a v1 row): exit non-zero naming only ws-two, `workspace ws-one: clean …
+    rewritten=2`, `workspace ws-two: refused subscription sub-t envelope=enc:v2 key_id=…`, ws-three
+    swept, transplant bytes unchanged; after deleting the bad row the second run exits 0 (`current=2`,
+    `summary: workspaces=3 clean=3`); no secret in output or logs. Unit
+    `TestSecretsReencrypt_RequiresKeyAndTouchesNothing` (no key → error naming
+    `SPINE_SECRET_ENCRYPTION_KEY`, before any database) and `_SharedResolverNeedsAllWorkspaces`.
+
+### Deviations and additions (with reasons)
+
+- **`ErrSubscriptionSecretBinding` (new, `service/internal/workspace`).** The helper returns both
+  binding and sweep errors; callers must fail on the first and tolerate the second (§4). A typed
+  sentinel lets `buildStore` / `buildServiceSet` tell them apart.
+- **`subscriptionSweepTimeout` is a package variable, not a constant** (still 10 s, pinned by
+  `TestSubscriptionSweepTimeout_Default`), so the timeout test runs in 0.3 s instead of 10 s.
+- **`SecretSweepConversion.Repaired bool`** added beside the three designed fields, so a repaired
+  nested row is visible in the per-row log; it carries no secret material.
+- **`SubscriptionSecretBinding()` getter** on `PostgresStore` (tests and embedders can verify a store
+  is bound) and **`ParseSecretEnvelopeMode`** (shared by `spine serve` and the command; SMP TASK-006
+  can reuse it).
+- **A bound store with a nil cipher also refuses non-empty reads** (`ErrSecretCipherRequired`), not
+  only writes: a binding means "sealed", and a plaintext read through a key-less bound store would
+  silently bypass strict. The helper never binds without a cipher, so standalone never hits it.
+- **`Open` accepts only canonical base64 for `enc:v2` and a lowercase-hex kid** (`ErrMalformedEnvelope`
+  otherwise), so one sealed value has one stored spelling; v1 parsing is unchanged.
+- **Sweep counters are by outer envelope**; a repaired row whose outer envelope was already the
+  target under the primary key counts only in `Repaired` (documented on the type).
+- **codex round 1 (accepted):** (P1) `--all-workspaces` now sweeps **inactive** workspaces too, via
+  new `DBProvider.ResolveAnyStatus` (same ref validation and secret dereference as `Resolve`, any
+  status, no cache) — otherwise a clean run could license dropping a key an inactive workspace still
+  needs. (P2) `rotate-secret` read the row first and so could not repair a refused row, which the
+  docs name as the fix; new `PostgresStore.ReplaceSubscriptionSecret` replaces the secret without
+  opening the stored value and the gateway handler uses it when the store supports it (fallback kept;
+  response unchanged). `PATCH`/`pause`/`activate` still read first and fail on a refused row until it
+  is rotated (documented). These touch `service/internal/gateway` and `db_provider.go`, outside §9's
+  file list; both edits are additive.
+- **Hygiene commits** sort the import blocks of five files that were not `gofmt`-clean on `main`.
+
+### Gates (all at the branch head unless noted)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | exit 0 |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` (no DB env) | exit 0, 38 packages ok, no FAIL |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all exit 0, no output |
+| `go test -race -p 4 -count=1` on `core/crypto`, `adapters/store`, `adapters/delivery`, `service/cmd/spine`, `service/internal/workspace`, `service/internal/gateway` | all ok |
+| `go test -tags integration -count=1` per touched package, each against its own fresh database (`s009_store`, `s009_dlv`, `s009_cmd`, `s009_ws` + `SPINE_REGISTRY_TEST_DATABASE_URL=s009_reg` migrated with `spine migrate`) | delivery, cmd/spine, workspace, crypto, gateway: ok. store: 58 PASS, 1 FAIL `TestRunModeDatabaseDefault` — **pre-existing**, fails identically on a `main` snapshot (`git archive main`) against a fresh database (`cannot scan NULL into *string`, `workflow_version_label`). Every TASK-009 integration test passes. |
+| `go test -tags scenario -count=1 -run '^TestGitHTTP_' ./service/scenariotest/scenarios/` (the CI job) | 19 `TestGitHTTP_*` PASS, 0 skips |
+| `go test -tags scenario -count=1 -p 1 ./service/scenariotest/...` (full suite, branch vs `main` snapshot, fresh `s009_scen` each) | 30 failures on both; the failing-test sets are **identical** (`diff` empty). CI notes the rest of the suite is not green on `main`; none of the touched packages has scenario tests. |
+| `golangci-lint run` (and `--build-tags integration`) on the six touched package trees, branch vs `main` snapshot, line numbers stripped | 137 vs 143 (139 vs 145 tagged); **0 new issues** (the 6 fewer are the import-sort hygiene). |
+| `golangci-lint run --enable-only=gosec ./...` (`make lint-security`) | 1 issue, identical on `main` (`core/workflow/service.go` G703); 0 new. One reasoned `//nolint:gosec` (G101 on the AAD purpose label `"runtime.event_subscriptions.signing_secret"`). G115 on `uint64(len(s))` is not raised, so no suppression was added there. |
+| `gofmt -l` on every `.go` file in `git diff --name-only main...HEAD` | empty |
+| AC17 `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- migrations/` | empty |
+| Mutations (`go test -overlay`, script in the scratchpad) | AC2 ×3, AC3, AC4, AC5, AC7 ×2, AC8, AC9, AC10 ×2, AC11, AC14 ×3, AC21 ×2: every one FAILS its intended test(s) (AC14 timeout: `go test` timeout) |
+| Original audit PoCs overlaid unchanged (`go test -overlay`) | all 11 PoC tests PASS (expected; see AC20) |
+
+### SMP compatibility gate
+
+SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T009/smp` at SMP `main` `7d4e7cc9`, `replace ../spine`
+→ this worktree (`go list -m` confirms), unmodified (`git status` clean).
+
+- `go build ./...` exit 0; `go vet ./...` exit 0; `go vet -tags integration ./...` exit 0.
+- SMP packages importing a changed Spine package (`core/crypto`, `adapters/store`, `adapters/delivery`,
+  found with `go list -f` over Imports/TestImports/XTestImports): `cmd/customer-app`,
+  `internal/customer/{eventdelivery,projectionwriter,spinecore,stepevents,workspace}`.
+  `go test -p 4 -count=1` on all six: ok.
+- DB suites (PG 18.4 container provisioned exactly like SMP CI's `integration` job: roles `platform`,
+  `platform_audit_retention`, `smp_prov` NOSUPERUSER CREATEROLE CREATEDB; `smp_it` + `vector`,
+  `spine_runtime_it`; `go run ./dev/apply-migrations -set platform` / `-set spine-runtime`):
+  - `go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -allow-skip 'TEST_MINIO' -- -race -count=1 -p 4 ./internal/customer/{eventdelivery,stepevents,workspace,projectionwriter}/`
+    with `TEST_DATABASE_URL`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` → **PASS**, 627 tests, 6
+    allowed skips (MinIO and live AWS only: MinIO was not started to stay off the live dev stack).
+  - `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -p 4 ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/`
+    with `TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` → **PASS**, 1539 tests.
+  - `go test -race -count=1 ./cmd/customer-app/...` with `TEST_PROVISIONING_DSN`, `TEST_DATABASE_URL` → ok.
+  - AC18's named tests ran (not skipped) and PASS: `TestWorker_Integration_DeliversEncryptedSubscription`,
+    `TestWorker_Integration_RequiresCipherToDecrypt`, `TestCreateInitialActors_Integration_EncryptsSigningSecretAtRest`
+    (it lives in `internal/customer/workspace`, not `cmd/customer-app`).
+
+### Review
+
+- `codex review --base main`, round 1: two findings, both accepted and fixed with tests (`dfd85cc`,
+  above). Round 2 (after the fixes): "No actionable regressions were identified."
+- Round 3, at `0c9925c` (the final code): "No actionable regressions were identified." No finding
+  was rejected.
+
+### Pre-existing issues observed (not changed by this task)
+
+- `TestEventSubscription_SigningSecretEncryption` is not re-runnable on one database
+  (`CleanupTestData` does not clear `runtime.event_subscriptions`, so a second run hits a duplicate
+  key). It passes on a fresh database. TASK-009's own integration tests scope their assertions to
+  their own rows.
+- `TestRunModeDatabaseDefault` fails on `main` and on this branch (above).
+- 30 scenario tests fail on `main` and on this branch (identical sets).
+- `setupRegistryTable` in `db_provider_test.go` creates a registry table without
+  `smp_workspace_id`; the DBProvider tests pass only on a database migrated with
+  `migrations/registry` (as used here).
+
+### Follow-ups (recorded, not done)
+
+Strict by default (owner question 1); per-row tolerance in list paths; weak-key guard; the
+shared-database diagnostic in `Reason`; SMP TASK-006 adoption (§8, including the equal-keys refusal).
