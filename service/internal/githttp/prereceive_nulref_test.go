@@ -167,7 +167,7 @@ func nulPush(t *testing.T, h *Handler, repo string, role domain.ActorRole, em *n
 
 // nulBody frames the command lines, a flush, an optional push-options
 // block (options != nil), and the pack.
-func nulBody(lines []string, options []string, pack []byte) []byte {
+func nulBody(lines, options []string, pack []byte) []byte {
 	var b []byte
 	for _, l := range lines {
 		b = append(b, pktLine(l)...)
