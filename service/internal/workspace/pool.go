@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -179,6 +180,11 @@ type ServicePool struct {
 	ctx          context.Context    // pool-lifetime context for background goroutines
 	cancel       context.CancelFunc // cancels pool-lifetime context on Close
 
+	// secretEnvelopeMode is the subscription-secret binding mode each
+	// per-workspace store is bound with (PoolConfig.SecretEnvelopeMode,
+	// INIT-023 TASK-009).
+	secretEnvelopeMode store.SecretEnvelopeMode
+
 	// activeResolves counts in-flight resolver.Resolve calls per
 	// workspaceID. Get increments on entry, decrements on return.
 	// Evict consults this to decide whether an invalidation could
@@ -235,6 +241,14 @@ type PoolConfig struct {
 	// are encrypted with the same key used in single-workspace mode.
 	SecretCipher *spinecrypto.SecretCipher
 
+	// SecretEnvelopeMode is the subscription-secret mode (migrate,
+	// strict or downgrade; "" = migrate) each per-workspace store is
+	// bound with when SecretCipher is set (INIT-023 TASK-009). Each
+	// store is bound to its workspace's Config.ID and swept by
+	// PrepareSubscriptionSecrets every time its ServiceSet is built.
+	// Without SecretCipher no binding is made and it is ignored.
+	SecretEnvelopeMode store.SecretEnvelopeMode
+
 	// SecretClient, if set, is wired into each workspace's git client
 	// pool as the credential resolver for per-binding `credentials_ref`
 	// references (INIT-014 EPIC-003 TASK-006). The same client must
@@ -286,6 +300,8 @@ func NewServicePool(ctx context.Context, resolver Resolver, cfg PoolConfig) *Ser
 		codeRepoBase:   cfg.CodeRepoBase,
 		ctx:            poolCtx,
 		cancel:         cancel,
+
+		secretEnvelopeMode: cfg.SecretEnvelopeMode,
 	}
 	if interval := resolveIdleCheckInterval(cfg.IdleCheckInterval, timeout); interval > 0 {
 		go p.runIdleEvictor(interval)
@@ -521,7 +537,7 @@ func (p *ServicePool) removeLocked(id string, entry *poolEntry) {
 // inserted the entry into p.entries with refCount=1 before releasing the
 // mutex.
 func (p *ServicePool) initializeEntry(ctx context.Context, canonicalID string, cfg Config, entry *poolEntry) (*ServiceSet, error) {
-	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretClient, p.dbPolicy, p.codeRepoBase)
+	ss, buildErr := buildServiceSet(p.ctx, cfg, p.builder, p.secretCipher, p.secretEnvelopeMode, p.secretClient, p.dbPolicy, p.codeRepoBase)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -786,7 +802,7 @@ func perWorkspaceCodeRepoBase(base, workspaceID string) (string, error) {
 	return narrowed, nil
 }
 
-func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, secretClient secrets.SecretClient, dbPolicy PoolPolicy, codeRepoBase string) (*ServiceSet, error) {
+func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, secretEnvelopeMode store.SecretEnvelopeMode, secretClient secrets.SecretClient, dbPolicy PoolPolicy, codeRepoBase string) (*ServiceSet, error) {
 	// Each closer accepts the reason the service set is being torn
 	// down so the workspace pool can record the per-reason
 	// close-counter (ADR-012). Closers that don't care about the
@@ -820,6 +836,17 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 		}
 		pgStore = store.NewPostgresStoreWithQuerier(wp)
 		pgStore.SetSecretCipher(cipher)
+		// Bind the workspace's subscription signing secrets to its
+		// trusted id (cfg.ID, from the resolver — never from the
+		// database) and sweep legacy rows to enc:v2 (INIT-023
+		// TASK-009). This runs before the builder hook wires event
+		// delivery, so nothing reads a signing secret first. A sweep
+		// error is logged inside and does not fail the build; a
+		// binding error does.
+		if _, err := PrepareSubscriptionSecrets(ctx, pgStore, cipher, cfg.ID, secretEnvelopeMode, observe.Logger(ctx)); errors.Is(err, ErrSubscriptionSecretBinding) {
+			wp.Close("init-error")
+			return nil, err
+		}
 		st = pgStore
 		closers = append(closers, func(reason string) { wp.Close(reason) })
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/queue"
@@ -51,8 +52,22 @@ func serveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			secretEnvelopeMode, err := loadSecretEnvelopeMode()
+			if err != nil {
+				return err
+			}
 			if secretCipher == nil {
 				log.Warn("SPINE_SECRET_ENCRYPTION_KEY is not set — webhook signing secrets will be stored in plaintext", "env", runtimeEnv)
+				if secretEnvelopeMode != store.SecretEnvelopeMigrate {
+					log.Warn("SPINE_SECRET_ENVELOPE_MODE is ignored without SPINE_SECRET_ENCRYPTION_KEY", "mode", string(secretEnvelopeMode))
+				}
+			} else {
+				ids := secretCipher.KeyIDs()
+				log.Info("secret envelope configured",
+					"primary_key_id", secretCipher.PrimaryKeyID(),
+					"previous_key_ids", ids[1:],
+					"mode", string(secretEnvelopeMode),
+				)
 			}
 
 			codeRepoBase, err := loadCodeRepoBase(runtimeEnv)
@@ -72,7 +87,7 @@ func serveCmd() *cobra.Command {
 
 			deliveryCfg := loadWorkspaceDeliveryConfig()
 
-			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log, deliveryCfg, codeRepoBase)
+			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, secretEnvelopeMode, log, deliveryCfg, codeRepoBase)
 			if err != nil {
 				return err
 			}
@@ -92,7 +107,7 @@ func serveCmd() *cobra.Command {
 			if wsWiring.Pool == nil {
 				storeResolver = wsWiring.Resolver
 			}
-			st, err := buildStore(ctx, storeResolver, secretCipher, log)
+			st, err := buildStore(ctx, storeResolver, secretCipher, secretEnvelopeMode, log)
 			if err != nil {
 				return err
 			}

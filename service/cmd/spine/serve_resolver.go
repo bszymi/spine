@@ -11,6 +11,7 @@ import (
 
 	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/auth"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
@@ -348,6 +349,7 @@ type resolverWiring struct {
 func buildWorkspaceResolver(
 	ctx context.Context,
 	secretCipher *spinecrypto.SecretCipher,
+	secretEnvelopeMode store.SecretEnvelopeMode,
 	log *slog.Logger,
 	deliveryCfg workspaceDeliveryConfig,
 	codeRepoBase string,
@@ -406,12 +408,13 @@ func buildWorkspaceResolver(
 			return nil, fmt.Errorf("connect to workspace registry: %w", err)
 		}
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
-			SecretCipher: secretCipher,
-			SecretClient: dbSecretClient,
-			DBPolicy:     dbPolicyFromEnv(),
-			IdleTimeout:  poolIdleTimeoutFromEnv(),
-			CodeRepoBase: codeRepoBase,
+			Builder:            newPooledWorkspaceBuilder(deliveryCfg, log),
+			SecretCipher:       secretCipher,
+			SecretEnvelopeMode: secretEnvelopeMode,
+			SecretClient:       dbSecretClient,
+			DBPolicy:           dbPolicyFromEnv(),
+			IdleTimeout:        poolIdleTimeoutFromEnv(),
+			CodeRepoBase:       codeRepoBase,
 		})
 		log.Info("workspace resolver: db", "registry_url", "***")
 		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool, SecretClient: dbSecretClient}, nil
@@ -443,12 +446,13 @@ func buildWorkspaceResolver(
 		// process-level store. EPIC-003 (TASK-006/007) refines pool
 		// sizing and invalidation for this mode.
 		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
-			SecretCipher: secretCipher,
-			SecretClient: secretClient,
-			DBPolicy:     dbPolicyFromEnv(),
-			IdleTimeout:  poolIdleTimeoutFromEnv(),
-			CodeRepoBase: codeRepoBase,
+			Builder:            newPooledWorkspaceBuilder(deliveryCfg, log),
+			SecretCipher:       secretCipher,
+			SecretEnvelopeMode: secretEnvelopeMode,
+			SecretClient:       secretClient,
+			DBPolicy:           dbPolicyFromEnv(),
+			IdleTimeout:        poolIdleTimeoutFromEnv(),
+			CodeRepoBase:       codeRepoBase,
 		})
 		invalidator := &workspace.CombinedBindingInvalidator{
 			Provider: provider,

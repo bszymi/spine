@@ -71,6 +71,7 @@ func main() {
 	root.AddCommand(serveCmd())
 	root.AddCommand(healthCmd())
 	root.AddCommand(migrateCmd())
+	root.AddCommand(secretsCmd())
 	root.AddCommand(initRepoCmd())
 	root.AddCommand(artifactCmd())
 	root.AddCommand(runCmd())

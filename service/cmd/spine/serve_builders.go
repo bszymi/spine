@@ -454,14 +454,22 @@ func errIsCancellation(err error) bool {
 //
 // A connection failure is logged but does not abort startup so the
 // server still serves store-independent endpoints.
-func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *spinecrypto.SecretCipher, log *slog.Logger) (store.Store, error) {
-	var dbURL string
+//
+// With a cipher, the store's subscription signing secrets are bound to
+// the resolver's workspace id (SPINE_WORKSPACE_ID, default "default" —
+// the id the gateway serves) in secretEnvelopeMode, and legacy rows are
+// swept to enc:v2 before anything reads them (INIT-023 TASK-009;
+// startEventDelivery's bootstrap runs later). A sweep error is logged and
+// does not abort startup; a binding error does.
+func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *spinecrypto.SecretCipher, secretEnvelopeMode store.SecretEnvelopeMode, log *slog.Logger) (store.Store, error) {
+	var dbURL, workspaceID string
 	if resolver != nil {
 		cfg, err := resolver.Resolve(ctx, "")
 		if err != nil {
 			return nil, fmt.Errorf("resolve workspace for store: %w", err)
 		}
 		dbURL = string(cfg.DatabaseURL.Reveal())
+		workspaceID = cfg.ID
 	}
 	if dbURL == "" {
 		return nil, nil
@@ -475,5 +483,9 @@ func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *
 		return nil, nil
 	}
 	pgStore.SetSecretCipher(secretCipher)
+	if _, err := workspace.PrepareSubscriptionSecrets(ctx, pgStore, secretCipher, workspaceID, secretEnvelopeMode, log); errors.Is(err, workspace.ErrSubscriptionSecretBinding) {
+		pgStore.Close()
+		return nil, err
+	}
 	return pgStore, nil
 }
