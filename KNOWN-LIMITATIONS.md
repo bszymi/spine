@@ -93,10 +93,14 @@ The following limitations have been resolved:
   without following symlinks, inside an `os.Root`. Any symbolic link component is refused
   (`invalid_params`), and so is any `.git` component (including git's case, NTFS and HFS
   variants). New files are created `O_CREAT|O_EXCL` and updates replace by rename. A failed
-  create removes what it made. Reads of worktree files are capped at 4 MiB
-  (`payload_too_large`), so an artifact Update / accept / reject of an existing file over 4 MiB
-  (only reachable by a push or an import) is refused where it used to succeed. (INIT-023
-  TASK-004, audit F5.)
+  create removes what it made, including a file a failing hook replaced by a rename while the
+  path is untracked in HEAD. A narrow race remains in the shared standalone tree only: a
+  concurrent update of the same still-uncommitted path that lands just before that rollback is
+  removed with it — the update fails, or, if it commits between the HEAD check and the unlink,
+  its file is deleted from the working tree (not from git). Reads of worktree files are capped
+  at 4 MiB (`payload_too_large`), so an artifact Update / accept / reject of an existing file
+  over 4 MiB (only reachable by a push or an import) is refused where it used to succeed.
+  (INIT-023 TASK-004, audit F5.)
 - Residual: committed symlinks are still checked out as links (Spine does not set
   `core.symlinks=false`), and reads through `git show` never follow them.
 - `GIT_LITERAL_PATHSPECS=1` / `--literal-pathspecs` prevents Git pathspec injection

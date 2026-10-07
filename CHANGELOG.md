@@ -34,7 +34,12 @@ release is cut — this file is a staging area.
   through a filesystem path). Links are now refused before any read, and every
   worktree read is capped at 4 MiB (the same value as TASK-003's git blob cap).
 - **Failed creates clean up.** A create whose commit fails now removes the
-  directories it made as well as the file (they leaked before).
+  directories it made as well as the file (they leaked before). That includes
+  a file a failing pre-commit hook rewrote in place or replaced through a temp
+  file and a rename (`sed -i`, formatters), as long as the path is still
+  untracked in HEAD, so a retry fails the same way instead of with
+  `already_exists`. A file that is tracked in HEAD by then (a concurrent
+  writer committed it) is kept; before, the rollback removed it by name.
 
 ### Changed
 
@@ -75,16 +80,25 @@ release is cut — this file is a staging area.
 ### For embedders
 
 - **New:** `core/worktreefs` (stdlib-only): `Clean`, `Open`/`Tree`
-  (`Lstat`, `ReadFile`, `ReadFileLimit`, `Create` + `Undo`, `Replace`,
-  `WriteFile`, `Remove`, `RemoveEmptyDir`, `WalkRegularFiles`), `PathError`
-  (unwraps to `ErrUnsafePath`), `SizeError` (unwraps to `ErrTooLarge`),
+  (`Lstat`, `ReadFile`, `ReadFileLimit`, `Create` + `Undo` (`Rollback`,
+  `RollbackClaiming`, `Release`), `Replace`, `WriteFile`, `Remove`,
+  `RemoveEmptyDir`, `WalkRegularFiles`), `PathError` (unwraps to
+  `ErrUnsafePath`), `SizeError` (unwraps to `ErrTooLarge`),
   `DefaultMaxReadBytes`. SMP may use it for its own sinks (SMP TASK-004/008).
   An `Undo` holds at most three descriptors until it is resolved, whatever
-  the path's depth; `Create`'s `perm` must leave the file readable by the
+  the path's depth; `Rollback` then opens one more directory handle per
+  directory the create made, all at once and only while it runs, and
+  `WalkRegularFiles` holds one per level it is inside (both bounded by the
+  4096-byte path cap). `Create`'s `perm` must leave the file readable by the
   process (the `Undo` pins it with a read-only descriptor; `git add` reads
   it anyway).
+- **New:** `git.TrackedInHEAD(ctx, repoDir, path)` — whether a path is an
+  entry of HEAD (literal match; an unborn HEAD or any git failure is an
+  error). The artifact and workflow create rollbacks use it to claim a file a
+  failing hook left in place of the one they created.
 - No exported signature changes in `artifact`, `workflow`, `git`,
-  `engine.GitOperator`; no migration, environment variable or config.
+  `engine.GitOperator` (the two functions above are additions); no
+  migration, environment variable or config.
 - Behaviour changes reachable from SMP: the status codes above at the embedded
   artifact and workflow endpoints (SMP TASK-008 adopts them). One of them is
   a **newly refused flow**, not a status remap, and SMP TASK-008 must look

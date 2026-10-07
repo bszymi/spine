@@ -169,6 +169,10 @@ names the git directory; `os.Root` underneath is the containment backstop. Map r
 `domain.ErrInvalidParams` (`errors.Is(err, worktreefs.ErrUnsafePath)`) and the read cap to
 `domain.ErrPayloadTooLarge`. In `artifact.Service`, `safePath` / `safePathIn` are validation
 only (they return the repo-relative path to stage); the I/O itself still goes through the tree.
+A caller that can run git rolls a failed create back with `undo.RollbackClaiming(claim)`, where
+`claim` reports whether a file a failing hook put in place of the created one (a rename gives it
+a new inode) is still its own — `artifact` and `workflow` claim it while the path is untracked
+in HEAD (`git.TrackedInHEAD`), and keep it on any git error.
 
 ### 4.2 Pathspec Safety
 
