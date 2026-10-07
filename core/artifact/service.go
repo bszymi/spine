@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/git/refname"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/git/refname"
 	"github.com/bszymi/spine/core/observe"
 )
 
@@ -316,9 +316,23 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 }
 
 // List scans the repository for all artifacts.
+//
+// ref is resolved ONCE to an object id (RefSHA) unless it is "HEAD" or
+// already a full object id, and the listing and every per-file read use
+// that id (INIT-023 TASK-002, DC-7). Each read of a branch name would
+// otherwise pay its own exact branch lookup (one extra git process per
+// artifact on AddToRun and /artifacts/add), and a branch that moved
+// mid-listing would mix two snapshots.
 func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, error) {
 	if ref == "" {
 		ref = "HEAD"
+	}
+	if ref != "HEAD" && !git.IsFullObjectName(ref) {
+		sha, err := s.git.RefSHA(ctx, ref)
+		if err != nil {
+			return nil, domain.NewError(domain.ErrGit, err.Error())
+		}
+		ref = sha
 	}
 
 	// Scope listing to the artifacts directory.
