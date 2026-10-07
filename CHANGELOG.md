@@ -6,6 +6,113 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-003 TASK-010: webhook delivery hardening)
+
+### Security
+
+- **Opt-in v2 webhook signatures (audit P3-11).** A v1 signature
+  (`X-Spine-Signature: sha256=<HMAC(body)>`) covers the body only, so a
+  captured delivery verifies forever. A subscription whose metadata holds
+  `{"signature_version":"v2"}` now gets `X-Webhook-Timestamp` (send-time Unix
+  seconds), `X-Webhook-Nonce` (16 random bytes, hex) and
+  `X-Spine-Signature: v2=<HMAC(ts + "." + nonce + "." + body)>` — the format
+  the Spine Management Platform's receiver verifies — signed afresh on every
+  attempt. **v1 stays the default and byte-identical**; the integration guide
+  recommends v2 and lists a receiver checklist. An unknown or non-string
+  version, or v2 without a signing secret, fails closed (the delivery is
+  dead-lettered, never sent unsigned or downgraded).
+- **A half-open circuit can no longer wedge a subscription (P3-12).** A probe
+  that exited before reaching the endpoint (subscription read error, rejected
+  URL, request build error) left the circuit half-open, so the subscription
+  delivered nothing until restart. Every probe is now resolved; an early exit
+  returns the circuit to open and the next poll probes again.
+- **One subscription can no longer starve the delivery queue (P3-5).**
+  Non-retryable 4xx answers, circuit-held rows, rows of deleted subscriptions
+  and rejected URLs were written back as immediately claimable and re-claimed
+  ahead of every newer row, so a few of them stalled every other
+  subscription's deliveries for good. Every claimed delivery now ends
+  `delivered`, `dead`, or scheduled in the future, and the queue is claimed
+  round-robin across subscriptions.
+- **No address oracle in webhook target validation (P3-25).** Create, update,
+  the subscription test, `last_error` and the delivery log no longer reveal a
+  resolved IP address, an address class for a DNS name, or the DNS resolver's
+  address. IPv6 transition addresses (NAT64 `64:ff9b::/96`, 6to4, IPv4-
+  compatible, SIIT) are judged by the IPv4 address they embed, so for example
+  `64:ff9b::a9fe:a9fe` (cloud metadata through NAT64) is refused; RFC 8215
+  local-use NAT64, Teredo, site-local `fec0::/10` and `0.0.0.0/8` are refused.
+- **Webhook URL secrets are redacted (P3-26).** Path, query and fragment of a
+  target URL (where Slack/Discord-style webhooks carry their credential) no
+  longer reach `last_error`, the delivery log, the dispatcher's logs or the
+  subscription-test response: `Post "https://hooks.example/[redacted]": …`.
+  Rows written before this change are not rewritten (they reach `dead` and are
+  reaped by retention).
+
+### Changed
+
+- **Delivery outcomes.** Non-retryable failures go `dead` on their first
+  attempt (they used to be `failed` and retried forever). `408` and `425` are
+  now retryable, like `429` and 5xx. Rows whose subscription was deleted, whose
+  metadata is invalid, whose target URL is refused or whose TLS configuration
+  cannot be built go `dead` at once, each with a delivery-log row giving the
+  reason. A transient failure to read the subscription is retried with
+  backoff and recorded as `resolve subscription: temporarily unavailable`
+  (the database error goes to the operator log only). HTTP-status outcomes
+  keep the exact text `HTTP <code>`.
+- **Circuit holds.** A delivery held by an open circuit is deferred to the next
+  probe time without consuming an attempt (it used to burn one per poll), and
+  goes `dead` after 24 hours from when it was queued
+  (`circuit open: held longer than 24h0m0s`).
+- **Claim order.** Due deliveries are claimed round-robin across subscriptions,
+  oldest first within each; global cross-subscription FIFO was never
+  documented. A single-subscription queue is claimed in the old order.
+- **Error texts.** Validator refusals read `target_url: <class> address not
+  permitted` for a literal IP, `target_url: host resolves to a non-public
+  address (allowlist it via SPINE_WEBHOOK_ALLOWED_HOSTS if intended)` for a
+  host name, `target_url: destination address not permitted` at connect time,
+  `target_url: connect <host>:<port>: <reason>` for a connect failure and
+  `target_url: resolve <host>: no such host|timeout|temporary failure|lookup
+  failed` for DNS. Parse errors no longer quote the URL.
+- **Subscription API.** `metadata` is accepted as a JSON object (the
+  documented form, which used to fail to decode) or, as before, a base64
+  string; it is validated on `POST`/`PATCH` (`400 invalid_params`).
+  Subscription responses include `signature_version`.
+- **Docs.** The integration guide's TLS pin example used the wrong key and
+  encoding: the key is `tls.pinned_spki_sha256` and the value is hex (the CA
+  key is `tls.ca_bundle_pem`).
+
+### For embedders
+
+- **New `store.DeliveryStore` method** `DeferDelivery(ctx, deliveryID, reason,
+  until)`; `*store.PostgresStore` implements it. Types that embed the
+  `store.Store` / `store.DeliveryStore` interface compile unchanged; a type
+  that implements `DeliveryStore` method by method must add it.
+- **Shared behaviour at the first bump past this change, whatever the
+  opt-in** (SMP owner: SMP TASK-006 R1/R2 must land first): a 4xx from the
+  receiver dead-letters the delivery on its first attempt; orphaned,
+  malformed and URL-rejected rows go `dead`; `last_error` texts are redacted
+  as above. NTP sync across receiving replicas becomes a prerequisite once a
+  subscription opts into v2.
+- **New, additive API in `adapters/delivery`:** `SignV1`, `SignV2`,
+  `SignatureVersionV1/V2`, `MetadataKeySignatureVersion`, `HeaderSignature`,
+  `HeaderTimestamp`, `HeaderNonce`, `ErrInvalidSubscriptionMetadata`,
+  `ValidateSubscriptionMetadata`, `SignatureVersionOf`,
+  `WithSignatureVersion`, `SubscriptionDetail.SignatureVersion`,
+  `BootstrapConfig.SignatureVersion` (empty — the zero value — leaves the
+  stored metadata alone), `DispatcherConfig.MaxCircuitHold` and
+  `DefaultMaxCircuitHold`, `CircuitBreaker.Acquire` / `Permit` /
+  `NextAttemptAt`, `RedactURL`, `RedactError`, `BlockedAddressError`,
+  `ErrBlockedDestination`, `DialError`.
+- **`TargetValidator.CheckAddr`** now returns a `*BlockedAddressError`
+  (text without the address) and `SafeDialContext` returns
+  `ErrBlockedDestination` / `*DialError`; callers that matched the old texts
+  (`"loopback address 127.0.0.1 not permitted"`) must match the class or use
+  `errors.As` / `errors.Is`.
+- `CircuitBreaker.AllowDelivery`, `RecordSuccess`, `RecordFailure` and
+  `State` are unchanged, but `AllowDelivery` is documented as not for
+  dispatch use (it cannot resolve a probe).
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-001: pre-receive ref validation)
 
 ### Security

@@ -112,10 +112,10 @@ Spine encrypts sensitive fields before persisting them. Currently this applies t
 
 Per-subscription TLS config lives in the `metadata` JSONB column of `event_subscriptions` under the `tls` key. Set it when creating/updating a subscription to:
 
-- **Pin the server's SPKI hash**: `{"tls":{"spki_sha256":"<base64>"}}` — the webhook dispatcher rejects any certificate whose Subject Public Key Info SHA-256 does not match.
-- **Supply a custom CA bundle** (for internal CAs / private networks): `{"tls":{"root_cas_pem":"-----BEGIN CERTIFICATE-----..."}}`.
+- **Pin the server's SPKI hash**: `{"tls":{"pinned_spki_sha256":"<lowercase hex>"}}` — the hex-encoded SHA-256 of the leaf certificate's DER Subject Public Key Info. The webhook dispatcher rejects any certificate whose SPKI hash does not match. A value that is not hex is refused with `400 invalid_params`.
+- **Supply a custom CA bundle** (for internal CAs / private networks): `{"tls":{"ca_bundle_pem":"-----BEGIN CERTIFICATE-----..."}}`. A bundle that holds no certificate is refused with `400 invalid_params`.
 
-Both fields are optional; when neither is set, the dispatcher uses the system trust store. See `internal/delivery/tls.go` for the full validator.
+Both fields are optional; when neither is set, the dispatcher uses the system trust store. See `adapters/delivery/tls.go` for the full validator.
 
 ---
 
@@ -340,7 +340,7 @@ HTTP POST delivery to operator-configured URLs with HMAC-signed payloads, expone
 | `POST` | `/api/v1/subscriptions/{id}/activate` | Status → `active` |
 | `POST` | `/api/v1/subscriptions/{id}/pause` | Status → `paused` |
 | `POST` | `/api/v1/subscriptions/{id}/rotate-secret` | New signing secret (returned once) |
-| `POST` | `/api/v1/subscriptions/{id}/test` | Send a ping event synchronously |
+| `POST` | `/api/v1/subscriptions/{id}/test` | Send a ping event synchronously (the ping is not signed) |
 | `GET`  | `/api/v1/subscriptions/{id}/deliveries` | List delivery attempts |
 | `GET`  | `/api/v1/subscriptions/{id}/deliveries/{delivery_id}` | Delivery detail |
 | `POST` | `/api/v1/subscriptions/{id}/deliveries/{delivery_id}/replay` | Re-queue a failed delivery |
@@ -354,8 +354,9 @@ HTTP POST delivery to operator-configured URLs with HMAC-signed payloads, expone
   "target_url": "https://smp.example.com/spine/events",
   "event_types": ["step_assigned", "step_completed", "run_failed"],
   "metadata": {
+    "signature_version": "v2",
     "tls": {
-      "spki_sha256": "base64-spki-pin"
+      "pinned_spki_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
     }
   }
 }
@@ -363,24 +364,63 @@ HTTP POST delivery to operator-configured URLs with HMAC-signed payloads, expone
 
 `event_types` empty/missing = receive all events. The create response returns the generated `signing_secret` exactly once (`whsec_` prefix + 64 hex chars); store it securely — subsequent reads never include it again. Use `POST /rotate-secret` to replace it.
 
+**Metadata.** `metadata` is a JSON object. For compatibility with earlier clients, a JSON string holding base64 of the object is also accepted; both forms store the same value. `POST` and `PATCH` validate it as the dispatcher will read it — an unknown or non-string `signature_version` (key spelled exactly, lowercase), a non-hex `tls.pinned_spki_sha256` or a `tls.ca_bundle_pem` without a certificate is `400 invalid_params`. `PATCH` replaces `metadata` as a whole. Subscription responses include `"signature_version"` (`"v1"`, `"v2"`, or `"invalid"` for stored metadata that no longer parses).
+
 **Outbound webhook request** (sent by Spine to `target_url`):
 
 - `POST <target_url>`
 - `Content-Type: application/json`
 - `X-Spine-Event: <event_type>`
-- `X-Spine-Delivery: <delivery_id>`
-- `X-Spine-Signature: sha256=<HMAC-SHA256(raw-body, signing_secret)>` *(only when a secret is set)*
+- `X-Spine-Delivery: <delivery_id>` — stable across retries of one delivery; receivers may deduplicate on it.
+- The signature headers of the subscription's signature version (below).
 - Body: the canonical event object (see [event-schemas.md](../architecture/event-schemas.md)) — `{event_id, type, timestamp, actor_id?, run_id?, artifact_path?, trace_id?, payload?}`.
+
+#### Signature versions
+
+A subscription selects its signature format with `metadata.signature_version`. Absent, `null`, `""` or `"v1"` means **v1**, the default; `"v2"` means **v2**. Any other value is refused by the API, and a stored row with such a value has its deliveries dead-lettered — never sent unsigned and never downgraded.
+
+| | v1 (default) | v2 (recommended) |
+|---|---|---|
+| `X-Spine-Signature` | `sha256=<hex>` | `v2=<hex>` |
+| `X-Webhook-Timestamp` | — | decimal Unix seconds at send time, e.g. `1700000000` |
+| `X-Webhook-Nonce` | — | 32 lowercase hex characters (16 random bytes) |
+| MAC input (HMAC-SHA256, key = the `signing_secret` string's bytes) | the raw body | `timestamp + "." + nonce + "." + raw body`, using the exact header strings |
+| Without a `signing_secret` | sent unsigned | not sent: the delivery is dead-lettered |
+
+v1 signs only the body, so a captured request verifies forever: anyone who once sees a signed delivery (a TLS-terminating proxy log, a request-logging middleware, a mirrored receiver) can replay it. v2 binds a send-time timestamp and a single-use nonce into the MAC. Each attempt — every retry, an operator replay of a dead delivery — is signed afresh with a new timestamp and nonce; nothing about the signature is stored. A v2 request carries only the v2 MAC. v2 is the format the Spine Management Platform's step-event receiver verifies.
+
+Opt in by creating or updating the subscription with `"metadata": {"signature_version": "v2"}` (plus any other keys you keep, since `PATCH` replaces `metadata` as a whole).
+
+Golden vector: secret `whsec_test`, timestamp `1700000000`, nonce `000102030405060708090a0b0c0d0e0f`, body `{"event_id":"evt-1"}` → `v2=7259d9ee00d6dfc7d6cd0be62fac13dada610df1455f5bf2b23866fa5949b288` (v1 of the same body: `sha256=b5fb135192a36cba13b173dac6aadcc588b98253b1f45e016139e5208503c61e`).
+
+**Receiver checklist (v2):**
+
+1. Require both `X-Webhook-Timestamp` and `X-Webhook-Nonce`. When they are present, accept **only** a v2 MAC — never fall back to the body-only v1 MAC, or a captured v1 signature replays with fresh fake headers.
+2. Parse the timestamp as decimal seconds and refuse it outside ±5 minutes of your clock (keep receiver clocks NTP-synchronised).
+3. Hex-decode the nonce (refuse anything shorter than 16 bytes) and refuse a nonce you have already accepted within the window; record it only after the MAC verifies.
+4. Compute the MAC over the raw header strings and the raw body bytes, and compare with `hmac.Equal` (constant time).
+5. Use a distinct `signing_secret` per subscription: v2 binds neither the URL nor the subscription, so a shared secret lets a request captured at one endpoint replay at another inside the window.
 
 **Retry and failure handling**:
 
-- Retryable responses: 5xx, network errors, `429` (honours `Retry-After`).
-- Non-retryable: 4xx other than 429 → delivery immediately marked `failed`.
+- Retryable responses: 5xx, network errors, `408`, `425` and `429` (`429` honours `Retry-After`).
+- Non-retryable: any other 4xx → the delivery goes `dead` on that attempt.
 - Backoff schedule: `1s, 2s, 4s, 8s, 16s` (exponential, capped at 16s).
-- Attempt cap: **5** for domain events (`artifact_*`, `run_*`, `step_*`), **2** for operational events.
-- Exhausted domain-event deliveries land in the `dead` state; operational events in `failed`.
+- Attempt cap: **5** for domain events (`artifact_*`, `run_*`, `step_*`), **2** for operational events. A delivery that exhausts it goes `dead`.
+- Deliveries that can never succeed go `dead` at once instead of being retried: the subscription was deleted, its `metadata` is invalid, its `target_url` is refused by the URL validator, or its TLS configuration cannot be built. A transient failure to read the subscription (database or decryption) is retried with backoff and recorded as `resolve subscription: temporarily unavailable`.
+- `dead` is terminal: retention deletes it after the retention window, and `POST …/deliveries/{delivery_id}/replay` re-queues it. Every `dead` delivery has a delivery-log row that says why.
+- Error text in `last_error` and the delivery log never contains the path, query or fragment of `target_url` (`Post "https://hooks.example/[redacted]": …`), a resolved IP address, or a DNS resolver's address. An HTTP-status outcome is recorded as exactly `HTTP <code>`.
 
-**Per-subscription circuit breaker** — opens after **10** consecutive failures, stays open for **60s**, then half-opens to probe with a single delivery. A success closes it; a probe failure re-opens. While open, new events skip the subscription rather than queueing.
+**Per-subscription circuit breaker** — opens after **10** consecutive failures, stays open for **60s**, then half-opens to probe with a single delivery. A success closes it; a probe failure re-opens it. A probe that ends without reaching the endpoint (the subscription could not be read, the URL was refused) returns the circuit to open, so the next poll probes again.
+
+While the circuit is open, queued deliveries for that subscription are **held**: each is deferred to the circuit's next probe time without consuming an attempt, so it is delivered once the endpoint recovers. Two edges:
+
+- A delivery held longer than **24 hours**, measured from when it was queued, goes `dead` (`circuit open: held longer than 24h0m0s`) without an attempt. The queue has no "held since" column, so a delivery older than 24 hours that is replayed while the circuit is still open is dead-lettered again; replay after the endpoint has recovered. The limit is `DispatcherConfig.MaxCircuitHold` for embedders.
+- Probes are real attempts: during a long outage the oldest held delivery is the probe each cycle and spends one of its attempts per failed probe, so some deliveries reach their attempt cap and go `dead`.
+
+**Claim order.** The dispatcher claims due deliveries round-robin across subscriptions (oldest first within each subscription), so one subscription's backlog — however large — delays another subscription's deliveries by at most one poll.
+
+**Target URL validation.** `target_url` must be `https` (or `http` for a host in `SPINE_WEBHOOK_ALLOWED_HOSTS`) and must not reach loopback, link-local (including cloud metadata), private, CGNAT, benchmarking, multicast, unspecified or `0.0.0.0/8` addresses — checked at create/update/test and again at every connect. IPv6 transition addresses are judged by the IPv4 address they embed (NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, IPv4-compatible `::/96`, SIIT `::ffff:0:0:0/96`); RFC 8215 local-use NAT64, Teredo and site-local `fec0::/10` are refused outright. A host name that resolves to a refused address is rejected with a generic message that names neither the address nor its class. A NAT64 deployment that uses an operator-chosen network-specific prefix cannot be recognised from the address alone: operators running DNS64/NAT64 with such a prefix must rely on network egress policy.
 
 ### 6.2 SSE Event Stream
 
