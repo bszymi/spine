@@ -40,6 +40,16 @@ This document tracks known gaps and deferred functionality.
   10 s timeout — even with a success — limits every subscription in the workspace to about
   5 deliveries per 10 s. The fair claim does not help; per-subscription in-flight limits are
   the follow-up.
+- **A replica-local fault holds a subscription for every replica.** The circuit breaker is in
+  memory per process. With several dispatchers on one runtime database (SMP replicas), a
+  replica whose circuit for a subscription is open, or which cannot read the subscription (for
+  example one started without its encryption key), holds that subscription's due queue in the
+  database until its next attempt, up to 60 s per cycle; rows that arrive between holds are
+  still claimable by the healthy replica. A shared (database-backed) breaker would remove this.
+- **Re-holding a very large backlog is one large write per probe cycle.** When an open circuit's
+  probe time arrives, the whole held backlog becomes due and the first hold after the probe
+  re-schedules it in one statement: about 70 ms for 2 000 rows and 1.6 s for 100 000 rows on a
+  loaded development machine (PostgreSQL 17), once a minute, inside one poll.
 - **A lost status write strands a row in `delivering`.** Without a `claimed_at` column (a
   schema change) such a row is never re-claimed.
 - **NAT64 with a network-specific prefix** (RFC 6052 §2.2) cannot be recognised from the

@@ -26,17 +26,22 @@ release is cut — this file is a staging area.
   URL, request build error) left the circuit half-open, so the subscription
   delivered nothing until restart. Every probe is now resolved; an early exit
   returns the circuit to open and the next poll probes again.
-- **One subscription can no longer starve the delivery queue (P3-5).**
+- **Failing subscriptions can no longer starve the delivery queue (P3-5).**
   Non-retryable 4xx answers, circuit-held rows, rows of deleted subscriptions
   and rejected URLs were written back as immediately claimable and re-claimed
   ahead of every newer row, so a few of them stalled every other
   subscription's deliveries for good. Every claimed delivery now ends
-  `delivered`, `dead`, or scheduled in the future, and the queue is claimed
-  round-robin across subscriptions.
+  `delivered`, `dead`, or scheduled in the future; the queue is claimed
+  round-robin across subscriptions; and a subscription that cannot be
+  delivered to (open circuit, unreadable subscription) has its whole queue
+  held until its next attempt, so it takes about two claim slots per probe
+  cycle however large its backlog — also when five or more subscriptions are
+  held at once.
 - **No address oracle in webhook target validation (P3-25).** Create, update,
   the subscription test, `last_error` and the delivery log no longer reveal a
-  resolved IP address, an address class for a DNS name, or the DNS resolver's
-  address. IPv6 transition addresses (NAT64 `64:ff9b::/96`, 6to4, IPv4-
+  resolved IP address, an address class for a DNS name, Spine's own source
+  address, or the DNS resolver's address — neither for a failed connect nor
+  for a connection reset or broken pipe after connect. IPv6 transition addresses (NAT64 `64:ff9b::/96`, 6to4, IPv4-
   compatible, SIIT) are judged by the IPv4 address they embed, so for example
   `64:ff9b::a9fe:a9fe` (cloud metadata through NAT64) is refused; RFC 8215
   local-use NAT64, Teredo, site-local `fec0::/10` and `0.0.0.0/8` are refused.
@@ -54,13 +59,21 @@ release is cut — this file is a staging area.
   now retryable, like `429` and 5xx. Rows whose subscription was deleted, whose
   metadata is invalid, whose target URL is refused or whose TLS configuration
   cannot be built go `dead` at once, each with a delivery-log row giving the
-  reason. A transient failure to read the subscription is retried with
-  backoff and recorded as `resolve subscription: temporarily unavailable`
-  (the database error goes to the operator log only). HTTP-status outcomes
-  keep the exact text `HTTP <code>`.
+  reason. HTTP-status outcomes keep the exact text `HTTP <code>`.
+- **Unreadable subscription.** A transient failure to read the subscription
+  (database, decryption) used to re-try the delivery on every poll until the
+  fault cleared. It is now retried on the backoff schedule and then every
+  minute, recorded as `resolve subscription: temporarily unavailable` (the
+  database error goes to the operator log only), still counts its attempts,
+  and is delivered automatically once the subscription can be read; it goes
+  `dead` only after 24 hours from when it was queued
+  (`resolve subscription: temporarily unavailable: held longer than 24h0m0s`).
+  The subscription's other due deliveries wait for the same retry without
+  spending attempts.
 - **Circuit holds.** A delivery held by an open circuit is deferred to the next
-  probe time without consuming an attempt (it used to burn one per poll), and
-  goes `dead` after 24 hours from when it was queued
+  probe time without consuming an attempt (it used to burn one per poll),
+  together with the rest of its subscription's due queue, and goes `dead`
+  after 24 hours from when it was queued
   (`circuit open: held longer than 24h0m0s`).
 - **Claim order.** Due deliveries are claimed round-robin across subscriptions,
   oldest first within each; global cross-subscription FIFO was never
@@ -69,29 +82,52 @@ release is cut — this file is a staging area.
   permitted` for a literal IP, `target_url: host resolves to a non-public
   address (allowlist it via SPINE_WEBHOOK_ALLOWED_HOSTS if intended)` for a
   host name, `target_url: destination address not permitted` at connect time,
-  `target_url: connect <host>:<port>: <reason>` for a connect failure and
-  `target_url: resolve <host>: no such host|timeout|temporary failure|lookup
-  failed` for DNS. Parse errors no longer quote the URL.
+  `target_url: connect <host>:<port>: <reason>` for a connect failure,
+  `read tcp <host>:<port>: <reason>` (or `write …`) for a failure after
+  connect and `target_url: resolve <host>: no such host|timeout|temporary
+  failure|lookup failed` for DNS. Parse errors no longer quote the URL.
 - **Subscription API.** `metadata` is accepted as a JSON object (the
   documented form, which used to fail to decode) or, as before, a base64
-  string; it is validated on `POST`/`PATCH` (`400 invalid_params`).
-  Subscription responses include `signature_version`.
+  string; it is validated on `POST`/`PATCH` (`400 invalid_params`),
+  including a key given in more than one letter case (`tls` and `TLS`), which
+  used to be read one way by the API and another by the dispatcher.
+  Subscription responses include `signature_version`, which is `"invalid"`
+  whenever the stored metadata would not pass that validation.
 - **Docs.** The integration guide's TLS pin example used the wrong key and
   encoding: the key is `tls.pinned_spki_sha256` and the value is hex (the CA
   key is `tls.ca_bundle_pem`).
 
 ### For embedders
 
-- **New `store.DeliveryStore` method** `DeferDelivery(ctx, deliveryID, reason,
-  until)`; `*store.PostgresStore` implements it. Types that embed the
-  `store.Store` / `store.DeliveryStore` interface compile unchanged; a type
-  that implements `DeliveryStore` method by method must add it.
+- **New `store.DeliveryStore` methods** `DeferDelivery(ctx, deliveryID, reason,
+  until)` and `HoldDueDeliveries(ctx, store.DeliveryHold)` (new type
+  `store.DeliveryHold`); `*store.PostgresStore` implements both, with no
+  schema change. Types that embed the `store.Store` / `store.DeliveryStore`
+  interface compile unchanged; a type that implements `DeliveryStore` method
+  by method must add them.
 - **Shared behaviour at the first bump past this change, whatever the
-  opt-in** (SMP owner: SMP TASK-006 R1/R2 must land first): a 4xx from the
-  receiver dead-letters the delivery on its first attempt; orphaned,
-  malformed and URL-rejected rows go `dead`; `last_error` texts are redacted
-  as above. NTP sync across receiving replicas becomes a prerequisite once a
-  subscription opts into v2.
+  opt-in** (SMP owner: SMP TASK-006 R1/R2 must land first):
+  - a 4xx from the receiver dead-letters the delivery on its first attempt;
+  - orphaned, malformed and URL-rejected rows go `dead`, and so does a row
+    whose per-subscription TLS configuration cannot be built (it used to be
+    `failed` and retried on every poll);
+  - a row held by an open circuit, or whose subscription cannot be read, goes
+    `dead` once it has been queued for `DispatcherConfig.MaxCircuitHold`
+    (zero, the default, means 24 hours); before, held rows never became
+    terminal from holding alone;
+  - a transient failure to read the subscription (database, decryption, for
+    example a replica without its encryption key) is retried with backoff and
+    then every minute instead of on every poll, still counts attempts (so
+    SMP's stuck-dispatch view shows it at the budget) and is delivered
+    automatically once readable; it is never dead-lettered for this before
+    `MaxCircuitHold`;
+  - a dispatcher that holds a subscription (open circuit, unreadable
+    subscription) holds its whole due queue in the shared database until its
+    next attempt — with several dispatchers on one runtime database, a
+    replica-local fault delays that subscription's due rows for the other
+    replicas too, by up to the 60 s circuit recovery time per cycle;
+  - `last_error` texts are redacted as above. NTP sync across receiving
+    replicas becomes a prerequisite once a subscription opts into v2.
 - **New, additive API in `adapters/delivery`:** `SignV1`, `SignV2`,
   `SignatureVersionV1/V2`, `MetadataKeySignatureVersion`, `HeaderSignature`,
   `HeaderTimestamp`, `HeaderNonce`, `ErrInvalidSubscriptionMetadata`,
@@ -106,7 +142,17 @@ release is cut — this file is a staging area.
   (text without the address) and `SafeDialContext` returns
   `ErrBlockedDestination` / `*DialError`; callers that matched the old texts
   (`"loopback address 127.0.0.1 not permitted"`) must match the class or use
-  `errors.As` / `errors.Is`.
+  `errors.As` / `errors.Is`. A DNS failure from `SafeDialContext` (and so
+  from `TargetValidator.HTTPClient` / `Transport`) has a new text without the
+  resolver's address but still unwraps to the `*net.DNSError`, and still
+  reports `Timeout()` for a DNS timeout, also through `url.Error.Timeout()`.
+  The connection `SafeDialContext` returns re-renders read, write and close
+  failures as a `*net.OpError` with no `Source` and with `Addr` naming the
+  dialled host:port (`read tcp hooks.example:443: read: connection reset by
+  peer`); `Op`, `Net`, the inner error and `Timeout()` are unchanged, so
+  `errors.Is(err, syscall.ECONNRESET)` and `errors.As(err, &*net.OpError)`
+  still work. `RedactError` also re-renders any other `*net.OpError` that
+  names addresses.
 - `CircuitBreaker.AllowDelivery`, `RecordSuccess`, `RecordFailure` and
   `State` are unchanged, but `AllowDelivery` is documented as not for
   dispatch use (it cannot resolve a probe).
