@@ -2,12 +2,12 @@
 id: TASK-013
 type: Task
 title: "Admin-only skill management, actor role ceiling, and bootstrap-admin token hygiene"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -1176,3 +1176,222 @@ Neither repository was modified. The designer's text is kept, and each change is
     before the upgrade, because no grantor is recorded.
 
 ## Implementation Notes
+
+Implemented on branch `init/INIT-023-TASK-013-identity-and-skill-authority`, from Spine local
+`main` `ee3c249` (origin `61994fe` + the INIT-023 scaffold + merged TASK-001). No SMP file was
+changed. The orchestrator closes the task after merge.
+
+### Orchestrator rulings and owner-question defaults
+
+The owner questions take their defaults, recorded here **pending the owner**:
+
+| Question | Default implemented |
+|---|---|
+| OQ1 `actor.create` role | Stays `operator`, capped by the strictly-below ceiling (`AuthorizeRoleGrant`). |
+| OQ2 rotation grace | Immediate revocation on the first load after rotation. The runbook's "switch together" step (§5.6 (a)) covers the 401 window. The opt-in `SMP_ADMIN_TOKEN_PREVIOUS` two-phase rotation is a **recorded follow-up**, not built. |
+| OQ3 strength gate outside production | Warn only; only `SPINE_ENV=production` refuses to start. |
+| OQ4 rename guard | An admin rename of a skill whose old or new name an active workflow references answers 409 unless `?force=true`; renames are audited (`skill_renamed`). |
+| OQ5 restart-during-rollout residue | Accepted and documented (runbook §5.6 (b), KNOWN-LIMITATIONS, CHANGELOG); the recovery is to rotate forward. |
+
+Orchestrator ruling on SMP: SMP seeds `smp-admin` through `auth.BootstrapInternalAdmin`, so the
+compatibility gate below proves SMP's provisioning seed path and its gated DB suites still pass.
+
+### What was built
+
+| Area | Change |
+|---|---|
+| `core/auth/permissions.go` | `skill.create`, `skill.update`, `skill.deprecate` → admin; new `actor.add_skill`, `actor.remove_skill` (admin). `actor.create` and `skill.read` unchanged. `Authorize`'s status refusal moved into `requireActive` (identical behaviour), shared with the new helpers. |
+| `core/auth/grants.go` (new) | `ReasonSelfSkillChange`, `ReasonRoleCeiling`, `AuthorizeActorSkillChange` (status → self check for non-admins → role map) and `AuthorizeRoleGrant` (status → unknown/empty granted role refused for everyone → admin any → others strictly below). Both refuse a nil caller. Imports only `core/domain`. |
+| `core/auth/bootstrap.go` | `BootstrapAdminConfig.SupersededBefore`; status preservation for suspended/deactivated `smp-admin` (Warn; empty/unknown status still healed); `upsertInternalAdminToken` returns the current row, refuses a revoked current row (Error log, no sweep, nil); `revokeSupersededAdminTokens` (§7 rules, not-found skipped, other errors wrapped with the token id, Info log + `bootstrap_admin_token_revoked` audit); random `bootstrap-<16 hex>` ids. Doc comment rewritten. |
+| `service/internal/gateway/authz_identity.go` (new) | `authorizeActorSkillChange` (dev mode → `authorize()`; self refusal audited as `actor_skill_change_refused`), `actorIDParam` (decode-once, 400 `invalid_params` on a malformed escape), `errorReason`. |
+| `handlers_actor_skills.go` | Assign/remove use `actor.add_skill` / `actor.remove_skill` with the decoded id for authorization and the store call; `actor_skill_added` / `actor_skill_removed` audits. |
+| `handlers_skills.go` | Rename guard (both names, 409 + hint unless `?force=true`, deduplicated workflow list), `skill_renamed` and `skill_deprecated` audits. |
+| `handlers_actors.go` | Ceiling via `AuthorizeRoleGrant` after the role parse, before the id is generated; `actor_create_refused` / `actor_created` audits. |
+| `service/cmd/spine` | `validateSMPAdminToken` (32-char and 8-distinct-byte floor; production error, otherwise warning; never echoes the token) called in `serveCmd` right after the dev-mode guard; `workspaceDeliveryConfig.ProcessStart` set at boot and passed as `SupersededBefore` in `bootstrapInternalAdmin`. |
+| Docs | `security-model.md` §4.1, `api-operations.md` §3.6/§6, `actor-model.md` §3.2/§7.1, `integration-guide.md` (role list, skills paragraph, `SMP_ADMIN_TOKEN` env row), `operator-runbook.md` §5.6 (steps 1-4, (a)-(d), failure modes), README startup gates, KNOWN-LIMITATIONS (rotation window/residue/clock dependence/legacy ids/unset; name-based skill matching and guard scope; reviewing pre-upgrade grants, which record no grantor), CHANGELOG (every §12 row and design-check row, both upgrade notes, embedder section). |
+
+Commits (all prefixed `INIT-023 EPIC-004 TASK-013:`): `288dc9d` inert plumbing + red tests;
+`6cb6708` core/auth; `57906ff` gateway; `f48e172` spine serve; `a4f8759` docs; then this notes
+commit.
+
+### Red before green
+
+`288dc9d` is the inert-plumbing commit (constants, `AuthorizeActorSkillChange` = `Authorize`,
+`AuthorizeRoleGrant` = nil, `SupersededBefore` stored/unread, `ProcessStart` unset,
+`validateSMPAdminToken` = `("", nil)`, `setupSkillServerAdmin`) plus every test. On it,
+`go test ./core/auth/ ./service/internal/gateway/ ./service/cmd/spine/` had exactly **26 failing
+tests, all new or lockstep-updated**, and no pre-existing test failed:
+
+- AC 1-6: `TestSkillAuthority_ContributorCannotEscalate`, `…_SelfGrantedReviewChainBlocked`,
+  `…_NonAdminSelfChangeHasDistinctReason`, `…_AdminManagesSkills`,
+  `…_ReferencedSkillDeprecateAndRenameNeedForceAndAreAudited`, `TestActorCreate_RoleCeiling`.
+- AC 7: `TestAuthorizeActorSkillChange_Matrix`, `…_NilCallerFailsClosed`,
+  `TestAuthorizeRoleGrant_Matrix`, `…_UnknownRoleRefusedForEveryCaller`, `…_InactiveCaller`,
+  `…_NilCallerFailsClosed`, `TestSkillAndGrantOperationsAreAdminOnly`.
+- AC 8-11, 21: `TestBootstrapSecurity_RotationRevokesOldBearer`, `…_TokenIDIndependentOfBearer`,
+  `…_DoesNotResurrectDeactivatedAdmin`, `…_KeepsSuspendedAdminSuspended`,
+  `…_RevokedCurrentBearerStaysRevoked`, `…_CutoffStillRevokesRowsBeforeIt`,
+  `…_RevocationErrorPaths`; lockstep `TestBootstrapInternalAdmin_CreatesActorAndToken`,
+  `…_HealsStaleActor`, `…_RotatedTokenInsertsNewRow`.
+- AC 12 wiring and AC 14: `TestBootstrapInternalAdmin_RevokesOnlyRowsBeforeProcessStart`,
+  `TestValidateSMPAdminToken`, `TestServeRefusesWeakSMPAdminTokenInProduction`.
+- The bootstrap scenarios (AC 16) failed on the stub against Postgres (`token_id … does not match`).
+
+New tests that pass on the stub, as designed: `TestBootstrapSecurity_OldReplicaCannotRevokeNewerBearer`
+(AC 12) and `TestBootstrapSecurity_AdminMintedTokensSurviveRotation` (AC 13), the
+over-revocation guards; `TestBootstrapSecurity_HealsEmptyStatusToActive` (AC 10), the
+over-preservation guard; plus three extra guards — `TestAuthorizeActorSkillChange_InactiveCaller`
+(status precedes the self check), `TestBootstrapSecurity_SweepScope` (other actors' rows and
+non-bootstrap names are never swept) and `TestMemAuthRevokeContract` (fixture sanity). All pass on
+the fix.
+
+### Per-AC evidence
+
+| AC | Evidence |
+|---|---|
+| 1 | `service/internal/gateway/identity_authority_test.go` `TestSkillAuthority_ContributorCannotEscalate`: self-grant 403 `self_skill_change_forbidden`; mint, colluding grant, strip, forced deprecate, rename all 403; eligibility and catalogue unchanged. |
+| 2 | `service/internal/gateway/skill_selfreview_e2e_test.go` `TestSkillAuthority_SelfGrantedReviewChainBlocked` (real router, real `engine.Orchestrator`, real `workflows/task-default.yaml`): [2] 403, [3] 403 and alice still eligible, [4] claim refused ("missing required skills"), zero merges recorded. |
+| 3 | `TestSkillAuthority_NonAdminSelfChangeHasDistinctReason`: operator self-grant and self-removal 403 with the reason and the audit line (`operation`, `target_actor_id`, `reason`, caller `actor_id`); grant to another actor a plain insufficient-role 403 (`required_role=admin`, no reason); `op%2D1` 403 with the reason and no undecoded id stored; `%ZZ` 400 at the wire (net/http) and 400 `invalid_params` from the handler (in-process request with a hand-set `RawPath`). See Deviation 1. |
+| 4 | `TestSkillAuthority_AdminManagesSkills`: admin grants to `contributor-1` and to itself (200), `actor_skill_added` audit with all fields; encoded admin grant lands on the decoded id; removal audited. |
+| 5 | `TestSkillAuthority_ReferencedSkillDeprecateAndRenameNeedForceAndAreAudited`: rename away 409 (body `workflows` + hint, name unchanged), unforced deprecate 409, forced deprecate 200 with `skill_deprecated … forced=true referencing_workflows=1`; rename `x`→`review` with **no** `review` row 409, forced 200 + `skill_renamed`; unreferenced rename and same-name update need no force. |
+| 6 | `TestActorCreate_RoleCeiling`: operator→admin and operator→operator 403 `role_ceiling_exceeded` with `granted_role`, nothing stored; operator→reviewer and admin→admin 201; `actor_create_refused` / `actor_created` audits. |
+| 7 | `core/auth/grants_test.go`: 5 roles × self/other × both ops; inactive callers (suspended, deactivated, empty) get `actor_status`, never the self reason; full 5×5 grant matrix; `""`, `superuser`, `Admin` refused for every caller; suspended admin / deactivated operator / empty-status admin get the status detail; nil callers refused without panicking; the operation map pinned. |
+| 8 | `core/auth/bootstrap_security_test.go` `TestBootstrapSecurity_RotationRevokesOldBearer`: old bearer → "token revoked", new bearer validates and passes `token.create`; the revocation is audited; no log line carries a bearer or its hash prefix. |
+| 9 | `TestBootstrapSecurity_TokenIDIndependentOfBearer` (bearer `admin` accepted; id matches `^bootstrap-[0-9a-f]{16}$`, not a hash prefix) and the updated `TestBootstrapInternalAdmin_CreatesActorAndToken`. |
+| 10 | `TestBootstrapSecurity_DoesNotResurrectDeactivatedAdmin` (via `actor.Service.Deactivate`, Warn logged), `…_KeepsSuspendedAdminSuspended` (via `Suspend`; an explicit `Reactivate` still works), updated `TestBootstrapInternalAdmin_HealsStaleActor`, and `TestBootstrapSecurity_HealsEmptyStatusToActive`. |
+| 11 | `TestBootstrapSecurity_RevokedCurrentBearerStaysRevoked`: A, B, A → A refused, B validates, `level=ERROR` "revoked bootstrap admin token". |
+| 12 | `TestBootstrapSecurity_OldReplicaCannotRevokeNewerBearer`, `…_CutoffStillRevokesRowsBeforeIt`, and the wiring test `service/cmd/spine/serve_delivery_test.go` `TestBootstrapInternalAdmin_RevokesOnlyRowsBeforeProcessStart` (`authCaptureStore` gains `ListTokensByActor`, `RevokeToken`, `RevokedAt`; `ProcessStart` between two pre-seeded rows; only the earlier one is revoked; `loadWorkspaceDeliveryConfig().ProcessStart` non-zero). |
+| 13 | `TestBootstrapSecurity_AdminMintedTokensSurviveRotation` (a `tok_` token named `smp-admin-bootstrap`, made strictly older than the rotation). |
+| 14 | `service/cmd/spine/smp_admin_token_test.go`: `TestValidateSMPAdminToken` (the AC table plus the 32-char/8-distinct floor both sides; no message echoes the token, each names the variable and the remedy) and `TestServeRefusesWeakSMPAdminTokenInProduction`. |
+| 15 | Only the Design §12 tests changed (plus gofmt import order in those files, Deviation 6); no existing `Test…` in `serve_delivery_test.go` changed. `go build ./...`, `go vet ./...`, `go test ./...` pass. |
+| 16 | `bootstrap_admin_idempotency_test.go` updated (old bearer 401 via new `…ExpectingUnauthorized` steps at both sites, id regex at both sites, old row revoked / new row live in both row-count steps); passes against Postgres (command below). |
+| 17 | `dev/lint-boundaries.sh` OK with no allowlist change; golangci-lint 0 new issues; `cmd/embed-smoketest` OK. |
+| 18 | SMP compatibility gate below: all pass, no SMP file changed. |
+| 19 | `git diff main...HEAD -- migrations/` is empty; `adapters/store/interfaces.go` (`store.AuthStore`) unchanged. |
+| 20 | Every §15 document and the §15 note's runbook (a)-(d) updated; CHANGELOG covers every §12 row and the design-check rows plus both upgrade notes. |
+| 21 | `TestBootstrapSecurity_RevocationErrorPaths`: list failure → wrapped, "list bootstrap admin tokens"; revoke failure → wrapped, "revoke superseded bootstrap admin token" + the token id; first revoke not-found (revoked concurrently) → skipped, nil returned, the second superseded row still revoked. |
+
+**Audit PoCs.** All seven PoCs were re-run unchanged with `go test -overlay` (the gap1 PoC with
+its fixtures renamed to avoid colliding with the new test file's `memAuth`): every one now fails
+to reproduce — self-grant/strip/deprecate 403, the R1-4 chain stops at the claim (409 missing
+skills, no merge), operator `role=admin` 403 `role_ceiling_exceeded`, old bearer "token revoked",
+deactivated `smp-admin` stays deactivated. Their inverted forms are the committed tests above.
+
+### Mutations
+
+Run with `go test -overlay` on mutated copies (no repository file touched); **33 of 33 killed**:
+
+| AC | Mutation | Killed by |
+|---|---|---|
+| 1 | `skill.create` / `actor.add_skill` / `actor.remove_skill` → contributor (3 runs); self check removed | AC 1 test |
+| 2 | `actor.remove_skill` → contributor; `actor.add_skill` → contributor **and** self check removed | AC 2 test |
+| 3 | self check removed; `url.PathUnescape` dropped | AC 3 test |
+| 4 | self check applied to admins; `actor_skill_added` audit removed | AC 4 test |
+| 5 | rename guard removed; `skill_deprecated` audit removed | AC 5 test |
+| 6 | `>=` → `>` in `AuthorizeRoleGrant`; call in `handleActorCreate` disabled | AC 6 test |
+| 7 | `>=` → `>`; self check narrowed (`!= admin` → `< operator`); `RoleLevel()==0` refusal removed; status check removed from `AuthorizeRoleGrant` | AC 7 tests |
+| 8 | `revokeSupersededAdminTokens` call removed | AC 8 test |
+| 9 | `"bootstrap-"+hash[:12]` restored | AC 9 test and `…_CreatesActorAndToken` |
+| 10 | `desired.Status = existing.Status` deleted (each of the three tests killed individually); preserve rule widened to any non-active status | AC 10 tests; empty-status test |
+| 11 | revoked-current branch deleted; sweep removed | AC 11 test |
+| 12 | cutoff ignored; `SupersededBefore: cfg.ProcessStart` dropped from `serve_resolver.go`; `ProcessStart` not set | AC 12 tests |
+| 13 | `bootstrap-` prefix condition dropped | AC 13 test |
+| 14 | distinct-byte rule disabled; call in `serve_cmd.go` removed | AC 14 tests |
+| 21 | list error swallowed; non-not-found revoke error swallowed; return on not-found | AC 21 test |
+
+### Deviations from the design, with reasons
+
+1. **`{actor_id}` is decoded only when `r.URL.RawPath` is set** (Design §3 note says "decode once
+   with `url.PathUnescape`"). chi routes on `RawPath` when it is set and on the already-decoded
+   `Path` otherwise; net/http sets `RawPath` only for a non-canonical escaping. Unescaping
+   unconditionally would decode a `Path` a second time (`/actors/op%252D1/…` names the literal id
+   `op%2D1`, not `op-1`). Decoding exactly when chi saw the escaped form is "decode once" relative
+   to the wire. The AC 3 encoded row and its mutation behave as designed.
+2. **A malformed escape never reaches the handler over the wire.** net/http rejects a request line
+   with `%ZZ` (plain-text 400) before routing, so AC 3's "400 `invalid_params`" is reachable only
+   from an in-process caller or a front end that hands the raw path through. The handler's 400 is
+   kept as defence in depth; the test asserts both the wire-level 400 and the handler's
+   `invalid_params` (in-process request with a hand-set `RawPath`).
+3. **Both `core/auth` helpers refuse a nil caller** (`ErrForbidden`) instead of panicking, as
+   befits an exported primitive; `AuthorizeRoleGrant`'s ceiling detail also carries
+   `operation=actor.create`.
+4. **`ProcessStart` is truncated to microseconds** (Postgres precision), so a row a replica inserts
+   in its first microsecond never compares as "before" its own start.
+5. **The rename 409 body deduplicates** a workflow that references both the old and the new name.
+   `actor_create_refused`'s `reason` is read from the error detail (always `role_ceiling_exceeded`
+   in practice, since `authorize()` already refused inactive callers).
+6. **gofmt.** Eight touched files were not gofmt-clean on `main` (unsorted imports after the
+   adapters move): `core/auth/{auth_test,bootstrap,bootstrap_test}.go`,
+   `service/cmd/spine/{serve_delivery_test,serve_resolver}.go`,
+   `service/internal/gateway/{handlers_coverage2_test,handlers_skills_test}.go` and the bootstrap
+   scenario file. They were formatted (import order only), as TASK-001 did; golangci-lint reports 8
+   fewer gofmt issues as a result.
+7. **Extra tests** beyond the AC list (all listed above): `…_CutoffStillRevokesRowsBeforeIt`,
+   `…_SweepScope`, `TestMemAuthRevokeContract`, the nil-caller and inactive-caller tests,
+   `TestSkillAndGrantOperationsAreAdminOnly`, and extra rows in the AC 3-5 tests.
+8. **KNOWN-LIMITATIONS.md** gained two Security Notes entries (rotation; name-based skill matching)
+   although §15 does not list the file: they record the accepted residues (OQ2, OQ5), the replica
+   clock dependence of `created_at` ordering, the legacy-id window and the active-projection-only
+   guard scope.
+9. **The runbook section is §5.6** under "5. Rotating Credentials"; its failure-modes table adds the
+   Warn/Error log lines operators will see.
+
+No design point required a schema change.
+
+### Gates (all on the branch head before this notes commit, `a4f8759`)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` (no allowlist change) |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 ./...` | rc 0 |
+| `go test -race -count=1 -p 4 ./core/auth/ ./service/internal/gateway/ ./service/cmd/spine/` | ok ×3 |
+| `SPINE_TEST_DATABASE_URL=…/s013_scenario go test -race -tags scenario -count=1 -p 4 -run '^(TestBootstrapInternalAdmin_\|TestGitHTTP_)' ./service/scenariotest/scenarios/` | ok (AC 16 Postgres proof; the CI `scenario-git-http` set, 19 `TestGitHTTP_*` pass, none skip) |
+| `SPINE_TEST_DATABASE_URL=…/s013_scenario make test-scenario` | **not green, pre-existing**: run sequentially (`go test -tags scenario -count=1 -p 1 ./service/scenariotest/...`) on the branch and on an export of `main` (own database each), the failure sets are **identical, 30 tests each** (fixture/harness/actor-API/gateway scenarios; CI scopes this job to `TestGitHTTP_*` because the rest "is not green on main today"). Both `TestBootstrapInternalAdmin_*` scenarios pass. A parallel-package run showed 5 extra failures that pass standalone (cross-package sharing of one database). |
+| `SPINE_TEST_DATABASE_URL=…/s013_integ go test -tags integration -count=1 -p 1 ./adapters/store/` | not green, **pre-existing and unrelated** (`adapters/` untouched): `TestRunModeDatabaseDefault` (`workflow_version_label` NULL scan) and an intermittent `TestEventSubscription_SigningSecretEncryption`; identical on an export of `main`. No integration-tagged tests exist in the touched packages. |
+| `golangci-lint run ./core/auth/... ./service/internal/gateway/... ./service/cmd/spine/...` (branch vs `main` export, uncapped) | 98 vs 105 issues; **0 new** (7 gofmt fewer) |
+| `golangci-lint run --build-tags scenario ./service/scenariotest/scenarios/` | 59 vs 60; **0 new** |
+| `golangci-lint run --enable-only=gosec` (same two scopes) | 0 issues on branch and `main` |
+| `gofmt -l $(git diff --name-only main...HEAD \| grep '\.go$')` | empty |
+| `git diff main...HEAD -- migrations/` | empty |
+| `codex review --base main` | "No actionable regressions were identified in the changes." No P1/P2 findings, nothing rejected. |
+
+### SMP compatibility gate (AC 18)
+
+`/Users/bartoszszymichowski/42sid/i23/s-T013/smp`, detached at SMP `main` `7d4e7cc9`, `../spine` =
+this worktree, no `vendor/`, no `tmp/`, no SMP file changed (`git status` clean after every step).
+Databases: shared PostgreSQL 17.10 + pgvector, own `s013_smp_it` (platform migrations via
+`go run ./dev/apply-migrations -set platform -dir migrations`) and `s013_spine_rt`
+(`-set spine-runtime`), existing `smp_prov` role (not modified).
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go build ./cmd/... ./internal/... ./scenariotest/... ./dev/...` | OK |
+| `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `./dev/lint-spine-internals.sh`; `./dev/lint-spine-internals-self-test.sh` | OK; self-test OK (2 fixtures) |
+| `go test -p 4 -count=1` on every SMP package depending on Spine `core/auth` (`go list -deps`: 28 packages, direct importers `internal/customer/spinecore` and `internal/customer/workspace`) plus `./internal/customer/workspace/... ./internal/recovery/... ./internal/customer/spinecore/... ./cmd/customer-app/...` | rc 0, 29 packages ok |
+| `TEST_PROVISIONING_DSN=postgres://smp_prov:…@localhost:55630/postgres go run ./dev/testgate -v -- -race -count=1 -run '^TestCreateInitialActors_Integration_' ./internal/customer/workspace/` | **4 passed, 0 skipped** — `SeedsIdempotentAndEnqueues`, `TokenHashCollisionFailsClosed`, `IncompleteConfigSkipsSubscription`, `EncryptsSigningSecretAtRest` |
+| `go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -- -race -count=1 -p 2 ./internal/customer/workspace/ ./internal/customer/workspace/workspacetest/ ./internal/recovery/` (`TEST_DATABASE_URL`/`TEST_PLATFORM_DB`=`s013_smp_it`, `TEST_PROVISIONING_DSN`, `TEST_MINIO_*` = a temporary MinIO from the local `minio/minio` image, removed afterwards) | PASS: 778 tests, 1 allowed skip (live AWS KMS) |
+| `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (`TEST_SPINE_DB`=`s013_spine_rt`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN`) | PASS: 1539 tests, 1 allowed skip (the parked placeholder) |
+
+No `ws_*` database was left behind by the provisioning suites. SMP's seed path is unaffected in
+substance: its one bearer per workspace makes the sweep a no-op except after an SMP-side rotation,
+and no live SMP path consults `auth.tokens`.
+
+### Not run
+
+- SMP's full CI `integration` job beyond the suites above (the remaining platform-DB packages do
+  not depend on Spine `core/auth`), the `faultinject` failure-boundary step, and SMP's images and
+  RDS-emulation jobs. They re-run under SMP TASK-012's `.spine-revision` bump.
+- `TEST_AWS_OBJECT_STORE_*` (needs a real AWS account), as in SMP CI.
+
+### Follow-ups recorded
+
+- `SMP_ADMIN_TOKEN_PREVIOUS` two-phase rotation (OQ2 option ii); bearer generation numbers (OQ5).
+- Matching `required_skills` by immutable `skill_id` (Decision 13); domain events for identity
+  changes (Decision 11); an actor status API that treats `smp-admin` as platform-operator-only;
+  reserving the `smp-admin` id on `POST /actors`; gateway-wide path-param unescaping.
+- SMP: if SMP ever adds a verifier for `auth.tokens`, pass its process start as
+  `SupersededBefore` (Design §13).
