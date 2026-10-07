@@ -300,6 +300,10 @@ Workspace-scoped operations for the multi-repository model defined by [ADR-013](
 - `POST /runs/{run_id}/divergences/{divergence_id}/branches` — create branch (body: `branch_id`, `start_step`)
 - `POST /runs/{run_id}/divergences/{divergence_id}/close-window` — close window
 
+**Create-branch admission (INIT-023 TASK-016):**
+- `branch_id` becomes a git ref component (`spine/<run_id>/<divergence_id>/<branch_id>`), so it must match the workflow ID grammar `^[a-z0-9][a-z0-9_\-.]*$`, be at most 128 bytes, and contain no `..` and no trailing `.` or `.lock`. Anything else is `400 invalid_params`, for every caller.
+- The `contributor` permission is not enough on its own: the caller must be an `operator`/`admin`, or hold a live cursor of the divergence's run (the latest execution, `assigned` or `in_progress`, of the run's current step or of the current step of one of its open divergence branches; the run must be `active`). Otherwise `403 forbidden`. Without this rule any contributor could attach a branch to another actor's run and, by claiming its step, become the actor allowed to push its divergence ref (§6, "Git push admission").
+
 **Domain rules:**
 - `system.rebuild` is asynchronous — the response confirms the rebuild was started, not completed
 - `system.validate_all` may be slow on large repositories; it runs against the Projection Store
@@ -364,6 +368,27 @@ Authorization is role-based (per [Security Model](/architecture/security-model.m
 | `admin` | Full access including actor and token management |
 
 Additionally, individual workflow steps may require specific **skills** — the Workflow Engine checks these at assignment time, not the Access Gateway.
+
+### 6.1 Git Push (receive-pack) Admission
+
+With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, every ref update of every `POST /git/{workspace_id}/git-receive-pack` is admitted by **ref class** before branch protection runs, whether or not a branch-protection policy is wired (INIT-023 TASK-016, package `core/refadmit`). Branch-protection rules (ADR-009) still never name `spine/*`; this admission is a separate gate in front of them. Pre-receive stays all-or-nothing: one refused ref refuses the whole push, with `remote: ref-admission: …` lines.
+
+| Class | Ref | Create / update | Delete |
+|---|---|---|---|
+| `branch` | `refs/heads/<x>`, `<x>` outside the `spine` namespace | branch protection decides (unchanged) | branch protection decides |
+| `run_branch` | `refs/heads/spine/run/<name>`, `refs/heads/spine/plan/<name>` (`<name>` ends in `-<run-id hex>`) | the actor bound to the run's current step, or `operator`+ | `operator`+ |
+| `divergence_branch` | `refs/heads/spine/<run-id>/<divergence-id>/<branch-id>` | the actor bound to that branch's current step, or `operator`+ | `operator`+ |
+| `init_branch` | `refs/heads/spine/init`, the bootstrap branch `spine init-repo` writes | `operator`+ | `operator`+ |
+| `reserved` | `refs/heads/spine` itself, any other `refs/heads/spine/**` (malformed run names, names over 1024 bytes), and the namespace under **any case-fold spelling** (`SPINE/…`, `Spine/…`, `ſpine/…`) | `operator`+ | `operator`+ |
+| `non_branch` | anything outside `refs/heads/`: tags, notes, `refs/<x>`, `refs/remotes/*` | `operator`+, then branch protection (which allows non-branch refs) | `operator`+ |
+| `invalid` | any ref holding an ASCII control byte | nobody | nobody |
+
+Two further rules apply to **every** principal, operators included:
+
+- A ref with a control byte is refused (the pre-receive parser already refuses it; this is defence in depth).
+- Creating or updating a ref that has a `refs` path component after the first, or any `HEAD` component (`refs/heads/refs/heads/main`, `refs/tags/refs/heads/main`, `refs/refs/heads/main`, `refs/heads/HEAD`), is refused: such a name makes every client push of the branch it shadows fail. Deleting one stays possible, subject to its class, so it can be cleaned up.
+
+**Bound** means: the run is `active`; the actor's role is `contributor` or higher; and the **latest** step execution (by `created_at`) of the target — the run-level execution of the run's `current_step_id` for a run branch, the branch's execution of the branch's `current_step_id` for a divergence branch — is held by the actor in state `assigned` or `in_progress`, for the same repository. The run branch name must equal the run's own `branch_name` exactly. While a run is diverged its current step is `divergence:<id>`, so the parent run branch is operator-only. **Review freeze:** even the bound actor is refused while that step's declared type is `review` or `internal`; the step definition is loaded from the run's pinned workflow, and an unresolvable one refuses. Operators are never frozen and need no binding — an operator push is the remediation route. The wire messages never name who is bound. See `docs/git-push-guide.md` §5 for the message catalogue.
 
 ---
 

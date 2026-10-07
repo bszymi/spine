@@ -42,6 +42,32 @@ This document tracks known gaps and deferred functionality.
   (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
   INIT-023 EPIC-001 follow-up (owner: bszymi).
 
+### Git Push: Run-Branch Admission Is a Push-Start Check
+- With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a run, planning or divergence branch is pushable only
+  by the actor bound to its current step, or an operator (INIT-023 TASK-016). Three limits remain:
+  - **Admission time, not write time.** The gate decides when the push's command section arrives;
+    git writes the ref after the pack is received. A push started while bound can land after the
+    actor submits the step, bounded by the HTTP `ReadTimeout` (30 s in `spine serve`). Binding the
+    governed merge to the reviewed commit (INIT-023 TASK-005) is the content control for that
+    window; until it lands, the bound actor can still move the tip after validation (except
+    during a `review` or `internal` step, which is frozen).
+  - **Force-push by the bound actor is allowed.** Fast-forward-only cannot be enforced per actor
+    before the pack is unpacked, and `receive.denyNonFastForwards` would also block operators.
+  - **Dev mode pushes are anonymous.** `SPINE_DEV_MODE` skips git authentication, so dev pushes
+    reach the gate with no actor and can write ordinary branches only. Validating a presented
+    bearer in dev mode belongs to INIT-023 TASK-015.
+- **Exploratory divergence branches are effectively operator-only.** Creating one
+  (`POST /runs/{run_id}/divergences/{divergence_id}/branches`) now needs an operator or an actor
+  holding a live cursor of the run, and an exploratory divergence leaves the run with none (its
+  cursor is `divergence:<id>` and the API creates no step execution for the new branch). So only
+  operators create them, and only operators can push their divergence refs. This is the
+  fail-closed outcome of TASK-016 owner question 6; wiring step executions for exploratory
+  branches is a follow-up.
+- **Case-insensitive storage.** The admission folds the `spine` namespace with Unicode simple case
+  folding, so case-variant spellings are operator-only on any filesystem. Branch-protection rule
+  matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
+  below.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

@@ -6,6 +6,93 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-001 TASK-016: ref-class push admission)
+
+### Security
+
+- **Run branches can no longer be pushed by anyone who can authenticate (audit F2, push half,
+  P2).** With `SPINE_GIT_RECEIVE_PACK_ENABLED=true` the pre-receive gate skipped
+  `refs/heads/spine/*` entirely, so any authenticated actor — a `reader` included — could create,
+  advance, force-push or delete any run, planning or divergence branch, and the governed merge then
+  published whatever the branch pointed at. Every ref update is now admitted by ref class
+  (new package `core/refadmit`) before branch protection, whether or not a policy is wired. A run,
+  planning or divergence branch accepts a create or update only from the actor holding the
+  **latest** execution of its current step (`assigned` or `in_progress`) on an `active` run, with
+  role `contributor`+, for the same repository — or from an operator/admin. Only operators may
+  delete one. The parent run branch is operator-only while the run is diverged.
+- **Review freeze on the push path (owner question 4).** Even the bound actor is refused while the
+  current step's declared type is `review` or `internal`; the definition comes from the run's
+  pinned workflow, and an unresolvable one refuses. Operators are exempt.
+- **Tags and other non-branch refs are operator-only (audit F10, gateway half, P2).** A pushed
+  `refs/tags/<run-branch>` or `refs/tags/main` shadowed the branch in the engine's bare-name git
+  calls (the latter broke every governed merge). Tags, notes, `refs/<x>` and `refs/remotes/*` now
+  need the operator role, as do `spine/init` and the rest of the reserved `spine` namespace —
+  including `refs/heads/spine` itself (whose creation blocked every new run branch) and any case-fold
+  spelling of `spine` (`SPINE`, `Spine`, `ſpine`), which a case-insensitive server filesystem
+  aliases onto the real namespace.
+- **Shadowing ref names are refused for everyone (INIT-023 TASK-002 D12).** Creating or updating a
+  ref with a `refs` component after the first or any `HEAD` component (`refs/heads/refs/heads/main`,
+  `refs/tags/refs/heads/main`, `refs/refs/heads/main`, `refs/heads/HEAD`) is refused for every
+  principal, operators included: such a name makes every client push of the branch it shadows fail
+  (`dst refspec … matches more than one`). Deleting one stays allowed. Refs with a control byte are
+  refused for everyone too (defence in depth behind the TASK-001 parser).
+- **Divergence branch creation is tied to the run (owner question 6).**
+  `POST /runs/{run_id}/divergences/{divergence_id}/branches` now refuses, with `400`, a `branch_id`
+  outside the workflow ID grammar (`^[a-z0-9][a-z0-9_\-.]*$`, at most 128 bytes, no `..`, no
+  trailing `.`/`.lock`) — a control byte was a `500` before — and, with `403`, a caller who is
+  neither an operator nor holding a live cursor of the run. Before, any contributor could attach a
+  branch to another actor's run and then become the actor allowed to push its divergence ref.
+
+### Changed
+
+- **Pushes refused that were accepted before:** any push by a non-operator into `refs/heads/spine/**`
+  other than the bound run/divergence branch; any delete of such a branch by a non-operator; any
+  non-branch ref (tag, note, …) by a non-operator; shadowing names by anyone. In `SPINE_DEV_MODE`
+  (no git authentication) every push into `spine/**` and every tag push is refused, since the gate
+  sees no actor. Refusals arrive as `remote: ref-admission: …` lines with per-ref `ng` status
+  (catalogue: `docs/git-push-guide.md` §5; how to push a run branch: §6). Pre-receive stays
+  all-or-nothing.
+- **Exploratory divergence branches** are effectively operator-only to create, because an
+  exploratory divergence leaves its run with no live step execution (`KNOWN-LIMITATIONS.md`).
+- **Logs:** each refused ref is logged at Warn (`pre-receive ref admission denied`, with class and
+  reason); an operator's push to a reserved or non-branch ref is logged at Info. No event type,
+  schema, migration, endpoint or environment variable is added.
+- **Startup warnings** when receive-pack is on but no run store or no step-definition lookup is
+  wired (`run-branch pushes are operator-only: …`).
+
+### Upgrade note
+
+Shadow refs pushed before this change persist, and admission only stops new ones. On each
+workspace repository, list them and delete every non-branch ref whose short name equals a branch
+name, and every doubly-qualified or `HEAD`-named ref (`docs/integration-guide.md`, "Upgrading past
+ref-class admission"):
+
+```bash
+git -C <repo> for-each-ref --format='%(refname)' | grep -v '^refs/heads/'
+git -C <repo> for-each-ref --format='%(refname)' refs/refs refs/heads/refs refs/tags/refs refs/remotes/refs
+git -C <repo> for-each-ref --format='%(refname)' | grep -E '(^|/)HEAD(/|$)'
+```
+
+CI that pushes release tags must use an operator token.
+
+### For embedders
+
+- **New package `core/refadmit`** (imports `core/domain` and stdlib only): `Classify`,
+  `NewEvaluator(RunReader).WithStepDefs(StepDefLookup).Decide`, `DecideBoundToRun`,
+  `FrozenStepType`, `EvaluationErrorMessage`. `RunReader` is satisfied as is by
+  `*store.PostgresStore`, `store.Store` and SMP's `spinecore.RunStore` (whose run-not-found error
+  needs mapping to `domain.ErrNotFound` to read as "unresolved" rather than an evaluation error);
+  `StepDefLookup` is satisfied by `*engine.Orchestrator`. A nil reader or lookup makes run,
+  planning and divergence refs operator-only. Purely additive: nothing in `core/` or `adapters/`
+  calls it, so embedded behaviour is unchanged until an embedder adopts it (SMP INIT-027 EPIC-004
+  TASK-007).
+- **New `divergence.ValidateExploratoryBranchID`.** `CreateExploratoryBranch` does not call it, so
+  its behaviour is unchanged for embedders.
+- `adapters/store` asserts that `*PostgresStore` and `Store` satisfy `refadmit.RunReader`
+  (compile-time only).
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-001: pre-receive ref validation)
 
 ### Security
