@@ -125,6 +125,28 @@ The following limitations have been resolved:
   matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,
   paired with SMP's equivalent follow-up.
 
+### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
+- **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the
+  subscription (INIT-023 TASK-009). But the default `SPINE_SECRET_ENVELOPE_MODE=migrate` still
+  accepts legacy `enc:v1` and plaintext values and its re-encryption sweep converts them. A copy of
+  another workspace's pre-upgrade `enc:v1` value planted in a workspace database is indistinguishable
+  from a genuine pre-upgrade row and becomes a valid `enc:v2` row (audit P3-10).
+- **Closing it:** set `SPINE_SECRET_ENVELOPE_MODE=strict` once every workspace has swept clean
+  (`spine secrets reencrypt --all-workspaces` in shared mode), or retire every key that ever sealed
+  an `enc:v1` value. Every conversion is logged per row (`subscription secret converted`) so a
+  conversion after a workspace's first clean sweep can be investigated and its secret rotated.
+- **Status:** strict-by-default in a later release is a follow-up (owner question 1).
+
+### Webhook Signing Secrets: One Unopenable Row Stops a Workspace's Fan-Out
+- A signing secret that does not open (wrong or removed key, transplanted, legacy in `strict`) fails
+  the whole subscription list call, so the workspace's webhook delivery stops for the event types
+  that row subscribes to until the row is fixed (`POST /subscriptions/{id}/rotate-secret`). Rows are
+  deliberately not skipped (that would silently drop events) or blanked (unsigned deliveries). A
+  non-decrypting listing method would narrow the blast radius; it is a recorded follow-up because it
+  changes the `SubscriptionStore` interface.
+- The same fail-closed refusal applies when two workspaces share one runtime database, or a workspace
+  id changes without the documented `downgrade` procedure (`docs/integration-guide.md` §2.1).
+
 ## Architecture Deviations
 
 ### Convergence Evaluation Step

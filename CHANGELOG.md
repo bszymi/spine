@@ -68,6 +68,129 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-003 TASK-009: enc:v2 secret envelope and re-encryption sweep)
+
+### Security
+
+- **Webhook signing secrets are bound to their workspace and row (audit
+  P3-10).** The `enc:v1` at-rest envelope had no associated data and no key
+  id, and one key is shared by every workspace database, so a signing secret
+  copied from workspace A's `runtime.event_subscriptions` row into workspace
+  B's opened in B, and B then signed its deliveries with A's key. Standalone
+  `spine serve` now writes the new `enc:v2` envelope: AES-256-GCM under an
+  HKDF subkey, naming its key (`kid`), and authenticating the workspace id
+  this process serves (from configuration, never the row) and the
+  subscription id. A transplanted or swapped `enc:v2` value is refused, never
+  read as plaintext.
+- **P3-10 is closed only after `strict` mode or key retirement — not by
+  default.** This release's default mode, `migrate`, still accepts legacy
+  `enc:v1` and plaintext values and converts them, because it cannot tell a
+  genuine pre-upgrade `enc:v1` row from a copy of another workspace's
+  pre-upgrade `enc:v1` value; the audit's attacker holds exactly such a copy
+  (a pre-upgrade backup). Once every workspace has swept clean, set
+  `SPINE_SECRET_ENVELOPE_MODE=strict`, or rotate the key and drop every key
+  that ever sealed an `enc:v1` value. Making `strict` the default is a
+  recorded follow-up (owner question 1, default taken pending the owner).
+  Every conversion is logged per row so a planted value converted in
+  `migrate` mode can be found (`docs/integration-guide.md` §2.1).
+- **Adding the key later now encrypts existing rows (audit P3-1, Spine
+  half).** Rows written without a key stayed plaintext forever: the comment
+  and docs promised re-encryption "on the next update", but the bootstrap and
+  update paths skip unchanged secrets, so that write never came. Spine now
+  runs an explicit re-encryption sweep each time it opens a workspace store
+  (file mode: at startup; shared mode: when a workspace loads) and on demand
+  (`spine secrets reencrypt [--all-workspaces]`). The sweep converts
+  plaintext, `enc:v1` and previous-key rows to the mode's envelope under the
+  primary key with a compare-and-swap (a concurrent `rotate-secret` wins),
+  leaves rows it cannot open untouched and reports them, and never logs a
+  secret or a stored value.
+- **Keys rotate.** `SPINE_SECRET_PREVIOUS_KEYS` adds decrypt-only keys to the
+  ring; the sweep re-keys every row to the primary key, after which the old
+  key can be removed. Previously rotation was a manual decrypt-and-re-save.
+
+### Added
+
+- `SPINE_SECRET_PREVIOUS_KEYS` (comma-separated base64 keys, decrypt-only;
+  requires `SPINE_SECRET_ENCRYPTION_KEY`) and `SPINE_SECRET_ENVELOPE_MODE`
+  (`migrate` default, `strict`, `downgrade`; case-insensitive; anything else
+  refuses to start).
+- `spine secrets reencrypt [--all-workspaces]`: sweeps the file-mode
+  workspace, or every registry workspace like `spine migrate
+  --all-workspaces`; prints counters and refused rows only; exits non-zero
+  unless every workspace is clean. Use it before switching to `strict` or
+  dropping a previous key in shared mode.
+- Startup log `secret envelope configured` (`primary_key_id`,
+  `previous_key_ids`, `mode`) and per-workspace sweep logs
+  (`subscription secrets swept`, one `subscription secret converted` per row,
+  one `Error` per refused row). After a clean `migrate` sweep Spine logs a
+  hint to switch to `strict` (`Warn` when `SPINE_ENV=production`).
+
+### Changed
+
+- **A refused signing secret fails its reads.** Under the new envelope a row
+  that does not open (wrong or removed key, transplanted from another
+  workspace or row, a legacy value in `strict`, an unknown `enc:v<N>:`
+  version) fails `GetSubscription` and the list calls, as a wrong-key row
+  always did; one refused active row stops the workspace's webhook delivery
+  for the event types it subscribes to until it is fixed (`rotate-secret`).
+  Rows are never skipped or blanked.
+- **One workspace per runtime database is now load-bearing.** Two workspaces
+  registered on one runtime database refuse each other's rows once bound.
+  In file mode, two deployments that share a key and the default
+  `SPINE_WORKSPACE_ID=default` can transplant `enc:v2` values between them:
+  use a distinct key per deployment, or a distinct workspace id.
+- Doc fix: `README.md` names the crypto package `core/crypto`.
+
+### For embedders
+
+- **No behaviour change until you opt in.** A `store.PostgresStore` with no
+  `SetSubscriptionSecretBinding` writes `enc:v1` and reads plaintext and
+  `enc:v1` exactly as before. `crypto.NewSecretCipher`, `Encrypt`, `Decrypt`,
+  `ParseEncryptionKey`, `EncryptionKeySize`, `SetSecretCipher`,
+  `NewPostgresStoreWithQuerier`, the `SubscriptionStore` interface and
+  `delivery.BootstrapInternalSubscription` keep their signatures.
+- **New `core/crypto` API:** `SecretCipher` is now a key ring
+  (`NewSecretCipherRing(primary, previous...)`, `KeyID`, `PrimaryKeyID`,
+  `KeyIDs`); the `enc:v2` envelope is `Seal(plaintext, aad)` /
+  `Open(value, aad) (Opened, error)` with `AssociatedData(purpose,
+  fields...)`; `ClassifyEnvelope`/`Envelope`; sentinels `ErrNoCipher`,
+  `ErrMissingAAD`, `ErrUnknownKeyID`, `ErrEnvelopeAuth`,
+  `ErrMalformedEnvelope`, `ErrUnsupportedEnvelope`. A zero-value
+  `SecretCipher` now returns errors instead of panicking.
+- **New `adapters/store` API:** `SetSubscriptionSecretBinding(
+  SubscriptionSecretBinding{WorkspaceID, Mode})`, `SubscriptionSecretBinding()`,
+  `ParseSecretEnvelopeMode`, `ReencryptSubscriptionSecrets(ctx)
+  (SecretSweepReport, error)` with `SecretSweepIssue`/`SecretSweepConversion`,
+  and sentinels `ErrSecretCipherRequired`, `ErrNoSecretBinding`,
+  `ErrLegacySecretRefused`, `ErrEnvelopeInput`, `ErrNestedEnvelope`. Under a
+  binding, writes take plaintext secrets only (an envelope input is refused)
+  and every store that touches one workspace's subscriptions must use the
+  same workspace id and mode. SMP adopts this in SMP INIT-027 EPIC-004
+  TASK-006.
+- **Two deltas reachable without a binding:** `Decrypt("enc:v2:…")` now
+  returns an error wrapping `ErrMissingAAD` (it used to return the envelope
+  text as if it were the secret; no such value exists in an unbound
+  deployment), and `IsEncrypted` is true for `enc:v2:`. `Decrypt` opens
+  `enc:v1` with every ring key; its authentication-failure text is now
+  `decrypt: secret envelope failed authentication (…)`.
+
+### Upgrade and rollback
+
+- **One replica:** deploy (default `migrate`); each workspace is swept as it
+  loads; run `spine secrets reencrypt --all-workspaces` in shared mode;
+  review the conversion log; then set `strict`.
+- **Several replicas:** a binary older than this release reads `enc:v2` as
+  plaintext and signs with the envelope text. Deploy every replica with
+  `SPINE_SECRET_ENVELOPE_MODE=downgrade` first, then switch to `migrate`.
+- **Rollback below this release:** set `downgrade`, sweep every workspace
+  (`spine secrets reencrypt --all-workspaces`), confirm every workspace is
+  clean, then roll back. A rollback that skipped this leaves
+  `enc:v1(enc:v2:…)` rows behind; this release repairs those whose inner
+  value is the row's own and refuses the rest (`rotate-secret`).
+- No schema change and no migration file.
+
+---
+
 ## Spine Core library packaging — dual-target (standalone + embedded)
 
 Disposition: **Option A** — Spine remains available both as a standalone

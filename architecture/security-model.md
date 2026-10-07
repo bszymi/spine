@@ -220,6 +220,7 @@ Skills extend the authorization model at execution time but do not replace role-
 - Integration secrets are rotated by updating runtime configuration
 - Rotation does not require Git commits (credentials are not governed artifacts)
 - The system should support concurrent validity of old and new credentials during rotation windows
+- The at-rest encryption key for integration secrets rotates through a key ring: the new primary key seals, previous keys (`SPINE_SECRET_PREVIOUS_KEYS`) still decrypt, so old and new keys are valid together until a re-encryption sweep has moved every value to the new key; each `enc:v2` value names its key and is bound to its workspace and row (INIT-023 TASK-009, `docs/integration-guide.md` §2.1)
 
 ### 5.4 Credential Validation on Artifact Writes
 
