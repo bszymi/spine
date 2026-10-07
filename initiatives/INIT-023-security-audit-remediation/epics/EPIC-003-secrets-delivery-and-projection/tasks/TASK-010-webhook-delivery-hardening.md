@@ -2043,3 +2043,48 @@ at `7d4e7cc9`, with `../spine` = this worktree at `c3d1457`. Its tree was clean 
 | The unmodified prototype via `-overlay` (`go vet`) | does not compile: `missing method HoldDueDeliveries` (the reviewer's gap; see Handoffs) |
 | Throwaway `pgvector/pgvector:pg18` container (local image, data on tmpfs, removed afterwards), provisioned as SMP CI's integration job (roles `platform`, `platform_audit_retention`, `smp_prov` with the posture check `f`; `smp_it`, `smp_schema_it`, `spine_runtime_it`; `vector`; 115 platform and 26 spine-runtime migrations). `TEST_SPINE_DB=…/spine_runtime_it TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=smp_prov@…/postgres go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -timeout 20m -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` | PASS: 1539 tests, 1 allowed skip (spinecore's dispatch-store tests and `TestRedrive_RedeliversThroughSpineDispatcher` ran) |
 | `TEST_DATABASE_URL=TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=… go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -allow-skip 'TEST_MINIO_' -- -race -count=1 -timeout 20m -p 4` on `eventdelivery` (all `TestWorker_Integration_*`), `stepevents`, `workspace`, `workspace/workspacetest`, `projectionwriter`, `spineruntime`, `brain`, `notification`, `provenance`, `opshealth`, `recovery` | PASS: 998 tests, 7 allowed skips (MinIO and live AWS only) |
+
+### Integration (wave 2 merge) (2026-10-08)
+
+Integration branch `init/INIT-023-wave2-integration` (worktree `i23/s-int2/spine`), cut from Spine
+local `main` `ee3c249`. Merge order, each `git merge --no-ff` and built and tested before the next:
+TASK-002 `b674b90`, TASK-016 `350fe87`, TASK-004 `50b9c8e`, TASK-009 `8925de9`, TASK-007 `2aca054`,
+TASK-011 `c90c049`, TASK-010 `1e63692`, TASK-013 `85bf4b3`. Coordination commits: `3b88fb1`
+(TreeEntryType joins the ref grammar), `0c26c91` (step-entry policy through the shared pool
+constructor), `9e43640` (a refused signing secret holds its deliveries), `d61359d` (security model:
+skills are a step-entry boundary), `1291e74` (codex round 1). Nothing was pushed; `main` and the task
+branches are unchanged.
+
+**This task in the integration.** Merge `1e63692`.
+
+- *Conflicts:* the import block of `handlers_subscriptions.go` (TASK-009 had dropped the unsorted
+  `adapters/delivery` import), the initiative's SMP-effect table (this task's row kept from this task),
+  `CHANGELOG.md`.
+- *With TASK-009 (`9e43640`):* see TASK-009's note: an envelope refusal takes this task's
+  unreadable-subscription path; documented and pinned by `TestSecretEnvelopeRefusalIsHeldNotDeadLettered`.
+  No TASK-009 log line carries a target URL (redaction scope unchanged).
+- TASK-011's `projection_workflow_rejected` is an operational event, so it gets the operational
+  attempt cap (2).
+- Lint: the QF1006 `--new-from-rev main` reports on `webhook_dispatcher_test.go:349` is `main`'s
+  (this task changed only the literal on that line).
+
+**Gates on the integration branch** (code at `d61359d`; `1291e74` changes one `adapters/git` test
+file, after which `go vet` and `go test -race ./adapters/git/...` were re-run, ok):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "library surface is sound" |
+| `go test -p 4 -count=1 ./...` | exit 0 (40 packages ok) |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 25 packages the eight tasks touched | 24 ok; `service/scenariotest/scenarios` has only `scenario`-tagged files |
+| `-tags integration`, one fresh `s2i_int_*` database per package | store 165 PASS + the pre-existing `TestRunModeDatabaseDefault`; delivery 314, projection 160, cmd/spine 168, workspace 223 (with `SPINE_REGISTRY_TEST_DATABASE_URL`, registry migrated from `migrations/registry`), testutil 4; 0 SKIP |
+| CI `scenario-git-http` job | `TestGitHTTP_*` 20 PASS, 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 FAIL, the **same set** as a `git archive main` export on its own database (1479 vs 1475 PASS, 6 SKIP for the registry env in both) |
+| `git-floor` job's two steps in `golang:1.26-bookworm` (git 2.39.5, read-only mounts, `GOPROXY=off`, `--pull=never`, `--rm`) | step 1: 73 PASS, 0 SKIP, 0 FAIL (includes the new `RefGrammar_TreeEntryType*`); step 2 all ok |
+| `golangci-lint run --build-tags scenario` on the touched packages | `--new-from-rev main` reports one QF1006 at `adapters/delivery/webhook_dispatcher_test.go:349`, present on `main` (TASK-010 changed the literal on that line). Full sets compared by (file, linter, text): 298 issues vs `main`'s 348, nothing new except three `rangeValCopy` whose byte count moved 224 → 248 (`store.EventSubscription` grew in TASK-009) |
+| `--enable-only=gosec` | 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | round 1: one P2 (macOS xcrun cache in the TASK-002 leftover checks), fixed in `1291e74`; round 2: "No actionable regressions were identified relative to the merge base." |
+| SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 38 SMP packages depending on a changed Spine package (`go list -test -deps`) plus `./internal/customer/...` (67 packages): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2i_smp_spine_runtime` and `s2i_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. Extra: eventdelivery, projectionwriter, stepevents testgate: 35 passed, 6 allowed skips. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope). |
+
+All `s2i_*` databases were dropped afterwards; the only container started was removed.
