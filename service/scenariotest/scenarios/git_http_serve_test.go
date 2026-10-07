@@ -1205,7 +1205,15 @@ func TestGitHTTP_MixedPushRejectedAllOrNothing(t *testing.T) {
 						if err := runGit(t, cloneDir, "checkout", "-b", branch); err != nil {
 							return err
 						}
-						if err := os.WriteFile(filepath.Join(cloneDir, branch+".md"), []byte(branch+"\n"), 0o644); err != nil {
+						// The branch name has a "/", so its file lives in a
+						// subdirectory the clone does not have yet (INIT-023
+						// TASK-001: without this the step failed with ENOENT
+						// on every OS, unnoticed while no CI job ran scenarios).
+						file := filepath.Join(cloneDir, branch+".md")
+						if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+							return err
+						}
+						if err := os.WriteFile(file, []byte(branch+"\n"), 0o644); err != nil {
 							return err
 						}
 						if err := runGit(t, cloneDir, "add", "."); err != nil {
