@@ -59,6 +59,47 @@ Make the git surface trustworthy:
 - Binding the merge to a commit (EPIC-002 TASK-005). This epic decides *who may push* and
   *how refs are named*, not *what merges*.
 - Git-endpoint authentication (trusted CIDRs, dev mode). That is EPIC-004 TASK-015.
+- **Follow-up (recorded by TASK-001, 2026-10-07): case- and normalization-insensitive repository
+  storage.** On such storage branch protection can be bypassed with a case or normalization
+  variant of a protected ref (`refs/heads/MAIN`, `refs/HEADS/main`), even after TASK-001: the gate
+  evaluates the bytes git writes, and the filesystem then aliases the name (TASK-001 Design §6).
+  TASK-001 documents the deployment requirement only (`KNOWN-LIMITATIONS.md` → Security Notes;
+  TASK-001 owner question 1, default pending the owner). Fail-closed handling — a per-repository
+  case-sensitivity probe that refuses receive-pack, or fold-plus-NFC matching in `Evaluate` that
+  also covers the `refs/heads/` prefix test — needs a new EPIC-001 task, paired with SMP's
+  follow-up (SMP EPIC-004 TASK-001 owner question 2). It is not yet created. Its probe must cover
+  the repository's own dev override (`docker-compose.override.yaml.example`, `./:/repo`) on Docker
+  Desktop: TASK-001 review round 1 reproduced the aliasing there, with Linux git inside the
+  container moving a packed `main` through `refs/heads/MAIN` on a macOS bind mount.
+  The design must not assume a packed ref (TASK-001 review round 2). A packed ref is only what a
+  plain `git push` *create* needs. A hand-crafted case-variant **update** that carries the
+  protected ref's current object id moves a **loose** ref, and a case-variant **delete** removes
+  one: `refs/heads/MAIN` moved a loose, checked-out `main`, and `refs/heads/DEVELOP` deleted a
+  loose `develop`. This was reproduced with git 2.54 on APFS through `Handler.ServeHTTP`, and with
+  Linux git 2.39.5 on the Docker Desktop bind mount. TASK-016 owner question 5 had already recorded
+  the update form.
+- **Follow-up (recorded by TASK-001's cross-task review, wave 1, 2026-10-07): chunked receive-pack
+  bodies.** Owner: bszymi, who creates and schedules it. It is not yet created.
+  - **The gap.** Standalone `Handler.ServeHTTP` hands a chunked push body straight to
+    `net/http/cgi`, which refuses it with HTTP 400. git sends every push body larger than
+    `http.postBuffer` (1 MiB by default) chunked, so every such push fails, whatever the rules
+    say. SMP spools the body first (`internal/customer/githttp/handler.go`, `spoolBody`) and accepts
+    the same push.
+  - **It predates INIT-023** and is not a security finding. TASK-001 records it (`KNOWN-LIMITATIONS.md`,
+    `docs/git-push-guide.md` §5, TASK-001 "Parity with SMP") and pins it with
+    `TestHandler_ChunkedPushBodyRefusedByCGI`, because its AC 11 keeps `handler.go` untouched.
+  - **Design inputs for the task:**
+    - Spool after `prereceive`, set `ContentLength` and `Content-Length`, and clear
+      `TransferEncoding`. A scratch overlay doing exactly that made the 2 MiB push apply.
+    - **Spool outside the working tree.** SMP spools into `repoPath`, which is a bare repository.
+      Spine's served repositories are non-bare (TASK-001 Purpose note), so the same call would put
+      the temp file in the repository's working tree.
+    - Cap the spool, with a configuration knob for large repositories, and decide how it relates
+      to `OpTimeout`. SMP uses 2 GiB for pushes (`SMP_GIT_MAX_PUSH_BYTES`), 16 MiB for
+      upload-pack, and a read deadline.
+    - Flip the pin test, and add a push larger than 1 MiB to the `scenario-git-http` CI job.
+    - TASK-016 also edits `handler.go` (`Config`, `Handler`, the `prereceive` loop). Whichever
+      lands second rebases onto the other.
 
 ---
 

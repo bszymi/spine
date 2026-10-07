@@ -376,6 +376,8 @@ The bind mount must be **read-write** — Spine needs write access for commits, 
 
 **Caution:** With a bind mount, both the developer and Spine can modify the repository simultaneously. Developers should avoid modifying files that Spine is actively committing to (e.g., artifacts involved in an active Run).
 
+**Security caution (pushes):** do not enable `SPINE_GIT_RECEIVE_PACK_ENABLED` with this bind mount on a macOS or Windows host. Docker Desktop exposes the host directory with the host's case-insensitive (and, on macOS, normalization-insensitive) semantics, so a push to a case variant of a protected ref (`refs/heads/MAIN`) passes branch protection and can move or delete the protected ref itself (`refs/heads/main`). This does not depend on packing: a hand-crafted update or delete that carries the ref's current object id lands even when the ref is loose, as `main` normally is in this checkout, and once the ref is packed (after `git gc` or `git pack-refs`) a plain `git push` lands too. git's refusal to update the checked-out branch does not catch it, because git compares the names byte-wise. Serve pushes only from the named `repo` volume or a Linux host directory; see `KNOWN-LIMITATIONS.md` → Security Notes.
+
 ### 9.3 Git Credentials
 
 For Git operations requiring authentication (push to remote):

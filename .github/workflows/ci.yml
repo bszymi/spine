@@ -65,3 +65,57 @@ jobs:
 
       - name: Unit tests
         run: go test ./...
+
+  # INIT-023 / EPIC-001 / TASK-001: the git push scenarios
+  # (service/scenariotest/scenarios, TestGitHTTP_*) drive the real
+  # pre-receive gate end to end — accepted push, policy rejection,
+  # operator override with exactly one event, contributor override
+  # refused, no-delete, unused override, all-or-nothing mixed push,
+  # byte-identical commit. They need Postgres and SKIP without
+  # SPINE_TEST_DATABASE_URL, so `go test ./...` above never runs them
+  # (it does not even compile the `scenario` tag). This job runs them
+  # against a disposable Postgres and fails if any of them skips.
+  #
+  # Scoped to TestGitHTTP_* on purpose: the rest of the scenario suite
+  # is not green on main today, and repairing it is outside this task.
+  scenario-git-http:
+    name: Git push scenarios (Postgres)
+    runs-on: ubuntu-latest
+    needs: boundary-lint
+    services:
+      postgres:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_USER: spine_test
+          POSTGRES_PASSWORD: spine_test
+          POSTGRES_DB: spine_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U spine_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      SPINE_TEST_DATABASE_URL: postgres://spine_test:spine_test@localhost:5433/spine_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: TestGitHTTP_* scenarios (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-git-http.log
+          # Any skip fails the job: a top-level one (the database is not
+          # reachable) or an indented one inside a scenario step.
+          if grep -E '^[[:space:]]*--- SKIP: TestGitHTTP_' scenario-git-http.log; then
+            echo "::error::a TestGitHTTP_ scenario or step skipped — they must pass, never skip"
+            exit 1
+          fi
+          if ! grep -qE '^--- PASS: TestGitHTTP_Push' scenario-git-http.log; then
+            echo "::error::no TestGitHTTP_Push* scenario passed"
+            exit 1
+          fi

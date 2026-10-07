@@ -24,6 +24,24 @@ This document tracks known gaps and deferred functionality.
 - Zero implementation — planned feature
 - Thread creation, comments, resolution not yet built
 
+### Git Push: Bodies Larger Than the Client's `http.postBuffer` Are Refused
+- With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a push whose request body is larger than the client's
+  `http.postBuffer` (1 MiB by default) fails with `error: RPC failed; HTTP 400`. Nothing is
+  applied, and no branch-protection rule is involved.
+- **Why:** git sends such a body with `Transfer-Encoding: chunked`. The bridge to
+  `git-http-backend` (Go's `net/http/cgi`) refuses every chunked request body ("Chunked request
+  bodies are not supported by CGI"), because CGI needs a `CONTENT_LENGTH`.
+- **Workaround:** raise the client's buffer above the size of the push, for example
+  `git config http.postBuffer 157286400` (150 MiB) in the clone, or
+  `git -c http.postBuffer=157286400 push …`. git then sends one body with a `Content-Length` and the
+  push applies. The client holds that body in memory.
+- **Scope:** clone and fetch send small request bodies (want/have lines) and are normally
+  unaffected. SMP's gateway spools a chunked push body to disk before CGI and accepts these
+  pushes.
+- **Status:** this predates INIT-023 and is pinned by `TestHandler_ChunkedPushBodyRefusedByCGI`
+  (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
+  INIT-023 EPIC-001 follow-up (owner: bszymi).
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:
@@ -72,6 +90,40 @@ The following limitations have been resolved:
 - `safePath` in artifact service resolves symlinks and validates prefix
 - `GIT_LITERAL_PATHSPECS=1` prevents Git pathspec injection
 - Scoped commits use `-- path` to prevent accidental broader commits
+
+### Git Push Gate: Served Repositories Need Case- and Normalization-Sensitive Storage
+- **Requirement:** with `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, every repository the git endpoint
+  serves must live on a **case-sensitive, normalization-sensitive** filesystem: a Linux
+  filesystem or the shipped compose named volume (`repo:/repo`). Do not serve pushes from a
+  native macOS (APFS/HFS+) or Windows `spine serve`, from a bind mount of such a host directory,
+  or from an SMB-backed or other case-folding volume. That includes the repository's own dev
+  override, `docker-compose.override.yaml.example` (`./:/repo`, also shown in
+  `architecture/docker-runtime.md` §9.2), on Docker Desktop for Mac or Windows: both files carry
+  this warning. On such a bind mount, Linux git inside the container sees the host's
+  case-insensitive filesystem.
+- **Why:** branch protection matches the ref name byte-for-byte, exactly as the client sent it
+  (INIT-023 TASK-001 makes the gate evaluate the same bytes git writes). A case- or
+  normalization-insensitive filesystem then aliases two different names onto one ref file. A push
+  to `refs/heads/MAIN` matches no rule and is allowed, and git then writes or removes the file that
+  *is* `refs/heads/main` on such storage. `main` moves, or a `no-delete` branch disappears, without
+  review and without an override event. Whether the ref is packed decides only which push lands:
+  - **Packed ref** (any `git clone --bare` repository, or after `git gc`/`pack-refs`): a plain
+    `git push origin HEAD:refs/heads/MAIN` creates a loose `refs/heads/MAIN`, which shadows the
+    packed `main`.
+  - **Loose ref** (the usual state in a non-bare checkout, such as the `./:/repo` bind mount): git
+    refuses that plain create (`reference already exists`). A hand-crafted update of
+    `refs/heads/MAIN` that carries `main`'s current object id still moves `main`, and a
+    hand-crafted delete of `refs/heads/DEVELOP` that carries `develop`'s id removes `develop`.
+    git's refusal to update a checked-out branch does not catch it, because it compares names
+    byte-wise.
+
+  `refs/HEADS/main` takes the non-branch allow the same way, and the aliasing is not ASCII-only
+  (APFS also folds the Kelvin sign onto `k` and NFD onto NFC). `core.ignorecase` prevents none of
+  this.
+- **Status:** a documented deployment requirement, not yet enforced. Fail-closed handling (a
+  per-repository case-sensitivity probe that refuses receive-pack, or fold-and-normalize rule
+  matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,
+  paired with SMP's equivalent follow-up.
 
 ## Architecture Deviations
 

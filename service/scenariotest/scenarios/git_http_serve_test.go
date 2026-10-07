@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/branchprotect/config"
@@ -23,10 +24,9 @@ import (
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/service/internal/githttp"
-	"github.com/bszymi/spine/adapters/projection"
+	"github.com/bszymi/spine/service/internal/workspace"
 	scenarioEngine "github.com/bszymi/spine/service/scenariotest/engine"
 	"github.com/bszymi/spine/service/scenariotest/harness"
-	"github.com/bszymi/spine/service/internal/workspace"
 )
 
 // fakeWSResolver resolves workspace IDs to configs for testing.
@@ -1205,7 +1205,15 @@ func TestGitHTTP_MixedPushRejectedAllOrNothing(t *testing.T) {
 						if err := runGit(t, cloneDir, "checkout", "-b", branch); err != nil {
 							return err
 						}
-						if err := os.WriteFile(filepath.Join(cloneDir, branch+".md"), []byte(branch+"\n"), 0o644); err != nil {
+						// The branch name has a "/", so its file lives in a
+						// subdirectory the clone does not have yet (INIT-023
+						// TASK-001: without this the step failed with ENOENT
+						// on every OS, unnoticed while no CI job ran scenarios).
+						file := filepath.Join(cloneDir, branch+".md")
+						if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+							return err
+						}
+						if err := os.WriteFile(file, []byte(branch+"\n"), 0o644); err != nil {
 							return err
 						}
 						if err := runGit(t, cloneDir, "add", "."); err != nil {
