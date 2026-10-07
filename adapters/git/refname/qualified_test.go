@@ -27,7 +27,7 @@ var qualifiedCases = []struct {
 	{"refs/heads/a@b", true},
 	{"refs/heads/@", true},
 	{"refs/heads/é", true},
-	{"refs/heads/a b", true}, // NBSP: git accepts bytes >= 0x80
+	{"refs/heads/a\u00a0b", true}, // NBSP (escaped, never a literal): git accepts bytes >= 0x80
 	{"main", false},
 	{"heads/main", false},
 	{"spine/run/x", false},
@@ -84,6 +84,31 @@ func TestValidateQualified(t *testing.T) {
 		}
 		if strings.ContainsAny(err.Error(), rawControlBytes) {
 			t.Errorf("ValidateQualified(%q) error carries a raw control byte: %q", tc.ref, err)
+		}
+	}
+}
+
+// TestQualifiedCases_KeepNonASCIIAcceptRows pins the corpus rows that
+// prove the grammar is never stricter than git on bytes >= 0x80 (AC 5):
+// a precomposed é and an NBSP. The NBSP is written as an escape, never
+// as a literal: an editor or formatter that folded a literal NBSP into
+// an ASCII space would turn this accept row into a confusing duplicate
+// of the `a b` reject row and drop the non-ASCII coverage. If either
+// row is lost or rewritten, this test says so plainly.
+func TestQualifiedCases_KeepNonASCIIAcceptRows(t *testing.T) {
+	for _, want := range []string{"refs/heads/é", "refs/heads/a b"} {
+		found := false
+		for _, tc := range qualifiedCases {
+			if tc.ref != want {
+				continue
+			}
+			found = true
+			if !tc.valid {
+				t.Errorf("corpus row %q must be an accept row (git accepts bytes >= 0x80)", want)
+			}
+		}
+		if !found {
+			t.Errorf("corpus lost its non-ASCII accept row %q", want)
 		}
 	}
 }

@@ -71,7 +71,7 @@ func TestEvaluate_WellFormedBranchesUnchanged(t *testing.T) {
 		{"release/1.0", OpDelete, DecisionDeny},
 		{"release/1.0", OpDirectWrite, DecisionAllow},
 		{"feat/é", OpDirectWrite, DecisionAllow},
-		{"feat/a b", OpDirectWrite, DecisionAllow},
+		{"feat/a\u00a0b", OpDirectWrite, DecisionAllow}, // NBSP, escaped
 		{"refs/tags/v1", OpDelete, DecisionAllow},
 		{"main", OpGovernedMerge, DecisionAllow},
 	}
@@ -79,6 +79,20 @@ func TestEvaluate_WellFormedBranchesUnchanged(t *testing.T) {
 		d, _, err := p.Evaluate(context.Background(), Request{Branch: tc.branch, Kind: tc.kind, Actor: actor(domain.RoleContributor)})
 		if err != nil || d != tc.want {
 			t.Errorf("%q / %s: got (%v, %v), want %v", tc.branch, tc.kind, d, err, tc.want)
+		}
+	}
+	// The non-ASCII rows prove the guard is byte-wise: bytes >= 0x80 are
+	// not control bytes. The NBSP is an escape, never a literal, because
+	// an editor that folded it into an ASCII space would leave the row
+	// passing (a space is allowed here) while the coverage silently
+	// vanished. Pin that both rows are still in the table.
+	for _, want := range []string{"feat/é", "feat/a b"} {
+		found := false
+		for _, tc := range cases {
+			found = found || tc.branch == want
+		}
+		if !found {
+			t.Errorf("table lost its non-ASCII row %q", want)
 		}
 	}
 }
