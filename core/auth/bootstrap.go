@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/bszymi/spine/adapters/store"
@@ -30,11 +31,18 @@ const (
 type BootstrapAdminConfig struct {
 	// Token is the bearer the platform presents (SMP_ADMIN_TOKEN). An
 	// empty value disables the bootstrap, preserving single-workspace
-	// and pre-platform-binding deployments.
+	// and pre-platform-binding deployments. core/auth does not judge its
+	// strength: that is the embedder's policy (spine serve gates
+	// SMP_ADMIN_TOKEN at boot; SMP owns its own bearer's policy).
 	Token string
 
-	// SupersededBefore bounds rotation revocation. Inert plumbing:
-	// stored, not yet read.
+	// SupersededBefore bounds which older bootstrap token rows a
+	// rotation revokes: rows created at or after it are never revoked.
+	// A deployment that runs several replicas passes its process start
+	// time, so a still-running replica that carries the previous bearer
+	// can never revoke the newer bearer a newer replica seeded during a
+	// rolling deploy. The zero value adds no bound: every bootstrap row
+	// older than the current bearer's row is revoked.
 	SupersededBefore time.Time
 }
 
@@ -55,10 +63,29 @@ var ErrAdminTokenHashCollision = errors.New("bootstrap admin token hash bound to
 // wireWorkspaceDelivery on every workspace load and is safe to re-run.
 //
 // An empty cfg.Token is the no-op path (single-workspace /
-// pre-platform-binding deployments stay green). On a token rotation
-// the new hash inserts a new auth.tokens row; the stale row remains
-// until rotation cleanup is built (out of scope here — the live bearer
-// is the only one anyone uses).
+// pre-platform-binding deployments stay green). It does not retire an
+// earlier bearer: rows seeded while SMP_ADMIN_TOKEN was set stay valid
+// until an admin revokes them (DELETE /api/v1/tokens/{id}).
+//
+// Rotation (INIT-023 TASK-013, audit P3-31). Once the current bearer's
+// row exists, every other live bootstrap row of smp-admin that is not
+// newer than it — and, with a non-zero cfg.SupersededBefore, was
+// created before that cutoff — is revoked. A rotated-away platform
+// bearer therefore stops authenticating on the first workspace load
+// after the rotation, instead of keeping admin forever. Revocation is
+// never undone: a rollback to a revoked bearer is refused and logged at
+// Error, not re-enabled. Tokens an admin minted for smp-admin through
+// the token API carry "tok_" ids and are never touched.
+//
+// Status (P3-31). The bootstrap heals smp-admin's name and role, but
+// never re-activates a suspended or deactivated smp-admin: those are
+// the operator's documented lifecycle controls (actor-model.md §7.1),
+// and deactivation is permanent (actor.Service.Reactivate).
+//
+// Token ids (P3-35) are random ("bootstrap-" + 16 hex), not derived
+// from the bearer's hash, so listing smp-admin's tokens discloses
+// nothing about the bearer. Rows written by earlier versions keep their
+// hash-derived ids until a rotation revokes them.
 func BootstrapInternalAdmin(ctx context.Context, st store.AuthStore, cfg BootstrapAdminConfig) error {
 	if cfg.Token == "" {
 		return nil
@@ -69,7 +96,17 @@ func BootstrapInternalAdmin(ctx context.Context, st store.AuthStore, cfg Bootstr
 	if err := upsertInternalAdminActor(ctx, st, log); err != nil {
 		return err
 	}
-	return upsertInternalAdminToken(ctx, st, cfg.Token, log)
+	current, err := upsertInternalAdminToken(ctx, st, cfg.Token, log)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		// The current bearer's row is revoked (already logged at
+		// Error). Nothing is un-revoked, and nothing else is revoked:
+		// a rollback must not take down the newer bearer too.
+		return nil
+	}
+	return revokeSupersededAdminTokens(ctx, st, current, cfg.SupersededBefore, log)
 }
 
 func upsertInternalAdminActor(ctx context.Context, st store.AuthStore, log *slog.Logger) error {
@@ -84,6 +121,17 @@ func upsertInternalAdminActor(ctx context.Context, st store.AuthStore, log *slog
 	existing, err := st.GetActor(ctx, InternalAdminActorID)
 	switch {
 	case err == nil:
+		// A suspended or deactivated smp-admin is operator intent
+		// (incident response), not drift: keep it, and say why the
+		// platform bearer is about to be refused. Only these two
+		// statuses are preserved — an empty or unknown status is still
+		// healed to active, otherwise the bearer would be refused as
+		// "actor " forever with no log saying why (Decision 6).
+		if existing.Status == domain.ActorStatusSuspended || existing.Status == domain.ActorStatusDeactivated {
+			desired.Status = existing.Status
+			log.Warn("internal admin actor is not active; bootstrap leaves its status unchanged and the platform bearer will be refused",
+				"actor_id", InternalAdminActorID, "status", string(existing.Status))
+		}
 		if internalAdminActorMatches(existing, desired) {
 			log.Debug("internal admin actor already configured", "actor_id", InternalAdminActorID)
 			return nil
@@ -104,16 +152,33 @@ func upsertInternalAdminActor(ctx context.Context, st store.AuthStore, log *slog
 	}
 }
 
-func upsertInternalAdminToken(ctx context.Context, st store.AuthStore, rawToken string, log *slog.Logger) error {
+// upsertInternalAdminToken makes sure rawToken's hash has a bootstrap
+// row bound to smp-admin and returns that row — the "current" row the
+// rotation sweep measures against. It returns (nil, nil) when the row
+// exists but is revoked: the bearer stays refused, and the caller must
+// not sweep.
+func upsertInternalAdminToken(ctx context.Context, st store.AuthStore, rawToken string, log *slog.Logger) (*domain.Token, error) {
 	hash := HashToken(rawToken)
-	tokenID := internalAdminTokenID(hash)
 
-	actor, _, err := st.GetActorByTokenHash(ctx, hash)
+	actor, tok, err := st.GetActorByTokenHash(ctx, hash)
 	switch {
 	case err == nil:
 		if actor != nil && actor.ActorID == InternalAdminActorID {
-			log.Debug("internal admin token already configured", "actor_id", InternalAdminActorID, "token_id", tokenID)
-			return nil
+			// GetActorByTokenHash returns revoked rows (the SQL has no
+			// revoked_at filter), so a rollback to a bearer a rotation
+			// revoked lands here. Never un-revoke: that would let a
+			// leaked bearer come back through a config rollback. Do not
+			// fail the load either — in standalone production that would
+			// lock every user out of the workspace, in SMP it would
+			// wedge provisioning. The bearer is refused either way; the
+			// log says why and what to do.
+			if tok != nil && tok.RevokedAt != nil {
+				log.Error("SMP_ADMIN_TOKEN matches a revoked bootstrap admin token; the platform bearer will be refused until it is rotated to a fresh value",
+					"actor_id", InternalAdminActorID, "token_id", tok.TokenID)
+				return nil, nil
+			}
+			log.Debug("internal admin token already configured", "actor_id", InternalAdminActorID, "token_id", tokenIDOrEmpty(tok))
+			return tok, nil
 		}
 		// A row exists for this hash but is bound to a different
 		// actor. The spec's literal ON CONFLICT semantics would rebind
@@ -125,15 +190,20 @@ func upsertInternalAdminToken(ctx context.Context, st store.AuthStore, rawToken 
 		// non-production callers still get a matchable cause to
 		// log-and-continue with operator-actionable context. With a
 		// 256-bit hash this branch is reachable only via deliberate
-		// token reuse, never random collision.
-		return fmt.Errorf("bootstrap admin token hash already bound to actor %q; manual cleanup of colliding auth.tokens row required: %w",
+		// token reuse, never random collision. It runs before any
+		// revocation, so a collision never revokes anything.
+		return nil, fmt.Errorf("bootstrap admin token hash already bound to actor %q; manual cleanup of colliding auth.tokens row required: %w",
 			actorIDOrEmpty(actor), ErrAdminTokenHashCollision)
 	case isUnauthorized(err) || isNotFound(err):
 		// Fall through to insert.
 	default:
-		return fmt.Errorf("lookup bootstrap admin token: %w", err)
+		return nil, fmt.Errorf("lookup bootstrap admin token: %w", err)
 	}
 
+	tokenID, err := newInternalAdminTokenID()
+	if err != nil {
+		return nil, fmt.Errorf("generate bootstrap admin token id: %w", err)
+	}
 	record := &store.TokenRecord{
 		TokenID:   tokenID,
 		ActorID:   InternalAdminActorID,
@@ -142,14 +212,98 @@ func upsertInternalAdminToken(ctx context.Context, st store.AuthStore, rawToken 
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateToken(ctx, record); err != nil {
-		return fmt.Errorf("create bootstrap admin token: %w", err)
+		return nil, fmt.Errorf("create bootstrap admin token: %w", err)
 	}
 	log.Info("internal admin token created", "actor_id", InternalAdminActorID, "token_id", tokenID)
+	return &domain.Token{
+		TokenID:   record.TokenID,
+		ActorID:   record.ActorID,
+		Name:      record.Name,
+		CreatedAt: record.CreatedAt,
+	}, nil
+}
+
+// internalAdminTokenIDPrefix marks the rows this bootstrap writes, and
+// is what the rotation sweep matches on (together with the row name).
+// auth.Service.CreateToken mints "tok_" ids, so a token an admin minted
+// for smp-admin through the API never matches, whatever its name.
+const internalAdminTokenIDPrefix = "bootstrap-"
+
+// newInternalAdminTokenID returns "bootstrap-" + 16 random hex
+// characters: the same entropy as auth.Service's tok_ ids, and
+// independent of the bearer (audit P3-35). The previous id embedded
+// sha256(bearer)[:12], which a workspace admin could list and use as a
+// 48-bit offline oracle for the platform bearer. Idempotency never
+// depended on the id: it is keyed on token_hash (the
+// GetActorByTokenHash early return and the UNIQUE constraint).
+func newInternalAdminTokenID() (string, error) {
+	suffix, err := generateRandomHex(8)
+	if err != nil {
+		return "", err
+	}
+	return internalAdminTokenIDPrefix + suffix, nil
+}
+
+// revokeSupersededAdminTokens revokes every live bootstrap row of
+// smp-admin that a rotation superseded. A row is revoked only when all
+// of these hold:
+//
+//   - it is not current, and not already revoked;
+//   - it is a bootstrap row: name smp-admin-bootstrap AND a "bootstrap-"
+//     id (admin-minted "tok_" tokens are never touched);
+//   - it was not created after current — a newer row belongs to a newer
+//     bearer, for example one a newer replica seeded;
+//   - when cutoff is non-zero, it was created before cutoff. spine serve
+//     passes its process start, so a replica never revokes a row created
+//     after it booted: an old replica still carrying the previous bearer
+//     cannot revoke the new bearer during a rolling deploy.
+//
+// ErrNotFound from RevokeToken means another workspace loader revoked
+// the row first (Postgres' RevokeToken matches only live rows); it is
+// skipped. Any other error is returned, naming the token id.
+//
+// Ordering is by created_at, which the inserting process stamps. One
+// residue is inherent to ordering by time (INIT-023 TASK-013 owner
+// question 5): an old-config replica that restarts mid-rollout gets a
+// fresh cutoff and, in a workspace first seeded during the overlap,
+// revokes the new bearer. The recovery is to rotate forward.
+func revokeSupersededAdminTokens(ctx context.Context, st store.AuthStore, current *domain.Token, cutoff time.Time, log *slog.Logger) error {
+	tokens, err := st.ListTokensByActor(ctx, InternalAdminActorID)
+	if err != nil {
+		return fmt.Errorf("list bootstrap admin tokens: %w", err)
+	}
+	for i := range tokens {
+		t := &tokens[i]
+		if t.TokenID == current.TokenID || t.RevokedAt != nil {
+			continue
+		}
+		if t.Name != internalAdminTokenName || !strings.HasPrefix(t.TokenID, internalAdminTokenIDPrefix) {
+			continue
+		}
+		if t.CreatedAt.After(current.CreatedAt) {
+			continue
+		}
+		if !cutoff.IsZero() && !t.CreatedAt.Before(cutoff) {
+			continue
+		}
+		if err := st.RevokeToken(ctx, t.TokenID); err != nil {
+			if isNotFound(err) {
+				continue // revoked concurrently by another loader
+			}
+			return fmt.Errorf("revoke superseded bootstrap admin token %s: %w", t.TokenID, err)
+		}
+		log.Info("superseded bootstrap admin token revoked", "actor_id", InternalAdminActorID, "token_id", t.TokenID)
+		observe.AuditLog(ctx, "bootstrap_admin_token_revoked",
+			"actor_id", InternalAdminActorID, "token_id", t.TokenID, "reason", "superseded")
+	}
 	return nil
 }
 
-func internalAdminTokenID(hash string) string {
-	return "bootstrap-" + hash[:12]
+func tokenIDOrEmpty(t *domain.Token) string {
+	if t == nil {
+		return ""
+	}
+	return t.TokenID
 }
 
 // internalAdminActorMatches reports whether the existing actor row
