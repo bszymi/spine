@@ -42,9 +42,11 @@ import (
 // Messages quote the ref with %q so a control byte never reaches a log
 // line or a git client's side-band output raw.
 //
-// Validate and the adapters/git ValidateRef helper are deliberately
-// untouched here; converging them onto this grammar is INIT-023
-// TASK-002 ("one ref grammar"). SMP carries a temporary unexported copy
+// Validate (short branch names) converges on this grammar: a name it
+// accepts always yields a "refs/heads/<name>" this function accepts
+// (INIT-023 TASK-002, "one ref grammar"). The adapters/git ValidateRef
+// helper is a rev-syntax gate, not a refname check, and stays separate.
+// SMP carries a temporary unexported copy
 // of this function (INIT-027 EPIC-004 TASK-001) whose rules and test
 // corpus must stay identical to this one until SMP calls it directly.
 func ValidateQualified(ref string) error {
