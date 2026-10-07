@@ -694,6 +694,22 @@ The zero value keeps the forward-compatible skips.
 >   pilot. F3 then rests on TASK-006 and SMP TASK-010 alone.
 > - That is an owner decision: see Owner question 7.
 
+> **Review-round-1 note (2026-10-07): two more requirements for SMP TASK-011.**
+>
+> - **Step 2's resolver must be canonical.** The engine's exact-echo check only stops a
+>   resolver from answering for a *different* ID; a resolver that builds the `Actor` from the
+>   requested ID passes it for every variant. So the `workspace_roles` resolver must answer
+>   `ErrNotFound` unless the requested ID is byte for byte the stored `human-<uuid>` handle —
+>   no case folding, trimming, or lenient UUID parsing (`uuid.Parse` accepts upper case,
+>   braces and `urn:` forms). Otherwise `human-6B1D…` binds a review its lower-case twin
+>   executed. Spine pins the engine half (IDs reach the resolver verbatim) in AC 27 and the
+>   SMP shape in AC 8 and AC 16.
+> - **SoD bind serialisation is per process.** The engine serialises a run's SoD check and
+>   bind write with an in-process lock. If SMP turns `SeparationOfDuties` on while running more
+>   than one `customer-app` replica against a workspace, concurrent binds from different
+>   replicas are not serialised (divergence workflows only); that needs a database-level lock
+>   per run, which this task does not add.
+
 ### 16. Coordination with sibling tasks
 
 - **TASK-008** (submit ownership, CAS; depends on this task) also edits `IngestResult`. This task adds only the `requireActiveRun` call after `GetRun`. TASK-008 may add submit-side fields to `StepEntryPolicy` or define its own policy, and should reuse `requireActiveRun`.
@@ -1369,10 +1385,103 @@ not touch. The first testgate run without that allowance failed only on those th
 
 All `s007_*` databases created for these gates were dropped afterwards.
 
-### Follow-ups (unchanged from Out of scope)
+### Review round 1 (2026-10-07)
+
+Three reviewers looked at the branch: correctness with SMP compatibility, adversarial security,
+and completeness/tests. Each finding was checked against the code before anything changed.
+Line numbers below are from the branch before this round.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P3 | `AssignStep` on a run cancelled or failed under `TerminateStepsOnCancel` answers 404 "no active execution", not the documented 409, because `findStepExecution` ran before the run guard (`assign.go:60`) | **Fixed.** Under a gating policy `AssignStep` now loads the run and applies `requireActiveRun` before `findStepExecution`. Test: `TestStepEntry_AssignOnTerminatedRunAnswersConflict` (CancelRun and FailRun under the strict policy, 409 naming the status, nothing written). |
+| 2 | P3 | CHANGELOG "Changed (standalone)" left out two strict-default changes: strict evaluation at activation, and SoD on auto-selection with no fallback candidate | **Fixed (docs).** Bullets added: activation strictness (both directions, incl. `field_value status` now passing), SoD on auto-selection (step stays waiting, no other candidate, single-runner workflows stall), plus the 409-before-lookup, listing and serialisation changes from this round. `workflow-definition-format.md` §5.2 and `security-model.md` §4.4.1 say the same. |
+| 3 | P3 | Under `SeparationOfDuties` the candidate listing offers a run author its run's review, so each poll claims and gets 403 again | **Fixed.** `ListStepExecutions` mirrors D16: with `SeparationOfDuties` and an `actor_id`, a `waiting` candidate is hidden only when check 7 gives a definite `ErrForbidden` (`sodHidesCandidate`, sharing `separationOfDuties` with the bind path). The run's executions are read once per listing. If the check cannot run (unreadable ledger, no store, workflow not loadable) the candidate stays listed and the claim gives the fail-closed 503. Test: `TestStepEntry_CandidateListingHidesSoDRefusals` (author, released executor via the ledger, live reviewer on a branch step, independent actor, unreadable ledger, zero-value controls). |
+| 4 | P3 | The SoD ledger read `ListAssignmentsByActor(ctx, actor, nil)` loads the actor's whole history across runs on every review bind | **Fixed.** New optional port `runAssignmentHistory.ListAssignmentsByRunAndActor(ctx, runID, actorID)`, provided by `(*store.PostgresStore)` (`WHERE actor_id = $1 AND run_id = $2`, served by the existing `idx_assignments_actor` / `idx_assignments_run`, no schema change, no interface gains a method). The engine prefers it and falls back to `ListAssignmentsByActor`, keeping the in-memory `RunID` filter. SMP passes `*store.PostgresStore` as its assignment store, so it gets the port with no SMP change (only read under `SeparationOfDuties`, which SMP does not set). Tests: run-scoped rows in `TestStepEntry_SoDAuthorLedger` (narrow port preferred, whole-history read never called; narrow read error gives 503), compile-time pin in `step_entry_ports_test.go`, integration `TestListAssignmentsByRunAndActor`. |
+| 5 | P3 | The exact-echo check does not stop aliases. A resolver that echoes any `human-*` string passes the check for every variant, the committed SMP-shaped test resolvers did exactly that, and the docs overclaimed | **Fixed.** Real: the engine cannot tell a canonical handle from a variant the resolver chose to accept. `StepEntryPolicy.Actors`, `checkResolvedActor`, `security-model.md` §4.4.1, CHANGELOG "For embedders" and KNOWN-LIMITATIONS now separate the engine's duty (the echo, which stops mapping one ID to another; IDs passed to the resolver verbatim) from the resolver's duty (answer `ErrNotFound` unless the input is byte for byte a stored canonical handle; no case folding, trimming or lenient UUID parsing). `smpHumanResolver` (AC 16) and the AC 8 resolver are now fixed-table canonical resolvers. AC 8 asserts four variants of the executor's handle (upper-case prefix, upper-case UUID, trailing space, braces) give `ErrNotFound` and leave the review unbound. AC 27 adds "canonical resolver refuses variants; the engine passes IDs verbatim" (killed by a `strings.ToLower` mutation in `entryActor`). The requirement is carried to SMP TASK-011 in a review-round-1 note under §15. Standalone is unaffected: with no resolver, lookup is the exact `auth.actors.actor_id = $1`. |
+| 6 | P3 | The SoD check and the bind write are not tied together, so two concurrent binds of one actor into a divergence run (its review and an author branch step) can both pass | **Fixed in-process, residual documented.** A package-level striped mutex (`sodBindStripes`, 64 stripes by run-ID hash), taken only under `SeparationOfDuties`, is held by `AssignStep`, `ClaimStep` and `ActivateStep`'s auto-selection from before check 7 until the bind write. It is released before events, assignment records and runner dispatch, so a synchronous handler cannot deadlock on it, and a holder never takes a second stripe. It is package-level rather than per `Orchestrator` because `spine serve` runs a process-level orchestrator and per-workspace ones (rebuilt on pool eviction), and all of them must share it. This closes the race for `spine serve` (single process, `replicas: 1` in the integration guide). Binds from different processes sharing a database are not serialised: documented in KNOWN-LIMITATIONS, CHANGELOG "For embedders", `actor-model.md` §7.3 and the §15 SMP note. A DB-level per-run lock would close it, but the store interfaces have no transaction hook, and TASK-008's per-row CAS does not close it either (the two binds write different rows). Re-check-and-undo was rejected: it adds a second blind write per bind and interacts with TASK-008's CAS. Test: `TestStepEntry_SoDBindsSerialisePerRun` uses a copy-on-read, mutex-guarded store that pauses the first bind between its checks and its write. Four cases: claim review then claim branch, assign review then claim branch, assign branch then assign review, auto-select AI review then claim branch. The second bind must not finish during the pause, must then get 403, and the actor must end up bound to exactly one step. Removing the lock from any one of the three paths, or entirely, fails it. Race-detector clean. |
+| 7 | P2 | AC 2 never reaches the `eligible_actor_types` half of check 5 (the only wrong-type row is refused by check 3 first) | **Fixed.** New AC 2 row: an allow-listed, skilled, active `automated_system` actor on a hybrid review step limited to `[human]` gets `ErrConflict` "not eligible for this step", with the execution unchanged and zero merges. The `if false && …` mutation is killed. |
+| 8 | P3 | Check 4 on `ClaimStep` (existence + active status under `EnforceEligibility`) is untested | **Fixed.** `TestStepEntry_ClaimRequiresLiveActor`: a suspended actor (steps with and without an execution block) and a deactivated actor get 403. An unknown actor on a step without an execution block gets 404. No assignment row, execution unchanged. Zero-value control still claims. Both reviewer mutations are killed. |
+| 9 | P3 | Decision 10 (RequireSkillsOnAssign fails closed) is untested | **Fixed.** `TestStepEntry_RequireSkillsOnAssignFailsClosed`: a blocking store without `ListActorSkills` and a failing lister both give 503 with zero writes. A skill-holding control binds. Both `return nil` mutations are killed. |
+| 10 | P3 | AC 27's resolver-only row cannot fail when `claim.go` reverts to `loadActor` | **Fixed.** New AC 27 row: a resolver-only policy whose resolver answers `human-x`, which the blocking store does not know, on a step with an execution block and no `required_skills`. `ClaimStep` must succeed and record the assignment. A zero-value control shows the same claim fails without the resolver. The `loadActor` mutation at the claim site is killed. The original row stays, now commented as non-discriminating on its own. |
+| 11 | P3 | No test checks that `buildServerConfig` sets `DisableStepAssignFallback` from the policy | **Fixed.** `TestServeWiring_StepAssignFallbackFollowsPolicy` (strict and single-switch give true, zero value gives false). The `false` mutation is killed. |
+| 12 | P3 | Fail-closed branches untested: unknown-step execution as authorship, ledger row for an unknown execution, re-acknowledge of `in_progress` on a dead run | **Fixed.** `TestStepEntry_SoDFailClosedAnomalies` covers three rows: an unknown-step author is refused on review (assign and claim, message names the step); an orphan ledger row in the run is refused, with a control row in another run that does not count; and a live unknown-step execution blocks author steps (Deviation 5's symmetric half). AC 11 gains "AcknowledgeStep re-acknowledging in_progress" for all six non-active statuses (zero value: idempotent success). All four mutations are killed. |
+
+**AC gaps raised by the reviewers.**
+
+- AC 2 and AC 27: closed by findings 7 and 10.
+- AC 19: the gate runs against SMP `main` `7d4e7cc9`, which is newer than the `80995559` the AC names and is the checkout the orchestrator provides. That is a stricter check, accepted. The three `TEST_PROVISIONING_DSN` spinecore tests stay unrun, for the reason recorded above.
+- AC 21: the full scenario suite is not green on `main` either. It was re-run on fresh databases this round with an identical failure set (gates below). CI runs only `TestGitHTTP_*`.
+- AC 17 and the new `TestListAssignmentsByRunAndActor` run only by hand (`-tags integration`). Spine CI has no store integration job, and adding one would first need the pre-existing `TestRunModeDatabaseDefault` failure fixed. Follow-up, not required by the AC.
+- The gofmt import reordering in about 12 touched files is unchanged (Deviation 9).
+
+**Mutation pass (review round 1).** A scripted pass made one source edit at a time, re-ran the named test and reverted the edit. It killed all 19 mutants:
+
+- the run guard placed after the execution lookup;
+- the listing SoD filter removed;
+- the run-scoped ledger case removed;
+- `entryActor` lower-casing IDs;
+- the bind lock as a no-op, and removed from each of `AssignStep`, `ClaimStep` and `ActivateStep`;
+- check 5's type test disabled;
+- check 4 restricted to assign, both forms;
+- both `requireSkillsOnAssign` fail-closed branches returning nil;
+- `ClaimStep` looking up through `loadActor`;
+- `DisableStepAssignFallback: false`;
+- `runAuthor` skipping unknown steps;
+- the orphan-ledger branch disabled;
+- the symmetric guard ignoring unknown steps;
+- the acknowledge guard skipping `in_progress`.
+
+**Zero value / SMP.** Every new branch reads a policy bool. `lockSoDBind` takes nothing unless `SeparationOfDuties` is set. The listing filter needs `SeparationOfDuties`. Under a gating policy `AssignStep` only reorders its run load. The narrow ledger is read only under `SeparationOfDuties`. SMP sets no policy, so its behaviour is unchanged on every path (SMP gate below).
+
+**Commits (review round 1).**
+
+| Commit | Content |
+|---|---|
+| `45b67fd` | Findings 1, 3, 4, 6: run guard before the execution lookup, SoD bind serialisation, run-scoped ledger port + `PostgresStore.ListAssignmentsByRunAndActor`, listing SoD filter; their tests. |
+| `dcd4058` | Findings 5 and 10: canonical-resolver contract (doc comments), canonical SMP-shaped test resolvers, AC 8 variant rows, AC 27 rows. |
+| `0b6fc16` | Findings 7, 8, 9, 11, 12: coverage tests. |
+| `5343e60` | Finding 2 and the docs for this round (CHANGELOG, KNOWN-LIMITATIONS, `security-model.md`, `actor-model.md`, `workflow-definition-format.md`). |
+
+**Gates (review round 1, run on `5343e60` + this note; 2026-10-07).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | exit 0 |
+| `go test -race -p 4 -count=1` on every touched package (`adapters/scheduler adapters/store core/artifact core/domain core/engine core/workflow service/cmd/spine service/internal/gateway service/internal/workspace workflows`) | all ok; the race-sensitive tests also passed `-race -count=5` |
+| `SPINE_TEST_DATABASE_URL=…/s007_r1store go test -tags integration -p 1 -count=1 -v ./adapters/store/...` | 36 pass, 1 fail: `TestRunModeDatabaseDefault` (pre-existing; `main` copy on `s007_r1storemain`: 34 pass, the same 1 fail). `TestCancelActiveAssignmentsForExecution` and `TestListAssignmentsByRunAndActor` pass. |
+| CI scenario-git-http: `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (`s007_r1scen`) | exit 0; 19 `--- PASS: TestGitHTTP_*`, 0 fail, 0 skip |
+| `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (branch `s007_r1scen`, `main` copy `s007_r1scenmain`) | 190 pass / 30 fail on both, **identical failure set** (pre-existing fixture/validation drift; the harness uses the zero-value policy). AC 21 stays "not green on `main` either". |
+| `golangci-lint run --allow-parallel-runners --max-issues-per-linter=0 --max-same-issues=0` on the touched packages, branch vs `main` (`git archive main`) | 193 vs 206; **0 new** (position-stripped issue diff empty) |
+| same with `--enable-only=gosec` | 1 vs 1 (pre-existing `core/workflow/service.go` G703); 0 new |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | "No actionable regressions were identified relative to the merge base." No P1/P2; nothing to fix or reject. |
+
+**SMP compatibility gate (review round 1).** Run in `i23/s-T007/smp`, detached at SMP `main` `7d4e7cc9` with `../spine` pointing at this worktree, and left clean (`git status` empty):
+
+- `go build ./...`: OK.
+- `go vet ./...` and `go vet -tags integration ./...`: clean.
+- `go test -p 4 -count=1` on every SMP package that imports a changed Spine package: all ok. Those packages are `cmd/customer-app` and `internal/customer/{eventdelivery,executionreadiness,githttp,projectionwriter,proposals,runner,spinecore/...,spineembedded/...,stepevents,workspace/...}`, plus `./internal/customer/run/...` and `./internal/engine/...`.
+- The ci.yml "Spine runtime integration suites" leg through `go run ./dev/testgate` passed: `4 packages, 1536 tests passed, 0 failed, 4 skipped (4 allowed)`.
+  - Databases: `TEST_SPINE_DB=…/s007_r1smpspine` (spine-runtime set) and `TEST_PLATFORM_DB=…/s007_r1smpplatform` (platform set).
+  - Allowed skips: `-allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip 'TEST_PROVISIONING_DSN unset'`.
+  - The `TEST_PROVISIONING_DSN` skips are the same three dispatch-store tests as before, for the same reason.
+- `go run ./dev/testgate -- -race -count=1 -tags integration ./internal/customer/githttp/`: `140 tests passed, 0 failed`.
+
+All `s007_r1*` databases were dropped afterwards.
+
+### Follow-ups (Out of scope, plus review round 1)
 
 TASK-008 must keep the run-terminated `ErrConflict` first in `IngestResult`'s terminal branch,
 move the scheduler hook behind its CAS `applied` result, and route `terminateLiveSteps`' write
 through its `writeStepExecution`. SMP TASK-011 adopts the policy (resolver, workflow fixes /
 legacy loader using `DeferredStatusPreconditions`, the SoD decision). An append-only binding
-ledger (OQ6) and a one-shot sweep of pre-upgrade live executions remain follow-ups.
+ledger (OQ6) and a one-shot sweep of pre-upgrade live executions remain follow-ups. Review round 1
+adds two: a database-level per-run lock around the separation-of-duties check and bind, for
+embedders that run several replicas with `SeparationOfDuties` on; and a Spine CI job for the
+`-tags integration` store tests (AC 17, `TestListAssignmentsByRunAndActor`), which first needs the
+pre-existing `TestRunModeDatabaseDefault` failure fixed. SMP TASK-011's resolver must be canonical
+(§15 review-round-1 note).
