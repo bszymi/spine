@@ -3,19 +3,22 @@ package artifact
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/git/refname"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/git/refname"
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 // WriteResult contains the result of an artifact write operation.
@@ -91,58 +94,110 @@ func (s *Service) repoRelativePath(artifactPath string) string {
 	return filepath.Join(s.artifactsDir, artifactPath)
 }
 
-// safePath validates and resolves a path against the main repo root.
+// safePath validates a path against the main repo root (see safePathIn).
 func (s *Service) safePath(path string) (string, error) {
 	return s.safePathIn(s.repo, path)
 }
 
-// safePathIn validates and resolves a path, ensuring it stays within root.
-// The input path is artifact-relative; it is first converted to a repo-relative
-// path via repoRelativePath before being joined with root.
-// root may be the main repo or an isolated worktree directory.
-func (s *Service) safePathIn(root, path string) (string, error) {
-	// Reject absolute paths before any processing.
+// cleanPath validates an artifact-relative path lexically and returns its
+// repo-relative, slash-form path — the one path every later file and git
+// operation uses, so the path that is checked is the path that is staged.
+//
+// The caller's artifact-relative path is cleaned FIRST, before
+// repoRelativePath joins it under artifacts_dir: filepath.Join folds ".."
+// away, so "a/../../x.md" under artifacts_dir "spine" would otherwise
+// become the clean-looking "x.md" and escape the artifacts directory.
+// worktreefs.Clean refuses ".." and the git directory outright (INIT-023
+// TASK-004).
+func (s *Service) cleanPath(path string) (string, error) {
+	// Reject absolute paths before any processing (repoRelativePath would
+	// otherwise strip the leading "/").
 	if filepath.IsAbs(path) {
 		return "", domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("path must be relative: %s", path))
 	}
+	cleaned, err := worktreefs.Clean(path)
+	if err != nil {
+		return "", worktreeError(context.Background(), path, "validate path", err)
+	}
+	rel, err := worktreefs.Clean(s.repoRelativePath(cleaned))
+	if err != nil {
+		return "", worktreeError(context.Background(), path, "validate path", err)
+	}
+	return rel, nil
+}
 
-	repoPath := s.repoRelativePath(path)
-	fullPath := filepath.Join(root, repoPath)
-	absRoot, err := filepath.Abs(root)
+// safePathIn validates path for file I/O under root and returns its
+// repo-relative, slash-form path. root may be the main repo or an isolated
+// worktree directory; it is trusted (symlinks in its own path are followed).
+//
+// Beyond the lexical rules of cleanPath, every existing component of the
+// path is checked from a directory handle opened without following
+// symlinks (worktreefs): a symbolic link anywhere in the path — the final
+// component included, dangling or not — is refused, as is a non-directory
+// parent or a non-regular leaf. A missing leaf or parent is fine (Create).
+// The checks are repeated by every worktreefs operation that follows, so
+// this is the single validation entry, not the only guard. Refusals are
+// ErrInvalidParams whose message names only repo-relative components and
+// that satisfy errors.Is(err, worktreefs.ErrUnsafePath).
+func (s *Service) safePathIn(root, path string) (string, error) {
+	rel, err := s.cleanPath(path)
+	if err != nil {
+		return "", err
+	}
+	tree, err := worktreefs.Open(root)
 	if err != nil {
 		// Log the underlying error server-side; do not leak the repo
 		// root path back to the caller.
-		slog.Default().Warn("safePath: abs(root) failed", "error", err, "root", root)
+		slog.Default().Warn("safePath: open root failed", "error", err, "root", root)
 		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
 	}
+	defer func() { _ = tree.Close() }()
+	if _, err := tree.Lstat(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", worktreeError(context.Background(), path, "validate path", err)
+	}
+	return rel, nil
+}
 
-	// Resolve symlinks on the root
-	realRoot, err := filepath.EvalSymlinks(absRoot)
+// worktreeError maps a worktreefs failure onto the domain error contract:
+// a refused path is ErrInvalidParams (400) carrying the PathError text,
+// which names only repo-relative components; a read over the worktree read
+// cap is ErrPayloadTooLarge (413), the status TASK-003 uses for an
+// oversized git blob; anything else is logged server-side and returned as
+// a generic ErrInternal. The worktreefs error stays the cause, so
+// errors.Is(err, worktreefs.ErrUnsafePath) / worktreefs.ErrTooLarge hold.
+func worktreeError(ctx context.Context, path, action string, err error) error {
+	var pe *worktreefs.PathError
+	if errors.As(err, &pe) {
+		return domain.NewErrorWithCause(domain.ErrInvalidParams, pe.Error(), err)
+	}
+	var se *worktreefs.SizeError
+	if errors.As(err, &se) {
+		return domain.NewErrorWithCause(domain.ErrPayloadTooLarge, se.Error(), err)
+	}
+	observe.Logger(ctx).Warn("artifact worktree I/O failed",
+		"action", action, "path", path, "error", err)
+	return domain.NewErrorWithCause(domain.ErrInternal,
+		fmt.Sprintf("%s %s failed", action, path), err)
+}
+
+// readRepoFile reads an artifact's bytes from the main working tree
+// through worktreefs (symlinks refused, read capped).
+func (s *Service) readRepoFile(ctx context.Context, path string) ([]byte, error) {
+	rel, err := s.safePath(path)
 	if err != nil {
-		slog.Default().Warn("safePath: evalSymlinks(root) failed", "error", err, "root", absRoot)
-		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
+		return nil, err
 	}
-
-	// Resolve the target path — for new files, resolve the parent directory
-	absPath, err := filepath.Abs(fullPath)
+	tree, err := worktreefs.Open(s.repo)
 	if err != nil {
-		slog.Default().Warn("safePath: abs(fullPath) failed", "error", err, "path", path)
-		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
+		return nil, worktreeError(ctx, path, "open repository for", err)
 	}
-
-	// Resolve symlinks by walking up to the nearest existing ancestor.
-	// This prevents escaping via symlinked directories with missing descendants.
-	realPath, err := resolveToExistingAncestor(absPath)
+	defer func() { _ = tree.Close() }()
+	raw, err := tree.ReadFile(rel)
 	if err != nil {
-		slog.Default().Warn("safePath: resolveToExistingAncestor failed", "error", err, "path", path)
-		return "", domain.NewError(domain.ErrInvalidParams, "invalid path")
+		return nil, worktreeError(ctx, path, "read file", err)
 	}
-
-	if !strings.HasPrefix(realPath, realRoot+string(filepath.Separator)) && realPath != realRoot {
-		return "", domain.NewError(domain.ErrInvalidParams, "path escapes repository")
-	}
-	return absPath, nil
+	return raw, nil
 }
 
 // Create creates a new artifact, validates it, writes the file, commits to Git,
@@ -159,9 +214,10 @@ func (s *Service) Create(ctx context.Context, path, content string) (*WriteResul
 
 // writeOp encodes the three axes that distinguish Create from Update: the
 // pre-check semantics, the commit-message verb + operation trailer, and the
-// emitted event type. Both paths share the remaining 10-step skeleton
-// (parse → validate → enterBranch → safePath → pre-check → write → commit
-// → rollback-on-error → autoPush → emit).
+// emitted event type. Both paths share the remaining skeleton (parse →
+// validate → branch protection → cleanPath → enterBranch → safePathIn →
+// pre-check → confined write → commit → rollback-on-error → autoPush →
+// emit).
 type writeOp struct {
 	requireExists bool // false: must not exist (Create); true: must exist (Update)
 	messageVerb   string
@@ -193,46 +249,64 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 		return nil, err
 	}
 
+	// Lexical validation before enterBranch, so a refused path never
+	// creates a worktree.
+	if _, err := s.cleanPath(path); err != nil {
+		return nil, err
+	}
+
 	scope, err := s.enterBranch(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer scope.Cleanup()
 
-	fullPath, err := s.safePathIn(scope.RepoDir, path)
+	// All file I/O below goes through worktreefs (INIT-023 TASK-004, audit
+	// F5): every component is Lstat-checked from a directory handle, so a
+	// symlink committed on the branch — at the leaf or above it, dangling
+	// or not, into .git/ or out of the tree — is refused before any
+	// filesystem change and before anything is staged.
+	repoPath, err := s.safePathIn(scope.RepoDir, path)
 	if err != nil {
 		return nil, err
 	}
+	tree, err := worktreefs.Open(scope.RepoDir)
+	if err != nil {
+		return nil, worktreeError(ctx, path, "open worktree for", err)
+	}
+	defer func() { _ = tree.Close() }()
 
 	var originalContent []byte
+	var undo *worktreefs.Undo
 	if op.requireExists {
-		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		if _, err := tree.Lstat(repoPath); errors.Is(err, fs.ErrNotExist) {
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("artifact not found: %s", path))
+		} else if err != nil {
+			return nil, worktreeError(ctx, path, "check", err)
 		}
-		var readErr error
-		originalContent, readErr = os.ReadFile(fullPath)
-		if readErr != nil {
-			return nil, domain.NewError(domain.ErrInternal,
-				fmt.Sprintf("read original %s: %v", path, readErr))
+		originalContent, err = tree.ReadFile(repoPath)
+		if err != nil {
+			return nil, worktreeError(ctx, path, "read original", err)
+		}
+		// Replace never opens the existing file for writing: a fresh
+		// O_EXCL temp file is renamed over it, keeping its mode.
+		if err := tree.Replace(repoPath, []byte(content)); err != nil {
+			return nil, worktreeError(ctx, path, "write file", err)
 		}
 	} else {
-		if _, err := os.Stat(fullPath); err == nil {
+		// O_CREAT|O_EXCL: the final component is never followed.
+		undo, err = tree.Create(repoPath, []byte(content), 0o644)
+		if errors.Is(err, fs.ErrExist) {
 			return nil, domain.NewError(domain.ErrAlreadyExists,
 				fmt.Sprintf("artifact already exists at path: %s", path))
 		}
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-			return nil, domain.NewError(domain.ErrInternal,
-				fmt.Sprintf("create directory %s: %v", filepath.Dir(fullPath), err))
+		if err != nil {
+			return nil, worktreeError(ctx, path, "write file", err)
 		}
+		defer undo.Release()
 	}
 
-	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
-		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("write file %s: %v", path, err))
-	}
-
-	repoPath := s.repoRelativePath(path)
 	trailers := observe.TrailersFromContext(ctx, op.operation)
 	if bpResult.overrideHonoured {
 		// ADR-009 §4: API-path overrides carry a Branch-Protection-Override
@@ -252,11 +326,15 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	})
 	if err != nil {
 		// Rollback. StageAndCommit already unstaged on failure, so we only
-		// have to restore file state here.
+		// have to restore file state here: the original bytes (and mode,
+		// which Replace keeps) for an update; the file and every directory
+		// this call created for a create.
 		if op.requireExists {
-			_ = os.WriteFile(fullPath, originalContent, 0o644) //nolint:gosec // G703: fullPath came from safePath above; 0644 required for git tracking
-		} else {
-			_ = os.Remove(fullPath)
+			if rbErr := tree.Replace(repoPath, originalContent); rbErr != nil {
+				log.Warn("artifact rollback: restore failed", "path", path, "error", rbErr)
+			}
+		} else if rbErr := undo.Rollback(); rbErr != nil {
+			log.Warn("artifact rollback: remove failed", "path", path, "error", rbErr)
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
@@ -532,38 +610,6 @@ func (s *Service) enterBranch(ctx context.Context) (*git.WriteScope, error) {
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 	return scope, nil
-}
-
-// resolveToExistingAncestor resolves symlinks by walking up the path
-// to the nearest existing ancestor, then appending the remaining components.
-// This prevents symlink escapes via missing subdirectories.
-func resolveToExistingAncestor(absPath string) (string, error) {
-	// Try the full path first
-	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
-		return resolved, nil
-	}
-
-	// Walk up to find the nearest existing ancestor
-	current := absPath
-	var remainder []string
-	for {
-		parent := filepath.Dir(current)
-		if parent == current {
-			// Reached root without finding an existing path
-			return absPath, nil
-		}
-		remainder = append([]string{filepath.Base(current)}, remainder...)
-		current = parent
-
-		if ancestorReal, err := filepath.EvalSymlinks(current); err == nil {
-			// Found an existing ancestor — reconstruct the path
-			resolved := ancestorReal
-			for _, part := range remainder {
-				resolved = filepath.Join(resolved, part)
-			}
-			return resolved, nil
-		}
-	}
 }
 
 // stripArtifactsDir removes the artifacts directory prefix from a repo-relative path.
