@@ -516,3 +516,138 @@ func TestRefShadow_CloneNoTagsAndErrorKinds(t *testing.T) {
 		t.Errorf("a failed lookup was followed by %q; want the lookup only", calls)
 	}
 }
+
+// TestRefShadow_ObjectIDNamedRefsAreInert is review round 1 (P2): a ref
+// NAMED after an object id — refs/<oid>, refs/tags/<oid>,
+// refs/heads/<oid> or refs/remotes/<oid> — pointing at an attacker
+// commit never stands in for that object. `git branch <n> <oid>`
+// re-resolves its start point by DWIM after parsing it (branch.c
+// dwim_branch_start), so before the fix CreateBranch from "main",
+// "refs/heads/main" or main's object id cut the new branch at the
+// attacker commit: the F10 shadow, renamed after the base's object id.
+// The other commands that receive an object id (merge, show, ls-tree,
+// rev-parse, worktree add) are pinned here as well.
+func TestRefShadow_ObjectIDNamedRefsAreInert(t *testing.T) {
+	ctx := context.Background()
+	for _, prefix := range []string{"refs/", "refs/tags/", "refs/heads/", "refs/remotes/"} {
+		t.Run(prefix+"<oid>", func(t *testing.T) {
+			f := newShadowFixture(t)
+			c := f.client()
+			f.plant(t, prefix+f.base, f.evil)     // named after main's object id
+			f.plant(t, prefix+f.reviewed, f.evil) // named after the run branch's
+
+			for i, base := range []string{"main", "refs/heads/main", f.base} {
+				name := "spine/run/cut-" + string(rune('a'+i))
+				if err := c.CreateBranch(ctx, name, base); err != nil {
+					t.Fatalf("CreateBranch(%s, %q): %v", name, base, err)
+				}
+				if got := runGit(t, f.repo, "show-ref", "--verify", "--hash", "refs/heads/"+name); got != f.base {
+					t.Errorf("CreateBranch(base %q) cut the branch at %s, want main %s (attacker %s)", base, got, f.base, f.evil)
+				}
+				if tracking := runGitAllowFail(f.repo, "config", "--get", "branch."+name+".merge"); tracking != "" {
+					t.Errorf("CreateBranch(base %q) configured upstream tracking %q", base, tracking)
+				}
+			}
+
+			if _, err := c.Merge(ctx, git.MergeOpts{Source: f.branch, Target: "main", Strategy: "merge-commit", Message: "m"}); err != nil {
+				t.Fatalf("Merge(run branch): %v", err)
+			}
+			if got := runGit(t, f.repo, "rev-parse", "refs/heads/main^2"); got != f.reviewed {
+				t.Errorf("merged %s, want the run branch tip %s", got, f.reviewed)
+			}
+			if data, err := c.ReadFile(ctx, f.reviewed, "f.txt"); err != nil || string(data) != "reviewed\n" {
+				t.Errorf("ReadFile(<oid>) = %q, %v; want the object's own content", data, err)
+			}
+			if sha, err := c.RefSHA(ctx, f.reviewed); err != nil || sha != f.reviewed {
+				t.Errorf("RefSHA(<oid>) = %q, %v", sha, err)
+			}
+			if files, err := c.ListFiles(ctx, f.reviewed, ""); err != nil || !reflect.DeepEqual(files, []string{"f.txt"}) {
+				t.Errorf("ListFiles(<oid>) = %q, %v; want [f.txt]", files, err)
+			}
+			scope, err := git.EnterBranch(ctx, f.repo, f.branch, nil)
+			if err != nil {
+				t.Fatalf("EnterBranch: %v", err)
+			}
+			defer scope.Cleanup()
+			if got := runGit(t, scope.RepoDir, "rev-parse", "HEAD"); got != f.reviewed {
+				t.Errorf("worktree at %s, want the branch tip %s", got, f.reviewed)
+			}
+		})
+	}
+}
+
+// TestRefShadow_HEADNamedRefsAreInert is review round 1 (P2): `git
+// branch <n> HEAD` dies with "ambiguous object name: 'HEAD'" while any
+// refs/HEAD, refs/tags/HEAD, refs/heads/HEAD or refs/remotes/HEAD exists
+// (dwim_branch_start counts every DWIM match), so one pushed ref used to
+// block every run start (StartRun and divergence both cut from "HEAD").
+// CreateBranch passes HEAD^{commit}; the revision parser reads
+// $GIT_DIR/HEAD first. Reads of HEAD keep returning the real HEAD.
+func TestRefShadow_HEADNamedRefsAreInert(t *testing.T) {
+	ctx := context.Background()
+	for _, ref := range []string{"refs/HEAD", "refs/tags/HEAD", "refs/heads/HEAD", "refs/remotes/HEAD", "refs/remotes/HEAD/HEAD"} {
+		t.Run(ref, func(t *testing.T) {
+			f := newShadowFixture(t)
+			c := f.client()
+			f.plant(t, ref, f.evil)
+			const run = "spine/run/task-002-next-1a2b3c4d"
+			if err := c.CreateBranch(ctx, run, "HEAD"); err != nil {
+				t.Fatalf("CreateBranch(run, HEAD) with %s: %v", ref, err)
+			}
+			if got := runGit(t, f.repo, "show-ref", "--verify", "--hash", "refs/heads/"+run); got != f.base {
+				t.Errorf("run branch cut at %s, want HEAD %s (attacker %s)", got, f.base, f.evil)
+			}
+			if sha, err := c.Head(ctx); err != nil || sha != f.base {
+				t.Errorf("Head() = %q, %v; want %s", sha, err, f.base)
+			}
+			if sha, err := c.RefSHA(ctx, "HEAD"); err != nil || sha != f.base {
+				t.Errorf("RefSHA(HEAD) = %q, %v; want %s", sha, err, f.base)
+			}
+			if data, err := c.ReadFile(ctx, "HEAD", "f.txt"); err != nil || string(data) != "base\n" {
+				t.Errorf("ReadFile(HEAD) = %q, %v; want the real HEAD's content", data, err)
+			}
+		})
+	}
+}
+
+// TestRefShadow_RemoteTrackingBranchIsNeverGuessed pins the review round 1
+// CHANGELOG entry: with a branch present only as refs/remotes/origin/<n>,
+// Checkout (`switch --no-guess`), CreateBranch's base (exact lookup) and
+// EnterBranch (exact lookup, then `worktree add --detach`) refuse instead
+// of creating a local tracking branch the way `checkout <n>`,
+// `branch <run> <n>` and `worktree add <dir> <n>` used to. EnterBranch
+// leaves no worktree and no temporary parent behind.
+func TestRefShadow_RemoteTrackingBranchIsNeverGuessed(t *testing.T) {
+	ctx := context.Background()
+	f := newShadowFixture(t)
+	c := f.client()
+	const n = "feature-x"
+	f.plant(t, "refs/remotes/origin/"+n, f.reviewed)
+	noLocal := func(label string) {
+		t.Helper()
+		if refs := runGit(t, f.repo, "for-each-ref", "refs/heads/"+n); refs != "" {
+			t.Errorf("%s created a local branch from origin/%s: %q", label, n, refs)
+		}
+	}
+
+	if err := c.Checkout(ctx, n); err == nil {
+		t.Error("Checkout of a remote-tracking-only branch succeeded")
+	}
+	noLocal("Checkout")
+	if got := runGit(t, f.repo, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+		t.Errorf("HEAD = %s after a refused checkout, want refs/heads/main", got)
+	}
+
+	err := c.CreateBranch(ctx, "spine/run/from-remote-0a1b2c3d", n)
+	wantKind(t, "CreateBranch(base: remote-tracking-only branch)", err, git.ErrKindNotFound)
+	noLocal("CreateBranch")
+
+	tmp := isolateTempDir(t)
+	_, err = git.EnterBranch(ctx, f.repo, n, nil)
+	wantKind(t, "EnterBranch(remote-tracking-only branch)", err, git.ErrKindNotFound)
+	noLocal("EnterBranch")
+	if count := worktreeCount(t, f.repo); count != 1 {
+		t.Errorf("worktree list has %d entries, want 1", count)
+	}
+	assertEmptyDir(t, tmp)
+}

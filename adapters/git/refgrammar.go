@@ -21,7 +21,9 @@ package git
 //     git;
 //   - a push source is "<oid>^{commit}", which no refname can match ("^"
 //     is illegal in refnames), with an explicit refs/heads/<n>
-//     destination;
+//     destination; a CreateBranch start point is "<oid>^{commit}" or
+//     "HEAD^{commit}" for the same reason (`git branch` re-resolves its
+//     start point by DWIM, see CreateBranch);
 //   - every ref-like argument is syntax-checked before any git process
 //     starts (two phases: validate all, then resolve), and reaches git
 //     after --end-of-options, so a leading "-" can never become an
@@ -51,10 +53,15 @@ var ErrInvalidRef = errors.New("invalid git ref")
 const headsPrefix = "refs/heads/"
 
 var (
-	// fullObjectName is a complete SHA-1 or SHA-256 object id. git never
-	// DWIM-resolves a full hex id in revision context, so it is passed
-	// through unchanged. Abbreviated ids are NOT object names here: they
-	// are indistinguishable from branch names such as "cafe".
+	// fullObjectName is a complete SHA-1 or SHA-256 object id. git's
+	// revision parser takes a full hex id as the object itself before
+	// any ref lookup (a same-named ref only draws a warning), so rev-parse,
+	// show, ls-tree, diff, merge-base, log, merge and worktree add get it
+	// unchanged. `git branch` is the exception: it re-resolves its start
+	// point by DWIM after parsing it, so CreateBranch appends ^{commit}
+	// (verified on git 2.39.5 and 2.54). Abbreviated ids are NOT object
+	// names here: they are indistinguishable from branch names such as
+	// "cafe".
 	fullObjectName = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
 
 	// remoteNamePattern is the Remote class. Every caller passes
@@ -221,7 +228,9 @@ func (c *CLIClient) resolveBranchOID(ctx context.Context, op, what, value, short
 }
 
 // resolveCommit is phase 2 for a Commit-class argument: an object id and
-// "HEAD" pass through; a branch becomes its exact object id.
+// "HEAD" pass through; a branch becomes its exact object id. The result
+// is safe as a revision for every command except `git branch`, whose
+// caller (CreateBranch) appends ^{commit}.
 func (c *CLIClient) resolveCommit(ctx context.Context, op, what, v string) (string, error) {
 	if IsFullObjectName(v) || v == "HEAD" {
 		return v, nil

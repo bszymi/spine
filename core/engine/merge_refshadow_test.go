@@ -198,8 +198,8 @@ func TestRefShadow_MergeRunBranchMissingBranchShadow(t *testing.T) {
 // doubly-qualified local shadow of main (DC-1) in the engine repository,
 // two independent runs both complete and origin main advances twice.
 // The refs/tags/<local main oid> case of DC-1 needs the shadow planted
-// between the merge and the push, so it is pinned at the adapter level
-// (adapters/git TestRefShadow_PushIgnoresLocalShadows).
+// between the merge and the push: TestRefShadow_ObjectIDShadowOfMainAtPushTime
+// (and adapters/git TestRefShadow_PushIgnoresLocalShadows).
 func TestRefShadow_ShadowedMainDoesNotBlockGovernedMerges(t *testing.T) {
 	for _, shadow := range []string{"refs/tags/main", "refs/tags/refs/heads/main", "refs/refs/heads/main", "refs/heads/refs/heads/main"} {
 		t.Run(shadow, func(t *testing.T) {
@@ -266,5 +266,146 @@ func TestRefShadow_StatusCascadeReadsTheBranch(t *testing.T) {
 	}
 	if !strings.Contains(got, "# reviewed body, edited on the run") || !strings.Contains(got, "status: Completed") {
 		t.Fatalf("main:tasks/t.md = %q, want the reviewed body with status: Completed", got)
+	}
+}
+
+// shadowBeforePush plants refs/tags/<object id of local main> on an
+// attacker commit at the last moment before the governed merge pushes
+// main: the merged object id does not exist before the merge, so this is
+// the only way to put the DC-1 "raw object id as push source" shadow in
+// front of the real governed push.
+type shadowBeforePush struct {
+	*git.CLIClient
+	t       *testing.T
+	repo    string
+	evil    string
+	planted []string
+}
+
+func (s *shadowBeforePush) Push(ctx context.Context, remote, ref string) error {
+	oid := rsGit(s.t, s.repo, "show-ref", "--verify", "--hash", "refs/heads/"+ref)
+	rsGit(s.t, s.repo, "update-ref", "refs/tags/"+oid, s.evil)
+	s.planted = append(s.planted, oid)
+	return s.CLIClient.Push(ctx, remote, ref)
+}
+
+// TestRefShadow_ObjectIDShadowOfMainAtPushTime is AC 2's fourth DC-1
+// case through the governed merge (review round 1; it was pinned only at
+// the adapter level): with refs/tags/<merged main oid> on an attacker
+// commit built on origin main, a raw "<oid>:refs/heads/main" push source
+// would send the attacker commit as a fast-forward. The run completes,
+// origin main is the merge the engine made, and the attacker commit is
+// not on it.
+func TestRefShadow_ObjectIDShadowOfMainAtPushTime(t *testing.T) {
+	e := newRSEnv(t)
+	attacker := e.plantAttacker(t, "refs/attacker/parking")
+	branch := "spine/run/task-001-victim-0a1b2c3d"
+	reviewed := e.runBranch(t, branch, map[string]string{"f.txt": "reviewed change\n"})
+
+	run := committingRun("run-0a1b2c3d", branch)
+	orch := e.orchestrator(run)
+	sp := &shadowBeforePush{CLIClient: git.NewCLIClient(e.repo), t: t, repo: e.repo, evil: attacker}
+	orch.git = sp
+	if err := orch.MergeRunBranch(context.Background(), run.RunID); err != nil {
+		t.Fatalf("MergeRunBranch: %v", err)
+	}
+	if run.Status != domain.RunStatusCompleted {
+		t.Fatalf("run status = %s, want completed", run.Status)
+	}
+	if len(sp.planted) == 0 {
+		t.Fatal("the governed merge never pushed main; the shadow was not exercised")
+	}
+	originMain := rsGit(t, e.origin, "rev-parse", "refs/heads/main")
+	if want := sp.planted[len(sp.planted)-1]; originMain != want {
+		t.Fatalf("origin main = %s, want the merged local main %s (attacker %s)", originMain, want, attacker)
+	}
+	if rsIsAncestor(e.origin, attacker, "refs/heads/main") {
+		t.Fatal("the attacker commit reached origin main")
+	}
+	if !rsIsAncestor(e.origin, reviewed, "refs/heads/main") {
+		t.Fatal("the reviewed run-branch tip is not on origin main")
+	}
+}
+
+// realRepoClients serves a real *git.CLIClient per code repository.
+type realRepoClients map[string]git.GitClient
+
+func (r realRepoClients) Client(_ context.Context, repoID string) (git.GitClient, error) {
+	c, ok := r[repoID]
+	if !ok {
+		return nil, errors.New("test misconfigured: no client for " + repoID)
+	}
+	return c, nil
+}
+
+// TestRefShadow_StartRunCutsFromTheRealBase is review round 1 (both P2
+// findings) through StartRun with real CLIClients on the primary and a
+// code repository. `git branch <run> HEAD` (primary, and divergence)
+// died "ambiguous object name: 'HEAD'" next to any HEAD-named ref, so
+// one pushed refs/tags/HEAD failed every run start; `git branch <run>
+// <oid>` (code repository, base resolved exactly from default_branch)
+// adopted a ref named after <oid>, so the code-repo run branch was cut
+// at the attacker commit while RepositoryBaselines recorded the real
+// tip. Each shadow is planted in both repositories.
+func TestRefShadow_StartRunCutsFromTheRealBase(t *testing.T) {
+	shadows := []string{
+		"refs/HEAD", "refs/tags/HEAD", "refs/heads/HEAD", "refs/remotes/HEAD",
+		"refs/tags/<main oid>", "refs/heads/<main oid>", "refs/<main oid>", "refs/remotes/<main oid>",
+	}
+	for _, shadow := range shadows {
+		t.Run(shadow, func(t *testing.T) {
+			e := newRSEnv(t)
+			attacker := e.plantAttacker(t, "refs/attacker/parking")
+
+			code := filepath.Join(e.root, "code")
+			codeOrigin := filepath.Join(e.root, "code-origin.git")
+			rsGit(t, e.root, "init", "-q", "--bare", "-b", "main", codeOrigin)
+			rsGit(t, e.root, "init", "-q", "-b", "main", code)
+			rsGit(t, code, "remote", "add", "origin", codeOrigin)
+			testutil.WriteFile(t, code, "svc.go", "package svc\n")
+			rsGit(t, code, "add", ".")
+			rsGit(t, code, "commit", "-qm", "code base")
+			rsGit(t, code, "push", "-q", "origin", "refs/heads/main:refs/heads/main")
+			rsGit(t, code, "switch", "-q", "--orphan", "evil")
+			testutil.WriteFile(t, code, "svc.go", "package svc // ATTACKER\n")
+			rsGit(t, code, "add", ".")
+			rsGit(t, code, "commit", "-qm", "code attacker")
+			codeAttacker := rsGit(t, code, "rev-parse", "HEAD")
+			rsGit(t, code, "switch", "-q", "main")
+			rsGit(t, code, "branch", "-q", "-D", "evil")
+
+			primaryMain := rsGit(t, e.repo, "show-ref", "--verify", "--hash", "refs/heads/main")
+			codeMain := rsGit(t, code, "show-ref", "--verify", "--hash", "refs/heads/main")
+			rsGit(t, e.repo, "update-ref", strings.ReplaceAll(shadow, "<main oid>", primaryMain), attacker)
+			rsGit(t, code, "update-ref", strings.ReplaceAll(shadow, "<main oid>", codeMain), codeAttacker)
+
+			art := taskWithRepos([]string{"code-a"})
+			resolver := newRepoResolver(map[string]repoLookup{"code-a": activeRepoLookup("code-a", "main")})
+			orch, st := multiRepoOrchestrator(t, art, resolver,
+				realRepoClients{"code-a": git.NewCLIClient(code)}, git.NewCLIClient(e.repo))
+			res, err := orch.StartRun(context.Background(), art.Path)
+			if err != nil {
+				t.Fatalf("StartRun with %s: %v", shadow, err)
+			}
+			if st.createdRun == nil {
+				t.Fatal("no run row was persisted")
+			}
+			b := res.Run.BranchName
+			if got := rsGit(t, e.repo, "show-ref", "--verify", "--hash", "refs/heads/"+b); got != primaryMain {
+				t.Errorf("primary run branch cut at %s, want HEAD %s (attacker %s)", got, primaryMain, attacker)
+			}
+			if got := rsGit(t, code, "show-ref", "--verify", "--hash", "refs/heads/"+b); got != codeMain {
+				t.Errorf("code-repo run branch cut at %s, want main %s (attacker %s)", got, codeMain, codeAttacker)
+			}
+			if got := rsGit(t, codeOrigin, "show-ref", "--verify", "--hash", "refs/heads/"+b); got != codeMain {
+				t.Errorf("code-repo run branch on origin at %s, want main %s", got, codeMain)
+			}
+			if got := res.Run.RepositoryBaselines["code-a"]; got != codeMain {
+				t.Errorf("RepositoryBaselines[code-a] = %q, want %s", got, codeMain)
+			}
+			if got := res.Run.RepositoryBaselines[domain.PrimaryRepositoryID]; got != primaryMain {
+				t.Errorf("RepositoryBaselines[spine] = %q, want %s", got, primaryMain)
+			}
+		})
 	}
 }

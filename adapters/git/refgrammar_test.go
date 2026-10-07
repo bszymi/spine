@@ -296,7 +296,9 @@ func TestRefGrammar_ArgvInjectionRefusedBeforeExec(t *testing.T) {
 // TestRefGrammar_ArgvShape is AC 6 (amended by DC-1, DC-2, DC-5): the
 // exact argv of every method, including --end-of-options before the
 // first ref, the trailing "--" on diff/show/log, exact branch lookups,
-// object ids instead of branch names, and "<oid>^{commit}" push sources.
+// object ids instead of branch names, and "<oid>^{commit}" push sources
+// and CreateBranch start points (review round 1: `git branch`
+// re-resolves a bare start point by DWIM).
 func TestRefGrammar_ArgvShape(t *testing.T) {
 	c, repo, origin, mainOID, featOID := grammarRepo(t)
 	runGit(t, repo, "branch", "wt-branch", "feat")
@@ -323,11 +325,11 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		{"Checkout refs/heads/main", func() error { return c.Checkout(ctx, "refs/heads/main") },
 			[][]string{{"switch", "--no-guess", "--end-of-options", "main"}}},
 		{"CreateBranch from HEAD", func() error { return c.CreateBranch(ctx, "n1", "HEAD") },
-			[][]string{{"branch", "--end-of-options", "n1", "HEAD"}}},
+			[][]string{{"branch", "--end-of-options", "n1", "HEAD^{commit}"}}},
 		{"CreateBranch from branch", func() error { return c.CreateBranch(ctx, "n2", "feat") },
-			[][]string{lookup("feat"), {"branch", "--end-of-options", "n2", featOID}}},
+			[][]string{lookup("feat"), {"branch", "--end-of-options", "n2", featOID + "^{commit}"}}},
 		{"CreateBranch from oid", func() error { return c.CreateBranch(ctx, "n3", mainOID) },
-			[][]string{{"branch", "--end-of-options", "n3", mainOID}}},
+			[][]string{{"branch", "--end-of-options", "n3", mainOID + "^{commit}"}}},
 		{"DeleteBranch", func() error { return c.DeleteBranch(ctx, "n1") },
 			[][]string{{"branch", "-D", "--end-of-options", "n1"}}},
 		{"Diff branches", func() error { _, err := c.Diff(ctx, "main", "feat"); return err },

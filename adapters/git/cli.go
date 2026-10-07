@@ -26,7 +26,8 @@ import (
 //	        branch; DeleteRemoteBranch branch;
 //	        EnterBranch branch
 //	Commit  MergeOpts.Source; CreateBranch base        a full object id; HEAD (base   the object id or HEAD; a branch
-//	                                                   only); otherwise Branch        as its exact object id
+//	                                                   only); otherwise Branch        as its exact object id; as a
+//	                                                                                  CreateBranch base, with ^{commit}
 //	Rev     ReadFile/ListFiles/RefSHA ref; Diff        non-empty and ValidateRef      branch-first: an existing branch
 //	        from/to; MergeBase a/b; LogOpts.Since                                     as its exact object id, anything
 //	                                                                                  else unchanged (see resolveRev)
@@ -59,7 +60,7 @@ import (
 //	Checkout            switch --no-guess [eoo] <n>      (never detaches onto a tag)
 //	Merge               [switch --no-guess [eoo] <target>], merge [--ff-only | --no-ff [-m <msg>]] [eoo] <oid>
 //	Merge (abort)       merge --abort                     (Strategy "abort" or Source "--abort", nothing else)
-//	CreateBranch        branch [eoo] <n> <HEAD | oid>
+//	CreateBranch        branch [eoo] <n> <HEAD | oid>^{commit}   (git branch re-DWIMs a bare start point)
 //	DeleteBranch        branch -D [eoo] <n>
 //	Diff                diff --name-status [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
@@ -75,7 +76,11 @@ import (
 // never match a ref name ("^" is illegal in refnames), so neither a
 // local refs/tags/refs/heads/<n> nor a refs/tags/<oid> can make the
 // source ambiguous or substitute it; git writes no upstream tracking for
-// such a source. A doubly-qualified ref on the REMOTE
+// such a source. `git branch` is the one command that re-resolves an
+// already-parsed start point by DWIM (a bare <oid> loses to a ref named
+// refs/tags/<oid>, a bare HEAD dies "ambiguous" next to refs/tags/HEAD),
+// so CreateBranch passes "<oid>^{commit}" / "HEAD^{commit}" for the same
+// reason. A doubly-qualified ref on the REMOTE
 // (refs/heads/refs/heads/<n> and siblings) still breaks every client's
 // push to <n> ("dst refspec ... matches more than one"); no argv can
 // avoid that, and push admission must refuse such names
@@ -538,6 +543,24 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 // same-named tag never becomes the base and a missing base branch is
 // ErrKindNotFound rather than a DWIM guess (a code-repo default branch
 // with no local branch is refused, not taken from origin/<base>).
+//
+// The start point reaches git as "<oid>^{commit}" or "HEAD^{commit}",
+// never bare (INIT-023 TASK-002 review round 1). Unlike every other
+// command the client runs, `git branch` re-resolves its start point by
+// DWIM after parsing it: branch.c dwim_branch_start passes the string to
+// dwim_ref and adopts the object of the first ref it finds. So a bare
+// <oid> was replaced by a pushed refs/<oid>, refs/tags/<oid>,
+// refs/heads/<oid> or refs/remotes/<oid> (the F10 shadow, renamed after
+// the base's object id), and a bare "HEAD" died with "ambiguous object
+// name: 'HEAD'" while any refs/HEAD, refs/tags/HEAD, refs/heads/HEAD or
+// refs/remotes/HEAD existed — one pushed ref blocked every run start.
+// "^" is illegal in refnames, so dwim_ref matches nothing; the revision
+// parser still reads HEAD from $GIT_DIR/HEAD first (rule 1, a warning
+// at most) and a full hex id as the object itself. git writes no
+// upstream tracking for such a start point (the engine never relied on
+// it: autoSetupMerge's default tracks remote-tracking bases only). An
+// unborn HEAD still fails with "not a valid object name", Permanent, as
+// before.
 func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 	short, _, err := checkBranch("branch", "name", name)
 	if err != nil {
@@ -550,7 +573,7 @@ func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.run(ctx, "branch", "branch", "--end-of-options", short, from)
+	_, err = c.run(ctx, "branch", "branch", "--end-of-options", short, from+"^{commit}")
 	return err
 }
 
