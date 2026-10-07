@@ -281,6 +281,7 @@ func buildOrchestrator(
 	q *queue.MemoryQueue,
 	artifactSvc *artifact.Service,
 	validator *validation.Engine,
+	stepEntryPolicy engine.StepEntryPolicy,
 	log *slog.Logger,
 ) *engine.Orchestrator {
 	if st == nil || wfProvider == nil {
@@ -315,6 +316,9 @@ func buildOrchestrator(
 		return nil
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
+	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
+	orch.WithStepEntryPolicy(stepEntryPolicy)
 
 	divSvc := divergence.NewService(st, gitClient, events)
 	divPolicy, err := buildBranchProtectPolicy(st)
@@ -355,6 +359,11 @@ func buildScheduler(
 			scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
 				return orch.FailRun(ctx, runID, reason)
 			}),
+			// The run-timeout cancel writes the run row directly; this
+			// hook closes the run's live executions afterwards (INIT-023
+			// TASK-007). A no-op unless the step-entry policy sets
+			// TerminateStepsOnCancel.
+			scheduler.WithRunTerminated(orch.TerminateLiveSteps),
 			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
 				return orch.MergeRunBranch(ctx, runID)
 			}, 3, 2*time.Minute),
@@ -562,7 +571,7 @@ func (w *serveWorkspaces) Close() {
 // migrate, converting the legacy rows strict exists to refuse (INIT-023
 // TASK-009, review round 2). TestBuildServeWorkspaces_* drive this function
 // from the environment for every resolver.
-func buildServeWorkspaces(ctx context.Context, runtimeEnv string, log *slog.Logger, deliveryCfg workspaceDeliveryConfig, codeRepoBase string) (*serveWorkspaces, error) {
+func buildServeWorkspaces(ctx context.Context, runtimeEnv string, log *slog.Logger, deliveryCfg workspaceDeliveryConfig, codeRepoBase string, stepEntryPolicy engine.StepEntryPolicy) (*serveWorkspaces, error) {
 	secretCipher, err := loadSecretCipher(runtimeEnv)
 	if err != nil {
 		return nil, err
@@ -585,7 +594,7 @@ func buildServeWorkspaces(ctx context.Context, runtimeEnv string, log *slog.Logg
 		)
 	}
 
-	wiring, err := buildWorkspaceResolver(ctx, secretCipher, secretEnvelopeMode, log, deliveryCfg, codeRepoBase)
+	wiring, err := buildWorkspaceResolver(ctx, secretCipher, secretEnvelopeMode, log, deliveryCfg, codeRepoBase, stepEntryPolicy)
 	if err != nil {
 		return nil, err
 	}

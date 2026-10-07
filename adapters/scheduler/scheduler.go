@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // Scheduler implements time-based triggers and crash recovery.
@@ -22,6 +22,7 @@ type Scheduler struct {
 	commitThreshold  time.Duration
 	stepRecoveryFn   StepRecoveryFunc
 	runFailFn        RunFailFunc
+	runTerminatedFn  RunTerminatedFunc
 	// now is the clock source for scan-loop time reads (run timeouts,
 	// step timeouts, orphan threshold). Production keeps the default
 	// time.Now; scenario tests inject a controllable clock via

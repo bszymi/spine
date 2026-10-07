@@ -7,20 +7,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bszymi/spine/core/artifact"
-	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/adapters/delivery"
-	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/core/engine"
-	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/adapters/gitpool"
-	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/artifact"
+	"github.com/bszymi/spine/core/auth"
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/engine"
+	"github.com/bszymi/spine/core/evidence"
+	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -191,6 +191,7 @@ type Server struct {
 	stepExecutionLister        StepExecutionLister        // optional, nil if not configured
 	stepAcknowledger           StepAcknowledger           // optional, nil if not configured
 	stepAssigner               StepAssigner               // optional, nil if not configured
+	disableStepAssignFallback  bool                       // INIT-023 TASK-007: no engine-less store binder; see ServerConfig.DisableStepAssignFallback
 	eventBroadcaster           *delivery.EventBroadcaster // optional, nil if not configured
 	gitHTTP                    *githttp.Handler           // optional, nil if not configured
 	gitPushResolver            GitPushResolverFunc        // optional, nil if not configured; resolves per-workspace policy+events for push
@@ -329,6 +330,16 @@ type ServerConfig struct {
 	IdleTimeout                time.Duration             // defaults to 120s
 	SSEMaxConnPerActor         int                       // per-actor SSE connection cap; defaults to 5, <=0 disables
 	TrustedProxyCIDRs          []*net.IPNet              // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
+
+	// DisableStepAssignFallback removes the gateway's engine-less step
+	// assigner (storeStepAssigner), which binds an actor straight through
+	// the store with none of the engine step-entry policy's checks
+	// (INIT-023 TASK-007). When true and no orchestrator assigner is
+	// wired, POST /runs/{run_id}/steps/{step_id}/assign answers 503
+	// "step assigner not configured". `spine serve` sets it whenever a
+	// step-entry policy is installed; the default false keeps the
+	// fallback for single-workspace test setups.
+	DisableStepAssignFallback bool
 }
 
 // NewServer creates a new HTTP server with all routes and middleware.
@@ -361,6 +372,7 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		stepExecutionLister:        cfg.StepExecutionLister,
 		stepAcknowledger:           cfg.StepAcknowledger,
 		stepAssigner:               cfg.StepAssigner,
+		disableStepAssignFallback:  cfg.DisableStepAssignFallback,
 		eventBroadcaster:           cfg.EventBroadcaster,
 		gitHTTP:                    cfg.GitHTTP,
 		gitPushResolver:            cfg.GitPushResolver,

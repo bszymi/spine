@@ -170,6 +170,46 @@ steps:
 
 The Workflow Engine evaluates these constraints when assigning actors to steps. An actor must have both sufficient role permissions and meet step-level requirements.
 
+#### 4.4.1 Step-entry policy (INIT-023 TASK-007)
+
+Before INIT-023 only the pull path (`ClaimStep`) checked step-level constraints;
+`AssignStep` bound any actor ID to any step, no binding path looked at
+`execution.mode`, preconditions or run status, and nothing stopped the executor
+of a run from being bound to its review (audit P3-3, P3-4, P3-15, P3-16 and the
+F3 separation-of-duties amplifier). The engine now enforces these through an
+**opt-in** `engine.StepEntryPolicy` with independent switches:
+
+| Switch | Effect |
+|---|---|
+| `EnforceRunStatus` | Assign, claim, acknowledge, result submission, step activation and retry refuse (409) a run that is not `active`; the candidate listing hides such runs; a late submit on an execution terminated with its run answers 409. |
+| `EnforceEligibility` | The actor must exist and be `active` (404 / 403); on assign it must also be in the effective `eligible_actor_ids` list (403) and match `eligible_actor_types` (409). |
+| `EnforceExecutionMode` | Engine-owned steps (`type: internal` or `mode: spine_only`) can never be assigned or claimed (409); `automated_only` / `ai_only` / `human_only` bind only `automated_system` / `ai_agent` / `human` actors (409). |
+| `EnforcePreconditions` | The engine evaluates the step's preconditions at assign and claim (412), strictly ([Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2); activation uses the same strict evaluator, so a failing step stays `waiting` and is not dispatched. |
+| `RequireSkillsOnAssign` | `required_skills` on assign (409; 503 if no skill lookup is wired). |
+| `SeparationOfDuties` | A run author cannot be bound to the run's `review` steps, and a live reviewer cannot take its author steps (403; 503 if the assignment ledger cannot be read) — by assignment, claim or engine auto-selection (which leaves the step `waiting`). The candidate listing does not offer an actor what this rule would refuse. Within a process a run's check and bind are serialised. See [Actor Model](/architecture/actor-model.md) §7.3. |
+| `TerminateStepsOnCancel` | Cancelling or failing a run (including the scheduler's run timeout) moves its live executions to `skipped` / `run_terminated` and cancels their active assignments. Safe only together with `EnforceRunStatus`. |
+
+Checks run in a fixed order and nothing is written before a bind is refused.
+An embedder whose actors are not all rows in Spine's actor table supplies an
+`Actors` resolver. The engine requires its answer to echo the requested actor ID
+exactly, which stops a resolver from mapping one ID to a different identity. It
+cannot tell a canonical handle from a variant the resolver chose to accept, so
+the resolver must also refuse (not found) every input that is not byte for byte
+a stored canonical handle — no case folding, trimming or lenient UUID parsing.
+Only then can no alias of an actor defeat the exact-string separation-of-duties
+and ownership compares. Standalone needs no resolver: actor lookup is an exact
+match on `auth.actors`.
+
+- **Standalone (`spine serve`)** installs `StrictStepEntryPolicy()` (every switch
+  on) by default. `SPINE_STEP_ENTRY_POLICY=legacy` restores the pre-INIT-023
+  behaviour with a startup WARN; any other value refuses to start. With a policy
+  installed the gateway's engine-less step-assign fallback is disabled.
+- **Embedders** get the zero value — today's behaviour — until they call
+  `WithStepEntryPolicy` (SMP adopts it in its TASK-011).
+- `required_skills` becomes a real boundary in standalone only once skill grants
+  are admin-only (INIT-023 TASK-013); until then a contributor can self-grant a
+  skill, but separation of duties still refuses self-review.
+
 ### 4.5 Authorization and Git Operations
 
 When the Artifact Service commits to Git on behalf of an actor:

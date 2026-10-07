@@ -26,9 +26,29 @@ type AssignResult struct {
 }
 
 // AssignStep assigns an actor to the named step execution under the run.
-// Precondition evaluation is the caller's responsibility (the HTTP handler
-// owns the precondition model that was in place before extraction); this
-// method handles the state-machine transition and the exec update.
+//
+// With the zero-value StepEntryPolicy (the default) precondition evaluation
+// and actor eligibility are the caller's responsibility, exactly as before
+// INIT-023: this method handles only the state-machine transition and the
+// exec update, and loads neither the run nor the workflow.
+//
+// When the installed policy gates binding (any entry check on), the engine
+// owns them: it loads the run (and, under EnforceRunStatus, refuses a
+// non-active one before looking for the execution) and the pinned workflow
+// (a step missing from it is ErrNotFound, so the bind fails closed) and runs
+// checkStepEntryActor and checkStepEntryPreconditions before anything is
+// written. The effective allow-list is req.EligibleActorIDs when non-empty,
+// otherwise the stored exec.EligibleActorIDs — the list the call leaves in
+// place. The assigner may therefore replace a stored list with one that
+// admits itself (Owner question 5 default): step.assign is the only writer
+// of the list, so this widens nothing a stronger control granted, and
+// separation of duties applies whatever list is passed.
+//
+// Under SeparationOfDuties the bind write is made inside sodBindSection:
+// check 7 runs once in its place in the order and again under the run's
+// bind stripe, which is held only for that re-check and the write. A caller
+// whose context ends while waiting for the stripe gets ErrUnavailable and
+// nothing is bound.
 func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*AssignResult, error) {
 	if req.ActorID == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "actor_id is required")
@@ -37,9 +57,58 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 		return nil, domain.NewError(domain.ErrInvalidParams, "run_id and step_id are required")
 	}
 
+	gated := o.entryPolicy.gatesBinding()
+	if gated && (o.store == nil || o.wfLoader == nil) {
+		// Only reachable for hand-built &Orchestrator{} values: engine.New
+		// requires both. Refuse rather than nil-dereference or bind unchecked.
+		return nil, domain.NewError(domain.ErrUnavailable, "step-entry policy needs a run store and a workflow loader")
+	}
+
+	// Under a gating policy the run is loaded first and its status checked
+	// before the execution lookup: a run cancelled under
+	// TerminateStepsOnCancel has no live execution left, and the caller
+	// must hear "run R is cancelled" (409), not "no active execution" (404).
+	var (
+		run     *domain.Run
+		wfDef   *domain.WorkflowDefinition
+		stepDef *domain.StepDefinition
+	)
+	if gated {
+		r, err := o.store.GetRun(ctx, req.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("get run: %w", err)
+		}
+		if err := o.requireActiveRun(r, "assigned"); err != nil {
+			return nil, err
+		}
+		run = r
+	}
+
 	exec, err := o.findStepExecution(ctx, req.RunID, req.StepID)
 	if err != nil {
 		return nil, err
+	}
+
+	if gated {
+		wfDef, err = o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+		if err != nil {
+			return nil, fmt.Errorf("load workflow: %w", err)
+		}
+		stepDef = findStepDef(wfDef, req.StepID)
+		if stepDef == nil {
+			return nil, domain.NewError(domain.ErrNotFound,
+				fmt.Sprintf("step %q not found in workflow %s", req.StepID, wfDef.ID))
+		}
+		allow := req.EligibleActorIDs
+		if len(allow) == 0 {
+			allow = exec.EligibleActorIDs
+		}
+		if err := o.checkStepEntryActor(ctx, entryAssign, run, wfDef, stepDef, exec, req.ActorID, allow); err != nil {
+			return nil, err
+		}
+		if err := o.checkStepEntryPreconditions(ctx, run, stepDef); err != nil {
+			return nil, err
+		}
 	}
 
 	// Recovery for pre-Option-B phantom rows: a step persisted as
@@ -67,9 +136,21 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 	if len(req.EligibleActorIDs) > 0 {
 		exec.EligibleActorIDs = req.EligibleActorIDs
 	}
+
+	// SeparationOfDuties: the critical section is only check 7, re-run
+	// under the run's bind stripe, and the write (see sodBindStripes). The
+	// reads above — run, workflow (`git show`), actor resolution, skills,
+	// preconditions — ran without it. A no-op unless the policy sets
+	// SeparationOfDuties.
+	unlock, err := o.sodBindSection(ctx, run, wfDef, stepDef, exec, req.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
+	unlock()
 
 	return &AssignResult{Exec: exec}, nil
 }

@@ -45,6 +45,20 @@ func (o *Orchestrator) AcknowledgeStep(ctx context.Context, req AcknowledgeReque
 			fmt.Sprintf("actor %q is not assigned to step execution %s", req.ActorID, req.ExecutionID))
 	}
 
+	// EnforceRunStatus (INIT-023 TASK-007): no work starts on a run that is
+	// not active. Checked ahead of the idempotent in_progress answer too, so
+	// a runner re-acknowledging on a dead run is told to stop rather than
+	// that it may carry on. The run is loaded only when the flag is on.
+	if o.entryPolicy.EnforceRunStatus {
+		run, err := o.store.GetRun(ctx, exec.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("get run: %w", err)
+		}
+		if err := o.requireActiveRun(run, "acknowledged"); err != nil {
+			return nil, err
+		}
+	}
+
 	// Idempotency: acknowledging an already-in_progress step is a no-op.
 	// The same actor calling acknowledge twice (e.g., after a network retry)
 	// should receive the current state rather than an error.

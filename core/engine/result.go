@@ -34,6 +34,18 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 		return nil, err
 	}
 
+	// EnforceRunStatus (INIT-023 TASK-007): an execution the engine closed
+	// because its run was cancelled or failed answers 409, not the
+	// idempotent terminal response below. That response exists so a
+	// duplicate submit of the same completed outcome is harmless; applied to
+	// a run-terminated execution it would tell a late runner or agent that
+	// its work was accepted (an HTTP 200 where SMP's F12 contract answers
+	// 409 RUN_NOT_ACTIVE). Ordering contract for TASK-008's terminal guard
+	// in this branch: this check stays first.
+	if o.entryPolicy.EnforceRunStatus && isRunTerminated(exec) {
+		return nil, o.runTerminatedConflict(ctx, exec)
+	}
+
 	// Idempotency: if already in a terminal state, return current state.
 	// This prevents corrupting completed/failed steps on resubmission.
 	if exec.Status.IsTerminal() {
@@ -79,6 +91,12 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 	run, err := o.store.GetRun(ctx, exec.RunID)
 	if err != nil {
 		return nil, fmt.Errorf("get run: %w", err)
+	}
+	// EnforceRunStatus (INIT-023 TASK-007): refuse before the
+	// required-outputs failure path below, so a dead run's step is never
+	// failed-and-retried by a late submit.
+	if err := o.requireActiveRun(run, "submitted"); err != nil {
+		return nil, err
 	}
 
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)

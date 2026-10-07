@@ -15,6 +15,7 @@ import (
 
 	"github.com/bszymi/spine/adapters/store"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
+	"github.com/bszymi/spine/core/engine"
 )
 
 func b64Key(t *testing.T) (string, []byte) {
@@ -300,7 +301,7 @@ func TestSharedModePoolConfig_CarriesSecretEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, mode := range []store.SecretEnvelopeMode{store.SecretEnvelopeStrict, store.SecretEnvelopeDowngrade, store.SecretEnvelopeMigrate} {
-		cfg := sharedModePoolConfig(workspaceDeliveryConfig{}, slog.New(slog.DiscardHandler), c, mode, nil, "")
+		cfg := sharedModePoolConfig(workspaceDeliveryConfig{}, slog.New(slog.DiscardHandler), c, mode, nil, "", engine.StrictStepEntryPolicy())
 		if cfg.SecretCipher != c || cfg.SecretEnvelopeMode != mode || cfg.Builder == nil {
 			t.Fatalf("mode %s: pool config does not carry the secret envelope: cipher=%v mode=%q", mode, cfg.SecretCipher == c, cfg.SecretEnvelopeMode)
 		}
@@ -350,7 +351,7 @@ func TestBuildServeWorkspaces_SharedPoolCarriesConfiguredMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", tc.key)
 			t.Setenv("SPINE_SECRET_ENVELOPE_MODE", tc.mode)
-			ws, err := buildServeWorkspaces(ctx, "development", discard, workspaceDeliveryConfig{}, "")
+			ws, err := buildServeWorkspaces(ctx, "development", discard, workspaceDeliveryConfig{}, "", engine.StrictStepEntryPolicy())
 			if err != nil {
 				t.Fatalf("buildServeWorkspaces: %v", err)
 			}
@@ -380,7 +381,7 @@ func TestBuildServeWorkspaces_SharedPoolCarriesConfiguredMode(t *testing.T) {
 	// A bad mode fails start-up before any resolver or pool is built.
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", key)
 	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "bogus")
-	if ws, err := buildServeWorkspaces(ctx, "development", discard, workspaceDeliveryConfig{}, ""); err == nil || ws != nil || !strings.Contains(err.Error(), "SPINE_SECRET_ENVELOPE_MODE") {
+	if ws, err := buildServeWorkspaces(ctx, "development", discard, workspaceDeliveryConfig{}, "", engine.StrictStepEntryPolicy()); err == nil || ws != nil || !strings.Contains(err.Error(), "SPINE_SECRET_ENVELOPE_MODE") {
 		t.Fatalf("bogus mode: %v", err)
 	}
 }

@@ -8,13 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -592,7 +593,7 @@ func TestLoadWorkspaceDeliveryConfig_ReadsAdminToken(t *testing.T) {
 // short-circuits, so this test exercises the gate alone.
 func TestNewPooledWorkspaceBuilder_DeliveryDisabled_NoWiring(t *testing.T) {
 	cfg := workspaceDeliveryConfig{Enabled: false}
-	builder := newPooledWorkspaceBuilder(cfg, observe.Logger(context.Background()))
+	builder := newPooledWorkspaceBuilder(cfg, engine.StrictStepEntryPolicy(), observe.Logger(context.Background()))
 
 	ss := &workspace.ServiceSet{}
 	if err := builder(context.Background(), ss); err != nil {
@@ -612,7 +613,7 @@ func TestNewPooledWorkspaceBuilder_NilStore_SkipsDelivery(t *testing.T) {
 		Enabled:        true,
 		WebhookTargets: delivery.NewTargetValidator(nil),
 	}
-	builder := newPooledWorkspaceBuilder(cfg, observe.Logger(context.Background()))
+	builder := newPooledWorkspaceBuilder(cfg, engine.StrictStepEntryPolicy(), observe.Logger(context.Background()))
 
 	ss := &workspace.ServiceSet{} // no Store, no Events
 	if err := builder(context.Background(), ss); err != nil {

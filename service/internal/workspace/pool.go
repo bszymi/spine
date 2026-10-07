@@ -72,6 +72,9 @@ type ServiceSet struct {
 	CommitRetryFn  func(ctx context.Context, runID string) error
 	StepRecoveryFn func(ctx context.Context, executionID string) error
 	RunFailFn      func(ctx context.Context, runID, reason string) error
+	// RunTerminatedFn closes a timed-out run's live step executions
+	// (INIT-023 TASK-007); mirrors scheduler.ServiceSet.RunTerminatedFn.
+	RunTerminatedFn func(ctx context.Context, runID, message string)
 
 	// RunStarter and PlanningRunStarter hold workspace-scoped run adapters.
 	// Typed as any to avoid a workspace → engine → scheduler → workspace

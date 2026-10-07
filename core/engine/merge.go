@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 )
@@ -457,6 +457,9 @@ func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run,
 	if err := o.store.UpdateRunStatus(ctx, run.RunID, result.ToStatus); err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
+	// TerminateStepsOnCancel (INIT-023 TASK-007): the publish step (and any
+	// other live execution) closes with the run.
+	o.terminateLiveSteps(ctx, run.RunID, "run failed: merge failed permanently")
 
 	o.emitEvent(ctx, domain.EventRunFailed, run.RunID, run.TraceID,
 		fmt.Sprintf("evt-%s-failed", run.TraceID[:12]), nil)

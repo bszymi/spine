@@ -72,6 +72,46 @@ func (s *PostgresStore) ListAssignmentsByActor(ctx context.Context, actorID stri
 	return assignments, rows.Err()
 }
 
+// ListAssignmentsByRunAndActor returns every assignment row, in any status,
+// that one actor holds in one run, newest first. It is the engine's
+// separation-of-duties author ledger (the optional runAssignmentHistory
+// port, INIT-023 TASK-007): ListAssignmentsByActor would load the actor's
+// whole history across all runs on every review bind. Served by
+// idx_assignments_actor (actor_id, status) and idx_assignments_run (run_id);
+// no schema change. Deliberately not part of the AssignmentStore interface:
+// embedders' fakes keep compiling.
+func (s *PostgresStore) ListAssignmentsByRunAndActor(ctx context.Context, runID, actorID string) ([]domain.Assignment, error) {
+	return queryAll(ctx, s.pool, `
+		SELECT assignment_id, run_id, execution_id, actor_id, status, assigned_at, responded_at, timeout_at
+		FROM runtime.actor_assignments WHERE actor_id = $1 AND run_id = $2
+		ORDER BY assigned_at DESC`,
+		[]any{actorID, runID},
+		func(row pgx.Rows, a *domain.Assignment) error {
+			return row.Scan(&a.AssignmentID, &a.RunID, &a.ExecutionID, &a.ActorID, &a.Status, &a.AssignedAt, &a.RespondedAt, &a.TimeoutAt)
+		},
+	)
+}
+
+// CancelActiveAssignmentsForExecution marks every active assignment row of
+// an execution cancelled, stamping responded_at, and returns how many rows it
+// changed. The engine calls it (as the optional activeAssignmentCanceller
+// port, type-asserted on its assignment store) when it terminates a live
+// execution because the run was cancelled or failed (INIT-023 TASK-007).
+// Rows in any other status are left alone, so a repeated call is a no-op
+// that returns 0. Deliberately not part of the AssignmentStore interface:
+// embedders' fakes keep compiling.
+func (s *PostgresStore) CancelActiveAssignmentsForExecution(ctx context.Context, executionID string, at time.Time) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.actor_assignments SET status = 'cancelled', responded_at = $2
+		WHERE execution_id = $1 AND status = 'active'`,
+		executionID, at,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (s *PostgresStore) ListExpiredAssignments(ctx context.Context, before time.Time) ([]domain.Assignment, error) {
 	return queryAll(ctx, s.pool, `
 		SELECT assignment_id, run_id, execution_id, actor_id, status, assigned_at, responded_at, timeout_at

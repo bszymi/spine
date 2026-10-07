@@ -65,6 +65,9 @@ type ServiceSet struct {
 	CommitRetryFn  CommitRetryFunc
 	StepRecoveryFn StepRecoveryFunc
 	RunFailFn      RunFailFunc
+	// RunTerminatedFn closes a timed-out run's live executions
+	// (INIT-023 TASK-007); see WithRunTerminated.
+	RunTerminatedFn RunTerminatedFunc
 }
 
 // NewMultiScheduler creates a scheduler that operates across all active workspaces.
@@ -177,6 +180,9 @@ func (ms *MultiScheduler) forEachWorkspace(ctx context.Context, scanName string,
 		}
 		if ss.RunFailFn != nil {
 			opts = append(opts, WithRunFail(ss.RunFailFn))
+		}
+		if ss.RunTerminatedFn != nil {
+			opts = append(opts, WithRunTerminated(ss.RunTerminatedFn))
 		}
 		sched := New(ss.Store, ss.Events, opts...)
 

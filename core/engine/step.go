@@ -39,6 +39,16 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	if err != nil {
 		return fmt.Errorf("get run: %w", err)
 	}
+	// EnforceRunStatus (INIT-023 TASK-007): no activation, and so no
+	// DeliverAssignment runner dispatch, for a run that is not active.
+	// Engine-internal callers always reach this on an active run
+	// (startRunCommon activates first; the publish merge_failed route-back
+	// sets active before routing); a cancel that lands between a submit and
+	// advanceToNextStep's activation is refused here and leaves an inert
+	// waiting execution behind.
+	if err := o.requireActiveRun(run, "activated"); err != nil {
+		return err
+	}
 
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
 	if err != nil {
@@ -71,7 +81,36 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	exec.ErrorDetail = nil
 
 	actorID := o.tryResolveAutoActor(ctx, exec, stepDef)
+	// SeparationOfDuties: an auto-selected bind holds the run's bind stripe
+	// for its check and its write only, like AssignStep and ClaimStep (see
+	// sodBindStripes); the actor selection above ran without it. A caller
+	// whose context ends while waiting for the stripe gets ErrUnavailable
+	// and the step is left as it was. A no-op unless the policy sets
+	// SeparationOfDuties.
+	unlock := func() {}
+	if actorID != "" && o.entryPolicy.SeparationOfDuties {
+		u, err := o.lockSoDBind(ctx, runID)
+		if err != nil {
+			return err
+		}
+		unlock = u
+		defer u()
+		// Separation of duties also governs engine auto-selection. A
+		// selected run author (or, for an author step, a live reviewer) is
+		// never bound: the step stays waiting, exactly as for "no match",
+		// and a non-author can claim it. actor.SelectionRequest has no
+		// exclusion list, so the engine does not retry with another
+		// candidate. A ledger failure fails closed the same way. Check 7
+		// runs only here, under the stripe: a refusal is not an error, so
+		// there is no check order to keep.
+		if err := o.checkSeparationOfDuties(ctx, run, wfDef, stepDef, exec, actorID); err != nil {
+			log.Info("auto-selected actor refused by separation of duties; step stays waiting",
+				"run_id", runID, "step_id", stepID, "actor_id", actorID, "reason", err.Error())
+			actorID = ""
+		}
+	}
 	if actorID == "" {
+		unlock()
 		// Stay in waiting. Pull-based actors discover via
 		// ListStepExecutions and call /claim; operators bind via
 		// /assign. Either path moves the step out of waiting.
@@ -95,6 +134,9 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
+	// Bound: release the stripe before the assignment record, the runner
+	// dispatch and the events.
+	unlock()
 
 	o.createAutoAssignmentRecord(ctx, exec, runID)
 
@@ -301,6 +343,12 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	run, err := o.store.GetRun(ctx, exec.RunID)
 	if err != nil {
 		return fmt.Errorf("get run: %w", err)
+	}
+	// EnforceRunStatus (INIT-023 TASK-007): the engine funnel for every
+	// submit — IngestResult, the queue consumer and the scheduler's step
+	// recovery callback — never advances a run that is not active.
+	if err := o.requireActiveRun(run, "submitted"); err != nil {
+		return err
 	}
 
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
@@ -757,6 +805,12 @@ func (o *Orchestrator) evaluatePreconditions(ctx context.Context, step *domain.S
 			}
 		case "cross_artifact_valid":
 			if o.validator == nil {
+				if o.entryPolicy.EnforcePreconditions {
+					// Strict evaluation (INIT-023 TASK-007, Owner question 4):
+					// a check that cannot run does not pass.
+					log.Info("cross_artifact_valid precondition failed closed (no validator configured)")
+					return false, nil
+				}
 				log.Info("cross_artifact_valid precondition skipped (no validator configured)")
 				continue
 			}
@@ -781,6 +835,12 @@ func (o *Orchestrator) evaluatePreconditions(ctx context.Context, step *domain.S
 				return false, &result
 			}
 		default:
+			if o.entryPolicy.EnforcePreconditions {
+				// Strict evaluation: an unknown type — including the
+				// documented-but-unimplemented `custom` — fails closed.
+				log.Info("unknown precondition type failed closed", "type", precond.Type)
+				return false, nil
+			}
 			// Unknown precondition types are skipped (forward-compatible).
 			log.Info("unknown precondition type skipped", "type", precond.Type)
 		}
@@ -836,22 +896,25 @@ func (o *Orchestrator) checkArtifactStatus(ctx context.Context, config map[strin
 	return string(art.Status) == config["status"]
 }
 
-// checkFieldPresent verifies an artifact at config["path"] has a non-empty metadata field.
+// checkFieldPresent verifies an artifact at config["path"] has a non-empty
+// front-matter field (see preconditionField for how id/type/title/status are
+// read).
 func (o *Orchestrator) checkFieldPresent(ctx context.Context, config map[string]string, run *domain.Run) bool {
 	art, ok := o.loadPreconditionArtifact(ctx, config, run)
 	if !ok {
 		return false
 	}
-	return art.Metadata[config["field"]] != ""
+	return o.preconditionField(art, config["field"]) != ""
 }
 
-// checkFieldValue verifies an artifact field matches an expected value.
+// checkFieldValue verifies an artifact field matches an expected value (see
+// preconditionField for how id/type/title/status are read).
 func (o *Orchestrator) checkFieldValue(ctx context.Context, config map[string]string, run *domain.Run) bool {
 	art, ok := o.loadPreconditionArtifact(ctx, config, run)
 	if !ok {
 		return false
 	}
-	return art.Metadata[config["field"]] == config["value"]
+	return o.preconditionField(art, config["field"]) == config["value"]
 }
 
 // checkLinksExist verifies an artifact has at least one link of the given type.
@@ -873,6 +936,11 @@ func (o *Orchestrator) checkLinksExist(ctx context.Context, config map[string]st
 // Config supports optional "anchor_type" (defaults to "artifact") and "path" (defaults to run.TaskPath).
 func (o *Orchestrator) checkDiscussionsResolved(ctx context.Context, config map[string]string, run *domain.Run) bool {
 	if o.discussions == nil {
+		if o.entryPolicy.EnforcePreconditions {
+			// Strict evaluation (INIT-023 TASK-007): fail closed.
+			observe.Logger(ctx).Info("discussions_resolved precondition failed closed (no discussion checker configured)")
+			return false
+		}
 		observe.Logger(ctx).Info("discussions_resolved precondition skipped (no discussion checker configured)")
 		return true
 	}

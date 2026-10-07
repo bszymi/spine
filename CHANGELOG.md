@@ -616,6 +616,162 @@ CI that pushes release tags must use an operator token.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-007: step-entry policy)
+
+### Security
+
+- **Engine step-entry policy (audit P3-3, P3-4, P3-15, P3-16; F3 amplifier).**
+  `AssignStep` bound any actor ID to any step; neither binding path looked at
+  `execution.mode`, preconditions or run status; two precondition checks failed
+  open; a cancelled run's live steps stayed bindable and submittable; and the
+  executor of a run could be bound to its own review. The new opt-in
+  `engine.StepEntryPolicy` closes each of these behind its own switch
+  (`EnforceRunStatus`, `EnforceEligibility`, `EnforceExecutionMode`,
+  `EnforcePreconditions`, `RequireSkillsOnAssign`, `SeparationOfDuties`,
+  `TerminateStepsOnCancel`). `spine serve` turns all of them on by default.
+
+### Changed (standalone)
+
+`spine serve` installs `engine.StrictStepEntryPolicy()` unless
+`SPINE_STEP_ENTRY_POLICY=legacy`. Externally visible changes under the default:
+
+- **New env var `SPINE_STEP_ENTRY_POLICY`:** unset or `strict` → strict policy;
+  `legacy` → pre-INIT-023 behaviour with a startup `WARN`; any other value
+  refuses to start. `legacy` is a migration escape hatch and will be removed.
+- **Assign and claim refusals** (`POST /runs/{run_id}/steps/{step_id}/assign`,
+  claim), nothing written on refusal:
+  - `409` run not `active` ("run R is cancelled; a step can only be assigned on
+    an active run"); `409` engine-owned step (`type: internal` / `mode:
+    spine_only`); `409` actor type outside the mode (`automated_only` →
+    `automated_system`, `ai_only` → `ai_agent`, `human_only` → `human`);
+  - `404` unknown actor; `403` suspended or deactivated actor;
+  - assign only: `403` actor outside the effective `eligible_actor_ids`, `409`
+    actor type outside `eligible_actor_types`, `409` "actor missing required
+    skills" (`503` if no skill lookup is wired);
+  - `403` separation of duties ("separation of duties: actor A executed step S of
+    run R and cannot review it"), `503` if the assignment ledger cannot be read;
+  - `412` preconditions not met — now evaluated by the engine at assign and
+    claim, strictly: `custom`/unknown types, `cross_artifact_valid` without a
+    validator and `discussions_resolved` without a checker fail, and
+    `field_value`/`field_present` on `status`, `id`, `type`, `title` read the
+    typed front-matter fields (so `field_value status` can now pass);
+  - a run that is not `active` answers the `409` above even after its live
+    executions were closed with it (the run status is checked before the
+    execution is looked up, so a cancelled run never answers `404 no active
+    execution`).
+- **Strict preconditions also govern step activation.** The same strict
+  evaluator runs when the engine activates a step, so a step whose
+  precondition used to be skipped (a `custom` or unknown type,
+  `cross_artifact_valid` with no validator, `discussions_resolved` with no
+  checker) now stays `waiting` with a precondition failure and is neither
+  dispatched nor auto-assigned — and, since assign and claim evaluate it too,
+  cannot be bound until the condition holds. In the other direction a
+  `field_value`/`field_present` condition on `status`, `id`, `type` or `title`,
+  which could never pass before, now passes when the artifact matches.
+- **Separation of duties also governs engine auto-selection.** When the engine
+  auto-selects an actor for an `automated_only` or `ai_only` step and the
+  selected actor authored the run (for a `review` step) or holds the run's live
+  review (for a `manual`/`automated` step), the step stays `waiting` with an
+  info log ("auto-selected actor refused by separation of duties"); no other
+  candidate is tried, so a non-author must claim it or an operator assign one.
+  A workflow whose only eligible runner or agent also executed an author step
+  stalls at that review.
+- **Separation of duties is serialised per run.** Within one `spine serve`
+  process, two concurrent binds into the same run (assign, claim or
+  auto-selection) run their separation-of-duties check and bind write one after
+  the other, so one actor cannot win a review and an author branch step of the
+  same divergence run by racing two requests. The lock covers only a re-run of
+  that check and the write: workflow loads, actor lookups and precondition git
+  reads happen outside it, so a slow read in one run does not hold up binds in
+  others. A request whose context ends while it waits answers `503` and binds
+  nothing.
+- **Run status:** acknowledge, result submission, step activation and retry on a
+  run that is not `active` answer `409`; the step-execution candidate listing no
+  longer offers executions of non-active runs.
+- **Candidate listing and separation of duties:** `GET /execution/steps` with
+  `actor_id` no longer offers that actor a `waiting` execution its claim would
+  refuse under separation of duties (a review of a run it authored, or an
+  author step of a run whose review it holds). A candidate whose check cannot
+  run (unreadable assignment ledger) stays listed; its claim answers `503`.
+- **Run end:** cancelling, failing (including a permanent merge failure) or
+  timing out a run moves its `waiting`/`assigned`/`in_progress`/`blocked`
+  executions to `skipped` with `error_detail.classification: run_terminated`
+  and cancels their active assignments. A later result submission on such an
+  execution answers `409` (it answered `200` with `status: skipped`); a duplicate
+  submit of a `completed` execution is still idempotent. Executions of runs that
+  ended before the upgrade are not swept; they are refused and hidden.
+- **Gateway assign fallback:** with a policy installed the engine-less store
+  binder is disabled, so an assign with no orchestrator wired answers `503 step
+  assigner not configured` instead of binding unchecked.
+- **Reference workflow:** `workflows/epic-lifecycle.yaml` v1.1 drops execute's
+  `artifact_status: In Progress` precondition, which could never hold mid-run
+  (commit status lands only at merge); the execute step is now bindable.
+- Operators with custom workflows that require, on the run's own artifact, a
+  status an earlier outcome commits must remove that precondition (see
+  `workflow.DeferredStatusPreconditions`) or run with `legacy` while migrating.
+
+### For embedders
+
+- **No behaviour change unless you opt in.** Every new check is guarded by a
+  `StepEntryPolicy` bool; an orchestrator without `WithStepEntryPolicy` runs
+  exactly the previous logic. One nuance: a policy that sets only `Actors`
+  (a resolver) is not "the zero value" — `ClaimStep`'s actor lookup then uses
+  the resolver (`IsZero` ignores `Actors`).
+- **New (additive):** `engine.StepEntryPolicy`, `engine.EntryActorResolver`,
+  `engine.StrictStepEntryPolicy`, `StepEntryPolicy.IsZero`,
+  `(*Orchestrator).WithStepEntryPolicy`, `(*Orchestrator).StepEntryPolicy`,
+  `(*Orchestrator).TerminateLiveSteps`; `workflow.StepTriggerRunTerminated`
+  (`run.terminated`, live → `skipped`); `domain.FailureRunTerminated`
+  (`run_terminated`, not retryable); `workflow.DeferredStatusPreconditions` and
+  `workflow.DeferredStatusPrecondition` (pinned shape: StepID, Index, Type,
+  Status, SetBy); `(*store.PostgresStore).CancelActiveAssignmentsForExecution`;
+  `(*store.PostgresStore).ListAssignmentsByRunAndActor`;
+  `scheduler.WithRunTerminated`, `scheduler.RunTerminatedFunc`,
+  `scheduler.ServiceSet.RunTerminatedFn`. No exported signature changes and no
+  interface gains a method: the SoD ledger reads (`ListAssignmentsByRunAndActor`,
+  falling back to `ListAssignmentsByActor`) and the assignment cancel are
+  optional ports type-asserted on the assignment store; `*store.PostgresStore`
+  provides all three.
+- **Resolver contract:** the `Actors` resolver's answer must have `ActorID`
+  equal to the requested ID, or the bind answers `ErrNotFound`; a
+  `*domain.SpineError` keeps its code (`ErrUnavailable` stays 503); an untyped
+  error becomes `ErrInternal`. The echo check only stops a resolver from
+  answering for a *different* ID. The resolver itself must be canonical: it
+  answers `ErrNotFound` for any input that is not byte for byte a stored actor
+  handle (no case folding, trimming, brace/`urn:` UUID forms or other lenient
+  parsing). A resolver that builds the actor from the requested ID lets a
+  variant of a run author's handle bind as a second identity and defeats
+  separation of duties. The engine passes the requested ID to the resolver
+  unmodified.
+- **Separation-of-duties ledger:** the engine prefers a run-scoped ledger read,
+  `ListAssignmentsByRunAndActor(ctx, runID, actorID)`, type-asserted on the
+  assignment store (`*store.PostgresStore` provides it; one indexed query, no
+  schema change), and falls back to `ListAssignmentsByActor` filtered in memory.
+- **Bind serialisation is per process.** Under `SeparationOfDuties` the engine
+  serialises each run's SoD check and bind write with an in-process lock shared
+  by every orchestrator in the process. Binds made by different processes
+  sharing one database are not serialised; an embedder that runs several
+  replicas with `SeparationOfDuties` on keeps that race (see
+  `KNOWN-LIMITATIONS.md`).
+- **The bind lock is narrow and context-aware.** It is striped by run ID and
+  shared by every orchestrator in the process, so in a multi-tenant embedder
+  unrelated runs of different workspaces can share a stripe. It is held only
+  while check 7 is re-run (the run's executions and the assignment-ledger rows
+  are read again) and the bind is written. Workflow loads, the `Actors`
+  resolver, skill lookups and precondition git reads run before it is taken.
+  The checks themselves still run in the documented order first. A waiter whose
+  context ends gets `ErrUnavailable` wrapping `ctx.Err()`, and nothing is bound.
+  Under `SeparationOfDuties` each assign or claim therefore reads the run's
+  executions and ledger rows twice.
+- **Run gate:** `EnforceRunStatus` refuses every non-`active` status (including
+  `pending`, `paused`, `committing`, `partially-merged`), stricter than a gate
+  that refuses only terminal runs.
+- **`TerminateStepsOnCancel` without `EnforceRunStatus`** logs a `WARN`: the
+  termination write is not atomic against a concurrent bind.
+- `validation.EvaluatePreconditions` is unchanged.
+
+---
+
 ## Spine Core library packaging — dual-target (standalone + embedded)
 
 Disposition: **Option A** — Spine remains available both as a standalone

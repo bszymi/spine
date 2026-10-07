@@ -35,6 +35,7 @@ import (
 	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/adapters/store"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
+	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/service/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
@@ -245,7 +246,7 @@ func TestBuildServeWorkspaces_FileResolverBindsConfiguredMode(t *testing.T) {
 	t009ServeEnv(t, 0x61)
 	t.Setenv("SPINE_WORKSPACE_ID", "ws-srv-file")
 	t.Setenv("SPINE_DATABASE_URL", dsn)
-	ws, err := buildServeWorkspaces(context.Background(), "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "")
+	ws, err := buildServeWorkspaces(context.Background(), "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "", engine.StrictStepEntryPolicy())
 	if err != nil {
 		t.Fatalf("buildServeWorkspaces: %v", err)
 	}
@@ -282,7 +283,7 @@ func TestBuildServeWorkspaces_DBResolverBindsConfiguredMode(t *testing.T) {
 	t009ServeEnv(t, 0x62)
 	t.Setenv("WORKSPACE_RESOLVER", "db")
 	t.Setenv("SPINE_REGISTRY_DATABASE_URL", regDSN)
-	ws, err := buildServeWorkspaces(ctx, "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "")
+	ws, err := buildServeWorkspaces(ctx, "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "", engine.StrictStepEntryPolicy())
 	if err != nil {
 		t.Fatalf("buildServeWorkspaces: %v", err)
 	}
@@ -354,7 +355,7 @@ func TestBuildServeWorkspaces_PlatformBindingBindsConfiguredMode(t *testing.T) {
 	t.Setenv("SPINE_SECRET_PROVIDER", "file")
 	t.Setenv("SPINE_SECRET_FILE_ROOT", root)
 	ctx := context.Background()
-	ws, err := buildServeWorkspaces(ctx, "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "")
+	ws, err := buildServeWorkspaces(ctx, "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "", engine.StrictStepEntryPolicy())
 	if err != nil {
 		t.Fatalf("buildServeWorkspaces: %v", err)
 	}

@@ -184,6 +184,13 @@ type serveDeps struct {
 	// with SPINE_WEBHOOK_ALLOWED_HOSTS (comma-separated) when internal
 	// or localhost destinations are intentional.
 	WebhookTargets *delivery.TargetValidator
+
+	// StepEntryPolicy is the engine step-entry policy installed on the
+	// process-level orchestrator (INIT-023 TASK-007). serveCmd sets it
+	// from SPINE_STEP_ENTRY_POLICY (strict by default); a non-zero
+	// policy also disables the gateway's engine-less step-assign
+	// fallback, which would otherwise bind with no checks at all.
+	StepEntryPolicy engine.StepEntryPolicy
 }
 
 // serveRuntime bundles the ServerConfig with the long-lived background
@@ -348,7 +355,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// same instance pool.PrimaryClient() returns — passing it here
 	// keeps semantics identical to a routed call without expanding
 	// the abstract interface.
-	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, log)
+	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, deps.StepEntryPolicy, log)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Reuses the registry built above so the pool and the orchestrator
 	// resolve through the same authoritative source.
@@ -467,6 +474,11 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		TrustedProxyCIDRs:          deps.TrustedProxyCIDRs,
 		DevMode:                    deps.DevMode,
 		Env:                        deps.RuntimeEnv,
+		// INIT-023 TASK-007: with a step-entry policy installed, the
+		// gateway must not fall back to its engine-less store binder (it
+		// performs none of the policy's checks); a missing orchestrator
+		// answers 503 instead.
+		DisableStepAssignFallback: !deps.StepEntryPolicy.IsZero(),
 	}
 
 	return &serveRuntime{

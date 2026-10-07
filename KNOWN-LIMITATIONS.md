@@ -75,6 +75,46 @@ This document tracks known gaps and deferred functionality.
   matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
   below.
 
+### Step-Entry Checks Are Opt-In for Embedders (and Off Under `legacy`)
+- The engine's step-entry policy (`engine.StepEntryPolicy`, INIT-023 TASK-007) closes audit
+  P3-3 (assign checks no actor constraints), P3-4 (precondition-failed steps stay bindable; two
+  evaluator checks fail open), P3-15 (claim ignores `execution.mode`) and P3-16 (entry points
+  ignore run status; cancel leaves steps live), and adds separation of duties.
+- **The zero value is the pre-INIT-023 behaviour.** An embedder that has not called
+  `WithStepEntryPolicy` (SMP until its TASK-011), and `spine serve` with
+  `SPINE_STEP_ENTRY_POLICY=legacy`, still has all four findings open and no separation of duties.
+  `spine serve` defaults to the strict policy; `legacy` is a logged escape hatch for operators
+  migrating custom workflows and will be removed.
+- **Separation-of-duties residual (accepted, Owner question 6):** `AssignStep` writes no
+  assignment row, so if restart recovery resets an assign-bound execution and a different actor is
+  bound, the first actor leaves no record and is not treated as a run author. Closing it needs an
+  append-only binding ledger (a schema change; follow-up). SoD also cannot see git authorship
+  directly; INIT-023 TASK-016 limits run-branch pushes to the bound actor.
+- **Separation-of-duties bind race across processes:** the SoD check reads state and the bind
+  writes it later. Within one process the engine serialises a run's check-and-bind (an in-process
+  lock shared by every orchestrator, held only while the check is re-run and the bind written), so
+  one actor cannot win a live review and an author branch step of the same divergence run by racing
+  two requests. Processes that share one database are not serialised: an embedder running several
+  replicas with `SeparationOfDuties` on keeps that race (linear workflows are unaffected — the
+  review execution exists only after the author step was submitted). Closing it needs a
+  database-level lock per run around check and bind; TASK-008's per-row compare-and-swap does not,
+  because the two binds write different execution rows.
+- **Actor resolvers must be canonical:** the engine requires an `Actors` resolver to echo the
+  requested ID, which stops it answering for a different identity, but it cannot tell a canonical
+  handle from a variant the resolver chose to accept. A resolver that accepts case, whitespace or
+  alternate UUID spellings of a handle lets the variant bind as a second identity and defeats
+  separation of duties; embedders (SMP TASK-011's `human-<uuid>` resolver) must refuse every
+  non-canonical input. Standalone has no resolver: actor lookup is an exact `auth.actors` match.
+- **Stored data:** runs that were cancelled or failed before the upgrade keep their live
+  executions. They are inert under `EnforceRunStatus` (every entry point refuses them, and the
+  candidate listing hides them); a one-shot sweep is a follow-up.
+- **Not atomic:** run-end termination is a blind write that a concurrent bind can overwrite until
+  INIT-023 TASK-008's compare-and-swap; `EnforceRunStatus` is the backstop.
+- **Status preconditions on the run's own artifact** are evaluated against `main`, where commit
+  status lands only at merge; a precondition requiring a status an earlier outcome commits can
+  never hold mid-run (see `workflow.DeferredStatusPreconditions`). Custom workflows with such a
+  precondition strand under the strict policy until it is removed.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:
