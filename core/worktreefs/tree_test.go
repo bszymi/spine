@@ -611,12 +611,19 @@ func TestTree_UndoRollback(t *testing.T) {
 			t.Error("unrelated file removed")
 		}
 	})
-	// The replacement may get the same inode number (ext4, overlayfs and
-	// tmpfs reuse a freed inode at once), so identity alone is not enough:
-	// Rollback also matches the size and mtime of the version it wrote.
-	for _, repl := range []struct{ name, data string }{
-		{"different size", "someone else"},
-		{"same size", "DATA"},
+	// A file deleted and re-created under the name may get the freed inode
+	// number (ext4, overlayfs and tmpfs reuse one at once) unless the Undo
+	// keeps the created inode allocated (Undo.pin). The "same size and
+	// mtime" row is the replacement a size+mtime match cannot tell apart:
+	// on Linux, with the pin removed, the replacement reuses the inode and
+	// Rollback deletes it.
+	for _, repl := range []struct {
+		name, data string
+		sameMtime  bool
+	}{
+		{"different size", "someone else", false},
+		{"same size", "DATA", false},
+		{"same size and mtime", "DATA", true},
 	} {
 		t.Run("leaves a leaf that was replaced since/"+repl.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -624,12 +631,19 @@ func TestTree_UndoRollback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			created, err := os.Lstat(f.path("gov/new.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Remove(f.path("gov/new.md")); err != nil {
 				t.Fatal(err)
 			}
 			mustWrite(t, f.path("gov/new.md"), repl.data, 0o644)
-			past := time.Unix(1_000_000_000, 0)
-			if err := os.Chtimes(f.path("gov/new.md"), past, past); err != nil {
+			when := time.Unix(1_000_000_000, 0)
+			if repl.sameMtime {
+				when = created.ModTime()
+			}
+			if err := os.Chtimes(f.path("gov/new.md"), when, when); err != nil {
 				t.Fatal(err)
 			}
 			if err := u.Rollback(); err != nil {
@@ -640,6 +654,67 @@ func TestTree_UndoRollback(t *testing.T) {
 			}
 		})
 	}
+	// A failing pre-commit hook may rewrite the staged file in place
+	// before the commit fails (pre-commit-framework fixers do). It is still
+	// the file Create made, so Rollback removes it and the directories it
+	// made; leaving it would turn the caller's retry into already_exists.
+	// Mutation check: matching size and mtime as well as the inode (the
+	// pre-review strict match) leaves gov/a/new.md and gov/a behind.
+	t.Run("removes a leaf modified in place since", func(t *testing.T) {
+		f := newFixture(t)
+		u, err := f.tree.Create("gov/a/new.md", []byte("data"), 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fh, err := os.OpenFile(f.path("gov/a/new.md"), os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fh.WriteString("\nfixed by a hook\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := fh.Close(); err != nil {
+			t.Fatal(err)
+		}
+		later := time.Now().Add(time.Hour)
+		if err := os.Chtimes(f.path("gov/a/new.md"), later, later); err != nil {
+			t.Fatal(err)
+		}
+		if err := u.Rollback(); err != nil {
+			t.Fatalf("Rollback: %v", err)
+		}
+		for _, p := range []string{"gov/a/new.md", "gov/a"} {
+			if exists(f.path(p)) {
+				t.Errorf("%s left behind", p)
+			}
+		}
+	})
+	// A created directory swapped for a same-directory link before
+	// Rollback: the re-walk from the anchor refuses the link, so nothing is
+	// removed through it, and the decoy's empty "c" survives.
+	t.Run("does not follow a created dir swapped for a link", func(t *testing.T) {
+		f := newFixture(t)
+		u, err := f.tree.Create("gov/a/b/c/new.md", []byte("data"), 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustMkdir(t, f.path("gov/a/decoy/c"))
+		if err := os.Rename(f.path("gov/a/b"), f.path("gov/a/b.moved")); err != nil {
+			t.Fatal(err)
+		}
+		f.link(t, "gov/a/b", "decoy")
+		if err := u.Rollback(); err != nil {
+			t.Fatalf("Rollback: %v", err)
+		}
+		if !exists(f.path("gov/a/decoy/c")) {
+			t.Fatal("Rollback removed a directory through the swapped-in link")
+		}
+		// The leaf is removed through the held parent handle, which moved
+		// with b: it is the file Create made.
+		if exists(f.path("gov/a/b.moved/c/new.md")) {
+			t.Error("created leaf left behind")
+		}
+	})
 	t.Run("usable after Tree.Close", func(t *testing.T) {
 		f := newFixture(t)
 		u, err := f.tree.Create("gov/a/new.md", []byte("data"), 0o644)
@@ -1062,6 +1137,32 @@ func countFDs() int {
 	return len(ents)
 }
 
+// TestTree_CreateLeafSwappedBeforePin: a leaf swapped for a same-directory
+// link between the O_EXCL create and the pin is refused (ReasonChanged);
+// the link target is untouched and nothing is left at the name by Create.
+func TestTree_CreateLeafSwappedBeforePin(t *testing.T) {
+	resetHooks(t)
+	f := newFixture(t)
+	mustWrite(t, f.path("gov/victim.md"), "orig", 0o644)
+	testHookBeforeLeafOp = func(op, _ string) {
+		if op != "pin" {
+			return
+		}
+		if err := os.Remove(f.path("gov/new.md")); err != nil {
+			t.Error(err)
+		}
+		f.link(t, "gov/new.md", "victim.md")
+	}
+	u, err := f.tree.Create("gov/new.md", []byte("evil"), 0o644)
+	if u != nil {
+		u.Release()
+	}
+	requireReason(t, err, ReasonChanged, "gov/new.md")
+	if got := readString(t, f.path("gov/victim.md")); got != "orig" {
+		t.Fatalf("link target written: %q", got)
+	}
+}
+
 // TestTree_ReadLeafSwappedForLinkAfterCheck pins ReadFileLimit's post-open
 // identity check: a leaf swapped, after its Lstat, for a same-directory
 // link (which os.Root follows for O_RDONLY) yields no bytes.
@@ -1128,4 +1229,68 @@ func TestTree_WalkSubdirSwappedForLinkMidWalk(t *testing.T) {
 		}
 	}
 	requireReason(t, err, ReasonChanged, "gov")
+}
+
+// TestTree_HandlesBoundedByDepth is I8 for deep paths: a walk holds at most
+// two directory handles at any point, and the Undo a Create returns —
+// which callers keep across git add + git commit — holds at most three
+// descriptors (leaf parent, the anchor above the first created directory,
+// the leaf pin), however many components the path has. Rollback re-opens
+// the levels it needs transiently and leaves nothing open.
+//
+// Mutation check: keeping one handle per component (the pre-review walk)
+// fails both the during-walk and the held-by-Undo bounds.
+func TestTree_HandlesBoundedByDepth(t *testing.T) {
+	const depth = 300
+	comps := make([]string, depth)
+	for i := range comps {
+		comps[i] = "d"
+	}
+	deepDir := strings.Join(comps, "/")
+
+	for _, tc := range []struct {
+		name     string
+		existing bool // the directories exist before Create
+		maxUndo  int64
+	}{
+		{"creates every directory", false, 3},
+		{"directories exist", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetHooks(t)
+			f := newFixture(t)
+			if tc.existing {
+				mustMkdir(t, f.path(deepDir))
+			}
+			baseline := openHandles.Load()
+			var peak int64
+			testHookAfterComponentLstat = func(string, string) {
+				if n := openHandles.Load() - baseline; n > peak {
+					peak = n
+				}
+			}
+			u, err := f.tree.Create(deepDir+"/new.md", []byte("data"), 0o644)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if peak > 2 {
+				t.Errorf("walk held %d handles at once, want <= 2", peak)
+			}
+			if held := openHandles.Load() - baseline; held > tc.maxUndo {
+				t.Errorf("Undo holds %d handles across the commit, want <= %d", held, tc.maxUndo)
+			}
+			if err := u.Rollback(); err != nil {
+				t.Fatalf("Rollback: %v", err)
+			}
+			if got := openHandles.Load(); got != baseline {
+				t.Fatalf("open handles after Rollback: %d, want baseline %d", got, baseline)
+			}
+			if exists(f.path(deepDir + "/new.md")) {
+				t.Fatal("leaf left behind")
+			}
+			if tc.existing != exists(f.path("d")) {
+				t.Fatalf("top directory exists=%v after Rollback, want %v", !tc.existing, tc.existing)
+			}
+		})
+	}
 }

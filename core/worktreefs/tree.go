@@ -32,7 +32,8 @@ var (
 
 	// testHookBeforeLeafOp runs after the walk and the leaf checks, right
 	// before the leaf primitive (O_EXCL open, O_RDONLY open, rename,
-	// unlink).
+	// unlink), and in Create between the O_EXCL open and the pin (op
+	// "pin").
 	testHookBeforeLeafOp func(op, rel string)
 
 	// testHookAfterLeafOpen runs after Create / Replace opened their file;
@@ -134,57 +135,130 @@ func (t *Tree) Close() error {
 
 var errTreeClosed = errors.New("worktreefs: tree is closed")
 
-// walk is the result of a checked descent. dirs[0] is a private duplicate
-// of the tree root's handle; dirs[i] is the handle for the i-th descended
-// component. Every handle in dirs is owned by the walk.
+// walk is the result of a checked descent. It owns at most two directory
+// handles, whatever the depth of the path (I8): cur, the deepest directory
+// descended (for a leaf walk, the leaf's parent), and — only when the walk
+// created directories — anchor, the parent of the shallowest directory it
+// created. Every other handle is closed as soon as the descent has moved
+// past it. An Undo keeps its walk across a whole `git add` + `git commit`,
+// so a path of a couple of thousand components (MaxPathBytes allows ~2 000)
+// must not pin one descriptor per component for that long; rollback
+// re-opens the levels it needs from anchor instead (rollbackDirs). Before
+// the descent first moves below it, anchor is the same handle as cur.
 type walk struct {
-	rel     string
-	leaf    string // final component; "" for a directory walk
-	dirs    []*os.Root
-	created []createdDir // directories this walk made, shallowest first
+	rel    string
+	leaf   string // final component; "" for a directory walk
+	cur    *os.Root
+	anchor *os.Root
+	// below records, from anchor's child down to the deepest component
+	// passed, each component's name, the identity its Lstat saw and
+	// whether this walk created it. Empty while anchor is nil.
+	below []walkedDir
 }
 
-type createdDir struct {
-	parent *os.Root
-	name   string
-	info   fs.FileInfo
+type walkedDir struct {
+	name    string
+	info    fs.FileInfo
+	created bool
 }
 
-func (w *walk) parent() *os.Root { return w.dirs[len(w.dirs)-1] }
+func (w *walk) parent() *os.Root { return w.cur }
 
 func (w *walk) close() {
-	for i := len(w.dirs) - 1; i >= 0; i-- {
-		closeRoot(w.dirs[i])
+	if w.anchor != nil && w.anchor != w.cur {
+		closeRoot(w.anchor)
 	}
-	w.dirs = nil
+	if w.cur != nil {
+		closeRoot(w.cur)
+	}
+	w.anchor, w.cur = nil, nil
+}
+
+// errNotSame reports that a name no longer refers to the directory a walk
+// recorded. Rollback treats it as "not ours any more": left alone.
+var errNotSame = errors.New("worktreefs: not the recorded directory")
+
+// openBound opens name below parent only if it is still the directory
+// described by info: not a link, a directory, and the same inode both at
+// the Lstat and after the open.
+func openBound(parent *os.Root, name string, info fs.FileInfo) (*os.Root, error) {
+	fi, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if isSymlink(fi) || !fi.IsDir() || !os.SameFile(fi, info) {
+		return nil, errNotSame
+	}
+	h, err := openSubRoot(parent, name)
+	if err != nil {
+		return nil, err
+	}
+	hfi, err := h.Stat(".")
+	if err != nil || !os.SameFile(hfi, info) {
+		closeRoot(h)
+		if err != nil {
+			return nil, err
+		}
+		return nil, errNotSame
+	}
+	return h, nil
 }
 
 // rollbackDirs removes, deepest first, every directory this walk created,
-// through the parent handle it was created in. A directory that is no
-// longer the one created, or is not empty, is left alone.
+// through a handle on its parent, and only while it is still the directory
+// created (os.SameFile) and empty. Only anchor is held across the walk, so
+// the parents below it are re-opened here, each bound by openBound to the
+// identity recorded when the walk passed it. A level that is gone or no
+// longer matches ends the re-walk: nothing below it is reachable through
+// the directories this walk made, and the levels above are removed only if
+// they are empty. The re-opened handles are closed before returning; they
+// are transient, never held across a commit.
 func (w *walk) rollbackDirs() error {
+	below := w.below
+	w.below = nil
+	if w.anchor == nil || len(below) == 0 {
+		return nil
+	}
 	var first error
-	for i := len(w.created) - 1; i >= 0; i-- {
-		d := w.created[i]
-		if err := removeIfSame(d.parent, d.name, d.info, false); err != nil && first == nil {
+	// parents[j] is the directory that contains below[j].
+	parents := []*os.Root{w.anchor}
+	defer func() {
+		for _, h := range parents[1:] {
+			closeRoot(h)
+		}
+	}()
+	for _, d := range below[:len(below)-1] {
+		h, err := openBound(parents[len(parents)-1], d.name, d.info)
+		if err != nil {
+			if !errors.Is(err, errNotSame) && !errors.Is(err, fs.ErrNotExist) {
+				first = err
+			}
+			break
+		}
+		parents = append(parents, h)
+	}
+	for j := len(below) - 1; j >= 0; j-- {
+		if !below[j].created || j >= len(parents) {
+			continue
+		}
+		if err := removeIfSame(parents[j], below[j].name, below[j].info); err != nil && first == nil {
 			first = err
 		}
 	}
-	w.created = nil
 	return first
 }
 
 // removeIfSame unlinks name from parent if it is still the file or
-// directory described by info. A directory that is not empty is left in
-// place without an error.
+// directory described by info (os.SameFile: device and inode). A directory
+// that is not empty is left in place without an error.
 //
-// Identity is os.SameFile (device and inode). Inode numbers are reused as
-// soon as a file is unlinked (ext4, overlayfs, tmpfs do so readily), so a
-// file deleted and re-created under the same name can look identical; with
-// strict, the size and modification time must also match the version this
-// package wrote, so a later Rollback never removes someone else's file.
-// Directories are matched loosely: they are only ever removed while empty.
-func removeIfSame(parent *os.Root, name string, info fs.FileInfo, strict bool) error {
+// Identity by inode number is exact only while the inode cannot be freed
+// and its number handed to a new file (ext4, overlayfs and tmpfs reuse a
+// freed number at once). For a created leaf, Undo guarantees that by
+// keeping a descriptor on it open (Undo.pin) until it is resolved.
+// Directories are only ever removed while empty, so a reused directory
+// inode costs at most an empty directory.
+func removeIfSame(parent *os.Root, name string, info fs.FileInfo) error {
 	fi, err := parent.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -193,9 +267,6 @@ func removeIfSame(parent *os.Root, name string, info fs.FileInfo, strict bool) e
 		return err
 	}
 	if !os.SameFile(fi, info) {
-		return nil
-	}
-	if strict && (fi.Size() != info.Size() || !fi.ModTime().Equal(info.ModTime())) {
 		return nil
 	}
 	err = parent.Remove(name)
@@ -209,7 +280,8 @@ func removeIfSame(parent *os.Root, name string, info fs.FileInfo, strict bool) e
 // and I3 on every component and binding each descent to the inode its
 // Lstat saw. With mkdirs it creates missing components (mkdirat never
 // follows a link and fails EEXIST on a planted one) and records them so a
-// failure can remove them again.
+// failure can remove them again. It keeps only the handles walk documents:
+// each intermediate handle is closed once the descent is below it.
 //
 // On error every handle the walk opened is closed and every directory it
 // created is removed before returning.
@@ -221,7 +293,7 @@ func (t *Tree) descend(op, rel string, comps []string, mkdirs bool) (_ *walk, er
 	if err != nil {
 		return nil, relErr(err, ".")
 	}
-	w := &walk{rel: rel, dirs: []*os.Root{start}}
+	w := &walk{rel: rel, cur: start}
 	defer func() {
 		if err != nil {
 			_ = w.rollbackDirs()
@@ -233,17 +305,19 @@ func (t *Tree) descend(op, rel string, comps []string, mkdirs bool) (_ *walk, er
 	prefix := ""
 	for _, c := range comps {
 		prefix = joinRel(prefix, c)
-		cur := w.parent()
+		cur := w.cur
 
 		fi, lerr := cur.Lstat(c)
+		created := false
 		if mkdirs && errors.Is(lerr, fs.ErrNotExist) {
 			merr := cur.Mkdir(c, 0o755)
 			switch {
 			case merr == nil:
 				fi, lerr = cur.Lstat(c)
-				if lerr == nil {
-					w.created = append(w.created, createdDir{parent: cur, name: c, info: fi})
-				}
+				// Only a directory is recorded as ours: if something else
+				// already sits at the name, the check below refuses it and
+				// rollback must not remove it.
+				created = lerr == nil && fi.IsDir() && !isSymlink(fi)
 			case errors.Is(merr, fs.ErrExist):
 				// Lost a race with a concurrent creator, or a link was
 				// planted after the Lstat: re-check what is there now.
@@ -254,6 +328,15 @@ func (t *Tree) descend(op, rel string, comps []string, mkdirs bool) (_ *walk, er
 		}
 		if lerr != nil {
 			return nil, relErr(lerr, prefix)
+		}
+		if created && w.anchor == nil {
+			// The parent of the first directory this walk creates is the
+			// one handle kept besides cur: rollback re-opens the deeper
+			// levels from it.
+			w.anchor = cur
+		}
+		if w.anchor != nil {
+			w.below = append(w.below, walkedDir{name: c, info: fi, created: created})
 		}
 		if !skip {
 			if isSymlink(fi) {
@@ -278,7 +361,11 @@ func (t *Tree) descend(op, rel string, comps []string, mkdirs bool) (_ *walk, er
 			}
 			return nil, relErr(oerr, prefix)
 		}
-		w.dirs = append(w.dirs, next)
+		// Move down. The handle just left is closed unless it is anchor.
+		if cur != w.anchor {
+			closeRoot(cur)
+		}
+		w.cur = next
 		if !skip {
 			// Bind the descent to the inode the Lstat saw. A component
 			// swapped for a link between the Lstat and the OpenRoot is
@@ -456,31 +543,47 @@ func readCapped(f io.Reader, rel string, sizeHint, limit int64) ([]byte, error) 
 	return buf, nil
 }
 
-// Undo reverts a Create. It holds the directory handles the Create walked,
-// so it stays usable after the Tree is closed. Exactly one of Rollback or
-// Release should be called; both are idempotent and nil-safe, so
-// `defer undo.Release()` after an explicit Rollback is safe.
+// Undo reverts a Create. It holds the leaf's parent directory handle, the
+// handle of the parent of the first directory the Create made (if any) and
+// a read-only descriptor on the created file — at most three descriptors
+// whatever the path's depth (I8) — so it stays usable after the Tree is
+// closed. Exactly one of Rollback or Release should be called; both are
+// idempotent and nil-safe, so `defer undo.Release()` after an explicit
+// Rollback is safe.
 type Undo struct {
 	w        *walk
-	leafInfo fs.FileInfo // the created leaf: its identity, and after a successful write its final version
-	strict   bool        // leafInfo is the final version: Rollback also matches size and mtime
+	leafInfo fs.FileInfo // the created leaf's identity (device and inode)
+	// pin is a read-only descriptor on the created leaf, open until the
+	// Undo is resolved. While any descriptor on an inode is open the inode
+	// is not freed, so its number cannot be handed to another file:
+	// os.SameFile against leafInfo then names exactly the file Create
+	// made. A file deleted and re-created under the same name — which
+	// ext4, overlayfs and tmpfs would otherwise give the freed inode
+	// number at once — never matches, and the file Create made still
+	// matches after its content changed in place (a failing pre-commit
+	// hook that rewrites staged files, as pre-commit-framework fixers do).
+	pin *os.File
 }
 
 // Rollback removes the created leaf, then each directory the Create made
-// (deepest first, only while empty), through the held handles, and
-// releases the handles. A leaf or directory that has since been replaced
-// by something else is left alone.
+// (deepest first, only while empty), and releases the handles. A leaf or
+// directory that has since been replaced by something else is left alone;
+// the leaf is matched by identity only (see Undo.pin), so a leaf modified
+// in place is still removed.
 func (u *Undo) Rollback() error {
 	if u == nil || u.w == nil {
 		return nil
 	}
 	var first error
 	if u.leafInfo != nil {
-		first = removeIfSame(u.w.parent(), u.w.leaf, u.leafInfo, u.strict)
+		// Unlinked while the pin is still open, so the identity check and
+		// the unlink both see an inode no other file can have.
+		first = removeIfSame(u.w.parent(), u.w.leaf, u.leafInfo)
 		if first != nil {
 			first = relErr(first, u.w.rel)
 		}
 	}
+	u.unpin()
 	if err := u.w.rollbackDirs(); err != nil && first == nil {
 		first = relErr(err, u.w.rel)
 	}
@@ -494,8 +597,16 @@ func (u *Undo) Release() {
 	if u == nil || u.w == nil {
 		return
 	}
+	u.unpin()
 	u.w.close()
 	u.w = nil
+}
+
+func (u *Undo) unpin() {
+	if u.pin != nil {
+		_ = closeFile(u.pin)
+		u.pin = nil
+	}
 }
 
 // Create writes a new regular file at rel with O_CREAT|O_EXCL (I4),
@@ -504,6 +615,10 @@ func (u *Undo) Release() {
 // failure the leaf and every directory this call made are removed before
 // returning. On success the caller resolves the returned Undo: Rollback
 // when the commit that follows fails, Release otherwise.
+//
+// perm must let the process read the file (the Undo pins it with a
+// read-only descriptor); every caller stages the file with `git add`
+// afterwards, which has to read it anyway.
 func (t *Tree) Create(rel string, data []byte, perm fs.FileMode) (_ *Undo, err error) {
 	w, err := t.walkToLeaf("create", rel, true)
 	if err != nil {
@@ -557,25 +672,44 @@ func (t *Tree) Create(rel string, data []byte, perm fs.FileMode) (_ *Undo, err e
 		_ = parent.Remove(w.leaf)
 		return nil, relErr(serr, w.rel)
 	}
-	u.leafInfo = info
-	final, err := writeAndClose(f, data, "create", w.rel, 0, false)
-	if err != nil {
+	if hook := testHookBeforeLeafOp; hook != nil {
+		hook("pin", w.rel)
+	}
+	// Pin the created inode (see Undo.pin) with a read-only descriptor,
+	// opened through the held parent while f still holds the inode. A leaf
+	// swapped since the O_EXCL create (os.Root follows a same-directory
+	// link for O_RDONLY) fails the SameFile check.
+	pin, perr := openFileIn(parent, w.leaf, os.O_RDONLY, 0)
+	if perr != nil {
+		perr = relErr(perr, w.rel)
+	} else if pfi, e := pin.Stat(); e != nil || !os.SameFile(pfi, info) {
+		_ = closeFile(pin)
+		perr = &PathError{Path: w.rel, Component: w.rel, Reason: ReasonChanged}
+		if e != nil {
+			perr = relErr(e, w.rel)
+		}
+	}
+	if perr != nil {
+		// f still holds the created inode, so this identity check is
+		// exact too.
+		_ = removeIfSame(parent, w.leaf, info)
+		_ = closeFile(f)
+		return nil, perr
+	}
+	u.leafInfo, u.pin = info, pin
+	if err := writeAndClose(f, data, "create", w.rel, 0, false); err != nil {
 		return nil, err
 	}
-	// From here on the caller owns the Undo, possibly across a slow
-	// commit: match the written version, not only the inode (see
-	// removeIfSame).
-	u.leafInfo, u.strict = final, true
 	return u, nil
 }
 
-// writeAndClose writes data to f, optionally fchmods it, and closes it,
-// returning the file's final Stat (taken on the descriptor before Close). f
-// is closed on every path.
-func writeAndClose(f *os.File, data []byte, op, rel string, mode fs.FileMode, chmod bool) (fs.FileInfo, error) {
-	fail := func(err error) (fs.FileInfo, error) {
+// writeAndClose writes data to f, optionally fchmods it, and closes it. f
+// is closed on every path; a Close error is returned (on a network
+// filesystem it can be the only report of a failed write).
+func writeAndClose(f *os.File, data []byte, op, rel string, mode fs.FileMode, chmod bool) error {
+	fail := func(err error) error {
 		_ = closeFile(f)
-		return nil, err
+		return err
 	}
 	if hook := testHookAfterLeafOpen; hook != nil {
 		if err := hook(op, rel); err != nil {
@@ -591,14 +725,10 @@ func writeAndClose(f *os.File, data []byte, op, rel string, mode fs.FileMode, ch
 			return fail(relErr(err, rel))
 		}
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return fail(relErr(err, rel))
-	}
 	if err := closeFile(f); err != nil {
-		return nil, relErr(err, rel)
+		return relErr(err, rel)
 	}
-	return fi, nil
+	return nil
 }
 
 func tempName() (string, error) {
@@ -643,7 +773,7 @@ func replaceIn(w *walk, data []byte, mode fs.FileMode) (err error) {
 			_ = parent.Remove(tmp)
 		}
 	}()
-	if _, err := writeAndClose(f, data, "replace", w.rel, mode, true); err != nil {
+	if err := writeAndClose(f, data, "replace", w.rel, mode, true); err != nil {
 		return err
 	}
 	if hook := testHookBeforeLeafOp; hook != nil {

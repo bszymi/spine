@@ -343,6 +343,42 @@ func TestF5_Create_CommitFailure_RemovesFileAndCreatedDirs(t *testing.T) {
 	}
 }
 
+// AC11 with a failing pre-commit hook that rewrites the staged file before
+// it exits non-zero (pre-commit-framework fixers do this). The file is
+// still the one Create made, so the rollback removes it and the directories
+// it created, and a retry fails the same way instead of with
+// already_exists. Before review round 1 the rollback matched the written
+// size and mtime as well as the inode and left the rewritten file (and its
+// directories) behind; on 61994fe the directories leaked.
+func TestF5_Create_CommitFailure_HookRewritesFile_StillRemoved(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, "governance"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '\\nfixed by a hook\\n' >> governance/a/b/doc.md\nexit 1\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc := f5OpenSvc(repo)
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, err := svc.Create(f5Ctx(""), "governance/a/b/doc.md", f5Doc)
+		f5RequireCode(t, err, domain.ErrGit)
+		for _, p := range []string{"governance/a/b/doc.md", "governance/a/b", "governance/a"} {
+			if _, statErr := os.Lstat(filepath.Join(repo, p)); statErr == nil {
+				t.Fatalf("attempt %d: %s left behind after a failed create", attempt, p)
+			}
+		}
+	}
+	out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("working tree not clean after rollback:\n%s", out)
+	}
+}
+
 // AC11: an Update whose commit fails restores the original bytes and mode
 // (a guard: os.WriteFile on an existing file kept the mode on 61994fe too;
 // the fix must not lose it by replacing through a rename).
