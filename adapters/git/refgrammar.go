@@ -102,6 +102,20 @@ func ValidateBranchName(name string) error {
 	return err
 }
 
+// ValidateShortBranchName is ValidateBranchName for stored
+// configuration such as a repository's default_branch: name must be the
+// SHORT branch name. "refs/heads/<n>" is refused rather than accepted
+// and stored verbatim, so one branch has one spelling (it would
+// otherwise surface as RepositoryMergeOutcome.TargetBranch
+// "refs/heads/main" and never compare equal to "main").
+func ValidateShortBranchName(name string) error {
+	if strings.HasPrefix(name, headsPrefix) {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("branch name %q must be the short name, without %s", name, headsPrefix))
+	}
+	return ValidateBranchName(name)
+}
+
 // ValidateRemoteName reports whether name is acceptable as a remote
 // argument: a configured remote's name, never a URL or an option.
 func ValidateRemoteName(name string) error {

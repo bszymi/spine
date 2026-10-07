@@ -642,10 +642,12 @@ func TestManagerEmptyCodeRepoBaseSkipsContainmentCheck(t *testing.T) {
 // (input guard, P3-36): default_branch reaches git argv for the code
 // repository, so Register and Update refuse anything that is not a git
 // branch name with ErrInvalidParams (HTTP 400 invalid_params), and keep
-// accepting ordinary branch names.
+// accepting ordinary branch names. The value is the SHORT name: a
+// refs/heads/<n> form is refused too (review round 1), as the
+// repositories docs and the runbook say.
 func TestManagerDefaultBranchMustBeABranchName(t *testing.T) {
 	ctx := context.Background()
-	for _, bad := range []string{"--force", "a..b", "HEAD", "x y", "refs/tags/v1", "-x"} {
+	for _, bad := range []string{"--force", "a..b", "HEAD", "x y", "refs/tags/v1", "-x", "refs/heads/main", "refs/heads/release/2026.10"} {
 		mgr, _, _ := newTestManager(t, nil)
 		_, err := mgr.Register(ctx, repository.RegisterRequest{
 			ID: "code-a", Name: "A", DefaultBranch: bad,

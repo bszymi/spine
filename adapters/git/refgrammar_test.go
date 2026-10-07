@@ -488,6 +488,24 @@ func TestRefGrammar_ExportedPredicates(t *testing.T) {
 		if err := git.ValidateBranchName(in); err == nil {
 			t.Errorf("ValidateBranchName(%q) = nil error", in)
 		}
+		if err := git.ValidateShortBranchName(in); err == nil {
+			t.Errorf("ValidateShortBranchName(%q) = nil error", in)
+		}
+	}
+	// ValidateShortBranchName (stored configuration, review round 1):
+	// the short name only; refs/heads/<n> is refused, not normalised.
+	for _, in := range []string{"main", "release/2026.10", "spine/run/x-0a1b2c3d"} {
+		if err := git.ValidateShortBranchName(in); err != nil {
+			t.Errorf("ValidateShortBranchName(%q) = %v", in, err)
+		}
+	}
+	for _, in := range []string{"refs/heads/main", "refs/heads/release/v1"} {
+		if err := git.ValidateBranchName(in); err != nil {
+			t.Errorf("ValidateBranchName(%q) = %v (the Branch class accepts refs/heads/<n>)", in, err)
+		}
+		if err := git.ValidateShortBranchName(in); err == nil {
+			t.Errorf("ValidateShortBranchName(%q) = nil error, want the refs/heads/ form refused", in)
+		}
 	}
 	for _, r := range []string{"origin", "upstream", "a.b-c_d", "x/y"} {
 		if err := git.ValidateRemoteName(r); err != nil {

@@ -45,6 +45,9 @@ var invalidDefaultBranches = []string{
 	"refs/tags/v1",
 	"x y",
 	"0123456789abcdef0123456789abcdef01234567",
+	// default_branch is the SHORT name (review round 1): a refs/heads/
+	// form is refused, not stored verbatim and echoed as TargetBranch.
+	"refs/heads/develop",
 }
 
 // TestDefaultBranchGuard_StartRunRefusesBeforeAnyCodeRepoGit is AC 11
@@ -153,7 +156,7 @@ func TestDefaultBranchGuard_MergeRefusesBeforeAnyCodeRepoGit(t *testing.T) {
 // ordinary default branches still reach the client.
 func TestDefaultBranchGuard_ValidBranchesStillMerge(t *testing.T) {
 	t.Setenv("SPINE_GIT_PUSH_ENABLED", "true")
-	for _, good := range []string{"main", "trunk", "release/2026.10", "refs/heads/develop"} {
+	for _, good := range []string{"main", "trunk", "release/2026.10"} {
 		run := committingRun("run-0a1b2c3d", "spine/run/task-001-x-0a1b2c3d")
 		tracker := &trackingCodeRepoClient{repoID: "code-a"}
 		orch := &Orchestrator{store: &mockRunStore{runs: map[string]*domain.Run{run.RunID: run}}, git: &stubGitOperator{}, events: &mockEventEmitter{}, wfLoader: &stubWorkflowLoader{}}

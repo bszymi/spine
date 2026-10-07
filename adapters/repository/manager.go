@@ -118,10 +118,12 @@ func NewManager(workspaceID string, primary PrimarySpec, catalog CatalogStore, b
 // validateDefaultBranch refuses a default_branch that is not a git
 // branch name (INIT-023 TASK-002, P3-36): the value later reaches `git
 // switch`, `git branch` and `git push` argv for the code repository, so
-// "--force" or "HEAD" must never be stored. The engine re-checks at use
-// time for rows written before this guard.
+// "--force" or "HEAD" must never be stored. It must be the SHORT name:
+// "refs/heads/main" is refused too (one spelling per branch, so the
+// stored value and RepositoryMergeOutcome.TargetBranch read "main"). The
+// engine re-checks at use time for rows written before this guard.
 func validateDefaultBranch(branch string) error {
-	if err := git.ValidateBranchName(branch); err != nil {
+	if err := git.ValidateShortBranchName(branch); err != nil {
 		return domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("default_branch is not a valid branch name: %v", err))
 	}

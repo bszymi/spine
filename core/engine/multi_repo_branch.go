@@ -186,10 +186,11 @@ func (o *Orchestrator) resolveCodeRepoForBranch(ctx context.Context, repoID stri
 			fmt.Sprintf("repository %q has no default_branch configured", repoID))
 	}
 	// P3-36: default_branch becomes `git branch <run> <base>` and a
-	// RefSHA argument. Refuse a non-branch value before the per-repo
-	// client is even built (no clone), so the caller rolls back the
-	// primary run branch and persists no run row.
-	if err := git.ValidateBranchName(repo.DefaultBranch); err != nil {
+	// RefSHA argument. Refuse a non-branch value (or a refs/heads/ form:
+	// default_branch is a short name, the same rule as the repositories
+	// API) before the per-repo client is even built (no clone), so the
+	// caller rolls back the primary run branch and persists no run row.
+	if err := git.ValidateShortBranchName(repo.DefaultBranch); err != nil {
 		return nil, "", defaultBranchInvalid(repoID, err)
 	}
 	client, err := o.repoClients.Client(ctx, repoID)
