@@ -651,3 +651,29 @@ func TestRefShadow_RemoteTrackingBranchIsNeverGuessed(t *testing.T) {
 	}
 	assertEmptyDir(t, tmp)
 }
+
+// TestRefShadow_ReadFileMissIsNotFound pins the review round 1 CHANGELOG
+// entry. With the trailing "--" on `git show` (D3), every ReadFile miss
+// is git's "bad revision '<rev>:<path>'", classified ErrKindNotFound —
+// including a path that exists in the working tree but not at the
+// revision, which git used to report as "exists on disk, but not in"
+// (unclassified, so ErrKindPermanent and HTTP 500 at main; now 404).
+func TestRefShadow_ReadFileMissIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	f := newShadowFixture(t)
+	c := f.client()
+	testutil.WriteFile(t, f.repo, "untracked.md", "on disk only\n")
+	for _, tc := range []struct{ label, ref, path string }{
+		{"missing path at HEAD", "HEAD", "nope.md"},
+		{"missing path at a branch", f.branch, "nope.md"},
+		{"missing path at an object id", f.base, "nope.md"},
+		{"path on disk, not at HEAD", "HEAD", "untracked.md"},
+		{"path on disk, not at an object id", f.base, "untracked.md"},
+	} {
+		_, err := c.ReadFile(ctx, tc.ref, tc.path)
+		wantKind(t, tc.label, err, git.ErrKindNotFound)
+		if err != nil && !strings.Contains(err.Error(), "bad revision") {
+			t.Errorf("%s: %v, want git's \"bad revision\" text", tc.label, err)
+		}
+	}
+}
