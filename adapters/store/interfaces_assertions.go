@@ -1,5 +1,7 @@
 package store
 
+import "github.com/bszymi/spine/core/refadmit"
+
 // Compile-time assertions that *PostgresStore satisfies every
 // role-specific interface in interfaces.go. Adding a method to a role
 // without adding the matching method on PostgresStore produces a
@@ -24,4 +26,14 @@ var (
 	_ DeliveryStore           = (*PostgresStore)(nil)
 	_ SubscriptionStore       = (*PostgresStore)(nil)
 	_ Store                   = (*PostgresStore)(nil)
+)
+
+// The git gateways' ref-class push admission reads runs, executions
+// and divergence branches through refadmit.RunReader (INIT-023
+// TASK-016). Both the concrete store and the union satisfy it with no
+// store-interface change, which is what lets `spine serve` hand either
+// to the admission as is.
+var (
+	_ refadmit.RunReader = (*PostgresStore)(nil)
+	_ refadmit.RunReader = Store(nil)
 )
