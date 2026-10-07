@@ -198,9 +198,12 @@ System operations are administrative and require elevated authorization.
 |-----------|--------|-------------|
 | `actor.add_skill` | Assigns a skill to an actor | Configuring actor skills |
 | `actor.remove_skill` | Removes a skill from an actor | Revoking skills |
+| `skill.create` / `skill.update` / `skill.deprecate` | Edits the skill catalogue | Defining, renaming or retiring skills |
 | `actor.list_skills` | Lists skills assigned to an actor | Viewing actor skills |
 | `actor.find_eligible` | Lists actors eligible for given skill requirements | Discovering who can execute a step |
 | `execution.candidates` | Lists tasks ready for execution, filtered by actor type, skills, blocking status | AI agents and dashboards discovering available work |
+
+Skills are authorization — a workflow step admits an actor by the skill names it holds — so every operation that changes them is **admin-only**: `actor.add_skill`, `actor.remove_skill`, `skill.create`, `skill.update` and `skill.deprecate`. A non-admin actor can never change its own skills; that refusal carries `reason=self_skill_change_forbidden` in the 403 detail. Renaming or deprecating a skill that an active workflow's `required_skills` names answers 409 unless `?force=true` is passed, because both change who is eligible. Both requests re-read the skill right before writing it and answer 409 `conflict` if it was renamed since they first read it; this narrows the window for concurrent admin edits but does not close it — a change committed between the re-read and the write is still overwritten (see `KNOWN-LIMITATIONS.md`, "Skill Eligibility Is Matched by Name"). Grants, removals, renames, deprecations and self-change refusals are audit-logged (as are `actor.create` role-ceiling refusals); other role refusals on these routes are plain 403s with no audit line. Reading skills (`skill.read`, `actor.list_skills`) stays open to readers.
 
 **Endpoint:** `GET /api/v1/execution/candidates`
 
@@ -364,8 +367,10 @@ Authorization is role-based (per [Security Model](/architecture/security-model.m
 | `reader` | All read and query operations |
 | `contributor` | Reader + create/update artifacts, start Runs, submit step results |
 | `reviewer` | Contributor + task governance decisions (accept, reject, cancel, abandon, supersede) |
-| `operator` | Reviewer + system operations, Run cancellation, manual step assignment |
-| `admin` | Full access including actor and token management |
+| `operator` | Reviewer + system operations, Run cancellation, manual step assignment, registering actors with a role strictly below its own |
+| `admin` | Full access including admin and operator actors, the skill catalogue, actor skill grants, and token management |
+
+A non-admin actor can never change its own skills (§3.6).
 
 Additionally, individual workflow steps may require specific **skills** — the Workflow Engine checks these at assignment time, not the Access Gateway.
 

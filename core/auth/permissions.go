@@ -73,14 +73,26 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"system.rebuild":  domain.RoleOperator,
 	"system.validate": domain.RoleAdmin,
 
-	// Actors
+	// Actors. actor.create stays operator, but a non-admin caller may
+	// only register roles strictly below its own (AuthorizeRoleGrant,
+	// INIT-023 TASK-013, audit P3-33).
 	"actor.create": domain.RoleOperator,
 
-	// Skills
-	"skill.create":    domain.RoleContributor,
+	// Actor-skill grants (api-operations.md §3.6). Skills decide who
+	// may approve — every shipped review step names a required skill —
+	// so granting or removing one is admin-only, and a non-admin can
+	// never change its own skills (AuthorizeActorSkillChange). These
+	// replace the routes' former reuse of skill.update (audit F6).
+	"actor.add_skill":    domain.RoleAdmin,
+	"actor.remove_skill": domain.RoleAdmin,
+
+	// Skill catalogue. Create, update (which can rename, moving
+	// eligibility exactly as deprecation does) and deprecate are
+	// admin-only (audit F6); reading stays open to readers.
+	"skill.create":    domain.RoleAdmin,
 	"skill.read":      domain.RoleReader,
-	"skill.update":    domain.RoleContributor,
-	"skill.deprecate": domain.RoleContributor,
+	"skill.update":    domain.RoleAdmin,
+	"skill.deprecate": domain.RoleAdmin,
 
 	// Subscriptions
 	"subscription.create": domain.RoleAdmin,
@@ -119,14 +131,8 @@ func RequiredRole(op Operation) (domain.ActorRole, bool) {
 // that loosens the token path — would otherwise let suspended /
 // deactivated actors slip through.
 func Authorize(actor *domain.Actor, op Operation) error {
-	if actor.Status != domain.ActorStatusActive {
-		return domain.NewErrorWithDetail(domain.ErrForbidden,
-			"actor is not active",
-			map[string]string{
-				"actor_id":     actor.ActorID,
-				"actor_status": string(actor.Status),
-				"operation":    string(op),
-			})
+	if err := requireActive(actor, op); err != nil {
+		return err
 	}
 	required, ok := RequiredRole(op)
 	if !ok {
@@ -139,6 +145,23 @@ func Authorize(actor *domain.Actor, op Operation) error {
 				"required_role": string(required),
 				"actor_role":    string(actor.Role),
 				"operation":     string(op),
+			})
+	}
+	return nil
+}
+
+// requireActive is Authorize's status-class refusal, shared with the
+// identity-authority helpers in grants.go so every exported
+// authorization primitive refuses a non-active actor with the same
+// detail, ahead of any role or reason check.
+func requireActive(actor *domain.Actor, op Operation) error {
+	if actor.Status != domain.ActorStatusActive {
+		return domain.NewErrorWithDetail(domain.ErrForbidden,
+			"actor is not active",
+			map[string]string{
+				"actor_id":     actor.ActorID,
+				"actor_status": string(actor.Status),
+				"operation":    string(op),
 			})
 	}
 	return nil

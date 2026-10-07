@@ -10,18 +10,19 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/service/internal/gateway"
-	scenarioEngine "github.com/bszymi/spine/service/scenariotest/engine"
-	"github.com/bszymi/spine/adapters/secrets"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/service/internal/workspace"
+	scenarioEngine "github.com/bszymi/spine/service/scenariotest/engine"
 )
 
 // State keys for the bootstrap-admin scenario. The bundle in
@@ -85,12 +86,12 @@ func (s *syncBuffer) Reset() {
 //     "internal admin token already configured" DEBUG line is emitted,
 //     same bearer still authenticates.
 //  3. Re-call with rotated token=bar inserts a second auth.tokens row
-//     bound to the same actor; new bearer authenticates immediately
-//     and (per the v0.x deferral on rotation cleanup documented in
-//     bootstrap.go:46-47 + INIT-020/EPIC-002/TASK-001) the OLD bearer
-//     also continues to authenticate. If a future task wires rotation
-//     cleanup the old-bearer expectation flips and this scenario must
-//     update in lockstep.
+//     bound to the same actor; the new bearer authenticates
+//     immediately. Rotation cleanup landed with INIT-023 TASK-013
+//     (audit P3-31): the same call revokes the superseded bootstrap
+//     row, so the OLD bearer now answers 401 and its row carries
+//     revoked_at. This is the Postgres-backed proof that
+//     ListTokensByActor + RevokeToken revoke the right row.
 //
 // AC mapping notes: the task body's "ON CONFLICT (token_hash) DO
 // UPDATE" wording is reconciled here against what actually ships —
@@ -99,15 +100,15 @@ func (s *syncBuffer) Reset() {
 // upsertInternalAdminToken's GetActorByTokenHash early-return. The
 // equivalent mutation target is "remove the early-return for the
 // matching actor in upsertInternalAdminToken" — the second bootstrap
-// then re-attempts CreateToken with the same deterministic token_id
-// (and same UNIQUE token_hash), failing the third step's bootstrap
-// call. Verified manually before checking in: dropping the
+// then re-attempts CreateToken with the same UNIQUE token_hash (the
+// token_id is random since INIT-023 TASK-013, so the hash constraint
+// is the one that fires), failing the second-bootstrap step. Verified manually before checking in: dropping the
 // `actor != nil && actor.ActorID == InternalAdminActorID` early-return
 // fails the second-bootstrap step here.
 func TestBootstrapInternalAdmin_IdempotencyAndRotation(t *testing.T) {
 	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
 		Name:        "bootstrap-admin-idempotency-and-rotation",
-		Description: "Locks BootstrapInternalAdmin's three-state contract: first-create, no-op re-resolve, dual-bearer rotation.",
+		Description: "Locks BootstrapInternalAdmin's three-state contract: first-create, no-op re-resolve, rotation that revokes the superseded bearer.",
 		Steps: []scenarioEngine.Step{
 			setupBootstrapAdminEnv(),
 			firstBootstrap(),
@@ -120,7 +121,7 @@ func TestBootstrapInternalAdmin_IdempotencyAndRotation(t *testing.T) {
 			rotationBootstrap(),
 			assertRotationRowCounts(),
 			driveAuthenticatedRequestExpectingOK(bootstrapBearerRotated, "phase=after-rotation-new-bearer"),
-			driveAuthenticatedRequestExpectingOK(bootstrapBearerInitial, "phase=after-rotation-old-bearer"),
+			driveAuthenticatedRequestExpectingUnauthorized(bootstrapBearerInitial, "phase=after-rotation-old-bearer"),
 		},
 	})
 }
@@ -228,12 +229,14 @@ func assertSingleActorAndTokenAfterFirstBootstrap() scenarioEngine.Step {
 				return fmt.Errorf("token hash bound to %q, want %q",
 					gotActor.ActorID, auth.InternalAdminActorID)
 			}
-			// The deterministic token_id is bootstrap-<first 12 hex of hash>;
-			// pin it so a regression that randomized the ID (and thereby
-			// broke the second-bootstrap idempotency check) would surface.
-			wantTokenID := "bootstrap-" + expectHash[:12]
-			if gotToken.TokenID != wantTokenID {
-				return fmt.Errorf("token_id: got %q, want %q", gotToken.TokenID, wantTokenID)
+			// The token_id is bootstrap-<16 random hex> (INIT-023
+			// TASK-013, audit P3-35): it must not disclose any part of
+			// the bearer's hash to a workspace admin listing tokens.
+			// Idempotency never depended on it — it is keyed on
+			// token_hash (the GetActorByTokenHash early return and the
+			// UNIQUE constraint).
+			if err := assertRandomBootstrapTokenID(gotToken.TokenID, expectHash); err != nil {
+				return err
 			}
 			return nil
 		},
@@ -266,8 +269,8 @@ func secondBootstrapNoOp() scenarioEngine.Step {
 // assertNoRowDuplicationAfterSecondBootstrap is the AC mutation target.
 // If upsertInternalAdminToken's GetActorByTokenHash early-return is
 // removed, the second bootstrap re-attempts CreateToken with the same
-// deterministic token_id and same UNIQUE token_hash, failing on the
-// PK/unique violation — secondBootstrapNoOp would surface the error.
+// UNIQUE token_hash, failing on the unique violation —
+// secondBootstrapNoOp would surface the error.
 // Even if a regression silently swallowed the error, this step would
 // still fire because the row count would change (or the actor row
 // would be re-stamped). Together they cover both the early-return-
@@ -328,11 +331,10 @@ func assertDebugIdempotentLogPresent() scenarioEngine.Step {
 }
 
 // rotationBootstrap drives the third bootstrap with the rotated bearer.
-// Per the v0.x contract the old auth.tokens row is left in place; the
-// new bearer's hash is inserted as a second row bound to the same
-// actor. The log buffer is reset here so a future rotation-cleanup
-// task that adds an info-level "old token revoked" line can be pinned
-// in a follow-up scenario without colliding with this step's noise.
+// The new bearer's hash is inserted as a second row bound to the same
+// actor, and the superseded bootstrap row is revoked in the same call
+// (INIT-023 TASK-013). The log buffer is reset here so this step's
+// output is scoped to the rotation.
 func rotationBootstrap() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "rotation-bootstrap-with-bar",
@@ -350,13 +352,14 @@ func rotationBootstrap() scenarioEngine.Step {
 	}
 }
 
-// assertRotationRowCounts pins the dual-bearer state: still one
-// smp-admin actor, but now two auth.tokens rows — one bound to the
-// initial-bearer hash, one bound to the rotated-bearer hash. Both
-// rows reference smp-admin. A regression that quietly dropped or
-// rebound the old row would surface as a failed lookup against the
-// initial-bearer hash here, before the dual-bearer auth check below
-// even runs.
+// assertRotationRowCounts pins the post-rotation state: still one
+// smp-admin actor and two auth.tokens rows — one bound to the
+// initial-bearer hash, one bound to the rotated-bearer hash, both
+// referencing smp-admin — with the initial-bearer row revoked and the
+// rotated-bearer row live. The row is revoked, not deleted, so the
+// audit trail survives; a regression that dropped or rebound the old
+// row would surface as a failed lookup against the initial-bearer
+// hash here.
 func assertRotationRowCounts() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "assert-rotation-row-counts",
@@ -371,7 +374,7 @@ func assertRotationRowCounts() scenarioEngine.Step {
 
 			oldHash := auth.HashToken(bootstrapBearerInitial)
 			newHash := auth.HashToken(bootstrapBearerRotated)
-			oldActor, _, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, oldHash)
+			oldActor, oldToken, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, oldHash)
 			if err != nil {
 				return fmt.Errorf("GetActorByTokenHash(old): %w", err)
 			}
@@ -379,7 +382,7 @@ func assertRotationRowCounts() scenarioEngine.Step {
 				return fmt.Errorf("old hash bound to %q, want %q",
 					oldActor.ActorID, auth.InternalAdminActorID)
 			}
-			newActor, _, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, newHash)
+			newActor, newToken, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, newHash)
 			if err != nil {
 				return fmt.Errorf("GetActorByTokenHash(new): %w", err)
 			}
@@ -387,7 +390,7 @@ func assertRotationRowCounts() scenarioEngine.Step {
 				return fmt.Errorf("new hash bound to %q, want %q",
 					newActor.ActorID, auth.InternalAdminActorID)
 			}
-			return nil
+			return assertOldRevokedNewLive(oldToken, newToken)
 		},
 	}
 }
@@ -398,8 +401,8 @@ func assertRotationRowCounts() scenarioEngine.Step {
 //
 //   - Phase 1: foo authenticates after first bootstrap.
 //   - Phase 2: foo still authenticates after the no-op re-bootstrap.
-//   - Phase 3: bar authenticates after rotation, AND foo continues to
-//     authenticate (the v0.x dual-bearer contract).
+//   - Phase 3: bar authenticates after rotation (foo is then refused;
+//     see driveAuthenticatedRequestExpectingUnauthorized).
 //
 // /api/v1/system/metrics is the smallest auth-protected endpoint that
 // only requires Operator (smp-admin is RoleAdmin, which satisfies it)
@@ -434,6 +437,72 @@ func driveAuthenticatedRequestExpectingOK(bearer, phase string) scenarioEngine.S
 	}
 }
 
+// driveAuthenticatedRequestExpectingUnauthorized is the rotation
+// counterpart of driveAuthenticatedRequestExpectingOK: the superseded
+// bearer must be refused with 401 once the rotation bootstrap has
+// revoked its row (INIT-023 TASK-013, audit P3-31). Before that task
+// the old bearer kept full admin after a rotation.
+func driveAuthenticatedRequestExpectingUnauthorized(bearer, phase string) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "drive-unauthorized-request-" + phase,
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			env := sc.MustGet(stateBootstrapEnv).(*bootstrapAdminEnv)
+			return expectUnauthorized(sc, env.BaseURL, bearer, "", phase)
+		},
+	}
+}
+
+// expectUnauthorized issues the same GET as the OK helpers and asserts
+// 401. workspaceID is sent as X-Workspace-ID when non-empty.
+func expectUnauthorized(sc *scenarioEngine.ScenarioContext, baseURL, bearer, workspaceID, phase string) error {
+	req, err := http.NewRequestWithContext(sc.Ctx, http.MethodGet, baseURL+"/api/v1/system/metrics", http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build request (%s): %w", phase, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	if workspaceID != "" {
+		req.Header.Set(gateway.WorkspaceHeader, workspaceID)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("issue request (%s): %w", phase, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		return fmt.Errorf("phase %s: bearer=%s got status %d, want 401 (superseded bootstrap bearer must be revoked); body=%s",
+			phase, redactBearer(bearer), resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// assertRandomBootstrapTokenID pins the INIT-023 TASK-013 bootstrap
+// token id shape: "bootstrap-" + 16 hex characters, independent of
+// the bearer's hash.
+func assertRandomBootstrapTokenID(tokenID, bearerHash string) error {
+	if !bootstrapTokenIDPattern.MatchString(tokenID) {
+		return fmt.Errorf("token_id %q does not match %s", tokenID, bootstrapTokenIDPattern)
+	}
+	if strings.Contains(bearerHash, strings.TrimPrefix(tokenID, "bootstrap-")) {
+		return fmt.Errorf("token_id %q discloses part of the bearer hash", tokenID)
+	}
+	return nil
+}
+
+var bootstrapTokenIDPattern = regexp.MustCompile(`^bootstrap-[0-9a-f]{16}$`)
+
+// assertOldRevokedNewLive checks the two rotation rows: the superseded
+// bootstrap row is revoked (not deleted), the current one is live.
+func assertOldRevokedNewLive(oldToken, newToken *domain.Token) error {
+	if oldToken == nil || oldToken.RevokedAt == nil {
+		return fmt.Errorf("old bootstrap token row not revoked after rotation: %+v", oldToken)
+	}
+	if newToken == nil || newToken.RevokedAt != nil {
+		return fmt.Errorf("rotated bootstrap token row missing or revoked: %+v", newToken)
+	}
+	return nil
+}
+
 // redactBearer trims the bearer for error messages so the failure
 // path of a real-deployment-shaped scenario does not echo a full
 // secret to the test log. The local test bearer is synthetic but the
@@ -459,20 +528,21 @@ func redactBearer(bearer string) string {
 //
 // TestBootstrapInternalAdmin_PooledBuilderIdempotencyAndRotation
 // covers the same three-phase contract (first-create, idempotent
-// re-resolve, rotation insertion) but through that production-shaped
+// re-resolve, rotation insertion plus revocation of the superseded
+// row) but through that production-shaped
 // chain end-to-end:
 //
-//   1. workspace.ServicePool with a builder that calls
-//      auth.BootstrapInternalAdmin against the workspace's own
-//      ServiceSet.Store (a per-workspace pgx pool over the same test
-//      Postgres instance the harness uses).
-//   2. Gateway wired with WorkspaceResolver + ServicePool and NO
-//      direct Store/Auth handles, so the auth middleware can only
-//      succeed through the pooled ServiceSet's auth service.
-//   3. Idle "reload" simulated by pool.Evict between requests, so the
-//      next request fans through workspace.Resolve + ServiceSet
-//      construction + builder invocation again — the same chain a
-//      real workspace's idle eviction would re-run.
+//  1. workspace.ServicePool with a builder that calls
+//     auth.BootstrapInternalAdmin against the workspace's own
+//     ServiceSet.Store (a per-workspace pgx pool over the same test
+//     Postgres instance the harness uses).
+//  2. Gateway wired with WorkspaceResolver + ServicePool and NO
+//     direct Store/Auth handles, so the auth middleware can only
+//     succeed through the pooled ServiceSet's auth service.
+//  3. Idle "reload" simulated by pool.Evict between requests, so the
+//     next request fans through workspace.Resolve + ServiceSet
+//     construction + builder invocation again — the same chain a
+//     real workspace's idle eviction would re-run.
 //
 // AC bait (TASK-035 AC #1): reverting any link in that chain breaks
 // the HTTP authentication assertion. Verified manually for two
@@ -487,7 +557,7 @@ func redactBearer(bearer string) string {
 func TestBootstrapInternalAdmin_PooledBuilderIdempotencyAndRotation(t *testing.T) {
 	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
 		Name:        "bootstrap-admin-pooled-idempotency-and-rotation",
-		Description: "Locks BootstrapInternalAdmin's three-state contract end-to-end through the production-shaped WorkspaceResolver + ServicePool + builder chain.",
+		Description: "Locks BootstrapInternalAdmin's three-state contract (first-create, idempotent re-resolve, rotation that revokes the superseded bearer) end-to-end through the production-shaped WorkspaceResolver + ServicePool + builder chain.",
 		Steps: []scenarioEngine.Step{
 			setupPooledBootstrapAdminEnv(bootstrapBearerInitial),
 			drivePooledAuthenticatedRequestExpectingOK(bootstrapBearerInitial, "phase=first"),
@@ -499,7 +569,7 @@ func TestBootstrapInternalAdmin_PooledBuilderIdempotencyAndRotation(t *testing.T
 			rotatePooledAdminTokenTo(bootstrapBearerRotated),
 			resetPooledLogBufAndEvictWorkspace(),
 			drivePooledAuthenticatedRequestExpectingOK(bootstrapBearerRotated, "phase=after-rotation-new-bearer"),
-			drivePooledAuthenticatedRequestExpectingOK(bootstrapBearerInitial, "phase=after-rotation-old-bearer"),
+			drivePooledAuthenticatedRequestExpectingUnauthorized(bootstrapBearerInitial, "phase=after-rotation-old-bearer"),
 			assertRotationRowCountsAfterPooledBootstrap(),
 		},
 	})
@@ -698,11 +768,21 @@ func assertSingleActorAndTokenAfterPooledFirstBootstrap() scenarioEngine.Step {
 				return fmt.Errorf("token hash bound to %q, want %q",
 					gotActor.ActorID, auth.InternalAdminActorID)
 			}
-			wantTokenID := "bootstrap-" + expectHash[:12]
-			if gotToken.TokenID != wantTokenID {
-				return fmt.Errorf("token_id: got %q, want %q", gotToken.TokenID, wantTokenID)
-			}
-			return nil
+			return assertRandomBootstrapTokenID(gotToken.TokenID, expectHash)
+		},
+	}
+}
+
+// drivePooledAuthenticatedRequestExpectingUnauthorized is the pooled
+// counterpart of driveAuthenticatedRequestExpectingUnauthorized: after
+// the rotated builder run, the superseded bearer answers 401 through the
+// production-shaped WorkspaceResolver + ServicePool chain.
+func drivePooledAuthenticatedRequestExpectingUnauthorized(bearer, phase string) scenarioEngine.Step {
+	return scenarioEngine.Step{
+		Name: "pooled-drive-unauthorized-request-" + phase,
+		Action: func(sc *scenarioEngine.ScenarioContext) error {
+			env := sc.MustGet(statePooledBootstrapEnv).(*pooledBootstrapAdminEnv)
+			return expectUnauthorized(sc, env.BaseURL, bearer, pooledWorkspaceID, phase)
 		},
 	}
 }
@@ -806,12 +886,11 @@ func rotatePooledAdminTokenTo(newToken string) scenarioEngine.Step {
 
 // assertRotationRowCountsAfterPooledBootstrap mirrors
 // assertRotationRowCounts for the pool-backed scenario: the rotated
-// bootstrap must leave the initial-bearer hash row intact and add a
-// second row bound to the same smp-admin actor. The two HTTP requests
-// preceding this step (new bearer then old bearer, both expecting 200)
-// already proved the dual-bearer contract authenticates end-to-end;
-// this step pins the underlying row shape so a regression that swapped
-// row-counts for an unrelated assertion would still surface.
+// bootstrap keeps the initial-bearer hash row (revoked, not deleted)
+// and adds a live second row bound to the same smp-admin actor. The
+// two HTTP requests preceding this step (new bearer 200, old bearer
+// 401) already proved the rotation end-to-end; this step pins the
+// underlying row shape.
 func assertRotationRowCountsAfterPooledBootstrap() scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "assert-rotation-row-counts-after-pooled-bootstrap",
@@ -826,7 +905,7 @@ func assertRotationRowCountsAfterPooledBootstrap() scenarioEngine.Step {
 
 			oldHash := auth.HashToken(bootstrapBearerInitial)
 			newHash := auth.HashToken(bootstrapBearerRotated)
-			oldActor, _, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, oldHash)
+			oldActor, oldToken, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, oldHash)
 			if err != nil {
 				return fmt.Errorf("GetActorByTokenHash(old): %w", err)
 			}
@@ -834,7 +913,7 @@ func assertRotationRowCountsAfterPooledBootstrap() scenarioEngine.Step {
 				return fmt.Errorf("old hash bound to %q, want %q",
 					oldActor.ActorID, auth.InternalAdminActorID)
 			}
-			newActor, _, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, newHash)
+			newActor, newToken, err := sc.Runtime.Store.GetActorByTokenHash(sc.Ctx, newHash)
 			if err != nil {
 				return fmt.Errorf("GetActorByTokenHash(new): %w", err)
 			}
@@ -842,7 +921,7 @@ func assertRotationRowCountsAfterPooledBootstrap() scenarioEngine.Step {
 				return fmt.Errorf("new hash bound to %q, want %q",
 					newActor.ActorID, auth.InternalAdminActorID)
 			}
-			return nil
+			return assertOldRevokedNewLive(oldToken, newToken)
 		},
 	}
 }

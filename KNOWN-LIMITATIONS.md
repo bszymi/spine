@@ -412,6 +412,58 @@ The following limitations have been resolved:
 - The same fail-closed refusal applies when two workspaces share one runtime database, or a workspace
   id changes without the documented `downgrade` procedure (`docs/integration-guide.md` §2.1).
 
+### Platform Bootstrap Bearer (`SMP_ADMIN_TOKEN`) Rotation
+- **Behaviour (INIT-023 TASK-013):** the first load of a workspace after a restart with a new
+  `SMP_ADMIN_TOKEN` revokes the previous bootstrap bearer there (only `bootstrap-…` rows of
+  `smp-admin` created before the replica started; admin-minted `tok_…` tokens are kept).
+  Revocation is never undone.
+- **Not zero-downtime:** platform requests that still carry the old bearer get 401 from each
+  workspace's first load after the Spine restart until the platform switches. Switch both in one
+  change window (`docs/operator-runbook.md` §5.6). A two-phase `SMP_ADMIN_TOKEN_PREVIOUS` grace
+  is a recorded follow-up (TASK-013 owner question 2).
+- **Rollout residues:** rows are ordered by time, which cannot tell a stale bearer re-inserted
+  late from a newer one. Both residues are confined to workspaces first loaded during a
+  rotation's rollout (a row for one bearer and none for the other); only bearer generation
+  numbers would remove them (owner question 5), and the default accepts them.
+  - *Restart during the rollout:* an old-config replica that restarts mid-rollout and then loads
+    such a workspace revokes the *new* bearer there. Recovery is to rotate forward to a fresh
+    value.
+  - *Old bearer inserted after the new one:* if a new-config replica seeds the new bearer first
+    and a replica still carrying the old bearer (an old-config replica, or pre-upgrade code during
+    the upgrade rollout) then loads the workspace, the old bearer's row is newer than the new
+    one's. No replica carrying the new bearer revokes it, restarts included, so the **old bearer
+    stays valid until the next rotation**. Only a replica that started after that row was
+    written logs it at Warn (with the row's `token_id`), on each load of such a workspace. A
+    replica already running when the row was written cannot tell it from a rollout still in
+    progress and stays quiet on every load, idle-eviction reloads included, so the Warn appears
+    only once every replica is restarted after the rollout. Revoke the named row with
+    `DELETE /api/v1/tokens/{token_id}` (runbook §5.6 (e)).
+- **A failed bootstrap leaves the old bearer live until a retry succeeds:** `spine serve`
+  retries a failed admin bootstrap in the background (from 1s, up to 1 min apart) for as long as
+  the workspace stays loaded; each failure is logged at Error.
+- **Clock dependence:** rows are ordered by the `created_at` the inserting replica stamps, so the
+  rollout cutoff assumes replica clocks agree to well within the deploy's duration.
+- **Legacy token ids:** bootstrap rows written before TASK-013 keep their
+  `bootstrap-<sha256(bearer)[:12]>` id (listable by a workspace admin, printed at Debug on each
+  load) until the next rotation revokes them. Rotate once after upgrading.
+- **Unsetting `SMP_ADMIN_TOKEN`** stops seeding but does not revoke the existing bootstrap row;
+  revoke it with `DELETE /api/v1/tokens/{token_id}`.
+
+### Skill Eligibility Is Matched by Name
+- Workflow `required_skills` and claim-time eligibility match skill *names*, not ids. Since
+  INIT-023 TASK-013 every operation that can move eligibility (granting, removing, creating,
+  renaming, deprecating) is admin-only, a non-admin can never change its own skills, and a rename
+  or deprecation that touches a name an active workflow requires needs `?force=true`. Matching by
+  immutable `skill_id` is a deferred follow-up (a governed workflow-format change).
+- The rename and deprecation guards scan **active** workflow projections only; a run pinned to a
+  superseded workflow version that names the skill is not detected.
+- `auth.actor_skills` records no grantor, so grants made by non-admins before the upgrade are not
+  distinguishable. Review `review`, `workflow_review` and `architecture` holders after upgrading.
+- `PATCH /skills/{id}` and `POST /skills/{id}/deprecate` are read-modify-write. They re-read the
+  skill right before writing (a rename in between is a 409), but a change another admin commits
+  between that re-read and the write is still overwritten. Closing the window needs a
+  conditional `UPDATE` in the store (a follow-up).
+
 ## Architecture Deviations
 
 ### Convergence Evaluation Step

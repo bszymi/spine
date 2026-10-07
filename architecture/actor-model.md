@@ -96,6 +96,7 @@ On success, the step transitions to `assigned` and an assignment record is creat
 - Actor IDs are stable and never reused
 - Actor type is set at registration and cannot be changed (create a new actor record instead)
 - Role and skills may be updated by an admin
+- `actor.create` is an operator operation, capped: a non-admin may register only roles strictly below its own (an operator can register reader, contributor and reviewer actors; only an admin can register operator or admin actors). An unknown role is refused
 - Deactivated actors cannot authenticate or be assigned to steps
 
 ### 3.3 Why Actors Are Not Git Artifacts
@@ -305,6 +306,8 @@ active → deactivated (permanent, cannot be reactivated)
 | `active` | Yes | Yes | Continue normally |
 | `suspended` | No | No | In-progress assignments remain; no new assignments |
 | `deactivated` | No | No | In-progress assignments are reassigned or failed |
+
+The platform bootstrap admin (`smp-admin`, seeded from `SMP_ADMIN_TOKEN` on every workspace load) follows the same lifecycle: the bootstrap heals its name and role but never re-activates a suspended or deactivated `smp-admin`, so suspending it is an effective incident-response control. An empty or unknown status is still healed to `active`.
 
 ### 7.2 Availability
 

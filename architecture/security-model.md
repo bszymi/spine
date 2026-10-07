@@ -129,8 +129,10 @@ Spine v0.x uses a role-based authorization model. Roles are assigned to actors, 
 | `reader` | Read artifacts, query projected state, view Runs and execution history |
 | `contributor` | Reader + create/update artifacts, submit step results, start Runs |
 | `reviewer` | Contributor + approve/reject tasks, execute governance steps |
-| `operator` | Reviewer + system operations (projection rebuild, health checks, Run cancellation) |
-| `admin` | Full access including actor management, token management, and configuration |
+| `operator` | Reviewer + system operations (projection rebuild, health checks, Run cancellation), and registering actors with a role strictly below its own |
+| `admin` | Full access including actor management (admin and operator actors included), the skill catalogue, actor skill grants, token management, and configuration |
+
+A non-admin actor can never change its own skills. Skills decide who may claim review and approval steps, so creating, updating, renaming or deprecating a skill and granting or removing an actor's skill are admin-only, and the actor-skill routes refuse a non-admin caller targeting itself with `reason=self_skill_change_forbidden` (INIT-023 TASK-013).
 
 ### 4.2 Role Hierarchy
 

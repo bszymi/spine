@@ -2,12 +2,12 @@
 id: TASK-013
 type: Task
 title: "Admin-only skill management, actor role ceiling, and bootstrap-admin token hygiene"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -274,7 +274,9 @@ func AuthorizeRoleGrant(caller *domain.Actor, granted domain.ActorRole) error
 > - **Sinks.** A grep of non-test Go in Spine finds no writer of `auth.skills`,
 >   `auth.actor_skills` or `auth.actors` beyond the three handlers this task changes,
 >   `core/actor/service.go` (no non-test caller of `AddSkill`/`RemoveSkill`) and the bootstrap.
-> - **API surface.** `PATCH /skills` has no status field, so there is no un-deprecate path. No
+> - **API surface.** `PATCH /skills` has no status field, so there is no un-deprecate path
+>   (*review-round-1 correction:* except a PATCH racing a deprecation, which wrote the stale status
+>   back; both handlers now re-read before writing, see Implementation Notes, Review round 1). No
 >   actor role or status update route exists. The `api/spec.yaml` contract does not cover these
 >   routes.
 > - **Claim-side check.** It is live in standalone, because `WithBlockingStore(ss.Store)` is wired
@@ -412,6 +414,27 @@ func AuthorizeRoleGrant(caller *domain.Actor, granted domain.ActorRole) error
     `SupersededBefore: cfg.ProcessStart` at `:239-241`.
   - The error policy at `:246-251` is unchanged. A revocation error is logged and swallowed like
     any non-collision error.
+
+> **Review-round-1 note (2026-10-07): two corrections to this section.**
+> - **The residue bound above is right only for one ordering.** It holds when the old bearer's row
+>   is seeded first (old replica, then new replica). In the reverse order — a new-config replica
+>   seeds the new bearer B first, then a replica still carrying A (an old-config replica, or
+>   pre-upgrade code during the upgrade rollout) loads the same workspace and inserts A — A's row
+>   is *newer* than B's. The "not after the current row" rule then spares A on every later load by
+>   a B-carrying replica, restarts included, so **A stays valid until the next rotation**, not
+>   until the next new-config restart. Time ordering cannot tell that row from a newer bearer
+>   (owner question 5), so it is still never revoked; the sweep now logs it at Warn with its
+>   token id once no rollout explains it (no cutoff, or created before the cutoff), and runbook
+>   §5.6 (e) says how to find and revoke it. Reproduced by the review with an overlay probe and
+>   pinned by `TestBootstrapSecurity_StaleBearerInsertedAfterCurrentIsFlagged`.
+>   *Review-round-2 correction:* "created before the cutoff" means, in `spine serve`, only a
+>   replica that **started after** A's row was written logs it. A replica already running then
+>   sees the same data as a rollout in progress and stays quiet on every reload, idle eviction
+>   included, so the docs tell operators to restart every replica once after a rolling rotation.
+> - **"Logged and swallowed" no longer means "retried on the next load".** The pooled builder runs
+>   only when a `ServiceSet` is rebuilt, so a busy workspace may never re-run the sweep before a
+>   restart. `bootstrapInternalAdmin` now retries a failed bootstrap in the background until it
+>   succeeds or the `ServiceSet` closes (see Implementation Notes, Review round 1).
 
 > **Design-check note (2026-10-06): rotation is no longer zero-downtime.** Today, rotation adds
 > the new row and keeps the old one, so the platform can switch bearers at any time after Spine
@@ -1176,3 +1199,408 @@ Neither repository was modified. The designer's text is kept, and each change is
     before the upgrade, because no grantor is recorded.
 
 ## Implementation Notes
+
+Implemented on branch `init/INIT-023-TASK-013-identity-and-skill-authority`, from Spine local
+`main` `ee3c249` (origin `61994fe` + the INIT-023 scaffold + merged TASK-001). No SMP file was
+changed. The orchestrator closes the task after merge.
+
+### Orchestrator rulings and owner-question defaults
+
+The owner questions take their defaults, recorded here **pending the owner**:
+
+| Question | Default implemented |
+|---|---|
+| OQ1 `actor.create` role | Stays `operator`, capped by the strictly-below ceiling (`AuthorizeRoleGrant`). |
+| OQ2 rotation grace | Immediate revocation on the first load after rotation. The runbook's "switch together" step (§5.6 (a)) covers the 401 window. The opt-in `SMP_ADMIN_TOKEN_PREVIOUS` two-phase rotation is a **recorded follow-up**, not built. |
+| OQ3 strength gate outside production | Warn only; only `SPINE_ENV=production` refuses to start. |
+| OQ4 rename guard | An admin rename of a skill whose old or new name an active workflow references answers 409 unless `?force=true`; renames are audited (`skill_renamed`). |
+| OQ5 restart-during-rollout residue | Accepted and documented (runbook §5.6 (b), KNOWN-LIMITATIONS, CHANGELOG); the recovery is to rotate forward. |
+
+Orchestrator ruling on SMP: SMP seeds `smp-admin` through `auth.BootstrapInternalAdmin`, so the
+compatibility gate below proves SMP's provisioning seed path and its gated DB suites still pass.
+
+### What was built
+
+| Area | Change |
+|---|---|
+| `core/auth/permissions.go` | `skill.create`, `skill.update`, `skill.deprecate` → admin; new `actor.add_skill`, `actor.remove_skill` (admin). `actor.create` and `skill.read` unchanged. `Authorize`'s status refusal moved into `requireActive` (identical behaviour), shared with the new helpers. |
+| `core/auth/grants.go` (new) | `ReasonSelfSkillChange`, `ReasonRoleCeiling`, `AuthorizeActorSkillChange` (status → self check for non-admins → role map) and `AuthorizeRoleGrant` (status → unknown/empty granted role refused for everyone → admin any → others strictly below). Both refuse a nil caller. Imports only `core/domain`. |
+| `core/auth/bootstrap.go` | `BootstrapAdminConfig.SupersededBefore`; status preservation for suspended/deactivated `smp-admin` (Warn; empty/unknown status still healed); `upsertInternalAdminToken` returns the current row, refuses a revoked current row (Error log, no sweep, nil); `revokeSupersededAdminTokens` (§7 rules, not-found skipped, other errors wrapped with the token id, Info log + `bootstrap_admin_token_revoked` audit); random `bootstrap-<16 hex>` ids. Doc comment rewritten. |
+| `service/internal/gateway/authz_identity.go` (new) | `authorizeActorSkillChange` (dev mode → `authorize()`; self refusal audited as `actor_skill_change_refused`), `actorIDParam` (decode-once, 400 `invalid_params` on a malformed escape), `errorReason`. |
+| `handlers_actor_skills.go` | Assign/remove use `actor.add_skill` / `actor.remove_skill` with the decoded id for authorization and the store call; `actor_skill_added` / `actor_skill_removed` audits. |
+| `handlers_skills.go` | Rename guard (both names, 409 + hint unless `?force=true`, deduplicated workflow list), `skill_renamed` and `skill_deprecated` audits. |
+| `handlers_actors.go` | Ceiling via `AuthorizeRoleGrant` after the role parse, before the id is generated; `actor_create_refused` / `actor_created` audits. |
+| `service/cmd/spine` | `validateSMPAdminToken` (32-char and 8-distinct-byte floor; production error, otherwise warning; never echoes the token) called in `serveCmd` right after the dev-mode guard; `workspaceDeliveryConfig.ProcessStart` set at boot and passed as `SupersededBefore` in `bootstrapInternalAdmin`. |
+| Docs | `security-model.md` §4.1, `api-operations.md` §3.6/§6, `actor-model.md` §3.2/§7.1, `integration-guide.md` (role list, skills paragraph, `SMP_ADMIN_TOKEN` env row), `operator-runbook.md` §5.6 (steps 1-4, (a)-(d), failure modes), README startup gates, KNOWN-LIMITATIONS (rotation window/residue/clock dependence/legacy ids/unset; name-based skill matching and guard scope; reviewing pre-upgrade grants, which record no grantor), CHANGELOG (every §12 row and design-check row, both upgrade notes, embedder section). |
+
+Commits (all prefixed `INIT-023 EPIC-004 TASK-013:`): `288dc9d` inert plumbing + red tests;
+`6cb6708` core/auth; `57906ff` gateway; `f48e172` spine serve; `a4f8759` docs; then this notes
+commit.
+
+### Red before green
+
+`288dc9d` is the inert-plumbing commit (constants, `AuthorizeActorSkillChange` = `Authorize`,
+`AuthorizeRoleGrant` = nil, `SupersededBefore` stored/unread, `ProcessStart` unset,
+`validateSMPAdminToken` = `("", nil)`, `setupSkillServerAdmin`) plus every test. On it,
+`go test ./core/auth/ ./service/internal/gateway/ ./service/cmd/spine/` had exactly **26 failing
+tests, all new or lockstep-updated**, and no pre-existing test failed:
+
+- AC 1-6: `TestSkillAuthority_ContributorCannotEscalate`, `…_SelfGrantedReviewChainBlocked`,
+  `…_NonAdminSelfChangeHasDistinctReason`, `…_AdminManagesSkills`,
+  `…_ReferencedSkillDeprecateAndRenameNeedForceAndAreAudited`, `TestActorCreate_RoleCeiling`.
+- AC 7: `TestAuthorizeActorSkillChange_Matrix`, `…_NilCallerFailsClosed`,
+  `TestAuthorizeRoleGrant_Matrix`, `…_UnknownRoleRefusedForEveryCaller`, `…_InactiveCaller`,
+  `…_NilCallerFailsClosed`, `TestSkillAndGrantOperationsAreAdminOnly`.
+- AC 8-11, 21: `TestBootstrapSecurity_RotationRevokesOldBearer`, `…_TokenIDIndependentOfBearer`,
+  `…_DoesNotResurrectDeactivatedAdmin`, `…_KeepsSuspendedAdminSuspended`,
+  `…_RevokedCurrentBearerStaysRevoked`, `…_CutoffStillRevokesRowsBeforeIt`,
+  `…_RevocationErrorPaths`; lockstep `TestBootstrapInternalAdmin_CreatesActorAndToken`,
+  `…_HealsStaleActor`, `…_RotatedTokenInsertsNewRow`.
+- AC 12 wiring and AC 14: `TestBootstrapInternalAdmin_RevokesOnlyRowsBeforeProcessStart`,
+  `TestValidateSMPAdminToken`, `TestServeRefusesWeakSMPAdminTokenInProduction`.
+- The bootstrap scenarios (AC 16) failed on the stub against Postgres (`token_id … does not match`).
+
+New tests that pass on the stub, as designed: `TestBootstrapSecurity_OldReplicaCannotRevokeNewerBearer`
+(AC 12) and `TestBootstrapSecurity_AdminMintedTokensSurviveRotation` (AC 13), the
+over-revocation guards; `TestBootstrapSecurity_HealsEmptyStatusToActive` (AC 10), the
+over-preservation guard; plus three extra guards — `TestAuthorizeActorSkillChange_InactiveCaller`
+(status precedes the self check), `TestBootstrapSecurity_SweepScope` (other actors' rows and
+non-bootstrap names are never swept) and `TestMemAuthRevokeContract` (fixture sanity). All pass on
+the fix.
+
+### Per-AC evidence
+
+| AC | Evidence |
+|---|---|
+| 1 | `service/internal/gateway/identity_authority_test.go` `TestSkillAuthority_ContributorCannotEscalate`: self-grant 403 `self_skill_change_forbidden`; mint, colluding grant, strip, forced deprecate, rename all 403; eligibility and catalogue unchanged. |
+| 2 | `service/internal/gateway/skill_selfreview_e2e_test.go` `TestSkillAuthority_SelfGrantedReviewChainBlocked` (real router, real `engine.Orchestrator`, real `workflows/task-default.yaml`): [2] 403, [3] 403 and alice still eligible, [4] claim refused ("missing required skills"), zero merges recorded. |
+| 3 | `TestSkillAuthority_NonAdminSelfChangeHasDistinctReason`: operator self-grant and self-removal 403 with the reason and the audit line (`operation`, `target_actor_id`, `reason`, caller `actor_id`); grant to another actor a plain insufficient-role 403 (`required_role=admin`, no reason); `op%2D1` 403 with the reason and no undecoded id stored; `%ZZ` 400 at the wire (net/http) and 400 `invalid_params` from the handler (in-process request with a hand-set `RawPath`). See Deviation 1. |
+| 4 | `TestSkillAuthority_AdminManagesSkills`: admin grants to `contributor-1` and to itself (200), `actor_skill_added` audit with all fields; encoded admin grant lands on the decoded id; removal audited. |
+| 5 | `TestSkillAuthority_ReferencedSkillDeprecateAndRenameNeedForceAndAreAudited`: rename away 409 (body `workflows` + hint, name unchanged), unforced deprecate 409, forced deprecate 200 with `skill_deprecated … forced=true referencing_workflows=1`; rename `x`→`review` with **no** `review` row 409, forced 200 + `skill_renamed`; unreferenced rename and same-name update need no force. |
+| 6 | `TestActorCreate_RoleCeiling`: operator→admin and operator→operator 403 `role_ceiling_exceeded` with `granted_role`, nothing stored; operator→reviewer and admin→admin 201; `actor_create_refused` / `actor_created` audits. |
+| 7 | `core/auth/grants_test.go`: 5 roles × self/other × both ops; inactive callers (suspended, deactivated, empty) get `actor_status`, never the self reason; full 5×5 grant matrix; `""`, `superuser`, `Admin` refused for every caller; suspended admin / deactivated operator / empty-status admin get the status detail; nil callers refused without panicking; the operation map pinned. |
+| 8 | `core/auth/bootstrap_security_test.go` `TestBootstrapSecurity_RotationRevokesOldBearer`: old bearer → "token revoked", new bearer validates and passes `token.create`; the revocation is audited; no log line carries a bearer or its hash prefix. |
+| 9 | `TestBootstrapSecurity_TokenIDIndependentOfBearer` (bearer `admin` accepted; id matches `^bootstrap-[0-9a-f]{16}$`, not a hash prefix) and the updated `TestBootstrapInternalAdmin_CreatesActorAndToken`. |
+| 10 | `TestBootstrapSecurity_DoesNotResurrectDeactivatedAdmin` (via `actor.Service.Deactivate`, Warn logged), `…_KeepsSuspendedAdminSuspended` (via `Suspend`; an explicit `Reactivate` still works), updated `TestBootstrapInternalAdmin_HealsStaleActor`, and `TestBootstrapSecurity_HealsEmptyStatusToActive`. |
+| 11 | `TestBootstrapSecurity_RevokedCurrentBearerStaysRevoked`: A, B, A → A refused, B validates, `level=ERROR` "revoked bootstrap admin token". |
+| 12 | `TestBootstrapSecurity_OldReplicaCannotRevokeNewerBearer`, `…_CutoffStillRevokesRowsBeforeIt`, and the wiring test `service/cmd/spine/serve_delivery_test.go` `TestBootstrapInternalAdmin_RevokesOnlyRowsBeforeProcessStart` (`authCaptureStore` gains `ListTokensByActor`, `RevokeToken`, `RevokedAt`; `ProcessStart` between two pre-seeded rows; only the earlier one is revoked; `loadWorkspaceDeliveryConfig().ProcessStart` non-zero). |
+| 13 | `TestBootstrapSecurity_AdminMintedTokensSurviveRotation` (a `tok_` token named `smp-admin-bootstrap`, made strictly older than the rotation). |
+| 14 | `service/cmd/spine/smp_admin_token_test.go`: `TestValidateSMPAdminToken` (the AC table plus the 32-char/8-distinct floor both sides; no message echoes the token, each names the variable and the remedy) and `TestServeRefusesWeakSMPAdminTokenInProduction`. |
+| 15 | Only the Design §12 tests changed (plus gofmt import order in those files, Deviation 6); no existing `Test…` in `serve_delivery_test.go` changed. `go build ./...`, `go vet ./...`, `go test ./...` pass. |
+| 16 | `bootstrap_admin_idempotency_test.go` updated (old bearer 401 via new `…ExpectingUnauthorized` steps at both sites, id regex at both sites, old row revoked / new row live in both row-count steps). **Partial against the literal gate:** both `TestBootstrapInternalAdmin_*` scenarios pass against Postgres (filtered run, command below, and CI's `scenario-git-http` job step `^TestBootstrapInternalAdmin_`), but `make test-scenario` as a whole is **red**, with the same 30 pre-existing failures as `main`. The filtered run stands in for the gate — **Deviation 10, which needs the owner's explicit acceptance**. |
+| 17 | `dev/lint-boundaries.sh` OK with no allowlist change; golangci-lint 0 new issues; `cmd/embed-smoketest` OK. |
+| 18 | SMP compatibility gate below: all pass, no SMP file changed. |
+| 19 | `git diff main...HEAD -- migrations/` is empty; `adapters/store/interfaces.go` (`store.AuthStore`) unchanged. |
+| 20 | Every §15 document and the §15 note's runbook (a)-(d) updated; CHANGELOG covers every §12 row and the design-check rows plus both upgrade notes. |
+| 21 | `TestBootstrapSecurity_RevocationErrorPaths`: list failure → wrapped, "list bootstrap admin tokens"; revoke failure → wrapped, "revoke superseded bootstrap admin token" + the token id; first revoke not-found (revoked concurrently) → skipped, nil returned, the second superseded row still revoked. |
+
+**Audit PoCs.** All seven PoCs were re-run unchanged with `go test -overlay` (the gap1 PoC with
+its fixtures renamed to avoid colliding with the new test file's `memAuth`): every one now fails
+to reproduce — self-grant/strip/deprecate 403, the R1-4 chain stops at the claim (409 missing
+skills, no merge), operator `role=admin` 403 `role_ceiling_exceeded`, old bearer "token revoked",
+deactivated `smp-admin` stays deactivated. Their inverted forms are the committed tests above.
+
+### Mutations
+
+Run with `go test -overlay` on mutated copies (no repository file touched); **33 of 33 killed**:
+
+| AC | Mutation | Killed by |
+|---|---|---|
+| 1 | `skill.create` / `actor.add_skill` / `actor.remove_skill` → contributor (3 runs); self check removed | AC 1 test |
+| 2 | `actor.remove_skill` → contributor; `actor.add_skill` → contributor **and** self check removed | AC 2 test |
+| 3 | self check removed; `url.PathUnescape` dropped | AC 3 test |
+| 4 | self check applied to admins; `actor_skill_added` audit removed | AC 4 test |
+| 5 | rename guard removed; `skill_deprecated` audit removed | AC 5 test |
+| 6 | `>=` → `>` in `AuthorizeRoleGrant`; call in `handleActorCreate` disabled | AC 6 test |
+| 7 | `>=` → `>`; self check narrowed (`!= admin` → `< operator`); `RoleLevel()==0` refusal removed; status check removed from `AuthorizeRoleGrant` | AC 7 tests |
+| 8 | `revokeSupersededAdminTokens` call removed | AC 8 test |
+| 9 | `"bootstrap-"+hash[:12]` restored | AC 9 test and `…_CreatesActorAndToken` |
+| 10 | `desired.Status = existing.Status` deleted (each of the three tests killed individually); preserve rule widened to any non-active status | AC 10 tests; empty-status test |
+| 11 | revoked-current branch deleted; sweep removed | AC 11 test |
+| 12 | cutoff ignored; `SupersededBefore: cfg.ProcessStart` dropped from `serve_resolver.go`; `ProcessStart` not set | AC 12 tests |
+| 13 | `bootstrap-` prefix condition dropped | AC 13 test |
+| 14 | distinct-byte rule disabled; call in `serve_cmd.go` removed | AC 14 tests |
+| 21 | list error swallowed; non-not-found revoke error swallowed; return on not-found | AC 21 test |
+
+### Deviations from the design, with reasons
+
+1. **`{actor_id}` is decoded only when `r.URL.RawPath` is set** (Design §3 note says "decode once
+   with `url.PathUnescape`"). chi routes on `RawPath` when it is set and on the already-decoded
+   `Path` otherwise; net/http sets `RawPath` only for a non-canonical escaping. Unescaping
+   unconditionally would decode a `Path` a second time (`/actors/op%252D1/…` names the literal id
+   `op%2D1`, not `op-1`). Decoding exactly when chi saw the escaped form is "decode once" relative
+   to the wire. The AC 3 encoded row and its mutation behave as designed.
+2. **A malformed escape never reaches the handler over the wire.** net/http rejects a request line
+   with `%ZZ` (plain-text 400) before routing, so AC 3's "400 `invalid_params`" is reachable only
+   from an in-process caller or a front end that hands the raw path through. The handler's 400 is
+   kept as defence in depth; the test asserts both the wire-level 400 and the handler's
+   `invalid_params` (in-process request with a hand-set `RawPath`).
+3. **Both `core/auth` helpers refuse a nil caller** (`ErrForbidden`) instead of panicking, as
+   befits an exported primitive; `AuthorizeRoleGrant`'s ceiling detail also carries
+   `operation=actor.create`.
+4. **`ProcessStart` is truncated to microseconds** (Postgres precision), so a row a replica inserts
+   in its first microsecond never compares as "before" its own start.
+5. **The rename 409 body deduplicates** a workflow that references both the old and the new name.
+   `actor_create_refused`'s `reason` is read from the error detail (always `role_ceiling_exceeded`
+   in practice, since `authorize()` already refused inactive callers).
+6. **gofmt.** Eight touched files were not gofmt-clean on `main` (unsorted imports after the
+   adapters move): `core/auth/{auth_test,bootstrap,bootstrap_test}.go`,
+   `service/cmd/spine/{serve_delivery_test,serve_resolver}.go`,
+   `service/internal/gateway/{handlers_coverage2_test,handlers_skills_test}.go` and the bootstrap
+   scenario file. They were formatted (import order only), as TASK-001 did; golangci-lint reports 8
+   fewer gofmt issues as a result.
+7. **Extra tests** beyond the AC list (all listed above): `…_CutoffStillRevokesRowsBeforeIt`,
+   `…_SweepScope`, `TestMemAuthRevokeContract`, the nil-caller and inactive-caller tests,
+   `TestSkillAndGrantOperationsAreAdminOnly`, and extra rows in the AC 3-5 tests.
+8. **KNOWN-LIMITATIONS.md** gained two Security Notes entries (rotation; name-based skill matching)
+   although §15 does not list the file: they record the accepted residues (OQ2, OQ5), the replica
+   clock dependence of `created_at` ordering, the legacy-id window and the active-projection-only
+   guard scope.
+9. **The runbook section is §5.6** under "5. Rotating Credentials"; its failure-modes table adds the
+   Warn/Error log lines operators will see.
+10. **AC 16's gate is a filtered scenario run, not `make test-scenario`** (recorded in review round
+    2; **needs the owner's explicit acceptance**). AC 16 says "`make test-scenario` passes". It
+    does not, on this branch or on `main`: run sequentially on each with its own database, both fail
+    the **identical 30 tests** (fixture, harness, actor-API and gateway scenarios — none touches a
+    route or code path TASK-013 changes; see Review round 2), which is why Spine CI scopes its
+    Postgres scenario job instead of running the whole suite. The AC's stated purpose — "the
+    Postgres-backed proof that `ListTokensByActor` plus `RevokeToken` revoke the right row" — is
+    met by the filtered run `go test -tags scenario -run '^(TestBootstrapInternalAdmin_|TestGitHTTP_)'
+    ./service/scenariotest/scenarios/`, which passes (both bootstrap scenarios and all 19
+    `TestGitHTTP_*`, no skip), and by the CI step this task added (`scenario-git-http` job,
+    `^TestBootstrapInternalAdmin_`, fails on a skip). Repairing the 30 pre-existing failures is
+    outside this task.
+
+No design point required a schema change.
+
+### Gates (all on the branch head before this notes commit, `a4f8759`)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` (no allowlist change) |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 ./...` | rc 0 |
+| `go test -race -count=1 -p 4 ./core/auth/ ./service/internal/gateway/ ./service/cmd/spine/` | ok ×3 |
+| `SPINE_TEST_DATABASE_URL=…/s013_scenario go test -race -tags scenario -count=1 -p 4 -run '^(TestBootstrapInternalAdmin_\|TestGitHTTP_)' ./service/scenariotest/scenarios/` | ok (AC 16 Postgres proof; the CI `scenario-git-http` set, 19 `TestGitHTTP_*` pass, none skip) |
+| `SPINE_TEST_DATABASE_URL=…/s013_scenario make test-scenario` | **not green, pre-existing**: run sequentially (`go test -tags scenario -count=1 -p 1 ./service/scenariotest/...`) on the branch and on an export of `main` (own database each), the failure sets are **identical, 30 tests each** (fixture/harness/actor-API/gateway scenarios; CI scopes this job to `TestGitHTTP_*` because the rest "is not green on main today"). Both `TestBootstrapInternalAdmin_*` scenarios pass. A parallel-package run showed 5 extra failures that pass standalone (cross-package sharing of one database). |
+| `SPINE_TEST_DATABASE_URL=…/s013_integ go test -tags integration -count=1 -p 1 ./adapters/store/` | not green, **pre-existing and unrelated** (`adapters/` untouched): `TestRunModeDatabaseDefault` (`workflow_version_label` NULL scan) and an intermittent `TestEventSubscription_SigningSecretEncryption`; identical on an export of `main`. No integration-tagged tests exist in the touched packages. |
+| `golangci-lint run ./core/auth/... ./service/internal/gateway/... ./service/cmd/spine/...` (branch vs `main` export, uncapped) | 98 vs 105 issues; **0 new** (7 gofmt fewer) |
+| `golangci-lint run --build-tags scenario ./service/scenariotest/scenarios/` | 59 vs 60; **0 new** |
+| `golangci-lint run --enable-only=gosec` (same two scopes) | 0 issues on branch and `main` |
+| `gofmt -l $(git diff --name-only main...HEAD \| grep '\.go$')` | empty |
+| `git diff main...HEAD -- migrations/` | empty |
+| `codex review --base main` | "No actionable regressions were identified in the changes." No P1/P2 findings, nothing rejected. |
+
+### SMP compatibility gate (AC 18)
+
+`/Users/bartoszszymichowski/42sid/i23/s-T013/smp`, detached at SMP `main` `7d4e7cc9`, `../spine` =
+this worktree, no `vendor/`, no `tmp/`, no SMP file changed (`git status` clean after every step).
+Databases: shared PostgreSQL 17.10 + pgvector, own `s013_smp_it` (platform migrations via
+`go run ./dev/apply-migrations -set platform -dir migrations`) and `s013_spine_rt`
+(`-set spine-runtime`), existing `smp_prov` role (not modified).
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go build ./cmd/... ./internal/... ./scenariotest/... ./dev/...` | OK |
+| `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `./dev/lint-spine-internals.sh`; `./dev/lint-spine-internals-self-test.sh` | OK; self-test OK (2 fixtures) |
+| `go test -p 4 -count=1` on every SMP package depending on Spine `core/auth` (`go list -deps`: 28 packages, direct importers `internal/customer/spinecore` and `internal/customer/workspace`) plus `./internal/customer/workspace/... ./internal/recovery/... ./internal/customer/spinecore/... ./cmd/customer-app/...` | rc 0, 29 packages ok |
+| `TEST_PROVISIONING_DSN=postgres://smp_prov:…@localhost:55630/postgres go run ./dev/testgate -v -- -race -count=1 -run '^TestCreateInitialActors_Integration_' ./internal/customer/workspace/` | **4 passed, 0 skipped** — `SeedsIdempotentAndEnqueues`, `TokenHashCollisionFailsClosed`, `IncompleteConfigSkipsSubscription`, `EncryptsSigningSecretAtRest` |
+| `go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -- -race -count=1 -p 2 ./internal/customer/workspace/ ./internal/customer/workspace/workspacetest/ ./internal/recovery/` (`TEST_DATABASE_URL`/`TEST_PLATFORM_DB`=`s013_smp_it`, `TEST_PROVISIONING_DSN`, `TEST_MINIO_*` = a temporary MinIO from the local `minio/minio` image, removed afterwards) | PASS: 778 tests, 1 allowed skip (live AWS KMS) |
+| `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (`TEST_SPINE_DB`=`s013_spine_rt`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN`) | PASS: 1539 tests, 1 allowed skip (the parked placeholder) |
+
+No `ws_*` database was left behind by the provisioning suites. SMP's seed path is unaffected in
+substance: its one bearer per workspace makes the sweep a no-op except after an SMP-side rotation,
+and no live SMP path consults `auth.tokens`.
+
+### Not run
+
+- SMP's full CI `integration` job beyond the suites above (the remaining platform-DB packages do
+  not depend on Spine `core/auth`), the `faultinject` failure-boundary step, and SMP's images and
+  RDS-emulation jobs. They re-run under SMP TASK-012's `.spine-revision` bump.
+- `TEST_AWS_OBJECT_STORE_*` (needs a real AWS account), as in SMP CI.
+
+### Follow-ups recorded
+
+- `SMP_ADMIN_TOKEN_PREVIOUS` two-phase rotation (OQ2 option ii); bearer generation numbers (OQ5).
+- Matching `required_skills` by immutable `skill_id` (Decision 13); domain events for identity
+  changes (Decision 11); an actor status API that treats `smp-admin` as platform-operator-only;
+  reserving the `smp-admin` id on `POST /actors`; gateway-wide path-param unescaping.
+- SMP: if SMP ever adds a verifier for `auth.tokens`, pass its process start as
+  `SupersededBefore` (Design §13).
+
+### Review round 1 (2026-10-07)
+
+Three reviewers (correctness and SMP compatibility, adversarial security, completeness and tests)
+examined the branch at `b61e1f2`. Every finding was checked against the code first. Commits:
+`a1ceb9e` (core/auth), `c5ca291` (spine serve), `160aece` (gateway), `2f78020` (CI), `26e9a84`
+(docs), then this notes commit.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P2 | `bootstrap.go`: when the new bearer B is seeded first and a replica still carrying A then inserts A, A's row is newer than B's and no B-carrying replica ever revokes it; Design §7's bound is wrong for that order and the docs omit it | **Fixed (documented + made visible).** Confirmed by reading the sweep: the "not after the current row" rule spares A on every later load. It cannot be closed by time ordering — from the data, A is indistinguishable from a newer bearer that a stale replica must not revoke — so the rule stays (owner question 5; generation numbers are the full fix). The sweep now logs such a row at **Warn** with its `token_id` when no rollout explains it (no cutoff, or created before the cutoff); the rolling-deploy case (after the cutoff) stays quiet, and the line omits the current row's id (it may be a legacy hash-derived id). Design §7 carries an inline correction; KNOWN-LIMITATIONS, runbook §5.6 ((b) and new (e): find the Warn, revoke the named row, never by age) and the CHANGELOG (Changed, Upgrade notes) describe both residues. `TestBootstrapSecurity_StaleBearerInsertedAfterCurrentIsFlagged` drives R2(B), R1(A), R2 reload (quiet), R3 after the rollout (A still live, Warn names A), admin revoke (stays revoked). |
+| 2 | P3 | `serve_resolver.go`: a failed sweep is logged and swallowed; "re-runs on the next workspace load" is false for a busy workspace (rebuild only on idle eviction, invalidation or restart) | **Fixed.** `bootstrapInternalAdmin` now retries a failed bootstrap in the background (`retryInternalAdminBootstrap`: 1s doubling to 1 min, unbounded count) until success or `ServiceSet` close (`AppendCloser` cancels an attempt in flight; `ss.Done` also covers a builder-failure teardown, which skips appended closers). Collisions are not retried. Comment rewritten. Tests: `TestBootstrapInternalAdmin_RetriesUntilTheRotationSweepSucceeds` (two transient list failures, then the old row is revoked without a rebuild), `TestRetryInternalAdminBootstrap_StopsWhenTheServiceSetCloses` (done / cancel), `TestBootstrapInternalAdmin_CollisionIsNotRetried`. |
+| 3 | P3 | `BootstrapAdminConfig` zero value is not today's behaviour (INIT-023 opt-in rule); new failure path for SMP's provisioning | **Fixed (recorded as the sanctioned exception).** The initiative already lists this exact change under §7b **Rule 4 — shared-behaviour changes** ("reach SMP at the first bump … whatever the opt-in"; "Nothing in SMP observes this"), so it is not an opt-in by design. The CHANGELOG "For embedders" section and the `SupersededBefore` doc now say so explicitly, state what an embedder that adds a verifier of `auth.tokens` must do (pass its process start; never-un-revoke means a mistyped re-run revokes the real bearer and a rollback stays refused), and name the two extra store calls as a new failure path that a retrying caller (SMP's provisioning step) completes on the next call. No SMP file can be changed here; SMP TASK-012 re-runs AC 18. An opt-in `RevokeSuperseded` flag was not added: it would contradict the initiative's own classification and leave status preservation and random ids non-opt-in anyway. |
+| 4 | P3 | `ci.yml`: the Postgres proof for AC 16 never runs in CI | **Fixed.** The Postgres scenario job gains a second step running `^TestBootstrapInternalAdmin_` that fails on any skip and requires both scenarios to pass (the job id/name and the `TestGitHTTP_` step are unchanged, so required checks keep matching). Both steps were run locally with `bash -eo pipefail` against a fresh database, as CI runs them. |
+| 5 | P3 | Same as 2 (adversarial angle; sibling replica losing the insert race never sweeps) | **Fixed** with 2. The retry also completes the sibling's load: the second attempt finds the row (existing-row branch) and sweeps. |
+| 6 | P3 | `handlers_skills.go`: PATCH and deprecate write every column back; concurrent admin requests undo each other, widened by the rename guard's scans | **Fixed (narrowed to the pre-task window).** Both handlers re-read the skill immediately before `UpdateSkill` (`rereadSkillForWrite`) and apply the request to the fresh row, so a concurrent deprecation survives a PATCH; a name that changed since the first read answers **409 `conflict`** with nothing written (the guard or reference check decided on a stale name). A fully atomic fix needs a conditional `UPDATE` in `adapters/store` (a store change that reaches the library SMP embeds), recorded as a follow-up and in KNOWN-LIMITATIONS; the design-check claim "no un-deprecate path" is annotated. `TestSkillMutations_ConcurrentChangeIsNotOverwritten` (4 rows) fails on `b61e1f2`'s handler. |
+| 7 | P2 | No test for the sweep when the current bearer's row already exists | **Fixed.** `TestBootstrapSecurity_SweepRunsWhenCurrentRowExists` (two live rows A older, B newer; load with B; A revoked, B live, no re-insert), with and without a cutoff. |
+| 8 | P2 | No test for "never revoke a row newer than current" | **Fixed.** `TestBootstrapSecurity_NeverRevokesRowNewerThanCurrent` (load with the older bearer A; B stays live; Warn names B), with no cutoff and with a cutoff after both rows. |
+| 9 | P3 | No test for `{actor_id}` decoding on DELETE | **Fixed.** AC 3 test: operator self-removal through `op%2D1` → 403 `self_skill_change_forbidden`, skill kept, refusal audited; AC 4 test: admin removal through `contributor%2D1` → 204, the decoded actor's grant removed, audit names the decoded id. |
+| 10 | P3 | Same as 4 | **Fixed** with 4. |
+| 11 | P3 | CHANGELOG claims a JSON 400 `invalid_params` for a malformed escape | **Fixed.** Reworded: over HTTP net/http answers a plain-text 400 before routing; only an in-process caller gets the JSON `invalid_params`. |
+| 12 | P3 | `api-operations.md` says "refusals are audit-logged" | **Fixed.** Now "self-change refusals (and `actor.create` ceiling refusals)"; other role refusals are plain 403s without an audit line. |
+
+**Acceptance-criteria gaps raised by the review.**
+- **AC 16 (`make test-scenario`).** Not real as a regression: re-run on this head and on an export
+  of `main` (own databases `s013_r1full` / `s013_r1main`, `-p 1`), both fail the **identical 30
+  tests** (harness, engine and scenario packages; fixture, actor-API and gateway scenarios), and
+  both `TestBootstrapInternalAdmin_*` pass. Repairing the suite is outside this task (CI scopes the
+  job for the same reason). The bootstrap scenarios now run in CI (finding 4).
+- **AC 20 / Design §7 residue.** Fixed with finding 1.
+- **AC 18.** The reviewer could not run the DB suites within the database-naming constraint (the
+  SMP allocator creates `ws_*` databases). This round ran them on a **throwaway**
+  `pgvector/pgvector:pg18` container (local image, removed afterwards), so nothing was created on
+  the shared server: see the gate table.
+- **AC 3 `%ZZ` → 400 `invalid_params` over the wire.** Not real as a defect: already Deviation 2;
+  the CHANGELOG now says the same (finding 11).
+- **Design §7 rules without a test / DELETE decode untested.** Fixed with findings 7, 8 and 9.
+
+**Mutations (round 1),** all with `go test -overlay` on mutated copies; **14 of 14 killed**:
+
+| Mutation | Killed by |
+|---|---|
+| existing-row branch returns `nil, nil` (no sweep) | `…_SweepRunsWhenCurrentRowExists`, `…_NeverRevokesRowNewerThanCurrent`, `…_StaleBearerInsertedAfterCurrentIsFlagged` |
+| "newer than current" rule removed | `…_NeverRevokesRowNewerThanCurrent`, `…_StaleBearer…` |
+| Warn removed | `…_NeverRevokesRowNewerThanCurrent`, `…_StaleBearer…` |
+| Warn regardless of the cutoff | `…_StaleBearer…` (Warn during the rollout) |
+| background retry not started | `…_RetriesUntilTheRotationSweepSucceeds` |
+| retry ignores `done` | `…_StopsWhenTheServiceSetCloses/done_closed` |
+| retry continues after a collision | `…_CollisionIsNotRetried` |
+| first-attempt collision starts a retry | `…_CollisionIsNotRetried` |
+| workspace id not added to the bootstrap context | `…_CoreLogLinesNameTheWorkspace` |
+| `b61e1f2`'s `handlers_skills.go` (no re-read) | `TestSkillMutations_ConcurrentChangeIsNotOverwritten` (4 rows) |
+| no re-read in PATCH | same, 3 rows |
+| no re-read in deprecate | same, the rename row |
+| re-read without the name check | same, 2 rows |
+| remove route uses the raw `chi.URLParam` | AC 3 and AC 4 tests |
+
+**Also changed.** `bootstrapInternalAdmin` adds the workspace id to the bootstrap context: the pool
+builder's context named no workspace, so core/auth's lines (including the pre-existing revoked-
+current Error the runbook tells operators to act on per workspace) did not say which workspace.
+Named in the CHANGELOG (log shape).
+
+**Gates (review round 1, on `26e9a84`).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | rc 0 |
+| `go test -race -p 4 -count=1 ./core/auth/ ./service/internal/gateway/ ./service/cmd/spine/` | ok ×3 |
+| CI scenario job, both steps, `bash -eo pipefail`, `SPINE_TEST_DATABASE_URL=…/s013_r1scen` | `TestGitHTTP_*` 19 pass, `TestBootstrapInternalAdmin_*` 2 pass, no skip |
+| `go test -race -tags scenario -p 4 -run '^(TestBootstrapInternalAdmin_\|TestGitHTTP_)' ./service/scenariotest/scenarios/` (`s013_r1scen`) | ok |
+| `go test -tags scenario -count=1 -p 1 ./service/scenariotest/...` on the branch (`s013_r1full`) and on an export of `main` (`s013_r1main`) | both rc 1, **identical 30-test failure set** (pre-existing) |
+| integration-tagged tests in touched packages | none exist (`core/auth`, `service/internal/gateway`, `service/cmd/spine`) |
+| `golangci-lint run` on the three touched package trees, branch vs `main` export | 98 vs 105 issues, **0 new** |
+| `golangci-lint run --enable-only=gosec` (touched trees; scenarios with `--build-tags scenario`) | 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| `git diff main...HEAD -- migrations/`; `store.AuthStore` | empty; unchanged (no `adapters/` change at all) |
+| `codex review --base main` (plain, on `26e9a84`) | "No actionable regressions were found in the changes relative to the supplied merge base." No P1/P2 findings; nothing rejected. |
+
+**SMP compatibility gate (round 1).** `/Users/bartoszszymichowski/42sid/i23/s-T013/smp` at
+`7d4e7cc9`, `../spine` = this worktree, no `vendor/` or `tmp/`, `git status` clean throughout. The
+only round-1 change that reaches SMP is in `core/auth/bootstrap.go`: a Warn in a branch SMP's
+single-bearer calls never take, and comments.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...` | OK, clean |
+| `./dev/lint-spine-internals.sh`; `./dev/lint-spine-internals-self-test.sh` | OK; self-test OK (2 fixtures) |
+| `go test -p 4 -count=1` on the 28 SMP packages that depend on Spine `core/auth` (`go list -deps`) plus `./internal/customer/workspace/... ./internal/recovery/... ./internal/customer/spinecore/... ./cmd/customer-app/...` | rc 0, 29 packages ok |
+| Throwaway cluster: `pgvector/pgvector:pg18` on 127.0.0.1:19613 (local image, `--pull never`), roles and `smp_it` / `spine_runtime_it` per SMP `dev/README.md`, migrations via `dev/apply-migrations` | provisioned |
+| `TEST_PROVISIONING_DSN=postgres://smp_prov:…@localhost:19613/postgres go run ./dev/testgate -v -- -race -count=1 -run '^TestCreateInitialActors_Integration_' ./internal/customer/workspace/` | **4 passed, 0 skipped** (`SeedsIdempotentAndEnqueues`, `TokenHashCollisionFailsClosed`, `IncompleteConfigSkipsSubscription`, `EncryptsSigningSecretAtRest`) |
+| `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` on the throwaway cluster) | PASS: 1446 tests, 1 allowed skip |
+| `ws_*` leak check on the throwaway cluster; `docker rm -f` | none; container removed |
+
+The shared server's databases `s013_r1scen`, `s013_r1full` and `s013_r1main` were dropped.
+
+**Follow-ups added.** A conditional (compare-and-set) skill `UPDATE` in `adapters/store` behind an
+optional interface, to close the remaining PATCH/deprecate read-write window.
+
+### Review round 2 (2026-10-07)
+
+A second-round reviewer examined the branch at `b720db2`: two P3 findings (both documentation
+overclaims) and one acceptance-criteria gap; the reviewer also re-verified every round-1 fix by
+mutation (12 of 12 caught) and re-ran the gates and the SMP gate green. Each finding was checked
+against the code first. Commits: `b5d7ca7` (core/auth comments and test), `ff9a86d` (gateway
+test), `6d746fa` (docs), then this notes commit.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P3 | CHANGELOG (Changed, Upgrade notes), KNOWN-LIMITATIONS and runbook §5.6 (e) say the surviving-old-bearer Warn appears on each load after the rollout, and offer idle eviction to surface it; the sweep warns only when the row predates the cutoff, and `spine serve`'s cutoff is the process start | **Real; fixed.** Confirmed in `revokeSupersededAdminTokens` (`cutoff.IsZero() \|\| t.CreatedAt.Before(cutoff)`) and `serve_config.go` (`ProcessStart`): a replica already running when the stale row was written sees exactly the data of a rollout in progress and stays quiet on every reload. The code cannot do better from the data alone (the same indistinguishability as owner question 5), so the docs now say what it does: only a replica started after the row was written logs it; **restart every replica once more after a rolling rotation or the upgrade rollout; idle eviction is not enough**. Changed: CHANGELOG "Rollout residues" and the upgrade note, KNOWN-LIMITATIONS, runbook §5.6 step 2 (new pointer), (e) ("or wait for idle eviction" removed; a workspace logs only on its first load by a restarted replica) and the Warn row of the failure-modes table, the sweep's two comments, and the Design §7 round-1 note (inline correction). `TestBootstrapSecurity_StaleBearerInsertedAfterCurrentIsFlagged` now also reloads with the never-restarted R2 **after** the rollout and asserts it stays quiet and A stays live, so the docs' "restart" advice is pinned (and a change to it fails with a pointer to the three documents). |
+| 2 | P3 | CHANGELOG security entry ("no longer silently undone") and `architecture/api-operations.md` §3.6 ("answers 409 conflict instead of being overwritten") overstate the skill re-read; a change committed between the re-read and `UpdateSkill` is still overwritten, as KNOWN-LIMITATIONS says | **Real; fixed.** Confirmed in `handleSkillUpdate` / `handleSkillDeprecate`: `UpdateSkill` writes every column after `rereadSkillForWrite`. Both lines now say the re-read **narrows but does not close** the window, that only a rename seen by the re-read is a 409, that a change committed after the re-read is still overwritten, and that a conditional `UPDATE` is a follow-up, pointing to KNOWN-LIMITATIONS. New `TestSkillMutations_ChangeAfterRereadIsStillOverwritten` pins the residue (the racing test store can now inject its change after any read; injected after read 2, a PATCH writes `active` back over a deprecation and a forced deprecation writes the old name back over a rename), so closing the window fails it and brings the docs along. |
+
+**Acceptance-criteria gaps raised by the review.**
+- **AC 16 — literal gate `make test-scenario` is red; the substitution was recorded only in notes.**
+  **Real as a recording gap; fixed by recording it, not by changing the gate.** The suite is red on
+  `main` with the same 30 failures (round 1 established identical sets on the branch and on a
+  `main` export; the reviewer re-confirmed that no scenario reaches a route or path TASK-013
+  changes — `skill_system_test.go` writes skills through the store, not the HTTP routes, and
+  `TestGateway_RoleEnforcement`'s contributor `POST /actors` is refused 403 by the operator role
+  check before the new ceiling, on both). Per-AC row 16 now reads **partial against the literal
+  gate**, and **Deviation 10** records the substitution — the filtered Postgres run and the CI
+  `scenario-git-http` step `^TestBootstrapInternalAdmin_` stand in for `make test-scenario` —
+  **which needs the owner's explicit acceptance**. Re-run this round (below).
+- **Round-1 fixes / numbered ACs / gates.** Not gaps: the reviewer's 12 mutations were all caught,
+  every other AC names an existing test, and the gates and SMP gate were green on `b720db2`.
+
+**Mutations (round 2),** with `go test -overlay` on mutated copies; **2 of 2 killed**:
+
+| Mutation | Killed by |
+|---|---|
+| stale-bearer Warn made unconditional (`if true`) | `…_StaleBearerInsertedAfterCurrentIsFlagged` (R2's reloads) |
+| re-read removed from PATCH | `TestSkillMutations_ChangeAfterRereadIsStillOverwritten` (read count 1, want 2) |
+
+**Gates (review round 2, on `6d746fa`; this notes commit changes only this file).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` (rc 0) |
+| `make build` | OK (rc 0) |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all rc 0 |
+| `go test -p 4 -count=1 ./...` | rc 0 |
+| `go test -race -count=1 -p 4 ./core/auth/ ./service/internal/gateway/ ./service/cmd/spine/` | ok ×3 |
+| `go test -race -count=30 -p 4 -run 'TestSkillMutations_\|TestBootstrapSecurity_StaleBearer' ./core/auth/ ./service/internal/gateway/` | ok ×2, no flake |
+| CI `scenario-git-http` job, both steps verbatim, `bash -eo pipefail`, `SPINE_TEST_DATABASE_URL=…/s013_r2scen` (fresh, dropped afterwards) | OK: `TestGitHTTP_*` 19 pass, `TestBootstrapInternalAdmin_IdempotencyAndRotation` and `…_PooledBuilderIdempotencyAndRotation` pass, no skip or fail |
+| integration-tagged tests in touched packages | none exist (`core/auth`, `service/internal/gateway`, `service/cmd/spine`) |
+| `golangci-lint run --new-from-rev=main` on `./core/auth/... ./service/internal/gateway/... ./service/cmd/spine/...`, and with `--build-tags scenario` on `./service/scenariotest/scenarios/` | 0 issues; 0 issues |
+| same trees uncapped (`--max-issues-per-linter=0 --max-same-issues=0`) | 98 issues, as in round 1 (round 1's `main` export: 105; `main` unchanged since); none in a file changed this round |
+| `golangci-lint run --enable-only=gosec` (both scopes) | 0 issues; 0 issues |
+| `gofmt -l` on every `.go` file in `git diff main...HEAD` | empty |
+| `git diff main...HEAD -- migrations/`; `adapters/` | empty; untouched (no schema change) |
+| `codex review --base main` (plain, on `6d746fa` plus this file's uncommitted notes) | "No actionable regressions were identified." No P1/P2 findings; nothing rejected. |
+
+**SMP compatibility gate (round 2).** `/Users/bartoszszymichowski/42sid/i23/s-T013/smp` at
+`7d4e7cc9`, `../spine` = this worktree, `git status` clean throughout. The only round-2 change that
+reaches SMP is **comments** in `core/auth/bootstrap.go` (test files do not reach SMP).
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go build ./cmd/... ./internal/... ./scenariotest/... ./dev/...` | rc 0 |
+| `go vet ./...`; `go vet -tags integration ./...` | rc 0 |
+| `./dev/lint-spine-internals.sh`; `./dev/lint-spine-internals-self-test.sh` | OK; self-test OK (2 fixtures) |
+| `go test -p 4 -count=1` on the 28 SMP packages depending on Spine `core/auth` (`go list -deps`) plus `./internal/customer/workspace/... ./internal/recovery/... ./internal/customer/spinecore/... ./cmd/customer-app/...` | rc 0, 29 packages ok |
+| Throwaway cluster `pgvector/pgvector:pg18` (local image, `--pull never`) on 127.0.0.1:19613; roles and `smp_it` / `spine_runtime_it` per SMP `dev/README.md`; migrations via `dev/apply-migrations` (platform 115, spine-runtime 26 versions) | provisioned |
+| `TEST_PROVISIONING_DSN=postgres://smp_prov:…@localhost:19613/postgres go run ./dev/testgate -v -- -race -count=1 -run '^TestCreateInitialActors_Integration_' ./internal/customer/workspace/` | **4 passed, 0 skipped** (`SeedsIdempotentAndEnqueues`, `TokenHashCollisionFailsClosed`, `IncompleteConfigSkipsSubscription`, `EncryptsSigningSecretAtRest`) |
+| `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` on the throwaway cluster) | PASS: 1446 tests, 1 allowed skip |
+| `ws_*` leak check; `docker rm -f` | none; container removed |
+
+**Not re-run this round:** SMP's MinIO-backed `internal/customer/workspace` / `internal/recovery`
+testgate suite (778 tests in round 0): round 2 changes no SMP-reachable code, only comments, and
+its non-DB tests passed above. The shared server's `s013_r2scen` was dropped.

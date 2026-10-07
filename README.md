@@ -52,6 +52,7 @@ spine validate --all
 | `SPINE_SECRET_PREVIOUS_KEYS` | Optional. Comma-separated previous keys that still decrypt during a key rotation (never seal). |
 | `SPINE_SECRET_ENVELOPE_MODE` | `migrate` (default), `strict` or `downgrade`. Set `strict` once every workspace has swept clean: only `strict` (or retiring every pre-upgrade key) closes the cross-workspace secret transplant of audit P3-10. `spine secrets reencrypt` requires it set explicitly, to serve's mode. See `docs/integration-guide.md` §2.1. |
 | `SPINE_OPERATOR_TOKEN` | Bearer token for workspace-management endpoints. Minimum 32 characters. Leave unset to return 503 on those endpoints. |
+| `SMP_ADMIN_TOKEN` | Platform bootstrap bearer, seeded as admin into every workspace. When set: minimum 32 characters and 8 distinct characters (`openssl rand -hex 32`); weaker values refuse to start in production. Rotation revokes the previous bearer per workspace on first load — see `docs/operator-runbook.md` §5.6. |
 | `SPINE_GIT_CREDENTIAL_HELPER` | One of `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended over `SPINE_GIT_PUSH_TOKEN`. |
 | `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. |
 

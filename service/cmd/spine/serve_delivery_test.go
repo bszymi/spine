@@ -339,7 +339,7 @@ func (a *authCaptureStore) GetActorByTokenHash(_ context.Context, hash string) (
 		return nil, nil, domain.NewError(domain.ErrUnauthorized, "actor not found")
 	}
 	actorClone := *actor
-	tok := &domain.Token{TokenID: rec.TokenID, ActorID: rec.ActorID, Name: rec.Name, CreatedAt: rec.CreatedAt}
+	tok := &domain.Token{TokenID: rec.TokenID, ActorID: rec.ActorID, Name: rec.Name, RevokedAt: rec.RevokedAt, CreatedAt: rec.CreatedAt}
 	return &actorClone, tok, nil
 }
 
@@ -349,6 +349,45 @@ func (a *authCaptureStore) CreateToken(_ context.Context, rec *store.TokenRecord
 	clone := *rec
 	a.tokens[rec.TokenHash] = &clone
 	return nil
+}
+
+// ListTokensByActor and RevokeToken make the bootstrap's rotation sweep
+// (INIT-023 TASK-013) observable here; the promoted stubStore versions
+// return nothing and revoke nothing. RevokeToken mirrors Postgres:
+// NotFound when the row is missing or already revoked.
+func (a *authCaptureStore) ListTokensByActor(_ context.Context, actorID string) ([]domain.Token, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []domain.Token
+	for _, rec := range a.tokens {
+		if rec.ActorID == actorID {
+			out = append(out, domain.Token{TokenID: rec.TokenID, ActorID: rec.ActorID, Name: rec.Name,
+				ExpiresAt: rec.ExpiresAt, RevokedAt: rec.RevokedAt, CreatedAt: rec.CreatedAt})
+		}
+	}
+	return out, nil
+}
+
+func (a *authCaptureStore) RevokeToken(_ context.Context, tokenID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, rec := range a.tokens {
+		if rec.TokenID == tokenID && rec.RevokedAt == nil {
+			now := time.Now().UTC()
+			rec.RevokedAt = &now
+			return nil
+		}
+	}
+	return domain.NewError(domain.ErrNotFound, "token not found or already revoked")
+}
+
+func (a *authCaptureStore) tokenByHash(hash string) store.TokenRecord {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.tokens[hash] == nil {
+		return store.TokenRecord{}
+	}
+	return *a.tokens[hash]
 }
 
 func (a *authCaptureStore) ListSubscriptions(_ context.Context, _ string) ([]store.EventSubscription, error) {
@@ -412,6 +451,54 @@ func TestBootstrapInternalAdmin_RunsWhenTokenSet(t *testing.T) {
 	}
 	if got := cs.tokenCount(); got != 1 {
 		t.Errorf("expected token bootstrap to be idempotent, got %d rows", got)
+	}
+}
+
+// TestBootstrapInternalAdmin_RevokesOnlyRowsBeforeProcessStart pins the
+// standalone wiring of the rotation cutoff (INIT-023 TASK-013 AC 12):
+// bootstrapInternalAdmin passes cfg.ProcessStart as SupersededBefore,
+// so a rotation revokes bootstrap rows created before this process
+// booted and never one created after it (a newer replica's bearer in a
+// rolling deploy).
+func TestBootstrapInternalAdmin_RevokesOnlyRowsBeforeProcessStart(t *testing.T) {
+	if loadWorkspaceDeliveryConfig().ProcessStart.IsZero() {
+		t.Fatal("loadWorkspaceDeliveryConfig left ProcessStart zero")
+	}
+
+	ctx := context.Background()
+	cs := newAuthCaptureStore()
+	cs.actors[auth.InternalAdminActorID] = &domain.Actor{ActorID: auth.InternalAdminActorID, Type: domain.ActorTypeAutomated,
+		Name: "SMP Bootstrap Admin", Role: domain.RoleAdmin, Status: domain.ActorStatusActive}
+	now := time.Now().UTC()
+	beforeBoot := now.Add(-2 * time.Hour)
+	afterBoot := now.Add(-1 * time.Minute)
+	cs.tokens["hash-before-boot"] = &store.TokenRecord{TokenID: "bootstrap-aaaaaaaaaaaa", ActorID: auth.InternalAdminActorID,
+		TokenHash: "hash-before-boot", Name: "smp-admin-bootstrap", CreatedAt: beforeBoot}
+	cs.tokens["hash-after-boot"] = &store.TokenRecord{TokenID: "bootstrap-bbbbbbbbbbbb", ActorID: auth.InternalAdminActorID,
+		TokenHash: "hash-after-boot", Name: "smp-admin-bootstrap", CreatedAt: afterBoot}
+
+	cfg := workspaceDeliveryConfig{
+		SMPAdminToken: "fresh-bearer-0123456789abcdef0123456789",
+		ProcessStart:  now.Add(-30 * time.Minute), // between the two rows
+	}
+	ss := &workspace.ServiceSet{Config: workspace.Config{ID: "ws-cutoff"}, Store: cs}
+	if err := bootstrapInternalAdmin(ctx, ss, cfg, observe.Logger(ctx)); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	if cs.tokenByHash("hash-before-boot").RevokedAt == nil {
+		t.Error("bootstrap row created before ProcessStart was not revoked")
+	}
+	if cs.tokenByHash("hash-after-boot").RevokedAt != nil {
+		t.Error("bootstrap row created after ProcessStart was revoked: the cutoff is not wired")
+	}
+	// The same through the auth path the gateway uses: the post-boot
+	// row's actor still resolves and its token is not revoked.
+	if _, tok, err := cs.GetActorByTokenHash(ctx, "hash-after-boot"); err != nil || tok.RevokedAt != nil {
+		t.Errorf("post-boot row: err=%v revoked=%v", err, tok != nil && tok.RevokedAt != nil)
+	}
+	if _, err := auth.NewService(cs).ValidateToken(ctx, cfg.SMPAdminToken); err != nil {
+		t.Errorf("current bearer refused: %v", err)
 	}
 }
 

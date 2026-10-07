@@ -388,6 +388,157 @@ CI that pushes release tags must use an operator token.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-004 TASK-013: identity and skill authority)
+
+All of the HTTP and startup changes below are in standalone `spine serve` (`service/`). The
+`core/auth` changes reach embedders; see "For embedders".
+
+### Security
+
+- **Skill management is admin-only (audit F6).** Any contributor could grant itself any skill,
+  strip one from another actor, or mint, rename or deprecate catalogue entries — and step
+  eligibility is decided by skill names, so a contributor could grant itself `review`, claim and
+  accept the review of its own run, and have it merged into `main`. Now:
+  - `POST /api/v1/skills`, `PATCH /api/v1/skills/{id}` and `POST /api/v1/skills/{id}/deprecate`
+    by a contributor, reviewer or operator answer **403** (were 2xx).
+  - `POST`/`DELETE /api/v1/actors/{other}/skills/{id}` by a non-admin answer **403**
+    (insufficient role; were 2xx for contributor and up). The routes authorize the new
+    admin-only operations `actor.add_skill` / `actor.remove_skill` instead of `skill.update`.
+  - A non-admin's request on its **own** `/actors/{self}/skills/{id}` answers **403** with
+    `reason=self_skill_change_forbidden` in the error detail, and is audit-logged. This holds
+    for a percent-encoded id too (`/actors/op%2D1/…` for `op-1`): `{actor_id}` is now decoded
+    once. A malformed escape in it is refused with **400**: over HTTP by net/http itself, before
+    routing, with a plain-text body (not the JSON error envelope); an in-process caller that
+    hands the handler a raw path gets the JSON `invalid_params` error.
+  - An admin may manage any actor's skills, its own included (2xx, now audited).
+  - Renaming a skill whose old or new name an active workflow's `required_skills` references
+    answers **409** unless `?force=true` is passed (was 200), with the same body shape as
+    deprecation and `hint: "use ?force=true to rename anyway"`.
+  - `PATCH /api/v1/skills/{id}` and `POST /api/v1/skills/{id}/deprecate` re-read the skill right
+    before writing it, which **narrows, but does not close,** the window in which a concurrent
+    admin request is silently undone (a description edit could write a stale `active` status back
+    over a forced deprecation, and a deprecation could revert a concurrent rename, across the
+    whole request including its workflow scans). If the re-read finds the skill renamed since the
+    request first read it, the request answers **409 `conflict`** ("skill was renamed by a
+    concurrent request; retry") and writes nothing. A change another admin commits between the
+    re-read and the write is still overwritten, because the write replaces every column; a
+    conditional `UPDATE` is a recorded follow-up (`KNOWN-LIMITATIONS.md`, "Skill Eligibility Is
+    Matched by Name").
+- **Actor role ceiling (audit P3-33).** `POST /api/v1/actors` by an operator with role
+  `operator` or `admin` answers **403** with `reason=role_ceiling_exceeded` (was 201). A
+  non-admin may register only roles strictly below its own; `actor.create` itself stays an
+  operator operation. Admins may register any role.
+- **Rotating `SMP_ADMIN_TOKEN` revokes the previous bootstrap bearer (audit P3-31).** The old
+  bearer used to stay valid as an admin of every workspace after a rotation. Now each
+  workspace's first load after the restart revokes every older `bootstrap-…` row of
+  `smp-admin` created before that replica started; tokens an admin minted for `smp-admin` are
+  kept. Revocation is never undone: a **rollback to a revoked bearer is refused (401)** and the
+  load logs at Error (`SMP_ADMIN_TOKEN matches a revoked bootstrap admin token`).
+- **A suspended or deactivated `smp-admin` stays that way (audit P3-31).** The bootstrap used
+  to re-activate it on every workspace load, undoing incident response. It now heals only name
+  and role (and an empty status), and logs at Warn that the platform bearer will be refused.
+- **Bootstrap token ids no longer disclose the bearer (audit P3-35).** New bootstrap rows get
+  `bootstrap-<16 random hex>` ids instead of `bootstrap-<sha256(bearer)[:12]>`, which a workspace
+  admin could list and use as an offline oracle; the insert log no longer prints the hash.
+- **`SMP_ADMIN_TOKEN` strength gate (audit P3-35).** A value shorter than 32 characters or with
+  fewer than 8 distinct characters makes `spine serve` refuse to start when
+  `SPINE_ENV=production` and log a warning elsewhere (it was accepted). The message never echoes
+  the token.
+
+### Changed
+
+- **`SMP_ADMIN_TOKEN` rotation is no longer zero-downtime.** Platform requests that still carry
+  the old bearer get **401** from each workspace's first load after the Spine restart until the
+  platform switches (were 2xx). Switch the platform's bearer in the same change window
+  (`docs/operator-runbook.md` §5.6).
+- **Rollout residues.** Both are confined to workspaces first loaded during a rotation's rollout
+  (a row for one bearer and none for the other). Prefer a recreate strategy for rotations.
+  - An old-config replica that restarts mid-rollout and then loads such a workspace revokes the
+    *new* bearer there. Recover by rotating forward to a fresh value.
+  - If the new bearer is seeded first and a replica still carrying the old bearer (an old-config
+    replica, or pre-upgrade code during the upgrade rollout) then loads the workspace, the *old*
+    bearer is inserted after the new one and **stays valid until the next rotation**: no replica
+    carrying the new bearer ever revokes a row newer than its own, restarts included. Only a
+    replica that **started after** that row was written logs it, at Warn ("a live bootstrap admin
+    token is newer than the current SMP_ADMIN_TOKEN's row …") with the row's `token_id`, on each
+    load of such a workspace. A replica that was already running when the row was written stays
+    quiet on every load of it, idle-eviction reloads included, because its data looks the same as
+    a rollout still in progress. So **restart every replica once more after a rolling rotation**
+    (idle eviction is not enough), watch for the Warn, and revoke each named row with
+    `DELETE /api/v1/tokens/{token_id}` (`docs/operator-runbook.md` §5.6 (e)).
+- **A failed admin bootstrap is retried in the background.** If a workspace load's bootstrap
+  fails with a store error (for example while revoking a superseded bearer), `spine serve` logs
+  at Error, keeps the workspace in service, and retries (from 1s, doubling to at most 1 min)
+  until it succeeds or the workspace is unloaded. Before, it was retried only when the
+  workspace was next loaded, which for a busy workspace meant the next restart. A hash collision
+  is not retried.
+- **Unsetting `SMP_ADMIN_TOKEN`** after it was set still leaves the existing bootstrap row valid
+  (unchanged); retire it with `DELETE /api/v1/tokens/{token_id}`.
+- **Dev mode** (`SPINE_DEV_MODE`, no actor in context) is unchanged: allow-all on these routes.
+- **New audit lines** (`[AUDIT]`, `audit_operation=`): `actor_skill_added`,
+  `actor_skill_removed`, `actor_skill_change_refused`, `skill_renamed`, `skill_deprecated`,
+  `actor_created`, `actor_create_refused`, `bootstrap_admin_token_revoked`. None carries a
+  bearer. In `spine serve` the admin bootstrap's log and audit lines now carry `workspace_id`
+  (they named no workspace before).
+- **Wire format:** new 403 detail `reason` values `self_skill_change_forbidden` and
+  `role_ceiling_exceeded`; the new `bootstrap-<16 hex>` token id format (legacy 12-hex ids keep
+  their value until rotated).
+
+### Upgrade notes
+
+- **Bootstrap bearers from past rotations are revoked on first load.** Earlier versions never
+  revoked, so every older bootstrap row of `smp-admin` that still authenticates is revoked by the
+  first load of each workspace by the new code. Make sure the platform uses the current
+  `SMP_ADMIN_TOKEN`. A row inserted by pre-upgrade code *after* the current bearer's row (a
+  workspace first loaded during the upgrade rollout) is newer than it and is not revoked. Only a
+  replica started after that row was written logs it at Warn, so **restart every replica once
+  more when the upgrade rollout has finished** (idle eviction is not enough); see "Rollout
+  residues".
+- **Review pre-existing actor-skill grants.** Grants made by non-admins before the upgrade stay in
+  place, and `auth.actor_skills` records no grantor. Review holders of `review`,
+  `workflow_review` and `architecture` (for example `GET /api/v1/actors/{id}/skills` per actor,
+  or SQL on `auth.actor_skills`) and remove unexpected grants as an admin.
+- **Integrations whose non-admin actors (including AI agents) register or manage skills** must
+  move that to an admin token.
+- **Rotate `SMP_ADMIN_TOKEN` once after upgrading** to retire the legacy hash-derived token id of
+  the live bearer.
+
+### For embedders
+
+- **This is a shared-behaviour change, not an opt-in** (INIT-023 §7b rule 4, recorded there for
+  TASK-013): the zero `BootstrapAdminConfig` no longer means "today's behaviour".
+  `BootstrapInternalAdmin` with only `Token` set now revokes superseded bootstrap rows, keeps a
+  suspended or deactivated `smp-admin` as it is, and mints random ids. It is inert in an
+  embedder that never validates the `auth.tokens` rows it writes (SMP today). An embedder that
+  adds such a verifier should pass its process start as `SupersededBefore`, and must accept that
+  revocation is never undone: re-running the bootstrap with a mistyped bearer revokes the real
+  one, and a rollback to a revoked bearer stays refused until the bearer is rotated to a fresh
+  value.
+- **`auth.BootstrapAdminConfig.SupersededBefore time.Time` (new, optional).** Rows created at or
+  after it are never revoked; the zero value revokes every bootstrap row older than the current
+  one. A row newer than the current one is never revoked, whatever the cutoff; with no cutoff, or
+  when it predates the cutoff, it is logged at Warn with its token id. `spine serve` passes its
+  process start. Keyed literals compile unchanged.
+- **`auth.BootstrapInternalAdmin` behaviour.** It now revokes superseded bootstrap rows of
+  `smp-admin` (it calls `AuthStore.ListTokensByActor` and `RevokeToken`, both already part of
+  `store.AuthStore`; a store whose `RevokeToken` returns `ErrNotFound` for an already-revoked row
+  is handled), never re-activates a suspended or deactivated `smp-admin`, mints random token ids,
+  and returns nil (Error log) when the configured bearer's row is revoked. Revocation errors other
+  than not-found are returned, wrapped: the two extra store calls are a new way for the call to
+  fail, and a caller that retries (SMP's provisioning step does) completes the sweep on the next
+  call, because the sweep also runs when the current bearer's row already exists. It still
+  accepts any non-empty bearer: strength policy is the embedder's. SMP's provisioning seed is
+  unaffected (no SMP path consults `auth.tokens`).
+- **`core/auth` operation map:** `skill.create`, `skill.update`, `skill.deprecate` now require
+  `admin`; new operations `actor.add_skill` and `actor.remove_skill` (admin). Callers of
+  `auth.Authorize` / `auth.RequiredRole` see the new roles.
+- **New:** `auth.AuthorizeActorSkillChange(caller, op, targetActorID)` and
+  `auth.AuthorizeRoleGrant(caller, granted)`, with `auth.ReasonSelfSkillChange` and
+  `auth.ReasonRoleCeiling`. Both refuse a nil or non-active caller first;
+  `AuthorizeRoleGrant` also refuses an unknown or empty granted role for every caller.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-001: pre-receive ref validation)
 
 ### Security
