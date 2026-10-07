@@ -10,22 +10,22 @@ type EventType string
 
 // Domain events (reconstructible from Git).
 const (
-	EventArtifactCreated EventType = "artifact_created"
-	EventArtifactUpdated EventType = "artifact_updated"
-	EventRunStarted          EventType = "run_started"
-	EventRunCompleted        EventType = "run_completed"
-	EventRunFailed           EventType = "run_failed"
-	EventRunCancelled        EventType = "run_cancelled"
-	EventRunPaused           EventType = "run_paused"
-	EventRunResumed          EventType = "run_resumed"
-	EventRunPartiallyMerged  EventType = "run_partially_merged"
-	EventStepAssigned    EventType = "step_assigned"
-	EventStepStarted     EventType = "step_started"
-	EventStepCompleted   EventType = "step_completed"
-	EventStepFailed      EventType = "step_failed"
-	EventStepTimeout     EventType = "step_timeout"
-	EventRetryAttempted  EventType = "retry_attempted"
-	EventRunTimeout      EventType = "run_timeout"
+	EventArtifactCreated    EventType = "artifact_created"
+	EventArtifactUpdated    EventType = "artifact_updated"
+	EventRunStarted         EventType = "run_started"
+	EventRunCompleted       EventType = "run_completed"
+	EventRunFailed          EventType = "run_failed"
+	EventRunCancelled       EventType = "run_cancelled"
+	EventRunPaused          EventType = "run_paused"
+	EventRunResumed         EventType = "run_resumed"
+	EventRunPartiallyMerged EventType = "run_partially_merged"
+	EventStepAssigned       EventType = "step_assigned"
+	EventStepStarted        EventType = "step_started"
+	EventStepCompleted      EventType = "step_completed"
+	EventStepFailed         EventType = "step_failed"
+	EventStepTimeout        EventType = "step_timeout"
+	EventRetryAttempted     EventType = "retry_attempted"
+	EventRunTimeout         EventType = "run_timeout"
 )
 
 // Operational events (not reconstructible from Git).
@@ -75,6 +75,14 @@ const (
 	// EventRunRepositoryMergeResolved: the outcome row is the source
 	// of truth, the event records who asked and why.
 	EventRunRepositoryMergeRetryRequested EventType = "run_repository_merge_retry_requested"
+
+	// EventProjectionWorkflowRejected is emitted when the projection
+	// refuses a workflow file because of its content (strict parse,
+	// projection round trip, scope, absence at head, or — opt-in —
+	// workflow.Validate). Payload: workflow_path, commit, check, action
+	// (kept | not_projected | removed), kept_source_commit, quarantined,
+	// error. INIT-023 TASK-011; architecture/event-schemas.md.
+	EventProjectionWorkflowRejected EventType = "projection_workflow_rejected"
 )
 
 // Event represents a domain or operational event emitted by the system.
