@@ -1358,7 +1358,7 @@ No migration, column or table (AC17). `go.mod`/`go.sum` unchanged; `core/crypto`
 | `gofmt -l` on every `.go` file in `git diff --name-only main...HEAD` | empty |
 | AC17 `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- migrations/` | empty |
 | Mutations (`go test -overlay`, script in the scratchpad) | AC2 ×3, AC3, AC4, AC5, AC7 ×2, AC8, AC9, AC10 ×2, AC11, AC14 ×3, AC21 ×2: every one FAILS its intended test(s) (AC14 timeout: `go test` timeout) |
-| Original audit PoCs overlaid unchanged (`go test -overlay`) | all 11 PoC tests PASS (expected; see AC20) |
+| Original audit PoCs overlaid unchanged (`go test -overlay`) | all 10 PoC test functions PASS (expected; see AC20). *(Review round 1: this row said 11; there are 10 functions. Re-run at the round-1 head: 10 PASS.)* |
 
 ### SMP compatibility gate
 
@@ -1390,6 +1390,126 @@ SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T009/smp` at SMP `main` `7d
 - Round 3, at `0c9925c` (the final code): "No actionable regressions were identified." No finding
   was rejected.
 
+### Review round 1 (2026-10-07)
+
+Three reviewers (correctness + SMP compatibility, adversarial security, completeness/tests) reported
+14 findings (11 distinct: 2≡13, 4≡10, 6≡14) and 8 AC-gap notes against `120e442`. Each was
+verified against the code before it was dispositioned. Commits: `21f684e` (store), `be90990`
+(command), `a47d7d9` (wiring tests), `74a01df` (docs), then three codex follow-ups — `f4baca4`
+(credential-free database errors), `0ef0733` (kept-secret judged from the caller's read),
+`e99027d` (two-rollout key rotation) — and this notes commit.
+
+| # | Sev | Finding (verified) | Disposition |
+|---|---|---|---|
+| 7 | P2 | **Read-modify-write laundering bypassed the per-row record.** Confirmed: in `migrate`, `GetSubscription` opens a planted foreign `enc:v1` value and a bound `UpdateSubscription` re-sealed it as this row's `enc:v2` (gateway `PATCH`/`pause`/`activate`; also a bootstrap that only realigns the URL, and SMP's `ensureScopedTargetURL` once bound). The next sweep saw a current row, so `Converted` was empty. | **FIXED** (`21f684e`, option (a); refined in `0ef0733` after codex round 2). A bound `UpdateSubscription` writes `signing_secret` only when the caller *set* a secret; when it kept the one it read, only the other columns are written, so the sweep — which records every conversion — is the only path from a legacy value to `enc:v2`. "Kept" is judged from the caller's own read: a value returned by a bound read (`GetSubscription`, the list calls) remembers the secret that read returned in two unexported `EventSubscription` fields, and `SigningSecret` is compared (constant-time) with that, whatever the row holds now; only a caller-built value falls back to comparing with the stored value (one extra `SELECT`). `21f684e` compared with a fresh read of the row, which codex round 2 showed a concurrent `rotate-secret` defeats (the stale planted secret was re-sealed over the rotation). Changed secret, refused stored value and missing row behave as before; unbound reads record nothing and unbound stores keep the single historical `UPDATE` (SMP unaffected; every `EventSubscription` literal in both repos is keyed). Tests: `TestBoundUpdate_UnchangedSecretKeepsStoredBytes` (PATCH/pause/activate after a plant made post-clean-sweep — next sweep converts **and records** it; rotation between read and update; list-then-update; caller-built fallback; current row not rewritten; changed secret; refused row; missing row) and *integration* `TestBoundUpdate_RealPostgresKeepsUnchangedSecret` (including the race); `TestLegacyMode_Unchanged` asserts unbound reads record nothing. Mutations (`-overlay`): dropping the kept branch fails both ("a read-modify-write re-sealed the stored secret"); ignoring or not recording the caller's read fails both race cases. Option (b) (a `Warn` on every bound read that accepts a legacy value after a clean sweep) was **not** added: with (a) the "every conversion is logged" statement holds, and (b) needs per-store "swept clean" state plus logging on the dispatcher's per-delivery read path; a plant read before the next sweep is the documented `migrate` trust boundary and is recorded by that sweep. Doc statements corrected (`74a01df`). |
+| 1 | P3 | One-replica runbook assumed no overlap; the guide's manifest uses the default `RollingUpdate`, and a 401 from the receiver is a permanent delivery failure (`retry.go` `isRetryable`). Confirmed. | **FIXED** (`74a01df`): the one-replica procedure requires no overlap (stop old first; Kubernetes `strategy: Recreate`), otherwise the downgrade-first procedure; CHANGELOG likewise; the example manifest sets `strategy: {type: Recreate}` with a comment; *Deployment Assumptions* states why. |
+| 2, 13 | P3 | The audit rule "a `from=enc:v1` conversion after the first clean sweep was not written by this release" ignored `downgrade` (which writes and sweeps to `enc:v1`), older binaries and keyless periods. Confirmed (`sealTarget` → `Encrypt` in downgrade). | **FIXED** (`74a01df`): the log has a *baseline* — the first clean `migrate`/`strict` sweep after the last `downgrade` period, older binary or keyless period; each such period resets it; only conversions after the baseline are flagged. Applied in the guide (sweep section, upgrade step 3, several-replica step 2, rollback, workspace-id runbook), CHANGELOG and KNOWN-LIMITATIONS. This supersedes the §3 design-check sentence "logged after a workspace's first clean sweep was not written by this release". |
+| 3 | P3 | `--all-workspaces` did not check `WORKSPACE_RESOLVER`. Confirmed. | **FIXED** (`be90990`): refused unless `WORKSPACE_RESOLVER=db` (unset/`file`/other → error naming `WORKSPACE_RESOLVER=db`; `platform-binding` → error explaining there is no registry and how to verify), before the registry is opened. Test `TestSecretsReencrypt_AllWorkspacesNeedsDBResolver`; mutation (guard returns nil) fails it. |
+| 4, 10 | P3 | Subscription id printed with `%s` from an attacker-writable database. Confirmed (`Reason` was also `%s` in the code, not `%q` as one report said). | **FIXED** (`be90990`): subscription id, key id and reason `%q`; resolve/connect/sweep errors `%q`; a registry id that fails `ValidateID` is printed quoted. Tests `TestSweepOneWorkspace_QuotesDatabaseText` (newline + ANSI escape + forged "clean"/"summary" lines stay on one line) and *integration* `TestSecretsReencrypt_SingleWorkspace` (a planted row whose id tries to forge a clean line). Mutations (`%s` back) fail them. |
+| 5 | P3 | CHANGELOG embedder deltas imprecise. Confirmed: nil/zero cipher → `ErrNoCipher` for `Decrypt(enc:v2)`; unbound writes pass `enc:v2:`-prefixed inputs through verbatim (`IsEncrypted` widened); malformed `enc:v1` errors wrap `ErrMalformedEnvelope`. No SMP impact (hex credentials, no `enc:v2` producer). | **FIXED** (`74a01df`): delta list rewritten, plus the new bound-`UpdateSubscription` read. Pinned: `TestV2_RequiresAAD` (zero-value → `ErrNoCipher`, not `ErrMissingAAD`), `TestLegacy_EncryptStillV1AndDecryptPassesThrough` (malformed v1 → `ErrMalformedEnvelope`), `TestLegacyMode_Unchanged` (unbound `enc:v2` input stored verbatim; unbound update still one `UPDATE`). The pass-through itself was kept (design §1/§2: `IsEncrypted` widened, never double-encrypt), not reverted to a v1-only check. |
+| 6, 14 | P3 | No verification path for `platform-binding` in the strict / key-drop / rollback runbooks (required by the Owner question 2 design-check note). Confirmed. | **FIXED** (`74a01df`): a shared *Verifying every workspace* step (file / db / platform-binding: load every bound workspace and check each one's latest `subscription secrets swept` record for `refused=0`, `conflicts=0` and the expected mode/key/current), used by the upgrade, key-rotation and rollback runbooks; a KNOWN-LIMITATIONS entry; the command's `platform-binding` refusal says the same. |
+| 8 | P3 | `reencrypt` took its mode from the shell; unset meant `migrate`. Confirmed. | **FIXED** (`be90990`): `SPINE_SECRET_ENVELOPE_MODE` must be set (non-blank) for the command, checked after the key and before any database; docs, README, `.env.example` and the env table say it must equal serve's mode. Test `TestSecretsReencrypt_RequiresExplicitMode` (blank/whitespace, single and all-workspaces, nothing printed); mutation fails it. A separate `--allow-legacy-conversion` flag was not added: an explicit `migrate` is the operator's statement that conversion is intended. |
+| 9 | P3 | "When P3-10 Is Closed" item 2 and the key-rotation runbook presented retirement as closure; plants converted earlier survive (re-keyed). Confirmed. | **FIXED** (`74a01df`): both closing steps are worded as closing the path *for future plants*; P3-10 is closed once one step is in place **and** the conversion-log review + `rotate-secret` is done; the key-rotation runbook gains that review as step 4, before K1 is dropped. |
+| 11 | P3 | One unreachable inactive workspace made `--all-workspaces` fail forever. Confirmed (`ResolveAnyStatus`/`NewPostgresStore` ping failure → NOT CLEAN). | **FIXED** (`be90990`): resolve/connect failures are an *unreachable* outcome; `--allow-unreachable-inactive=<ids>` acknowledges named **inactive** ones (reported as ACKNOWLEDGED, listed in the summary as `acknowledged_unreachable=N (ids)`, unmatched ids noted); never an active or a reachable workspace; requires `--all-workspaces`. Documented, with retiring the registry row as the alternative. *Integration* `TestSecretsReencrypt_AllWorkspaces` now registers a decommissioned inactive `ws-four` (database never created): unclean without the flag, clean with it, and still unclean once its row is made active. Mutations (allow active; ignore the flag) fail it. |
+| 12 | P3 | Nothing tested that the configured mode reaches the stores. Confirmed by the reviewer's `-overlay` drop. | **FIXED** (`a47d7d9`): both shared resolvers build their pool through one constructor, `sharedModePoolConfig` (no behaviour change). Tests: `TestSharedModePoolConfig_CarriesSecretEnvelope`, `TestNewServicePool_CarriesSecretEnvelopeMode`, *integration* `TestServicePool_BindsStoresInConfiguredMode` (PoolConfig → `Get` → `initializeEntry` → `buildServiceSet`, strict: binding strict, plaintext row refused and untouched) and `TestBuildStore_FileResolverBindsConfiguredMode`. Each of the five drops (`NewServicePool` field, `initializeEntry` argument, `sharedModePoolConfig` field, `buildStore` argument) fails its test. |
+
+**AC-gap notes.**
+
+- **AC19 (`make test-integration` passes) — not met literally; pre-existing; owner waiver requested.**
+  Run as written this round (`go test -tags integration -p 4 -count=1 ./...`, only
+  `SPINE_TEST_DATABASE_URL` set, one fresh database each) on the branch head and on a `git archive main`
+  snapshot: 35 packages ok on both. Failing on **both**: `TestRunModeDatabaseDefault` (pre-existing,
+  `workflow_version_label` NULL scan) and `TestAWSClient_Contract_LocalStack` (environment: the local
+  LocalStack has no `secretsmanager`). The remaining failures **differ between the two runs**
+  (branch: `TestExecutionProjection_RepositoriesRoundTrip`, `TestQueryGraphDepthLimit`; main:
+  `TestCheckFreshness`, `TestStepExecutionCRUD`): `adapters/projection` and `adapters/store` share
+  projection/run tables in the one database while running concurrently. Re-run standalone on fresh
+  databases at the branch head: `adapters/projection` ok; `adapters/store` only
+  `TestRunModeDatabaseDefault`. No failure touches `runtime.event_subscriptions` or a TASK-009 file.
+- **AC18 (SMP DB-backed suites)** — re-run this round; see *Gates (review round 1)*.
+- **Decision 15 / §3 note / AC22 intent** — closed by finding 7's fix.
+- **AC16 key-rotation review step** — closed by finding 9's fix.
+- **Untested single-workspace command path** — added: *integration* `TestSecretsReencrypt_SingleWorkspace`
+  (file mode, `SPINE_WORKSPACE_ID=ws-file`: migrate converts and binds to `ws-file`, exit 0; strict
+  refuses a planted plaintext row, leaves it, exit non-zero) and unit
+  `TestSecretsReencrypt_WorkspaceFlagMustMatchFileWorkspace` (the `--workspace` mismatch guard fires
+  before the database is opened).
+- **"10 test functions, not 11"** — correct; the PoC row in *Gates* is fixed (10 functions; all PASS
+  again at the round-1 head).
+- **Lint evidence** — `golangci-lint run --new-from-rev main ./...` → 0 issues, plain and
+  `--build-tags integration` (see below).
+
+**Deviations introduced in round 1 (with reasons).**
+
+- `store.EventSubscription` gains two unexported fields (`secretRead`, `readSecret`), set only by a
+  bound read, and a bound `UpdateSubscription` writes `signing_secret` only when the caller set a
+  secret (finding 7, codex round B). A caller-built value costs one extra `SELECT`. Bound stores
+  only; documented for embedders. Unexported fields keep every keyed literal compiling; there is no
+  unkeyed literal in either repository.
+- `adapters/store/subscription.go` was gofmt'd (comment alignment) because it is now a changed file.
+- codex follow-ups: `describeDBError` in the command (round A); the two-rollout key rotation and the
+  `strict` → `migrate` → `downgrade` rollback with overlapping processes (round C, docs + a pinning
+  test).
+- `spine secrets reencrypt` now requires `SPINE_SECRET_ENVELOPE_MODE`, and `--all-workspaces`
+  requires `WORKSPACE_RESOLVER=db` (findings 8, 3). AC23's integration test sets both.
+- New flag `--allow-unreachable-inactive` (finding 11) and quoted output (findings 4/10); the AC23
+  output format changed accordingly (`refused subscription "sub-t" envelope=enc:v2 key_id="…"`, and the
+  summary gains `acknowledged_unreachable=N`).
+- `serve_resolver.go`: the two shared-mode `PoolConfig` literals became `sharedModePoolConfig`
+  (finding 12); this also touches the platform-binding branch, with identical fields.
+
+### Gates (review round 1, at the round-1 head)
+
+Head `e99027d` unless noted. Shared native PostgreSQL 17.10, `s009_r1*` databases (all dropped
+afterwards); SMP DB suites in a disposable `pgvector/pgvector:pg18` container (PG 18.4), removed
+afterwards.
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | exit 0 |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` (no DB env) | exit 0, 38 packages ok |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all exit 0 |
+| `go test -race -p 4 -count=1` on `core/crypto`, `adapters/store`, `adapters/delivery`, `service/cmd/spine`, `service/internal/workspace`, `service/internal/gateway` | all ok |
+| `go test -tags integration -count=1` per touched package, each on a fresh database (`SPINE_REGISTRY_TEST_DATABASE_URL` migrated with `spine migrate` for workspace) | crypto, delivery, cmd/spine, workspace, gateway ok; store: only the pre-existing `TestRunModeDatabaseDefault` fails. Every TASK-009 integration test ran and passed (`-v` checked). |
+| `go test -tags scenario -count=1 -run '^TestGitHTTP_' ./service/scenariotest/scenarios/` (the CI job) | 19 PASS, 0 SKIP, 0 FAIL |
+| AC19: `go test -tags integration -p 4 -count=1 ./...`, one fresh database, only `SPINE_TEST_DATABASE_URL` | branch `74a01df` and a `main` snapshot: 35 packages ok each; at `e99027d`: 35 ok, failing `TestRunModeDatabaseDefault`, `TestAWSClient_Contract_LocalStack` (both pre-existing, both on `main`) and `TestQueryGraphDepthLimit` (shared-database interference; differs run to run on branch and `main`, passes standalone). See *AC-gap notes*. |
+| `golangci-lint run --new-from-rev main ./...` (plain and `--build-tags integration`) | 0 issues |
+| `golangci-lint run --enable-only=gosec ./...` | 1 issue, pre-existing on `main` (`core/workflow/service.go` G703) |
+| `gofmt -l` on every changed `.go` file | empty (`adapters/store/subscription.go`, unformatted on `main`, is now formatted) |
+| AC17 `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- migrations/` | empty |
+| Mutations (`go test -overlay`) for every round-1 test | each FAILS its intended test(s): kept branch dropped (unit + integration); caller's read ignored / not recorded (race cases, unit + integration); explicit-mode check removed; resolver guard removed; `%q` → `%s` (unit + both integration command tests); acknowledgement allowed for active / ignored; `NewServicePool` mode field, `initializeEntry` argument, `sharedModePoolConfig` field, `buildStore` argument dropped; `describeDBError` bypassed (prints the query-parameter password) |
+| Original audit PoCs overlaid unchanged | 10 PoC test functions PASS (expected, AC20) |
+| SMP gate (SMP `7d4e7cc9`, `../spine` → this worktree, unmodified) | `go build ./...`, `go vet ./...`, `go vet -tags integration ./...`: exit 0 at `e99027d`. Unit tests of the six SMP packages importing a changed Spine package (`cmd/customer-app`, `internal/customer/{eventdelivery,projectionwriter,spinecore,stepevents,workspace}`): ok (one `spinecore` failure under load during a concurrent codex run; standalone and the full six-package re-run pass). DB suites at `0ef0733` (the last production change SMP can import; `e99027d` adds a test and docs only), provisioned like SMP CI's integration job: `testgate … ./internal/customer/{eventdelivery,stepevents,workspace,projectionwriter}/` → PASS, 627 tests, 6 allowed skips (MinIO, live AWS); `testgate … ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` → PASS, 1539 tests, 1 allowed skip; `go test -race ./cmd/customer-app/...` with `TEST_PROVISIONING_DSN` → ok. (Also run at `74a01df`: same counts, PASS.) |
+
+**codex review --base main (round 1 of this review).**
+
+- Round A (at `74a01df`): one finding, **[P2] database configuration errors could print a password**
+  — real: pgx v5.8.0 masks only a userinfo password, and a `pgconn.ParseConfigError` echoes a
+  `?password=` query parameter. **FIXED** in `f4baca4` (`describeDBError`: a configuration error
+  becomes a fixed message; every password-like DSN value is masked in other errors; used for the
+  workspace and registry connect failures). Test `TestSecretsReencrypt_DatabaseErrorsCarryNoCredentials`
+  (five DSN shapes, the helper, the registry path); without the fix it prints the password.
+- Round B (at `f4baca4`): one finding, **[P1] metadata updates could still re-seal a stale legacy
+  secret** when a rotation lands between the caller's read and the update — real (codex reproduced
+  it). **FIXED** in `0ef0733` (see finding 7).
+- Round C (at `0ef0733`): one finding, **[P2] key rotation loses deliveries during overlapping
+  restarts** — real: the first K2-primary process re-keys rows, and a K1-only process then refuses
+  them (`ErrUnknownKeyID`; the subscriber cannot list, queued deliveries fail permanently).
+  **FIXED** in `e99027d`: the runbook distributes K2 as a previous key to every process first and
+  promotes it only then (one rollout only for a stop-the-world restart); the rollback runbook goes
+  `strict` → `migrate` → `downgrade` when processes overlap. Test `TestP310_TwoPhaseRotationOverlapReads`
+  pins the premise (K1-only refuses K2 rows; the two phase rings read each other's rows through
+  opposing sweeps, which settle on K2).
+- Round D (at `e99027d`, the final code): "No actionable regressions were identified."
+- No codex finding was rejected.
+
+**Pre-existing, observed this round (not changed).** `spine serve` and `spine migrate` print or
+log pgx connection errors as-is, so a database URL that passes its password as a query parameter
+and fails to parse would show it there too (only this task's command was hardened, per the codex
+finding). Recorded as a follow-up.
+
 ### Pre-existing issues observed (not changed by this task)
 
 - `TestEventSubscription_SigningSecretEncryption` is not re-runnable on one database
@@ -1406,3 +1526,8 @@ SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T009/smp` at SMP `main` `7d
 
 Strict by default (owner question 1); per-row tolerance in list paths; weak-key guard; the
 shared-database diagnostic in `Reason`; SMP TASK-006 adoption (§8, including the equal-keys refusal).
+*Review round 1 additions:* an enumeration source for `platform-binding` verification (KNOWN-LIMITATIONS);
+credential-free connection errors in `spine serve` / `spine migrate` (pre-existing, above); SMP
+TASK-006 should build its realign/ensure updates from the values the bound store returns (so
+"kept" is judged from the caller's read) and require an explicit mode for its all-workspaces sweep;
+an owner waiver (or follow-up) for AC19's pre-existing `make test-integration` failures.
