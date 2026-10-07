@@ -24,7 +24,7 @@ import (
 )
 
 func TestStepEntryPolicyFromEnv(t *testing.T) {
-	for _, tc := range []struct {
+	cases := []struct {
 		value   string
 		want    engine.StepEntryPolicy
 		wantErr bool
@@ -35,8 +35,9 @@ func TestStepEntryPolicyFromEnv(t *testing.T) {
 		{value: "legacy", want: engine.StepEntryPolicy{}},
 		{value: "foo", wantErr: true},
 		{value: "off", wantErr: true},
-	} {
-		tc := tc
+	}
+	for i := range cases {
+		tc := &cases[i]
 		t.Run("value="+tc.value, func(t *testing.T) {
 			t.Setenv(stepEntryPolicyEnv, tc.value)
 			got, err := stepEntryPolicyFromEnv()
@@ -110,7 +111,8 @@ func (s *timeoutStore) UpdateStepExecution(_ context.Context, e *domain.StepExec
 // (strict) or untouched (legacy).
 func requireTermination(t *testing.T, st *timeoutStore, terminated bool) {
 	t.Helper()
-	for _, e := range st.execs {
+	for i := range st.execs {
+		e := &st.execs[i]
 		isTerminated := e.Status == domain.StepStatusSkipped && e.ErrorDetail != nil &&
 			e.ErrorDetail.Classification == domain.FailureRunTerminated
 		if isTerminated != terminated {
