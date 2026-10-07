@@ -1202,7 +1202,7 @@ The orchestrator ruled that the owner questions take their defaults; each is imp
 
 | OQ | Default implemented | Where |
 |---|---|---|
-| 1 | `Clone` adds `--no-tags` (persisted `remote.origin.tagOpt=--no-tags`); CHANGELOG notes that `?ref=<upstream tag>` stops working on newly provisioned clones | `cli.go` `Clone`; CHANGELOG "Changed" |
+| 1 | `Clone` adds `--no-tags` (persisted `remote.origin.tagOpt=--no-tags`); CHANGELOG notes that `?ref=<upstream tag>` stops working on newly provisioned clones. **Wider cost (review round 1):** in standalone the provisioned clone (`provision.go:221`) is the repository `githttp` serves (`ResolveRepoPath` → `cfg.RepoPath`), so runners' clones of a newly provisioned workspace carry no upstream tags either (`git describe --tags`, tag-derived versions). The owner should weigh this; the alternative that keeps them is a one-off `fetch --tags` after the provisioning clone | `cli.go` `Clone`; CHANGELOG "Changed" |
 | 2 | `Push` accepts branches only; CHANGELOG "Changed (embedders)" | `cli.go` `pushBranch` |
 | 3 | `spine serve` refuses to start below git 2.30 | `serve_cmd.go`; `git.CheckGitVersion` |
 | 4 | `PushBranch` drops upstream tracking (`-u`); CHANGELOG | `cli.go` |
@@ -1249,11 +1249,11 @@ refs/heads/<n>`; `clone --no-tags -- <url> <path>`; `EnterBranch`: lookup, `work
 | AC | Status | Evidence |
 |---|---|---|
 | 1 | done | `core/engine/merge_refshadow_test.go` `TestRefShadow_MergeRunBranchIgnoresShadowRef` (`refs/tags/<run>`, `refs/<run>`: run completes, origin `main:f.txt` reviewed, reviewed tip ancestor and `main^2`, attacker not an ancestor); `TestRefShadow_MergeRunBranchMissingBranchShadow` (DC-2: `CLIClient.Merge` non-retryable NotFound, attacker not on main, run not completed); adapter half `adapters/git` `TestRefShadow_MissingBranchNeverFollowsShadow` (recorder shows no `merge`/`switch`). All fail at `main` (run against an exported `main` tree). Mutations checked: bare merge source (M1) and a `rev-parse --verify --quiet` lookup (M2) fail them. |
-| 2 | done | `TestRefShadow_ShadowedMainDoesNotBlockGovernedMerges` (two runs complete, origin main advances twice, then `CLIClient.Push` nil, with `refs/tags/main` and each doubly-qualified local shadow); `adapters/git` `TestRefShadow_PushIgnoresLocalShadows` adds `refs/tags/<local main oid>`. Mutations: `refs/heads/main:refs/heads/main` source fails the three DC-1 cases (M4); raw `<oid>:` source fails the `refs/tags/<oid>` case (M3). See deviation 6. |
+| 2 | done | `TestRefShadow_ShadowedMainDoesNotBlockGovernedMerges` (two runs complete, origin main advances twice, then `CLIClient.Push` nil, with `refs/tags/main` and each doubly-qualified local shadow); `adapters/git` `TestRefShadow_PushIgnoresLocalShadows` adds `refs/tags/<local main oid>`. Mutations: `refs/heads/main:refs/heads/main` source fails the three DC-1 cases (M4); raw `<oid>:` source fails the `refs/tags/<oid>` case (M3). Review round 1: the `refs/tags/<local main oid>` case also runs through the governed merge (`TestRefShadow_ObjectIDShadowOfMainAtPushTime`), and the run-start twin of the DoS (HEAD-named refs) is closed (`TestRefShadow_StartRunCutsFromTheRealBase`). |
 | 3 | done | `TestRefShadow_StatusCascadeReadsTheBranch`; fails at `main`; removing the branch-first lookup (M9) fails it. |
 | 4 | done | `TestRefShadow_ReadsResolveBranchFirst` (ReadFile/RefSHA/MergeBase/Diff/ListFiles; unchanged resolution for tag-only, 8-hex, `refs/tags/<b>`, HEAD, full oid, `refs/remotes/origin/<b>`; `HOTFIXHEAD`); `TestRefShadow_MissingBranchNeverFollowsShadow` (DC-2, three doubly-qualified shadows). Mutations M2, M5 (`^[A-Z_]*HEAD$`), M9 fail them. |
 | 5 | done | `adapters/git/refgrammar_test.go` `TestRefGrammar_InputClassTable` (18 method/parameter rows x 20 input classes + remote class; every refusal: `ErrInvalidRef`, Permanent, `invalid git ref`, no raw control byte, **zero recorded git processes**); `TestRefGrammar_TwoPhase` (DC-4, both argument orders for Diff, MergeBase, Merge, CreateBranch, Push, PushBranch, DeleteRemoteBranch, Log). Mutation M10 (resolve before checking the second arg) fails it and `TestDiffRejectsPoisonedRef`. See deviation 2 for abbreviated ids. |
-| 6 | done | `TestRefGrammar_ArgvShape`: exact argv for every method (real object ids), the abort sentinels, `EnterBranch` and `CurrentBranch`; asserts no `rev-parse` argument starts with `refs/heads/`. See deviation 7 (recorder). |
+| 6 | done | `TestRefGrammar_ArgvShape`: exact argv for every method (real object ids), the abort sentinels, `EnterBranch` and `CurrentBranch`; asserts no `rev-parse` argument starts with `refs/heads/`. See deviation 7 (recorder). Review round 1: `CreateBranch` now ends in `<oid>^{commit}` / `HEAD^{commit}` (the amended §2 row passed a bare object id, which `git branch` re-resolves by DWIM). |
 | 7 | done | `TestRefGrammar_ArgvInjectionRefusedBeforeExec`; `TestDiffRejectsPoisonedRef` and `TestMergeBaseRejectsPoisonedRef` pass unmodified. |
 | 8 | done | `TestCheckout_NeverDetaches`; mutation `checkout <n>` (M6) fails it. |
 | 9 | done | `TestEnterBranch_RefusesWithoutLeftovers` (tag-only, branch in use, post-condition via a faked `symbolic-ref`; one worktree, empty `TMPDIR`), `TestEnterBranch_AttachesDespiteShadows` (tag, blob `refs/<n>`, blob `refs/tags/<n>`), `TestCurrentBranch_ShadowDetachedUnborn`, `core/artifact` `TestCreate_AutoPushWithShadowTag`. Mutations: `worktree add <dir> <n>` (M15) fails the blob cases; no post-condition (M16) fails the post-condition subtest; `--abbrev-ref` (M14) fails the CurrentBranch and auto-push tests. See deviation 5. |
@@ -1266,7 +1266,7 @@ refs/heads/<n>`; `clone --no-tags -- <url> <path>`; `EnterBranch`: lookup, `work
 | 16 | done | `CLIClient` doc carries the class table and argv rules; KNOWN-LIMITATIONS "Git Ref Arguments" (grammar, floor, `?ref=` DWIM residual, missing non-branch residual, remote doubly-qualified residual with owners and listing command, dormant code-repo default-branch change); CHANGELOG (Security, Changed, Changed (embedders) incl. Push/Clone/floor/PushBranch tracking, Upgrade notes); §6.4 "resolve exactly, by object name". |
 | 17 | done | `TestRefShadow_RemoteDoubleQualifiedPushResidual` (three remote shadows: non-retryable `*GitError`, local main unchanged); its comment names TASK-016 and SMP E4-TASK-005 §7. |
 | 18 | done | `core/artifact` `TestList_ResolvesTheRefOnce` (one lookup, five `show` calls on one oid, `ls-tree` on that oid, same artifacts as listing the checked-out branch); per-file resolution (M8) fails it. |
-| 19 | done (gate) | SMP-side overlay test `TestTask002AC19_WorkflowWriterPushIgnoresLocalShadows` (injected with `go test -overlay`, not committed to SMP): `WorkflowWriter.writeAndPush` with a local `refs/tags/refs/heads/main`, `refs/refs/heads/main`, `refs/heads/refs/heads/main` or `refs/tags/main` in the scope repository pushes, and origin `main` equals local `main`. Passed under `-race` in the testgate run. SMP TASK-008 item 3 commits the equivalent. |
+| 19 | done (gate) | Source persisted in this artifact (Review round 1, "AC 19 test source"). SMP-side overlay test `TestTask002AC19_WorkflowWriterPushIgnoresLocalShadows` (injected with `go test -overlay`, not committed to SMP): `WorkflowWriter.writeAndPush` with a local `refs/tags/refs/heads/main`, `refs/refs/heads/main`, `refs/heads/refs/heads/main` or `refs/tags/main` in the scope repository pushes, and origin `main` equals local `main`. Passed under `-race` in the testgate run. SMP TASK-008 item 3 commits the equivalent. |
 
 ### Deviations (closest safe alternative, with reasons)
 
@@ -1287,7 +1287,9 @@ refs/heads/<n>`; `clone --no-tags -- <url> <path>`; `EnterBranch`: lookup, `work
    ("removing the post-condition fails the tag-only case") cannot fail that case; the post-condition is
    pinned by its own subtest, which fakes `symbolic-ref` through the recorder
    (`SPINE_GIT_RECORDER_FAKE_SYMREF`).
-6. **AC 2's `refs/tags/<local main oid>` case** needs the shadow planted between the governed merge and
+6. *(Superseded in review round 1: `core/engine` `TestRefShadow_ObjectIDShadowOfMainAtPushTime` now plants
+   the shadow at push time through a `Push` decorator, so the case runs through the governed merge.)*
+   **AC 2's `refs/tags/<local main oid>` case** needs the shadow planted between the governed merge and
    its push (the merged oid is not known before), so it is pinned at the adapter level
    (`TestRefShadow_PushIgnoresLocalShadows`); the governed-merge test covers the other four shadows.
 7. **AC 5/6 shim.** `testutil.InstallGitRecorder` records argv and then runs the real git, instead of a
@@ -1361,7 +1363,7 @@ All `s002_*` scratch databases (`s002_it`, `s002_scen`, `s002_scen_main`, `s002_
 ### Handoffs
 
 - **SMP INIT-027 EPIC-004 TASK-008:** bump `.spine-revision` (no SMP code change is needed to compile);
-  call `spinegit.CheckGitVersion(ctx)` in `bootCore`; commit the AC 19 workflow-writer test above (local
+  call `spinegit.CheckGitVersion(ctx)` in `bootCore`; commit the AC 19 workflow-writer test, whose full source is under Review round 1 → "AC 19 test source" (local
   `refs/tags/refs/heads/<default>` and siblings, push succeeds, origin equals local) plus the §6 item 3
   tests (AddToRun `NextID` with `refs/tags/<run>` in the pooled clone; `RunBranchDiffReader` guard).
 - **Spine TASK-005:** use this task's exact lookup (`lookupBranch` / `QualifyBranch`) for
@@ -1370,3 +1372,179 @@ All `s002_*` scratch databases (`s002_it`, `s002_scen`, `s002_scen_main`, `s002_
   command are the remaining owners of the remote-side residual (`TestRefShadow_RemoteDoubleQualifiedPushResidual` pins it).
 - **Follow-up (not done, as the design says):** `classifyGitError` matches the substring `lock` first, so a
   git error that echoes a branch name containing "lock" is classified transient.
+
+### Review round 1 (2026-10-07)
+
+Three reviewers (correctness and SMP compatibility, adversarial security, completeness and tests)
+reviewed the branch at `24e97a6`. Every finding was verified against the code and against git
+(host 2.54.0; `golang:1.26-bookworm` 2.39.5) before acting.
+
+Commits, oldest first: `c6c6633` (CreateBranch start point and regression tests), `d04a1e4`
+(`default_branch` short-name rule), `9f248ec` (CHANGELOG, KNOWN-LIMITATIONS and docs
+corrections), `bf7fafe` (ReadFile miss classification test), then this notes commit.
+
+#### Findings
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| R1 | P2 | `CreateBranch` passes a bare object id to `git branch`, which re-resolves its start point by DWIM, so a ref named after the base's object id replaces the base | **FIXED** (`c6c6633`). Reproduced on 2.39.5 and 2.54 for `refs/<oid>`, `refs/tags/<oid>`, `refs/heads/<oid>` and `refs/remotes/<oid>`. Probing also confirmed that `merge`, `show`, `ls-tree`, `diff`, `merge-base`, `rev-parse` and `worktree add --detach` keep a full hex id as the object; only `git branch` re-DWIMs (branch.c `dwim_branch_start`). `CreateBranch` now passes `<oid>^{commit}`: `^` is illegal in refnames, so `dwim_ref` matches nothing, and no tracking is written. Tests: adapter `TestRefShadow_ObjectIDNamedRefsAreInert` (CreateBranch from `main`, `refs/heads/main` and the oid; Merge, ReadFile, RefSHA, ListFiles and EnterBranch by object id) and engine `TestRefShadow_StartRunCutsFromTheRealBase` (real CLIClients; the code-repo run branch and `RepositoryBaselines` both hold the real tip). The bare start point (mutation) fails both. The AC 6 expected argv was updated. The `refgrammar.go` comment ("git never DWIM-resolves a full hex id"), the `CLIClient` doc, KNOWN-LIMITATIONS and §6.4 now name the `git branch` exception. |
+| R2 | P2 | `git branch <run> HEAD` dies `ambiguous object name: 'HEAD'` next to any `refs/HEAD`, `refs/tags/HEAD`, `refs/heads/HEAD` or `refs/remotes/HEAD`. StartRun and divergence cut from `HEAD`, so this is a workspace-wide run-start denial of service (it predates this task) | **FIXED** (`c6c6633`) with `HEAD^{commit}` rather than the suggested `rev-parse` pre-resolution. The effect is the same: the revision parser reads `$GIT_DIR/HEAD` first (DWIM rule 1, a warning at most), and `^` makes `dwim_ref` match nothing. It needs no extra process, and an unborn `HEAD` keeps its Permanent `not a valid object name` classification; a `rev-parse --verify` pre-step would have turned that into NotFound `Needed a single revision`. Verified on 2.39.5 and 2.54, including `refs/remotes/HEAD/HEAD`, `branch.autoSetupMerge=always` and a detached HEAD. Tests: adapter `TestRefShadow_HEADNamedRefsAreInert` (CreateBranch, Head, RefSHA, ReadFile) and the four HEAD cases of `TestRefShadow_StartRunCutsFromTheRealBase`. The upgrade notes (CHANGELOG, KNOWN-LIMITATIONS) now also list HEAD-named and object-id-named refs. Spine's own calls are immune to both, but other git clients are not. Both listing commands were verified to match exactly those refs and not `refs/remotes/origin/HEAD`. |
+| R3 | P3 | The CHANGELOG ReadFile error text is wrong, and the `exists on disk, but not in` case (Permanent/500 becomes NotFound/404) is unrecorded | **FIXED** (`9f248ec`, `bf7fafe`). Verified: with the trailing `--`, every miss reads `fatal: bad revision '<rev>:<path>'`, including HEAD and full-oid reads. The CHANGELOG "Error text" entry is corrected, and a "Changed" entry records the 404 reclassification (artifact and workflow reads, `evidence.Load` returning `Found: false`). §7 delta 7 is superseded by this. The trailing `--` is kept (D3): without it, a working-tree file literally named `<rev>:<path>` is taken as a pathspec. The new kind is the correct one (the path does not exist at that revision). In SMP the case needs an untracked file in a scope clone and is an error path either way; this is recorded for TASK-008. Test `TestRefShadow_ReadFileMissIsNotFound` (kind and `bad revision` text, five cases); dropping the `--` fails its on-disk cases. |
+| R4 | P3 | "Changed (embedders)" omits the Rev-class `ValidateRef` narrowing and the loss of remote-tracking guessing in `Checkout`/`EnterBranch` | **FIXED** (`9f248ec`). There are two new bullets. No Spine or SMP call site passes a rev expression (grep), and the gateways' `?ref=` already applied `ValidateRef`. The existing grammar-table rows `a~1`, `a^`, `a:b`, `a..b` pin the narrowing. The guessing loss is pinned by the new `TestRefShadow_RemoteTrackingBranchIsNeverGuessed`. **Correction to DC-8 and to the CHANGELOG I wrote:** `git branch <run> <d>` never reached `origin/<d>`. The DWIM rules try `refs/remotes/<d>`, not `refs/remotes/origin/<d>`, and git failed with `not a valid object name` (Permanent; verified with `origin` configured). Only `checkout` and `worktree add` guessed. The `CreateBranch` delta is therefore Permanent→NotFound, not "refused instead of guessed". The CHANGELOG, the KNOWN-LIMITATIONS dormant entry and the `CreateBranch` comment are corrected. |
+| R5 | P3 | The cost of `clone --no-tags` is wider than stated: the provisioned clone is the served repository, so runner clones lose upstream tags | **FIXED (docs)** (`9f248ec`; the OQ 1 row above). Verified: `provision.go` clones into `RepoPath`, and `githttp`'s `ResolveRepoPath` returns `cfg.RepoPath`. The default is unchanged pending the owner. The alternative that keeps the tags (a one-off tag fetch after the provisioning clone) is recorded for the owner, not implemented, because it would reverse the ruled default. |
+| R6 | P3 | DC-2 adds one `show-ref` per Rev read of `refs/heads/<n>`. SMP's `RunBranchDiffReader` pays about N+2 extra processes per run-artifacts request, and §1's "hot paths pay nothing" is stale | **FIXED (docs and handoff)**. Results are unchanged; only latency changes. There is no Spine code change, because an exact lookup and a read cannot share one git process: `show-ref --verify` is the only DWIM-free lookup, and `show`/`rev-parse` of a name DWIM when the branch is missing. A cache keyed by name would reopen a stale-tip window. **Correction to §1:** under DC-2, `RunBranchDiffReader`'s `refs/heads/<run>` is resolved exactly, once per `MergeBase`, `Diff` and per-file `ReadFile`. Projection (SHAs) and `HEAD` reads still pay nothing. Recorded in CHANGELOG "Changed (embedders)" and KNOWN-LIMITATIONS. Handoff to SMP TASK-008 below. |
+| R7 / R8 | P3 | A `default_branch` of `refs/heads/main` is accepted and stored verbatim, although the docs say `refs/...` is refused, and the rule is not pinned at the API layer | **FIXED (code)** (`d04a1e4`). One rule, matching the docs: the short name only. The new additive `git.ValidateShortBranchName` is `ValidateBranchName` without the `refs/heads/<n>` form. `Manager.Register`/`Update` (400) and both engine guards (precondition, no git call) use it. `refs/heads/` values were added to `TestManagerDefaultBranchMustBeABranchName` and to the engine guard's invalid list, and removed from its valid list (both lists were added by this task, so no pre-existing test changed). Reverting to `ValidateBranchName` fails them. The docs now say "`main`, not `refs/heads/main`". |
+| R9 | P3 | The AC 19 test exists only as a scratchpad overlay | **FIXED**. Its full source is under "AC 19 test source" below, and the TASK-008 handoff points there. It was re-run this round: 4/4 PASS, and under `-race` in the testgate run. It is still not committed in SMP, because this task must not modify the SMP checkout. |
+| R10 | P3 | The `EnterBranch` loss of remote-tracking guessing is unrecorded, and "the final state is unchanged" overclaims | **FIXED** (`9f248ec`, test in `c6c6633`). Verified on 2.54 with `origin` configured: `worktree add <dir> <n>` created `<n>` tracking `origin/<n>`. Now a wrapped NotFound, with no local branch, no extra worktree and no temporary parent (`TestRefShadow_RemoteTrackingBranchIsNeverGuessed`). The CHANGELOG wording now reads "for an existing local branch the resulting worktree is the same as before". |
+
+#### Acceptance-criteria gaps
+
+| AC | Disposition |
+|---|---|
+| 2 (`refs/tags/<local main oid>` only at adapter level) | **FIXED**. `TestRefShadow_ObjectIDShadowOfMainAtPushTime` wraps the engine's `CLIClient` in a `Push` decorator that plants `refs/tags/<merged main oid>` on an attacker commit built on origin `main`, right before the governed push. The run completes, origin `main` equals the merge, and the attacker commit is not on it. A raw `<oid>:refs/heads/main` source fails it: the attacker commit was published as a fast-forward and the run "completed". Deviation 6 is superseded. |
+| 2 (run-start DoS through HEAD-named refs) | **FIXED** (R2). |
+| 6 (CreateBranch argv not shadow-proof) | **FIXED** (R1). |
+| 16 (CHANGELOG error text; KNOWN-LIMITATIONS and §6.4 overclaims; upgrade listing) | **FIXED** (R1 to R4, R10). |
+| 19 (overlay only) | **FIXED** as far as this task can go (R9). |
+| 14 (`make test-scenario` not green) | **NOT REAL as a regression of this task**, because the failures are identical on `main`. The full scenario suite was re-run this round at `9f248ec` (`s002_r1scen`) and on an exported `main` tree (`s002_r1scenmain`): 30 failures each, **identical sets**, and 190 PASS each. The failures are fixtures that fail validation, plus the gateway-connection cases the reviewer described, at `main` too; the CI comment already records the suite as not green on `main`. `docker-compose.test.yaml` was not used because the shared machine forbids building or pulling images. The CI scenario job (`^TestGitHTTP_`) passes: 19 PASS, 0 SKIP. Fixing the pre-existing scenario fixtures is outside this task. |
+| 5 (abbreviated SHA looked up as a branch, not refused) | **NOT REAL as a defect** (deviation 2). Phase 1 cannot refuse `cafe` or `abc1234` without refusing legitimate branches of those names, which git allows. The safety property the AC wants, that an abbreviated id is never resolved to an object in the Commit class, holds and is pinned by `TestRefGrammar_AbbreviatedIDIsNeverAnObject`. |
+| 9 (literal mutation "removing the post-condition fails the tag-only case") | **NOT REAL as a defect** (deviation 5). The exact lookup refuses a tag-only name before any worktree exists, so the post-condition cannot be what fails that case. The post-condition is pinned by its own subtest (faked `symbolic-ref`), which was confirmed by mutation. |
+| 15 (`TEST_PROVISIONING_DSN` suites not run) | **NOT RUN, by rule**. Those suites allocate per-test `ws_*` databases and roles as `smp_prov`. The shared-database rule allows only `s002_*` databases. The command for an isolated server is recorded under "SMP compatibility gate". Everything else in the SMP gate was re-run this round (below). |
+| 13 (git-floor job not yet run on GitHub Actions) | **NOT RUNNABLE here**: a GitHub Actions run needs a push, which is forbidden. The job's exact commands were re-run this round in `golang:1.26-bookworm` (git 2.39.5), as root against the host-owned checkout mounted read-only. All tests ran with 0 SKIP, including the five new round-1 tests. On Actions, modules are downloaded (network allowed there), and the runner-owned checkout does not matter. These tests touch only temporary repositories under `testutil.HermeticGit` (their own `HOME`, `GIT_CONFIG_NOSYSTEM`), so `safe.directory` never applies, and `go test` does not stamp VCS information. |
+
+#### Review round 1 gates (Spine at `9f248ec` unless noted; `bf7fafe` adds one adapter test, run separately)
+
+| Gate | Command | Result |
+|---|---|---|
+| Boundary lint | `./dev/lint-boundaries.sh` | OK |
+| Build | `make build` | OK |
+| Embed smoketest | `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK ("library surface is sound") |
+| Unit | `go test -p 4 -count=1 ./...` | all ok |
+| Vet | `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| Race | `go test -race -p 4 -count=1 ./adapters/git/... ./adapters/repository/ ./core/engine/ ./core/artifact/ ./core/workflow/ ./core/divergence/ ./service/cmd/spine/ ./testutil/` | all ok |
+| Integration | `SPINE_TEST_DATABASE_URL=.../s002_r1it go test -tags integration -count=1 -p 1 ./testutil/ ./adapters/projection/ ./core/engine/ ./core/artifact/ ./core/workflow/ ./core/divergence/ ./adapters/git/... ./adapters/repository/` | all ok (1214 PASS, 0 SKIP) |
+| CI scenario job | `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (`s002_r1scen`) | 19 PASS, 0 SKIP |
+| Full scenario suite | `go test -tags scenario -count=1 -p 1 ./service/scenariotest/...`, branch vs exported `main` | 30 failures each, identical sets; 190 PASS each |
+| git 2.39.5 | the `git-floor` job's two `go test` steps in `golang:1.26-bookworm` (read-only mounts, `GOPROXY=off`) | all ok; `-v` shows every new test PASS, 0 SKIP; containers removed |
+| golangci-lint | `golangci-lint run ./adapters/git/... ./adapters/repository/ ./core/artifact/ ./core/engine/ ./service/cmd/spine/ ./testutil/`, branch vs `main` (issues compared without line numbers) | 0 new issues (80 vs 85; the 5 fewer are gofmt import order fixed in touched files) |
+| gosec | same, `--enable-only=gosec` | 0 issues (`main`: 0) |
+| gofmt | `gofmt -l` on every changed `.go` file | empty |
+| Mutations | bare `CreateBranch` start point; raw `<oid>:` push source; `ValidateBranchName` in the three `default_branch` guards; no trailing `--` on `show` | each fails its named test (ObjectIDNamedRefsAreInert, HEADNamedRefsAreInert, StartRunCutsFromTheRealBase; ObjectIDShadowOfMainAtPushTime; TestManagerDefaultBranchMustBeABranchName and the engine guard test; ReadFileMissIsNotFound) |
+| codex | `codex review --base main` (at `9f248ec`) | "No actionable regressions were identified." No finding was rejected. |
+| SMP gate | SMP `7d4e7cc9`, `../spine` = this worktree, `GOFLAGS=-mod=readonly` | `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` OK. All 38 SMP packages depending on a changed Spine package (`go list -test -deps`, plus `gitclone`) pass `go test -p 4`. The named five pass with `-tags integration`. `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip 'TEST_PROVISIONING_DSN unset' -- -race -p 4 -count=1 -timeout 20m -overlay <AC 19 overlay> ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (`s002_r1smpspine`, `s002_r1smpplatform`, migrated with `dev/apply-migrations`) gives **PASS: 1541 passed, 0 failed, 4 allowed skips**. The `projectionwriter` platform-DB testgate gives **PASS: 8 passed, 2 allowed skips**. The AC 19 test run directly with `-race`: 4/4 PASS. The SMP checkout stayed clean. |
+
+All `s002_r1*` databases were dropped and no container was left running. The SMP-reachable
+deltas of this round are none in behaviour. SMP never calls `CLIClient.CreateBranch` (its engine
+uses its own `RealGitOperator`), and it wires no repository `Manager` or code-repo catalog. The
+round changes only Spine-side argv, guards and docs.
+
+#### Handoffs added in round 1
+
+- **SMP INIT-027 EPIC-004 TASK-008:**
+  - **(a)** `NewRunBranchDiffReader` should resolve `runRef` once with `RefSHA("refs/heads/<run>")`,
+    whose exact lookup yields the object id with no extra process. It should then pass that oid
+    to `MergeBase`, `Diff` and every `ReadFile`. This removes about N+2 `show-ref` processes per
+    run-artifacts request and reads one consistent snapshot.
+  - **(b)** Commit the AC 19 test whose full source is under "AC 19 test source" below.
+  - **(c)** Note the 404 reclassification of an "exists on disk, but not in" read (R3), which can
+    reach `ArtifactService.ReadRaw` only through an untracked file in a scope clone.
+- **Spine TASK-016:**
+  - Besides D12, consider refusing created or updated refs whose last component is a full object
+    id (`refs/<oid>`, `refs/{tags,heads,remotes}/<oid>`). Spine's own calls are immune after round
+    1, but other git clients are not: `git checkout <oid>` lands on `refs/heads/<oid>`, and
+    `git branch <n> <oid>` re-DWIMs. The current rule classifies `refs/heads/<40 hex>` as an
+    ordinary branch.
+  - The upgrade listing for such refs ships in CHANGELOG.
+- **Spine TASK-005:** any new `git branch` (or `checkout -b`) start point must be `<oid>^{commit}`,
+  exactly like the push source. A bare object id there is re-resolved by DWIM.
+
+#### AC 19 test source
+
+The SMP-side test was injected into `internal/customer/spinecore` with `go test -overlay` and run in
+the SMP gate. SMP TASK-008 commits it (or an equivalent with the same setup and assertions):
+
+<details>
+<summary><code>internal/customer/spinecore/zz_task002_ac19_test.go</code></summary>
+
+```go
+package spinecore
+
+// INIT-023 TASK-002 AC 19 (SMP-side twin of Spine AC 2's DC-1 cases),
+// injected with `go test -overlay` for the Spine compatibility gate; SMP
+// INIT-027 EPIC-004 TASK-008 item 3 commits the equivalent test. The
+// workflow writer pushes the authoritative branch with
+// git.CLIClient.Push(origin, <default>); a local doubly-qualified shadow
+// of that branch in the scope worktree's repository (or a plain
+// refs/tags/<default>) must not break the push.
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	spinegit "github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/workflow"
+)
+
+func TestTask002AC19_WorkflowWriterPushIgnoresLocalShadows(t *testing.T) {
+	requireGitForIntegration(t)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("HOME", t.TempDir())
+	for _, shadow := range []string{"refs/tags/refs/heads/main", "refs/refs/heads/main", "refs/heads/refs/heads/main", "refs/tags/main"} {
+		t.Run(shadow, func(t *testing.T) {
+			root := t.TempDir()
+			origin := filepath.Join(root, "origin.git")
+			dir := filepath.Join(root, "scope")
+			gitRun(t, root, "init", "--quiet", "--bare", "-b", "main", origin)
+			gitRun(t, root, "init", "--quiet", "-b", "main", dir)
+			gitRun(t, dir, "config", "user.email", "t@example.com")
+			gitRun(t, dir, "config", "user.name", "test")
+			gitRun(t, dir, "remote", "add", "origin", origin)
+			if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, dir, "add", "a.txt")
+			gitRun(t, dir, "commit", "--quiet", "-m", "base")
+			gitRun(t, dir, "push", "--quiet", "origin", "refs/heads/main:refs/heads/main")
+			// The shadow points at an unrelated commit.
+			gitRun(t, dir, "switch", "--quiet", "--orphan", "attacker")
+			if err := os.WriteFile(filepath.Join(dir, "evil.txt"), []byte("evil\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, dir, "add", "evil.txt")
+			gitRun(t, dir, "commit", "--quiet", "-m", "attacker")
+			evil := gitRun(t, dir, "rev-parse", "HEAD")
+			gitRun(t, dir, "switch", "--quiet", "main")
+			gitRun(t, dir, "branch", "--quiet", "-D", "attacker")
+			gitRun(t, dir, "update-ref", shadow, evil)
+
+			client := spinegit.NewCLIClient(dir)
+			w := &WorkflowWriter{git: client, defaultBranch: "main", repoDir: dir}
+			_, err := w.writeAndPush(context.Background(), func() (*workflow.WriteResult, error) {
+				if err := os.MkdirAll(filepath.Join(dir, "workflows"), 0o755); err != nil {
+					return nil, err
+				}
+				if err := os.WriteFile(filepath.Join(dir, "workflows", "w.yaml"), []byte("id: w\n"), 0o600); err != nil {
+					return nil, err
+				}
+				gitRun(t, dir, "add", "workflows/w.yaml")
+				gitRun(t, dir, "commit", "--quiet", "-m", "workflow write")
+				return &workflow.WriteResult{}, nil
+			})
+			if err != nil {
+				t.Fatalf("writeAndPush with local %s: %v", shadow, err)
+			}
+			local := gitRun(t, dir, "show-ref", "--verify", "--hash", "refs/heads/main")
+			if got := gitRun(t, origin, "show-ref", "--verify", "--hash", "refs/heads/main"); got != local {
+				t.Fatalf("origin main = %s, want local main %s", got, local)
+			}
+		})
+	}
+}
+```
+
+The overlay file was `{"Replace":{"<smp>/internal/customer/spinecore/zz_task002_ac19_test.go":"<this file>"}}`, used as
+`go test -overlay overlay.json -run TestTask002AC19 ./internal/customer/spinecore/`.
+
+</details>
