@@ -91,8 +91,10 @@ func runFixture() *fakeReader {
 		}},
 		execs: map[string][]domain.StepExecution{fxRun: {
 			{ExecutionID: "e0", RunID: fxRun, StepID: "draft", ActorID: "carol", Status: domain.StepStatusAssigned, RepositoryID: "spine"},
-			{ExecutionID: "eb", RunID: fxRun, StepID: "execute", BranchID: "some-branch", ActorID: "dan", Status: domain.StepStatusInProgress, RepositoryID: "spine"},
 			{ExecutionID: "e1", RunID: fxRun, StepID: "execute", ActorID: "alice", Status: domain.StepStatusInProgress, RepositoryID: "spine"},
+			// Newer than e1, so a binding that ignored BranchID would
+			// take it as the latest attempt of `execute`.
+			{ExecutionID: "eb", RunID: fxRun, StepID: "execute", BranchID: "some-branch", ActorID: "dan", Status: domain.StepStatusInProgress, RepositoryID: "spine"},
 		}},
 	}
 }
@@ -125,7 +127,7 @@ func TestDecide_RunBranch(t *testing.T) {
 	t.Run("allowed", func(t *testing.T) {
 		for _, st := range []domain.StepExecutionStatus{domain.StepStatusAssigned, domain.StepStatusInProgress} {
 			rr := runFixture()
-			rr.execs[fxRun][2].Status = st
+			rr.execs[fxRun][1].Status = st
 			d := decide(t, rr, defsFixture(), Request{Ref: fxRunRef, Actor: alice})
 			if !d.Allow || d.Reason != ReasonBoundActor || d.ExecutionID != "e1" || d.RunID != fxRun || d.Class != ClassRunBranch {
 				t.Errorf("alice with %s execution: %+v, want bound_actor allow on e1", st, d)
@@ -137,13 +139,13 @@ func TestDecide_RunBranch(t *testing.T) {
 			t.Errorf(`RepositoryID "spine": %+v, want allow`, d)
 		}
 		rr := runFixture()
-		rr.execs[fxRun][2].RepositoryID = ""
+		rr.execs[fxRun][1].RepositoryID = ""
 		if d := decide(t, rr, defsFixture(), Request{Ref: fxRunRef, Actor: alice, RepositoryID: ""}); !d.Allow {
 			t.Errorf(`legacy "" execution repository: %+v, want allow`, d)
 		}
 		// A reviewer-role actor (above contributor) binds the same way.
 		rr = runFixture()
-		rr.execs[fxRun][2].ActorID = "rita"
+		rr.execs[fxRun][1].ActorID = "rita"
 		if d := decide(t, rr, defsFixture(), Request{Ref: fxRunRef, Actor: actor("rita", domain.RoleReviewer)}); !d.Allow {
 			t.Errorf("bound reviewer-role actor: %+v, want allow", d)
 		}
@@ -190,8 +192,8 @@ func TestDecide_RunBranch(t *testing.T) {
 		{name: "run has no current step", mutate: func(rr *fakeReader) { rr.runs[fxRun].CurrentStepID = "" }, req: Request{Ref: fxRunRef, Actor: alice}, reason: ReasonNotBound},
 		{name: "run diverged", mutate: func(rr *fakeReader) { rr.runs[fxRun].CurrentStepID = "divergence:" + fxRun + "-div-d" }, req: Request{Ref: fxRunRef, Actor: alice}, reason: ReasonNotBound},
 		{name: "open slot (assigned, no actor)", mutate: func(rr *fakeReader) {
-			rr.execs[fxRun][2].ActorID = ""
-			rr.execs[fxRun][2].Status = domain.StepStatusAssigned
+			rr.execs[fxRun][1].ActorID = ""
+			rr.execs[fxRun][1].Status = domain.StepStatusAssigned
 		}, req: Request{Ref: fxRunRef, Actor: actor("", domain.RoleContributor)}, reason: ReasonNotBound},
 	}
 	for _, st := range []domain.StepExecutionStatus{
@@ -201,7 +203,7 @@ func TestDecide_RunBranch(t *testing.T) {
 		st := st
 		denies = append(denies, denyCase{
 			name:   "execution " + string(st),
-			mutate: func(rr *fakeReader) { rr.execs[fxRun][2].Status = st },
+			mutate: func(rr *fakeReader) { rr.execs[fxRun][1].Status = st },
 			req:    Request{Ref: fxRunRef, Actor: alice}, reason: ReasonNotBound,
 		})
 	}
@@ -249,7 +251,7 @@ func TestDecide_RunBranch(t *testing.T) {
 	t.Run("non-primary repository uses RepositoryBranches", func(t *testing.T) {
 		rr := runFixture()
 		rr.runs[fxRun].RepositoryBranches = map[string]string{"payments": "spine/run/payments-x-0a1b2c3d"}
-		rr.execs[fxRun][2].RepositoryID = "payments"
+		rr.execs[fxRun][1].RepositoryID = "payments"
 		d := decide(t, rr, defsFixture(), Request{Ref: "refs/heads/spine/run/payments-x-0a1b2c3d", Actor: alice, RepositoryID: "payments"})
 		if !d.Allow {
 			t.Errorf("code-repo branch: %+v, want allow", d)
