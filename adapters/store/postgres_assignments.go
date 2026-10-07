@@ -72,6 +72,26 @@ func (s *PostgresStore) ListAssignmentsByActor(ctx context.Context, actorID stri
 	return assignments, rows.Err()
 }
 
+// CancelActiveAssignmentsForExecution marks every active assignment row of
+// an execution cancelled, stamping responded_at, and returns how many rows it
+// changed. The engine calls it (as the optional activeAssignmentCanceller
+// port, type-asserted on its assignment store) when it terminates a live
+// execution because the run was cancelled or failed (INIT-023 TASK-007).
+// Rows in any other status are left alone, so a repeated call is a no-op
+// that returns 0. Deliberately not part of the AssignmentStore interface:
+// embedders' fakes keep compiling.
+func (s *PostgresStore) CancelActiveAssignmentsForExecution(ctx context.Context, executionID string, at time.Time) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.actor_assignments SET status = 'cancelled', responded_at = $2
+		WHERE execution_id = $1 AND status = 'active'`,
+		executionID, at,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (s *PostgresStore) ListExpiredAssignments(ctx context.Context, before time.Time) ([]domain.Assignment, error) {
 	return queryAll(ctx, s.pool, `
 		SELECT assignment_id, run_id, execution_id, actor_id, status, assigned_at, responded_at, timeout_at
