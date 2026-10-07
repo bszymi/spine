@@ -2,10 +2,11 @@ package engine
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/testutil"
 )
 
@@ -99,5 +100,37 @@ func TestValidateBranch_EmptyBranch(t *testing.T) {
 
 	if result.Failed != 1 {
 		t.Errorf("expected 1 failure (empty branch), got %d", result.Failed)
+	}
+}
+
+// INIT-023 TASK-011 AC 28: branch validation ignores the new
+// ChangeSet.ReadErrors field, so a planning branch carrying an
+// unreadable entry (a gitlink named x.md whose commit is absent, which
+// `git show` refuses as "bad object") validates exactly as before: the
+// entry is skipped and the readable artifact is validated.
+func TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+	ctx := context.Background()
+
+	testutil.WriteFile(t, repo, "README.md", "# Test\n")
+	testutil.GitAdd(t, repo, ".", "initial commit")
+	testutil.GitCheckout(t, repo, "-b", "test-branch")
+	testutil.WriteFile(t, repo, "initiatives/init-001/initiative.md",
+		"---\nid: INIT-001\ntype: Initiative\ntitle: Test\nstatus: Draft\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-001\n")
+	cmd := exec.Command("git", "update-index", "--add", "--cacheinfo",
+		"160000,0123456789abcdef0123456789abcdef01234567,x.md")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add gitlink: %v\n%s", err, out)
+	}
+	testutil.GitAdd(t, repo, "initiatives", "add artifact and gitlink")
+
+	result, err := ValidateBranch(ctx, client, &domain.Run{RunID: "r1", Mode: domain.RunModePlanning, BranchName: "test-branch"})
+	if err != nil {
+		t.Fatalf("ValidateBranch: %v", err)
+	}
+	if result.TotalArtifacts != 1 || result.Passed != 1 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want 1 artifact passed (the gitlink skipped)", result)
 	}
 }
