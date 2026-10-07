@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -22,10 +23,28 @@ import (
 // json.Marshal, the strict JSON decode) and bodies carrying U+0000,
 // which PostgreSQL refuses in jsonb and text columns.
 //
+// It also covers a definition the projection row cannot hold: a value
+// over maxIndexedFieldBytes in a btree-indexed column (see
+// checkIndexedFields).
+//
 // Callers distinguish it from a parse failure with errors.Is: the
 // projection reports it as check "round_trip", the write path maps it to
 // the "projection_round_trip" validation rule (INIT-023 TASK-011).
 var ErrProjectionRoundTrip = errors.New("workflow: projected definition does not round-trip to the parsed definition")
+
+// maxIndexedFieldBytes caps the workflow fields the projection stores in
+// btree-indexed text columns of projection.workflows: workflow_path (the
+// primary key), workflow_id (idx_workflows_id) and status
+// (idx_workflows_status). PostgreSQL refuses a btree entry over about
+// 2.7 KB — a third of an 8 KiB page — so an over-long, incompressible
+// value made the row's upsert fail. That was an infrastructure error:
+// the sync held in `error` on a file that never changes, with the
+// previous row left Active and bindable while main showed a different
+// body (INIT-023 TASK-011 review round 1). 1024 bytes is far above any
+// real value and below the limit uncompressed. Unindexed text columns
+// (name, version) have no such limit and are not capped; applies_to's GIN
+// index hashes long values.
+const maxIndexedFieldBytes = 1024
 
 // ProjectionDefinition is the only way a workflow body becomes a
 // projection row, and the write path's parity check (INIT-023 TASK-011,
@@ -52,7 +71,9 @@ var ErrProjectionRoundTrip = errors.New("workflow: projected definition does not
 //  3. Refuse U+0000 in any key or string value (walked on the decoded
 //     value, never a byte search: the six-character text `\u0000` in a
 //     description is legitimate).
-//  4. got := UnmarshalProjectionDefinition(def), normalised the way the
+//  4. Refuse a path, id or status over maxIndexedFieldBytes (a value the
+//     row's indexed columns cannot hold).
+//  5. got := UnmarshalProjectionDefinition(def), normalised the way the
 //     loaders normalise it (Path set from the row, CommitSHA empty, an
 //     empty Mode read as "execution"); reflect.DeepEqual(got, wf) must
 //     hold. Decoding successfully is not enough: `version: 2026-10-06`
@@ -71,6 +92,9 @@ func ProjectionDefinition(path string, content []byte) (*domain.WorkflowDefiniti
 	}
 	if where, found := findNUL(raw, ""); found {
 		return nil, nil, roundTripErr(path, fmt.Errorf("U+0000 in %s (not storable in the projection)", where))
+	}
+	if err := checkIndexedFields(path, wf); err != nil {
+		return nil, nil, roundTripErr(path, err)
 	}
 
 	got, err := UnmarshalProjectionDefinition(def)
@@ -161,7 +185,36 @@ func encodeProjection(content []byte) ([]byte, any, error) {
 }
 
 func roundTripErr(path string, cause error) error {
-	return fmt.Errorf("workflow %s: %w: %v", path, ErrProjectionRoundTrip, cause)
+	return fmt.Errorf("workflow %s: %w: %v", displayPath(path), ErrProjectionRoundTrip, cause)
+}
+
+// checkIndexedFields refuses a value the projection row's btree-indexed
+// columns cannot hold (see maxIndexedFieldBytes). The value itself is not
+// echoed: the error reaches logs, events and API responses.
+func checkIndexedFields(path string, wf *domain.WorkflowDefinition) error {
+	for _, f := range []struct{ column, value string }{
+		{"workflow_path", path},
+		{"workflow_id", wf.ID},
+		{"status", string(wf.Status)},
+	} {
+		if len(f.value) > maxIndexedFieldBytes {
+			return fmt.Errorf("%s is %d bytes; the projection stores at most %d (an indexed column)", f.column, len(f.value), maxIndexedFieldBytes)
+		}
+	}
+	return nil
+}
+
+// displayPath shortens an over-long path for an error message.
+func displayPath(path string) string {
+	const n = 200
+	if len(path) <= n {
+		return path
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(path[cut]) {
+		cut--
+	}
+	return path[:cut] + fmt.Sprintf("…(%d bytes)", len(path))
 }
 
 // normaliseMode mirrors Parse's default: an absent mode is "execution".

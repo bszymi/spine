@@ -4,6 +4,8 @@ package projection_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -136,6 +138,75 @@ func TestIntegration_NULWorkflowIsRejectionNotWedge(t *testing.T) {
 	rej := rec.rejections(t)
 	if len(rej) != 1 || rej[0]["check"] != "round_trip" || rej[0]["action"] != "kept" {
 		t.Fatalf("expected one round_trip/kept rejection, got %+v", rej)
+	}
+}
+
+// Review round 1 (finding H, AC 29 / I6): a Parse-accepted body whose
+// workflow_id overflows the btree index idx_workflows_id (an
+// incompressible 6000-character value) made the upsert fail. Before the
+// fix every IncrementalSync ended error@c1 with no rejection reported,
+// and the c1 row stayed Active — new runs kept binding the c1 definition
+// while main showed c2 (here c2 also adds a review step). It is now a
+// round_trip rejection: idle@c2, the c1 row kept quarantined.
+func TestIntegration_OverLongIndexedFieldIsRejectionNotWedge(t *testing.T) {
+	ctx := context.Background()
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+	db := store.NewTestStore(t)
+	defer db.CleanupTestData(ctx, t)
+	rec := &pgRecorder{}
+	svc := projection.NewService(client, db, rec, time.Second)
+
+	reviewless := strings.Replace(pgValidWorkflow, "next_step: review}", "next_step: end}", 1)
+	testutil.WriteFile(t, repo, "workflows/task-default.yaml", reviewless)
+	testutil.GitAdd(t, repo, ".", "c1")
+	c1 := headOf(t, client)
+	if err := svc.FullRebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	noise := make([]byte, 3000)
+	if _, err := rand.Read(noise); err != nil {
+		t.Fatal(err)
+	}
+	longID := "x" + hex.EncodeToString(noise) // 6001 bytes
+	testutil.WriteFile(t, repo, "workflows/task-default.yaml",
+		strings.Replace(pgValidWorkflow, "id: task-default", "id: "+longID, 1))
+	testutil.GitAdd(t, repo, ".", "c2")
+	c2 := headOf(t, client)
+
+	for tick := 1; tick <= 2; tick++ {
+		if err := svc.IncrementalSync(ctx); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+	}
+	state, err := db.GetSyncState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "idle" || state.LastSyncedCommit != c2 {
+		t.Fatalf("sync must advance past a content rejection: state=%+v (c1=%s c2=%s)", state, c1, c2)
+	}
+	row, err := db.GetWorkflowProjection(ctx, "workflows/task-default.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.SourceCommit != c1 || row.Status != "Quarantined" || row.WorkflowID != "task-default" {
+		t.Fatalf("the c1 row must be kept, quarantined (not bindable): %+v", row)
+	}
+	active, err := db.ListActiveWorkflowProjections(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("the review-less c1 row must not stay bindable: %+v", active)
+	}
+	rej := rec.rejections(t)
+	if len(rej) == 0 || rej[0]["check"] != "round_trip" || rej[0]["action"] != "kept" {
+		t.Fatalf("expected a round_trip/kept rejection, got %+v", rej)
+	}
+	if strings.Contains(rej[0]["error"].(string), longID[:100]) {
+		t.Fatal("the rejection must not echo the over-long value")
 	}
 }
 

@@ -180,6 +180,51 @@ func TestProjectionDefinition_RefusesRoundTripFailures(t *testing.T) {
 	}
 }
 
+// Review round 1 (finding H): a value the projection row's btree-indexed
+// columns cannot hold — PostgreSQL refuses an index entry over about
+// 2.7 KB — is a round-trip rejection, not a store error that wedges the
+// sync with the previous row left bindable. The path, id and status are
+// capped at 1024 bytes; unindexed name and version are not.
+func TestProjectionDefinition_RefusesOverLongIndexedFields(t *testing.T) {
+	long := strings.Repeat("x", 6000)
+	at := strings.Repeat("y", 1024)
+	over := strings.Repeat("y", 1025)
+	for _, tc := range []struct {
+		name, path, body string
+		refused          bool
+	}{
+		{"id 6000", "workflows/task-default.yaml", strings.Replace(rtBase, "id: task-default", "id: "+long, 1) + rtSteps, true},
+		{"id 1025", "workflows/task-default.yaml", strings.Replace(rtBase, "id: task-default", "id: "+over, 1) + rtSteps, true},
+		{"id 1024", "workflows/task-default.yaml", strings.Replace(rtBase, "id: task-default", "id: "+at, 1) + rtSteps, false},
+		{"status 6000", "workflows/task-default.yaml", strings.Replace(rtBase, "status: Active", "status: "+long, 1) + rtSteps, true},
+		{"path 6000", "workflows/" + long + ".yaml", rtBase + rtSteps, true},
+		{"name 6000 unindexed", "workflows/task-default.yaml", strings.Replace(rtBase, "name: n", "name: "+long, 1) + rtSteps, false},
+		{"version 6000 unindexed", "workflows/task-default.yaml", strings.Replace(rtBase, `version: "1"`, `version: "`+long+`"`, 1) + rtSteps, false},
+		// The alias form a reviewer suggested hiding it with.
+		{"id aliased to a long description", "workflows/task-default.yaml",
+			strings.Replace(strings.Replace(rtBase, "description: d", "description: &desc "+long, 1), "id: task-default\n", "", 1) + "id: *desc\n" + rtSteps, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := workflow.Parse(tc.path, []byte(tc.body)); err != nil {
+				t.Fatalf("precondition: Parse must accept this input, got %v", err)
+			}
+			_, _, err := workflow.ProjectionDefinition(tc.path, []byte(tc.body))
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("expected acceptance, got %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, workflow.ErrProjectionRoundTrip) {
+				t.Fatalf("expected ErrProjectionRoundTrip, got %v", err)
+			}
+			if strings.Contains(err.Error(), long) || len(err.Error()) > 600 {
+				t.Fatalf("the error must not echo the over-long value (%d bytes)", len(err.Error()))
+			}
+		})
+	}
+}
+
 // The six-character text `\u0000` inside a description is ordinary
 // content; a byte search over the JSON would wrongly refuse it.
 func TestProjectionDefinition_AcceptsLiteralBackslashU0000Text(t *testing.T) {

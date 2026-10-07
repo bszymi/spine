@@ -109,6 +109,12 @@ func TestService_ValidateBody_ReportsProjectionRoundTripRule(t *testing.T) {
 			t.Fatalf("rule id constant drifted: %q", workflow.ProjectionRoundTripRuleID)
 		}
 	}
+	// A body whose status the projection's indexed column cannot hold
+	// (review round 1) is the same rule.
+	longStatus := strings.Replace(fmtYAML("task-default", "1.0"), "status: Active", "status: "+strings.Repeat("s", 3000), 1)
+	if r := svc.ValidateBody(ctxWithActor(), "task-default", longStatus); r.Status != "failed" || len(r.Errors) != 1 || r.Errors[0].RuleID != "projection_round_trip" {
+		t.Fatalf("over-long status: expected one projection_round_trip error, got %+v", r)
+	}
 	// A strict-parse failure keeps RuleID "parse".
 	result := svc.ValidateBody(ctxWithActor(), "task-default", fmtYAML("task-default", "1.0")+"Steps: []\n")
 	if result.Status != "failed" || len(result.Errors) != 1 || result.Errors[0].RuleID != "parse" {
