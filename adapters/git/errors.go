@@ -46,7 +46,10 @@ func classifyGitError(op, stderr string) *GitError {
 		return &GitError{Kind: ErrKindTransient, Op: op, Message: "repository locked"}
 	case containsAny(stderr, "CONFLICT", "conflict", "Merge conflict"):
 		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "merge conflict"}
-	case containsAny(stderr, "does not exist", "not found", "bad revision", "unknown revision"):
+	// "Needed a single revision" is `rev-parse --verify`'s missing-ref
+	// message (RefSHA uses --verify since INIT-023 TASK-002); keeping it
+	// here keeps RefSHA on an unknown ref ErrKindNotFound, as before.
+	case containsAny(stderr, "does not exist", "not found", "bad revision", "unknown revision", "Needed a single revision"):
 		return &GitError{Kind: ErrKindNotFound, Op: op, Message: stderr}
 	case containsAny(stderr, "fatal: not a git repository"):
 		return &GitError{Kind: ErrKindPermanent, Op: op, Message: "not a git repository"}

@@ -1,8 +1,14 @@
 package refname
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bszymi/spine/core/domain"
 )
 
 func TestValidate(t *testing.T) {
@@ -46,5 +52,110 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+// TestValidate_ConvergedGrammar pins the INIT-023 TASK-002 §3 rules: a
+// branch name must also be a name git accepts as a branch, so names git
+// refuses to create (or reads as something other than a branch) are
+// refused here before they reach any git argv (AC 12).
+func TestValidate_ConvergedGrammar(t *testing.T) {
+	for _, name := range []string{
+		".hidden",      // component starts with "."
+		"a/.b",         // inner component starts with "."
+		"a.lock/b",     // inner component ends with ".lock"
+		"a//b",         // empty component
+		"/a",           // leading "/"
+		"a.",           // trailing "."
+		"HEAD",         // the current commit, not a branch
+		"@",            // shorthand for HEAD
+		"refs/heads/x", // a qualified ref, never a short name
+		"refs/tags/v1", // ditto
+		"refs/x",       // ditto
+	} {
+		err := Validate(name)
+		if err == nil {
+			t.Errorf("Validate(%q) = nil, want an error", name)
+			continue
+		}
+		var se *domain.SpineError
+		if !errors.As(err, &se) || se.Code != domain.ErrInvalidParams {
+			t.Errorf("Validate(%q) error %v is not a *domain.SpineError with ErrInvalidParams", name, err)
+		}
+	}
+	for _, name := range []string{
+		"main",
+		"release/2026.10",
+		"feature/a.b",
+		"spine/run/task-001-git-push-0a5d0f6d",
+		"spine/plan/init-001-initiative-abcd1234",
+		"spine/run-abc123/explore/branch-a",
+		"HOTFIXHEAD",
+		"a@b",
+		"ok",
+	} {
+		if err := Validate(name); err != nil {
+			t.Errorf("Validate(%q) = %v, want nil", name, err)
+		}
+	}
+}
+
+// branchCorpus is the name corpus for TestValidate_NeverLooserThanGit:
+// the accept and reject rows above plus the shapes the converged rules
+// target. Rows that git accepts and Validate refuses are fine (Validate
+// is deliberately stricter on Unicode control/space, "@{" and "refs/");
+// the reverse never is.
+var branchCorpus = []string{
+	"main", "feature/add-login", "release/2026.10", "spine/run/task-001-x-0a1b2c3d",
+	"HEAD", "@", "HOTFIXHEAD", "a@b", "a@{1}", "@{-1}",
+	".hidden", "a/.b", "a.lock", "a.lock/b", "a//b", "/a", "a/", "a.", "a..b",
+	"-x", "--force", "a b", "a~1", "a^", "a:b", "a?", "a*", "a[b", "a\\b",
+	"refs/heads/x", "refs/tags/v1", "heads/x", "x/HEAD", "x/@/y",
+	"\u00e9", "a\u00a0b", "a\u2028b",
+	"0123456789abcdef0123456789abcdef01234567",
+}
+
+// gitAcceptsBranch reports `git check-ref-format --branch name`'s
+// verdict, run outside any repository so "@{-N}" expansion cannot
+// consult a checkout's reflog.
+func gitAcceptsBranch(t *testing.T, dir, name string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "check-ref-format", "--branch", name)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+filepath.Dir(dir), "GIT_CONFIG_NOSYSTEM=1", "HOME="+dir)
+	return cmd.Run() == nil
+}
+
+// TestValidate_NeverLooserThanGit asserts AC 12's corpus property: no
+// name Validate accepts is one `git check-ref-format --branch` rejects,
+// over the corpus and over a byte sweep (each byte 0x01-0x7f plus 0x80,
+// 0xc2 and 0xff, placed mid-component, at a component start and at the
+// end of the name).
+func TestValidate_NeverLooserThanGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not on PATH: %v", err)
+	}
+	dir := t.TempDir()
+	names := append([]string(nil), branchCorpus...)
+	for b := 0x01; b <= 0x7f; b++ {
+		c := string([]byte{byte(b)})
+		names = append(names, "a"+c+"b", "x/"+c+"y", "x"+c)
+	}
+	for _, b := range []byte{0x80, 0xc2, 0xff} {
+		c := string([]byte{b})
+		names = append(names, "a"+c+"b", "x/"+c+"y", "x"+c)
+	}
+	accepted := 0
+	for _, name := range names {
+		if Validate(name) != nil {
+			continue
+		}
+		accepted++
+		if !gitAcceptsBranch(t, dir, name) {
+			t.Errorf("Validate(%q) = nil, but git check-ref-format --branch rejects it", name)
+		}
+	}
+	if accepted < 10 {
+		t.Fatalf("only %d corpus names accepted; the corpus no longer exercises the accept side", accepted)
 	}
 }

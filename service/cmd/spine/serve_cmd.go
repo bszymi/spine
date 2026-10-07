@@ -34,6 +34,15 @@ func serveCmd() *cobra.Command {
 			ctx = observe.WithComponent(ctx, "server")
 			log := observe.Logger(ctx)
 
+			// Git floor first (INIT-023 TASK-002): the git client's argv
+			// needs git >= 2.30 (`rev-parse --end-of-options`) and has no
+			// fallback without the terminator. Refuse to start rather
+			// than fail closed on the first read with a confusing error,
+			// and before any database, workspace or push-auth setup.
+			if err := git.CheckGitVersion(ctx); err != nil {
+				return err
+			}
+
 			if err := validateOperatorToken(os.Getenv("SPINE_OPERATOR_TOKEN")); err != nil {
 				return err
 			}
