@@ -610,23 +610,35 @@ func TestTree_UndoRollback(t *testing.T) {
 			t.Error("unrelated file removed")
 		}
 	})
-	t.Run("leaves a leaf that was replaced since", func(t *testing.T) {
-		f := newFixture(t)
-		u, err := f.tree.Create("gov/new.md", []byte("data"), 0o644)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Remove(f.path("gov/new.md")); err != nil {
-			t.Fatal(err)
-		}
-		mustWrite(t, f.path("gov/new.md"), "someone else", 0o644)
-		if err := u.Rollback(); err != nil {
-			t.Fatalf("Rollback: %v", err)
-		}
-		if readString(t, f.path("gov/new.md")) != "someone else" {
-			t.Fatal("Rollback removed a file it did not create")
-		}
-	})
+	// The replacement may get the same inode number (ext4, overlayfs and
+	// tmpfs reuse a freed inode at once), so identity alone is not enough:
+	// Rollback also matches the size and mtime of the version it wrote.
+	for _, repl := range []struct{ name, data string }{
+		{"different size", "someone else"},
+		{"same size", "DATA"},
+	} {
+		t.Run("leaves a leaf that was replaced since/"+repl.name, func(t *testing.T) {
+			f := newFixture(t)
+			u, err := f.tree.Create("gov/new.md", []byte("data"), 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(f.path("gov/new.md")); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, f.path("gov/new.md"), repl.data, 0o644)
+			past := time.Unix(1_000_000_000, 0)
+			if err := os.Chtimes(f.path("gov/new.md"), past, past); err != nil {
+				t.Fatal(err)
+			}
+			if err := u.Rollback(); err != nil {
+				t.Fatalf("Rollback: %v", err)
+			}
+			if readString(t, f.path("gov/new.md")) != repl.data {
+				t.Fatal("Rollback removed a file it did not create")
+			}
+		})
+	}
 	t.Run("usable after Tree.Close", func(t *testing.T) {
 		f := newFixture(t)
 		u, err := f.tree.Create("gov/a/new.md", []byte("data"), 0o644)

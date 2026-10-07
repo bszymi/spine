@@ -163,7 +163,7 @@ func (w *walk) rollbackDirs() error {
 	var first error
 	for i := len(w.created) - 1; i >= 0; i-- {
 		d := w.created[i]
-		if err := removeIfSame(d.parent, d.name, d.info); err != nil && first == nil {
+		if err := removeIfSame(d.parent, d.name, d.info, false); err != nil && first == nil {
 			first = err
 		}
 	}
@@ -174,7 +174,14 @@ func (w *walk) rollbackDirs() error {
 // removeIfSame unlinks name from parent if it is still the file or
 // directory described by info. A directory that is not empty is left in
 // place without an error.
-func removeIfSame(parent *os.Root, name string, info fs.FileInfo) error {
+//
+// Identity is os.SameFile (device and inode). Inode numbers are reused as
+// soon as a file is unlinked (ext4, overlayfs, tmpfs do so readily), so a
+// file deleted and re-created under the same name can look identical; with
+// strict, the size and modification time must also match the version this
+// package wrote, so a later Rollback never removes someone else's file.
+// Directories are matched loosely: they are only ever removed while empty.
+func removeIfSame(parent *os.Root, name string, info fs.FileInfo, strict bool) error {
 	fi, err := parent.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -183,6 +190,9 @@ func removeIfSame(parent *os.Root, name string, info fs.FileInfo) error {
 		return err
 	}
 	if !os.SameFile(fi, info) {
+		return nil
+	}
+	if strict && (fi.Size() != info.Size() || !fi.ModTime().Equal(info.ModTime())) {
 		return nil
 	}
 	err = parent.Remove(name)
@@ -438,7 +448,8 @@ func readCapped(f io.Reader, rel string, sizeHint, limit int64) ([]byte, error) 
 // `defer undo.Release()` after an explicit Rollback is safe.
 type Undo struct {
 	w        *walk
-	leafInfo fs.FileInfo
+	leafInfo fs.FileInfo // the created leaf: its identity, and after a successful write its final version
+	strict   bool        // leafInfo is the final version: Rollback also matches size and mtime
 }
 
 // Rollback removes the created leaf, then each directory the Create made
@@ -451,7 +462,7 @@ func (u *Undo) Rollback() error {
 	}
 	var first error
 	if u.leafInfo != nil {
-		first = removeIfSame(u.w.parent(), u.w.leaf, u.leafInfo)
+		first = removeIfSame(u.w.parent(), u.w.leaf, u.leafInfo, u.strict)
 		if first != nil {
 			first = relErr(first, u.w.rel)
 		}
@@ -523,7 +534,7 @@ func (t *Tree) Create(rel string, data []byte, perm fs.FileMode) (_ *Undo, err e
 		return nil, relErr(err, w.rel)
 	}
 	// Record the created file's identity first, so a failure from here on
-	// removes exactly this file.
+	// (inside this call) removes exactly this file.
 	info, serr := f.Stat()
 	if serr != nil {
 		_ = closeFile(f)
@@ -533,36 +544,47 @@ func (t *Tree) Create(rel string, data []byte, perm fs.FileMode) (_ *Undo, err e
 		return nil, relErr(serr, w.rel)
 	}
 	u.leafInfo = info
-	if err := writeAndClose(f, data, "create", w.rel, 0, false); err != nil {
+	final, err := writeAndClose(f, data, "create", w.rel, 0, false)
+	if err != nil {
 		return nil, err
 	}
+	// From here on the caller owns the Undo, possibly across a slow
+	// commit: match the written version, not only the inode (see
+	// removeIfSame).
+	u.leafInfo, u.strict = final, true
 	return u, nil
 }
 
-// writeAndClose writes data to f, optionally fchmods it, and closes it. f
+// writeAndClose writes data to f, optionally fchmods it, and closes it,
+// returning the file's final Stat (taken on the descriptor before Close). f
 // is closed on every path.
-func writeAndClose(f *os.File, data []byte, op, rel string, mode fs.FileMode, chmod bool) error {
+func writeAndClose(f *os.File, data []byte, op, rel string, mode fs.FileMode, chmod bool) (fs.FileInfo, error) {
+	fail := func(err error) (fs.FileInfo, error) {
+		_ = closeFile(f)
+		return nil, err
+	}
 	if hook := testHookAfterLeafOpen; hook != nil {
 		if err := hook(op, rel); err != nil {
-			_ = closeFile(f)
-			return err
+			return fail(err)
 		}
 	}
 	if _, err := f.Write(data); err != nil {
-		_ = closeFile(f)
-		return relErr(err, rel)
+		return fail(relErr(err, rel))
 	}
 	if chmod {
 		// fchmod on the open descriptor: never resolves a name.
 		if err := f.Chmod(mode); err != nil {
-			_ = closeFile(f)
-			return relErr(err, rel)
+			return fail(relErr(err, rel))
 		}
 	}
-	if err := closeFile(f); err != nil {
-		return relErr(err, rel)
+	fi, err := f.Stat()
+	if err != nil {
+		return fail(relErr(err, rel))
 	}
-	return nil
+	if err := closeFile(f); err != nil {
+		return nil, relErr(err, rel)
+	}
+	return fi, nil
 }
 
 func tempName() (string, error) {
@@ -607,7 +629,7 @@ func replaceIn(w *walk, data []byte, mode fs.FileMode) (err error) {
 			_ = parent.Remove(tmp)
 		}
 	}()
-	if err := writeAndClose(f, data, "replace", w.rel, mode, true); err != nil {
+	if _, err := writeAndClose(f, data, "replace", w.rel, mode, true); err != nil {
 		return err
 	}
 	if hook := testHookBeforeLeafOp; hook != nil {
