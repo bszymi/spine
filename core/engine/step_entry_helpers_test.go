@@ -164,10 +164,19 @@ func (f fakeEntryResolver) ResolveEntryActor(ctx context.Context, actorID string
 
 // smpHumanResolver answers SMP's `human-<uuid>` handles as active humans
 // (who hold no skills) and everything else through the blocking store —
-// the shape SMP TASK-011 wires.
-func smpHumanResolver(bs *claimBlockingStore) EntryActorResolver {
+// the shape SMP TASK-011 wires. It is a CANONICAL resolver, as the
+// StepEntryPolicy.Actors contract requires: only the exact handles it was
+// given resolve, so a case, whitespace or brace variant of a member's handle
+// is "not found" rather than a second live identity (review round 1: an
+// echo-any-"human-*" resolver passes the engine's echo check for every
+// variant and defeats separation of duties).
+func smpHumanResolver(bs *claimBlockingStore, handles ...string) EntryActorResolver {
+	members := make(map[string]bool, len(handles))
+	for _, h := range handles {
+		members[h] = true
+	}
 	return fakeEntryResolver(func(ctx context.Context, actorID string) (*domain.Actor, error) {
-		if len(actorID) > len("human-") && actorID[:len("human-")] == "human-" {
+		if members[actorID] {
 			return &domain.Actor{ActorID: actorID, Type: domain.ActorTypeHuman, Status: domain.ActorStatusActive}, nil
 		}
 		if bs != nil {
@@ -178,11 +187,12 @@ func smpHumanResolver(bs *claimBlockingStore) EntryActorResolver {
 }
 
 // smpShapedPolicy is every check except RequireSkillsOnAssign, plus the
-// human-handle resolver (SMP TASK-011's intended adoption).
-func smpShapedPolicy(bs *claimBlockingStore) StepEntryPolicy {
+// canonical human-handle resolver for the given members (SMP TASK-011's
+// intended adoption).
+func smpShapedPolicy(bs *claimBlockingStore, handles ...string) StepEntryPolicy {
 	p := StrictStepEntryPolicy()
 	p.RequireSkillsOnAssign = false
-	p.Actors = smpHumanResolver(bs)
+	p.Actors = smpHumanResolver(bs, handles...)
 	return p
 }
 

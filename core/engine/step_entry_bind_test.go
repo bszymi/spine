@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -728,10 +729,9 @@ func TestStepEntry_SMPTaskDefaultContract(t *testing.T) {
 	o := &Orchestrator{store: st, wfLoader: &claimTestWFLoader{wf: wf}, events: &mockEventEmitter{},
 		git: &stubGitOperator{}, actors: &stubActorAssigner{}, blocking: bs, artifacts: reader,
 		assignments: newMemAssignmentStore(), discussions: &fakeDiscussions{}}
-	o.WithStepEntryPolicy(smpShapedPolicy(bs))
-
 	const executor = "human-0f9a7c1e-1111-4a3b-9c2d-000000000001"
 	const reviewer = "human-0f9a7c1e-2222-4a3b-9c2d-000000000002"
+	o.WithStepEntryPolicy(smpShapedPolicy(bs, executor, reviewer))
 	if _, err := o.AssignStep(ctx, AssignRequest{RunID: "run-1", StepID: "execute", ActorID: executor}); err != nil {
 		t.Fatalf("SMP task-default execute assign of a skill-less human handle must succeed: %v", err)
 	}
@@ -779,7 +779,9 @@ func TestStepEntry_ResolverContract(t *testing.T) {
 	})
 	for _, p := range []StepEntryPolicy{
 		{EnforceEligibility: true, Actors: aliasing},
-		{Actors: aliasing}, // resolver only: ClaimStep's actor lookup uses it too
+		// Resolver only: ClaimStep's actor lookup uses it too. Not
+		// discriminating on its own (see the next sub-test).
+		{Actors: aliasing},
 	} {
 		p := p
 		t.Run("resolver answering a different ActorID is not found", func(t *testing.T) {
@@ -797,6 +799,74 @@ func TestStepEntry_ResolverContract(t *testing.T) {
 			}
 		})
 	}
+	// Review round 1: the resolver-only row above cannot fail when
+	// ClaimStep's lookup reverts to loadActor (the blocking store knows no
+	// "alice" either way). This row can: the resolver answers an ID the
+	// blocking store does not know, on a step with an execution block (so
+	// ClaimStep looks the actor up) and no required_skills.
+	t.Run("resolver-only policy routes ClaimStep's actor lookup through the resolver", func(t *testing.T) {
+		smpOnly := fakeEntryResolver(func(_ context.Context, id string) (*domain.Actor, error) {
+			if id == "human-x" {
+				return activeActor(id, domain.ActorTypeHuman), nil
+			}
+			return nil, domain.NewError(domain.ErrNotFound, "actor not found")
+		})
+		st, as, o := setup(StepEntryPolicy{Actors: smpOnly})
+		res, err := o.ClaimStep(ctx, ClaimRequest{ActorID: "human-x", ExecutionID: "run-1-execute-1"})
+		if err != nil {
+			t.Fatalf("ClaimStep of a resolver-only actor: %v", err)
+		}
+		if res.Assignment.ActorID != "human-x" || len(as.assignments) != 1 {
+			t.Fatalf("claim recorded %+v (%d rows)", res.Assignment, len(as.assignments))
+		}
+		if e := execByID(st, "run-1-execute-1"); e.ActorID != "human-x" || e.Status != domain.StepStatusAssigned {
+			t.Fatalf("claimed exec = %s/%q", e.Status, e.ActorID)
+		}
+		// Control: without the resolver the same claim is refused, which
+		// is what makes this row discriminating.
+		_, _, zero := setup(StepEntryPolicy{})
+		if _, err := zero.ClaimStep(ctx, ClaimRequest{ActorID: "human-x", ExecutionID: "run-1-execute-1"}); err == nil {
+			t.Fatalf("zero value: ClaimStep of an actor the blocking store does not know must fail")
+		}
+	})
+	// Review round 1: the echo check cannot tell a canonical handle from a
+	// variant a resolver chose to accept, so the contract puts canonical
+	// matching on the resolver. This pins the engine's half: it hands the
+	// resolver the requested ID unmodified (no trimming or case folding),
+	// so a canonical resolver refuses every variant on both paths.
+	t.Run("canonical resolver refuses variants; the engine passes IDs verbatim", func(t *testing.T) {
+		var asked []string
+		canonical := fakeEntryResolver(func(_ context.Context, id string) (*domain.Actor, error) {
+			asked = append(asked, id)
+			if id == "alice" {
+				return activeActor(id, domain.ActorTypeHuman), nil
+			}
+			return nil, domain.NewError(domain.ErrNotFound, "actor not found")
+		})
+		st, as, o := setup(StepEntryPolicy{EnforceEligibility: true, Actors: canonical})
+		before := snapshotExecs(st)
+		for _, variant := range []string{"Alice", "ALICE", " alice", "alice ", "alice\t"} {
+			asked = nil
+			aErr, cErr := bind(o, variant)
+			requireCode(t, aErr, domain.ErrNotFound, "AssignStep of variant "+strconv.Quote(variant))
+			requireCode(t, cErr, domain.ErrNotFound, "ClaimStep of variant "+strconv.Quote(variant))
+			for _, got := range asked {
+				if got != variant {
+					t.Fatalf("resolver was asked %q for requested ID %q: the engine must not normalise IDs", got, variant)
+				}
+			}
+			if len(asked) == 0 {
+				t.Fatalf("variant %q never reached the resolver", variant)
+			}
+		}
+		requireExecsUnchanged(t, st, before, "refused variant binds")
+		if len(as.assignments) != 0 {
+			t.Fatalf("a refused claim must not create an assignment row")
+		}
+		if _, err := o.AssignStep(ctx, AssignRequest{RunID: "run-1", StepID: "execute", ActorID: "alice"}); err != nil {
+			t.Fatalf("the canonical handle must bind: %v", err)
+		}
+	})
 	t.Run("typed resolver errors keep their code", func(t *testing.T) {
 		_, _, o := setup(StepEntryPolicy{EnforceEligibility: true, Actors: fakeEntryResolver(
 			func(context.Context, string) (*domain.Actor, error) {

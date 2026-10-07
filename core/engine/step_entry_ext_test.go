@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -160,10 +161,17 @@ func TestStepEntry_GovernanceSelfApprovalRefused(t *testing.T) {
 	})
 
 	t.Run("SMP-shaped policy", func(t *testing.T) {
+		const executor = "human-6b1d1f3e-0000-4000-8000-00000000000a"
+		const reviewer = "human-6b1d1f3e-0000-4000-8000-00000000000b"
+		// A CANONICAL resolver (the StepEntryPolicy.Actors contract): only
+		// the members' exact handles resolve. Review round 1: a resolver
+		// that echoed any "human-*" string let a case, whitespace or brace
+		// variant of the executor's handle bind the review.
+		members := map[string]bool{executor: true, reviewer: true}
 		p := engine.StrictStepEntryPolicy()
 		p.RequireSkillsOnAssign = false
 		p.Actors = extResolver(func(_ context.Context, id string) (*domain.Actor, error) {
-			if strings.HasPrefix(id, "human-") {
+			if members[id] {
 				return &domain.Actor{ActorID: id, Type: domain.ActorTypeHuman, Status: domain.ActorStatusActive}, nil
 			}
 			return nil, domain.NewError(domain.ErrNotFound, "actor not found")
@@ -171,8 +179,6 @@ func TestStepEntry_GovernanceSelfApprovalRefused(t *testing.T) {
 		// The Spine actor table knows none of SMP's human handles, and SMP
 		// humans hold no skills.
 		st, orch := build(t, p, &entryBlocking{actors: map[string]*domain.Actor{}, skills: map[string][]domain.Skill{}})
-		const executor = "human-6b1d1f3e-0000-4000-8000-00000000000a"
-		const reviewer = "human-6b1d1f3e-0000-4000-8000-00000000000b"
 
 		res, err := orch.StartRun(ctx, "tasks/t.md")
 		if err != nil {
@@ -187,6 +193,22 @@ func TestStepEntry_GovernanceSelfApprovalRefused(t *testing.T) {
 		}
 		_, err = orch.AssignStep(ctx, engine.AssignRequest{RunID: runID, StepID: "review", ActorID: executor})
 		requireErrCode(t, err, domain.ErrForbidden, "executor self-assigning review (SMP-shaped)")
+		// Variants of the executor's handle are not a second identity:
+		// the canonical resolver answers not found, so none binds the
+		// review (each would pass the engine's exact-echo check had the
+		// resolver accepted it).
+		for _, variant := range []string{
+			strings.ToUpper(executor[:6]) + executor[6:],
+			"human-6B1D1F3E-0000-4000-8000-00000000000A",
+			executor + " ",
+			"human-{6b1d1f3e-0000-4000-8000-00000000000a}",
+		} {
+			_, err = orch.AssignStep(ctx, engine.AssignRequest{RunID: runID, StepID: "review", ActorID: variant})
+			requireErrCode(t, err, domain.ErrNotFound, "assign of executor-handle variant "+strconv.Quote(variant))
+			if e := st.steps[liveExecID(t, st, runID, "review")]; e.ActorID != "" || e.Status != domain.StepStatusWaiting {
+				t.Fatalf("variant %q bound the review: %s/%q", variant, e.Status, e.ActorID)
+			}
+		}
 		if _, err := orch.AssignStep(ctx, engine.AssignRequest{RunID: runID, StepID: "review", ActorID: reviewer}); err != nil {
 			t.Fatalf("an independent member must be assignable to review: %v", err)
 		}

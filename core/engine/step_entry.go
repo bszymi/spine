@@ -82,13 +82,27 @@ type StepEntryPolicy struct {
 	// ClaimStep's actor lookup. A resolver-only policy is therefore NOT the
 	// zero value (IsZero ignores this field).
 	//
-	// Contract, enforced by the engine rather than left to the resolver:
-	// the returned Actor's ActorID must equal the requested ID exactly, or
-	// the bind answers ErrNotFound — no alias (a case variant, say) may
-	// resolve to a live actor, because separation of duties and an
-	// embedder's submit-ownership check are exact string compares. A
-	// *domain.SpineError keeps its code (ErrUnavailable stays 503); an
-	// untyped error becomes ErrInternal.
+	// Contract. Separation of duties and an embedder's submit-ownership
+	// check are exact string compares, so one identity must have exactly
+	// one actor ID that binds:
+	//
+	//   - Enforced by the engine: the returned Actor's ActorID must equal
+	//     the requested ID byte for byte, or the bind answers ErrNotFound.
+	//     This only stops a resolver from answering for a DIFFERENT ID
+	//     than the one asked about (mapping "Alice" to "alice", say).
+	//   - The resolver's own duty, which the engine cannot check: answer
+	//     ErrNotFound for every input that is not, byte for byte, the
+	//     stored canonical handle of an actor — no case folding, trimming,
+	//     brace / urn: UUID forms or other lenient parsing. A resolver
+	//     that builds the Actor from the requested ID (echoing any
+	//     "human-*" string, or parsing it with a lenient UUID parser)
+	//     passes the echo check for every variant, so a case or whitespace
+	//     variant of a run author's handle binds as a different actor and
+	//     defeats separation of duties.
+	//
+	// A *domain.SpineError keeps its code (ErrUnavailable stays 503); an
+	// untyped error becomes ErrInternal. The engine passes the requested
+	// ID to the resolver unmodified.
 	Actors EntryActorResolver
 }
 
@@ -226,9 +240,12 @@ func (o *Orchestrator) policyActor(ctx context.Context, actorID string) (*domain
 }
 
 // checkResolvedActor applies the lookup contract to a resolver or store
-// answer. The exact-ID echo check stops an alias from binding an identity
-// that the exact-string separation-of-duties and ownership compares would
-// not recognise.
+// answer. The exact-ID echo check stops a resolver from answering for a
+// different identity than the one requested; it cannot tell a canonical
+// handle from a variant the resolver chose to accept, which is why the
+// resolver itself must refuse non-canonical input (StepEntryPolicy.Actors).
+// The store path (no resolver) is exact: GetActor is an equality lookup on
+// auth.actors.actor_id.
 func checkResolvedActor(a *domain.Actor, err error, actorID string) (*domain.Actor, error) {
 	if err != nil {
 		var se *domain.SpineError
