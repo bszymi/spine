@@ -354,6 +354,16 @@ All existing tests pass un *[designer's text truncated here]*
 - `0001`/`0002` packets;
 - gzip bodies.
 
+  > **Implementation note (review round 2, 2026-10-07): the shallow case is a real client.** A push
+  > from a `git clone --depth` clone, common in CI, is one git applies: `send-pack` sends
+  > `shallow <oid>` ahead of the commands, and `receive-pack` accepts the push when the new commits
+  > connect to history it has. The gate refuses it as `command 1: malformed ref update`, as it did
+  > before this task (OQ2 keeps that). The round-1 wording in the CHANGELOG, in `isCapabilityList`'s
+  > doc comment and in the capability-list test's comment dropped this section's "newly". All three
+  > now say "newly refused" and name the shallow case.
+  > `TestPreReceive_ShallowClonePushStillRefused` pins both halves with the real git client: plain
+  > git applies the push, and the gate refuses it.
+
 **SMP (embedded).**
 - **Parser.** SMP does not import `service/`, so the parser change does not reach it. SMP's own copy
   (`internal/customer/githttp/prereceive.go`, byte-identical at `80995559`) is fixed by SMP
@@ -413,12 +423,41 @@ All existing tests pass un *[designer's text truncated here]*
 >   rule matching alone would therefore not close it.
 > - **Non-ASCII aliases.** APFS also aliases the Kelvin sign (U+212A → `k`) and NFD/NFC forms
 >   (`é` ↔ `é`). ASCII-only folding is therefore incomplete.
-> - **Loose `main` is refused.** With a **loose** `main`, git 2.54 refuses
->   (`cannot lock ref 'refs/heads/MAIN': unable to resolve reference`).
-> - **TASK-016's premise is false for packed refs.** That loose case is the only one TASK-016's
->   out-of-scope line covers ("not exploitable on git 2.54, which has `core.ignorecase` collision
->   refusal"). The premise fails for packed refs, even with `core.ignorecase=true`, which the bare
->   clone had set.
+> - **Loose `main`: only the plain create is refused.** With a **loose** `main`, git refuses a
+>   plain client's *create* of `refs/heads/MAIN` (old id = zero), because the aliased file already
+>   exists.
+>   - *Review round 2 (2026-10-07):* the refusal reads
+>     `cannot lock ref 'refs/heads/MAIN': reference already exists` on git 2.54, not the
+>     `unable to resolve reference` first recorded here.
+>   - A loose `main` does **not** stop a hand-crafted update or delete. See the review-round-2
+>     note below.
+> - **TASK-016's premise is false for packed refs, and for updates.** That loose create is the
+>   only case TASK-016's out-of-scope line covers ("not exploitable on git 2.54, which has
+>   `core.ignorecase` collision refusal"). The premise fails for packed refs, even with
+>   `core.ignorecase=true`, which the bare clone had set. As TASK-016's own design-check note
+>   (owner question 5) found, it also fails for an update that carries the ref's current id.
+>
+> **Review round 2 (2026-10-07): the loose-ref path.** A plain create needs a packed ref; a
+> hand-crafted update or delete does not. Reproduced with rules `main: [no-delete,
+> no-direct-write]` and `develop: [no-delete]`, a contributor actor, and `main` and `develop`
+> **loose**:
+> - **Update.** `<main-tip> <evil> refs/heads/MAIN` plus a pack returned `ok refs/heads/MAIN`.
+>   `refs/heads/main` then resolved to the attacker commit, and no override event was emitted.
+> - **Delete.** `<develop-tip> 0{40} refs/heads/DEVELOP` returned `ok refs/heads/DEVELOP` and
+>   removed `develop`.
+> - **Where it was reproduced:**
+>   - git 2.54 on APFS, through `Handler.ServeHTTP`, in a bare repository with no `packed-refs`;
+>   - git 2.54 on APFS, through `Handler.ServeHTTP`, in a **non-bare checkout with `main` checked
+>     out**. git's default `receive.denyCurrentBranch=refuse` did not catch it, because it compares
+>     `refs/heads/MAIN` with HEAD's `refs/heads/main` byte-wise. So the incidental protection the
+>     Purpose note describes for standalone `main` does not hold on such storage.
+>   - Linux git 2.39.5 (`golang:1.26-bookworm`), with plain `git receive-pack --stateless-rpc`,
+>     in a non-bare checkout on a Docker Desktop bind mount of a macOS directory
+>     (`core.ignorecase=true`). This is the `./:/repo` dev-override configuration.
+>
+> A stock `git push` never sends that update or delete, because the server advertises `main`, not
+> `MAIN`; it is a hand-written request body. The KNOWN-LIMITATIONS entry, both bind-mount warnings
+> and the EPIC-001 follow-up note now describe both paths.
 >
 > **Why this is not F1.** The gate evaluates the same bytes git writes, so §0's invariant holds; the
 > filesystem then aliases two names.
@@ -968,6 +1007,8 @@ against real git and Docker) before anything was changed.
      - The CHANGELOG entry names the one exception and why it costs no client.
      - `isCapabilityList`'s doc comment says it is the one place the gate is stricter than git.
      - Design §5 gets an implementation note.
+     - *(Review round 2: the CHANGELOG and both comments dropped Design §5's "newly", which made
+       them false for pushes from shallow clones. Corrected; see Review round 2, finding 1.)*
    - **Test that pins it:** `TestPreReceive_CapabilityListStricterThanGit`. It sends the same
      bodies to plain `git receive-pack --stateless-rpc` and through `Handler.ServeHTTP`:
      - rows: a TAB separator, UTF-8 in `agent=`, both, and a printable-ASCII control;
@@ -991,6 +1032,8 @@ against real git and Docker) before anything was changed.
 
      So Linux git inside the container inherits the host's case-insensitivity.
    - **Fix.**
+     - *(Review round 2: the comment's "whenever the protected ref is packed" condition was wrong;
+       loose refs are exposed too. Corrected; see Review round 2, finding 2.)*
      - The example gets a security comment: do not enable `SPINE_GIT_RECEIVE_PACK_ENABLED` with
        this bind mount on macOS or Windows. It points to KNOWN-LIMITATIONS.
      - The KNOWN-LIMITATIONS entry names the example explicitly.
@@ -1132,6 +1175,148 @@ The scratch databases and containers were removed afterwards:
 - `s001_r1_scenario` was dropped;
 - `s001-r1-pg18`, which was on tmpfs and created no volume, was removed;
 - `s001-r1-linux-*` and `s001-r1-bindmount` ran with `--rm`.
+
+### Review round 2 (2026-10-07)
+
+A second-round reviewer examined the branch after round 1 and raised two P3 findings and two
+AC gaps. As in round 1, each finding was checked against the code and against real git (and
+Docker, where it made a claim about Docker) before anything was changed. Toolchain this round:
+git 2.54.0 and go 1.26.8 (round 1 ran go 1.26.5).
+
+#### Findings
+
+1. **P3: the CHANGELOG and two comments claim the capability-list guard is the only place the
+   gate refuses a push git would apply. FIXED (`a2125dc`).**
+   - **The finding is real.**
+     - A `shallow <oid>` frame has two fields, so `parseRefUpdates` refuses it as
+       `command 1: malformed ref update`. `main`'s parser refused it the same way, just without
+       the `command 1:` prefix.
+     - git applies such a push. Reproduced below with the real git client and git 2.54.
+     - Design §5 had it right: "newly refused", with shallow among the shapes "already refused".
+       The CHANGELOG, `isCapabilityList`'s doc comment and the comment on
+       `TestPreReceive_CapabilityListStricterThanGit` dropped the "newly".
+   - **Fix.**
+     - All three now say "newly refused". They state that pushes from shallow clones stay
+       refused, as before; the CHANGELOG adds "push from a full clone".
+     - Design §5 gets a round-2 implementation note, and the round-1 finding 1 entry points here.
+     - `docs/git-push-guide.md` §5 already listed the shallow cause (AC 12), so it is unchanged.
+     - The refusal itself is unchanged (OQ2 ruling).
+   - **Test that pins it: `TestPreReceive_ShallowClonePushStillRefused`.** It uses the real git
+     client:
+     - setup: a depth-1 clone over `file://` of a two-commit repository, asserted shallow
+       (`rev-parse --is-shallow-repository`);
+     - plain git (the local transport, pushing to a bare copy) **applies** the push;
+     - through `Handler.ServeHTTP` the same push is **refused**:
+       `malformed push: command 1: malformed ref update "shallow …"`;
+     - after the refusal, `feature` was not created, `main` did not move, and 0 events were
+       emitted.
+   - **Mutants, via overlay.** Both are killed:
+     - The naive mutant (the parser skips `shallow ` lines) is killed on the message, because the
+       caps line becomes command 2.
+     - The clean mutant (skip, then `n--`) is killed with `admitted through the gate … [new
+       branch]`. That run also shows that git, through the real CGI, applies the push once the
+       gate lets it through.
+2. **P3: the bind-mount warnings' "whenever the protected ref is packed (any clone, or after git
+   gc)" is wrong. FIXED (`875e681`; Design §6 in the notes commit).**
+   - **The finding is real.** Reproduced with a throwaway probe test, deleted afterwards and never
+     committed. Rules: `main: [no-delete, no-direct-write]` and `develop: [no-delete]`, with a
+     contributor actor.
+     - **APFS, git 2.54, through `Handler.ServeHTTP`, bare repository, loose refs and no
+       `packed-refs`:**
+       - a create of `refs/heads/MAIN` was refused (`reference already exists`);
+       - `<main-tip> <evil> refs/heads/MAIN` returned `ok refs/heads/MAIN`, and `main` resolved to
+         the attacker commit;
+       - `<develop-tip> 0{40} refs/heads/DEVELOP` returned `ok refs/heads/DEVELOP`, and
+         `develop` was gone;
+       - 0 override events.
+     - **The same in a non-bare checkout with `main` checked out.** git's default
+       `receive.denyCurrentBranch=refuse` did not catch it, because it compares names byte-wise.
+     - **Docker Desktop bind mount of a macOS directory.** Container `s001-r2-bindmount`
+       (`golang:1.26-bookworm`, `--rm`), Linux git 2.39.5, `core.ignorecase=true`, plain
+       `git receive-pack --stateless-rpc`, a non-bare checkout with `main` checked out and loose:
+       - the update returned ok, and `main` resolved to the attacker commit, read back from a
+         fresh container. The same container briefly failed to resolve `refs/heads/main` right
+         after the rename, a stale directory cache in the mount;
+       - the delete removed `develop`.
+     - **"Any clone" is false for the bind mount.** A non-bare checkout's `refs/heads/main` is
+       loose: both checkouts above had only `.git/refs/heads/{main,develop}` and no
+       `packed-refs`.
+   - **Fix.**
+     - **Both warnings** (`docker-compose.override.yaml.example`, `architecture/docker-runtime.md`
+       §9.2) drop the packed condition. They now say:
+       - a hand-crafted update or delete that carries the ref's current id lands even on a loose
+         ref;
+       - a plain `git push` lands once the ref is packed;
+       - git's checked-out-branch refusal does not catch it.
+     - **The KNOWN-LIMITATIONS "Why"** lists the packed path and the loose path.
+     - **The EPIC-001 follow-up note** says the follow-up's design must not assume a packed ref.
+     - **Design §6:**
+       - the "Loose `main`" bullet now covers only the plain create;
+       - the recorded refusal text is corrected to `reference already exists`; the
+         `unable to resolve reference` first recorded there was not reproduced;
+       - the TASK-016 premise bullet now also names updates;
+       - a round-2 note records the loose-ref evidence.
+   - **TASK-016 is not edited.** Its owner question 5 and design-check note already record the
+     update form, and its "Correction by TASK-001" bullet stays accurate.
+   - **No test.** This documents an environmental limitation, as in round 1. A test that
+     reproduces the bypass would pin an exploit and could run only on case-insensitive storage.
+     The enforcing test belongs to the follow-up's fail-closed probe (OQ1).
+
+#### Acceptance-criteria gaps
+
+- **AC 9: `make lint` is not green, and the CI job is scoped to `TestGitHTTP_*`. Unchanged, and
+  not fixable inside this branch.**
+  - Re-checked this round:
+    - the touched packages show the same 22 issues as a `main` export, compared by file, linter
+      and message: 0 new and 0 gone;
+    - `--new-from-rev=main` reports 0 issues on the touched packages and 0 on the scenario
+      package;
+    - the full scenario suite, on PostgreSQL 17.10, has 30 FAILs, **name for name the same set**
+      as the round-1 list.
+  - Both remain recorded deviations, **awaiting the owner's or orchestrator's ratification**. No
+    test inside this branch can make the literal clauses falsifiable.
+- **AC 4, AC 9, AC 10 and AC 13: the post-push clauses.** These are:
+  - SHA-256 PASS on the ubuntu runner;
+  - the `scenario-git-http` job running on GitHub;
+  - SMP's CI green with `../spine` at the merge commit;
+  - the PR description.
+
+  All are orchestrator-owned and observable only after the push or merge. The local evidence was
+  re-run this round (Gates below): the CI step script verbatim, the SHA-256 test (PASS), and the
+  SMP gate.
+
+#### Gates (review round 2; code at `875e681`)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | exit 0 |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | exit 0, 38 ok, 0 FAIL |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | all exit 0 |
+| `go test -race -p 4 -count=1 ./adapters/git/refname/... ./service/internal/githttp/... ./core/branchprotect/...` | all ok (5 packages) |
+| `CI=true go test -count=1 -v -run 'TestPreReceive_SHA256NullOIDDeleteRefusedByNoDelete\|TestRefUpdate_IsDeleteRecognisesBothNullOIDs' ./service/internal/githttp/` | both **PASS**, not SKIP (macOS, git 2.54) |
+| `SPINE_TEST_DATABASE_URL=…/s001_r2_scenario` (PostgreSQL 17.10) `go test -race -tags scenario -p 4 -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` | exit 0; 19 PASS, 0 SKIP and 0 FAIL at any depth, 0 races |
+| The CI `scenario-git-http` step script, extracted from `ci.yml` and run verbatim (`env -i`, `CI=true`, `bash --noprofile --norc -eo pipefail`) against `s001_r2_scenario` | step exit 0; 19/19 PASS, 0 SKIP at any depth |
+| `SPINE_TEST_DATABASE_URL=…/s001_r2_full go test -tags scenario -count=1 -p 1 ./service/scenariotest/...` | 30 FAIL, identical by name to the round-1 pre-existing set (see AC 9); no new failure |
+| Integration-tagged tests in the touched packages | none exist (0 files) |
+| `golangci-lint run` on the touched packages, branch vs a `main` export | 22 vs 22, identical sets; `--new-from-rev=main`: 0 issues |
+| `golangci-lint run --build-tags scenario --new-from-rev=main ./service/scenariotest/scenarios/` | 0 issues |
+| `golangci-lint run --enable-only=gosec` on the touched packages | 0 issues |
+| `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
+| **SMP gate** (`../spine` = this worktree, `-mod=readonly`, SMP `7d4e7cc9`, no `vendor/`): `go build ./...`, `go vet ./...` | clean |
+| SMP `go test -p 4 ./internal/customer/githttp/... ./internal/customer/spineembedded/...`; `-tags integration ./internal/customer/githttp/...` | ok, ok; ok |
+| SMP `go test -p 4 ./...` (AC 10) | exit 0; 148 ok, 0 FAIL. SMP checkout left clean (`git status` empty) |
+| `codex review --base main`, plain, on `875e681` | "No actionable regressions were identified." No P1, P2 or P3, so nothing to fix or reject. Codex ran the refname, branch-protection and git-HTTP tests itself |
+
+**The SMP guard-alone PoC check was not re-run.** This round changes no file SMP compiles: Spine's
+`service/` is not imported by SMP, and `prereceive.go` changed only in a comment. Build, vet and
+the suites above were re-run anyway.
+
+**Cleanup.**
+- `s001_r2_scenario` and `s001_r2_full` were dropped.
+- The probe container `s001-r2-bindmount` ran with `--rm`; no `s001-r2*` container remains.
+- The throwaway probe test file was deleted before the first round-2 commit.
 
 ### PR description (draft, AC 13)
 
