@@ -50,6 +50,7 @@ spine validate --all
 | `SPINE_DATABASE_URL=…?sslmode=require` | `sslmode=disable` is refused unless `SPINE_INSECURE_LOCAL=1`. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Base64 32-byte AES-256 key for at-rest webhook-secret encryption. Generate with `openssl rand -base64 32`. |
 | `SPINE_OPERATOR_TOKEN` | Bearer token for workspace-management endpoints. Minimum 32 characters. Leave unset to return 503 on those endpoints. |
+| `SMP_ADMIN_TOKEN` | Platform bootstrap bearer, seeded as admin into every workspace. When set: minimum 32 characters and 8 distinct characters (`openssl rand -hex 32`); weaker values refuse to start in production. Rotation revokes the previous bearer per workspace on first load — see `docs/operator-runbook.md` §5.6. |
 | `SPINE_GIT_CREDENTIAL_HELPER` | One of `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended over `SPINE_GIT_PUSH_TOKEN`. |
 | `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. |
 

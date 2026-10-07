@@ -125,6 +125,38 @@ The following limitations have been resolved:
   matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,
   paired with SMP's equivalent follow-up.
 
+### Platform Bootstrap Bearer (`SMP_ADMIN_TOKEN`) Rotation
+- **Behaviour (INIT-023 TASK-013):** the first load of a workspace after a restart with a new
+  `SMP_ADMIN_TOKEN` revokes the previous bootstrap bearer there (only `bootstrap-…` rows of
+  `smp-admin` created before the replica started; admin-minted `tok_…` tokens are kept).
+  Revocation is never undone.
+- **Not zero-downtime:** platform requests that still carry the old bearer get 401 from each
+  workspace's first load after the Spine restart until the platform switches. Switch both in one
+  change window (`docs/operator-runbook.md` §5.6). A two-phase `SMP_ADMIN_TOKEN_PREVIOUS` grace
+  is a recorded follow-up (TASK-013 owner question 2).
+- **Restart-during-rollout residue:** an old-config replica that restarts mid-rollout and then
+  loads a workspace first seeded during the overlap revokes the *new* bearer there. Recovery is
+  to rotate forward to a fresh value. Only bearer generation numbers would remove this (owner
+  question 5); the default accepts it.
+- **Clock dependence:** rows are ordered by the `created_at` the inserting replica stamps, so the
+  rollout cutoff assumes replica clocks agree to well within the deploy's duration.
+- **Legacy token ids:** bootstrap rows written before TASK-013 keep their
+  `bootstrap-<sha256(bearer)[:12]>` id (listable by a workspace admin, printed at Debug on each
+  load) until the next rotation revokes them. Rotate once after upgrading.
+- **Unsetting `SMP_ADMIN_TOKEN`** stops seeding but does not revoke the existing bootstrap row;
+  revoke it with `DELETE /api/v1/tokens/{token_id}`.
+
+### Skill Eligibility Is Matched by Name
+- Workflow `required_skills` and claim-time eligibility match skill *names*, not ids. Since
+  INIT-023 TASK-013 every operation that can move eligibility (granting, removing, creating,
+  renaming, deprecating) is admin-only, a non-admin can never change its own skills, and a rename
+  or deprecation that touches a name an active workflow requires needs `?force=true`. Matching by
+  immutable `skill_id` is a deferred follow-up (a governed workflow-format change).
+- The rename and deprecation guards scan **active** workflow projections only; a run pinned to a
+  superseded workflow version that names the skill is not detected.
+- `auth.actor_skills` records no grantor, so grants made by non-admins before the upgrade are not
+  distinguishable. Review `review`, `workflow_review` and `architecture` holders after upgrading.
+
 ## Architecture Deviations
 
 ### Convergence Evaluation Step

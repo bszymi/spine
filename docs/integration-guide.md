@@ -262,10 +262,10 @@ Each role grants specific permissions:
 - `reader` -- read artifacts, query state
 - `contributor` -- create/update artifacts, start runs, submit results
 - `reviewer` -- all contributor permissions + accept/reject tasks
-- `operator` -- all reviewer permissions + manage tokens, system operations
-- `admin` -- all permissions
+- `operator` -- all reviewer permissions + system operations, run cancellation, manual step assignment, and registering actors with a role strictly below its own (reader, contributor, reviewer)
+- `admin` -- all permissions, including token management, operator and admin actors, the skill catalogue and actor skill grants
 
-**Skills:** Actors can have skills assigned (e.g., "go-development", "code-review"). Workflows can require specific skills for step assignment, enabling skill-based routing of work.
+**Skills:** Actors can have skills assigned (e.g., "go-development", "code-review"). Workflows can require specific skills for step assignment, enabling skill-based routing of work. Because skills decide who may claim review and approval steps, managing them is admin-only: creating, updating, renaming or deprecating a skill (`POST`/`PATCH /api/v1/skills…`, `POST /api/v1/skills/{id}/deprecate`) and granting or removing an actor's skill (`POST`/`DELETE /api/v1/actors/{actor_id}/skills/{skill_id}`). A non-admin actor can never change its own skills (403 with `reason=self_skill_change_forbidden`). Renaming or deprecating a skill that an active workflow requires answers 409 unless `?force=true` is passed. An integration that let agents register their own skills must move that to an admin token.
 
 ---
 
@@ -609,6 +609,7 @@ spec:
 | `SPINE_DEV_MODE` | No | - | `1` or `true` lets unauthenticated requests through the auth gate. Dev-only; refused at startup when `SPINE_ENV=production`. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Yes (production) | - | Base64-encoded 32-byte AES-256 key for at-rest secret encryption (webhook signing secrets). Generate with `openssl rand -base64 32`. See [Secrets at Rest](#secrets-at-rest). |
 | `SPINE_OPERATOR_TOKEN` | No | - | Static bearer token for system-level endpoints (workspace CRUD). Minimum 32 characters; shorter values are refused at startup. Unset: operator endpoints return 503. |
+| `SMP_ADMIN_TOKEN` | No | - | Platform bearer seeded as the admin actor `smp-admin` into every workspace this process loads (db / platform-binding modes), so the management platform authenticates on its first request. Must be at least 32 characters with at least 8 distinct characters (generate with `openssl rand -hex 32`): a weaker value refuses to start when `SPINE_ENV=production` and logs a warning otherwise. Rotating it revokes the previous bootstrap bearer in each workspace on that workspace's first load after the restart, so switch the platform's bearer in the same change window (see the operator runbook, "Rotating `SMP_ADMIN_TOKEN`"). Unsetting it does not revoke the existing bearer. A suspended or deactivated `smp-admin` stays that way. Unset: no bootstrap. |
 | `SPINE_INSECURE_LOCAL` | No | - | Set to `1` only for local development with `sslmode=disable` DB URLs. |
 | `SPINE_TRUSTED_PROXY_CIDRS` | No | - | Comma-separated CIDRs of reverse proxies Spine should trust for `X-Forwarded-For`. Leave unset if directly internet-facing. |
 | `SPINE_GIT_HTTP_TRUSTED_CIDRS` | No | - | Comma-separated CIDRs allowed to clone/fetch over the internal git-HTTP endpoint without a bearer token (e.g. runner container network). Unset = require tokens from every caller. |

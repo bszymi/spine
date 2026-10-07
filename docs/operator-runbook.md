@@ -295,6 +295,31 @@ If a run's clone or push fails with `auth_failed` after rotation despite the `PU
 | `PUT` succeeds, then pushes start failing with `credentials_unavailable` | The new `credentials_ref` is malformed or points at a path the secret-client cannot dereference. The PUT path stores the string as-is — validation happens later, on the next Git operation, when the secret resolver tries to read the secret. | Inspect the failed Git operation's classification; correct the `credentials_ref` (issue another `PUT`) so the next attempt resolves cleanly. |
 | `PUT` succeeds but pushes still fail with `auth_failed` | The new value at `secret-store://workspaces/<ws>/git` is wrong, OR a cache is still serving the old value from one of two layers (gitpool's CLI client cache; secret-client's value cache) | (1) Issue another no-op `PUT` so `UpdatedAt` advances and the gitpool cache evicts; (2) call `Invalidate(ref)` on the secret-client to drop any cached secret value (§5.4); (3) verify the secret backend has the new credential at the canonical ref. Do NOT change `credentials_ref` to a different scheme — the canonical ref is the only supported form, and rewriting it would convert `auth_failed` into `credentials_unavailable` |
 
+### 5.6 Rotating `SMP_ADMIN_TOKEN`
+
+`SMP_ADMIN_TOKEN` is the platform-binding bootstrap bearer. On every workspace load (`db` / `platform-binding` modes) `spine serve` makes sure that workspace has a bootstrap token row for it, bound to the admin actor `smp-admin`. Since INIT-023 TASK-013 the same load also **revokes the previous bootstrap bearer**: every other live `bootstrap-…` row of `smp-admin` that is older than the current bearer's row and was created before this replica started. Tokens an admin minted for `smp-admin` through `POST /api/v1/tokens` (`tok_…` ids) are never touched, and **revocation is never undone**. Workspace loads are lazy — the first request to a workspace after a restart loads it, whichever bearer that request carries.
+
+Steps:
+
+1. **Set the new value.** Generate it with `openssl rand -hex 32`. `spine serve` refuses a value shorter than 32 characters or with fewer than 8 distinct characters when `SPINE_ENV=production`, and warns elsewhere.
+2. **Restart all replicas.** In each workspace, the old bearer is revoked on that workspace's first load after the restart.
+3. **Expect the old bearer to be refused** (401), including after a rollback to the old value. A rollback to a revoked bearer is refused too, and the load logs at Error: `SMP_ADMIN_TOKEN matches a revoked bootstrap admin token`. Roll forward to a fresh value instead.
+4. **To lock the platform out during an incident, suspend `smp-admin`.** The bootstrap no longer re-activates a suspended or deactivated `smp-admin` (it logs a Warn on each load instead). Standalone Spine has no actor-status API; set `auth.actors.status` to `suspended` in the workspace's runtime database. Deactivation is permanent.
+
+Also:
+
+- **(a) Switch together.** Switch the platform's bearer in the same change window as the Spine restart. Rotation is no longer zero-downtime: every platform request that still carries the old bearer gets 401 from each workspace's first load after the restart until the platform switches. (A two-phase `SMP_ADMIN_TOKEN_PREVIOUS` grace is a recorded follow-up, TASK-013 owner question 2.)
+- **(b) Do not let old-config replicas restart during the rollout.** Prefer a recreate strategy, or scale the old ReplicaSet to zero first. An old-config replica that restarts mid-rollout gets a fresh start time; if it then loads a workspace that was first seeded during the overlap (so the workspace has a row for the new bearer and none for the old one), it inserts the old bearer and revokes the new one there. This residue is inherent to ordering bearers by time (TASK-013 owner question 5) and is bounded to workspaces created during the rollout. If a workspace created during a rollout refuses the new bearer (an Error log naming a revoked bootstrap token), **rotate forward to a fresh value**.
+- **(c) Rotate once after upgrading** to a Spine that contains INIT-023 TASK-013. Bootstrap rows written by earlier versions have ids derived from the bearer's hash (`bootstrap-<12 hex>`), which a workspace admin can list. New rows get random ids (`bootstrap-<16 hex>`); a rotation revokes the legacy row. The upgrade itself already revokes bootstrap bearers from **past** rotations that still authenticated, on each workspace's first load by the new code.
+- **(d) To retire the platform bearer entirely,** revoke `smp-admin`'s live bootstrap row in each workspace: find it with `GET /api/v1/tokens?actor_id=smp-admin` and revoke it with `DELETE /api/v1/tokens/{token_id}` (admin). Unsetting `SMP_ADMIN_TOKEN` only stops seeding; it does not revoke the existing row. The bootstrap respects that revocation if the same bearer is configured again later.
+
+| Symptom | Cause | Remedy |
+|---------|-------|--------|
+| The platform gets 401 right after a Spine restart | The platform still sends the previous `SMP_ADMIN_TOKEN`, which the first load of each workspace revoked | Switch the platform to the new value (step (a)) |
+| Error log: `SMP_ADMIN_TOKEN matches a revoked bootstrap admin token` | A rollback to a revoked value, or the restart-during-rollout residue in (b) | Rotate forward to a fresh value; revocation is never undone |
+| Warn log: `internal admin actor is not active` | `smp-admin` is suspended or deactivated in that workspace | Intended during an incident. To restore a suspended `smp-admin`, set its status back to `active` in the runtime database; a deactivated one is permanent |
+| `spine serve` refuses to start: `SMP_ADMIN_TOKEN is N characters` / `has N distinct characters` | The value fails the strength floor in production | Generate a value with `openssl rand -hex 32` |
+
 ---
 
 ## 6. Deregistering a Repository
