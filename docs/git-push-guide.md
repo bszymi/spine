@@ -123,6 +123,7 @@ A policy rejection (every row above except `malformed push`) also includes a per
 | `401 Unauthorized` with body `authorization required for external git access` | No `Authorization: Bearer <token>` header, and the caller is not inside a trusted CIDR (and trusted CIDRs don't help for push anyway). |
 | `403 Forbidden` with body `git push is disabled — enable via git.receive_pack_enabled (SPINE_GIT_RECEIVE_PACK_ENABLED=true); see ADR-009` | `SPINE_GIT_RECEIVE_PACK_ENABLED` is not set (or not `true`) on the server. |
 | `403 Forbidden` with body `unsupported git operation` | Unrecognised request against the git endpoint (neither clone/fetch nor push). |
+| `400 Bad Request` with body `Chunked request bodies are not supported by CGI.` (the client prints `error: RPC failed; HTTP 400`) | The push body was larger than the client's `http.postBuffer` (1 MiB by default), so git sent it chunked, and the server's CGI bridge refuses chunked bodies (`KNOWN-LIMITATIONS.md`). Raise the buffer above the push size (`git config http.postBuffer 157286400`) and push again. |
 
 ---
 

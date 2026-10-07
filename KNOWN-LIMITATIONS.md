@@ -24,6 +24,24 @@ This document tracks known gaps and deferred functionality.
 - Zero implementation — planned feature
 - Thread creation, comments, resolution not yet built
 
+### Git Push: Bodies Larger Than the Client's `http.postBuffer` Are Refused
+- With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a push whose request body is larger than the client's
+  `http.postBuffer` (1 MiB by default) fails with `error: RPC failed; HTTP 400`. Nothing is
+  applied, and no branch-protection rule is involved.
+- **Why:** git sends such a body with `Transfer-Encoding: chunked`. The bridge to
+  `git-http-backend` (Go's `net/http/cgi`) refuses every chunked request body ("Chunked request
+  bodies are not supported by CGI"), because CGI needs a `CONTENT_LENGTH`.
+- **Workaround:** raise the client's buffer above the size of the push, for example
+  `git config http.postBuffer 157286400` (150 MiB) in the clone, or
+  `git -c http.postBuffer=157286400 push …`. git then sends one body with a `Content-Length` and the
+  push applies. The client holds that body in memory.
+- **Scope:** clone and fetch send small request bodies (want/have lines) and are normally
+  unaffected. SMP's gateway spools a chunked push body to disk before CGI and accepts these
+  pushes.
+- **Status:** this predates INIT-023 and is pinned by `TestHandler_ChunkedPushBodyRefusedByCGI`
+  (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
+  INIT-023 EPIC-001 follow-up (owner: bszymi).
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

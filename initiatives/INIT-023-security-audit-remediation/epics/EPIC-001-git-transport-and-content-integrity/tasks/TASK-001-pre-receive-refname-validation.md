@@ -738,6 +738,9 @@ without answers, using the stated defaults.)*
   the §3 guard and is refused as HTTP 500 instead of 400 (Design §3 note). The entry-point check
   belongs to whichever task takes TASK-016 owner question 6 (recommended: TASK-007). This task
   only corrects the stated premise and pins the fail-closed refusal.
+- **Chunked receive-pack bodies (cross-task review, wave 1).** A standalone push over 1 MiB fails
+  with HTTP 400 from CGI. This predates the task and sits in `handler.go` (AC 11). It is a new
+  EPIC-001 follow-up owned by bszymi (epic Out of scope), and Parity with SMP describes it.
 
 ## Implementation Notes
 
@@ -968,6 +971,23 @@ The worktree itself was never reverted.
     side.
   - **Symref aliasing.** See Out of scope.
   - **Case- and normalization-insensitive storage.** OQ1 and §6.
+- **Pre-existing transport difference, outside the gate: chunked push bodies.** *(Added by the
+  cross-task review, wave 1; finding 1.)* This section first covered only the parser, the grammar
+  and the log fields.
+  - **The difference.** git sends every push body larger than `http.postBuffer` (1 MiB by default)
+    with `Transfer-Encoding: chunked`.
+    - **Spine** passes the stitched body to `net/http/cgi` unchanged (`handler.go:281`). CGI
+      refuses a chunked body with HTTP 400, so every push over 1 MiB fails, whatever the rules say.
+    - **SMP** spools such a body to disk before CGI (`internal/customer/githttp/handler.go`,
+      `spoolBody`) and accepts the same push.
+  - **Not introduced by this task.** `handler.go` is unchanged since `main`, and AC 11 keeps it so.
+  - **The gate is unaffected.** `prereceive` reads the command section of a chunked body the same
+    way, and the refusal comes after it, from CGI.
+  - **Recorded, not fixed:**
+    - `KNOWN-LIMITATIONS.md` (with the `http.postBuffer` workaround);
+    - `docs/git-push-guide.md` §5;
+    - the EPIC-001 Out of scope, as a follow-up owned by bszymi.
+  - **Pinned** by `TestHandler_ChunkedPushBodyRefusedByCGI`, which also proves the workaround.
 
 ### Gates (commands and results)
 

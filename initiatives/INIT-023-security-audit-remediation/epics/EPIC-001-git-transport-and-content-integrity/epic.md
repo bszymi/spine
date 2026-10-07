@@ -78,6 +78,28 @@ Make the git surface trustworthy:
   loose `develop`. This was reproduced with git 2.54 on APFS through `Handler.ServeHTTP`, and with
   Linux git 2.39.5 on the Docker Desktop bind mount. TASK-016 owner question 5 had already recorded
   the update form.
+- **Follow-up (recorded by TASK-001's cross-task review, wave 1, 2026-10-07): chunked receive-pack
+  bodies.** Owner: bszymi, who creates and schedules it. It is not yet created.
+  - **The gap.** Standalone `Handler.ServeHTTP` hands a chunked push body straight to
+    `net/http/cgi`, which refuses it with HTTP 400. git sends every push body larger than
+    `http.postBuffer` (1 MiB by default) chunked, so every such push fails, whatever the rules
+    say. SMP spools the body first (`internal/customer/githttp/handler.go`, `spoolBody`) and accepts
+    the same push.
+  - **It predates INIT-023** and is not a security finding. TASK-001 records it (`KNOWN-LIMITATIONS.md`,
+    `docs/git-push-guide.md` §5, TASK-001 "Parity with SMP") and pins it with
+    `TestHandler_ChunkedPushBodyRefusedByCGI`, because its AC 11 keeps `handler.go` untouched.
+  - **Design inputs for the task:**
+    - Spool after `prereceive`, set `ContentLength` and `Content-Length`, and clear
+      `TransferEncoding`. A scratch overlay doing exactly that made the 2 MiB push apply.
+    - **Spool outside the working tree.** SMP spools into `repoPath`, which is a bare repository.
+      Spine's served repositories are non-bare (TASK-001 Purpose note), so the same call would put
+      the temp file in the repository's working tree.
+    - Cap the spool, with a configuration knob for large repositories, and decide how it relates
+      to `OpTimeout`. SMP uses 2 GiB for pushes (`SMP_GIT_MAX_PUSH_BYTES`), 16 MiB for
+      upload-pack, and a read deadline.
+    - Flip the pin test, and add a push larger than 1 MiB to the `scenario-git-http` CI job.
+    - TASK-016 also edits `handler.go` (`Config`, `Handler`, the `prereceive` loop). Whichever
+      lands second rebases onto the other.
 
 ---
 
