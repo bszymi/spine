@@ -153,3 +153,142 @@ func TestSubscriptionTest_LoopbackHostRefusedWithoutAddress(t *testing.T) {
 		t.Fatalf("response %s lacks the generic refusal", body.String())
 	}
 }
+
+func errorCode(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	var body struct {
+		Errors []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Errors) == 0 {
+		return ""
+	}
+	return body.Errors[0].Code
+}
+
+// AC4: metadata is accepted as a JSON object (the documented form) or as
+// a base64 string (the legacy wire form) and stored identically; an
+// unknown or non-string signature_version is a 400 invalid_params.
+func TestSubscriptionCreate_MetadataForms(t *testing.T) {
+	ts, fs, token := setupSubServer(t)
+	const md = `{"signature_version":"v2","tls":{"pinned_spki_sha256":"ab"}}`
+	create := func(name string, metadata any) (*http.Response, *store.EventSubscription) {
+		t.Helper()
+		resp := doJSON(t, http.MethodPost, ts.URL+"/api/v1/subscriptions", token, map[string]any{
+			"name": name, "target_url": "https://example.test/hook", "metadata": metadata,
+		})
+		for _, s := range fs.subs {
+			if s.Name == name {
+				return resp, s
+			}
+		}
+		return resp, nil
+	}
+
+	respObj, objSub := create("object-form", json.RawMessage(md))
+	respObj.Body.Close()
+	respB64, b64Sub := create("base64-form", []byte(md)) // json.Marshal encodes []byte as base64
+	respB64.Body.Close()
+	if respObj.StatusCode != http.StatusCreated || respB64.StatusCode != http.StatusCreated {
+		t.Fatalf("object form %d, base64 form %d, want 201/201", respObj.StatusCode, respB64.StatusCode)
+	}
+	if objSub == nil || b64Sub == nil || string(objSub.Metadata) != md || string(b64Sub.Metadata) != md {
+		t.Fatalf("stored metadata differs: object=%s base64=%s", objSub.Metadata, b64Sub.Metadata)
+	}
+
+	// Whitespace in the object form is normalised to the same bytes.
+	respWS, wsSub := create("object-form-spaced", json.RawMessage(`{ "signature_version" : "v2", "tls": {"pinned_spki_sha256":"ab"} }`))
+	respWS.Body.Close()
+	if respWS.StatusCode != http.StatusCreated || string(wsSub.Metadata) != md {
+		t.Fatalf("spaced object form: %d %s", respWS.StatusCode, wsSub.Metadata)
+	}
+
+	// No metadata: {} as before.
+	respNone, noneSub := create("no-metadata", nil)
+	respNone.Body.Close()
+	if respNone.StatusCode != http.StatusCreated || string(noneSub.Metadata) != "{}" {
+		t.Fatalf("absent metadata: %d %s", respNone.StatusCode, noneSub.Metadata)
+	}
+
+	for i, bad := range []any{
+		json.RawMessage(`{"signature_version":"v3"}`),
+		json.RawMessage(`{"signature_version":2}`),
+		json.RawMessage(`{"Signature_Version":"v2"}`),
+		[]byte(`{"signature_version":"v3"}`),
+		json.RawMessage(`{"tls":{"pinned_spki_sha256":"not-hex"}}`),
+		json.RawMessage(`[1,2]`),
+		json.RawMessage(`"not base64!"`),
+		[]byte(`not json`),
+		json.RawMessage(`7`),
+	} {
+		name := fmt.Sprintf("bad-%d", i)
+		resp, sub := create(name, bad)
+		code := errorCode(t, resp)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || code != "invalid_params" || sub != nil {
+			t.Errorf("metadata %s: status %d code %q stored=%v, want 400 invalid_params and nothing stored", bad, resp.StatusCode, code, sub != nil)
+		}
+	}
+}
+
+// AC4: PATCH validates metadata the same way; a rejected update leaves
+// the row unchanged; GET reports signature_version.
+func TestSubscriptionUpdate_MetadataValidationAndSignatureVersion(t *testing.T) {
+	ts, fs, token := setupSubServer(t)
+	fs.subs["sub-1"] = &store.EventSubscription{SubscriptionID: "sub-1", Name: "a", TargetURL: "https://example.test/hook",
+		Status: "active", Metadata: []byte(`{"source":"api"}`)}
+
+	resp := doJSON(t, http.MethodPatch, ts.URL+"/api/v1/subscriptions/sub-1", token, map[string]any{
+		"metadata": json.RawMessage(`{"signature_version":"v9"}`),
+	})
+	code := errorCode(t, resp)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || code != "invalid_params" {
+		t.Fatalf("invalid PATCH: %d %q, want 400 invalid_params", resp.StatusCode, code)
+	}
+	if string(fs.subs["sub-1"].Metadata) != `{"source":"api"}` {
+		t.Fatalf("rejected PATCH changed metadata: %s", fs.subs["sub-1"].Metadata)
+	}
+
+	resp = doJSON(t, http.MethodPatch, ts.URL+"/api/v1/subscriptions/sub-1", token, map[string]any{
+		"metadata": json.RawMessage(`{"signature_version":"v2"}`),
+	})
+	var got map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || got["signature_version"] != "v2" {
+		t.Fatalf("valid PATCH: %d %v, want 200 with signature_version v2", resp.StatusCode, got)
+	}
+	if string(fs.subs["sub-1"].Metadata) != `{"signature_version":"v2"}` {
+		t.Fatalf("PATCH metadata stored as %s (update replaces metadata wholesale)", fs.subs["sub-1"].Metadata)
+	}
+
+	// A PATCH without metadata keeps it.
+	resp = doJSON(t, http.MethodPatch, ts.URL+"/api/v1/subscriptions/sub-1", token, map[string]any{"name": "renamed"})
+	resp.Body.Close()
+	if string(fs.subs["sub-1"].Metadata) != `{"signature_version":"v2"}` {
+		t.Fatalf("PATCH without metadata changed it: %s", fs.subs["sub-1"].Metadata)
+	}
+
+	for id, tc := range map[string]struct {
+		metadata string
+		want     string
+	}{
+		"sub-none":    {"", "v1"},
+		"sub-v1":      {`{"source":"bootstrap"}`, "v1"},
+		"sub-v2":      {`{"signature_version":"v2"}`, "v2"},
+		"sub-invalid": {`{"signature_version":"v3"}`, "invalid"},
+	} {
+		fs.subs[id] = &store.EventSubscription{SubscriptionID: id, Metadata: []byte(tc.metadata)}
+		resp := doJSON(t, http.MethodGet, ts.URL+"/api/v1/subscriptions/"+id, token, nil)
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if body["signature_version"] != tc.want {
+			t.Errorf("%s: signature_version = %v, want %s", id, body["signature_version"], tc.want)
+		}
+	}
+}

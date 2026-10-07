@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -15,18 +16,59 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// Metadata is a json.RawMessage so the documented form — a JSON object,
+// e.g. {"signature_version":"v2","tls":{...}} — decodes. Before INIT-023
+// TASK-010 the field was []byte, which only accepted a JSON string
+// holding base64 (an object failed with "cannot unmarshal object into
+// ... []uint8"); decodeSubscriptionMetadata keeps accepting that form.
 type createSubscriptionRequest struct {
-	Name       string   `json:"name"`
-	TargetURL  string   `json:"target_url"`
-	EventTypes []string `json:"event_types"`
-	Metadata   []byte   `json:"metadata,omitempty"`
+	Name       string          `json:"name"`
+	TargetURL  string          `json:"target_url"`
+	EventTypes []string        `json:"event_types"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
 }
 
 type updateSubscriptionRequest struct {
-	Name       *string  `json:"name,omitempty"`
-	TargetURL  *string  `json:"target_url,omitempty"`
-	EventTypes []string `json:"event_types,omitempty"`
-	Metadata   []byte   `json:"metadata,omitempty"`
+	Name       *string         `json:"name,omitempty"`
+	TargetURL  *string         `json:"target_url,omitempty"`
+	EventTypes []string        `json:"event_types,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+}
+
+// decodeSubscriptionMetadata turns the request's metadata field into the
+// bytes to store. It accepts a JSON object (the documented form) or a
+// JSON string holding base64 of an object (the pre-TASK-010 wire form,
+// kept for compatibility); both store the same compact JSON. Absent or
+// null means "not supplied". The result must pass
+// delivery.ValidateSubscriptionMetadata — the dispatcher's own parse —
+// so a subscription is never stored with metadata that would
+// dead-letter every delivery (unknown signature_version, a non-hex SPKI
+// pin, a CA bundle with no certificate, ...). Errors are invalid_params.
+func decodeSubscriptionMetadata(raw json.RawMessage) (metadata []byte, supplied bool, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, false, nil
+	}
+	obj := trimmed
+	if trimmed[0] == '"' {
+		var decoded []byte
+		if err := json.Unmarshal(trimmed, &decoded); err != nil {
+			return nil, true, domain.NewError(domain.ErrInvalidParams,
+				"metadata: must be a JSON object (or a string holding base64 of one)")
+		}
+		obj = bytes.TrimSpace(decoded)
+	}
+	if len(obj) == 0 || obj[0] != '{' {
+		return nil, true, domain.NewError(domain.ErrInvalidParams, "metadata: must be a JSON object")
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, obj); err != nil {
+		return nil, true, domain.NewError(domain.ErrInvalidParams, "metadata: invalid JSON")
+	}
+	if err := delivery.ValidateSubscriptionMetadata(compact.Bytes()); err != nil {
+		return nil, true, domain.NewError(domain.ErrInvalidParams, "metadata: "+err.Error())
+	}
+	return compact.Bytes(), true, nil
 }
 
 // POST /api/v1/subscriptions
@@ -52,6 +94,14 @@ func (s *Server) handleSubscriptionCreate(w http.ResponseWriter, r *http.Request
 		WriteError(w, err)
 		return
 	}
+	metadata, supplied, err := decodeSubscriptionMetadata(req.Metadata)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+	if !supplied {
+		metadata = []byte("{}")
+	}
 
 	subID, err := generateID("sub")
 	if err != nil {
@@ -72,10 +122,6 @@ func (s *Server) handleSubscriptionCreate(w http.ResponseWriter, r *http.Request
 	wsID := ""
 	if wsCfg := WorkspaceConfigFromContext(r.Context()); wsCfg != nil {
 		wsID = wsCfg.ID
-	}
-	metadata := req.Metadata
-	if metadata == nil {
-		metadata = []byte("{}")
 	}
 	eventTypes := req.EventTypes
 	if eventTypes == nil {
@@ -194,6 +240,13 @@ func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	// Metadata, when supplied, replaces the stored value wholesale (as
+	// before); it is validated first so a rejected update changes nothing.
+	metadata, metadataSupplied, err := decodeSubscriptionMetadata(req.Metadata)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
 
 	if req.Name != nil {
 		sub.Name = *req.Name
@@ -204,8 +257,8 @@ func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request
 	if req.EventTypes != nil {
 		sub.EventTypes = req.EventTypes
 	}
-	if req.Metadata != nil {
-		sub.Metadata = req.Metadata
+	if metadataSupplied {
+		sub.Metadata = metadata
 	}
 
 	if err := st.UpdateSubscription(r.Context(), sub); err != nil {
@@ -382,18 +435,27 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 }
 
 // subscriptionResponse formats a subscription for API output, excluding the signing secret.
+//
+// signature_version reports which webhook signature format the receiver
+// gets ("v1" or "v2", INIT-023 TASK-010), or "invalid" when the stored
+// metadata does not parse (the dispatcher dead-letters its deliveries).
 func subscriptionResponse(sub store.EventSubscription) map[string]any {
+	signatureVersion, err := delivery.SignatureVersionOf(sub.Metadata)
+	if err != nil {
+		signatureVersion = "invalid"
+	}
 	return map[string]any{
-		"subscription_id": sub.SubscriptionID,
-		"workspace_id":    sub.WorkspaceID,
-		"name":            sub.Name,
-		"target_type":     sub.TargetType,
-		"target_url":      sub.TargetURL,
-		"event_types":     sub.EventTypes,
-		"status":          sub.Status,
-		"created_by":      sub.CreatedBy,
-		"created_at":      sub.CreatedAt,
-		"updated_at":      sub.UpdatedAt,
+		"signature_version": signatureVersion,
+		"subscription_id":   sub.SubscriptionID,
+		"workspace_id":      sub.WorkspaceID,
+		"name":              sub.Name,
+		"target_type":       sub.TargetType,
+		"target_url":        sub.TargetURL,
+		"event_types":       sub.EventTypes,
+		"status":            sub.Status,
+		"created_by":        sub.CreatedBy,
+		"created_at":        sub.CreatedAt,
+		"updated_at":        sub.UpdatedAt,
 	}
 }
 
