@@ -71,6 +71,13 @@ Make the git surface trustworthy:
   the repository's own dev override (`docker-compose.override.yaml.example`, `./:/repo`) on Docker
   Desktop: TASK-001 review round 1 reproduced the aliasing there, with Linux git inside the
   container moving a packed `main` through `refs/heads/MAIN` on a macOS bind mount.
+  The design must not assume a packed ref (TASK-001 review round 2). A packed ref is only what a
+  plain `git push` *create* needs. A hand-crafted case-variant **update** that carries the
+  protected ref's current object id moves a **loose** ref, and a case-variant **delete** removes
+  one: `refs/heads/MAIN` moved a loose, checked-out `main`, and `refs/heads/DEVELOP` deleted a
+  loose `develop`. This was reproduced with git 2.54 on APFS through `Handler.ServeHTTP`, and with
+  Linux git 2.39.5 on the Docker Desktop bind mount. TASK-016 owner question 5 had already recorded
+  the update form.
 
 ---
 

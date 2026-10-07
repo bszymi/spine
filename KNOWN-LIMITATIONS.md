@@ -85,13 +85,23 @@ The following limitations have been resolved:
   case-insensitive filesystem.
 - **Why:** branch protection matches the ref name byte-for-byte, exactly as the client sent it
   (INIT-023 TASK-001 makes the gate evaluate the same bytes git writes). A case- or
-  normalization-insensitive filesystem then aliases two different names onto one ref file. With
-  `main` packed (any `git clone --bare` repository, or after `git gc`/`pack-refs`), a plain
-  `git push origin HEAD:refs/heads/MAIN` matches no rule, is allowed, and git's loose
-  `refs/heads/MAIN` file *is* `refs/heads/main` on such storage — `main` moves without review
-  and without an override event. `refs/HEADS/main` takes the non-branch allow the same way, and
-  the aliasing is not ASCII-only (APFS also folds the Kelvin sign onto `k` and NFD onto NFC).
-  `core.ignorecase` does not prevent it for packed refs.
+  normalization-insensitive filesystem then aliases two different names onto one ref file. A push
+  to `refs/heads/MAIN` matches no rule and is allowed, and git then writes or removes the file that
+  *is* `refs/heads/main` on such storage. `main` moves, or a `no-delete` branch disappears, without
+  review and without an override event. Whether the ref is packed decides only which push lands:
+  - **Packed ref** (any `git clone --bare` repository, or after `git gc`/`pack-refs`): a plain
+    `git push origin HEAD:refs/heads/MAIN` creates a loose `refs/heads/MAIN`, which shadows the
+    packed `main`.
+  - **Loose ref** (the usual state in a non-bare checkout, such as the `./:/repo` bind mount): git
+    refuses that plain create (`reference already exists`). A hand-crafted update of
+    `refs/heads/MAIN` that carries `main`'s current object id still moves `main`, and a
+    hand-crafted delete of `refs/heads/DEVELOP` that carries `develop`'s id removes `develop`.
+    git's refusal to update a checked-out branch does not catch it, because it compares names
+    byte-wise.
+
+  `refs/HEADS/main` takes the non-branch allow the same way, and the aliasing is not ASCII-only
+  (APFS also folds the Kelvin sign onto `k` and NFD onto NFC). `core.ignorecase` prevents none of
+  this.
 - **Status:** a documented deployment requirement, not yet enforced. Fail-closed handling (a
   per-repository case-sensitivity probe that refuses receive-pack, or fold-and-normalize rule
   matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,

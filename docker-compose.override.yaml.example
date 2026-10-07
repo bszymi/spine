@@ -13,9 +13,12 @@
 # mount on a macOS or Windows host. Docker Desktop shares the host
 # directory with the host's case-insensitive (and, on macOS,
 # normalization-insensitive) semantics, so a push to a case variant of a
-# protected ref (refs/heads/MAIN) passes branch protection and, whenever
-# the protected ref is packed (any clone, or after git gc), moves the
-# protected ref itself (refs/heads/main).
+# protected ref (refs/heads/MAIN) passes branch protection and can move
+# or delete the protected ref itself (refs/heads/main). That holds even
+# though main is a loose ref in this checkout: a hand-crafted update or
+# delete that carries the ref's current object id lands on it, and once
+# the ref is packed (git gc, git pack-refs) a plain git push does too.
+# git's refusal to update the checked-out branch does not catch it.
 # Serve pushes only from the shipped named volume (repo:/repo) or a Linux
 # host directory. See KNOWN-LIMITATIONS.md -> Security Notes ("Git Push
 # Gate: Served Repositories Need Case- and Normalization-Sensitive
