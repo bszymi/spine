@@ -619,7 +619,7 @@ func TestDecide_NonRunClasses(t *testing.T) {
 // TestDecision_Messages pins the wire catalogue (TASK-016 §1.3 "Wire
 // messages") and that no message names who is bound.
 func TestDecision_Messages(t *testing.T) {
-	ref := func(r string) Ref { return Classify(r) }
+	ref := Classify
 	cases := []struct {
 		d    Decision
 		want string

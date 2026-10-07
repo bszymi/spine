@@ -24,6 +24,7 @@ package refadmit
 
 import (
 	"strings"
+	"unicode"
 )
 
 // Class is the admission class of a ref. Classify assigns it from the
@@ -206,9 +207,13 @@ func Classify(ref string) Ref {
 }
 
 // foldsToNamespace reports whether c is a spelling of "spine" that a
-// case-insensitive filesystem could alias onto it (see Classify, DC-1).
+// case-insensitive filesystem could alias onto it (see Classify, DC-1):
+// equal under Unicode simple folding (catches U+017F), or equal after
+// per-rune lower-casing (catches U+0130, which is outside the fold orbit
+// of "i"). The second test is spelled with strings.Map so it is not
+// mistaken for a hand-rolled EqualFold: it is deliberately not one.
 func foldsToNamespace(c string) bool {
-	return strings.EqualFold(c, namespace) || strings.ToLower(c) == namespace
+	return strings.EqualFold(c, namespace) || strings.Map(unicode.ToLower, c) == namespace
 }
 
 // hasControlByte reports whether s holds an ASCII control byte
