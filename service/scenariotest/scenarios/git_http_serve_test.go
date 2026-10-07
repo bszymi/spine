@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/branchprotect/config"
@@ -23,10 +24,9 @@ import (
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/service/internal/githttp"
-	"github.com/bszymi/spine/adapters/projection"
+	"github.com/bszymi/spine/service/internal/workspace"
 	scenarioEngine "github.com/bszymi/spine/service/scenariotest/engine"
 	"github.com/bszymi/spine/service/scenariotest/harness"
-	"github.com/bszymi/spine/service/internal/workspace"
 )
 
 // fakeWSResolver resolves workspace IDs to configs for testing.
