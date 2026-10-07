@@ -370,7 +370,15 @@ func buildScheduler(
 // admission of run, plan and divergence branches (INIT-023 TASK-016);
 // the gateway's per-push resolver attaches the target workspace's pair
 // per request, which wins.
-func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, log *slog.Logger) *githttp.Handler {
+//
+// perWorkspace is true when that pair is resolved per workspace on each
+// push (shared mode): the fallback pair is then never consulted and is
+// nil by design, so its absence is not reported (it would warn on every
+// shared-mode start); a workspace without a store or engine is refused
+// operator-only at push time, with a Warn log per refused ref. In single
+// mode the resolver attaches exactly this pair, so the warning below
+// describes what pushes will actually get.
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
@@ -407,10 +415,12 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 			log.Info("git HTTP receive-pack is ENABLED with branch-protection pre-receive enforcement (EPIC-004)")
 		}
 		switch {
+		case perWorkspace:
+			log.Info("run-branch push admission resolves each workspace's run store and engine per push; a workspace without them is operator-only")
 		case runs == nil:
-			log.Warn("run-branch pushes are operator-only: no run store wired (a per-workspace store, where configured, is attached per push)")
+			log.Warn("run-branch pushes are operator-only: no run store wired")
 		case stepDefs == nil:
-			log.Warn("run-branch pushes are operator-only: no step-definition lookup wired for the review freeze (a per-workspace engine, where configured, is attached per push)")
+			log.Warn("run-branch pushes are operator-only: no step-definition lookup wired for the review freeze")
 		}
 	}
 	return h

@@ -7,11 +7,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
+	"github.com/bszymi/spine/core/event"
+	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/core/refadmit"
+	"github.com/bszymi/spine/service/internal/config"
 	"github.com/bszymi/spine/service/internal/workspace"
+	"github.com/bszymi/spine/testutil"
 )
 
 // builderStepDefs is a refadmit.StepDefLookup stand-in for the
@@ -145,31 +150,89 @@ func TestStepDefLookupOrNil(t *testing.T) {
 
 // TestBuildGitHTTPHandler_WarnsWhenRunBranchesAreOperatorOnly is AC 14's
 // startup warning: with receive-pack on and no run store, run-branch
-// pushes are operator-only, and the operator is told so.
+// pushes are operator-only, and the operator is told so. In shared mode
+// the pair is resolved per workspace on each push, so a nil fallback
+// pair is expected and is not reported (review round 1: it warned on
+// every shared-mode start).
 func TestBuildGitHTTPHandler_WarnsWhenRunBranchesAreOperatorOnly(t *testing.T) {
 	resolver := builderResolver{cfg: workspace.Config{ID: "ws", RepoPath: t.TempDir(), Status: workspace.StatusActive}}
-	build := func(runs refadmit.RunReader, defs refadmit.StepDefLookup, receivePack bool) string {
+	build := func(runs refadmit.RunReader, defs refadmit.StepDefLookup, perWorkspace, receivePack bool) string {
 		t.Helper()
 		var buf bytes.Buffer
 		log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-		if h := buildGitHTTPHandler(resolver, nil, receivePack, branchprotect.NewPermissive(), runs, defs, log); h == nil {
+		if h := buildGitHTTPHandler(resolver, nil, receivePack, branchprotect.NewPermissive(), runs, defs, perWorkspace, log); h == nil {
 			t.Skip("git-http-backend unavailable")
 		}
 		return buf.String()
 	}
 
-	out := build(nil, builderStepDefs{}, true)
+	out := build(nil, builderStepDefs{}, false, true)
 	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "run-branch pushes are operator-only: no run store wired") {
 		t.Errorf("nil reader with receive-pack on: want the operator-only warning, got:\n%s", out)
 	}
-	out = build(&stubStore{}, nil, true)
+	out = build(&stubStore{}, nil, false, true)
 	if !strings.Contains(out, "run-branch pushes are operator-only: no step-definition lookup wired") {
 		t.Errorf("nil step-definition lookup: want the operator-only warning, got:\n%s", out)
 	}
-	if out := build(&stubStore{}, builderStepDefs{}, true); strings.Contains(out, "operator-only") {
+	if out := build(&stubStore{}, builderStepDefs{}, false, true); strings.Contains(out, "operator-only") {
 		t.Errorf("fully wired: unexpected warning:\n%s", out)
 	}
-	if out := build(nil, nil, false); strings.Contains(out, "operator-only") {
+	if out := build(nil, nil, false, false); strings.Contains(out, "operator-only") {
 		t.Errorf("receive-pack off: unexpected warning:\n%s", out)
+	}
+	out = build(nil, nil, true, true)
+	if strings.Contains(out, "operator-only: no") || !strings.Contains(out, "resolves each workspace's run store and engine per push") {
+		t.Errorf("shared mode: want the per-workspace Info line and no fallback warning, got:\n%s", out)
+	}
+}
+
+// TestBuildServerConfig_GitPushResolverWiresAdmission drives the real
+// `spine serve` wiring (buildServerConfig, single mode, as the smoke
+// test does) and asks the installed push resolver for its admission
+// pair: the process store as the run reader and the orchestrator as the
+// review-freeze lookup. Review round 1: passing nil instead of the
+// lookup to buildGitPushResolver left every package test green while
+// making every non-operator run, plan and divergence push refused
+// (resolver_unavailable), with no startup warning. Mutation check:
+// that nil fails this test.
+func TestBuildServerConfig_GitPushResolverWiresAdmission(t *testing.T) {
+	repoPath := testutil.NewTempRepo(t)
+	q := queue.NewMemoryQueue(16)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go q.Start(ctx)
+	st := stubStore{}
+	rt, err := buildServerConfig(ctx, serveDeps{
+		Store:      st,
+		RepoPath:   repoPath,
+		SpineCfg:   &config.SpineConfig{ArtifactsDir: "/"},
+		GitClient:  git.NewCLIClient(repoPath),
+		Queue:      q,
+		Events:     event.NewQueueRouter(q),
+		DevMode:    true,
+		RuntimeEnv: "development",
+	})
+	if err != nil {
+		t.Fatalf("buildServerConfig: %v", err)
+	}
+	if rt.Config.GitPushResolver == nil {
+		t.Fatal("no git push resolver installed")
+	}
+	if rt.Config.StepAssigner == nil {
+		t.Fatal("fixture: no orchestrator built (StepAssigner is nil)")
+	}
+	res, release, err := rt.Config.GitPushResolver(ctx, "")
+	defer release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Runs != refadmit.RunReader(st) {
+		t.Errorf("Runs = %#v, want the process store", res.Runs)
+	}
+	if res.StepDefs == nil {
+		t.Fatal("StepDefs is nil: every non-operator run-branch push would be refused")
+	}
+	if any(res.StepDefs) != any(rt.Config.StepAssigner) {
+		t.Errorf("StepDefs = %T %p, want the orchestrator the gateway uses as its step assigner", res.StepDefs, res.StepDefs)
 	}
 }
