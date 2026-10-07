@@ -250,3 +250,15 @@ func TestSignRequest(t *testing.T) {
 		}
 	})
 }
+
+func TestInvalidVersionMessageIsBounded(t *testing.T) {
+	long := strings.Repeat("x", 10000)
+	_, err := SignatureVersionOf([]byte(`{"signature_version":"` + long + `"}`))
+	if err == nil || len(err.Error()) > 200 {
+		t.Fatalf("error length %d: %v", len(err.Error()), err)
+	}
+	_, err = SignatureVersionOf([]byte(`{"` + strings.ToUpper("signature_version") + long + `":"v2"}`))
+	if err != nil {
+		t.Fatalf("an unrelated long key must not matter: %v", err)
+	}
+}

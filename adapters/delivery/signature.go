@@ -118,7 +118,7 @@ func parseMetadataObject(metadata []byte) (map[string]json.RawMessage, error) {
 func signatureVersionFromObject(obj map[string]json.RawMessage) (string, error) {
 	for k := range obj {
 		if k != MetadataKeySignatureVersion && strings.EqualFold(k, MetadataKeySignatureVersion) {
-			return "", fmt.Errorf("%w: key %q must be spelled %q", ErrInvalidSubscriptionMetadata, k, MetadataKeySignatureVersion)
+			return "", fmt.Errorf("%w: key %s must be spelled %q", ErrInvalidSubscriptionMetadata, quoteShort(k), MetadataKeySignatureVersion)
 		}
 	}
 	raw, ok := obj[MetadataKeySignatureVersion]
@@ -142,8 +142,18 @@ func normaliseSignatureVersion(v string) (string, error) {
 	case SignatureVersionV2:
 		return SignatureVersionV2, nil
 	}
-	return "", fmt.Errorf("%w: unknown signature_version %q (want %q or %q)",
-		ErrInvalidSubscriptionMetadata, v, SignatureVersionV1, SignatureVersionV2)
+	return "", fmt.Errorf("%w: unknown signature_version %s (want %q or %q)",
+		ErrInvalidSubscriptionMetadata, quoteShort(v), SignatureVersionV1, SignatureVersionV2)
+}
+
+// quoteShort quotes an operator-supplied value for an error message,
+// truncated so a pathological value cannot bloat last_error and logs.
+func quoteShort(s string) string {
+	const maxRunes = 32
+	if r := []rune(s); len(r) > maxRunes {
+		return strconv.Quote(string(r[:maxRunes])) + "…"
+	}
+	return strconv.Quote(s)
 }
 
 // parseSubscriptionMetadata parses everything the dispatcher reads from a
@@ -225,8 +235,8 @@ func SignatureVersionOf(metadata []byte) (string, error) {
 // empty object); the result is compact JSON with keys in sorted order.
 func WithSignatureVersion(metadata []byte, version string) ([]byte, error) {
 	if version != SignatureVersionV1 && version != SignatureVersionV2 {
-		return nil, fmt.Errorf("%w: signature_version must be %q or %q, got %q",
-			ErrInvalidSubscriptionMetadata, SignatureVersionV1, SignatureVersionV2, version)
+		return nil, fmt.Errorf("%w: signature_version must be %q or %q, got %s",
+			ErrInvalidSubscriptionMetadata, SignatureVersionV1, SignatureVersionV2, quoteShort(version))
 	}
 	obj, err := parseMetadataObject(metadata)
 	if err != nil {
