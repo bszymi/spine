@@ -3,6 +3,7 @@ package gateway
 import (
 	"net/http"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
@@ -169,6 +170,10 @@ func (s *Server) handleSkillUpdate(w http.ResponseWriter, r *http.Request) {
 		renamedFrom = skill.Name
 	}
 
+	skill, ok = rereadSkillForWrite(w, r, st, skill)
+	if !ok {
+		return
+	}
 	if req.Name != nil {
 		skill.Name = *req.Name
 	}
@@ -189,6 +194,38 @@ func (s *Server) handleSkillUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, skill)
+}
+
+// rereadSkillForWrite re-reads a skill right before PATCH or deprecate
+// writes it, and returns the fresh row to apply the request to
+// (INIT-023 TASK-013 review round 1).
+//
+// UpdateSkill writes every column, so writing back the row read before
+// the reference scans would undo whatever a concurrent admin request
+// committed in between: a forced deprecation silently reversed by a
+// description edit (PATCH has no status field, but it would write the
+// stale status back), or a rename reverted by a deprecation while the
+// skill_renamed audit line says it happened. The fresh row supplies
+// every column the request does not change. A name that changed since
+// the first read means the rename guard or the deprecation's reference
+// check decided on a name the skill no longer has, so the request is
+// refused with 409 conflict and nothing is written; the client retries.
+//
+// This narrows the window to the back-to-back read and write; closing
+// it fully needs a conditional UPDATE in the store (a recorded
+// follow-up).
+func rereadSkillForWrite(w http.ResponseWriter, r *http.Request, st store.SkillStore, read *domain.Skill) (*domain.Skill, bool) {
+	fresh, err := st.GetSkill(r.Context(), read.SkillID)
+	if err != nil {
+		WriteError(w, err)
+		return nil, false
+	}
+	if fresh.Name != read.Name {
+		WriteError(w, domain.NewError(domain.ErrConflict,
+			"skill was renamed by a concurrent request; retry"))
+		return nil, false
+	}
+	return fresh, true
 }
 
 // appendSkillReferences appends refs to dst, skipping workflows already
@@ -245,6 +282,10 @@ func (s *Server) handleSkillDeprecate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	skill, ok = rereadSkillForWrite(w, r, st, skill)
+	if !ok {
+		return
+	}
 	skill.Status = domain.SkillStatusDeprecated
 	if err := st.UpdateSkill(r.Context(), skill); err != nil {
 		WriteError(w, err)

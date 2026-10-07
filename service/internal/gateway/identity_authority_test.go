@@ -225,6 +225,22 @@ func TestSkillAuthority_NonAdminSelfChangeHasDistinctReason(t *testing.T) {
 	if _, ok := ss.actorSkills["op%2D1"]; ok {
 		t.Fatal("encoded id reached the store undecoded")
 	}
+	// The remove route decodes the same way: an encoded self-removal is
+	// refused with the self reason, not as a removal from "another"
+	// actor, and the operator keeps its skill.
+	encDel := skillRequest(t, "DELETE", ts.URL+"/api/v1/actors/op%2D1/skills/sk-1", op, "")
+	if encDel.StatusCode != http.StatusForbidden {
+		t.Fatalf("encoded self-removal: %d, want 403", encDel.StatusCode)
+	}
+	if r := errorDetail(t, encDel)["reason"]; r != auth.ReasonSelfSkillChange {
+		t.Fatalf("encoded self-removal reason %q, want %q", r, auth.ReasonSelfSkillChange)
+	}
+	if !ss.actorSkills["op-1"]["sk-1"] {
+		t.Fatal("encoded self-removal removed the operator's skill")
+	}
+	if n := strings.Count(audit.String(), "operation=actor.remove_skill"); n != 2 {
+		t.Fatalf("%d actor.remove_skill refusals audited, want 2 (plain and encoded); log:\n%s", n, audit.String())
+	}
 
 	// Malformed escape. net/http refuses it before routing (the request
 	// line does not parse), so over the wire it can never reach the
@@ -298,14 +314,23 @@ func TestSkillAuthority_AdminManagesSkills(t *testing.T) {
 		t.Fatalf("encoded admin grant: %d, stored %v", resp.StatusCode, ss.actorSkills)
 	}
 
+	// Removal through the encoded path reaches the decoded actor too
+	// (an undecoded "contributor%2D1" would answer 404).
+	resp = skillRequest(t, "DELETE", ts.URL+"/api/v1/actors/contributor%2D1/skills/sk-review", admin, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || ss.actorSkills["contributor-1"]["sk-review"] {
+		t.Fatalf("encoded admin removal: %d, stored %v", resp.StatusCode, ss.actorSkills)
+	}
+	if line := audit.auditLine("actor_skill_removed"); line == "" ||
+		!strings.Contains(line, "target_actor_id=contributor-1") || !strings.Contains(line, "skill_id=sk-review") {
+		t.Fatalf("removal not audited with the decoded id; log:\n%s", audit.String())
+	}
+
+	ss.actorSkills["contributor-1"] = map[string]bool{"sk-review": true}
 	resp = skillRequest(t, "DELETE", ts.URL+"/api/v1/actors/contributor-1/skills/sk-review", admin, "")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("admin removal: %d, want 204", resp.StatusCode)
-	}
-	if line := audit.auditLine("actor_skill_removed"); line == "" ||
-		!strings.Contains(line, "target_actor_id=contributor-1") || !strings.Contains(line, "skill_id=sk-review") {
-		t.Fatalf("removal not audited; log:\n%s", audit.String())
 	}
 }
 
@@ -475,5 +500,94 @@ func TestActorCreate_RoleCeiling(t *testing.T) {
 	created := audit.auditLine("actor_created")
 	if created == "" || !strings.Contains(created, "created_actor_id=rev-1") || !strings.Contains(created, "granted_role=reviewer") {
 		t.Errorf("creation not audited; log:\n%s", audit.String())
+	}
+}
+
+// ── Review round 1: concurrent skill writes ──
+
+// racingSkillStore returns copies from GetSkill, as Postgres does, and
+// runs a concurrent change once, right after the handler's first read:
+// another admin request committing between that read and the write.
+type racingSkillStore struct {
+	*skillStore
+	once           sync.Once
+	afterFirstRead func(stored *domain.Skill)
+}
+
+func (r *racingSkillStore) GetSkill(ctx context.Context, skillID string) (*domain.Skill, error) {
+	sk, err := r.skillStore.GetSkill(ctx, skillID)
+	if err != nil {
+		return nil, err
+	}
+	read := *sk
+	r.once.Do(func() {
+		if r.afterFirstRead != nil {
+			r.afterFirstRead(sk)
+		}
+	})
+	return &read, nil
+}
+
+// UpdateSkill and PATCH write every column, so before the re-read a
+// PATCH racing a forced deprecation wrote the stale status back (an
+// un-deprecation with no audit line), and a deprecation racing a rename
+// reverted the name. The rename guard's reference scans widened that
+// window. Now the columns a request does not change come from a re-read
+// just before the write, and a name that changed in between is a 409.
+func TestSkillMutations_ConcurrentChangeIsNotOverwritten(t *testing.T) {
+	setup := func(t *testing.T, change func(*domain.Skill)) (*httptest.Server, *skillStore, string) {
+		t.Helper()
+		ss := newSkillStore()
+		ss.actors["admin-1"] = &domain.Actor{ActorID: "admin-1", Type: domain.ActorTypeHuman, Name: "Admin",
+			Role: domain.RoleAdmin, Status: domain.ActorStatusActive}
+		ss.skills["sk-x"] = &domain.Skill{SkillID: "sk-x", Name: "x", Description: "old", Status: domain.SkillStatusActive}
+		rs := &racingSkillStore{skillStore: ss, afterFirstRead: change}
+		tok, _, err := auth.NewService(rs).CreateToken(context.Background(), "admin-1", "t", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := gateway.NewServer(":0", gateway.ServerConfig{Store: rs, Auth: auth.NewService(rs)})
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+		return ts, ss, tok
+	}
+	deprecate := func(sk *domain.Skill) { sk.Status = domain.SkillStatusDeprecated }
+	rename := func(sk *domain.Skill) { sk.Name = "y" }
+
+	for _, c := range []struct {
+		name       string
+		change     func(*domain.Skill)
+		method     string
+		path       string
+		body       string
+		wantStatus int
+		want       domain.Skill
+	}{
+		{"description edit keeps a concurrent deprecation", deprecate, "PATCH", "/api/v1/skills/sk-x", `{"description":"new"}`,
+			http.StatusOK, domain.Skill{Name: "x", Description: "new", Status: domain.SkillStatusDeprecated}},
+		{"rename keeps a concurrent deprecation", deprecate, "PATCH", "/api/v1/skills/sk-x", `{"name":"z"}`,
+			http.StatusOK, domain.Skill{Name: "z", Description: "old", Status: domain.SkillStatusDeprecated}},
+		{"rename decided on a stale name is refused", rename, "PATCH", "/api/v1/skills/sk-x", `{"name":"z"}`,
+			http.StatusConflict, domain.Skill{Name: "y", Description: "old", Status: domain.SkillStatusActive}},
+		{"deprecation does not revert a concurrent rename", rename, "POST", "/api/v1/skills/sk-x/deprecate?force=true", "",
+			http.StatusConflict, domain.Skill{Name: "y", Description: "old", Status: domain.SkillStatusActive}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ts, ss, admin := setup(t, c.change)
+			resp := skillRequest(t, c.method, ts.URL+c.path, admin, c.body)
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != c.wantStatus {
+				t.Fatalf("%s %s: %d (%s), want %d", c.method, c.path, resp.StatusCode, b, c.wantStatus)
+			}
+			if c.wantStatus == http.StatusConflict && !strings.Contains(string(b), `"code":"conflict"`) {
+				t.Errorf("409 body %s, want code conflict", b)
+			}
+			got := ss.skills["sk-x"]
+			if got.Name != c.want.Name || got.Description != c.want.Description || got.Status != c.want.Status {
+				t.Fatalf("stored skill {name %q, description %q, status %q}, want {%q, %q, %q}",
+					got.Name, got.Description, got.Status, c.want.Name, c.want.Description, c.want.Status)
+			}
+		})
 	}
 }
