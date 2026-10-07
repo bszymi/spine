@@ -69,7 +69,12 @@ configured secret backend). With --all-workspaces (WORKSPACE_RESOLVER=db only)
 it sweeps every workspace in the registry (SPINE_REGISTRY_DATABASE_URL) —
 active and inactive, because an inactive workspace's rows still need the key
 that sealed them. WORKSPACE_RESOLVER=platform-binding has no registry to
-enumerate: check each workspace's "subscription secrets swept" log instead.
+enumerate: check each workspace's "subscription secrets swept" log instead
+(after a rolling update, restart every process first: a request to a
+workspace a process already holds does not sweep it).
+
+Run it once the rollout of the change it verifies has completed: until then a
+process still on the previous setting can sweep a workspace back.
 
 Exits non-zero unless every workspace is clean (no refused row, no lost
 compare-and-swap). An inactive workspace whose database can no longer be
@@ -169,7 +174,7 @@ func requireRegistryResolver() error {
 	case "db":
 		return nil
 	case "platform-binding":
-		return errors.New("--all-workspaces needs a workspace registry, and WORKSPACE_RESOLVER=platform-binding has none to enumerate: each workspace is swept when spine serve loads it, so before switching to strict or dropping a previous key, load every workspace and check that each one's \"subscription secrets swept\" log shows refused=0 and conflicts=0 (docs/integration-guide.md §2.1; nothing was changed)")
+		return errors.New("--all-workspaces needs a workspace registry, and WORKSPACE_RESOLVER=platform-binding has none to enumerate: a spine serve process sweeps a workspace only when it builds it, not on every request, so before switching to strict, dropping a previous key or rolling back, restart every process once the rollout has completed, then load every workspace and check that each one's latest \"subscription secrets swept\" log across all replicas comes from a restarted process and shows refused=0 and conflicts=0 (docs/integration-guide.md §2.1, Verifying every workspace; nothing was changed)")
 	case "", "file":
 		return errors.New("--all-workspaces sweeps the workspace registry, which spine serve uses only with WORKSPACE_RESOLVER=db; in file mode (WORKSPACE_RESOLVER unset or file) run the command without --all-workspaces, or set WORKSPACE_RESOLVER=db as spine serve does (nothing was changed)")
 	default:

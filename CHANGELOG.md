@@ -117,6 +117,9 @@ release is cut — this file is a staging area.
   With overlapping processes, rotate in two rollouts: first add the new key
   to every ring as a previous key, then promote it (a process without the
   new key refuses rows re-keyed to it, and its webhook fan-out fails).
+  A process still on the first rollout can re-key a workspace back to the
+  old key while the promotion rolls out, so verify every workspace once the
+  promotion has completed and before removing the old key.
 
 ### Added
 
@@ -133,9 +136,14 @@ release is cut — this file is a staging area.
   mode (it never assumes `migrate`); `--all-workspaces` requires
   `WORKSPACE_RESOLVER=db`; `--allow-unreachable-inactive=<ids>` acknowledges
   decommissioned inactive workspaces whose database is gone (listed in the
-  summary). `platform-binding` has no registry to enumerate: verify by
-  loading every workspace and checking its `subscription secrets swept`
-  log.
+  summary). `platform-binding` has no registry to enumerate, and a request
+  to a workspace a process already holds does not sweep it: after a rolling
+  update, restart every process once the rollout has completed, then load
+  every workspace and check its latest `subscription secrets swept` record
+  across all replicas (`docs/integration-guide.md` §2.1, *Verifying every
+  workspace*). In file and `db` mode, run the command once the rollout has
+  completed: a process still on the previous setting can sweep a workspace
+  back while it runs.
 - Startup log `secret envelope configured` (`primary_key_id`,
   `previous_key_ids`, `mode`) and per-workspace sweep logs
   (`subscription secrets swept`, one `subscription secret converted` per row,

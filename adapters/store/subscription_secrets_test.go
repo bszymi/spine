@@ -706,6 +706,30 @@ func TestP310_TwoPhaseRotationOverlapReads(t *testing.T) {
 	if !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v2:"+testRing(t, k2).PrimaryKeyID()+":") {
 		t.Fatal("rows do not settle on K2 once only promote-phase processes sweep")
 	}
+
+	// Review round 2: the rows are on K2 only if a K2-primary sweep came
+	// last. When the last sweep is a distribute-phase one (a step-2 process
+	// that first loads the workspace late in the promote rollout), the rows
+	// stay on K1 after every distribute-phase process is gone: nothing
+	// re-keys them until a K2-primary process sweeps again, which is why the
+	// runbook verifies with a fresh sweep after the rollout (the command, or
+	// a restart in platform-binding mode) before K1 is dropped.
+	if rep, err := distributed.ReencryptSubscriptionSecrets(ctxBG); err != nil || rep.Rekeyed != 1 {
+		t.Fatalf("late distribute sweep: %+v %v", rep, err)
+	}
+	if !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v2:"+testRing(t, k1).PrimaryKeyID()+":") {
+		t.Fatal("a late distribute-phase sweep should leave the row on K1")
+	}
+	k2Only := boundStore(t, db, testRing(t, k2), "ws-X", SecretEnvelopeMigrate)
+	if _, err := k2Only.GetSubscription(ctxBG, "sub-1"); !errors.Is(err, spinecrypto.ErrUnknownKeyID) {
+		t.Fatalf("dropping K1 now would strand the row: %v", err)
+	}
+	if rep, err := promoted.ReencryptSubscriptionSecrets(ctxBG); err != nil || rep.Rekeyed != 1 || !rep.Clean() {
+		t.Fatalf("verification sweep after the rollout: %+v %v", rep, err)
+	}
+	if got, err := k2Only.GetSubscription(ctxBG, "sub-1"); err != nil || got.SigningSecret != "whsec_1" {
+		t.Fatalf("after the verification sweep a K2-only ring must read the row: %v", err)
+	}
 }
 
 func TestP310_DowngradeRewritesV2ToV1(t *testing.T) {

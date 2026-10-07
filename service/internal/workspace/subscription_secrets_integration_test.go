@@ -156,3 +156,75 @@ func TestServicePool_BindsStoresInConfiguredMode(t *testing.T) {
 		t.Fatalf("legacy row not refused by the pooled strict store: %v", err)
 	}
 }
+
+// Review round 2: the premise of the platform-binding runbook. A pooled
+// workspace is swept only when the pool builds its ServiceSet: a Get for a
+// workspace the pool already holds does not sweep, so a row another process
+// swept back (here: an enc:v1 value, as a downgrade-mode process writes
+// during an overlapping rollout) stays as it is, however many requests
+// follow. The first Get after an eviction (idle, binding invalidation — or a
+// process restart, which starts with an empty pool) rebuilds and sweeps it.
+func TestServicePool_SweepsOnlyWhenItBuilds(t *testing.T) {
+	dsn := t009WorkspaceDB(t, "t009_rebuild")
+	key := make([]byte, spinecrypto.EncryptionKeySize)
+	for i := range key {
+		key[i] = 0x50 + byte(i)
+	}
+	c, err := spinecrypto.NewSecretCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	admin, err := store.NewPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	raw := func() string {
+		t.Helper()
+		var v string
+		if err := admin.QueryRowSecret(ctx, "sub-svc", &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	v2Prefix := "enc:v2:" + c.PrimaryKeyID() + ":"
+
+	resolver := &multiConfigResolver{configs: map[string]Config{
+		"ws-rebuild": {ID: "ws-rebuild", DatabaseURL: secrets.NewSecretValue([]byte(dsn)), RepoPath: ".", Status: StatusActive},
+	}}
+	pool := NewServicePool(ctx, resolver, PoolConfig{SecretCipher: c, SecretEnvelopeMode: store.SecretEnvelopeMigrate, IdleTimeout: time.Hour})
+	t.Cleanup(pool.Close)
+	get := func() {
+		t.Helper()
+		if _, err := pool.Get(ctx, "ws-rebuild"); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		pool.Release("ws-rebuild")
+	}
+
+	get()
+	if !strings.HasPrefix(raw(), v2Prefix) {
+		t.Fatal("the first build did not sweep the workspace")
+	}
+
+	v1, err := c.Encrypt("whsec-plain-svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.ExecRaw(ctx, `UPDATE runtime.event_subscriptions SET signing_secret = $1 WHERE subscription_id = 'sub-svc'`, v1); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		get()
+	}
+	if raw() != v1 {
+		t.Fatal("a Get for a workspace the pool already holds swept it; the runbook's restart step would be unnecessary")
+	}
+
+	pool.Evict("ws-rebuild")
+	get()
+	if !strings.HasPrefix(raw(), v2Prefix) {
+		t.Fatal("the first Get after an eviction did not rebuild and sweep the workspace")
+	}
+}

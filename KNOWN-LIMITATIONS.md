@@ -144,11 +144,19 @@ The following limitations have been resolved:
 
 ### Webhook Signing Secrets: No All-Workspaces Verification in `platform-binding` Mode
 - `spine secrets reencrypt --all-workspaces` needs the workspace registry (`WORKSPACE_RESOLVER=db`).
-  `platform-binding` has none to enumerate, so before switching to `strict`, dropping a previous
-  key or rolling back, the operator must load every bound workspace and check that each one's latest
-  `subscription secrets swept` log shows `refused=0` and `conflicts=0`. A workspace that has not
-  loaded since the change is unverified, and flipping early stops its webhook fan-out when it next
-  loads. An enumeration source for this mode (the platform's binding list) is a follow-up.
+  `platform-binding` has none to enumerate, and a process sweeps a workspace only when it builds it
+  (its first request after the process starts, or after an eviction): a request to a workspace the
+  process already holds does not sweep it. During a rolling update, a process still on the previous
+  setting that first loads a workspace late in the rollout sweeps it back (to `enc:v1`, to the old
+  primary key, or to `enc:v2`), and no clean record logged before that shows it. So before switching
+  to `strict`, dropping a previous key or rolling back, the operator must restart every process once
+  the rollout of the change has completed (unless it was a stop-the-world restart), then load every
+  bound workspace and check that each one's latest `subscription secrets swept` record across all
+  replicas comes from a process started after the rollout and shows `refused=0` and `conflicts=0`
+  (`docs/integration-guide.md` §2.1, *Verifying every workspace*). A workspace without such a record
+  is unverified; flipping early stops its webhook fan-out when it next loads, or, before a rollback,
+  leaves `enc:v2` rows the old binary signs with as text. An enumeration source for this mode (the
+  platform's binding list) or an on-demand sweep is a follow-up.
 
 ### Webhook Signing Secrets: One Unopenable Row Stops a Workspace's Fan-Out
 - A signing secret that does not open (wrong or removed key, transplanted, legacy in `strict`) fails
