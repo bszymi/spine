@@ -2,12 +2,12 @@
 id: TASK-016
 type: Task
 title: "Ref-class push admission in the standalone git gateway (run, plan, divergence, init and non-branch refs)"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -690,16 +690,22 @@ The design works without answers, using the stated defaults.
      matches the **latest** run-level execution of the current step" (DC-6). The answer must
      now be identical across three tasks: this one, SMP TASK-007 owner question 3, and the
      binding half of TASK-014 §4.
+   - *Ruling (orchestrator, 2026-10-07; the default, pending the owner):* the default as amended
+     by DC-6 — operator/admin always; otherwise the actor holds the **latest** run-level
+     execution of `current_step_id` (`assigned` or `in_progress`) on an `active` run, role
+     `contributor`+, same repository, create/update but never delete. Implemented as such.
 2. **Non-branch refs (tags, notes) are operator-only.** Is there a legitimate non-operator tag
    pusher, such as CI release tagging with a contributor token?
    - *Default:* operator-only. CI must use an operator token.
    - If an exception is wanted, it is a follow-up: a narrow allow such as `refs/tags/release/*`
      that never admits a tag whose short name equals an existing branch name or `main`.
+   - *Ruling (orchestrator, 2026-10-07; the default, pending the owner):* operator-only.
 3. **Audit for operator pushes to reserved refs.**
    - *Default:* an Info log line only.
    - *Alternative:* require `-o spine.override=true` and emit a `branch_protection.override`-style
      governance event. That needs an event-schema change and would make operator remediation
      pushes two-step.
+   - *Ruling (orchestrator, 2026-10-07; the default, pending the owner):* an Info log line only.
 
 *Added by the design check (2026-10-06):*
 
@@ -719,6 +725,10 @@ The design works without answers, using the stated defaults.
    - This closes the "reviewer moves the tip" gap before TASK-005 lands, and it keeps I5.
    - If the owner keeps "no freeze", TASK-014 must drop its freeze, or document the divergence
      as accepted.
+   - *Ruling (orchestrator, 2026-10-07; pending the owner):* adopt the freeze for non-operators
+     through an optional `StepDefLookup` hook in `refadmit` that fails closed when nil; the API
+     freeze stays TASK-014's and the hook is reusable by it. Implementation Notes record the
+     exact shape (it also freezes `internal` steps, for parity with TASK-014's amended I6).
 5. **Who owns the case-insensitive-filesystem gap in `branchprotect`?**
    - On a case-insensitive server filesystem, a case-variant *update* of a protected branch (for
      example `refs/heads/MAIN`, old id = `main`'s tip) is evaluated against rule `main`. The rule
@@ -735,6 +745,8 @@ The design works without answers, using the stated defaults.
    - *Disposition (TASK-001, 2026-10-07):* not folded into TASK-001 §3. TASK-001 owner question 1
      (default, pending the owner) documents the storage requirement and routes fail-closed
      handling to a new INIT-023 EPIC-001 follow-up task (see the corrected Out-of-scope bullet).
+   - *Ruling (orchestrator, 2026-10-07; pending the owner):* stays with the TASK-001 follow-up;
+     documentation only here.
 6. **Exploratory divergence branches are a binding entry point that no task owns.**
    - `divergence.create_branch` is `contributor` (`core/auth/permissions.go:65`). Its
      `branch_id` is unvalidated (`handlers_divergence.go:35-46`), and nothing ties the caller to
@@ -764,6 +776,10 @@ The design works without answers, using the stated defaults.
      - TASK-001's `TestCreateExploratoryBranch_ControlByteBranchIDFailsClosed`
        (`core/divergence/service_controlbyte_test.go`) asserts only that the refusal is fail-closed,
        so it stays valid after that change.
+   - *Ruling (orchestrator, 2026-10-07; pending the owner):* **this task owns it.** `branch_id` is
+     validated against the workflow ID grammar (`ErrInvalidParams`, 400) and the caller must be
+     bound to the run or an operator, in a way that is identical for every input SMP produces
+     (SMP never calls `CreateExploratoryBranch`) — see Implementation Notes.
 
 ---
 
@@ -1130,3 +1146,291 @@ git 2.54. Neither repo was modified.
 
 ## Implementation Notes
 
+*(Implementation, 2026-10-07. Branch `init/INIT-023-TASK-016-run-branch-push-admission`, cut from
+Spine local `main` `ee3c249` (`61994fe` + the INIT-023 scaffold + the merged TASK-001). The
+orchestrator named the branch. Run on macOS (APFS, case-insensitive), git 2.54.0, go 1.26.5;
+the local PostgreSQL is 17.10, CI uses 18.)*
+
+### Orchestrator rulings (recorded as defaults, pending the owner)
+
+| Question | Ruling | Where |
+|---|---|---|
+| OQ1 run-branch pushers | Operator/admin always; otherwise the holder of the **latest** run-level execution of `current_step_id` (`assigned`/`in_progress`) on an `active` run, `contributor`+, same repository, create/update only | `core/refadmit` rules 4–7 |
+| OQ2 non-branch refs | Operator-only | class `non_branch` |
+| OQ3 operator audit | Info log only (`pre-receive admitted reserved ref` / `… non-branch ref`) | `githttp.prereceive` |
+| OQ4 review freeze | Adopted for non-operators via an optional `StepDefLookup` hook that fails closed when nil | `refadmit.StepDefLookup`, `FrozenStepType` |
+| OQ5 case-insensitive storage in `branchprotect` | Stays with the TASK-001 follow-up; docs only (`KNOWN-LIMITATIONS.md` cross-reference) | — |
+| OQ6 divergence `create_branch` | Owned here: workflow-ID grammar (400) and run binding or operator (403) | `divergence.ValidateExploratoryBranchID`, `refadmit.DecideBoundToRun`, `handleCreateBranch` |
+| TASK-002 DC-3 / D12 | Created/updated refs with a non-first `refs` or any `HEAD` component are refused for every principal; deletes stay allowed | `Ref.Shadowing`, rule 0b |
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `4c414cf` | `core/refadmit` (new; imports `core/domain` + stdlib): `Classify` (7 classes, DC-1…DC-4, `Shadowing` flag), `Evaluator.Decide` (rules 0, 0b, 1–7, DC-5 cap, DC-6, DC-7, memoization, `not_evaluated`), the review freeze, `DecideBoundToRun`, wire messages. `adapters/store` asserts `*PostgresStore` and `Store` satisfy `refadmit.RunReader` |
+| `d112201` | `service/internal/githttp`: unconditional admission loop before the policy; `Config.RunRefs`/`StepDefs`; `WithRunRefs`/`WithStepDefs`/`WithRepositoryID`. AC 7 tests; the F10 PoC port (`ref_admission_tags_test.go`); TASK-001's `nulHandler` wires a bound reader |
+| `0094d59` | `gateway.GitPushResources.Runs`/`StepDefs`, `handleGit` attaches the repository ID and the per-push pair; `spine serve` wiring (`buildGitPushResolver`, `buildGitHTTPHandler`, `runReaderOrNil`, `stepDefLookupOrNil`). AC 8, 9, 11, 12 (`git_push_admission_test.go`) and AC 14 (`serve_builders_test.go`) |
+| `2e68589` | OQ6: `divergence.ValidateExploratoryBranchID` (new, exported, not called by `CreateExploratoryBranch`) and the gateway's grammar + binding checks, with tests |
+| `8195fe5` | AC 13: `TestGitHTTP_PushAcceptedWhenFlagOn` pushes `feature/push`; new `TestGitHTTP_PushReservedRefRejectedAnonymously` |
+| `08c6c35` | §7 documentation, `KNOWN-LIMITATIONS.md`, `CHANGELOG.md` |
+| `ec57c0b`, `9826cdc` | Test fixture order (makes the BranchID-match mutation fail an AC 3 row), and two gocritic fixes |
+| `a49d811` | Self-review fix: a nil per-request run reader is a decision. `WithRunRefs` always attaches (nil included), `handleGit` attaches the resolver's pair unconditionally, and githttp never falls back to its `Config` pair once one is attached — otherwise a shared-mode workspace with no database would be admitted against the handler's process-level store (another workspace's). Latent in `spine serve` (its shared-mode process store is nil). Tests: githttp AC 7(d) extension and `TestGitPush_WorkspaceWithoutStoreDoesNotFallBack` |
+
+No migration, table, column, endpoint, event type or environment variable is added (I4). Nothing in
+`core/` or `adapters/` calls the new package, so embedded behaviour is unchanged.
+
+### Per-AC evidence
+
+1. **Package.** `go list -deps ./core/refadmit` → only `core/domain` (+ `core/yamlsafe`, a
+   `core/domain` dependency) and stdlib. `./dev/lint-boundaries.sh` OK with no allowlist line;
+   `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` OK;
+   `adapters/store/interfaces_assertions.go` holds `_ refadmit.RunReader = (*PostgresStore)(nil)`
+   (and `= Store(nil)`).
+2. **`TestClassify`**: every AC 2 row, every design-check row, plus U+0130 (`spİne`, caught by the
+   lower-case half of the fold), shadowing rows and further shapes. `TestClassify_ReservedLengthBoundary`
+   pins 1024 vs 1025 bytes. Mutations: `ToLower`-only fold, removed byte loop, removed length bound
+   all fail (table below).
+3. **`TestDecide_RunBranch`**: all allowed/denied rows of AC 3, DC-6 (alice older `in_progress`,
+   bob newer `assigned`: alice denied, bob allowed), DC-7 (`"spine"` request; legacy `""` row),
+   operators allowed with **zero** reader and step-definition calls (also with a nil reader), the
+   `RepositoryBranches` path, the diverged-run row, and the freeze rows. Every AC 3 mutation fails
+   at least one row.
+4. **`TestDecide_Divergence`**: dave allowed on `x1`; run-level actor, sibling-branch actor,
+   completed/failed branch, foreign `RunID`/`DivergenceID`, non-`-div-` segment (0 `GetBranch`),
+   unknown branch, moved cursor and delete denied; a `DivergencePath` with an extra `/` resolves.
+5. **`TestDecide_FailClosed`**: nil reader (contributor `resolver_unavailable`, operator allowed);
+   non-NotFound errors returned (GetRun, ListStepExecutionsByRun, GetBranch) and the evaluator then
+   answers `not_evaluated`; 1 denial + 50 foreign refs = 2 reader calls; bound refs memoized (1
+   read each). DC-5: a 400-segment divergence ref (under the DC-4 bound) → `unresolved` with ≤ 8
+   `GetBranch`; the literal 10,000-segment path → ≤ 8 calls through `findBranch` (see Deviations).
+6. **`TestDecide_NonRunClasses`**: init/reserved/non-branch deny contributor, reviewer, reader and
+   nil (0 reads) and allow operator and admin, deletes included; `branch` allows everyone
+   (`ordinary_branch`); `invalid` denies everyone including operator/admin with 0 reads and a
+   message with no byte < 0x20; shadowing names refused for every principal, deletes fall through.
+   `TestDecision_Messages` pins the wire catalogue and the 1024-byte echo bound.
+7. **githttp**: (a) `TestServeHTTP_SpineRefsSkipPolicyButNotAdmission` replaces
+   `TestServeHTTP_PreReceiveAllowsSpineRefsWithoutPolicy`; (b) `…RunsWithoutPolicy` (mutation
+   "re-wrap in `if policy != nil`" fails it); (c) `…MixedPushAllOrNothing`; (d)
+   `…PerRequestReaderWins` (context reader binds alice, config reader binds bob → admitted, config
+   reader not called; per-request reader without per-request lookup → refused; config only →
+   refused; a per-request **nil** reader with a binding `Config` reader → refused, no fallback;
+   both nil → refused).
+8. **`TestGitPush_ReaderCannotPushForeignRunBranch`**: PoC setup kept (reader token,
+   `StaticRules(nil)`, no resolver, `spine/run/victim-run`); push and force-push exit non-zero with
+   `ref-admission:`; ref = reviewed SHA; `task.md` = `reviewed content`. The original PoC, overlaid
+   on this branch, now fails with `push did not land`. "Decide always allows" fails this test and
+   AC 9–12 (table below).
+9. **`TestGitPush_BoundAndOperatorPushes`**: bob's push and force-push refused, ref unchanged;
+   alice's push lands at her SHA; alice's delete refused, ref kept; run `committing` → alice
+   refused; operator force-push and delete succeed.
+10. **`TestRefAdmission_ShadowTagsRefused`** (`t.TempDir()`, no `POC_DIR`): `refs/tags/<run>`,
+    `refs/tags/main`, `refs/notes/commits`, `refs/<run>` refused for anonymous and contributor;
+    `for-each-ref refs/tags refs/notes refs/spine` empty; operator `refs/tags/v1.0.0` lands. The
+    original PoC, overlaid, fails at its `tag push denied` fatal. Extra:
+    `TestRefAdmission_ShadowingNamesRefusedForOperators` (D12, real git; cleanup delete works).
+11. **`TestGitPush_DivergenceRefAdmission`**: alice refused, dave admitted (ref = his SHA), operator
+    admitted.
+12. **`TestGitPush_InitAndReservedNamespace`**: `cli.InitRepo` with a contributor bearer leaves no
+    `spine/init`, with an operator bearer creates it; contributor `spine` and `spine/other` refused
+    with the reserved-namespace line; `feature/x` lands; `main` refused with `rule
+    "no-direct-write"`. **`TestGitPush_CaseFoldVariantOfReservedRefRefused` ran (not skipped) on
+    this APFS host**: hand-built updates of `SPINE/…` and `ſpine/…` with the fixture's old id are
+    refused for bob and for the bound alice, ref unchanged. With the fold mutated to `ToLower`
+    only, the `ſpine` update **moved the real run branch** (`ok refs/heads/ſpine/run/…`), so the
+    test is the real DC-1 regression on case-insensitive hosts.
+13. **Scenarios** (fresh `s016_scenario`): `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v
+    ./service/scenariotest/scenarios/` → 20 `--- PASS: TestGitHTTP_*`, 0 skips, including
+    `TestGitHTTP_PushAcceptedWhenFlagOn` (`feature/push`) and the new
+    `TestGitHTTP_PushReservedRefRejectedAnonymously`; the other push scenarios unmodified.
+14. **Wiring**: `TestBuildGitPushResolver_RunReaderWiring` (single mode: `Runs` identical to the
+    store, `StepDefs` the fallback; nil store: `Runs == nil`, permissive policy; shared mode without
+    a DB: nil pair, never the process fallback; shared mode with a store and engine: the
+    workspace's own pair), `TestStepDefLookupOrNil` (typed-nil orchestrator → nil),
+    `TestGitPush_WorkspaceWithoutStoreDoesNotFallBack` (real gateway: a resolver with no `Runs` and a
+    handler whose fallback reader would bind alice → alice refused, operator admitted), and
+    `TestBuildGitHTTPHandler_WarnsWhenRunBranchesAreOperatorOnly` (captured `slog`).
+15. **Unchanged surfaces**: all `core/branchprotect` tests and every listed `githttp`/`gateway` test
+    pass unedited, except the edits listed under Deviations (TASK-001's two multi-ref tests via
+    their shared helper, and `TestHandleCreateBranch_Success`, both caused by rules this task adds).
+16. **Docs**: §7 items 1–7 are in `08c6c35`; `grep -n "bypass policy by design"
+    docs/integration-guide.md` returns nothing; `docs/git-push-guide.md` §6 states the
+    admission-time window (DC-8, `ReadTimeout`, 30 s in `spine serve`) and the case-fold
+    reservation (DC-1).
+17. **Gates**: below. Codex: see "Codex review".
+
+### Mutation checks (AC 3, 5, 7b, 8, and the design-check mutations)
+
+Run in a scratch copy of the tree (never in the worktree), each mutation applied alone:
+
+| Mutation | Result (first failing test) |
+|---|---|
+| drop `ActorID` equality | killed — `TestDecide_RunBranch/denied/another_contributor` |
+| drop the status filter | killed — `…/denied/execution_waiting` |
+| drop the `CurrentStepID` match | killed — `…/denied/run_diverged` |
+| drop the `BranchID == ""` match | killed — `…/denied/holder_of_the_current_step_on_a_branch_execution` (after `ec57c0b`) |
+| drop the run-`active` check | killed — `…/denied/run_pending` (and every run status) |
+| drop the `BranchName` equality | killed — `…/denied/same_suffix,_different_slug` |
+| drop the delete guard | killed — `…/denied/alice_deleting` |
+| drop the contributor floor | killed — `…/denied/alice_as_reader` |
+| drop the repository match | killed — `…/denied/repository_mismatch` |
+| move the operator check after the lookup | killed — `…/operators_never_read_the_store` |
+| "any execution" instead of latest (DC-6) | killed — `…/DC-6_latest_attempt_wins` |
+| `repoOrPrimary` identity / request side unnormalized (DC-7) | killed — `…/allowed` |
+| remove `not_evaluated` | killed — `TestDecide_FailClosed/not_evaluated_bounds_reads_after_the_first_denial` |
+| remove the split cap (DC-5) | killed — `TestDecide_FailClosed/DC-5_split_cap` |
+| `ToLower`-only fold (DC-1) | killed — `TestClassify`; and the real-git `TestGitPush_CaseFoldVariantOfReservedRefRefused` (ref moved) |
+| remove the control-byte loop (DC-2) | killed — `TestClassify`, `TestDecide_NonRunClasses/invalid_…` |
+| remove the length bound (DC-4) | killed — `TestClassify_ReservedLengthBoundary` |
+| rule 0 after the operator check | killed — `TestDecide_NonRunClasses/invalid_refuses_every_principal` |
+| shadowing rule removed / applied to deletes | killed — `TestDecide_NonRunClasses/shadowing_…` |
+| freeze removed / nil hook not fail-closed (OQ4) | killed — `TestDecide_RunBranch/review_freeze_…` |
+| re-wrap admission in `if policy != nil` (AC 7b) | killed — `TestServeHTTP_RefAdmissionRunsWithoutPolicy` |
+| `Decide` always allows, types kept (AC 8) | killed — all AC 7 tests, both F10 tests, all five `TestGitPush_*` (AC 8–12), and `TestGitHTTP_PushReservedRefRejectedAnonymously` |
+| gateway drops the per-request reader | killed — `TestGitPush_BoundAndOperatorPushes`, `…DivergenceRefAdmission` |
+| githttp prefers the config reader | killed — `TestServeHTTP_RefAdmissionPerRequestReaderWins` |
+| a nil per-request reader falls back to the config pair (`a49d811` reverted) | killed — `TestServeHTTP_RefAdmissionPerRequestReaderWins`, `TestGitPush_WorkspaceWithoutStoreDoesNotFallBack` |
+| OQ6 binding / grammar check removed | killed — `TestHandleCreateBranch_UnboundContributorForbidden` / `…InvalidBranchIDRejected` |
+| resolver drops `Runs` (AC 14) | killed — `TestBuildGitPushResolver_RunReaderWiring/single_mode_with_a_store` |
+
+### Deviations and additions (with reasons)
+
+- **The review-freeze hook (OQ4).** `refadmit.StepDefLookup` is an interface with the method
+  `LookupStepDef(ctx, runID, stepID) (*domain.StepDefinition, *domain.Run)` — the exact method
+  `*engine.Orchestrator` (pinned workflow version) and the gateway's `StepAssigner` already have,
+  so TASK-014 can pass `s.assignerFor(ctx)` as is. Installed with `Evaluator.WithStepDefs`. A nil
+  hook is a configuration gap and reports `resolver_unavailable` (checked before any store read); a
+  nil definition reports the new `step_unresolved`; a frozen step reports the new `review_frozen`.
+  The lookup runs only after the binding passes, so an unbound pusher never triggers a workflow
+  load. **Additions beyond the ruling's "review step":** (1) `internal` steps freeze too
+  (`FrozenStepType`), for parity with TASK-014's amended I6 — `ClaimStep` ignores `execution.mode`
+  (P3-15), so a contributor could otherwise claim task-default's `publish` and push between
+  approval and merge; (2) the freeze also applies to a divergence branch's current step, for one
+  rule across both store-backed classes. Both only refuse more, never less.
+- **The DC-3 / D12 rule is a flag plus rule 0b, not a class.** `Classify` keeps the AC 2 classes
+  (`refs/heads/refs/heads/x` is still `branch`) and sets `Ref.Shadowing`; `Decide` refuses
+  `shadowing_ref` before the operator check unless the update is a delete, which then falls
+  through to the class rules (so a contributor may delete `refs/heads/refs/heads/main`, an
+  operator `refs/tags/refs/heads/main`). Matching is exact-case, as git's refspec and
+  abbreviation matching are, and as SMP E4-TASK-005 §7 specifies.
+- **Wiring signatures.** `buildGitPushResolver` gains a fourth parameter (the process-level step
+  definition lookup, `orch`), and `buildGitHTTPHandler` gains `runs` and `stepDefs`: the hook needs
+  a source in both modes (shared mode uses `ServiceSet.StepAssigner`). `githttp` takes the reader
+  and the lookup as a **pair**: once a per-request reader is attached, the per-request lookup (or
+  none) is used, never `Config.StepDefs`, so a shared-mode push cannot mix workspaces. A
+  per-request reader is "attached" even when nil (`a49d811`): the resolver's "no store for this
+  workspace" then means operator-only, never the handler's fallback. `WithStepDefs` ignores nil;
+  `runReaderOrNil`/`stepDefLookupOrNil` avoid typed nils.
+- **DC-5 test shape.** A 10,000-segment ref is ~20 KB, so DC-4 classifies it `reserved` and `Decide`
+  answers `operator_required` with no read at all (asserted). The cap is therefore tested through
+  `Decide` with a 400-segment path that stays under 1024 bytes (`unresolved`, ≤ 8 reads) and on the
+  literal 10,000-segment path directly against `findBranch` (≤ 8 reads). The cap counts `GetBranch`
+  calls (qualifying splits), as AC 5 measures.
+- **Echo bound.** Messages echo at most 1024 bytes of a name (rune-safe, `...` appended); this also
+  bounds the non-branch and shadowing messages, whose refs DC-4 does not bound.
+- **OQ6 details.** The grammar is the workflow ID regex plus a 128-byte cap and the ref-component
+  rules git enforces (`..`, trailing `.`, `.lock`), because the regex alone admits names git then
+  refuses with a 500. "Bound to the run" is `refadmit.DecideBoundToRun`: operator, or a `contributor`+
+  actor holding the latest live execution of the run-level current step or of an open divergence
+  branch's current step, on an `active` run (≤ 8 branch reads). A nil actor (dev mode only) skips the
+  binding, as the step-submit ownership check does. Consequence, documented in
+  `KNOWN-LIMITATIONS.md` and `CHANGELOG.md`: an exploratory divergence leaves its run with no live
+  cursor (and the API creates no step execution for the new branch), so creating exploratory
+  branches is effectively operator-only. Validation lives in the gateway (`service/`); the new
+  `divergence.ValidateExploratoryBranchID` is exported but `CreateExploratoryBranch` does not call
+  it, so embedders and SMP (which never calls it) are unchanged.
+- **Existing tests edited (AC 15).** (1) TASK-001's `nulHandler` (shared by its tests) now wires a
+  reader binding `actor-contributor` to `run-abcd1234`, because
+  `TestPreReceive_WellFormedMultiRefPushStillApplies` and `TestPreReceive_RealGitClientPushesUnchanged`
+  push `spine/run/task-001-abcd1234` as a contributor and expect it to land; their assertions are
+  unchanged (two doc comments updated). These tests did not exist at `61994fe`, which is why §6
+  missed them. (2) `TestHandleCreateBranch_Success` now uses the operator token: its unbound
+  contributor is refused by OQ6 on purpose (new `…UnboundContributorForbidden` pins that).
+- **Logging.** Refused refs are logged at Warn with `class`, `reason`, `actor_id` and `run_id`;
+  slog quotes values with control bytes, so the ref is passed raw rather than pre-`%q`-quoted
+  (double quoting otherwise). Operator admissions of **non-branch** refs are also logged at Info
+  (OQ3 extension), and they still reach the policy.
+- **Docs.** `architecture/git-integration.md`'s divergence examples used a divergence ID without the
+  engine's `<run-id>-div-` prefix; corrected, since admission resolves exactly that shape. The
+  upgrade note covers doubly-qualified and `HEAD`-named refs (TASK-002 cross-task requirement).
+
+### Notes for dependent tasks
+
+- **TASK-014:** call `refadmit.NewEvaluator(st).WithStepDefs(s.assignerFor(ctx)).Decide(ctx,
+  refadmit.Request{Ref: "refs/heads/" + run.BranchName, Actor: actor})` — without `WithStepDefs` every
+  non-operator is refused. The push path exempts operators from the freeze; TASK-014's API freeze
+  (every role) stays its own. `refadmit.FrozenStepType` is the shared step-type set.
+- **SMP TASK-007:** mirror DC-1…DC-7, D12 (rule 0b), the freeze (review + internal, fail closed) and
+  `DecideBoundToRun` if it adopts OQ6. `spinecore.RunStore` satisfies `refadmit.RunReader` as is
+  (overlay compile, below); its `ErrRunNotFound` needs mapping to `domain.ErrNotFound` to read as
+  `unresolved` instead of an evaluation error.
+- **TASK-015:** devMode pushes reach admission with no actor; validating a presented bearer there
+  would let bound actors push in dev.
+
+### Gates (commands and results; final code at `a49d811`)
+
+All rows below were (re-)run on `a49d811`, except the full-scenario, store-integration and mutation
+rows, which ran on `9826cdc`; `a49d811` changes only `githttp`/`gateway` admission wiring and
+tests, so those rows are unaffected (its own mutation row is in the table above).
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | all packages `ok`, no failures |
+| `go test -race -p 4 -count=1 ./core/refadmit ./adapters/store ./core/divergence ./service/internal/githttp ./service/internal/gateway ./service/cmd/spine` | all `ok`, no races |
+| `SPINE_TEST_DATABASE_URL=…/s016_scenario go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (fresh DB) | 20 PASS, 0 SKIP |
+| `SPINE_TEST_DATABASE_URL=…/s016_integration go test -tags integration -count=1 ./adapters/store` (fresh DB) | 1 failure, `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`, `workflow_version_label`) — **identical on `main`** (`git archive main`, fresh DB); `adapters/store` changed only by a compile-time assertion |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (fresh DB) | 30 failures, the **same 30 as `main`** on its own fresh DB (`TestSchemaMatchesProduction`, fixture validation, …: the pre-existing set TASK-001 recorded); every `TestGitHTTP_*` passes |
+| `golangci-lint run --build-tags scenario --new-from-rev main <each touched package>` | `0 issues` for each of `core/refadmit`, `adapters/store`, `core/divergence`, `githttp`, `gateway`, `cmd/spine`, `scenarios` |
+| `golangci-lint run --build-tags scenario <package>` per package, branch vs `main` | `core/refadmit` 0 (new); store 5 = 5; divergence 4 = 4; githttp 19 < 20; gateway 89 < 90; cmd/spine 10 < 11; scenarios 60 = 60 (no new issue anywhere) |
+| `golangci-lint run --enable-only=gosec` on the same packages | 0 issues, branch and `main` |
+| `git diff --name-only main...HEAD \| grep '\.go$' \| xargs gofmt -l` | empty |
+| Mutation checks | 31 mutant runs, all killed (table above; two first drafts that did not compile were redone as compiling mutants) |
+| PoCs overlaid (`go test -overlay`) | `poc_git_push_runbranch_test.go`: fails with `push did not land`; `push_phase1_test.go` (`POC_DIR` set): fails at `tag push denied` |
+
+### Codex review
+
+| Round | Code | Command | Result |
+|---|---|---|---|
+| 1 | `08c6c35` | `codex review --base main` | "No actionable regressions were identified." (its sandbox could not bind sockets, so it ran only the socket-free tests) |
+| 2 | `9826cdc` | same | first attempt aborted ("Selected model is at capacity"); the retry: "No actionable regressions were identified in the admission logic or gateway wiring." |
+| 3 | `a49d811` | same | "No actionable defects were identified in the changes." |
+
+No P1/P2 was reported, so none was fixed or rejected. The one defect fixed after review (`a49d811`)
+came from self-review.
+
+### SMP compatibility gate
+
+Re-run on `a49d811` with the same results.
+
+SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T016/smp`, detached at `7d4e7cc9`, no `vendor/`
+or `tmp/`; `go list -m` resolves `github.com/bszymi/spine => …/i23/s-T016/spine`. Not modified
+(`git status` clean after every step).
+
+| Command (in the SMP checkout) | Result |
+|---|---|
+| `go build ./...` | OK |
+| `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `go test -p 4 -count=1 <31 packages>` — every SMP package whose dependency graph contains `adapters/store` or `core/divergence` (`go list -f '{{.ImportPath}} {{join .Deps " "}}' ./...`; direct importers: `cmd/customer-app`, `eventdelivery`, `projectionwriter`, `spinecore`, `stepevents`, `workspace`) | 30 `ok`, 1 `[no test files]` (`workspace/faultharness`) |
+| `./dev/lint-spine-internals.sh` | `lint-spine-internals: OK` |
+| `go vet -overlay` with `var _ refadmit.RunReader = (*RunStore)(nil)` in `spinecore` | compiles: SMP's run store satisfies the reader unchanged |
+
+Every Spine change reaching SMP is provably identical for SMP: `core/refadmit` is new and called by
+nothing in `core/`/`adapters/`; `adapters/store` gains a compile-time assertion only;
+`core/divergence` gains an exported function nothing calls (SMP never calls
+`CreateExploratoryBranch`); everything else is under `service/`, which SMP cannot import.
+
+### Not run
+
+- **SMP's gated DB suites** (`go run ./dev/testgate -- -race -count=1 … ./internal/customer/workspace/
+  ./internal/customer/eventdelivery/ ./internal/customer/projectionwriter/ …`, as in SMP `ci.yml`'s
+  `integration` job): the artifact names none (§8: no SMP change), and the job needs its
+  provisioned roles, `smp_prov` and MinIO. The changed Spine code is not on any path those suites
+  execute (see above).
+- **CI on GitHub** (including the `scenario-git-http` job on PostgreSQL 18): needs a push, which the
+  orchestrator owns.
+- **The Linux skip path of `TestGitPush_CaseFoldVariantOfReservedRefRefused`**: this host is
+  case-insensitive, so the test ran in full; on ext4 it skips by design and the `TestClassify` rows
+  carry the guarantee.
