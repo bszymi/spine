@@ -60,16 +60,30 @@ This document tracks known gaps and deferred functionality.
 - **Incremental deletes leave the task's execution projection row** (`projection.execution_projections`)
   until the next full rebuild. This predates INIT-023; incremental sync never called
   `DeleteExecutionProjection`.
-- **U+0000 in an artifact** (front matter or body) is refused by PostgreSQL and keeps incremental sync
-  in `error` until the file changes. Workflow files with U+0000 are rejected instead (TASK-011); the
-  artifact side is a follow-up.
+- **Artifact content PostgreSQL cannot store** — U+0000 in front matter or body, or a path or id
+  longer than a btree index entry allows (about 2.7 KB) — keeps incremental sync in `error` until the
+  file changes. Workflow files of either kind are rejected instead (TASK-011: U+0000, and a path,
+  `id` or `status` over 1024 bytes); the artifact side is a follow-up.
 - **`QueryService.CheckFreshness` still compares against the working tree's `HEAD`**, not the
   authoritative branch. It has no production caller.
-- **A workflow path whose blob cannot be read at all** (for example a gitlink committed at
-  `workflows/x.yaml`) is still an infrastructure error, so the sync stays in `error` until the entry
-  is fixed, as before INIT-023. Its previous row is kept quarantined. Classifying deterministic read
-  failures of workflow files as rejections is the `isContentReadError` hook in
-  `adapters/projection/workflow_rows.go`; the bounded-read work (TASK-003) registers the first one.
+- **A workflow file git fails to read** (a lock, a git process killed or unable to start, a missing
+  object) is an infrastructure error. An incremental sync holds in `error` and leaves the previous
+  row as it was — still Active, like every other change in the unapplied window; a full rebuild
+  restores a verified previous row quarantined, and the next sync's reconciliation retries the file
+  (the rest of the window is applied meanwhile). A missing blob is repository corruption — a push
+  cannot plant one, receive-pack's connectivity check refuses it — and holds the sync until the
+  repository is repaired. An entry that is not a regular file (a gitlink, the one unreadable entry a
+  push can carry) is a `not_a_file` rejection instead. Oversized blobs become `read_bounds`
+  rejections once the bounded-read work (TASK-003) registers its sentinel in `isContentReadError`
+  (`adapters/projection/workflow_rows.go`).
+- **Read failures are classified from the commit's tree** (`git.TreeEntryTyper`, implemented by
+  `*git.CLIClient`). A `GitClient` decorator passed to `projection.NewService` that does not forward
+  it makes every read failure infrastructure: a gitlink then holds the sync in `error` (fail closed)
+  instead of being skipped (artifact) or rejected (workflow).
+- **A first full rebuild that was interrupted** (the process stopped while `sync_state` was
+  `rebuilding` with no synced commit) is not retried automatically, because it cannot be told apart
+  from a first rebuild still running on another instance; run `POST /api/v1/system/rebuild`. A first
+  rebuild that *fails* records `error` and is retried by the next sync.
 
 ## Resolved (Previously Listed)
 

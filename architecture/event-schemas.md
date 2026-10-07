@@ -427,7 +427,7 @@ payload:
   deleted: <integer>             # Artifacts deleted
   errors: <integer>              # Counted sync errors (state stays at from_commit when > 0)
   workflows_rejected: <integer>  # Workflow files refused for their content (never counted in errors)
-  read_skipped: <integer>        # Changed files whose blob could not be read for a deterministic reason (e.g. a gitlink); skipped, logged at Warn
+  read_skipped: <integer>        # Changed files the commit's tree holds no regular file for (a gitlink, a directory); skipped, logged at Warn
 ```
 
 ### 4.14 `projection_workflow_rejected`
@@ -440,7 +440,7 @@ Emitted when the projection refuses a workflow file because of its content (INIT
 payload:
   workflow_path: <string>        # Repository-relative workflow path
   commit: <string>               # Commit the file was read at (the sync head)
-  check: <string>                # parse | round_trip | validate | read_bounds | scope | absent_at_head
+  check: <string>                # parse | round_trip | validate | read_bounds | not_a_file | scope | absent_at_head
   action: <string>               # kept | not_projected | removed
   kept_source_commit: <string>   # source_commit of the kept row ("" unless action is kept)
   quarantined: <boolean>         # true when the kept row's status column is Quarantined
@@ -448,9 +448,11 @@ payload:
 ```
 
 - `parse`: strict `workflow.Parse` refused the file (unknown, duplicate or case-variant keys, `path` / `commit_sha`, bounds).
-- `round_trip`: `Parse` accepted the file but its stored JSON would decode differently (for example an unquoted `version: 2026-10-06`), or the file holds U+0000.
+- `round_trip`: `Parse` accepted the file but its stored JSON would decode differently (for example an unquoted `version: 2026-10-06`), or the row could not be stored: U+0000 anywhere, or a workflow path, `id` or `status` over 1024 bytes (an indexed column).
+- `read_bounds`: the blob is refused by a content-size bound on read.
+- `not_a_file`: the commit's tree holds no regular file at the path (for example a gitlink), so there is no content to read.
 - `validate`: `workflow.Validate` failed and strict projection validation is enabled (off by default).
-- `scope` / `absent_at_head`: the sweep found a stored row outside the workflow definition locations, or whose file no longer exists at head.
+- `scope` / `absent_at_head`: the sweep found a stored row outside the workflow definition locations, or whose file no longer exists at head and did not exist at the last synced commit either (a file deleted after the last synced commit is removed like the pending diff would remove it, without a rejection).
 - `kept`: the previous row verified and is kept for in-flight runs, with its status set to `Quarantined` so no new run binds it. `removed`: the previous row could not be verified and was deleted. `not_projected`: there was no row.
 
 ---
