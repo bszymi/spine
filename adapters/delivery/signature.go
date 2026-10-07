@@ -159,10 +159,6 @@ func quoteShort(s string) string {
 // parseSubscriptionMetadata parses everything the dispatcher reads from a
 // subscription's metadata: the tls block and the signature version. Every
 // error wraps ErrInvalidSubscriptionMetadata.
-//
-// The tls block is decoded through the same struct as before this task,
-// so its semantics (including encoding/json's case-insensitive field
-// matching) are unchanged for existing rows.
 func parseSubscriptionMetadata(metadata []byte) (subscriptionMetadata, error) {
 	out := subscriptionMetadata{SignatureVersion: SignatureVersionV1}
 	obj, err := parseMetadataObject(metadata)
@@ -172,16 +168,10 @@ func parseSubscriptionMetadata(metadata []byte) (subscriptionMetadata, error) {
 	if out.SignatureVersion, err = signatureVersionFromObject(obj); err != nil {
 		return out, err
 	}
-	if len(obj) == 0 {
-		return out, nil
+	tlsCfg, err := tlsFromObject(obj)
+	if err != nil {
+		return out, err
 	}
-	var wrapper struct {
-		TLS *SubscriptionTLSConfig `json:"tls"`
-	}
-	if err := json.Unmarshal(metadata, &wrapper); err != nil {
-		return out, fmt.Errorf("%w: parse: %v", ErrInvalidSubscriptionMetadata, err)
-	}
-	tlsCfg := wrapper.TLS
 	if tlsCfg == nil || (tlsCfg.PinnedSPKISHA256 == "" && tlsCfg.CABundlePEM == "") {
 		return out, nil
 	}
@@ -192,6 +182,71 @@ func parseSubscriptionMetadata(metadata []byte) (subscriptionMetadata, error) {
 	}
 	out.TLS = tlsCfg
 	return out, nil
+}
+
+// tlsFromObject decodes the tls block from the top-level keys.
+//
+// Before INIT-023 TASK-010 the block was decoded through a struct over
+// the whole document, and encoding/json matches struct fields
+// case-insensitively, letting the last matching key in document order
+// win. The gateway validates the client's bytes, but the dispatcher reads
+// the row back from a jsonb column, which re-orders keys (shorter first,
+// then bytewise, so "TLS" sorts before "tls"). Metadata such as
+// {"tls":null,"TLS":{"pinned_spki_sha256":...}} therefore validated with
+// a pin and was dispatched without one (any CA-valid certificate
+// accepted), and the reverse validated clean and dead-lettered every
+// delivery (review round 1). The decoding is now order-independent:
+// exactly one key that folds to "tls" — in any letter case, so a row
+// stored as "TLS" keeps its meaning — is decoded on its own, and two or
+// more are refused as ambiguous. The same rule applies to the fields
+// inside the block. (signature_version, a key new in this task, is
+// stricter: any spelling but the exact one is refused.)
+func tlsFromObject(obj map[string]json.RawMessage) (*SubscriptionTLSConfig, error) {
+	raw, err := foldedKey(obj, "tls")
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("%w: tls must be a JSON object", ErrInvalidSubscriptionMetadata)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
+		return nil, fmt.Errorf("%w: parse tls: %v", ErrInvalidSubscriptionMetadata, err)
+	}
+	for _, name := range []string{"pinned_spki_sha256", "ca_bundle_pem"} {
+		if _, err := foldedKey(fields, name); err != nil {
+			return nil, err
+		}
+	}
+	var cfg SubscriptionTLSConfig
+	if err := json.Unmarshal(trimmed, &cfg); err != nil {
+		return nil, fmt.Errorf("%w: parse tls: %v", ErrInvalidSubscriptionMetadata, err)
+	}
+	return &cfg, nil
+}
+
+// foldedKey returns the value of the one key in obj that equals name
+// case-insensitively — the set encoding/json would match a struct field
+// against (its folding is strings.EqualFold's) — or nil when there is
+// none. Two or more such keys are ambiguous and refused. Exact duplicate
+// keys are not a concern here: encoding/json and jsonb both keep the last.
+func foldedKey(obj map[string]json.RawMessage, name string) (json.RawMessage, error) {
+	var found json.RawMessage
+	n := 0
+	for k, v := range obj {
+		if strings.EqualFold(k, name) {
+			found = v
+			n++
+		}
+	}
+	if n > 1 {
+		return nil, fmt.Errorf("%w: key %q is given in more than one letter case", ErrInvalidSubscriptionMetadata, name)
+	}
+	return found, nil
 }
 
 // ValidateSubscriptionMetadata reports whether metadata is acceptable for

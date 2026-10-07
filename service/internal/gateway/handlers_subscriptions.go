@@ -438,11 +438,19 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 //
 // signature_version reports which webhook signature format the receiver
 // gets ("v1" or "v2", INIT-023 TASK-010), or "invalid" when the stored
-// metadata does not parse (the dispatcher dead-letters its deliveries).
+// metadata would not pass the dispatcher (the dispatcher dead-letters
+// its deliveries). The whole value is checked with
+// ValidateSubscriptionMetadata — not only the version key, which
+// SignatureVersionOf reads — so a row stored before the API validated
+// metadata (a base64 SPKI pin from the old docs, a CA bundle with no
+// certificate, an ambiguous tls key) is reported "invalid" instead of
+// looking healthy while every delivery goes dead (review round 1).
 func subscriptionResponse(sub store.EventSubscription) map[string]any {
-	signatureVersion, err := delivery.SignatureVersionOf(sub.Metadata)
-	if err != nil {
-		signatureVersion = "invalid"
+	signatureVersion := "invalid"
+	if delivery.ValidateSubscriptionMetadata(sub.Metadata) == nil {
+		if v, err := delivery.SignatureVersionOf(sub.Metadata); err == nil {
+			signatureVersion = v
+		}
 	}
 	return map[string]any{
 		"signature_version": signatureVersion,

@@ -347,6 +347,14 @@ func TestSubscriptionUpdate_MetadataValidationAndSignatureVersion(t *testing.T) 
 		"sub-v1":      {`{"source":"bootstrap"}`, "v1"},
 		"sub-v2":      {`{"signature_version":"v2"}`, "v2"},
 		"sub-invalid": {`{"signature_version":"v3"}`, "invalid"},
+		// Review round 1: metadata the dispatcher refuses for a reason
+		// other than the version is "invalid" too, not "v1"/"v2".
+		"sub-base64-pin":   {`{"tls":{"pinned_spki_sha256":"n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg="}}`, "invalid"},
+		"sub-v2-bad-pin":   {`{"signature_version":"v2","tls":{"pinned_spki_sha256":"zz"}}`, "invalid"},
+		"sub-empty-ca":     {`{"tls":{"ca_bundle_pem":"not a certificate"}}`, "invalid"},
+		"sub-ambiguous":    {`{"TLS":{"pinned_spki_sha256":"ab"},"tls":null}`, "invalid"},
+		"sub-v2-good-pin":  {`{"signature_version":"v2","tls":{"pinned_spki_sha256":"ab"}}`, "v2"},
+		"sub-v1-upper-tls": {`{"TLS":{"pinned_spki_sha256":"ab"}}`, "v1"},
 	} {
 		fs.subs[id] = &store.EventSubscription{SubscriptionID: id, Metadata: []byte(tc.metadata)}
 		resp := doJSON(t, http.MethodGet, ts.URL+"/api/v1/subscriptions/"+id, token, nil)

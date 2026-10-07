@@ -169,9 +169,11 @@ func TestWithSignatureVersion(t *testing.T) {
 	}
 }
 
-// TestParseSubscriptionMetadata_TLSUnchanged: the tls block keeps its
-// pre-TASK-010 decoding, including encoding/json's case-insensitive field
-// match, so no stored row changes meaning.
+// TestParseSubscriptionMetadata_TLSUnchanged: a tls block given under one
+// key keeps its pre-TASK-010 meaning, including encoding/json's
+// case-insensitive match of the key and its fields, so no stored row
+// changes meaning (two spellings of one key are refused; see
+// TestTLSBlockDecodingIsOrderIndependent).
 func TestParseSubscriptionMetadata_TLSUnchanged(t *testing.T) {
 	md, err := parseSubscriptionMetadata([]byte(`{"TLS":{"Pinned_SPKI_SHA256":"abcd"},"signature_version":"v2"}`))
 	if err != nil {
@@ -260,5 +262,62 @@ func TestInvalidVersionMessageIsBounded(t *testing.T) {
 	_, err = SignatureVersionOf([]byte(`{"` + strings.ToUpper("signature_version") + long + `":"v2"}`))
 	if err != nil {
 		t.Fatalf("an unrelated long key must not matter: %v", err)
+	}
+}
+
+// TestTLSBlockDecodingIsOrderIndependent (review round 1): the gateway
+// validates the client's key order, the dispatcher reads Postgres jsonb's
+// (keys re-ordered: "TLS" before "tls"). With the old whole-document
+// struct decode, {"tls":null,"TLS":{pin}} validated with a pin and was
+// dispatched without one. Two keys that fold to the same name are now
+// refused in either order; a single key in any letter case keeps its
+// meaning (rows stored as "TLS" still work).
+func TestTLSBlockDecodingIsOrderIndependent(t *testing.T) {
+	pin := strings.Repeat("ab", 32)
+	refused := [][2]string{
+		// {client order, jsonb order}
+		{`{"tls":null,"TLS":{"pinned_spki_sha256":"` + pin + `"}}`, `{"TLS":{"pinned_spki_sha256":"` + pin + `"},"tls":null}`},
+		{`{"tls":{"pinned_spki_sha256":"zz"},"TLS":null}`, `{"TLS":null,"tls":{"pinned_spki_sha256":"zz"}}`},
+		{`{"tls":{"pinned_spki_sha256":"` + pin + `"},"Tls":{}}`, `{"Tls":{},"tls":{"pinned_spki_sha256":"` + pin + `"}}`},
+		{`{"tls":{"pinned_spki_sha256":"` + pin + `","PINNED_SPKI_SHA256":"cd"}}`, `{"tls":{"PINNED_SPKI_SHA256":"cd","pinned_spki_sha256":"` + pin + `"}}`},
+		{`{"tls":{"ca_bundle_pem":"x","CA_Bundle_PEM":"y"}}`, `{"tls":{"CA_Bundle_PEM":"y","ca_bundle_pem":"x"}}`},
+	}
+	for _, pair := range refused {
+		for _, doc := range pair {
+			if _, err := parseSubscriptionMetadata([]byte(doc)); !errors.Is(err, ErrInvalidSubscriptionMetadata) {
+				t.Errorf("parse %s = %v, want ErrInvalidSubscriptionMetadata (ambiguous key)", doc, err)
+			}
+			if err := ValidateSubscriptionMetadata([]byte(doc)); !errors.Is(err, ErrInvalidSubscriptionMetadata) {
+				t.Errorf("validate %s = %v, want ErrInvalidSubscriptionMetadata", doc, err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		doc     string
+		wantPin string
+	}{
+		{`{"TLS":{"pinned_spki_sha256":"` + pin + `"}}`, pin},
+		{`{"tls":{"Pinned_SPKI_SHA256":"` + pin + `"}}`, pin},
+		{`{"source":"api","tls":{"pinned_spki_sha256":"` + pin + `"},"TLSX":{}}`, pin},
+		{`{"tls":null}`, ""},
+		{`{"tls":{}}`, ""},
+	} {
+		md, err := parseSubscriptionMetadata([]byte(tc.doc))
+		if err != nil {
+			t.Errorf("parse %s: %v", tc.doc, err)
+			continue
+		}
+		got := ""
+		if md.TLS != nil {
+			got = md.TLS.PinnedSPKISHA256
+		}
+		if got != tc.wantPin {
+			t.Errorf("parse %s: pin %q, want %q", tc.doc, got, tc.wantPin)
+		}
+	}
+	for _, doc := range []string{`{"tls":"x"}`, `{"tls":[1]}`, `{"tls":{"pinned_spki_sha256":5}}`} {
+		if _, err := parseSubscriptionMetadata([]byte(doc)); !errors.Is(err, ErrInvalidSubscriptionMetadata) {
+			t.Errorf("parse %s = %v, want ErrInvalidSubscriptionMetadata", doc, err)
+		}
 	}
 }
