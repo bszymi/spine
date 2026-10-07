@@ -94,7 +94,9 @@ The following limitations have been resolved:
   (`invalid_params`), and so is any `.git` component (including git's case, NTFS and HFS
   variants). New files are created `O_CREAT|O_EXCL` and updates replace by rename. A failed
   create removes what it made. Reads of worktree files are capped at 4 MiB
-  (`payload_too_large`). (INIT-023 TASK-004, audit F5.)
+  (`payload_too_large`), so an artifact Update / accept / reject of an existing file over 4 MiB
+  (only reachable by a push or an import) is refused where it used to succeed. (INIT-023
+  TASK-004, audit F5.)
 - Residual: committed symlinks are still checked out as links (Spine does not set
   `core.symlinks=false`), and reads through `git show` never follow them.
 - `GIT_LITERAL_PATHSPECS=1` / `--literal-pathspecs` prevents Git pathspec injection

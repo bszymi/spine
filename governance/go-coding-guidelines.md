@@ -157,7 +157,8 @@ All file I/O inside a git working tree (main repo or worktree) goes through
 rel, err := worktreefs.Clean(path) // lexical: no "..", no absolute, no .git, length caps
 tree, err := worktreefs.Open(scope.RepoDir)
 defer tree.Close()
-undo, err := tree.Create(rel, data, 0o644) // O_EXCL; undo.Rollback() if the commit fails
+undo, err := tree.Create(rel, data, 0o644) // O_EXCL; undo.Rollback() if the commit fails,
+defer undo.Release()                       // else Release (it holds up to 3 descriptors)
 err = tree.Replace(rel, data)              // temp file + rename; keeps the mode
 data, err := tree.ReadFile(rel)            // capped at worktreefs.DefaultMaxReadBytes
 ```
