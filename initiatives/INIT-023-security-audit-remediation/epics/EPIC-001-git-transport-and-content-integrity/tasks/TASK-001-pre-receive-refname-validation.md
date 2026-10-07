@@ -338,6 +338,16 @@ All existing tests pass un *[designer's text truncated here]*
 - **Nothing git would apply is lost.** No push that git would have applied as written is newly
   refused (AC 5, AC 7).
 
+  > **Implementation note (review round 1, 2026-10-07): one deliberate exception.** The line-1
+  > capability-list guard added during implementation (`isCapabilityList`; see Implementation
+  > Notes → Deviations) refuses a first-command capability list that is not printable ASCII. git
+  > itself accepts a TAB separator or a byte `>= 0x80` there and applies the push, so the
+  > sentence above holds for every push **except** one whose first-command capability list is not
+  > printable ASCII. No git, JGit, libgit2 or go-git client sends such a list (git 2.54 rewrites a
+  > non-printable `GIT_USER_AGENT` to `.`, checked with `GIT_TRACE_PACKET`).
+  > `TestPreReceive_CapabilityListStricterThanGit` pins the exception against plain
+  > `git receive-pack --stateless-rpc`.
+
 **Shapes that were already refused stay refused**, only with new message text:
 - `shallow` lines;
 - `push-cert`;
@@ -866,8 +876,10 @@ The worktree itself was never reverted.
 - **Test hermeticity.** Every git command the new tests run uses `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`. Otherwise a developer's
   `init.defaultObjectFormat=sha256` or `commit.gpgsign` would change what the tests build.
-- **The corpus writes NBSP as ` `,** not as a literal invisible character. The bytes are
-  identical to SMP's `qualifiedRefCases`.
+- **The corpus writes NBSP as the Go escape `\u00a0`,** not as a literal invisible character. The
+  bytes are identical to SMP's `qualifiedRefCases`. *(Review round 1: this note was first written
+  while both rows still held a literal U+00A0, and the note itself had a literal NBSP where the
+  escape belonged. Both rows are now escaped, and pinned; see Review round 1, finding 4.)*
 
 ### Parity with SMP INIT-027 EPIC-004 TASK-001
 
@@ -923,15 +935,203 @@ were dropped after the runs.
 
 ### Not run
 
-- **The new CI job itself,** which cannot run locally. Its exact command,
-  `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/`, ran
-  locally against PostgreSQL 17.10 rather than CI's `postgres:18-bookworm`. Its skip guard was run
-  against an unreachable database.
-- **SHA-256 PASS on the ubuntu runner.** Verified locally on git 2.54. On CI, `CI=true` turns a
-  skip into a failure.
-- **A green full scenario suite in CI.** Pre-existing failures on `main` (above). This is a
-  follow-up for whoever owns the scenario harness. The command is
-  `make test-scenario` with `SPINE_TEST_DATABASE_URL` set.
+*(Updated in review round 1; see below for what that round added.)*
+
+- **The new CI job on GitHub.** It needs a push, which the orchestrator owns. Its step script ran
+  verbatim, the way Actions runs `shell: bash`, against PostgreSQL **18.4** on Debian bookworm:
+  19/19 PASS, 0 SKIP at any depth (review round 1, AC 9). It also ran against PostgreSQL 17.10.
+- **SHA-256 PASS on the ubuntu runner.** It also needs a push. It passed (PASS, not SKIP) with
+  `CI=true` on macOS git 2.54 and on Linux git 2.39.5 (review round 1, AC 4). On CI, `CI=true` turns
+  a skip into a failure.
+- **A green full scenario suite in CI.** There are 30 pre-existing failures on `main`, the same set
+  on PostgreSQL 17 and 18 (review round 1 lists them by name). They have **no owning task** yet;
+  this is an open question for the orchestrator. The command is `make test-scenario` with
+  `SPINE_TEST_DATABASE_URL` set.
+- **A green `make lint`.** The repository has 324 pre-existing golangci-lint issues on `main`, and
+  `make lint-security` reports 1 (review round 1, AC 9). This branch adds none.
+
+### Review round 1 (2026-10-07)
+
+Three reviewers examined the branch: correctness, adversarial security, and completeness/tests.
+Each finding was first checked against the code (and, where it made a claim about git or Docker,
+against real git and Docker) before anything was changed.
+
+#### Findings
+
+1. **P3: the CHANGELOG and Design §5 claim that no push git would apply is refused. FIXED
+   (`3b5069d`).**
+   - **The finding is real.** `isCapabilityList` refuses a line-1 capability list with a TAB or a
+     byte `>= 0x80`, and git's feature parser accepts both. git reads the list as a C string,
+     splits it on its own `isspace` (which includes TAB) and ignores high bytes. So the absolute
+     wording was wrong. The guard itself stays.
+   - **Fix.**
+     - The CHANGELOG entry names the one exception and why it costs no client.
+     - `isCapabilityList`'s doc comment says it is the one place the gate is stricter than git.
+     - Design §5 gets an implementation note.
+   - **Test that pins it:** `TestPreReceive_CapabilityListStricterThanGit`. It sends the same
+     bodies to plain `git receive-pack --stateless-rpc` and through `Handler.ServeHTTP`:
+     - rows: a TAB separator, UTF-8 in `agent=`, both, and a printable-ASCII control;
+     - **git** applies all four;
+     - **the gate** refuses the first three as `command 1: malformed capability list` and applies
+       the control.
+
+     It kills M14 (guard dropped): all three refusal rows fail, each with the ref created through
+     the gate. It also fails if git ever starts refusing these lists, which would make the
+     documented exception obsolete.
+   - **Client claim checked.** On git 2.54, `GIT_USER_AGENT=$'evil\tagent\xc3\xa9'` goes on the
+     wire as `agent=evil.agent..` (`GIT_TRACE_PACKET`).
+2. **P3: `docker-compose.override.yaml.example` bind-mounts `./:/repo` with no warning. FIXED
+   (`f0e1ef2`).**
+   - **The finding is real.** Reproduced on this Mac's Docker Desktop in `golang:1.26-bookworm`
+     (Linux git 2.39.5):
+     - setup: a bare clone on a bind mount of a macOS directory, with `main` packed and
+       `core.ignorecase=true`;
+     - a plain push to `refs/heads/MAIN` moved `refs/heads/main`;
+     - the only loose head written was `MAIN`.
+
+     So Linux git inside the container inherits the host's case-insensitivity.
+   - **Fix.**
+     - The example gets a security comment: do not enable `SPINE_GIT_RECEIVE_PACK_ENABLED` with
+       this bind mount on macOS or Windows. It points to KNOWN-LIMITATIONS.
+     - The KNOWN-LIMITATIONS entry names the example explicitly.
+     - The EPIC-001 follow-up's probe must now cover this configuration.
+   - **No test.** This is documentation only. The enforcing test belongs to that follow-up's
+     fail-closed probe (OQ1).
+3. **P3: the same gap in `architecture/docker-runtime.md` §9.2. FIXED (`f0e1ef2`).**
+   - This duplicates finding 2 for the architecture document, which recommends the same bind
+     mount.
+   - §9.2 gets the same security caution and the same KNOWN-LIMITATIONS pointer.
+4. **P3: literal NBSP in the corpus rows; the artifact note was wrong. FIXED (`dc1281f`,
+   `2108b21`).**
+   - **The finding is real.** `xxd` showed `c2 a0` in both `qualified_test.go` and
+     `policy_controlbyte_test.go`. The Deviations note itself held a literal NBSP where the
+     `\u00a0` escape belonged.
+   - **Fix.**
+     - Both rows are now `\u00a0`. The bytes are identical, so SMP corpus parity is unchanged.
+     - The note is corrected.
+     - No literal U+00A0 remains in any file this branch touches.
+   - **The same slip, made again in this round.** The pin lists added in `dc1281f` were themselves
+     written with a literal NBSP (and a literal `é`). The final invisible-character scan before the
+     notes commit caught it. `2108b21` escapes them.
+   - **Tests that would have caught it:**
+     - **`TestNoLiteralInvisibleCharactersInTestSources`**, in both packages. It reads every
+       `*_test.go` in the package and fails, naming the file and line, on any literal non-ASCII
+       space or format character: NBSP, zero-width space, BOM, U+2028. With a literal NBSP
+       written back into either file on disk, it fails in both packages. (An `-overlay` mutant
+       cannot exercise it, because the test reads the files at run time.)
+     - **`TestQualifiedCases_KeepNonASCIIAcceptRows`**, and a presence check at the end of
+       `TestEvaluate_WellFormedBranchesUnchanged`. Under an overlay that folds the NBSP into an
+       ASCII space, both fail with "lost its non-ASCII row". Before this round, the policy table
+       kept passing silently in that case.
+
+#### Acceptance-criteria gaps
+
+- **AC 9: the CI job never ran on GitHub, and only on PostgreSQL 17. Partly closed.**
+  - **How it ran.** The job's step script was extracted from `ci.yml` and run verbatim with
+    `bash --noprofile --norc -eo pipefail`, which is what `shell: bash` means on Actions:
+    - environment: `env -i`, an empty `HOME`, `GIT_CONFIG_NOSYSTEM=1` and `CI=true`;
+    - database: a throwaway `pgvector/pgvector:pg18` container on tmpfs. That is PostgreSQL
+      18.4, Debian `pgdg12` (bookworm), the same server build as CI's `postgres:18-bookworm`
+      plus the pgvector extension.
+  - **Result.** Step exit 0. 19/19 `TestGitHTTP_*` PASS, 55 step-level PASS, no `SKIP` or `FAIL`
+    line at any depth.
+  - **Guard checks.**
+    - Pointed at an unreachable database, the step exits 1.
+    - The skip guard matched only top-level `--- SKIP:` lines, so a step-level skip would have
+      passed. It now matches any indentation (`48e0d0e`). A synthetic indented skip line trips
+      the new guard and not the old one.
+  - **Still open.** The job has not been observed on GitHub; the orchestrator owns the push.
+- **AC 9: scoped to `TestGitHTTP_*`. Kept, with fresh evidence.**
+  - **PostgreSQL 18 run.** The full `go test -tags scenario -p 1 ./service/scenariotest/...` was
+    re-run on PostgreSQL 18:
+    - this branch: 190 PASS / 30 FAIL / 6 SKIP;
+    - a `main` export: 189 / 31 / 6.
+  - **Comparison.** The branch's failures are a strict subset of `main`'s. The only difference is
+    the mixed-push scenario this task fixed. That matches the PostgreSQL 17 result.
+  - **The 30 pre-existing failures:**
+    - `TestArtifactCreationEntry_{FirstArtifactInScope,TaskGoldenPath}`;
+    - `TestArtifactMutation_{BranchConflictWithMain,LinkRemovalMergesToMain,ReadThroughOnRunBranch,UpdateMergesToMain,UpdateOnRunBranch}`;
+    - `TestBlocking_{CancelledBlockerStaysBlocking,StartRunRejectedForBlockedTask,StartRunSucceedsAfterBlockerCompletes}`;
+    - `TestClaiming_ClaimAndRelease`;
+    - `TestComposeStep`, `TestCreateArtifactStep`, `TestExpectErrorStep`, `TestSyncAndAssertSteps`;
+    - `TestDivergence_{MinimumCompletedBranches,RequireAllWithFailedBranch,SelectOneEndToEnd,SequentialDivergence}`;
+    - `TestEventReplay_GoldenPathSequence`;
+    - `TestGateway_{AuthRejection,RoleEnforcement,RunStart_StepQuery}`;
+    - `TestNewTestEnvironment_EndToEnd`, `TestNewTestRuntime_CreateArtifact`;
+    - `TestRunLifecycle_{DoubleStart,IdempotentIngestResult,SubmitToCancelledRun}`;
+    - `TestSchemaMatchesProduction`;
+    - `TestSkill_WorkflowWithSkillsGoldenPath`.
+  - **The 6 skips** are the `TestWorkspace_*` scenarios that need
+    `SPINE_REGISTRY_TEST_DATABASE_URL`.
+  - **Ownership.** None of the failures is a security-remediation item, so no INIT-023 task is
+    created here. Who owns them is an **open question for the orchestrator or owner**.
+- **AC 9: `make lint` is not green. NOT FIXABLE within this task's scope.**
+  - **Repo-wide comparison.** `golangci-lint run ./...` reports **324** issues on `main` and 324
+    on this branch. Compared by file, linter and message (line numbers ignored), the two sets are
+    identical: 160 gofmt, 122 gocritic, 30 staticcheck, 11 errcheck, 1 gosec.
+  - **`make lint-security`** reports 1 issue on both, at `core/workflow/service.go:189` (G703),
+    which is pre-existing.
+  - **The 22 in the touched packages** are all on `main`:
+    - 20 gocritic, including the untouched `sidebandChunks` at `prereceive.go:327`;
+    - 2 gofmt in `core/branchprotect/projection`, a non-test file AC 11 keeps out of this diff.
+  - **No new issues.** `--new-from-rev=main` reports 0 issues on the touched packages and 0 on the
+    scenario package.
+  - **Reading of the AC.** A green `make lint` needs a repository-wide cleanup. That is out of
+    scope for a P1 fix whose diff scope AC 11 limits. AC 9's lint clause is therefore read as
+    "no new issues", and that is recorded as a deviation.
+- **AC 4: SHA-256 PASS not yet observed on the ubuntu runner. Partly closed.**
+  - **Touched packages on Linux.** In `golang:1.26-bookworm` (Linux, git 2.39.5, `CI=true`), every
+    touched-package test passes:
+    - `TestPreReceive_SHA256NullOIDDeleteRefusedByNoDelete`: **PASS, not SKIP**;
+    - the byte sweep, which agrees with git 2.39 as well;
+    - the new capability-list test.
+  - **Full suite on Linux.** `go test -p 4 ./...` in the same container: 38 ok, exit 0.
+  - **Still open.** The ubuntu runner itself is observable only after a push.
+- **AC 13: no PR or merge commit exists yet. Orchestrator-owned.**
+  - The draft linked SMP `tasks/TASK-001-nul-ref-push-gate.md`, which does not exist on SMP
+    `main` (`7d4e7cc9` has `EPIC-004-security-remediation/epic.md` and no `tasks/` directory).
+  - The draft below now links the epic's TASK-001 row, and says the task file lands with SMP
+    TASK-001.
+- **Checked by the reviewers and holding:** the at-HEAD failures, the mutants, the PoC flips and
+  the suites. Nothing to do.
+
+#### Gates (review round 1, on the round's final code, `2108b21`)
+
+Some rows ran on `48e0d0e`, before the last code commit:
+- the PostgreSQL scenario runs;
+- the Linux full-suite run;
+- SMP's full `go test ./...`;
+- the PoC check.
+
+`2108b21` changes only two `_test.go` files, in packages that none of those runs compile or
+exercise differently. Every other row, and the changed tests on Linux, ran on `2108b21`.
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | ok |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | exit 0, 38 ok, 0 FAIL |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | all exit 0 |
+| `go test -race -p 4 -count=1 ./adapters/git/refname/... ./service/internal/githttp/... ./core/branchprotect/...` | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s001_r1_scenario` (PostgreSQL 17.10) `go test -race -tags scenario -p 4 -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` | exit 0; 19 PASS, 0 SKIP, 0 FAIL, 0 races |
+| The CI step script, verbatim, against PostgreSQL 18.4 (see AC 9 above) | exit 0; 19/19 PASS |
+| The full scenario suite on PostgreSQL 18, branch vs a `main` export | 30 vs 31 FAIL, a strict subset (see above) |
+| Integration-tagged tests in the touched packages | none exist (0 files) |
+| `golangci-lint run` on the touched packages, and `--build-tags scenario` on the scenario package | 22 issues, identical to `main`; 60 vs `main`'s 61. `--new-from-rev=main`: 0 and 0 |
+| `golangci-lint run --enable-only=gosec` on the touched packages | 0 issues |
+| `gofmt -l` on every touched Go file | empty |
+| Linux (`golang:1.26-bookworm`, git 2.39.5, `CI=true`): the touched-package tests, then `go test -p 4 ./...` | all PASS (SHA-256 PASS); 38 ok, exit 0. The changed tests (the scan, the pins, SHA-256 and the capability-list test) were re-run there on `2108b21`: PASS |
+| **SMP gate** (`../spine` = this worktree, `-mod=readonly`, SMP `7d4e7cc9`, no `vendor/`): `go build ./...`, `go vet ./...` | clean |
+| SMP `go test -p 4 ./...` | 148 ok, 0 FAIL. Run on `48e0d0e`; `2108b21` touches only Spine `_test.go` files, which SMP does not compile. Build, vet and the two rows below were re-run on `2108b21` |
+| SMP `go test ./internal/customer/githttp/... ./internal/customer/spineembedded/...`; `-tags integration ./internal/customer/githttp/...` | ok; ok, no skips |
+| SMP guard-alone PoC check (Per-AC 10 recipe, SMP parser unfixed) | `TestSkeptic_SMP_NulRefBypass` and `TestVerify_NulRef*` **fail to reproduce**: `main not moved`, `NOT REPRODUCED`, `release still present`. The control with Spine `main`'s `policy.go` **reproduces** (`SMP CONFIRMED`). SMP checkout left clean |
+| `codex review --base main`, plain, twice: on `48e0d0e`, then on the final `2108b21` | Both runs: "No actionable regressions were found." No P1, P2 or P3, so nothing to fix or reject. Codex ran the refname, branch-protection and git-HTTP tests itself, all passing. It did not run the PostgreSQL scenario suite, which is covered above |
+
+The scratch databases and containers were removed afterwards:
+- `s001_r1_scenario` was dropped;
+- `s001-r1-pg18`, which was on tmpfs and created no volume, was removed;
+- `s001-r1-linux-*` and `s001-r1-bindmount` ran with `--rm`.
 
 ### PR description (draft, AC 13)
 
@@ -945,8 +1145,11 @@ were dropped after the runs.
 >   contract change; see CHANGELOG).
 > - A new CI job runs the `TestGitHTTP_*` scenarios against Postgres.
 >
-> SMP counterpart: `smp:/initiatives/INIT-027-pilot-readiness/epics/EPIC-004-security-remediation/`
-> TASK-001 (`TASK-001-nul-ref-push-gate.md`). SMP's own parser fix does **not** wait for this PR.
+> SMP counterpart: SMP INIT-027 EPIC-004 TASK-001 (`nul-ref-push-gate`), listed in
+> `smp:/initiatives/INIT-027-pilot-readiness/epics/EPIC-004-security-remediation/epic.md` (the
+> TASK-001 row). Its task file, `tasks/TASK-001-nul-ref-push-gate.md`, lands on SMP `main` with
+> SMP TASK-001 itself; until then, link the epic row. SMP's own parser fix does **not** wait for
+> this PR.
 > It ships independently, with no `.spine-revision` bump. This PR's merge commit is the one SMP's
 > later `.spine-revision` bump names (SMP TASK-012 adds the `Evaluate` pin test).
 
