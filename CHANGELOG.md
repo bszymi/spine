@@ -23,8 +23,11 @@ release is cut — this file is a staging area.
   but the first is refused, and the first line's capability list must be
   printable ASCII so the gate and git read the same feature set. Such a push is
   refused whole as `branch-protection: malformed push: command N: …`. No push
-  that git would apply as written is refused; well-formed pushes, push options
-  and deletes are unchanged.
+  that git would apply as written is refused, with one deliberate exception: a
+  first-command capability list that is not printable ASCII (a TAB separator,
+  or a byte >= 0x80, both of which git itself accepts). No git, JGit, libgit2
+  or go-git client sends such a list — git rewrites a non-printable `agent=` to
+  `.` — so well-formed pushes, push options and deletes are unchanged.
 - **SHA-256 deletes are classified as deletes.** The gate recognised only the
   SHA-1 null object id (40 zeros), so in a SHA-256 repository a delete (64
   zeros) was evaluated as a direct write and passed a `no-delete`-only rule.

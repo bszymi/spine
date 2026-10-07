@@ -202,6 +202,13 @@ func isHexOID(s string) bool {
 // tokens). A second NUL, a control byte or a non-ASCII space would make
 // this gate's token set differ from the feature list git receive-pack
 // reads — a C string split on git's isspace.
+//
+// This is the one place the gate is deliberately stricter than git:
+// receive-pack itself accepts a TAB separator or a byte >= 0x80 in the
+// list and applies the push. Refusing those costs no real client and is
+// what keeps the token-set proof simple; the exception is documented
+// (CHANGELOG) and pinned against real git by
+// TestPreReceive_CapabilityListStricterThanGit.
 func isCapabilityList(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] > 0x7e {

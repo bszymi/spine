@@ -416,3 +416,67 @@ func TestPreReceive_Line1CapabilityListRefused(t *testing.T) {
 		t.Errorf("override events emitted = %d, want 0", n)
 	}
 }
+
+// TestPreReceive_CapabilityListStricterThanGit pins the one deliberate
+// exception to "no push git would apply as written is refused" (the
+// CHANGELOG entry and Design §5 state it): a first-command capability
+// list that is not printable ASCII. git reads the list as a C string,
+// splits it on its own isspace (which includes TAB) and accepts any
+// byte >= 0x80, so it applies the pushes below; the gate refuses them
+// as a malformed capability list (isCapabilityList), because that is
+// what lets the two token sets be proven identical. No git, JGit,
+// libgit2 or go-git client sends such a list (git rewrites a
+// non-printable agent= to '.'), so real pushes are unaffected
+// (TestPreReceive_RealGitClientPushesUnchanged).
+//
+// Each body goes both to plain `git receive-pack --stateless-rpc` and
+// through Handler.ServeHTTP. The ASCII control row, with the same
+// tokens, is applied by both, so the capability-list bytes are the only
+// difference. If git ever starts refusing these lists, this test fails
+// and the documented exception can be dropped; if the gate starts
+// accepting them, it fails too, and isCapabilityList's proof is gone.
+func TestPreReceive_CapabilityListStricterThanGit(t *testing.T) {
+	repo, _, evil, pack := nulRepo(t, "")
+	// A second copy of the same repository for git alone; the pack is
+	// self-contained (pack-objects --revs evil), so it applies to either.
+	gitRepo := t.TempDir()
+	clone := exec.Command("git", "clone", "-q", "--bare", repo, gitRepo)
+	clone.Env = nulGitEnv(t)
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, out)
+	}
+	h := nulHandler(t, repo)
+	em := &nulEmitter{}
+
+	for _, tc := range []struct {
+		name, ref, caps string
+		gateRefuses     bool
+	}{
+		{"TAB separator", "refs/heads/caps-tab", "report-status\tagent=x", true},
+		{"UTF-8 in agent=", "refs/heads/caps-utf8", "report-status agent=x\xc3\xa9", true},
+		{"TAB and UTF-8", "refs/heads/caps-both", "report-status\tagent=x\xc3\xa9", true},
+		{"control: printable ASCII", "refs/heads/caps-ascii", "report-status agent=x", false},
+	} {
+		body := nulBody([]string{zeroSHA + " " + evil + " " + tc.ref + "\x00" + tc.caps + "\n"}, nil, pack)
+
+		gitOut := nulGit(t, gitRepo, body, "receive-pack", "--stateless-rpc", ".")
+		if !strings.Contains(gitOut, "ok "+tc.ref) || !nulRefExists(t, gitRepo, tc.ref) {
+			t.Errorf("%s: plain git receive-pack did not apply the push (the exception is no longer needed?): %q", tc.name, gitOut)
+		}
+
+		resp := nulPush(t, h, repo, domain.RoleContributor, em, body)
+		if tc.gateRefuses {
+			assertMalformedRefusal(t, tc.name, resp, "command 1: malformed capability list")
+			if nulRefExists(t, repo, tc.ref) {
+				t.Errorf("%s: %s was created through the gate", tc.name, tc.ref)
+			}
+			continue
+		}
+		if strings.Contains(resp, "malformed push") || !nulRefExists(t, repo, tc.ref) {
+			t.Errorf("%s: ASCII control push was not applied through the gate: %q", tc.name, resp)
+		}
+	}
+	if n := em.count(); n != 0 {
+		t.Errorf("events emitted = %d, want 0", n)
+	}
+}
