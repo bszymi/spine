@@ -21,6 +21,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/gitpool"
+	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
@@ -407,6 +410,100 @@ func TestGitPush_WorkspaceWithoutStoreDoesNotFallBack(t *testing.T) {
 	if out, err := p.push("op", "origin", "HEAD:refs/heads/"+admRunBranch); err != nil {
 		t.Errorf("operator push refused: %v\n%s", err, out)
 	}
+}
+
+// admCodeRepos is a gitpool.Resolver serving one code repository.
+type admCodeRepos struct{ id, path string }
+
+func (r admCodeRepos) Lookup(_ context.Context, id string) (*repository.Repository, error) {
+	if id == r.id {
+		return &repository.Repository{ID: id, LocalPath: r.path}, nil
+	}
+	return nil, domain.NewErrorWithCause(domain.ErrNotFound,
+		fmt.Sprintf("repository %q not found in catalog", id), repository.ErrRepositoryNotFound)
+}
+
+func (r admCodeRepos) ListActive(context.Context) ([]repository.Repository, error) { return nil, nil }
+
+// TestGitPush_RepositoryScopedBinding pins §3 item 2 (DC-7): the
+// gateway hands the URL's repository segment to the admission, so a run
+// branch is pushable only in the repository the bound execution
+// targets. carol holds the run's current step `build` on code
+// repository "payments". Review round 1: no gateway test pushed to a
+// code-repository URL, so dropping githttp.WithRepositoryID in
+// handleGit (every push then evaluated as a primary-repository push)
+// went unnoticed. Mutation check: that no-op fails this test.
+func TestGitPush_RepositoryScopedBinding(t *testing.T) {
+	primary, primaryReviewed := admServerRepo(t, admRunBranch)
+	payments, paymentsReviewed := admServerRepo(t, admRunBranch)
+	runs := &admRuns{
+		runs: map[string]*domain.Run{admRunID: {
+			RunID: admRunID, Status: domain.RunStatusActive, CurrentStepID: "build", BranchName: admRunBranch,
+			RepositoryBranches: map[string]string{"payments": admRunBranch},
+		}},
+		execs: map[string][]domain.StepExecution{admRunID: {
+			{ExecutionID: "b1", RunID: admRunID, StepID: "build", ActorID: "carol", Status: domain.StepStatusInProgress, RepositoryID: "payments"},
+		}},
+	}
+	fs := newFakeStore()
+	authSvc, tokens := admTokens(t, fs, map[string]domain.ActorRole{"carol": domain.RoleContributor, "op": domain.RoleOperator})
+	policy := branchprotect.New(branchprotect.StaticRules(nil))
+	gh, err := githttp.NewHandler(githttp.Config{ReceivePackEnabled: true, Policy: policy})
+	if err != nil {
+		t.Skipf("git-http-backend unavailable: %v", err)
+	}
+	pool, err := gitpool.New(git.NewCLIClient(primary), admCodeRepos{id: "payments", path: payments}, gitpool.NewCLIClientFactory())
+	if err != nil {
+		t.Fatalf("gitpool.New: %v", err)
+	}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store: fs, Auth: authSvc, GitHTTP: gh, GitPool: pool,
+		WorkspaceResolver: admResolver{cfg: workspace.Config{ID: "ws1", RepoPath: primary, Status: workspace.StatusActive}},
+		GitPushResolver: func(context.Context, string) (gateway.GitPushResources, func(), error) {
+			return gateway.GitPushResources{Policy: policy, Runs: runs, StepDefs: admStepDefs{}}, func() {}, nil
+		},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	base := ts.URL + "/git/ws1"
+	dst := "HEAD:refs/heads/" + admRunBranch
+
+	p := newAdmPusher(t, base+"/payments", tokens, "op")
+	refused := func(url string) {
+		t.Helper()
+		if out, err := p.push("carol", url, dst); err == nil || !strings.Contains(out, "ref-admission: "+admRunBranch+" is a run branch") {
+			t.Errorf("carol push to %s: err=%v, want the run-branch refusal\n%s", url, err, out)
+		}
+	}
+
+	// The step targets payments: admitted there, refused in the
+	// primary under both of its URL spellings.
+	if out, err := p.push("carol", base+"/payments", dst); err != nil {
+		t.Fatalf("carol push to payments refused: %v\n%s", err, out)
+	}
+	if got := admRefSHA(t, payments, admRunBranch); got != p.head() {
+		t.Fatalf("payments run branch = %s, want carol's %s (reviewed %s)", got, p.head(), paymentsReviewed)
+	}
+	refused(base)
+	refused(base + "/spine")
+	if got := admRefSHA(t, primary, admRunBranch); got != primaryReviewed {
+		t.Fatalf("primary run branch moved to %s, want %s", got, primaryReviewed)
+	}
+
+	// Retarget the step at the primary: "/git/ws1/spine" is the primary
+	// (DC-7), and payments is now refused.
+	runs.mu.Lock()
+	runs.execs[admRunID][0].RepositoryID = domain.PrimaryRepositoryID
+	runs.mu.Unlock()
+	admMust(t, p.dir, "commit", "-q", "--allow-empty", "-m", "primary")
+	if out, err := p.push("carol", base+"/spine", dst); err != nil {
+		t.Fatalf("carol push to the primary via /spine refused: %v\n%s", err, out)
+	}
+	if got := admRefSHA(t, primary, admRunBranch); got != p.head() {
+		t.Fatalf("primary run branch = %s, want carol's %s", got, p.head())
+	}
+	admMust(t, p.dir, "commit", "-q", "--allow-empty", "-m", "late")
+	refused(base + "/payments")
 }
 
 // TestGitPush_DivergenceRefAdmission is AC 11: the deterministic
