@@ -1520,7 +1520,7 @@ numbered R1-1 … R1-9 in the order they were reported.
 | `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
 | `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
 | `go test -p 4 -count=1 ./...` | 41 packages: 39 `ok`, 2 no test files, no failures |
-| `go test -race -p 4 -count=1 ./core/refadmit ./service/internal/githttp ./service/internal/gateway ./service/cmd/spine ./service/internal/cli` | all `ok`, no races |
+| `go test -race -p 4 -count=1 ./core/refadmit ./service/internal/githttp ./service/internal/gateway ./service/cmd/spine ./service/internal/cli` | all `ok`, no races. *Review round 2: does not reproduce.* `35dcb38`'s `os.Stderr` swap races with `net/http/cgi` (`gateway` failed 3 of 4 `-race` runs for the reviewer and on re-run here); this row was a lucky pass. Fixed in round 2 (`c780abd`); see the round 2 gates |
 | `SPINE_TEST_DATABASE_URL=…/s016_r1scen go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (fresh DB, dropped after) | 20 PASS, 0 SKIP |
 | `SPINE_TEST_DATABASE_URL=…/s016_r1int go test -tags integration -p 4 -count=1` on the touched packages and `core/divergence` (fresh DB, dropped after) | all `ok` (none of this round's packages has integration-only tests; `adapters/store` is untouched this round) |
 | `golangci-lint run --build-tags scenario --new-from-rev main` on `core/refadmit`, `githttp`, `gateway`, `cmd/spine`, `cli` | `0 issues` each |
@@ -1543,3 +1543,66 @@ in `core/` or `adapters/` calls and SMP does not call, so SMP behaviour is ident
 (process group + deadline) or add a post-unpack re-check, with an owner decision on large
 pushes/clones and `receive.maxInputSize` (R1-4); the R1-1 trigger rule is pending the owner with
 the OQ6 ruling (alternative: operator-only).
+
+### Review round 2 (2026-10-07)
+
+One second-round reviewer examined `da1d8ff`. It reported four findings (R2-1 … R2-4) and five
+gaps. Each was checked against the code and reproduced before acting.
+
+**Per-finding disposition**
+
+| # | Sev. | Finding | Disposition |
+|---|---|---|---|
+| R2-1 | P2 | `TestGitPush_RepositoryScopedBinding` (R1-7) is flaky. Its two `admServerRepo` fixtures got different `init` commits whenever the calls straddled a second. The client then refused the primary pushes as non-fast-forward (`fetch first`) before they reached the gate | **Fixed** (`391c540`). Reproduced: it failed under `-race` here. `admServerRepo` now pins `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` on its one commit, so every call makes the same commit object. The test asserts that the fixtures share it, which turns any future fixture drift into a named failure instead of a misleading refusal. The reviewer's other options were not taken. Cloning payments from primary would leave an `origin` remote and the run branch as a remote-tracking ref only. A force refspec in `refused()` would hide a real non-fast-forward. Checks: with a 1.1 s sleep between the calls, the fixed test passed 3 of 3 runs; without the pin, the same sleep fails the new assertion 2 of 2; `-count=30` passed; and the `WithRepositoryID` mutation is still killed (`carol push to payments refused`). |
+| R2-2 | P3 | R1-3's capture swapped the global `os.Stderr`. The test's in-process gateway reads it concurrently: `cgi.Handler` with a nil `Stderr` reads `os.Stderr` per request (`net/http/cgi/host.go:88`). The result is a `-race` failure, and the round-1 race row did not hold | **Fixed** (`c780abd`, `8cf2e72`). Reproduced: `go test -race -count=2 -run TestGitPush_` reported the race at the deferred restore. `cli.InitOpts` gains `Stderr io.Writer` (nil means `os.Stderr`). `commitOnBranch` writes the push-failure note there, and the test passes a buffer. `service/internal/cli` is internal to the Spine module, so SMP cannot see the change, and every existing caller (`spine init-repo`, workspace provisioning) keeps `os.Stderr`. errcheck flagged `fmt.Fprintln` to an `io.Writer`, so it now uses `output.go`'s `_, _ =` form. **Not taken:** setting `cgi.Handler.Stderr` in `githttp`. Production never reassigns `os.Stderr`, and pinning it at `NewHandler` time changes where `git-http-backend`'s stderr goes for no production benefit. The race came from the test's own global write. The round-1 race row is annotated in place. |
+| R2-3 | P3 | The push-guide row for the `spine/init` refusal led with "run `spine init-repo` with an operator token". In the refused clone that re-run is a silent no-op: nothing to commit, so `commitOnBranch` returns before the push | **Fixed** (`1af8e3d`). Verified against `initrepo.go`: the `git commit` failure returns `nil` before the push and before any output. The row now gives `git push -u origin spine/init` with an operator token and says the re-run does not retry the push. The CHANGELOG entry says the same. The note init-repo prints already named the push. **Not taken:** making `commitOnBranch` push when `spine/init` has no upstream. That changes init-repo's re-run behaviour, for example a generic push note on every re-run in a remote-less clone. Neither the security fix nor the remedy needs it. |
+| R2-4 | P3 | The R1-4 code bound on the admission window was said to be "recorded as a new EPIC-001 follow-up", but `epic.md` was untouched. The user-facing docs point at a follow-up the epic does not list | **Fixed** (`9d48138`). `epic.md` → Out of scope gains "Follow-up (recorded by TASK-016 review round 1)". It covers the gap and why it reopens F2's "move the run branch during review" vector until TASK-005. It lists the three options, each with the owner decision it needs: a process-group deadline, which also cuts large pushes and clones; `receive.maxInputSize`, which applies repo-wide; and a post-unpack re-check (Decision 5). It also lists the R1-1 trigger rule as pending the owner with owner question 6. The round-1 "Follow-ups opened by this round" paragraph is now carried there. |
+
+**Gaps**
+
+- **Disposition check (R1-1, -2, -5, -6, -8, -9 confirmed fixed; R1-3, R1-4, R1-7 caveats).** The
+  caveats are R2-1 … R2-4 above. No further action.
+- **AC 17 race-gate row.** It was wrong (R2-2). The row is annotated in place, and the round 2 race
+  gate below covers every TASK-016 package, with `gateway` also run at `-count=4`.
+- **AC 12 test race and the DC-7 test's timing.** Fixed by R2-2 and R2-1.
+- **AC 16 / DC-8 now contradicts its original "bounded by `ReadTimeout`" clause.** It is superseded
+  in place by the round-1 annotation, because no time bound exists. **Owner ratification
+  requested.** This is an open question, not a code change; the follow-up in `epic.md` is where a
+  bound would come from.
+- **Every numbered AC maps to a test or a check.** No action.
+
+**Mutation checks (review round 2)**, each applied alone through `go test -overlay`:
+
+| Mutation | Result |
+|---|---|
+| fixture dates unpinned, with a 1.1 s sleep between the two `admServerRepo` calls (R2-1) | killed: `fixtures do not share history`, 2 of 2 |
+| gateway drops `githttp.WithRepositoryID` (R1-7, re-checked) | killed: `TestGitPush_RepositoryScopedBinding` (`carol push to payments refused`) |
+| `commitOnBranch` writes the note to `os.Stderr` instead of `InitOpts.Stderr` (R2-2) | killed: `TestGitPush_InitAndReservedNamespace` |
+| init-repo generic note restored (R1-3, re-checked through the new capture) | killed: `TestGitPush_InitAndReservedNamespace` |
+
+**Gates (review round 2; code at `8cf2e72`)**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | 41 packages: 39 `ok`, 2 no test files, no failures |
+| `go test -race -p 4 -count=1 ./core/refadmit ./core/divergence ./service/internal/githttp ./service/internal/gateway ./service/cmd/spine ./service/internal/cli ./adapters/store` | all `ok`, no races |
+| `go test -race -p 4 -count=4 ./service/internal/gateway`; `go test -race -count=3 -run TestGitPush_ ./service/internal/gateway` | `ok`, no races |
+| `go test -count=30 -run 'TestGitPush_RepositoryScopedBinding$' ./service/internal/gateway` | `ok` |
+| `SPINE_TEST_DATABASE_URL=…/s016_r2scen go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (fresh DB, dropped after) | 20 PASS |
+| `SPINE_TEST_DATABASE_URL=…/s016_r2int go test -tags integration -p 4 -count=1` on all seven TASK-016 packages (fresh DB, dropped after) | six `ok`. `adapters/store` fails only `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`, `workflow_version_label`), which is **identical on `main`** (`git archive main`, fresh `s016_r2main`, dropped) and already recorded in the first gates table. No integration-tagged tests exist in `cli` or `gateway` |
+| `golangci-lint run --build-tags scenario --new-from-rev main` on `core/refadmit`, `core/divergence`, `adapters/store`, `githttp`, `gateway`, `cmd/spine`, `cli`, `scenarios` | `0 issues` each (after `8cf2e72`) |
+| `golangci-lint run --build-tags scenario`, branch vs `main` (`git archive main`) | `cli` 1 = 1 (the pre-existing `initrepo_test.go` gofmt issue); `gateway` 89 < 90 |
+| `golangci-lint run --enable-only=gosec` on the same eight packages | 0 issues |
+| `git diff --name-only main...HEAD \| grep '\.go$' \| xargs gofmt -l` | empty |
+| SMP: `go build ./...`; `go vet ./...`; `go vet -tags integration ./...` | OK, clean, clean |
+| SMP: `go test -p 4 -count=1` on the 31 packages whose dependencies include `adapters/store`, `core/divergence` or `core/refadmit` | 30 `ok`, 1 no test files |
+| SMP: `./dev/lint-spine-internals.sh`; dependency graph | OK. No SMP package depends on any `spine/service/internal/...` package, so this round's only non-test code change (`service/internal/cli`) cannot reach SMP. SMP checkout unmodified (`git status` clean) |
+| `codex review --base main` (round 5, on `8cf2e72`) | "No actionable regressions were identified in the ref-admission logic, gateway wiring, or CLI changes. The full `go test ./...` suite passed." No P1/P2 reported, so none fixed or rejected |
+
+**Commits (review round 2):** `391c540` (R2-1), `c780abd` (R2-2), `1af8e3d` (R2-3), `9d48138`
+(R2-4), `8cf2e72` (R2-2 lint), then this note. No migration, table, column, endpoint, event type
+or environment variable is added. Nothing under `core/` or `adapters/` changed in this round.
