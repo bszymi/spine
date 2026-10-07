@@ -55,9 +55,16 @@ func RedactURL(rawURL string) string {
 	return u.Redacted()
 }
 
-// ValidateRef checks that a git ref name is safe to pass as a command argument.
-// Rejects refs starting with "-" (flag injection) and refs containing
-// control characters or other unsafe patterns.
+// ValidateRef is the rev-SYNTAX gate, not a refname check: it accepts
+// anything that is safe to place in a revision argument, including rev
+// expressions git resolves itself (main@{1}, origin/main, an abbreviated
+// id). It rejects refs starting with "-" (flag injection), refs
+// containing control characters, space, ~ ^ : or \, and "..". The empty
+// string passes (callers default it); CLIClient's Rev class refuses it
+// separately. Branch names have their own, stricter grammar
+// (QualifyBranch / refname.Validate); user-supplied ?ref= values on the
+// read APIs go through this gate and keep its accept set (INIT-023
+// TASK-002 D6).
 func ValidateRef(ref string) error {
 	if ref == "" {
 		return nil
