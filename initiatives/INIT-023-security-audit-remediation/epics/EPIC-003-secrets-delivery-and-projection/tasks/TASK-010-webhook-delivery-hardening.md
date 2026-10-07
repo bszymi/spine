@@ -247,6 +247,16 @@ The design-phase prototype and regression tests are under
 >   fewer than `concurrency` subscriptions are held, and at most `ceil(2 × held / concurrency)`
 >   polls otherwise.
 
+> **Review-round-2 note (2026-10-07) — I7 also covers subscriptions whose deliveries can never
+> succeed.** The round-1 statement held only for subscriptions the dispatcher *holds*. A permanent
+> verdict on a subscription (deleted, invalid metadata, refused target URL, a request that cannot be
+> built, unusable TLS or signing configuration) dead-lettered only the claimed row, so `concurrency`
+> or more such subscriptions with old backlogs took every claim slot until their backlogs drained
+> one row per poll each (reviewer: at 5 × 300 rows the first healthy delivery came at poll 300).
+> Amended: the first such row dead-letters the subscription's whole due queue in one statement
+> (§2 round-2 note), so such a subscription costs one claim slot, once. A healthy subscription's
+> due row then waits at most `ceil(k / concurrency)` polls behind `k` of them.
+
 ### 1. P3-11 — opt-in v2 signatures (`adapters/delivery/signature.go`, new)
 
 **Opt-in.** The opt-in is a per-subscription key in the existing
@@ -469,6 +479,31 @@ WHERE delivery_id = $1 AND status = 'delivering'
 >   ~15 s turned a fixable operator-side fault (an SMP replica without its encryption key, a
 >   TASK-009 key-ring rollout) into lost dispatches that each need a manual redrive, a
 >   shared-behaviour change Rule 4 did not sanction (cross-repo rule 2).
+
+> **Review-round-2 note (2026-10-07) — permanent verdicts take the due queue; the hold cap
+> counts from the start of the hold.**
+> - **Whole-queue dead-letter.** Every outcome-table row that dead-letters for a reason that is a
+>   function of the subscription, not of the row — subscription not found, metadata invalid, URL
+>   rejected, request build error, TLS config error, v2 without a secret or an unknown version at
+>   signing — now also dead-letters every other row of the subscription that is due by the next
+>   poll, in one `HoldDueDeliveries` statement with `ExpireBefore = Until = now + poll interval`,
+>   each with the same reason and a delivery-log row, `attempt_count` untouched. Rows scheduled
+>   later are left alone: they are not claimable now, and each meets the same verdict when due. No
+>   new store method and no SQL change. The entropy-read failure stays per row (transient).
+> - **`MaxCircuitHold` is measured from the start of the hold.** Measured from `created_at`, a
+>   row queued more than 24 h ago was dead-lettered by the first fault it met, and the bulk hold
+>   expired the rest of the aged backlog with it — after a day-long dispatcher outage, or in an SMP
+>   workspace re-warmed after a day, one resolver blip turned every aged dispatch into a dead row.
+>   A row is now held since the later of its `created_at` and the start of its subscription's
+>   current hold as this process observed it: the circuit opening (`CircuitBreaker.OpenedAt`, kept
+>   across failed and released probes) or the first of the current run of resolver failures
+>   (`unreadableSince`, cleared by a successful read). The bulk hold expires rows only once the
+>   hold itself is older than the cap, with cut-off `now − cap`, so the rule is exact for rows the
+>   dispatcher never claimed. The start lives in memory: a restart starts it again, so the cap can
+>   come late, never early (`KNOWN-LIMITATIONS.md`).
+> - **The "old replays dead-letter at once" edge narrows.** An old row replayed or redriven while
+>   its circuit is open is dead-lettered again only if the outage itself has lasted longer than the
+>   cap on the claiming dispatcher.
 
 #### 2a. Fair claim (design-check addition, 2026-10-06; closes the residual P3-5 starvation)
 
@@ -806,6 +841,25 @@ whatever the opt-in:**
 >     and the row stays redrivable from the banner. Dual-key verification is the lossless
 >     alternative, and choosing it remains TASK-006's call.
 
+> **Review-round-2 note (2026-10-07) — inherited behaviour, amended.**
+> - **B3 extended (B10).** An orphaned, malformed or URL-rejected row (and a TLS- or
+>   signing-config failure) now dead-letters the subscription's whole due queue in one statement,
+>   not one row per claim. SMP has one subscription per runtime DB and reaches none of these
+>   verdicts in normal operation (it never deletes `smp-internal`, writes its metadata through
+>   bootstrap, and allowlists its own target). Where one is reached, the end state equals
+>   per-row dead-lettering — every due row `dead` within `N / 5` polls — except for a fix that
+>   lands mid-drain.
+> - **B8 and B9 amended.** The 24 h cap counts from the later of `created_at` and the start of the
+>   hold on that replica (circuit opening, first failed read), in memory. An SMP replica restarted
+>   with the wrong encryption key therefore retries an aged backlog for 24 h instead of
+>   dead-lettering it at the first failed read, and a workspace re-warmed after a day keeps its
+>   aged rows through a fresh outage. This moves held rows' terminal time later, toward today's
+>   behaviour (held rows never become terminal from holding alone). The Rule 4 row says so.
+> - **R5 handoff.** Round 2 adds no `DeliveryStore` method. The committed contract test still needs
+>   the round-1 addition to its `contractQueue` fake, which the prototype under `_work/` and the
+>   SMP TASK-006 design do not yet carry (reviewer round 2):
+>   `func (q *contractQueue) HoldDueDeliveries(context.Context, spinestore.DeliveryHold) ([]spinestore.DeliveryEntry, error) { return nil, nil }`.
+
 **Required SMP changes (SMP TASK-006).**
 
 - **R1 — Transient receiver failures answer 503.** `no_secret_db` and
@@ -1007,6 +1061,10 @@ The design works without answers, using the stated defaults.
      with no attempt (§2 note). The default therefore also decides how long an operator must wait
      for the endpoint to recover before a redrive of an old row can succeed. A per-row "held
      since" column would remove this edge, but it is a schema change (I6). It is not proposed.
+   - *Review-round-2 note (2026-10-07):* the cap is now measured from the later of `created_at`
+     and the start of the hold as the dispatcher process observed it (circuit opening, first failed
+     read), kept in memory (§2 round-2 note). The edge above applies only when the outage itself
+     is older than the cap; a restart starts the count again.
 2. **Should rows written before this task have their `last_error` / `event_delivery_log.error`
    scrubbed?**
    - *Default:* no rewrite. Those rows now reach `dead` (§2) and retention removes them after its
@@ -1112,6 +1170,13 @@ The design works without answers, using the stated defaults.
      - making `DeferDelivery` bump the attempt count fails this AC;
      - deferring with `NULL` fails it.
 
+   - *Review-round-2 amendment (2026-10-07):* "older than `MaxCircuitHold`" means held longer
+     than the cap, counted from the later of `created_at` and the circuit opening.
+     `TestCircuitHoldCapDeadLetters` runs each cap with an outage older than the cap (old row
+     `dead`), younger than the cap and just begun (old row deferred);
+     `TestCircuitHoldCapCountsFromOutageStart` drives a real 503 outage through failed probes;
+     `TestCircuitOpenedAt` pins `OpenedAt`.
+
    **9a. Fair claim, no starvation at scale** (*design-check addition, 2026-10-06*).
    `TestHeldBacklogDoesNotStarveOtherSubscriptions` sets up a regression fake whose
    `ClaimDeliveries` mirrors §2a, one shared fake clock for store, dispatcher and breaker, and
@@ -1127,6 +1192,13 @@ The design works without answers, using the stated defaults.
      FIFO claim with per-row deferral starves at 1×400, and the fair claim with per-row deferral
      starves at 5×61 (0/900, the reviewers' reproduction). A real-Postgres scenario with 6×100
      held rows delivers a new row within 3 polls.
+   - *Review-round-2 addition (2026-10-07):* `TestDeadLetteredBacklogsDoNotStarveOtherSubscriptions`
+     runs 4, 5, 6 and 10 subscriptions × 300 rows whose deliveries can never succeed (deleted,
+     invalid metadata, refused URL), one healthy row per simulated second for 600 polls: every
+     healthy row is delivered within `ceil(k / 5)` polls and every bad row is `dead` with one log
+     row. Control: per-row dead-lettering waits 300 polls at 5×300.
+     `TestPermanentVerdictDeadLettersWholeDueQueue` covers all seven verdicts. A real-Postgres
+     scenario with 6 deleted subscriptions × 100 rows delivers a new row within 2 polls.
 10. **Orphans and resolver errors.**
     - `TestOrphanedRowsDeadLetter`: a `not_found` resolver for five rows ⇒ all five are `dead`,
       the healthy row is delivered, and the resolver is called at most six times over 100 polls.
@@ -1135,6 +1207,12 @@ The design works without answers, using the stated defaults.
       *Review-round-1 amendment (2026-10-07):* it is not `dead` at the budget; past it the row
       stays `failed` with `attempt_count` ≥ the budget, is retried every minute, is delivered once
       the resolver recovers, and goes `dead` only after `MaxCircuitHold` (§2 review-round-1 note).
+      *Review-round-2 amendment (2026-10-07):* "after `MaxCircuitHold`" means after the
+      subscription has been unreadable for that long (from this dispatcher's first failed read of
+      the current run), not after the row has been queued that long.
+      `TestAgedBacklogSurvivesTransientFaults` (20 rows queued 25 h ago, one failed read: 0 dead,
+      20 delivered) and `TestUnreadableSubscriptionHoldsBacklog` (an aged row is retried, then
+      `dead` once unreadable for 24 h 1 min) distinguish the two.
     - Invalid metadata ⇒ `dead`.
     - Mutation: retrying `not_found` fails this AC.
     - *Design-check addition (2026-10-06):* a transient resolver error carries the text
@@ -1842,3 +1920,126 @@ at `7d4e7cc9`, with `../spine` = this worktree. Its tree was clean afterwards.
 | AC7 contract test via `-overlay` (scratch copy plus `HoldDueDeliveries` on its fake) | `TestSpineV2Contract_DispatcherToEventReceiver` PASS, `TestSpineV2Contract_V1DefaultStillAccepted` PASS |
 | Container as above; `TEST_SPINE_DB=…/spine_runtime_it TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=smp_prov@…/postgres go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -timeout 20m -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (CI's "Spine runtime integration suites", now with the provisioning DSN, so spinecore's dispatch-store tests and `TestRedrive_RedeliversThroughSpineDispatcher` run) | PASS: 1539 tests, 1 allowed skip |
 | `TEST_DATABASE_URL=TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=… go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -allow-skip 'TEST_MINIO_' -- -race -count=1 -timeout 20m -p 4` on `eventdelivery` (all `TestWorker_Integration_*`, including `RequiresCipherToDecrypt` on the changed resolver path), `stepevents`, `workspace`, `workspace/workspacetest`, `projectionwriter`, `spineruntime`, `brain`, `notification`, `provenance`, `opshealth`, `recovery` | PASS: 998 tests, 7 allowed skips (MinIO and live AWS only; the live dev stack's MinIO was deliberately not used) |
+
+### Review round 2 (2026-10-07)
+
+One reviewer re-verified the round-1 dispositions and gates and sent two P3 findings and six gap
+notes. Both findings are real and were reproduced with the reviewer's own proofs of concept
+(scratchpad `rev2-t010/poc/zz_rev2_test.go`, run through `-overlay` without writing into the tree).
+Fix commits: `e36c3f9` (finding 1), `19b3dfc` (finding 2), `c3d1457` (documentation). The
+design-text amendments are marked *Review-round-2 note / addition / amendment* in I7, §2, Owner
+question 1, §7 and ACs 9, 9a and 10. The initiative's Rule 4 TASK-010 row is updated with them.
+
+**Per-finding disposition**
+
+| # | Finding (severity) | Verdict | Disposition |
+|---|---|---|---|
+| 1 | Rows dead-lettered per row still starve the queue at `k ≥ concurrency` (P3) | Real. Reproduced: with 4 × 300 deleted-subscription rows the first healthy delivery is at poll 0; with 5 × 300 it is at poll 300, and with 6 × 300 at poll 360. | **Fixed** in `e36c3f9`. A permanent verdict on the subscription dead-letters the claimed row and, in one `HoldDueDeliveries` statement (`ExpireBefore = Until = now + poll interval`), every other row of the subscription due by the next poll. Each row gets the same reason and a log row, and `attempt_count` is untouched. This covers all seven such verdicts: deleted, invalid metadata, refused URL, request build error, TLS config error, v2 without a secret, and an unknown version at signing. With the reviewer's proof of concept after the fix, the first healthy delivery is at poll 1 for both 5 × 300 and 6 × 300. The CHANGELOG starvation claim now names both mechanisms. The alternative (`DeleteSubscription` dead-letters its rows) was not taken: it covers deletion only, and it leaves rows orphaned by earlier deletes. |
+| 2 | `MaxCircuitHold` measured from `created_at` dead-letters aged rows at the first fault (P3) | Real. Reproduced: 20 rows queued 25 h ago, one failed read, then the read succeeds → 20 dead, 0 delivered, 1 resolver call. | **Fixed** in `19b3dfc`, by a different mechanism from the one suggested (deviation R2-1). The hold is measured from the later of `created_at` and the start of the subscription's current hold, as this process observed it. That start is `CircuitBreaker.OpenedAt` (new: set when the circuit opens from closed, kept across failed and released probes, zero while closed) or the dispatcher's `unreadableSince` (the first failed read of the current run, cleared by a successful read or a permanent verdict). The bulk hold expires rows only once the hold itself is older than the cap, with cut-off `now − cap`. A row is therefore expired exactly when `max(created_at, start) < now − cap`. Neither the SQL nor the schema changes. With the proof of concept after the fix: 0 dead, 20 delivered. |
+| — | AC7 / §7 R5: the named prototype does not compile against HEAD (gap) | Confirmed: `go vet -overlay` in the SMP tree reports `*contractQueue does not implement store.DeliveryStore (missing method HoldDueDeliveries)`. | A handoff gap, not a code defect. The prototype (under SMP's `tmp/`) and the SMP TASK-006 design are outside this worktree, so this task cannot edit them. The handoff is now stated in three places: §7 (round-2 note, with the exact method); the CHANGELOG "For embedders" entry, which names the fake; and **Handoffs** below. Round 2 adds no `DeliveryStore` method. AC7 was re-run green at the round-2 head (SMP gate below). |
+| — | I7 / AC9a: no test for `k ≥ concurrency` dead-lettered subscriptions (gap) | Real (finding 1). | **Closed** by `TestDeadLetteredBacklogsDoNotStarveOtherSubscriptions` (4/5/6/10 × 300 for deleted, invalid metadata and refused URL, plus a control), `TestPermanentVerdictDeadLettersWholeDueQueue` and `TestQueuePG_DeadLetteredBacklogsOfManySubscriptionsDoNotStarve`. |
+| — | AC10 amendment: no test separates "held 24 h" from "queued 24 h ago" (gap) | Real (finding 2). | **Closed** by `TestAgedBacklogSurvivesTransientFaults`, the reworked `TestUnreadableSubscriptionHoldsBacklog`, `TestCircuitHoldCapDeadLetters` (each cap × three outage ages), `TestCircuitHoldExpiresUnclaimedBacklog` ("outage just began"), `TestCircuitHoldCapCountsFromOutageStart`, `TestCircuitOpenedAt`, `TestHoldStartedAt` and `TestQueuePG_FreshOutageHoldsAgedBacklog`. |
+| — | Round-1 fixes, NOT REAL AC11, cheap gates, other ACs re-verified (notes) | Acknowledged. | No action. |
+
+**Measured after the fix** (fake clock, concurrency 5, one healthy row per simulated second for
+600 polls, maximum wait of a healthy row): 4 × 300: 0 polls; 5 × 300: 1; 6 × 300: 1;
+10 × 300: 2. The same figures hold for the deleted, invalid-metadata and refused-URL kinds. The
+control with per-row dead-lettering at 5 × 300 waits 300 polls.
+
+**Deviations in this round, with reasons**
+
+- **R2-1. Finding 2 uses an in-memory hold start, not the suggested `last_error` proxy.** The
+  proxy dead-letters only when the row's `last_error` already equals the hold reason. An aged row
+  would then still go `dead` at its second consecutive fault: a two-poll read blip, or one probe
+  cycle into a fresh outage. It would also need an SQL predicate on the bulk expiry. The start of
+  the hold is what "held for 24 h" actually means, and the breaker and dispatcher already keep
+  per-subscription state in memory. The cost is that a restart starts the count again: the cap
+  can come late, never early. `KNOWN-LIMITATIONS.md` records this, including its one unbounded
+  case. A subscription that stays unreadable while its dispatcher restarts more often than daily
+  keeps `failed` rows at the attempt budget, retried every minute and shown in SMP's banner.
+- **R2-2. The whole-queue dead-letter reuses `HoldDueDeliveries`** (`ExpireBefore = Until =` the
+  next poll). It adds no store method (so the R5 fake needs nothing new) and no SQL. Rows
+  scheduled beyond the next poll are left alone: they are not claimable, so they cannot take
+  slots, and each meets the same verdict when due. A row due now but stamped more than one poll
+  ahead by a skewed clock is held to the next poll, not expired.
+- **R2-3. The TLS-config and signing-config verdicts are included.** The reviewer named deleted,
+  invalid metadata, refused URL and TLS. The rule applied is: every verdict that is a function of
+  the subscription rather than of the row. The entropy-read failure stays per row because it is
+  transient. The TLS path still records its breaker failure.
+- **R2-4. A DNS-based URL refusal dead-letters the due queue too.** A host is refused on what it
+  resolves to at that moment, so a briefly wrong DNS answer costs the subscription its due
+  deliveries; they stay replayable. Keeping DNS refusals per row would leave the starvation
+  open for that verdict. The integration guide and `KNOWN-LIMITATIONS.md` say so.
+- **R2-5. `CircuitBreaker.OpenedAt` is new exported API** (additive). It is listed in the
+  CHANGELOG.
+- **R2-6. SMP.** SMP has one subscription per runtime DB, so finding 1's starvation never applies
+  to it. Its verdict paths are not reached in normal operation. Where one is reached, the end
+  state equals per-row dead-lettering except for a fix that lands mid-drain. Finding 2 moves the
+  terminal time of held rows later, toward today's `main`, where holding alone never makes a row
+  terminal. A replica restarted with the wrong encryption key now retries an aged backlog for
+  24 h instead of dead-lettering it at the first failed read. §7 (B10, B8/B9 amended) and the
+  Rule 4 row record both.
+
+**Mutation results (round 2).** Each mutation is textual and was restored afterwards. Every one
+is killed by each named test run alone. The real-Postgres column ran on `s010_delivery`.
+
+| Mutation | Killed by | Real Postgres |
+|---|---|---|
+| `deadLetterRest` a no-op | `TestPermanentVerdictDeadLettersWholeDueQueue`, `TestDeadLetteredBacklogsDoNotStarveOtherSubscriptions` | `TestQueuePG_DeadLetteredBacklogsOfManySubscriptionsDoNotStarve` |
+| `not_found` dead-letters only the claimed row | `…WholeDueQueue/deleted`, `…DoNotStarve…/deleted` | same |
+| invalid metadata, refused URL, request build error, TLS config error, signing: each claimed-row only | the matching `…WholeDueQueue` subtest (and `…DoNotStarve…` for the first two) | — |
+| `deadLetterRest` holds instead of expiring (no `ExpireBefore`) | `TestPermanentVerdictDeadLettersWholeDueQueue` | `TestQueuePG_OrphanedRowsDeadLetter`, `…DeadLetteredBacklogs…` |
+| `heldTooLong` from `created_at` only (the round-1 rule) | `TestAgedBacklogSurvivesTransientFaults`, `TestCircuitHoldCapDeadLetters`, `TestHoldStartedAt` | `TestQueuePG_FreshOutageHoldsAgedBacklog` |
+| bulk expiry from `created_at` only (the round-1 rule) | `TestAgedBacklogSurvivesTransientFaults`, `TestCircuitHoldExpiresUnclaimedBacklog`, `TestUnreadableSubscriptionHoldsBacklog` | `TestQueuePG_FreshOutageHoldsAgedBacklog` |
+| unknown (zero) hold start counted from `created_at` | `TestHoldStartedAt` | — |
+| a successful read does not clear `unreadableSince` | `TestAgedBacklogSurvivesTransientFaults` | — |
+| `unreadableSince` not kept across failures | `TestUnreadableSubscriptionHoldsBacklog` | — |
+| a failed probe moves `openedAt` | `TestCircuitOpenedAt`, `TestCircuitHoldCapCountsFromOutageStart` | — |
+| `OpenedAt` reported while closed | `TestCircuitOpenedAt` | — |
+| `openedAt` never set | `TestCircuitOpenedAt`, `TestCircuitHoldCapCountsFromOutageStart` | — |
+
+**Handoffs (for the orchestrator; outside this worktree)**
+
+- SMP TASK-006 R5: the committed `internal/customer/runner/spine_webhook_v2_contract_test.go` must
+  give its `contractQueue` fake
+  `func (q *contractQueue) HoldDueDeliveries(context.Context, spinestore.DeliveryHold) ([]spinestore.DeliveryEntry, error) { return nil, nil }`.
+  The prototype under `_work/task010/smp/` and the SMP TASK-006 design should record this. With
+  that method the test passes against this branch; without it, it fails to compile.
+
+**Gates (round 2; code at `c3d1457`, and the closing commit changes only this file and the
+initiative's Rule 4 row)**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | OK |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK ("library surface is sound") |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | PASS (38 packages ok) |
+| `go test -race -p 4 -count=1 ./adapters/delivery/ ./adapters/store/ ./service/internal/gateway/ ./service/cmd/spine/` | PASS |
+| `SPINE_TEST_DATABASE_URL=…/s010_delivery go test -tags integration -race -count=1 ./adapters/delivery/` | PASS (all 9 `TestQueuePG_*`, including the two new ones) |
+| same on `s010_gw`: `./service/internal/gateway/ ./service/cmd/spine/` | PASS |
+| same on a fresh `s010_store`: `./adapters/store/` | only the pre-existing `TestRunModeDatabaseDefault` fails (`GetRun … cannot scan NULL into *string`, as on `main`, round-1 row 7); on a fresh database again with `-skip '^TestRunModeDatabaseDefault$'`: PASS |
+| `SPINE_TEST_DATABASE_URL=…/s010_scenario go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` | 19 PASS, 0 SKIP |
+| `golangci-lint run --allow-parallel-runners` on the four packages | 125 issues against 136 on `main` (fresh `git archive main` export); 0 new (diffed ignoring line numbers) |
+| same with `--build-tags integration` on `adapters/delivery`, `adapters/store` | 29 against 37; 0 new |
+| `golangci-lint run --enable-only=gosec` on the four packages (and with `--build-tags integration` on `adapters/delivery`) | 0 issues |
+| `gofmt -l $(git diff --name-only main...HEAD -- '*.go')` | empty |
+| `git diff --name-only main...HEAD -- migrations` | empty |
+| `codex review --base main` (at `c3d1457`) | "No actionable regressions were identified." Its own runs of the gateway and `cmd/spine` suites could not listen on sockets in its sandbox; both pass in the rows above. |
+
+All `s010_*` databases (`s010_delivery`, `s010_store`, `s010_gw`, `s010_scenario`, and
+`s010_mut` for the real-Postgres mutation checks) were dropped afterwards.
+
+**SMP compatibility gate (round 2).** The SMP checkout is `/Users/bartoszszymichowski/42sid/i23/s-T010/smp`
+at `7d4e7cc9`, with `../spine` = this worktree at `c3d1457`. Its tree was clean afterwards.
+
+| Command | Result |
+|---|---|
+| `go build ./...` | OK |
+| `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `go test -p 4 -count=1` on the 31 packages whose deps include `adapters/delivery` or `adapters/store`, plus the 7 whose test deps do (`brain`, `clarity`, `notification`, `provenance`, `spineruntime`, `opshealth`, `recovery`) | all PASS (`workspace/faultharness` has no tests) |
+| AC7 contract test via `-overlay` (scratch copy plus `HoldDueDeliveries` on its fake), `-run TestSpineV2Contract ./internal/customer/runner/` | `TestSpineV2Contract_DispatcherToEventReceiver` PASS, `TestSpineV2Contract_V1DefaultStillAccepted` PASS |
+| The unmodified prototype via `-overlay` (`go vet`) | does not compile: `missing method HoldDueDeliveries` (the reviewer's gap; see Handoffs) |
+| Throwaway `pgvector/pgvector:pg18` container (local image, data on tmpfs, removed afterwards), provisioned as SMP CI's integration job (roles `platform`, `platform_audit_retention`, `smp_prov` with the posture check `f`; `smp_it`, `smp_schema_it`, `spine_runtime_it`; `vector`; 115 platform and 26 spine-runtime migrations). `TEST_SPINE_DB=…/spine_runtime_it TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=smp_prov@…/postgres go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -- -race -count=1 -timeout 20m -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` | PASS: 1539 tests, 1 allowed skip (spinecore's dispatch-store tests and `TestRedrive_RedeliversThroughSpineDispatcher` ran) |
+| `TEST_DATABASE_URL=TEST_PLATFORM_DB=…/smp_it TEST_PROVISIONING_DSN=… go run ./dev/testgate -allow-skip 'TEST_AWS_OBJECT_STORE_' -allow-skip 'TEST_MINIO_' -- -race -count=1 -timeout 20m -p 4` on `eventdelivery` (all `TestWorker_Integration_*`), `stepevents`, `workspace`, `workspace/workspacetest`, `projectionwriter`, `spineruntime`, `brain`, `notification`, `provenance`, `opshealth`, `recovery` | PASS: 998 tests, 7 allowed skips (MinIO and live AWS only) |
