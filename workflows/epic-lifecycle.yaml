@@ -1,6 +1,6 @@
 id: epic-lifecycle
 name: Epic Lifecycle Workflow
-version: "1.0"
+version: "1.1"
 status: Active
 description: >
   Workflow for epic progression. An epic is planned, tasks are
@@ -44,10 +44,12 @@ steps:
         - human
         - ai_agent
       required_skills: [execution]
-    preconditions:
-      - type: artifact_status
-        config:
-          status: In Progress
+    # No status precondition here: `plan.planned` commits `In Progress`, but
+    # commit status is applied to the epic only at merge (publish), so the
+    # epic on main keeps its run-start status (Pending) for the whole run
+    # and `artifact_status: In Progress` could never hold mid-run (INIT-023
+    # TASK-007; workflow.DeferredStatusPreconditions guards against
+    # reintroducing such a precondition).
     outcomes:
       - id: tasks_complete
         name: All Tasks Complete
