@@ -208,9 +208,11 @@ match on `auth.actors`.
   installed the gateway's engine-less step-assign fallback is disabled.
 - **Embedders** get the zero value — today's behaviour — until they call
   `WithStepEntryPolicy` (SMP adopts it in its TASK-011).
-- `required_skills` becomes a real boundary in standalone only once skill grants
-  are admin-only (INIT-023 TASK-013); until then a contributor can self-grant a
-  skill, but separation of duties still refuses self-review.
+- `required_skills` (and `RequireSkillsOnAssign`) is a real boundary in
+  standalone because skill grants and the skill catalogue are admin-only
+  (INIT-023 TASK-013, §4.1): a non-admin can no longer grant itself
+  the skill a review step requires. Separation of duties refuses self-review
+  independently of skills.
 
 ### 4.5 Authorization and Git Operations
 
