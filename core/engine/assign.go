@@ -26,9 +26,22 @@ type AssignResult struct {
 }
 
 // AssignStep assigns an actor to the named step execution under the run.
-// Precondition evaluation is the caller's responsibility (the HTTP handler
-// owns the precondition model that was in place before extraction); this
-// method handles the state-machine transition and the exec update.
+//
+// With the zero-value StepEntryPolicy (the default) precondition evaluation
+// and actor eligibility are the caller's responsibility, exactly as before
+// INIT-023: this method handles only the state-machine transition and the
+// exec update, and loads neither the run nor the workflow.
+//
+// When the installed policy gates binding (any entry check on), the engine
+// owns them: it loads the run and the pinned workflow (a step missing from
+// it is ErrNotFound, so the bind fails closed) and runs
+// checkStepEntryActor and checkStepEntryPreconditions before anything is
+// written. The effective allow-list is req.EligibleActorIDs when non-empty,
+// otherwise the stored exec.EligibleActorIDs — the list the call leaves in
+// place. The assigner may therefore replace a stored list with one that
+// admits itself (Owner question 5 default): step.assign is the only writer
+// of the list, so this widens nothing a stronger control granted, and
+// separation of duties applies whatever list is passed.
 func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*AssignResult, error) {
 	if req.ActorID == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "actor_id is required")
@@ -37,9 +50,42 @@ func (o *Orchestrator) AssignStep(ctx context.Context, req AssignRequest) (*Assi
 		return nil, domain.NewError(domain.ErrInvalidParams, "run_id and step_id are required")
 	}
 
+	gated := o.entryPolicy.gatesBinding()
+	if gated && (o.store == nil || o.wfLoader == nil) {
+		// Only reachable for hand-built &Orchestrator{} values: engine.New
+		// requires both. Refuse rather than nil-dereference or bind unchecked.
+		return nil, domain.NewError(domain.ErrUnavailable, "step-entry policy needs a run store and a workflow loader")
+	}
+
 	exec, err := o.findStepExecution(ctx, req.RunID, req.StepID)
 	if err != nil {
 		return nil, err
+	}
+
+	if gated {
+		run, err := o.store.GetRun(ctx, req.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("get run: %w", err)
+		}
+		wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+		if err != nil {
+			return nil, fmt.Errorf("load workflow: %w", err)
+		}
+		stepDef := findStepDef(wfDef, req.StepID)
+		if stepDef == nil {
+			return nil, domain.NewError(domain.ErrNotFound,
+				fmt.Sprintf("step %q not found in workflow %s", req.StepID, wfDef.ID))
+		}
+		allow := req.EligibleActorIDs
+		if len(allow) == 0 {
+			allow = exec.EligibleActorIDs
+		}
+		if err := o.checkStepEntryActor(ctx, entryAssign, run, wfDef, stepDef, exec, req.ActorID, allow); err != nil {
+			return nil, err
+		}
+		if err := o.checkStepEntryPreconditions(ctx, run, stepDef); err != nil {
+			return nil, err
+		}
 	}
 
 	// Recovery for pre-Option-B phantom rows: a step persisted as

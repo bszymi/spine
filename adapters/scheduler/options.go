@@ -18,8 +18,10 @@ type StepRecoveryFunc func(ctx context.Context, executionID string) error
 // RunFailFunc is called by recovery to fail a run that cannot be recovered.
 type RunFailFunc func(ctx context.Context, runID, reason string) error
 
-// RunTerminatedFunc is called after the scheduler itself ends a run
-// (INIT-023 TASK-007).
+// RunTerminatedFunc is called after the scheduler itself ends a run, so the
+// engine can close the run's live step executions (INIT-023 TASK-007). The
+// scheduler does not import the engine; `spine serve` passes the
+// orchestrator's TerminateLiveSteps.
 type RunTerminatedFunc func(ctx context.Context, runID, message string)
 
 // WithTimeoutScanInterval sets how often the timeout scanner runs.
@@ -56,7 +58,9 @@ func WithRunFail(fn RunFailFunc) Option {
 	return func(s *Scheduler) { s.runFailFn = fn }
 }
 
-// WithRunTerminated sets the function called after a run timeout cancels a run.
+// WithRunTerminated sets the function called after a run timeout has
+// cancelled a run (only once the cancel write is applied). Unset, the
+// timeout path behaves exactly as before.
 func WithRunTerminated(fn RunTerminatedFunc) Option {
 	return func(s *Scheduler) { s.runTerminatedFn = fn }
 }

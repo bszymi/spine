@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/scheduler"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/scheduler"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -25,6 +25,11 @@ func (o *Orchestrator) RetryStep(ctx context.Context, exec *domain.StepExecution
 	run, err := o.store.GetRun(ctx, exec.RunID)
 	if err != nil {
 		return fmt.Errorf("get run: %w", err)
+	}
+	// EnforceRunStatus (INIT-023 TASK-007): no retry execution is created
+	// for a run that is not active.
+	if err := o.requireActiveRun(run, "retried"); err != nil {
+		return err
 	}
 
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)

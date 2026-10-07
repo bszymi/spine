@@ -256,7 +256,9 @@ type refStep struct {
 // TestStepEntry_ReferenceWorkflowsUnderStrictPolicy drives Spine's own
 // task-default, epic-lifecycle and adr workflows to completion under
 // StrictStepEntryPolicy(), with distinct executor and reviewer actors
-// holding exactly the declared skills.
+// holding only skills the workflow declares. The executors also hold
+// `review`, so the only check that can refuse them on a review step is
+// separation of duties (asserted as ErrForbidden).
 // Mutation: reverting the epic-lifecycle edit (execute's
 // `artifact_status: In Progress`) fails epic-lifecycle at execute with
 // ErrPrecondition; removing the strict `status` field resolution fails
@@ -281,7 +283,7 @@ func TestStepEntry_ReferenceWorkflowsUnderStrictPolicy(t *testing.T) {
 				"reviewer": human("reviewer"),
 			},
 			skills: map[string][]domain.Skill{
-				"drafter": activeSkills("execution"), "executor": activeSkills("execution"), "reviewer": activeSkills("review"),
+				"drafter": activeSkills("execution", "review"), "executor": activeSkills("execution", "review"), "reviewer": activeSkills("review"),
 			},
 			script: []refStep{
 				{step: "draft", binder: "drafter", outcome: "ready"},
@@ -292,7 +294,7 @@ func TestStepEntry_ReferenceWorkflowsUnderStrictPolicy(t *testing.T) {
 		{
 			file: "epic-lifecycle.yaml", path: refEpicPath,
 			actors: map[string]*domain.Actor{"executor": human("executor"), "reviewer": human("reviewer")},
-			skills: map[string][]domain.Skill{"executor": activeSkills("planning", "execution"), "reviewer": activeSkills("review")},
+			skills: map[string][]domain.Skill{"executor": activeSkills("planning", "execution", "review"), "reviewer": activeSkills("review")},
 			script: []refStep{
 				{step: "plan", binder: "executor", outcome: "planned"},
 				{step: "execute", binder: "executor", outcome: "tasks_complete"},
@@ -302,7 +304,7 @@ func TestStepEntry_ReferenceWorkflowsUnderStrictPolicy(t *testing.T) {
 		{
 			file: "adr.yaml", path: refADRPath,
 			actors: map[string]*domain.Actor{"executor": human("executor"), "reviewer": human("reviewer")},
-			skills: map[string][]domain.Skill{"executor": activeSkills("planning"), "reviewer": activeSkills("review")},
+			skills: map[string][]domain.Skill{"executor": activeSkills("planning", "review"), "reviewer": activeSkills("review")},
 			script: []refStep{
 				{step: "propose", binder: "executor", outcome: "proposed"},
 				{step: "evaluate", refused: []string{"executor"}, binder: "reviewer", outcome: "accepted"},

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // ClaimRequest represents a request to claim a step execution.
@@ -63,6 +63,10 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	}
 
 	// Load workflow to get step definition for skill validation.
+	gated := o.entryPolicy.gatesBinding()
+	if gated && o.wfLoader == nil {
+		return nil, domain.NewError(domain.ErrUnavailable, "step-entry policy needs a workflow loader")
+	}
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
 	if err != nil {
 		return nil, fmt.Errorf("load workflow: %w", err)
@@ -72,6 +76,16 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	if stepDef == nil {
 		return nil, domain.NewError(domain.ErrNotFound,
 			fmt.Sprintf("step %q not found in workflow %s", exec.StepID, wfDef.ID))
+	}
+
+	// Step-entry policy (INIT-023 TASK-007): run status, engine-owned step,
+	// mode-implied actor type, actor existence + active status, and
+	// separation of duties. The allow-list, eligible_actor_types and
+	// required_skills checks below are ClaimStep's own and stay as they were.
+	if gated {
+		if err := o.checkStepEntryActor(ctx, entryClaim, run, wfDef, stepDef, exec, req.ActorID, exec.EligibleActorIDs); err != nil {
+			return nil, err
+		}
 	}
 
 	// Check eligible actor IDs: enforced regardless of workflow execution block,
@@ -92,7 +106,9 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 
 	// Validate actor eligibility: type and skills (from workflow step definition).
 	if stepDef.Execution != nil {
-		actor, err := o.loadActor(ctx, req.ActorID)
+		// entryActor is loadActor unless the step-entry policy installs an
+		// Actors resolver, so the zero value is the same lookup as before.
+		actor, err := o.entryActor(ctx, req.ActorID)
 		if err != nil {
 			return nil, fmt.Errorf("load actor: %w", err)
 		}
@@ -140,6 +156,12 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 				}
 			}
 		}
+	}
+
+	// Preconditions are the last check before the assignment row is
+	// created: they may read git, and a refusal writes nothing.
+	if err := o.checkStepEntryPreconditions(ctx, run, stepDef); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()

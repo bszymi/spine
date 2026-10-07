@@ -112,6 +112,13 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 			runCache[exec.RunID] = r
 			run = r
 		}
+		// EnforceRunStatus (INIT-023 TASK-007): pollers are not offered
+		// executions of runs that are not active — every claim of one would
+		// answer 409, and live executions stored before the upgrade on runs
+		// that already ended would be offered forever.
+		if o.entryPolicy.EnforceRunStatus && run.Status != domain.RunStatusActive {
+			continue
+		}
 
 		// Apply actor_type filter via the workflow step definition.
 		if actorType != "" {

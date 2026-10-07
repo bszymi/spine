@@ -61,6 +61,15 @@ func (s *Scheduler) handleRunTimeout(ctx context.Context, run *domain.Run, scanN
 	if err := s.store.UpdateRunStatusAt(ctx, run.RunID, domain.RunStatusCancelled, scanNow); err != nil {
 		return fmt.Errorf("cancel timed-out run: %w", err)
 	}
+	// INIT-023 TASK-007: this cancel writes the run row directly and never
+	// calls the engine's CancelRun (which would also delete the run branch,
+	// something the timeout path deliberately does not do), so the run's
+	// live executions are closed through the hook — only after the cancel
+	// write has been applied. With TASK-008's compare-and-swap the hook
+	// fires only on an applied write.
+	if s.runTerminatedFn != nil {
+		s.runTerminatedFn(ctx, run.RunID, "run cancelled: run timeout")
+	}
 
 	log.Info("run timed out",
 		"run_id", run.RunID,
