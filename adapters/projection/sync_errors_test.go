@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 )
 
@@ -182,6 +183,11 @@ func TestIncrementalSync_WorkflowRenameDeleteErrorIsCounted(t *testing.T) {
 }
 
 // AC 28: artifact read errors are classified, never silently dropped.
+// The scripted client has no TreeEntryTyper capability, so no failure
+// can be proved deterministic and each one holds the sync, whatever its
+// error type or Kind. The real-client cases (a gitlink whose name makes
+// stderr look transient, a killed or silently failing git) are in
+// read_errors_test.go.
 func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -189,6 +195,7 @@ func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 	}{
 		{"non_git_error", errors.New("fork/exec git: resource temporarily unavailable")},
 		{"transient_git_error", &git.GitError{Kind: git.ErrKindTransient, Op: "read_file", Message: "repository locked"}},
+		{"permanent_git_error", &git.GitError{Kind: git.ErrKindPermanent, Op: "read_file", Message: ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &scriptedGit{
@@ -237,7 +244,7 @@ func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 		}
 		// A gitlink (submodule entry) named x.md whose commit is not in
 		// this repository: `git show <c>:x.md` fails with "bad object",
-		// which the git client classifies as a permanent GitError.
+		// and the commit's tree proves there is no regular file there.
 		repo.run("update-index", "--add", "--cacheinfo", "160000,"+gitlinkTarget+",x.md")
 		repo.run("commit", "-q", "-m", "gitlink")
 		head := repo.run("rev-parse", "HEAD")
@@ -248,7 +255,7 @@ func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 		if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != head {
 			t.Fatalf("sync state: %+v", got)
 		}
-		if n := len(logs.lines("level=WARN", "skipped unreadable changed file", "x.md")); n != 1 {
+		if n := len(logs.lines("level=WARN", "skipped unreadable changed file", "x.md", "entry=gitlink")); n != 1 {
 			t.Fatalf("expected one Warn naming x.md, got %d:\n%s", n, logs.String())
 		}
 		synced := router.ofType(domain.EventProjectionSynced)
@@ -285,3 +292,110 @@ type headFailGit struct{ git.GitClient }
 const gitlinkTarget = "0123456789abcdef0123456789abcdef01234567"
 
 func (headFailGit) Head(context.Context) (string, error) { return "", errSimulated }
+
+// failListGit fails ListFiles (artifact and workflow discovery).
+type failListGit struct{ git.GitClient }
+
+func (failListGit) ListFiles(context.Context, string, string) ([]string, error) {
+	return nil, errSimulated
+}
+
+// Review round 1 (finding D): every FullRebuild failure is recorded in
+// sync_state with its cause. Before the wipe the store is untouched, so
+// the previous commit is kept; a failed (possibly partial) wipe leaves no
+// commit describing the store, so none is recorded and the next sync
+// rebuilds.
+func TestFullRebuild_FailuresAreRecorded(t *testing.T) {
+	t.Run("discovery failure keeps the previous commit", func(t *testing.T) {
+		repo := newScratchRepo(t)
+		repo.write(taskPath, taskDoc("Pending", "T"))
+		c1 := repo.commit("c1")
+		st := allRowsStore{newMapStore()}
+		st.setState(c1, "idle")
+		svc := NewService(failListGit{repo.git}, st, nil, 0)
+		if err := svc.FullRebuild(context.Background()); err == nil || !errors.Is(err, errSimulated) {
+			t.Fatalf("expected the discovery error, got %v", err)
+		}
+		if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != c1 ||
+			!strings.Contains(got.ErrorDetail, "discover artifacts") || !strings.Contains(got.ErrorDetail, "simulated failure") {
+			t.Fatalf("sync state: %+v", got)
+		}
+	})
+
+	t.Run("failed wipe forces a rebuild on the next sync", func(t *testing.T) {
+		repo := newScratchRepo(t)
+		repo.write(taskPath, taskDoc("Pending", "T"))
+		c1 := repo.commit("c1")
+		st := allRowsStore{newMapStore()}
+		svc := NewService(repo.git, st, nil, 0)
+		if err := svc.FullRebuild(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		st.deleteAllErr = errSimulated
+		if err := svc.FullRebuild(context.Background()); err == nil || !errors.Is(err, errSimulated) {
+			t.Fatalf("expected the wipe error, got %v", err)
+		}
+		if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != "" || !strings.Contains(got.ErrorDetail, "delete projections") {
+			t.Fatalf("a failed wipe must record no commit: %+v", got)
+		}
+		if _, ok := st.artifacts[taskPath]; ok {
+			t.Fatal("precondition: the partial wipe removed the artifact")
+		}
+		st.deleteAllErr = nil
+		// head == the old last synced commit: an incremental diff would
+		// be empty and leave the artifact missing; the empty baseline
+		// rebuilds instead.
+		if err := svc.IncrementalSync(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != c1 {
+			t.Fatalf("sync state: %+v", got)
+		}
+		if _, ok := st.artifacts[taskPath]; !ok {
+			t.Fatal("the rebuild must restore the wiped artifact")
+		}
+	})
+}
+
+// A store with no synced commit and status "rebuilding" — a first
+// rebuild in flight elsewhere (SMP provisioning) or interrupted — is left
+// alone: no Diff from an empty commit, no second concurrent wipe, no
+// state write.
+func TestIncrementalSync_NoBaselineWhileRebuildingIsLeftAlone(t *testing.T) {
+	g := governanceChangeGit()
+	st := allRowsStore{newMapStore()}
+	st.setState("", "rebuilding")
+	err := NewService(g, st, nil, 0).IncrementalSync(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "first full rebuild") {
+		t.Fatalf("expected the no-baseline error, got %v", err)
+	}
+	if g.calls() != 0 || st.bpUpserts != 0 {
+		t.Fatalf("nothing may run: diffs=%d bp=%d", g.calls(), st.bpUpserts)
+	}
+	if got := st.syncState(); got.Status != "rebuilding" || got.LastSyncedCommit != "" {
+		t.Fatalf("state must be left alone: %+v", got)
+	}
+}
+
+// markSyncError puts the cause, sanitised to one bounded line, in
+// error_detail: the label alone ("read changed artifact") did not say
+// which file or why.
+func TestMarkSyncError_DetailCarriesTheSanitisedCause(t *testing.T) {
+	st := newMapStore()
+	svc := NewService(nil, st, nil, 0)
+	cause := errors.New("read docs/\u202eevil.md at 1234abcd: fatal: bad object\nsecond line")
+	err := svc.markSyncError(context.Background(), &store.SyncState{LastSyncedCommit: shaC1}, "read changed artifact", cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("the returned error must wrap the cause: %v", err)
+	}
+	got := st.syncState()
+	if got.Status != "error" || got.LastSyncedCommit != shaC1 {
+		t.Fatalf("state: %+v", got)
+	}
+	if !strings.HasPrefix(got.ErrorDetail, "read changed artifact: read docs/") || !strings.Contains(got.ErrorDetail, "bad object; second line") {
+		t.Fatalf("error_detail = %q", got.ErrorDetail)
+	}
+	if strings.ContainsAny(got.ErrorDetail, "\n\u202e") {
+		t.Fatalf("error_detail must be sanitised: %q", got.ErrorDetail)
+	}
+}

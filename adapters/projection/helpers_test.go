@@ -53,6 +53,7 @@ type mapStore struct {
 	// error injection
 	deleteWorkflowErr map[string]error
 	upsertWorkflowErr map[string]error
+	deleteAllErr      error
 }
 
 func newMapStore() *mapStore {
@@ -88,6 +89,11 @@ func (s *mapStore) UpdateSyncState(_ context.Context, st *store.SyncState) error
 func (s *mapStore) DeleteAllProjections(context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deleteAllErr != nil {
+		// A partial wipe, like PostgresStore's statement-by-statement one.
+		s.artifacts = map[string]*store.ArtifactProjection{}
+		return s.deleteAllErr
+	}
 	s.artifacts = map[string]*store.ArtifactProjection{}
 	s.links = map[string][]store.ArtifactLink{}
 	s.execs = map[string]*store.ExecutionProjection{}

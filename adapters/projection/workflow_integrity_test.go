@@ -628,26 +628,58 @@ func TestSweep_UpgradeCases(t *testing.T) {
 	})
 }
 
-// A sweep failure holds the sync and is retried by the next tick.
-func TestSweep_FailureMarksErrorAndRetries(t *testing.T) {
-	ms, _, svc, head := sweepFixture(t, map[string]string{wfPath: pocFoldWorkflow},
-		func(string) []store.WorkflowProjection {
-			return []store.WorkflowProjection{legacyRow(t, wfPath, pocFoldWorkflow, "1111111111111111111111111111111111111111")}
-		}, true)
+// A sweep failure holds the sync (counted: status error, last synced
+// commit unchanged) and is retried by the next tick — but it does not
+// freeze the projection: the artifact changes in the window are still
+// applied, as they were before the sweep existed (review round 1).
+func TestSweep_FailureHoldsTheSyncButDoesNotFreezeIt(t *testing.T) {
+	logs := captureLogs(t)
+	repo := newScratchRepo(t)
+	repo.write(wfPath, pocFoldWorkflow)
+	repo.write(taskPath, taskDoc("Pending", "T"))
+	c1 := repo.commit("c1")
+	ms := newMapStore()
+	ms.putRow(legacyRow(t, wfPath, pocFoldWorkflow, c1))
+	ms.setState(c1, "idle")
 	ms.deleteWorkflowErr[wfPath] = errSimulated
-	err := svc.IncrementalSync(context.Background())
-	if err == nil || !errors.Is(err, errSimulated) {
-		t.Fatalf("expected the sweep error, got %v", err)
+	st := allRowsStore{ms}
+	svc := NewService(repo.git, st, nil, 0)
+
+	// At head == last synced commit, idle: the early return must not
+	// hide the failed sweep.
+	if err := svc.IncrementalSync(context.Background()); err != nil {
+		t.Fatalf("a counted sweep failure is reported through sync_state, got %v", err)
 	}
-	if got := ms.syncState(); got.Status != "error" || got.LastSyncedCommit != head || !strings.Contains(got.ErrorDetail, "reconcile workflow rows") {
-		t.Fatalf("sync state: %+v", got)
+	if got := ms.syncState(); got.Status != "error" || got.LastSyncedCommit != c1 {
+		t.Fatalf("sync state after a failed sweep: %+v", got)
 	}
+	if n := len(logs.lines("level=WARN", "workflow row reconciliation failed", "simulated failure")); n != 1 {
+		t.Fatalf("expected one Warn with the cause, got %d:\n%s", n, logs.String())
+	}
+
+	// A change lands while the sweep still fails: it is applied.
+	repo.write(taskPath, taskDoc("Completed", "T"))
+	c2 := repo.commit("c2")
+	if err := svc.IncrementalSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := ms.syncState(); got.Status != "error" || got.LastSyncedCommit != c1 {
+		t.Fatalf("a failed sweep must keep holding the sync: %+v", got)
+	}
+	if a := ms.artifacts[taskPath]; a == nil || a.Status != "Completed" {
+		t.Fatalf("the artifact change must be applied despite the failed sweep: %+v", a)
+	}
+
+	// The store heals: the sweep completes and the sync advances.
 	delete(ms.deleteWorkflowErr, wfPath)
 	if err := svc.IncrementalSync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if ms.row(wfPath) != nil || ms.syncState().Status != "idle" {
-		t.Fatalf("retry must complete the sweep: row=%+v state=%+v", ms.row(wfPath), ms.syncState())
+	if ms.row(wfPath) != nil {
+		t.Fatalf("retry must complete the sweep: row=%+v", ms.row(wfPath))
+	}
+	if got := ms.syncState(); got.Status != "idle" || got.LastSyncedCommit != c2 {
+		t.Fatalf("sync state after the healed sweep: %+v", got)
 	}
 }
 
@@ -689,5 +721,109 @@ func TestFullRebuild_WorkflowReadFailureKeepsRowQuarantinedAndSweepRetries(t *te
 	}
 	if got := st.syncState(); got.Status != "idle" {
 		t.Fatalf("sync state after retry: %+v", got)
+	}
+}
+
+// AC 6 / design §2 step 2 (review round 1): FullRebuild restores a
+// previous row only when it passes VerifyProjectionDefinition. A row
+// smuggled before the upgrade, with its file still at head, is removed —
+// not restored quarantined — and, since a rejection is not an
+// infrastructure error, the rebuild marks the sweep done.
+func TestFullRebuild_UnverifiableRowOfRejectedFileIsRemoved(t *testing.T) {
+	repo := newScratchRepo(t)
+	repo.write(wfPath, pocFoldWorkflow)
+	c1 := repo.commit("c1")
+	ms := newMapStore()
+	ms.putRow(legacyRow(t, wfPath, pocFoldWorkflow, c1))
+	ms.setState(c1, "idle")
+	router := &recordingRouter{}
+	svc := NewService(repo.git, allRowsStore{ms}, router, 0)
+
+	if err := svc.FullRebuild(context.Background()); err != nil {
+		t.Fatalf("FullRebuild: %v", err)
+	}
+	if r := ms.row(wfPath); r != nil {
+		t.Fatalf("an unverifiable previous row must not survive the rebuild: %+v", r)
+	}
+	if got := ms.syncState(); got.Status != "idle" || got.LastSyncedCommit != c1 {
+		t.Fatalf("sync state: %+v", got)
+	}
+	assertOneRejection(t, router, "parse", "removed", "", false)
+	if !svc.workflowsVerified.Load() {
+		t.Fatal("a rebuild with no workflow infrastructure error marks the sweep done")
+	}
+}
+
+// The infrastructure-error branch of the same rule: a rebuild that cannot
+// read the workflow restores the previous row (quarantined) only when it
+// verifies. An unverifiable one is not written back.
+func TestFullRebuild_ReadFailureDoesNotRestoreAnUnverifiableRow(t *testing.T) {
+	repo := newScratchRepo(t)
+	repo.write(wfPath, pocFoldWorkflow)
+	c1 := repo.commit("c1")
+	ms := newMapStore()
+	ms.putRow(legacyRow(t, wfPath, pocFoldWorkflow, c1))
+	ms.setState(c1, "idle")
+	router := &recordingRouter{}
+	svc := NewService(&failReadGit{GitClient: repo.git, path: wfPath, err: errSimulated}, allRowsStore{ms}, router, 0)
+
+	if err := svc.FullRebuild(context.Background()); err != nil {
+		t.Fatalf("FullRebuild reports projection errors through sync_state, got %v", err)
+	}
+	if r := ms.row(wfPath); r != nil {
+		t.Fatalf("an unverifiable row must not be restored on a read failure: %+v", r)
+	}
+	if got := ms.syncState(); got.Status != "error" {
+		t.Fatalf("a workflow read failure is an infrastructure error: %+v", got)
+	}
+	if svc.workflowsVerified.Load() {
+		t.Fatal("the sweep must stay pending after a workflow infrastructure error")
+	}
+}
+
+// Review round 1 (finding M): a governed merge that deletes a workflow,
+// followed by a restart before the next tick, is an ordinary deletion in
+// the window the sync's Diff applies — the sweep removes the row like the
+// diff would, with an Info line, and reports no rejection.
+func TestSweep_DeletionInsidePendingWindowIsNotARejection(t *testing.T) {
+	logs := captureLogs(t)
+	const oldPath = "workflows/old.yaml"
+	repo := newScratchRepo(t)
+	repo.write(wfPath, reviewedWorkflow)
+	repo.write(oldPath, strings.Replace(reviewedWorkflow, "applies_to: [Task]", "applies_to: [Epic]", 1))
+	repo.commit("c1")
+	st := allRowsStore{newMapStore()}
+	router := &recordingRouter{}
+	if err := NewService(repo.git, st, router, 0).FullRebuild(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st.row(oldPath) == nil {
+		t.Fatal("precondition: the old workflow is projected")
+	}
+	repo.remove(oldPath)
+	c2 := repo.commit("c2: a governed merge deletes a workflow")
+	router.reset()
+
+	fresh := NewService(repo.git, st, router, 0) // a restart before the next tick
+	if err := fresh.IncrementalSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st.row(oldPath) != nil {
+		t.Fatal("the deleted workflow's row must be removed")
+	}
+	if rej := router.rejections(t); len(rej) != 0 {
+		t.Fatalf("an ordinary deletion is not a rejection: %+v", rej)
+	}
+	if n := len(logs.lines("level=WARN", "workflow file rejected")); n != 0 {
+		t.Fatalf("no rejection Warn expected:\n%s", logs.String())
+	}
+	if n := len(logs.lines("level=INFO", "deleted after the last synced commit", oldPath)); n != 1 {
+		t.Fatalf("expected one Info line for the in-window deletion:\n%s", logs.String())
+	}
+	if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != c2 {
+		t.Fatalf("sync state: %+v", got)
+	}
+	if r := st.row(wfPath); r == nil || r.Status != "Active" {
+		t.Fatalf("the surviving workflow is untouched: %+v", r)
 	}
 }

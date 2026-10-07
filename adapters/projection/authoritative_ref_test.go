@@ -122,11 +122,59 @@ func TestAuthoritativeBranch_UnbornMainIsSyncError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "refs/heads/main") {
 		t.Fatalf("expected an error naming refs/heads/main, got %v", err)
 	}
-	if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != initSHA {
-		t.Fatalf("sync state: %+v", got)
+	if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != initSHA || !strings.Contains(got.ErrorDetail, "refs/heads/main") {
+		t.Fatalf("sync state (error_detail must name the ref): %+v", got)
 	}
+	st.setState(initSHA, "idle")
 	if err := svc.FullRebuild(context.Background()); err == nil || !strings.Contains(err.Error(), "refs/heads/main") {
 		t.Fatalf("FullRebuild must refuse an unborn authoritative branch, got %v", err)
+	}
+	if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != initSHA || !strings.Contains(got.ErrorDetail, "refs/heads/main") {
+		t.Fatalf("FullRebuild must record the failure, keeping the commit: %+v", got)
+	}
+}
+
+// Review round 1 (finding D): the motivating case — `spine init-repo`
+// then `spine serve` on an EMPTY projection store — reports
+// sync_state = error naming the ref (before, the hand-off to FullRebuild
+// returned without writing any state), and heals by itself once the
+// spine/init branch is merged into main.
+func TestAuthoritativeBranch_UnbornMainOnFreshStoreReportsError(t *testing.T) {
+	repo := newScratchRepo(t) // init -b main, no commit on main
+	repo.run("checkout", "-q", "-b", "spine/init")
+	repo.write(BranchProtectionConfigPath, protectMain)
+	initSHA := repo.commit("init-repo seed")
+
+	st := newMapStore() // fresh: no sync_state row
+	svc := NewService(repo.git, st, nil, 0)
+	if err := svc.WithAuthoritativeBranch("main"); err != nil {
+		t.Fatal(err)
+	}
+	for tick := 1; tick <= 2; tick++ {
+		err := svc.IncrementalSync(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "refs/heads/main") {
+			t.Fatalf("tick %d: expected an error naming refs/heads/main, got %v", tick, err)
+		}
+		got := st.syncState()
+		if st.state == nil || got.Status != "error" || got.LastSyncedCommit != "" || !strings.Contains(got.ErrorDetail, "refs/heads/main") {
+			t.Fatalf("tick %d: a fresh store must report error with the cause: %+v", tick, got)
+		}
+	}
+	if len(st.bpRules) != 0 {
+		t.Fatal("nothing may be projected from the unmerged spine/init branch")
+	}
+
+	// The spine/init PR merges: main exists, and the next tick rebuilds
+	// from it (a store with no synced commit has no baseline to diff).
+	repo.run("branch", "main", "spine/init")
+	if err := svc.IncrementalSync(context.Background()); err != nil {
+		t.Fatalf("after the merge: %v", err)
+	}
+	if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != initSHA {
+		t.Fatalf("after the merge: %+v", got)
+	}
+	if len(st.bpRules) != 1 {
+		t.Fatalf("main's branch protection must be projected, got %d rules", len(st.bpRules))
 	}
 }
 

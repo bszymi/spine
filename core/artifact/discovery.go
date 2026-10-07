@@ -26,9 +26,8 @@ type DiscoveryError struct {
 	// ChangeSet.ReadErrors; empty for parse errors.
 	Ref string
 	// Err is the underlying read error, kept (not only its text) so a
-	// caller can classify it — errors.As(*git.GitError), its Kind — and
-	// decide whether the failure is transient. Set on
-	// ChangeSet.ReadErrors; nil for parse errors.
+	// caller can classify it (errors.Is / errors.As) together with Ref
+	// and Path. Set on ChangeSet.ReadErrors; nil for parse errors.
 	Err error
 }
 
@@ -41,7 +40,8 @@ type ChangeSet struct {
 	// The skip itself is unchanged (a path whose blob cannot be read is
 	// left out of Created/Modified/Deleted, as it always was), but the
 	// failure is no longer silent: the projection's IncrementalSync
-	// treats a transient one as a sync error instead of advancing past a
+	// holds the sync on every one it cannot prove deterministic (from the
+	// commit's tree, not from git's stderr) instead of advancing past a
 	// change it never applied (INIT-023 TASK-011, audit P3-14 class).
 	// Callers that only need the change lists — branch validation — can
 	// ignore it.

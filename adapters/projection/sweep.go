@@ -28,8 +28,9 @@ type allWorkflowRowsLister interface {
 // cannot interleave sweep writes with their own (a slower sweep at an
 // older head could otherwise re-upsert a stale row after a concurrent
 // sync projected the newer one). A failed sweep leaves the flag unset
-// and the next sync retries it.
-func (s *Service) ensureWorkflowsVerified(ctx context.Context, head string) error {
+// and the next sync retries it. from is the store's last_synced_commit
+// (see reconcileWorkflowRows).
+func (s *Service) ensureWorkflowsVerified(ctx context.Context, head, from string) error {
 	if s.workflowsVerified.Load() {
 		return nil
 	}
@@ -38,7 +39,7 @@ func (s *Service) ensureWorkflowsVerified(ctx context.Context, head string) erro
 	if s.workflowsVerified.Load() {
 		return nil
 	}
-	if err := s.reconcileWorkflowRows(ctx, head); err != nil {
+	if err := s.reconcileWorkflowRows(ctx, head, from); err != nil {
 		return err
 	}
 	s.workflowsVerified.Store(true)
@@ -62,16 +63,22 @@ func (s *Service) ensureWorkflowsVerified(ctx context.Context, head string) erro
 //     one is reported (scope / removed); a non-Active one — SMP's
 //     empty-status workflows/steps/* step-profile rows, which nothing
 //     reads — is logged at Info only;
-//   - file absent at head (a missed deletion): deleted, reported
-//     (absent_at_head / removed);
+//   - file absent at head: deleted. When the file still existed at from
+//     (the last synced commit, head being ahead of it), the deletion is
+//     an ordinary change inside the window this sync's Diff is about to
+//     apply — the row is deleted exactly as the diff would, with an Info
+//     line, not reported as a rejection. Otherwise it is a missed
+//     deletion and is reported (absent_at_head / removed);
 //   - file present and accepted: untouched when equal to the stored row
 //     (no re-stamp of source_commit, so pinned runs stay valid),
 //     otherwise replaced with head's row;
-//   - file present and rejected: the row is kept quarantined when it
-//     verifies, else deleted (removed).
+//   - file present and rejected (including a not_a_file entry such as a
+//     gitlink): the row is kept quarantined when it verifies, else
+//     deleted (removed).
 //
-// Any git or store error is returned; the caller marks the sync failed.
-func (s *Service) reconcileWorkflowRows(ctx context.Context, head string) error {
+// Any git or store error is returned; the caller counts it as a sync
+// error and retries the sweep on the next tick.
+func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) error {
 	log := observe.Logger(ctx)
 
 	var rows []store.WorkflowProjection
@@ -97,6 +104,31 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head string) error 
 		atHead[f] = struct{}{}
 	}
 
+	// inWindow reports whether a path absent at head still existed at
+	// from, i.e. it was deleted (or renamed away) by a commit this sync's
+	// Diff covers. The listing at from is taken lazily, once. If it
+	// cannot be taken (from pruned, for example) the answer is "no", so
+	// the row is reported — the louder of the two outcomes; the delete
+	// happens either way.
+	var atFrom map[string]struct{}
+	inWindow := func(p string) bool {
+		if from == "" || from == head {
+			return false
+		}
+		if atFrom == nil {
+			atFrom = map[string]struct{}{}
+			fromFiles, err := s.git.ListFiles(ctx, from, "")
+			if err != nil {
+				log.Debug("projection: list files at the last synced commit", "from", shortSHA(from), "error", sanitizeForLog(err.Error()))
+			}
+			for _, f := range fromFiles {
+				atFrom[f] = struct{}{}
+			}
+		}
+		_, ok := atFrom[p]
+		return ok
+	}
+
 	for i := range rows {
 		row := &rows[i]
 		active := row.Status == string(domain.WorkflowStatusActive)
@@ -120,6 +152,11 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head string) error 
 		if _, ok := atHead[row.WorkflowPath]; !ok {
 			if err := s.store.DeleteWorkflowProjection(ctx, row.WorkflowPath); err != nil {
 				return fmt.Errorf("delete workflow row absent at head %s: %w", row.WorkflowPath, err)
+			}
+			if inWindow(row.WorkflowPath) {
+				log.Info("projection: removed workflow row whose file was deleted after the last synced commit",
+					"workflow_path", row.WorkflowPath, "from", shortSHA(from), "head", shortSHA(head))
+				continue
 			}
 			s.reportWorkflowRejection(ctx, &WorkflowRejection{
 				Path: row.WorkflowPath, Commit: head, Check: checkAbsentAtHead,

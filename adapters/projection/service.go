@@ -111,17 +111,27 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	s.sweepMu.Lock()
 	defer s.sweepMu.Unlock()
 
-	head, err := s.resolveHead(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve sync target: %w", err)
-	}
-
-	// Mark as rebuilding but keep previous commit until rebuild succeeds
+	// Keep the previous commit until the rebuild succeeds.
 	existingState, _ := s.store.GetSyncState(ctx)
 	prevCommit := ""
 	if existingState != nil {
 		prevCommit = existingState.LastSyncedCommit
 	}
+	// Every failure before the wipe left the projection exactly as it
+	// was: record status error with the cause, last_synced_commit
+	// unchanged. A store with no synced commit yet records "" — the next
+	// IncrementalSync then rebuilds (there is no baseline to diff from).
+	// Before INIT-023 TASK-011 review round 1 these returned without
+	// touching the state: a fresh store (spine init-repo before its
+	// spine/init branch is merged) reported nothing at all, and a failed
+	// discovery left "rebuilding" behind.
+	prev := &store.SyncState{LastSyncedCommit: prevCommit}
+
+	head, err := s.resolveHead(ctx)
+	if err != nil {
+		return s.markSyncError(ctx, prev, "resolve sync target", err)
+	}
+
 	_ = s.store.UpdateSyncState(ctx, &store.SyncState{
 		LastSyncedCommit: prevCommit,
 		Status:           "rebuilding",
@@ -131,20 +141,22 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	// plan every workflow row before the wipe.
 	result, err := artifact.DiscoverAll(ctx, s.git, head, s.scope.dir)
 	if err != nil {
-		return fmt.Errorf("discover artifacts: %w", err)
+		return s.markSyncError(ctx, prev, "discover artifacts", err)
 	}
 	wfPaths, err := s.workflowPathsAt(ctx, head, result.Workflows)
 	if err != nil {
-		return fmt.Errorf("discover workflows: %w", err)
+		return s.markSyncError(ctx, prev, "discover workflows", err)
 	}
 	plans, err := s.planWorkflowRows(ctx, wfPaths, head)
 	if err != nil {
-		return err
+		return s.markSyncError(ctx, prev, "plan workflow rows", err)
 	}
 
-	// Clear existing projections
+	// Clear existing projections. The wipe is several statements, so a
+	// failure can leave it partial: no commit describes the store any
+	// more, so none is recorded and the next sync rebuilds.
 	if err := s.store.DeleteAllProjections(ctx); err != nil {
-		return fmt.Errorf("delete projections: %w", err)
+		return s.markSyncError(ctx, &store.SyncState{}, "delete projections", err)
 	}
 
 	// Count discovery errors as projection failures
@@ -328,16 +340,19 @@ func (s *Service) applyWorkflowPlans(ctx context.Context, plans []workflowPlan) 
 	return infraErrors, rejected
 }
 
-// markSyncError records an infrastructure failure: status error with the
-// detail, last_synced_commit left where it was, so the next tick retries
-// even when head has not moved. It returns the wrapped cause, joined with
-// any error from writing the state.
+// markSyncError records an infrastructure failure: status error,
+// last_synced_commit left where it was, so the next tick retries even
+// when head has not moved. error_detail carries the label and the cause
+// ("resolve sync target: resolve authoritative ref refs/heads/main: …"),
+// sanitised to one bounded line — git error text can echo committed
+// paths. It returns the wrapped cause, joined with any error from writing
+// the state.
 func (s *Service) markSyncError(ctx context.Context, state *store.SyncState, detail string, cause error) error {
 	err := fmt.Errorf("%s: %w", detail, cause)
 	if upErr := s.store.UpdateSyncState(ctx, &store.SyncState{
 		LastSyncedCommit: state.LastSyncedCommit,
 		Status:           "error",
-		ErrorDetail:      sanitizeForLog(detail),
+		ErrorDetail:      sanitizeForLog(err.Error()),
 	}); upErr != nil {
 		err = errors.Join(err, fmt.Errorf("update sync state: %w", upErr))
 	}
@@ -371,6 +386,20 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		// No sync state — do a full rebuild
 		return s.FullRebuild(ctx)
 	}
+	if state.LastSyncedCommit == "" {
+		// No baseline commit to diff from (`git diff "" <head>` can never
+		// succeed). A failed first rebuild records exactly this with
+		// status error: rebuild again. "rebuilding" means a first rebuild
+		// is in flight — on another instance, SMP's provisioning — or was
+		// interrupted; starting a second wipe-and-reload under it could
+		// let a reader see the other one's "idle" over a half-written
+		// projection, so leave it alone (an interrupted one is cleared by
+		// an operator rebuild, as before).
+		if state.Status == "rebuilding" {
+			return errors.New("projection has no synced commit yet: a first full rebuild is in progress or was interrupted")
+		}
+		return s.FullRebuild(ctx)
+	}
 
 	head, err := s.resolveHead(ctx)
 	if err != nil {
@@ -378,13 +407,22 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	}
 
 	// The sweep runs before the early return: a store already idle at
-	// head is exactly the state an upgrade starts from.
-	if err := s.ensureWorkflowsVerified(ctx, head); err != nil {
-		return s.markSyncError(ctx, state, "reconcile workflow rows at "+shortSHA(head), err)
+	// head is exactly the state an upgrade starts from. A failed sweep
+	// does not stop the rest of the sync — it is counted below, so the
+	// state ends error without advancing and the next tick sweeps again
+	// — but the artifact, branch-protection and workflow changes in the
+	// window are still applied, as they were before the sweep existed:
+	// one row that cannot be reconciled must not freeze the projection.
+	sweepErr := s.ensureWorkflowsVerified(ctx, head, state.LastSyncedCommit)
+	if sweepErr != nil {
+		log.Warn("projection: workflow row reconciliation failed; the sync is held in error and retries it",
+			"head", shortSHA(head),
+			"error", sanitizeForLog(sweepErr.Error()),
+		)
 	}
 
 	// Retry if previous sync failed, even at the same commit
-	if head == state.LastSyncedCommit && state.Status == "idle" {
+	if sweepErr == nil && head == state.LastSyncedCommit && state.Status == "idle" {
 		return nil // already up to date and healthy
 	}
 
@@ -411,6 +449,9 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	}
 
 	var syncErrors int
+	if sweepErr != nil {
+		syncErrors++ // logged above
+	}
 
 	// scopeViolation guards the invariant that artifactDiffs passed only
 	// in-scope paths to discovery. A path outside the scope here means a
@@ -600,35 +641,6 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	})
 
 	return nil
-}
-
-// classifyReadErrors sorts the artifact read failures discovery skipped
-// past (INIT-023 TASK-011 §3). A blanket "propagate" would be unsafe: a
-// gitlink entry named x.md reads as `fatal: bad object`, which the git
-// client classifies as permanent, so any member could wedge the sync with
-// one plantable entry. So only a failure that can heal on retry is
-// infrastructure — an error that is not a *git.GitError (exec/spawn
-// failure, e.g. EAGAIN under load), a transient GitError, or a cancelled
-// context — and it is returned to hold the sync. Every other failure keeps
-// the historical skip, now logged at Warn and counted (distinct paths) as
-// read_skipped.
-func (s *Service) classifyReadErrors(ctx context.Context, readErrors []artifact.DiscoveryError) (int, error) {
-	skipped := make(map[string]struct{})
-	for i := range readErrors {
-		re := &readErrors[i]
-		var gerr *git.GitError
-		if ctx.Err() != nil || !errors.As(re.Err, &gerr) || gerr.Kind == git.ErrKindTransient {
-			return 0, fmt.Errorf("read %s at %s: %w", re.Path, shortSHA(re.Ref), re.Err)
-		}
-		observe.Logger(ctx).Warn("projection: skipped unreadable changed file",
-			"path", re.Path,
-			"ref", shortSHA(re.Ref),
-			"kind", string(gerr.Kind),
-			"error", sanitizeForLog(re.Message),
-		)
-		skipped[re.Path] = struct{}{}
-	}
-	return len(skipped), nil
 }
 
 // StartSyncLoop runs incremental sync on a polling interval.

@@ -24,6 +24,7 @@ const (
 	checkRoundTrip    = "round_trip"     // Parse accepted it, but the stored JSON would read back differently
 	checkValidate     = "validate"       // workflow.Validate failed and strict validation is on
 	checkReadBounds   = "read_bounds"    // the blob is refused by a content-size bound on read
+	checkNotAFile     = "not_a_file"     // the commit's tree holds no regular file at the path (a gitlink, a directory)
 	checkScope        = "scope"          // a stored row whose path is not a workflow location
 	checkAbsentAtHead = "absent_at_head" // a stored row whose file no longer exists at head
 )
@@ -50,7 +51,7 @@ type WorkflowRejection struct {
 	Path   string // repository-relative workflow path
 	Commit string // commit the file was read at
 	// Check is one of "parse", "round_trip", "validate", "read_bounds",
-	// "scope" or "absent_at_head".
+	// "not_a_file", "scope" or "absent_at_head".
 	Check string
 	Err   error
 }
@@ -72,11 +73,13 @@ func (s *Service) WithStrictWorkflowValidation(strict bool) {
 }
 
 // isContentReadError is the single classifier for read errors that mean
-// "this blob's content is refused" rather than "git failed". Such a read
-// becomes a read_bounds rejection — the sync advances — instead of an
-// infrastructure error that would wedge the sync in `error` on a file
-// that never changes. Nothing qualifies yet; the bounded-read work
-// (INIT-023 TASK-003) registers its oversize-blob sentinel here.
+// "this blob's content is refused" rather than "git failed". For a
+// workflow such a read becomes a read_bounds rejection — the sync
+// advances — instead of an infrastructure error that would wedge the
+// sync in `error` on a file that never changes; for a changed artifact it
+// is a counted read_skipped (classifyReadFailure consults it for both).
+// Nothing qualifies yet; the bounded-read work (INIT-023 TASK-003)
+// registers its oversize-blob sentinel here.
 func isContentReadError(err error) bool {
 	_ = err
 	return false
@@ -86,6 +89,14 @@ func isContentReadError(err error) bool {
 // projection row. It returns exactly one of: a row to upsert, a content
 // rejection, or an infrastructure error (a git read failure).
 //
+// A read failure is a rejection only when classifyReadFailure proves it
+// deterministic: read_bounds for refused content, not_a_file when the
+// commit's tree holds no regular file at the path (a gitlink committed at
+// workflows/x.yaml reads as `fatal: bad object` forever — as an
+// infrastructure error it held the sync in error on every entry point,
+// and after a restart or a rebuild the pre-diff sweep froze the whole
+// projection on it). Every other read failure is infrastructure.
+//
 // The row's typed columns come from the strictly parsed definition and
 // its definition column from workflow.ProjectionDefinition, which is
 // byte-for-byte the historical encoder for every accepted file — SMP
@@ -93,10 +104,17 @@ func isContentReadError(err error) bool {
 func (s *Service) buildWorkflowRow(ctx context.Context, wfPath, commitSHA string) (*store.WorkflowProjection, *WorkflowRejection, error) {
 	content, err := s.git.ReadFile(ctx, commitSHA, wfPath)
 	if err != nil {
-		if isContentReadError(err) {
+		entry, infraErr := s.classifyReadFailure(ctx, commitSHA, wfPath, err)
+		if infraErr != nil {
+			return nil, nil, fmt.Errorf("read workflow %s: %w", wfPath, infraErr)
+		}
+		if entry == entryContentRefused {
 			return nil, &WorkflowRejection{Path: wfPath, Commit: commitSHA, Check: checkReadBounds, Err: err}, nil
 		}
-		return nil, nil, fmt.Errorf("read workflow %s: %w", wfPath, err)
+		return nil, &WorkflowRejection{
+			Path: wfPath, Commit: commitSHA, Check: checkNotAFile,
+			Err: fmt.Errorf("no regular file at this path (tree entry: %s): %w", entry, err),
+		}, nil
 	}
 
 	wf, definition, err := workflow.ProjectionDefinition(wfPath, content)
