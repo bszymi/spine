@@ -608,6 +608,28 @@ func TestServeHTTP_RefAdmissionPerRequestReaderWins(t *testing.T) {
 		t.Errorf("config reader binds bob, so alice must be refused, got: %s", body)
 	}
 
+	// A per-request nil reader is a decision, not an absence: the
+	// gateway attaches it for a workspace with no store, and the
+	// handler must not fall back to its Config reader (in shared mode,
+	// another workspace's store) even when that reader would bind.
+	aliceConfig, err := NewHandler(Config{
+		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
+		ReceivePackEnabled: true,
+		Policy:             branchprotect.NewPermissive(),
+		RunRefs:            boundRun("alice", "task-001-x", "0a1b2c3d"),
+		StepDefs:           admStepDefs{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = admPush(t, aliceConfig, func(ctx context.Context) context.Context {
+		ctx = WithRunRefs(domain.WithActor(ctx, alice), nil)
+		return WithStepDefs(ctx, nil)
+	}, u)
+	if !strings.Contains(body, "ref-admission: run-branch admission is not configured on this server") {
+		t.Errorf("per-request nil reader must not fall back to the config reader, got: %s", body)
+	}
+
 	// Both readers nil: refused.
 	bare, err := NewHandler(Config{
 		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },

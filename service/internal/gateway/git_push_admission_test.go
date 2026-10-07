@@ -364,6 +364,51 @@ func TestGitPush_BoundAndOperatorPushes(t *testing.T) {
 	}
 }
 
+// TestGitPush_WorkspaceWithoutStoreDoesNotFallBack: when the per-push
+// resolver has no run store for the workspace (a shared-mode workspace
+// with no database yet), run branches are operator-only for that push.
+// The handler's own fallback reader — here one that would bind alice —
+// must not be consulted, since in shared mode it belongs to another
+// workspace.
+func TestGitPush_WorkspaceWithoutStoreDoesNotFallBack(t *testing.T) {
+	repo, _ := admServerRepo(t, admRunBranch)
+	fallback := &admRuns{
+		runs: map[string]*domain.Run{admRunID: {
+			RunID: admRunID, Status: domain.RunStatusActive, CurrentStepID: "execute", BranchName: admRunBranch,
+		}},
+		execs: map[string][]domain.StepExecution{admRunID: {
+			{ExecutionID: "e1", RunID: admRunID, StepID: "execute", ActorID: "alice", Status: domain.StepStatusInProgress},
+		}},
+	}
+	fs := newFakeStore()
+	authSvc, tokens := admTokens(t, fs, map[string]domain.ActorRole{"alice": domain.RoleContributor, "op": domain.RoleOperator})
+	policy := branchprotect.New(branchprotect.StaticRules(nil))
+	gh, err := githttp.NewHandler(githttp.Config{
+		ReceivePackEnabled: true, Policy: policy, RunRefs: fallback, StepDefs: admStepDefs{},
+	})
+	if err != nil {
+		t.Skipf("git-http-backend unavailable: %v", err)
+	}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{
+		Store: fs, Auth: authSvc, GitHTTP: gh,
+		WorkspaceResolver: admResolver{cfg: workspace.Config{ID: "ws1", RepoPath: repo, Status: workspace.StatusActive}},
+		GitPushResolver: func(context.Context, string) (gateway.GitPushResources, func(), error) {
+			return gateway.GitPushResources{Policy: branchprotect.NewPermissive()}, func() {}, nil
+		},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	p := newAdmPusher(t, ts.URL+"/git/ws1", tokens, "op")
+	out, err := p.push("alice", "origin", "HEAD:refs/heads/"+admRunBranch)
+	if err == nil || !strings.Contains(out, "ref-admission: run-branch admission is not configured on this server") {
+		t.Errorf("push with no workspace store: err=%v, want the operator-only refusal\n%s", err, out)
+	}
+	if out, err := p.push("op", "origin", "HEAD:refs/heads/"+admRunBranch); err != nil {
+		t.Errorf("operator push refused: %v\n%s", err, out)
+	}
+}
+
 // TestGitPush_DivergenceRefAdmission is AC 11: the deterministic
 // divergence ref (the F8 vector) admits only the actor holding that
 // branch's current step, or an operator.

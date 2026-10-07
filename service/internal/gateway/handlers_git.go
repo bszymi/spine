@@ -242,13 +242,15 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 			ctx = githttp.WithEvents(ctx, res.Events)
 		}
 		// The admission's run reader and step-definition lookup travel
-		// as a pair (githttp prefers the per-request pair whenever a
-		// reader is attached). The resolver's release is deferred past
-		// ServeHTTP above, so a pooled workspace store outlives the push.
-		if res.Runs != nil {
-			ctx = githttp.WithRunRefs(ctx, res.Runs)
-			ctx = githttp.WithStepDefs(ctx, res.StepDefs)
-		}
+		// as a pair, and are attached even when nil: the resolver has
+		// decided for this workspace, so githttp must not fall back to
+		// its process-level pair (another workspace's store in shared
+		// mode). A nil reader or lookup makes run, plan and divergence
+		// refs operator-only for this push. The resolver's release is
+		// deferred past ServeHTTP above, so a pooled workspace store
+		// outlives the push.
+		ctx = githttp.WithRunRefs(ctx, res.Runs)
+		ctx = githttp.WithStepDefs(ctx, res.StepDefs)
 	}
 
 	s.gitHTTP.ServeHTTP(w, r.WithContext(ctx))

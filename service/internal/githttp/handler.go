@@ -69,8 +69,9 @@ type Handler struct {
 
 	// runRefs and stepDefs back the ref-class admission of run, plan
 	// and divergence branches (INIT-023 TASK-016). They are the
-	// fallback pair: a per-request pair attached with WithRunRefs wins.
-	// Either nil makes those refs operator-only (fail closed).
+	// fallback pair: a per-request pair attached with WithRunRefs (even
+	// a nil one) wins. Either nil makes those refs operator-only (fail
+	// closed).
 	runRefs  refadmit.RunReader
 	stepDefs refadmit.StepDefLookup
 
@@ -128,8 +129,8 @@ type Config struct {
 
 	// RunRefs reads runs, step executions and divergence branches for
 	// the run-branch admission (INIT-023 TASK-016). A per-request reader
-	// attached with WithRunRefs wins. With both nil, run, plan and
-	// divergence refs are operator-only.
+	// attached with WithRunRefs wins, even a nil one. With no reader,
+	// run, plan and divergence refs are operator-only.
 	RunRefs refadmit.RunReader
 
 	// StepDefs resolves a run's step definitions for the review freeze
@@ -437,9 +438,9 @@ func (h *Handler) prereceive(w http.ResponseWriter, r *http.Request, log *slog.L
 	// push could resolve its run in one workspace and its step
 	// definition in another.
 	admActor := domain.ActorFromContext(r.Context())
-	runs, defs := runRefsFromContext(r.Context()), stepDefsFromContext(r.Context())
-	if runs == nil {
-		runs, defs = h.runRefs, h.stepDefs
+	runs, defs := h.runRefs, h.stepDefs
+	if rr, ok := runRefsFromContext(r.Context()); ok {
+		runs, defs = rr, stepDefsFromContext(r.Context())
 	}
 	adm := refadmit.NewEvaluator(runs).WithStepDefs(defs)
 	repositoryID := repositoryIDFromContext(r.Context())
@@ -913,21 +914,30 @@ type (
 	repositoryIDKey struct{}
 )
 
+// runRefsValue wraps the per-request reader so that an attached nil
+// reader is distinguishable from no attachment at all.
+type runRefsValue struct{ rr refadmit.RunReader }
+
 // WithRunRefs returns a copy of ctx carrying the run reader the
-// pre-receive admission uses for run, plan and divergence refs. It
-// wins over the handler's Config.RunRefs, and once it is set the
-// step-definition lookup is taken from the context too (WithStepDefs),
-// never from Config.StepDefs. A nil reader is not attached.
+// pre-receive admission uses for run, plan and divergence refs. Once
+// it is attached — even as nil — it wins over the handler's
+// Config.RunRefs, and the step-definition lookup is taken from the
+// context too (WithStepDefs), never from Config.StepDefs.
+//
+// Attaching nil is meaningful: it pins "no run store for this push"
+// (a shared-mode workspace with no database yet), so run, plan and
+// divergence refs are operator-only for it instead of being resolved
+// against the handler's process-level fallback store, which would be
+// another workspace's.
 func WithRunRefs(ctx context.Context, rr refadmit.RunReader) context.Context {
-	if rr == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, runRefsKey{}, rr)
+	return context.WithValue(ctx, runRefsKey{}, runRefsValue{rr: rr})
 }
 
-func runRefsFromContext(ctx context.Context) refadmit.RunReader {
-	rr, _ := ctx.Value(runRefsKey{}).(refadmit.RunReader)
-	return rr
+// runRefsFromContext returns the per-request reader and whether one was
+// attached (possibly nil).
+func runRefsFromContext(ctx context.Context) (refadmit.RunReader, bool) {
+	v, ok := ctx.Value(runRefsKey{}).(runRefsValue)
+	return v.rr, ok
 }
 
 // WithStepDefs returns a copy of ctx carrying the step-definition
