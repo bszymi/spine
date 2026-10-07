@@ -466,18 +466,45 @@ func withActor(a *domain.Actor) func(context.Context) context.Context {
 	return func(ctx context.Context) context.Context { return domain.WithActor(ctx, a) }
 }
 
+// countingPolicy wraps a policy and records every ref it evaluates, so
+// a test can assert that a ref never reached Policy.Evaluate rather
+// than infer it from the absence of a denial.
+type countingPolicy struct {
+	inner     branchprotect.Policy
+	evaluated []string
+}
+
+func (c *countingPolicy) Evaluate(ctx context.Context, req branchprotect.Request) (branchprotect.Decision, []branchprotect.Reason, error) {
+	c.evaluated = append(c.evaluated, req.Branch)
+	return c.inner.Evaluate(ctx, req)
+}
+
 // TestServeHTTP_SpineRefsSkipPolicyButNotAdmission replaces
 // TestServeHTTP_PreReceiveAllowsSpineRefsWithoutPolicy (INIT-023
 // TASK-016 AC 7a). spine/** refs are still out of scope for
 // user-authored branch-protection rules and never reach
-// Policy.Evaluate, so an operator's push passes even a deny-everything
-// `*` rule. They no longer skip the gate itself: the same push with no
-// actor is refused by the ref-class admission.
+// Policy.Evaluate (I3, ADR-009 §3), so an operator's push passes rules
+// that really match every spine/** ref. They no longer skip the gate
+// itself: the same push with no actor is refused by the ref-class
+// admission.
+//
+// Review round 1: the AC's deny-all `*` rule matched nothing here
+// (path.Match's `*` stops at '/'), so deleting the `continue` that
+// keeps admitted spine/** refs away from the policy went unnoticed.
+// The rules below match each ref (asserted directly against the
+// policy), and a counting wrapper asserts the policy is never called.
+// Mutation check: deleting that `continue` fails this test.
 func TestServeHTTP_SpineRefsSkipPolicyButNotAdmission(t *testing.T) {
-	policy := staticRulePolicy(config.Rule{
-		Branch:      "*",
-		Protections: []config.RuleKind{config.KindNoDirectWrite},
-	})
+	deny := []config.RuleKind{config.KindNoDirectWrite, config.KindNoDelete}
+	rules := staticRulePolicy(
+		config.Rule{Branch: "main", Protections: deny},
+		config.Rule{Branch: "spine", Protections: deny},
+		config.Rule{Branch: "spine/*", Protections: deny},
+		config.Rule{Branch: "spine/*/*", Protections: deny},
+		config.Rule{Branch: "spine/*/*/*", Protections: deny},
+		config.Rule{Branch: "spine/*/*/*/*", Protections: deny},
+	)
+	policy := &countingPolicy{inner: rules}
 	h, err := NewHandler(Config{
 		ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return t.TempDir(), nil },
 		ReceivePackEnabled: true,
@@ -486,13 +513,49 @@ func TestServeHTTP_SpineRefsSkipPolicyButNotAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := RefUpdate{OldSHA: strings.Repeat("0", 40), NewSHA: strings.Repeat("a", 40), Ref: "refs/heads/spine/run/abc"}
+	operator := withActor(&domain.Actor{ActorID: "op-1", Role: domain.RoleOperator})
+	z, n := strings.Repeat("0", 40), strings.Repeat("a", 40)
 
-	body := admPush(t, h, withActor(&domain.Actor{ActorID: "op-1", Role: domain.RoleOperator}), u)
-	if strings.Contains(body, "pre-receive hook declined") || strings.Contains(body, "branch-protection:") {
-		t.Errorf("operator push of a spine/* ref must skip the policy, got denial: %s", body)
+	for _, ref := range []string{
+		"refs/heads/spine/run/abc",                            // reserved (no run suffix)
+		"refs/heads/spine/run/task-001-x-0a1b2c3d",            // run_branch
+		"refs/heads/spine/plan/task-001-x-0a1b2c3d",           // run_branch (plan)
+		"refs/heads/spine/run-0a1b2c3d/run-0a1b2c3d-div-d/b1", // divergence_branch
+		"refs/heads/spine/init",                               // init_branch
+		"refs/heads/spine",                                    // reserved
+	} {
+		// The rules really match the ref: evaluated directly, the
+		// policy denies both a write and a delete.
+		for _, kind := range []branchprotect.OperationKind{branchprotect.OpDirectWrite, branchprotect.OpDelete} {
+			if dec, _, err := rules.Evaluate(context.Background(), branchprotect.Request{Branch: ref, Kind: kind}); err != nil || dec != branchprotect.DecisionDeny {
+				t.Fatalf("fixture: rules on %s (%s) = %v %v, want deny", ref, kind, dec, err)
+			}
+		}
+		for _, u := range []RefUpdate{
+			{OldSHA: z, NewSHA: n, Ref: ref},
+			{OldSHA: n, NewSHA: z, Ref: ref},
+		} {
+			policy.evaluated = nil
+			body := admPush(t, h, operator, u)
+			if strings.Contains(body, "pre-receive hook declined") || strings.Contains(body, "branch-protection:") {
+				t.Errorf("operator push %s (delete=%v) must skip the policy, got denial: %s", ref, u.IsDelete(), body)
+			}
+			if len(policy.evaluated) != 0 {
+				t.Errorf("operator push %s (delete=%v): Policy.Evaluate called for %v, want never", ref, u.IsDelete(), policy.evaluated)
+			}
+		}
 	}
 
+	// Control: an ordinary branch does reach the policy, so the counter
+	// and the rules are live.
+	policy.evaluated = nil
+	body := admPush(t, h, operator, RefUpdate{OldSHA: z, NewSHA: n, Ref: "refs/heads/main"})
+	if !strings.Contains(body, `branch-protection: rule "no-direct-write"`) || len(policy.evaluated) != 1 {
+		t.Errorf("control: operator push to main: evaluated %v, body %s; want one evaluation and the no-direct-write denial", policy.evaluated, body)
+	}
+
+	u := RefUpdate{OldSHA: z, NewSHA: n, Ref: "refs/heads/spine/run/abc"}
+	policy.evaluated = nil
 	body = admPush(t, h, nil, u)
 	if !strings.Contains(body, "ng refs/heads/spine/run/abc pre-receive hook declined") {
 		t.Errorf("anonymous push of a spine/* ref must be ng'd, got: %s", body)
@@ -500,8 +563,8 @@ func TestServeHTTP_SpineRefsSkipPolicyButNotAdmission(t *testing.T) {
 	if !strings.Contains(body, "ref-admission: spine/run/abc is in the reserved spine namespace; operator role required") {
 		t.Errorf("anonymous push should carry the ref-admission line, got: %s", body)
 	}
-	if strings.Contains(body, "branch-protection:") {
-		t.Errorf("a spine/* ref must never reach the policy, got: %s", body)
+	if strings.Contains(body, "branch-protection:") || len(policy.evaluated) != 0 {
+		t.Errorf("a spine/* ref must never reach the policy, got evaluated %v, body: %s", policy.evaluated, body)
 	}
 }
 
