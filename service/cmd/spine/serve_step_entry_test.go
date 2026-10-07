@@ -19,6 +19,7 @@ import (
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/queue"
+	"github.com/bszymi/spine/service/internal/config"
 	"github.com/bszymi/spine/service/internal/workspace"
 	"github.com/bszymi/spine/testutil"
 )
@@ -188,6 +189,50 @@ func TestServeWiring_InstallsEnvSelectedStepEntryPolicy(t *testing.T) {
 			}
 			ss.RunTerminatedFn(ctx, "run-1", "run cancelled: run timeout")
 			requireTermination(t, wsStore, strict)
+		})
+	}
+}
+
+// TestServeWiring_StepAssignFallbackFollowsPolicy (review round 1): the
+// gateway's engine-less store binder performs none of the policy's checks,
+// so buildServerConfig must disable it whenever a step-entry policy is
+// installed (strict, the default) and keep it for the zero value (legacy).
+// Mutation: hard-coding DisableStepAssignFallback to false fails the strict
+// row.
+func TestServeWiring_StepAssignFallbackFollowsPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy engine.StepEntryPolicy
+		want   bool
+	}{
+		{"strict", engine.StrictStepEntryPolicy(), true},
+		{"single switch", engine.StepEntryPolicy{EnforceRunStatus: true}, true},
+		{"legacy (zero value)", engine.StepEntryPolicy{}, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			repoPath := testutil.NewTempRepo(t)
+			q := queue.NewMemoryQueue(16)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			go q.Start(ctx)
+			rt, err := buildServerConfig(ctx, serveDeps{
+				Store:           stubStore{},
+				RepoPath:        repoPath,
+				SpineCfg:        &config.SpineConfig{ArtifactsDir: "/"},
+				GitClient:       git.NewCLIClient(repoPath),
+				Queue:           q,
+				Events:          event.NewQueueRouter(q),
+				DevMode:         true,
+				RuntimeEnv:      "development",
+				StepEntryPolicy: tc.policy,
+			})
+			if err != nil {
+				t.Fatalf("buildServerConfig: %v", err)
+			}
+			if got := rt.Config.DisableStepAssignFallback; got != tc.want {
+				t.Fatalf("DisableStepAssignFallback = %v, want %v", got, tc.want)
+			}
 		})
 	}
 }

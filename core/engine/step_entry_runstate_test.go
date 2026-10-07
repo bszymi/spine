@@ -97,6 +97,13 @@ func TestStepEntry_RunStatusGuards(t *testing.T) {
 			_, err := f.orch.AcknowledgeStep(ctx, AcknowledgeRequest{ActorID: "worker", ExecutionID: "run-1-manual-1"})
 			return err
 		}},
+		// Review round 1 (Deviation 1): the guard sits before the
+		// idempotent in_progress answer, so a runner re-acknowledging its
+		// own in_progress execution on a dead run is told to stop.
+		{name: "AcknowledgeStep re-acknowledging in_progress", exec: bound("manual", domain.StepStatusInProgress), call: func(ctx context.Context, f guardFixture, _ bool) error {
+			_, err := f.orch.AcknowledgeStep(ctx, AcknowledgeRequest{ActorID: "worker", ExecutionID: "run-1-manual-1"})
+			return err
+		}},
 		{name: "IngestResult", exec: bound("manual", domain.StepStatusInProgress), call: func(ctx context.Context, f guardFixture, strict bool) error {
 			req := SubmitRequest{ExecutionID: "run-1-manual-1", OutcomeID: "done"}
 			if !strict {

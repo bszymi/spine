@@ -21,7 +21,8 @@ import (
 // ── AC 2 ──
 
 // From poc/engine-authz/poc_assign_bypass_test.go, policy on.
-// Mutation: deleting any one of checks 3-6 in checkStepEntryActor fails the
+// Mutation: deleting any one of checks 3-6 in checkStepEntryActor — and
+// either half of check 5 (allow-list, eligible_actor_types) — fails the
 // matching row (each row is built so that exactly one check refuses it,
 // and the error text is asserted as well as the code).
 func TestStepEntry_AssignRefusesIneligibleActor(t *testing.T) {
@@ -52,7 +53,23 @@ func TestStepEntry_AssignRefusesIneligibleActor(t *testing.T) {
 		// Design-check row: a step absent from the pinned workflow fails closed.
 		{name: "step absent from the pinned workflow", actor: "alice-reviewer", step: "ghost-step",
 			want: domain.ErrNotFound, msg: "ghost-step"},
+		// Review round 1: the eligible_actor_types half of check 5. On a
+		// hybrid step no mode-implied type applies (check 3 passes), so
+		// only check 5's type test refuses an allow-listed, skilled,
+		// active automated_system actor on a step limited to humans.
+		{name: "automated_system on a hybrid step limited to humans", actor: "rex-runner", step: "hybrid-review",
+			stored: []string{"alice-reviewer", "rex-runner"}, want: domain.ErrConflict, msg: "not eligible for this step"},
 	}
+	wf := legacyReviewWorkflow()
+	wf.Steps = append(wf.Steps, domain.StepDefinition{
+		ID: "hybrid-review", Name: "Hybrid review", Type: domain.StepTypeReview,
+		Execution: &domain.ExecutionConfig{
+			Mode:               domain.ExecModeHybrid,
+			EligibleActorTypes: []string{"human"},
+			RequiredSkills:     []string{"review"},
+		},
+		Outcomes: []domain.OutcomeDefinition{{ID: "accepted", Name: "Accepted", NextStep: "publish"}},
+	})
 
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -77,12 +94,13 @@ func TestStepEntry_AssignRefusesIneligibleActor(t *testing.T) {
 			bs.actors["bob-reviewer"] = activeActor("bob-reviewer", domain.ActorTypeHuman)
 			bs.actors["carol-noskill"] = activeActor("carol-noskill", domain.ActorTypeHuman)
 			bs.actors["sam-suspended"] = &domain.Actor{ActorID: "sam-suspended", Type: domain.ActorTypeHuman, Status: domain.ActorStatusSuspended}
-			for _, id := range []string{"mallory", "alice-reviewer", "bob-reviewer", "sam-suspended"} {
+			bs.actors["rex-runner"] = activeActor("rex-runner", domain.ActorTypeAutomated)
+			for _, id := range []string{"mallory", "alice-reviewer", "bob-reviewer", "sam-suspended", "rex-runner"} {
 				bs.skills[id] = skillSet("review")
 			}
 			gitOp := &recordingMergeGit{}
 			orch := &Orchestrator{
-				store: st, wfLoader: &claimTestWFLoader{wf: legacyReviewWorkflow()},
+				store: st, wfLoader: &claimTestWFLoader{wf: wf},
 				events: &mockEventEmitter{}, git: gitOp, actors: &stubActorAssigner{},
 				artifacts: &stubArtifactReader{}, blocking: bs, policy: branchprotect.NewPermissive(),
 			}
