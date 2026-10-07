@@ -43,10 +43,11 @@ import (
 // Caller-facing errors never name an address the caller did not supply
 // (P3-25): a DNS-named target that resolves to a blocked address gets a
 // generic refusal, the dialer returns ErrBlockedDestination or a
-// *DialError naming the caller's host:port, and DNS failures omit the
-// resolver's address. The detail goes to the operator log. Otherwise
-// create, update and the subscription test would be an oracle on the
-// operator's internal DNS and network.
+// *DialError naming the caller's host:port, read and write failures on
+// the connection it returns name the caller's host:port too (safeConn),
+// and DNS failures omit the resolver's address. The detail goes to the
+// operator log. Otherwise create, update and the subscription test would
+// be an oracle on the operator's internal DNS and network.
 //
 // The zero-value validator (nil) permits every URL. Callers must always
 // route webhook creation and dispatch through a non-nil validator.
@@ -273,6 +274,93 @@ func (e *DialError) Temporary() bool {
 	return errors.As(e.Err, &t) && t.Temporary()
 }
 
+// resolveError is SafeDialContext's error for a failed lookup. Error()
+// reads "target_url: resolve <host>: no such host|timeout|temporary
+// failure|lookup failed" and never includes the resolver's address
+// (*net.DNSError.Error() reads "lookup <host> on <server>: ...", and
+// <server> is the operator's internal resolver). Unwrap still returns the
+// resolver's error, so errors.As(err, &*net.DNSError) keeps working for
+// callers that branch on it, and Timeout/Temporary delegate to it, so
+// url.Error.Timeout() still reports a DNS timeout. Code that renders the
+// unwrapped *net.DNSError itself reintroduces the server address; nothing
+// in Spine does.
+type resolveError struct {
+	host string
+	err  error
+}
+
+func (e *resolveError) Error() string {
+	return "target_url: resolve " + e.host + ": " + dnsFailureReason(e.err)
+}
+
+func (e *resolveError) Unwrap() error { return e.err }
+
+// Timeout reports whether the lookup timed out.
+func (e *resolveError) Timeout() bool {
+	var t interface{ Timeout() bool }
+	return errors.As(e.err, &t) && t.Timeout()
+}
+
+// Temporary delegates to the resolver's error (net.Error).
+func (e *resolveError) Temporary() bool {
+	var t interface{ Temporary() bool }
+	return errors.As(e.err, &t) && t.Temporary()
+}
+
+// safeConn is the net.Conn SafeDialContext returns. A read or write
+// failure after the connection is up is a *net.OpError whose text names
+// both ends — "read tcp <local-ip:port>-><resolved-ip:port>: read:
+// connection reset by peer" — so a target that resets the connection
+// (or an allowlisted internal host restarting mid-request) would hand its
+// resolved address, and Spine's own source address, to anyone who reads
+// last_error, the delivery log or the subscription-test response
+// (INIT-023 TASK-010 I5, review round 1; DialError covers the connect
+// step). safeConn re-renders such errors as a *net.OpError with no Source
+// and with Addr set to the caller's own host:port ("read tcp
+// hooks.example:443: read: connection reset by peer"). The type, Op, Net
+// and inner Err are kept, so Timeout(), errors.Is(err,
+// syscall.ECONNRESET) and errors.As(err, &*net.OpError) behave as before.
+// io.EOF and other errors pass through unchanged. LocalAddr/RemoteAddr
+// are not rewritten: they are not error text.
+type safeConn struct {
+	net.Conn
+	addr net.Addr
+}
+
+func (c *safeConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	return n, scrubOpError(err, c.addr)
+}
+
+func (c *safeConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	return n, scrubOpError(err, c.addr)
+}
+
+func (c *safeConn) Close() error {
+	return scrubOpError(c.Conn.Close(), c.addr)
+}
+
+// scrubOpError returns err with the addresses of a *net.OpError replaced:
+// Source dropped, Addr set to addr (which may be nil). A net.Conn returns
+// its *net.OpError unwrapped, so only that exact value is rewritten.
+func scrubOpError(err error, addr net.Addr) error {
+	oe, ok := err.(*net.OpError)
+	if !ok || (oe.Source == nil && oe.Addr == addr) {
+		return err
+	}
+	cp := *oe
+	cp.Source = nil
+	cp.Addr = addr
+	return &cp
+}
+
+// callerAddr is a net.Addr that renders the caller's own host:port.
+type callerAddr struct{ network, hostPort string }
+
+func (a callerAddr) Network() string { return a.network }
+func (a callerAddr) String() string  { return a.hostPort }
+
 // dnsFailureReason renders a resolver failure without the resolver's
 // address: net.DNSError.Error() reads "lookup <host> on <server>: ...",
 // and <server> is the operator's internal resolver.
@@ -448,7 +536,7 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 		ips, err := v.lookup(ctx, host)
 		if err != nil {
 			observe.Logger(ctx).Debug("webhook target resolve failed", "host", host, "error", err)
-			return nil, fmt.Errorf("target_url: resolve %s: %s", host, dnsFailureReason(err))
+			return nil, &resolveError{host: host, err: err}
 		}
 		if len(ips) == 0 {
 			return nil, fmt.Errorf("target_url: %s resolved to no addresses", host)
@@ -474,7 +562,9 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 			conn, err := d.DialContext(attemptCtx, network, net.JoinHostPort(ipa.IP.String(), port))
 			cancel()
 			if err == nil {
-				return conn, nil
+				// Post-connect read/write errors name the addresses too;
+				// safeConn re-renders them under the caller's host:port.
+				return &safeConn{Conn: conn, addr: callerAddr{network: network, hostPort: addr}}, nil
 			}
 			observe.Logger(ctx).Debug("webhook dial failed", "host", host, "addr", ipa.IP.String(), "error", err)
 			lastErr = err

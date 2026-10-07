@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"errors"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -56,19 +57,44 @@ func RedactURL(raw string) string {
 // `Op "RedactURL(URL)": <inner>`. As a backstop, the raw targetURL, its
 // quoted form, its path, query and fragment are also replaced wherever
 // they still appear in the text. A nil err gives "".
+//
+// It also re-renders every *net.OpError in the chain that still carries a
+// source or a remote address ("read tcp 10.0.0.9:50122->10.1.2.3:443:
+// ..."), naming the target URL's host[:port] instead (I5). The validator's
+// dialer already returns such errors without addresses (DialError,
+// safeConn); this covers clients built without it — a nil validator, an
+// embedder's own transport — and any path a future change opens.
 func RedactError(err error, targetURL string) string {
 	if err == nil {
 		return ""
 	}
 	msg := renderRedacted(err)
-	// A *url.Error wrapped by another error was rendered by the
-	// wrapper's Error(); redact its URL in place.
+	var target net.Addr
+	if u, perr := url.Parse(targetURL); perr == nil && u.Host != "" {
+		target = callerAddr{network: "tcp", hostPort: u.Host}
+	}
 	for e := err; e != nil; e = errors.Unwrap(e) {
-		if ue, ok := e.(*url.Error); ok && ue.URL != "" {
-			msg = strings.ReplaceAll(msg, ue.URL, RedactURL(ue.URL))
+		switch v := e.(type) {
+		case *url.Error:
+			// A *url.Error wrapped by another error was rendered by the
+			// wrapper's Error(); redact its URL in place.
+			if v.URL != "" {
+				msg = strings.ReplaceAll(msg, v.URL, RedactURL(v.URL))
+			}
+		case *net.OpError:
+			if v.Source != nil || (v.Addr != nil && !isCallerAddr(v.Addr)) {
+				msg = strings.ReplaceAll(msg, v.Error(), scrubOpError(v, target).Error())
+			}
 		}
 	}
 	return scrubURL(msg, targetURL)
+}
+
+// isCallerAddr reports whether a is already the caller's own host:port
+// (set by safeConn), which needs no re-rendering.
+func isCallerAddr(a net.Addr) bool {
+	_, ok := a.(callerAddr)
+	return ok
 }
 
 // renderRedacted re-renders a *url.Error chain with redacted URLs.

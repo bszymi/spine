@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/adapters/store"
@@ -126,6 +127,71 @@ func TestSubscriptionTest_DialErrorOmitsResolvedAddress(t *testing.T) {
 	// detail is logged by the dialer at Debug, for the operator only).
 	if !strings.Contains(logs.String(), "subscription test failed") {
 		t.Fatal("test-failure log line missing")
+	}
+}
+
+// gatewayResetServer reads the request, then resets the connection
+// (SO_LINGER 0): the client's read fails after a successful connect.
+func gatewayResetServer(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				buf := make([]byte, 4096)
+				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, _ = c.Read(buf)
+				if tc, ok := c.(*net.TCPConn); ok {
+					_ = tc.SetLinger(0)
+				}
+				c.Close()
+			}(c)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// Review round 1 (I5): a target that accepts the connection and then
+// resets it used to put "read tcp 127.0.0.1:<p>->127.0.0.1:<port>: ..."
+// — the resolved address and Spine's own source address — into the
+// subscription-test response and its log line. Both now name the
+// caller's host:port only.
+func TestSubscriptionTest_PostConnectErrorOmitsAddresses(t *testing.T) {
+	logs := captureGatewayLogs(t)
+	port := gatewayResetServer(t)
+	ts, fs, token := setupSubServerWithCfg(t, func(cfg *gateway.ServerConfig) {
+		cfg.WebhookTargets = delivery.NewTargetValidator([]string{"localhost"})
+	})
+	fs.subs["sub-1"] = &store.EventSubscription{SubscriptionID: "sub-1", TargetURL: fmt.Sprintf("http://localhost:%d/services/T/B/s3cr3tPathToken", port)}
+
+	_, got := postSubscriptionTest(t, ts.URL, token, "sub-1")
+	msg, _ := got["error"].(string)
+	if got["success"] != false || !strings.Contains(msg, fmt.Sprintf("tcp localhost:%d", port)) {
+		t.Fatalf("body %v, want a failure naming localhost:%d", got, port)
+	}
+	var failLine string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "subscription test failed") {
+			failLine = line
+		}
+	}
+	if failLine == "" {
+		t.Fatal("test-failure log line missing")
+	}
+	for _, h := range []string{msg, failLine} {
+		for _, leak := range []string{"127.0.0.1", "[::1]", "s3cr3tPathToken"} {
+			if strings.Contains(h, leak) {
+				t.Fatalf("%q names %s", h, leak)
+			}
+		}
 	}
 }
 

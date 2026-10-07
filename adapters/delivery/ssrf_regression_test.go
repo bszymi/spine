@@ -8,7 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/url"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -236,5 +239,231 @@ func TestDialErrorOmitsResolvedAddress(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "127.0.0.1") || strings.Contains(err.Error(), "[::1]") {
 		t.Fatalf("timeout error names the resolved address: %v", err)
+	}
+}
+
+// resetServer accepts connections, reads what the client sends first
+// (an HTTP request, or a TLS ClientHello) and then resets the connection
+// (SO_LINGER 0), so the client's next read fails with ECONNRESET after a
+// successful connect. It returns the port.
+func resetServer(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				buf := make([]byte, 4096)
+				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, _ = c.Read(buf)
+				if tc, ok := c.(*net.TCPConn); ok {
+					_ = tc.SetLinger(0)
+				}
+				c.Close()
+			}(c)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// leaksAddress reports whether s names a loopback address in any form.
+func leaksAddress(s string) bool {
+	return strings.Contains(s, "127.0.0.1") || strings.Contains(s, "[::1]") || strings.Contains(s, "::1]")
+}
+
+// TestPostConnectErrorOmitsAddresses (review round 1, I5): a read or
+// write failure after a successful connect used to surface as
+// "read tcp 127.0.0.1:<p>->127.0.0.1:<port>: read: connection reset by
+// peer" — the resolved address of an allowlisted (or public) DNS-named
+// target and Spine's own source address. The validator's client now
+// reports the caller's host:port, keeps the error a *net.OpError that
+// unwraps to ECONNRESET, and the dispatcher's last_error, delivery log
+// and operator log name no address — for the default client and for a
+// per-subscription TLS client.
+func TestPostConnectErrorOmitsAddresses(t *testing.T) {
+	port := resetServer(t)
+	v := NewTargetValidator([]string{"localhost"})
+	hostPort := fmt.Sprintf("localhost:%d", port)
+
+	// The validator's client itself: this is what an embedder using
+	// TargetValidator.HTTPClient sees, before any redaction.
+	_, err := v.HTTPClient(5*time.Second).Post("http://"+hostPort+"/hook", "application/json", strings.NewReader(`{}`))
+	if err == nil {
+		t.Fatal("request to a resetting server succeeded")
+	}
+	if leaksAddress(err.Error()) || !strings.Contains(err.Error(), hostPort) {
+		t.Fatalf("client error %q names an address or lost the caller's host:port", err)
+	}
+	var oe *net.OpError
+	if !errors.As(err, &oe) || !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("client error %v: want a *net.OpError unwrapping to ECONNRESET", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		target string
+		tls    *SubscriptionTLSConfig
+	}{
+		{name: "default client", target: "http://" + hostPort + "/services/T/B/s3cr3tPathToken"},
+		{name: "per-subscription TLS client", target: "https://" + hostPort + "/hook",
+			tls: &SubscriptionTLSConfig{PinnedSPKISHA256: strings.Repeat("ab", 32)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			st := newQueueStore()
+			st.add("d1", "sub-x", st.now())
+			res := &mapResolver{subs: map[string]*SubscriptionDetail{"sub-x": {SubscriptionID: "sub-x", TargetURL: tc.target, TLS: tc.tls}}}
+			d := NewWebhookDispatcher(st, res, DispatcherConfig{Targets: v, HTTPTimeout: 5 * time.Second})
+			sharedClock(d, st)
+			d.poll(context.Background())
+			r := st.row("d1")
+			if r.Status != "failed" || r.LastError == "" {
+				t.Fatalf("row = %+v, want a retryable transport failure", r)
+			}
+			// The dialer logs the resolved address at Debug for the
+			// operator by design (§4); every other line carries the
+			// caller-facing text and must not.
+			texts := []string{r.LastError}
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if !strings.Contains(line, "level=DEBUG") {
+					texts = append(texts, line)
+				}
+			}
+			if !strings.Contains(logs.String(), "webhook delivery failed") {
+				t.Fatal("the delivery-failure log line is missing")
+			}
+			for _, l := range st.logsFor("d1") {
+				texts = append(texts, l.Error)
+			}
+			for _, s := range texts {
+				if leaksAddress(s) {
+					t.Fatalf("error text names an address: %q", s)
+				}
+			}
+			if !strings.Contains(r.LastError, hostPort) {
+				t.Fatalf("last_error %q does not name the caller's host:port", r.LastError)
+			}
+		})
+	}
+}
+
+// opConn is a net.Conn whose Read, Write and Close fail with the errors a
+// kernel socket reports after connect.
+type opConn struct {
+	net.Conn
+	readErr, writeErr, closeErr error
+}
+
+func (c *opConn) Read([]byte) (int, error)  { return 0, c.readErr }
+func (c *opConn) Write([]byte) (int, error) { return 0, c.writeErr }
+func (c *opConn) Close() error              { return c.closeErr }
+
+// TestSafeConnRewritesOpErrors (review round 1): every *net.OpError from
+// the connection loses its source and names the caller's host:port, with
+// Op, Net, the inner error and Timeout() kept; other errors pass through.
+func TestSafeConnRewritesOpErrors(t *testing.T) {
+	src := &net.TCPAddr{IP: net.ParseIP("10.0.0.9"), Port: 50122}
+	dst := &net.TCPAddr{IP: net.ParseIP("10.1.2.3"), Port: 443}
+	reset := &net.OpError{Op: "read", Net: "tcp", Source: src, Addr: dst, Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+	pipe := &net.OpError{Op: "write", Net: "tcp", Source: src, Addr: dst, Err: os.NewSyscallError("write", syscall.EPIPE)}
+	deadline := &net.OpError{Op: "read", Net: "tcp", Source: src, Addr: dst, Err: os.ErrDeadlineExceeded}
+	c := &safeConn{Conn: &opConn{readErr: reset, writeErr: pipe, closeErr: deadline}, addr: callerAddr{network: "tcp", hostPort: "hooks.example:443"}}
+
+	_, rerr := c.Read(nil)
+	_, werr := c.Write(nil)
+	cerr := c.Close()
+	for _, tc := range []struct {
+		got     error
+		want    string
+		is      error
+		timeout bool
+	}{
+		{rerr, "read tcp hooks.example:443: read: connection reset by peer", syscall.ECONNRESET, false},
+		{werr, "write tcp hooks.example:443: write: broken pipe", syscall.EPIPE, false},
+		{cerr, "read tcp hooks.example:443: i/o timeout", os.ErrDeadlineExceeded, true},
+	} {
+		if tc.got == nil || tc.got.Error() != tc.want {
+			t.Errorf("got %v, want %q", tc.got, tc.want)
+			continue
+		}
+		var oe *net.OpError
+		if !errors.As(tc.got, &oe) || !errors.Is(tc.got, tc.is) || oe.Timeout() != tc.timeout {
+			t.Errorf("%v: type/unwrap/timeout not kept", tc.got)
+		}
+	}
+	// The originals are not mutated, and non-OpErrors pass through.
+	if reset.Source != src || reset.Addr != dst {
+		t.Fatal("the original *net.OpError was modified")
+	}
+	eof := &safeConn{Conn: &opConn{readErr: io.EOF}, addr: c.addr}
+	if _, err := eof.Read(nil); err != io.EOF {
+		t.Fatalf("io.EOF became %v", err)
+	}
+}
+
+// TestRedactErrorRewritesOpErrorAddresses (review round 1): the
+// RedactError backstop re-renders any *net.OpError in the chain that
+// still names addresses, under the target URL's host[:port].
+func TestRedactErrorRewritesOpErrorAddresses(t *testing.T) {
+	src := &net.TCPAddr{IP: net.ParseIP("10.0.0.9"), Port: 50122}
+	dst := &net.TCPAddr{IP: net.ParseIP("10.1.2.3"), Port: 443}
+	target := "https://hooks.example/services/T/B/s3cr3tPathToken"
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"read after connect", &url.Error{Op: "Post", URL: target,
+			Err: &net.OpError{Op: "read", Net: "tcp", Source: src, Addr: dst, Err: os.NewSyscallError("read", syscall.ECONNRESET)}},
+			`Post "https://hooks.example/[redacted]": read tcp hooks.example: read: connection reset by peer`},
+		{"dial without a validator", &url.Error{Op: "Post", URL: target,
+			Err: &net.OpError{Op: "dial", Net: "tcp", Addr: dst, Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}},
+			`Post "https://hooks.example/[redacted]": dial tcp hooks.example: connect: connection refused`},
+		{"wrapped", fmt.Errorf("transport: %w", &net.OpError{Op: "write", Net: "tcp", Source: src, Addr: dst, Err: os.NewSyscallError("write", syscall.EPIPE)}),
+			`transport: write tcp hooks.example: write: broken pipe`},
+	} {
+		got := RedactError(tc.err, target)
+		if got != tc.want || strings.Contains(got, "10.0.0.9") || strings.Contains(got, "10.1.2.3") {
+			t.Errorf("%s: RedactError = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// An error safeConn already re-rendered is left as it is.
+	clean := &net.OpError{Op: "read", Net: "tcp", Addr: callerAddr{"tcp", "hooks.example:443"}, Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+	if got := RedactError(clean, target); got != clean.Error() {
+		t.Errorf("RedactError rewrote an already clean error: %q", got)
+	}
+}
+
+// TestResolveErrorKeepsDNSErrorInChain (review round 1, CHANGELOG
+// "For embedders"): the dialer's DNS-failure error omits the resolver's
+// address from its text but still unwraps to the *net.DNSError, and a
+// DNS timeout still reports Timeout() — directly and through the
+// *url.Error a client returns.
+func TestResolveErrorKeepsDNSErrorInChain(t *testing.T) {
+	v := NewTargetValidator(nil)
+	v.lookupIPAddr = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		return nil, &net.DNSError{Err: "i/o timeout", Name: host, Server: "10.0.0.2:53", IsTimeout: true}
+	}
+	_, err := v.SafeDialContext(&net.Dialer{Timeout: time.Second})(context.Background(), "tcp", "x.example:443")
+	if err == nil || err.Error() != "target_url: resolve x.example: timeout" {
+		t.Fatalf("dial error = %v", err)
+	}
+	var de *net.DNSError
+	if !errors.As(err, &de) || de.Server != "10.0.0.2:53" || !de.IsTimeout {
+		t.Fatalf("errors.As(*net.DNSError) lost the resolver error: %v", err)
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("DNS timeout lost Timeout(): %v", err)
+	}
+	if ue := (&url.Error{Op: "Post", URL: "https://x.example/", Err: err}); !ue.Timeout() || strings.Contains(ue.Error(), "10.0.0.2") {
+		t.Fatalf("through *url.Error: Timeout()=%v text %q", ue.Timeout(), ue.Error())
 	}
 }
