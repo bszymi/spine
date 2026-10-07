@@ -2,15 +2,16 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/git/refname"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 )
 
@@ -122,7 +123,13 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 	}
 	path := filePath(id)
 
-	wf, err := Parse(path, []byte(body))
+	// ProjectionDefinition, not bare Parse: a body the projection would
+	// refuse (strict-parse failure, or a definition whose stored JSON
+	// reads back differently, e.g. `version: 2026-10-06`) is refused here
+	// with the same ErrValidationFailed a parse failure returns, so an
+	// author learns at create/update time instead of finding a silently
+	// kept or quarantined row (INIT-023 TASK-011 §7).
+	wf, _, err := ProjectionDefinition(path, []byte(body))
 	if err != nil {
 		return nil, domain.NewError(domain.ErrValidationFailed, err.Error())
 	}
@@ -270,14 +277,23 @@ func (s *Service) List(ctx context.Context, opts ListOptions) ([]*domain.Workflo
 }
 
 // ValidateBody parses and validates a candidate body without persisting.
+//
+// It mirrors Create/Update: the body must pass ProjectionDefinition. A
+// strict-parse failure reports RuleID "parse"; a body that parses but
+// would not project faithfully reports RuleID "projection_round_trip"
+// (INIT-023 TASK-011 §7).
 func (s *Service) ValidateBody(ctx context.Context, id, body string) domain.ValidationResult {
 	path := filePath(id)
-	wf, err := Parse(path, []byte(body))
+	wf, _, err := ProjectionDefinition(path, []byte(body))
 	if err != nil {
+		ruleID := "parse"
+		if errors.Is(err, ErrProjectionRoundTrip) {
+			ruleID = ProjectionRoundTripRuleID
+		}
 		return domain.ValidationResult{
 			Status: "failed",
 			Errors: []domain.ValidationError{{
-				RuleID:   "parse",
+				RuleID:   ruleID,
 				Severity: "error",
 				Message:  err.Error(),
 			}},
@@ -285,6 +301,12 @@ func (s *Service) ValidateBody(ctx context.Context, id, body string) domain.Vali
 	}
 	return Validate(wf)
 }
+
+// ProjectionRoundTripRuleID is the validation rule id ValidateBody reports
+// for a body that strict Parse accepts but the projection would refuse
+// (ErrProjectionRoundTrip). Embedders that mirror ValidateBody use it so
+// both surfaces report the same rule.
+const ProjectionRoundTripRuleID = "projection_round_trip"
 
 // readFromDisk is a cheap read used internally (no git round-trip).
 func (s *Service) readFromDisk(absPath, path string) (*domain.WorkflowDefinition, error) {
