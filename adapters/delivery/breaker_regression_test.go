@@ -55,4 +55,7 @@ func TestHalfOpenProbeRejectedURLReleasesProbe(t *testing.T) {
 	if s := d.breaker.State("sub-x"); s == CircuitHalfOpen {
 		t.Fatalf("breaker left half-open after a URL-rejected probe")
 	}
+	if r := st.row("d1"); r.Status != "dead" {
+		t.Fatalf("rejected-URL row status %q, want dead", r.Status)
+	}
 }

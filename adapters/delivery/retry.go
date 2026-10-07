@@ -44,12 +44,17 @@ func maxRetriesFor(eventType string) int {
 
 // isRetryable determines if a delivery failure should be retried.
 // 5xx, timeouts, and network errors are retryable.
-// 4xx are permanent failures except 429 (Too Many Requests).
+// 4xx are permanent failures except 408 (Request Timeout), 425 (Too
+// Early) and 429 (Too Many Requests), which are conventionally
+// transient. Since INIT-023 TASK-010 a permanent failure is dead-lettered
+// on its first attempt (it used to hot-loop), so a transient code
+// misclassified as permanent would lose the delivery.
 func isRetryable(statusCode int, isNetworkError bool) bool {
 	if isNetworkError {
 		return true
 	}
-	if statusCode == http.StatusTooManyRequests {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
 		return true
 	}
 	if statusCode >= 500 {

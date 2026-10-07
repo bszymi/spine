@@ -194,6 +194,14 @@ type DeliveryStore interface {
 	EnqueueDelivery(ctx context.Context, entry *DeliveryEntry) error
 	ClaimDeliveries(ctx context.Context, limit int) ([]DeliveryEntry, error)
 	UpdateDeliveryStatus(ctx context.Context, deliveryID, status string, lastError string, nextRetryAt *time.Time) error
+	// DeferDelivery re-schedules a claimed delivery without consuming an
+	// attempt: the row returns to 'pending' with last_error = reason and
+	// next_retry_at = until, attempt_count unchanged. It touches the row
+	// only while it is still 'delivering', so a row an operator replayed
+	// (or an embedder redrove) in the meantime is never overwritten. The
+	// webhook dispatcher uses it for deliveries its circuit breaker held
+	// (INIT-023 TASK-010).
+	DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error
 	MarkDelivered(ctx context.Context, deliveryID string) error
 	LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error
 	ListDeliveryHistory(ctx context.Context, query DeliveryHistoryQuery) ([]DeliveryLogEntry, error)

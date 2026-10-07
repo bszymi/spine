@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // Per-role no-op stubs for gateway tests (INIT-022 EPIC-001 TASK-029).
@@ -350,6 +350,9 @@ func (stubDeliveryStore) ClaimDeliveries(_ context.Context, _ int) ([]store.Deli
 	return nil, nil
 }
 func (stubDeliveryStore) UpdateDeliveryStatus(_ context.Context, _, _ string, _ string, _ *time.Time) error {
+	return nil
+}
+func (stubDeliveryStore) DeferDelivery(_ context.Context, _, _ string, _ time.Time) error {
 	return nil
 }
 func (stubDeliveryStore) MarkDelivered(_ context.Context, _ string) error { return nil }

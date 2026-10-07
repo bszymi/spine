@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 )
 
@@ -48,6 +50,9 @@ type WebhookDispatcher struct {
 	concurrency  int
 	pollInterval time.Duration
 	breaker      *CircuitBreaker
+	// maxCircuitHold bounds how long an open circuit may keep deferring
+	// a delivery, measured from the row's created_at.
+	maxCircuitHold time.Duration
 
 	// tlsClients caches per-subscription http.Clients keyed by
 	// subscription ID so we don't rebuild an x509 pool / Transport
@@ -88,7 +93,19 @@ type DispatcherConfig struct {
 	// reach a private address at connect time. Production callers
 	// must set this; tests may leave it nil for a permissive client.
 	Targets *TargetValidator
+
+	// MaxCircuitHold bounds how long a subscription's open circuit may
+	// keep deferring one delivery, measured from the row's created_at.
+	// A held row older than this is dead-lettered (and stays
+	// replayable) instead of being deferred again. Zero selects
+	// DefaultMaxCircuitHold.
+	MaxCircuitHold time.Duration
 }
+
+// DefaultMaxCircuitHold is the MaxCircuitHold used when the config
+// leaves it zero (INIT-023 TASK-010 owner question 1, default pending
+// the owner: 24 hours).
+const DefaultMaxCircuitHold = 24 * time.Hour
 
 // NewWebhookDispatcher creates a dispatcher that delivers events to
 // webhook URLs. Takes a store.DeliveryStore — the narrow role interface
@@ -104,19 +121,23 @@ func NewWebhookDispatcher(st store.DeliveryStore, resolver SubscriptionResolver,
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 1 * time.Second
 	}
+	if cfg.MaxCircuitHold <= 0 {
+		cfg.MaxCircuitHold = DefaultMaxCircuitHold
+	}
 
 	return &WebhookDispatcher{
-		store:        st,
-		resolver:     resolver,
-		client:       cfg.Targets.HTTPClient(cfg.HTTPTimeout),
-		httpTimeout:  cfg.HTTPTimeout,
-		concurrency:  cfg.Concurrency,
-		pollInterval: cfg.PollInterval,
-		breaker:      NewCircuitBreaker(),
-		tlsClients:   make(map[string]*tlsClientEntry),
-		targets:      cfg.Targets,
-		now:          time.Now,
-		rand:         rand.Reader,
+		store:          st,
+		resolver:       resolver,
+		client:         cfg.Targets.HTTPClient(cfg.HTTPTimeout),
+		httpTimeout:    cfg.HTTPTimeout,
+		concurrency:    cfg.Concurrency,
+		pollInterval:   cfg.PollInterval,
+		breaker:        NewCircuitBreaker(),
+		maxCircuitHold: cfg.MaxCircuitHold,
+		tlsClients:     make(map[string]*tlsClientEntry),
+		targets:        cfg.Targets,
+		now:            time.Now,
+		rand:           rand.Reader,
 	}
 }
 
@@ -196,6 +217,17 @@ func (d *WebhookDispatcher) poll(ctx context.Context) {
 }
 
 // deliver sends a single webhook and records the result.
+//
+// Every claimed row leaves deliver in one of three states (INIT-023
+// TASK-010 invariant I3, audit P3-5): 'delivered'; 'dead' (terminal,
+// reaped by retention, replayable); or 'failed'/'pending' with
+// next_retry_at strictly in the future. Before this, four exits wrote a
+// row back as immediately claimable (non-retryable 4xx, circuit open,
+// resolver error, rejected URL / request build error); ClaimDeliveries
+// re-claimed them on every poll, ahead of newer rows, so a handful of
+// such rows hot-looped and starved every other subscription. (The one
+// gap: a status write that is itself lost leaves the row 'delivering';
+// recovering that needs a claimed_at column, a schema change.)
 func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEntry) {
 	log := observe.Logger(ctx).With(
 		"delivery_id", entry.DeliveryID,
@@ -210,36 +242,49 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	// subscription's circuit half-open (P3-12).
 	permit, ok := d.breaker.Acquire(ctx, entry.SubscriptionID)
 	if !ok {
-		log.Debug("circuit open, skipping delivery")
-		// Return to pending so it can be retried later
-		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "pending", "circuit open", nil)
+		d.holdForCircuit(ctx, log, entry)
 		return
 	}
 	defer permit.Release(ctx)
 
 	sub, err := d.resolver.GetSubscription(ctx, entry.SubscriptionID)
 	if err != nil {
-		if errors.Is(err, ErrInvalidSubscriptionMetadata) {
+		var se *domain.SpineError
+		switch {
+		case errors.As(err, &se) && se.Code == domain.ErrNotFound:
+			// The subscription was deleted. Queue rows have no foreign
+			// key to event_subscriptions and DeleteSubscription leaves
+			// them behind, so without this the orphans would be
+			// re-claimed forever. No retry can bring the row back.
+			log.Warn("subscription no longer exists; dead-lettering delivery")
+			d.deadLetter(ctx, entry, "subscription not found")
+		case errors.Is(err, ErrInvalidSubscriptionMetadata):
 			// Permanent configuration error (unknown signature_version,
-			// malformed metadata): no retry can fix it, so the row is
-			// dead-lettered instead of being re-claimed forever. The
-			// parse reason names keys and values the operator wrote,
-			// never infrastructure detail.
+			// malformed metadata): no retry can fix it. The parse reason
+			// names keys and values the operator wrote, never
+			// infrastructure detail.
 			log.Warn("subscription metadata invalid; dead-lettering delivery", "error", err.Error())
 			d.deadLetter(ctx, entry, err.Error())
-			return
+		default:
+			// Transient (DB, decrypt, pool): ride the backoff, dead at
+			// the budget. The error columns get a fixed reason — pgconn
+			// connect errors name the database host:port, user and
+			// database, and last_error is shown to subscription readers
+			// (and to SMP workspace members in the run page) — so the
+			// full error goes to the operator log only.
+			log.Error("failed to resolve subscription", "error", err.Error())
+			resolveLogID, _ := generateDeliveryID()
+			d.handleFailure(ctx, entry, resolveLogID, 0, 0, true, resolveUnavailableReason, nil)
 		}
-		log.Error("failed to resolve subscription", "error", err)
-		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", err.Error(), nil)
 		return
 	}
 
 	// Re-validate the persisted URL before every delivery so
 	// subscriptions predating the SSRF hardening are rejected here,
-	// not at the socket. Failures are permanent (not retryable).
+	// not at the socket. Failures are permanent: dead-letter.
 	if err := d.targets.ValidateURL(sub.TargetURL); err != nil {
 		log.Warn("webhook target_url rejected by validator", "error", err)
-		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", err.Error(), nil)
+		d.deadLetter(ctx, entry, err.Error())
 		return
 	}
 
@@ -247,7 +292,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sub.TargetURL, bytes.NewReader(entry.Payload))
 	if err != nil {
 		log.Error("failed to build request", "error", err)
-		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", err.Error(), nil)
+		d.deadLetter(ctx, entry, err.Error())
 		return
 	}
 
@@ -331,6 +376,38 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	})
 }
 
+// resolveUnavailableReason is the fixed last_error / delivery-log text for
+// a transient subscription-resolver failure (see deliver).
+const resolveUnavailableReason = "resolve subscription: temporarily unavailable"
+
+// holdForCircuit handles a delivery the circuit breaker refused (open,
+// or half-open with the probe in flight). Nothing was sent, so no
+// attempt is consumed: the row is deferred to the circuit's next probe
+// time (or one poll interval while a probe is in flight) through
+// DeferDelivery. Before this the row went back to 'pending' with no
+// next_retry_at and a bumped attempt_count, so ClaimDeliveries re-claimed
+// it on every poll (a hot loop starving other subscriptions) and each
+// hold burned one of its retries.
+//
+// A row held longer than MaxCircuitHold (measured from created_at — the
+// queue has no "held since" column) is dead-lettered instead, so a
+// permanently failing endpoint cannot keep rows non-terminal forever.
+// It stays replayable. A row with no created_at is never treated as
+// aged out.
+func (d *WebhookDispatcher) holdForCircuit(ctx context.Context, log *slog.Logger, entry store.DeliveryEntry) {
+	if !entry.CreatedAt.IsZero() && d.clock().Sub(entry.CreatedAt) > d.maxCircuitHold {
+		reason := "circuit open: held longer than " + d.maxCircuitHold.String()
+		log.Warn("circuit held delivery past MaxCircuitHold; dead-lettering", "max_circuit_hold", d.maxCircuitHold.String())
+		d.deadLetter(ctx, entry, reason)
+		return
+	}
+	until := d.breaker.NextAttemptAt(entry.SubscriptionID, d.pollInterval)
+	log.Debug("circuit open, deferring delivery", "until", until)
+	if err := d.store.DeferDelivery(ctx, entry.DeliveryID, "circuit open", until); err != nil {
+		log.Error("failed to defer circuit-held delivery", "error", err)
+	}
+}
+
 // deadLetter is the one terminal write for failures that never produced
 // an HTTP outcome (configuration errors, a deleted subscription, a
 // rejected target, an over-long circuit hold). It writes an
@@ -377,13 +454,14 @@ func (d *WebhookDispatcher) handleFailure(ctx context.Context, entry store.Deliv
 		CreatedAt:      time.Now().UTC(),
 	})
 
+	// Non-retryable or out of budget: 'dead'. A non-retryable outcome
+	// used to be written as 'failed' with no next_retry_at, which
+	// ClaimDeliveries re-claims immediately — every permanent 4xx
+	// hot-looped forever (P3-5). 'dead' is terminal, reaped by
+	// retention, and replayable.
 	if !retryable || newAttemptCount >= maxRetries {
-		status := "dead"
-		if !retryable {
-			status = "failed"
-		}
-		log.Warn("delivery exhausted", "delivery_id", entry.DeliveryID, "status", status, "attempts", newAttemptCount)
-		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, status, errMsg, nil)
+		log.Warn("delivery exhausted", "delivery_id", entry.DeliveryID, "status", "dead", "retryable", retryable, "attempts", newAttemptCount)
+		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "dead", errMsg, nil)
 		return
 	}
 
@@ -394,7 +472,7 @@ func (d *WebhookDispatcher) handleFailure(ctx context.Context, entry store.Deliv
 			delay = ra
 		}
 	}
-	retryAt := time.Now().Add(delay)
+	retryAt := d.clock().Add(delay)
 	log.Info("scheduling retry", "delivery_id", entry.DeliveryID, "attempt", newAttemptCount, "retry_at", retryAt)
 	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", errMsg, &retryAt)
 }

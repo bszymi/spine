@@ -18,12 +18,12 @@ import (
 
 // dispatcherStore implements the store methods used by WebhookDispatcher.
 type dispatcherStore struct {
-	mu           sync.Mutex
-	queue        []store.DeliveryEntry
-	claimed      []store.DeliveryEntry
-	delivered    map[string]bool
-	statuses     map[string]string
-	logs         []store.DeliveryLogEntry
+	mu        sync.Mutex
+	queue     []store.DeliveryEntry
+	claimed   []store.DeliveryEntry
+	delivered map[string]bool
+	statuses  map[string]string
+	logs      []store.DeliveryLogEntry
 }
 
 func newDispatcherStore() *dispatcherStore {
@@ -57,6 +57,13 @@ func (s *dispatcherStore) UpdateDeliveryStatus(_ context.Context, deliveryID, st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.statuses[deliveryID] = status
+	return nil
+}
+
+func (s *dispatcherStore) DeferDelivery(_ context.Context, deliveryID, _ string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses[deliveryID] = "pending"
 	return nil
 }
 
@@ -300,7 +307,9 @@ func TestWebhookDispatcher_NoSignatureWithoutSecret(t *testing.T) {
 // TestWebhookDispatcher_RejectsPersistedUnsafeURL proves the dispatcher
 // refuses to deliver to a persisted SSRF-flavoured target_url even
 // when the resolver returns it — the validator is consulted on every
-// dispatch, not just at subscription create time.
+// dispatch, not just at subscription create time. The rejection is
+// permanent, so the row is dead-lettered (INIT-023 TASK-010: it used to
+// be written back as an immediately re-claimable 'failed').
 func TestWebhookDispatcher_RejectsPersistedUnsafeURL(t *testing.T) {
 	ds := newDispatcherStore()
 	resolver := &staticResolver{sub: &SubscriptionDetail{
@@ -333,12 +342,12 @@ func TestWebhookDispatcher_RejectsPersistedUnsafeURL(t *testing.T) {
 
 	deadline := time.After(2 * time.Second)
 	for {
-		if ds.getStatus("dlv-bad") == "failed" {
+		if ds.getStatus("dlv-bad") == "dead" {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("expected delivery to be marked failed, got status=%q", ds.getStatus("dlv-bad"))
+			t.Fatalf("expected delivery to be dead-lettered, got status=%q", ds.getStatus("dlv-bad"))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -376,6 +385,10 @@ func (s *dispatcherMinimalStore) ClaimDeliveries(ctx context.Context, limit int)
 
 func (s *dispatcherMinimalStore) UpdateDeliveryStatus(ctx context.Context, deliveryID, status string, lastError string, nextRetryAt *time.Time) error {
 	return s.ds.UpdateDeliveryStatus(ctx, deliveryID, status, lastError, nextRetryAt)
+}
+
+func (s *dispatcherMinimalStore) DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error {
+	return s.ds.DeferDelivery(ctx, deliveryID, reason, until)
 }
 
 func (s *dispatcherMinimalStore) MarkDelivered(ctx context.Context, deliveryID string) error {
