@@ -379,6 +379,35 @@ func (p *DBProvider) ListAllWorkspaces(ctx context.Context) ([]Config, error) {
 	return configs, rows.Err()
 }
 
+// ResolveAnyStatus resolves a workspace like Resolve — the same ref
+// validation and SecretClient dereference of its runtime database
+// credential — but for any status (active or inactive) and without
+// reading or filling the resolver cache. It exists for operator
+// maintenance that must reach every provisioned runtime database, such as
+// `spine secrets reencrypt --all-workspaces` (INIT-023 TASK-009): an
+// inactive workspace's rows still need the key that sealed them, so
+// skipping it would let an operator retire that key and strand the rows
+// until reactivation. Request routing must keep using Resolve, which
+// refuses inactive workspaces.
+func (p *DBProvider) ResolveAnyStatus(ctx context.Context, workspaceID string) (*Config, error) {
+	if err := ValidateID(workspaceID); err != nil {
+		return nil, ErrWorkspaceNotFound
+	}
+	cfg, dbURL, err := p.scanRowRaw(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStoredRefMatchesWorkspace(dbURL, workspaceID); err != nil {
+		return nil, err
+	}
+	dbValue, err := p.resolveStoredDBURL(ctx, dbURL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.DatabaseURL = dbValue
+	return cfg, nil
+}
+
 // DeleteWorkspace removes a workspace from the registry entirely.
 // Used for test cleanup only — production should use DeactivateWorkspace.
 func (p *DBProvider) DeleteWorkspace(ctx context.Context, workspaceID string) error {

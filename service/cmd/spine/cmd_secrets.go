@@ -55,9 +55,9 @@ primary key of SPINE_SECRET_ENCRYPTION_KEY, bound to the workspace id.
 
 Without --all-workspaces it sweeps the single file-mode workspace
 (SPINE_WORKSPACE_ID, default "default"; database from SPINE_DATABASE_URL or the
-configured secret backend). With --all-workspaces it sweeps every active
-workspace in the registry (SPINE_REGISTRY_DATABASE_URL), like
-'spine migrate --all-workspaces'.
+configured secret backend). With --all-workspaces it sweeps every workspace in
+the registry (SPINE_REGISTRY_DATABASE_URL) — active and inactive, because an
+inactive workspace's rows still need the key that sealed them.
 
 Exits non-zero unless every workspace is clean (no refused row, no lost
 compare-and-swap). Output contains counters, subscription ids, envelope names
@@ -73,8 +73,17 @@ and key ids only.`,
 
 // sweepTarget is one workspace to sweep.
 type sweepTarget struct {
-	id    string
-	dbURL string
+	id       string
+	dbURL    string
+	inactive bool
+}
+
+// label is the workspace as printed: its id, marked when inactive.
+func (t sweepTarget) label() string {
+	if t.inactive {
+		return t.id + " (inactive)"
+	}
+	return t.id
 }
 
 func runSecretsReencrypt(ctx context.Context, out io.Writer, allWorkspaces bool) error {
@@ -153,10 +162,13 @@ func singleWorkspaceSweepTarget(ctx context.Context) (sweepTarget, error) {
 	return sweepTarget{id: cfg.ID, dbURL: dbURL}, nil
 }
 
-// registrySweepTargets lists every active registry workspace and
-// resolves its database, as `spine migrate --all-workspaces` does.
-// Workspaces that cannot be resolved are reported and returned in
-// skipped (they count as not clean).
+// registrySweepTargets lists every registry workspace — active AND
+// inactive — and resolves its database. Unlike `spine migrate
+// --all-workspaces` (active only), inactive workspaces are included: their
+// rows still need the key that sealed them, and a "clean" result is what
+// licenses dropping a previous key or rolling back. Workspaces that cannot
+// be resolved are reported and returned in skipped (they count as not
+// clean).
 func registrySweepTargets(ctx context.Context, out io.Writer) (targets []sweepTarget, skipped []string, err error) {
 	registryURL := os.Getenv("SPINE_REGISTRY_DATABASE_URL")
 	if registryURL == "" {
@@ -178,28 +190,29 @@ func registrySweepTargets(ctx context.Context, out io.Writer) (targets []sweepTa
 		return nil, nil, fmt.Errorf("connect to workspace registry: %w", err)
 	}
 	defer provider.Close()
-	list, err := provider.List(ctx)
+	list, err := provider.ListAllWorkspaces(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list workspaces: %w", err)
 	}
 	for _, ws := range list {
-		resolved, err := provider.Resolve(ctx, ws.ID)
+		resolved, err := provider.ResolveAnyStatus(ctx, ws.ID)
 		if err != nil {
 			outf(out, "workspace %s: NOT CLEAN resolve failed: %v\n", ws.ID, err)
 			skipped = append(skipped, ws.ID)
 			continue
 		}
-		dbURL := string(resolved.DatabaseURL.Reveal())
-		if dbURL == "" {
-			outf(out, "workspace %s: skipped (no database configured)\n", resolved.ID)
+		target := sweepTarget{id: resolved.ID, inactive: resolved.Status != workspace.StatusActive}
+		target.dbURL = string(resolved.DatabaseURL.Reveal())
+		if target.dbURL == "" {
+			outf(out, "workspace %s: skipped (no database configured)\n", target.label())
 			continue
 		}
-		if err := requireSecureDBURL(dbURL); err != nil {
-			outf(out, "workspace %s: NOT CLEAN %v\n", resolved.ID, err)
+		if err := requireSecureDBURL(target.dbURL); err != nil {
+			outf(out, "workspace %s: NOT CLEAN %v\n", target.label(), err)
 			skipped = append(skipped, resolved.ID)
 			continue
 		}
-		targets = append(targets, sweepTarget{id: resolved.ID, dbURL: dbURL})
+		targets = append(targets, target)
 	}
 	return targets, skipped, nil
 }
@@ -213,7 +226,7 @@ func sweepOneWorkspace(ctx context.Context, out io.Writer, target sweepTarget, c
 	if err != nil {
 		// pgx connection errors name the host and database, never the
 		// password; the URL itself is not printed.
-		outf(out, "workspace %s: NOT CLEAN connect failed: %v\n", target.id, err)
+		outf(out, "workspace %s: NOT CLEAN connect failed: %v\n", target.label(), err)
 		return false
 	}
 	defer st.Close()
@@ -221,17 +234,17 @@ func sweepOneWorkspace(ctx context.Context, out io.Writer, target sweepTarget, c
 	rep, err := workspace.PrepareSubscriptionSecrets(wsCtx, st, cipher, target.id, mode, observe.Logger(wsCtx))
 	for _, r := range rep.Refused {
 		outf(out, "workspace %s: refused subscription %s envelope=%s key_id=%s reason=%s\n",
-			target.id, r.SubscriptionID, r.Envelope, r.KeyID, r.Reason)
+			target.label(), r.SubscriptionID, r.Envelope, r.KeyID, r.Reason)
 	}
 	status := "clean"
 	if err != nil || !rep.Clean() {
 		status = "NOT CLEAN"
 	}
 	outf(out, "workspace %s: %s scanned=%d rewritten=%d current=%d empty=%d conflicts=%d refused=%d from_plaintext=%d from_v1=%d to_v1=%d rekeyed=%d repaired=%d\n",
-		target.id, status, rep.Scanned, rep.Rewritten, rep.Current, rep.Empty, rep.Conflicts, len(rep.Refused),
+		target.label(), status, rep.Scanned, rep.Rewritten, rep.Current, rep.Empty, rep.Conflicts, len(rep.Refused),
 		rep.FromPlaintext, rep.FromV1, rep.ToV1, rep.Rekeyed, rep.Repaired)
 	if err != nil {
-		outf(out, "workspace %s: sweep error: %v\n", target.id, err)
+		outf(out, "workspace %s: sweep error: %v\n", target.label(), err)
 		return false
 	}
 	return rep.Clean()

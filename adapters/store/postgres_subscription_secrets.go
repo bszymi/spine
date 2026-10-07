@@ -282,6 +282,34 @@ func (s *PostgresStore) sealSubscriptionSecret(subscriptionID, secret string) (s
 	return s.sealTarget(subscriptionID, secret)
 }
 
+// ReplaceSubscriptionSecret sets a subscription's signing secret to
+// secret WITHOUT reading or opening the stored value, and bumps
+// updated_at. It is the repair path for a row whose stored secret is
+// refused (sealed for another workspace or row, under a removed key, a
+// legacy value in strict mode): GetSubscription fails closed on such a
+// row, so a read-modify-write rotation could never replace it. The new
+// secret is sealed exactly as UpdateSubscription would seal it (bound:
+// the mode's envelope for this row; unbound: the historical path). An
+// empty secret is refused — a rotation must leave the row signed — and
+// so is an envelope input under a binding (ErrEnvelopeInput). A missing
+// subscription is a domain not-found error.
+func (s *PostgresStore) ReplaceSubscriptionSecret(ctx context.Context, subscriptionID, secret string) error {
+	if secret == "" {
+		return errors.New("replacement signing secret is empty")
+	}
+	sealed, err := s.sealSubscriptionSecret(subscriptionID, secret)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE runtime.event_subscriptions SET signing_secret = $2, updated_at = now() WHERE subscription_id = $1`,
+		subscriptionID, sealed)
+	if err != nil {
+		return err
+	}
+	return mustAffect(tag, "subscription not found")
+}
+
 // sealTarget seals plaintext in the mode's target envelope under the
 // primary key. The binding and the cipher must be set.
 func (s *PostgresStore) sealTarget(subscriptionID, plaintext string) (string, error) {

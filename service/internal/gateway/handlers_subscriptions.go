@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -271,7 +272,21 @@ func (s *Server) setSubscriptionStatus(w http.ResponseWriter, r *http.Request, s
 	WriteJSON(w, http.StatusOK, subscriptionResponse(*sub))
 }
 
+// subscriptionSecretReplacer is implemented by stores that can replace a
+// signing secret without opening the stored one
+// (store.PostgresStore.ReplaceSubscriptionSecret, INIT-023 TASK-009).
+type subscriptionSecretReplacer interface {
+	ReplaceSubscriptionSecret(ctx context.Context, subscriptionID, secret string) error
+}
+
 // POST /api/v1/subscriptions/{subscription_id}/rotate-secret
+//
+// Rotation never needs the old secret. Where the store supports it the
+// new secret replaces the stored value without reading it, so rotation
+// is also the documented repair for a row whose stored secret the store
+// refuses to open (a transplanted value, a removed key, a legacy value in
+// strict mode — docs/integration-guide.md §2.1); a read-modify-write
+// rotation would fail on exactly those rows.
 func (s *Server) handleSubscriptionRotateSecret(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "subscription.update") {
 		return
@@ -283,6 +298,23 @@ func (s *Server) handleSubscriptionRotateSecret(w http.ResponseWriter, r *http.R
 	}
 
 	subID := chi.URLParam(r, "subscription_id")
+	if rs, ok := st.(subscriptionSecretReplacer); ok {
+		newSecret, err := generateSigningSecret()
+		if err != nil {
+			WriteError(w, fmt.Errorf("generate signing secret: %w", err))
+			return
+		}
+		if err := rs.ReplaceSubscriptionSecret(r.Context(), subID, newSecret); err != nil {
+			WriteError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"subscription_id": subID,
+			"signing_secret":  newSecret,
+		})
+		return
+	}
+
 	sub, err := st.GetSubscription(r.Context(), subID)
 	if err != nil {
 		WriteError(w, err)

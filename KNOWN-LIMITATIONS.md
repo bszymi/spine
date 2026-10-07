@@ -140,7 +140,8 @@ The following limitations have been resolved:
 ### Webhook Signing Secrets: One Unopenable Row Stops a Workspace's Fan-Out
 - A signing secret that does not open (wrong or removed key, transplanted, legacy in `strict`) fails
   the whole subscription list call, so the workspace's webhook delivery stops for the event types
-  that row subscribes to until the row is fixed (`POST /subscriptions/{id}/rotate-secret`). Rows are
+  that row subscribes to until the row is fixed (`POST /subscriptions/{id}/rotate-secret`, which
+  replaces the secret without reading the refused value, or deleting the subscription). Rows are
   deliberately not skipped (that would silently drop events) or blanked (unsigned deliveries). A
   non-decrypting listing method would narrow the blast radius; it is a recorded follow-up because it
   changes the `SubscriptionStore` interface.

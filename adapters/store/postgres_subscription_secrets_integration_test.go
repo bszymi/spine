@@ -8,6 +8,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -21,14 +22,17 @@ import (
 
 // casHookQuerier is a *pgxpool.Pool whose Exec runs before() ahead of
 // the sweep's compare-and-swap UPDATE, i.e. between the sweep's read and
-// its write.
+// its write. It matches the statement's SET/WHERE prefix, not the
+// compare-and-swap clause itself, so the AC11 mutation (dropping
+// "AND signing_secret = $3") still triggers the concurrent write and
+// fails on the overwrite.
 type casHookQuerier struct {
 	*pgxpool.Pool
 	before func(ctx context.Context)
 }
 
 func (q *casHookQuerier) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if q.before != nil && strings.Contains(sql, "AND signing_secret = $3") {
+	if q.before != nil && strings.Contains(sql, "SET signing_secret = $2 WHERE subscription_id = $1") {
 		f := q.before
 		q.before = nil
 		f(ctx)
@@ -234,5 +238,37 @@ func TestSweep_RealPostgresConvertsAndIsIdempotent(t *testing.T) {
 	}
 	if t009RawSecret(t, admin) != raw {
 		t.Fatal("second sweep rewrote a current row")
+	}
+}
+
+// ReplaceSubscriptionSecret against real Postgres: a refused row (here a
+// legacy plaintext row in strict mode) is replaced without being opened,
+// and updated_at moves.
+func TestReplaceSubscriptionSecret_RealPostgres(t *testing.T) {
+	admin, pool, c := t009Setup(t)
+	s := store.NewPostgresStoreWithQuerier(pool)
+	s.SetSecretCipher(c)
+	if err := s.SetSubscriptionSecretBinding(store.SubscriptionSecretBinding{WorkspaceID: "ws-int", Mode: store.SecretEnvelopeStrict}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSubscription(context.Background(), "t009-sub-1"); !errors.Is(err, store.ErrLegacySecretRefused) {
+		t.Fatalf("fixture: %v", err)
+	}
+	var before time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT updated_at FROM runtime.event_subscriptions WHERE subscription_id = 't009-sub-1'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceSubscriptionSecret(context.Background(), "t009-sub-1", "whsec_rotated"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSubscription(context.Background(), "t009-sub-1")
+	if err != nil || got.SigningSecret != "whsec_rotated" || !got.UpdatedAt.After(before) {
+		t.Fatalf("after replace: %v", err)
+	}
+	if raw := t009RawSecret(t, admin); !strings.HasPrefix(raw, "enc:v2:"+c.PrimaryKeyID()+":") {
+		t.Fatal("replacement not sealed as enc:v2")
+	}
+	if err := s.ReplaceSubscriptionSecret(context.Background(), "t009-missing", "whsec_x"); err == nil {
+		t.Fatal("replacing a missing subscription succeeded")
 	}
 }

@@ -115,10 +115,10 @@ release is cut — this file is a staging area.
   (`migrate` default, `strict`, `downgrade`; case-insensitive; anything else
   refuses to start).
 - `spine secrets reencrypt [--all-workspaces]`: sweeps the file-mode
-  workspace, or every registry workspace like `spine migrate
-  --all-workspaces`; prints counters and refused rows only; exits non-zero
-  unless every workspace is clean. Use it before switching to `strict` or
-  dropping a previous key in shared mode.
+  workspace, or every registry workspace — active and inactive (an inactive
+  workspace's rows still need their key); prints counters and refused rows
+  only; exits non-zero unless every workspace is clean. Use it before
+  switching to `strict` or dropping a previous key in shared mode.
 - Startup log `secret envelope configured` (`primary_key_id`,
   `previous_key_ids`, `mode`) and per-workspace sweep logs
   (`subscription secrets swept`, one `subscription secret converted` per row,
@@ -132,8 +132,13 @@ release is cut — this file is a staging area.
   workspace or row, a legacy value in `strict`, an unknown `enc:v<N>:`
   version) fails `GetSubscription` and the list calls, as a wrong-key row
   always did; one refused active row stops the workspace's webhook delivery
-  for the event types it subscribes to until it is fixed (`rotate-secret`).
-  Rows are never skipped or blanked.
+  for the event types it subscribes to until it is fixed. Rows are never
+  skipped or blanked.
+- **`POST /subscriptions/{id}/rotate-secret` no longer reads the old
+  secret.** It replaces the stored value directly
+  (`PostgresStore.ReplaceSubscriptionSecret`), so it is the repair for a
+  refused row; a read-modify-write rotation would fail on exactly those
+  rows. The response is unchanged.
 - **One workspace per runtime database is now load-bearing.** Two workspaces
   registered on one runtime database refuse each other's rows once bound.
   In file mode, two deployments that share a key and the default
@@ -159,7 +164,8 @@ release is cut — this file is a staging area.
   `SecretCipher` now returns errors instead of panicking.
 - **New `adapters/store` API:** `SetSubscriptionSecretBinding(
   SubscriptionSecretBinding{WorkspaceID, Mode})`, `SubscriptionSecretBinding()`,
-  `ParseSecretEnvelopeMode`, `ReencryptSubscriptionSecrets(ctx)
+  `ParseSecretEnvelopeMode`, `ReplaceSubscriptionSecret(ctx, id, secret)`
+  (replace without opening the stored value), `ReencryptSubscriptionSecrets(ctx)
   (SecretSweepReport, error)` with `SecretSweepIssue`/`SecretSweepConversion`,
   and sentinels `ErrSecretCipherRequired`, `ErrNoSecretBinding`,
   `ErrLegacySecretRefused`, `ErrEnvelopeInput`, `ErrNestedEnvelope`. Under a

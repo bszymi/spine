@@ -74,6 +74,14 @@ func (m *memSubs) Exec(_ context.Context, sql string, a ...any) (pgconn.CommandT
 		}
 		r[colSecret] = a[1]
 		return pgconn.NewCommandTag("UPDATE 1"), nil
+	case strings.Contains(s, "SET signing_secret = $2, updated_at = now() WHERE subscription_id = $1"):
+		m.execs++
+		r, ok := m.rows[a[0].(string)]
+		if !ok {
+			return pgconn.NewCommandTag("UPDATE 0"), nil
+		}
+		r[colSecret] = a[1]
+		return pgconn.NewCommandTag("UPDATE 1"), nil
 	case strings.HasPrefix(s, "UPDATE runtime.event_subscriptions SET name"):
 		m.execs++
 		r := m.rows[a[0].(string)]
@@ -905,4 +913,46 @@ func secretNeedles(stored []string) []string {
 		}
 	}
 	return needles
+}
+
+// ReplaceSubscriptionSecret repairs a refused row without opening it
+// (codex review: rotate-secret must work on exactly the rows a bound
+// store refuses).
+func TestReplaceSubscriptionSecret_RepairsRefusedRow(t *testing.T) {
+	c := testRing(t, testKey(t))
+	db := newMemSubs()
+	s := boundStore(t, db, c, "ws-B", SecretEnvelopeStrict)
+	mustCreate(t, s, "sub-1", "whsec_B")
+	setRaw(db, "sub-1", sealFor(t, c, "ws-A", "sub-1", "whsec_A")) // a transplant
+	if _, err := s.GetSubscription(ctxBG, "sub-1"); !errors.Is(err, spinecrypto.ErrEnvelopeAuth) {
+		t.Fatalf("fixture: %v", err)
+	}
+	if err := s.ReplaceSubscriptionSecret(ctxBG, "sub-1", "whsec_rotated"); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v2:"+c.PrimaryKeyID()+":") {
+		t.Fatal("replacement not sealed for the binding")
+	}
+	got, err := s.GetSubscription(ctxBG, "sub-1")
+	if err != nil || got.SigningSecret != "whsec_rotated" {
+		t.Fatalf("read-back: %v", err)
+	}
+	if rep, err := s.ReencryptSubscriptionSecrets(ctxBG); err != nil || !rep.Clean() || rep.Current != 1 {
+		t.Fatalf("sweep after repair: %+v %v", rep, err)
+	}
+	// Missing row, empty secret and envelope input are refused.
+	if err := s.ReplaceSubscriptionSecret(ctxBG, "missing", "whsec_x"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing row: %v", err)
+	}
+	if err := s.ReplaceSubscriptionSecret(ctxBG, "sub-1", ""); err == nil {
+		t.Fatal("empty replacement accepted")
+	}
+	if err := s.ReplaceSubscriptionSecret(ctxBG, "sub-1", encryptV1(t, c, "x")); !errors.Is(err, ErrEnvelopeInput) {
+		t.Fatalf("envelope replacement: %v", err)
+	}
+	// Unbound stores keep the historical sealing (enc:v1 with a key).
+	legacy := legacyStore(db, c)
+	if err := legacy.ReplaceSubscriptionSecret(ctxBG, "sub-1", "whsec_legacy"); err != nil || !strings.HasPrefix(rawSecret(db, "sub-1"), "enc:v1:") {
+		t.Fatalf("unbound replace: %v", err)
+	}
 }

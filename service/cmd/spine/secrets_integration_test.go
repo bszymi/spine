@@ -181,29 +181,36 @@ func runReencrypt(t *testing.T, args ...string) (string, error) {
 
 // AC23 (integration): workspace one holds plaintext and enc:v1 rows;
 // workspace two holds one row that is an enc:v2 value sealed for
-// workspace one (a transplant). The command converts one, refuses the
+// workspace one (a transplant); workspace three is INACTIVE and holds an
+// enc:v1 row (codex review: an inactive workspace still needs the key, so
+// it is swept too). The command converts one and three, refuses the
 // transplant untouched and exits non-zero; after the bad row is deleted
 // it exits 0. Nothing it prints or logs carries a secret or stored value.
 func TestSecretsReencrypt_AllWorkspaces(t *testing.T) {
 	regDSN := t009CreateDB(t, "t009_reg")
 	ws1DSN := t009CreateDB(t, "t009_ws1")
 	ws2DSN := t009CreateDB(t, "t009_ws2")
+	ws3DSN := t009CreateDB(t, "t009_ws3")
 	t009Migrate(t, regDSN, filepath.Join(store.FindMigrationsDir(), "registry"))
 	ws1 := t009Migrate(t, ws1DSN, store.FindMigrationsDir())
 	ws2 := t009Migrate(t, ws2DSN, store.FindMigrationsDir())
+	ws3 := t009Migrate(t, ws3DSN, store.FindMigrationsDir())
 
 	ctx := context.Background()
 	provider, err := workspace.NewDBProvider(ctx, regDSN, workspace.DBProviderConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for id, dsn := range map[string]string{"ws-one": ws1DSN, "ws-two": ws2DSN} {
+	for id, dsn := range map[string]string{"ws-one": ws1DSN, "ws-two": ws2DSN, "ws-three": ws3DSN} {
 		if err := provider.CreateWorkspace(ctx, workspace.Config{
 			ID: id, DisplayName: id, DatabaseURL: secrets.NewSecretValue([]byte(dsn)),
 			RepoPath: ".", Status: workspace.StatusActive,
 		}); err != nil {
 			t.Fatalf("register %s: %v", id, err)
 		}
+	}
+	if err := provider.DeactivateWorkspace(ctx, "ws-three"); err != nil {
+		t.Fatal(err)
 	}
 	provider.Close()
 
@@ -217,6 +224,8 @@ func TestSecretsReencrypt_AllWorkspaces(t *testing.T) {
 	t009Insert(t, ws1, "sub-p", "whsec-LEAK-plain")
 	t009Insert(t, ws1, "sub-v1", v1)
 	t009Insert(t, ws2, "sub-t", transplant)
+	v1Inactive, _ := c.Encrypt("whsec-LEAK-inactive")
+	t009Insert(t, ws3, "sub-i", v1Inactive)
 
 	clearSecretBackendEnv(t)
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(key))
@@ -237,6 +246,7 @@ func TestSecretsReencrypt_AllWorkspaces(t *testing.T) {
 		"rewritten=2",
 		"workspace ws-two: NOT CLEAN ",
 		"workspace ws-two: refused subscription sub-t envelope=enc:v2 key_id=" + c.PrimaryKeyID(),
+		"workspace ws-three (inactive): clean scanned=1 rewritten=1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
@@ -254,7 +264,10 @@ func TestSecretsReencrypt_AllWorkspaces(t *testing.T) {
 	if t009Raw(t, ws2, "sub-t") != transplant {
 		t.Fatal("the refused transplant was modified")
 	}
-	assertNoSecretMaterial(t, out+logs.String(), key, v1, transplant)
+	if _, err := c.Open(t009Raw(t, ws3, "sub-i"), spinecrypto.AssociatedData(t009Purpose, "ws-three", "sub-i")); err != nil {
+		t.Fatalf("inactive workspace row not converted for ws-three: %v", err)
+	}
+	assertNoSecretMaterial(t, out+logs.String(), key, v1, transplant, v1Inactive)
 
 	if err := ws2.ExecRaw(ctx, `DELETE FROM runtime.event_subscriptions WHERE subscription_id = 'sub-t'`); err != nil {
 		t.Fatal(err)
@@ -265,10 +278,11 @@ func TestSecretsReencrypt_AllWorkspaces(t *testing.T) {
 	}
 	if !strings.Contains(out2, "workspace ws-one: clean scanned=2 rewritten=0 current=2") ||
 		!strings.Contains(out2, "workspace ws-two: clean scanned=0") ||
-		!strings.Contains(out2, "summary: workspaces=2 clean=2 not_clean=0") {
+		!strings.Contains(out2, "workspace ws-three (inactive): clean scanned=1 rewritten=0 current=1") ||
+		!strings.Contains(out2, "summary: workspaces=3 clean=3 not_clean=0") {
 		t.Fatalf("second run output:\n%s", out2)
 	}
-	assertNoSecretMaterial(t, out2+logs.String(), key, v1, transplant)
+	assertNoSecretMaterial(t, out2+logs.String(), key, v1, transplant, v1Inactive)
 }
 
 func assertNoSecretMaterial(t *testing.T, text string, key []byte, stored ...string) {
