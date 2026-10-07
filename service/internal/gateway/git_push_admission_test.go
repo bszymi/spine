@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -549,20 +550,49 @@ func TestGitPush_InitAndReservedNamespace(t *testing.T) {
 	} {
 		t.Setenv(k, v)
 	}
-	initRepoAs := func(who string) {
+	// initRepoAs runs cli.InitRepo in a clone authenticated as who and
+	// returns what it wrote to stderr (InitRepo writes its push note to
+	// os.Stderr; this test is not parallel, so swapping it is safe).
+	initRepoAs := func(who string) string {
 		t.Helper()
 		parent := t.TempDir()
 		dir := filepath.Join(parent, "c")
 		admMust(t, parent, "clone", "-q", "-c", "http.extraHeader=Authorization: Bearer "+g.tokens[who], g.url, dir)
-		if err := cli.InitRepo(dir); err != nil {
-			t.Fatalf("InitRepo as %s: %v", who, err)
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
 		}
+		stderr := make(chan string, 1)
+		go func() {
+			b, _ := io.ReadAll(r)
+			stderr <- string(b)
+		}()
+		orig := os.Stderr
+		os.Stderr = w
+		initErr := func() error {
+			defer func() { os.Stderr = orig; w.Close() }()
+			return cli.InitRepo(dir)
+		}()
+		out := <-stderr
+		if initErr != nil {
+			t.Fatalf("InitRepo as %s: %v\n%s", who, initErr, out)
+		}
+		return out
 	}
-	initRepoAs("alice")
+	// The contributor's push of spine/init is refused, and init-repo
+	// says why instead of "remote may not be configured" (review round
+	// 1: before, it exited 0 with only that misleading note).
+	out := initRepoAs("alice")
 	if got := admRefSHA(t, g.repo, "spine/init"); got != "" {
 		t.Fatalf("contributor init-repo created spine/init (%s)", got)
 	}
-	initRepoAs("op")
+	if !strings.Contains(out, "ref-admission: spine/init is reserved for 'spine init-repo'; operator role required") ||
+		!strings.Contains(out, "operator token") || strings.Contains(out, "remote may not be configured") {
+		t.Errorf("contributor init-repo stderr does not name the refusal and its remedy:\n%s", out)
+	}
+	if out := initRepoAs("op"); strings.Contains(out, "Note:") {
+		t.Errorf("operator init-repo printed a push note:\n%s", out)
+	}
 	if admRefSHA(t, g.repo, "spine/init") == "" {
 		t.Fatal("operator init-repo did not create spine/init")
 	}

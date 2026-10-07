@@ -161,9 +161,11 @@ func commitOnBranch(repoDir string) error {
 
 	// Push if remote exists and auto-push enabled.
 	if !autoPushDisabled() {
-		if _, err := run("git", "push", "-u", "origin", "spine/init"); err != nil {
-			// Push failure is non-fatal — remote may not exist.
-			fmt.Fprintf(os.Stderr, "Note: could not push to origin (remote may not be configured)\n")
+		if out, err := run("git", "push", "-u", "origin", "spine/init"); err != nil {
+			// Push failure is non-fatal — remote may not exist. When the
+			// remote is a Spine gateway that refused the push, say so:
+			// spine/init is operator-only there (INIT-023 TASK-016).
+			fmt.Fprintln(os.Stderr, pushFailureNote(out))
 		}
 	}
 
@@ -172,6 +174,53 @@ func commitOnBranch(repoDir string) error {
 	fmt.Println("  gh pr create --base main --head spine/init")
 
 	return nil
+}
+
+// pushFailureNote is the note init-repo prints when pushing spine/init
+// fails. A Spine gateway refuses spine/init for every non-operator
+// (ref-class admission, INIT-023 TASK-016), and before this note named
+// the cause, init-repo reported only that the remote "may not be
+// configured" while the workspace looked initialised. Only the server's
+// own refusal lines are quoted ("remote: ref-admission: …" and
+// "remote: branch-protection: …"), never the rest of git's output, which
+// can name the remote URL; non-printable bytes are dropped so a remote
+// cannot write terminal control sequences through this note.
+func pushFailureNote(gitOutput string) string {
+	var refusals []string
+	admission := false
+	for _, line := range strings.Split(gitOutput, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "remote:")
+		if !ok {
+			continue
+		}
+		rest = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}, strings.TrimSpace(rest))
+		switch {
+		case strings.HasPrefix(rest, "ref-admission:"):
+			admission = true
+		case strings.HasPrefix(rest, "branch-protection:"):
+		default:
+			continue
+		}
+		refusals = append(refusals, rest)
+	}
+	if len(refusals) == 0 {
+		return "Note: could not push to origin (remote may not be configured)"
+	}
+	var b strings.Builder
+	b.WriteString("Note: origin refused the push; spine/init exists only locally:")
+	for _, r := range refusals {
+		b.WriteString("\n  " + r)
+	}
+	if admission {
+		b.WriteString("\nA Spine git gateway admits spine/init from operators only: re-run the push " +
+			"(git push -u origin spine/init) with an operator token (docs/git-push-guide.md §5).")
+	}
+	return b.String()
 }
 
 // autoPushDisabled checks the SPINE_GIT_AUTO_PUSH env var.
