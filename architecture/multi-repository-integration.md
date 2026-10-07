@@ -60,7 +60,7 @@ The catalog lives in the primary Spine repo and is committed alongside other gov
 | `id` | yes | string | Workspace-scoped ID. `spine` is reserved for the primary repo. |
 | `kind` | yes | enum | `spine` or `code`. Exactly one entry has `kind: spine`. |
 | `name` | yes | string | Human display name. |
-| `default_branch` | yes | string | Branch that `spine/run/*` branches are cut from in this repo. Must be a short git branch name (`refname.Validate`; not `HEAD`, not a `refs/...` name, no leading `-`); the repositories API refuses anything else and the engine re-checks it before any git call (INIT-023 TASK-002). |
+| `default_branch` | yes | string | Branch that `spine/run/*` branches are cut from in this repo. Must be a short git branch name (`git.ValidateShortBranchName`: `main`, not `refs/heads/main`; not `HEAD`, no other `refs/...` name, no leading `-`); the repositories API refuses anything else and the engine re-checks it before any git call (INIT-023 TASK-002). |
 | `role` | optional | string | Free-form role label (e.g., `service`, `library`, `infra`). |
 | `description` | optional | string | One- or two-sentence explanation. |
 

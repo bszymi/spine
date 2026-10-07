@@ -132,9 +132,16 @@ The following limitations have been resolved:
   looked up exactly (`git show-ref --verify`, no DWIM) and reach git as object ids, so a pushed
   tag or ref named after a run branch or `main` can no longer stand in for it. Revisions resolve
   branch-first, then exactly as before. Push sources are `<oid>^{commit}`, push destinations
-  `refs/heads/<n>`; `Push` accepts branches only. Every ref follows `--end-of-options` and is
-  validated before git starts; a refusal is a permanent error wrapping `git.ErrInvalidRef`.
-  A repository's `default_branch` must be a branch name (API 400, engine precondition).
+  `refs/heads/<n>`; `Push` accepts branches only. A new branch is cut from `<oid>^{commit}` or
+  `HEAD^{commit}`: `git branch` alone re-resolves a bare start point by DWIM, so a ref named after
+  the base's object id would replace it and a `refs/tags/HEAD` would make it fail. Every ref
+  follows `--end-of-options` and is validated before git starts; a refusal is a permanent error
+  wrapping `git.ErrInvalidRef`. A repository's `default_branch` must be a short branch name
+  (`main`, not `refs/heads/main`; API 400, engine precondition).
+- **Cost:** reading a branch by name (a bare existing branch, or `refs/heads/<n>`) runs one extra
+  `git show-ref` per call. Callers that read many files from one branch resolve it once
+  (`artifact.Service.List` does; SMP's run-artifacts reader is handed off to SMP INIT-027 EPIC-004
+  TASK-008).
 - **Git floor:** git 2.30 or newer (`rev-parse --end-of-options`). `spine serve` refuses to start
   below it; embedders call `git.CheckGitVersion` at boot. Every shipped image runs 2.39.5 or later.
 - **Residual — user `?ref=` for a non-branch name still follows DWIM.** A read with
@@ -153,11 +160,19 @@ The following limitations have been resolved:
   (standalone) and SMP INIT-027 EPIC-004 TASK-005 §7. Existing such refs are not deleted
   automatically; list them in each served repository and delete them (see `CHANGELOG.md`):
   `git -C <repo> for-each-ref refs/refs refs/heads/refs refs/tags/refs refs/remotes/refs`.
+- **Residual — refs named `HEAD` or after an object id.** Spine's own git calls are immune to
+  them (exact lookups, object ids, `^{commit}` start points), but other git clients that work on
+  the served repository or its clones are not (`git branch <n> HEAD` dies next to a
+  `refs/tags/HEAD`; `git checkout <oid>` can land on a branch named `<oid>`). TASK-016 refuses new
+  `HEAD` components; existing ones, and object-id-named refs, are listed and deleted per the
+  `CHANGELOG.md` upgrade notes.
 - **Dormant — code-repo default branch must exist locally.** Code-repository clones are made with
-  `--no-tags` and hold a local branch only for the remote's `HEAD`. A `default_branch` that is not
-  the remote's `HEAD` used to reach `origin/<d>` through checkout's guessing or DWIM; it is now
-  refused (`switch --no-guess`, exact branch base). No shipped build wires a code-repository
-  catalog (P3-36, P3-37), so this is dormant.
+  `--no-tags` and hold a local branch only for the remote's `HEAD`. For a `default_branch` that is
+  not the remote's `HEAD`, run start's `git branch <run> <d>` already failed (`git branch` never
+  reaches `origin/<d>`), while the code-repo merge's `git checkout <d>` created `<d>` from
+  `origin/<d>` by guessing; the merge is now refused too (`switch --no-guess`), and run start
+  reports `not_found`. No shipped build wires a code-repository catalog (P3-36, P3-37), so this is
+  dormant.
 
 ## Architecture Deviations
 

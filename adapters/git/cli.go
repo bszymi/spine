@@ -542,7 +542,9 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 // looked up exactly and the branch is cut from that object id, so a
 // same-named tag never becomes the base and a missing base branch is
 // ErrKindNotFound rather than a DWIM guess (a code-repo default branch
-// with no local branch is refused, not taken from origin/<base>).
+// with no local branch is refused, as `git branch <run> <d>` already
+// refused it with a Permanent "not a valid object name"; it is never
+// taken from origin/<d>).
 //
 // The start point reaches git as "<oid>^{commit}" or "HEAD^{commit}",
 // never bare (INIT-023 TASK-002 review round 1). Unlike every other

@@ -82,6 +82,15 @@ release is cut — this file is a staging area.
   bases, checkouts, worktrees, pushes, and every read of a name that is an existing branch. A
   missing branch is `not_found`, never a DWIM fallback to `refs/tags/refs/heads/<n>`. Pushes send
   `<oid>^{commit}:refs/heads/<n>`, which no local ref can make ambiguous.
+- **A ref named after an object id or `HEAD` no longer redirects or blocks run-branch creation.**
+  `git branch` is the one git command that re-resolves its start point by DWIM after parsing it.
+  So a pushed `refs/tags/<oid>` (or `refs/<oid>`, `refs/heads/<oid>`, `refs/remotes/<oid>`) named
+  after the base's object id replaced that base: a run branch cut from `main`, `refs/heads/main` or
+  the object id itself started at the attacker's commit (the code-repository run-start path, and
+  embedders). A `refs/HEAD`, `refs/tags/HEAD`, `refs/heads/HEAD` or `refs/remotes/HEAD` made
+  `git branch <run> HEAD` fail with `ambiguous object name: 'HEAD'`, so one pushed ref blocked every
+  run start and every divergence branch in the workspace (this predates INIT-023). `CreateBranch`
+  now passes `<oid>^{commit}` or `HEAD^{commit}`, which no ref name can match.
 - **Ref arguments never become git options (P3-32).** Every ref argument is validated before any
   git process starts and follows `--end-of-options`; `diff`, `show` and `log` end in `--`.
 - **`default_branch` is validated (P3-36, dormant).** A code repository's `default_branch` reached
@@ -96,7 +105,10 @@ release is cut — this file is a staging area.
 - **`Clone` no longer imports tags** (`git clone --no-tags`, persisted as
   `remote.origin.tagOpt=--no-tags`; owner question 1). On a workspace or code-repo clone
   provisioned after this change, `?ref=<upstream tag>` reads fail until the tag is pushed to the
-  workspace repository. Existing clones are unaffected.
+  workspace repository. In standalone the provisioned clone **is** the repository the git endpoint
+  serves, so runners' clones of a newly provisioned workspace carry no upstream tags either: a
+  runner step that runs `git describe --tags` or derives a version from a tag finds none. Existing
+  clones are unaffected, and tags pushed to the workspace repository later are served as before.
 - **A bare `?ref=<name>` that names an existing branch now always reads the branch,** even when a
   same-named tag or `refs/<name>` exists (before, the shadow won). Every other `?ref=` value
   resolves as before.
@@ -104,12 +116,22 @@ release is cut — this file is a staging area.
   `refname.ValidateQualified`): a component starting with `.` or ending in `.lock`, `//`, a
   leading `/`, a trailing `.`, `HEAD`, `@` and names under `refs/` are now refused (HTTP 400 on
   `write_context.branch`). git refuses to create all of them as branches.
-- **`default_branch`** on `POST`/`PATCH /api/v1/repositories` must be a branch name (HTTP 400
-  `invalid_params`).
+- **`default_branch`** on `POST`/`PATCH /api/v1/repositories` must be a short branch name
+  (`main`, not `refs/heads/main`; HTTP 400 `invalid_params`). The engine applies the same rule to a
+  stored value at run start and at code-repository merge (a precondition failure, no git call);
+  code-repository catalogs are not wired in any shipped build.
+- **A path missing at a revision that exists in the served working tree is now `not_found`
+  (HTTP 404), not `git_error` (HTTP 500).** git reports that case as
+  `path '<p>' exists on disk, but not in '<rev>'`, which the classifier did not recognise
+  (`permanent`). With the trailing `--` on `git show` it reports `bad revision`, which is
+  `not_found`. Artifact and workflow reads (`GET` with `?ref=`) now return 404 for it, and
+  `evidence.Load` returns `Found: false` instead of an error. Every other read miss was already
+  `not_found`.
 - **Error text.** Grammar refusals read `git <op>: invalid git ref: <what> "<value>": <cause>:
-  invalid git ref`. A path-not-found error for a branch read names the branch's object id
-  (`... does not exist in '<oid>'`); its kind is still `not_found`. A checkout of a missing branch
-  carries `git switch`'s message.
+  invalid git ref`. Every `ReadFile` miss now reads `fatal: bad revision '<rev>:<path>'` (it read
+  `path '<p>' does not exist in '<rev>'`), where `<rev>` is the branch's object id for a branch
+  read; the kind is `not_found`, as before. Log consumers matching `does not exist in` must match
+  `bad revision` instead. A checkout of a missing branch carries `git switch`'s message.
 
 ### Changed (embedders)
 
@@ -125,20 +147,42 @@ release is cut — this file is a staging area.
 - **`Merge`:** the abort sentinel (`Strategy: "abort"` or `Source: "--abort"`) runs exactly
   `git merge --abort`, with no checkout. A branch source is merged by object id, so without
   `Message` git's default text reads `Merge commit '<oid>'`; a missing source branch is
-  `not_found`. `CreateBranch` from a branch base that has no local branch (only `origin/<d>`) is
-  refused instead of DWIM-resolved.
+  `not_found`.
+- **Revision arguments are validated** (`ReadFile`, `ListFiles` and `RefSHA` ref, `LogOpts.Since`;
+  `Diff` and `MergeBase` already were): they must pass `git.ValidateRef`, so rev expressions such
+  as `HEAD~1`, `<sha>^`, `HEAD^{tree}`, `a..b`, and anything containing `:`, `\` or a space are
+  refused with `git.ErrInvalidRef` before git runs. Resolve such an expression to an object id
+  first. No Spine or SMP caller passes one; the gateways' `?ref=` already refused them.
+- **Reading a branch by name costs one `git show-ref` per call** (a bare existing branch name or
+  `refs/heads/<n>`; object ids, `HEAD` and other `refs/*` cost nothing extra). A caller that reads
+  many files from one branch should resolve it once with `RefSHA` and read by object id, as
+  `artifact.Service.List` now does; that also reads one consistent snapshot. SMP's
+  `RunBranchDiffReader` (reads by `refs/heads/<run>`) pays this per file until SMP INIT-027 EPIC-004
+  TASK-008 resolves its run ref once.
+- **`CreateBranch`** cuts the branch from `<oid>^{commit}` or `HEAD^{commit}` (see Security), so
+  git never writes upstream tracking for it, even with `branch.autoSetupMerge=always`.
 - **`Checkout` uses `git switch --no-guess`:** it never detaches onto a tag and refuses while a
   merge, rebase, cherry-pick, revert or bisect is in progress.
+- **No branch is guessed from a remote-tracking ref any more.** At `main`, with no local
+  `refs/heads/<n>` but a unique `refs/remotes/origin/<n>` (and `origin` configured),
+  `Checkout(<n>)` (`git checkout <n>`) and `EnterBranch(<n>)` (`git worktree add <dir> <n>`)
+  created a local branch tracking it and used that. Now `Checkout` fails and `EnterBranch` returns
+  a wrapped `not_found` `*GitError`; no local branch is created. A standalone
+  `write_context.branch` that exists only as `origin/<n>` in the served repository is therefore a
+  `git_error` instead of an implicit branch creation. Spine creates run branches locally, and SMP
+  calls `EnterBranch` only with `""`. A `CreateBranch` base in that state was already refused
+  (`git branch` never guessed: `not a valid object name`, permanent); it is now `not_found`.
 - **`EnterBranch`** adds the worktree detached at the branch's object id, then switches to the
-  branch and checks `symbolic-ref HEAD`; the final state is unchanged, and a missing branch is a
-  wrapped `not_found` `*GitError`. **`CurrentBranch`** reads `symbolic-ref` (it returned
-  `heads/<n>` when a same-named tag existed) and returns the branch name on an unborn `HEAD`.
+  branch and checks `symbolic-ref HEAD`. For an existing local branch the resulting worktree is the
+  same as before; a missing branch (including one present only as `origin/<n>`, above) is a wrapped
+  `not_found` `*GitError`. **`CurrentBranch`** reads `symbolic-ref` (it returned `heads/<n>` when a
+  same-named tag existed) and returns the branch name on an unborn `HEAD`.
 - **`artifact.Service.List`** resolves its ref once and reads one snapshot.
 - **New API (additive):** `git.ErrInvalidRef`, `git.IsFullObjectName`, `git.QualifyBranch`,
-  `git.ValidateBranchName`, `git.ValidateRemoteName`, `git.CheckGitVersion`,
-  `git.MinGitVersion` (`"2.30"`). Embedders should call `CheckGitVersion` at boot (SMP INIT-027
-  EPIC-004 TASK-008). The `GitClient` method set and the `MergeOpts`, `GitError` and `FileDiff`
-  types are unchanged.
+  `git.ValidateBranchName`, `git.ValidateShortBranchName`, `git.ValidateRemoteName`,
+  `git.CheckGitVersion`, `git.MinGitVersion` (`"2.30"`). Embedders should call `CheckGitVersion`
+  at boot (SMP INIT-027 EPIC-004 TASK-008). The `GitClient` method set and the `MergeOpts`,
+  `GitError` and `FileDiff` types are unchanged.
 
 ### Upgrade notes
 
@@ -151,6 +195,15 @@ release is cut — this file is a staging area.
   automatically (owner question 5). List them with
   `git -C <repo> for-each-ref refs/refs refs/heads/refs refs/tags/refs refs/remotes/refs`
   and delete every one listed (`git -C <repo> update-ref -d <ref>`).
+- **Delete refs named `HEAD` or named after an object id as well.** Spine's own git calls are now
+  immune to them, but no legitimate workflow creates them, and other git clients (runners'
+  clones, operators' shells) are not: `git branch <n> HEAD` or `git checkout -b <n> HEAD` dies
+  `ambiguous object name: 'HEAD'` next to a `refs/tags/HEAD`, and `git branch <n> <oid>` or
+  `git checkout <oid>` can land on a ref named `<oid>`. List them with
+  `git -C <repo> for-each-ref refs/HEAD refs/tags/HEAD refs/heads/HEAD refs/remotes/HEAD` and
+  `git -C <repo> for-each-ref --format='%(refname)' | grep -E '^refs/((tags|heads|remotes)/)?([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(/HEAD)?$'`,
+  and delete every one listed the same way. Push admission (INIT-023 TASK-016) refuses new `HEAD`
+  components; refusing object-id-named refs is recommended to it.
 
 ---
 
