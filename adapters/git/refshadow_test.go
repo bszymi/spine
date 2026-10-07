@@ -345,13 +345,31 @@ func isolateTempDir(t *testing.T) string {
 
 func assertEmptyDir(t *testing.T, dir string) {
 	t.Helper()
+	if left := leftoverEntries(t, dir); len(left) != 0 {
+		t.Errorf("%s is not empty after a refused EnterBranch: %v", dir, left)
+	}
+}
+
+// leftoverEntries lists dir, ignoring only the cache Apple's xcrun
+// launcher (the /usr/bin/git shim on macOS) writes as $TMPDIR/xcrun_db*
+// when its default cache location is not writable (a sandboxed run): git
+// runs with the test's TMPDIR, so that file is not EnterBranch's and must
+// not read as a leaked worktree parent (INIT-023 wave 2 integration,
+// codex review). Everything else counts.
+func leftoverEntries(t *testing.T, dir string) []string {
+	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Errorf("%s is not empty after a refused EnterBranch: %v", dir, entries)
+	var left []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "xcrun_db") {
+			continue
+		}
+		left = append(left, e.Name())
 	}
+	return left
 }
 
 func worktreeCount(t *testing.T, repo string) int {
@@ -675,5 +693,29 @@ func TestRefShadow_ReadFileMissIsNotFound(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "bad revision") {
 			t.Errorf("%s: %v, want git's \"bad revision\" text", tc.label, err)
 		}
+	}
+}
+
+// TestLeftoverEntries_IgnoresOnlyTheXcrunCache pins the helper above: the
+// macOS launcher's cache is ignored, a worktree parent or any other entry
+// still counts.
+func TestLeftoverEntries_IgnoresOnlyTheXcrunCache(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"xcrun_db", "xcrun_db-AbC123"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if left := leftoverEntries(t, dir); len(left) != 0 {
+		t.Fatalf("xcrun cache files counted as leftovers: %v", left)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "spine-wt-parent-123"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "other"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if left := leftoverEntries(t, dir); !reflect.DeepEqual(left, []string{"other", "spine-wt-parent-123"}) {
+		t.Fatalf("leftovers = %v, want [other spine-wt-parent-123]", left)
 	}
 }
