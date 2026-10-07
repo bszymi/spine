@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -156,15 +157,133 @@ func TestSecretsReencrypt_SharedResolverNeedsAllWorkspaces(t *testing.T) {
 	k, _ := b64Key(t)
 	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", k)
 	t.Setenv("SPINE_SECRET_PREVIOUS_KEYS", "")
-	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "")
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
 	t.Setenv("WORKSPACE_RESOLVER", "db")
 	var out bytes.Buffer
-	if err := runSecretsReencrypt(context.Background(), &out, false); err == nil || !strings.Contains(err.Error(), "--all-workspaces") {
+	if err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{}); err == nil || !strings.Contains(err.Error(), "--all-workspaces") {
 		t.Fatalf("db resolver without --all-workspaces: %v", err)
 	}
-	t.Setenv("WORKSPACE_RESOLVER", "")
 	t.Setenv("SPINE_REGISTRY_DATABASE_URL", "")
-	if err := runSecretsReencrypt(context.Background(), &out, true); err == nil || !strings.Contains(err.Error(), "SPINE_REGISTRY_DATABASE_URL") {
+	if err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{allWorkspaces: true}); err == nil || !strings.Contains(err.Error(), "SPINE_REGISTRY_DATABASE_URL") {
 		t.Fatalf("--all-workspaces without a registry: %v", err)
+	}
+}
+
+// reencryptEnv sets a key and points every database variable at an
+// address that refuses connections, so a test that expects a refusal
+// before any database is opened would see a different error otherwise.
+func reencryptEnv(t *testing.T) {
+	t.Helper()
+	k, _ := b64Key(t)
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", k)
+	t.Setenv("SPINE_SECRET_PREVIOUS_KEYS", "")
+	t.Setenv("SPINE_ENV", "")
+	t.Setenv("SPINE_SECRET_PROVIDER", "")
+	t.Setenv("SPINE_SECRET_FILE_ROOT", "")
+	t.Setenv("SPINE_INSECURE_LOCAL", "1")
+	t.Setenv("SPINE_DATABASE_URL", "postgres://nobody@127.0.0.1:1/none?sslmode=disable")
+	t.Setenv("SPINE_REGISTRY_DATABASE_URL", "postgres://nobody@127.0.0.1:1/registry?sslmode=disable")
+}
+
+// Review round 1: the command writes every workspace database, so it
+// refuses to guess the mode. An unset SPINE_SECRET_ENVELOPE_MODE would
+// otherwise mean migrate, which converts (launders) the legacy rows a
+// strict deployment refuses and reports the run clean.
+func TestSecretsReencrypt_RequiresExplicitMode(t *testing.T) {
+	reencryptEnv(t)
+	t.Setenv("WORKSPACE_RESOLVER", "")
+	for _, mode := range []string{"", "   "} {
+		t.Setenv("SPINE_SECRET_ENVELOPE_MODE", mode)
+		for _, opts := range []reencryptOptions{{}, {allWorkspaces: true}} {
+			var out bytes.Buffer
+			err := runSecretsReencrypt(context.Background(), &out, opts)
+			if err == nil || !strings.Contains(err.Error(), "SPINE_SECRET_ENVELOPE_MODE must be set") {
+				t.Fatalf("mode %q, %+v: %v", mode, opts, err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("command went past the mode check: %q", out.String())
+			}
+		}
+	}
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "bogus")
+	var out bytes.Buffer
+	if err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{}); err == nil || !strings.Contains(err.Error(), "SPINE_SECRET_ENVELOPE_MODE") {
+		t.Fatalf("bogus mode: %v", err)
+	}
+}
+
+// Review round 1: --all-workspaces binds every registry database under its
+// registry id, which spine serve binds only with WORKSPACE_RESOLVER=db.
+// Every other resolver is refused before the registry is opened.
+func TestSecretsReencrypt_AllWorkspacesNeedsDBResolver(t *testing.T) {
+	reencryptEnv(t)
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
+	cases := map[string]string{
+		"":                 "WORKSPACE_RESOLVER=db",
+		"file":             "WORKSPACE_RESOLVER=db",
+		"FILE":             "WORKSPACE_RESOLVER=db",
+		"platform-binding": "subscription secrets swept",
+		"bogus":            "WORKSPACE_RESOLVER=db",
+	}
+	for resolver, want := range cases {
+		t.Setenv("WORKSPACE_RESOLVER", resolver)
+		var out bytes.Buffer
+		err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{allWorkspaces: true})
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "nothing was changed") {
+			t.Fatalf("WORKSPACE_RESOLVER=%q: %v", resolver, err)
+		}
+		if strings.Contains(err.Error(), "registry:") || strings.Contains(out.String(), "workspace ") {
+			t.Fatalf("WORKSPACE_RESOLVER=%q: the registry was touched: %v %q", resolver, err, out.String())
+		}
+	}
+}
+
+func TestSecretsReencrypt_AllowUnreachableNeedsAllWorkspaces(t *testing.T) {
+	reencryptEnv(t)
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
+	t.Setenv("WORKSPACE_RESOLVER", "")
+	var out bytes.Buffer
+	err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{allowUnreachableInactive: []string{"ws-gone"}})
+	if err == nil || !strings.Contains(err.Error(), "--allow-unreachable-inactive applies only with --all-workspaces") {
+		t.Fatalf("flag without --all-workspaces: %v", err)
+	}
+}
+
+// The single-workspace path refuses a --workspace that differs from the
+// file-mode workspace spine serve binds, before it opens the database
+// (sealing under another id would make every row unreadable to serve).
+func TestSecretsReencrypt_WorkspaceFlagMustMatchFileWorkspace(t *testing.T) {
+	reencryptEnv(t)
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
+	t.Setenv("WORKSPACE_RESOLVER", "file")
+	t.Setenv("SPINE_WORKSPACE_ID", "ws-a")
+	prev := globalWorkspaceID
+	t.Cleanup(func() { globalWorkspaceID = prev })
+	globalWorkspaceID = "ws-b"
+	var out bytes.Buffer
+	err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{})
+	if err == nil || !strings.Contains(err.Error(), `--workspace "ws-b" does not match the file-mode workspace "ws-a"`) {
+		t.Fatalf("mismatched --workspace: %v", err)
+	}
+	if strings.Contains(out.String(), "workspace ws-") {
+		t.Fatalf("command went past the guard: %q", out.String())
+	}
+}
+
+// Database-sourced text is quoted in the command output: a subscription id
+// planted by a runtime-database writer cannot inject a forged line or a
+// terminal escape into the output operators gate strict on.
+func TestSweepOneWorkspace_QuotesDatabaseText(t *testing.T) {
+	forged := "x\nworkspace ws-b: clean scanned=1 rewritten=0\x1b[2K\nsummary: workspaces=1 clean=1 not_clean=0"
+	var out bytes.Buffer
+	sweepOneWorkspace(context.Background(), &out, sweepTarget{id: "ws-b", resolveErr: errors.New(forged)}, nil, store.SecretEnvelopeMigrate)
+	printRefused(&out, sweepTarget{id: "ws-b"}, store.SecretSweepIssue{SubscriptionID: forged, Envelope: spinecrypto.EnvelopeV1, Reason: forged})
+	got := out.String()
+	if strings.Count(got, "\n") != 2 || strings.Contains(got, "\x1b") || strings.Contains(got, "\nworkspace ws-b: clean") || strings.Contains(got, "\nsummary:") {
+		t.Fatalf("database text escaped its line:\n%s", got)
+	}
+	// A registry id that is not a valid workspace id is printed quoted.
+	if l := (sweepTarget{id: "bad\nid", inactive: true}).label(); l != `"bad\nid" (inactive)` {
+		t.Fatalf("label: %q", l)
 	}
 }
