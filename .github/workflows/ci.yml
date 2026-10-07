@@ -119,3 +119,31 @@ jobs:
             echo "::error::no TestGitHTTP_Push* scenario passed"
             exit 1
           fi
+
+  # INIT-023 / EPIC-001 / TASK-002: the git client's ref grammar (exact
+  # `show-ref --verify` lookups, `--end-of-options`, `git switch
+  # --no-guess`, `<oid>^{commit}` push sources, `worktree add --detach`)
+  # must hold on the git that ships, not only on the runner's newer git:
+  # the standalone and customer-app images install Debian bookworm's git
+  # 2.39.5, and golang:1.26-bookworm carries the same package. The first
+  # step is the task's acceptance filter; the second runs the whole git
+  # adapter and the artifact/workflow services that drive it.
+  git-floor:
+    name: Ref grammar on shipped git (2.39.x)
+    runs-on: ubuntu-latest
+    needs: boundary-lint
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shipped git version
+        run: |
+          git --version
+          git --version | grep -Eq '^git version 2\.39\.' || { echo "::error::expected Debian bookworm's git 2.39.x"; exit 1; }
+
+      - name: Ref-grammar regression tests (git 2.39.x)
+        run: go test -count=1 ./adapters/git/... ./core/engine/ -run 'RefShadow|RefGrammar|Checkout|EnterBranch|CurrentBranch'
+
+      - name: Git adapter and services (git 2.39.x)
+        run: go test -count=1 ./adapters/git/... ./core/artifact/ ./core/workflow/
