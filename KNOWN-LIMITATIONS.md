@@ -138,8 +138,11 @@ The following limitations have been resolved:
   follows `--end-of-options` and is validated before git starts; a refusal is a permanent error
   wrapping `git.ErrInvalidRef`. A repository's `default_branch` must be a short branch name
   (`main`, not `refs/heads/main`; API 400, engine precondition).
-- **Cost:** reading a branch by name (a bare existing branch, or `refs/heads/<n>`) runs one extra
-  `git show-ref` per call. Callers that read many files from one branch resolve it once
+- **Cost:** a revision given by name runs one extra `git show-ref` per call when it is
+  `refs/heads/<n>` or a bare name that is a valid branch name, whether or not the branch exists:
+  branches, tags (`v1.2`), abbreviated ids and `origin/<n>`. Full object ids, `HEAD` and other
+  `refs/*` names (`refs/tags/<t>`, `refs/remotes/<r>/<n>`) cost nothing extra. Callers that read
+  many files at one name resolve it once with `RefSHA` and read by object id
   (`artifact.Service.List` does; SMP's run-artifacts reader is handed off to SMP INIT-027 EPIC-004
   TASK-008).
 - **Git floor:** git 2.30 or newer (`rev-parse --end-of-options`). `spine serve` refuses to start

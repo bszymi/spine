@@ -153,9 +153,14 @@ release is cut — this file is a staging area.
   as `HEAD~1`, `<sha>^`, `HEAD^{tree}`, `a..b`, and anything containing `:`, `\` or a space are
   refused with `git.ErrInvalidRef` before git runs. Resolve such an expression to an object id
   first. No Spine or SMP caller passes one; the gateways' `?ref=` already refused them.
-- **Reading a branch by name costs one `git show-ref` per call** (a bare existing branch name or
-  `refs/heads/<n>`; object ids, `HEAD` and other `refs/*` cost nothing extra). A caller that reads
-  many files from one branch should resolve it once with `RefSHA` and read by object id, as
+- **A revision given by name costs one `git show-ref` per call** (`ReadFile`, `ListFiles`,
+  `RefSHA`, `Diff`, `MergeBase`, `LogOpts.Since`). This applies to any bare name that is a valid
+  branch name, whether or not that branch exists: a branch, a tag such as `v1.2`, an abbreviated
+  id or `origin/<n>` (each is first looked up as `refs/heads/<name>`). It also applies to
+  `refs/heads/<n>`. Full object ids, `HEAD` and other `refs/*` names (`refs/tags/<t>`,
+  `refs/remotes/<r>/<n>`) cost nothing extra. `RefSHA` of an existing branch runs the lookup
+  instead of `rev-parse`. A caller that reads many files at one name, whether a branch, a tag or
+  `origin/<n>`, should resolve it once with `RefSHA` and read by object id, as
   `artifact.Service.List` now does; that also reads one consistent snapshot. SMP's
   `RunBranchDiffReader` (reads by `refs/heads/<run>`) pays this per file until SMP INIT-027 EPIC-004
   TASK-008 resolves its run ref once.
