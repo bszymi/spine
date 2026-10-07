@@ -47,6 +47,16 @@ func serveCmd() *cobra.Command {
 				log.Warn("SPINE_DEV_MODE is enabled — unauthenticated requests will be allowed", "env", runtimeEnv)
 			}
 
+			// SMP_ADMIN_TOKEN strength gate (INIT-023 TASK-013): checked
+			// before any store, secret or listener is opened.
+			smpAdminWarning, err := validateSMPAdminToken(os.Getenv("SMP_ADMIN_TOKEN"), runtimeEnv)
+			if err != nil {
+				return err
+			}
+			if smpAdminWarning != "" {
+				log.Warn(smpAdminWarning, "env", runtimeEnv)
+			}
+
 			secretCipher, err := loadSecretCipher(runtimeEnv)
 			if err != nil {
 				return err

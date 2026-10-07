@@ -44,8 +44,12 @@ type workspaceDeliveryConfig struct {
 	// philosophy that gates SPINE_DEV_MODE, SPINE_CODE_REPO_BASE, and
 	// SPINE_SECRET_ENCRYPTION_KEY at boot.
 	ProductionStrict bool
-	// ProcessStart is when this spine serve process booted. Inert
-	// plumbing: not yet set or read.
+	// ProcessStart is when this spine serve process booted. The admin
+	// bootstrap passes it as BootstrapAdminConfig.SupersededBefore, so
+	// an SMP_ADMIN_TOKEN rotation revokes only bootstrap rows created
+	// before this process started: a replica still carrying the old
+	// bearer in a rolling deploy can never revoke the bearer a newer
+	// replica seeded (INIT-023 TASK-013, audit P3-31).
 	ProcessStart time.Time
 }
 
@@ -63,6 +67,10 @@ func loadWorkspaceDeliveryConfig() workspaceDeliveryConfig {
 		SMPInternalToken: os.Getenv("SMP_INTERNAL_TOKEN"),
 		SMPAdminToken:    os.Getenv("SMP_ADMIN_TOKEN"),
 		ProductionStrict: resolveRuntimeEnv() == "production",
+		// Truncated to Postgres' microsecond precision so a row this
+		// process inserts in the same microsecond it booted can never
+		// compare as "before" its own start.
+		ProcessStart: time.Now().UTC().Truncate(time.Microsecond),
 	}
 	if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -206,10 +214,56 @@ func validateOperatorToken(token string) error {
 	return nil
 }
 
-// validateSMPAdminToken checks SMP_ADMIN_TOKEN strength.
-// Inert plumbing: accepts everything.
+// smpAdminTokenMinDistinct is the minimum number of distinct bytes in
+// SMP_ADMIN_TOKEN. The length floor alone accepts long-but-trivial
+// values ("aaaa…", "0000…", "abab…").
+const smpAdminTokenMinDistinct = 8
+
+// validateSMPAdminToken is the SMP_ADMIN_TOKEN strength gate (INIT-023
+// TASK-013, audit P3-35). spine serve seeds that bearer as the admin
+// actor smp-admin into every workspace it serves, so a guessable value
+// is a cross-tenant admin credential.
+//
+// A token is weak when it is shorter than operatorTokenMinLength (32,
+// SPINE_OPERATOR_TOKEN's floor) or has fewer than 8 distinct bytes.
+// This is a floor against human-chosen values, not an entropy
+// estimator: a Shannon estimate would add false positives on hex tokens
+// without stopping a determined weak choice. Empty means the bootstrap
+// is off, which is fine.
+//
+// SPINE_ENV=production refuses to start (err); every other environment
+// gets a warning for serveCmd to log, like the other startup gates that
+// treat only production as strict. Neither message ever echoes the
+// token. The gate lives here, not in core/auth: embedders call
+// auth.BootstrapInternalAdmin with their own bearer under their own
+// policy (SMP's dev default passes it anyway: 58 characters, 24
+// distinct bytes).
 func validateSMPAdminToken(token, env string) (warning string, err error) {
-	return "", nil
+	if token == "" {
+		return "", nil
+	}
+	var seen [256]bool
+	distinct := 0
+	for i := 0; i < len(token); i++ {
+		if !seen[token[i]] {
+			seen[token[i]] = true
+			distinct++
+		}
+	}
+	var problem string
+	switch {
+	case len(token) < operatorTokenMinLength:
+		problem = fmt.Sprintf("SMP_ADMIN_TOKEN is %d characters; minimum is %d", len(token), operatorTokenMinLength)
+	case distinct < smpAdminTokenMinDistinct:
+		problem = fmt.Sprintf("SMP_ADMIN_TOKEN has %d distinct characters; minimum is %d", distinct, smpAdminTokenMinDistinct)
+	default:
+		return "", nil
+	}
+	const remedy = ". It is the platform bearer seeded into every workspace this process serves; generate one with `openssl rand -hex 32`"
+	if env == "production" {
+		return "", fmt.Errorf("%s%s before starting spine serve", problem, remedy)
+	}
+	return problem + remedy, nil
 }
 
 // loadCodeRepoBase reads SPINE_CODE_REPO_BASE and returns the absolute

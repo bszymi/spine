@@ -9,14 +9,14 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/auth"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
-	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/adapters/secrets"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
@@ -229,7 +229,9 @@ func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Lo
 //     SPINE_CODE_REPO_BASE, and SPINE_SECRET_ENCRYPTION_KEY at boot.
 //   - All other errors (and the same collision off-production) are
 //     logged and swallowed so a transient store blip does not knock a
-//     workspace out of rotation. The collision specifically is also
+//     workspace out of rotation. That includes a failure to revoke a
+//     superseded bootstrap bearer after a rotation: the sweep re-runs on
+//     the next workspace load. The collision specifically is also
 //     logged before being returned so the production failure has a
 //     structured log breadcrumb alongside the workspace-load error.
 func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg workspaceDeliveryConfig, log *slog.Logger) error {
@@ -238,6 +240,10 @@ func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg w
 	}
 	err := auth.BootstrapInternalAdmin(ctx, ss.Store, auth.BootstrapAdminConfig{
 		Token: cfg.SMPAdminToken,
+		// A rotation revokes only bootstrap rows created before this
+		// process booted (INIT-023 TASK-013): an old replica in a
+		// rolling deploy never revokes the newer bearer.
+		SupersededBefore: cfg.ProcessStart,
 	})
 	if err == nil {
 		return nil
