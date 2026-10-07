@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -25,6 +26,8 @@ var (
 	// testHookAfterComponentLstat runs between a component's Lstat and its
 	// OpenRoot: the window in which swapping the component for a symlink
 	// would redirect the descent if the SameFile check were missing (AC4).
+	// WalkRegularFiles also calls it (op "walk") between each
+	// subdirectory's Lstat and OpenRoot.
 	testHookAfterComponentLstat func(op, prefix string)
 
 	// testHookBeforeLeafOp runs after the walk and the leaf checks, right
@@ -351,13 +354,20 @@ func (t *Tree) ReadFile(rel string) ([]byte, error) {
 }
 
 // ReadFileLimit reads a regular file of at most limit bytes (a negative
-// limit is treated as 0). A leaf whose Lstat size exceeds limit is refused
-// with *SizeError before it is opened; the read itself goes through an
-// io.LimitReader(limit+1), so a file that grows after the check is still
-// refused after reading at most limit+1 bytes.
+// limit is treated as 0; a limit of math.MaxInt64 — "no cap" — is treated
+// as math.MaxInt64-1, which no file reaches). A leaf whose Lstat size
+// exceeds limit is refused with *SizeError before it is opened; the read
+// itself goes through an io.LimitReader(limit+1), so a file that grows
+// after the check is still refused after reading at most limit+1 bytes.
 func (t *Tree) ReadFileLimit(rel string, limit int64) ([]byte, error) {
 	if limit < 0 {
 		limit = 0
+	}
+	if limit > maxReadLimit {
+		// limit+1 below would overflow to a negative LimitReader bound,
+		// which reads nothing: the call would return empty content and a
+		// nil error for any file.
+		limit = maxReadLimit
 	}
 	w, err := t.walkToLeaf("read", rel, false)
 	if err != nil {
@@ -394,6 +404,10 @@ func (t *Tree) ReadFileLimit(rel string, limit int64) ([]byte, error) {
 	}
 	return readCapped(f, w.rel, lfi.Size(), limit)
 }
+
+// maxReadLimit is the largest limit ReadFileLimit honours: limit+1 must
+// not overflow.
+const maxReadLimit = math.MaxInt64 - 1
 
 type countingReader struct {
 	r io.Reader
@@ -712,10 +726,13 @@ func (t *Tree) RemoveEmptyDir(rel string) error {
 // It descends only through directories that pass the same checks as every
 // other operation, never yields or enters a symbolic link or anything that
 // is not a regular file or directory, and never yields or enters a
-// component that names the git directory (I3). The walk holds the
-// directory handles it descended through; fn may use the Tree (its own
-// reads are bounded by ReadFile, I7). An error from fn stops the walk and
-// is returned.
+// component that names the git directory (I3). Each subdirectory is
+// opened from its held parent and bound with os.SameFile to the inode its
+// Lstat saw, so a directory swapped for an in-root link mid-walk is
+// refused (ReasonChanged), not entered. While fn runs, the walk holds one
+// handle per level it is inside; fn may use the Tree (its own reads are
+// bounded by ReadFile, I7). An error from fn stops the walk and is
+// returned.
 func (t *Tree) WalkRegularFiles(relDir string, fn func(rel string) error) error {
 	var comps []string
 	if relDir != "" {
@@ -767,6 +784,9 @@ func walkDir(dir *os.Root, prefix string, fn func(rel string) error) error {
 		case isSymlink(fi):
 			continue
 		case fi.IsDir():
+			if hook := testHookAfterComponentLstat; hook != nil {
+				hook("walk", rel)
+			}
 			sub, err := openSubRoot(dir, name)
 			if err != nil {
 				return relErr(err, rel)

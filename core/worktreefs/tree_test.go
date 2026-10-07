@@ -3,6 +3,7 @@ package worktreefs
 import (
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -947,6 +948,17 @@ func TestTree_ReadFileOverLimit(t *testing.T) {
 			t.Fatalf("read %d bytes from a growing file, want exactly limit+1 = %d", observed, limit+1)
 		}
 	})
+	// math.MaxInt64 ("no cap") must not overflow limit+1 into a negative
+	// LimitReader bound, which reads nothing and returns empty content.
+	t.Run("math.MaxInt64 limit reads the whole file", func(t *testing.T) {
+		f := newFixture(t)
+		for _, limit := range []int64{math.MaxInt64, math.MaxInt64 - 1} {
+			b, err := f.tree.ReadFileLimit("gov/x.md", limit)
+			if err != nil || string(b) != "x" {
+				t.Fatalf("ReadFileLimit(limit=%d) = %q, %v; want \"x\"", limit, b, err)
+			}
+		}
+	})
 	t.Run("negative limit admits only empty files", func(t *testing.T) {
 		f := newFixture(t)
 		if _, err := f.tree.ReadFileLimit("gov/x.md", -5); !errors.Is(err, ErrTooLarge) {
@@ -1048,4 +1060,72 @@ func countFDs() int {
 		return -1
 	}
 	return len(ents)
+}
+
+// TestTree_ReadLeafSwappedForLinkAfterCheck pins ReadFileLimit's post-open
+// identity check: a leaf swapped, after its Lstat, for a same-directory
+// link (which os.Root follows for O_RDONLY) yields no bytes.
+//
+// Mutation check: dropping the os.SameFile(lfi, ffi) comparison returns
+// the link target's bytes ("secret").
+func TestTree_ReadLeafSwappedForLinkAfterCheck(t *testing.T) {
+	resetHooks(t)
+	f := newFixture(t)
+	mustWrite(t, f.path("gov/secret.md"), "secret", 0o644)
+	swapped := false
+	testHookBeforeLeafOp = func(op, _ string) {
+		if op != "read" || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Remove(f.path("gov/x.md")); err != nil {
+			t.Error(err)
+		}
+		f.link(t, "gov/x.md", "secret.md")
+	}
+	b, err := f.tree.ReadFile("gov/x.md")
+	if !swapped {
+		t.Fatal("hook never ran")
+	}
+	if b != nil {
+		t.Fatalf("ReadFile returned bytes through a swapped-in link: %q", b)
+	}
+	requireReason(t, err, ReasonChanged, "gov/x.md")
+}
+
+// TestTree_WalkSubdirSwappedForLinkMidWalk pins WalkRegularFiles' per-
+// directory binding: a subdirectory swapped for an in-root link (to
+// .git/info) between its Lstat and its OpenRoot is refused, and nothing
+// under the link target is yielded.
+//
+// Mutation check: dropping the os.SameFile(fi, nfi) comparison in walkDir
+// yields "gov/exclude" (.git/info/exclude) and returns no error.
+func TestTree_WalkSubdirSwappedForLinkMidWalk(t *testing.T) {
+	resetHooks(t)
+	f := newFixture(t)
+	swapped := false
+	testHookAfterComponentLstat = func(op, prefix string) {
+		if op != "walk" || prefix != "gov" || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(f.path("gov"), f.path("gov.bak")); err != nil {
+			t.Error(err)
+		}
+		f.link(t, "gov", ".git/info")
+	}
+	var got []string
+	err := f.tree.WalkRegularFiles("", func(rel string) error {
+		got = append(got, rel)
+		return nil
+	})
+	if !swapped {
+		t.Fatal("hook never ran")
+	}
+	for _, rel := range got {
+		if strings.HasPrefix(rel, "gov/") {
+			t.Errorf("yielded %s through the swapped-in link", rel)
+		}
+	}
+	requireReason(t, err, ReasonChanged, "gov")
 }
