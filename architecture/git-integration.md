@@ -396,6 +396,14 @@ All Spine-managed branches use the `spine/` prefix to distinguish them from huma
 
 Human-managed branches (per [Naming Conventions](/governance/naming-conventions.md) §6) use the `INIT-XXX/EPIC-XXX/TASK-XXX-<slug>` pattern. These are not managed by the Artifact Service.
 
+**Branch names resolve exactly, by object name** (INIT-023 TASK-002). Spine and its embedders pass bare branch names (`run.BranchName`, `main`) to the git client, and git resolves a bare name by DWIM — `refs/<n>` and `refs/tags/<n>` before `refs/heads/<n>` — while branch protection allows pushes outside `refs/heads/` (ADR-009 §6). The git client therefore never hands git a branch *name* as a revision:
+
+- A branch argument (merge source and target, branch base, checkout, push, worktree) or a revision that names an existing branch is looked up with `git show-ref --verify refs/heads/<n>`, which applies no DWIM, and the resulting **object id** reaches git. A qualified `refs/heads/<n>` is not enough: when the branch is missing, git DWIM-resolves it to `refs/tags/refs/heads/<n>` and its siblings, so a missing branch is an error (`not_found`), never a fallback.
+- A push sends `<oid>^{commit}:refs/heads/<n>`, which no local ref can shadow; checkout is `git switch --no-guess`, which never detaches onto a tag; every ref argument follows `--end-of-options` and is validated before any git process starts.
+- Anything that is not an existing branch (a tag, `refs/remotes/...`, an abbreviated or full object id, `HEAD`) resolves as before. See `KNOWN-LIMITATIONS.md` → "Git ref arguments" for the residuals, which only push admission closes.
+
+The grammar and argv rules are documented on `adapters/git.CLIClient`; the server requires git 2.30 or newer.
+
 Spine-managed branches (`spine/*`) are governed exclusively by the Artifact Service. Direct manipulation of user-facing authoritative branches (e.g. `main`, `staging`, `release/*`) is **enforced** against direct writes and deletions by the branch-protection policy described in [ADR-009](/architecture/adr/ADR-009-branch-protection.md). Operators authoring `/.spine/branch-protection.yaml` are expected to scope rules to user-facing branches; the config parser does not currently reject patterns that would match `spine/*` (e.g. `spine/run/*`, `*/*/*`), so a pattern like that would accidentally gate Spine's own Run branches and block routine Orchestrator operations. Treat `spine/*` as a reserved namespace and do not target it from rules.
 
 ### 6.5 Git Push (`git-receive-pack`)

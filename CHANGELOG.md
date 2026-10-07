@@ -68,6 +68,92 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-001 TASK-002: one ref grammar for the git client)
+
+### Security
+
+- **A pushed tag or ref can no longer stand in for a run branch or `main` (audit F10, P2).** git
+  resolves a bare name by DWIM (`refs/<n>` and `refs/tags/<n>` before `refs/heads/<n>`), and
+  branch protection allows every push outside `refs/heads/`. A `refs/tags/<run-branch>` made the
+  governed merge publish the tag's unreviewed commit under the trusted merge message (also through
+  the commit-status cascade, which read the shadow's files); a `refs/tags/main` made every
+  governed push fail permanently. The git client now looks every branch up exactly
+  (`git show-ref --verify refs/heads/<n>`) and hands git the object id: merge sources, branch
+  bases, checkouts, worktrees, pushes, and every read of a name that is an existing branch. A
+  missing branch is `not_found`, never a DWIM fallback to `refs/tags/refs/heads/<n>`. Pushes send
+  `<oid>^{commit}:refs/heads/<n>`, which no local ref can make ambiguous.
+- **Ref arguments never become git options (P3-32).** Every ref argument is validated before any
+  git process starts and follows `--end-of-options`; `diff`, `show` and `log` end in `--`.
+- **`default_branch` is validated (P3-36, dormant).** A code repository's `default_branch` reached
+  git argv unchecked (`--force` force-pushed, `--pathspec-from-file=<file>` echoed a host file
+  into the merge outcome). The repositories API now refuses a value that is not a branch name,
+  and the engine refuses it at run start and code-repo merge as a precondition, with no git call.
+
+### Changed
+
+- **Git 2.30 or newer is required.** `spine serve` refuses to start below it (owner question 3).
+  Every shipped image runs Debian bookworm's git 2.39.5 or newer; Ubuntu 20.04's 2.25 is refused.
+- **`Clone` no longer imports tags** (`git clone --no-tags`, persisted as
+  `remote.origin.tagOpt=--no-tags`; owner question 1). On a workspace or code-repo clone
+  provisioned after this change, `?ref=<upstream tag>` reads fail until the tag is pushed to the
+  workspace repository. Existing clones are unaffected.
+- **A bare `?ref=<name>` that names an existing branch now always reads the branch,** even when a
+  same-named tag or `refs/<name>` exists (before, the shadow won). Every other `?ref=` value
+  resolves as before.
+- **Branch names are validated by git's own grammar as well** (`refname.Validate` converges on
+  `refname.ValidateQualified`): a component starting with `.` or ending in `.lock`, `//`, a
+  leading `/`, a trailing `.`, `HEAD`, `@` and names under `refs/` are now refused (HTTP 400 on
+  `write_context.branch`). git refuses to create all of them as branches.
+- **`default_branch`** on `POST`/`PATCH /api/v1/repositories` must be a branch name (HTTP 400
+  `invalid_params`).
+- **Error text.** Grammar refusals read `git <op>: invalid git ref: <what> "<value>": <cause>:
+  invalid git ref`. A path-not-found error for a branch read names the branch's object id
+  (`... does not exist in '<oid>'`); its kind is still `not_found`. A checkout of a missing branch
+  carries `git switch`'s message.
+
+### Changed (embedders)
+
+- **`CLIClient.Push` accepts branches only** (owner question 2): a tag or any other refspec is
+  refused with `git.ErrInvalidRef`. Every Spine and SMP caller pushes branches.
+- **`CLIClient.PushBranch` no longer sets upstream tracking** (`branch.<n>.remote` /
+  `branch.<n>.merge`; owner question 4). Nothing in Spine or SMP reads them.
+- **Grammar refusals are `*git.GitError{Kind: ErrKindPermanent, Err: git.ErrInvalidRef}`,**
+  returned before any git process; `Diff`/`MergeBase` refusals used to be plain wrapped errors
+  (the `invalid git ref` text is kept). An empty revision is refused (`ReadFile("", p)` used to
+  read the index). `RefSHA` uses `rev-parse --verify` and still returns `not_found` for an unknown
+  ref.
+- **`Merge`:** the abort sentinel (`Strategy: "abort"` or `Source: "--abort"`) runs exactly
+  `git merge --abort`, with no checkout. A branch source is merged by object id, so without
+  `Message` git's default text reads `Merge commit '<oid>'`; a missing source branch is
+  `not_found`. `CreateBranch` from a branch base that has no local branch (only `origin/<d>`) is
+  refused instead of DWIM-resolved.
+- **`Checkout` uses `git switch --no-guess`:** it never detaches onto a tag and refuses while a
+  merge, rebase, cherry-pick, revert or bisect is in progress.
+- **`EnterBranch`** adds the worktree detached at the branch's object id, then switches to the
+  branch and checks `symbolic-ref HEAD`; the final state is unchanged, and a missing branch is a
+  wrapped `not_found` `*GitError`. **`CurrentBranch`** reads `symbolic-ref` (it returned
+  `heads/<n>` when a same-named tag existed) and returns the branch name on an unborn `HEAD`.
+- **`artifact.Service.List`** resolves its ref once and reads one snapshot.
+- **New API (additive):** `git.ErrInvalidRef`, `git.IsFullObjectName`, `git.QualifyBranch`,
+  `git.ValidateBranchName`, `git.ValidateRemoteName`, `git.CheckGitVersion`,
+  `git.MinGitVersion` (`"2.30"`). Embedders should call `CheckGitVersion` at boot (SMP INIT-027
+  EPIC-004 TASK-008). The `GitClient` method set and the `MergeOpts`, `GitError` and `FileDiff`
+  types are unchanged.
+
+### Upgrade notes
+
+- **Delete doubly-qualified refs in every served repository.** A ref such as
+  `refs/heads/refs/heads/main`, `refs/refs/heads/main` or `refs/tags/refs/heads/main` in a
+  repository clients push to makes every push to the branch it shadows fail
+  (`dst refspec refs/heads/main matches more than one`) — in standalone, every governed merge.
+  This release makes such refs inert in the engine's own lookups but cannot fix the remote side;
+  push admission (INIT-023 TASK-016) is what refuses new ones. Existing ones are not deleted
+  automatically (owner question 5). List them with
+  `git -C <repo> for-each-ref refs/refs refs/heads/refs refs/tags/refs refs/remotes/refs`
+  and delete every one listed (`git -C <repo> update-ref -d <ref>`).
+
+---
+
 ## Spine Core library packaging — dual-target (standalone + embedded)
 
 Disposition: **Option A** — Spine remains available both as a standalone

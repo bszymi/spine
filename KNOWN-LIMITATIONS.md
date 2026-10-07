@@ -125,6 +125,40 @@ The following limitations have been resolved:
   matching that also covers the `refs/heads/` prefix test) is an INIT-023 EPIC-001 follow-up,
   paired with SMP's equivalent follow-up.
 
+### Git Ref Arguments
+- **Grammar** (INIT-023 TASK-002; audit F10, P3-32, P3-36): the git client
+  (`adapters/git.CLIClient`, `EnterBranch`) builds every ref argument through one grammar.
+  Branch arguments are short names or `refs/heads/<n>` that pass `refname.Validate`; they are
+  looked up exactly (`git show-ref --verify`, no DWIM) and reach git as object ids, so a pushed
+  tag or ref named after a run branch or `main` can no longer stand in for it. Revisions resolve
+  branch-first, then exactly as before. Push sources are `<oid>^{commit}`, push destinations
+  `refs/heads/<n>`; `Push` accepts branches only. Every ref follows `--end-of-options` and is
+  validated before git starts; a refusal is a permanent error wrapping `git.ErrInvalidRef`.
+  A repository's `default_branch` must be a branch name (API 400, engine precondition).
+- **Git floor:** git 2.30 or newer (`rev-parse --end-of-options`). `spine serve` refuses to start
+  below it; embedders call `git.CheckGitVersion` at boot. Every shipped image runs 2.39.5 or later.
+- **Residual — user `?ref=` for a non-branch name still follows DWIM.** A read with
+  `?ref=<name>` where `<name>` is not an existing branch resolves as git always has, so a pushed
+  `refs/<name>` beats `refs/tags/<name>`. Name tags in full (`?ref=refs/tags/<name>`). TASK-016
+  blocks such pushes for non-operators.
+- **Residual — missing non-branch refs.** A `refs/tags/...` or `refs/remotes/...` argument naming
+  a ref that does not exist can still be DWIM-substituted by a name such as
+  `refs/tags/refs/tags/...`; push admission must refuse those names (below).
+- **Residual — doubly-qualified refs on the remote break pushes.** If the repository a client
+  pushes to holds `refs/heads/refs/heads/<n>`, `refs/refs/heads/<n>` or
+  `refs/tags/refs/heads/<n>`, every push to `<n>` fails (`dst refspec refs/heads/<n> matches more
+  than one`), whatever the client argv; in standalone that is the governed-merge push to `main`.
+  The git client cannot fix this. The failure is classified permanent, so the engine does not
+  loop on it. Push admission must refuse such names for every principal: Spine INIT-023 TASK-016
+  (standalone) and SMP INIT-027 EPIC-004 TASK-005 §7. Existing such refs are not deleted
+  automatically; list them in each served repository and delete them (see `CHANGELOG.md`):
+  `git -C <repo> for-each-ref refs/refs refs/heads/refs refs/tags/refs refs/remotes/refs`.
+- **Dormant — code-repo default branch must exist locally.** Code-repository clones are made with
+  `--no-tags` and hold a local branch only for the remote's `HEAD`. A `default_branch` that is not
+  the remote's `HEAD` used to reach `origin/<d>` through checkout's guessing or DWIM; it is now
+  refused (`switch --no-guess`, exact branch base). No shipped build wires a code-repository
+  catalog (P3-36, P3-37), so this is dormant.
+
 ## Architecture Deviations
 
 ### Convergence Evaluation Step
