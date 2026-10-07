@@ -408,11 +408,22 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 
 	var syncErrors int
 
+	// scopeViolation guards the invariant that artifactDiffs passed only
+	// in-scope paths to discovery. A path outside the scope here means a
+	// filter regressed; refuse to advance rather than silently skip, so
+	// the regression is loud (and the equivalence tests catch it).
+	scopeViolation := func(repoPath string) {
+		log.Warn("projection: changed artifact outside the projection scope; not applied",
+			"path", repoPath, "artifacts_dir", s.scope.dir)
+		syncErrors++
+	}
+
 	// Process created artifacts
 	for _, a := range changeset.Created {
 		key, ok := s.scope.artifactKey(a.Path)
 		if !ok {
-			continue // unreachable: artifactDiffs kept in-scope paths only
+			scopeViolation(a.Path)
+			continue
 		}
 		a.Path = key
 		if err := s.projectArtifact(ctx, a, head); err != nil {
@@ -428,7 +439,8 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	for _, a := range changeset.Modified {
 		key, ok := s.scope.artifactKey(a.Path)
 		if !ok {
-			continue // unreachable: artifactDiffs kept in-scope paths only
+			scopeViolation(a.Path)
+			continue
 		}
 		a.Path = key
 		if err := s.projectArtifact(ctx, a, head); err != nil {
@@ -444,7 +456,8 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	for _, repoPath := range changeset.Deleted {
 		path, ok := s.scope.artifactKey(repoPath)
 		if !ok {
-			continue // unreachable: artifactDiffs kept in-scope paths only
+			scopeViolation(repoPath)
+			continue
 		}
 		if err := s.store.DeleteArtifactProjection(ctx, path); err != nil {
 			log.Warn("failed to delete projection",
