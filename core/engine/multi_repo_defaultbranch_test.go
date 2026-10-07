@@ -103,10 +103,16 @@ func TestDefaultBranchGuard_StartRunRefusesBeforeAnyCodeRepoGit(t *testing.T) {
 
 // TestDefaultBranchGuard_MergeRefusesBeforeAnyCodeRepoGit is AC 11 (code
 // repository merge): a default_branch changed after run start to
-// "--pathspec-from-file=<host file>" or "--force" makes
-// attemptCodeRepositoryMerge return ErrPrecondition with no client, no
-// Merge, no Push and no outcome row, and the file's contents appear in
-// no error or log line.
+// "--pathspec-from-file=<host file>", "--force" or any other value of
+// invalidDefaultBranches makes attemptCodeRepositoryMerge return
+// ErrPrecondition with no client, no Merge, no Push and no outcome row,
+// and the file's contents appear in no error or log line.
+//
+// The list includes "refs/heads/develop" (review rounds 1 and 2): the
+// git client would accept it (QualifyBranch strips the prefix) and the
+// outcome row would record TargetBranch "refs/heads/develop", so only
+// this guard's short-name rule (ValidateShortBranchName, not
+// ValidateBranchName) refuses it here.
 func TestDefaultBranchGuard_MergeRefusesBeforeAnyCodeRepoGit(t *testing.T) {
 	secret := filepath.Join(t.TempDir(), "secret.env")
 	const secretValue = "SERVICE_TOKEN=sk-live-0a1b2c3d"
@@ -118,7 +124,7 @@ func TestDefaultBranchGuard_MergeRefusesBeforeAnyCodeRepoGit(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	for _, bad := range []string{"--pathspec-from-file=" + secret, "--force"} {
+	for _, bad := range append([]string{"--pathspec-from-file=" + secret}, invalidDefaultBranches...) {
 		t.Run(bad, func(t *testing.T) {
 			run := committingRun("run-0a1b2c3d", "spine/run/task-001-x-0a1b2c3d")
 			run.AffectedRepositories = []string{domain.PrimaryRepositoryID, "code-a"}
@@ -133,6 +139,9 @@ func TestDefaultBranchGuard_MergeRefusesBeforeAnyCodeRepoGit(t *testing.T) {
 			var se *domain.SpineError
 			if !errors.As(err, &se) || se.Code != domain.ErrPrecondition {
 				t.Fatalf("attemptCodeRepositoryMerge = %v, want ErrPrecondition", err)
+			}
+			if !strings.Contains(err.Error(), "default_branch is not a valid branch name") {
+				t.Fatalf("attemptCodeRepositoryMerge error %q does not name the invalid default_branch", err)
 			}
 			if err := orch.mergeAffectedCodeRepositories(context.Background(), run); err == nil {
 				t.Fatal("mergeAffectedCodeRepositories accepted an invalid default_branch")
