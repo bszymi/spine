@@ -124,8 +124,8 @@ release is cut — this file is a staging area.
 - `spine secrets reencrypt [--all-workspaces]`: sweeps the file-mode
   workspace, or every registry workspace — active and inactive (an inactive
   workspace's rows still need their key); prints counters and refused rows
-  only (database-sourced text quoted); exits non-zero unless every workspace
-  is clean. Use it before switching to `strict` or dropping a previous key.
+  only (database-sourced text quoted; database errors carry no
+  credentials); exits non-zero unless every workspace is clean. Use it before switching to `strict` or dropping a previous key.
   It requires `SPINE_SECRET_ENVELOPE_MODE` to be set explicitly, to serve's
   mode (it never assumes `migrate`); `--all-workspaces` requires
   `WORKSPACE_RESOLVER=db`; `--allow-unreachable-inactive=<ids>` acknowledges

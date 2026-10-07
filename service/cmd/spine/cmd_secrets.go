@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/service/internal/workspace"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
 )
 
@@ -315,7 +317,7 @@ func registrySweepTargets(ctx context.Context, out io.Writer) (targets []sweepTa
 	}
 	provider, err := workspace.NewDBProvider(ctx, registryURL, workspace.DBProviderConfig{SecretClient: dbSecretClient})
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to workspace registry: %w", err)
+		return nil, nil, fmt.Errorf("connect to workspace registry: %s", describeDBError(err, registryURL))
 	}
 	defer provider.Close()
 	list, err := provider.ListAllWorkspaces(ctx)
@@ -359,9 +361,7 @@ func sweepOneWorkspace(ctx context.Context, out io.Writer, target sweepTarget, c
 	wsCtx := observe.WithWorkspaceID(ctx, target.id)
 	st, err := store.NewPostgresStore(wsCtx, target.dbURL)
 	if err != nil {
-		// pgx connection errors name the host and database, never the
-		// password; the URL itself is not printed.
-		outf(out, "workspace %s: unreachable: connect failed: %q\n", target.label(), err.Error())
+		outf(out, "workspace %s: unreachable: connect failed: %q\n", target.label(), describeDBError(err, target.dbURL))
 		return sweepUnreachable
 	}
 	defer st.Close()
@@ -385,6 +385,54 @@ func sweepOneWorkspace(ctx context.Context, out io.Writer, target sweepTarget, c
 		return sweepNotClean
 	}
 	return sweepClean
+}
+
+// describeDBError renders a database open/connect error for operator
+// output without credentials (codex review, round 1). pgx masks a password
+// in the URL's userinfo, but a pgconn.ParseConfigError echoes the rest of
+// the connection string, including a password passed as a query parameter
+// (postgres://u@h/db?password=…&connect_timeout=bad). So a configuration
+// error is reduced to a fixed message, and in any other error every
+// password-like value the DSN carries (userinfo password, password= and
+// sslpassword= in URL or key=value form) is masked.
+func describeDBError(err error, dsn string) string {
+	var parseErr *pgconn.ParseConfigError
+	if errors.As(err, &parseErr) {
+		return "invalid database connection string (details withheld: it may carry credentials)"
+	}
+	msg := err.Error()
+	for _, secret := range dsnSecrets(dsn) {
+		msg = strings.ReplaceAll(msg, secret, "xxxxx")
+	}
+	return msg
+}
+
+// dsnSecrets lists the credential values a connection string carries.
+func dsnSecrets(dsn string) []string {
+	var out []string
+	add := func(v string) {
+		if v = strings.Trim(v, "'"); v != "" {
+			out = append(out, v)
+		}
+	}
+	if u, err := url.Parse(dsn); err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
+		if pw, ok := u.User.Password(); ok {
+			add(pw)
+		}
+		q := u.Query()
+		for _, k := range []string{"password", "sslpassword"} {
+			for _, v := range q[k] {
+				add(v)
+			}
+		}
+		return out
+	}
+	for _, field := range strings.Fields(dsn) {
+		if k, v, ok := strings.Cut(field, "="); ok && (k == "password" || k == "sslpassword") {
+			add(v)
+		}
+	}
+	return out
 }
 
 // printRefused prints one refused row. The subscription id, key id and

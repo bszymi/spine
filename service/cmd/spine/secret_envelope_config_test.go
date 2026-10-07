@@ -306,3 +306,38 @@ func TestSharedModePoolConfig_CarriesSecretEnvelope(t *testing.T) {
 		}
 	}
 }
+
+// codex review (round 1, P2): pgx masks a URL's userinfo password but a
+// ParseConfigError echoes a password passed as a query parameter. The
+// command must never print one, for a workspace database or the registry.
+func TestSecretsReencrypt_DatabaseErrorsCarryNoCredentials(t *testing.T) {
+	ctx := context.Background()
+	for name, dsn := range map[string]string{
+		"query password, bad option":    "postgres://u@127.0.0.1:1/db?password=TOPSECRET1&connect_timeout=no",
+		"query sslpassword, bad option": "postgres://u@127.0.0.1:1/db?sslpassword=TOPSECRET2&connect_timeout=no",
+		"query password, refused":       "postgres://u@127.0.0.1:1/db?sslmode=disable&password=TOPSECRET3&connect_timeout=2",
+		"userinfo password, refused":    "postgres://u:TOPSECRET4@127.0.0.1:1/db?sslmode=disable&connect_timeout=2",
+		"key=value, bad option":         "host=127.0.0.1 port=1 user=u password=TOPSECRET5 connect_timeout=no",
+	} {
+		var out bytes.Buffer
+		if got := sweepOneWorkspace(ctx, &out, sweepTarget{id: "ws-x", dbURL: dsn}, nil, store.SecretEnvelopeMigrate); got != sweepUnreachable {
+			t.Fatalf("%s: outcome %v", name, got)
+		}
+		if strings.Contains(out.String(), "TOPSECRET") || !strings.Contains(out.String(), "workspace ws-x: unreachable: connect failed: ") {
+			t.Fatalf("%s: output leaks a credential or lacks the line: %q", name, out.String())
+		}
+	}
+	if got := describeDBError(errors.New("boom TOPSECRET6 boom"), "postgres://u:TOPSECRET6@h/db"); got != "boom xxxxx boom" {
+		t.Fatalf("describeDBError did not mask the DSN's password: %q", got)
+	}
+
+	reencryptEnv(t)
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
+	t.Setenv("WORKSPACE_RESOLVER", "db")
+	t.Setenv("SPINE_REGISTRY_DATABASE_URL", "postgres://u@127.0.0.1:1/reg?sslmode=disable&password=REGSECRET&connect_timeout=no")
+	var out bytes.Buffer
+	err := runSecretsReencrypt(ctx, &out, reencryptOptions{allWorkspaces: true})
+	if err == nil || strings.Contains(err.Error()+out.String(), "REGSECRET") || !strings.Contains(err.Error(), "connect to workspace registry") {
+		t.Fatalf("registry error leaks a credential: %v %q", err, out.String())
+	}
+}
