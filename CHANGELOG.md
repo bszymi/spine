@@ -109,8 +109,16 @@ release is cut — this file is a staging area.
   Content the projection row cannot store is a rejection too (check `round_trip`): U+0000 anywhere,
   or a workflow path, `id` or `status` over 1024 bytes (PostgreSQL refuses an index entry over
   about 2.7 KB, which used to hold the sync in `error` with the previous row still bindable). An
-  entry at a workflow path that is not a regular file — a gitlink, a directory — is a rejection
-  with check `not_a_file`; it used to hold the sync in `error` on every tick.
+  entry at a workflow path that is not a file — a gitlink, a directory — is a rejection with check
+  `not_a_file`. The entry is typed from the commit's tree **before** the file is read, so a gitlink
+  is refused even when the id it records names a blob in the repository: `git show` prints that
+  blob, and before this release the projection accepted it — a body no diff shows (the diff and
+  repository viewers show only a submodule pointer). A gitlink whose id names nothing used to hold
+  the sync in `error` on every tick.
+- **A non-file entry at `.spine/branch-protection.yaml`** (a gitlink) is treated like a malformed
+  config (ADR-009 §1): the projected rules stay as they are and the sync is held in `error` until
+  the path holds a file again. Before, a gitlink recording the id of a `rules: []` blob projected
+  the relaxed rules while the diff showed only a submodule pointer.
 - **The first sync after the upgrade reconciles every stored workflow row** against head, once per
   projection instance: rows outside the workflow locations or absent at head are removed, stale rows
   are replaced, unchanged rows keep their `source_commit`. A row whose file was deleted after the
@@ -120,9 +128,11 @@ release is cut — this file is a staging area.
 - **Only direct children of `workflows/` (and `<artifacts_dir>/workflows/`) are workflows.** Nested
   files such as runner step profiles under `workflows/steps/` are no longer projected; existing rows
   for them are deleted on the first sync (Info log only when they are not Active).
-- **`projection_synced` payload** gains `workflows_rejected` and `read_skipped` (changed files the
-  commit's tree holds no regular file for — a gitlink, a directory — are still skipped, but now
-  logged at Warn with the entry type and counted).
+- **`projection_synced` payload** gains `workflows_rejected` and `read_skipped` (changed artifact
+  files git cannot read because the commit's tree holds no file at the path — a gitlink whose
+  recorded id is not an object in the repository, a directory — are still skipped, but now logged
+  at Warn with the entry type and counted). Changed artifacts are not typed before a read that
+  succeeds; see `KNOWN-LIMITATIONS.md`.
 - **`sync_state.error_detail`** names the cause of an infrastructure failure (for example
   `resolve sync target: resolve authoritative ref refs/heads/main: …`), sanitised to one line of at
   most 512 bytes, instead of a bare label. A `FullRebuild` that fails now records `error` with the
@@ -163,14 +173,20 @@ release is cut — this file is a staging area.
   `(*store.PostgresStore).ListWorkflowProjections` (not added to `store.Store`).
 - **New optional git capability:** `git.TreeEntryTyper` (`TreeEntryType(ctx, ref, path)`, with
   `git.TreeEntryBlob` / `TreeEntryTree` / `TreeEntryCommit`), implemented by `*git.CLIClient` and not
-  added to `git.GitClient`. The projection asks it what a commit's tree holds at a path whose read
-  failed. **A `GitClient` decorator passed to `projection.NewService` should forward it:** without
-  it no read failure can be proved deterministic, so a gitlink holds the sync in `error` (fail
-  closed) instead of being skipped or rejected.
+  added to `git.GitClient`. The projection asks it what a commit's tree holds at a path before
+  every workflow and branch-protection read, and after a failed changed-artifact read. **A
+  `GitClient` decorator passed to `projection.NewService` should forward it:** without it the
+  projection keeps the historical read — a successful read is trusted, so a gitlink recording the
+  id of a blob in the repository is read as that blob — and no read failure can be proved
+  deterministic, so a dangling gitlink holds the sync in `error` (fail closed) instead of being
+  skipped or rejected.
 - **Shared behaviour for an embedder that runs `projection.Service` (SMP).** Without opting in to
   anything:
   - rejected workflow files (including `not_a_file` entries and over-long indexed fields) are
-    quarantined or not projected instead of projected;
+    quarantined or not projected instead of projected; every workflow read and the
+    branch-protection read cost one extra `git ls-tree` process (the entry is typed first);
+  - a gitlink at `.spine/branch-protection.yaml` holds the sync in `error` with the rules unchanged,
+    even when the id it records names a blob;
   - the first sync's reconciliation deletes **every** stored row outside the workflow definition
     locations — every nested `workflows/**` row, not only the empty-status `workflows/steps/*`
     step profiles: an Active nested definition (for example in an imported repository) is removed
@@ -185,7 +201,7 @@ release is cut — this file is a staging area.
     `engine.StartWorkflowPlanningRun` returns `invalid_params` for a round-trip-failing body, U+0000,
     or a path, `id` or `status` over 1024 bytes.
 
-  A canonical workflow whose file is rejected (or is not a regular file) and has no row stays
+  A canonical workflow whose file is rejected (or is not a file) and has no row stays
   without a row — an embedder that rebuilds whenever a canonical workflow row is missing must exclude
   such paths from that probe, or it rebuilds on every pass (SMP TASK-012).
 

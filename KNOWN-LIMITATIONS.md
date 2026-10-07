@@ -72,14 +72,25 @@ This document tracks known gaps and deferred functionality.
   restores a verified previous row quarantined, and the next sync's reconciliation retries the file
   (the rest of the window is applied meanwhile). A missing blob is repository corruption — a push
   cannot plant one, receive-pack's connectivity check refuses it — and holds the sync until the
-  repository is repaired. An entry that is not a regular file (a gitlink, the one unreadable entry a
-  push can carry) is a `not_a_file` rejection instead. Oversized blobs become `read_bounds`
-  rejections once the bounded-read work (TASK-003) registers its sentinel in `isContentReadError`
+  repository is repaired. An entry that is not a file (a gitlink — the one non-file entry at a file
+  path a push can carry — or a directory) is a `not_a_file` rejection instead, decided from the
+  commit's tree before the file is read. Oversized blobs become `read_bounds` rejections once the
+  bounded-read work (TASK-003) registers its sentinel in `isContentReadError`
   (`adapters/projection/workflow_rows.go`).
-- **Read failures are classified from the commit's tree** (`git.TreeEntryTyper`, implemented by
-  `*git.CLIClient`). A `GitClient` decorator passed to `projection.NewService` that does not forward
-  it makes every read failure infrastructure: a gitlink then holds the sync in `error` (fail closed)
-  instead of being skipped (artifact) or rejected (workflow).
+- **Entries are typed from the commit's tree** (`git.TreeEntryTyper`, implemented by
+  `*git.CLIClient`): before every workflow and branch-protection read, and after a failed
+  changed-artifact read. A `GitClient` decorator passed to `projection.NewService` that does not
+  forward it gets the historical read: a successful read is trusted (a gitlink recording the id of
+  a blob in the repository is read as that blob), and every read failure is infrastructure (a
+  dangling gitlink holds the sync in `error`, fail closed, instead of being skipped or rejected).
+- **A gitlink at an artifact path whose recorded id names a blob in the repository is read as that
+  blob** — by artifact discovery in both projection entry points and by every other artifact
+  reader (`artifact.Service` reads, branch validation) — while diffs and repository viewers show a
+  submodule pointer. Workflow files and `.spine/branch-protection.yaml` are typed before they are
+  read, so this cannot change a run's workflow or the branch rules (TASK-011 review round 2).
+  Typing every artifact in the projection alone would not close it for the other readers and would
+  add a git process per artifact to every full rebuild; refusing gitlink entries in a governed
+  repository at the push and merge boundary closes it for every reader at once (follow-up).
 - **A first full rebuild that was interrupted** (the process stopped while `sync_state` was
   `rebuilding` with no synced commit) is not retried automatically, because it cannot be told apart
   from a first rebuild still running on another instance; run `POST /api/v1/system/rebuild`. A first

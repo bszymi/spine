@@ -427,7 +427,7 @@ payload:
   deleted: <integer>             # Artifacts deleted
   errors: <integer>              # Counted sync errors (state stays at from_commit when > 0)
   workflows_rejected: <integer>  # Workflow files refused for their content (never counted in errors)
-  read_skipped: <integer>        # Changed files the commit's tree holds no regular file for (a gitlink, a directory); skipped, logged at Warn
+  read_skipped: <integer>        # Changed artifact files git could not read because the commit's tree holds no file at the path (a gitlink to an object not in the repository, a directory); skipped, logged at Warn
 ```
 
 ### 4.14 `projection_workflow_rejected`
@@ -450,7 +450,7 @@ payload:
 - `parse`: strict `workflow.Parse` refused the file (unknown, duplicate or case-variant keys, `path` / `commit_sha`, bounds).
 - `round_trip`: `Parse` accepted the file but its stored JSON would decode differently (for example an unquoted `version: 2026-10-06`), or the row could not be stored: U+0000 anywhere, or a workflow path, `id` or `status` over 1024 bytes (an indexed column).
 - `read_bounds`: the blob is refused by a content-size bound on read.
-- `not_a_file`: the commit's tree holds no regular file at the path (for example a gitlink), so there is no content to read.
+- `not_a_file`: the commit's tree holds no file (blob) at the path — a gitlink or a directory — so there is no content to project. The entry is typed before the file is read, so a gitlink is refused even when the id it records names a blob in the repository (which `git show` would print, though diffs show only a submodule pointer).
 - `validate`: `workflow.Validate` failed and strict projection validation is enabled (off by default).
 - `scope` / `absent_at_head`: the sweep found a stored row outside the workflow definition locations, or whose file no longer exists at head and did not exist at the last synced commit either (a file deleted after the last synced commit is removed like the pending diff would remove it, without a rejection).
 - `kept`: the previous row verified and is kept for in-flight runs, with its status set to `Quarantined` so no new run binds it. `removed`: the previous row could not be verified and was deleted. `not_projected`: there was no row.
