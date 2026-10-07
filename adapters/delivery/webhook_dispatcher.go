@@ -203,13 +203,19 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		"event_type", entry.EventType,
 	)
 
-	// Circuit breaker check
-	if !d.breaker.AllowDelivery(ctx, entry.SubscriptionID) {
+	// Circuit breaker check. The permit must be resolved on every exit
+	// path: the HTTP outcomes call Success/Failure, and the deferred
+	// Release resolves a half-open probe that exits early (resolver,
+	// URL, request-build or signing failure) so it cannot wedge the
+	// subscription's circuit half-open (P3-12).
+	permit, ok := d.breaker.Acquire(ctx, entry.SubscriptionID)
+	if !ok {
 		log.Debug("circuit open, skipping delivery")
 		// Return to pending so it can be retried later
 		_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "pending", "circuit open", nil)
 		return
 	}
+	defer permit.Release(ctx)
 
 	sub, err := d.resolver.GetSubscription(ctx, entry.SubscriptionID)
 	if err != nil {
@@ -254,7 +260,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	client, err := d.clientFor(sub)
 	if err != nil {
 		log.Error("subscription TLS config invalid", "error", err)
-		d.breaker.RecordFailure(ctx, entry.SubscriptionID)
+		permit.Failure(ctx)
 		tlsLogID, _ := generateDeliveryID()
 		d.handleFailure(ctx, entry, tlsLogID, 0, 0, false, err.Error(), nil)
 		return
@@ -288,7 +294,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 
 	if err != nil {
 		log.Error("webhook delivery failed", "error", err, "duration_ms", durationMs)
-		d.breaker.RecordFailure(ctx, entry.SubscriptionID)
+		permit.Failure(ctx)
 		d.handleFailure(ctx, entry, logID, durationMs, 0, true, err.Error(), nil)
 		return
 	}
@@ -299,7 +305,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 
 	if statusCode >= 200 && statusCode < 300 {
 		log.Info("webhook delivered", "status", statusCode, "duration_ms", durationMs)
-		d.breaker.RecordSuccess(ctx, entry.SubscriptionID)
+		permit.Success(ctx)
 		_ = d.store.MarkDelivered(ctx, entry.DeliveryID)
 	} else {
 		errMsg := fmt.Sprintf("HTTP %d", statusCode)
@@ -309,7 +315,7 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 		} else {
 			log.Warn("webhook delivery rejected (permanent)", "status", statusCode, "duration_ms", durationMs)
 		}
-		d.breaker.RecordFailure(ctx, entry.SubscriptionID)
+		permit.Failure(ctx)
 		d.handleFailure(ctx, entry, logID, durationMs, statusCode, retryable, errMsg, resp)
 		return
 	}

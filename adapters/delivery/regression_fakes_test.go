@@ -222,3 +222,19 @@ func statusServer(t *testing.T, status int) (*httptest.Server, *atomic.Int64) {
 	t.Cleanup(srv.Close)
 	return srv, &hits
 }
+
+// sharedClock wires the store's clock into the dispatcher and its
+// breaker, so deferral times, backoff and probe times all move with
+// queueStore.advance.
+func sharedClock(d *WebhookDispatcher, st *queueStore) {
+	d.now = st.now
+	d.breaker.now = st.now
+}
+
+// tripOpen puts sub's circuit into the open state with its last failure
+// at lastFailure.
+func tripOpen(cb *CircuitBreaker, sub string, lastFailure time.Time) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.circuits[sub] = &circuitEntry{state: CircuitOpen, consecutiveFailures: circuitFailureThreshold, lastFailureAt: lastFailure}
+}
