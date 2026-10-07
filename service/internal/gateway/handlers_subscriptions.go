@@ -8,9 +8,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -341,7 +342,9 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 	// SSRF exposure is bounded even for operator-configured targets.
 	testReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, sub.TargetURL, bytes.NewReader(pingPayload)) //nolint:gosec // G704: operator-configured webhook URL, validator-gated
 	if err != nil {
-		WriteJSON(w, http.StatusOK, map[string]any{"success": false, "error": err.Error()})
+		// The parse error quotes the whole URL; its path/query may carry
+		// the receiver's credential (INIT-023 TASK-010, P3-26).
+		WriteJSON(w, http.StatusOK, map[string]any{"success": false, "error": delivery.RedactError(err, sub.TargetURL)})
 		return
 	}
 	testReq.Header.Set("Content-Type", "application/json")
@@ -357,10 +360,14 @@ func (s *Server) handleSubscriptionTest(w http.ResponseWriter, r *http.Request) 
 	durationMs := int(time.Since(start).Milliseconds())
 
 	if err != nil {
-		observe.Logger(r.Context()).Warn("subscription test failed", "subscription_id", subID, "error", err)
+		// client.Do errors are *url.Error carrying the full request (or
+		// redirect) URL; the dialer's own errors name no resolved
+		// address (P3-25). Redact before both the log and the response.
+		msg := delivery.RedactError(err, sub.TargetURL)
+		observe.Logger(r.Context()).Warn("subscription test failed", "subscription_id", subID, "error", msg)
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"success":     false,
-			"error":       err.Error(),
+			"error":       msg,
 			"duration_ms": durationMs,
 		})
 		return

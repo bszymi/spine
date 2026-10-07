@@ -282,17 +282,23 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	// Re-validate the persisted URL before every delivery so
 	// subscriptions predating the SSRF hardening are rejected here,
 	// not at the socket. Failures are permanent: dead-letter.
+	//
+	// From here on every error text that reaches a log line or an error
+	// column goes through RedactError: the target URL's path and query
+	// may carry the receiver's credential (P3-26).
 	if err := d.targets.ValidateURL(sub.TargetURL); err != nil {
-		log.Warn("webhook target_url rejected by validator", "error", err)
-		d.deadLetter(ctx, entry, err.Error())
+		msg := RedactError(err, sub.TargetURL)
+		log.Warn("webhook target_url rejected by validator", "error", msg)
+		d.deadLetter(ctx, entry, msg)
 		return
 	}
 
 	// Build request
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sub.TargetURL, bytes.NewReader(entry.Payload))
 	if err != nil {
-		log.Error("failed to build request", "error", err)
-		d.deadLetter(ctx, entry, err.Error())
+		msg := RedactError(err, sub.TargetURL)
+		log.Error("failed to build request", "error", msg)
+		d.deadLetter(ctx, entry, msg)
 		return
 	}
 
@@ -304,10 +310,11 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	// configured — uses a dedicated client cached by subscription ID.
 	client, err := d.clientFor(sub)
 	if err != nil {
-		log.Error("subscription TLS config invalid", "error", err)
+		msg := RedactError(err, sub.TargetURL)
+		log.Error("subscription TLS config invalid", "error", msg)
 		permit.Failure(ctx)
 		tlsLogID, _ := generateDeliveryID()
-		d.handleFailure(ctx, entry, tlsLogID, 0, 0, false, err.Error(), nil)
+		d.handleFailure(ctx, entry, tlsLogID, 0, 0, false, msg, nil)
 		return
 	}
 
@@ -338,9 +345,12 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 	logID, _ := generateDeliveryID() // reuse ID generator, prefix doesn't matter for log
 
 	if err != nil {
-		log.Error("webhook delivery failed", "error", err, "duration_ms", durationMs)
+		// client.Do errors are *url.Error, whose text is the full
+		// request (or redirect) URL. Never store or log err.Error().
+		msg := RedactError(err, sub.TargetURL)
+		log.Error("webhook delivery failed", "error", msg, "duration_ms", durationMs)
 		permit.Failure(ctx)
-		d.handleFailure(ctx, entry, logID, durationMs, 0, true, err.Error(), nil)
+		d.handleFailure(ctx, entry, logID, durationMs, 0, true, msg, nil)
 		return
 	}
 	defer resp.Body.Close()

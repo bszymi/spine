@@ -167,7 +167,7 @@ func BootstrapInternalSubscription(ctx context.Context, st store.SubscriptionSto
 		return err
 	}
 
-	log.Info("internal subscription created", "subscription_id", sub.SubscriptionID, "target_url", cfg.EventURL)
+	log.Info("internal subscription created", "subscription_id", sub.SubscriptionID, "target_url", RedactURL(cfg.EventURL))
 	return nil
 }
 
