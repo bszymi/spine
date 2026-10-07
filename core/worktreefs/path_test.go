@@ -2,6 +2,7 @@ package worktreefs
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -10,7 +11,9 @@ import (
 //
 // Mutation checks: dropping the ".git" comparison in isGitDirName fails the
 // ReasonGitDir rows; dropping the HFS fold fails the ".g\u200cit/x" row;
-// dropping the ':' cut or the trailing-dot/space strip fails the NTFS rows.
+// dropping the ':' cut or the trailing-dot/space strip fails the NTFS rows;
+// dropping the backslash split fails the backslash rows, and cutting at ':'
+// before splitting fails the `a:b\.git` row.
 func TestClean(t *testing.T) {
 	long := strings.Repeat("a/", MaxPathBytes/2) + "b" // 4097 bytes
 	longComp := strings.Repeat("c", MaxComponentBytes+1)
@@ -19,6 +22,9 @@ func TestClean(t *testing.T) {
 		in     string
 		want   string // cleaned form when accepted
 		reason Reason // "" = accepted
+		// unix: a backslash is an ordinary byte only off Windows (Clean's
+		// filepath.ToSlash turns it into a separator there).
+		unix bool
 	}{
 		// ReasonInvalid.
 		{in: "", reason: ReasonInvalid},
@@ -48,6 +54,19 @@ func TestClean(t *testing.T) {
 		{in: "\ufeff.git/x", reason: ReasonGitDir},
 		{in: ".git:x/y", reason: ReasonGitDir},
 		{in: ".git. :z/y", reason: ReasonGitDir},
+		// git's NTFS rule also ends a name at a backslash and re-checks after
+		// every backslash (core.protectNTFS, on by default everywhere):
+		// `git add` refuses each of these on Linux and macOS.
+		{in: `.git\x`, reason: ReasonGitDir, unix: true},
+		{in: `.git\info\attributes`, reason: ReasonGitDir, unix: true},
+		{in: `git~1\x`, reason: ReasonGitDir, unix: true},
+		{in: `GIT~1\x.md`, reason: ReasonGitDir, unix: true},
+		{in: `governance/.git\x.md`, reason: ReasonGitDir, unix: true},
+		{in: `a\.git`, reason: ReasonGitDir, unix: true},
+		{in: `a:b\.git`, reason: ReasonGitDir, unix: true},
+		{in: `x\git~1.`, reason: ReasonGitDir, unix: true},
+		{in: `x\.git.\y`, reason: ReasonGitDir, unix: true},
+		{in: `x\.GIT :s`, reason: ReasonGitDir, unix: true},
 
 		// Accepted: tracked dotfiles and look-alikes are content.
 		{in: ".gitignore", want: ".gitignore"},
@@ -56,6 +75,9 @@ func TestClean(t *testing.T) {
 		{in: "a.git/x.md", want: "a.git/x.md"},
 		{in: "git/x.md", want: "git/x.md"},
 		{in: ".git .x/y", want: ".git .x/y"},
+		{in: `a\b.md`, want: `a\b.md`, unix: true},
+		{in: `.github\x.md`, want: `.github\x.md`, unix: true},
+		{in: `a\.gitignore`, want: `a\.gitignore`, unix: true},
 		{in: "governance/charter.md", want: "governance/charter.md"},
 		{in: strings.Repeat("c", MaxComponentBytes), want: strings.Repeat("c", MaxComponentBytes)},
 	}
@@ -65,6 +87,9 @@ func TestClean(t *testing.T) {
 			name = name[:40] + "…"
 		}
 		t.Run(name, func(t *testing.T) {
+			if tc.unix && runtime.GOOS == "windows" {
+				t.Skip("a backslash is a separator on Windows")
+			}
 			got, err := Clean(tc.in)
 			if tc.reason == "" {
 				if err != nil {
@@ -106,6 +131,20 @@ func TestClean_GitDirComponentNamesValidatedPrefix(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `"governance/sub/.GIT"`) || strings.Contains(err.Error(), "attributes") {
 		t.Fatalf("message must name the refused prefix and nothing after it: %q", err.Error())
+	}
+}
+
+// The backslash spellings name the validated component, like any other
+// git-dir refusal (before the backslash split, `governance/.git\x.md` passed Clean and
+// was a 500 git_error after the file was written, not a 400 before it).
+func TestClean_BackslashGitDirNamesComponent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a backslash is a separator on Windows")
+	}
+	_, err := Clean(`governance/.git\x.md`)
+	var pe *PathError
+	if !errors.As(err, &pe) || pe.Reason != ReasonGitDir || pe.Component != `governance/.git\x.md` {
+		t.Fatalf("want ReasonGitDir naming the component, got %v", err)
 	}
 }
 

@@ -216,16 +216,26 @@ func Clean(rel string) (string, error) {
 //
 //  1. drop the code points HFS+ ignores when it compares names
 //     (U+200C–U+200F, U+202A–U+202E, U+206A–U+206F, U+FEFF);
-//  2. cut at the first ':' (an NTFS alternate data stream: ".git:x" is the
-//     git dir on NTFS), then strip trailing '.' and ' ' (NTFS drops them);
-//  3. compare ".git" case-insensitively; separately, compare "git~1" (the
+//  2. split at every '\': git's NTFS rule treats a backslash as a directory
+//     separator on every platform (is_xplatform_dir_sep), and with
+//     core.protectNTFS — on by default everywhere — verify_path re-checks
+//     after each backslash, so `git add` on Linux refuses ".git\x",
+//     "GIT~1\x", "a\.git" and "a:b\.git" alike;
+//  3. in each segment, cut at the first ':' (an NTFS alternate data
+//     stream: ".git:x" is the git dir on NTFS), then strip trailing '.'
+//     and ' ' (NTFS drops them) — splitting first matters: "a:b\.git"
+//     must not be cut to "a";
+//  4. compare ".git" case-insensitively; separately, compare "git~1" (the
 //     8.3 short name of ".git") case-insensitively.
 //
 // On Linux and macOS some of these names are not the git directory, but git
-// refuses to check them out anyway (core.protectNTFS / core.protectHFS), so
-// refusing them here costs nothing and keeps the rule a faithful mirror.
-// Applying both folds to every component makes the rule a superset of
-// git's, never a subset.
+// refuses to stage or check them out anyway (core.protectNTFS /
+// core.protectHFS), so refusing them here costs nothing: the write would
+// otherwise fail at `git add`, after the file was on disk. Applying the HFS
+// fold and the NTFS rules to every component makes the rule a superset of
+// git's for these spellings (verified against git 2.54's `git add`); it
+// refuses some names git accepts (an HFS-ignorable code point inside an
+// NTFS spelling), never one git would stage.
 func isGitDirName(c string) bool {
 	var b strings.Builder
 	for _, r := range c {
@@ -233,12 +243,16 @@ func isGitDirName(c string) bool {
 			b.WriteRune(r)
 		}
 	}
-	s := b.String()
-	if i := strings.IndexByte(s, ':'); i >= 0 {
-		s = s[:i]
+	for _, s := range strings.Split(b.String(), `\`) {
+		if i := strings.IndexByte(s, ':'); i >= 0 {
+			s = s[:i]
+		}
+		s = strings.TrimRight(s, ". ")
+		if strings.EqualFold(s, ".git") || strings.EqualFold(s, "git~1") {
+			return true
+		}
 	}
-	s = strings.TrimRight(s, ". ")
-	return strings.EqualFold(s, ".git") || strings.EqualFold(s, "git~1")
+	return false
 }
 
 func hfsIgnorable(r rune) bool {

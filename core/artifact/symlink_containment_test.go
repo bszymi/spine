@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -193,6 +194,32 @@ func TestF5_Create_DotGitPath_RefusedBeforeWrite(t *testing.T) {
 			f5RequireUnsafePath(t, err)
 			if _, statErr := os.Lstat(filepath.Join(repo, ".git", "info", "attributes")); statErr == nil {
 				t.Errorf(".git/info/attributes was created")
+			}
+		})
+	}
+}
+
+// The backslash spellings git's NTFS rule treats as ".git" (core.protectNTFS
+// is on by default on every platform, so `git add` refuses them on Linux and
+// macOS too). Before review round 1 they passed Clean, the file was written,
+// and the call ended in a 500 git_error ("invalid path") after a rollback;
+// now they are refused 400 before anything touches the disk.
+func TestF5_Create_BackslashDotGitPath_RefusedBeforeWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a backslash is a path separator on Windows")
+	}
+	for _, p := range []string{`.git\info\attributes`, `governance/.git\x.md`, `GIT~1\x.md`, `governance/a\.git`} {
+		t.Run(p, func(t *testing.T) {
+			repo := testutil.NewTempRepo(t)
+			_, err := f5OpenSvc(repo).Create(f5Ctx(""), p, f5Doc)
+			f5RequireUnsafePath(t, err)
+			var pe *worktreefs.PathError
+			if !errors.As(err, &pe) || pe.Reason != worktreefs.ReasonGitDir {
+				t.Fatalf("want ReasonGitDir, got %v", err)
+			}
+			out, _ := exec.Command("git", "-C", repo, "status", "--porcelain", "--untracked-files=all").CombinedOutput()
+			if strings.TrimSpace(string(out)) != "" {
+				t.Errorf("the refused path touched the working tree:\n%s", out)
 			}
 		})
 	}
