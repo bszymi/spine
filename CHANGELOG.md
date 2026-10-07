@@ -68,6 +68,98 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-007: step-entry policy)
+
+### Security
+
+- **Engine step-entry policy (audit P3-3, P3-4, P3-15, P3-16; F3 amplifier).**
+  `AssignStep` bound any actor ID to any step; neither binding path looked at
+  `execution.mode`, preconditions or run status; two precondition checks failed
+  open; a cancelled run's live steps stayed bindable and submittable; and the
+  executor of a run could be bound to its own review. The new opt-in
+  `engine.StepEntryPolicy` closes each of these behind its own switch
+  (`EnforceRunStatus`, `EnforceEligibility`, `EnforceExecutionMode`,
+  `EnforcePreconditions`, `RequireSkillsOnAssign`, `SeparationOfDuties`,
+  `TerminateStepsOnCancel`). `spine serve` turns all of them on by default.
+
+### Changed (standalone)
+
+`spine serve` installs `engine.StrictStepEntryPolicy()` unless
+`SPINE_STEP_ENTRY_POLICY=legacy`. Externally visible changes under the default:
+
+- **New env var `SPINE_STEP_ENTRY_POLICY`:** unset or `strict` → strict policy;
+  `legacy` → pre-INIT-023 behaviour with a startup `WARN`; any other value
+  refuses to start. `legacy` is a migration escape hatch and will be removed.
+- **Assign and claim refusals** (`POST /runs/{run_id}/steps/{step_id}/assign`,
+  claim), nothing written on refusal:
+  - `409` run not `active` ("run R is cancelled; a step can only be assigned on
+    an active run"); `409` engine-owned step (`type: internal` / `mode:
+    spine_only`); `409` actor type outside the mode (`automated_only` →
+    `automated_system`, `ai_only` → `ai_agent`, `human_only` → `human`);
+  - `404` unknown actor; `403` suspended or deactivated actor;
+  - assign only: `403` actor outside the effective `eligible_actor_ids`, `409`
+    actor type outside `eligible_actor_types`, `409` "actor missing required
+    skills" (`503` if no skill lookup is wired);
+  - `403` separation of duties ("separation of duties: actor A executed step S of
+    run R and cannot review it"), `503` if the assignment ledger cannot be read;
+  - `412` preconditions not met — now evaluated by the engine at assign and
+    claim, strictly: `custom`/unknown types, `cross_artifact_valid` without a
+    validator and `discussions_resolved` without a checker fail, and
+    `field_value`/`field_present` on `status`, `id`, `type`, `title` read the
+    typed front-matter fields (so `field_value status` can now pass).
+- **Run status:** acknowledge, result submission, step activation and retry on a
+  run that is not `active` answer `409`; the step-execution candidate listing no
+  longer offers executions of non-active runs.
+- **Run end:** cancelling, failing (including a permanent merge failure) or
+  timing out a run moves its `waiting`/`assigned`/`in_progress`/`blocked`
+  executions to `skipped` with `error_detail.classification: run_terminated`
+  and cancels their active assignments. A later result submission on such an
+  execution answers `409` (it answered `200` with `status: skipped`); a duplicate
+  submit of a `completed` execution is still idempotent. Executions of runs that
+  ended before the upgrade are not swept; they are refused and hidden.
+- **Gateway assign fallback:** with a policy installed the engine-less store
+  binder is disabled, so an assign with no orchestrator wired answers `503 step
+  assigner not configured` instead of binding unchecked.
+- **Reference workflow:** `workflows/epic-lifecycle.yaml` v1.1 drops execute's
+  `artifact_status: In Progress` precondition, which could never hold mid-run
+  (commit status lands only at merge); the execute step is now bindable.
+- Operators with custom workflows that require, on the run's own artifact, a
+  status an earlier outcome commits must remove that precondition (see
+  `workflow.DeferredStatusPreconditions`) or run with `legacy` while migrating.
+
+### For embedders
+
+- **No behaviour change unless you opt in.** Every new check is guarded by a
+  `StepEntryPolicy` bool; an orchestrator without `WithStepEntryPolicy` runs
+  exactly the previous logic. One nuance: a policy that sets only `Actors`
+  (a resolver) is not "the zero value" — `ClaimStep`'s actor lookup then uses
+  the resolver (`IsZero` ignores `Actors`).
+- **New (additive):** `engine.StepEntryPolicy`, `engine.EntryActorResolver`,
+  `engine.StrictStepEntryPolicy`, `StepEntryPolicy.IsZero`,
+  `(*Orchestrator).WithStepEntryPolicy`, `(*Orchestrator).StepEntryPolicy`,
+  `(*Orchestrator).TerminateLiveSteps`; `workflow.StepTriggerRunTerminated`
+  (`run.terminated`, live → `skipped`); `domain.FailureRunTerminated`
+  (`run_terminated`, not retryable); `workflow.DeferredStatusPreconditions` and
+  `workflow.DeferredStatusPrecondition` (pinned shape: StepID, Index, Type,
+  Status, SetBy); `(*store.PostgresStore).CancelActiveAssignmentsForExecution`;
+  `scheduler.WithRunTerminated`, `scheduler.RunTerminatedFunc`,
+  `scheduler.ServiceSet.RunTerminatedFn`. No exported signature changes and no
+  interface gains a method: the SoD ledger read (`ListAssignmentsByActor`) and
+  the assignment cancel are optional ports type-asserted on the assignment
+  store; `*store.PostgresStore` provides both.
+- **Resolver contract:** the `Actors` resolver's answer must have `ActorID`
+  equal to the requested ID, or the bind answers `ErrNotFound`; a
+  `*domain.SpineError` keeps its code (`ErrUnavailable` stays 503); an untyped
+  error becomes `ErrInternal`.
+- **Run gate:** `EnforceRunStatus` refuses every non-`active` status (including
+  `pending`, `paused`, `committing`, `partially-merged`), stricter than a gate
+  that refuses only terminal runs.
+- **`TerminateStepsOnCancel` without `EnforceRunStatus`** logs a `WARN`: the
+  termination write is not atomic against a concurrent bind.
+- `validation.EvaluatePreconditions` is unchanged.
+
+---
+
 ## Spine Core library packaging — dual-target (standalone + embedded)
 
 Disposition: **Option A** — Spine remains available both as a standalone

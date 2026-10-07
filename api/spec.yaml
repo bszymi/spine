@@ -559,6 +559,23 @@ paths:
               properties:
                 actor_id:
                   type: string
+                eligible_actor_ids:
+                  type: array
+                  items: { type: string }
+                  description: >
+                    Replaces the execution's stored allow-list. Under the
+                    engine step-entry policy the actor must be in the
+                    effective list (this one when non-empty, else the stored
+                    one).
+      description: >
+        Under the engine step-entry policy (`SPINE_STEP_ENTRY_POLICY`, strict by
+        default; INIT-023 TASK-007) the engine checks, in order and before
+        writing anything: run is `active` (409), step is not engine-owned (409),
+        actor type matches the execution mode (409), actor exists (404) and is
+        `active` (403), allow-list (403) and `eligible_actor_types` (409),
+        `required_skills` (409), separation of duties (403), preconditions (412).
+        A check that cannot run (no skill lookup, unreadable assignment ledger,
+        no orchestrator wired) answers 503.
       responses:
         '200':
           description: Actor assigned
@@ -568,8 +585,14 @@ paths:
                 $ref: '#/components/schemas/AssignmentResponse'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '412':
+          description: Step preconditions not met
+        '503':
+          description: Step assigner or a step-entry check dependency not configured
 
   # ── Task Governance Operations ──
 

@@ -42,6 +42,31 @@ This document tracks known gaps and deferred functionality.
   (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
   INIT-023 EPIC-001 follow-up (owner: bszymi).
 
+### Step-Entry Checks Are Opt-In for Embedders (and Off Under `legacy`)
+- The engine's step-entry policy (`engine.StepEntryPolicy`, INIT-023 TASK-007) closes audit
+  P3-3 (assign checks no actor constraints), P3-4 (precondition-failed steps stay bindable; two
+  evaluator checks fail open), P3-15 (claim ignores `execution.mode`) and P3-16 (entry points
+  ignore run status; cancel leaves steps live), and adds separation of duties.
+- **The zero value is the pre-INIT-023 behaviour.** An embedder that has not called
+  `WithStepEntryPolicy` (SMP until its TASK-011), and `spine serve` with
+  `SPINE_STEP_ENTRY_POLICY=legacy`, still has all four findings open and no separation of duties.
+  `spine serve` defaults to the strict policy; `legacy` is a logged escape hatch for operators
+  migrating custom workflows and will be removed.
+- **Separation-of-duties residual (accepted, Owner question 6):** `AssignStep` writes no
+  assignment row, so if restart recovery resets an assign-bound execution and a different actor is
+  bound, the first actor leaves no record and is not treated as a run author. Closing it needs an
+  append-only binding ledger (a schema change; follow-up). SoD also cannot see git authorship
+  directly; INIT-023 TASK-016 limits run-branch pushes to the bound actor.
+- **Stored data:** runs that were cancelled or failed before the upgrade keep their live
+  executions. They are inert under `EnforceRunStatus` (every entry point refuses them, and the
+  candidate listing hides them); a one-shot sweep is a follow-up.
+- **Not atomic:** run-end termination is a blind write that a concurrent bind can overwrite until
+  INIT-023 TASK-008's compare-and-swap; `EnforceRunStatus` is the backstop.
+- **Status preconditions on the run's own artifact** are evaluated against `main`, where commit
+  status lands only at merge; a precondition requiring a status an earlier outcome commits can
+  never hold mid-run (see `workflow.DeferredStatusPreconditions`). Custom workflows with such a
+  precondition strand under the strict policy until it is removed.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

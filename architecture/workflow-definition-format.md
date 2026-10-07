@@ -340,7 +340,37 @@ Validation Service.
 | `field_value` | Specified front matter field must have the given value |
 | `links_exist` | Artifact must have at least one link of the specified type |
 | `cross_artifact_valid` | Invokes the Validation Service to validate the artifact against its governed context (linked artifacts, structural rules, or parent relationships) |
-| `custom` | Custom validation function (for extensibility) |
+| `discussions_resolved` | No open discussion thread is anchored on the artifact (or, with `anchor_type: run`, on the run) |
+| `custom` | Custom validation function (for extensibility). **Not implemented** — see strict evaluation below. |
+
+**Strict evaluation (INIT-023 TASK-007).** When an embedder installs the engine
+step-entry policy with `EnforcePreconditions` (the `spine serve` default, see
+[Security Model](/architecture/security-model.md) "Step-entry policy"),
+preconditions are evaluated by the engine when an actor is assigned to or claims
+a step, not only at activation, and evaluation is strict:
+
+- `field_value` and `field_present` on `status`, `id`, `type` and `title` read
+  the artifact's typed front-matter fields. (The parser keeps those four keys out
+  of the free-form metadata map, so without strict evaluation such a condition
+  can never pass.) Every other field reads the metadata map as before.
+- A type the engine does not implement — including `custom` — fails instead of
+  being skipped.
+- `cross_artifact_valid` with no validator wired, and `discussions_resolved` with
+  no discussion checker wired, fail instead of passing.
+
+Without the policy (the zero value every embedder starts with) the forward-
+compatible skips above remain and the four typed fields are not readable.
+
+**Status conditions on the run's own artifact are evaluated against `main`.** An
+outcome's `commit` block (for example `commit: {status: In Progress}`) is
+recorded on the run and written to the artifact only when the run's branch is
+merged, at publish. Until then the run's own artifact keeps its run-start
+status. So an `artifact_status` (or `field_value` on `status`) condition without
+`config.path` on a later step must require the **run-start** status: requiring a
+status that an earlier outcome commits can never hold mid-run, and under strict
+evaluation that step can never be bound. `workflow.DeferredStatusPreconditions`
+reports such conditions; every workflow shipped in `workflows/` is tested to
+report none.
 
 ### 5.3 Inputs and Outputs
 

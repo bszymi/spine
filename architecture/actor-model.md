@@ -322,7 +322,7 @@ Availability may include additional operational signals such as error rates, lat
 
 - An actor may be assigned to multiple steps concurrently
 - The system does not enforce single-assignment constraints by default
-- Workflow definitions may declare step-level constraints that limit concurrent assignments if needed (e.g., a human reviewer should not review their own work)
+- **Separation of duties (INIT-023 TASK-007).** When the engine step-entry policy enables `SeparationOfDuties` (the `spine serve` default; an embedder opts in), an actor who authored a run cannot be bound — by assignment, claim or engine auto-selection — to a `review` step of that run. A run author is any actor bound, now or ever, to a `manual` or `automated` execution of the run: the execution's current actor in any status (failed and reworked attempts count), or any `actor_assignments` row of such an execution in any status (so an executor who released the step and let someone else finish still counts). Executions of `review`, `convergence` and `internal` steps do not make an actor an author, so one actor may both verify and review. Symmetrically, an actor holding a live `review` execution cannot be bound to a `manual` or `automated` step of the same run (relevant with divergence branches). The rule is per run: a reviewer who sent work back may execute the rework but cannot then review it. Step types come from the workflow version the run is pinned to. If the assignment ledger cannot be read the bind is refused (fail closed). Known residual: an `AssignStep` binding writes no assignment row, so an assign-bound execution reset by restart recovery and rebound to someone else leaves no record of the first actor (closing it needs an append-only binding ledger; follow-up). The run initiator is not recorded and does not count.
 
 ---
 
@@ -361,6 +361,6 @@ Areas expected to require refinement:
 - Actor performance metrics and quality tracking
 - Multi-agent collaboration patterns
 - Actor marketplace or registry for third-party integrations
-- Conflict-of-interest rules (e.g., an actor cannot review their own work)
+- Conflict-of-interest rules beyond the separation-of-duties rule in §7.3 (e.g., the run initiator, or one actor holding two review steps of a run)
 
 Changes that alter the Actor Gateway protocol, selection algorithm, or trust model should be captured as ADRs.

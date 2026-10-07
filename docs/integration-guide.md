@@ -618,6 +618,7 @@ spec:
 | `SPINE_GIT_PUSH_ENABLED` | No | `true` | Set to `false` to disable git push |
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
+| `SPINE_STEP_ENTRY_POLICY` | No | `strict` | Engine step-entry policy (INIT-023 TASK-007). `strict` (or unset): assign/claim enforce run status, actor eligibility, execution mode, preconditions, `required_skills` on assign and separation of duties; cancelled/failed runs close their live steps; the gateway's engine-less assign fallback is disabled. `legacy`: pre-INIT-023 behaviour, logged as a `WARN` at startup (migration escape hatch, to be removed). Any other value refuses to start. See [Security Model](/architecture/security-model.md) §4.4.1. |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
 | `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections (≤0 disables the cap) |
 | `SPINE_EVENT_DELIVERY` | No | `false` | Feature flag — set to `true` to enable webhook / SSE / pull-log delivery. Without it, only projection polling works. |
