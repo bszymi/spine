@@ -790,6 +790,20 @@ func TestDecideBoundToRun(t *testing.T) {
 	if _, err := NewEvaluator(errRR).DecideBoundToRun(ctx, actor("alice", domain.RoleContributor), fxRun); !errors.Is(err, boom) {
 		t.Errorf("store error: %v, want it returned", err)
 	}
+
+	// The branch-cursor rule checks the branch record, not only the
+	// execution (review round 1). Mutation check: dropping
+	// `b.RunID == run.RunID` or `b.CurrentStepID == k.step` admits dave.
+	for name, mutate := range map[string]func(b *domain.Branch){
+		"branch record of another run":               func(b *domain.Branch) { b.RunID = "run-ffffffff" },
+		"branch cursor moved past the holder's step": func(b *domain.Branch) { b.CurrentStepID = "judge" },
+	} {
+		rr := divergenceFixture()
+		mutate(rr.branches[fxRun+"-div-d-b1"])
+		if d := call(rr, actor("dave", domain.RoleContributor), fxRun); d.Allow {
+			t.Errorf("%s: %+v, want deny", name, d)
+		}
+	}
 }
 
 func TestFrozenStepType(t *testing.T) {
