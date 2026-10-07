@@ -222,16 +222,27 @@ func TestHandleCloseWindow_ServiceError(t *testing.T) {
 	}
 }
 
-// boundExecStore is the gateway fakeStore with one live execution of
-// the run's current step (step1, see fakeStore.GetRun) held by holder.
-type boundExecStore struct {
+// explorationStore is the gateway fakeStore in the state the engine
+// really produces while an exploratory divergence's window is open
+// (core/engine startDivergence): the run cursor is "divergence:div-1",
+// and the latest run-level execution is the completed step1 whose
+// outcome triggered the divergence, submitted by trigger. contrib-2
+// completed the earlier step0. No execution exists for any branch: the
+// engine creates none for an exploratory branch, so nobody holds a
+// live cursor of the run (TASK-016 review round 1).
+type explorationStore struct {
 	*fakeStore
-	holder string
+	trigger string
 }
 
-func (b *boundExecStore) ListStepExecutionsByRun(_ context.Context, runID string) ([]domain.StepExecution, error) {
+func (e *explorationStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
+	return &domain.Run{RunID: runID, Status: domain.RunStatusActive, CurrentStepID: "divergence:div-1", BranchName: "spine/run/test-branch"}, nil
+}
+
+func (e *explorationStore) ListStepExecutionsByRun(_ context.Context, runID string) ([]domain.StepExecution, error) {
 	return []domain.StepExecution{
-		{ExecutionID: "exec-1", RunID: runID, StepID: "step1", ActorID: b.holder, Status: domain.StepStatusInProgress, Attempt: 1},
+		{ExecutionID: "exec-0", RunID: runID, StepID: "step0", ActorID: "contrib-2", Status: domain.StepStatusCompleted, Attempt: 1},
+		{ExecutionID: "exec-1", RunID: runID, StepID: "step1", ActorID: e.trigger, Status: domain.StepStatusCompleted, Attempt: 1},
 	}, nil
 }
 
@@ -250,16 +261,16 @@ func createBranchAs(t *testing.T, url, token, body string) int {
 	return resp.StatusCode
 }
 
-// newDivergenceBindingServer is newDivergenceFullServer over a store in
-// which holder holds the run's current step.
-func newDivergenceBindingServer(t *testing.T, bc gateway.BranchCreator, holder string) (*httptest.Server, string, string) {
+// newDivergenceBindingServer is newDivergenceFullServer over an
+// explorationStore whose divergence trigger is trigger.
+func newDivergenceBindingServer(t *testing.T, bc gateway.BranchCreator, trigger string) (*httptest.Server, string, string) {
 	t.Helper()
 	fs := newFakeStore()
 	for id, role := range map[string]domain.ActorRole{"contrib-1": domain.RoleContributor, "contrib-2": domain.RoleContributor, "op-1": domain.RoleOperator} {
 		fs.actors[id] = &domain.Actor{ActorID: id, Type: domain.ActorTypeHuman, Name: id, Role: role, Status: domain.ActorStatusActive}
 	}
 	fs.divContexts = map[string]*domain.DivergenceContext{"div-1": {DivergenceID: "div-1", RunID: "run-1"}}
-	st := &boundExecStore{fakeStore: fs, holder: holder}
+	st := &explorationStore{fakeStore: fs, trigger: trigger}
 	authSvc := auth.NewService(st)
 	c1, _, _ := authSvc.CreateToken(context.Background(), "contrib-1", "test", nil)
 	c2, _, _ := authSvc.CreateToken(context.Background(), "contrib-2", "test", nil)
@@ -282,17 +293,22 @@ func TestHandleCreateBranch_UnboundContributorForbidden(t *testing.T) {
 	}
 }
 
-// TestHandleCreateBranch_BoundContributorAllowed: the actor holding the
-// run's current step may add a branch; another contributor may not.
-func TestHandleCreateBranch_BoundContributorAllowed(t *testing.T) {
+// TestHandleCreateBranch_DivergenceTriggerHolderAllowed: in the state
+// the engine produces for an open exploratory divergence, the actor who
+// submitted the triggering step may add a branch; a contributor who
+// completed an earlier step of the same run may not. (Before review
+// round 1 this test modelled a live run-level execution of the current
+// step beside the divergence, which the engine never produces, so no
+// contributor could in fact pass the binding.)
+func TestHandleCreateBranch_DivergenceTriggerHolderAllowed(t *testing.T) {
 	bc := &fakeBranchCreator{}
-	ts, holderToken, otherToken := newDivergenceBindingServer(t, bc, "contrib-1")
+	ts, triggerToken, otherToken := newDivergenceBindingServer(t, bc, "contrib-1")
 	defer ts.Close()
-	if code := createBranchAs(t, ts.URL, holderToken, `{"branch_id":"b-1","start_step":"step-1"}`); code != http.StatusCreated {
-		t.Errorf("bound contributor: status %d, want 201", code)
+	if code := createBranchAs(t, ts.URL, triggerToken, `{"branch_id":"b-1","start_step":"step-1"}`); code != http.StatusCreated {
+		t.Errorf("divergence trigger holder: status %d, want 201", code)
 	}
 	if code := createBranchAs(t, ts.URL, otherToken, `{"branch_id":"b-2","start_step":"step-1"}`); code != http.StatusForbidden {
-		t.Errorf("other contributor: status %d, want 403", code)
+		t.Errorf("contributor who completed an earlier step: status %d, want 403", code)
 	}
 	if bc.calls != 1 {
 		t.Errorf("branch creator called %d times, want 1", bc.calls)

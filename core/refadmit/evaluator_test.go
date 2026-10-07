@@ -806,6 +806,106 @@ func TestDecideBoundToRun(t *testing.T) {
 	}
 }
 
+// explorationFixture is the state the engine really produces while an
+// exploratory divergence's window is open (TASK-016 review round 1):
+// alice submitted `execute`, whose outcome diverged the run, so the
+// run-level cursor is "divergence:<id>", `execute`'s execution e1 is
+// completed and is the latest run-level execution, and the divergence
+// has no branch executions (the engine creates none for exploratory
+// branches). carol completed the earlier `draft` step.
+func explorationFixture() *fakeReader {
+	const div = fxRun + "-div-x"
+	return &fakeReader{
+		runs: map[string]*domain.Run{fxRun: {
+			RunID: fxRun, Status: domain.RunStatusActive, CurrentStepID: "divergence:" + div, BranchName: fxRunBranch,
+		}},
+		execs: map[string][]domain.StepExecution{fxRun: {
+			{ExecutionID: "e0", RunID: fxRun, StepID: "draft", ActorID: "carol", Status: domain.StepStatusCompleted, RepositoryID: "spine"},
+			{ExecutionID: "e1", RunID: fxRun, StepID: "execute", ActorID: "alice", Status: domain.StepStatusCompleted, RepositoryID: "spine"},
+		}},
+		branches: map[string]*domain.Branch{},
+	}
+}
+
+// TestDecideBoundToRun_DivergenceTrigger: while a run is diverged, the
+// actor who submitted the triggering step is bound to it for
+// DecideBoundToRun (owner question 6), and nobody else below operator.
+// Mutation checks: dropping the rule fails the alice row; taking any
+// completed run-level execution instead of the latest fails the carol
+// row; dropping the status check fails the failed-trigger row; applying
+// the rule to an undiverged run fails the undiverged row.
+func TestDecideBoundToRun_DivergenceTrigger(t *testing.T) {
+	ctx := context.Background()
+	call := func(rr RunReader, a *domain.Actor) Decision {
+		t.Helper()
+		d, err := NewEvaluator(rr).DecideBoundToRun(ctx, a, fxRun)
+		if err != nil {
+			t.Fatalf("DecideBoundToRun: %v", err)
+		}
+		return d
+	}
+
+	if d := call(explorationFixture(), actor("alice", domain.RoleContributor)); !d.Allow || d.Reason != ReasonDivergenceTrigger || d.ExecutionID != "e1" {
+		t.Fatalf("trigger holder: %+v, want divergence_trigger allow on e1", d)
+	}
+	reads := explorationFixture()
+	call(reads, actor("alice", domain.RoleContributor))
+	if reads.getRun != 1 || reads.listExecs != 1 || reads.getBranch != 0 {
+		t.Errorf("trigger holder: GetRun=%d ListStepExecutionsByRun=%d GetBranch=%d, want 1/1/0", reads.getRun, reads.listExecs, reads.getBranch)
+	}
+
+	denies := map[string]struct {
+		mutate func(rr *fakeReader)
+		a      *domain.Actor
+	}{
+		"another contributor":               {a: actor("bob", domain.RoleContributor)},
+		"holder of an older run-level step": {a: actor("carol", domain.RoleContributor)},
+		"trigger holder as reader":          {a: actor("alice", domain.RoleReader)},
+		"nil actor":                         {a: nil},
+		"trigger attempt failed": {
+			mutate: func(rr *fakeReader) { rr.execs[fxRun][1].Status = domain.StepStatusFailed },
+			a:      actor("alice", domain.RoleContributor),
+		},
+		"a newer run-level attempt by another actor": {
+			mutate: func(rr *fakeReader) {
+				rr.execs[fxRun] = append(rr.execs[fxRun], domain.StepExecution{ExecutionID: "e2", RunID: fxRun, StepID: "execute", ActorID: "bob", Status: domain.StepStatusCompleted})
+			},
+			a: actor("alice", domain.RoleContributor),
+		},
+		"run not active": {
+			mutate: func(rr *fakeReader) { rr.runs[fxRun].Status = domain.RunStatusPaused },
+			a:      actor("alice", domain.RoleContributor),
+		},
+		"undiverged run, completed step behind the cursor": {
+			mutate: func(rr *fakeReader) { rr.runs[fxRun].CurrentStepID = "review" },
+			a:      actor("alice", domain.RoleContributor),
+		},
+	}
+	for name, tc := range denies {
+		rr := explorationFixture()
+		if tc.mutate != nil {
+			tc.mutate(rr)
+		}
+		if d := call(rr, tc.a); d.Allow {
+			t.Errorf("%s: %+v, want deny", name, d)
+		}
+	}
+
+	// A branch execution newer than the trigger does not displace it:
+	// only run-level executions (BranchID == "") are candidates.
+	rr := explorationFixture()
+	rr.execs[fxRun] = append(rr.execs[fxRun], domain.StepExecution{ExecutionID: "xb", RunID: fxRun, StepID: "explore", BranchID: fxRun + "-div-x-b1", ActorID: "erin", Status: domain.StepStatusCompleted})
+	if d := call(rr, actor("alice", domain.RoleContributor)); !d.Allow || d.ExecutionID != "e1" {
+		t.Errorf("trigger holder with a newer branch execution: %+v, want allow on e1", d)
+	}
+
+	// The trigger rule binds only for DecideBoundToRun: Decide never
+	// admits a push on a completed execution.
+	if d := decide(t, explorationFixture(), defsFixture(), Request{Ref: fxRunRef, Actor: actor("alice", domain.RoleContributor)}); d.Allow {
+		t.Errorf("trigger holder pushing the run branch: %+v, want deny", d)
+	}
+}
+
 func TestFrozenStepType(t *testing.T) {
 	for st, want := range map[domain.StepType]bool{
 		domain.StepTypeReview: true, domain.StepTypeInternal: true,

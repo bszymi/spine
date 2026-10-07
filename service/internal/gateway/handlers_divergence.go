@@ -60,10 +60,13 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 	// step can be claimed and its divergence ref then pushed as the
 	// bound actor (core/refadmit). The permission alone
 	// (divergence.create_branch, contributor) does not tie the caller
-	// to the run, so require an operator or an actor who holds a live
-	// cursor of the run: the latest execution of its current step or of
-	// one of its open divergence branches (refadmit.DecideBoundToRun,
-	// owner question 6). A nil actor exists only in dev mode, where
+	// to the run, so require an operator or an actor bound to the run
+	// (refadmit.DecideBoundToRun, owner question 6). For the exploratory
+	// divergence this endpoint serves, that is in practice the actor
+	// who submitted the step that triggered it: the engine has moved
+	// the run cursor to "divergence:<id>" and creates no step execution
+	// for an API-created branch, so nobody holds a live cursor while
+	// the window is open. A nil actor exists only in dev mode, where
 	// authorize admits everything; there is no identity to bind then,
 	// the same stance as the step-submit ownership check.
 	if actor := actorFromContext(r.Context()); actor != nil {
@@ -79,8 +82,9 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 				"run_id", divCtx.RunID, "divergence_id", divergenceID,
 				"actor_id", actor.ActorID, "reason", dec.Reason)
 			WriteError(w, domain.NewError(domain.ErrForbidden,
-				"creating a branch in this divergence requires holding the run's current step or "+
-					"the current step of one of its open divergence branches, or the operator role"))
+				"creating a branch in this divergence requires having submitted the step that "+
+					"triggered it, holding the run's current step or the current step of one of its "+
+					"open divergence branches, or the operator role"))
 			return
 		}
 	}

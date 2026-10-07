@@ -107,7 +107,17 @@ const (
 	ReasonStepUnresolved Reason = "step_unresolved"
 	// ReasonBoundActor: the actor holds the branch's current step.
 	ReasonBoundActor Reason = "bound_actor"
+	// ReasonDivergenceTrigger: DecideBoundToRun only. The run is
+	// diverged and the actor submitted the run-level step that
+	// triggered the divergence (the latest run-level execution,
+	// completed). Never a reason to admit a push.
+	ReasonDivergenceTrigger Reason = "divergence_trigger"
 )
+
+// divergenceCursorPrefix is the run-level cursor the engine sets while
+// a run is diverged: "divergence:<divergence-id>" (core/engine,
+// startDivergence). No step execution carries it as a StepID.
+const divergenceCursorPrefix = "divergence:"
 
 // Decision is the outcome of admitting one ref.
 type Decision struct {
@@ -475,7 +485,21 @@ func (e *Evaluator) resolveBranch(ctx context.Context, runID, path string) (*dom
 //   - a contributor-or-above actor who holds a live cursor of the
 //     active run: the latest execution (assigned or in progress) of the
 //     run-level current step, or of the current step of one of the
-//     run's open divergence branches.
+//     run's open divergence branches; or
+//   - while the active run is diverged (its cursor is
+//     "divergence:<id>"), a contributor-or-above actor who submitted
+//     the run-level step that triggered the divergence: the latest
+//     run-level execution, which must be completed and theirs
+//     (ReasonDivergenceTrigger).
+//
+// The third rule is what makes the predicate reachable for an
+// exploratory divergence, the only kind divergence.create_branch
+// accepts: the engine moves the run cursor to "divergence:<id>" after
+// completing the triggering execution, and it creates no step execution
+// for a branch added through the API, so while the window is open
+// nobody holds a live cursor of the run (TASK-016 review round 1).
+// The trigger rule never admits a push: Decide requires a live
+// execution.
 //
 // Everything else is refused with the same Reasons Decide uses
 // (not_bound, unresolved, resolver_unavailable). It never applies the
@@ -507,6 +531,26 @@ func (e *Evaluator) DecideBoundToRun(ctx context.Context, actor *domain.Actor, r
 	execs, err := e.listExecs(ctx, run.RunID)
 	if err != nil {
 		return d, err
+	}
+
+	// A diverged run: its run-level cursor is the divergence, held by
+	// whoever submitted the step that triggered it. The engine
+	// completes that execution and only then moves the cursor, and it
+	// creates no run-level execution until convergence, so the latest
+	// run-level execution in store order (created_at) is the trigger.
+	// Anything else in that slot (a live or failed attempt) means the
+	// state is not the one the engine produces, and refuses.
+	if strings.HasPrefix(run.CurrentStepID, divergenceCursorPrefix) {
+		var trigger *domain.StepExecution
+		for i := range execs {
+			if execs[i].BranchID == "" {
+				trigger = &execs[i]
+			}
+		}
+		if trigger != nil && trigger.ActorID == actor.ActorID && trigger.Status == domain.StepStatusCompleted {
+			d.Allow, d.Reason, d.ExecutionID = true, ReasonDivergenceTrigger, trigger.ExecutionID
+			return d, nil
+		}
 	}
 
 	// Latest attempt per (branch, step), in first-seen order.
