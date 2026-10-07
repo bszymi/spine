@@ -810,9 +810,20 @@ func (s *Service) projectBranchProtection(ctx context.Context, commitSHA string)
 		return s.store.UpsertBranchProtectionRules(ctx, bootstrapRows(), "bootstrap")
 	}
 
-	content, readErr := s.git.ReadFile(ctx, commitSHA, BranchProtectionConfigPath)
+	// The entry is typed before it is read (INIT-023 TASK-011 review
+	// round 2, readFileEntry): a gitlink recording the id of a blob in
+	// this repository reads successfully, so a `rules: []` blob behind a
+	// submodule pointer used to relax protection with nothing visible in
+	// the diff. An entry that is not a file is treated like a malformed
+	// config — the rules stay as they are and the sync is held — never
+	// as "absent", which would seed bootstrap defaults.
+	content, unreadable, readErr := s.readFileEntry(ctx, commitSHA, BranchProtectionConfigPath)
 	if readErr != nil {
 		return fmt.Errorf("read branch-protection config at %s: %w", shortSHA(commitSHA), readErr)
+	}
+	if unreadable != nil {
+		return fmt.Errorf("branch-protection config at %s is not readable: %w; rules left unchanged",
+			shortSHA(commitSHA), unreadable.cause())
 	}
 	if len(bytes.TrimSpace(content)) == 0 {
 		// A committed-but-empty file is treated as a malformed config,

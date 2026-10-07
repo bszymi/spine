@@ -37,15 +37,19 @@ const (
 //     permanent — a silent skip that advanced the sync past a change it
 //     never applied.
 //   - Instead the commit's tree is asked what is at that path
-//     (git.TreeEntryTyper, which reads tree objects only). No regular
-//     file there — a gitlink, a directory, or no entry at that exact
+//     (git.TreeEntryTyper, which reads tree objects only). No file (blob)
+//     there — a gitlink, a directory, or no entry at that exact
 //     path (a quoted or normalised path the diff produced) — is
 //     deterministic: there is no content to read at that commit, ever.
 //     A blob there means the content exists and git failed to read it
 //     (a lock, a killed or unspawnable process, a missing object):
 //     infrastructure. Pushes cannot plant a missing blob — receive-pack's
-//     connectivity check refuses it; gitlinks are the one unreadable
-//     entry a push can carry.
+//     connectivity check refuses it; a gitlink is the one non-file entry
+//     at a file path a push can carry (its recorded commit is never
+//     checked). Workflow files and the branch-protection config are
+//     typed BEFORE they are read (readFileEntry), so with the capability
+//     they never get here; this classifier serves changed-artifact reads
+//     and readFileEntry's fallback for a client without it.
 //   - isContentReadError (a blob whose content is refused by a size bound,
 //     registered by the bounded-read work) is deterministic too.
 //   - Anything that cannot be proved — a cancelled context, a git client
@@ -73,7 +77,26 @@ func (s *Service) classifyReadFailure(ctx context.Context, ref, path string, rea
 	if err != nil {
 		return "", errors.Join(readErr, fmt.Errorf("type the tree entry: %w", err))
 	}
+	entry, err := nonFileEntry(typ)
+	if err != nil {
+		return "", errors.Join(readErr, err)
+	}
+	if entry == "" {
+		// A blob: the content exists, so the read failure is git's or
+		// the host's.
+		return "", readErr
+	}
+	return entry, nil
+}
+
+// nonFileEntry maps a TreeEntryType answer to the description of a
+// deterministic "no file here" (entryGitlink, entryTree, entryNone), or ""
+// for a blob. An answer outside the documented set — only a foreign
+// TreeEntryTyper can give one — proves nothing and is an error.
+func nonFileEntry(typ string) (string, error) {
 	switch typ {
+	case git.TreeEntryBlob:
+		return "", nil
 	case git.TreeEntryCommit:
 		return entryGitlink, nil
 	case git.TreeEntryTree:
@@ -81,10 +104,90 @@ func (s *Service) classifyReadFailure(ctx context.Context, ref, path string, rea
 	case "":
 		return entryNone, nil
 	default:
-		// A blob: the content exists, so the read failure is git's or
-		// the host's.
-		return "", readErr
+		return "", fmt.Errorf("unexpected tree entry type %q", truncateForLog(typ, 40))
 	}
+}
+
+// unreadableEntry is readFileEntry's deterministic outcome: the commit
+// holds no content the projection may read at the path, ever.
+type unreadableEntry struct {
+	entry   string // entryGitlink, entryTree, entryNone or entryContentRefused
+	readErr error  // the failed read, when one was attempted (entryContentRefused)
+}
+
+// cause is the error a rejection or a sync error carries.
+func (u *unreadableEntry) cause() error {
+	if u.entry == entryContentRefused {
+		return u.readErr
+	}
+	return fmt.Errorf("no file at this path (tree entry: %s)", u.entry)
+}
+
+// readFileEntry reads path at ref only when ref's tree records a file (a
+// blob) at exactly that path (INIT-023 TASK-011 review round 2). It is
+// the read for the governance files the projection is the authority for
+// — workflow definitions and the branch-protection config.
+//
+// The entry is typed BEFORE the read, not only after a failed one.
+// `git show <ref>:<path>` resolves the path to the object id the tree
+// entry records and prints that object whatever the entry's mode. A
+// gitlink (mode 160000) is meant to name a commit in another repository,
+// but nothing checks what it names: a push can record the id of a blob
+// that is in this repository (any pushed branch can put one in the
+// object store). The read then SUCCEEDS and returns content no diff or
+// repository viewer shows — they show "Subproject commit <id>" — so a
+// reviewed workflow could be replaced by a review-less one, or the
+// branch-protection rules relaxed, with nothing visible to review.
+//
+// It returns exactly one of: the content of a blob; an unreadableEntry
+// (a gitlink, a directory, no entry at that exact path — a quoted or
+// normalised path a listing produced — or content isContentReadError
+// refuses); or an infrastructure error (the tree could not be typed, an
+// unexpected type, or git failed to read a blob that is there).
+//
+// A git client without git.TreeEntryTyper keeps the historical read: a
+// successful read is trusted and a failure goes through
+// classifyReadFailure (infrastructure, unless the content is refused).
+// Refusing every read there would stop the projection for an embedder
+// whose GitClient decorator does not forward the capability; the gap is
+// documented in KNOWN-LIMITATIONS.md. *git.CLIClient implements it, and
+// both Spine and SMP hand that to NewService.
+func (s *Service) readFileEntry(ctx context.Context, ref, path string) ([]byte, *unreadableEntry, error) {
+	typer, ok := s.git.(git.TreeEntryTyper)
+	if !ok {
+		content, err := s.git.ReadFile(ctx, ref, path)
+		if err == nil {
+			return content, nil, nil
+		}
+		entry, infraErr := s.classifyReadFailure(ctx, ref, path, err)
+		if infraErr != nil {
+			return nil, nil, infraErr
+		}
+		return nil, &unreadableEntry{entry: entry, readErr: err}, nil
+	}
+
+	typ, err := typer.TreeEntryType(ctx, ref, path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("type the tree entry: %w", err)
+	}
+	entry, err := nonFileEntry(typ)
+	if err != nil {
+		return nil, nil, err
+	}
+	if entry != "" {
+		return nil, &unreadableEntry{entry: entry}, nil
+	}
+
+	// A blob. The ref is a commit SHA on every projection path, so the
+	// tree read above and the blob read below see the same entry.
+	content, err := s.git.ReadFile(ctx, ref, path)
+	if err == nil {
+		return content, nil, nil
+	}
+	if ctx.Err() == nil && isContentReadError(err) {
+		return nil, &unreadableEntry{entry: entryContentRefused, readErr: err}, nil
+	}
+	return nil, nil, err
 }
 
 // classifyReadErrors sorts the artifact read failures discovery skipped

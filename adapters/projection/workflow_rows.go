@@ -24,7 +24,7 @@ const (
 	checkRoundTrip    = "round_trip"     // Parse accepted it, but the stored JSON would read back differently
 	checkValidate     = "validate"       // workflow.Validate failed and strict validation is on
 	checkReadBounds   = "read_bounds"    // the blob is refused by a content-size bound on read
-	checkNotAFile     = "not_a_file"     // the commit's tree holds no regular file at the path (a gitlink, a directory)
+	checkNotAFile     = "not_a_file"     // the commit's tree holds no file (blob) at the path (a gitlink, a directory); checked before every read
 	checkScope        = "scope"          // a stored row whose path is not a workflow location
 	checkAbsentAtHead = "absent_at_head" // a stored row whose file no longer exists at head
 )
@@ -77,7 +77,9 @@ func (s *Service) WithStrictWorkflowValidation(strict bool) {
 // workflow such a read becomes a read_bounds rejection — the sync
 // advances — instead of an infrastructure error that would wedge the
 // sync in `error` on a file that never changes; for a changed artifact it
-// is a counted read_skipped (classifyReadFailure consults it for both).
+// is a counted read_skipped; for the branch-protection config it is held
+// like a malformed config (readFileEntry and classifyReadFailure consult
+// it).
 // Nothing qualifies yet; the bounded-read work (INIT-023 TASK-003)
 // registers its oversize-blob sentinel here.
 func isContentReadError(err error) bool {
@@ -89,32 +91,32 @@ func isContentReadError(err error) bool {
 // projection row. It returns exactly one of: a row to upsert, a content
 // rejection, or an infrastructure error (a git read failure).
 //
-// A read failure is a rejection only when classifyReadFailure proves it
-// deterministic: read_bounds for refused content, not_a_file when the
-// commit's tree holds no regular file at the path (a gitlink committed at
-// workflows/x.yaml reads as `fatal: bad object` forever — as an
-// infrastructure error it held the sync in error on every entry point,
-// and after a restart or a rebuild the pre-diff sweep froze the whole
-// projection on it). Every other read failure is infrastructure.
+// The file is read with readFileEntry, which types the commit's tree
+// entry BEFORE reading (review round 2). An entry that is not a file is a
+// not_a_file rejection whether or not `git show` could print something
+// for it: a gitlink whose recorded id names a blob in this repository
+// reads successfully, and projecting that content would run a body no
+// diff shows; a dangling gitlink reads as `fatal: bad object` forever —
+// as an infrastructure error it held the sync in error on every entry
+// point, and after a restart or a rebuild the pre-diff sweep froze the
+// whole projection on it. Refused content is a read_bounds rejection.
+// Every other failure is infrastructure.
 //
 // The row's typed columns come from the strictly parsed definition and
 // its definition column from workflow.ProjectionDefinition, which is
 // byte-for-byte the historical encoder for every accepted file — SMP
 // reads that JSONB raw, so its shape must not change.
 func (s *Service) buildWorkflowRow(ctx context.Context, wfPath, commitSHA string) (*store.WorkflowProjection, *WorkflowRejection, error) {
-	content, err := s.git.ReadFile(ctx, commitSHA, wfPath)
+	content, unreadable, err := s.readFileEntry(ctx, commitSHA, wfPath)
 	if err != nil {
-		entry, infraErr := s.classifyReadFailure(ctx, commitSHA, wfPath, err)
-		if infraErr != nil {
-			return nil, nil, fmt.Errorf("read workflow %s: %w", wfPath, infraErr)
+		return nil, nil, fmt.Errorf("read workflow %s: %w", wfPath, err)
+	}
+	if unreadable != nil {
+		check := checkNotAFile
+		if unreadable.entry == entryContentRefused {
+			check = checkReadBounds
 		}
-		if entry == entryContentRefused {
-			return nil, &WorkflowRejection{Path: wfPath, Commit: commitSHA, Check: checkReadBounds, Err: err}, nil
-		}
-		return nil, &WorkflowRejection{
-			Path: wfPath, Commit: commitSHA, Check: checkNotAFile,
-			Err: fmt.Errorf("no regular file at this path (tree entry: %s): %w", entry, err),
-		}, nil
+		return nil, &WorkflowRejection{Path: wfPath, Commit: commitSHA, Check: check, Err: unreadable.cause()}, nil
 	}
 
 	wf, definition, err := workflow.ProjectionDefinition(wfPath, content)

@@ -21,13 +21,20 @@ const (
 // decorator that wraps a GitClient should forward it.
 //
 // The projection uses it to tell a read failure that is a property of
-// the commit (there is no regular file at that path — a gitlink, a
-// directory, no entry at all) from one that is a property of git or the
-// host (a lock, a killed or unspawnable process, a missing object). It
-// must not decide that from git's stderr: `git show <sha>:<path>` echoes
-// the committed, attacker-chosen path, so stderr substrings such as
-// "lock" or "timeout" in a file name would steer the classification
-// (INIT-023 TASK-011 review round 1).
+// the commit (there is no file at that path — a gitlink, a directory, no
+// entry at all) from one that is a property of git or the host (a lock,
+// a killed or unspawnable process, a missing object). It must not decide
+// that from git's stderr: `git show <sha>:<path>` echoes the committed,
+// attacker-chosen path, so stderr substrings such as "lock" or "timeout"
+// in a file name would steer the classification (INIT-023 TASK-011
+// review round 1).
+//
+// The projection also asks it BEFORE reading a governance file (review
+// round 2): `git show <sha>:<path>` prints whatever object the entry's
+// recorded id names, so a gitlink recording the id of a blob in this
+// repository reads successfully — content no diff shows. A successful
+// read therefore does not prove the path holds a file; the entry type
+// does.
 type TreeEntryTyper interface {
 	// TreeEntryType returns TreeEntryBlob, TreeEntryTree or
 	// TreeEntryCommit for the entry at exactly path in ref's tree, or ""
