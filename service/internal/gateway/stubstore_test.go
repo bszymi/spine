@@ -355,6 +355,9 @@ func (stubDeliveryStore) UpdateDeliveryStatus(_ context.Context, _, _ string, _ 
 func (stubDeliveryStore) DeferDelivery(_ context.Context, _, _ string, _ time.Time) error {
 	return nil
 }
+func (stubDeliveryStore) HoldDueDeliveries(_ context.Context, _ store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	return nil, nil
+}
 func (stubDeliveryStore) MarkDelivered(_ context.Context, _ string) error { return nil }
 func (stubDeliveryStore) LogDeliveryAttempt(_ context.Context, _ *store.DeliveryLogEntry) error {
 	return nil

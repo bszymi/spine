@@ -202,35 +202,54 @@ func TestCircuitHoldCapDeadLetters(t *testing.T) {
 	}
 }
 
-// TestHeldBacklogDoesNotStarveOtherSubscriptions (AC9a, design check):
-// N rows of one subscription are held behind an open circuit; one new
-// healthy-subscription row arrives per simulated second for 900 polls.
-// With the old global created_at claim, all held rows become claimable
-// at the same probe instant and are re-claimed oldest-first 5 per poll:
-// above 5 x 60 = 300 held rows the healthy subscription is never claimed
-// again (900/900 polls at N = 400). The fair claim keeps every healthy
-// row within one poll. The fifo-claim control shows the scenario does
-// discriminate: it starves on the old ordering.
+// TestHeldBacklogDoesNotStarveOtherSubscriptions (AC9a, design check and
+// review round 1): `subs` subscriptions each hold `rows` rows behind an
+// open circuit; one new healthy-subscription row arrives per simulated
+// second for 900 polls.
+//
+// Two mechanisms keep the healthy subscription served, and the controls
+// show each one is needed:
+//
+//   - With the old global created_at claim and per-row deferral, every
+//     held row becomes claimable at the shared probe instant and is
+//     re-claimed oldest-first 5 per poll: above 5 x 60 = 300 held rows
+//     the healthy subscription is never claimed again (design check).
+//   - The fair claim alone fixes one held subscription but not
+//     `concurrency` (5) or more: each held subscription's oldest row is
+//     older than any healthy row, so five of them take every slot on
+//     every poll while each still has a due row (review round 1: 5 x 61
+//     rows starved the healthy subscription for all 900 polls).
+//   - Holding a subscription's whole due backlog at once (HoldDueDeliveries)
+//     leaves it nothing claimable until its next probe, so it costs about
+//     two slots per probe cycle (the probe and the first hold after it).
+//
+// A healthy row therefore waits at most one poll while fewer than
+// `concurrency` subscriptions are held, and at most ceil(2 x subs /
+// concurrency) polls otherwise, however many rows they hold.
 func TestHeldBacklogDoesNotStarveOtherSubscriptions(t *testing.T) {
-	run := func(t *testing.T, n int, fifo bool) (delivered int64, maxLag int) {
+	const concurrency, ticks = 5, 900
+	run := func(t *testing.T, subs, rows int, fifo, noBulk bool) (delivered int64, maxLag int) {
 		bad, _ := statusServer(t, http.StatusServiceUnavailable)
 		good, goodHits := statusServer(t, http.StatusOK)
 		st := newQueueStore()
-		st.fifoClaim = fifo
+		st.fifoClaim, st.noBulkHold = fifo, noBulk
 		base := st.now().Add(-10 * time.Minute)
-		for i := 0; i < n; i++ {
-			st.add(fmt.Sprintf("bad-%05d", i), "sub-bad", base.Add(time.Duration(i)*time.Millisecond))
-		}
 		res := &mapResolver{subs: map[string]*SubscriptionDetail{
-			"sub-bad":  {SubscriptionID: "sub-bad", TargetURL: bad.URL},
 			"sub-good": {SubscriptionID: "sub-good", TargetURL: good.URL},
 		}}
-		d := NewWebhookDispatcher(st, res, DispatcherConfig{})
+		d := NewWebhookDispatcher(st, res, DispatcherConfig{Concurrency: concurrency})
 		sharedClock(d, st)
-		tripOpen(d.breaker, "sub-bad", st.now())
+		for j := 0; j < subs; j++ {
+			sub := fmt.Sprintf("sub-bad-%02d", j)
+			res.subs[sub] = &SubscriptionDetail{SubscriptionID: sub, TargetURL: bad.URL}
+			tripOpen(d.breaker, sub, st.now())
+			for i := 0; i < rows; i++ {
+				st.add(fmt.Sprintf("bad-%02d-%05d", j, i), sub, base.Add(time.Duration(i*subs+j)*time.Millisecond))
+			}
+		}
 
 		enqueuedAt := map[string]int{}
-		for tick := 0; tick < 900; tick++ {
+		for tick := 0; tick < ticks; tick++ {
 			id := fmt.Sprintf("good-%04d", tick)
 			st.add(id, "sub-good", st.now())
 			enqueuedAt[id] = tick
@@ -247,28 +266,53 @@ func TestHeldBacklogDoesNotStarveOtherSubscriptions(t *testing.T) {
 			}
 			st.advance(time.Second)
 		}
-		for i := 0; i < n; i++ {
-			if r := st.row(fmt.Sprintf("bad-%05d", i)); r.AttemptCount > MaxRetriesDomain {
-				t.Fatalf("held row %s attempt_count=%d exceeds the retry budget", r.DeliveryID, r.AttemptCount)
+		for j := 0; j < subs; j++ {
+			for i := 0; i < rows; i++ {
+				r := st.row(fmt.Sprintf("bad-%02d-%05d", j, i))
+				if r.AttemptCount > MaxRetriesDomain {
+					t.Fatalf("held row %s attempt_count=%d exceeds the retry budget", r.DeliveryID, r.AttemptCount)
+				}
+				if r.Status == "dead" && r.AttemptCount < MaxRetriesDomain {
+					t.Fatalf("held row %s dead after %d attempts within MaxCircuitHold: %q", r.DeliveryID, r.AttemptCount, r.LastError)
+				}
 			}
 		}
 		return goodHits.Load(), maxLag
 	}
-	for _, n := range []int{100, 400, 5000} {
-		t.Run(fmt.Sprintf("held=%d", n), func(t *testing.T) {
-			delivered, maxLag := run(t, n, false)
-			if delivered < 899 {
-				t.Fatalf("held=%d: only %d/900 healthy rows delivered", n, delivered)
+	for _, tc := range []struct{ subs, rows int }{
+		{1, 100}, {1, 400}, {1, 5000}, // design check: one held subscription
+		{4, 100}, {5, 61}, {5, 80}, {6, 60}, {10, 40}, {10, 400}, // review round 1: concurrency or more
+	} {
+		t.Run(fmt.Sprintf("held=%dx%d", tc.subs, tc.rows), func(t *testing.T) {
+			bound := 1
+			if tc.subs >= concurrency {
+				bound = (2*tc.subs + concurrency - 1) / concurrency
 			}
-			if maxLag > 1 {
-				t.Fatalf("held=%d: a healthy row waited %d polls behind the held backlog (want <= 1)", n, maxLag)
+			delivered, maxLag := run(t, tc.subs, tc.rows, false, false)
+			t.Logf("%d held subscriptions x %d rows: %d/%d healthy rows delivered, max wait %d polls (bound %d)", tc.subs, tc.rows, delivered, ticks, maxLag, bound)
+			if delivered < int64(ticks-bound) {
+				t.Fatalf("%d held subscriptions x %d rows: only %d/%d healthy rows delivered", tc.subs, tc.rows, delivered, ticks)
+			}
+			if maxLag > bound {
+				t.Fatalf("%d held subscriptions x %d rows: a healthy row waited %d polls (want <= %d)", tc.subs, tc.rows, maxLag, bound)
 			}
 		})
 	}
-	t.Run("control: fifo claim starves at held=400", func(t *testing.T) {
-		delivered, _ := run(t, 400, true)
-		if delivered >= 899 {
-			t.Fatalf("fifo claim delivered %d/900: the scenario no longer exercises the starvation", delivered)
+	// Controls: the scenario discriminates. Each mechanism switched off
+	// (the claim back to global created_at order, or the bulk hold back
+	// to per-row deferral) starves the healthy subscription.
+	t.Run("control: fifo claim, per-row deferral starves at 1x400", func(t *testing.T) {
+		delivered, _ := run(t, 1, 400, true, true)
+		t.Logf("fifo claim, per-row deferral, 1x400: %d/%d healthy rows delivered", delivered, ticks)
+		if delivered >= ticks-1 {
+			t.Fatalf("delivered %d/%d: the scenario no longer exercises the design-check starvation", delivered, ticks)
+		}
+	})
+	t.Run("control: fair claim, per-row deferral starves at 5x61", func(t *testing.T) {
+		delivered, _ := run(t, 5, 61, false, true)
+		t.Logf("fair claim, per-row deferral, 5x61: %d/%d healthy rows delivered", delivered, ticks)
+		if delivered >= ticks-1 {
+			t.Fatalf("delivered %d/%d: the scenario no longer exercises the review-round-1 starvation", delivered, ticks)
 		}
 	})
 }
@@ -307,18 +351,27 @@ func TestOrphanedRowsDeadLetter(t *testing.T) {
 	}
 }
 
-// TestTransientResolverErrorBacksOffWithFixedText (AC10 + design check):
-// a transient resolver failure rides the backoff and is dead at the
-// budget; the error columns carry a fixed reason, never the pgconn text
-// (which names the database host, user and database). The full error
-// reaches the operator log only.
+// TestTransientResolverErrorBacksOffWithFixedText (AC10 + design check,
+// amended by review round 1): a transient resolver failure rides the
+// backoff with a fixed reason in the error columns, never the pgconn text
+// (which names the database host, user and database); the full error
+// reaches the operator log only. Past the attempt budget the row stays
+// 'failed' (visible to a stuck-delivery view as attempt_count >= budget),
+// is retried every resolveRetryInterval and is delivered as soon as the
+// subscription can be read again — it is not dead-lettered for a
+// resolver fault before MaxCircuitHold. Before INIT-023 such a row was
+// retried on every poll and delivered once the fault cleared; the first
+// cut of this task dead-lettered it after ~15 s, which on a replica with
+// a missing or wrong decryption key turned every dispatch into a manual
+// replay.
 func TestTransientResolverErrorBacksOffWithFixedText(t *testing.T) {
 	logs := captureLogs(t)
 	infraErr := errors.New("failed to connect to `user=u database=d`: 10.9.8.7:5432 (db.internal): dial error: connection refused")
+	srv, hits := statusServer(t, http.StatusOK)
 	st := newQueueStore()
 	st.add("d1", "sub-x", st.now())
 	res := &mapResolver{
-		subs:  map[string]*SubscriptionDetail{},
+		subs:  map[string]*SubscriptionDetail{"sub-x": {SubscriptionID: "sub-x", TargetURL: srv.URL}},
 		errs:  map[string]error{"sub-x": infraErr},
 		stick: map[string]bool{"sub-x": true},
 	}
@@ -327,16 +380,22 @@ func TestTransientResolverErrorBacksOffWithFixedText(t *testing.T) {
 
 	d.poll(context.Background())
 	r := st.row("d1")
-	if r.Status != "failed" || r.NextRetryAt == nil || !r.NextRetryAt.After(st.now()) {
-		t.Fatalf("after one transient failure: %+v, want failed with a future retry", r)
+	if r.Status != "failed" || r.AttemptCount != 1 || r.NextRetryAt == nil || !r.NextRetryAt.After(st.now()) {
+		t.Fatalf("after one transient failure: %+v, want failed/attempt 1 with a future retry", r)
+	}
+	if got := r.NextRetryAt.Sub(st.now()); got != nextRetryDelay(0) {
+		t.Fatalf("first retry in %v, want the backoff schedule's %v", got, nextRetryDelay(0))
 	}
 	for i := 0; i < 2*MaxRetriesDomain+5; i++ {
-		st.advance(20 * time.Second) // past every backoff step
+		st.advance(time.Minute + time.Second) // past every retry interval
 		d.poll(context.Background())
 	}
 	r = st.row("d1")
-	if r.Status != "dead" || r.AttemptCount != MaxRetriesDomain {
-		t.Fatalf("after the budget: status %q attempts %d, want dead/%d", r.Status, r.AttemptCount, MaxRetriesDomain)
+	if r.Status != "failed" || r.AttemptCount < MaxRetriesDomain {
+		t.Fatalf("past the budget: status %q attempts %d, want failed with attempt_count >= %d (retried, not dead)", r.Status, r.AttemptCount, MaxRetriesDomain)
+	}
+	if r.NextRetryAt == nil || r.NextRetryAt.Sub(st.now()) != resolveRetryInterval {
+		t.Fatalf("past the budget the retry is at %v, want now + %v", r.NextRetryAt, resolveRetryInterval)
 	}
 	texts := []string{r.LastError}
 	for _, l := range st.logsFor("d1") {
@@ -354,6 +413,119 @@ func TestTransientResolverErrorBacksOffWithFixedText(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "10.9.8.7:5432") {
 		t.Fatalf("the operator log lost the resolver error detail")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("endpoint reached while the subscription was unreadable")
+	}
+
+	// The fault clears (a key is fixed, the database is back): the row is
+	// delivered on its next retry with no operator action.
+	res.mu.Lock()
+	delete(res.errs, "sub-x")
+	res.mu.Unlock()
+	st.advance(resolveRetryInterval)
+	d.poll(context.Background())
+	if r := st.row("d1"); r.Status != "delivered" || hits.Load() != 1 {
+		t.Fatalf("after the fault cleared: %+v, %d hits, want delivered", r, hits.Load())
+	}
+}
+
+// TestUnreadableSubscriptionHoldsBacklog (review round 1): while a
+// subscription cannot be read, only the row being tried consumes
+// attempts; the rest of its due backlog is held to the same retry
+// instant without attempts, so the subscription takes one claim slot
+// per retry however large its backlog. A row older than MaxCircuitHold
+// is dead-lettered with the hold reason.
+func TestUnreadableSubscriptionHoldsBacklog(t *testing.T) {
+	st := newQueueStore()
+	base := st.now().Add(-time.Hour)
+	for i := 0; i < 4; i++ {
+		st.add(fmt.Sprintf("d%d", i), "sub-x", base.Add(time.Duration(i)*time.Second))
+	}
+	res := &mapResolver{
+		subs:  map[string]*SubscriptionDetail{},
+		errs:  map[string]error{"sub-x": errors.New("decrypt signing_secret: encrypted value found but cipher is not configured")},
+		stick: map[string]bool{"sub-x": true},
+	}
+	d := NewWebhookDispatcher(st, res, DispatcherConfig{Concurrency: 1})
+	sharedClock(d, st)
+	d.poll(context.Background())
+	tried := st.row("d0")
+	if tried.Status != "failed" || tried.AttemptCount != 1 || tried.NextRetryAt == nil {
+		t.Fatalf("tried row = %+v, want failed/attempt 1/scheduled", tried)
+	}
+	for i := 1; i < 4; i++ {
+		r := st.row(fmt.Sprintf("d%d", i))
+		if r.Status != "pending" || r.AttemptCount != 0 || r.NextRetryAt == nil || !r.NextRetryAt.Equal(*tried.NextRetryAt) || r.LastError != resolveUnavailableReason {
+			t.Fatalf("backlog row %s = %+v, want pending/0 held to %v with the fixed reason", r.DeliveryID, r, *tried.NextRetryAt)
+		}
+	}
+	// Ten more polls before the retry instant claim nothing.
+	calls := res.calls.Load()
+	for i := 0; i < 10; i++ {
+		d.poll(context.Background())
+	}
+	if res.calls.Load() != calls {
+		t.Fatalf("held backlog was claimed before its retry instant")
+	}
+
+	// Past MaxCircuitHold the row is dead-lettered with the hold reason.
+	old := newQueueStore()
+	old.add("o1", "sub-x", old.now().Add(-DefaultMaxCircuitHold-time.Minute))
+	d = NewWebhookDispatcher(old, res, DispatcherConfig{})
+	sharedClock(d, old)
+	d.poll(context.Background())
+	want := resolveUnavailableReason + ": held longer than " + DefaultMaxCircuitHold.String()
+	if r := old.row("o1"); r.Status != "dead" || r.LastError != want {
+		t.Fatalf("aged row = %q/%q, want dead/%q", r.Status, r.LastError, want)
+	}
+	if logs := old.logsFor("o1"); len(logs) != 1 || logs[0].Error != want {
+		t.Fatalf("aged row's dead-letter not logged: %+v", logs)
+	}
+}
+
+// TestCircuitHoldExpiresUnclaimedBacklog (review round 1): the hold cap
+// reaches rows the dispatcher was never handed. One claimed row of an
+// open circuit dead-letters itself if it is too old, holds the younger
+// rest of the backlog without attempts, and dead-letters (with a
+// delivery-log row each) the backlog rows older than MaxCircuitHold.
+func TestCircuitHoldExpiresUnclaimedBacklog(t *testing.T) {
+	srv, hits := statusServer(t, http.StatusOK)
+	st := newQueueStore()
+	st.add("old-a", "sub-x", st.now().Add(-DefaultMaxCircuitHold-2*time.Minute))
+	st.add("old-b", "sub-x", st.now().Add(-DefaultMaxCircuitHold-time.Minute))
+	st.add("young-a", "sub-x", st.now().Add(-DefaultMaxCircuitHold+time.Minute))
+	st.add("young-b", "sub-x", st.now().Add(-time.Minute))
+	st.add("other", "sub-y", st.now().Add(-DefaultMaxCircuitHold-time.Hour))
+	st.rows["other"].Status = "dead" // another subscription's row is never touched
+	res := &mapResolver{subs: map[string]*SubscriptionDetail{"sub-x": {SubscriptionID: "sub-x", TargetURL: srv.URL}}}
+	d := NewWebhookDispatcher(st, res, DispatcherConfig{Concurrency: 1})
+	sharedClock(d, st)
+	tripOpen(d.breaker, "sub-x", st.now())
+	d.poll(context.Background())
+
+	if hits.Load() != 0 {
+		t.Fatalf("held rows reached the endpoint (%d hits)", hits.Load())
+	}
+	want := "circuit open: held longer than " + DefaultMaxCircuitHold.String()
+	for _, id := range []string{"old-a", "old-b"} {
+		r := st.row(id)
+		if r.Status != "dead" || r.LastError != want {
+			t.Fatalf("%s = %q/%q, want dead/%q", id, r.Status, r.LastError, want)
+		}
+		if logs := st.logsFor(id); len(logs) != 1 || logs[0].Error != want || logs[0].StatusCode != nil {
+			t.Fatalf("%s: dead-letter log rows %+v, want one explaining it", id, logs)
+		}
+	}
+	probeAt := st.now().Add(circuitRecoveryTimeout)
+	for _, id := range []string{"young-a", "young-b"} {
+		r := st.row(id)
+		if r.Status != "pending" || r.AttemptCount != 0 || r.LastError != "circuit open" || r.NextRetryAt == nil || !r.NextRetryAt.Equal(probeAt) {
+			t.Fatalf("%s = %+v, want pending/0/circuit open held to the probe time %v", id, r, probeAt)
+		}
+	}
+	if r := st.row("other"); r.LastError != "" || r.NextRetryAt != nil {
+		t.Fatalf("another subscription's row was touched: %+v", r)
 	}
 }
 

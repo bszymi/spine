@@ -94,11 +94,12 @@ type DispatcherConfig struct {
 	// must set this; tests may leave it nil for a permissive client.
 	Targets *TargetValidator
 
-	// MaxCircuitHold bounds how long a subscription's open circuit may
-	// keep deferring one delivery, measured from the row's created_at.
-	// A held row older than this is dead-lettered (and stays
-	// replayable) instead of being deferred again. Zero selects
-	// DefaultMaxCircuitHold.
+	// MaxCircuitHold bounds how long a delivery may be held without a
+	// terminal outcome because its subscription cannot be delivered to —
+	// an open circuit, or a subscription that cannot be read (database,
+	// decrypt) — measured from the row's created_at. A held row older
+	// than this is dead-lettered (and stays replayable) instead of being
+	// held again. Zero selects DefaultMaxCircuitHold.
 	MaxCircuitHold time.Duration
 }
 
@@ -266,15 +267,15 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 			log.Warn("subscription metadata invalid; dead-lettering delivery", "error", err.Error())
 			d.deadLetter(ctx, entry, err.Error())
 		default:
-			// Transient (DB, decrypt, pool): ride the backoff, dead at
-			// the budget. The error columns get a fixed reason — pgconn
-			// connect errors name the database host:port, user and
+			// Transient (DB, decrypt, pool): retried with backoff and
+			// never dead-lettered for it before MaxCircuitHold (see
+			// retryUnresolved). The error columns get a fixed reason —
+			// pgconn connect errors name the database host:port, user and
 			// database, and last_error is shown to subscription readers
 			// (and to SMP workspace members in the run page) — so the
 			// full error goes to the operator log only.
 			log.Error("failed to resolve subscription", "error", err.Error())
-			resolveLogID, _ := generateDeliveryID()
-			d.handleFailure(ctx, entry, resolveLogID, 0, 0, true, resolveUnavailableReason, nil)
+			d.retryUnresolved(ctx, log, entry)
 		}
 		return
 	}
@@ -390,6 +391,34 @@ func (d *WebhookDispatcher) deliver(ctx context.Context, entry store.DeliveryEnt
 // a transient subscription-resolver failure (see deliver).
 const resolveUnavailableReason = "resolve subscription: temporarily unavailable"
 
+// circuitOpenReason is the last_error of a delivery the circuit holds.
+const circuitOpenReason = "circuit open"
+
+// resolveRetryInterval is how often a delivery whose subscription cannot
+// be read is retried once its attempt budget is spent (see
+// retryUnresolved).
+const resolveRetryInterval = time.Minute
+
+// holdCap is the effective MaxCircuitHold.
+func (d *WebhookDispatcher) holdCap() time.Duration {
+	if d.maxCircuitHold <= 0 {
+		return DefaultMaxCircuitHold
+	}
+	return d.maxCircuitHold
+}
+
+// heldTooLong reports whether entry has been queued for longer than
+// maxHold. A row with no created_at is never treated as aged out.
+func (d *WebhookDispatcher) heldTooLong(entry store.DeliveryEntry, maxHold time.Duration) bool {
+	return !entry.CreatedAt.IsZero() && d.clock().Sub(entry.CreatedAt) > maxHold
+}
+
+// heldTooLongReason is the dead-letter reason of a row held past the cap:
+// "circuit open: held longer than 24h0m0s".
+func heldTooLongReason(reason string, maxHold time.Duration) string {
+	return reason + ": held longer than " + maxHold.String()
+}
+
 // holdForCircuit handles a delivery the circuit breaker refused (open,
 // or half-open with the probe in flight). Nothing was sent, so no
 // attempt is consumed: the row is deferred to the circuit's next probe
@@ -399,39 +428,140 @@ const resolveUnavailableReason = "resolve subscription: temporarily unavailable"
 // it on every poll (a hot loop starving other subscriptions) and each
 // hold burned one of its retries.
 //
+// The rest of the subscription's due backlog is held to the same instant
+// in one statement (holdBacklog), so a large held backlog is not
+// claimable between probes and cannot take claim slots from other
+// subscriptions, however many subscriptions are held.
+//
 // A row held longer than MaxCircuitHold (measured from created_at — the
 // queue has no "held since" column) is dead-lettered instead, so a
 // permanently failing endpoint cannot keep rows non-terminal forever.
 // It stays replayable. A row with no created_at is never treated as
 // aged out.
 func (d *WebhookDispatcher) holdForCircuit(ctx context.Context, log *slog.Logger, entry store.DeliveryEntry) {
-	maxHold := d.maxCircuitHold
-	if maxHold <= 0 {
-		maxHold = DefaultMaxCircuitHold
-	}
-	if !entry.CreatedAt.IsZero() && d.clock().Sub(entry.CreatedAt) > maxHold {
-		reason := "circuit open: held longer than " + maxHold.String()
+	maxHold := d.holdCap()
+	until := d.breaker.NextAttemptAt(entry.SubscriptionID, d.pollInterval)
+	if d.heldTooLong(entry, maxHold) {
 		log.Warn("circuit held delivery past MaxCircuitHold; dead-lettering", "max_circuit_hold", maxHold.String())
-		d.deadLetter(ctx, entry, reason)
+		d.deadLetter(ctx, entry, heldTooLongReason(circuitOpenReason, maxHold))
+	} else {
+		log.Debug("circuit open, deferring delivery", "until", until)
+		if err := d.store.DeferDelivery(ctx, entry.DeliveryID, circuitOpenReason, until); err != nil {
+			log.Error("failed to defer circuit-held delivery", "error", err)
+		}
+	}
+	d.holdBacklog(ctx, log, entry.SubscriptionID, circuitOpenReason, until)
+}
+
+// retryUnresolved handles a transient failure to read the delivery's
+// subscription (database, pool, decrypt).
+//
+// The claimed row is retried like an endpoint failure — an attempt is
+// recorded and the backoff schedule applies (1, 2, 4, 8 s), so once the
+// budget is spent the row is 'failed' with attempt_count at the budget,
+// which is what an embedder's stuck-delivery view (SMP's run banner)
+// shows — but it is never dead-lettered for this before MaxCircuitHold:
+// past the budget it is retried every resolveRetryInterval and is
+// delivered as soon as the subscription can be read again. A resolver
+// fault (a missing or rotated decryption key on one replica, a database
+// blip) is an operator-side condition, not the endpoint's verdict; before
+// INIT-023 TASK-010 such rows were retried on every poll until the fault
+// cleared, and dead-lettering them after ~15 s would have turned a
+// fixable misconfiguration into lost deliveries that each need a manual
+// replay. Rows older than MaxCircuitHold are dead-lettered, as for an
+// open circuit.
+//
+// The subscription's other due rows are held to the same retry instant
+// without consuming attempts (holdBacklog), so an unreadable
+// subscription takes about one claim slot per retry, however large its
+// backlog.
+func (d *WebhookDispatcher) retryUnresolved(ctx context.Context, log *slog.Logger, entry store.DeliveryEntry) {
+	maxHold := d.holdCap()
+	if d.heldTooLong(entry, maxHold) {
+		log.Warn("subscription unreadable past MaxCircuitHold; dead-lettering", "max_circuit_hold", maxHold.String())
+		d.deadLetter(ctx, entry, heldTooLongReason(resolveUnavailableReason, maxHold))
+		d.holdBacklog(ctx, log, entry.SubscriptionID, resolveUnavailableReason, d.clock().Add(resolveRetryInterval))
 		return
 	}
-	until := d.breaker.NextAttemptAt(entry.SubscriptionID, d.pollInterval)
-	log.Debug("circuit open, deferring delivery", "until", until)
-	if err := d.store.DeferDelivery(ctx, entry.DeliveryID, "circuit open", until); err != nil {
-		log.Error("failed to defer circuit-held delivery", "error", err)
+	delay := nextRetryDelay(entry.AttemptCount)
+	if entry.AttemptCount+1 >= maxRetriesFor(entry.EventType) {
+		delay = resolveRetryInterval
+	}
+	retryAt := d.clock().Add(delay)
+	logID, _ := generateDeliveryID()
+	zero := 0
+	_ = d.store.LogDeliveryAttempt(ctx, &store.DeliveryLogEntry{
+		LogID:          logID,
+		DeliveryID:     entry.DeliveryID,
+		SubscriptionID: entry.SubscriptionID,
+		EventID:        entry.EventID,
+		DurationMs:     &zero,
+		Error:          resolveUnavailableReason,
+		CreatedAt:      d.clock().UTC(),
+	})
+	log.Info("subscription unreadable; scheduling retry", "attempt", entry.AttemptCount+1, "retry_at", retryAt)
+	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "failed", resolveUnavailableReason, &retryAt)
+	d.holdBacklog(ctx, log, entry.SubscriptionID, resolveUnavailableReason, retryAt)
+}
+
+// holdBacklog takes the subscription's other due deliveries off the
+// claimable set until `until`, in one attempt-free statement
+// (DeliveryStore.HoldDueDeliveries); those older than MaxCircuitHold are
+// dead-lettered there and get their delivery-log row here.
+//
+// Why: the fair claim gives each subscription's oldest due row a slot
+// ahead of any newer row. If only the rows the dispatcher was handed were
+// deferred, a held subscription would keep an old due row on every poll,
+// and once `concurrency` subscriptions were held with a backlog of more
+// than about a minute of polls each, they would take every claim slot
+// and starve every other subscription (INIT-023 TASK-010 review round 1;
+// I7). After a hold such a subscription has nothing claimable until
+// `until`, so it costs about two slots per probe cycle (the probe, and
+// the first hold after it) however many rows it holds.
+//
+// Embedders: with several dispatchers on one queue (SMP replicas), a
+// replica whose circuit is open holds the subscription's due rows for
+// every replica until its probe time. A replica-local fault therefore
+// delays the subscription's due backlog by up to the recovery timeout
+// per probe cycle; rows that arrive after the hold are claimable at once.
+func (d *WebhookDispatcher) holdBacklog(ctx context.Context, log *slog.Logger, subscriptionID, reason string, until time.Time) {
+	maxHold := d.holdCap()
+	expiredReason := heldTooLongReason(reason, maxHold)
+	expired, err := d.store.HoldDueDeliveries(ctx, store.DeliveryHold{
+		SubscriptionID: subscriptionID,
+		Until:          until,
+		Reason:         reason,
+		ExpireBefore:   d.clock().Add(-maxHold),
+		ExpiredReason:  expiredReason,
+	})
+	if err != nil {
+		log.Error("failed to hold the subscription's due deliveries", "error", err)
+		return
+	}
+	for i := range expired {
+		d.logDeadLetter(ctx, expired[i], expiredReason)
+	}
+	if len(expired) > 0 {
+		log.Warn("held deliveries past MaxCircuitHold dead-lettered", "count", len(expired), "max_circuit_hold", maxHold.String())
 	}
 }
 
 // deadLetter is the one terminal write for failures that never produced
 // an HTTP outcome (configuration errors, a deleted subscription, a
-// rejected target, an over-long circuit hold). It writes an
-// event_delivery_log row carrying the reason, so the delivery-history
-// API always explains a dead row, then moves the row to 'dead' — the
-// existing terminal status (no schema change), which retention reaps and
-// the replay endpoint can re-queue. reason must already be safe to show
-// to a subscription reader (no URL path/query, no resolved address, no
-// infrastructure error text).
+// rejected target, an over-long hold). It writes an event_delivery_log
+// row carrying the reason, so the delivery-history API always explains a
+// dead row, then moves the row to 'dead' — the existing terminal status
+// (no schema change), which retention reaps and the replay endpoint can
+// re-queue. reason must already be safe to show to a subscription reader
+// (no URL path/query, no resolved address, no infrastructure error text).
 func (d *WebhookDispatcher) deadLetter(ctx context.Context, entry store.DeliveryEntry, reason string) {
+	d.logDeadLetter(ctx, entry, reason)
+	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "dead", reason, nil)
+}
+
+// logDeadLetter writes the delivery-log row that explains a dead-lettered
+// delivery: no status code, the reason as the error.
+func (d *WebhookDispatcher) logDeadLetter(ctx context.Context, entry store.DeliveryEntry, reason string) {
 	logID, _ := generateDeliveryID()
 	zero := 0
 	_ = d.store.LogDeliveryAttempt(ctx, &store.DeliveryLogEntry{
@@ -443,7 +573,6 @@ func (d *WebhookDispatcher) deadLetter(ctx context.Context, entry store.Delivery
 		Error:          reason,
 		CreatedAt:      d.clock().UTC(),
 	})
-	_ = d.store.UpdateDeliveryStatus(ctx, entry.DeliveryID, "dead", reason, nil)
 }
 
 // handleFailure processes a delivery failure, deciding whether to retry or dead-letter.

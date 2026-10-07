@@ -67,6 +67,10 @@ func (s *dispatcherStore) DeferDelivery(_ context.Context, deliveryID, _ string,
 	return nil
 }
 
+func (s *dispatcherStore) HoldDueDeliveries(context.Context, store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	return nil, nil
+}
+
 func (s *dispatcherStore) MarkDelivered(_ context.Context, deliveryID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -389,6 +393,10 @@ func (s *dispatcherMinimalStore) UpdateDeliveryStatus(ctx context.Context, deliv
 
 func (s *dispatcherMinimalStore) DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error {
 	return s.ds.DeferDelivery(ctx, deliveryID, reason, until)
+}
+
+func (s *dispatcherMinimalStore) HoldDueDeliveries(ctx context.Context, hold store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	return s.ds.HoldDueDeliveries(ctx, hold)
 }
 
 func (s *dispatcherMinimalStore) MarkDelivered(ctx context.Context, deliveryID string) error {

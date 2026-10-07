@@ -61,6 +61,10 @@ func (f *fakeDeliveryStore) DeferDelivery(context.Context, string, string, time.
 	panic("DeferDelivery: not used by runRetentionPass")
 }
 
+func (f *fakeDeliveryStore) HoldDueDeliveries(context.Context, store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	panic("HoldDueDeliveries: not used by runRetentionPass")
+}
+
 func (f *fakeDeliveryStore) MarkDelivered(context.Context, string) error {
 	panic("MarkDelivered: not used by runRetentionPass")
 }

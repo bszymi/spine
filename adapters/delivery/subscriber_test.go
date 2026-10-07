@@ -503,6 +503,9 @@ func (m *minimalStore) UpdateDeliveryStatus(context.Context, string, string, str
 func (m *minimalStore) DeferDelivery(context.Context, string, string, time.Time) error {
 	panic("not used")
 }
+func (m *minimalStore) HoldDueDeliveries(context.Context, store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	panic("not used")
+}
 func (m *minimalStore) MarkDelivered(context.Context, string) error { panic("not used") }
 func (m *minimalStore) LogDeliveryAttempt(context.Context, *store.DeliveryLogEntry) error {
 	panic("not used")

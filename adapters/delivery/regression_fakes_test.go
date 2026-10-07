@@ -28,7 +28,11 @@ import (
 //     test can show what the fair claim buys;
 //   - UpdateDeliveryStatus and MarkDelivered bump attempt_count, as the
 //     SQL does on every status write;
-//   - DeferDelivery does not, and only touches a row still 'delivering'.
+//   - DeferDelivery does not, and only touches a row still 'delivering';
+//   - HoldDueDeliveries holds (or, past ExpireBefore, dead-letters) every
+//     due row of one subscription without touching attempt_count, as the
+//     SQL does; noBulkHold turns it into a no-op so a test can show what
+//     the bulk hold buys.
 //
 // Its clock is the test's: advance() moves it, and now() can be wired
 // into the dispatcher and the breaker so all three share one clock.
@@ -38,7 +42,11 @@ type queueStore struct {
 	rows      map[string]*store.DeliveryEntry
 	logs      []store.DeliveryLogEntry
 	defers    int
+	holds     int
 	fifoClaim bool
+	// noBulkHold makes HoldDueDeliveries a no-op (the pre-review-round-1
+	// dispatcher deferred only the rows it was handed).
+	noBulkHold bool
 }
 
 func newQueueStore() *queueStore {
@@ -117,6 +125,35 @@ func (s *queueStore) DeferDelivery(_ context.Context, id, reason string, until t
 	r.Status, r.LastError, r.NextRetryAt = "pending", reason, &u
 	s.defers++
 	return nil
+}
+
+func (s *queueStore) HoldDueDeliveries(_ context.Context, h store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.holds++
+	if s.noBulkHold {
+		return nil, nil
+	}
+	var expired []store.DeliveryEntry
+	for _, r := range s.rows {
+		if r.SubscriptionID != h.SubscriptionID || (r.Status != "pending" && r.Status != "failed") {
+			continue
+		}
+		if r.NextRetryAt != nil && !r.NextRetryAt.Before(h.Until) {
+			continue
+		}
+		if !h.ExpireBefore.IsZero() && r.CreatedAt.Before(h.ExpireBefore) {
+			r.Status, r.LastError, r.NextRetryAt = "dead", h.ExpiredReason, nil
+			expired = append(expired, *r)
+			continue
+		}
+		if r.Status == "pending" {
+			r.LastError = h.Reason
+		}
+		u := h.Until
+		r.NextRetryAt = &u
+	}
+	return expired, nil
 }
 
 func (s *queueStore) MarkDelivered(_ context.Context, id string) error {

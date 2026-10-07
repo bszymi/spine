@@ -379,6 +379,9 @@ func (stubDeliveryStore) UpdateDeliveryStatus(ctx context.Context, deliveryID, s
 func (stubDeliveryStore) DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error {
 	return nil
 }
+func (stubDeliveryStore) HoldDueDeliveries(ctx context.Context, hold store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	return nil, nil
+}
 func (stubDeliveryStore) MarkDelivered(ctx context.Context, deliveryID string) error { return nil }
 func (stubDeliveryStore) LogDeliveryAttempt(ctx context.Context, entry *store.DeliveryLogEntry) error {
 	return nil

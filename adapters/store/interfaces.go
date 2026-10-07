@@ -202,6 +202,19 @@ type DeliveryStore interface {
 	// webhook dispatcher uses it for deliveries its circuit breaker held
 	// (INIT-023 TASK-010).
 	DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error
+	// HoldDueDeliveries takes every due delivery of one subscription off
+	// the claimable set in one statement, without consuming an attempt
+	// (attempt_count is never touched): 'pending'/'failed' rows whose
+	// next_retry_at is NULL or before hold.Until get next_retry_at =
+	// hold.Until, except rows created before a non-zero hold.ExpireBefore,
+	// which go 'dead' with hold.ExpiredReason and are returned so the
+	// caller can write their delivery-log rows. Rows another transaction
+	// holds locked (being claimed or written) are skipped. The webhook
+	// dispatcher uses it when a subscription cannot be delivered to at
+	// all for a while (open circuit, unreadable subscription), so its
+	// backlog stops taking claim slots from other subscriptions
+	// (INIT-023 TASK-010, audit P3-5).
+	HoldDueDeliveries(ctx context.Context, hold DeliveryHold) ([]DeliveryEntry, error)
 	MarkDelivered(ctx context.Context, deliveryID string) error
 	LogDeliveryAttempt(ctx context.Context, entry *DeliveryLogEntry) error
 	ListDeliveryHistory(ctx context.Context, query DeliveryHistoryQuery) ([]DeliveryLogEntry, error)

@@ -340,6 +340,162 @@ func TestQueuePG_DeferDelivery(t *testing.T) {
 	}
 }
 
+// Review round 1: HoldDueDeliveries holds exactly the subscription's due
+// rows (pending/failed, next_retry_at NULL or before Until) without
+// touching attempt_count, keeps a failed row's last endpoint outcome,
+// skips a row another transaction holds locked without waiting for it,
+// and dead-letters (and returns) only rows created before ExpireBefore.
+func TestQueuePG_HoldDueDeliveries(t *testing.T) {
+	ctx := context.Background()
+	s, p := queuePG(t)
+	sub, other := p+"hold", p+"other"
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	set := func(id, sql string, args ...any) {
+		t.Helper()
+		if err := s.ExecRaw(ctx, `UPDATE runtime.event_delivery_queue SET `+sql+` WHERE delivery_id = $1`, append([]any{id}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pend := queuePGEnqueue(t, s, sub, "pend", now.Add(-time.Minute))
+	set(pend, `attempt_count = 2`)
+	failedDue := queuePGEnqueue(t, s, sub, "failed-due", now.Add(-time.Minute))
+	set(failedDue, `status = 'failed', attempt_count = 1, last_error = 'HTTP 503', next_retry_at = $2`, now.Add(-time.Second))
+	failedSoon := queuePGEnqueue(t, s, sub, "failed-soon", now.Add(-time.Minute))
+	set(failedSoon, `status = 'failed', attempt_count = 1, last_error = 'HTTP 503', next_retry_at = $2`, now.Add(5*time.Second))
+	until := now.Add(time.Minute)
+	failedLater := queuePGEnqueue(t, s, sub, "failed-later", now.Add(-time.Minute))
+	set(failedLater, `status = 'failed', attempt_count = 1, last_error = 'HTTP 503', next_retry_at = $2`, until.Add(time.Hour))
+	untouched := map[string]string{failedLater: "failed"}
+	for _, st := range []string{"delivering", "dead", "delivered"} {
+		id := queuePGEnqueue(t, s, sub, "s-"+st, now.Add(-time.Minute))
+		set(id, `status = $2, last_error = 'before'`, st)
+		untouched[id] = st
+	}
+	old := queuePGEnqueue(t, s, sub, "old", now.Add(-2*time.Hour))
+	otherRow := queuePGEnqueue(t, s, other, "o1", now.Add(-time.Hour))
+	untouched[otherRow] = "pending"
+	locked := queuePGEnqueue(t, s, sub, "locked", now.Add(-time.Minute))
+	untouched[locked] = "pending"
+
+	tx, err := s.RawPool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM runtime.event_delivery_queue WHERE delivery_id = $1 FOR UPDATE`, locked); err != nil {
+		t.Fatal(err)
+	}
+
+	hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// No ExpireBefore: nothing is dead-lettered, the old row is held too.
+	expired, err := s.HoldDueDeliveries(hctx, store.DeliveryHold{SubscriptionID: sub, Until: until, Reason: "circuit open"})
+	if err != nil {
+		t.Fatalf("HoldDueDeliveries (a locked row must be skipped, not waited on): %v", err)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("expired %v without an ExpireBefore", ids(expired))
+	}
+	get := func(id string) *store.DeliveryEntry {
+		t.Helper()
+		e, err := s.GetDelivery(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	for id, want := range map[string]struct {
+		status, lastError string
+		attempts          int
+	}{
+		pend:       {"pending", "circuit open", 2},
+		failedDue:  {"failed", "HTTP 503", 1},
+		failedSoon: {"failed", "HTTP 503", 1},
+		old:        {"pending", "circuit open", 0},
+	} {
+		e := get(id)
+		if e.Status != want.status || e.LastError != want.lastError || e.AttemptCount != want.attempts || e.NextRetryAt == nil || !e.NextRetryAt.Equal(until) {
+			t.Fatalf("held row %s = %+v, want %s/%q/attempts %d/next %v", id, e, want.status, want.lastError, want.attempts, until)
+		}
+	}
+	for id, status := range untouched {
+		e := get(id)
+		if e.Status != status || (e.NextRetryAt != nil && id != failedLater) || (id == failedLater && !e.NextRetryAt.Equal(until.Add(time.Hour))) {
+			t.Fatalf("row %s (%s) was touched: %+v", id, status, e)
+		}
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// With ExpireBefore: rows created before it go dead and are returned;
+	// the rest move to the later Until.
+	until2 := until.Add(time.Minute)
+	expired, err = s.HoldDueDeliveries(ctx, store.DeliveryHold{SubscriptionID: sub, Until: until2, Reason: "circuit open",
+		ExpireBefore: now.Add(-time.Hour), ExpiredReason: "circuit open: held longer than 1h0m0s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || expired[0].DeliveryID != old || expired[0].Status != "dead" || expired[0].EventID != "old" {
+		t.Fatalf("expired = %+v, want only %s", expired, old)
+	}
+	if e := get(old); e.Status != "dead" || e.LastError != "circuit open: held longer than 1h0m0s" || e.NextRetryAt != nil || e.AttemptCount != 0 {
+		t.Fatalf("expired row = %+v", e)
+	}
+	if e := get(locked); e.Status != "pending" || e.NextRetryAt == nil || !e.NextRetryAt.Equal(until2) {
+		t.Fatalf("formerly locked row = %+v, want held to %v once unlocked", e, until2)
+	}
+	if e := get(otherRow); e.Status != "pending" || e.NextRetryAt != nil {
+		t.Fatalf("another subscription's row was touched: %+v", e)
+	}
+}
+
+// Review round 1, against real Postgres: six subscriptions hold 100 old
+// rows each behind open circuits (more held subscriptions than the
+// dispatcher's concurrency of 5). A new smp-internal row is delivered
+// within ceil(2 x 6 / 5) = 3 polls, and every held row is off the
+// claimable set with no attempt consumed. Before the bulk hold, the five
+// oldest held subscriptions' rows took every slot on every poll.
+func TestQueuePG_HeldBacklogsOfManySubscriptionsDoNotStarve(t *testing.T) {
+	ctx := context.Background()
+	s, p := queuePG(t)
+	bad, good, bh, gh := queuePGServers(t, http.StatusServiceUnavailable)
+	internal := p + "smp-internal"
+	queuePGSub(t, s, internal, good.URL)
+	d := NewWebhookDispatcher(s, NewStoreSubscriptionResolver(s), DispatcherConfig{})
+	base := time.Now().Add(-10 * time.Minute)
+	var held []string
+	for j := 0; j < 6; j++ {
+		sub := fmt.Sprintf("%sheld-%d", p, j)
+		held = append(held, sub)
+		queuePGSub(t, s, sub, bad.URL)
+		tripOpen(d.breaker, sub, time.Now())
+		for i := 0; i < 100; i++ {
+			queuePGEnqueue(t, s, sub, fmt.Sprintf("h%03d", i), base.Add(time.Duration(i*6+j)*time.Millisecond))
+		}
+	}
+	queuePGEnqueue(t, s, internal, "g0", time.Now())
+	polls := 0
+	for polls < 3 && atomic.LoadInt64(gh) == 0 {
+		d.poll(ctx)
+		polls++
+	}
+	if atomic.LoadInt64(gh) != 1 {
+		t.Fatalf("smp-internal row not delivered within %d polls while 6 subscriptions are held", polls)
+	}
+	if atomic.LoadInt64(bh) != 0 {
+		t.Fatalf("held subscriptions reached their endpoint %d times before their probe time", atomic.LoadInt64(bh))
+	}
+	for _, sub := range held {
+		if n := queuePGCount(t, s, `subscription_id = $1 AND status IN ('pending','failed') AND (next_retry_at IS NULL OR next_retry_at <= now())`, sub); n != 0 {
+			t.Fatalf("%s: %d rows still claimable after its hold", sub, n)
+		}
+		if n := queuePGCount(t, s, `subscription_id = $1 AND attempt_count > 0`, sub); n != 0 {
+			t.Fatalf("%s: %d held rows consumed an attempt", sub, n)
+		}
+	}
+}
+
 func ids(es []store.DeliveryEntry) []string {
 	out := make([]string, len(es))
 	for i := range es {
