@@ -412,6 +412,47 @@ payload:
   errors: [<string>]             # Summary of error messages (truncated if excessive)
 ```
 
+### 4.13 `projection_synced`
+
+Emitted by `IncrementalSync` after a sync that did work (not on the up-to-date early return).
+
+**Source:** Projection Service
+
+```yaml
+payload:
+  from_commit: <string>          # Short SHA of the previous last_synced_commit
+  to_commit: <string>            # Short SHA of the sync head
+  created: <integer>             # Artifacts created
+  modified: <integer>            # Artifacts modified
+  deleted: <integer>             # Artifacts deleted
+  errors: <integer>              # Counted sync errors (state stays at from_commit when > 0)
+  workflows_rejected: <integer>  # Workflow files refused for their content (never counted in errors)
+  read_skipped: <integer>        # Changed files whose blob could not be read for a deterministic reason (e.g. a gitlink); skipped, logged at Warn
+```
+
+### 4.14 `projection_workflow_rejected`
+
+Emitted when the projection refuses a workflow file because of its content (INIT-023 TASK-011). A rejection is never a sync error: the sync advances and this event plus one Warn log line (`projection: workflow file rejected`) are the durable signals. `artifact_path` on the envelope is the workflow path. The event id is deterministic (`wfrej-` + 16 hex characters over path, commit and action), so a repeated report de-duplicates.
+
+**Source:** Projection Service (`FullRebuild`, `IncrementalSync`, and the once-per-instance workflow-row sweep)
+
+```yaml
+payload:
+  workflow_path: <string>        # Repository-relative workflow path
+  commit: <string>               # Commit the file was read at (the sync head)
+  check: <string>                # parse | round_trip | validate | read_bounds | scope | absent_at_head
+  action: <string>               # kept | not_projected | removed
+  kept_source_commit: <string>   # source_commit of the kept row ("" unless action is kept)
+  quarantined: <boolean>         # true when the kept row's status column is Quarantined
+  error: <string>                # One line, control characters replaced, at most 512 bytes
+```
+
+- `parse`: strict `workflow.Parse` refused the file (unknown, duplicate or case-variant keys, `path` / `commit_sha`, bounds).
+- `round_trip`: `Parse` accepted the file but its stored JSON would decode differently (for example an unquoted `version: 2026-10-06`), or the file holds U+0000.
+- `validate`: `workflow.Validate` failed and strict projection validation is enabled (off by default).
+- `scope` / `absent_at_head`: the sweep found a stored row outside the workflow definition locations, or whose file no longer exists at head.
+- `kept`: the previous row verified and is kept for in-flight runs, with its status set to `Quarantined` so no new run binds it. `removed`: the previous row could not be verified and was deleted. `not_projected`: there was no row.
+
 ---
 
 ## 5. Event Versioning
@@ -584,6 +625,7 @@ All event types are emitted from the following code paths:
 | `convergence_completed` | `divergence.Service.CommitConvergence` | divergence/convergence.go |
 | `engine_recovered` | `Scheduler.RecoverOnStartup` | scheduler/recovery.go |
 | `projection_synced` | `projection.Service.IncrementalSync` | projection/service.go |
+| `projection_workflow_rejected` | `projection.Service` | projection/service.go |
 | `validation_passed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `validation_failed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `step_assignment_failed` | `Orchestrator.ActivateStep` | engine/step.go |

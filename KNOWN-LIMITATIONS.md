@@ -42,6 +42,30 @@ This document tracks known gaps and deferred functionality.
   (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
   INIT-023 EPIC-001 follow-up (owner: bszymi).
 
+### Projection Sync: What INIT-023 TASK-011 Leaves Open
+- **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
+  enforced (a file that fails either is not projected), but a workflow that fails the full
+  `workflow.Validate` suite is still projected, with one Info log line. 6 of Spine's 8 shipped
+  workflow files (and 4 of SMP's 7) fail `Validate` today, so `WithStrictWorkflowValidation` stays
+  off in both repositories until a corpus-repair task (INIT-023 owner question 7).
+- **A full rebuild re-stamps `source_commit`** on every accepted workflow row. An embedder that pins
+  runs to a row's `source_commit` (SMP) strands in-flight runs on every `FullRebuild`.
+  Preserving `source_commit` for unchanged rows is a recorded follow-up (TASK-011 owner question 5).
+- **Rows corrupted before the upgrade by the old `artifacts_dir` handling** (an out-of-tree `.md`
+  file overwriting a governed artifact's row) are not repaired automatically. Standalone deployments
+  with `artifacts_dir` set should run `POST /api/v1/system/rebuild` once after upgrading.
+- **Non-Active workflow rows are only swept on stores with the all-rows capability.**
+  `*store.PostgresStore` has it; a custom `store.Store` without `ListWorkflowProjections` gets an
+  Active-only sweep.
+- **Incremental deletes leave the task's execution projection row** (`projection.execution_projections`)
+  until the next full rebuild. This predates INIT-023; incremental sync never called
+  `DeleteExecutionProjection`.
+- **U+0000 in an artifact** (front matter or body) is refused by PostgreSQL and keeps incremental sync
+  in `error` until the file changes. Workflow files with U+0000 are rejected instead (TASK-011); the
+  artifact side is a follow-up.
+- **`QueryService.CheckFreshness` still compares against the working tree's `HEAD`**, not the
+  authoritative branch. It has no production caller.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

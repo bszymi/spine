@@ -52,6 +52,11 @@ The authoritative branch (typically `main`) represents the current governed stat
 - Projection Service syncs from the authoritative branch
 - Workflow binding resolution reads workflow definitions from the authoritative branch
 
+How the projection finds that branch depends on the repository (INIT-023 TASK-011):
+
+- **Standalone Spine** shares one non-bare working tree between the engine and the projection, and the engine checks run branches out in it. `spine serve` therefore pins the projection to the fully qualified `refs/heads/main` (`projection.Service.WithAuthoritativeBranch`, the same branch governed merges target). A run branch that happens to be checked out is never projected, and a ref such as `refs/tags/refs/heads/main` cannot shadow it. A repository with no `refs/heads/main` (a fresh `init-repo` before its `spine/init` branch is merged, or a repository governed on another branch) logs one startup Warn and reports `sync_state = error` until the branch exists.
+- **Bare-repository deployments** (the embedded SMP model) keep the zero value and read `HEAD`, a symbolic ref to the default branch that a push cannot move.
+
 ### 2.3 Hosting Requirements
 
 Spine requires a Git hosting platform that supports:
