@@ -178,7 +178,7 @@ func commitOnBranch(repoDir string, stderr io.Writer) error {
 			// Push failure is non-fatal — remote may not exist. When the
 			// remote is a Spine gateway that refused the push, say so:
 			// spine/init is operator-only there (INIT-023 TASK-016).
-			fmt.Fprintln(stderr, pushFailureNote(out))
+			_, _ = fmt.Fprintln(stderr, pushFailureNote(out))
 		}
 	}
 
