@@ -91,8 +91,15 @@ release is cut — this file is a staging area.
   `SPINE_SECRET_ENVELOPE_MODE=strict`, or rotate the key and drop every key
   that ever sealed an `enc:v1` value. Making `strict` the default is a
   recorded follow-up (owner question 1, default taken pending the owner).
-  Every conversion is logged per row so a planted value converted in
-  `migrate` mode can be found (`docs/integration-guide.md` §2.1).
+  Both closing steps stop values planted **from then on** only: a plant a
+  `migrate` sweep already converted is a valid `enc:v2` row and survives
+  `strict` and a key rotation. The sweep is the only path that converts a
+  legacy value to `enc:v2` (a write that keeps a subscription's secret —
+  `PATCH`, `pause`, `activate` — leaves the stored bytes untouched), and it
+  logs every conversion per row, so review that log against its documented
+  baseline (the first clean `migrate` sweep after any `downgrade` period,
+  older binary or keyless period) and `rotate-secret` what it flags before
+  either step (`docs/integration-guide.md` §2.1).
 - **Adding the key later now encrypts existing rows (audit P3-1, Spine
   half).** Rows written without a key stayed plaintext forever: the comment
   and docs promised re-encryption "on the next update", but the bootstrap and
@@ -117,8 +124,15 @@ release is cut — this file is a staging area.
 - `spine secrets reencrypt [--all-workspaces]`: sweeps the file-mode
   workspace, or every registry workspace — active and inactive (an inactive
   workspace's rows still need their key); prints counters and refused rows
-  only; exits non-zero unless every workspace is clean. Use it before
-  switching to `strict` or dropping a previous key in shared mode.
+  only (database-sourced text quoted); exits non-zero unless every workspace
+  is clean. Use it before switching to `strict` or dropping a previous key.
+  It requires `SPINE_SECRET_ENVELOPE_MODE` to be set explicitly, to serve's
+  mode (it never assumes `migrate`); `--all-workspaces` requires
+  `WORKSPACE_RESOLVER=db`; `--allow-unreachable-inactive=<ids>` acknowledges
+  decommissioned inactive workspaces whose database is gone (listed in the
+  summary). `platform-binding` has no registry to enumerate: verify by
+  loading every workspace and checking its `subscription secrets swept`
+  log.
 - Startup log `secret envelope configured` (`primary_key_id`,
   `previous_key_ids`, `mode`) and per-workspace sweep logs
   (`subscription secrets swept`, one `subscription secret converted` per row,
@@ -134,6 +148,12 @@ release is cut — this file is a staging area.
   always did; one refused active row stops the workspace's webhook delivery
   for the event types it subscribes to until it is fixed. Rows are never
   skipped or blanked.
+- **A write that keeps a subscription's secret no longer rewrites it.**
+  Under the new envelope, `PATCH`, `pause`, `activate` and a bootstrap that
+  only realigns the target URL write the other columns and leave the stored
+  secret's bytes untouched, so only the (logged) sweep converts legacy
+  values; a metadata-only update also no longer reverts a concurrent
+  `rotate-secret`.
 - **`POST /subscriptions/{id}/rotate-secret` no longer reads the old
   secret.** It replaces the stored value directly
   (`PostgresStore.ReplaceSubscriptionSecret`), so it is the repair for a
@@ -171,28 +191,49 @@ release is cut — this file is a staging area.
   `ErrLegacySecretRefused`, `ErrEnvelopeInput`, `ErrNestedEnvelope`. Under a
   binding, writes take plaintext secrets only (an envelope input is refused)
   and every store that touches one workspace's subscriptions must use the
-  same workspace id and mode. SMP adopts this in SMP INIT-027 EPIC-004
-  TASK-006.
-- **Two deltas reachable without a binding:** `Decrypt("enc:v2:…")` now
-  returns an error wrapping `ErrMissingAAD` (it used to return the envelope
-  text as if it were the secret; no such value exists in an unbound
-  deployment), and `IsEncrypted` is true for `enc:v2:`. `Decrypt` opens
-  `enc:v1` with every ring key; its authentication-failure text is now
-  `decrypt: secret envelope failed authentication (…)`.
+  same workspace id and mode. A bound `UpdateSubscription` first reads the
+  stored secret (one extra `SELECT`) and, when it already opens to the
+  given secret, leaves the `signing_secret` column untouched and writes the
+  other columns only. SMP adopts this in SMP INIT-027 EPIC-004 TASK-006.
+- **Deltas reachable without a binding** (none is reachable from SMP's
+  current inputs: its credentials are hex and it produces no `enc:v2`
+  value):
+  - `Decrypt("enc:v2:…")` now errors instead of returning the envelope text
+    as if it were the secret: with a cipher the error wraps `ErrMissingAAD`;
+    with a nil or zero-value cipher it is `ErrNoCipher` (as for `enc:v1`).
+  - `IsEncrypted` is true for `enc:v2:`. So an unbound `CreateSubscription`
+    or `UpdateSubscription` stores an input that starts with `enc:v2:`
+    **verbatim** (the never-double-encrypt pass-through), where it used to
+    seal it as `enc:v1`; reading that row back through an unbound store
+    then errors.
+  - `Decrypt` opens `enc:v1` with every ring key. Its error texts changed:
+    an authentication failure is `decrypt: secret envelope failed
+    authentication (…)` (wraps `ErrEnvelopeAuth`), and a short or
+    undecodable `enc:v1` value is `malformed secret envelope: …` (wraps
+    `ErrMalformedEnvelope`).
 
 ### Upgrade and rollback
 
-- **One replica:** deploy (default `migrate`); each workspace is swept as it
-  loads; run `spine secrets reencrypt --all-workspaces` in shared mode;
+- **One replica, no overlap:** stop the old process before the new one
+  starts (Kubernetes `strategy: {type: Recreate}` — the default
+  `RollingUpdate` overlaps them); deploy (default `migrate`); each workspace
+  is swept as it loads; verify every workspace (`spine secrets reencrypt
+  [--all-workspaces]` with serve's mode, or the platform-binding log check);
   review the conversion log; then set `strict`.
-- **Several replicas:** a binary older than this release reads `enc:v2` as
-  plaintext and signs with the envelope text. Deploy every replica with
-  `SPINE_SECRET_ENVELOPE_MODE=downgrade` first, then switch to `migrate`.
-- **Rollback below this release:** set `downgrade`, sweep every workspace
-  (`spine secrets reencrypt --all-workspaces`), confirm every workspace is
-  clean, then roll back. A rollback that skipped this leaves
-  `enc:v1(enc:v2:…)` rows behind; this release repairs those whose inner
-  value is the row's own and refuses the rest (`rotate-secret`).
+- **Several replicas, or any overlap of old and new:** a binary older than
+  this release reads `enc:v2` as plaintext and signs with the envelope text;
+  receivers reject it and the dispatcher does not retry a 4xx other than
+  `429`, so those events are lost. Deploy every replica with
+  `SPINE_SECRET_ENVELOPE_MODE=downgrade` first, then, once no old replica
+  remains, switch to `migrate`.
+- **Rollback below this release:** set `downgrade`, verify every workspace
+  (`spine secrets reencrypt [--all-workspaces]` with
+  `SPINE_SECRET_ENVELOPE_MODE=downgrade`, or the platform-binding log
+  check), confirm every workspace is clean, then roll back. A rollback
+  that skipped this leaves `enc:v1(enc:v2:…)` rows behind; this release
+  repairs those whose inner value is the row's own and refuses the rest
+  (`rotate-secret`). A `downgrade` period resets the conversion-log
+  baseline.
 - No schema change and no migration file.
 
 ---

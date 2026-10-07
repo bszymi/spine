@@ -192,6 +192,12 @@ func TestV2_RequiresAAD(t *testing.T) {
 	if _, err := nilCipher.Decrypt(ct); !errors.Is(err, spinecrypto.ErrNoCipher) {
 		t.Fatalf("nil Decrypt(v2): %v", err)
 	}
+	// A zero-value cipher reports ErrNoCipher too, not ErrMissingAAD
+	// (documented in the CHANGELOG's embedder notes).
+	var zero spinecrypto.SecretCipher
+	if _, err := zero.Decrypt(ct); !errors.Is(err, spinecrypto.ErrNoCipher) || errors.Is(err, spinecrypto.ErrMissingAAD) {
+		t.Fatalf("zero-value Decrypt(v2): %v", err)
+	}
 }
 
 // The legacy v1 surface stays as it was at 61994fe for SMP's current
@@ -228,6 +234,13 @@ func TestLegacy_EncryptStillV1AndDecryptPassesThrough(t *testing.T) {
 	other := ring(t, randomKey(t))
 	if _, err := other.Decrypt(ct); !errors.Is(err, spinecrypto.ErrEnvelopeAuth) {
 		t.Fatalf("wrong-key v1: %v", err)
+	}
+	// A short or undecodable v1 value is still an error; it now wraps
+	// ErrMalformedEnvelope (documented in the CHANGELOG's embedder notes).
+	for _, v := range []string{"enc:v1:AAAA", "enc:v1:!!not-base64!!"} {
+		if _, err := c.Decrypt(v); !errors.Is(err, spinecrypto.ErrMalformedEnvelope) {
+			t.Fatalf("Decrypt(%q) should wrap ErrMalformedEnvelope: %v", v, err)
+		}
 	}
 }
 

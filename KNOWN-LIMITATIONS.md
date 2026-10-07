@@ -132,10 +132,23 @@ The following limitations have been resolved:
   another workspace's pre-upgrade `enc:v1` value planted in a workspace database is indistinguishable
   from a genuine pre-upgrade row and becomes a valid `enc:v2` row (audit P3-10).
 - **Closing it:** set `SPINE_SECRET_ENVELOPE_MODE=strict` once every workspace has swept clean
-  (`spine secrets reencrypt --all-workspaces` in shared mode), or retire every key that ever sealed
-  an `enc:v1` value. Every conversion is logged per row (`subscription secret converted`) so a
-  conversion after a workspace's first clean sweep can be investigated and its secret rotated.
+  (`spine secrets reencrypt [--all-workspaces]` with serve's mode), or retire every key that ever
+  sealed an `enc:v1` value. Either step stops values planted from then on only: a plant a `migrate`
+  sweep already converted stays a valid `enc:v2` row. The sweep is the only path that converts a
+  legacy value (a write that keeps a subscription's secret leaves its stored bytes untouched) and it
+  logs every conversion per row (`subscription secret converted`), so before either step review that
+  log against its baseline — the first clean `migrate` sweep after any `downgrade` period, older
+  binary or keyless period — and rotate every subscription it flags
+  (`docs/integration-guide.md` §2.1). A value planted *during* such a period cannot be told apart.
 - **Status:** strict-by-default in a later release is a follow-up (owner question 1).
+
+### Webhook Signing Secrets: No All-Workspaces Verification in `platform-binding` Mode
+- `spine secrets reencrypt --all-workspaces` needs the workspace registry (`WORKSPACE_RESOLVER=db`).
+  `platform-binding` has none to enumerate, so before switching to `strict`, dropping a previous
+  key or rolling back, the operator must load every bound workspace and check that each one's latest
+  `subscription secrets swept` log shows `refused=0` and `conflicts=0`. A workspace that has not
+  loaded since the change is unverified, and flipping early stops its webhook fan-out when it next
+  loads. An enumeration source for this mode (the platform's binding list) is a follow-up.
 
 ### Webhook Signing Secrets: One Unopenable Row Stops a Workspace's Fan-Out
 - A signing secret that does not open (wrong or removed key, transplanted, legacy in `strict`) fails

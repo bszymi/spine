@@ -137,60 +137,80 @@ Rows written before a key existed are **not** re-encrypted by later writes (the 
 
 - **File mode**: at startup, before the internal subscription bootstrap.
 - **Shared mode** (`WORKSPACE_RESOLVER=db|platform-binding`): when a workspace's services are built — on its first request, and again after idle eviction.
-- **On demand**: `spine secrets reencrypt` (file mode) or `spine secrets reencrypt --all-workspaces` (every workspace in the registry, `SPINE_REGISTRY_DATABASE_URL` — **active and inactive**, unlike `spine migrate --all-workspaces`, because an inactive workspace's rows still need the key that sealed them). The command prints one line of counters per workspace and one line per refused row, and exits non-zero unless every workspace is clean. In `platform-binding` mode there is no registry to enumerate, so workspaces are swept only as they load.
+- **On demand**: `spine secrets reencrypt` (file mode) or `spine secrets reencrypt --all-workspaces` (`WORKSPACE_RESOLVER=db` only: every workspace in the registry, `SPINE_REGISTRY_DATABASE_URL` — **active and inactive**, unlike `spine migrate --all-workspaces`, because an inactive workspace's rows still need the key that sealed them). The command prints one line of counters per workspace and one line per refused row (subscription ids and reasons are printed quoted, so a value planted in a workspace database cannot forge or erase an output line), and exits non-zero unless every workspace is clean.
+  - **`SPINE_SECRET_ENVELOPE_MODE` must be set explicitly for the command, to the mode `spine serve` runs with.** The command writes every workspace database and cannot see serve's mode; it refuses to run with the variable unset rather than assume `migrate` (which would convert — and so launder — legacy rows a `strict` deployment refuses) or inherit a stray `downgrade` (which would rewrite every `enc:v2` row to `enc:v1`, which `strict` then refuses).
+  - `--all-workspaces` refuses to run unless `WORKSPACE_RESOLVER=db`, the only mode in which `spine serve` binds registry ids; in file mode serve binds `SPINE_WORKSPACE_ID`, and sweeping a registry would seal rows under ids serve refuses.
+  - An **inactive** workspace whose database can no longer be resolved or reached (a decommissioned tenant whose database was dropped but whose registry row was kept) counts as not clean. Once you have confirmed it is retired, name it in `--allow-unreachable-inactive=<id>[,<id>…]`: it is then reported as acknowledged (and listed in the summary) instead of failing the run. The flag never covers an active workspace or one that is reachable — a reachable workspace is always swept and judged on its rows. Alternatively, remove the retired workspace's registry row.
+  - **`WORKSPACE_RESOLVER=platform-binding` has no registry to enumerate**, so the command cannot verify it; workspaces are swept only as they load. See the platform-binding steps in the runbooks below.
 
 The sweep re-seals every row that is not yet in the mode's envelope under the primary key: plaintext rows, `enc:v1` rows, rows under a previous key. It never overwrites a value that changed after it read it (compare-and-swap; a concurrent `rotate-secret` wins), does not bump `updated_at`, and runs under a 10-second limit so a held row lock cannot stall startup. It logs a summary (`subscription secrets swept`, with every counter), one `Info` record per converted row (`subscription secret converted`: `subscription_id`, `from`, `from_key_id`) and one `Error` record per refused row. No log line, report or error ever contains a secret or a stored value.
 
+**The sweep is the only path that turns a legacy value into `enc:v2`.** A write that keeps a subscription's secret — `PATCH`, `pause`, `activate`, the internal bootstrap realigning a target URL — writes the other columns and leaves the stored secret's bytes untouched; a write that changes the secret (`rotate-secret`, a bootstrap token change) replaces the stored value outright. So every conversion of a plaintext or `enc:v1` value appears in the sweep's per-row log.
+
 A row that does not open — sealed for another workspace or row, under a key no longer in the ring, a legacy value in `strict`, an unknown version — is **refused and left untouched**. It is not skipped: a read of it fails, and because the webhook fan-out lists the workspace's active subscriptions per event type and a list fails as a whole, **one refused active row stops the workspace's webhook delivery for every event type that row subscribes to** until it is fixed: `POST /subscriptions/{id}/rotate-secret` replaces the stored secret **without reading it**, so it works on a refused row (`PATCH`, `pause` and `activate` read the row first and fail until it is rotated); or restore the key, or correct the workspace id; or delete the subscription. The sweep's `Error` log names it. After a clean sweep in `migrate` mode Spine logs a hint to switch to `strict` (at `Warn` when `SPINE_ENV=production`).
 
-**Trust boundary.** In `migrate` mode the sweep trusts the legacy (`enc:v1` and plaintext) rows present when it runs. It cannot tell a genuine pre-upgrade `enc:v1` row from a copy of **another workspace's** pre-upgrade `enc:v1` value planted in this database — `enc:v1` binds nothing — so it converts both into valid `enc:v2` rows for this workspace. This lasts for as long as `migrate` is active: every sweep converts whatever legacy row it finds. The per-row conversion log is the audit trail: a `from=plaintext` or `from=enc:v1` conversion logged **after** a workspace's first clean sweep was not written by this release.
+**Trust boundary.** In `migrate` mode the sweep trusts the legacy (`enc:v1` and plaintext) rows present when it runs. It cannot tell a genuine pre-upgrade `enc:v1` row from a copy of **another workspace's** pre-upgrade `enc:v1` value planted in this database — `enc:v1` binds nothing — so it converts both into valid `enc:v2` rows for this workspace. This lasts for as long as `migrate` is active: every sweep converts whatever legacy row it finds.
+
+**The conversion log is the audit trail.** Its *baseline* is a workspace's first clean sweep in `migrate` (or `strict`) mode after the last period in which **anything wrote `enc:v1` or plaintext legitimately**: a replica in `downgrade` mode (which writes and sweeps to `enc:v1` on purpose — the several-replica upgrade, a rollback preparation, the workspace-id runbook), a binary older than this release (a rollback, an overlapping rollout), or a deployment without a key. Each such period resets the baseline; the first clean `migrate` sweep after it is the new reference point, and the `from=enc:v1` conversions that sweep logs are expected (a value planted *during* such a period is indistinguishable from them, so keep those periods short). A `from=plaintext` or `from=enc:v1` conversion logged **after** the baseline was not written by this release in its normal posture: treat it as a possible planted copy and rotate that subscription's signing secret (`POST /subscriptions/{id}/rotate-secret`).
 
 ### When P3-10 Is Closed {#when-p3-10-is-closed}
 
-The default `migrate` mode does **not** close audit finding P3-10 on its own. An attacker who holds a pre-upgrade backup of workspace A (an `enc:v1` copy of its column) and write access to workspace B's database can still plant A's value in B, and the next `migrate` sweep accepts it. P3-10 is closed only once **either**:
+The default `migrate` mode does **not** close audit finding P3-10 on its own. An attacker who holds a pre-upgrade backup of workspace A (an `enc:v1` copy of its column) and write access to workspace B's database can still plant A's value in B, and the next `migrate` sweep accepts it. Either of these closes the path **for values planted from then on**:
 
 1. `SPINE_SECRET_ENVELOPE_MODE=strict` is set — no plaintext or `enc:v1` value is accepted again; **or**
 2. every key that ever sealed an `enc:v1` value has been removed from the ring (see *Key rotation*) — such values then no longer open.
+
+Neither undoes a plant that a `migrate` sweep already converted: that row is a valid `enc:v2` row for B and stays valid under `strict` and after a key rotation (the rotation re-keys it like any other row). So both closing steps are preceded by the conversion-log review above, with `rotate-secret` on every subscription it flags. P3-10 is closed once one of the two steps is in place **and** that review has been done.
 
 ### Deployment Assumptions
 
 - **One workspace per runtime database** (ADR-012). The registry does not enforce a unique `database_url`. If two workspaces are registered on one runtime database, each refuses the other's rows once bound, so both workspaces' webhook delivery fails with refused rows. That is intended: such a topology already fans each workspace's events out to the other's subscriptions. Give every workspace its own database.
 - **The binding is only as unique as the workspace id.** In file mode the id defaults to `default`. Two single-workspace deployments that share one key and both use `default` can transplant `enc:v2` values between them. Use a **distinct key per deployment**, or else a distinct `SPINE_WORKSPACE_ID`.
 - **Changing the workspace id** makes its `enc:v2` rows fail closed (the id is part of the binding). See the runbook below.
+- **No binary older than this release may run alongside it.** An older binary reads an `enc:v2` value as plaintext and signs with the envelope text; the receiver rejects the delivery (typically `401`), the dispatcher treats a 4xx other than `429` as a permanent failure, and the event is lost. This includes the overlap of a rolling update with one replica — see the upgrade runbooks.
 
 ### Runbooks
 
-**Upgrade (one replica).**
+Every `spine secrets reencrypt` run below uses the same `SPINE_SECRET_ENCRYPTION_KEY`, `SPINE_SECRET_PREVIOUS_KEYS` and **`SPINE_SECRET_ENVELOPE_MODE`** as `spine serve` (the command refuses to run with the mode unset).
+
+**Verifying every workspace** (used by the steps below):
+
+- File mode: `spine secrets reencrypt` exits 0.
+- `WORKSPACE_RESOLVER=db`: `spine secrets reencrypt --all-workspaces` exits 0 (acknowledge decommissioned inactive workspaces with `--allow-unreachable-inactive`).
+- `WORKSPACE_RESOLVER=platform-binding`: there is no registry to enumerate. Load **every** bound workspace (one request each, after the change being verified), and confirm each workspace's latest `subscription secrets swept` record shows `refused=0` and `conflicts=0` (and, where the step asks, the expected `mode`, `primary_key_id` and `current` count). A workspace that has not logged a sweep since the change is **not** verified.
+
+**Upgrade (one replica).** This procedure requires that the old and new process **never run at the same time**: stop the old process before the new one starts (Kubernetes `strategy: {type: Recreate}`; the default `RollingUpdate` starts the new pod while the old one still dispatches). If any overlap is possible, use the several-replica procedure instead.
 
 1. Deploy. The default mode is `migrate`.
 2. Each store build sweeps its workspace: plaintext and `enc:v1` rows become `enc:v2`.
 3. Before switching to `strict`:
-   - In shared mode, run `spine secrets reencrypt --all-workspaces` instead of waiting for every workspace to load; it must exit 0.
-   - Review the per-row conversion log. If a workspace logged a `from=plaintext` or `from=enc:v1` conversion **after** its first clean sweep, run `POST /subscriptions/{id}/rotate-secret` on that subscription before switching: its value may be a planted copy the sweep converted.
+   - Verify every workspace (above) with `SPINE_SECRET_ENVELOPE_MODE=migrate`.
+   - Review the per-row conversion log against its baseline (see *The conversion log is the audit trail*). For every `from=plaintext` or `from=enc:v1` conversion logged after a workspace's baseline, run `POST /subscriptions/{id}/rotate-secret` before switching: its value may be a planted copy the sweep converted.
 4. Set `SPINE_SECRET_ENVELOPE_MODE=strict` and restart. From then on an `enc:v1` value copied from a pre-upgrade backup, or a plaintext value planted in the database, is refused.
 
-**Upgrade (several replicas).** A binary older than this release reads an `enc:v2` value as plaintext and would sign with the envelope text, so no old replica may see one.
+**Upgrade (several replicas, or any rollout where old and new processes overlap).** A binary older than this release reads an `enc:v2` value as plaintext and would sign with the envelope text, so no old replica may see one.
 
 1. Deploy every replica with `SPINE_SECRET_ENVELOPE_MODE=downgrade`: all can read `enc:v2`, none writes it.
-2. Switch to `migrate`.
-3. Later, switch to `strict` as above.
+2. Once no old replica remains, switch to `migrate`. The first clean `migrate` sweep is each workspace's conversion-log baseline: it converts the `enc:v1` rows `downgrade` wrote, as expected.
+3. Later, switch to `strict` as in step 3 of the one-replica procedure.
 
 **Key rotation.**
 
 1. Generate K2 (`openssl rand -base64 32`).
 2. Set `SPINE_SECRET_ENCRYPTION_KEY=K2` and `SPINE_SECRET_PREVIOUS_KEYS=K1`, and restart. The sweep re-keys every row to K2 (in shared mode, as each workspace loads).
-3. When every workspace is clean under `kid(K2)` — in shared mode, a clean `spine secrets reencrypt --all-workspaces` run — remove K1 from `SPINE_SECRET_PREVIOUS_KEYS`.
-4. Keep K1 in escrow for as long as a backup taken before step 2 may be restored. To restore such a backup, put K1 back in the ring and run `migrate` until the sweep is clean.
-5. Dropping K1 also makes every `enc:v1` value written under K1 unopenable — the second way to close P3-10.
-6. Rotating a subscription's *webhook signing secret* is a separate operation: `POST /subscriptions/{id}/rotate-secret`.
+3. Verify every workspace (above): every workspace clean under `primary_key_id=kid(K2)`.
+4. If K1 ever sealed `enc:v1` values and the deployment is not yet `strict`, review the conversion log against its baseline and `rotate-secret` every flagged subscription **before** dropping K1 (see *When P3-10 Is Closed*): a plant converted earlier was re-keyed to K2 in step 2 and survives the drop.
+5. Remove K1 from `SPINE_SECRET_PREVIOUS_KEYS`. This also makes every `enc:v1` value written under K1 unopenable — the second way to close P3-10 for future plants.
+6. Keep K1 in escrow for as long as a backup taken before step 2 may be restored. To restore such a backup, put K1 back in the ring and run `migrate` until the sweep is clean.
+7. Rotating a subscription's *webhook signing secret* is a separate operation: `POST /subscriptions/{id}/rotate-secret`.
 
 **Rollback below this release.**
 
-1. Set `SPINE_SECRET_ENVELOPE_MODE=downgrade` and restart. In shared mode, run `spine secrets reencrypt --all-workspaces` (or load every workspace).
-2. Confirm every workspace reports `current` equal to its number of non-empty rows (and `refused=0`).
+1. Set `SPINE_SECRET_ENVELOPE_MODE=downgrade` and restart.
+2. Verify every workspace (above) with `SPINE_SECRET_ENVELOPE_MODE=downgrade`: every workspace reports `current` equal to its number of non-empty rows, and `refused=0`.
 3. Roll back the binary.
 
-Without this procedure, an old binary signs every webhook with the literal `enc:v2:…` text and receivers reject it. The standalone internal subscription heals on the old binary's bootstrap; API-created subscriptions need `rotate-secret`.
+Without this procedure, an old binary signs every webhook with the literal `enc:v2:…` text and receivers reject it. The standalone internal subscription heals on the old binary's bootstrap; API-created subscriptions need `rotate-secret`. On a later re-upgrade the `downgrade` period resets the conversion-log baseline.
 
 **Rollback that skipped `downgrade`.** Rows the old binary wrote back become `enc:v1(enc:v2:…)`. On re-upgrade, a row whose inner value is that row's own `enc:v2` is repaired (read correctly, and rewritten by the sweep — counted as `repaired`). A row that cannot be repaired is refused and needs `rotate-secret`.
 
@@ -198,7 +218,7 @@ Without this procedure, an old binary signs every webhook with the literal `enc:
 
 1. Run in `downgrade` under the old id, and confirm a clean sweep.
 2. Change the id.
-3. Switch back to `migrate`.
+3. Switch back to `migrate`. The first clean `migrate` sweep under the new id is the new conversion-log baseline.
 
 ### Webhook TLS Configuration
 
@@ -641,6 +661,11 @@ metadata:
   name: spine
 spec:
   replicas: 1
+  # Recreate stops the old pod before starting the new one. Required for
+  # the one-replica secret-envelope upgrade (§2.1 Runbooks): a rolling
+  # update overlaps an older binary that cannot read enc:v2 values.
+  strategy:
+    type: Recreate
   template:
     spec:
       containers:
@@ -701,7 +726,7 @@ spec:
 | `SPINE_DEV_MODE` | No | - | `1` or `true` lets unauthenticated requests through the auth gate. Dev-only; refused at startup when `SPINE_ENV=production`. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Yes (production) | - | Base64-encoded 32-byte AES-256 key for at-rest secret encryption (webhook signing secrets). Generate with `openssl rand -base64 32`. See [Secrets at Rest](#secrets-at-rest). |
 | `SPINE_SECRET_PREVIOUS_KEYS` | No | - | Comma-separated base64 32-byte keys that still decrypt values sealed before a key rotation; they never seal. Requires `SPINE_SECRET_ENCRYPTION_KEY`. See [Secrets at Rest](#secrets-at-rest). |
-| `SPINE_SECRET_ENVELOPE_MODE` | No | `migrate` | `migrate`, `strict` or `downgrade`: how legacy (`enc:v1`, plaintext) signing secrets are treated and which envelope is written. `strict` is required to close audit finding P3-10. See [Envelope Modes](#secrets-at-rest). |
+| `SPINE_SECRET_ENVELOPE_MODE` | No for `spine serve`; **yes** for `spine secrets reencrypt` | `migrate` (serve only) | `migrate`, `strict` or `downgrade`: how legacy (`enc:v1`, plaintext) signing secrets are treated and which envelope is written. `strict` is required to close audit finding P3-10. `spine secrets reencrypt` refuses to run without it; set it to serve's mode. See [Envelope Modes](#secrets-at-rest). |
 | `SPINE_OPERATOR_TOKEN` | No | - | Static bearer token for system-level endpoints (workspace CRUD). Minimum 32 characters; shorter values are refused at startup. Unset: operator endpoints return 503. |
 | `SPINE_INSECURE_LOCAL` | No | - | Set to `1` only for local development with `sslmode=disable` DB URLs. |
 | `SPINE_TRUSTED_PROXY_CIDRS` | No | - | Comma-separated CIDRs of reverse proxies Spine should trust for `X-Forwarded-For`. Leave unset if directly internet-facing. |
