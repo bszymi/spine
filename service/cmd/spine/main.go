@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bszymi/spine/service/internal/cli"
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/service/internal/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -71,6 +71,7 @@ func main() {
 	root.AddCommand(serveCmd())
 	root.AddCommand(healthCmd())
 	root.AddCommand(migrateCmd())
+	root.AddCommand(secretsCmd())
 	root.AddCommand(initRepoCmd())
 	root.AddCommand(artifactCmd())
 	root.AddCommand(runCmd())

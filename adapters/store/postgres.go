@@ -39,13 +39,20 @@ type PostgresStore struct {
 	// respects this so the pool is torn down exactly once.
 	ownsPool bool
 	cipher   *spinecrypto.SecretCipher
+	// secretBinding, when set, switches event_subscriptions.signing_secret
+	// to the enc:v2 envelope bound to (workspace, subscription id) and
+	// enables the re-encryption sweep (postgres_subscription_secrets.go,
+	// INIT-023 TASK-009). nil keeps the historical enc:v1/plaintext
+	// behaviour unchanged.
+	secretBinding *SubscriptionSecretBinding
 }
 
-// SetSecretCipher installs the AEAD used to encrypt at-rest secrets
-// (currently: event_subscriptions.signing_secret). With no cipher
+// SetSecretCipher installs the AEAD key ring used to encrypt at-rest
+// secrets (currently: event_subscriptions.signing_secret). With no cipher
 // configured the store falls back to plaintext, matching behaviour
 // before TASK-007 so integration tests and development setups work
-// without additional configuration.
+// without additional configuration. Without SetSubscriptionSecretBinding
+// the store writes the unbound enc:v1 envelope; with it, enc:v2.
 func (s *PostgresStore) SetSecretCipher(c *spinecrypto.SecretCipher) {
 	s.cipher = c
 }

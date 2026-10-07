@@ -11,6 +11,7 @@ import (
 
 	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
@@ -230,11 +231,24 @@ func loadCodeRepoBase(env string) (string, error) {
 	return filepath.Clean(v), nil
 }
 
-// loadSecretCipher builds the at-rest secret cipher from
-// SPINE_SECRET_ENCRYPTION_KEY. In production the key is required.
+// loadSecretCipher builds the at-rest secret key ring from
+// SPINE_SECRET_ENCRYPTION_KEY (the primary key: it seals) and
+// SPINE_SECRET_PREVIOUS_KEYS (a comma-separated list of base64 keys that
+// still open values sealed before a rotation; whitespace is trimmed and
+// empty entries are ignored). In production the primary key is required.
+// Previous keys without a primary key are a startup error: they would
+// silently do nothing. Errors name a previous key by its 1-based entry
+// index, never by its value.
 func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
 	encoded := os.Getenv("SPINE_SECRET_ENCRYPTION_KEY")
+	previous, err := loadPreviousSecretKeys()
+	if err != nil {
+		return nil, err
+	}
 	if encoded == "" {
+		if len(previous) > 0 {
+			return nil, fmt.Errorf("SPINE_SECRET_PREVIOUS_KEYS is set but SPINE_SECRET_ENCRYPTION_KEY is not; previous keys only decrypt, so a primary key is required")
+		}
 		if env == "production" {
 			return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY is required when SPINE_ENV=production; generate one with `openssl rand -base64 32`")
 		}
@@ -244,7 +258,47 @@ func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY: %w", err)
 	}
-	return spinecrypto.NewSecretCipher(key)
+	c, err := spinecrypto.NewSecretCipherRing(key, previous...)
+	if err != nil {
+		return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY / SPINE_SECRET_PREVIOUS_KEYS: %w", err)
+	}
+	return c, nil
+}
+
+// loadPreviousSecretKeys parses SPINE_SECRET_PREVIOUS_KEYS. The error for
+// a malformed entry names its 1-based index and wraps only the decoder's
+// message (a byte offset or a length), never the entry itself.
+func loadPreviousSecretKeys() ([][]byte, error) {
+	raw := os.Getenv("SPINE_SECRET_PREVIOUS_KEYS")
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var keys [][]byte
+	n := 0
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		n++
+		key, err := spinecrypto.ParseEncryptionKey(entry)
+		if err != nil {
+			return nil, fmt.Errorf("SPINE_SECRET_PREVIOUS_KEYS entry %d: %w", n, err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+// loadSecretEnvelopeMode reads SPINE_SECRET_ENVELOPE_MODE: empty means
+// migrate; migrate, strict and downgrade are accepted case-insensitively;
+// anything else is a startup error (INIT-023 TASK-009).
+func loadSecretEnvelopeMode() (store.SecretEnvelopeMode, error) {
+	mode, err := store.ParseSecretEnvelopeMode(os.Getenv("SPINE_SECRET_ENVELOPE_MODE"))
+	if err != nil {
+		return "", fmt.Errorf("SPINE_SECRET_ENVELOPE_MODE: %w", err)
+	}
+	return mode, nil
 }
 
 // dbPolicyFromEnv reads ADR-012 pool overrides from environment

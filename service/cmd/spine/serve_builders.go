@@ -512,6 +512,107 @@ func errIsCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// serveWorkspaces is the workspace topology `spine serve` runs on, as
+// buildServeWorkspaces assembles it from the environment.
+type serveWorkspaces struct {
+	// SecretCipher and SecretEnvelopeMode are the subscription-secret key
+	// ring and mode every runtime store below is bound and swept with
+	// (INIT-023 TASK-009). SecretCipher is nil when
+	// SPINE_SECRET_ENCRYPTION_KEY is unset outside production; no store is
+	// bound then and the mode has no effect.
+	SecretCipher       *spinecrypto.SecretCipher
+	SecretEnvelopeMode store.SecretEnvelopeMode
+
+	// Wiring is the workspace resolver and, with WORKSPACE_RESOLVER=db or
+	// platform-binding, the ServicePool that builds (binds and sweeps)
+	// every workspace's store.
+	Wiring *resolverWiring
+
+	// Store is the process-level store: file mode only. It is nil in
+	// shared mode and when the database is unreachable at start-up.
+	Store store.Store
+}
+
+// Close releases the store, the pool and the registry connection, in the
+// reverse order of construction.
+func (w *serveWorkspaces) Close() {
+	if closer, ok := w.Store.(interface{ Close() }); ok && w.Store != nil {
+		closer.Close()
+	}
+	if w.Wiring.Pool != nil {
+		w.Wiring.Pool.Close()
+	}
+	if w.Wiring.DBProvider != nil {
+		w.Wiring.DBProvider.Close()
+	}
+}
+
+// buildServeWorkspaces is the start-up step of `spine serve` that turns the
+// environment into the subscription-secret key ring and envelope mode, the
+// workspace resolver (with its ServicePool in shared mode) and the
+// process-level store (file mode).
+//
+// It loads the mode itself and hands the same value to both consumers —
+// buildWorkspaceResolver, whose pool binds every shared-mode workspace
+// store, and buildStore, which binds the file-mode store — so serveCmd
+// carries no mode argument a refactor could drop. That matters because ""
+// is an untyped constant that converts to SecretEnvelopeMode and means
+// migrate: a dropped argument would still compile, the start-up log would
+// still print the configured mode, and every store would be bound in
+// migrate, converting the legacy rows strict exists to refuse (INIT-023
+// TASK-009, review round 2). TestBuildServeWorkspaces_* drive this function
+// from the environment for every resolver.
+func buildServeWorkspaces(ctx context.Context, runtimeEnv string, log *slog.Logger, deliveryCfg workspaceDeliveryConfig, codeRepoBase string) (*serveWorkspaces, error) {
+	secretCipher, err := loadSecretCipher(runtimeEnv)
+	if err != nil {
+		return nil, err
+	}
+	secretEnvelopeMode, err := loadSecretEnvelopeMode()
+	if err != nil {
+		return nil, err
+	}
+	if secretCipher == nil {
+		log.Warn("SPINE_SECRET_ENCRYPTION_KEY is not set — webhook signing secrets will be stored in plaintext", "env", runtimeEnv)
+		if secretEnvelopeMode != store.SecretEnvelopeMigrate {
+			log.Warn("SPINE_SECRET_ENVELOPE_MODE is ignored without SPINE_SECRET_ENCRYPTION_KEY", "mode", string(secretEnvelopeMode))
+		}
+	} else {
+		ids := secretCipher.KeyIDs()
+		log.Info("secret envelope configured",
+			"primary_key_id", secretCipher.PrimaryKeyID(),
+			"previous_key_ids", ids[1:],
+			"mode", string(secretEnvelopeMode),
+		)
+	}
+
+	wiring, err := buildWorkspaceResolver(ctx, secretCipher, secretEnvelopeMode, log, deliveryCfg, codeRepoBase)
+	if err != nil {
+		return nil, err
+	}
+	ws := &serveWorkspaces{
+		SecretCipher:       secretCipher,
+		SecretEnvelopeMode: secretEnvelopeMode,
+		Wiring:             wiring,
+	}
+
+	// Only the file resolver is single-workspace and sized to back the
+	// process-level store. db / platform-binding modes route
+	// per-workspace via ServicePool, so passing their resolver here would
+	// resolve only one tenant's credential into a shared store — not the
+	// desired model.
+	var storeResolver workspace.Resolver
+	if wiring.Pool == nil {
+		storeResolver = wiring.Resolver
+	}
+	st, err := buildStore(ctx, storeResolver, secretCipher, secretEnvelopeMode, log)
+	if err != nil {
+		ws.Close()
+		return nil, err
+	}
+	ws.Store = st
+	return ws, nil
+}
+
 // buildStore connects to the workspace database in single-workspace
 // mode. The runtime DB URL is read through the resolver — which in
 // turn goes through SecretClient (ADR-010, TASK-008) — so a deployment
@@ -522,14 +623,22 @@ func errIsCancellation(err error) bool {
 //
 // A connection failure is logged but does not abort startup so the
 // server still serves store-independent endpoints.
-func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *spinecrypto.SecretCipher, log *slog.Logger) (store.Store, error) {
-	var dbURL string
+//
+// With a cipher, the store's subscription signing secrets are bound to
+// the resolver's workspace id (SPINE_WORKSPACE_ID, default "default" —
+// the id the gateway serves) in secretEnvelopeMode, and legacy rows are
+// swept to enc:v2 before anything reads them (INIT-023 TASK-009;
+// startEventDelivery's bootstrap runs later). A sweep error is logged and
+// does not abort startup; a binding error does.
+func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *spinecrypto.SecretCipher, secretEnvelopeMode store.SecretEnvelopeMode, log *slog.Logger) (store.Store, error) {
+	var dbURL, workspaceID string
 	if resolver != nil {
 		cfg, err := resolver.Resolve(ctx, "")
 		if err != nil {
 			return nil, fmt.Errorf("resolve workspace for store: %w", err)
 		}
 		dbURL = string(cfg.DatabaseURL.Reveal())
+		workspaceID = cfg.ID
 	}
 	if dbURL == "" {
 		return nil, nil
@@ -543,5 +652,9 @@ func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *
 		return nil, nil
 	}
 	pgStore.SetSecretCipher(secretCipher)
+	if _, err := workspace.PrepareSubscriptionSecrets(ctx, pgStore, secretCipher, workspaceID, secretEnvelopeMode, log); errors.Is(err, workspace.ErrSubscriptionSecretBinding) {
+		pgStore.Close()
+		return nil, err
+	}
 	return pgStore, nil
 }

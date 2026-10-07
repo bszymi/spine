@@ -49,6 +49,8 @@ spine validate --all
 | `SPINE_ENV=production` | Activates production checks (refuses dev-mode auth bypass, requires secret encryption). |
 | `SPINE_DATABASE_URL=…?sslmode=require` | `sslmode=disable` is refused unless `SPINE_INSECURE_LOCAL=1`. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Base64 32-byte AES-256 key for at-rest webhook-secret encryption. Generate with `openssl rand -base64 32`. |
+| `SPINE_SECRET_PREVIOUS_KEYS` | Optional. Comma-separated previous keys that still decrypt during a key rotation (never seal). |
+| `SPINE_SECRET_ENVELOPE_MODE` | `migrate` (default), `strict` or `downgrade`. Set `strict` once every workspace has swept clean: only `strict` (or retiring every pre-upgrade key) closes the cross-workspace secret transplant of audit P3-10. `spine secrets reencrypt` requires it set explicitly, to serve's mode. See `docs/integration-guide.md` §2.1. |
 | `SPINE_OPERATOR_TOKEN` | Bearer token for workspace-management endpoints. Minimum 32 characters. Leave unset to return 503 on those endpoints. |
 | `SPINE_GIT_CREDENTIAL_HELPER` | One of `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended over `SPINE_GIT_PUSH_TOKEN`. |
 | `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. |
@@ -230,7 +232,7 @@ Spine is implemented in Go with PostgreSQL for runtime state.
 | Divergence Service | `internal/divergence` | Parallel execution branching and convergence |
 | Workspace Service | `internal/workspace` | Multi-workspace resolution and registry |
 | Git Client | `internal/git` | Git CLI operations, worktree management |
-| Crypto | `internal/crypto` | At-rest secret encryption (AES-256 GCM) |
+| Crypto | `core/crypto` | At-rest secret encryption (AES-256 GCM key ring; `enc:v2` envelope) |
 | Domain Types | `internal/domain` | Core entities, state constants, errors |
 | Store | `internal/store` | PostgreSQL persistence layer |
 | Config | `internal/config` | .spine.yaml loading, artifacts directory |
@@ -243,6 +245,7 @@ Spine is implemented in Go with PostgreSQL for runtime state.
 spine serve              Start runtime server
 spine health             System health check
 spine migrate            Run database migrations
+spine secrets reencrypt [--all-workspaces]  Re-encrypt webhook signing secrets (key ring / envelope mode)
 spine init-repo [path]   Initialize Spine repository
 
 spine artifact entry --type TYPE --title TITLE  Create artifact through governed workflow

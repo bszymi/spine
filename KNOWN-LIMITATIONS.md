@@ -226,6 +226,50 @@ The following limitations have been resolved:
   reports `not_found`. No shipped build wires a code-repository catalog (P3-36, P3-37), so this is
   dormant.
 
+### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
+- **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the
+  subscription (INIT-023 TASK-009). But the default `SPINE_SECRET_ENVELOPE_MODE=migrate` still
+  accepts legacy `enc:v1` and plaintext values and its re-encryption sweep converts them. A copy of
+  another workspace's pre-upgrade `enc:v1` value planted in a workspace database is indistinguishable
+  from a genuine pre-upgrade row and becomes a valid `enc:v2` row (audit P3-10).
+- **Closing it:** set `SPINE_SECRET_ENVELOPE_MODE=strict` once every workspace has swept clean
+  (`spine secrets reencrypt [--all-workspaces]` with serve's mode), or retire every key that ever
+  sealed an `enc:v1` value. Either step stops values planted from then on only: a plant a `migrate`
+  sweep already converted stays a valid `enc:v2` row. The sweep is the only path that converts a
+  legacy value (a write that keeps a subscription's secret leaves its stored bytes untouched) and it
+  logs every conversion per row (`subscription secret converted`), so before either step review that
+  log against its baseline — the first clean `migrate` sweep after any `downgrade` period, older
+  binary or keyless period — and rotate every subscription it flags
+  (`docs/integration-guide.md` §2.1). A value planted *during* such a period cannot be told apart.
+- **Status:** strict-by-default in a later release is a follow-up (owner question 1).
+
+### Webhook Signing Secrets: No All-Workspaces Verification in `platform-binding` Mode
+- `spine secrets reencrypt --all-workspaces` needs the workspace registry (`WORKSPACE_RESOLVER=db`).
+  `platform-binding` has none to enumerate, and a process sweeps a workspace only when it builds it
+  (its first request after the process starts, or after an eviction): a request to a workspace the
+  process already holds does not sweep it. During a rolling update, a process still on the previous
+  setting that first loads a workspace late in the rollout sweeps it back (to `enc:v1`, to the old
+  primary key, or to `enc:v2`), and no clean record logged before that shows it. So before switching
+  to `strict`, dropping a previous key or rolling back, the operator must restart every process once
+  the rollout of the change has completed (unless it was a stop-the-world restart), then load every
+  bound workspace and check that each one's latest `subscription secrets swept` record across all
+  replicas comes from a process started after the rollout and shows `refused=0` and `conflicts=0`
+  (`docs/integration-guide.md` §2.1, *Verifying every workspace*). A workspace without such a record
+  is unverified; flipping early stops its webhook fan-out when it next loads, or, before a rollback,
+  leaves `enc:v2` rows the old binary signs with as text. An enumeration source for this mode (the
+  platform's binding list) or an on-demand sweep is a follow-up.
+
+### Webhook Signing Secrets: One Unopenable Row Stops a Workspace's Fan-Out
+- A signing secret that does not open (wrong or removed key, transplanted, legacy in `strict`) fails
+  the whole subscription list call, so the workspace's webhook delivery stops for the event types
+  that row subscribes to until the row is fixed (`POST /subscriptions/{id}/rotate-secret`, which
+  replaces the secret without reading the refused value, or deleting the subscription). Rows are
+  deliberately not skipped (that would silently drop events) or blanked (unsigned deliveries). A
+  non-decrypting listing method would narrow the blast radius; it is a recorded follow-up because it
+  changes the `SubscriptionStore` interface.
+- The same fail-closed refusal applies when two workspaces share one runtime database, or a workspace
+  id changes without the documented `downgrade` procedure (`docs/integration-guide.md` §2.1).
+
 ## Architecture Deviations
 
 ### Convergence Evaluation Step
