@@ -121,7 +121,7 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 		rmCmd := exec.CommandContext(cleanupCtx, "git", "worktree", "remove", "--force", worktreeDir)
 		rmCmd.Dir = repoDir
 		_, _ = rmCmd.CombinedOutput()
-		os.RemoveAll(parent)
+		_ = os.RemoveAll(parent)
 	}
 
 	sw := exec.CommandContext(ctx, "git", "switch", "--no-guess", "--end-of-options", short)
