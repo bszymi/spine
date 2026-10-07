@@ -2,12 +2,12 @@
 id: TASK-001
 type: Task
 title: "Reject NUL/control-byte and invalid refs on every pre-receive command line"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: bugfix
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -473,15 +473,22 @@ without answers, using the stated defaults.)*
    - ***Alternative.*** Add ASCII case folding to `Evaluate` in this task (about 5 lines, fail-closed).
      - This closes `MAIN`, `Main` and `refs/HEADS/main` for ASCII rules.
      - It leaves Kelvin-sign and NFD variants open.
+   - ***Ruling (orchestrator, 2026-10-07): default taken, pending the owner.** Implemented as the
+     AC 12 documentation guard, the follow-up recorded in the EPIC-001 epic's Out of scope, and
+     TASK-016's Out-of-scope bullet and owner question 5 corrected to point at it.
 2. **Pushes from shallow clones** (parity with SMP TASK-001 Owner question 1).
    - Today's gate refuses `shallow <oid>` lines as malformed, and this task keeps that (pinned in
      AC 1).
    - No standalone Spine client is known to push from a shallow clone.
    - *Default:* keep refusing. Any widening is designed together with TASK-016's run-branch
      admission.
+   - ***Ruling (orchestrator, 2026-10-07): default taken, pending the owner.** `shallow <oid>`
+     lines stay refused as malformed (two parser-table rows pin it).
 3. **Audit surface for a refused malformed push** (parity with SMP TASK-001 Owner question 3).
    - *Default:* a WARN log only.
    - A new governance event type is an event-catalogue change, which does not belong in a wave-1 fix.
+   - ***Ruling (orchestrator, 2026-10-07): default taken, pending the owner.** The existing
+     `pre-receive parse failed` WARN is the only record; no event type was added.
 
 ## Acceptance Criteria
 
@@ -665,7 +672,283 @@ without answers, using the stated defaults.)*
 
 ## Implementation Notes
 
-*(To be filled in during implementation.)*
+*(Implementation, 2026-10-07. Branch `init/INIT-023-TASK-001-pre-receive-refname-validation`, cut
+from Spine local `main` `5b5df5b` (`61994fe` + the INIT-023 scaffold). The orchestrator named the
+branch, so it differs from the `INIT-023/EPIC-001/TASK-001-…` name in the Deliverable. Run on
+macOS, git 2.54.0, go 1.26.5. The local PostgreSQL is 17.10; CI uses 18.)*
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `cde1176` | `adapters/git/refname/qualified.go` (new): `ValidateQualified`, Design §1. Its doc comment names both receive-pack exceptions, as the §1 design-check note asked. `qualified_test.go`: corpus, agreement with git, byte sweep |
+| `fec38fe` | `service/internal/githttp/prereceive.go`: Design §2 steps 1–6, plus SMP's line-1 capability-list guard (see Additions). New tests: `prereceive_refvalidation_test.go`, `prereceive_nulref_test.go`, `prereceive_realclient_test.go` |
+| `6d540d7` | `core/branchprotect/policy.go`: the Design §3 guard, `indexControlByte`, and both doc comments. `policy_controlbyte_test.go` |
+| `9bd5236` | The three AC 12 documentation touches |
+| `0a6bfe3` | OQ1 default: the follow-up is recorded in the EPIC-001 epic's Out of scope. TASK-016's Out-of-scope bullet and owner question 5 are corrected |
+| `56f242b` | AC 9: the CI job `scenario-git-http`, plus a fixture fix in `TestGitHTTP_MixedPushRejectedAllOrNothing` |
+| `79c029a`, `1fae0fa` | Hygiene: gofmt on the scenario file's imports (they were unformatted on `main`), and one gocritic fix in a new test helper |
+
+`handler.go`, `go.mod`, `go.sum`, migrations, configuration, environment variables and the event
+catalogue are untouched (`git diff --quiet main...HEAD -- go.mod go.sum service/internal/githttp/handler.go migrations`).
+
+### Per-AC evidence
+
+"At HEAD" means: new tests run with `go test -overlay`, which swaps `main`'s `prereceive.go`
+and `policy.go` back in (plus a one-line test shim that defines `zeroSHA256` so the tests compile).
+The worktree itself was never reverted.
+
+1. **Parser table.** `TestParseRefUpdates_RejectsMalformedCommandOnAnyLine` has 37 rows, covering:
+   - every listed refusal, each error naming `command N`;
+   - the pinned `shallow`, `push-cert` and `0001` rows, plus a `shallow <oid> <ref>` (3-field) row
+     and an empty-pkt-line row;
+   - parsed rows for line-1 caps, SHA-256 ids, uppercase hex, **no trailing LF**, and a real-shaped
+     capability list.
+
+   No error contains a raw NUL, CR, `\v` or DEL. `TestParseRefUpdates_CapabilitiesFromLine1Only`
+   pins the caps set and the empty list. **At HEAD:** 31 of the 37 rows fail. The 6 that pass are
+   the 5 parsed rows and the `0001` row, which was already refused.
+2. **End-to-end through the real `git-http-backend`.** Two tests, each run as contributor and as
+   operator. The operator pushes **without** `-o spine.override`, the case the audit flagged as an
+   unaudited override:
+   - `TestPreReceive_NulAfterRefOnLaterLine_DirectWriteRefused`, variants `nul`, `nul+caps`,
+     `nul+junk` and `spine-run decoy`;
+   - `TestPreReceive_NulAfterRefOnLaterLine_DeleteRefused`: `develop` and `release/1` (the
+     wildcard row is kept for SMP parity), with a `feature-y` decoy.
+
+   The attacker commit carries the takeover shape (`.spine/branch-protection.yaml` with
+   `rules: []`). Each test asserts all of the following:
+   - the response contains `malformed push: command 2: invalid ref name: ref "refs/heads/main\x00…`;
+   - there are no `ng` lines and no raw NUL;
+   - `main` does not move;
+   - `develop`, `release/1` and the decoys survive;
+   - 0 events.
+
+   The controls without the NUL are denied by `no-direct-write` and `no-delete`. **At HEAD:**
+   `BYPASS — main moved`, and `develop` and `feature-y` are deleted, for both roles.
+3. **Audit PoCs flip.** `poc/verify-r1-0/nulref_verify_test.go` and
+   `poc/governance/nul_ref_bypass_test.go` were overlaid unchanged:
+   - **On the fix:** both **fail** (`NOT REPRODUCED`, `release still present`,
+     `expected main advanced to B by bypass`).
+   - **At HEAD:** both **pass** (`CONFIRMED …`).
+
+   AC 2 holds the inverted ports.
+4. **SHA-256.** `TestPreReceive_SHA256NullOIDDeleteRefusedByNoDelete` passes, and a control
+   delete of an unprotected branch in the same repository applies. **At HEAD:** `BYPASS — no-delete
+   branch develop deleted in a SHA-256 repo`. `TestRefUpdate_IsDeleteRecognisesBothNullOIDs`
+   passes. The test calls `t.Fatal` instead of `t.Skip` when `CI` is set, so the `go test ./...`
+   CI job cannot skip it.
+5. **Grammar.** Three tests pass:
+   - `TestValidateQualified`: the 41-row corpus, every rejection a `*domain.SpineError` with
+     `ErrInvalidParams`, and no raw control byte;
+   - `TestValidateQualified_AgreesWithGit`: the corpus also includes `refs/heads/-x`,
+     `refs/heads/a./b`, `refs/heads/@`, `refs/heads/é` and NBSP;
+   - `TestValidateQualified_ByteSweepAgreesWithGit` (an SMP-parity addition): 390 refs, with
+     bytes `0x01`–`0x7f`, `0x80`, `0xc2` and `0xff` in three positions, each checked against
+     `git check-ref-format --allow-onelevel`. 0 mismatches, about 4 s.
+6. **Policy guard.** `TestEvaluate_ControlByteBranchFailsClosed` runs 9 branches × 3 kinds × 3
+   rule sets × override on/off, with an admin actor. Every case returns `(Deny, nil, error)`. At
+   HEAD, **all 162 fail**. `TestEvaluate_WellFormedBranchesUnchanged` (which includes `é` and NBSP)
+   passes at HEAD and on the fix. `TestIndexControlByte` covers all 256 bytes.
+   - `core/branchprotect` imports are unchanged.
+   - `./dev/lint-boundaries.sh` passes with no allowlist change.
+   - The `Policy` and `Evaluate` doc comments name the malformed-request error.
+7. **Well-formed pushes are unchanged.** `TestPreReceive_RealGitClientPushesUnchanged`,
+   `TestPreReceive_WellFormedMultiRefPushStillApplies` and
+   `TestParseRefUpdates_CapabilitiesFromLine1Only` pass **at HEAD and on the fix**. The real-client
+   test covers:
+   - a 3-ref push that includes `spine/run/*`;
+   - `-o ci.skip`;
+   - an unprotected delete;
+   - `main` denied with `no-direct-write`;
+   - *(parity with SMP AC 7)* a contributor's `-o spine.override=true` refused;
+   - *(parity with SMP AC 7)* an operator's override push landing with exactly 1 event.
+8. **Mutations.** Each mutant was applied alone via overlay. All were **killed**:
+
+   | Mutant | Killed by |
+   |---|---|
+   | M1 (caps split on every line) | AC 1 and AC 2 tests |
+   | M2 (validateRefUpdate skipped) | AC 1 and AC 2, on `malformed push` |
+   | M3 (guard off) | `TestEvaluate_ControlByteBranchFailsClosed` |
+   | M4 (IsDelete SHA-1 only) | AC 4 |
+   | M5 (TrimRight) | AC 1, the second-LF row |
+   | M6 (drop hex check) | AC 1 |
+   | M7 (drop equal-length check) | AC 1 |
+   | M8 (drop `refs/` rule) | AC 1 and the grammar tests |
+   | M9 (accept DEL) | AC 1 and the grammar tests |
+   | M10 (`%s` instead of `%q`) | AC 1, AC 2 and the grammar tests |
+   | M11 (reject only NUL) | AC 1 and the grammar tests |
+   | M12 (accept `..`) | AC 1 and the grammar tests |
+   | M14 (drop the line-1 capability check) | AC 1 and `TestPreReceive_Line1CapabilityListRefused` |
+
+   Under M2, `main` still held through the `Evaluate` guard (no `BYPASS`, and
+   `branch-protection evaluation failed` was logged). This proves the second layer. M13 and M15
+   (SMP's log fields) do not apply here; see Parity.
+9. **Existing suites.**
+   - `go test ./...` is green.
+   - The `TestGitHTTP_*` scenarios: 19 of 19 **PASS, 0 SKIP**, against a real database. That
+     includes all 8 push scenarios AC 9 lists.
+   - **CI:** a new `scenario-git-http` job runs them against a `postgres:18-bookworm` service and
+     fails on any `--- SKIP: TestGitHTTP_` (see Deviations).
+   - One of the 8, `TestGitHTTP_MixedPushRejectedAllOrNothing`, **failed on `main` too**, with
+     ENOENT writing `feature/a.md`. It is a latent fixture bug that no CI job had run. Fixed
+     (`os.MkdirAll`); the assertion is unchanged.
+   - `make lint` (the lint commands themselves) shows no new issues; see Gates.
+10. **SMP compatibility.** The SMP checkout was at SMP `main` `7d4e7cc9`, which carries SMP's
+    **unfixed** parser. It has no `vendor/` and no `tmp/`, and `../spine` is this worktree.
+    Every SMP command below ran with `-mod=readonly`:
+    - `go build ./...` and `go vet ./...` are clean.
+    - `go test -p 4 ./...`: 148 packages ok, 0 fail.
+    - `go test -p 4 ./internal/customer/... ./cmd/customer-app/... ./internal/engine/...`: 55 ok.
+    - `go test -tags integration ./internal/customer/githttp/...`: ok.
+    - **The guard alone:** `poc/skeptic_nul/smp_nul_ref_test.go` and
+      `poc/verify-r1-0/nulref_verify_test.go` were overlaid on SMP's `internal/customer/githttp`.
+      Both **fail to reproduce** (`main not moved`, `NOT REPRODUCED`, `release still present`), and
+      SMP answers `branch-protection: evaluation error on main\x00`.
+    - **Control:** the same run, also overlaying Spine `main`'s `policy.go`, **reproduces**
+      (`SMP CONFIRMED`). So the overlay was not vacuous.
+    - The SMP checkout was left unmodified (`git status` clean).
+11. **Diff scope.**
+    - The non-test Go files are exactly `qualified.go` (new), `prereceive.go` and `policy.go`.
+    - Test files: the five named ones, plus the scenario fixture fix.
+    - Non-Go files: `ci.yml`, the three docs and the planning artifacts.
+12. **Documentation.**
+    - **`docs/git-push-guide.md` §5:**
+      - the `malformed push` row lists the AC's four causes, plus the capability-list cause and
+        the `command N` text;
+      - the paragraph below the table now says a malformed-push rejection carries **no** `ng`
+        lines.
+    - **`KNOWN-LIMITATIONS.md` → Security Notes:** a new subsection, "Served Repositories Need
+      Case- and Normalization-Sensitive Storage". The packed-ref `refs/heads/MAIN` aliasing was
+      re-checked on APFS with plain git 2.54 before writing it.
+    - **`CHANGELOG.md` (the Unreleased staging file):** a Security section (F1, SHA-256 delete), a
+      Changed section, and a For-embedders section (the `Policy.Evaluate` contract and the new
+      `refname.ValidateQualified`).
+13. **SMP sequencing.** This branch is merged by the orchestrator, and the merge commit is the one
+    SMP's bump names. The PR description below links SMP TASK-001 and says SMP's parser fix does
+    not wait for it.
+
+### Deviations and additions (with reasons)
+
+- **Added: the line-1 capability-list guard (`isCapabilityList`).** It refuses a non-printable-ASCII
+  capability list as `command 1: malformed capability list %q`.
+  - **Origin.** SMP TASK-001's design check (§1 step 3a, Decision 9, §7 note 3) found that this
+    task's prototype had the same line-1 differential, and asked Spine to adopt the guard.
+  - **The differential.** git ends the feature list at a second NUL and splits it on `isspace`;
+    `strings.Fields` does not behave the same way.
+  - **Reproduced at HEAD through the real CGI** (`TestPreReceive_Line1CapabilityListRefused`):
+    - an operator's `spine.override=true` was honoured, and **1 override event** was emitted, for
+      a push git then failed to unpack;
+    - a push-options block that git read was invisible to the gate.
+  - **Not a protection bypass,** but it falsified §0's invariant.
+  - The orchestrator ruled that validation rules stay equivalent across the two gateways, so it is
+    adopted here.
+  - Real clients are unaffected (the real-client test passes).
+- **Added: wire-text parity.** `validateRefUpdate` unwraps the `*domain.SpineError` message, so the
+  denial reads `invalid ref name: ref "…" contains control byte 0x00`, with no `invalid_params:`
+  prefix. That is the same text as SMP's copy, and the `%q` quoting is kept (§1 design-check note:
+  optional).
+- **Added: the byte-sweep test, and the delete test's `release/*` row.** These keep parity with
+  SMP AC 5 and AC 2.
+- **AC 9, CI wiring scoped to `TestGitHTTP_*`.** Closest safe alternative.
+  - **Why scoped.** The full `go test -tags scenario ./service/scenariotest/...` is **not green on
+    `main`**. Locally, `-p 1` against PostgreSQL 17 gave the same 31-failure set on a pristine
+    `main` export and on this branch (before the fixture fix); after it, 30. The failures are
+    artifact-validation, run-lifecycle, gateway and fixture steps, unrelated to the push gate. A
+    full-suite job would be red from day one.
+  - **What the job does.** It runs exactly the scenarios AC 9 names. It fails if any of them skips
+    and if no `TestGitHTTP_Push*` passes. The guard was checked locally: pointed at an unreachable
+    database, it fails.
+  - **Follow-up.** Making the whole scenario suite green in CI is out of scope; recorded under
+    "Not run".
+- **SHA-256 test:** fails instead of skipping under `CI`, so "PASS, not SKIP" is enforced
+  mechanically (AC 4).
+- **Test hermeticity.** Every git command the new tests run uses `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`. Otherwise a developer's
+  `init.defaultObjectFormat=sha256` or `commit.gpgsign` would change what the tests build.
+- **The corpus writes NBSP as ` `,** not as a literal invisible character. The bytes are
+  identical to SMP's `qualifiedRefCases`.
+
+### Parity with SMP INIT-027 EPIC-004 TASK-001
+
+- **Equivalent.** The refusal set and the ref grammar are equivalent:
+  - `parseRefUpdates`, `validateRefUpdate`, `isHexOID`, `isCapabilityList`, `IsDelete` and
+    `zeroSHA256` behave identically;
+  - `ValidateQualified` and `validateQualifiedRef` have identical rules and messages;
+  - the corpora match entry for entry;
+  - the sweep shape is the same;
+  - the wire text is identical.
+- **Intentional code differences:**
+  - `ValidateQualified` returns `*domain.SpineError` (`ErrInvalidParams`, like `refname.Validate`),
+    where SMP returns plain errors. `validateRefUpdate` therefore unwraps the message, and SMP's
+    copy does not need to.
+  - Comments and a local variable name (`capList`) differ.
+- **Intentional difference: the parse-failure log.**
+  - **SMP** adds `actor_id` and `repo_path` to its two `pre-receive parse failed` warnings (its
+    M13, M15).
+  - **Spine** keeps `handler.go` untouched (AC 11; OQ3: WARN only). Its warning already carries
+    `remote_addr`, the error (`%q`-escaped) and `workspace_id`; the last comes through
+    `observe.Logger`, because `handleGit` sets it. It does not carry the actor.
+  - Adding `actor_id` would be a one-line `handler.go` change. It is left to the owner, as a
+    possible follow-up next to OQ3.
+- **Residual differentials,** recorded and not fixed (as in SMP's §0 note):
+  - **`push-options=<value>` tokens.** git counts them as the push-options feature; the gate does
+    not. The options are then inert and the gate decides with override=false, which is the safe
+    side.
+  - **Symref aliasing.** See Out of scope.
+  - **Case- and normalization-insensitive storage.** OQ1 and §6.
+
+### Gates (commands and results)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | ok |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | exit 0 (38 packages ok) |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -race -p 4 -count=1 ./adapters/git/refname/... ./service/internal/githttp/... ./core/branchprotect/...` | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s001_scenario go test -race -tags scenario -p 4 -count=1 -run '^TestGitHTTP_' ./service/scenariotest/scenarios/` | ok; 19/19 PASS, 0 SKIP (non-race `-v` run) |
+| `SPINE_TEST_DATABASE_URL=…/s001_scenario go test -tags scenario -count=1 -p 1 ./service/scenariotest/...` | 190 PASS / 6 SKIP / 30 FAIL. The SKIPs need `SPINE_REGISTRY_TEST_DATABASE_URL`. The FAIL set is `main`'s 31 minus the fixed mixed-push scenario (pre-existing; a `main` export against `s001_scenario_main`) |
+| `SPINE_TEST_DATABASE_URL=…/s001_integration go test -tags integration -count=1 -p 1 ./...` | 36 ok, 2 FAIL: `TestAWSClient_Contract_LocalStack` (local :4566 is not LocalStack Secrets Manager, HTTP 501) and `TestRunModeDatabaseDefault` (NULL `workflow_version_label`). Same set on the `main` export (`s001_integration_main`); neither is in a touched package. The touched packages have no integration-tagged tests |
+| `golangci-lint run ./adapters/git/refname/... ./service/internal/githttp/... ./core/branchprotect/...` | 22 issues, an **identical** set to `main` (20 gocritic in existing tests and `prereceive.go`'s `sidebandChunks`, 2 gofmt in `core/branchprotect/projection`). **0 new** |
+| `golangci-lint run --build-tags scenario ./service/scenariotest/scenarios/` | 1 issue fewer than `main` (the gofmt import fix), 0 new |
+| `golangci-lint run --enable-only=gosec` (touched packages) | 0 issues |
+| `gofmt -l` on every touched Go file | empty. The repository has pre-existing unformatted files elsewhere on `main`, which are untouched |
+| SMP gate (Per-AC 10) | build, vet, 148/148 packages, integration githttp, and the guard-alone PoC check: all green |
+| `codex review --base main` | "No actionable regressions were found." No P1 or P2, so nothing to fix or reject. Its sandbox could not run the boundary lint, which was run above |
+
+The `s001_scenario`, `s001_scenario_main`, `s001_integration` and `s001_integration_main` databases
+were dropped after the runs.
+
+### Not run
+
+- **The new CI job itself,** which cannot run locally. Its exact command,
+  `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/`, ran
+  locally against PostgreSQL 17.10 rather than CI's `postgres:18-bookworm`. Its skip guard was run
+  against an unreachable database.
+- **SHA-256 PASS on the ubuntu runner.** Verified locally on git 2.54. On CI, `CI=true` turns a
+  skip into a failure.
+- **A green full scenario suite in CI.** Pre-existing failures on `main` (above). This is a
+  follow-up for whoever owns the scenario harness. The command is
+  `make test-scenario` with `SPINE_TEST_DATABASE_URL` set.
+
+### PR description (draft, AC 13)
+
+> **INIT-023 EPIC-001 TASK-001 — Reject NUL/control-byte and invalid refs on every pre-receive
+> command line (audit F1, P1).**
+>
+> - The standalone gateway's pre-receive parser now validates every command line: object ids,
+>   git's refname grammar (new `refname.ValidateQualified`), capabilities on line 1 only and as
+>   printable ASCII, and the SHA-256 null id.
+> - `branchprotect.Policy.Evaluate` fails closed on control-byte branch names (embedder-visible
+>   contract change; see CHANGELOG).
+> - A new CI job runs the `TestGitHTTP_*` scenarios against Postgres.
+>
+> SMP counterpart: `smp:/initiatives/INIT-027-pilot-readiness/epics/EPIC-004-security-remediation/`
+> TASK-001 (`TASK-001-nul-ref-push-gate.md`). SMP's own parser fix does **not** wait for this PR.
+> It ships independently, with no `.spine-revision` bump. This PR's merge commit is the one SMP's
+> later `.spine-revision` bump names (SMP TASK-012 adds the `Evaluate` pin test).
 
 ## Design check
 
