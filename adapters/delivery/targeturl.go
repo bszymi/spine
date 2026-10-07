@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/observe"
 )
 
 // TargetValidator enforces the rules webhook target URLs must satisfy
@@ -29,9 +31,22 @@ import (
 // Rules applied in CheckAddr / SafeDialContext (re-evaluated at connect
 // time so DNS rebinding cannot slip past the ValidateURL step):
 //   - reject loopback, link-local (includes 169.254.169.254), multicast,
-//     unspecified, and RFC 1918 / ULA private addresses
+//     unspecified, RFC 1918 / ULA private, and the other non-public
+//     ranges in extraNonPublicV4 / rejectedV6Prefixes
+//   - classify the IPv4 address embedded in an IPv6 transition address
+//     (NAT64 64:ff9b::/96, 6to4 2002::/16, IPv4-compatible ::/96, SIIT
+//     ::ffff:0:0:0/96) the same way, so 64:ff9b::a9fe:a9fe (IMDS through
+//     NAT64) is refused like 169.254.169.254 (INIT-023 TASK-010, P3-25)
 //   - unless the hostname is in the explicit allowlist, in which case
 //     the operator has opted in to a known-internal destination
+//
+// Caller-facing errors never name an address the caller did not supply
+// (P3-25): a DNS-named target that resolves to a blocked address gets a
+// generic refusal, the dialer returns ErrBlockedDestination or a
+// *DialError naming the caller's host:port, and DNS failures omit the
+// resolver's address. The detail goes to the operator log. Otherwise
+// create, update and the subscription test would be an oracle on the
+// operator's internal DNS and network.
 //
 // The zero-value validator (nil) permits every URL. Callers must always
 // route webhook creation and dispatch through a non-nil validator.
@@ -86,7 +101,10 @@ func (v *TargetValidator) ValidateURL(rawURL string) error {
 	// url.Parse accepts relative refs; require a scheme explicitly.
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return domain.NewError(domain.ErrInvalidParams, fmt.Sprintf("target_url: parse error: %v", err))
+		// Never echo the URL: its path or query may carry a secret
+		// token (Slack/Discord-style webhooks) and this message reaches
+		// API responses, error columns and logs (P3-26).
+		return domain.NewError(domain.ErrInvalidParams, "target_url: parse error: "+urlParseReason(err))
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme == "" {
@@ -126,9 +144,11 @@ func (v *TargetValidator) ValidateURL(rawURL string) error {
 	// time so the row never makes it into the subscriptions table —
 	// otherwise a row like https://127.0.0.1/ would persist and only
 	// fail at dial time with a connection error (not invalid_params).
+	// A literal-IP refusal names the class (loopback, private, ...) but
+	// not the address — the caller supplied the address themselves.
 	if ip := net.ParseIP(host); ip != nil {
 		if err := v.CheckAddr(host, ip); err != nil {
-			return domain.NewError(domain.ErrInvalidParams, "target_url: "+err.Error())
+			return domain.NewError(domain.ErrInvalidParams, err.Error())
 		}
 		return nil
 	}
@@ -146,10 +166,116 @@ func (v *TargetValidator) ValidateURL(rawURL string) error {
 	}
 	for _, ipa := range ips {
 		if err := v.CheckAddr(host, ipa.IP); err != nil {
-			return domain.NewError(domain.ErrInvalidParams, "target_url: "+err.Error())
+			// Neither the resolved address nor even its class goes back
+			// to the caller: both are bits of the operator's internal
+			// DNS. The operator log keeps the detail.
+			observe.Logger(ctx).Info("webhook target host resolves to a blocked address",
+				"host", host, "detail", blockedDetail(err))
+			return domain.NewError(domain.ErrInvalidParams, msgNonPublicHost)
 		}
 	}
 	return nil
+}
+
+// msgNonPublicHost is ValidateURL's refusal for a DNS-named target that
+// resolves to a blocked address. It deliberately names no address and no
+// address class.
+const msgNonPublicHost = "target_url: host resolves to a non-public address (allowlist it via SPINE_WEBHOOK_ALLOWED_HOSTS if intended)"
+
+// urlParseReason renders a url.Parse failure without the URL: the
+// *url.Error wrapper quotes the whole input, and an escape error quotes
+// the bytes after a '%', which may be part of a secret path segment.
+func urlParseReason(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	var esc url.EscapeError
+	if errors.As(err, &esc) {
+		return "invalid URL escape"
+	}
+	return err.Error()
+}
+
+// BlockedAddressError is CheckAddr's refusal. Error() names the address
+// class only ("target_url: private address not permitted"); the address
+// itself is kept for operator logs and never rendered to a caller.
+type BlockedAddressError struct {
+	// Class is "loopback", "unspecified", "multicast", "link-local",
+	// "private" or "non-public".
+	Class string
+	ip    net.IP
+}
+
+func (e *BlockedAddressError) Error() string {
+	return "target_url: " + e.Class + " address not permitted"
+}
+
+// detail renders class and address for the operator log.
+func (e *BlockedAddressError) detail() string {
+	return e.Class + " " + e.ip.String()
+}
+
+func blockedDetail(err error) string {
+	var be *BlockedAddressError
+	if errors.As(err, &be) {
+		return be.detail()
+	}
+	return err.Error()
+}
+
+// ErrBlockedDestination is what SafeDialContext returns when a resolved
+// address is refused: no address, no class. It is the text that reaches
+// last_error, the delivery log and the subscription-test response.
+var ErrBlockedDestination = errors.New("target_url: destination address not permitted")
+
+// DialError is SafeDialContext's error when every validated address
+// failed to connect. It names the caller's own host:port, never the
+// resolved address (the dialer's *net.OpError reads
+// "dial tcp <resolved-ip>:<port>: ...", which hands the private address
+// of an allowlisted internal host to anyone who can read last_error or
+// the subscription-test response). Err is the OpError's inner error
+// ("connect: connection refused", "i/o timeout"); Timeout, Temporary and
+// Unwrap delegate to it, so net.Error semantics hold for callers.
+type DialError struct {
+	HostPort string
+	Err      error
+}
+
+func (e *DialError) Error() string {
+	return "target_url: connect " + e.HostPort + ": " + e.Err.Error()
+}
+
+func (e *DialError) Unwrap() error { return e.Err }
+
+// Timeout reports whether the underlying dial failure was a timeout.
+func (e *DialError) Timeout() bool {
+	var t interface{ Timeout() bool }
+	return errors.As(e.Err, &t) && t.Timeout()
+}
+
+// Temporary delegates to the underlying error (net.Error).
+func (e *DialError) Temporary() bool {
+	var t interface{ Temporary() bool }
+	return errors.As(e.Err, &t) && t.Temporary()
+}
+
+// dnsFailureReason renders a resolver failure without the resolver's
+// address: net.DNSError.Error() reads "lookup <host> on <server>: ...",
+// and <server> is the operator's internal resolver.
+func dnsFailureReason(err error) string {
+	var de *net.DNSError
+	if errors.As(err, &de) {
+		switch {
+		case de.IsNotFound:
+			return "no such host"
+		case de.IsTimeout:
+			return "timeout"
+		case de.IsTemporary:
+			return "temporary failure"
+		}
+	}
+	return "lookup failed"
 }
 
 // CheckAddr reports whether the given resolved IP is a safe
@@ -166,42 +292,118 @@ func (v *TargetValidator) CheckAddr(host string, ip net.IP) error {
 	if v.isAllowedHost(host) {
 		return nil
 	}
-	if ip.IsLoopback() {
-		return fmt.Errorf("target_url: loopback address %s not permitted", ip)
-	}
-	if ip.IsUnspecified() {
-		return fmt.Errorf("target_url: unspecified address %s not permitted", ip)
-	}
-	if ip.IsMulticast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() {
-		return fmt.Errorf("target_url: multicast address %s not permitted", ip)
-	}
-	// IsLinkLocalUnicast covers IPv4 169.254.0.0/16 (including the AWS
-	// IMDS address) and IPv6 fe80::/10.
-	if ip.IsLinkLocalUnicast() {
-		return fmt.Errorf("target_url: link-local address %s not permitted", ip)
-	}
-	// IsPrivate covers RFC 1918 IPv4 and RFC 4193 IPv6 ULA.
-	if ip.IsPrivate() {
-		return fmt.Errorf("target_url: private address %s not permitted", ip)
-	}
-	// IsPrivate does not include several non-public IPv4 ranges that
-	// are routinely used for internal services:
-	//   - 100.64.0.0/10 (RFC 6598 shared address space, aka CGNAT)
-	//   - 198.18.0.0/15 (RFC 2544 benchmarking, also used internally)
-	// Reject them explicitly so the allowlist remains the only way in.
-	for _, cidr := range extraNonPublicV4 {
-		if cidr.Contains(ip) {
-			return fmt.Errorf("target_url: non-public address %s not permitted", ip)
-		}
+	if class := blockedClass(ip); class != "" {
+		return &BlockedAddressError{Class: class, ip: ip}
 	}
 	return nil
 }
+
+// blockedClass returns the non-public class of ip, or "" when ip is a
+// permitted destination. It checks, in order:
+//
+//  1. ip itself (classifyOne);
+//  2. for an IPv6 address, prefixes refused outright because the IPv4
+//     address they lead to cannot be read off the address
+//     (rejectedV6Prefixes);
+//  3. the IPv4 address an IPv6 transition mechanism embeds in ip
+//     (embeddedIPv4), classified like a native IPv4 address.
+//
+// Public NAT64 and 6to4 targets (64:ff9b::808:808, 2002:808:808::1) stay
+// allowed: IPv6-only deployments reach IPv4 webhooks through NAT64.
+func blockedClass(ip net.IP) string {
+	if c := classifyOne(ip); c != "" {
+		return c
+	}
+	if ip.To4() != nil {
+		return ""
+	}
+	for _, n := range rejectedV6Prefixes {
+		if n.Contains(ip) {
+			return "non-public"
+		}
+	}
+	if v4 := embeddedIPv4(ip); v4 != nil {
+		return classifyOne(v4)
+	}
+	return ""
+}
+
+// classifyOne classifies one address by the native ranges.
+func classifyOne(ip net.IP) string {
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsUnspecified():
+		return "unspecified"
+	case ip.IsMulticast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast():
+		return "multicast"
+	// IsLinkLocalUnicast covers IPv4 169.254.0.0/16 (including the AWS
+	// IMDS address) and IPv6 fe80::/10.
+	case ip.IsLinkLocalUnicast():
+		return "link-local"
+	// IsPrivate covers RFC 1918 IPv4 and RFC 4193 IPv6 ULA.
+	case ip.IsPrivate():
+		return "private"
+	}
+	// IsPrivate does not include several non-public IPv4 ranges that
+	// are routinely used for internal services. Reject them explicitly
+	// so the allowlist remains the only way in.
+	for _, cidr := range extraNonPublicV4 {
+		if cidr.Contains(ip) {
+			return "non-public"
+		}
+	}
+	return ""
+}
+
+// embeddedIPv4 extracts the IPv4 address an IPv6 transition address
+// carries, or nil:
+//   - NAT64 well-known prefix 64:ff9b::/96 — the last 32 bits (RFC 6052);
+//   - 6to4 2002::/16 — bits 16-47 (RFC 3056);
+//   - IPv4-compatible ::/96 — the last 32 bits (RFC 4291 §2.5.5.1,
+//     deprecated but still routable by some stacks);
+//   - IPv4-translated (SIIT) ::ffff:0:0:0/96 — the last 32 bits
+//     (RFC 2765 / RFC 6145); net.IP.To4 does not fold it.
+//
+// IPv4-mapped ::ffff:0:0/96 is already folded by net.IP.To4, so it is
+// classified as the IPv4 address it is. A NAT64 deployment with an
+// operator-chosen network-specific prefix (RFC 6052 §2.2) cannot be
+// recognised generically; egress policy is the control there.
+func embeddedIPv4(ip net.IP) net.IP {
+	ip16 := ip.To16()
+	if ip16 == nil || ip.To4() != nil {
+		return nil
+	}
+	switch {
+	case nat64WellKnown.Contains(ip16), ipv4Compatible.Contains(ip16), ipv4Translated.Contains(ip16):
+		return net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15])
+	case sixToFour.Contains(ip16):
+		return net.IPv4(ip16[2], ip16[3], ip16[4], ip16[5])
+	}
+	return nil
+}
+
+var (
+	nat64WellKnown = mustParseCIDR("64:ff9b::/96")
+	sixToFour      = mustParseCIDR("2002::/16")
+	ipv4Compatible = mustParseCIDR("::/96")
+	ipv4Translated = mustParseCIDR("::ffff:0:0:0/96")
+
+	// rejectedV6Prefixes are refused outright: the IPv4 destination
+	// behind them is not readable off the address.
+	rejectedV6Prefixes = []*net.IPNet{
+		mustParseCIDR("64:ff9b:1::/48"), // RFC 8215 local-use NAT64 (operator-defined embedding)
+		mustParseCIDR("2001::/32"),      // Teredo (RFC 4380): server/client/obfuscated IPv4
+		mustParseCIDR("fec0::/10"),      // deprecated site-local (RFC 3879), still routed internally
+	}
+)
 
 // extraNonPublicV4 are IPv4 ranges that net.IP.IsPrivate does not
 // classify as private but that routinely host internal services, so
 // the SSRF guard must also reject them. Parsed once at init so
 // CheckAddr stays allocation-free on the hot path.
 var extraNonPublicV4 = []*net.IPNet{
+	mustParseCIDR("0.0.0.0/8"),     // RFC 1122 "this network" (0.0.0.0 itself is "unspecified")
 	mustParseCIDR("100.64.0.0/10"), // RFC 6598 shared address space (CGNAT)
 	mustParseCIDR("198.18.0.0/15"), // RFC 2544 benchmarking
 }
@@ -232,14 +434,16 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 		// than racing the dialer to pick a public one.
 		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 		if err != nil {
-			return nil, fmt.Errorf("target_url: resolve %s: %w", host, err)
+			observe.Logger(ctx).Debug("webhook target resolve failed", "host", host, "error", err)
+			return nil, fmt.Errorf("target_url: resolve %s: %s", host, dnsFailureReason(err))
 		}
 		if len(ips) == 0 {
 			return nil, fmt.Errorf("target_url: %s resolved to no addresses", host)
 		}
 		for _, ipa := range ips {
 			if err := v.CheckAddr(host, ipa.IP); err != nil {
-				return nil, err
+				observe.Logger(ctx).Warn("webhook dial blocked", "host", host, "detail", blockedDetail(err))
+				return nil, ErrBlockedDestination
 			}
 		}
 		// Dial the already-validated addresses in order so we still
@@ -259,9 +463,17 @@ func (v *TargetValidator) SafeDialContext(d *net.Dialer) func(ctx context.Contex
 			if err == nil {
 				return conn, nil
 			}
+			observe.Logger(ctx).Debug("webhook dial failed", "host", host, "addr", ipa.IP.String(), "error", err)
 			lastErr = err
 		}
-		return nil, lastErr
+		// Re-render the failure under the caller's host:port: the
+		// *net.OpError names the resolved address.
+		inner := lastErr
+		var opErr *net.OpError
+		if errors.As(lastErr, &opErr) && opErr.Err != nil {
+			inner = opErr.Err
+		}
+		return nil, &DialError{HostPort: addr, Err: inner}
 	}
 }
 

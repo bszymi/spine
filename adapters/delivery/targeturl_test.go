@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -43,7 +44,9 @@ func TestTargetValidator_ValidateURL(t *testing.T) {
 		// DNS-resolving hostnames that land on blocked ranges — the
 		// bounded DNS lookup inside ValidateURL catches these so a
 		// legacy-looking https URL can't persist a private target.
-		{name: "https localhost resolves to loopback", url: "https://localhost/hook", wantErr: "loopback"},
+		// The refusal names neither the address nor its class
+		// (INIT-023 TASK-010, P3-25: no DNS oracle).
+		{name: "https localhost resolves to loopback", url: "https://localhost/hook", wantErr: "non-public address"},
 
 		// Out-of-range port rejected so the row never persists as
 		// permanently-undeliverable. Default ports, explicit valid
@@ -172,8 +175,10 @@ func TestTargetValidator_HTTPClient_RejectsLoopback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected connection rejection for loopback")
 	}
-	if !strings.Contains(err.Error(), "loopback") {
-		t.Fatalf("expected loopback rejection, got %v", err)
+	// The dialer's refusal names no address and no class (INIT-023
+	// TASK-010, P3-25).
+	if !errors.Is(err, ErrBlockedDestination) {
+		t.Fatalf("expected ErrBlockedDestination, got %v", err)
 	}
 }
 
