@@ -124,6 +124,8 @@ func plantOnRunBranch(t *testing.T, repo, linkPath, target string) {
 
 func TestF5_Create_DanglingSymlinkAbsolute_NoEscape(t *testing.T) {
 	repo := testutil.NewTempRepo(t)
+	wtTmp := t.TempDir()
+	t.Setenv("TMPDIR", wtTmp) // worktree = $TMPDIR/spine-wt-parent-*/wt
 	outside := t.TempDir()
 	victim := filepath.Join(outside, "pwned.md")
 	plantOnRunBranch(t, repo, "governance/evil.md", victim)
@@ -131,6 +133,9 @@ func TestF5_Create_DanglingSymlinkAbsolute_NoEscape(t *testing.T) {
 	_, err := f5Svc(repo).Create(f5Ctx("run-evil"), "governance/evil.md", f5Doc)
 	if _, statErr := os.Lstat(victim); statErr == nil {
 		t.Errorf("file written outside the worktree at %s", victim)
+	}
+	if left, _ := filepath.Glob(filepath.Join(wtTmp, "spine-wt-parent-*")); len(left) != 0 {
+		t.Errorf("worktree parents leaked: %v", left)
 	}
 	f5RequireUnsafePath(t, err)
 }
