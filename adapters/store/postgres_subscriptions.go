@@ -11,7 +11,7 @@ import (
 // ── Event Subscriptions ──
 
 func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
-	secret, err := s.encryptSubscriptionSecret(sub.SigningSecret)
+	secret, err := s.sealSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
 		return err
 	}
@@ -27,10 +27,12 @@ func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscr
 	return err
 }
 
-// encryptSubscriptionSecret encrypts a signing secret at rest when a
-// cipher is configured. If the value is already ciphertext (i.e. it
-// was re-saved without being decrypted first) it is passed through so
-// we never double-encrypt.
+// encryptSubscriptionSecret is the unbound write path (no
+// SetSubscriptionSecretBinding): it encrypts a signing secret as enc:v1
+// when a cipher is configured. If the value is already ciphertext (i.e.
+// it was re-saved without being decrypted first) it is passed through so
+// we never double-encrypt. Bound stores use sealSubscriptionSecret
+// (postgres_subscription_secrets.go) instead.
 func (s *PostgresStore) encryptSubscriptionSecret(secret string) (string, error) {
 	if s.cipher == nil || secret == "" || spinecrypto.IsEncrypted(secret) {
 		return secret, nil
@@ -38,9 +40,13 @@ func (s *PostgresStore) encryptSubscriptionSecret(secret string) (string, error)
 	return s.cipher.Encrypt(secret)
 }
 
-// decryptSubscriptionSecret reverses encryptSubscriptionSecret.
-// Pre-migration plaintext rows are returned as-is; they will be
-// re-encrypted on their next UpdateSubscription call.
+// decryptSubscriptionSecret is the unbound read path: it reverses
+// encryptSubscriptionSecret. Plaintext rows (written before a key was
+// configured) are returned as-is. They are NOT re-encrypted by a later
+// write: BootstrapInternalSubscription and SMP's realign compare the
+// decrypted secret and skip unchanged rows, so no write ever comes
+// (audit P3-1). Converting them is the job of the explicit sweep,
+// ReencryptSubscriptionSecrets, which needs a binding.
 func (s *PostgresStore) decryptSubscriptionSecret(stored string) (string, error) {
 	if stored == "" {
 		return stored, nil
@@ -64,7 +70,7 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID stri
 	if wsID != nil {
 		sub.WorkspaceID = *wsID
 	}
-	secret, err := s.decryptSubscriptionSecret(sub.SigningSecret)
+	secret, err := s.openSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt signing_secret: %w", err)
 	}
@@ -73,7 +79,7 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID stri
 }
 
 func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscription) error {
-	secret, err := s.encryptSubscriptionSecret(sub.SigningSecret)
+	secret, err := s.sealSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
 		return err
 	}
@@ -144,7 +150,7 @@ func (s *PostgresStore) scanSubscriptions(rows pgx.Rows) ([]EventSubscription, e
 		if wsID != nil {
 			sub.WorkspaceID = *wsID
 		}
-		secret, err := s.decryptSubscriptionSecret(sub.SigningSecret)
+		secret, err := s.openSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt signing_secret: %w", err)
 		}
