@@ -119,7 +119,9 @@ func graphMaps(wf *domain.WorkflowDefinition) (map[string]*domain.StepDefinition
 }
 
 func TestCanReachEnd_MatchesReferenceOnRandomGraphs(t *testing.T) {
-	r := rand.New(rand.NewSource(20261006))
+	// A fixed seed keeps the corpus reproducible; this is test-graph
+	// generation, not a security context.
+	r := rand.New(rand.NewSource(20261006)) //nolint:gosec // G404: deterministic test corpus
 	reachable := 0
 	for i := 0; i < 20000; i++ {
 		wf := randomWorkflowGraph(r)
