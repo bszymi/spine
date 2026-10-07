@@ -85,8 +85,10 @@ type workflowPlan struct {
 	// restored quarantined), removed or not_projected (row is nil).
 	action string
 	// infraErr is a git read failure for this path. A verified previous
-	// row (in row) is restored unchanged so the next sync's sweep retries
-	// the file instead of the row silently disappearing.
+	// row (in row) is restored QUARANTINED: kept for runs pinned to its
+	// source_commit and visible to the next sync's sweep, which retries
+	// the file (and restores the row's status when the read succeeds),
+	// but not bindable while the file at head cannot be checked (I6).
 	infraErr error
 }
 
@@ -294,7 +296,9 @@ func (s *Service) applyWorkflowPlans(ctx context.Context, plans []workflowPlan) 
 			log.Warn("failed to project workflow", "path", plan.path, "error", plan.infraErr)
 			infraErrors++
 			if plan.row != nil {
-				if err := s.store.UpsertWorkflowProjection(ctx, plan.row); err != nil {
+				restored := *plan.row
+				restored.Status = string(domain.WorkflowStatusQuarantined)
+				if err := s.store.UpsertWorkflowProjection(ctx, &restored); err != nil {
 					log.Warn("failed to restore previous workflow row", "path", plan.path, "error", err)
 				}
 			}

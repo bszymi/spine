@@ -65,6 +65,11 @@ This document tracks known gaps and deferred functionality.
   artifact side is a follow-up.
 - **`QueryService.CheckFreshness` still compares against the working tree's `HEAD`**, not the
   authoritative branch. It has no production caller.
+- **A workflow path whose blob cannot be read at all** (for example a gitlink committed at
+  `workflows/x.yaml`) is still an infrastructure error, so the sync stays in `error` until the entry
+  is fixed, as before INIT-023. Its previous row is kept quarantined. Classifying deterministic read
+  failures of workflow files as rejections is the `isContentReadError` hook in
+  `adapters/projection/workflow_rows.go`; the bounded-read work (TASK-003) registers the first one.
 
 ## Resolved (Previously Listed)
 

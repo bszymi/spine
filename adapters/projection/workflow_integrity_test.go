@@ -650,3 +650,44 @@ func TestSweep_FailureMarksErrorAndRetries(t *testing.T) {
 		t.Fatalf("retry must complete the sweep: row=%+v state=%+v", ms.row(wfPath), ms.syncState())
 	}
 }
+
+// A FullRebuild that cannot read a workflow file is an infrastructure
+// error: the state is error, the verified previous row survives the
+// delete-all window quarantined (kept for pinned runs, not bindable while
+// head cannot be checked), and the next IncrementalSync's sweep retries
+// the file and restores the row once the read succeeds.
+func TestFullRebuild_WorkflowReadFailureKeepsRowQuarantinedAndSweepRetries(t *testing.T) {
+	repo, st, router, _, c1 := newIntegrityFixture(t, reviewedWorkflow)
+	head := repo.run("rev-parse", "HEAD")
+
+	broken := NewService(&failReadGit{GitClient: repo.git, path: wfPath, err: errSimulated}, st, router, 0)
+	if err := broken.FullRebuild(context.Background()); err != nil {
+		t.Fatalf("FullRebuild reports projection errors through sync_state, got %v", err)
+	}
+	if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != head {
+		t.Fatalf("sync state after a failed workflow read: %+v", got)
+	}
+	r := st.row(wfPath)
+	if r == nil || r.Status != "Quarantined" || r.SourceCommit != c1 {
+		t.Fatalf("the verified row must survive the wipe quarantined: %+v", r)
+	}
+	if broken.workflowsVerified.Load() {
+		t.Fatal("a workflow infrastructure error must leave the sweep pending")
+	}
+	if rej := router.rejections(t); len(rej) != 0 {
+		t.Fatalf("an infrastructure error is not a rejection: %+v", rej)
+	}
+
+	// Same instance, git healthy again: the sweep retries the file.
+	healthy := NewService(repo.git, st, router, 0)
+	healthy.workflowsVerified.Store(false)
+	if err := healthy.IncrementalSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if r := st.row(wfPath); r == nil || r.Status != "Active" {
+		t.Fatalf("the sweep must restore the row once the file reads: %+v", r)
+	}
+	if got := st.syncState(); got.Status != "idle" {
+		t.Fatalf("sync state after retry: %+v", got)
+	}
+}
