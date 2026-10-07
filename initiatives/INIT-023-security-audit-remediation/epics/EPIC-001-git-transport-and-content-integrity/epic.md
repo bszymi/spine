@@ -100,6 +100,29 @@ Make the git surface trustworthy:
     - Flip the pin test, and add a push larger than 1 MiB to the `scenario-git-http` CI job.
     - TASK-016 also edits `handler.go` (`Config`, `Handler`, the `prereceive` loop). Whichever
       lands second rebases onto the other.
+- **Follow-up (recorded by TASK-016 review round 1, 2026-10-07): the push admission window.**
+  Owner: bszymi, who decides it and creates the task. It is not yet created.
+  - **The gap.** TASK-016's run-branch binding and its review freeze (owner question 4) are
+    checked when the push's command section arrives. git writes the ref only after the pack is
+    uploaded **and** processed (index, delta resolution, connectivity check). The upload is bounded
+    by `ReadTimeout`, the processing by nothing: `net/http/cgi` ignores the request context, and
+    killing `git-http-backend` does not reach its `receive-pack` child. A push started while bound
+    can therefore land after the step is submitted, during review. That reopens the audit's F2
+    "move the run branch during review" vector until TASK-005 (merge exactly the reviewed commit)
+    lands. Recorded in `KNOWN-LIMITATIONS.md` (Git Push: Run-Branch Admission Is a Push-Start
+    Check), `architecture/security-model.md` §7.3 and `docs/git-push-guide.md` §6.
+  - **Owner decisions needed:**
+    - A time bound: run `git-http-backend` in its own process group under a deadline. Any deadline
+      also cuts legitimate large pushes **and clones**, which outlive `OpTimeout` (30 s) today.
+    - A size cap: `receive.maxInputSize` bounds the processing time, but repo-wide, operators
+      included.
+    - Or a post-unpack re-check (TASK-016 Decision 5): re-evaluate the binding and the freeze after
+      the pack is unpacked and before the ref moves. The pre-receive gate cannot do that, because
+      it runs before `git-http-backend` unpacks.
+  - **Also pending the owner, with TASK-016 owner question 6:** the divergence-trigger rule from
+    TASK-016 review round 1 (R1-1). While a run's cursor is `divergence:<id>`, the actor of the
+    latest run-level execution, which must be `completed`, may create an exploratory branch. The
+    alternative is operator-only.
 
 ---
 

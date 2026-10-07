@@ -7,26 +7,27 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/scheduler"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
 	bpprojection "github.com/bszymi/spine/core/branchprotect/projection"
-	"github.com/bszymi/spine/service/internal/config"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
-	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/scheduler"
-	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/refadmit"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/config"
+	"github.com/bszymi/spine/service/internal/gateway"
+	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -124,18 +125,26 @@ func buildWorkspaceCloneURLBuilder(base, workspaceID string) engine.CloneURLBuil
 }
 
 // buildGitPushResolver returns a resolver the gateway calls on each
-// push to fetch the target workspace's branch-protection policy and
-// event emitter. In shared mode the pool yields the workspace's own
-// store and event router (different database and event stream per
-// workspace, so both MUST be per-request). In single mode
-// (pool == nil) we fall back to the process-level store + event
-// router — both artifact-path and push-path writes evaluate and audit
-// against the same services there.
+// push to fetch the target workspace's branch-protection policy, event
+// emitter, and the run reader plus step-definition lookup the ref-class
+// admission uses for run, plan and divergence branches (INIT-023
+// TASK-016). In shared mode the pool yields the workspace's own store,
+// event router and orchestrator (different database and event stream
+// per workspace, so all of them MUST be per-request). In single mode
+// (pool == nil) we fall back to the process-level store, event router
+// and step-definition lookup — artifact-path and push-path writes
+// evaluate, admit and audit against the same services there.
+//
+// Runs is nil exactly when there is no store (a shared-mode workspace
+// with no database yet, or a single-mode process without one), and
+// StepDefs is nil when no orchestrator is wired. Either way run, plan
+// and divergence branches are operator-only for that push: admission
+// fails closed, unlike the permissive policy below (Decision 4).
 //
 // The returned release callback decrements the ServicePool ref so
 // workspace pools do not leak. Callers defer it; it is always safe to
 // call.
-func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store, fallbackEvents event.EventRouter) gateway.GitPushResolverFunc {
+func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store, fallbackEvents event.EventRouter, fallbackStepDefs refadmit.StepDefLookup) gateway.GitPushResolverFunc {
 	return func(ctx context.Context, workspaceID string) (gateway.GitPushResources, func(), error) {
 		noop := func() {}
 		if pool == nil {
@@ -144,8 +153,10 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 				return gateway.GitPushResources{}, noop, fmt.Errorf("git-push fallback branch-protect policy: %w", err)
 			}
 			return gateway.GitPushResources{
-				Policy: policy,
-				Events: fallbackEvents,
+				Policy:   policy,
+				Events:   fallbackEvents,
+				Runs:     runReaderOrNil(fallbackStore),
+				StepDefs: fallbackStepDefs,
 			}, noop, nil
 		}
 		ss, err := pool.Get(ctx, workspaceID)
@@ -173,8 +184,42 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 		if ss.Events != nil {
 			events = ss.Events
 		}
-		return gateway.GitPushResources{Policy: policy, Events: events}, release, nil
+		return gateway.GitPushResources{
+			Policy:   policy,
+			Events:   events,
+			Runs:     runReaderOrNil(ss.Store),
+			StepDefs: stepDefLookupOrNil(ss.StepAssigner),
+		}, release, nil
 	}
+}
+
+// runReaderOrNil returns st as the ref admission's run reader, or a
+// true nil interface when st is nil, so the admission sees "no reader"
+// (operator-only) rather than a typed nil it would call.
+func runReaderOrNil(st store.Store) refadmit.RunReader {
+	if st == nil {
+		return nil
+	}
+	return st
+}
+
+// stepDefLookupOrNil returns the workspace's step assigner (the
+// per-workspace *engine.Orchestrator, whose LookupStepDef loads the
+// run's pinned workflow version) as the review-freeze hook, or a true
+// nil interface when none is wired or it is a typed nil.
+func stepDefLookupOrNil(v any) refadmit.StepDefLookup {
+	switch l := v.(type) {
+	case nil:
+		return nil
+	case *engine.Orchestrator:
+		if l == nil {
+			return nil
+		}
+		return l
+	case refadmit.StepDefLookup:
+		return l
+	}
+	return nil
 }
 
 // buildWorkflowResolver builds the projection-backed workflow resolver
@@ -320,7 +365,20 @@ func buildScheduler(
 
 // buildGitHTTPHandler assembles the git HTTP handler. Returns nil when
 // no workspace resolver is available or when handler construction fails.
-func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, log *slog.Logger) *githttp.Handler {
+//
+// runs and stepDefs are the handler's fallback pair for the ref-class
+// admission of run, plan and divergence branches (INIT-023 TASK-016);
+// the gateway's per-push resolver attaches the target workspace's pair
+// per request, which wins.
+//
+// perWorkspace is true when that pair is resolved per workspace on each
+// push (shared mode): the fallback pair is then never consulted and is
+// nil by design, so its absence is not reported (it would warn on every
+// shared-mode start); a workspace without a store or engine is refused
+// operator-only at push time, with a Warn log per refused ref. In single
+// mode the resolver attaches exactly this pair, so the warning below
+// describes what pushes will actually get.
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
@@ -335,6 +393,8 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 		TrustedCIDRs:       trustedCIDRs,
 		ReceivePackEnabled: receivePackEnabled,
 		Policy:             policy,
+		RunRefs:            runs,
+		StepDefs:           stepDefs,
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
@@ -350,9 +410,17 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 			// A nil policy is valid (early-bootstrap, no Store), but
 			// it means pushes are not gated by branch protection —
 			// surface that loudly.
-			log.Warn("git HTTP receive-pack is ENABLED with no branch-protection policy; pushes will land unchecked")
+			log.Warn("git HTTP receive-pack is ENABLED with no branch-protection policy; branch pushes will land unchecked (ref-class admission still applies)")
 		} else {
 			log.Info("git HTTP receive-pack is ENABLED with branch-protection pre-receive enforcement (EPIC-004)")
+		}
+		switch {
+		case perWorkspace:
+			log.Info("run-branch push admission resolves each workspace's run store and engine per push; a workspace without them is operator-only")
+		case runs == nil:
+			log.Warn("run-branch pushes are operator-only: no run store wired")
+		case stepDefs == nil:
+			log.Warn("run-branch pushes are operator-only: no step-definition lookup wired for the review freeze")
 		}
 	}
 	return h

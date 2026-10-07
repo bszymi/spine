@@ -131,6 +131,13 @@ func nulRepo(t *testing.T, objectFormat string, branches ...string) (repo, base,
 // nulHandler returns a push-enabled handler for repo. With no rules it
 // uses the ADR-009 bootstrap defaults (main: no-delete +
 // no-direct-write).
+//
+// The handler also carries a run reader in which the contributor these
+// tests push as ("actor-contributor") holds the current step of run
+// run-abcd1234, whose branch is spine/run/task-001-abcd1234. Since
+// INIT-023 TASK-016 a run branch is admitted only for the actor bound
+// to its current step (or an operator), so the well-formed multi-ref
+// pushes below that include that run branch stay applicable.
 func nulHandler(t *testing.T, repo string, rules ...config.Rule) *Handler {
 	t.Helper()
 	var src branchprotect.RuleSource = branchprotect.StaticRules(nil)
@@ -141,6 +148,8 @@ func nulHandler(t *testing.T, repo string, rules ...config.Rule) *Handler {
 		ResolveRepoPath:    func(context.Context, string) (string, error) { return repo, nil },
 		ReceivePackEnabled: true,
 		Policy:             branchprotect.New(src),
+		RunRefs:            boundRun("actor-"+string(domain.RoleContributor), "task-001", "abcd1234"),
+		StepDefs:           admStepDefs{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +312,9 @@ func TestPreReceive_NulAfterRefOnLaterLine_DeleteRefused(t *testing.T) {
 // TestPreReceive_WellFormedMultiRefPushStillApplies proves the fix does
 // not change well-formed pushes: a two-command push (caps on line 1
 // only) to unprotected branches is admitted and applied by git. It
-// passes before and after the fix.
+// passes before and after the fix. The run branch is admitted because
+// the contributor is bound to its run's current step (nulHandler;
+// INIT-023 TASK-016).
 func TestPreReceive_WellFormedMultiRefPushStillApplies(t *testing.T) {
 	repo, _, evil, pack := nulRepo(t, "")
 	h := nulHandler(t, repo)

@@ -23,6 +23,7 @@ import (
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/queue"
+	"github.com/bszymi/spine/core/refadmit"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/config"
@@ -418,8 +419,16 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if err != nil {
 		return nil, fmt.Errorf("git-http branch-protect policy: %w", err)
 	}
-	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, log)
-	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events)
+	// Ref-class push admission (INIT-023 TASK-016): the process-level
+	// run reader and review-freeze lookup (the orchestrator, which
+	// loads each run's pinned workflow) back single mode; shared mode
+	// attaches each workspace's own pair per push.
+	var gitStepDefs refadmit.StepDefLookup
+	if orch != nil {
+		gitStepDefs = orch
+	}
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, runReaderOrNil(deps.Store), gitStepDefs, deps.WSServicePool != nil, log)
+	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events, gitStepDefs)
 
 	cfg := gateway.ServerConfig{
 		Store:                      deps.Store,

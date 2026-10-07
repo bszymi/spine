@@ -176,6 +176,18 @@ Out of scope (explicitly — each requires its own ADR):
 - Per-actor override allow-lists.
 - Protection rules on tags.
 
+### Amendment — 2026-10 (INIT-023 TASK-016): ref-class push admission
+
+§3 and §6 still hold for branch-protection **rules**: rules are authored for user-facing branches, never name `spine/*`, and do not cover tags. They no longer describe the whole Git push gate. The 2026-10-06 security audit found that, because nothing else gated them, every authenticated pusher could write `spine/**` run, planning and divergence branches (F2) and push tags and other non-branch refs that shadow run branches and `main` in bare-name git calls (F10).
+
+A separate **ref-class admission** (`core/refadmit`) now runs on every receive-pack ref update at the standalone git gateway, before and independently of `Policy.Evaluate`, with or without a policy wired:
+
+- non-branch refs (tags, notes, `refs/<x>`), `spine/init` and the rest of the reserved `spine` namespace are operator-only;
+- run, planning and divergence branches admit only the actor bound to their current step (or an operator), are frozen for non-operators during `review`/`internal` steps, and can be deleted only by an operator;
+- refs with a control byte, and created or updated refs with a non-leading `refs` or any `HEAD` component, are refused for every principal.
+
+Admitted `spine/**` refs still never reach `Policy.Evaluate`, and ordinary branches are evaluated exactly as before. Operator admissions of reserved refs are logged, not evented. The class table and the binding rule are in [API Operations](/architecture/api-operations.md) §6.1; the push-path sequence is in [Git Integration](/architecture/git-integration.md) §6.5.
+
 ---
 
 ## Consequences

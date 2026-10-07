@@ -42,6 +42,39 @@ This document tracks known gaps and deferred functionality.
   (`service/internal/githttp`). Spooling chunked bodies before CGI, with a size cap, is an
   INIT-023 EPIC-001 follow-up (owner: bszymi).
 
+### Git Push: Run-Branch Admission Is a Push-Start Check
+- With `SPINE_GIT_RECEIVE_PACK_ENABLED=true`, a run, planning or divergence branch is pushable only
+  by the actor bound to its current step, or an operator (INIT-023 TASK-016). Three limits remain:
+  - **Admission time, not write time.** The gate decides when the push's command section arrives;
+    git writes the ref only after the pack has been received and processed. A push started while
+    bound can land after the actor submits the step. The window is the upload (at most the HTTP
+    `ReadTimeout`, 30 s in `spine serve`) **plus** git's processing of the received pack (index,
+    delta resolution, connectivity check), which nothing bounds: `net/http/cgi` ignores the request
+    context and does not bound `git-http-backend`, and the pusher influences the processing time
+    through the pack it sends. The review freeze is checked at the same moment, so a push started
+    before the step was submitted can still land during review. Binding the governed merge to the
+    reviewed commit (INIT-023 TASK-005) is the content control for that window; until it lands,
+    the bound actor can still move the tip after validation. A real bound needs `git-http-backend`
+    run in its own process group under a deadline (a deadline would also cut legitimate large
+    pushes and clones, which today outlive `OpTimeout`), or a post-unpack re-check; both are
+    INIT-023 EPIC-001 follow-ups.
+  - **Force-push by the bound actor is allowed.** Fast-forward-only cannot be enforced per actor
+    before the pack is unpacked, and `receive.denyNonFastForwards` would also block operators.
+  - **Dev mode pushes are anonymous.** `SPINE_DEV_MODE` skips git authentication, so dev pushes
+    reach the gate with no actor and can write ordinary branches only. Validating a presented
+    bearer in dev mode belongs to INIT-023 TASK-015.
+- **Exploratory divergence branches: creation is bound to the run, their refs are operator-only.**
+  Creating one (`POST /runs/{run_id}/divergences/{divergence_id}/branches`) needs an operator, or
+  the actor who submitted the run-level step that triggered the divergence (while the run's cursor
+  is `divergence:<id>`, the engine's state for an open exploratory window), or an actor holding a
+  live cursor of the run. The API creates no step execution for the new branch, so nobody below
+  operator can then push its divergence ref (pushes need a live execution). Wiring step
+  executions for exploratory branches is a follow-up (TASK-016 owner question 6).
+- **Case-insensitive storage.** The admission folds the `spine` namespace with Unicode simple case
+  folding, so case-variant spellings are operator-only on any filesystem. Branch-protection rule
+  matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
+  below.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:
@@ -153,14 +186,15 @@ The following limitations have been resolved:
   blocks such pushes for non-operators.
 - **Residual — missing non-branch refs.** A `refs/tags/...` or `refs/remotes/...` argument naming
   a ref that does not exist can still be DWIM-substituted by a name such as
-  `refs/tags/refs/tags/...`; push admission must refuse those names (below).
+  `refs/tags/refs/tags/...`; push admission refuses to create or update those names for every
+  principal (TASK-016 rule 0b; below).
 - **Residual — doubly-qualified refs on the remote break pushes.** If the repository a client
   pushes to holds `refs/heads/refs/heads/<n>`, `refs/refs/heads/<n>` or
   `refs/tags/refs/heads/<n>`, every push to `<n>` fails (`dst refspec refs/heads/<n> matches more
   than one`), whatever the client argv; in standalone that is the governed-merge push to `main`.
   The git client cannot fix this. The failure is classified permanent, so the engine does not
-  loop on it. Push admission must refuse such names for every principal: Spine INIT-023 TASK-016
-  (standalone) and SMP INIT-027 EPIC-004 TASK-005 §7. Existing such refs are not deleted
+  loop on it. Push admission refuses to create or update such names for every principal: Spine
+  INIT-023 TASK-016 (standalone, rule 0b) and SMP INIT-027 EPIC-004 TASK-005 §7. Existing such refs are not deleted
   automatically; list them in each served repository and delete them (see `CHANGELOG.md`):
   `git -C <repo> for-each-ref refs/refs refs/heads/refs refs/tags/refs refs/remotes/refs`.
 - **Residual — refs named `HEAD` or after an object id.** Spine's own git calls are immune to
