@@ -5,6 +5,10 @@ package main
 // INIT-023 TASK-009 integration tests for the standalone wiring:
 //   - AC14: buildStore (file resolver) binds the store to the resolver's
 //     workspace id and sweeps before it returns.
+//   - AC14, review round 2: buildServeWorkspaces — the start-up step
+//     serveCmd calls — binds every store in the configured mode, end to
+//     end from the environment, for the file, db and platform-binding
+//     resolvers.
 //   - AC23: `spine secrets reencrypt --all-workspaces` over a registry of
 //     workspaces on separate databases (one inactive and reachable, one
 //     inactive whose database is gone), and the single-workspace path.
@@ -17,9 +21,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -195,6 +203,172 @@ func TestBuildStore_FileResolverBindsConfiguredMode(t *testing.T) {
 	if _, err := st.GetSubscription(ctx, "sub-file"); !errors.Is(err, store.ErrLegacySecretRefused) {
 		t.Fatalf("legacy row not refused: %v", err)
 	}
+}
+
+// t009AssertBoundStrict checks that st is bound strict to wsID and that the
+// plaintext row subID seeded before start-up was refused and left untouched
+// by the start-up sweep. A store bound in migrate — what a dropped mode
+// argument produces, since "" means migrate — would have converted it.
+func t009AssertBoundStrict(t *testing.T, st store.Store, admin *store.PostgresStore, wsID, subID, plain string) {
+	t.Helper()
+	pg, ok := st.(*store.PostgresStore)
+	if !ok {
+		t.Fatalf("store is %T, not a PostgresStore", st)
+	}
+	if b, bound := pg.SubscriptionSecretBinding(); !bound || b.Mode != store.SecretEnvelopeStrict || b.WorkspaceID != wsID {
+		t.Fatalf("store binding = %+v (bound %v), want strict for %s", b, bound, wsID)
+	}
+	if t009Raw(t, admin, subID) != plain {
+		t.Fatal("the start-up sweep converted the legacy row: the store was not bound strict")
+	}
+	if _, err := st.GetSubscription(context.Background(), subID); !errors.Is(err, store.ErrLegacySecretRefused) {
+		t.Fatalf("legacy row not refused by the strict store: %v", err)
+	}
+}
+
+// t009ServeEnv sets the environment every TestBuildServeWorkspaces_* test
+// shares: a key, SPINE_SECRET_ENVELOPE_MODE=strict, and no secret backend.
+func t009ServeEnv(t *testing.T, seed byte) {
+	t.Helper()
+	clearSecretBackendEnv(t)
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(t009Key(seed)))
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "strict")
+}
+
+// Review round 2 (AC14, file mode): buildServeWorkspaces, from the
+// environment, binds the process-level store strict to SPINE_WORKSPACE_ID.
+func TestBuildServeWorkspaces_FileResolverBindsConfiguredMode(t *testing.T) {
+	dsn := t009CreateDB(t, "t009_srv_file")
+	admin := t009Migrate(t, dsn, store.FindMigrationsDir())
+	t009Insert(t, admin, "sub-file", "whsec-plain-file")
+
+	t009ServeEnv(t, 0x61)
+	t.Setenv("SPINE_WORKSPACE_ID", "ws-srv-file")
+	t.Setenv("SPINE_DATABASE_URL", dsn)
+	ws, err := buildServeWorkspaces(context.Background(), "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "")
+	if err != nil {
+		t.Fatalf("buildServeWorkspaces: %v", err)
+	}
+	t.Cleanup(ws.Close)
+	if ws.Wiring.Pool != nil || ws.Store == nil {
+		t.Fatalf("file wiring: pool %v, process store %v", ws.Wiring.Pool != nil, ws.Store != nil)
+	}
+	t009AssertBoundStrict(t, ws.Store, admin, "ws-srv-file", "sub-file", "whsec-plain-file")
+}
+
+// Review round 2 (AC14, db mode): buildServeWorkspaces with
+// WORKSPACE_RESOLVER=db builds the registry-backed pool, and a registry
+// workspace's store — built by Pool.Get exactly as a request builds it — is
+// bound strict to its registry id.
+func TestBuildServeWorkspaces_DBResolverBindsConfiguredMode(t *testing.T) {
+	regDSN := t009CreateDB(t, "t009_srv_reg")
+	wsDSN := t009CreateDB(t, "t009_srv_db")
+	t009Migrate(t, regDSN, filepath.Join(store.FindMigrationsDir(), "registry"))
+	admin := t009Migrate(t, wsDSN, store.FindMigrationsDir())
+	t009Insert(t, admin, "sub-db", "whsec-plain-db")
+	ctx := context.Background()
+	provider, err := workspace.NewDBProvider(ctx, regDSN, workspace.DBProviderConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.CreateWorkspace(ctx, workspace.Config{
+		ID: "ws-srv-db", DisplayName: "ws-srv-db", DatabaseURL: secrets.NewSecretValue([]byte(wsDSN)),
+		RepoPath: ".", Status: workspace.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	provider.Close()
+
+	t009ServeEnv(t, 0x62)
+	t.Setenv("WORKSPACE_RESOLVER", "db")
+	t.Setenv("SPINE_REGISTRY_DATABASE_URL", regDSN)
+	ws, err := buildServeWorkspaces(ctx, "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "")
+	if err != nil {
+		t.Fatalf("buildServeWorkspaces: %v", err)
+	}
+	t.Cleanup(ws.Close)
+	if ws.Wiring.Pool == nil || ws.Wiring.DBProvider == nil || ws.Store != nil {
+		t.Fatalf("db wiring: pool %v, registry %v, process store %v", ws.Wiring.Pool != nil, ws.Wiring.DBProvider != nil, ws.Store != nil)
+	}
+	ss, err := ws.Wiring.Pool.Get(ctx, "ws-srv-db")
+	if err != nil {
+		t.Fatalf("Pool.Get: %v", err)
+	}
+	t.Cleanup(func() { ws.Wiring.Pool.Release("ws-srv-db") })
+	t009AssertBoundStrict(t, ss.Store, admin, "ws-srv-db", "sub-db", "whsec-plain-db")
+}
+
+// Review round 2 (AC14, platform-binding mode): buildServeWorkspaces with
+// WORKSPACE_RESOLVER=platform-binding builds the binding-backed pool; a
+// workspace resolved from a stand-in platform (its runtime database
+// reference dereferenced through the file secret backend) is bound strict
+// to its platform workspace id once Pool.Get builds it.
+func TestBuildServeWorkspaces_PlatformBindingBindsConfiguredMode(t *testing.T) {
+	const wsID = "ws-srv-pb"
+	wsDSN := t009CreateDB(t, "t009_srv_pb")
+	admin := t009Migrate(t, wsDSN, store.FindMigrationsDir())
+	t009Insert(t, admin, "sub-pb", "whsec-plain-pb")
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "workspaces", wsID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for purpose, value := range map[string]string{
+		secrets.PurposeRuntimeDB:    wsDSN,
+		secrets.PurposeProjectionDB: wsDSN,
+		secrets.PurposeGit:          "unused-git-credential",
+	} {
+		b, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, purpose+".json"), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer svc-token" || r.URL.Path != "/api/v1/internal/workspaces/"+wsID+"/runtime-binding" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(workspace.PlatformBinding{
+			WorkspaceID:      wsID,
+			DisplayName:      wsID,
+			SpineWorkspaceID: wsID + "-smp",
+			DeploymentMode:   "shared",
+			RepoPath:         ".",
+			ActorScope:       "workspace:" + wsID,
+			RuntimeDBRef:     secrets.WorkspaceRef(wsID, secrets.PurposeRuntimeDB),
+			ProjectionDBRef:  secrets.WorkspaceRef(wsID, secrets.PurposeProjectionDB),
+			GitRef:           secrets.WorkspaceRef(wsID, secrets.PurposeGit),
+		})
+	}))
+	t.Cleanup(platform.Close)
+
+	t009ServeEnv(t, 0x63)
+	t.Setenv("WORKSPACE_RESOLVER", "platform-binding")
+	t.Setenv("SPINE_PLATFORM_URL", platform.URL)
+	t.Setenv("SPINE_PLATFORM_SERVICE_TOKEN", "svc-token")
+	t.Setenv("SPINE_SECRET_PROVIDER", "file")
+	t.Setenv("SPINE_SECRET_FILE_ROOT", root)
+	ctx := context.Background()
+	ws, err := buildServeWorkspaces(ctx, "development", slog.New(slog.DiscardHandler), workspaceDeliveryConfig{}, "")
+	if err != nil {
+		t.Fatalf("buildServeWorkspaces: %v", err)
+	}
+	t.Cleanup(ws.Close)
+	if ws.Wiring.Pool == nil || ws.Wiring.BindingInvalidationHandler == nil || ws.Store != nil {
+		t.Fatalf("platform-binding wiring: pool %v, invalidation handler %v, process store %v",
+			ws.Wiring.Pool != nil, ws.Wiring.BindingInvalidationHandler != nil, ws.Store != nil)
+	}
+	ss, err := ws.Wiring.Pool.Get(ctx, wsID)
+	if err != nil {
+		t.Fatalf("Pool.Get: %v", err)
+	}
+	t.Cleanup(func() { ws.Wiring.Pool.Release(wsID) })
+	t009AssertBoundStrict(t, ss.Store, admin, wsID, "sub-pb", "whsec-plain-pb")
 }
 
 // captureDefaultLog routes slog.Default (observe.Logger) into buf for the

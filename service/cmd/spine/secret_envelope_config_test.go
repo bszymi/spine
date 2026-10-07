@@ -307,6 +307,84 @@ func TestSharedModePoolConfig_CarriesSecretEnvelope(t *testing.T) {
 	}
 }
 
+// Review round 2: the `spine serve` start-up path — environment → key ring
+// and envelope mode → buildWorkspaceResolver → ServicePool — carries the
+// configured mode into the pool that binds every shared-mode workspace
+// store. It drives buildServeWorkspaces, the one function serveCmd calls for
+// this, so a mode dropped anywhere on that path (it would compile: "" means
+// migrate) fails here, in the plain `go test ./...` CI runs. It uses
+// WORKSPACE_RESOLVER=platform-binding because that branch is constructible
+// without a database; the db branch builds its pool through the same
+// newSharedPool, and both are driven end to end, through Pool.Get to a bound
+// store, by the integration tests TestBuildServeWorkspaces_*BindsConfiguredMode.
+func TestBuildServeWorkspaces_SharedPoolCarriesConfiguredMode(t *testing.T) {
+	key, raw := b64Key(t)
+	kid, err := spinecrypto.KeyID(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPINE_SECRET_PREVIOUS_KEYS", "")
+	t.Setenv("SPINE_ENV", "")
+	t.Setenv("WORKSPACE_RESOLVER", "platform-binding")
+	// Never dialled: the provider fetches a binding only when a workspace
+	// is first requested.
+	t.Setenv("SPINE_PLATFORM_URL", "http://127.0.0.1:1")
+	t.Setenv("SPINE_PLATFORM_SERVICE_TOKEN", "svc-token")
+	t.Setenv("SPINE_SECRET_PROVIDER", "file")
+	t.Setenv("SPINE_SECRET_FILE_ROOT", t.TempDir())
+	ctx := context.Background()
+	discard := slog.New(slog.DiscardHandler)
+
+	cases := []struct {
+		name, key, mode string
+		want            store.SecretEnvelopeMode
+	}{
+		{"strict", key, "strict", store.SecretEnvelopeStrict},
+		{"downgrade", key, "downgrade", store.SecretEnvelopeDowngrade},
+		{"migrate", key, "migrate", store.SecretEnvelopeMigrate},
+		{"unset means migrate", key, "", store.SecretEnvelopeMigrate},
+		// Without a key no store is bound; the pool carries no cipher.
+		{"no key", "", "strict", store.SecretEnvelopeStrict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", tc.key)
+			t.Setenv("SPINE_SECRET_ENVELOPE_MODE", tc.mode)
+			ws, err := buildServeWorkspaces(ctx, "development", discard, workspaceDeliveryConfig{}, "")
+			if err != nil {
+				t.Fatalf("buildServeWorkspaces: %v", err)
+			}
+			t.Cleanup(ws.Close)
+			if ws.Wiring == nil || ws.Wiring.Pool == nil || ws.Store != nil {
+				t.Fatalf("platform-binding wiring: pool %v, process store %v", ws.Wiring != nil && ws.Wiring.Pool != nil, ws.Store)
+			}
+			cipher, mode := ws.Wiring.Pool.SubscriptionSecretConfig()
+			if mode != tc.want || ws.SecretEnvelopeMode != tc.want {
+				t.Fatalf("pool binds stores in %q (start-up loaded %q), want %q", mode, ws.SecretEnvelopeMode, tc.want)
+			}
+			if cipher != ws.SecretCipher {
+				t.Fatal("the pool does not carry the start-up key ring")
+			}
+			if tc.key == "" {
+				if cipher != nil {
+					t.Fatal("a cipher was built without a key")
+				}
+				return
+			}
+			if cipher == nil || cipher.PrimaryKeyID() != kid {
+				t.Fatalf("pool cipher is not the configured key ring")
+			}
+		})
+	}
+
+	// A bad mode fails start-up before any resolver or pool is built.
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", key)
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "bogus")
+	if ws, err := buildServeWorkspaces(ctx, "development", discard, workspaceDeliveryConfig{}, ""); err == nil || ws != nil || !strings.Contains(err.Error(), "SPINE_SECRET_ENVELOPE_MODE") {
+		t.Fatalf("bogus mode: %v", err)
+	}
+}
+
 // codex review (round 1, P2): pgx masks a URL's userinfo password but a
 // ParseConfigError echoes a password passed as a query parameter. The
 // command must never print one, for a workspace database or the registry.

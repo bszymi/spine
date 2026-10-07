@@ -660,6 +660,18 @@ func (p *ServicePool) RefCount(workspaceID string) int {
 	return 0
 }
 
+// SubscriptionSecretConfig reports the cipher and envelope mode every
+// per-workspace store this pool builds is bound and swept with
+// (PoolConfig.SecretCipher / SecretEnvelopeMode, INIT-023 TASK-009); the
+// mode has no effect without a cipher. Both are fixed at construction.
+// It lets `spine serve`'s start-up wiring be checked without a workspace
+// database: "" is an untyped constant that converts to SecretEnvelopeMode
+// and means migrate, so a dropped mode argument compiles and only shows
+// as the wrong mode here.
+func (p *ServicePool) SubscriptionSecretConfig() (*spinecrypto.SecretCipher, store.SecretEnvelopeMode) {
+	return p.secretCipher, p.secretEnvelopeMode
+}
+
 // EvictIdle removes service sets that have not been accessed within the idle timeout
 // and have no active references. Call this periodically (e.g., from a background ticker).
 func (p *ServicePool) EvictIdle() {
