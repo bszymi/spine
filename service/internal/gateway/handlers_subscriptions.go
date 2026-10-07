@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/go-chi/chi/v5"
 )
 
