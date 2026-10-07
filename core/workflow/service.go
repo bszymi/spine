@@ -2,16 +2,17 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"regexp"
 	"strings"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/git/refname"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 // WorkflowsDir is the canonical repo-relative directory for workflow definitions.
@@ -135,24 +136,49 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 			"workflow validation failed", result.Errors)
 	}
 
+	// workflows/<id>.yaml is already constrained by idPattern; Clean adds
+	// the length caps and the git-dir rule, before any worktree exists.
+	rel, err := worktreefs.Clean(path)
+	if err != nil {
+		return nil, worktreeError(ctx, path, "validate path", err)
+	}
+
 	scope, err := s.enterBranch(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer scope.Cleanup()
 
-	absPath := filepath.Join(scope.RepoDir, path)
+	// All file I/O below goes through worktreefs (INIT-023 TASK-004, audit
+	// F5). On 61994fe this joined scope.RepoDir + path and called os.* with
+	// no containment check at all: a committed workflows/<id>.yaml link
+	// made Create write outside the repository and Update overwrite (and
+	// read without bound — a link to /dev/zero) whatever it pointed at.
+	tree, err := worktreefs.Open(scope.RepoDir)
+	if err != nil {
+		return nil, worktreeError(ctx, path, "open worktree for", err)
+	}
+	defer func() { _ = tree.Close() }()
 
 	var prior *domain.WorkflowDefinition
 	var originalBody []byte
+	var undo *worktreefs.Undo
 	if op.requireExists {
-		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		if _, err := tree.Lstat(rel); errors.Is(err, fs.ErrNotExist) {
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("workflow not found: %s", path))
+		} else if err != nil {
+			return nil, worktreeError(ctx, path, "check", err)
 		}
-		p, readErr := s.readFromDisk(absPath, path)
+		// One confined, capped read serves both the prior-version check
+		// and the rollback copy.
+		original, readErr := tree.ReadFile(rel)
 		if readErr != nil {
-			return nil, readErr
+			return nil, worktreeError(ctx, path, "read existing workflow", readErr)
+		}
+		p, parseErr := parseExisting(path, original)
+		if parseErr != nil {
+			return nil, parseErr
 		}
 		prior = p
 		if op.priorCheck != nil {
@@ -160,35 +186,34 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 				return nil, err
 			}
 		}
-		original, readErr := os.ReadFile(absPath)
-		if readErr != nil {
-			return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("read original: %v", readErr))
-		}
 		originalBody = original
+		if err := tree.Replace(rel, []byte(body)); err != nil {
+			return nil, worktreeError(ctx, path, "write file", err)
+		}
 	} else {
-		if _, err := os.Stat(absPath); err == nil {
+		undo, err = tree.Create(rel, []byte(body), 0o644)
+		if errors.Is(err, fs.ErrExist) {
 			return nil, domain.NewError(domain.ErrAlreadyExists,
 				fmt.Sprintf("workflow already exists: %s", path))
 		}
-		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-			return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("create dir: %v", err))
+		if err != nil {
+			return nil, worktreeError(ctx, path, "write file", err)
 		}
+		defer undo.Release()
 	}
 
-	if err := os.WriteFile(absPath, []byte(body), 0o644); err != nil {
-		return nil, domain.NewError(domain.ErrInternal, fmt.Sprintf("write file: %v", err))
-	}
-
-	commit, err := git.StageAndCommit(ctx, scope, path, git.CommitOpts{
+	commit, err := git.StageAndCommit(ctx, scope, rel, git.CommitOpts{
 		Message:  op.messageFn(wf, prior),
 		Trailers: workflowTrailers(ctx, op.operation),
 		Author:   workflowAuthor(ctx),
 	})
 	if err != nil {
+		// Restore the original bytes and mode (update), or remove the file
+		// and every directory this call created (create).
 		if op.requireExists {
-			_ = os.WriteFile(absPath, originalBody, 0o644)
+			_ = tree.Replace(rel, originalBody)
 		} else {
-			_ = os.Remove(absPath)
+			_ = undo.Rollback()
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
@@ -286,19 +311,37 @@ func (s *Service) ValidateBody(ctx context.Context, id, body string) domain.Vali
 	return Validate(wf)
 }
 
-// readFromDisk is a cheap read used internally (no git round-trip).
-func (s *Service) readFromDisk(absPath, path string) (*domain.WorkflowDefinition, error) {
-	content, err := os.ReadFile(absPath)
-	if err != nil {
-		return nil, domain.NewError(domain.ErrInternal,
-			fmt.Sprintf("read existing workflow: %v", err))
-	}
+// parseExisting parses the workflow currently on disk (read through
+// worktreefs by the caller).
+func parseExisting(path string, content []byte) (*domain.WorkflowDefinition, error) {
 	wf, err := Parse(path, content)
 	if err != nil {
 		return nil, domain.NewError(domain.ErrInternal,
 			fmt.Sprintf("parse existing workflow: %v", err))
 	}
 	return wf, nil
+}
+
+// worktreeError maps a worktreefs failure onto the workflow error contract
+// (the same one artifact.Service uses): a refused path is ErrInvalidParams
+// with the PathError text, which names only repo-relative components; a
+// file over the worktree read cap is ErrPayloadTooLarge (413); anything
+// else is logged server-side and returned as a generic ErrInternal. The
+// worktreefs error stays the cause, so errors.Is(err,
+// worktreefs.ErrUnsafePath) / worktreefs.ErrTooLarge hold.
+func worktreeError(ctx context.Context, path, action string, err error) error {
+	var pe *worktreefs.PathError
+	if errors.As(err, &pe) {
+		return domain.NewErrorWithCause(domain.ErrInvalidParams, pe.Error(), err)
+	}
+	var se *worktreefs.SizeError
+	if errors.As(err, &se) {
+		return domain.NewErrorWithCause(domain.ErrPayloadTooLarge, se.Error(), err)
+	}
+	observe.Logger(ctx).Warn("workflow worktree I/O failed",
+		"action", action, "path", path, "error", err)
+	return domain.NewErrorWithCause(domain.ErrInternal,
+		fmt.Sprintf("%s %s failed", action, path), err)
 }
 
 func validateID(id string) error {
