@@ -87,7 +87,7 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 		return def, nil
 	}
 	// runExecs caches each run's executions for the separation-of-duties
-	// filter (read only when SeparationOfDuties is on).
+	// and prior-holder filters (read only when either is on).
 	runExecs := map[string][]domain.StepExecution{}
 
 	var result []StepExecutionItem
@@ -159,6 +159,12 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 			o.sodHidesCandidate(ctx, run, exec, q.ActorID, workflowFor, runExecs) {
 			continue
 		}
+		// ReofferToPriorHolder (INIT-023 TASK-014 owner question 7): the
+		// same for a waiting author step re-offered to another actor.
+		if o.entryPolicy.ReofferToPriorHolder && q.ActorID != "" && exec.Status == domain.StepStatusWaiting &&
+			o.reofferHidesCandidate(ctx, run, exec, q.ActorID, workflowFor, runExecs) {
+			continue
+		}
 
 		result = append(result, StepExecutionItem{
 			ExecutionID: exec.ExecutionID,
@@ -214,4 +220,33 @@ func (o *Orchestrator) sodHidesCandidate(ctx context.Context, run *domain.Run, e
 	var se *domain.SpineError
 	err = o.separationOfDuties(ctx, run, wfDef, stepDef, exec, actorID, execs)
 	return errors.As(err, &se) && se.Code == domain.ErrForbidden
+}
+
+// reofferHidesCandidate reports whether the prior-holder rule would refuse
+// actorID's claim of the waiting execution exec — the listing's mirror of
+// check 6b, like sodHidesCandidate. Only a definite refusal hides the
+// candidate; when the check cannot run the candidate stays listed and the
+// claim itself answers the fail-closed error.
+func (o *Orchestrator) reofferHidesCandidate(ctx context.Context, run *domain.Run, exec *domain.StepExecution, actorID string,
+	workflowFor func(*domain.Run) (*domain.WorkflowDefinition, error), runExecs map[string][]domain.StepExecution) bool {
+	if o.store == nil {
+		return false
+	}
+	wfDef, err := workflowFor(run)
+	if err != nil {
+		return false
+	}
+	stepDef := findStepDef(wfDef, exec.StepID)
+	if stepDef == nil || !isAuthorStepType(stepDef.Type) {
+		return false
+	}
+	execs, hit := runExecs[run.RunID]
+	if !hit {
+		execs, err = o.store.ListStepExecutionsByRun(ctx, run.RunID)
+		if err != nil {
+			return false
+		}
+		runExecs[run.RunID] = execs
+	}
+	return priorHolderRefusal(run, stepDef, exec, actorID, execs) != nil
 }

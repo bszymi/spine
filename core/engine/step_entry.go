@@ -68,6 +68,32 @@ type StepEntryPolicy struct {
 	// actor holding a live review execution cannot be bound to an author
 	// step of the same run.
 	SeparationOfDuties bool
+	// ReofferToPriorHolder (audit P3-6 residual; INIT-023 TASK-014 owner
+	// question 7): ClaimStep of an author step (isAuthorStepType — every
+	// type whose bound actor may write the run or divergence branch through
+	// push admission or the standalone API) is refused (403) for any actor
+	// other than the step's prior holder in this run. TASK-014 limits API
+	// writes to a run branch to the actor bound to the run's current step,
+	// and TASK-016 does the same for pushes; without this rule an eligible
+	// contributor could still claim a colleague's step the moment it is
+	// waiting again and then write as its bound actor. The prior holder is:
+	//
+	//   - the actor still named on the execution being claimed — a waiting
+	//     row reset by scheduler restart recovery keeps its actor_id; or
+	//   - otherwise the actor of the latest earlier attempt of the same step
+	//     on the same branch that completed — a needs_rework loop creates a
+	//     new, unbound attempt of the author step.
+	//
+	// A step never held in this run (a first attempt — owner question 4: no
+	// auto-bind at run start) stays claimable by any eligible actor, as
+	// does a retry of a failed attempt (a failed holder is not re-offered
+	// the work). AssignStep (step.assign, operator) is never restricted:
+	// "re-offered to the prior holder unless an operator assigns". The
+	// candidate listing hides what the claim would refuse. Releasing a step
+	// blanks its actor (ReleaseStep), so a first-attempt step its holder
+	// released is claimable by others — release is the holder's own
+	// hand-off; it stays attributed through the cancelled claim row.
+	ReofferToPriorHolder bool
 	// TerminateStepsOnCancel (P3-16): CancelRun, FailRun, the permanent
 	// merge failure and the scheduler's run-timeout hook move every live
 	// execution of the run to `skipped` with classification run_terminated
@@ -125,6 +151,7 @@ func StrictStepEntryPolicy() StepEntryPolicy {
 		EnforcePreconditions:   true,
 		RequireSkillsOnAssign:  true,
 		SeparationOfDuties:     true,
+		ReofferToPriorHolder:   true,
 		TerminateStepsOnCancel: true,
 	}
 }
@@ -142,7 +169,8 @@ func (p StepEntryPolicy) IsZero() bool {
 // pre-INIT-023 code.
 func (p StepEntryPolicy) gatesBinding() bool {
 	return p.EnforceRunStatus || p.EnforceEligibility || p.EnforceExecutionMode ||
-		p.EnforcePreconditions || p.RequireSkillsOnAssign || p.SeparationOfDuties
+		p.EnforcePreconditions || p.RequireSkillsOnAssign || p.SeparationOfDuties ||
+		p.ReofferToPriorHolder
 }
 
 // WithStepEntryPolicy installs the step-entry policy. The zero value (the
@@ -303,6 +331,9 @@ func modeActorType(stepDef *domain.StepDefinition) (engineOwned bool, implied do
 //  6. required_skills                    (RequireSkillsOnAssign) 409 / 503  assign only
 //  7. separation of duties               (SeparationOfDuties)    403 / 503
 //
+// Check 6b, claim only, runs between 6 and 7: the prior holder
+// (ReofferToPriorHolder, INIT-023 TASK-014), 403 / 503.
+//
 // Check 8, preconditions, is checkStepEntryPreconditions; it runs last
 // because it may read git. allow is the effective eligible_actor_ids list
 // (assign: the request's list when non-empty, else the stored one). ClaimStep
@@ -377,6 +408,12 @@ func (o *Orchestrator) checkStepEntryActor(ctx context.Context, op entryOp, run 
 		}
 	}
 
+	if op == entryClaim && p.ReofferToPriorHolder {
+		if err := o.checkPriorHolder(ctx, run, stepDef, exec, actorID); err != nil {
+			return err
+		}
+	}
+
 	if p.SeparationOfDuties {
 		if err := o.checkSeparationOfDuties(ctx, run, wfDef, stepDef, exec, actorID); err != nil {
 			return err
@@ -418,6 +455,63 @@ func (o *Orchestrator) requireSkillsOnAssign(ctx context.Context, stepDef *domai
 		return domain.NewError(domain.ErrConflict, fmt.Sprintf("actor missing required skills: %v", missing))
 	}
 	return nil
+}
+
+// checkPriorHolder is check 6b (ReofferToPriorHolder, claim only). It
+// reads the run's executions once; a read failure fails closed (503). The
+// refusal never names the prior holder (the TASK-016 wire-message rule: a
+// refusal does not tell a caller who holds a run).
+func (o *Orchestrator) checkPriorHolder(ctx context.Context, run *domain.Run, stepDef *domain.StepDefinition,
+	exec *domain.StepExecution, actorID string) error {
+	if !isAuthorStepType(stepDef.Type) {
+		return nil
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot list the run's executions", err)
+	}
+	return priorHolderRefusal(run, stepDef, exec, actorID, execs)
+}
+
+// priorHolderRefusal is check 6b over an already-read execution list (the
+// candidate listing reads it once per run).
+func priorHolderRefusal(run *domain.Run, stepDef *domain.StepDefinition, exec *domain.StepExecution,
+	actorID string, execs []domain.StepExecution) error {
+	if !isAuthorStepType(stepDef.Type) {
+		return nil
+	}
+	holder := priorHolder(exec, execs)
+	if holder == "" || holder == actorID {
+		return nil
+	}
+	return domain.NewError(domain.ErrForbidden,
+		fmt.Sprintf("step %q of run %s is re-offered to the actor who held it before (rework or restart recovery); "+
+			"only that actor may claim it, or an operator may assign it to another actor (POST /runs/%s/steps/%s/assign)",
+			stepDef.ID, run.RunID, run.RunID, stepDef.ID))
+}
+
+// priorHolder returns the actor a claimable execution is re-offered to, or
+// "" when it was never held in this run (see ReofferToPriorHolder): the
+// actor still named on the execution, else the actor of the highest
+// earlier attempt of the same step on the same branch that completed.
+func priorHolder(exec *domain.StepExecution, execs []domain.StepExecution) string {
+	if exec.ActorID != "" {
+		return exec.ActorID
+	}
+	holder, best := "", 0
+	for i := range execs {
+		e := &execs[i]
+		if e.ExecutionID == exec.ExecutionID || e.StepID != exec.StepID || e.BranchID != exec.BranchID {
+			continue
+		}
+		if e.Status != domain.StepStatusCompleted || e.ActorID == "" || e.Attempt >= exec.Attempt {
+			continue
+		}
+		if e.Attempt > best {
+			holder, best = e.ActorID, e.Attempt
+		}
+	}
+	return holder
 }
 
 // assignmentHistory is the optional ledger read behind the separation-of-
