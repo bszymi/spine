@@ -810,7 +810,12 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
   only (database-sourced text quoted; database errors carry no
   credentials); exits non-zero unless every workspace is clean. Use it before switching to `strict` or dropping a previous key.
   It requires `SPINE_SECRET_ENVELOPE_MODE` to be set explicitly, to serve's
-  mode (it never assumes `migrate`); `--all-workspaces` requires
+  mode (it never assumes `migrate`); without `--all-workspaces` it also
+  requires the workspace id to be stated — `SPINE_WORKSPACE_ID` set to serve's
+  value, or `--workspace default` — because the id is part of every `enc:v2`
+  value's associated data and a guessed `default` seals rows a serve bound to
+  another id refuses (INIT-023 wave 2 cross-task review); its first line names
+  the bound id (`workspace_id=`); `--all-workspaces` requires
   `WORKSPACE_RESOLVER=db`; `--allow-unreachable-inactive=<ids>` acknowledges
   decommissioned inactive workspaces whose database is gone (listed in the
   summary). `platform-binding` has no registry to enumerate, and a request

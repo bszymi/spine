@@ -63,9 +63,13 @@ SPINE_SECRET_ENVELOPE_MODE must be set explicitly, to the mode spine serve runs
 with: the command writes every workspace database, and an unset value would
 apply migrate, which converts legacy rows a strict deployment refuses.
 
-Without --all-workspaces it sweeps the single file-mode workspace
-(SPINE_WORKSPACE_ID, default "default"; database from SPINE_DATABASE_URL or the
-configured secret backend). With --all-workspaces (WORKSPACE_RESOLVER=db only)
+Without --all-workspaces it sweeps the single file-mode workspace, bound to
+SPINE_WORKSPACE_ID (database from SPINE_DATABASE_URL or the configured secret
+backend). The workspace id must be stated explicitly, like the mode: set
+SPINE_WORKSPACE_ID to the value spine serve runs with, or pass --workspace
+default for a deployment that leaves it unset. The id is part of every enc:v2
+value's associated data, so rows sealed under a guessed "default" would be
+refused by a serve bound to another id. With --all-workspaces (WORKSPACE_RESOLVER=db only)
 it sweeps every workspace in the registry (SPINE_REGISTRY_DATABASE_URL) —
 active and inactive, because an inactive workspace's rows still need the key
 that sealed them. WORKSPACE_RESOLVER=platform-binding has no registry to
@@ -202,7 +206,7 @@ func runSecretsReencrypt(ctx context.Context, out io.Writer, opts reencryptOptio
 			return err
 		}
 	}
-	outf(out, "secret envelope: mode=%s primary_key_id=%s previous_key_ids=%s\n",
+	header := fmt.Sprintf("secret envelope: mode=%s primary_key_id=%s previous_key_ids=%s",
 		mode, cipher.PrimaryKeyID(), strings.Join(cipher.KeyIDs()[1:], ","))
 
 	if !opts.allWorkspaces {
@@ -210,6 +214,9 @@ func runSecretsReencrypt(ctx context.Context, out io.Writer, opts reencryptOptio
 		if err != nil {
 			return err
 		}
+		// The bound id is part of every enc:v2 value's associated data:
+		// print it with the key ids, before anything is written.
+		outf(out, "%s workspace_id=%s\n", header, target.printableID())
 		if outcome := sweepOneWorkspace(ctx, out, target, cipher, mode); outcome != sweepClean {
 			if outcome == sweepUnreachable {
 				outf(out, "workspace %s: NOT CLEAN (unreachable)\n", target.label())
@@ -219,6 +226,7 @@ func runSecretsReencrypt(ctx context.Context, out io.Writer, opts reencryptOptio
 		return nil
 	}
 
+	outf(out, "%s\n", header)
 	targets, failed, err := registrySweepTargets(ctx, out)
 	if err != nil {
 		return err
@@ -268,9 +276,23 @@ func runSecretsReencrypt(ctx context.Context, out io.Writer, opts reencryptOptio
 // singleWorkspaceSweepTarget resolves the file-mode workspace exactly as
 // `spine serve` does (workspace.NewFileProvider over the same secret
 // client), so the sweep binds the id serve binds.
+//
+// The id must be stated, never defaulted (INIT-023 wave 2 cross-task
+// review): it is part of every enc:v2 value's associated data, exactly
+// like the key, and an ops job whose environment was copied from `spine
+// migrate` (which needs no workspace id) would otherwise bind the
+// FileProvider's "default" fallback. In migrate mode that seals every
+// legacy row under AAD("default", …) and reports the workspace clean,
+// while serve, bound to its real SPINE_WORKSPACE_ID, refuses every such
+// row and the workspace's webhook fan-out stops. So SPINE_WORKSPACE_ID
+// must be set, or --workspace given (`--workspace default` for a
+// deployment that really runs as "default"), as the mode must be.
 func singleWorkspaceSweepTarget(ctx context.Context) (sweepTarget, error) {
 	if r := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER"))); r != "" && r != "file" {
 		return sweepTarget{}, fmt.Errorf("WORKSPACE_RESOLVER=%s is a shared mode: use --all-workspaces", r)
+	}
+	if os.Getenv("SPINE_WORKSPACE_ID") == "" && globalWorkspaceID == "" {
+		return sweepTarget{}, errors.New("the workspace id must be stated for this command: set SPINE_WORKSPACE_ID to the value spine serve runs with, or pass --workspace default if serve runs without it; the id is part of every enc:v2 value's associated data, and rows sealed under a guessed \"default\" are refused by a serve bound to another id (nothing was changed)")
 	}
 	secretClient, err := buildFileResolverSecretClient(ctx)
 	if err != nil {

@@ -612,6 +612,65 @@ func TestSecretsReencrypt_SingleWorkspace(t *testing.T) {
 	assertNoSecretMaterial(t, out+out2+logs.String(), key, v1)
 }
 
+// INIT-023 wave 2 cross-task review: an ops job whose environment carries
+// the key, the mode and SPINE_DATABASE_URL but not SPINE_WORKSPACE_ID (one
+// copied from `spine migrate`, which needs no workspace id) used to bind
+// the FileProvider's "default" fallback: the migrate sweep sealed every
+// legacy row under AAD("default", sub), reported the workspace clean, and
+// serve — bound to its real id — then refused every row, stopping the
+// workspace's webhook fan-out. The command now refuses with nothing
+// written; with the id stated it binds the id serve binds.
+func TestSecretsReencrypt_SingleWorkspaceNeverGuessesTheID(t *testing.T) {
+	dsn := t009CreateDB(t, "t009_wsid")
+	st := t009Migrate(t, dsn, store.FindMigrationsDir())
+	key := t009Key(0x60)
+	t009Insert(t, st, "sub-a", "whsec-LEAK-wsid-a")
+	t009Insert(t, st, "sub-b", "whsec-LEAK-wsid-b")
+
+	clearSecretBackendEnv(t)
+	t.Setenv("SPINE_SECRET_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(key))
+	t.Setenv("SPINE_DATABASE_URL", dsn)
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
+	t.Setenv("SPINE_WORKSPACE_ID", "")
+	prev := globalWorkspaceID
+	t.Cleanup(func() { globalWorkspaceID = prev })
+	globalWorkspaceID = ""
+
+	out, err := runReencrypt(t)
+	if err == nil || !strings.Contains(err.Error(), "the workspace id must be stated") {
+		t.Fatalf("reencrypt with no workspace id: %v\n%s", err, out)
+	}
+	for id, want := range map[string]string{"sub-a": "whsec-LEAK-wsid-a", "sub-b": "whsec-LEAK-wsid-b"} {
+		if got := t009Raw(t, st, id); got != want {
+			t.Fatalf("%s was rewritten by a refused run", id)
+		}
+	}
+
+	// Stated: the rows are bound to the id serve binds, and serve reads them.
+	t.Setenv("SPINE_WORKSPACE_ID", "acme")
+	out, err = runReencrypt(t)
+	if err != nil || !strings.Contains(out, "workspace_id=acme\n") || !strings.Contains(out, "workspace acme: clean scanned=2 rewritten=2") {
+		t.Fatalf("reencrypt with SPINE_WORKSPACE_ID=acme: %v\n%s", err, out)
+	}
+	ctx := context.Background()
+	sc, err := buildFileResolverSecretClient(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := spinecrypto.NewSecretCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	served, err := buildStore(ctx, workspace.NewFileProvider(sc), c, store.SecretEnvelopeMigrate, slog.New(slog.DiscardHandler))
+	if err != nil || served == nil {
+		t.Fatalf("buildStore: %v", err)
+	}
+	t.Cleanup(served.(*store.PostgresStore).Close)
+	if got, err := served.GetSubscription(ctx, "sub-a"); err != nil || got.SigningSecret != "whsec-LEAK-wsid-a" {
+		t.Fatalf("serve cannot read the swept row: %v", err)
+	}
+}
+
 func assertNoSecretMaterial(t *testing.T, text string, key []byte, stored ...string) {
 	t.Helper()
 	if strings.Contains(text, "LEAK") {

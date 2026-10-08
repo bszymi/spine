@@ -272,6 +272,45 @@ func TestSecretsReencrypt_WorkspaceFlagMustMatchFileWorkspace(t *testing.T) {
 	}
 }
 
+// INIT-023 wave 2 cross-task review: the single-workspace path binds every
+// row it converts to the workspace id, which is part of the enc:v2
+// associated data, so the id is never guessed. With SPINE_WORKSPACE_ID
+// unset and no --workspace the command refuses before it opens the
+// database; an explicit `--workspace default` proceeds and names the id it
+// binds in the header line.
+func TestSecretsReencrypt_SingleWorkspaceRequiresExplicitID(t *testing.T) {
+	reencryptEnv(t)
+	t.Setenv("SPINE_SECRET_ENVELOPE_MODE", "migrate")
+	t.Setenv("WORKSPACE_RESOLVER", "")
+	t.Setenv("SPINE_WORKSPACE_ID", "")
+	prev := globalWorkspaceID
+	t.Cleanup(func() { globalWorkspaceID = prev })
+	globalWorkspaceID = ""
+
+	var out bytes.Buffer
+	err := runSecretsReencrypt(context.Background(), &out, reencryptOptions{})
+	if err == nil || !strings.Contains(err.Error(), "the workspace id must be stated") ||
+		!strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("unset workspace id: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("command went past the workspace-id check: %q", out.String())
+	}
+
+	// --workspace default states the id: the command goes on to the
+	// database (refusing connections here) and prints the bound id.
+	globalWorkspaceID = "default"
+	out.Reset()
+	err = runSecretsReencrypt(context.Background(), &out, reencryptOptions{})
+	if err == nil || strings.Contains(err.Error(), "must be stated") {
+		t.Fatalf("--workspace default: %v", err)
+	}
+	if !strings.Contains(out.String(), " workspace_id=default\n") ||
+		!strings.Contains(out.String(), "workspace default: unreachable: connect failed") {
+		t.Fatalf("--workspace default output:\n%s", out.String())
+	}
+}
+
 // Database-sourced text is quoted in the command output: a subscription id
 // planted by a runtime-database writer cannot inject a forged line or a
 // terminal escape into the output operators gate strict on.
