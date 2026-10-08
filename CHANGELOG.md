@@ -158,8 +158,14 @@ CI that pushes release tags must use an operator token.
     refused before any side effect (these previously failed at `git add`, or
     with an OS error, after the file was written);
   - a non-canonical path (`a//b.md`, `a/./b.md`, a trailing `/`), which was
-    folded and written before: **now 400 `invalid_params`** (SMP's
-    `validateRepoRelativePath` already refuses these);
+    folded and written before: **now 400 `invalid_params`**. SMP is unaffected
+    because its embedded artifact entry points pass only canonical paths
+    (`normalizeTaskPath` for task actions, a `path.Clean` equality check for
+    content writes, `BuildArtifactPath` for creates). SMP's
+    `validateRepoRelativePath` is not that guard: it refuses only empty,
+    absolute, NUL and `..` paths, and only in front of SMP's own
+    `RealGitOperator`, so a new SMP entry point that passes a client path to
+    `artifact.Service` must canonicalise or refuse it itself;
   - `Create` at a path that is an in-repo symlink to an existing file, or an
     existing directory: **409 `already_exists` → 400 `invalid_params`**;
   - artifact `Update` / accept / reject of an existing worktree file over
@@ -592,9 +598,10 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
   callers already treat any error as a refusal. A malformed `Branch` is not
   always a caller bug: when `Branch` embeds client input, validate that input
   first and report it as invalid input, because this error cannot tell bad input
-  from an outage. Spine's own divergence branch API does not do that yet, so a
-  `branch_id` carrying a control byte is refused with HTTP 500 rather than 400
-  (INIT-023 TASK-016 owner question 6). This is a second layer behind the
+  from an outage. Spine's own divergence branch API does so since INIT-023
+  TASK-016: it validates `branch_id` first (`divergence.ValidateExploratoryBranchID`)
+  and answers HTTP 400 for a control byte (it answered 500 while only this guard
+  refused it). This is a second layer behind the
   parser: an embedder that passes a pushed ref to `Evaluate` raw (SMP's gateway
   does) is protected from F1 by this guard alone.
 - **New:** `adapters/git/refname.ValidateQualified(ref string) error`, git's
@@ -682,13 +689,14 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
   `git merge --abort`, with no checkout. A branch source is merged by object id, so without
   `Message` git's default text reads `Merge commit '<oid>'`; a missing source branch is
   `not_found`.
-- **Revision arguments are validated** (`ReadFile`, `ListFiles` and `RefSHA` ref, `LogOpts.Since`;
-  `Diff` and `MergeBase` already were): they must pass `git.ValidateRef`, so rev expressions such
+- **Revision arguments are validated** (`ReadFile`, `ListFiles`, `RefSHA` and `TreeEntryType` ref,
+  `LogOpts.Since`; `Diff` and `MergeBase` already were; `TreeEntryType` is the optional
+  `git.TreeEntryTyper` capability added by INIT-023 TASK-011): they must pass `git.ValidateRef`, so rev expressions such
   as `HEAD~1`, `<sha>^`, `HEAD^{tree}`, `a..b`, and anything containing `:`, `\` or a space are
   refused with `git.ErrInvalidRef` before git runs. Resolve such an expression to an object id
   first. No Spine or SMP caller passes one; the gateways' `?ref=` already refused them.
 - **A revision given by name costs one `git show-ref` per call** (`ReadFile`, `ListFiles`,
-  `RefSHA`, `Diff`, `MergeBase`, `LogOpts.Since`). This applies to any bare name that is a valid
+  `RefSHA`, `TreeEntryType`, `Diff`, `MergeBase`, `LogOpts.Since`). This applies to any bare name that is a valid
   branch name, whether or not that branch exists: a branch, a tag such as `v1.2`, an abbreviated
   id or `origin/<n>` (each is first looked up as `refs/heads/<name>`). It also applies to
   `refs/heads/<n>`. Full object ids, `HEAD` and other `refs/*` names (`refs/tags/<t>`,
@@ -742,7 +750,8 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
   `git -C <repo> for-each-ref refs/HEAD refs/tags/HEAD refs/heads/HEAD refs/remotes/HEAD` and
   `git -C <repo> for-each-ref --format='%(refname)' | grep -E '^refs/((tags|heads|remotes)/)?([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(/HEAD)?$'`,
   and delete every one listed the same way. Push admission (INIT-023 TASK-016) refuses new `HEAD`
-  components; refusing object-id-named refs is recommended to it.
+  components; it does not refuse object-id-named refs, which remain a residual (see
+  `KNOWN-LIMITATIONS.md`, "Git Ref Arguments").
 
 ---
 
@@ -1212,7 +1221,10 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
   `(*store.PostgresStore).ListWorkflowProjections` (not added to `store.Store`).
 - **New optional git capability:** `git.TreeEntryTyper` (`TreeEntryType(ctx, ref, path)`, with
   `git.TreeEntryBlob` / `TreeEntryTree` / `TreeEntryCommit`), implemented by `*git.CLIClient` and not
-  added to `git.GitClient`. The projection asks it what a commit's tree holds at a path before
+  added to `git.GitClient`. Its `ref` is a Rev-class argument of the `CLIClient` ref grammar
+  (INIT-023 TASK-002): validated before git starts (an empty ref or a rev expression is refused with
+  `git.ErrInvalidRef`), a name that is an existing branch is looked up exactly (one `git show-ref`)
+  and reaches git as its object id, and it follows `--end-of-options`. The projection asks it what a commit's tree holds at a path before
   every workflow and branch-protection read, and after a failed changed-artifact read. **A
   `GitClient` decorator passed to `projection.NewService` should forward it:** without it the
   projection keeps the historical read — a successful read is trusted, so a gitlink recording the

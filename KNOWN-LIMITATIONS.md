@@ -353,6 +353,18 @@ The following limitations have been resolved:
   `?ref=<name>` where `<name>` is not an existing branch resolves as git always has, so a pushed
   `refs/<name>` beats `refs/tags/<name>`. Name tags in full (`?ref=refs/tags/<name>`). TASK-016
   blocks such pushes for non-operators.
+- **Residual — a branch beats a same-named tag in a bare-name read.** Revisions resolve
+  branch-first, so a bare `<name>` that is both `refs/heads/<name>` and `refs/tags/<name>` reads
+  the branch; git itself, and Spine before INIT-023, read the tag. Branch-first is what stops a
+  pushed tag from standing in for a run branch or `main`. Since INIT-023 TASK-016 tags are
+  operator-only in standalone while an ordinary branch is pushable by any contributor that branch
+  protection does not stop, so a contributor can push `refs/heads/<tag-name>` and every read that
+  passes the bare name — `?ref=<tag-name>` on the artifact, artifact-list and workflow read APIs —
+  then returns the branch's content instead of the operator's tag, with no warning. Engine-internal
+  reads (run branches, `main`, object ids) are unaffected. Name tags in full
+  (`?ref=refs/tags/<name>`), or protect the tag names' branch namespace with a branch-protection
+  rule. Refusing an ambiguous bare name, or qualifying user-supplied refs at the API, is an
+  INIT-023 follow-up (TASK-002 cross-task review (wave 2)).
 - **Residual — missing non-branch refs.** A `refs/tags/...` or `refs/remotes/...` argument naming
   a ref that does not exist can still be DWIM-substituted by a name such as
   `refs/tags/refs/tags/...`; push admission refuses to create or update those names for every

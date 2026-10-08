@@ -249,6 +249,10 @@ func (u *Undo) Release()        // close held handles without removing anything
   - an empty path, `.` (the root itself), an absolute path, a NUL byte;
   - any empty, `.` or `..` component, even when `filepath.Clean` would fold it away (this matches
     SMP's `validateRepoRelativePath`, `internal/customer/spinecore/gitplumbing.go:122-140`).
+    *(Corrected by the wave 2 cross-task review: it matches only for `..`. SMP's
+    `validateRepoRelativePath` refuses empty, absolute, NUL and `..` paths, not empty or `.`
+    components, and guards only SMP's own `RealGitOperator`. SMP is unaffected for another reason:
+    its embedded artifact entry points pass canonical paths. See "Cross-task review (wave 2)".)*
 - Refused with `ReasonGitDir`: any component that names the git directory. The check mirrors
   git's own `verify_path` `.git` handling, in this order:
   1. drop the code points git's HFS check ignores (U+200C–U+200F, U+202A–U+202E, U+206A–U+206F,
