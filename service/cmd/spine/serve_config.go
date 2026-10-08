@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,6 +203,63 @@ func guardDevModeEnv(env string, dev bool) error {
 		return fmt.Errorf("SPINE_DEV_MODE is enabled but SPINE_ENV=production; dev-mode auth bypass MUST NOT run in production")
 	}
 	return nil
+}
+
+// gitHTTPDevNoAuthEnabled reports whether SPINE_GIT_HTTP_DEV_NO_AUTH is
+// set to an affirmative value (1, true, yes, on; case-insensitive).
+// INIT-023 TASK-015, audit P3-30: this is the only switch that lets /git
+// clone and fetch skip the bearer outside the direct-peer trusted-CIDR
+// rule. SPINE_DEV_MODE no longer touches /git, and no switch lets a push
+// skip authentication.
+func gitHTTPDevNoAuthEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SPINE_GIT_HTTP_DEV_NO_AUTH"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// guardGitHTTPDevNoAuth refuses SPINE_GIT_HTTP_DEV_NO_AUTH unless the
+// runtime environment is explicitly development (owner question 1
+// default, pending the owner). Unlike SPINE_DEV_MODE, which is refused
+// only under production, an unset or staging SPINE_ENV is not enough: an
+// unauthenticated repository read endpoint must be a deliberate local
+// choice, and "SPINE_ENV unset" was exactly the gap the audit flagged.
+func guardGitHTTPDevNoAuth(env string, on bool) error {
+	if !on {
+		return nil
+	}
+	if env != "development" {
+		shown := env
+		if shown == "" {
+			shown = "unset"
+		}
+		return fmt.Errorf("SPINE_GIT_HTTP_DEV_NO_AUTH is set but SPINE_ENV is %s; the unauthenticated git read endpoint requires SPINE_ENV=development", shown)
+	}
+	return nil
+}
+
+// overlappingCIDRs returns the SPINE_GIT_HTTP_TRUSTED_CIDRS entries that
+// overlap a SPINE_TRUSTED_PROXY_CIDRS network. A request whose peer is a
+// declared proxy is never token-less (gateway gitPeerIP), so token-less
+// clones from an address in the overlap stop working; the caller logs
+// this at startup. Unparsable entries are skipped here (githttp refuses
+// them when it builds the handler).
+func overlappingCIDRs(gitTrusted []string, proxies []*net.IPNet) []string {
+	var out []string
+	for _, raw := range gitTrusted {
+		_, n, err := net.ParseCIDR(raw)
+		if err != nil {
+			continue
+		}
+		for _, p := range proxies {
+			if n.Contains(p.IP) || p.Contains(n.IP) {
+				out = append(out, raw)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // validateOperatorToken enforces the startup gate described in TASK-010.

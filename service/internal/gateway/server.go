@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bszymi/spine/adapters/delivery"
@@ -199,11 +200,13 @@ type Server struct {
 	webhookTargets             *delivery.TargetValidator  // optional, nil = permissive; enforces SSRF rules on target_url writes and tests
 	bindingInvalidationHandler http.Handler               // optional, nil if not configured; ADR-011 platform → Spine invalidation webhook
 	repoManager                *repository.Manager        // optional, nil if not configured; INIT-014 EPIC-001 multi-repo workspace management
-	devMode                    bool                       // when true, authorize allows unauthenticated requests
+	devMode                    bool                       // when true, authorize allows unauthenticated requests; never affects /git (INIT-023 TASK-015)
+	gitDevNoAuth               bool                       // SPINE_GIT_HTTP_DEV_NO_AUTH: /git clone and fetch skip the bearer (SPINE_ENV=development only); pushes never do
 	env                        string                     // SPINE_ENV value (production/staging/development); surfaced in health
-	sseLimiter                 *sseLimiter                // caps concurrent SSE streams per actor
-	trustedProxyCIDRs          []*net.IPNet               // reverse-proxy networks whose XFF header is honored for rate limiting
-	rebuilds                   sync.Map                   // rebuild_id -> *rebuildState
+	sseLimiter                 *sseLimiter                // caps concurrent SSE streams per (workspace, actor)
+	trustedProxyCIDRs          []*net.IPNet               // reverse-proxy networks: their XFF picks the rate-limit bucket; a request from them never gets token-less git access
+	rebuilds                   sync.Map                   // (workspace, rebuild_id) -> *rebuildState; see rebuildRegistryKey
+	gitProxyWarnAt             atomic.Int64               // unix nanos of the last "proxied trusted-CIDR git peer" Warn; rate-limits it
 }
 
 // CandidateFinder discovers tasks ready for execution.
@@ -322,14 +325,15 @@ type ServerConfig struct {
 	BindingInvalidationHandler http.Handler
 	RepositoryManager          *repository.Manager       // optional; serves /api/v1/repositories
 	WebhookTargets             *delivery.TargetValidator // optional; enforces webhook target_url SSRF rules on create/update/test. A nil validator permits every URL and is only appropriate for tests.
-	DevMode                    bool                      // when true, authorize allows unauthenticated requests
+	DevMode                    bool                      // when true, authorize allows unauthenticated requests; does not affect /git
+	GitHTTPDevNoAuth           bool                      // SPINE_GIT_HTTP_DEV_NO_AUTH: /git clone and fetch without a bearer (cmd/spine accepts it only with SPINE_ENV=development); pushes still need one
 	Env                        string                    // SPINE_ENV: production/staging/development; surfaced in /system/health
 	ReadHeaderTimeout          time.Duration             // defaults to 10s
 	ReadTimeout                time.Duration             // defaults to 30s
 	WriteTimeout               time.Duration             // defaults to 60s
 	IdleTimeout                time.Duration             // defaults to 120s
 	SSEMaxConnPerActor         int                       // per-actor SSE connection cap; defaults to 5, <=0 disables
-	TrustedProxyCIDRs          []*net.IPNet              // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables
+	TrustedProxyCIDRs          []*net.IPNet              // reverse-proxy networks whose XFF header is honored for rate limiting; nil disables. A request from one never gets token-less git access
 
 	// DisableStepAssignFallback removes the gateway's engine-less step
 	// assigner (storeStepAssigner), which binds an actor straight through
@@ -381,12 +385,16 @@ func NewServer(addr string, cfg ServerConfig) *Server {
 		repoManager:                cfg.RepositoryManager,
 		webhookTargets:             cfg.WebhookTargets,
 		devMode:                    cfg.DevMode,
+		gitDevNoAuth:               cfg.GitHTTPDevNoAuth,
 		env:                        cfg.Env,
 		sseLimiter:                 newSSELimiter(withDefaultInt(cfg.SSEMaxConnPerActor, 5)),
 		trustedProxyCIDRs:          cfg.TrustedProxyCIDRs,
 	}
 	if cfg.DevMode {
 		observe.Logger(context.Background()).Warn("DEV MODE ENABLED — authentication is bypassed for unauthenticated requests, do not use in production")
+	}
+	if cfg.GitHTTPDevNoAuth {
+		observe.Logger(context.Background()).Warn("SPINE_GIT_HTTP_DEV_NO_AUTH ENABLED — /git clone and fetch need no bearer token; pushes still do. Development only")
 	}
 
 	s.httpServer = &http.Server{

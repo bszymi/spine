@@ -82,9 +82,11 @@ func tagSetup(t *testing.T) (engine, attacker, evil string) {
 }
 
 // tagServer serves repo with main protected (no-direct-write,
-// no-delete) and one URL prefix per principal: /anon/ (no actor, as in
-// the gateway's devMode), /contributor/ and /operator/. It wires no run
-// reader: none of these refs is a run branch.
+// no-delete) and one URL prefix per principal: /anon/ (no actor — the
+// gateway itself never forwards an anonymous push since INIT-023
+// TASK-015, so this exercises the handler's own defence), /contributor/
+// and /operator/. It wires no run reader: none of these refs is a run
+// branch.
 func tagServer(t *testing.T, repo string) func(principal string) string {
 	t.Helper()
 	h, err := NewHandler(Config{

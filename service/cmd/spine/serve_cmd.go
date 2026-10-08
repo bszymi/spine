@@ -54,6 +54,13 @@ func serveCmd() *cobra.Command {
 			if devMode {
 				log.Warn("SPINE_DEV_MODE is enabled — unauthenticated requests will be allowed", "env", runtimeEnv)
 			}
+			// SPINE_GIT_HTTP_DEV_NO_AUTH (INIT-023 TASK-015): refused
+			// unless SPINE_ENV=development, before any store, secret or
+			// listener is opened, so a misconfiguration fails at startup.
+			gitDevNoAuth := gitHTTPDevNoAuthEnabled()
+			if err := guardGitHTTPDevNoAuth(runtimeEnv, gitDevNoAuth); err != nil {
+				return err
+			}
 
 			// SMP_ADMIN_TOKEN strength gate (INIT-023 TASK-013): checked
 			// before any store, secret or listener is opened.
@@ -142,6 +149,11 @@ func serveCmd() *cobra.Command {
 			if len(trustedProxyCIDRs) > 0 {
 				log.Info("rate limiter will honor X-Forwarded-For from trusted proxies", "cidrs", os.Getenv("SPINE_TRUSTED_PROXY_CIDRS"))
 			}
+			gitTrustedCIDRs := parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS"))
+			if overlap := overlappingCIDRs(gitTrustedCIDRs, trustedProxyCIDRs); len(overlap) > 0 {
+				log.Warn("SPINE_GIT_HTTP_TRUSTED_CIDRS overlaps SPINE_TRUSTED_PROXY_CIDRS: a request from a declared proxy is never given token-less git access, so token-less clones from the overlap will be refused",
+					"overlap", overlap)
+			}
 
 			orphanThreshold := time.Duration(0)
 			if v := os.Getenv("SPINE_ORPHAN_THRESHOLD"); v != "" {
@@ -175,7 +187,8 @@ func serveCmd() *cobra.Command {
 				RuntimeEnv:                 runtimeEnv,
 				DevMode:                    devMode,
 				TrustedProxyCIDRs:          trustedProxyCIDRs,
-				TrustedGitHTTPCIDRs:        parseGitHTTPTrustedCIDRs(os.Getenv("SPINE_GIT_HTTP_TRUSTED_CIDRS")),
+				TrustedGitHTTPCIDRs:        gitTrustedCIDRs,
+				GitHTTPDevNoAuth:           gitDevNoAuth,
 				GitReceivePackEnabled:      parseGitReceivePackEnabled(os.Getenv("SPINE_GIT_RECEIVE_PACK_ENABLED")),
 				EventDeliveryOn:            deliveryCfg.Enabled,
 				SMPEventURL:                deliveryCfg.SMPEventURL,

@@ -158,6 +158,10 @@ type serveDeps struct {
 	DevMode             bool
 	TrustedProxyCIDRs   []*net.IPNet
 	TrustedGitHTTPCIDRs []string
+	// GitHTTPDevNoAuth (SPINE_GIT_HTTP_DEV_NO_AUTH; serveCmd refuses it
+	// unless SPINE_ENV=development) lets /git clone and fetch skip the
+	// bearer. Pushes always need one. INIT-023 TASK-015.
+	GitHTTPDevNoAuth bool
 	// GitReceivePackEnabled wires the git push endpoint (receive-pack).
 	// Default false; EPIC-004 TASK-001. When true this is still a bare
 	// passthrough — branch-protection enforcement is TASK-002.
@@ -481,6 +485,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		SSEMaxConnPerActor:         deps.SSEMaxConn,
 		TrustedProxyCIDRs:          deps.TrustedProxyCIDRs,
 		DevMode:                    deps.DevMode,
+		GitHTTPDevNoAuth:           deps.GitHTTPDevNoAuth,
 		Env:                        deps.RuntimeEnv,
 		// INIT-023 TASK-007: with a step-entry policy installed, the
 		// gateway must not fall back to its engine-less store binder (it
