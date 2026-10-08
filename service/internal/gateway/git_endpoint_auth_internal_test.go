@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -268,10 +269,29 @@ func TestP330_RateLimitClientIP_ReadsAllForwardedLines(t *testing.T) {
 
 // The refused-proxied-peer Warn names the remedy, carries no header
 // value, and is rate-limited.
+// lockedBuffer is a bytes.Buffer safe for the concurrent writes of
+// whatever else logs through slog.Default while a test captures it.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 func TestP330_ProxiedTrustedPeerWarnIsRateLimited(t *testing.T) {
-	var buf bytes.Buffer
+	buf := &lockedBuffer{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	s := t015GitServer(t, []string{"172.28.0.0/16"}, "", false)
