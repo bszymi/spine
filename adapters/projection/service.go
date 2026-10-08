@@ -413,7 +413,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	// — but the artifact, branch-protection and workflow changes in the
 	// window are still applied, as they were before the sweep existed:
 	// one row that cannot be reconciled must not freeze the projection.
-	sweepErr := s.ensureWorkflowsVerified(ctx, head, state.LastSyncedCommit)
+	swept, sweepErr := s.ensureWorkflowsVerified(ctx, head, state.LastSyncedCommit)
 	if sweepErr != nil {
 		log.Warn("projection: workflow row reconciliation failed; the sync is held in error and retries it",
 			"head", shortSHA(head),
@@ -423,6 +423,26 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 
 	// Retry if previous sync failed, even at the same commit
 	if sweepErr == nil && head == state.LastSyncedCommit && state.Status == "idle" {
+		if swept {
+			// The sweep wrote rows judged at head, which was resolved
+			// before the sweep listed them. Another instance — an SMP
+			// replica, or a fresh instance after a pool rotation — may
+			// meanwhile have projected a newer head and advanced
+			// sync_state, and a row it wrote there (a new workflow, a
+			// changed one) looks absent or different at this head, so the
+			// sweep just deleted or replaced it. Every other path that
+			// writes rows also writes sync_state; do the same here and
+			// re-record the state this sync is based on, so that if it was
+			// advanced meanwhile the next tick re-diffs from this head and
+			// restores what the sweep undid (INIT-023 wave 2 cross-task
+			// review). When nothing moved, the write changes nothing.
+			if err := s.store.UpdateSyncState(ctx, &store.SyncState{
+				LastSyncedCommit: head,
+				Status:           "idle",
+			}); err != nil {
+				return fmt.Errorf("update sync state: %w", err)
+			}
+		}
 		return nil // already up to date and healthy
 	}
 

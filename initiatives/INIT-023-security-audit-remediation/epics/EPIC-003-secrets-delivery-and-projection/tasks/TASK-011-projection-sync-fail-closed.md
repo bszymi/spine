@@ -820,6 +820,11 @@ Non-Active rows are not swept. They are not bindable, and a `FullRebuild` re-der
 >      then stale until that file next changes.
 >    - Cross-instance concurrency stays out of scope, as before: SMP's provisioning `FullRebuild`
 >      next to the warm-workspace loop.
+>      *(Corrected by the wave 2 cross-task review: not "as before". Before this task every path
+>      that deleted or rewrote a row from a stale head also wrote `sync_state`, so a cross-instance
+>      race healed on the next tick; the sweep followed by the up-to-date early return did not, and
+>      could lose a row another instance projected at a newer head for good. A sweep that writes
+>      now re-records `sync_state` on that path — see "Cross-task review (wave 2)".)*
 
 ### 7. Write-path parity
 

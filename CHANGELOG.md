@@ -1230,6 +1230,13 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
     locations — every nested `workflows/**` row, not only the empty-status `workflows/steps/*`
     step profiles: an Active nested definition (for example in an imported repository) is removed
     and reported, and in-flight runs pinned to it lose their row;
+  - when that reconciliation writes a row (deletes, replaces or quarantines one) on a sync that is
+    otherwise up to date, it re-records `sync_state` (`idle` at the head it judged by) instead of
+    returning without a write. Its head is resolved before the rows are listed, so another instance
+    (an SMP replica, a re-warmed workspace) may have projected a newer head in between; if it did,
+    the next tick re-diffs from this head and restores what the reconciliation undid. A row whose
+    projecting sync spans the whole reconciliation can still be lost, as with any two instances
+    projecting at different heads;
   - incremental sync no longer projects `templates/`;
   - a `Diff` failure, a `Head()` failure (previously the state was left untouched), and a read of a
     changed file that git itself failed (a lock, a killed or unspawnable process) are each an

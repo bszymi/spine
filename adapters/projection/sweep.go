@@ -29,21 +29,24 @@ type allWorkflowRowsLister interface {
 // older head could otherwise re-upsert a stale row after a concurrent
 // sync projected the newer one). A failed sweep leaves the flag unset
 // and the next sync retries it. from is the store's last_synced_commit
-// (see reconcileWorkflowRows).
-func (s *Service) ensureWorkflowsVerified(ctx context.Context, head, from string) error {
+// (see reconcileWorkflowRows). changed reports whether this call's sweep
+// wrote any row (deleted, replaced or quarantined one), whether or not it
+// then failed.
+func (s *Service) ensureWorkflowsVerified(ctx context.Context, head, from string) (changed bool, err error) {
 	if s.workflowsVerified.Load() {
-		return nil
+		return false, nil
 	}
 	s.sweepMu.Lock()
 	defer s.sweepMu.Unlock()
 	if s.workflowsVerified.Load() {
-		return nil
+		return false, nil
 	}
-	if err := s.reconcileWorkflowRows(ctx, head, from); err != nil {
-		return err
+	changed, err = s.reconcileWorkflowRows(ctx, head, from)
+	if err != nil {
+		return changed, err
 	}
 	s.workflowsVerified.Store(true)
-	return nil
+	return changed, nil
 }
 
 // reconcileWorkflowRows re-checks every stored workflow row against
@@ -77,27 +80,31 @@ func (s *Service) ensureWorkflowsVerified(ctx context.Context, head, from string
 //     deleted (removed).
 //
 // Any git or store error is returned; the caller counts it as a sync
-// error and retries the sweep on the next tick.
-func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) error {
+// error and retries the sweep on the next tick. changed reports whether
+// any row was written (deleted, replaced or quarantined) before it
+// returned: the caller must then move sync_state (see IncrementalSync),
+// because head was resolved before the rows were listed, and a row another
+// instance projected at a newer head in between is judged at this older
+// one.
+func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) (changed bool, err error) {
 	log := observe.Logger(ctx)
 
 	var rows []store.WorkflowProjection
-	var err error
 	if lister, ok := s.store.(allWorkflowRowsLister); ok {
 		rows, err = lister.ListWorkflowProjections(ctx)
 	} else {
 		rows, err = s.store.ListActiveWorkflowProjections(ctx)
 	}
 	if err != nil {
-		return fmt.Errorf("list workflow rows: %w", err)
+		return false, fmt.Errorf("list workflow rows: %w", err)
 	}
 	if len(rows) == 0 {
-		return nil
+		return false, nil
 	}
 
 	files, err := s.git.ListFiles(ctx, head, "")
 	if err != nil {
-		return fmt.Errorf("list files at %s: %w", shortSHA(head), err)
+		return false, fmt.Errorf("list files at %s: %w", shortSHA(head), err)
 	}
 	atHead := make(map[string]struct{}, len(files))
 	for _, f := range files {
@@ -135,8 +142,9 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 
 		if !s.scope.isWorkflow(row.WorkflowPath) {
 			if err := s.store.DeleteWorkflowProjection(ctx, row.WorkflowPath); err != nil {
-				return fmt.Errorf("delete out-of-scope workflow row %s: %w", row.WorkflowPath, err)
+				return changed, fmt.Errorf("delete out-of-scope workflow row %s: %w", row.WorkflowPath, err)
 			}
+			changed = true
 			if active {
 				s.reportWorkflowRejection(ctx, &WorkflowRejection{
 					Path: row.WorkflowPath, Commit: head, Check: checkScope,
@@ -151,8 +159,9 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 
 		if _, ok := atHead[row.WorkflowPath]; !ok {
 			if err := s.store.DeleteWorkflowProjection(ctx, row.WorkflowPath); err != nil {
-				return fmt.Errorf("delete workflow row absent at head %s: %w", row.WorkflowPath, err)
+				return changed, fmt.Errorf("delete workflow row absent at head %s: %w", row.WorkflowPath, err)
 			}
+			changed = true
 			if inWindow(row.WorkflowPath) {
 				log.Info("projection: removed workflow row whose file was deleted after the last synced commit",
 					"workflow_path", row.WorkflowPath, "from", shortSHA(from), "head", shortSHA(head))
@@ -167,30 +176,35 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 
 		cand, rej, err := s.buildWorkflowRow(ctx, row.WorkflowPath, head)
 		if err != nil {
-			return err
+			return changed, err
 		}
 		if rej == nil {
 			if sameWorkflowRow(cand, row) {
 				continue
 			}
 			if err := s.store.UpsertWorkflowProjection(ctx, cand); err != nil {
-				return fmt.Errorf("upsert workflow %s: %w", row.WorkflowPath, err)
+				return changed, fmt.Errorf("upsert workflow %s: %w", row.WorkflowPath, err)
 			}
+			changed = true
 			continue
 		}
 		if workflow.VerifyProjectionDefinition(row.Definition) == nil {
+			if row.Status != string(domain.WorkflowStatusQuarantined) {
+				changed = true // quarantineWorkflowRow writes only then
+			}
 			if err := s.quarantineWorkflowRow(ctx, row); err != nil {
-				return err
+				return changed, err
 			}
 			s.reportWorkflowRejection(ctx, rej, actionKept, row)
 			continue
 		}
 		if err := s.store.DeleteWorkflowProjection(ctx, row.WorkflowPath); err != nil {
-			return fmt.Errorf("delete unverifiable workflow row %s: %w", row.WorkflowPath, err)
+			return changed, fmt.Errorf("delete unverifiable workflow row %s: %w", row.WorkflowPath, err)
 		}
+		changed = true
 		s.reportWorkflowRejection(ctx, rej, actionRemoved, nil)
 	}
-	return nil
+	return changed, nil
 }
 
 // sameWorkflowRow reports whether a candidate row built at head carries
