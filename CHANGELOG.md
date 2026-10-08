@@ -39,7 +39,8 @@ release is cut — this file is a staging area.
 - **Divergence branch creation is tied to the run (owner question 6).**
   `POST /runs/{run_id}/divergences/{divergence_id}/branches` now refuses, with `400`, a `branch_id`
   outside the workflow ID grammar (`^[a-z0-9][a-z0-9_\-.]*$`, at most 128 bytes, no `..`, no
-  trailing `.`/`.lock`) — a control byte was a `500` before — and, with `403`, a caller who is
+  trailing `.`/`.lock`, not `refs`, which would make a ref name the push gate refuses for
+  everyone) — a control byte was a `500` before — and, with `403`, a caller who is
   neither an operator nor bound to the run: the actor who submitted the step that triggered the
   divergence, or one holding a live cursor of the run. Before, any contributor could attach a
   branch to another actor's run and then become the actor allowed to push its divergence ref.

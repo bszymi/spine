@@ -27,8 +27,16 @@ const maxExploratoryBranchIDLen = 128
 // branch ID before it is embedded in a git ref name and a store key
 // (INIT-023 TASK-016 owner question 6). It returns ErrInvalidParams
 // (HTTP 400) unless id matches the workflow ID grammar, is at most 128
-// bytes, and is a valid git ref component: no "..", no trailing "."
-// and no ".lock" suffix.
+// bytes, is a valid git ref component (no "..", no trailing "." and no
+// ".lock" suffix), and is not "refs".
+//
+// "refs" would make the branch's ref spine/<run>/<divergence>/refs, a
+// name with a non-leading "refs" component, which push admission's rule
+// 0b (core/refadmit) refuses for every principal, operators included:
+// the engine would create a branch nobody can ever push (INIT-023 wave 2
+// cross-task review). "HEAD", the other shadowing component, cannot match
+// the lower-case grammar, and the run and divergence components the
+// engine builds ("<run-id>-div-…") never equal either name.
 //
 // CreateExploratoryBranch itself does not call it, so embedders that
 // call that method keep their current behaviour; the standalone
@@ -47,6 +55,9 @@ func ValidateExploratoryBranchID(id string) error {
 	case strings.Contains(id, ".."), strings.HasSuffix(id, "."), strings.HasSuffix(id, ".lock"):
 		return domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("invalid branch_id %q (not a valid git ref component)", id))
+	case id == "refs":
+		return domain.NewError(domain.ErrInvalidParams,
+			`invalid branch_id "refs" (a "refs" component after the first makes a ref name push admission refuses)`)
 	}
 	return nil
 }
