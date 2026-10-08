@@ -97,25 +97,60 @@ func ValidateCloneURL(raw string) error {
 	return nil
 }
 
-// RedactCloneURL returns the clone URL with any embedded password
-// stripped. A bare user component without a password is left intact —
-// e.g. ssh://git@host/... uses "git" as the SSH login, not a
-// credential. The SCP-like form (user@host:path) is also left intact
-// for the same reason. Operators often embed deploy tokens directly
-// in HTTPS clone URLs as user:token@host, so any code that surfaces
-// such a URL through the API or event log should run it through this
-// first.
+// RedactCloneURL returns the clone URL with any embedded credential
+// stripped, for echoing through the API or an event:
+//
+//   - https: all userinfo is removed. GitHub, GitLab and Bitbucket accept
+//     a bare token in the username position (https://<token>@host/...),
+//     which the old password-only rule echoed to every Reader of
+//     GET /repositories (INIT-023 TASK-015). The cost is that a
+//     non-secret username (Azure DevOps https://org@dev.azure.com/...)
+//     is not shown either; the stored value is untouched.
+//   - other schemes: the userinfo is removed only when it carries a
+//     password. A bare user of an ssh URL (ssh://git@host/...,
+//     git+ssh://git@host/...) is the SSH login, not a credential, and
+//     is kept; so is the SCP-like form (user@host:path).
+//   - a value url.Parse refuses (only reachable for a row stored before
+//     ValidateCloneURL existed) loses everything before the last '@' of
+//     its authority, so a parse failure never echoes a credential.
+//
+// Operators often embed deploy tokens directly in HTTPS clone URLs, so
+// any code that surfaces such a URL must run it through this first.
 func RedactCloneURL(raw string) string {
 	if scpLikeGit.MatchString(raw) {
 		return raw
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
+	if err != nil {
+		return redactUnparsedUserinfo(raw)
+	}
+	if u.User == nil {
 		return raw
 	}
-	if _, hasPassword := u.User.Password(); !hasPassword {
+	_, hasPassword := u.User.Password()
+	if !hasPassword && !strings.EqualFold(u.Scheme, "https") {
 		return raw
 	}
 	u.User = nil
 	return u.String()
+}
+
+// redactUnparsedUserinfo strips the userinfo of a "scheme://authority"
+// string url.Parse could not parse: everything between "://" and the
+// last '@' before the path, query or fragment. A string without "://" is
+// returned unchanged.
+func redactUnparsedUserinfo(raw string) string {
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return raw
+	}
+	rest := raw[i+3:]
+	end := strings.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	if at := strings.LastIndex(rest[:end], "@"); at >= 0 {
+		return raw[:i+3] + rest[at+1:]
+	}
+	return raw
 }
