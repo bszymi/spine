@@ -44,6 +44,9 @@ func (s *Server) routes() http.Handler {
 			r.Get("/workspaces", s.handleWorkspaceList)
 			r.Get("/workspaces/{workspace_id}", s.handleWorkspaceGet)
 			r.Post("/workspaces/{workspace_id}/deactivate", s.handleWorkspaceDeactivate)
+			// Process-wide metrics, every workspace (INIT-023 TASK-015).
+			// Tenant operators use the workspace-scoped /system/metrics.
+			r.Get("/platform/metrics", s.handlePlatformMetrics)
 		})
 
 		// Workspace-scoped + authenticated routes.

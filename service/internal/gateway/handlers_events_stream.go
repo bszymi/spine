@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,15 +47,20 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 
 	// Cap concurrent SSE streams per actor to prevent resource exhaustion.
-	var heldActorID string
+	// The key is (workspace, actor), captured once so Acquire and Release
+	// always use the same key: actor IDs are unique only within a
+	// workspace (every shared-mode workspace has its own smp-admin, and
+	// human IDs are often guessable), so a bare actor_id key let streams
+	// in one workspace exhaust the same ID's slots in every other
+	// workspace (INIT-023 TASK-015, audit P3-29).
 	if actor := actorFromContext(r.Context()); actor != nil {
-		if !s.sseLimiter.Acquire(actor.ActorID) {
+		heldKey := sseLimiterKey(r.Context(), actor.ActorID)
+		if !s.sseLimiter.Acquire(heldKey) {
 			observe.Logger(r.Context()).Warn("sse connection limit reached", "actor_id", actor.ActorID)
 			WriteError(w, domain.NewError(domain.ErrRateLimited, "concurrent SSE connections exceeded for this actor"))
 			return
 		}
-		heldActorID = actor.ActorID
-		defer s.sseLimiter.Release(heldActorID)
+		defer s.sseLimiter.Release(heldKey)
 	}
 
 	// Parse event type filters
@@ -166,6 +172,24 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// sseLimiterKey scopes the per-actor SSE cap to the request's workspace
+// (INIT-023 TASK-015, audit P3-29). A request with no resolved workspace
+// (no resolver wired) keeps the bare actor ID. Shared-mode workspace IDs
+// pass workspace.ValidateID, which admits no NUL, so the composite key
+// cannot collide with another (workspace, actor) pair.
+//
+// An empty actor ID stays empty, which the limiter treats as "no limit",
+// exactly as before.
+func sseLimiterKey(ctx context.Context, actorID string) string {
+	if actorID == "" {
+		return ""
+	}
+	if cfg := WorkspaceConfigFromContext(ctx); cfg != nil && cfg.ID != "" {
+		return cfg.ID + "\x00" + actorID
+	}
+	return actorID
 }
 
 // sseFieldSafe reports whether v can be written as the value of a

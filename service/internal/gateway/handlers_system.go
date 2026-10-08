@@ -94,7 +94,7 @@ func (s *Server) handleSystemRebuild(w http.ResponseWriter, r *http.Request) {
 		Status:    "in_progress",
 		StartedAt: time.Now(),
 	}
-	s.rebuilds.Store(rebuildID, state)
+	s.rebuilds.Store(rebuildRegistryKey(r.Context(), rebuildID), state)
 
 	// G118: the rebuild deliberately detaches from the request
 	// context. It must survive the client hanging up, and its
@@ -121,7 +121,7 @@ func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	rebuildID := chi.URLParam(r, "rebuild_id")
-	val, ok := s.rebuilds.Load(rebuildID)
+	val, ok := s.rebuilds.Load(rebuildRegistryKey(r.Context(), rebuildID))
 	if !ok {
 		WriteError(w, domain.NewError(domain.ErrNotFound, "rebuild not found"))
 		return
@@ -131,13 +131,66 @@ func (s *Server) handleSystemRebuildStatus(w http.ResponseWriter, r *http.Reques
 	WriteJSON(w, http.StatusOK, state.snapshot())
 }
 
+// rebuildRegistryKey scopes the process-global rebuild registry to the
+// request's workspace (INIT-023 TASK-015, audit P3-29). The rebuild ID is
+// "rb-" plus the first eight characters of the trace ID, which a client
+// sets with X-Trace-Id, so in shared mode a bare-ID key let one tenant
+// read another tenant's rebuild status, or replace it, by choosing the
+// same trace prefix. The wire format of rebuild_id is unchanged. A
+// request with no resolved workspace (no resolver wired) keys on the bare
+// ID. Shared-mode workspace IDs pass workspace.ValidateID, which admits no
+// NUL, so two composite keys cannot collide.
+func rebuildRegistryKey(ctx context.Context, rebuildID string) string {
+	if cfg := WorkspaceConfigFromContext(ctx); cfg != nil && cfg.ID != "" {
+		return cfg.ID + "\x00" + rebuildID
+	}
+	return rebuildID
+}
+
+// handleMetrics serves Prometheus metrics to an operator of the request's
+// workspace. In shared multi-workspace mode (a ServicePool is wired) the
+// full export is a cross-tenant disclosure: its spine_workspace_pool_*
+// series name every workspace in the process, and its process-global
+// counters and histograms aggregate every tenant's runs and steps. There
+// the response is only the caller's own workspace series
+// (observe.ExportPrometheusWorkspace); the full export moves to
+// GET /api/v1/platform/metrics behind SPINE_OPERATOR_TOKEN. INIT-023
+// TASK-015, audit P3-29; owner question 3 default, pending the owner.
+//
+// The mode test is "a ServicePool is wired", not "a workspace config is
+// present": file mode resolves a workspace config too, and a
+// single-tenant scrape keeps the full export, unchanged.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "system.metrics") {
 		return
 	}
+	if s.servicePool == nil {
+		writePrometheus(w, observe.ExportPrometheus())
+		return
+	}
+	cfg := WorkspaceConfigFromContext(r.Context())
+	if cfg == nil || cfg.ID == "" {
+		// Unreachable past authMiddleware in shared mode; fail closed
+		// rather than fall back to the full export.
+		WriteError(w, domain.NewError(domain.ErrInvalidParams, "X-Workspace-ID header is required"))
+		return
+	}
+	writePrometheus(w, observe.ExportPrometheusWorkspace(cfg.ID))
+}
+
+// handlePlatformMetrics serves the full process-wide export — every
+// workspace's series and the process-global ones — to the platform
+// operator. It is mounted in the operatorTokenMiddleware group, so it
+// authenticates with SPINE_OPERATOR_TOKEN and answers 503 when that is
+// unset. Shared-mode deployments scrape this one target.
+func (s *Server) handlePlatformMetrics(w http.ResponseWriter, _ *http.Request) {
+	writePrometheus(w, observe.ExportPrometheus())
+}
+
+func writePrometheus(w http.ResponseWriter, body string) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(observe.ExportPrometheus()))
+	_, _ = w.Write([]byte(body))
 }
 
 func (s *Server) handleSystemValidate(w http.ResponseWriter, r *http.Request) {
