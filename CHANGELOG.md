@@ -990,11 +990,21 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
 - **Separation of duties also governs engine auto-selection.** When the engine
   auto-selects an actor for an `automated_only` or `ai_only` step and the
   selected actor authored the run (for a `review` step) or holds the run's live
-  review (for a `manual`/`automated` step), the step stays `waiting` with an
+  review (for an author step), the step stays `waiting` with an
   info log ("auto-selected actor refused by separation of duties"); no other
   candidate is tried, so a non-author must claim it or an operator assign one.
   A workflow whose only eligible runner or agent also executed an author step
   stalls at that review.
+- **Run authors include every step a bound actor may push for** (INIT-023 wave 2
+  cross-task review). Separation of duties counts an execution as authorship
+  when its step type is anything but `review` or `internal`: besides `manual`
+  and `automated`, a `convergence` step (a divergence workflow's
+  `evaluation_step`) and a step with no or an unknown `type` now count, because
+  run-branch push admission (TASK-016) lets the bound actor of any such step
+  push commits. So the actor who evaluated a convergence point can no longer be
+  bound to the run's review (`403` separation of duties), and an actor holding
+  a live review cannot be bound to a `convergence` step of the same run.
+  Embedders that set `SeparationOfDuties` get the same rule.
 - **Separation of duties is serialised per run.** Within one `spine serve`
   process, two concurrent binds into the same run (assign, claim or
   auto-selection) run their separation-of-duties check and bind write one after

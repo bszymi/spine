@@ -287,6 +287,9 @@ The mode-implied types match `resolveAutoActorID`'s inference (`step.go:947-956`
   - The data comes from `o.store.ListStepExecutionsByRun` and the pinned `wfDef`; no new store method is needed.
 - **What does not count:**
   - executions of `review`, `convergence` and `internal` steps, so one person may both `verify` and `review` in SMP's `task-default`, which has two review-type steps (owner question 1);
+    *(amended by the wave 2 cross-task review: `convergence` steps and steps with no or an unknown
+    `type` do count — push admission lets their bound actor push commits; only `review` and
+    `internal` do not. See "Cross-task review (wave 2)".)*
   - the run initiator, who is not recorded on `runtime.runs` (no schema change; Out of scope).
 - **Both binding paths.** The rule applies to `AssignStep` and `ClaimStep`.
 - **Auto-selection.** It also applies when `ActivateStep` auto-selects an actor for an `automated_only` or `ai_only` review step (`step.go:73`, `:169-181`). If the selected actor is an author, the step stays `waiting` with an info log, the same as "no match". It is never bound, and a non-author can claim it. `actor.SelectionRequest` (`core/actor/selection.go:23-29`) has no exclusion list, and adding one is not needed here.
@@ -352,6 +355,10 @@ The mode-implied types match `resolveAutoActorID`'s inference (`step.go:947-956`
 >   when recovery left a claim row active. It is listed under Out of scope.
 > - SoD also cannot see git authorship: who pushed which commit. TASK-016 limits pushes to the
 >   bound actor; together with (b) that covers every push a bound actor made.
+>   *(Corrected by the wave 2 cross-task review: that held only for `manual` and `automated`
+>   steps. TASK-016 also admits the bound actor of a `convergence` step and of a step with no or
+>   an unknown `type`, which this rule did not count; the author set is now every type but
+>   `review` and `internal`. Operators, who push unbound, remain invisible to SoD.)*
 
 ### 8. Preconditions under `EnforcePreconditions`
 
@@ -739,7 +746,8 @@ The zero value keeps the forward-compatible skips.
 >     already expects.
 > - **TASK-016** (run-branch push admission) admits a non-operator only while they are bound to
 >   the live execution. The SoD ledger (§7 note) then covers every non-operator who could have
->   pushed: anyone ever bound to an author execution.
+>   pushed: anyone ever bound to an author execution. *(True only since the wave 2 cross-task
+>   review widened "author execution" to every step type TASK-016 does not freeze.)*
 >   - Together they bound "who wrote it" against "who reviews it". Neither does it alone.
 >   - **Gap 1:** the documented assign-reset residual (Owner question 6).
 >   - **Gap 2:** under TASK-016's Owner question 1 default, operators and admins may push to any
@@ -776,6 +784,7 @@ The zero value keeps the forward-compatible skips.
 
 1. **Separation-of-duties scope.** Which earlier executions disqualify a reviewer?
    - **Default:** any execution, in any status, of a `manual` or `automated` step of the same run, bound to the same actor id. Review, convergence and internal executions do not disqualify, so the same person may `verify` and `review` in SMP's `task-default`.
+   - **Amended (wave 2 cross-task review):** any type but `review` and `internal` disqualifies (`convergence` and untyped steps added), because TASK-016 lets their bound actor push commits. `verify` + `review` stays allowed.
    - **Alternatives:** count only completed executions; also forbid one actor holding two review steps of the same run; also exclude the run initiator. The last needs a `runtime.runs` column, which is a schema change, so it would go to a follow-up.
 2. **Standalone default.** Should `spine serve` install `StrictStepEntryPolicy()` (every check, including SoD and skills-on-assign) by default, with `SPINE_STEP_ENTRY_POLICY=legacy` as a logged escape hatch?
    - **Default:** yes, strict, with the escape hatch, to be removed in a later release.
@@ -1208,6 +1217,7 @@ Implemented on branch `init/INIT-023-TASK-007-step-entry-guards` (base: Spine lo
   execute assign).
 - **OQ1** (default, pending owner): SoD disqualifies any status of a `manual` or `automated`
   execution of the same run, plus `actor_assignments` rows in any status of such an execution.
+  *(Wave 2 cross-task review: of any execution whose type is not `review` or `internal`.)*
 - **OQ2** (default, pending owner): `spine serve` installs the strict policy;
   `SPINE_STEP_ENTRY_POLICY=legacy` is a logged escape hatch; any other value refuses to start.
 - **OQ3** (default, pending owner): keep "main is truth"; Spine's `epic-lifecycle.yaml` execute loses

@@ -10,6 +10,7 @@ import (
 
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/refadmit"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -60,10 +61,12 @@ type StepEntryPolicy struct {
 	// (ClaimStep already checks them). Fails closed (503) when no skill
 	// lookup is wired, unlike ClaimStep's silent skip.
 	RequireSkillsOnAssign bool
-	// SeparationOfDuties: a run author (any actor bound, now or ever, to a
-	// manual or automated execution of the run) cannot be bound to a review
-	// step of that run, and an actor holding a live review execution cannot
-	// be bound to a manual or automated step of the same run.
+	// SeparationOfDuties: a run author (any actor bound, now or ever, to an
+	// execution of the run whose step type is neither review nor internal —
+	// manual, automated, convergence, or an empty or unknown type; see
+	// isAuthorStepType) cannot be bound to a review step of that run, and an
+	// actor holding a live review execution cannot be bound to an author
+	// step of the same run.
 	SeparationOfDuties bool
 	// TerminateStepsOnCancel (P3-16): CancelRun, FailRun, the permanent
 	// merge failure and the scheduler's run-timeout hook move every live
@@ -435,10 +438,22 @@ type runAssignmentHistory interface {
 }
 
 // isAuthorStepType reports whether executing a step of this type makes an
-// actor a run author. review, convergence and internal executions do not,
-// so one actor may both verify and review (Owner question 1 default).
+// actor a run author: every type whose bound actor may write the run or
+// divergence branch. That is every type refadmit.FrozenStepType does not
+// freeze — manual, automated, convergence, and an empty or unknown type —
+// because INIT-023 TASK-016's push admission lets the bound actor of any
+// such step push commits to the branch (wave 2 cross-task review). Only
+// review and internal executions do not make an actor an author, so one
+// actor may still both verify and review in SMP's task-default (Owner
+// question 1 default, as amended).
+//
+// Before the review a convergence step (a divergence workflow's
+// evaluation_step) and a step with no declared type were not author
+// steps, so their bound actor could push commits to the run branch and
+// then review the run. Keying both rules on the one predicate keeps them
+// from drifting apart again.
 func isAuthorStepType(t domain.StepType) bool {
-	return t == domain.StepTypeManual || t == domain.StepTypeAutomated
+	return !refadmit.FrozenStepType(t)
 }
 
 // sodBindStripes serialises, within one process, the separation-of-duties
@@ -552,7 +567,8 @@ func (o *Orchestrator) sodBindSection(ctx context.Context, run *domain.Run, wfDe
 //   - Review step: refused when the candidate is a run author (runAuthor).
 //     The rule is per run: a reviewer who sent work back may execute the
 //     rework, but cannot then review that rework.
-//   - Manual or automated step (the symmetric guard): refused when the
+//   - Author step (isAuthorStepType: manual, automated, convergence, or an
+//     empty or unknown type; the symmetric guard): refused when the
 //     candidate holds a non-terminal review execution of the same run. This
 //     matters only with divergence branches, where a review and an author
 //     step can be live at once; in a linear workflow a reviewer who sent
@@ -610,8 +626,9 @@ func (o *Orchestrator) separationOfDuties(ctx context.Context, run *domain.Run, 
 // runAuthor returns the step through which actorID authored the run, or ""
 // when it did not. An actor is a run author when either holds:
 //
-//	(a) it is the ActorID of a manual or automated execution of the run, in
-//	    any status (failed, in-progress and completed attempts all count);
+//	(a) it is the ActorID of an author execution of the run
+//	    (isAuthorStepType: any type but review and internal), in any
+//	    status (failed, in-progress and completed attempts all count);
 //	(b) it is the actor_id of an actor_assignments row, in any status, of
 //	    such an execution.
 //

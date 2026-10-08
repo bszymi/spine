@@ -136,8 +136,20 @@ This document tracks known gaps and deferred functionality.
 - **Separation-of-duties residual (accepted, Owner question 6):** `AssignStep` writes no
   assignment row, so if restart recovery resets an assign-bound execution and a different actor is
   bound, the first actor leaves no record and is not treated as a run author. Closing it needs an
-  append-only binding ledger (a schema change; follow-up). SoD also cannot see git authorship
-  directly; INIT-023 TASK-016 limits run-branch pushes to the bound actor.
+  append-only binding ledger (a schema change; follow-up).
+- **Separation of duties sees bindings, not git authorship.** It cannot tell who pushed which
+  commit. INIT-023 TASK-016 admits a non-operator's push to a run or divergence branch only from
+  the actor bound to the branch's current step, and only while that step is not a `review` or
+  `internal` step; every other step type (`manual`, `automated`, `convergence`, or a step with no
+  or an unknown `type`) makes its bound actor a run author. So every non-operator who could have
+  pushed is in the author ledger, apart from the assign-reset residual above. Two gaps remain:
+  - **Operators push unbound and are invisible to SoD.** Operators and admins may push any run
+    branch without being bound (TASK-016 owner question 1), and such a push makes them no run
+    author: an operator who pushes commits to a run branch can then be bound to its review. That
+    is within operator authority in standalone; where it matters, compare the run branch's commit
+    authors with the reviewer before accepting.
+  - **A push admitted while bound can land after the step is submitted** (see "Run-Branch
+    Admission Is a Push-Start Check"); its actor still counts as an author, because it was bound.
 - **Separation-of-duties bind race across processes:** the SoD check reads state and the bind
   writes it later. Within one process the engine serialises a run's check-and-bind (an in-process
   lock shared by every orchestrator, held only while the check is re-run and the bind written), so
