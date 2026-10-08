@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 
@@ -28,6 +31,95 @@ type workflowValidateRequest struct {
 	Body string `json:"body"`
 }
 
+// workflowIdentifierPattern is the charset the standalone gateway accepts
+// for the workflow identifiers the engine embeds in event IDs, execution
+// IDs and branch names: step IDs, divergence-point IDs, divergence-branch
+// IDs and convergence-point IDs (core/engine "evt-<trace>-<step>-
+// completed", core/divergence "<run>-div-<dp>"). INIT-023 TASK-015, audit
+// P3-28; the default of owner question 7, pending the owner.
+//
+// It is enforced here, on the standalone API write path only, and
+// deliberately not in core/workflow validation (Decision 3): workflows
+// already on a branch or in the projection — and every workflow SMP's
+// embedded WorkflowWriter writes — keep loading and validating unchanged.
+// The SSE writer refuses unsafe field values on its own
+// (formatSSEEvent), which also covers workflows that arrive by git push
+// or governed merge; this rule is defence in depth. Upper case, "." and
+// "/" are refused: step IDs appear in URL paths
+// (/runs/{run_id}/steps/{step_id}/assign). The 64-character cap matches
+// the trace-ID and repository-ID caps and bounds event-ID growth.
+var workflowIdentifierPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// workflowIdentifierCheckPath is the path the identifier check decodes a
+// request body under. The body, not the path, carries the identifiers.
+const workflowIdentifierCheckPath = workflow.WorkflowsDir + "/identifier-check.yaml"
+
+// maxIdentifierEcho bounds how much of a refused identifier an error
+// message repeats.
+const maxIdentifierEcho = 80
+
+// workflowIdentifierErrors returns one schema error per identifier in
+// body that does not match workflowIdentifierPattern. The body is decoded
+// with workflow.ProjectionDefinition — the decoder the write path itself
+// uses (INIT-023 TASK-011) — so the check sees exactly the document that
+// would be written. A body that does not decode returns nil: the
+// workflow service owns that error (strict decoding refuses case-variant
+// keys such as `ID:`, so a body cannot hide an identifier from this check
+// and still be written). Empty identifiers are left to core validation
+// ("required field missing").
+func workflowIdentifierErrors(body string) []domain.ValidationError {
+	wf, _, err := workflow.ProjectionDefinition(workflowIdentifierCheckPath, []byte(body))
+	if err != nil {
+		return nil
+	}
+	var bad []domain.ValidationError
+	check := func(field, v string) {
+		if v == "" || workflowIdentifierPattern.MatchString(v) {
+			return
+		}
+		echo := v
+		if len(echo) > maxIdentifierEcho {
+			cut := maxIdentifierEcho
+			for cut > 0 && !utf8.RuneStart(echo[cut]) {
+				cut--
+			}
+			echo = echo[:cut] + "..."
+		}
+		bad = append(bad, domain.ValidationError{
+			RuleID:   "schema",
+			Field:    field,
+			Severity: "error",
+			Message:  fmt.Sprintf("identifier %q must match %s", echo, workflowIdentifierPattern.String()),
+		})
+	}
+	for i := range wf.Steps {
+		check(fmt.Sprintf("steps[%d].id", i), wf.Steps[i].ID)
+	}
+	for i := range wf.DivergencePoints {
+		dp := &wf.DivergencePoints[i]
+		check(fmt.Sprintf("divergence_points[%d].id", i), dp.ID)
+		for j := range dp.Branches {
+			check(fmt.Sprintf("divergence_points[%d].branches[%d].id", i, j), dp.Branches[j].ID)
+		}
+	}
+	for i := range wf.ConvergencePoints {
+		check(fmt.Sprintf("convergence_points[%d].id", i), wf.ConvergencePoints[i].ID)
+	}
+	return bad
+}
+
+// checkWorkflowIdentifiers returns ErrValidationFailed (422) carrying
+// workflowIdentifierErrors, or nil. POST and PUT call it right after the
+// body checks, before any dispatch, so the direct-commit path and the
+// planning-run path refuse the same bodies and nothing is written.
+func checkWorkflowIdentifiers(body string) error {
+	bad := workflowIdentifierErrors(body)
+	if len(bad) == 0 {
+		return nil
+	}
+	return domain.NewErrorWithDetail(domain.ErrValidationFailed, "workflow identifiers contain unsupported characters", bad)
+}
+
 func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "workflow.create") {
 		return
@@ -39,6 +131,12 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ID == "" || req.Body == "" {
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "id and body required"))
+		return
+	}
+	// Before the planning-run dispatch below, so a reviewer's planning
+	// run and an operator's direct commit refuse the same bodies.
+	if err := checkWorkflowIdentifiers(req.Body); err != nil {
+		WriteError(w, err)
 		return
 	}
 
@@ -150,6 +248,10 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 	}
 	if req.Body == "" {
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "body required"))
+		return
+	}
+	if err := checkWorkflowIdentifiers(req.Body); err != nil {
+		WriteError(w, err)
 		return
 	}
 
@@ -287,6 +389,12 @@ func (s *Server) handleWorkflowValidate(w http.ResponseWriter, r *http.Request, 
 	}
 
 	result := svc.ValidateBody(r.Context(), id, req.Body)
+	// Report the gateway's identifier rule too, so /validate never passes
+	// a body that POST and PUT refuse.
+	if bad := workflowIdentifierErrors(req.Body); len(bad) > 0 {
+		result.Errors = append(result.Errors, bad...)
+		result.Status = "failed"
+	}
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"workflow_id": id,
 		"status":      result.Status,

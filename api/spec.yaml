@@ -262,7 +262,10 @@ paths:
       description: |
         Creates a new workflow definition. The full workflow validation suite
         (per /architecture/workflow-validation.md) runs before commit. On
-        validation failure, no Git state changes.
+        validation failure, no Git state changes. The standalone server also
+        refuses (422, before any planning run starts) step, divergence-point,
+        divergence-branch and convergence-point IDs outside
+        `^[a-z0-9][a-z0-9_-]{0,63}$` (workflow-definition-format §3.6).
       tags: [Workflows]
       parameters:
         - $ref: '#/components/parameters/XTraceId'
@@ -357,7 +360,7 @@ paths:
       description: |
         Updates an existing workflow definition. Version bump relative to the
         prior definition is required. The full workflow validation suite runs
-        before commit.
+        before commit. The identifier rule of `workflow.create` applies (422).
       tags: [Workflows]
       parameters:
         - $ref: '#/components/parameters/WorkflowId'
@@ -393,7 +396,9 @@ paths:
       summary: Validate a workflow definition without persisting
       description: |
         Runs the workflow validation suite against a candidate body. No Git
-        state changes regardless of outcome.
+        state changes regardless of outcome. Identifiers that `workflow.create`
+        and `workflow.update` would refuse are reported as `schema` errors with
+        `status: failed`.
       tags: [Workflows]
       parameters:
         - $ref: '#/components/parameters/WorkflowId'
