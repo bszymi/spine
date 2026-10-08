@@ -269,7 +269,15 @@ If the Projection Store is lost or corrupted, it can be fully rebuilt from Git:
 3. Projection records are created with `source_commit` set to HEAD
 4. Linkage graph is reconstructed from parsed front matter
 
-**Guarantee:** Full rebuild produces a Projection Store identical to one that was incrementally maintained, because all projection data is derived from Git.
+**Guarantee:** Full rebuild produces a Projection Store identical to one that was incrementally maintained, because all projection data is derived from Git — on every column except `source_commit` (and `synced_at`): incremental sync stamps the commit that changed a file, a rebuild stamps the commit it read.
+
+**One scope for both entry points (INIT-023 TASK-011).** Full rebuild and incremental sync classify paths with one function:
+
+- *Artifacts* are exactly the `.md` files under `artifacts_dir` (the whole repository when it is `/`), excluding `templates/`, keyed by the path relative to `artifacts_dir`. A rename across that boundary is a create or a delete.
+- *Workflow definitions* are the direct `*.yaml` / `*.yml` children of the root `workflows/` directory and, when `artifacts_dir` is a subdirectory, of `<artifacts_dir>/workflows/`. Nested files (for example runner step profiles under `workflows/steps/`) are not definitions.
+- `.spine/branch-protection.yaml` stays at its fixed repository-root path.
+
+**Workflow rejection rule.** A workflow row is written only from a file that strict `workflow.Parse` accepts and whose stored JSON definition reads back to exactly the parsed definition (`workflow.ProjectionDefinition`). A file that fails is *rejected*, not projected; a rejection is never a sync error. Its previous row is kept only when it still verifies (`workflow.VerifyProjectionDefinition`), and then with its `status` column set to `Quarantined`: its `definition` and `source_commit` are untouched, so runs pinned to that commit keep loading it, but no new run binds it. An unverifiable previous row is removed. A full rebuild applies the same rule across its delete-all window and restores a kept row with its own `source_commit`. Rejections are reported as a Warn log line and the `projection_workflow_rejected` event ([Event Schemas](/architecture/event-schemas.md) §4.14).
 
 ### 4.2 Incremental Sync
 
@@ -279,6 +287,14 @@ During normal operation, projections are updated incrementally:
 2. Projection Service reads the changed files from the new commit
 3. Affected projection records are updated
 4. `source_commit` and `synced_at` are updated
+
+The sync target is the authoritative branch when one is configured (standalone Spine pins `refs/heads/main`; see [Git Integration](/architecture/git-integration.md) §2.2), otherwise the repository's `HEAD`.
+
+Each incremental sync computes **one** diff between `last_synced_commit` and the target and uses it for artifacts, workflow definitions and branch protection. Any infrastructure failure — resolving the target, the diff, a store write, a read of a changed file that git itself failed (a lock, a killed or unspawnable process) — sets `sync_state.status = error`, with the cause in `error_detail`, and leaves `last_synced_commit` unchanged, so the next tick retries the same window. A workflow content rejection advances the sync (§4.1). A read failure counts as deterministic only when the commit's tree shows there is no file at that path (a gitlink, a directory) — decided from the tree, never from git's error text, which echoes the committed path: such a changed artifact is skipped, logged at Warn and counted as `read_skipped` in `projection_synced`. Workflow files and `.spine/branch-protection.yaml` are typed from the tree **before** they are read, because `git show` prints whatever object a gitlink's recorded id names — a blob in the repository included — so a successful read does not prove the path holds a file: a non-file workflow entry is a `not_a_file` rejection, and a non-file branch-protection entry is held like a malformed config (rules unchanged, sync `error`).
+
+The first incremental sync of a Projection Service instance also reconciles every stored workflow row against the target before its up-to-date check: rows outside the workflow locations or absent at the target are removed, stale rows are replaced, unchanged rows are left untouched (no `source_commit` re-stamp), and rows whose file is now rejected follow the rejection rule. A row whose file was deleted after `last_synced_commit` is removed as the pending diff would remove it, without a rejection report. A reconciliation that fails holds the sync in `error` and is retried on the next tick, while the changes in the window are still applied.
+
+A store with no `last_synced_commit` has no baseline to diff from: a full rebuild that failed before recording a commit (it records `error`) is retried as a full rebuild.
 
 ### 4.3 Consistency Model
 

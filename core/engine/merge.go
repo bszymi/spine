@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 )
@@ -21,6 +21,12 @@ import (
 // request is built consistently with the git.MergeOpts target below — if
 // either changes, they change together.
 const authoritativeBranch = "main"
+
+// AuthoritativeBranch exports the governed-merge target so wiring that
+// must follow the same branch — the projection's
+// WithAuthoritativeBranch (INIT-023 TASK-011, audit P3-22) — cannot
+// drift from it. It is a short branch name, not a qualified ref.
+const AuthoritativeBranch = authoritativeBranch
 
 // MergeRunBranch merges the run's branch to the authoritative branch (main)
 // and transitions the run from committing to completed. If the merge fails,
@@ -457,6 +463,9 @@ func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run,
 	if err := o.store.UpdateRunStatus(ctx, run.RunID, result.ToStatus); err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
+	// TerminateStepsOnCancel (INIT-023 TASK-007): the publish step (and any
+	// other live execution) closes with the run.
+	o.terminateLiveSteps(ctx, run.RunID, "run failed: merge failed permanently")
 
 	o.emitEvent(ctx, domain.EventRunFailed, run.RunID, run.TraceID,
 		fmt.Sprintf("evt-%s-failed", run.TraceID[:12]), nil)

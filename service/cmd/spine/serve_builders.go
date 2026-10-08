@@ -7,26 +7,27 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/scheduler"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/branchprotect"
 	bpprojection "github.com/bszymi/spine/core/branchprotect/projection"
-	"github.com/bszymi/spine/service/internal/config"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
-	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/scheduler"
-	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/refadmit"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/config"
+	"github.com/bszymi/spine/service/internal/gateway"
+	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -124,18 +125,26 @@ func buildWorkspaceCloneURLBuilder(base, workspaceID string) engine.CloneURLBuil
 }
 
 // buildGitPushResolver returns a resolver the gateway calls on each
-// push to fetch the target workspace's branch-protection policy and
-// event emitter. In shared mode the pool yields the workspace's own
-// store and event router (different database and event stream per
-// workspace, so both MUST be per-request). In single mode
-// (pool == nil) we fall back to the process-level store + event
-// router — both artifact-path and push-path writes evaluate and audit
-// against the same services there.
+// push to fetch the target workspace's branch-protection policy, event
+// emitter, and the run reader plus step-definition lookup the ref-class
+// admission uses for run, plan and divergence branches (INIT-023
+// TASK-016). In shared mode the pool yields the workspace's own store,
+// event router and orchestrator (different database and event stream
+// per workspace, so all of them MUST be per-request). In single mode
+// (pool == nil) we fall back to the process-level store, event router
+// and step-definition lookup — artifact-path and push-path writes
+// evaluate, admit and audit against the same services there.
+//
+// Runs is nil exactly when there is no store (a shared-mode workspace
+// with no database yet, or a single-mode process without one), and
+// StepDefs is nil when no orchestrator is wired. Either way run, plan
+// and divergence branches are operator-only for that push: admission
+// fails closed, unlike the permissive policy below (Decision 4).
 //
 // The returned release callback decrements the ServicePool ref so
 // workspace pools do not leak. Callers defer it; it is always safe to
 // call.
-func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store, fallbackEvents event.EventRouter) gateway.GitPushResolverFunc {
+func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store, fallbackEvents event.EventRouter, fallbackStepDefs refadmit.StepDefLookup) gateway.GitPushResolverFunc {
 	return func(ctx context.Context, workspaceID string) (gateway.GitPushResources, func(), error) {
 		noop := func() {}
 		if pool == nil {
@@ -144,8 +153,10 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 				return gateway.GitPushResources{}, noop, fmt.Errorf("git-push fallback branch-protect policy: %w", err)
 			}
 			return gateway.GitPushResources{
-				Policy: policy,
-				Events: fallbackEvents,
+				Policy:   policy,
+				Events:   fallbackEvents,
+				Runs:     runReaderOrNil(fallbackStore),
+				StepDefs: fallbackStepDefs,
 			}, noop, nil
 		}
 		ss, err := pool.Get(ctx, workspaceID)
@@ -173,8 +184,42 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 		if ss.Events != nil {
 			events = ss.Events
 		}
-		return gateway.GitPushResources{Policy: policy, Events: events}, release, nil
+		return gateway.GitPushResources{
+			Policy:   policy,
+			Events:   events,
+			Runs:     runReaderOrNil(ss.Store),
+			StepDefs: stepDefLookupOrNil(ss.StepAssigner),
+		}, release, nil
 	}
+}
+
+// runReaderOrNil returns st as the ref admission's run reader, or a
+// true nil interface when st is nil, so the admission sees "no reader"
+// (operator-only) rather than a typed nil it would call.
+func runReaderOrNil(st store.Store) refadmit.RunReader {
+	if st == nil {
+		return nil
+	}
+	return st
+}
+
+// stepDefLookupOrNil returns the workspace's step assigner (the
+// per-workspace *engine.Orchestrator, whose LookupStepDef loads the
+// run's pinned workflow version) as the review-freeze hook, or a true
+// nil interface when none is wired or it is a typed nil.
+func stepDefLookupOrNil(v any) refadmit.StepDefLookup {
+	switch l := v.(type) {
+	case nil:
+		return nil
+	case *engine.Orchestrator:
+		if l == nil {
+			return nil
+		}
+		return l
+	case refadmit.StepDefLookup:
+		return l
+	}
+	return nil
 }
 
 // buildWorkflowResolver builds the projection-backed workflow resolver
@@ -236,6 +281,7 @@ func buildOrchestrator(
 	q *queue.MemoryQueue,
 	artifactSvc *artifact.Service,
 	validator *validation.Engine,
+	stepEntryPolicy engine.StepEntryPolicy,
 	log *slog.Logger,
 ) *engine.Orchestrator {
 	if st == nil || wfProvider == nil {
@@ -270,6 +316,9 @@ func buildOrchestrator(
 		return nil
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
+	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
+	orch.WithStepEntryPolicy(stepEntryPolicy)
 
 	divSvc := divergence.NewService(st, gitClient, events)
 	divPolicy, err := buildBranchProtectPolicy(st)
@@ -310,6 +359,11 @@ func buildScheduler(
 			scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
 				return orch.FailRun(ctx, runID, reason)
 			}),
+			// The run-timeout cancel writes the run row directly; this
+			// hook closes the run's live executions afterwards (INIT-023
+			// TASK-007). A no-op unless the step-entry policy sets
+			// TerminateStepsOnCancel.
+			scheduler.WithRunTerminated(orch.TerminateLiveSteps),
 			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
 				return orch.MergeRunBranch(ctx, runID)
 			}, 3, 2*time.Minute),
@@ -320,7 +374,20 @@ func buildScheduler(
 
 // buildGitHTTPHandler assembles the git HTTP handler. Returns nil when
 // no workspace resolver is available or when handler construction fails.
-func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, log *slog.Logger) *githttp.Handler {
+//
+// runs and stepDefs are the handler's fallback pair for the ref-class
+// admission of run, plan and divergence branches (INIT-023 TASK-016);
+// the gateway's per-push resolver attaches the target workspace's pair
+// per request, which wins.
+//
+// perWorkspace is true when that pair is resolved per workspace on each
+// push (shared mode): the fallback pair is then never consulted and is
+// nil by design, so its absence is not reported (it would warn on every
+// shared-mode start); a workspace without a store or engine is refused
+// operator-only at push time, with a Warn log per refused ref. In single
+// mode the resolver attaches exactly this pair, so the warning below
+// describes what pushes will actually get.
+func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, receivePackEnabled bool, policy branchprotect.Policy, runs refadmit.RunReader, stepDefs refadmit.StepDefLookup, perWorkspace bool, log *slog.Logger) *githttp.Handler {
 	if wsResolver == nil {
 		return nil
 	}
@@ -335,6 +402,8 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 		TrustedCIDRs:       trustedCIDRs,
 		ReceivePackEnabled: receivePackEnabled,
 		Policy:             policy,
+		RunRefs:            runs,
+		StepDefs:           stepDefs,
 	})
 	if err != nil {
 		log.Warn("git HTTP endpoint disabled", "reason", err.Error())
@@ -350,9 +419,17 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 			// A nil policy is valid (early-bootstrap, no Store), but
 			// it means pushes are not gated by branch protection —
 			// surface that loudly.
-			log.Warn("git HTTP receive-pack is ENABLED with no branch-protection policy; pushes will land unchecked")
+			log.Warn("git HTTP receive-pack is ENABLED with no branch-protection policy; branch pushes will land unchecked (ref-class admission still applies)")
 		} else {
 			log.Info("git HTTP receive-pack is ENABLED with branch-protection pre-receive enforcement (EPIC-004)")
+		}
+		switch {
+		case perWorkspace:
+			log.Info("run-branch push admission resolves each workspace's run store and engine per push; a workspace without them is operator-only")
+		case runs == nil:
+			log.Warn("run-branch pushes are operator-only: no run store wired")
+		case stepDefs == nil:
+			log.Warn("run-branch pushes are operator-only: no step-definition lookup wired for the review freeze")
 		}
 	}
 	return h
@@ -444,6 +521,107 @@ func errIsCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// serveWorkspaces is the workspace topology `spine serve` runs on, as
+// buildServeWorkspaces assembles it from the environment.
+type serveWorkspaces struct {
+	// SecretCipher and SecretEnvelopeMode are the subscription-secret key
+	// ring and mode every runtime store below is bound and swept with
+	// (INIT-023 TASK-009). SecretCipher is nil when
+	// SPINE_SECRET_ENCRYPTION_KEY is unset outside production; no store is
+	// bound then and the mode has no effect.
+	SecretCipher       *spinecrypto.SecretCipher
+	SecretEnvelopeMode store.SecretEnvelopeMode
+
+	// Wiring is the workspace resolver and, with WORKSPACE_RESOLVER=db or
+	// platform-binding, the ServicePool that builds (binds and sweeps)
+	// every workspace's store.
+	Wiring *resolverWiring
+
+	// Store is the process-level store: file mode only. It is nil in
+	// shared mode and when the database is unreachable at start-up.
+	Store store.Store
+}
+
+// Close releases the store, the pool and the registry connection, in the
+// reverse order of construction.
+func (w *serveWorkspaces) Close() {
+	if closer, ok := w.Store.(interface{ Close() }); ok && w.Store != nil {
+		closer.Close()
+	}
+	if w.Wiring.Pool != nil {
+		w.Wiring.Pool.Close()
+	}
+	if w.Wiring.DBProvider != nil {
+		w.Wiring.DBProvider.Close()
+	}
+}
+
+// buildServeWorkspaces is the start-up step of `spine serve` that turns the
+// environment into the subscription-secret key ring and envelope mode, the
+// workspace resolver (with its ServicePool in shared mode) and the
+// process-level store (file mode).
+//
+// It loads the mode itself and hands the same value to both consumers —
+// buildWorkspaceResolver, whose pool binds every shared-mode workspace
+// store, and buildStore, which binds the file-mode store — so serveCmd
+// carries no mode argument a refactor could drop. That matters because ""
+// is an untyped constant that converts to SecretEnvelopeMode and means
+// migrate: a dropped argument would still compile, the start-up log would
+// still print the configured mode, and every store would be bound in
+// migrate, converting the legacy rows strict exists to refuse (INIT-023
+// TASK-009, review round 2). TestBuildServeWorkspaces_* drive this function
+// from the environment for every resolver.
+func buildServeWorkspaces(ctx context.Context, runtimeEnv string, log *slog.Logger, deliveryCfg workspaceDeliveryConfig, codeRepoBase string, stepEntryPolicy engine.StepEntryPolicy) (*serveWorkspaces, error) {
+	secretCipher, err := loadSecretCipher(runtimeEnv)
+	if err != nil {
+		return nil, err
+	}
+	secretEnvelopeMode, err := loadSecretEnvelopeMode()
+	if err != nil {
+		return nil, err
+	}
+	if secretCipher == nil {
+		log.Warn("SPINE_SECRET_ENCRYPTION_KEY is not set — webhook signing secrets will be stored in plaintext", "env", runtimeEnv)
+		if secretEnvelopeMode != store.SecretEnvelopeMigrate {
+			log.Warn("SPINE_SECRET_ENVELOPE_MODE is ignored without SPINE_SECRET_ENCRYPTION_KEY", "mode", string(secretEnvelopeMode))
+		}
+	} else {
+		ids := secretCipher.KeyIDs()
+		log.Info("secret envelope configured",
+			"primary_key_id", secretCipher.PrimaryKeyID(),
+			"previous_key_ids", ids[1:],
+			"mode", string(secretEnvelopeMode),
+		)
+	}
+
+	wiring, err := buildWorkspaceResolver(ctx, secretCipher, secretEnvelopeMode, log, deliveryCfg, codeRepoBase, stepEntryPolicy)
+	if err != nil {
+		return nil, err
+	}
+	ws := &serveWorkspaces{
+		SecretCipher:       secretCipher,
+		SecretEnvelopeMode: secretEnvelopeMode,
+		Wiring:             wiring,
+	}
+
+	// Only the file resolver is single-workspace and sized to back the
+	// process-level store. db / platform-binding modes route
+	// per-workspace via ServicePool, so passing their resolver here would
+	// resolve only one tenant's credential into a shared store — not the
+	// desired model.
+	var storeResolver workspace.Resolver
+	if wiring.Pool == nil {
+		storeResolver = wiring.Resolver
+	}
+	st, err := buildStore(ctx, storeResolver, secretCipher, secretEnvelopeMode, log)
+	if err != nil {
+		ws.Close()
+		return nil, err
+	}
+	ws.Store = st
+	return ws, nil
+}
+
 // buildStore connects to the workspace database in single-workspace
 // mode. The runtime DB URL is read through the resolver — which in
 // turn goes through SecretClient (ADR-010, TASK-008) — so a deployment
@@ -454,14 +632,22 @@ func errIsCancellation(err error) bool {
 //
 // A connection failure is logged but does not abort startup so the
 // server still serves store-independent endpoints.
-func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *spinecrypto.SecretCipher, log *slog.Logger) (store.Store, error) {
-	var dbURL string
+//
+// With a cipher, the store's subscription signing secrets are bound to
+// the resolver's workspace id (SPINE_WORKSPACE_ID, default "default" —
+// the id the gateway serves) in secretEnvelopeMode, and legacy rows are
+// swept to enc:v2 before anything reads them (INIT-023 TASK-009;
+// startEventDelivery's bootstrap runs later). A sweep error is logged and
+// does not abort startup; a binding error does.
+func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *spinecrypto.SecretCipher, secretEnvelopeMode store.SecretEnvelopeMode, log *slog.Logger) (store.Store, error) {
+	var dbURL, workspaceID string
 	if resolver != nil {
 		cfg, err := resolver.Resolve(ctx, "")
 		if err != nil {
 			return nil, fmt.Errorf("resolve workspace for store: %w", err)
 		}
 		dbURL = string(cfg.DatabaseURL.Reveal())
+		workspaceID = cfg.ID
 	}
 	if dbURL == "" {
 		return nil, nil
@@ -475,5 +661,9 @@ func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *
 		return nil, nil
 	}
 	pgStore.SetSecretCipher(secretCipher)
+	if _, err := workspace.PrepareSubscriptionSecrets(ctx, pgStore, secretCipher, workspaceID, secretEnvelopeMode, log); errors.Is(err, workspace.ErrSubscriptionSecretBinding) {
+		pgStore.Close()
+		return nil, err
+	}
 	return pgStore, nil
 }

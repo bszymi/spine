@@ -54,7 +54,7 @@ git checkout -b feature/my-change
 git push origin feature/my-change
 ```
 
-`feature/*` and any other branch that no rule in `/.spine/branch-protection.yaml` targets is treated as unprotected. The push goes through `git-http-backend` as a plain passthrough.
+`feature/*` and any other branch outside the reserved `spine/` namespace that no rule in `/.spine/branch-protection.yaml` targets is treated as unprotected. The push goes through `git-http-backend` as a plain passthrough. Tags and other non-branch refs, and `spine/**` branches, are admitted separately (§6).
 
 ---
 
@@ -112,9 +112,22 @@ When the pre-receive gate refuses a push, the Spine gateway responds with a git-
 | `branch-protection: rule "no-delete" blocks this operation on branch "refs/heads/<X>"` | The branch matches a `no-delete` rule and the push is a ref deletion. | Operator override is the only bypass — `git push -o spine.override=true origin --delete <X>`. |
 | `branch-protection: override requested but actor lacks operator role (rule "<kind>" still applies on branch "refs/heads/<X>")` | The caller set `-o spine.override=true` but their role is below `operator`. | Ask an operator to perform the push, or have an operator grant you the role (out-of-band). |
 | `branch-protection: evaluation error on <X>` | The policy backend (projection) returned an error. Push is rejected as a fail-closed measure. | Check Spine server logs for the underlying error; the push can be retried once the backend is reachable. |
+| `ref-admission: <X> is a run branch; only the actor assigned to the run's current step, or an operator, may push it` | `<X>` is a run or planning branch (`spine/run/…`, `spine/plan/…`) and you are not bound to it: you do not hold the latest execution of the run's current step (`assigned` or `in_progress`), the run is not `active` (for example `committing` during its merge), the name is not the run's own branch name, or your role is below `contributor`. | Claim the step first (§6), or ask an operator. The message never says who holds the step. |
+| `ref-admission: <X> is a divergence branch; only the actor assigned to that branch's current step, or an operator, may push it` | The same, for a divergence branch (`spine/<run-id>/<run-id>-div-<id>/<branch-id>`): you must hold that branch's current step, which the branch must still be open on. | Claim that branch's step, or ask an operator. |
+| `ref-admission: deleting <X> requires the operator role` | A non-operator deleted a run, planning or divergence branch. Even the bound actor may not. | Ask an operator. |
+| `ref-admission: <X> is frozen while its current step is a review or engine-internal step; operator role required` | You are bound, but the step you hold is a `review` (or engine-`internal`) step: the branch under review cannot move. | Finish the review with a `needs_rework`-style outcome to return the run to an editable step, or ask an operator. |
+| `ref-admission: cannot resolve the current step of <X>; operator role required` | You are bound, but the server could not load the step's definition from the run's pinned workflow, so it cannot rule out the review freeze (fail closed). | Check the server logs and the run's workflow; an operator can push meanwhile. |
+| `ref-admission: spine/init is reserved for 'spine init-repo'; operator role required` | `spine/init` is the bootstrap branch `spine init-repo` writes. `spine init-repo` run with a non-operator token prints this line in its `Note: origin refused the push` and leaves `spine/init` local only. | Push the local branch from that clone with an operator token: `git -c http.extraHeader="Authorization: Bearer $OPERATOR_TOKEN" push -u origin spine/init`. Re-running `spine init-repo` in the same clone does **not** retry the push: with nothing left to commit it stops before pushing, prints nothing and exits 0. |
+| `ref-admission: <X> is in the reserved spine namespace; operator role required` | `<X>` is `spine` itself or another `spine/**` name that is not a run, planning or divergence branch — including any case-fold spelling of `spine` (`SPINE/…`, `Spine/…`, `ſpine/…`) and names over 1024 bytes. | Use a branch name outside `spine/`, or ask an operator. |
+| `ref-admission: <ref> is not a branch; only operators may push tags or other non-branch refs` | Tags, notes, `refs/<x>` and every other ref outside `refs/heads/` are operator-only: a tag named after a branch shadows it in bare-name git calls. | Push tags with an operator token (CI release tagging included). |
+| `ref-admission: <ref> has a 'refs' component after the first or a 'HEAD' component, which would shadow another ref; push refused (deleting it is allowed)` | Names such as `refs/heads/refs/heads/main`, `refs/tags/refs/heads/main` or `refs/heads/HEAD` make every client push of the branch they shadow fail. Refused for everyone, operators included. | Rename the ref. Deleting an existing one is allowed. |
+| `ref-admission: ref name contains a control byte; push refused` | Defence in depth behind the parser (which normally answers `malformed push` first). Refused for everyone. | Check the ref name with `git check-ref-format`. |
+| `ref-admission: run-branch admission is not configured on this server; operator role required for <X>` | The server has no run store or no step-definition lookup for this workspace (for example a workspace without a database yet), so it cannot tell who is bound. | Ask an operator, or fix the server wiring. |
+| `ref-admission: <X> not evaluated (push already refused)` | An earlier run or divergence ref in the same push was refused, so the rest are refused without further lookups. | Fix the first refusal; push the refs separately if needed. |
+| `ref-admission: evaluation error on <X>` | The run store returned an error. Rejected fail-closed. | Check the server logs; retry once the store is reachable. |
 | `branch-protection: malformed push: …` (usually `command N: …`, naming the offending command line) | The pre-receive parser refused the client's pkt-line stream before evaluating any rule, because git could read it differently from the gate or would refuse it anyway. Causes: an invalid ref name (`command N: invalid ref name: …` — not under `refs/`, or containing `..`, `@{`, a `.lock` component, a space or one of `~ ^ : ? * [ \`); a control byte in a ref, including a NUL after a later command's ref (`… contains control byte 0x00`); a malformed object id (`command N: malformed object ids …`); a capability list on the first command that is not printable ASCII (`command 1: malformed capability list …`); a push from a shallow clone (its `shallow <oid>` line is refused as `command 1: malformed ref update …`); or a truncated or mis-framed stream. A stock `git` client never sends the first four from a full clone. | Push from a full (non-shallow) clone with a recent `git` client and check the ref name with `git check-ref-format`. If it persists, file a bug with the full output of `GIT_TRACE_PACKET=1 git push`. |
 
-A policy rejection (every row above except `malformed push`) also includes a per-ref `ng <ref> pre-receive hook declined` status line for each ref that was part of the push — pre-receive is all-or-nothing, so every ref is `ng`-ed when any is denied, even the ones that would have been allowed in isolation. A `malformed push` rejection carries **no** per-ref `ng` lines, only `unpack ok`: the gate could not trust the refs it would have named, so it names none, and nothing in the push is applied. Untrusted bytes in its message are escaped (`\x00`), never echoed raw.
+A policy or admission rejection (every row above except `malformed push`) also includes a per-ref `ng <ref> pre-receive hook declined` status line for each ref that was part of the push — pre-receive is all-or-nothing, so every ref is `ng`-ed when any is denied, even the ones that would have been allowed in isolation. A `malformed push` rejection carries **no** per-ref `ng` lines, only `unpack ok`: the gate could not trust the refs it would have named, so it names none, and nothing in the push is applied. Untrusted bytes in its message are escaped (`\x00`), never echoed raw.
 
 **Status codes that are NOT pre-receive rejections** (operators will occasionally see these too):
 
@@ -127,7 +140,25 @@ A policy rejection (every row above except `malformed push`) also includes a per
 
 ---
 
-## 6. References
+## 6. Pushing a run branch
+
+Run, planning and divergence branches (`refs/heads/spine/**`) are admitted by **ref class** before any branch-protection rule (INIT-023 TASK-016; [API Operations](../architecture/api-operations.md) §6.1). Pushing one works only like this:
+
+1. **Hold the step.** You must be the actor of the **latest** execution of the run's current step (for a divergence branch: of that branch's current step), in state `assigned` or `in_progress`, on an `active` run, with role `contributor` or above. Claim it with `POST /api/v1/execution/claim`, or have an operator assign it (`POST /api/v1/runs/{run_id}/steps/{step_id}/assign`). Push with the same bearer token (§1), to the same repository the step targets.
+2. **Push the run's own branch name.** It must equal the run's `branch_name` exactly, case included. Create, update and force-push are allowed for the bound actor.
+3. **Do not delete it.** Deleting a run, planning or divergence branch needs the operator role, for the bound actor too.
+4. **Not during review.** While the current step is a `review` (or engine-`internal`) step the branch is frozen for everyone below operator, the reviewer included. While the run is diverged its own branch is operator-only; push the divergence branch you hold instead.
+5. **Tags need an operator.** Tags, notes and every other non-branch ref are operator-only, CI release tagging included.
+
+**The `spine` namespace is reserved under any case-fold spelling.** `refs/heads/spine` itself, `spine/init`, any other `spine/**` name and every spelling a case-insensitive filesystem would alias onto `spine` (`SPINE/…`, `Spine/…`, `ſpine/…` with U+017F) are operator-only. A case variant is never treated as the run branch it would alias, even for the bound actor.
+
+**Admission is decided when the push starts.** The gate decides as soon as the push's command section arrives; git updates the ref only after the pack has been uploaded **and processed** (indexed, deltas resolved, connectivity checked). A push *started* while you are bound can therefore still land after you have submitted the step, while review is open. That window has no fixed bound: the upload is limited by the server's HTTP `ReadTimeout` (30 s in `spine serve`), but git's processing of the received pack is not — `git-http-backend` runs under Go's `net/http/cgi`, which neither honours the request context nor bounds the child process — and how long it takes depends on the pack the pusher sends. "Only the bound actor writes the run branch", and the review freeze (item 4), are push-start checks, not write-time ones; merging exactly the reviewed commit (INIT-023 TASK-005) is the content control for that window.
+
+**Operators** may push, force-push and delete any of these refs with no binding; the server logs each such admission. In `SPINE_DEV_MODE` the git endpoint skips authentication, so dev pushes carry no actor and can write ordinary branches only.
+
+---
+
+## 7. References
 
 - [ADR-009 — Branch Protection](/architecture/adr/ADR-009-branch-protection.md)
 - [`docs/integration-guide.md`](./integration-guide.md) §7 — Git HTTP endpoint configuration

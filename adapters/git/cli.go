@@ -6,13 +6,90 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 // CLIClient implements GitClient by shelling out to the git CLI.
+//
+// # Ref grammar (INIT-023 TASK-002)
+//
+// Every ref-like parameter belongs to exactly one class, and its argv is
+// built only by the helpers in refgrammar.go:
+//
+//	Class   Parameters                                Accepted                       Reaches git as
+//	Branch  Checkout branch; MergeOpts.Target          <n> or refs/heads/<n>, where   <n> for switch/branch/worktree;
+//	        (non-empty); CreateBranch name;            <n> passes refname.Validate    refs/heads/<n> as a push
+//	        DeleteBranch name; Push ref; PushBranch    and is not a full object id    destination
+//	        branch; DeleteRemoteBranch branch;
+//	        EnterBranch branch
+//	Commit  MergeOpts.Source; CreateBranch base        a full object id; HEAD (base   the object id or HEAD; a branch
+//	                                                   only); otherwise Branch        as its exact object id; as a
+//	                                                                                  CreateBranch base, with ^{commit}
+//	Rev     ReadFile/ListFiles/RefSHA/TreeEntryType    non-empty and ValidateRef      branch-first: an existing branch
+//	        ref; Diff from/to; MergeBase a/b;                                         as its exact object id, anything
+//	        LogOpts.Since                                                             else unchanged (see resolveRev)
+//	Remote  remote of Push, PushBranch,                ^[A-Za-z0-9][A-Za-z0-9._-]*    unchanged
+//	        DeleteRemoteBranch                         (/[A-Za-z0-9._-]+)*, no ".."
+//
+// Everything else is refused, before any git process starts, with a
+// *GitError{Kind: ErrKindPermanent, Err: ErrInvalidRef}: HEAD, "@" and
+// any refs/* other than refs/heads/<n> as a branch; tags, remote refs
+// and rev expressions as a commit (an abbreviated id is a valid branch
+// NAME there, so it is looked up as a branch and is ErrKindNotFound
+// unless such a branch exists — never read as an object); "", a leading
+// "-", ~ ^ : \ "..", space and control bytes as a rev; URLs, ext:: and
+// options as a remote.
+// Each method checks ALL of its arguments first, then resolves (two
+// phases), so an invalid second argument never follows a lookup of the
+// first.
+//
+// A branch is looked up exactly (`show-ref --verify --hash
+// refs/heads/<n>`, no DWIM), and its object id, not its name, reaches
+// git: a pushed refs/tags/<n>, refs/<n> or refs/tags/refs/heads/<n> can
+// therefore never stand in for the branch, even when the branch is
+// missing (then the result is ErrKindNotFound).
+//
+// Argv rules (<oid> is the looked-up object id, [eoo] is
+// --end-of-options, which ends option parsing without turning revisions
+// into pathspecs):
+//
+//	Clone               clone --no-tags -- <url> <path>
+//	Checkout            switch --no-guess [eoo] <n>      (never detaches onto a tag)
+//	Merge               [switch --no-guess [eoo] <target>], merge [--ff-only | --no-ff [-m <msg>]] [eoo] <oid>
+//	Merge (abort)       merge --abort                     (Strategy "abort" or Source "--abort", nothing else)
+//	CreateBranch        branch [eoo] <n> <HEAD | oid>^{commit}   (git branch re-DWIMs a bare start point)
+//	DeleteBranch        branch -D [eoo] <n>
+//	Diff                diff --name-status [eoo] <from'> <to'> --
+//	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
+//	ReadFile            show [eoo] <ref'>:<path> --
+//	ListFiles           ls-tree -r --name-only [eoo] <ref'>
+//	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
+//	RefSHA              rev-parse --verify [eoo] <ref'>   (no call at all for an existing branch)
+//	MergeBase           merge-base [eoo] <a'> <b'>
+//	Push, PushBranch    push [eoo] <remote> <oid>^{commit}:refs/heads/<n>
+//	DeleteRemoteBranch  push --delete [eoo] <remote> refs/heads/<n>
+//
+// The trailing "--" on diff, show and log stops a "rev" that is really a
+// path from being read as a pathspec. A push source "<oid>^{commit}" can
+// never match a ref name ("^" is illegal in refnames), so neither a
+// local refs/tags/refs/heads/<n> nor a refs/tags/<oid> can make the
+// source ambiguous or substitute it; git writes no upstream tracking for
+// such a source. `git branch` is the one command that re-resolves an
+// already-parsed start point by DWIM (a bare <oid> loses to a ref named
+// refs/tags/<oid>, a bare HEAD dies "ambiguous" next to refs/tags/HEAD),
+// so CreateBranch passes "<oid>^{commit}" / "HEAD^{commit}" for the same
+// reason. A doubly-qualified ref on the REMOTE
+// (refs/heads/refs/heads/<n> and siblings) still breaks every client's
+// push to <n> ("dst refspec ... matches more than one"); no argv can
+// avoid that, and push admission refuses to create or update such names
+// (core/refadmit rule 0b; KNOWN-LIMITATIONS.md, "Git ref arguments").
+//
+// The client requires git >= MinGitVersion (2.30); hosts call
+// CheckGitVersion at startup.
 type CLIClient struct {
 	repoPath         string
 	credentialHelper string   // path to external credential helper script
@@ -293,7 +370,13 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 	// provisioning) and `gitpool.cliCloner.Clone` re-validates as a
 	// second line of defense, but the sentinel is the cheapest fix
 	// directly inside the shellout.
-	args = append(args, "clone", "--", url, path)
+	//
+	// --no-tags (INIT-023 TASK-002, owner question 1): the clone imports
+	// no upstream tag names into the local namespace and persists
+	// remote.origin.tagOpt=--no-tags, so later fetches do not either.
+	// Branch arguments never resolve through tags anyway (exact lookup);
+	// this keeps upstream-controlled names out of rev resolution too.
+	args = append(args, "clone", "--no-tags", "--", url, path)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	// Build the clone environment when the client carries any auth
 	// state — askpass token, credential-helper env (e.g.
@@ -330,9 +413,26 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 	return nil
 }
 
-// Checkout switches to the given branch.
+// Checkout switches to the given branch (Branch class).
+//
+// It runs `git switch --no-guess --end-of-options <n>`, not checkout:
+// before git 2.44 `checkout --end-of-options` treats the terminator as a
+// pathspec, `checkout <n>` detaches onto a same-named tag when the branch
+// is missing, and checkout --guess would create a branch from a
+// remote-tracking ref. switch only ever attaches to an existing local
+// branch ("a branch is expected, got tag ..."), carries staged changes
+// like checkout, and refuses to run during an in-progress merge.
 func (c *CLIClient) Checkout(ctx context.Context, branch string) error {
-	_, err := c.run(ctx, "checkout", "checkout", branch)
+	short, _, err := checkBranch("checkout", "branch", branch)
+	if err != nil {
+		return err
+	}
+	return c.switchTo(ctx, short)
+}
+
+// switchTo runs the Checkout argv for an already-validated short name.
+func (c *CLIClient) switchTo(ctx context.Context, short string) error {
+	_, err := c.run(ctx, "checkout", "switch", "--no-guess", "--end-of-options", short)
 	return err
 }
 
@@ -362,9 +462,46 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 }
 
 // Merge merges a source branch into the current branch (or target branch).
+//
+// Strategy "abort" or Source "--abort" is the in-band abort sentinel the
+// engine (and SMP's operator) rely on: it runs exactly `git merge
+// --abort` — no checkout, no grammar check, no other argv.
+//
+// Otherwise Source is Commit class (a full object id or a branch) and a
+// non-empty Target is Branch class; both are checked before any git
+// process. A branch source is looked up exactly and merged BY OBJECT ID,
+// so a same-named tag or ref, or a refs/tags/refs/heads/<n> planted for a
+// deleted branch, can never be merged in its place: a missing source
+// branch is ErrKindNotFound and no `git merge` runs. The lookup happens
+// before the switch to Target, so a missing source changes nothing.
 func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, error) {
+	if opts.Strategy == "abort" || opts.Source == "--abort" {
+		if _, err := c.run(ctx, "merge", "merge", "--abort"); err != nil {
+			return MergeResult{}, err
+		}
+		return MergeResult{}, nil
+	}
+
+	// Phase 1: every argument, before any git process.
+	if err := checkCommit("merge", "source", opts.Source, false); err != nil {
+		return MergeResult{}, err
+	}
+	var target string
 	if opts.Target != "" {
-		if _, err := c.run(ctx, "checkout", "checkout", opts.Target); err != nil {
+		short, _, err := checkBranch("merge", "target", opts.Target)
+		if err != nil {
+			return MergeResult{}, err
+		}
+		target = short
+	}
+
+	// Phase 2: resolve the source to an object id, then switch.
+	source, err := c.resolveCommit(ctx, "merge", "source", opts.Source)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	if target != "" {
+		if err := c.switchTo(ctx, target); err != nil {
 			return MergeResult{}, err
 		}
 	}
@@ -386,7 +523,7 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 			args = append(args, "-m", msg)
 		}
 	}
-	args = append(args, opts.Source)
+	args = append(args, "--end-of-options", source)
 
 	output, err := c.run(ctx, "merge", args...)
 	if err != nil {
@@ -402,35 +539,83 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 	return MergeResult{SHA: strings.TrimSpace(sha), FastForward: ff}, nil
 }
 
-// CreateBranch creates a new branch from the specified base.
-func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
-	_, err := c.run(ctx, "branch", "branch", name, base)
-	return err
-}
-
-// DeleteBranch deletes a local branch.
-func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
-	_, err := c.run(ctx, "branch", "branch", "-D", name)
-	return err
-}
-
-// Diff returns the file differences between two refs.
+// CreateBranch creates a new branch from the specified base. name is
+// Branch class; base is Commit class plus "HEAD". A branch base is
+// looked up exactly and the branch is cut from that object id, so a
+// same-named tag never becomes the base and a missing base branch is
+// ErrKindNotFound rather than a DWIM guess (a code-repo default branch
+// with no local branch is refused, as `git branch <run> <d>` already
+// refused it with a Permanent "not a valid object name"; it is never
+// taken from origin/<d>).
 //
-// Refs are validated before the shellout so a poisoned ref like
-// `--upload-pack=cmd` cannot be re-interpreted as a `git diff` flag.
-// `--` is NOT inserted between the subcommand and the refs because in
-// `git diff` `--` ends option parsing AND switches the following
-// positionals from revisions to pathspecs, which would silently change
-// the semantics on every valid call. The right defense is the
-// ValidateRef gate.
+// The start point reaches git as "<oid>^{commit}" or "HEAD^{commit}",
+// never bare (INIT-023 TASK-002 review round 1). Unlike every other
+// command the client runs, `git branch` re-resolves its start point by
+// DWIM after parsing it: branch.c dwim_branch_start passes the string to
+// dwim_ref and adopts the object of the first ref it finds. So a bare
+// <oid> was replaced by a pushed refs/<oid>, refs/tags/<oid>,
+// refs/heads/<oid> or refs/remotes/<oid> (the F10 shadow, renamed after
+// the base's object id), and a bare "HEAD" died with "ambiguous object
+// name: 'HEAD'" while any refs/HEAD, refs/tags/HEAD, refs/heads/HEAD or
+// refs/remotes/HEAD existed — one pushed ref blocked every run start.
+// "^" is illegal in refnames, so dwim_ref matches nothing; the revision
+// parser still reads HEAD from $GIT_DIR/HEAD first (rule 1, a warning
+// at most) and a full hex id as the object itself. git writes no
+// upstream tracking for such a start point (the engine never relied on
+// it: autoSetupMerge's default tracks remote-tracking bases only). An
+// unborn HEAD still fails with "not a valid object name", Permanent, as
+// before.
+func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
+	short, _, err := checkBranch("branch", "name", name)
+	if err != nil {
+		return err
+	}
+	if err := checkCommit("branch", "base", base, true); err != nil {
+		return err
+	}
+	from, err := c.resolveCommit(ctx, "branch", "base", base)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "branch", "branch", "--end-of-options", short, from+"^{commit}")
+	return err
+}
+
+// DeleteBranch deletes a local branch (Branch class).
+func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
+	short, _, err := checkBranch("branch", "name", name)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "branch", "branch", "-D", "--end-of-options", short)
+	return err
+}
+
+// Diff returns the file differences between two refs (both Rev class).
+//
+// Both refs are validated before any git process, so a poisoned ref like
+// `--upload-pack=cmd` cannot be re-interpreted as a `git diff` flag. The
+// refs follow --end-of-options, which ends option parsing WITHOUT
+// turning them into pathspecs (a bare `--` before them would, INIT-022
+// TASK-009), and a trailing `--` stops a "rev" that is really a path
+// from being silently read as a pathspec (`diff <sha> f` used to return
+// an empty diff; now it is "bad revision", ErrKindNotFound).
 func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, error) {
-	if err := ValidateRef(from); err != nil {
-		return nil, fmt.Errorf("diff from: %w", err)
+	if err := checkRev("diff", "from", from); err != nil {
+		return nil, err
 	}
-	if err := ValidateRef(to); err != nil {
-		return nil, fmt.Errorf("diff to: %w", err)
+	if err := checkRev("diff", "to", to); err != nil {
+		return nil, err
 	}
-	output, err := c.run(ctx, "diff", "diff", "--name-status", from, to)
+	fromRev, err := c.resolveRev(ctx, "diff", "from", from)
+	if err != nil {
+		return nil, err
+	}
+	toRev, err := c.resolveRev(ctx, "diff", "to", to)
+	if err != nil {
+		return nil, err
+	}
+	output, err := c.run(ctx, "diff", "diff", "--name-status", "--end-of-options", fromRev, toRev, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -473,18 +658,30 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 	return diffs, nil
 }
 
-// Log returns commit history.
+// Log returns commit history. A non-empty Since is Rev class; Path
+// always follows the `--`.
 func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error) {
+	if opts.Since != "" {
+		if err := checkRev("log", "since", opts.Since); err != nil {
+			return nil, err
+		}
+	}
 	args := []string{"log", "--format=%H%n%an%n%ae%n%aI%n%B%n---END---"}
 
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("-n%d", opts.Limit))
 	}
+	args = append(args, "--end-of-options")
 	if opts.Since != "" {
-		args = append(args, fmt.Sprintf("%s..HEAD", opts.Since))
+		since, err := c.resolveRev(ctx, "log", "since", opts.Since)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, fmt.Sprintf("%s..HEAD", since))
 	}
+	args = append(args, "--")
 	if opts.Path != "" {
-		args = append(args, "--", opts.Path)
+		args = append(args, opts.Path)
 	}
 
 	output, err := c.run(ctx, "log", args...)
@@ -495,9 +692,18 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 	return parseLogOutput(output), nil
 }
 
-// ReadFile reads a file at a specific Git ref.
+// ReadFile reads a file at a specific Git ref (Rev class). An empty ref
+// is refused: `git show :<path>` would read the index, which no caller
+// means.
 func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
-	output, err := c.run(ctx, "read_file", "show", fmt.Sprintf("%s:%s", ref, path))
+	if err := checkRev("read_file", "ref", ref); err != nil {
+		return nil, err
+	}
+	rev, err := c.resolveRev(ctx, "read_file", "ref", ref)
+	if err != nil {
+		return nil, err
+	}
+	output, err := c.run(ctx, "read_file", "show", "--end-of-options", fmt.Sprintf("%s:%s", rev, path), "--")
 	if err != nil {
 		return nil, err
 	}
@@ -505,23 +711,49 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 }
 
 // WriteAndStageFile writes content to a file in the working tree and stages it.
+//
+// This is the governed-merge status cascade's sink (engine.applyCommitStatus
+// reads each blob with `git show`, then checks the run branch out and writes
+// here). The write goes through worktreefs (INIT-023 TASK-004, audit F5):
+// path must be a clean repo-relative path ("..", absolute paths and every
+// git-dir spelling are refused lexically), and a symbolic link anywhere in
+// it — for example one pushed to the run branch between the read and the
+// checkout — is refused before any filesystem change instead of being
+// followed out of the repository. Refusals unwrap to worktreefs.ErrUnsafePath.
+// An existing file is replaced by rename (its mode is kept); a new one is
+// created O_EXCL with mode 0644.
 func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string) error {
-	fullPath := filepath.Join(c.repoPath, path)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		return fmt.Errorf("mkdir for %s: %w", path, err)
-	}
-	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+	rel, err := worktreefs.Clean(path)
+	if err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if _, err := c.run(ctx, "add", "add", "--", path); err != nil {
+	tree, err := worktreefs.Open(c.repoPath)
+	if err != nil {
+		return fmt.Errorf("open worktree: %w", err)
+	}
+	defer func() { _ = tree.Close() }()
+	if err := tree.WriteFile(rel, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	// --literal-pathspecs (go-coding-guidelines §4.2): the path is a file
+	// name, never a pathspec pattern.
+	if _, err := c.run(ctx, "add", "--literal-pathspecs", "add", "--", rel); err != nil {
 		return fmt.Errorf("stage %s: %w", path, err)
 	}
 	return nil
 }
 
-// ListFiles lists files matching a pattern at a specific Git ref.
+// ListFiles lists files matching a pattern at a specific Git ref (Rev
+// class).
 func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]string, error) {
-	output, err := c.run(ctx, "list_files", "ls-tree", "-r", "--name-only", ref)
+	if err := checkRev("list_files", "ref", ref); err != nil {
+		return nil, err
+	}
+	rev, err := c.resolveRev(ctx, "list_files", "ref", ref)
+	if err != nil {
+		return nil, err
+	}
+	output, err := c.run(ctx, "list_files", "ls-tree", "-r", "--name-only", "--end-of-options", rev)
 	if err != nil {
 		return nil, err
 	}
@@ -548,11 +780,23 @@ func (c *CLIClient) Head(ctx context.Context) (string, error) {
 }
 
 // RefSHA resolves a named ref (branch, tag, or HEAD) to its commit
-// SHA via `git rev-parse <ref>`. Returns an error when the ref is
-// unknown or ambiguous; callers that treat baseline capture as
-// best-effort should swallow the error.
+// SHA (Rev class). An existing branch resolves to its exact object id
+// with no further git call; anything else runs `git rev-parse --verify
+// --end-of-options <ref>`. Returns an error when the ref is unknown
+// (ErrKindNotFound, as before) or ambiguous; callers that treat baseline
+// capture as best-effort should swallow the error.
 func (c *CLIClient) RefSHA(ctx context.Context, ref string) (string, error) {
-	output, err := c.run(ctx, "ref-sha", "rev-parse", ref)
+	if err := checkRev("ref-sha", "ref", ref); err != nil {
+		return "", err
+	}
+	rev, err := c.resolveRev(ctx, "ref-sha", "ref", ref)
+	if err != nil {
+		return "", err
+	}
+	if rev != ref && IsFullObjectName(rev) {
+		return rev, nil // the exact branch lookup already produced the id
+	}
+	output, err := c.run(ctx, "ref-sha", "rev-parse", "--verify", "--end-of-options", rev)
 	if err != nil {
 		return "", err
 	}
@@ -564,18 +808,26 @@ func (c *CLIClient) RefSHA(ctx context.Context, ref string) (string, error) {
 // rather than "what differs from the current tip of the other ref", which
 // would also flag files the other ref deleted or modified in the meantime.
 //
-// Same flag-injection guard as Diff: refs are validated before shellout
-// rather than relying on a `--` sentinel, because `git merge-base --
-// <a> <b>` would interpret a/b as pathspecs (which merge-base does not
-// accept anyway) instead of revisions.
+// Same flag-injection guard as Diff: both refs (Rev class) are validated
+// before any git process, and they follow --end-of-options rather than a
+// `--` sentinel, because `git merge-base -- <a> <b>` would interpret a/b
+// as pathspecs (which merge-base does not accept anyway).
 func (c *CLIClient) MergeBase(ctx context.Context, a, b string) (string, error) {
-	if err := ValidateRef(a); err != nil {
-		return "", fmt.Errorf("merge-base a: %w", err)
+	if err := checkRev("merge-base", "a", a); err != nil {
+		return "", err
 	}
-	if err := ValidateRef(b); err != nil {
-		return "", fmt.Errorf("merge-base b: %w", err)
+	if err := checkRev("merge-base", "b", b); err != nil {
+		return "", err
 	}
-	output, err := c.run(ctx, "merge-base", "merge-base", a, b)
+	revA, err := c.resolveRev(ctx, "merge-base", "a", a)
+	if err != nil {
+		return "", err
+	}
+	revB, err := c.resolveRev(ctx, "merge-base", "b", b)
+	if err != nil {
+		return "", err
+	}
+	output, err := c.run(ctx, "merge-base", "merge-base", "--end-of-options", revA, revB)
 	if err != nil {
 		return "", err
 	}
@@ -604,21 +856,67 @@ func (c *CLIClient) HasCommitWithTrailer(ctx context.Context, key, value string)
 	return "", false, nil
 }
 
-// Push pushes a ref to the specified remote.
+// Push pushes a local branch to the same-named branch on the specified
+// remote. remote is Remote class and ref is Branch class: Push accepts
+// branches only (INIT-023 TASK-002, owner question 2); a tag or any
+// other refspec is refused with ErrInvalidRef.
+//
+// The branch is looked up exactly and pushed as
+// `push --end-of-options <remote> <oid>^{commit}:refs/heads/<n>`. A
+// bare `push origin main` failed ("src refspec main matches more than
+// one") once any refs/tags/main existed — a workspace-wide merge denial
+// of service — and even `refs/heads/main:refs/heads/main` or a raw
+// `<oid>:` source is matched against local refs and can be made
+// ambiguous or substituted (refs/tags/refs/heads/main, refs/tags/<oid>).
+// "<oid>^{commit}" can never match a ref name. A missing local branch is
+// a Permanent *GitError, matching the classification of git's own
+// "src refspec ... does not match any".
 func (c *CLIClient) Push(ctx context.Context, remote, ref string) error {
-	_, err := c.run(ctx, "push", "push", remote, ref)
-	return err
+	return c.pushBranch(ctx, "ref", remote, ref)
 }
 
-// PushBranch pushes a branch to the specified remote with upstream tracking.
+// PushBranch pushes a branch to the specified remote; same argv and
+// rules as Push. It no longer configures upstream tracking (`-u`): git
+// writes branch.<n>.remote/merge only for a ref source, and nothing in
+// Spine or SMP reads them (INIT-023 TASK-002, owner question 4).
 func (c *CLIClient) PushBranch(ctx context.Context, remote, branch string) error {
-	_, err := c.run(ctx, "push", "push", "-u", remote, branch)
+	return c.pushBranch(ctx, "branch", remote, branch)
+}
+
+func (c *CLIClient) pushBranch(ctx context.Context, what, remote, branch string) error {
+	if err := checkRemote("push", remote); err != nil {
+		return err
+	}
+	short, full, err := checkBranch("push", what, branch)
+	if err != nil {
+		return err
+	}
+	oid, ok, err := lookupBranch(ctx, c.repoPath, "push", short)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &GitError{Kind: ErrKindPermanent, Op: "push",
+			Message: fmt.Sprintf("%s: local branch %q does not exist", what, short)}
+	}
+	_, err = c.run(ctx, "push", "push", "--end-of-options", remote, oid+"^{commit}:"+full)
 	return err
 }
 
-// DeleteRemoteBranch deletes a branch on the specified remote.
+// DeleteRemoteBranch deletes a branch on the specified remote (remote is
+// Remote class, branch is Branch class):
+// `push --delete --end-of-options <remote> refs/heads/<n>`. It has no
+// source side; only a doubly-qualified ref on the remote can make the
+// destination ambiguous, which push admission must refuse.
 func (c *CLIClient) DeleteRemoteBranch(ctx context.Context, remote, branch string) error {
-	_, err := c.run(ctx, "push", "push", remote, "--delete", branch)
+	if err := checkRemote("push", remote); err != nil {
+		return err
+	}
+	_, full, err := checkBranch("push", "branch", branch)
+	if err != nil {
+		return err
+	}
+	_, err = c.run(ctx, "push", "push", "--delete", "--end-of-options", remote, full)
 	return err
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
@@ -44,6 +45,13 @@ type workspaceDeliveryConfig struct {
 	// philosophy that gates SPINE_DEV_MODE, SPINE_CODE_REPO_BASE, and
 	// SPINE_SECRET_ENCRYPTION_KEY at boot.
 	ProductionStrict bool
+	// ProcessStart is when this spine serve process booted. The admin
+	// bootstrap passes it as BootstrapAdminConfig.SupersededBefore, so
+	// an SMP_ADMIN_TOKEN rotation revokes only bootstrap rows created
+	// before this process started: a replica still carrying the old
+	// bearer in a rolling deploy can never revoke the bearer a newer
+	// replica seeded (INIT-023 TASK-013, audit P3-31).
+	ProcessStart time.Time
 }
 
 // loadWorkspaceDeliveryConfig reads the env vars that drive event
@@ -60,6 +68,10 @@ func loadWorkspaceDeliveryConfig() workspaceDeliveryConfig {
 		SMPInternalToken: os.Getenv("SMP_INTERNAL_TOKEN"),
 		SMPAdminToken:    os.Getenv("SMP_ADMIN_TOKEN"),
 		ProductionStrict: resolveRuntimeEnv() == "production",
+		// Truncated to Postgres' microsecond precision so a row this
+		// process inserts in the same microsecond it booted can never
+		// compare as "before" its own start.
+		ProcessStart: time.Now().UTC().Truncate(time.Microsecond),
 	}
 	if v := os.Getenv("SPINE_EVENT_RETENTION"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -203,6 +215,58 @@ func validateOperatorToken(token string) error {
 	return nil
 }
 
+// smpAdminTokenMinDistinct is the minimum number of distinct bytes in
+// SMP_ADMIN_TOKEN. The length floor alone accepts long-but-trivial
+// values ("aaaa…", "0000…", "abab…").
+const smpAdminTokenMinDistinct = 8
+
+// validateSMPAdminToken is the SMP_ADMIN_TOKEN strength gate (INIT-023
+// TASK-013, audit P3-35). spine serve seeds that bearer as the admin
+// actor smp-admin into every workspace it serves, so a guessable value
+// is a cross-tenant admin credential.
+//
+// A token is weak when it is shorter than operatorTokenMinLength (32,
+// SPINE_OPERATOR_TOKEN's floor) or has fewer than 8 distinct bytes.
+// This is a floor against human-chosen values, not an entropy
+// estimator: a Shannon estimate would add false positives on hex tokens
+// without stopping a determined weak choice. Empty means the bootstrap
+// is off, which is fine.
+//
+// SPINE_ENV=production refuses to start (err); every other environment
+// gets a warning for serveCmd to log, like the other startup gates that
+// treat only production as strict. Neither message ever echoes the
+// token. The gate lives here, not in core/auth: embedders call
+// auth.BootstrapInternalAdmin with their own bearer under their own
+// policy (SMP's dev default passes it anyway: 58 characters, 24
+// distinct bytes).
+func validateSMPAdminToken(token, env string) (warning string, err error) {
+	if token == "" {
+		return "", nil
+	}
+	var seen [256]bool
+	distinct := 0
+	for i := 0; i < len(token); i++ {
+		if !seen[token[i]] {
+			seen[token[i]] = true
+			distinct++
+		}
+	}
+	var problem string
+	switch {
+	case len(token) < operatorTokenMinLength:
+		problem = fmt.Sprintf("SMP_ADMIN_TOKEN is %d characters; minimum is %d", len(token), operatorTokenMinLength)
+	case distinct < smpAdminTokenMinDistinct:
+		problem = fmt.Sprintf("SMP_ADMIN_TOKEN has %d distinct characters; minimum is %d", distinct, smpAdminTokenMinDistinct)
+	default:
+		return "", nil
+	}
+	const remedy = ". It is the platform bearer seeded into every workspace this process serves; generate one with `openssl rand -hex 32`"
+	if env == "production" {
+		return "", fmt.Errorf("%s%s before starting spine serve", problem, remedy)
+	}
+	return problem + remedy, nil
+}
+
 // loadCodeRepoBase reads SPINE_CODE_REPO_BASE and returns the absolute
 // directory under which every code-repo binding's LocalPath must
 // resolve. Required when SPINE_ENV=production — a production deployment
@@ -230,11 +294,24 @@ func loadCodeRepoBase(env string) (string, error) {
 	return filepath.Clean(v), nil
 }
 
-// loadSecretCipher builds the at-rest secret cipher from
-// SPINE_SECRET_ENCRYPTION_KEY. In production the key is required.
+// loadSecretCipher builds the at-rest secret key ring from
+// SPINE_SECRET_ENCRYPTION_KEY (the primary key: it seals) and
+// SPINE_SECRET_PREVIOUS_KEYS (a comma-separated list of base64 keys that
+// still open values sealed before a rotation; whitespace is trimmed and
+// empty entries are ignored). In production the primary key is required.
+// Previous keys without a primary key are a startup error: they would
+// silently do nothing. Errors name a previous key by its 1-based entry
+// index, never by its value.
 func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
 	encoded := os.Getenv("SPINE_SECRET_ENCRYPTION_KEY")
+	previous, err := loadPreviousSecretKeys()
+	if err != nil {
+		return nil, err
+	}
 	if encoded == "" {
+		if len(previous) > 0 {
+			return nil, fmt.Errorf("SPINE_SECRET_PREVIOUS_KEYS is set but SPINE_SECRET_ENCRYPTION_KEY is not; previous keys only decrypt, so a primary key is required")
+		}
 		if env == "production" {
 			return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY is required when SPINE_ENV=production; generate one with `openssl rand -base64 32`")
 		}
@@ -244,7 +321,47 @@ func loadSecretCipher(env string) (*spinecrypto.SecretCipher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY: %w", err)
 	}
-	return spinecrypto.NewSecretCipher(key)
+	c, err := spinecrypto.NewSecretCipherRing(key, previous...)
+	if err != nil {
+		return nil, fmt.Errorf("SPINE_SECRET_ENCRYPTION_KEY / SPINE_SECRET_PREVIOUS_KEYS: %w", err)
+	}
+	return c, nil
+}
+
+// loadPreviousSecretKeys parses SPINE_SECRET_PREVIOUS_KEYS. The error for
+// a malformed entry names its 1-based index and wraps only the decoder's
+// message (a byte offset or a length), never the entry itself.
+func loadPreviousSecretKeys() ([][]byte, error) {
+	raw := os.Getenv("SPINE_SECRET_PREVIOUS_KEYS")
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var keys [][]byte
+	n := 0
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		n++
+		key, err := spinecrypto.ParseEncryptionKey(entry)
+		if err != nil {
+			return nil, fmt.Errorf("SPINE_SECRET_PREVIOUS_KEYS entry %d: %w", n, err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+// loadSecretEnvelopeMode reads SPINE_SECRET_ENVELOPE_MODE: empty means
+// migrate; migrate, strict and downgrade are accepted case-insensitively;
+// anything else is a startup error (INIT-023 TASK-009).
+func loadSecretEnvelopeMode() (store.SecretEnvelopeMode, error) {
+	mode, err := store.ParseSecretEnvelopeMode(os.Getenv("SPINE_SECRET_ENVELOPE_MODE"))
+	if err != nil {
+		return "", fmt.Errorf("SPINE_SECRET_ENVELOPE_MODE: %w", err)
+	}
+	return mode, nil
 }
 
 // dbPolicyFromEnv reads ADR-012 pool overrides from environment

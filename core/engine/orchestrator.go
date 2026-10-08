@@ -30,6 +30,7 @@ type Orchestrator struct {
 	repositories   RepositoryResolver     // optional, gates run start on repository availability
 	repoClients    RepositoryGitClients   // optional, resolves per-repo git clients for multi-repo branch creation
 	policy         branchprotect.Policy   // branch-protection guard for MergeRunBranch (ADR-009 §3)
+	entryPolicy    StepEntryPolicy        // step-entry checks (INIT-023 TASK-007); zero value = pre-INIT-023 behaviour
 	// cloneURLBuilder constructs the runner-facing clone URL for a
 	// resolved repository ID per ADR-015 *Assignment payload shape*.
 	// Production wires this to the workspace's git HTTP endpoint

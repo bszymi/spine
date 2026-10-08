@@ -52,6 +52,11 @@ The authoritative branch (typically `main`) represents the current governed stat
 - Projection Service syncs from the authoritative branch
 - Workflow binding resolution reads workflow definitions from the authoritative branch
 
+How the projection finds that branch depends on the repository (INIT-023 TASK-011):
+
+- **Standalone Spine** shares one non-bare working tree between the engine and the projection, and the engine checks run branches out in it. `spine serve` therefore pins the projection to the fully qualified `refs/heads/main` (`projection.Service.WithAuthoritativeBranch`, the same branch governed merges target). A run branch that happens to be checked out is never projected, and a ref such as `refs/tags/refs/heads/main` cannot shadow it. A repository with no `refs/heads/main` (a fresh `init-repo` before its `spine/init` branch is merged, or a repository governed on another branch) logs one startup Warn and reports `sync_state = error`, with `refs/heads/main` named in `error_detail`, until the branch exists — on an empty projection store as well; the first sync after the branch appears runs the full rebuild.
+- **Bare-repository deployments** (the embedded SMP model) keep the zero value and read `HEAD`, a symbolic ref to the default branch that a push cannot move.
+
 ### 2.3 Hosting Requirements
 
 Spine requires a Git hosting platform that supports:
@@ -326,11 +331,13 @@ During divergence, each branch gets its own Git branch (per [Divergence and Conv
 spine/<run-id>/<divergence-id>/<branch-id>
 ```
 
-Example:
+The divergence ID the engine assigns is `<run-id>-div-<divergence-point-id>` (`core/divergence/service.go`), so for a divergence point `explore-designs` on run `run-0a5d0f6d`:
 ```
-spine/run-abc123/explore-designs/branch-a
-spine/run-abc123/explore-designs/branch-b
+spine/run-0a5d0f6d/run-0a5d0f6d-div-explore-designs/branch-a
+spine/run-0a5d0f6d/run-0a5d0f6d-div-explore-designs/branch-b
 ```
+
+Push admission (§6.5 step 3) resolves a divergence ref through exactly this shape: a ref whose divergence segment lacks the `<run-id>-div-` prefix matches no branch record and is operator-only.
 
 **Divergence branch lifecycle:**
 
@@ -386,7 +393,7 @@ All Spine-managed branches use the `spine/` prefix to distinguish them from huma
 |-------------|---------|---------|
 | Standard run | `spine/run/<artifact-id>-<slug>-<run-hex>` | `spine/run/task-003-git-push-0a5d0f6d` |
 | Planning run | `spine/plan/<artifact-id>-<slug>-<run-hex>` | `spine/plan/init-001-initiative-abcd1234` |
-| Divergence branch | `spine/<run-id>/<divergence-id>/<branch-id>` | `spine/run-abc123/explore/branch-a` |
+| Divergence branch | `spine/<run-id>/<run-id>-div-<divergence-point-id>/<branch-id>` | `spine/run-0a5d0f6d/run-0a5d0f6d-div-explore/branch-a` |
 
 **Slug rules:**
 - Derived from the artifact filename (without extension)
@@ -396,7 +403,16 @@ All Spine-managed branches use the `spine/` prefix to distinguish them from huma
 
 Human-managed branches (per [Naming Conventions](/governance/naming-conventions.md) §6) use the `INIT-XXX/EPIC-XXX/TASK-XXX-<slug>` pattern. These are not managed by the Artifact Service.
 
-Spine-managed branches (`spine/*`) are governed exclusively by the Artifact Service. Direct manipulation of user-facing authoritative branches (e.g. `main`, `staging`, `release/*`) is **enforced** against direct writes and deletions by the branch-protection policy described in [ADR-009](/architecture/adr/ADR-009-branch-protection.md). Operators authoring `/.spine/branch-protection.yaml` are expected to scope rules to user-facing branches; the config parser does not currently reject patterns that would match `spine/*` (e.g. `spine/run/*`, `*/*/*`), so a pattern like that would accidentally gate Spine's own Run branches and block routine Orchestrator operations. Treat `spine/*` as a reserved namespace and do not target it from rules.
+**Branch names resolve exactly, by object name** (INIT-023 TASK-002). Spine and its embedders pass bare branch names (`run.BranchName`, `main`) to the git client, and git resolves a bare name by DWIM — `refs/<n>` and `refs/tags/<n>` before `refs/heads/<n>` — while branch protection allows pushes outside `refs/heads/` (ADR-009 §6). The git client therefore never hands git a branch *name* as a revision:
+
+- A branch argument (merge source and target, branch base, checkout, push, worktree) or a revision that names an existing branch is looked up with `git show-ref --verify refs/heads/<n>`, which applies no DWIM, and the resulting **object id** reaches git. A qualified `refs/heads/<n>` is not enough: when the branch is missing, git DWIM-resolves it to `refs/tags/refs/heads/<n>` and its siblings, so a missing branch is an error (`not_found`), never a fallback.
+- A push sends `<oid>^{commit}:refs/heads/<n>`, which no local ref can shadow; checkout is `git switch --no-guess`, which never detaches onto a tag; every ref argument follows `--end-of-options` and is validated before any git process starts.
+- An object id reaches git as itself: git's revision parser takes a full hex id before any ref lookup, so a ref *named* after it (`refs/tags/<oid>`) is ignored by `merge`, `show`, `diff`, `rev-parse` and `worktree add`. `git branch` is the exception — it re-resolves its start point by DWIM after parsing it, so a run branch is cut from `<oid>^{commit}` (or `HEAD^{commit}`, which also keeps a pushed `refs/tags/HEAD` from making the start point ambiguous).
+- Anything that is not an existing branch (a tag, `refs/remotes/...`, an abbreviated or full object id, `HEAD`) resolves as before. See `KNOWN-LIMITATIONS.md` → "Git ref arguments" for the residuals, which only push admission (§6.5 step 3) closes, and only for refs pushed after it.
+
+The grammar and argv rules are documented on `adapters/git.CLIClient`; the server requires git 2.30 or newer.
+
+Spine-managed branches (`spine/*`) are governed exclusively by the Artifact Service, and on the git push surface the namespace is **reserved and enforced**, not only a convention (INIT-023 TASK-016; §6.5 step 3): `refs/heads/spine` itself, `spine/init` and every `spine/**` name other than a run, planning or divergence branch are operator-only, under any case-fold spelling of `spine`; a run, planning or divergence branch can be pushed only by the actor bound to its current step (or an operator) and deleted only by an operator. Direct manipulation of user-facing authoritative branches (e.g. `main`, `staging`, `release/*`) is **enforced** against direct writes and deletions by the branch-protection policy described in [ADR-009](/architecture/adr/ADR-009-branch-protection.md). Operators authoring `/.spine/branch-protection.yaml` are expected to scope rules to user-facing branches; the config parser does not currently reject patterns that would match `spine/*` (e.g. `spine/run/*`, `*/*/*`), so a pattern like that would accidentally gate Spine's own Run branches and block routine Orchestrator operations. Treat `spine/*` as a reserved namespace and do not target it from rules.
 
 ### 6.5 Git Push (`git-receive-pack`)
 
@@ -406,9 +422,10 @@ Push is a first-class, enforced surface in v1. It is off by default — `SPINE_G
 
 1. The gateway requires a bearer token on every push. The trusted-CIDR bypass used for clone/fetch does not apply to receive-pack — every push carries an actor identity so branch-protection decisions and audit events can pin the caller.
 2. The pre-receive gate in `internal/githttp` reads the pkt-line command section out of the request body, extracts each `(old_sha, new_sha, ref)` triple, and classifies it (`delete` if `new_sha == 00…0`, else `direct_write` — every push is a direct write from the policy's perspective; governed merges happen inside Spine, not over the wire).
-3. `branchprotect.Policy.Evaluate` is called per ref update against the target **workspace's** rules (each workspace has its own branch-protection table in shared mode). A `Deny` on any ref rejects the **entire** push — pre-receive semantics are all-or-nothing, so no ref advances if any ref would have been blocked. `spine/*` refs bypass the policy by design (§6.4) but still flow through CGI so audit remains consistent with the API path.
-4. Rejections render as a `x-git-receive-pack-result` body: a side-band 2 `remote: branch-protection: <rule> denies <branch>` line plus a side-band 1 `unpack ok` + `ng <ref> pre-receive hook declined` per ref. Frames are chunked to stay under the pkt-line length limit so even multi-thousand-ref pushes parse cleanly.
-5. On allow, the buffered command bytes are replayed verbatim in front of the still-pending PACK stream; `git-http-backend` sees the original request unchanged. Spine does not rewrite client-produced commits.
+3. **Ref-class admission** (`core/refadmit`, INIT-023 TASK-016) runs on every ref update, always — with or without a branch-protection policy. Tags, notes and every other non-branch ref, `spine/init` and the rest of the reserved `spine` namespace are operator-only; a run, planning or divergence branch admits only the actor bound to its current step (the latest execution, `assigned` or `in_progress`, on an `active` run; not during a `review`/`internal` step) or an operator, and only an operator may delete one. A ref with a control byte, or a created/updated ref with a non-leading `refs` or any `HEAD` component, is refused for everyone. The class table is in [API Operations](/architecture/api-operations.md) §6.1. Refusals read `remote: ref-admission: …`.
+4. `branchprotect.Policy.Evaluate` is called per remaining ref update against the target **workspace's** rules (each workspace has its own branch-protection table in shared mode). A `Deny` on any ref — from admission or from the policy — rejects the **entire** push: pre-receive semantics are all-or-nothing, so no ref advances if any ref would have been blocked. Admitted `spine/*` refs still bypass the *policy* (rules never name them, §6.4), but they no longer bypass the gate: step 3 has already decided them.
+5. Rejections render as a `x-git-receive-pack-result` body: a side-band 2 `remote: branch-protection: <rule> denies <branch>` (or `remote: ref-admission: …`) line plus a side-band 1 `unpack ok` + `ng <ref> pre-receive hook declined` per ref. Frames are chunked to stay under the pkt-line length limit so even multi-thousand-ref pushes parse cleanly.
+6. On allow, the buffered command bytes are replayed verbatim in front of the still-pending PACK stream; `git-http-backend` sees the original request unchanged. Spine does not rewrite client-produced commits.
 
 **Operator override.** The Git-path equivalent of `write_context.override` is `git push -o spine.override=true`. Operators (role `operator+`) bypass a matching rule for that single push; contributors setting the same option are rejected with a distinct "override not authorised" reason, not silently accepted. Every honored override emits exactly one `branch_protection.override` governance event per overridden ref update — not per push — with the ADR-009 §4 payload plus a `pre_receive_ref: {old_sha, new_sha, ref}` block. No commit trailer is added on this path; the event is the sole audit record for a Git push override. Unused overrides (flag set on a push that did not need it) emit nothing.
 

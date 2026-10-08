@@ -3,12 +3,13 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // ── Fake store extensions for bootstrap tests ──
@@ -124,11 +125,21 @@ func TestBootstrapInternalAdmin_CreatesActorAndToken(t *testing.T) {
 	if entry.token.ActorID != auth.InternalAdminActorID {
 		t.Errorf("expected token bound to %q, got %q", auth.InternalAdminActorID, entry.token.ActorID)
 	}
-	wantTokenID := "bootstrap-" + hash[:12]
-	if entry.token.TokenID != wantTokenID {
-		t.Errorf("expected deterministic token_id %q, got %q", wantTokenID, entry.token.TokenID)
+	// INIT-023 TASK-013 (P3-35): the id is random, not derived from the
+	// bearer's hash, so a workspace admin listing smp-admin's tokens
+	// learns nothing about the platform bearer.
+	if !bootstrapTokenIDPattern.MatchString(entry.token.TokenID) {
+		t.Errorf("token_id %q does not match %s", entry.token.TokenID, bootstrapTokenIDPattern)
+	}
+	if suffix := strings.TrimPrefix(entry.token.TokenID, "bootstrap-"); strings.Contains(hash, suffix) {
+		t.Errorf("token_id %q embeds a substring of sha256(bearer)", entry.token.TokenID)
 	}
 }
+
+// bootstrapTokenIDPattern is the INIT-023 TASK-013 bootstrap token id
+// shape: the "bootstrap-" prefix the rotation sweep matches on, plus 16
+// random hex characters (the same entropy as auth.Service's tok_ ids).
+var bootstrapTokenIDPattern = regexp.MustCompile(`^bootstrap-[0-9a-f]{16}$`)
 
 func TestBootstrapInternalAdmin_HealsStaleActor(t *testing.T) {
 	fs := newFakeStore()
@@ -144,9 +155,14 @@ func TestBootstrapInternalAdmin_HealsStaleActor(t *testing.T) {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
+	// Name and role are healed; the suspension is operator intent and
+	// survives the bootstrap (INIT-023 TASK-013, P3-31).
 	got := fs.actors[auth.InternalAdminActorID]
-	if got.Role != domain.RoleAdmin || got.Status != domain.ActorStatusActive {
-		t.Errorf("stale actor not healed: %+v", got)
+	if got.Role != domain.RoleAdmin || got.Name != "SMP Bootstrap Admin" {
+		t.Errorf("stale actor name/role not healed: %+v", got)
+	}
+	if got.Status != domain.ActorStatusSuspended {
+		t.Errorf("bootstrap changed a suspended smp-admin to %q; want it left suspended", got.Status)
 	}
 }
 
@@ -184,6 +200,14 @@ func TestBootstrapInternalAdmin_RotatedTokenInsertsNewRow(t *testing.T) {
 
 	if len(fs.tokens) != 2 {
 		t.Errorf("expected old + new token rows, got %d", len(fs.tokens))
+	}
+	// INIT-023 TASK-013 (P3-31): the rotated-away row is revoked, the
+	// new one is live.
+	if old := fs.tokens[auth.HashToken("old-bearer")]; old == nil || old.token.RevokedAt == nil {
+		t.Errorf("old bootstrap token row not revoked after rotation: %+v", old)
+	}
+	if cur := fs.tokens[auth.HashToken("new-bearer")]; cur == nil || cur.token.RevokedAt != nil {
+		t.Errorf("new bootstrap token row missing or revoked: %+v", cur)
 	}
 }
 

@@ -407,63 +407,58 @@ func canTerminate(wf *domain.WorkflowDefinition) bool {
 	// Check reachability from the entry step only. Steps that are only
 	// reachable via divergence branch StartStep edges are followed through
 	// the divergence definition, not by requiring every step independently.
-	return canReachEnd(wf.EntryStep, stepMap, divMap, convMap, make(map[string]bool))
+	return canReachEnd(wf.EntryStep, stepMap, divMap, convMap)
 }
 
-func canReachEnd(stepID string, stepMap map[string]*domain.StepDefinition, divMap map[string]*domain.DivergenceDefinition, convMap map[string]*domain.ConvergenceDefinition, visited map[string]bool) bool {
-	if stepID == "end" {
-		return true
-	}
-	if visited[stepID] {
-		return false
-	}
-	visited[stepID] = true
-
-	step, ok := stepMap[stepID]
-	if !ok {
-		return false
-	}
-
-	// Follow normal outcome edges — at least one must reach end.
-	for j := range step.Outcomes {
-		if canReachEnd(step.Outcomes[j].NextStep, stepMap, divMap, convMap, copyMap(visited)) {
+// canReachEnd reports whether "end" is reachable from stepID by following
+// outcome next_step edges, divergence branch start_step edges and
+// convergence evaluation_step edges. A step id with no step definition
+// (other than "end") has no outgoing edges.
+//
+// It is a plain graph search with one visited set, so it runs in time
+// linear in the number of edges. It used to enumerate simple paths,
+// copying the visited set per edge, which is exponential on a chain of
+// steps with two outcomes each (INIT-023 TASK-011 codex P1: projection now
+// runs workflow.Validate on every committed workflow file, so a small file
+// could stall the sync). The answer is the same: a path to "end" exists
+// iff a simple path to "end" exists.
+func canReachEnd(stepID string, stepMap map[string]*domain.StepDefinition, divMap map[string]*domain.DivergenceDefinition, convMap map[string]*domain.ConvergenceDefinition) bool {
+	visited := make(map[string]bool)
+	stack := []string{stepID}
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if current == "end" {
 			return true
 		}
-	}
+		if visited[current] {
+			continue
+		}
+		visited[current] = true
 
-	// Follow divergence branch StartStep edges.
-	if step.Diverge != "" {
-		if div, ok := divMap[step.Diverge]; ok {
-			for _, branch := range div.Branches {
-				if branch.StartStep != "" {
-					if canReachEnd(branch.StartStep, stepMap, divMap, convMap, copyMap(visited)) {
-						return true
+		step, ok := stepMap[current]
+		if !ok {
+			continue
+		}
+		for j := range step.Outcomes {
+			stack = append(stack, step.Outcomes[j].NextStep)
+		}
+		if step.Diverge != "" {
+			if div, ok := divMap[step.Diverge]; ok {
+				for _, branch := range div.Branches {
+					if branch.StartStep != "" {
+						stack = append(stack, branch.StartStep)
 					}
 				}
 			}
 		}
-	}
-
-	// Follow convergence EvaluationStep edge.
-	if step.Converge != "" {
-		if conv, ok := convMap[step.Converge]; ok {
-			if conv.EvaluationStep != "" {
-				if canReachEnd(conv.EvaluationStep, stepMap, divMap, convMap, copyMap(visited)) {
-					return true
-				}
+		if step.Converge != "" {
+			if conv, ok := convMap[step.Converge]; ok && conv.EvaluationStep != "" {
+				stack = append(stack, conv.EvaluationStep)
 			}
 		}
 	}
-
 	return false
-}
-
-func copyMap(m map[string]bool) map[string]bool {
-	c := make(map[string]bool, len(m))
-	for k, v := range m {
-		c[k] = v
-	}
-	return c
 }
 
 // ValidateSemantic performs semantic validation per Workflow Validation §5.

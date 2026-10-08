@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // The smoke-test stub store is composed of per-role stubs. Each role
@@ -375,6 +375,12 @@ func (stubDeliveryStore) ClaimDeliveries(ctx context.Context, limit int) ([]stor
 }
 func (stubDeliveryStore) UpdateDeliveryStatus(ctx context.Context, deliveryID, status string, lastError string, nextRetryAt *time.Time) error {
 	return nil
+}
+func (stubDeliveryStore) DeferDelivery(ctx context.Context, deliveryID, reason string, until time.Time) error {
+	return nil
+}
+func (stubDeliveryStore) HoldDueDeliveries(ctx context.Context, hold store.DeliveryHold) ([]store.DeliveryEntry, error) {
+	return nil, nil
 }
 func (stubDeliveryStore) MarkDelivered(ctx context.Context, deliveryID string) error { return nil }
 func (stubDeliveryStore) LogDeliveryAttempt(ctx context.Context, entry *store.DeliveryLogEntry) error {

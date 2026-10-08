@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/observe"
 )
 
 // errPendingCodeRepoRetry signals that one or more code repos have a
@@ -176,6 +176,17 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 	if repo.DefaultBranch == "" {
 		return domain.RepositoryMergeOutcome{}, domain.NewError(domain.ErrPrecondition,
 			fmt.Sprintf("repository %q has no default_branch configured", repoID))
+	}
+	// default_branch reaches `git switch`, `git push` and the outcome
+	// row (P3-36). Refuse anything that is not a short branch name here
+	// (refs/heads/<n> included: one spelling, as the API enforces), with
+	// zero git calls and no outcome row, exactly like the empty case:
+	// the run stays in committing and retries once the operator fixes
+	// the binding. The git client would refuse it too (ErrInvalidRef),
+	// but only after a clone, and as a merge failure instead of a
+	// precondition the operator can read.
+	if err := git.ValidateShortBranchName(repo.DefaultBranch); err != nil {
+		return domain.RepositoryMergeOutcome{}, defaultBranchInvalid(repoID, err)
 	}
 	client, err := o.repoClients.Client(ctx, repoID)
 	if err != nil {

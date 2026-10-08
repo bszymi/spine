@@ -10,8 +10,13 @@ import (
 
 // ── Event Subscriptions ──
 
+// CreateSubscription inserts a subscription. Under a binding a successful
+// insert also records SigningSecret as the secret sub last saw (as a bound
+// read does), so a later UpdateSubscription of the same value judges
+// "kept" from it rather than from a fresh read of the row (see
+// UpdateSubscription).
 func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscription) error {
-	secret, err := s.encryptSubscriptionSecret(sub.SigningSecret)
+	secret, err := s.sealSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
 		return err
 	}
@@ -24,13 +29,18 @@ func (s *PostgresStore) CreateSubscription(ctx context.Context, sub *EventSubscr
 		sub.EventTypes, secret, sub.Status, sub.Metadata,
 		sub.CreatedBy, sub.CreatedAt, sub.UpdatedAt,
 	)
+	if err == nil {
+		s.recordSecretRead(sub)
+	}
 	return err
 }
 
-// encryptSubscriptionSecret encrypts a signing secret at rest when a
-// cipher is configured. If the value is already ciphertext (i.e. it
-// was re-saved without being decrypted first) it is passed through so
-// we never double-encrypt.
+// encryptSubscriptionSecret is the unbound write path (no
+// SetSubscriptionSecretBinding): it encrypts a signing secret as enc:v1
+// when a cipher is configured. If the value is already ciphertext (i.e.
+// it was re-saved without being decrypted first) it is passed through so
+// we never double-encrypt. Bound stores use sealSubscriptionSecret
+// (postgres_subscription_secrets.go) instead.
 func (s *PostgresStore) encryptSubscriptionSecret(secret string) (string, error) {
 	if s.cipher == nil || secret == "" || spinecrypto.IsEncrypted(secret) {
 		return secret, nil
@@ -38,9 +48,13 @@ func (s *PostgresStore) encryptSubscriptionSecret(secret string) (string, error)
 	return s.cipher.Encrypt(secret)
 }
 
-// decryptSubscriptionSecret reverses encryptSubscriptionSecret.
-// Pre-migration plaintext rows are returned as-is; they will be
-// re-encrypted on their next UpdateSubscription call.
+// decryptSubscriptionSecret is the unbound read path: it reverses
+// encryptSubscriptionSecret. Plaintext rows (written before a key was
+// configured) are returned as-is. They are NOT re-encrypted by a later
+// write: BootstrapInternalSubscription and SMP's realign compare the
+// decrypted secret and skip unchanged rows, so no write ever comes
+// (audit P3-1). Converting them is the job of the explicit sweep,
+// ReencryptSubscriptionSecrets, which needs a binding.
 func (s *PostgresStore) decryptSubscriptionSecret(stored string) (string, error) {
 	if stored == "" {
 		return stored, nil
@@ -64,18 +78,79 @@ func (s *PostgresStore) GetSubscription(ctx context.Context, subscriptionID stri
 	if wsID != nil {
 		sub.WorkspaceID = *wsID
 	}
-	secret, err := s.decryptSubscriptionSecret(sub.SigningSecret)
+	secret, err := s.openSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt signing_secret: %w", err)
 	}
 	sub.SigningSecret = secret
+	s.recordSecretRead(&sub)
 	return &sub, nil
 }
 
+// UpdateSubscription replaces a subscription's mutable columns.
+//
+// Under a binding (SetSubscriptionSecretBinding) the signing_secret column
+// is written only when the caller set a secret; when it kept the one it
+// read — the common read-modify-write: PATCH, pause, activate, a
+// target-URL realign — only the other columns are written. Re-sealing a
+// kept secret would let a read-modify-write convert a legacy (plaintext
+// or enc:v1) value into this row's enc:v2 silently: in migrate mode a
+// planted copy of another workspace's pre-upgrade enc:v1 value opens
+// (enc:v1 binds nothing), and re-sealing what was read would make it a
+// valid enc:v2 row that strict later accepts, with no conversion record
+// (INIT-023 TASK-009 review round 1). Leaving the bytes alone keeps the
+// re-encryption sweep, which records every conversion, the only path from
+// a legacy value to enc:v2; a set secret replaces the stored value
+// outright, so nothing read from the row is carried over.
+//
+// "Kept" is decided from what the caller read, never from a later read
+// of the row (codex review): for a value returned by a bound read,
+// SigningSecret is compared with the secret that read returned, so a
+// rotation that lands between the caller's read and this update is
+// neither reverted nor replaced by the stale (possibly planted) secret.
+// Only a value that did not come from a bound read (a struct the caller
+// built) falls back to comparing against the stored value — one extra
+// SELECT, and a caller that copies a secret it read into a new struct
+// while a rotation races it can still write that copy; build updates from
+// the value the store returned.
+//
+// After a successful bound update, SigningSecret becomes the secret sub
+// last saw, whichever branch ran (codex review, round 2): the value just
+// written, or the value just found kept. A caller that reuses sub for a
+// further update is then judged against what this update left, not
+// against its original read. Without that, reading A, setting B, then
+// setting A back would be judged "kept" against the stale A and silently
+// leave B in the row; and after setting B, a metadata-only update would
+// see B ≠ A, write B again, and revert a rotation that landed in between.
+// A failed update records nothing.
+//
+// A side effect: an update that keeps the secret no longer reverts a
+// concurrent rotate-secret. With no binding the historical single UPDATE
+// is unchanged and nothing is recorded.
 func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscription) error {
-	secret, err := s.encryptSubscriptionSecret(sub.SigningSecret)
+	secret, err := s.sealSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 	if err != nil {
 		return err
+	}
+	if s.secretBinding != nil {
+		kept, err := s.boundSecretKept(ctx, sub)
+		if err != nil {
+			return err
+		}
+		if kept {
+			_, err = s.pool.Exec(ctx, `
+				UPDATE runtime.event_subscriptions SET
+					name = $2, target_type = $3, target_url = $4, event_types = $5,
+					status = $6, metadata = $7, updated_at = now()
+				WHERE subscription_id = $1`,
+				sub.SubscriptionID, sub.Name, sub.TargetType, sub.TargetURL,
+				sub.EventTypes, sub.Status, sub.Metadata,
+			)
+			if err == nil {
+				s.recordSecretRead(sub)
+			}
+			return err
+		}
 	}
 	_, err = s.pool.Exec(ctx, `
 		UPDATE runtime.event_subscriptions SET
@@ -85,6 +160,10 @@ func (s *PostgresStore) UpdateSubscription(ctx context.Context, sub *EventSubscr
 		sub.SubscriptionID, sub.Name, sub.TargetType, sub.TargetURL,
 		sub.EventTypes, secret, sub.Status, sub.Metadata,
 	)
+	if err == nil {
+		// No-op without a binding (recordSecretRead checks).
+		s.recordSecretRead(sub)
+	}
 	return err
 }
 
@@ -144,11 +223,12 @@ func (s *PostgresStore) scanSubscriptions(rows pgx.Rows) ([]EventSubscription, e
 		if wsID != nil {
 			sub.WorkspaceID = *wsID
 		}
-		secret, err := s.decryptSubscriptionSecret(sub.SigningSecret)
+		secret, err := s.openSubscriptionSecret(sub.SubscriptionID, sub.SigningSecret)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt signing_secret: %w", err)
 		}
 		sub.SigningSecret = secret
+		s.recordSecretRead(&sub)
 		results = append(results, sub)
 	}
 	return results, rows.Err()

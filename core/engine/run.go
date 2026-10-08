@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -301,7 +301,12 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 
 	path := workflow.WorkflowsDir + "/" + workflowID + ".yaml"
 
-	parsed, err := workflow.Parse(path, []byte(body))
+	// ProjectionDefinition, not bare Parse: the body is what the
+	// projection will read after the planning run merges, so a body it
+	// would refuse (strict-parse or round-trip failure) is refused here
+	// with the same ErrInvalidParams a parse failure returns
+	// (INIT-023 TASK-011 §7).
+	parsed, _, err := workflow.ProjectionDefinition(path, []byte(body))
 	if err != nil {
 		return nil, domain.NewError(domain.ErrInvalidParams, fmt.Sprintf("invalid workflow body: %v", err))
 	}
@@ -465,6 +470,9 @@ func (o *Orchestrator) FailRun(ctx context.Context, runID, reason string) error 
 	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
+	// TerminateStepsOnCancel (INIT-023 TASK-007): close the run's live
+	// executions now that the run row says failed.
+	o.terminateLiveSteps(ctx, runID, "run failed: "+reason)
 
 	payload, _ := json.Marshal(map[string]string{"reason": reason})
 	o.emitEvent(ctx, domain.EventRunFailed, runID, run.TraceID,
@@ -499,6 +507,10 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) error {
 	if err := o.store.UpdateRunStatus(ctx, runID, result.ToStatus); err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
+	// TerminateStepsOnCancel (INIT-023 TASK-007): engine-state-machine.md
+	// §2.2 "terminate in-progress steps" on run.cancel — every live
+	// execution moves to skipped/run_terminated.
+	o.terminateLiveSteps(ctx, runID, "run cancelled")
 
 	o.emitEvent(ctx, domain.EventRunCancelled, runID, run.TraceID,
 		fmt.Sprintf("evt-%s-cancelled", run.TraceID[:12]), nil)

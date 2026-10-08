@@ -12,7 +12,6 @@ import (
 	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/service/internal/config"
 	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/service/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -34,6 +33,15 @@ func serveCmd() *cobra.Command {
 			ctx = observe.WithComponent(ctx, "server")
 			log := observe.Logger(ctx)
 
+			// Git floor first (INIT-023 TASK-002): the git client's argv
+			// needs git >= 2.30 (`rev-parse --end-of-options`) and has no
+			// fallback without the terminator. Refuse to start rather
+			// than fail closed on the first read with a confusing error,
+			// and before any database, workspace or push-auth setup.
+			if err := git.CheckGitVersion(ctx); err != nil {
+				return err
+			}
+
 			if err := validateOperatorToken(os.Getenv("SPINE_OPERATOR_TOKEN")); err != nil {
 				return err
 			}
@@ -47,12 +55,14 @@ func serveCmd() *cobra.Command {
 				log.Warn("SPINE_DEV_MODE is enabled — unauthenticated requests will be allowed", "env", runtimeEnv)
 			}
 
-			secretCipher, err := loadSecretCipher(runtimeEnv)
+			// SMP_ADMIN_TOKEN strength gate (INIT-023 TASK-013): checked
+			// before any store, secret or listener is opened.
+			smpAdminWarning, err := validateSMPAdminToken(os.Getenv("SMP_ADMIN_TOKEN"), runtimeEnv)
 			if err != nil {
 				return err
 			}
-			if secretCipher == nil {
-				log.Warn("SPINE_SECRET_ENCRYPTION_KEY is not set — webhook signing secrets will be stored in plaintext", "env", runtimeEnv)
+			if smpAdminWarning != "" {
+				log.Warn(smpAdminWarning, "env", runtimeEnv)
 			}
 
 			codeRepoBase, err := loadCodeRepoBase(runtimeEnv)
@@ -72,33 +82,27 @@ func serveCmd() *cobra.Command {
 
 			deliveryCfg := loadWorkspaceDeliveryConfig()
 
-			wsWiring, err := buildWorkspaceResolver(ctx, secretCipher, log, deliveryCfg, codeRepoBase)
+			// Engine step-entry policy (INIT-023 TASK-007): strict unless
+			// SPINE_STEP_ENTRY_POLICY=legacy; any other value refuses to
+			// start. Parsed once and threaded to both orchestrator builders.
+			stepEntryPolicy, err := stepEntryPolicyFromEnv()
 			if err != nil {
 				return err
 			}
-			if wsWiring.DBProvider != nil {
-				defer wsWiring.DBProvider.Close()
-			}
-			if wsWiring.Pool != nil {
-				defer wsWiring.Pool.Close()
-			}
+			logStepEntryPolicy(log, stepEntryPolicy)
 
-			// Only the file resolver is single-workspace and sized to
-			// back the process-level store. db / platform-binding
-			// modes route per-workspace via ServicePool, so passing
-			// their resolver here would resolve only one tenant's
-			// credential into a shared store — not the desired model.
-			var storeResolver workspace.Resolver
-			if wsWiring.Pool == nil {
-				storeResolver = wsWiring.Resolver
-			}
-			st, err := buildStore(ctx, storeResolver, secretCipher, log)
+			// The subscription-secret key ring and envelope mode, the
+			// workspace resolver (with its ServicePool in shared mode) and
+			// the file-mode store come from one call, which loads the mode
+			// itself so no argument here can drop it (INIT-023 TASK-009).
+			// The step-entry policy reaches every pooled workspace's
+			// orchestrator through the same call (INIT-023 TASK-007).
+			workspaces, err := buildServeWorkspaces(ctx, runtimeEnv, log, deliveryCfg, codeRepoBase, stepEntryPolicy)
 			if err != nil {
 				return err
 			}
-			if closer, ok := st.(interface{ Close() }); ok && st != nil {
-				defer closer.Close()
-			}
+			defer workspaces.Close()
+			secretCipher, wsWiring, st := workspaces.SecretCipher, workspaces.Wiring, workspaces.Store
 
 			repoPath := os.Getenv("SPINE_REPO_PATH")
 			if repoPath == "" {
@@ -182,6 +186,7 @@ func serveCmd() *cobra.Command {
 				OrphanThreshold:            orphanThreshold,
 				WebhookTargets:             deliveryCfg.WebhookTargets,
 				NotifyBridgeEnabled:        parseEventLogNotifyBridge(os.Getenv("SPINE_EVENT_LOG_NOTIFY_BRIDGE")),
+				StepEntryPolicy:            stepEntryPolicy,
 			}
 
 			rt, err := buildServerConfig(ctx, deps)

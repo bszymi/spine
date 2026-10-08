@@ -392,8 +392,8 @@ whatever the opt-in. Each has an owner, and some have an ordering constraint.
 | TASK-002 | Argv terminators and qualified refs. AddToRun now resolves `refs/heads/<run>` first, which is a fix. There is a git version floor. | SMP TASK-008 |
 | TASK-003 | `Diff` output becomes NUL-delimited. Oversized and unsafe-named files are skipped and recorded. | **Spine TASK-003 merges only after SMP TASK-003 is on SMP `main`.** SMP TASK-008 adopts. |
 | TASK-004 | Confined writes; new refusal status codes | SMP TASK-008 |
-| TASK-010 | A 4xx from the receiver dead-letters on the first attempt. Orphaned and malformed rows go `dead`. Error text is redacted. | **SMP TASK-006's R1 (503 for transient receiver failures) and R2 (the rotation-window requeue) must be on SMP `main` before any SMP bump past Spine TASK-010.** |
-| TASK-011 | Strict, round-trip-checked workflow projection. A rejected row is quarantined. Nested `workflows/steps/*` files are no longer projected. | **The first SMP bump whose pin contains Spine TASK-011 also carries SMP's backfill-probe change** (SMP TASK-012 §4.6). Without it, every leader acquisition triggers a `FullRebuild` that strands in-flight runs. |
+| TASK-010 | A 4xx from the receiver dead-letters on the first attempt. Orphaned and malformed rows go `dead`, and so do rows whose TLS configuration cannot be built — the first such row takes the subscription's whole due queue with it. Error text is redacted. Rows held by an open circuit, or whose subscription cannot be read (database, decrypt), are held without consuming attempts — the subscription's whole due queue at once — and go `dead` once held 24 h (`MaxCircuitHold`, counted from the circuit opening or the first failed read on that replica, or from `created_at` if later; in memory, so a restart starts it again). A transient subscription-read failure is retried with backoff, then every minute, instead of on every poll; it still counts attempts and is never dead-lettered for this before the 24 h cap. | **SMP TASK-006's R1 (503 for transient receiver failures) and R2 (the rotation-window requeue) must be on SMP `main` before any SMP bump past Spine TASK-010.** |
+| TASK-011 | Strict, round-trip-checked workflow projection (also U+0000, a path / `id` / `status` over 1024 bytes, and a non-file entry such as a gitlink). A rejected row is quarantined. The write path SMP wraps (`workflow.Service` Create/Update, `StartWorkflowPlanningRun`) refuses the same bodies. The first sync deletes every stored row outside the workflow definition locations — every nested `workflows/**` row, Active ones included (reported; runs pinned to them lose their row). A `Head()`, `Diff` or git-caused read failure is an `error` tick. | **The first SMP bump whose pin contains Spine TASK-011 also carries SMP's backfill-probe change** (SMP TASK-012 §4.6), exempting rejected and non-file paths. Without it, every leader acquisition triggers a `FullRebuild` that strands in-flight runs. |
 | TASK-012 | Git children are stopped with SIGTERM on cancel, and the merge blocks re-check run status. A successful result does not change. | SMP TASK-012 (gates) |
 | TASK-013 | `BootstrapInternalAdmin` no longer re-activates a suspended `smp-admin`, revokes superseded bootstrap bearers and uses random token ids. Nothing in SMP observes this. | SMP TASK-012 (re-runs TASK-013 AC 18) |
 | TASK-014 | `workflow.Service` gains a branch-protection policy. SMP's admin writes stay bypass writes. | SMP TASK-012 (§6 of that task) |
@@ -600,6 +600,34 @@ questions stay in that task.
     - *Alternative:* SMP bumps to the latest commit that contains every task SMP consumes
       (TASK-001 … TASK-011 and TASK-017), and records the stalled tasks as not yet picked up.
     - Source: SMP TASK-012 OQ2.
+
+---
+
+## 7f. Progress
+
+- 2026-10-07 — **Wave 1:** TASK-001 (the P1: every pre-receive command line
+  is validated; `refname.ValidateQualified`; the branch-protection
+  control-byte deny) merged to local `main` after its own review rounds, a
+  cross-task review with SMP's fix of the same bug (INIT-027 EPIC-004
+  TASK-001), Spine CI and the SMP compatibility build. Not pushed.
+- 2026-10-08 — **Wave 2:** TASK-002, TASK-004, TASK-007, TASK-009, TASK-010,
+  TASK-011, TASK-013 and TASK-016 merged to local `main` through
+  `init/INIT-023-wave2-integration`. Each task was reviewed alone (three
+  lenses, two rounds, codex); the integration fixed four semantic conflicts
+  with tests (`TreeEntryType` follows the ref grammar; the step-entry policy
+  reaches every pooled workspace; a refused signing secret holds its
+  deliveries; docs). A cross-task review (git/ref surface,
+  governance/engine, secrets/delivery, SMP compatibility, merge audit; two
+  skeptics per P1/P2) confirmed two P2s, both fixed with tests: separation
+  of duties now counts every step type push admission lets write, and
+  `spine secrets reencrypt` never guesses the workspace id. Gates: Spine CI,
+  vet with every tag, race on the touched packages, integration and the
+  `TestGitHTTP_*` scenarios on PostgreSQL 17, golangci (no new issues),
+  codex clean; SMP `main` 6ca0eeb7 builds and passes its Spine-runtime and
+  gateway suites against the merged tree with no SMP change. Known
+  pre-existing failures, identical on `main`: 30 scenario tests,
+  `TestRunModeDatabaseDefault`. Tasks stay In Progress until GitHub CI runs
+  after a push. Not pushed.
 
 ---
 

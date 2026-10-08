@@ -23,6 +23,7 @@ import (
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/queue"
+	"github.com/bszymi/spine/core/refadmit"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/config"
@@ -183,6 +184,13 @@ type serveDeps struct {
 	// with SPINE_WEBHOOK_ALLOWED_HOSTS (comma-separated) when internal
 	// or localhost destinations are intentional.
 	WebhookTargets *delivery.TargetValidator
+
+	// StepEntryPolicy is the engine step-entry policy installed on the
+	// process-level orchestrator (INIT-023 TASK-007). serveCmd sets it
+	// from SPINE_STEP_ENTRY_POLICY (strict by default); a non-zero
+	// policy also disables the gateway's engine-less step-assign
+	// fallback, which would otherwise bind with no checks at all.
+	StepEntryPolicy engine.StepEntryPolicy
 }
 
 // serveRuntime bundles the ServerConfig with the long-lived background
@@ -286,6 +294,14 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		projQuery = projection.NewQueryService(deps.Store, primaryClient)
 		projSync = projection.NewService(primaryClient, deps.Store, deps.Events, 30*time.Second)
 		projSync.WithArtifactsDir(deps.SpineCfg.ArtifactsDir)
+		// The single-workspace repository is a non-bare working tree
+		// the engine checks run branches out in: follow the
+		// governed-merge target, not HEAD (INIT-023 TASK-011, audit
+		// P3-22). One startup Warn when the branch does not resolve.
+		if err := projSync.WithAuthoritativeBranch(engine.AuthoritativeBranch); err != nil {
+			return nil, fmt.Errorf("projection authoritative branch: %w", err)
+		}
+		_ = projSync.ProbeAuthoritativeRef(ctx)
 	}
 
 	// In platform-binding mode the global projSync above is moot: every
@@ -347,7 +363,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// same instance pool.PrimaryClient() returns — passing it here
 	// keeps semantics identical to a routed call without expanding
 	// the abstract interface.
-	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, log)
+	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, deps.StepEntryPolicy, log)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Reuses the registry built above so the pool and the orchestrator
 	// resolve through the same authoritative source.
@@ -418,8 +434,16 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if err != nil {
 		return nil, fmt.Errorf("git-http branch-protect policy: %w", err)
 	}
-	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, log)
-	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events)
+	// Ref-class push admission (INIT-023 TASK-016): the process-level
+	// run reader and review-freeze lookup (the orchestrator, which
+	// loads each run's pinned workflow) back single mode; shared mode
+	// attaches each workspace's own pair per push.
+	var gitStepDefs refadmit.StepDefLookup
+	if orch != nil {
+		gitStepDefs = orch
+	}
+	gitHTTPHandler := buildGitHTTPHandler(deps.WSResolver, deps.TrustedGitHTTPCIDRs, deps.GitReceivePackEnabled, gitHTTPPolicy, runReaderOrNil(deps.Store), gitStepDefs, deps.WSServicePool != nil, log)
+	gitPushResolver := buildGitPushResolver(deps.WSServicePool, deps.Store, deps.Events, gitStepDefs)
 
 	cfg := gateway.ServerConfig{
 		Store:                      deps.Store,
@@ -458,6 +482,11 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		TrustedProxyCIDRs:          deps.TrustedProxyCIDRs,
 		DevMode:                    deps.DevMode,
 		Env:                        deps.RuntimeEnv,
+		// INIT-023 TASK-007: with a step-entry policy installed, the
+		// gateway must not fall back to its engine-less store binder (it
+		// performs none of the policy's checks); a missing orchestrator
+		// answers 503 instead.
+		DisableStepAssignFallback: !deps.StepEntryPolicy.IsZero(),
 	}
 
 	return &serveRuntime{

@@ -583,9 +583,14 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 						}
 					}
 
-					// Create a new branch, add a file, commit.
+					// Create a new branch, add a file, commit. An
+					// ordinary branch: since INIT-023 TASK-016 the
+					// reserved spine/** namespace is operator-only, and
+					// this devMode push is anonymous
+					// (TestGitHTTP_PushReservedRefRejectedAnonymously
+					// pins that).
 					branchCmds := [][]string{
-						{"checkout", "-b", "spine/test/push"},
+						{"checkout", "-b", "feature/push"},
 					}
 					for _, args := range branchCmds {
 						c := exec.Command("git", args...)
@@ -610,19 +615,81 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 					}
 
 					// Push to the HTTP endpoint.
-					push := exec.Command("git", "push", "origin", "spine/test/push")
+					push := exec.Command("git", "push", "origin", "feature/push")
 					push.Dir = cloneDir
 					if out, err := push.CombinedOutput(); err != nil {
 						return fmt.Errorf("git push failed: %w\n%s", err, out)
 					}
 
 					// Verify the server repo has the new branch.
-					show := exec.Command("git", "show-ref", "--verify", "refs/heads/spine/test/push")
+					show := exec.Command("git", "show-ref", "--verify", "refs/heads/feature/push")
 					show.Dir = repoPath
 					if out, err := show.CombinedOutput(); err != nil {
-						return fmt.Errorf("server should have refs/heads/spine/test/push after push, got: %w\n%s", err, out)
+						return fmt.Errorf("server should have refs/heads/feature/push after push, got: %w\n%s", err, out)
 					}
 
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// TestGitHTTP_PushReservedRefRejectedAnonymously pins the ref-class
+// admission (INIT-023 TASK-016) end to end: in devMode the git endpoint
+// skips auth, so the push reaches the pre-receive gate with no actor,
+// and a push into the reserved spine/** namespace (the shape
+// TestGitHTTP_PushAcceptedWhenFlagOn pushed before TASK-016) is refused
+// with a ref-admission line and leaves no ref on the server. No
+// branch-protection policy is wired: admission runs without one.
+func TestGitHTTP_PushReservedRefRejectedAnonymously(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
+		Name:        "git-http-push-reserved-ref-anonymous",
+		Description: "An anonymous devMode push into spine/** is refused by ref-class admission",
+		EnvOpts: []harness.EnvOption{
+			harness.WithGovernance(),
+		},
+		Steps: []scenarioEngine.Step{
+			setupGitHTTPServerWithOptions(true, true, nil, nil),
+			enableGitHTTPExport(),
+			{
+				Name: "push-reserved-ref-anonymously",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					base := sc.MustGet("gw_url").(string)
+					repoPath := sc.Repo.Dir
+					cloneDir := filepath.Join(sc.T.TempDir(), "reserved-clone")
+					if out, err := exec.Command("git", "clone", base+"/git", cloneDir).CombinedOutput(); err != nil {
+						return fmt.Errorf("git clone failed: %w\n%s", err, out)
+					}
+					for _, args := range [][]string{
+						{"config", "user.email", "push-test@spine.local"},
+						{"config", "user.name", "Push Test"},
+						{"checkout", "-b", "spine/test/push"},
+						{"commit", "--allow-empty", "-m", "reserved"},
+					} {
+						c := exec.Command("git", args...)
+						c.Dir = cloneDir
+						if out, err := c.CombinedOutput(); err != nil {
+							return fmt.Errorf("git %v: %w\n%s", args, err, out)
+						}
+					}
+
+					push := exec.Command("git", "push", "origin", "spine/test/push")
+					push.Dir = cloneDir
+					out, err := push.CombinedOutput()
+					if err == nil {
+						return fmt.Errorf("anonymous push into spine/** succeeded; expected a ref-admission refusal\n%s", out)
+					}
+					if !strings.Contains(string(out), "ref-admission: spine/test/push is in the reserved spine namespace; operator role required") {
+						return fmt.Errorf("expected the reserved-namespace ref-admission line, got:\n%s", out)
+					}
+
+					show := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/spine/test/push")
+					show.Dir = repoPath
+					if show.Run() == nil {
+						return fmt.Errorf("server has refs/heads/spine/test/push after a refused push")
+					}
 					return nil
 				},
 			},

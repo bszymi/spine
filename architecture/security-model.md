@@ -129,8 +129,10 @@ Spine v0.x uses a role-based authorization model. Roles are assigned to actors, 
 | `reader` | Read artifacts, query projected state, view Runs and execution history |
 | `contributor` | Reader + create/update artifacts, submit step results, start Runs |
 | `reviewer` | Contributor + approve/reject tasks, execute governance steps |
-| `operator` | Reviewer + system operations (projection rebuild, health checks, Run cancellation) |
-| `admin` | Full access including actor management, token management, and configuration |
+| `operator` | Reviewer + system operations (projection rebuild, health checks, Run cancellation), and registering actors with a role strictly below its own |
+| `admin` | Full access including actor management (admin and operator actors included), the skill catalogue, actor skill grants, token management, and configuration |
+
+A non-admin actor can never change its own skills. Skills decide who may claim review and approval steps, so creating, updating, renaming or deprecating a skill and granting or removing an actor's skill are admin-only, and the actor-skill routes refuse a non-admin caller targeting itself with `reason=self_skill_change_forbidden` (INIT-023 TASK-013).
 
 ### 4.2 Role Hierarchy
 
@@ -169,6 +171,48 @@ steps:
 ```
 
 The Workflow Engine evaluates these constraints when assigning actors to steps. An actor must have both sufficient role permissions and meet step-level requirements.
+
+#### 4.4.1 Step-entry policy (INIT-023 TASK-007)
+
+Before INIT-023 only the pull path (`ClaimStep`) checked step-level constraints;
+`AssignStep` bound any actor ID to any step, no binding path looked at
+`execution.mode`, preconditions or run status, and nothing stopped the executor
+of a run from being bound to its review (audit P3-3, P3-4, P3-15, P3-16 and the
+F3 separation-of-duties amplifier). The engine now enforces these through an
+**opt-in** `engine.StepEntryPolicy` with independent switches:
+
+| Switch | Effect |
+|---|---|
+| `EnforceRunStatus` | Assign, claim, acknowledge, result submission, step activation and retry refuse (409) a run that is not `active`; the candidate listing hides such runs; a late submit on an execution terminated with its run answers 409. |
+| `EnforceEligibility` | The actor must exist and be `active` (404 / 403); on assign it must also be in the effective `eligible_actor_ids` list (403) and match `eligible_actor_types` (409). |
+| `EnforceExecutionMode` | Engine-owned steps (`type: internal` or `mode: spine_only`) can never be assigned or claimed (409); `automated_only` / `ai_only` / `human_only` bind only `automated_system` / `ai_agent` / `human` actors (409). |
+| `EnforcePreconditions` | The engine evaluates the step's preconditions at assign and claim (412), strictly ([Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2); activation uses the same strict evaluator, so a failing step stays `waiting` and is not dispatched. |
+| `RequireSkillsOnAssign` | `required_skills` on assign (409; 503 if no skill lookup is wired). |
+| `SeparationOfDuties` | A run author cannot be bound to the run's `review` steps, and a live reviewer cannot take its author steps (403; 503 if the assignment ledger cannot be read) — by assignment, claim or engine auto-selection (which leaves the step `waiting`). The candidate listing does not offer an actor what this rule would refuse. Within a process a run's check and bind are serialised. See [Actor Model](/architecture/actor-model.md) §7.3. |
+| `TerminateStepsOnCancel` | Cancelling or failing a run (including the scheduler's run timeout) moves its live executions to `skipped` / `run_terminated` and cancels their active assignments. Safe only together with `EnforceRunStatus`. |
+
+Checks run in a fixed order and nothing is written before a bind is refused.
+An embedder whose actors are not all rows in Spine's actor table supplies an
+`Actors` resolver. The engine requires its answer to echo the requested actor ID
+exactly, which stops a resolver from mapping one ID to a different identity. It
+cannot tell a canonical handle from a variant the resolver chose to accept, so
+the resolver must also refuse (not found) every input that is not byte for byte
+a stored canonical handle — no case folding, trimming or lenient UUID parsing.
+Only then can no alias of an actor defeat the exact-string separation-of-duties
+and ownership compares. Standalone needs no resolver: actor lookup is an exact
+match on `auth.actors`.
+
+- **Standalone (`spine serve`)** installs `StrictStepEntryPolicy()` (every switch
+  on) by default. `SPINE_STEP_ENTRY_POLICY=legacy` restores the pre-INIT-023
+  behaviour with a startup WARN; any other value refuses to start. With a policy
+  installed the gateway's engine-less step-assign fallback is disabled.
+- **Embedders** get the zero value — today's behaviour — until they call
+  `WithStepEntryPolicy` (SMP adopts it in its TASK-011).
+- `required_skills` (and `RequireSkillsOnAssign`) is a real boundary in
+  standalone because skill grants and the skill catalogue are admin-only
+  (INIT-023 TASK-013, §4.1): a non-admin can no longer grant itself
+  the skill a review step requires. Separation of duties refuses self-review
+  independently of skills.
 
 ### 4.5 Authorization and Git Operations
 
@@ -220,6 +264,7 @@ Skills extend the authorization model at execution time but do not replace role-
 - Integration secrets are rotated by updating runtime configuration
 - Rotation does not require Git commits (credentials are not governed artifacts)
 - The system should support concurrent validity of old and new credentials during rotation windows
+- The at-rest encryption key for integration secrets rotates through a key ring: the new primary key seals, previous keys (`SPINE_SECRET_PREVIOUS_KEYS`) still decrypt, so old and new keys are valid together until a re-encryption sweep has moved every value to the new key; each `enc:v2` value names its key and is bound to its workspace and row (INIT-023 TASK-009, `docs/integration-guide.md` §2.1)
 
 ### 5.4 Credential Validation on Artifact Writes
 
@@ -310,11 +355,19 @@ Bootstrap defaults apply to repositories that have not yet seeded the config fil
 
 **Override.** Operators may bypass a rule per-operation:
 - **Spine API path (available today):** `write_context.override: true` on the operation. Honored on artifact endpoints; workflow wiring is follow-up work — see [INIT-018 EPIC-003 TASK-003](/initiatives/INIT-018-branch-protection/epics/EPIC-003-api-enforcement/tasks/TASK-003-write-context-override.md).
-- **Git push path (planned — EPIC-004):** `git push -o spine.override=true` will be recognized by the pre-receive handler once `internal/githttp` accepts writes and the push-option parsing lands. The Git endpoint is read-only in this release; operators bypassing the authoritative-branch protection do so through the API path.
+- **Git push path:** `git push -o spine.override=true`, recognized by the pre-receive gate when `SPINE_GIT_RECEIVE_PACK_ENABLED=true` (off by default; `docs/git-push-guide.md` §4).
 
-Every honored API-path override produces a `branch_protection.override` governance event and adds a `Branch-Protection-Override: true` commit trailer. The Git path will emit the event (once enabled) but will not rewrite pushed commits — the event is the sole audit record on that path. Per-actor allow-lists are out of scope for v1 — operator override is the only escape hatch.
+Every honored API-path override produces a `branch_protection.override` governance event and adds a `Branch-Protection-Override: true` commit trailer. The Git path emits the event but does not rewrite pushed commits — the event is the sole audit record on that path. Per-actor allow-lists are out of scope for v1 — operator override is the only escape hatch.
 
-Force pushes are prohibited (commits are never rewritten, per Constitution §7); `no-direct-write` covers them as a subset, since a force push is a non-governed advance.
+Force pushes are prohibited on protected branches (commits are never rewritten, per Constitution §7); `no-direct-write` covers them as a subset, since a force push is a non-governed advance.
+
+**Ref-class push admission (INIT-023 TASK-016).** Branch-protection rules gate user-facing *branches* only (ADR-009 §3, §6), so on the Git push path a second gate runs first, on every ref update, whether or not a rule set is wired (`core/refadmit`; class table in [API Operations](/architecture/api-operations.md) §6.1):
+
+- Tags, notes and every other non-branch ref, `spine/init`, and the rest of the reserved `spine` namespace (under any case-fold spelling) are writable by `operator`/`admin` only. A pushed tag can no longer shadow a run branch or `main` in the engine's bare-name git calls (audit F10).
+- A run, planning or divergence branch can be created or updated only by the actor who holds the **latest** execution of its current step (`assigned` or `in_progress`) on an `active` run, with role `contributor` or above, for the same repository — or by an operator. Nobody below operator may delete one (ADR-032 §5 parity). Even the bound actor is refused while the current step's declared type is `review` or `internal` (review freeze). This closes F2's push half: a non-owner can no longer move a run branch under review, or during the `committing` merge window, and so cannot get unreviewed content published by the governed merge.
+- Nobody, operators included, may create a ref with a control byte or with a non-leading `refs` or any `HEAD` path component (such a name breaks every client push of the branch it shadows); deleting one stays allowed for cleanup.
+- Everything fails closed: no actor, no run store, no step-definition lookup, an unknown run, a store error or an unresolvable step definition all refuse non-operators. Operators are never blocked by store state, so they remain the remediation route. Operator pushes to reserved refs are logged at Info; no governance event is emitted.
+- **Limits.** Admission is decided when the push's command section arrives; git updates the ref only after the pack has been received and processed, so a push *started* while bound can land after the actor submits the step, and the review freeze is checked at the same moment. The window has no fixed bound: the upload is limited by the server `ReadTimeout` (30 s by default), but git's processing of the received pack is not (`net/http/cgi` ignores the request context and does not bound `git-http-backend`), and the pusher influences its duration through the pack it sends. Merging exactly the reviewed commit is the content-integrity control for that window (INIT-023 TASK-005, planned); until it lands, a bound actor can still move the tip after validation. A bound actor may still force-push the branch it holds: fast-forward-only cannot be enforced before the pack is unpacked. In `SPINE_DEV_MODE` the git endpoint skips authentication, so dev pushes are anonymous and can write ordinary branches only.
 
 ### 7.4 Repository Access
 

@@ -7,6 +7,16 @@ const (
 	WorkflowStatusActive     WorkflowStatus = "Active"
 	WorkflowStatusDeprecated WorkflowStatus = "Deprecated"
 	WorkflowStatusDraft      WorkflowStatus = "Draft"
+
+	// WorkflowStatusQuarantined is a projection-only marker, never a
+	// value an author should write. The projection sets it on the
+	// status column of a row it keeps for in-flight runs after the file
+	// at head was rejected (INIT-023 TASK-011): every bindability read
+	// filters status = 'Active', so no new run binds the kept
+	// definition, while path- and id-keyed loads for runs pinned to the
+	// row's source_commit keep working. The row's definition JSON keeps
+	// its authored status.
+	WorkflowStatusQuarantined WorkflowStatus = "Quarantined"
 )
 
 // StepType represents the execution type of a workflow step.

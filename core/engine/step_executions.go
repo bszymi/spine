@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -73,6 +74,21 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 	// Cache runs and workflow definitions to avoid redundant lookups per run.
 	runCache := map[string]*domain.Run{}
 	wfCache := map[string]*domain.WorkflowDefinition{} // key: path@version
+	workflowFor := func(run *domain.Run) (*domain.WorkflowDefinition, error) {
+		cacheKey := run.WorkflowPath + "@" + run.WorkflowVersion
+		if def, hit := wfCache[cacheKey]; hit {
+			return def, nil
+		}
+		def, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+		if err != nil {
+			return nil, err
+		}
+		wfCache[cacheKey] = def
+		return def, nil
+	}
+	// runExecs caches each run's executions for the separation-of-duties
+	// filter (read only when SeparationOfDuties is on).
+	runExecs := map[string][]domain.StepExecution{}
 
 	var result []StepExecutionItem
 	for i := range execs {
@@ -112,18 +128,19 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 			runCache[exec.RunID] = r
 			run = r
 		}
+		// EnforceRunStatus (INIT-023 TASK-007): pollers are not offered
+		// executions of runs that are not active — every claim of one would
+		// answer 409, and live executions stored before the upgrade on runs
+		// that already ended would be offered forever.
+		if o.entryPolicy.EnforceRunStatus && run.Status != domain.RunStatusActive {
+			continue
+		}
 
 		// Apply actor_type filter via the workflow step definition.
 		if actorType != "" {
-			cacheKey := run.WorkflowPath + "@" + run.WorkflowVersion
-			wfDef, wfHit := wfCache[cacheKey]
-			if !wfHit {
-				def, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
-				if err != nil {
-					continue // skip if workflow cannot be loaded
-				}
-				wfCache[cacheKey] = def
-				wfDef = def
+			wfDef, err := workflowFor(run)
+			if err != nil {
+				continue // skip if workflow cannot be loaded
 			}
 			stepDef := findStepDef(wfDef, exec.StepID)
 			if stepDef != nil && stepDef.Execution != nil && len(stepDef.Execution.EligibleActorTypes) > 0 {
@@ -131,6 +148,16 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 					continue
 				}
 			}
+		}
+
+		// SeparationOfDuties (INIT-023 TASK-007): like the run-status filter
+		// above, a poller is not offered a waiting execution its own claim
+		// would refuse under separation of duties — a review of a run it
+		// authored, or an author step of a run whose review it holds —
+		// because it would claim, get 403 and repeat that every poll cycle.
+		if o.entryPolicy.SeparationOfDuties && q.ActorID != "" && exec.Status == domain.StepStatusWaiting &&
+			o.sodHidesCandidate(ctx, run, exec, q.ActorID, workflowFor, runExecs) {
+			continue
 		}
 
 		result = append(result, StepExecutionItem{
@@ -152,4 +179,39 @@ func (o *Orchestrator) ListStepExecutions(ctx context.Context, q StepExecutionQu
 		result = []StepExecutionItem{}
 	}
 	return result, nil
+}
+
+// sodHidesCandidate reports whether separation of duties would refuse
+// actorID's claim of the waiting execution exec — the listing's mirror of
+// check 7. Only a definite refusal (ErrForbidden) hides the candidate: when
+// the check cannot run (workflow, executions or ledger unreadable, or no
+// run store wired) the candidate stays listed and the claim itself answers
+// the fail-closed error. The run's executions are read once per listing.
+func (o *Orchestrator) sodHidesCandidate(ctx context.Context, run *domain.Run, exec *domain.StepExecution, actorID string,
+	workflowFor func(*domain.Run) (*domain.WorkflowDefinition, error), runExecs map[string][]domain.StepExecution) bool {
+	if o.store == nil {
+		return false
+	}
+	wfDef, err := workflowFor(run)
+	if err != nil {
+		return false
+	}
+	stepDef := findStepDef(wfDef, exec.StepID)
+	if stepDef == nil {
+		return false
+	}
+	if stepDef.Type != domain.StepTypeReview && !isAuthorStepType(stepDef.Type) {
+		return false
+	}
+	execs, hit := runExecs[run.RunID]
+	if !hit {
+		execs, err = o.store.ListStepExecutionsByRun(ctx, run.RunID)
+		if err != nil {
+			return false
+		}
+		runExecs[run.RunID] = execs
+	}
+	var se *domain.SpineError
+	err = o.separationOfDuties(ctx, run, wfDef, stepDef, exec, actorID, execs)
+	return errors.As(err, &se) && se.Code == domain.ErrForbidden
 }

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // ── Fake Store ──
@@ -73,6 +73,21 @@ func (f *fakeStore) RevokeToken(_ context.Context, tokenID string) error {
 		}
 	}
 	return domain.NewError(domain.ErrNotFound, "token not found")
+}
+
+// ListTokensByActor lists the actor's token rows. The admin bootstrap
+// reads it to revoke superseded bootstrap bearers on rotation
+// (INIT-023 TASK-013); without it the embedded nil store.Store panics.
+// Entries are returned by value, mirroring the Postgres store, so a
+// caller cannot mutate the fake's state through the result.
+func (f *fakeStore) ListTokensByActor(_ context.Context, actorID string) ([]domain.Token, error) {
+	var out []domain.Token
+	for _, entry := range f.tokens {
+		if entry.token.ActorID == actorID {
+			out = append(out, *entry.token)
+		}
+	}
+	return out, nil
 }
 
 // ── ValidateToken Tests ──

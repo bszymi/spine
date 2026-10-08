@@ -2,10 +2,10 @@
 id: TASK-011
 type: Task
 title: "Projection sync integrity: close the workflow parser differential, stop dropped Diff errors, follow the authoritative ref, scope artifacts_dir"
-status: Pending
+status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -820,6 +820,11 @@ Non-Active rows are not swept. They are not bindable, and a `FullRebuild` re-der
 >      then stale until that file next changes.
 >    - Cross-instance concurrency stays out of scope, as before: SMP's provisioning `FullRebuild`
 >      next to the warm-workspace loop.
+>      *(Corrected by the wave 2 cross-task review: not "as before". Before this task every path
+>      that deleted or rewrote a row from a stale head also wrote `sync_state`, so a cross-instance
+>      race healed on the next tick; the sweep followed by the up-to-date early return did not, and
+>      could lose a row another instance projected at a newer head for good. A sweep that writes
+>      now re-records `sync_state` on that path — see "Cross-task review (wave 2)".)*
 
 ### 7. Write-path parity
 
@@ -1522,3 +1527,604 @@ Adversarial design check, 2026-10-06, against Spine `61994fe` and SMP `80995559`
 
 ## Implementation Notes
 
+*(Implementation, 2026-10-07. Branch `init/INIT-023-TASK-011-projection-sync-fail-closed`, cut from
+Spine local `main` `ee3c249` (`61994fe` + the INIT-023 scaffold + the merged TASK-001). The
+orchestrator named the branch. Run on macOS, git 2.54.0, go 1.26.8, against a shared native
+PostgreSQL 17.10 + pgvector; CI uses 18. Every database used was named `s011_*` and dropped at the
+end.)*
+
+### Orchestrator rulings and owner-question defaults (recorded, pending the owner)
+
+- **Scope:** audit P3-13 (narrowed to the parser differential), P3-14, P3-22, P3-23. P3-22's
+  enforcement is opt-in (`WithAuthoritativeBranch`; zero value `Head()`); `spine serve` turns it on.
+- **OQ1 (= INIT-023 OQ7) — default taken: strict.** A file failing strict `Parse` or the round
+  trip is never projected; the last verified row is kept.
+- **OQ2 — default taken:** `WithStrictWorkflowValidation` exists and is **off** in both repositories
+  until a corpus-repair follow-up per repository. Verified fact used: all 15 shipped workflow files
+  `Parse` and round-trip equal; 10 fail full `Validate`.
+- **OQ3 — default taken:** root `workflows/` and `<artifacts_dir>/workflows/` are both canonical,
+  applied identically by both entry points.
+- **OQ4 — default taken: QUARANTINED.** The ruling made it conditional on the status column
+  accepting the value without a schema change. Checked: `projection.workflows.status` is
+  `text NOT NULL` with no CHECK constraint, enum or domain in Spine `migrations/001_initial_schema.sql`
+  (and no later migration touches it) and in SMP's vendored copy
+  `internal/customer/workspace/spinemigrations/001_initial_schema.sql`. Proven on PostgreSQL by
+  `TestIntegration_NULWorkflowIsRejectionNotWedge` and `TestListWorkflowProjections_AllStatuses`
+  (a `Quarantined` row round-trips). So the quarantine was implemented; nothing was stopped.
+- **OQ5 — default taken:** `FullRebuild` `source_commit` preservation is a recorded follow-up, not
+  done here.
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `0d676d3` | `core/workflow/projection_definition.go` (new): `ProjectionDefinition`, `VerifyProjectionDefinition`, `ErrProjectionRoundTrip` (§1, both design-check classes: U+0000 walked on the decoded value; every post-`Parse` failure wraps the sentinel). Write-path parity (§7): `workflow.Service` Create/Update, `ValidateBody` (new `ProjectionRoundTripRuleID = "projection_round_trip"`), `StartWorkflowPlanningRun` |
+| `b780511` | `core/artifact`: `DiscoverChangesFromDiffs`; `DiscoverChanges` = `Diff` + it. Every skipped `ReadFile` failure recorded in additive `ChangeSet.ReadErrors`; `DiscoveryError` gains additive `Ref` and `Err` |
+| `fa4e2dc` | `domain.EventProjectionWorkflowRejected`, `domain.WorkflowStatusQuarantined`, `allEventTypes()` registration (+ the first test of that list), `(*store.PostgresStore).ListWorkflowProjections` (optional capability, not on `store.Store`) |
+| `857df75` | `adapters/projection`: `scope.go` (one classifier, `WorkflowDirs`), `authoritative.go` (`WithAuthoritativeBranch`, `AuthoritativeBranch`, `ProbeAuthoritativeRef`, `resolveHead`), `workflow_rows.go` (`WorkflowRejection`, `buildWorkflowRow`, `syncWorkflowFile`, quarantine, `reportWorkflowRejection`, `isContentReadError` hook, `WithStrictWorkflowValidation`), `sweep.go` (single-flight all-rows sweep, `sameWorkflowRow`), `service.go` (`FullRebuild` plans before the wipe, one-`Diff` `IncrementalSync`, `markSyncError`, read-error classification). The regression tests |
+| `d5fd6c1` | `engine.AuthoritativeBranch`; wiring in `serve_wiring.go`, `workspace/pool.go`, `scenariotest/harness/runtime.go`; wiring tests |
+| `82564de` | Docs: `event-schemas.md` (§4.13 `projection_synced`, §4.14 `projection_workflow_rejected`, emission map), `data-model.md` §4.1/§4.2, `git-integration.md` §2.2, `workflow-definition-format.md` §2.2; `CHANGELOG.md`; `KNOWN-LIMITATIONS.md` |
+| `8b68611`, `0a65121` | Lint hygiene in new tests |
+| `43592a5` | Out-of-scope changeset path after discovery is a counted sync error (found by mutation testing, see Deviations 5) |
+| `cdd506b`, `882220a` | `FullRebuild` read failure restores the verified row **quarantined** (Deviation 3); CHANGELOG / KNOWN-LIMITATIONS |
+| `9ace88f` | PostgreSQL test for the all-rows capability |
+| `ad1836c` | Codex round-2 P1: `canReachEnd` made linear (Deviation 6) |
+
+No migration, column, table, configuration key or environment variable was added
+(`git diff --stat main...HEAD -- migrations go.mod go.sum` is empty).
+
+### Per-AC evidence
+
+Test files are in `adapters/projection` unless named otherwise.
+
+1. `core/workflow/projection_definition_test.go` `TestProjectionDefinition_RefusesSmugglingClassAsParseError`:
+   the two audit payloads (verbatim), `Steps:`, duplicate `id`, top-level `path:` / `commit_sha:` —
+   all parse errors, none wraps `ErrProjectionRoundTrip`.
+2. `TestProjectionDefinition_RefusesRoundTripFailures`: `version: 1.0`, `retry: {limit: 1.5}`,
+   integer step `name`, `version: 2026-10-06`, `name: "a\0b"`, `commit: {status: "x\0"}`,
+   `commit: {1: x}` — each `Parse`-accepted (asserted) and `ErrProjectionRoundTrip`.
+   `TestProjectionDefinition_AcceptsLiteralBackslashU0000Text` accepts the six-character text.
+3. `TestProjectionDefinition_ShippedCorpusUnchanged`: 8 Spine files pass, JSON byte-identical to an
+   independent re-implementation of the `61994fe` encoder, and verify.
+4. `TestVerifyProjectionDefinition_RejectsDisagreeingRows`: the `61994fe` encoding of every AC 1
+   input that encodes (6; duplicate `id` does not encode) and of `version: 1.0` is refused. Plus
+   `…RejectsStoredOddities` / `…AcceptsMinimalAndEmptyShapes`.
+5. `workflow_integrity_test.go` `TestIncrementalSync_FoldedKeyWorkflowIsRejectedAndVerifiedRowKept`
+   and `…FoldedOutcomeOverride…`: row kept (review step / `failed → validate`), `source_commit == c1`,
+   `Quarantined`, not in `ListActiveWorkflowProjections`, still returned by `GetWorkflowProjection`,
+   `idle@c2`, exactly one event `parse` / `kept` / `kept_source_commit: c1` / `quarantined: true`.
+6. `TestFullRebuild_KeepsVerifiedRowOfRejectedFileQuarantined` (restored at `c1`, `Quarantined`,
+   `idle`), `TestFullRebuild_RejectedFileWithNoPreviousRowIsNotProjected` (`not_projected`, `idle`).
+   Review round 1 added the `VerifyProjectionDefinition` gate on both branches:
+   `TestFullRebuild_UnverifiableRowOfRejectedFileIsRemoved` and
+   `TestFullRebuild_ReadFailureDoesNotRestoreAnUnverifiableRow` (mutation-checked).
+7. `TestIncrementalSync_UnverifiableRowIsRemovedOnRejection`, run with the instance already swept
+   (diff path) and fresh (sweep path): row deleted, first event `removed`.
+8. `TestProjection_ValidateIsAdvisoryUnlessStrict`: a `Draft` file failing `Validate` is projected
+   with one Info line; with `WithStrictWorkflowValidation(true)` it is a `validate` rejection, no upsert.
+9. `TestIncrementalSync_WorkflowReadFailureIsSyncErrorRejectionIsNot`: a `ReadFile` failure sets
+   `error`, holds `c1`, leaves the row; a healthy retry projects `c2`. Rejections end `idle` (ACs 5–7).
+10. `TestSweep_UpgradeCases` (a)–(i), all at `head == last_synced_commit`, `idle`: (a) removed;
+    (b) replaced; (c) `absent_at_head`; (d) Active nested row `scope` + event, empty-status nested
+    row deleted with one Info line and no Warn/event; (e) no upsert, `source_commit` unchanged;
+    (f) no second listing; (g) Deprecated smuggled row removed with the capability, documented
+    survivor without it; (h) two concurrent first syncs make exactly one listing (`-race` clean);
+    (i) quarantined. Also `TestSweep_FailureHoldsTheSyncButDoesNotFreezeIt` (review round 1's
+    replacement for `TestSweep_FailureMarksErrorAndRetries`, removed in `e7b1a3c`: a failed sweep
+    holds the sync in `error` and retries, while the window's changes are applied) and, on
+    PostgreSQL, `TestIntegration_SweepRemovesDeprecatedSmuggledRow`.
+11. `TestProjection_NestedWorkflowFilesAreNotWorkflows`: only the top-level row; no rejection, no Warn.
+12. `sync_errors_test.go` `TestIncrementalSync_DiffFailureIsErrorAndRetried` (store holds no rows, so
+    the sweep is a no-op; the fake implements `ListFiles`/`ReadFile`): error returned, `{error, c1}`,
+    `error_detail` contains `diff`, no branch-protection or workflow upsert; healthy retry re-projects
+    both and ends `idle@head`.
+13. `TestIncrementalSync_OneDiffPerSync`: exactly one `Diff`; none on the up-to-date tick.
+14. `TestIncrementalSync_WorkflowRenameDeleteErrorIsCounted`.
+15. `authoritative_ref_test.go` `TestAuthoritativeBranch_RunBranchCheckoutIsIgnored`, sub-tests
+    `IncrementalSync` and `FullRebuild`: 1 rule kept, `last_synced_commit == rev-parse refs/heads/main`.
+16. `TestAuthoritativeBranch_ZeroValueFollowsHead`: 0 rules without the option.
+17. `TestWithAuthoritativeBranch_ArgumentValidation` (` main`, `main `, `-x`, `refs/heads/main`,
+    `a..b`, NUL, `\x01`, `\n`, `m:a` refused; `""` restores the default),
+    `TestAuthoritativeBranch_UnbornMainIsSyncError` (both entry points name `refs/heads/main`; state
+    `error`, commit held, `error_detail` names the ref), review round 1's
+    `TestAuthoritativeBranch_UnbornMainOnFreshStoreReportsError` (the empty-store case: `error` with
+    the ref in `error_detail`, then `idle@main` once the branch exists),
+    `TestAuthoritativeBranch_ShadowRefsDoNotWin` (`refs/tags/refs/heads/main`,
+    `refs/refs/heads/main`, `refs/heads/refs/heads/main`, `refs/remotes/refs/heads/main`, tracked files
+    `refs/heads/main` and `HEAD`, the relaxing branch checked out), `TestIsHexSHA`.
+18. `service/cmd/spine/serve_projection_wiring_test.go` (unit) and
+    `service/internal/workspace/pool_projection_wiring_test.go` (`-tags integration`, real DB):
+    `ProjSync.AuthoritativeBranch() == engine.AuthoritativeBranch`; a `master`-only repository logs
+    exactly one Warn naming `refs/heads/main` and startup does not fail.
+    `TestProbeAuthoritativeRef_WarnsOnceWhenMissing`. The scenario suite runs with the harness option
+    (Gates).
+19. `scope_test.go` `TestIncrementalSync_ArtifactsDirScopesArtifactsAndWorkflows`: governed row keeps
+    `Pending` + title; `spine/workflows/task.yaml` `Deprecated` v2; `spine/templates/x.md` not
+    projected; root `workflows/rogue.yaml` Active through **both** entry points (OQ3 default); rename
+    out of `templates/` creates TASK-002, the reverse deletes it. Classifier tables:
+    `TestPathScope_Classifier`, `TestPathScope_ArtifactDiffsConvertsBoundaryRenames`.
+20. `TestProjection_FullRebuildEqualsIncrementalStore`: 9 commits × `artifacts_dir` `""` and
+    `"spine"` (adds, modifies, deletes, boundary renames both ways and across `templates/`,
+    templates, nested and root and subdir workflows, two rejected workflows — one kept, one never
+    projected — a workflow rename, branch-protection edit and deletion, a link change). After every
+    commit a clone of the incremental store is rebuilt and compared: artifacts on every column but
+    `source_commit`, links as sets, workflows on every column (`source_commit` too for quarantined
+    rows), branch-protection rows without `source_commit`, execution projections of live tasks
+    without `blocked`/`blocked_by`. **Mutation runs** (overlay, worktree untouched): dropping
+    `DiscoverAll`'s dir, the incremental workflow classifier, the rebuild workflow filter, the rebuild
+    root-workflow list, or the incremental `artifactDiffs` each fail this test and/or AC 19/11. (The
+    last one passed until `43592a5`; Deviation 5.)
+21. `corpus_test.go` `TestFullRebuild_ShippedWorkflowCorpus`: 8 rows, 0 rejections, `idle`, definitions
+    and typed columns identical to the `61994fe` row, and a second instance's sweep upserts nothing.
+22. `adapters/delivery/event_types_test.go` `TestAllEventTypes_IncludesProjectionWorkflowRejected`;
+    `event-schemas.md` §4.14 + emission map.
+23. `core/workflow/write_path_parity_test.go` (Create/Update reject unquoted `1.0` and `2026-10-06`
+    with `ErrValidationFailed`, HEAD unchanged, file not written/unchanged; `ValidateBody` reports
+    `projection_round_trip`, a strict-parse failure keeps `parse`) and
+    `core/engine/run_test.go` `TestStartWorkflowPlanningRun_RejectsProjectionRoundTripBody`
+    (`ErrInvalidParams`, writer not called).
+24. SMP compatibility gate — see below.
+25. Overlay test (`go test -overlay`, nothing written into SMP) over SMP's `governedsources.Workflows`
+    (10 files, 3 under `workflows/steps/`): `idle`, exactly 7 rows, 0 under `workflows/steps/`,
+    0 rejections, every definition byte-identical to the `61994fe` encoder.
+26. Gates and PoCs — see below.
+27. `TestIncrementalSync_KeptRowIsNotBindable`: `c1` review-less row kept, `Quarantined`,
+    `workflow.ResolveBinding` over a `ProjectionWorkflowProvider` returns `workflow_not_found`,
+    `GetWorkflowProjection` still returns `c1`, one `kept` event with `quarantined: true`, `idle@c2`;
+    `c3` fixes the file → `c3`'s definition, `Active`, binding pins `c3`.
+28. `sync_errors_test.go` `TestIncrementalSync_ArtifactReadErrorsAreClassified`: a non-`GitError`
+    and an `ErrKindTransient` read hold the sync (error returned, `{error, c1}`) and a healthy retry
+    projects the change; a real gitlink `x.md` (commit absent → `fatal: bad object`) ends `idle@head`,
+    one Warn names `x.md`, `projection_synced` carries `read_skipped: 1`. `core/artifact`
+    `discovery_read_errors_test.go` pins the recording; `core/engine`
+    `TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore` passes **unchanged at `main`** and at HEAD.
+    **Superseded in review round 1:** the classification no longer reads the `GitError` Kind; see
+    "Review round 1" — real-client tests in `read_errors_test.go`. Cases 1 and 2 of
+    `TestIncrementalSync_ArtifactReadErrorsAreClassified` still pass, but only because that fake
+    does not implement `git.TreeEntryTyper`, so every failure is infrastructure; the proof of
+    AC 28 is now `TestIncrementalSync_GitlinkWithTransientLookingNameIsSkipped`,
+    `TestIncrementalSync_KilledGitReadHoldsTheSync` (real `CLIClient`) and the table
+    `TestClassifyReadErrors_OnlyAProvedNonBlobIsSkipped` (a typed blob and a client without the
+    capability both hold).
+29. `workflow_integrity_integration_test.go` `TestIntegration_NULWorkflowIsRejectionNotWedge` (written
+    against the pre-existing API only). **HEAD:** `idle@c2`, row kept at `c1`, `Quarantined`, not
+    Active, one `round_trip` / `kept` rejection. **`main` (same file run in a `git archive main`
+    export):** `state=&{LastSyncedCommit:<c1> Status:error ErrorDetail:1 sync errors}`, commit not
+    advanced. Review round 1 added the over-long indexed field case
+    (`TestIntegration_OverLongIndexedFieldIsRejectionNotWedge`).
+
+**Before/after for the new tests.** Run in a `git archive main` export with the new test files
+copied in: every new test package fails to build at `main` (`svc.WithAuthoritativeBranch undefined`,
+`undefined: artifact.DiscoverChangesFromDiffs`, `undefined: domain.EventProjectionWorkflowRejected`,
+`rt.ProjSync.AuthoritativeBranch undefined`, `undefined: workflow.ErrProjectionRoundTrip`). The
+behavioural before-state is the audit PoCs (AC 26) and AC 29 above.
+
+### Audit PoCs (AC 26)
+
+Run with `go test -overlay`-equivalent copies in scratch exports (git-ignored PoC material is not
+committed):
+
+| PoC | `main` | This branch |
+|---|---|---|
+| `TestPOC_ProjectionWorkflowFoldedKeyDifferential` | reproduces (engine steps `[execute publish]`) | fails at `projectWorkflow`: `rejected at c0ffee (parse)` |
+| `TestPOC_ProjectionWorkflowFoldedOutcomeOverride` | reproduces (`failed -> "publish"`) | fails at `projectWorkflow` (parse rejection) |
+| `TestPOC_IncrementalSyncArtifactsDirKeyCollision` | reproduces | fails `collision not reproduced`; governed row `Pending`, `spine/workflows/task.yaml` `Deprecated`, root `rogue.yaml` Active by design (AC 19) |
+| `TestPOC_IncrementalSyncDropsSecondDiffError` | reproduces (`diff calls=2, bp=0, idle@2222…`) | with the three-method shim (`ListActiveWorkflowProjections`→nil, `ListFiles`→nil, `ReadFile`→error): fails `not reproduced` — `diff calls=1, branch-protection re-projections=1, sync_state=error@1111…` |
+| `TestPOC_ProjectionFollowsCheckedOutRunBranch` | reproduces | **still reproduces**, as designed: it constructs `NewService` without the option (D7). Closed by ACs 15, 16, 18 |
+
+### Deviations (closest safe alternative, with reasons)
+
+1. **Rejection text is joined, not cut to its first line.** yaml.v3 puts the actionable detail
+   (`line 8: field ſteps not found…`) on the second line, so `sanitizeForLog` replaces line breaks
+   with `"; "`, every other control/format character (bidi overrides, U+2028/9) and invalid UTF-8 with
+   U+FFFD, and caps at 512 bytes. Same log-injection guarantee, more useful text. `error_detail` of
+   `markSyncError` goes through the same function (it also keeps a stray NUL out of a `text` column).
+2. **`FullRebuild` reports `removed`, not `not_projected`, when a previous row existed but did not
+   verify** (§2 step 4 said `not_projected` whenever no *verified* prev exists). The row was there
+   and is gone, and the incremental path reports the same situation as `removed`, so both entry
+   points now agree.
+3. **`FullRebuild` cannot read a workflow (infrastructure error):** the verified previous row is
+   restored **quarantined** and the sweep stays pending (the design only said such errors count as
+   today; at `61994fe` the wipe simply lost the row and nothing retried it). Kept for pinned runs,
+   not bindable while head cannot be checked (I6), restored by the next sync's sweep once the file
+   reads. `TestFullRebuild_WorkflowReadFailureKeepsRowQuarantinedAndSweepRetries`. Review round 1:
+   this now applies only to failures git causes; a gitlink (or other non-file entry) at the path is
+   a `not_a_file` rejection on every entry point, and a failing sweep no longer stops the sync.
+4. **`FullRebuild` holds the sweep mutex**, so a sweep and a rebuild on one instance never interleave
+   workflow writes (the design made only the sweep single-flight).
+5. **An out-of-scope path after scoped discovery is a counted sync error** instead of the
+   design's silent "always resolves". Mutation testing showed the defensive skip masked removal of
+   `artifactDiffs` from AC 20; now that removal fails AC 19/20.
+6. **`workflow.Validate`'s termination check is linear** (codex round 2, P1). Projection now runs
+   `Validate` on every committed file; `canReachEnd` enumerated simple paths (exponential: 2^n on a
+   chain of two-outcome steps, codex measured 75 ms at 16 steps and 1.45 s at 20). It is now one
+   graph search with a single visited set; reachability equals simple-path existence, so the result
+   is identical for every input — checked against the old code on 20 000 random graphs
+   (`core/workflow/termination_test.go`), plus a 400-step bounded-time test. This is in
+   `core/workflow` and also bounds the create/update path; SMP behaviour is provably unchanged.
+7. **`ReadErrors` also records the failed *old*-blob reads** in `modified` and `renamed` (not a
+   `continue` in the old code, but a transient failure there turned a delete into a skip).
+   `read_skipped` counts distinct paths.
+8. **`DiscoveryError` gained `Ref` and `Err` fields** rather than a new record type. Additive; SMP
+   only builds it with keyed literals (`projectionwriter/repo_artifacts_test.go`).
+9. **New exported `ProbeAuthoritativeRef(ctx) error`** implements the one startup Warn (§4 note 4)
+   so both wiring sites and the tests share it.
+10. **AC 20's execution-projection comparison is restricted to live tasks.** Incremental sync never
+    calls `DeleteExecutionProjection`, so a deleted task's execution row survives until a rebuild.
+    That predates this task (artifact side), is recorded in `KNOWN-LIMITATIONS.md`, and is not
+    changed here.
+11. **SMP `TEST_PROVISIONING_DSN` suites were not run.** They allocate `ws_*` databases and roles on
+    the server, and the shared server allows only `s011_*` databases. AC 24's two DB-backed worker
+    tests were therefore replayed as overlay twins over an `s011` Spine-runtime database with the
+    same `fixtureRepo` and the real `Worker` (see SMP gate), plus the §10 item 3/7 assertions.
+12. **gofmt of touched files** (precedent: TASK-001) reformats pre-existing import-order drift in 9
+    files and the domain-event alignment block in `core/domain/event.go`; the new event constant is
+    placed in its own section at the end of the operational block so siblings that add operational
+    events do not collide on alignment.
+13. `event-schemas.md` had no `projection_synced` subsection; added §4.13 for it and §4.14 for the
+    new event (§4 numbering already repeats 4.11 upstream).
+
+### Gates
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | ok |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | exit 0, 38 packages ok, 0 FAIL |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
+| `go test -race -p 4 -count=1` on `adapters/projection`, `adapters/store`, `adapters/delivery`, `core/workflow`, `core/artifact`, `core/domain`, `core/engine`, `service/cmd/spine`, `service/internal/workspace`, `service/scenariotest/harness`, `workflows` | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s011_spine go test -race -p 1 -count=1 -tags integration ./adapters/projection/ ./adapters/store/ ./adapters/delivery/ ./service/internal/workspace/` | projection, delivery, workspace ok; store: 1 FAIL `TestRunModeDatabaseDefault` (`cannot scan NULL into *string` on `workflow_version_label`) — **identical at `main`** (run in a `main` export on its own `s011_store_main`), unrelated. New `TestIntegration_*`, `TestListWorkflowProjections_AllStatuses`, `TestBuildServiceSet_ProjectionFollowsAuthoritativeBranch` pass |
+| `SPINE_TEST_DATABASE_URL=…/s011_scenario go test -p 1 -count=1 -tags scenario -v ./service/scenariotest/...` (`make test-scenario` with `-p 1`) | 190 pass / 30 fail / 6 skip; **`main` export on `s011_scenario_main`: the same 190 / 30 / 6, identical pass and fail sets** (the 30 are pre-existing: `artifact validation failed` on fixture creation, `TestSchemaMatchesProduction` NOT NULL `metadata`, gateway connection refused). The CI job's `TestGitHTTP_*`: 19 pass, 0 fail, 0 skip on both |
+| `golangci-lint run` (v2 config) on every touched package, plain / `--build-tags integration` / `--build-tags scenario`, branch vs a `main` export, compared as (linter, file, message) sets | 0 new issues in each; 9 fewer (gofmt) |
+| `golangci-lint run --enable-only=gosec` on the same packages | 1 issue, identical to `main` (`core/workflow/service.go` G703, pre-existing) |
+| `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
+| `codex review --base main` | round 1: no findings. Round 2: **one P1** (unbounded `canReachEnd` now reachable from projection) — fixed in `ad1836c` with tests (Deviation 6). Round 3 (at `ad1836c`): no findings. Round 4 (final code `0a65121` plus these notes): no findings. No rejected findings |
+
+### SMP compatibility gate
+
+`/Users/bartoszszymichowski/42sid/i23/s-T011/smp` detached at SMP `7d4e7cc9`, `../spine` = this
+worktree, no `vendor/`, no SMP file modified (`git status` empty after every run). Packages: the 31
+that depend on a changed Spine package (`go list -deps`) plus `internal/docmemory`.
+
+Final run with `../spine` at `0a65121` (the last code commit; later commits touch only this
+artifact):
+
+| Command (in the SMP checkout) | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...` | all ok |
+| `go test -race -p 4 -count=1 <32 packages>` (no DB env) | 31 ok, 1 `[no test files]` (`workspace/faultharness`), 0 FAIL |
+| `go run ./dev/apply-migrations -set platform -dir migrations` → `s011_smp_it` (pgvector); `-set spine-runtime` → `s011_smp_spine_rt` | 115 and 26 versions |
+| `TEST_SPINE_DB=…s011_smp_spine_rt TEST_PLATFORM_DB=…s011_smp_it go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip 'TEST_PROVISIONING_DSN' -- -race -p 4 -count=1 -timeout 15m ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (CI's Spine-runtime step) | `testgate: PASS` — 1536 passed, 0 failed, 4 allowed skips (CI's parked placeholder + 3 `TEST_PROVISIONING_DSN`) |
+| `TEST_DATABASE_URL=TEST_PLATFORM_DB=…s011_smp_it go run ./dev/testgate -allow-skip 'TEST_PROVISIONING_DSN' -allow-skip 'TEST_MINIO' -allow-skip 'TEST_AWS_OBJECT_STORE_' -- -race -p 4 -count=1 -timeout 20m ./internal/customer/projectionwriter/ ./internal/customer/workspace/ ./internal/customer/workspace/workspacetest/ ./internal/customer/eventdelivery/ ./internal/customer/stepevents/ ./internal/customer/profileinventory/ ./internal/docmemory/ ./internal/customer/docindex/ ./internal/automation/ ./internal/customer/discovery/` (the gate-list members of CI's shared step, plus `docindex`) | `testgate: PASS` — 1111 passed, 0 failed, 36 allowed skips (`TEST_PROVISIONING_DSN` per Deviation 11, MinIO, live AWS) |
+| `go run ./dev/testgate -- -race -count=1 -tags integration ./internal/customer/githttp/` | `testgate: PASS` — 140 passed |
+| Overlay twin of `TestWorker_Integration_ProjectsSeededRepo` (same `fixtureRepo` + real `Worker`, `s011_smp_spine_rt`) | PASS: `idle`, `task-default` and the constitution projected, exactly 7 rows `LIKE 'workflows/%'`, 0 `LIKE 'workflows/steps/%'` |
+| Overlay twin of `TestWorker_Integration_SurfacesMalformedArtifact` | PASS: still `error` |
+| Overlay §10 item 7: commit a rejected `task-default.yaml` (extra unknown key), next tick as `runSyncer` builds it | PASS: row `Quarantined` at the old `source_commit`, `sync_state` `idle`, `ProjectionWorkflowProvider.ListActiveWorkflows` omits it, `ProjectionWorkflowLoader.LoadWorkflow(path, <old commit>)` still returns it |
+| AC 25 overlay (corpus) | PASS (see AC 25) |
+
+No SMP edit was needed for the bump to compile or for any of the above to pass. The SMP-side
+obligations of §10 (above all the backfill probe) remain SMP TASK-012's.
+
+### Follow-ups (recorded, not done here)
+
+- **OQ5:** `FullRebuild` preserving `source_commit` for unchanged rows (SMP strands pinned runs on
+  every rebuild).
+- **OQ2:** corpus repair so the 10 shipped workflows pass `Validate` in both repositories, then
+  decide on `WithStrictWorkflowValidation`.
+- **SMP TASK-012 obligations from §10** (all still required): validate-mirror switch to
+  `ProjectionDefinition` with rule `projection_round_trip`; SMP corpus test; worker test assertions
+  (7 rows, 0 `workflows/steps/%`, quarantine); **the mandatory backfill-probe change** — review
+  round 1: it must also exempt a canonical path whose entry at `HEAD` is not a regular file (a
+  gitlink, now a `not_a_file` rejection; `git.TreeEntryTyper` answers it), not only bodies
+  `ProjectionDefinition` refuses; release notes (nested rows — every nested `workflows/**` row,
+  Active ones included — deleted on first sync; quarantined workflows show non-Active; a git-caused
+  read failure is an `error` tick).
+- **Spine TASK-003:** register `ErrBlobTooLarge` in `isContentReadError`
+  (`adapters/projection/workflow_rows.go`) and amend its I4 as §11 says. Since review round 1 the
+  same hook is also consulted for changed-artifact reads, where it makes an oversize artifact a
+  counted `read_skipped` skip (wedge-safe); TASK-003 confirms that is the artifact semantics it
+  wants. A gitlink at a workflow path no longer needs TASK-003 (`not_a_file`).
+- **Spine TASK-012 (working-tree serialisation):** if it wraps the `GitClient` handed to
+  `projection.NewService`, the wrapper must forward `git.TreeEntryTyper`; otherwise every read
+  failure is infrastructure and a gitlink holds the sync in `error` (fail closed, recorded in
+  `KNOWN-LIMITATIONS.md`).
+- **Spine TASK-006:** guard every directory in `projection.WorkflowDirs(artifactsDir)` and default its
+  guard to `AuthoritativeBranch()`.
+- Artifact-side U+0000 wedge (verified on PostgreSQL: an artifact title with `\0` keeps incremental
+  sync in `error`), stale execution projections after incremental deletes, `workflow_id` not unique
+  across paths in SMP's step-mode reads, `QueryService.CheckFreshness` still on `Head()`, surfacing
+  rejections in SMP beyond logs.
+- **Gitlink entries in a governed repository (review round 2).** Refuse a gitlink (mode 160000) at
+  the push and merge boundary — Spine's pre-receive and SMP's `/git/{workspace_id}` gateway — so a
+  gitlink recording the id of a blob in the repository cannot reach any reader. The projection now
+  types workflow and branch-protection entries before reading them, but every artifact reader
+  (projection discovery, `artifact.Service`, branch validation) still reads such an entry as the
+  blob it names (`KNOWN-LIMITATIONS.md`).
+
+### Review round 1 (2026-10-07)
+
+Three reviewers (correctness and SMP compatibility, adversarial security, completeness and tests)
+reviewed `0aeff8c`. Every finding was checked against the code first, and reproduced where it could
+be; all were real. Commits: `bb61148` (git tree-entry typing), `7d1d34b` (indexed-field cap),
+`4cc06b8` (sanitiser and event-id tests), `e7b1a3c` (read-failure classification, sync-state
+recording, sweep), `5753b16` (docs), `a0adf30` (test-wrapper robustness), and these notes.
+
+**Findings** (duplicates merged; the reviewers' severities):
+
+| # | Finding | Disposition | What changed / why | Regression tests |
+|---|---|---|---|---|
+| F1 | P1 (two reviewers): `classifyReadErrors` took "transient, hold" from `GitError.Kind`, which `classifyGitError` derives from stderr substrings; `git show <sha>:<path>` echoes the attacker-chosen path, so a gitlink named `initiatives/blocked.md` or `docs/timeout.md` wedged the sync | **FIXED** | Reproduced before the fix: `read docs/Could not resolve.md …: git read_file: network error`, state `error@c1` every tick. A read failure is now deterministic only when the commit's **tree** proves there is no regular file at the path: new optional capability `git.TreeEntryTyper` (`*CLIClient.TreeEntryType`: `git --literal-pathspecs ls-tree -z --full-tree <ref> -- <path>`, exact-path match, tree objects only). stderr is never consulted (`adapters/projection/read_errors.go`) | `TestIncrementalSync_GitlinkWithTransientLookingNameIsSkipped` (gitlinks `initiatives/blocked.md`, `docs/timeout.md`, `docs/Could not resolve.md`, `docs/x.lock.md`; 3 ticks `idle@c2`, the real change applied, `read_skipped: 4`); `TestTreeEntryType` (its precondition asserts the stderr misclassification) |
+| F2 | P2 (two reviewers): with the real client, a killed, unspawnable or silently failing git is a `*GitError` with empty stderr, Kind `permanent`, so it was skipped and the sync advanced past the change; the "not a `*GitError`" branch never fired | **FIXED** | Reproduced before the fix with a `PATH` wrapper (SIGKILL / `exit 1` on the blob read): `idle@c2`, change lost. Now a blob at the path means git failed → infrastructure; a client without the capability, an untypable tree or a cancelled context also hold | `TestIncrementalSync_KilledGitReadHoldsTheSync` (real `CLIClient`; signal and silent exit × modified and deleted), `TestClassifyReadErrors_OnlyAProvedNonBlobIsSkipped`, `TestIncrementalSync_KilledWorkflowReadIsInfrastructure`, `TestTreeEntryType_Errors` (git unavailable is an error, never "absent") |
+| F3 | P2: a gitlink at a stored workflow path froze the projection — the pre-diff sweep returned the read error every tick, a `FullRebuild` restored the row quarantined and left the sweep pending, so a rebuild no longer healed it | **FIXED** | (a) A non-file entry at a workflow path is a new `not_a_file` rejection on every entry point (kept quarantined / `not_projected` / `removed`, sync advances). (b) A failed sweep is now **counted**, not returned: the state holds in `error` and the sweep retries, but the window's artifact, branch-protection and workflow changes are applied, as before the sweep existed | `TestProjection_GitlinkAtWorkflowPathIsRejection` (incremental, a fresh instance's sweep, `FullRebuild` then incremental; all advance and apply later commits), `TestSweep_FailureHoldsTheSyncButDoesNotFreezeIt` |
+| F4 | P2: a Parse-accepted body whose indexed column overflows PostgreSQL's btree entry limit (an incompressible 6000-character `id`) failed the upsert → `error@c1` forever, previous row Active (I6 downgrade shape) | **FIXED** | Reproduced on PostgreSQL before the fix (`error@c1`, "1 sync errors"). `ProjectionDefinition` refuses a workflow path, `id` or `status` over 1024 bytes (`ErrProjectionRoundTrip`, value not echoed); the write path inherits it. `name` / `version` are not capped: their columns are unindexed, so PostgreSQL stores any length, and a cap would refuse legitimate text for no storage reason | `TestProjectionDefinition_RefusesOverLongIndexedFields` (1024 accepted, 1025 and 6000 refused, the `id: *desc` alias form), `TestService_ValidateBody_ReportsProjectionRoundTripRule` (long `status`), `TestIntegration_OverLongIndexedFieldIsRejectionNotWedge` (PostgreSQL: **before** `error@c1`; **after** `idle@c2`, `c1` row `Quarantined`, no Active row, one `round_trip`/`kept`) |
+| F5 | P2: `FullRebuild`'s `VerifyProjectionDefinition` gate (rejection and infra-error branches) and Deviation 2 untested | **FIXED** | Mutation `… == nil \|\| true` now fails both new tests | `TestFullRebuild_UnverifiableRowOfRejectedFileIsRemoved` (row gone, one `parse`/`removed`, `idle`, sweep done), `TestFullRebuild_ReadFailureDoesNotRestoreAnUnverifiableRow` |
+| F6 | P3: KNOWN-LIMITATIONS said an unreadable workflow's previous row is "kept quarantined"; only `FullRebuild` did that | **FIXED** | The plantable case (a gitlink) is now a `not_a_file` rejection that quarantines on every path. For a git-caused failure the limitation now says what happens: incremental holds with the row as it was (every change in the window is unapplied too); only a rebuild restores it quarantined. Not quarantining on a git failure is deliberate: no author can cause one (a push cannot plant a missing blob — receive-pack's connectivity check), and quarantining on every lock blip would deny new runs | (F3 tests) |
+| F7 | P3 (two reviewers): docs promised `sync_state = error` for an unborn `main`, but an empty store got no row (the hand-off to `FullRebuild` returned before writing); `markSyncError` stored only the label | **FIXED** | `FullRebuild` records every failure (`error`, sanitised cause, previous commit kept; no commit after a failed — possibly partial — wipe). `IncrementalSync` rebuilds a store with no synced commit, except while it is `rebuilding` (a first rebuild in flight elsewhere, e.g. SMP provisioning — a second wipe could expose a half-written projection under the other's `idle`). `error_detail` = label + cause, through `sanitizeForLog` | `TestAuthoritativeBranch_UnbornMainOnFreshStoreReportsError`, `TestAuthoritativeBranch_UnbornMainIsSyncError` (detail), `TestFullRebuild_FailuresAreRecorded`, `TestIncrementalSync_NoBaselineWhileRebuildingIsLeftAlone`, `TestMarkSyncError_DetailCarriesTheSanitisedCause` |
+| F8 | P3: CHANGELOG embedder list incomplete (write path SMP wraps; `Head()` failure now an `error` tick; the sweep deletes every nested `workflows/**` row, Active ones included); INIT-023 Rule 4 row narrowed the same way | **FIXED** | All three verified in the code; CHANGELOG embedder section and the Rule 4 row rewritten | — |
+| F9 | P3: Deviation 3 made the sweep re-read an unreadable blob forever; "as before INIT-023" was wrong | **FIXED** | By F3 (a) and (b); docs corrected | (F3 tests) |
+| F10 | P3: the sweep reported a legitimate deletion inside the pending window (`head` ahead of `last_synced_commit`, after a restart) as an `absent_at_head` rejection | **FIXED** | The sweep lists `last_synced_commit` lazily; a row whose file existed there is removed exactly as the diff would, with an Info line and no event. If that listing fails, the row is reported (the louder outcome); the delete happens either way | `TestSweep_DeletionInsidePendingWindowIsNotARejection` |
+| F11 | P3: `sanitizeForLog` and the deterministic event id untested | **FIXED** | Mutations (identity sanitiser, raw error text in the event, a randomised id) each fail | `TestSanitizeForLog`, `TestReportWorkflowRejection_SanitisedAndDeterministicID` |
+
+**Acceptance-criteria gaps:**
+
+- **AC 28** (F1, F2) — FIXED. The fakes-only evidence is replaced by real-client tests.
+- **AC 17 / §4 note 4** (F7) — FIXED.
+- **AC 29** (F4) — FIXED, on PostgreSQL.
+- **I6** — FIXED for every case an author can produce (an over-long indexed field → `round_trip`, a
+  non-file entry → `not_a_file`; both quarantine). A git-caused failure on a real blob leaves the row
+  as it was while the sync is held — not an I6 breach: nobody can make it happen through a commit,
+  and under I3 the whole projection stays at `last_synced_commit` until the retry succeeds.
+- **I2 / D2** (F3) — FIXED. `isContentReadError` still returns false for blob reads (TASK-003 adds
+  its sentinel); non-blob entries no longer need it.
+- **AC 6** (F5) — FIXED.
+- **AC 18 "`make test-scenario` passes"** — NOT REAL as a TASK-011 defect: re-run at this round's
+  code on `s011_r1_scen`, the suite gives 190 pass / 30 fail / 6 skip with pass and fail sets
+  **identical** to `main`'s run (subtests too: 1475 / 57 / 6), and CI's `TestGitHTTP_*` 19 / 0 / 0.
+  The 30 failures exist on `main` (fixture creation "artifact validation failed",
+  `TestSchemaMatchesProduction` NOT NULL `metadata`, gateway connection refused) and are outside this
+  task.
+- **AC 24 (SMP `TEST_PROVISIONING_DSN` suites)** — NOT REAL as a defect, an environment limit: those
+  suites create `ws_*` databases and roles, and the shared server allows only `s011_*` databases. The
+  overlay twins (same fixture, real `Worker`) were re-run against this round's code and pass; the
+  literal suites run in SMP TASK-012's gate at the bump (Deviation 11 stands).
+- **AC 26** — re-run this round: `codex review --base main` reports no findings (its sandbox could not
+  bind ports for one unrelated service test). The five audit PoCs (identifiers renamed to avoid
+  clashes, the three-method shim for the diff-drop one) behave exactly as the table above records.
+  The reviewers' own PoCs (`TestPOCSEC_GitlinkNamedLockWedgesSync`,
+  `…WorkflowGitlinkSweepWedgeSurvivesRebuild`, `…KilledGitReadIsSkippedNotRetried`,
+  `…Integration_LongIDWedges`, `…ProjectionDefinitionExactKeys`) all pass now; each failed (reported
+  the vulnerability) before.
+
+**New deviations (closest safe alternative):**
+
+14. **Read failures are classified positively from the tree**, not with the §3 note's rule (not a
+    `*GitError`, or Kind transient, or cancelled → infrastructure; everything else skipped). That rule
+    was F1 and F2. `git.TreeEntryTyper` is an optional capability, not a `GitClient` method (no
+    interface break for SMP or test doubles); a client without it fails closed.
+15. **New rejection check `not_a_file`** (the design listed six checks); documented in
+    `event-schemas.md` §4.14.
+16. **A failed sweep is counted, not returned** (§3 step 2 said `markSyncError` and return), so it
+    cannot freeze the rest of the sync.
+17. **`FullRebuild` records its failures**, an empty `last_synced_commit` is rebuilt, and an empty
+    one while `rebuilding` is left alone (the design wrote nothing on a rebuild failure).
+18. **In-window deletions found by the sweep are not rejections** (§6 reported every absent row).
+19. **Workflow path, `id` and `status` are capped at 1024 bytes** in `ProjectionDefinition` (the §1
+    note covered U+0000 and encoder failures only); the write path inherits it.
+20. **`isContentReadError` is consulted for changed-artifact reads too**, so TASK-003's sentinel will
+    make an oversize artifact a counted skip rather than a wedge (no-op today).
+
+**Mutation runs** (overlays, worktree untouched; each made the named tests fail): the `|| true`
+verify gate; no in-window check; identity sanitiser; raw error text in the event; randomised event
+id; stderr-Kind classification (`GitlinkWithTransientLookingName`, `KilledGitReadHoldsTheSync`); a
+blob treated as skippable (`KilledGitReadHoldsTheSync`, `OnlyAProvedNonBlobIsSkipped`,
+`KilledWorkflowReadIsInfrastructure`); workflow reads not classified (`GitlinkAtWorkflowPath`); the
+sweep returning early (`FailureHoldsTheSyncButDoesNotFreezeIt`). The new classification and
+workflow-gitlink tests were also run against `0aeff8c`'s code first: all failed.
+
+**Gates (review round 1)** — Spine at `a0adf30` unless stated (`a0adf30` changes one test file
+over `5753b16`):
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | ok; `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` (at `5753b16`) | exit 0, 38 packages ok, 0 FAIL |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
+| `go test -race -p 4 -count=1 ./adapters/git/ ./adapters/projection/ ./core/workflow/ ./core/artifact/ ./core/engine/` | all ok (projection and git re-run at `a0adf30`) |
+| `SPINE_TEST_DATABASE_URL=…/s011_r1 go test -race -p 1 -count=1 -tags integration` on projection, git, workflow, artifact, engine, store, delivery, workspace | all ok except store `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`), the pre-existing failure identical at `main` (round 0) |
+| `SPINE_TEST_DATABASE_URL=…/s011_r1_scen go test -p 1 -count=1 -tags scenario -v ./service/scenariotest/...` | 190 / 30 / 6, sets identical to `main`; `TestGitHTTP_*` 19 / 0 / 0 |
+| `golangci-lint run` on `adapters/git`, `adapters/projection`, `core/workflow`, `core/artifact`, plain / `--build-tags integration` / `--build-tags scenario`, vs the `main` export as (linter, file, message) sets | 0 new issues each (28 vs 31) |
+| `golangci-lint run --enable-only=gosec` (plain and integration) on the same packages | 1 issue, the pre-existing G703 in `core/workflow/service.go` |
+| `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
+| `codex review --base main` (at `5753b16`) | no findings |
+| SMP gate (SMP `7d4e7cc9`, `../spine` at `5753b16`, the last commit SMP compiles): `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` | all ok |
+| SMP `go test -race -p 4 -count=1` on the 31 packages depending on a changed Spine package plus `internal/docmemory` | 31 ok, 0 FAIL |
+| SMP testgate, Spine-runtime step (`s011_smp_spine_rt`) | PASS — 1536 passed, 0 failed, 4 allowed skips |
+| SMP testgate, shared step + `docindex` (`s011_smp_it`) | PASS — 1111 passed, 0 failed, 36 allowed skips |
+| SMP testgate `-tags integration ./internal/customer/githttp/` | PASS — 140 passed |
+| AC 25 overlay corpus; overlay worker twins (`ProjectsSeededRepo`, `SurfacesMalformedArtifact`, `RejectedWorkflowIsQuarantined`) | all PASS; SMP `git status` clean |
+
+Databases used this round (`s011_r1`, `s011_r1_main`, `s011_r1_scen`, `s011_smp_it`,
+`s011_smp_spine_rt`) were dropped at the end.
+
+### Review round 2 (2026-10-07)
+
+One reviewer re-examined `01c0e90` after round 1. They confirmed F1–F11 fixed, re-ran the
+PostgreSQL tests for F4 and AC 29 and found them passing, and re-ran every gate with no failures.
+They reported one finding and six gaps. The finding was checked against the code first and
+reproduced. Commits: `9166d5c` (code and tests), `f60a4f1` (docs), and these notes.
+
+**Finding:**
+
+| # | Finding | Disposition | What changed / why | Regression tests |
+|---|---|---|---|---|
+| R2-1 | P3: the `not_a_file` rule ran only when `ReadFile` failed. `git show <c>:<path>` prints whatever object a gitlink's recorded id names, so a gitlink whose id is an existing blob read successfully. The projection then accepted a hidden review-less workflow, or a `rules: []` branch-protection file, while diffs and repository viewers show only `Subproject commit <id>`. This contradicted CHANGELOG, event-schemas and KNOWN-LIMITATIONS. The same behaviour exists at `main`, so this is a bypass of the documented guarantee, not a regression | **FIXED** for workflow files and `.spine/branch-protection.yaml`. Artifacts are **documented, not typed** (Deviation 21) | Reproduced at `01c0e90` with the new tests. Incremental: the row was `Active` at `c2`, version `0.9`, with no review step. Branch protection: `idle@c2` with the relaxed rules. The new `readFileEntry` (`adapters/projection/read_errors.go`) types the entry with `git.TreeEntryTyper` **before** every workflow and branch-protection read: <br>• a gitlink, a directory or no entry at that exact path is an `unreadableEntry`; <br>• a typing failure, or a type outside the documented set, is infrastructure, so the sync holds; <br>• only a blob is read. A read failure on a blob is `read_bounds` when `isContentReadError` matches, otherwise infrastructure. <br>`buildWorkflowRow` turns `unreadableEntry` into a `not_a_file` rejection (or `read_bounds`), which covers incremental sync, the sweep and `FullRebuild`. `projectBranchProtection` turns it into a sync error with the rules unchanged (Deviation 22). A client without the capability keeps the historical read (Deviation 23). The ref is a commit SHA on every projection path, so the tree read and the blob read see the same entry. Cost: one `git ls-tree` per workflow read and per branch-protection projection | `gitlink_blob_test.go`, all on the real `CLIClient`: <br>`TestProjection_GitlinkToExistingBlobAtWorkflowPathIsRejection`. Its preconditions assert that `ls-tree` records `160000 commit <blob id>`, that `cat-file -t` is `blob`, that `git show` prints the hidden body, and that the diff is `T`. It covers incremental sync (`kept` quarantined at `c1`, plus `not_projected` for a new hidden workflow, `idle@c2`), a fresh instance's sweep, `FullRebuild` over the same store, `FullRebuild` into an empty store (no row for either path), and then a regular file at `c3`, which projects. <br>`TestProjection_GitlinkToExistingBlobAtBranchProtectionIsHeld`: 2 ticks `error@c1` with the strict rules kept and a Warn naming `tree entry: gitlink`; a rebuild keeps them; an empty store writes no rules; the same relaxation committed as a regular file projects. <br>Fake tables: `TestBuildWorkflowRow_TypesTheEntryBeforeEveryRead` (non-blob entries are not read at all) and `TestProjectBranchProtection_TypesTheEntryBeforeReading` |
+
+**Gaps:**
+
+| # | Gap | Disposition |
+|---|---|---|
+| G1 | Round-1 dispositions F1–F11 confirmed, including tree-shape probes (root `..`, `/` in a name, unsorted tree) | Confirmed. No action |
+| G2 | Gates green at `01c0e90`, lint 0 new | Confirmed; re-run at this round's code (below) |
+| G3 | AC 18 (third bullet) and AC 26: "`make test-scenario` passes" is not met as written. The reviewer did not re-verify that the sets match `main` | **Re-verified this round** with `go test -json` on both trees: HEAD and a `main` export each give **190 pass / 30 fail / 6 skip** (subtests 1285 / 27), **0 differences** in any test's outcome; `TestGitHTTP_*` 19 / 0 / 0 on both. Not a TASK-011 defect. Closing the AC as written **needs an owner waiver or an amended AC**; it stays an open question |
+| G4 | AC 24: SMP `TEST_PROVISIONING_DSN` suites not run | Still unmet as written; it is an environment limit (Deviation 11). The literal suites run at SMP TASK-012's gate. **Owner waiver or deferral** needed; open question |
+| G5 | AC 10 evidence cited the removed `TestSweep_FailureMarksErrorAndRetries` | **FIXED**: the evidence now cites `TestSweep_FailureHoldsTheSyncButDoesNotFreezeIt` |
+| G6 | AC 28 cases 1–2 pass only because the fake has no `TreeEntryTyper` | **FIXED** in the evidence: it now says so and names the real-client tests as the proof |
+
+**New deviations (closest safe alternative):**
+
+21. **Artifact reads are not typed before a successful read** (the reviewer marked this optional).
+    A gitlink at an artifact path whose id names a blob is still read as that blob. That is true of
+    projection discovery and of every other artifact reader: `artifact.Service` Read/List and
+    branch validation. A projection-only guard therefore would not close the class. It would also
+    break the `FullRebuild` ≡ `IncrementalSync` equivalence (AC 20) unless both entry points typed
+    every artifact, which adds a git process per artifact to every full rebuild. Artifact semantics
+    for gitlinks already differ between the entry points at `main`. The CHANGELOG / event-schemas
+    `read_skipped` wording is narrowed to reads git could not perform. KNOWN-LIMITATIONS records the
+    gap, and the follow-up refuses gitlinks at the push and merge boundary, which covers every
+    reader. Workflow files are fully covered: run binding goes only through the projection
+    (`ProjectionWorkflowProvider`, the only `WorkflowProvider`), and the loader reads at the bound
+    row's `source_commit`. Branch-protection enforcement reads only the projection
+    (`core/branchprotect/projection`).
+22. **A non-file entry at `.spine/branch-protection.yaml` is a held sync error, not a new
+    rejection kind.** This matches ADR-009 §1's rule for a malformed config: the rules stay as they
+    are, the sync does not advance, and the forced re-projection on `error` retries every tick. It
+    is never treated as "absent", which would seed bootstrap defaults. A dangling gitlink there was
+    already held (read error) at `main` and in round 1.
+23. **A git client without `TreeEntryTyper` keeps the historical read.** A successful read is
+    trusted, and a failure goes through `classifyReadFailure` (infrastructure). Refusing every read
+    would stop the projection for an embedder whose decorator does not forward the capability, and
+    for every test double. `*git.CLIClient` implements it, and Spine standalone (`gitpool` primary
+    client), the scenario harness and both SMP call sites (`projectionwriter/worker.go`,
+    `workspace/provision_steps_runtime.go`) pass a `CLIClient`. Documented in CHANGELOG (embedders)
+    and KNOWN-LIMITATIONS.
+24. **Symlinks stay blobs.** `TreeEntryBlob` covers mode 120000. A symlink's stored content is its
+    link text, which is what the diff shows and what the projection reads. A link-text body is
+    therefore not hidden, and a real symlinked workflow never parses. The docs say "file (blob)"
+    rather than "regular file".
+
+**Mutation runs** (`go test -overlay`, worktree untouched):
+- reading the entry anyway after a non-file answer fails all four new tests and
+  `TestProjection_GitlinkAtWorkflowPathIsRejection`;
+- treating an unknown type as a blob fails both fake tables.
+
+**Gates (review round 2)** — Spine at `f60a4f1` (code at `9166d5c`):
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | ok; `engine constructed and exercised; library surface is sound.` |
+| `go test -p 4 -count=1 ./...` | exit 0, 38 packages ok, 0 FAIL |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
+| `go test -race -p 4 -count=1` on `adapters/projection`, `adapters/git`, `adapters/store`, `adapters/delivery`, `core/workflow`, `core/artifact`, `core/domain`, `core/engine`, `service/cmd/spine`, `service/internal/workspace`, `service/scenariotest/harness` | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s011_r2 go test -race -p 1 -count=1 -tags integration` on projection, git, workflow, artifact, engine, store, delivery, workspace | all ok except store `TestRunModeDatabaseDefault` (`cannot scan NULL into *string` on `workflow_version_label`); the same test fails the same way in a `main` export on `s011_r2_main` |
+| `SPINE_TEST_DATABASE_URL=…/s011_r2_scen go test -p 1 -count=1 -tags scenario -json ./service/scenariotest/...`, and the same in a `main` export on `s011_r2_scen_main` | 190 / 30 / 6 on both, 0 outcome differences (G3); `TestGitHTTP_*` 19 / 0 / 0 |
+| `golangci-lint run` (v2, `--allow-parallel-runners`) on the 11 touched packages, plain / `--build-tags integration` / `--build-tags scenario`, vs the `main` export as (linter, file, message) multisets | 0 new each (144 vs 154, 146 vs 156, 145 vs 155) |
+| `golangci-lint run --enable-only=gosec`, plain and integration, same packages | 1 and 2 issues, identical to `main`; 0 new |
+| `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
+| `codex review --base main` (at `f60a4f1`, with these notes' AC 10/28 edits uncommitted) | "No actionable regressions were identified"; no findings to reject |
+| SMP gate (SMP `7d4e7cc9`, `../spine` at `f60a4f1`, no SMP file modified): `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` | all ok |
+| SMP `go test -race -p 4 -count=1` on the 31 packages depending on a changed Spine package (`go list -deps`) plus `internal/docmemory` | 31 ok, 1 `[no test files]`, 0 FAIL |
+| SMP testgate, Spine-runtime step (`s011_smp_spine_rt`, `-set spine-runtime`, 26 versions) | PASS — 1536 passed, 0 failed, 4 allowed skips |
+| SMP testgate, shared step + `docindex` (`s011_smp_it`, platform set, 115 versions) | PASS — 1111 passed, 0 failed, 36 allowed skips (`TEST_PROVISIONING_DSN`, MinIO, live AWS) |
+| SMP testgate `-tags integration ./internal/customer/githttp/` | PASS — 140 passed |
+
+SMP needs no edit: both of its `NewService` call sites pass a `*git.CLIClient`, so they get the
+typed read. The only behaviour change for SMP-produced input is the extra `ls-tree` per read.
+The SMP TASK-012 backfill-probe obligation from §10 covers the new case unchanged: a canonical
+path whose entry at `HEAD` is a gitlink, now including one that names a blob, is a `not_a_file`
+rejection.
+
+Databases used this round (`s011_r2`, `s011_r2_main`, `s011_r2_scen`, `s011_r2_scen_main`,
+`s011_smp_it`, `s011_smp_spine_rt`) were dropped at the end. Both repositories' `git status` was
+clean apart from this artifact.
+
+### Integration (wave 2 merge) (2026-10-08)
+
+Integration branch `init/INIT-023-wave2-integration` (worktree `i23/s-int2/spine`), cut from Spine
+local `main` `ee3c249`. Merge order, each `git merge --no-ff` and built and tested before the next:
+TASK-002 `b674b90`, TASK-016 `350fe87`, TASK-004 `50b9c8e`, TASK-009 `8925de9`, TASK-007 `2aca054`,
+TASK-011 `c90c049`, TASK-010 `1e63692`, TASK-013 `85bf4b3`. Coordination commits: `3b88fb1`
+(TreeEntryType joins the ref grammar), `0c26c91` (step-entry policy through the shared pool
+constructor), `9e43640` (a refused signing secret holds its deliveries), `d61359d` (security model:
+skills are a step-entry boundary), `1291e74` (codex round 1). Nothing was pushed; `main` and the task
+branches are unchanged.
+
+**This task in the integration.** Merge `c90c049`.
+
+- *Conflicts:* `core/workflow/service.go` (with TASK-004; resolution under TASK-004's note),
+  `CHANGELOG.md`, `KNOWN-LIMITATIONS.md`; and, at TASK-010's merge, the initiative's SMP-effect table,
+  where each branch carried the other's older row (this task's row is kept from this task).
+- *Semantic:* `pool_projection_wiring_test.go` adopted TASK-009's `buildServiceSet` signature. `3b88fb1`
+  puts `TreeEntryType` on TASK-002's Rev grammar (exact branch lookup, `--end-of-options`, no trailing
+  `--`); the projection passes object ids, so its behaviour is unchanged, which the projection tests
+  and SMP's projectionwriter testgate confirm.
+- `isContentReadError` still awaits TASK-003's sentinel (not in wave 2).
+
+**Gates on the integration branch** (code at `d61359d`; `1291e74` changes one `adapters/git` test
+file, after which `go vet` and `go test -race ./adapters/git/...` were re-run, ok):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "library surface is sound" |
+| `go test -p 4 -count=1 ./...` | exit 0 (40 packages ok) |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 25 packages the eight tasks touched | 24 ok; `service/scenariotest/scenarios` has only `scenario`-tagged files |
+| `-tags integration`, one fresh `s2i_int_*` database per package | store 165 PASS + the pre-existing `TestRunModeDatabaseDefault`; delivery 314, projection 160, cmd/spine 168, workspace 223 (with `SPINE_REGISTRY_TEST_DATABASE_URL`, registry migrated from `migrations/registry`), testutil 4; 0 SKIP |
+| CI `scenario-git-http` job | `TestGitHTTP_*` 20 PASS, 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 FAIL, the **same set** as a `git archive main` export on its own database (1479 vs 1475 PASS, 6 SKIP for the registry env in both) |
+| `git-floor` job's two steps in `golang:1.26-bookworm` (git 2.39.5, read-only mounts, `GOPROXY=off`, `--pull=never`, `--rm`) | step 1: 73 PASS, 0 SKIP, 0 FAIL (includes the new `RefGrammar_TreeEntryType*`); step 2 all ok |
+| `golangci-lint run --build-tags scenario` on the touched packages | `--new-from-rev main` reports one QF1006 at `adapters/delivery/webhook_dispatcher_test.go:349`, present on `main` (TASK-010 changed the literal on that line). Full sets compared by (file, linter, text): 298 issues vs `main`'s 348, nothing new except three `rangeValCopy` whose byte count moved 224 → 248 (`store.EventSubscription` grew in TASK-009) |
+| `--enable-only=gosec` | 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | round 1: one P2 (macOS xcrun cache in the TASK-002 leftover checks), fixed in `1291e74`; round 2: "No actionable regressions were identified relative to the merge base." |
+| SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 38 SMP packages depending on a changed Spine package (`go list -test -deps`) plus `./internal/customer/...` (67 packages): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2i_smp_spine_runtime` and `s2i_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. Extra: eventdelivery, projectionwriter, stepevents testgate: 35 passed, 6 allowed skips. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope). |
+
+All `s2i_*` databases were dropped afterwards; the only container started was removed.
+
+### Cross-task review (wave 2) (2026-10-08)
+
+**This task.** Finding 5: the first-sync workflow sweep, on the up-to-date early-return path,
+now re-records `sync_state` when it wrote a row, restoring the pre-TASK-011 property that every
+stale-head row write also moves `sync_state`; the §6 "as before" note is corrected. Finding 7's
+TASK-011 half: the `TreeEntryTyper` CHANGELOG entry now states its ref grammar.
+
+Wave 2 cross-task review of the integration branch at `2fab682`, five lenses (governance-engine,
+secrets-delivery, git-ref-surface, smp-compat, merge-ci). Each P1/P2 survived two adversarial
+skeptics. Every finding was re-verified against the code before it was fixed. Fixes are on
+`init/INIT-023-wave2-integration` (worktree `i23/s-int2/spine`). Nothing was pushed, and `main`
+and the task branches are unchanged.
+
+| # | Finding (lens) | Severity | Disposition | Commit | Regression test |
+|---|---|---|---|---|---|
+| 1 | Separation of duties counted only `manual`/`automated` executions as authorship, while TASK-016 lets the bound actor of every type but `review`/`internal` push the run branch: the evaluator of a `convergence` step (or of an untyped step) could push commits and then review the run (governance-engine) | P2 (both skeptics: P2) | **FIXED.** `isAuthorStepType` is `!refadmit.FrozenStepType`, used by `runAuthor`, the early return and the symmetric guard. KNOWN-LIMITATIONS, `architecture/actor-model.md`, CHANGELOG and the TASK-007 notes no longer claim full coverage, and they state the operator gap (operators push unbound and are invisible to SoD) | `b191be9` | `TestStepEntry_SoDAuthorshipCoversEveryPushableStepType` drives TASK-016's evaluator (orchestrator as step-definition source), then assign and claim, for every step type plus a live-reviewer case. Mutation: the old predicate fails 6 sub-tests. Also `TestIsAuthorStepType` |
+| 2 | `spine secrets reencrypt` without `--all-workspaces` bound the FileProvider's `default` fallback when `SPINE_WORKSPACE_ID` was unset. A migrate sweep then sealed legacy rows under `default` and reported the workspace clean, and serve, bound to its real id, refused every row (secrets-delivery) | P2 (both skeptics: P3) | **FIXED.** The command refuses ("nothing was changed") unless `SPINE_WORKSPACE_ID` is set or `--workspace` is given (`--workspace default` stays valid), as it already did for the mode. The header line prints `workspace_id=`. Integration guide, `.env.example` and CHANGELOG updated | `808bd6b` | `TestSecretsReencrypt_SingleWorkspaceRequiresExplicitID` (refusal before any database is opened); integration `TestSecretsReencrypt_SingleWorkspaceNeverGuessesTheID` (the reviewer's reproduction: both rows untouched; with the id stated, serve reads them). Mutation fails both |
+| 3 | An exploratory `branch_id` of `refs` (and a workflow-defined `refs`/`HEAD`) created `spine/<run>/<div>/refs`, which TASK-016 rule 0b refuses for every principal (git-ref-surface) | P3 | **FIXED for the API path:** `ValidateExploratoryBranchID` refuses `refs` (400). `HEAD` cannot match the lower-case grammar, and the run and divergence components the engine builds never equal either name. **Follow-up:** structured branch ids and divergence-point ids from a workflow definition are not validated. Checking them in `workflow.ValidateSemantic` changes validation output on SMP's `WorkflowWriter` path, and a `createBranchRecord` refusal changes embedded behaviour; under the INIT-023 rule both need an SMP-compat argument or an opt-in. The divergence-point id needs care too: one containing `/refs` produces the same component | `abfb014` | `TestValidateExploratoryBranchID_AgreesWithPushAdmission` classifies the ref of every admitted id with `refadmit.Classify` |
+| 4 | `resolveRev` is branch-first, so a contributor-pushed `refs/heads/<n>` overrides a same-named operator tag in bare-name reads (`?ref=` on the artifact, list and workflow APIs). git and Spine at `61994fe` read the tag (git-ref-surface) | P3 | **DOCUMENTED, follow-up.** A new KNOWN-LIMITATIONS residual under "Git Ref Arguments" gives the workarounds: name tags in full, or protect the branch namespace with a rule. Not fixed in `resolveRev` because each option changes engine-internal resolution for every embedder. Refusing an ambiguous bare name lets anyone who can push a same-named tag deny reads of a run branch where tags are not operator-only. Preferring the tag reopens F10's tag substitution. Follow-up (owner: TASK-002): qualify user-supplied `?ref=` at the standalone gateway and refuse a bare name that is both a branch and a tag, which costs one extra `show-ref` on that path only | `4849960` | — |
+| 5 | The first-sync workflow sweep judges rows at a head resolved before it lists them. It deleted a row another instance had projected at a newer head, then took the up-to-date early return without writing `sync_state`, so nothing re-diffed the window and the row stayed lost (smp-compat) | P3 | **FIXED.** The sweep reports whether it wrote a row. On the early-return path a sweep that wrote re-records `sync_state` (idle at the head it judged by), so if another instance advanced it, the next tick re-diffs and restores the row. A sweep that wrote nothing keeps the early return read-only. **Residual** (CHANGELOG): if the other instance's whole sync spans the sweep, the row can still be lost. That is the same window the diff path had before TASK-011. A compare-and-set on `sync_state` (an optional store capability) would close it; follow-up | `0fe5011` | `TestSweep_StaleHeadInstanceDoesNotLoseANewerRow` (two instances over one store; a stale-HEAD decorator lets the other instance sync between head resolution and the sweep's listing; mutation fails), `TestSweep_NoChangeKeepsTheEarlyReturnReadOnly` |
+| 6 | The CHANGELOG's TASK-004 entry said SMP's `validateRepoRelativePath` already refuses `a//b.md`, `a/./b.md` and a trailing `/`. It refuses only empty, absolute, NUL and `..` paths, and only in front of SMP's `RealGitOperator` (smp-compat) | P3 | **FIXED.** The CHANGELOG now says SMP is unaffected because its embedded entry points pass canonical paths (`normalizeTaskPath`, `path.Clean` equality, `BuildArtifactPath`; checked at SMP `6ca0eeb7`). The TASK-004 §1a note is corrected | `4849960` | — |
+| 7 | CHANGELOG statements that the merge made wrong: TASK-001 still said a control byte in `branch_id` is a 500, TASK-002 still "recommended" refusing object-id-named refs to TASK-016, and `TreeEntryType` (joined to the Rev grammar in `3b88fb1`) was missing from TASK-002's Rev lists and from TASK-011's `TreeEntryTyper` entry (merge-ci) | P3 | **FIXED** | `4849960` | — |
+
+Also checked and unaffected: under the zero-value step-entry policy (SMP today) finding 1's change
+is invisible, and no shipped Spine or SMP workflow has a `convergence` or untyped step. The
+`spine serve` strict scenario suite gives the same results before and after (below).
+
+**Gates** (code at `4849960`; the artifact notes were committed afterwards):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 25 packages touched since `main` | 24 ok; `service/scenariotest/scenarios` has only `scenario`-tagged files |
+| `-tags integration`, one fresh `s2f_int_*` database per package | store 165 PASS plus the pre-existing `TestRunModeDatabaseDefault` failure; delivery 314; projection 162 (+2); cmd/spine 170 (+2); workspace 223 (with `SPINE_REGISTRY_TEST_DATABASE_URL`, registry migrated from `migrations/registry`); testutil 4; 0 SKIP |
+| CI `scenario-git-http` job | `TestGitHTTP_*` 20 PASS, 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 FAIL, the **same set** as a `git archive 2fab682` export (the pre-review integration head) run on its own database: 1479 PASS and 6 SKIP in both |
+| `golangci-lint run --build-tags scenario --new-from-rev main` on the touched packages | 1 issue: the QF1006 at `adapters/delivery/webhook_dispatcher_test.go:349`, present on `main`. The full set is 298 issues, as at the integration, and none is in a file this review changed. `--build-tags integration --new-from-rev 2fab682` on `service/cmd/spine` and `adapters/projection`: 0 |
+| `--enable-only=gosec` | 0 issues |
+| `gofmt -l` on every `.go` file changed since `2fab682` | empty |
+| `codex review --base main` | "No actionable regressions were identified." |
+| SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 67 packages (dependents of a changed Spine package plus `./internal/customer/...`): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2f_smp_spine_runtime` and `s2f_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope) |
+
+All `s2f_*` databases were dropped afterwards, and no container was started.

@@ -3,7 +3,6 @@ package artifact
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -115,14 +114,10 @@ func buildSuccessorContent(original *domain.Artifact, successorID, rejectedPath,
 
 // addLinkToArtifact reads an artifact, adds a link, and commits the update.
 func (s *Service) addLinkToArtifact(ctx context.Context, path, linkType, target string) error {
-	fullPath, err := s.safePath(path)
+	// Confined, capped read (worktreefs; INIT-023 TASK-004).
+	raw, err := s.readRepoFile(ctx, path)
 	if err != nil {
 		return err
-	}
-
-	raw, err := os.ReadFile(fullPath)
-	if err != nil {
-		return fmt.Errorf("read file %s: %w", path, err)
 	}
 
 	// Insert the link before the closing --- of front matter.

@@ -17,7 +17,9 @@ import (
 // capabilities on line 1 only, no trailing LF, push-options in their
 // own section. It passes before and after the fix.
 //
-//   - contributor: a multi-ref push (spine/run/* included), a push with
+//   - contributor: a multi-ref push (including a spine/run/* branch
+//     whose current step the contributor holds, nulHandler; INIT-023
+//     TASK-016), a push with
 //     -o ci.skip and a delete of an unprotected branch all apply; a
 //     direct write to protected main is still denied by its rule, and
 //     -o spine.override=true does not change that;

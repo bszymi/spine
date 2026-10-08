@@ -2,12 +2,12 @@
 id: TASK-007
 type: Task
 title: "Opt-in step-entry policy for assign and claim: run state, eligibility, mode, preconditions, separation of duties"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-07
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
@@ -287,6 +287,9 @@ The mode-implied types match `resolveAutoActorID`'s inference (`step.go:947-956`
   - The data comes from `o.store.ListStepExecutionsByRun` and the pinned `wfDef`; no new store method is needed.
 - **What does not count:**
   - executions of `review`, `convergence` and `internal` steps, so one person may both `verify` and `review` in SMP's `task-default`, which has two review-type steps (owner question 1);
+    *(amended by the wave 2 cross-task review: `convergence` steps and steps with no or an unknown
+    `type` do count — push admission lets their bound actor push commits; only `review` and
+    `internal` do not. See "Cross-task review (wave 2)".)*
   - the run initiator, who is not recorded on `runtime.runs` (no schema change; Out of scope).
 - **Both binding paths.** The rule applies to `AssignStep` and `ClaimStep`.
 - **Auto-selection.** It also applies when `ActivateStep` auto-selects an actor for an `automated_only` or `ai_only` review step (`step.go:73`, `:169-181`). If the selected actor is an author, the step stays `waiting` with an info log, the same as "no match". It is never bound, and a non-author can claim it. `actor.SelectionRequest` (`core/actor/selection.go:23-29`) has no exclusion list, and adding one is not needed here.
@@ -352,6 +355,10 @@ The mode-implied types match `resolveAutoActorID`'s inference (`step.go:947-956`
 >   when recovery left a claim row active. It is listed under Out of scope.
 > - SoD also cannot see git authorship: who pushed which commit. TASK-016 limits pushes to the
 >   bound actor; together with (b) that covers every push a bound actor made.
+>   *(Corrected by the wave 2 cross-task review: that held only for `manual` and `automated`
+>   steps. TASK-016 also admits the bound actor of a `convergence` step and of a step with no or
+>   an unknown `type`, which this rule did not count; the author set is now every type but
+>   `review` and `internal`. Operators, who push unbound, remain invisible to SoD.)*
 
 ### 8. Preconditions under `EnforcePreconditions`
 
@@ -694,6 +701,31 @@ The zero value keeps the forward-compatible skips.
 >   pilot. F3 then rests on TASK-006 and SMP TASK-010 alone.
 > - That is an owner decision: see Owner question 7.
 
+> **Review-round-1 note (2026-10-07): two more requirements for SMP TASK-011.**
+>
+> - **Step 2's resolver must be canonical.** The engine's exact-echo check only stops a
+>   resolver from answering for a *different* ID; a resolver that builds the `Actor` from the
+>   requested ID passes it for every variant. So the `workspace_roles` resolver must answer
+>   `ErrNotFound` unless the requested ID is byte for byte the stored `human-<uuid>` handle —
+>   no case folding, trimming, or lenient UUID parsing (`uuid.Parse` accepts upper case,
+>   braces and `urn:` forms). Otherwise `human-6B1D…` binds a review its lower-case twin
+>   executed. Spine pins the engine half (IDs reach the resolver verbatim) in AC 27 and the
+>   SMP shape in AC 8 and AC 16.
+> - **SoD bind serialisation is per process.** The engine serialises a run's SoD check and
+>   bind write with an in-process lock. If SMP turns `SeparationOfDuties` on while running more
+>   than one `customer-app` replica against a workspace, concurrent binds from different
+>   replicas are not serialised (divergence workflows only); that needs a database-level lock
+>   per run, which this task does not add.
+
+> **Review-round-2 note (2026-10-07): the bind lock is shared by every workspace, but narrow.**
+>
+> - The stripes are package-level, so every workspace orchestrator in `customer-app` shares them,
+>   and runs of different workspaces can hash to one stripe.
+> - A stripe is held only while check 7 is re-run and the bind is written. The `workspace_roles`
+>   resolver, workflow loads and precondition git reads run before it is taken, so a slow query in
+>   one workspace delays another workspace's bind by at most one check-7 read and one write.
+> - A waiter whose context ends gets `ErrUnavailable` (503) and nothing is bound.
+
 ### 16. Coordination with sibling tasks
 
 - **TASK-008** (submit ownership, CAS; depends on this task) also edits `IngestResult`. This task adds only the `requireActiveRun` call after `GetRun`. TASK-008 may add submit-side fields to `StepEntryPolicy` or define its own policy, and should reuse `requireActiveRun`.
@@ -714,7 +746,8 @@ The zero value keeps the forward-compatible skips.
 >     already expects.
 > - **TASK-016** (run-branch push admission) admits a non-operator only while they are bound to
 >   the live execution. The SoD ledger (§7 note) then covers every non-operator who could have
->   pushed: anyone ever bound to an author execution.
+>   pushed: anyone ever bound to an author execution. *(True only since the wave 2 cross-task
+>   review widened "author execution" to every step type TASK-016 does not freeze.)*
 >   - Together they bound "who wrote it" against "who reviews it". Neither does it alone.
 >   - **Gap 1:** the documented assign-reset residual (Owner question 6).
 >   - **Gap 2:** under TASK-016's Owner question 1 default, operators and admins may push to any
@@ -751,6 +784,7 @@ The zero value keeps the forward-compatible skips.
 
 1. **Separation-of-duties scope.** Which earlier executions disqualify a reviewer?
    - **Default:** any execution, in any status, of a `manual` or `automated` step of the same run, bound to the same actor id. Review, convergence and internal executions do not disqualify, so the same person may `verify` and `review` in SMP's `task-default`.
+   - **Amended (wave 2 cross-task review):** any type but `review` and `internal` disqualifies (`convergence` and untyped steps added), because TASK-016 lets their bound actor push commits. `verify` + `review` stays allowed.
    - **Alternatives:** count only completed executions; also forbid one actor holding two review steps of the same run; also exclude the run initiator. The last needs a `runtime.runs` column, which is a schema change, so it would go to a follow-up.
 2. **Standalone default.** Should `spine serve` install `StrictStepEntryPolicy()` (every check, including SoD and skills-on-assign) by default, with `SPINE_STEP_ENTRY_POLICY=legacy` as a logged escape hatch?
    - **Default:** yes, strict, with the escape hatch, to be removed in a later release.
@@ -1170,3 +1204,535 @@ TASK-005 (SHA-bound merge) and TASK-008 (submit identity, CAS) would turn this t
 
 ## Implementation Notes
 
+Implemented on branch `init/INIT-023-TASK-007-step-entry-guards` (base: Spine local `main`
+`ee3c249` = origin `61994fe` + the INIT-023 scaffold + merged TASK-001). Diff base:
+`git diff main...HEAD`.
+
+### Orchestrator rulings recorded (owner questions take their defaults, pending the owner)
+
+- Scope: audit P3-3, P3-4 (Spine halves), P3-15, P3-16, plus separation of duties, as an
+  **opt-in** `engine.StepEntryPolicy` whose zero value is exactly today's behaviour.
+  `validation.EvaluatePreconditions` keeps its semantics (SMP's `embeddedRuns.AssignStep` depends on
+  it; AC 4 and the AC 1 r1-7 pin assert it still answers `passed`, AC 16 pins SMP's task-default
+  execute assign).
+- **OQ1** (default, pending owner): SoD disqualifies any status of a `manual` or `automated`
+  execution of the same run, plus `actor_assignments` rows in any status of such an execution.
+  *(Wave 2 cross-task review: of any execution whose type is not `review` or `internal`.)*
+- **OQ2** (default, pending owner): `spine serve` installs the strict policy;
+  `SPINE_STEP_ENTRY_POLICY=legacy` is a logged escape hatch; any other value refuses to start.
+- **OQ3** (default, pending owner): keep "main is truth"; Spine's `epic-lifecycle.yaml` execute loses
+  its unsatisfiable precondition (v1.1); `workflow.DeferredStatusPreconditions` + the reference
+  test guard against new ones.
+- **OQ4** (default, pending owner): strict mode fails closed on unknown/`custom` types,
+  `cross_artifact_valid` without a validator and `discussions_resolved` without a checker.
+- **OQ5** (default, pending owner): an assigner may replace a stored `eligible_actor_ids` list
+  (pinned by the AC 2 design-check row).
+- **OQ6** (default, pending owner): the recovery re-bind SoD residual (an `AssignStep` binding writes
+  no assignment row) is accepted and documented (`architecture/actor-model.md` §7.3,
+  `KNOWN-LIMITATIONS.md`, the `runAuthor` doc comment).
+- **OQ7**: SMP's decision (SMP TASK-011). Spine only provides the `SeparationOfDuties` switch.
+
+### What was built
+
+| Commit | Content |
+|---|---|
+| `21efe1e` | Red before green: inert plumbing (`StepEntryPolicy`, `EntryActorResolver`, `StrictStepEntryPolicy`, `IsZero`, `WithStepEntryPolicy` (stores only), `StepEntryPolicy()`, no-op `TerminateLiveSteps`, `workflow.StepTriggerRunTerminated`, `domain.FailureRunTerminated`, `scheduler.WithRunTerminated` (stored, never called)) plus the AC 1 legacy pins and the AC 2-12, 14, 16, 23-27 tests and the AC 9 parser-contract test. |
+| `baac09b` | `run.terminated` in `EvaluateStepTransition` (live → `skipped`, terminal refuses) + AC 13 tests. |
+| `a863286` | `workflow.DeferredStatusPreconditions` / `DeferredStatusPrecondition` (pinned shape), Spine `epic-lifecycle.yaml` v1.1, AC 15 tests incl. `workflows/` reference test. |
+| `c56d5be` | The engine enforcement (`core/engine/step_entry.go` and the guards in assign, claim, acknowledge, result, step, retry, run, merge, step_executions) and the scheduler hook (`run_timeout.go`, `multi.go`). |
+| `3ba7e76` | `(*store.PostgresStore).CancelActiveAssignmentsForExecution` + AC 17 integration test; compile-time pin that `PostgresStore` provides every optional step-entry port. |
+| `fdf623b` | `spine serve` wiring: `SPINE_STEP_ENTRY_POLICY`, both orchestrator builders, `WithRunTerminated` / `ServiceSet.RunTerminatedFn`, `gateway.ServerConfig.DisableStepAssignFallback`; AC 18 tests. |
+| `9902467` | Docs (§14), `api/spec.yaml`, `CHANGELOG.md`, `KNOWN-LIMITATIONS.md`. |
+| `97d5cc7` | gocritic fix in a test (0 new lint issues). |
+
+Engine shape (`core/engine/step_entry.go`): `gatesBinding()` (any of the six entry bools),
+`requireActiveRun`, `entryActor` (= `loadActor` with a nil resolver), `policyActor` (typed,
+fail-closed lookup for the checks), `checkResolvedActor` (exact `ActorID` echo, typed errors keep
+their code, `ErrNotFound` re-issued naming the ID, untyped → `ErrInternal`), `modeActorType`,
+`checkStepEntryActor` (checks 1-7 in the Design §2 order), `requireSkillsOnAssign`,
+`checkSeparationOfDuties` / `runAuthor` (ledger read through the optional `assignmentHistory`),
+`checkStepEntryPreconditions` (read-only), `preconditionField`, `terminateLiveSteps` /
+`TerminateLiveSteps` (optional `activeAssignmentCanceller`), `isRunTerminated`,
+`runTerminatedConflict`.
+
+### Red before green (AC "Red before green")
+
+Recorded on `21efe1e` by running each top-level test alone
+(`go test -c ./core/engine` then `engine.test -test.run '^<name>$'`, and
+`go test ./adapters/scheduler -run TestScheduler_RunTimeoutTerminatesLiveSteps`):
+
+- PASS (legacy pins, AC 1): all seven `TestStepEntryLegacy_*`.
+- FAIL: AC 2 `TestStepEntry_AssignRefusesIneligibleActor`, AC 3 `…PreconditionFailedStepNotBindable`,
+  AC 4 `…R17_SMPFunnelRefusesDraftTask`, AC 5 `…SpineOnlyStepNotBindable`, AC 6 `…ModeTable`,
+  AC 7 `…SeparationOfDuties`, AC 8 `…GovernanceSelfApprovalRefused`, AC 9
+  `…FieldValueReadsTypedFields`, AC 10 `…StrictPreconditionsFailClosed`, AC 11
+  `…RunStatusGuards`, AC 12 `…TerminateStepsOnRunEnd` and `…TerminateWithoutRunStatusWarns`,
+  AC 14 `…ReferenceWorkflowsUnderStrictPolicy`, AC 16 `…SMPTaskDefaultContract`, AC 23
+  `…SoDAuthorLedger`, AC 24 `…CandidateListingHidesDeadRuns`, AC 25
+  `…LateSubmitOnTerminatedExecution`, AC 26 `TestScheduler_RunTimeoutTerminatesLiveSteps` (the
+  hook and end-to-end sub-tests), AC 27 `…ResolverContract` (red as a nil-pointer panic on the
+  `&Orchestrator{}` row — exactly the panic the AC forbids).
+- All of them pass from `c56d5be` on (AC 14 needs `a863286`'s workflow edit as well).
+- AC 13, 15, 17 and 18 test API that did not exist in inert form (the transition, the lint, the
+  store method, the serve helpers), so their tests landed with their implementation commits; they
+  are outside the AC's red list.
+
+### Mutations checked (each must turn its test red)
+
+A scripted mutation pass (one source edit at a time, the named test re-run, the edit reverted)
+killed all 30 mutants: `gatesBinding()` true for the zero value (AC 1); dropping the resolver
+`ActorID` echo (AC 27); reading only `step_executions` for SoD (AC 23); dropping the symmetric
+guard, the `Type == review` condition, the manual/automated author filter, the auto-selection SoD
+check (AC 7); deleting `requireActiveRun` from each of IngestResult, SubmitStepResult,
+ActivateStep, AcknowledgeStep, RetryStep and the bind path (AC 11); deleting `terminateLiveSteps`
+from CancelRun, FailRun, failRunOnMergeError (AC 12); the WARN (AC 12); the `status` case of
+`preconditionField` (AC 9 and AC 14 task-default); the precondition call in ClaimStep and in
+AssignStep (AC 3); a `modeActorType` entry (AC 6); check 2 (AC 5); checks 4, 5 and 6 (AC 2);
+the listing filter (AC 24); the late-submit rule (AC 25); bypassing the resolver (AC 8 (b));
+the unknown-type fail-closed (AC 10); the scheduler hook call (AC 26). Reverting the
+epic-lifecycle edit fails AC 14 (epic execute, `ErrPrecondition`) and the AC 15 reference test.
+
+### Per-AC evidence
+
+- **AC 1** — `core/engine/step_entry_legacy_test.go` (5 PoCs, `package engine`) and
+  `step_entry_legacy_ext_test.go` (governance + verify-r1-6, `package engine_test`). Binding
+  assertions only; review executions are created directly in the store (no submit routing), no
+  merge assertions.
+- **AC 2** — all rows incl. the two design-check rows; each row is built so exactly one check
+  refuses it and asserts code + message; exec still waiting with no actor; zero merges.
+- **AC 3, 4, 5 (+ design-check ActivateStep merge row), 6, 7 (+ design-check rows), 8, 9, 10, 11
+  (incl. `partially-merged` and `pending`), 12 (incl. `CancelRun` from `partially-merged`, WARN
+  with captured logger, quiescent post-state only), 13, 14, 15 (full struct, real `Index`), 16,
+  23, 24, 25, 26, 27** — tests named as in the AC, in `core/engine/step_entry_*_test.go`,
+  `core/workflow/step_machine_test.go`, `core/workflow/precondition_lint_test.go`,
+  `workflows/reference_workflows_test.go`, `adapters/scheduler/run_timeout_terminated_test.go`.
+- **AC 9 parser contract** — `core/artifact/parser_typed_fields_test.go`.
+- **AC 17** — `adapters/store/postgres_assignments_cancel_test.go` (`-tags integration`).
+- **AC 18** — `service/cmd/spine/serve_step_entry_test.go` (`stepEntryPolicyFromEnv` table;
+  `buildOrchestrator(...).StepEntryPolicy()` and the orchestrator `workspaceOrchestratorBuilder`
+  stores on `ss.StepAssigner` equal the env-selected policy for `""`, `strict`, `legacy`;
+  `buildScheduler` installs the hook — a run-timeout scan terminates under strict and leaves
+  executions unchanged under legacy; `ss.RunTerminatedFn` likewise) and
+  `service/internal/gateway/step_assign_fallback_policy_test.go` (503 + no `UpdateStepExecution`
+  with `DisableStepAssignFallback`; the default still binds). Existing gateway assign tests are
+  unchanged and pass.
+- **AC 19** — see the SMP compatibility gate below.
+- **AC 20** — `git diff 61994fe -- migrations/` is empty (0 lines). No new migration, column or
+  table; new values only in existing unconstrained/allowed columns (`skipped`, `cancelled`,
+  `run_terminated` in JSONB).
+- **AC 21, 22** — gates and docs below.
+
+### Deviations and design points resolved against the real code
+
+1. **`AcknowledgeStep` run guard placement.** Design §9 says "before the transition". It is placed
+   after the existing actor-ownership check and **before the idempotent `in_progress` early
+   return**, so a runner re-acknowledging on a dead run is told 409 rather than "carry on". Still
+   flag-guarded; the run is loaded only when `EnforceRunStatus` is on.
+2. **`ClaimStep` with a gating policy and no workflow loader** returns `ErrUnavailable` (it used to
+   nil-dereference). Zero value unchanged (it still dereferences, as before).
+3. **`AssignStep` partial-wiring guard** also covers a nil store (AC 27 uses a literal
+   `&Orchestrator{}`), not only a nil workflow loader. Message: "step-entry policy needs a run
+   store and a workflow loader".
+4. **Unknown-actor errors from the store/resolver** are re-issued as `ErrNotFound` "actor %q not
+   found" (naming the ID) rather than passed through with the store's generic text; every other
+   typed error keeps its code and text (Design §1/§2 notes).
+5. **SoD fail-closed details** beyond the design text: a ledger row in the run whose execution the
+   run does not list counts as authorship; in the symmetric guard a live execution whose step is
+   missing from the pinned workflow counts like a review. Both are anomalies that cannot occur
+   with pinned workflows; failing closed matches the design's "missing step counts" rule.
+6. **Scheduler hook vs TASK-008's CAS.** TASK-008 has not landed, so the hook fires after a
+   *successful* `UpdateRunStatusAt` (and not when the run already progressed to terminal or
+   `committing`, or when the write errors). When TASK-008 turns the write into a CAS, the call must
+   move behind its `applied` result (comment in `run_timeout.go`).
+7. **Policy threading in `spine serve`.** Parsed once in `serveCmd` and passed explicitly:
+   `serveDeps.StepEntryPolicy` → `buildOrchestrator(..., policy, log)` and
+   `DisableStepAssignFallback: !policy.IsZero()`; `buildWorkspaceResolver(..., policy)` →
+   `newPooledWorkspaceBuilder(cfg, policy, log)` → `workspaceOrchestratorBuilder(ctx, ss, policy)`.
+   The env value is matched case-insensitively after trimming. The serve smoke test now mirrors
+   the strict default.
+8. **AC 14 actor skills.** Executors also hold `review` (a skill the workflows declare) so that
+   separation of duties — not the skills check, which runs earlier — is what refuses them on
+   review; the test asserts `ErrForbidden`.
+9. **gofmt.** Several touched files were not gofmt-clean on `main` (import order from an earlier
+   mass rename, one struct alignment). Running `gofmt -w` on touched files reorders those import
+   blocks; no other unrelated change.
+10. Docs: besides §14, `docs/integration-guide.md` documents `SPINE_STEP_ENTRY_POLICY` and
+    `api/spec.yaml` documents the assign endpoint's `eligible_actor_ids` and 404/412/503.
+
+### Gates (run on this branch; 2026-10-07)
+
+Spine (worktree `i23/s-T007/spine`):
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` (no new `core_to_adapters_allowlist` entry) |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go test -p 4 -count=1 ./...` | exit 0 (all packages ok) |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -race -p 4 -count=1` on every touched package (`adapters/scheduler adapters/store core/artifact core/domain core/engine core/workflow service/cmd/spine service/internal/gateway service/internal/workspace workflows`) | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s007_store go test -tags integration -p 1 -count=1 ./adapters/store/...` | 1 failure, `TestRunModeDatabaseDefault` ("cannot scan NULL into *string", `workflow_version_label`) — **pre-existing**: identical on `main` (`git archive main`, `s007_storemain`). `TestCancelActiveAssignmentsForExecution` (AC 17) passes. |
+| `SPINE_TEST_DATABASE_URL=…/s007_scen go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 failures, **identical set on `main`** (`s007_scenmain`; fixture/validation drift such as "create fixture …: artifact validation failed"; CI runs only `TestGitHTTP_*` because the rest is not green on main). The harness uses the zero-value policy, so nothing changes. |
+| CI scenario-git-http job: `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` | exit 0; 19 `--- PASS: TestGitHTTP_*`, 0 skips |
+| `golangci-lint run --allow-parallel-runners --max-issues-per-linter=0 --max-same-issues=0` on the touched packages, branch vs `main` | 193 vs 206 issues; **0 new** (the diff of issue lines without positions is empty; the count drops because touched files are now gofmt-clean) |
+| same with `--enable-only=gosec` | 1 issue on both (pre-existing `core/workflow/service.go` G703); 0 new |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | "No actionable regressions were identified against the supplied merge base." No P1/P2 reported; nothing to fix or reject. |
+
+Not run, with reason: nothing in the Spine CI list was skipped.
+
+### SMP compatibility gate (AC 19)
+
+SMP checkout `i23/s-T007/smp` detached at SMP `main` `7d4e7cc9`, `../spine` resolving to this
+worktree, no `vendor/`, no `tmp/`, tree left clean (`git status` empty afterwards); no SMP change.
+
+| Command (in SMP) | Result |
+|---|---|
+| `go build ./...` | OK |
+| `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `go test -p 4 -count=1` on every SMP package that imports a changed Spine package (`go list` direct imports of `core/engine`, `core/workflow`, `core/domain`, `adapters/store`, `adapters/scheduler`: `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`) plus `./internal/customer/spineembedded/... ./internal/customer/spinecore/... ./internal/customer/run/... ./internal/engine/...` | all ok. One timing-sensitive failure under load, `spinecore` `TestProfileSnapshot_StalledFetchIsKilledWithItsHelper` ("the fake fetch never started"), passed standalone and on a full `go test -p 4 ./internal/customer/spinecore/...` re-run. |
+| `TEST_SPINE_DB=…/s007_smpspine` (spine-runtime set applied with `go run ./dev/apply-migrations -set spine-runtime`) `TEST_PLATFORM_DB=…/s007_smpplatform` (platform set) `go run ./dev/testgate -allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip 'TEST_PROVISIONING_DSN unset' -- -race -count=1 -timeout 10m -p 4 ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (SMP ci.yml "Spine runtime integration suites") | `testgate: 4 packages, 1536 tests passed, 0 failed, 4 skipped (4 allowed)`, PASS. Includes `TestAssignGate_Integration` ("hybrid step to a human is unchanged", "agent claims an ai_only entry step"), `TestRecoverAutomation_Integration`, `TestRecoverUnavailableOwner_Integration` (also run by name with `-v`: all PASS). |
+
+Not run, exact command: the three `spinecore` dispatch-store tests gated on
+`TEST_PROVISIONING_DSN` (`TestListStuckStepDispatches_SelectsExactlyTheStuckSet`,
+`TestRedriveStepDispatches_ResetsOnlyEligibleRows_Idempotent`,
+`TestRedrive_RedeliversThroughSpineDispatcher`) — they need a CREATEROLE/CREATEDB DSN that
+allocates `ws_*` databases and roles, which this shared server's rules forbid
+(`TEST_PROVISIONING_DSN=postgres://smp_prov:smp_prov@localhost:5432/postgres go run ./dev/testgate
+… ./internal/customer/spinecore/`). They exercise Spine's delivery queue, which this task does
+not touch. The first testgate run without that allowance failed only on those three skips.
+
+All `s007_*` databases created for these gates were dropped afterwards.
+
+### Review round 1 (2026-10-07)
+
+Three reviewers looked at the branch: correctness with SMP compatibility, adversarial security,
+and completeness/tests. Each finding was checked against the code before anything changed.
+Line numbers below are from the branch before this round.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P3 | `AssignStep` on a run cancelled or failed under `TerminateStepsOnCancel` answers 404 "no active execution", not the documented 409, because `findStepExecution` ran before the run guard (`assign.go:60`) | **Fixed.** Under a gating policy `AssignStep` now loads the run and applies `requireActiveRun` before `findStepExecution`. Test: `TestStepEntry_AssignOnTerminatedRunAnswersConflict` (CancelRun and FailRun under the strict policy, 409 naming the status, nothing written). |
+| 2 | P3 | CHANGELOG "Changed (standalone)" left out two strict-default changes: strict evaluation at activation, and SoD on auto-selection with no fallback candidate | **Fixed (docs).** Bullets added: activation strictness (both directions, incl. `field_value status` now passing), SoD on auto-selection (step stays waiting, no other candidate, single-runner workflows stall), plus the 409-before-lookup, listing and serialisation changes from this round. `workflow-definition-format.md` §5.2 and `security-model.md` §4.4.1 say the same. |
+| 3 | P3 | Under `SeparationOfDuties` the candidate listing offers a run author its run's review, so each poll claims and gets 403 again | **Fixed.** `ListStepExecutions` mirrors D16: with `SeparationOfDuties` and an `actor_id`, a `waiting` candidate is hidden only when check 7 gives a definite `ErrForbidden` (`sodHidesCandidate`, sharing `separationOfDuties` with the bind path). The run's executions are read once per listing. If the check cannot run (unreadable ledger, no store, workflow not loadable) the candidate stays listed and the claim gives the fail-closed 503. Test: `TestStepEntry_CandidateListingHidesSoDRefusals` (author, released executor via the ledger, live reviewer on a branch step, independent actor, unreadable ledger, zero-value controls). |
+| 4 | P3 | The SoD ledger read `ListAssignmentsByActor(ctx, actor, nil)` loads the actor's whole history across runs on every review bind | **Fixed.** New optional port `runAssignmentHistory.ListAssignmentsByRunAndActor(ctx, runID, actorID)`, provided by `(*store.PostgresStore)` (`WHERE actor_id = $1 AND run_id = $2`, served by the existing `idx_assignments_actor` / `idx_assignments_run`, no schema change, no interface gains a method). The engine prefers it and falls back to `ListAssignmentsByActor`, keeping the in-memory `RunID` filter. SMP passes `*store.PostgresStore` as its assignment store, so it gets the port with no SMP change (only read under `SeparationOfDuties`, which SMP does not set). Tests: run-scoped rows in `TestStepEntry_SoDAuthorLedger` (narrow port preferred, whole-history read never called; narrow read error gives 503), compile-time pin in `step_entry_ports_test.go`, integration `TestListAssignmentsByRunAndActor`. |
+| 5 | P3 | The exact-echo check does not stop aliases. A resolver that echoes any `human-*` string passes the check for every variant, the committed SMP-shaped test resolvers did exactly that, and the docs overclaimed | **Fixed.** Real: the engine cannot tell a canonical handle from a variant the resolver chose to accept. `StepEntryPolicy.Actors`, `checkResolvedActor`, `security-model.md` §4.4.1, CHANGELOG "For embedders" and KNOWN-LIMITATIONS now separate the engine's duty (the echo, which stops mapping one ID to another; IDs passed to the resolver verbatim) from the resolver's duty (answer `ErrNotFound` unless the input is byte for byte a stored canonical handle; no case folding, trimming or lenient UUID parsing). `smpHumanResolver` (AC 16) and the AC 8 resolver are now fixed-table canonical resolvers. AC 8 asserts four variants of the executor's handle (upper-case prefix, upper-case UUID, trailing space, braces) give `ErrNotFound` and leave the review unbound. AC 27 adds "canonical resolver refuses variants; the engine passes IDs verbatim" (killed by a `strings.ToLower` mutation in `entryActor`). The requirement is carried to SMP TASK-011 in a review-round-1 note under §15. Standalone is unaffected: with no resolver, lookup is the exact `auth.actors.actor_id = $1`. |
+| 6 | P3 | The SoD check and the bind write are not tied together, so two concurrent binds of one actor into a divergence run (its review and an author branch step) can both pass | **Fixed in-process, residual documented.** A package-level striped mutex (`sodBindStripes`, 64 stripes by run-ID hash), taken only under `SeparationOfDuties`, is held by `AssignStep`, `ClaimStep` and `ActivateStep`'s auto-selection from before check 7 until the bind write. It is released before events, assignment records and runner dispatch, so a synchronous handler cannot deadlock on it, and a holder never takes a second stripe. It is package-level rather than per `Orchestrator` because `spine serve` runs a process-level orchestrator and per-workspace ones (rebuilt on pool eviction), and all of them must share it. This closes the race for `spine serve` (single process, `replicas: 1` in the integration guide). Binds from different processes sharing a database are not serialised: documented in KNOWN-LIMITATIONS, CHANGELOG "For embedders", `actor-model.md` §7.3 and the §15 SMP note. A DB-level per-run lock would close it, but the store interfaces have no transaction hook, and TASK-008's per-row CAS does not close it either (the two binds write different rows). Re-check-and-undo was rejected: it adds a second blind write per bind and interacts with TASK-008's CAS. Test: `TestStepEntry_SoDBindsSerialisePerRun` uses a copy-on-read, mutex-guarded store that pauses the first bind between its checks and its write. Four cases: claim review then claim branch, assign review then claim branch, assign branch then assign review, auto-select AI review then claim branch. The second bind must not finish during the pause, must then get 403, and the actor must end up bound to exactly one step. Removing the lock from any one of the three paths, or entirely, fails it. Race-detector clean. Review round 2 narrowed the held section to a re-run of check 7 plus the write, and made the wait honour the caller's context (see Review round 2). |
+| 7 | P2 | AC 2 never reaches the `eligible_actor_types` half of check 5 (the only wrong-type row is refused by check 3 first) | **Fixed.** New AC 2 row: an allow-listed, skilled, active `automated_system` actor on a hybrid review step limited to `[human]` gets `ErrConflict` "not eligible for this step", with the execution unchanged and zero merges. The `if false && …` mutation is killed. |
+| 8 | P3 | Check 4 on `ClaimStep` (existence + active status under `EnforceEligibility`) is untested | **Fixed.** `TestStepEntry_ClaimRequiresLiveActor`: a suspended actor (steps with and without an execution block) and a deactivated actor get 403. An unknown actor on a step without an execution block gets 404. No assignment row, execution unchanged. Zero-value control still claims. Both reviewer mutations are killed. |
+| 9 | P3 | Decision 10 (RequireSkillsOnAssign fails closed) is untested | **Fixed.** `TestStepEntry_RequireSkillsOnAssignFailsClosed`: a blocking store without `ListActorSkills` and a failing lister both give 503 with zero writes. A skill-holding control binds. Both `return nil` mutations are killed. |
+| 10 | P3 | AC 27's resolver-only row cannot fail when `claim.go` reverts to `loadActor` | **Fixed.** New AC 27 row: a resolver-only policy whose resolver answers `human-x`, which the blocking store does not know, on a step with an execution block and no `required_skills`. `ClaimStep` must succeed and record the assignment. A zero-value control shows the same claim fails without the resolver. The `loadActor` mutation at the claim site is killed. The original row stays, now commented as non-discriminating on its own. |
+| 11 | P3 | No test checks that `buildServerConfig` sets `DisableStepAssignFallback` from the policy | **Fixed.** `TestServeWiring_StepAssignFallbackFollowsPolicy` (strict and single-switch give true, zero value gives false). The `false` mutation is killed. |
+| 12 | P3 | Fail-closed branches untested: unknown-step execution as authorship, ledger row for an unknown execution, re-acknowledge of `in_progress` on a dead run | **Fixed.** `TestStepEntry_SoDFailClosedAnomalies` covers three rows: an unknown-step author is refused on review (assign and claim, message names the step); an orphan ledger row in the run is refused, with a control row in another run that does not count; and a live unknown-step execution blocks author steps (Deviation 5's symmetric half). AC 11 gains "AcknowledgeStep re-acknowledging in_progress" for all six non-active statuses (zero value: idempotent success). All four mutations are killed. |
+
+**AC gaps raised by the reviewers.**
+
+- AC 2 and AC 27: closed by findings 7 and 10.
+- AC 19: the gate runs against SMP `main` `7d4e7cc9`, which is newer than the `80995559` the AC names and is the checkout the orchestrator provides. That is a stricter check, accepted. The three `TEST_PROVISIONING_DSN` spinecore tests stay unrun, for the reason recorded above.
+- AC 21: the full scenario suite is not green on `main` either. It was re-run on fresh databases this round with an identical failure set (gates below). CI runs only `TestGitHTTP_*`.
+- AC 17 and the new `TestListAssignmentsByRunAndActor` run only by hand (`-tags integration`). Spine CI has no store integration job, and adding one would first need the pre-existing `TestRunModeDatabaseDefault` failure fixed. Follow-up, not required by the AC.
+- The gofmt import reordering in about 12 touched files is unchanged (Deviation 9).
+
+**Mutation pass (review round 1).** A scripted pass made one source edit at a time, re-ran the named test and reverted the edit. It killed all 19 mutants:
+
+- the run guard placed after the execution lookup;
+- the listing SoD filter removed;
+- the run-scoped ledger case removed;
+- `entryActor` lower-casing IDs;
+- the bind lock as a no-op, and removed from each of `AssignStep`, `ClaimStep` and `ActivateStep`;
+- check 5's type test disabled;
+- check 4 restricted to assign, both forms;
+- both `requireSkillsOnAssign` fail-closed branches returning nil;
+- `ClaimStep` looking up through `loadActor`;
+- `DisableStepAssignFallback: false`;
+- `runAuthor` skipping unknown steps;
+- the orphan-ledger branch disabled;
+- the symmetric guard ignoring unknown steps;
+- the acknowledge guard skipping `in_progress`.
+
+**Zero value / SMP.** Every new branch reads a policy bool. `lockSoDBind` takes nothing unless `SeparationOfDuties` is set. The listing filter needs `SeparationOfDuties`. Under a gating policy `AssignStep` only reorders its run load. The narrow ledger is read only under `SeparationOfDuties`. SMP sets no policy, so its behaviour is unchanged on every path (SMP gate below).
+
+**Commits (review round 1).**
+
+| Commit | Content |
+|---|---|
+| `45b67fd` | Findings 1, 3, 4, 6: run guard before the execution lookup, SoD bind serialisation, run-scoped ledger port + `PostgresStore.ListAssignmentsByRunAndActor`, listing SoD filter; their tests. |
+| `dcd4058` | Findings 5 and 10: canonical-resolver contract (doc comments), canonical SMP-shaped test resolvers, AC 8 variant rows, AC 27 rows. |
+| `0b6fc16` | Findings 7, 8, 9, 11, 12: coverage tests. |
+| `5343e60` | Finding 2 and the docs for this round (CHANGELOG, KNOWN-LIMITATIONS, `security-model.md`, `actor-model.md`, `workflow-definition-format.md`). |
+
+**Gates (review round 1, run on `5343e60` + this note; 2026-10-07).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | OK |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | exit 0 |
+| `go test -race -p 4 -count=1` on every touched package (`adapters/scheduler adapters/store core/artifact core/domain core/engine core/workflow service/cmd/spine service/internal/gateway service/internal/workspace workflows`) | all ok; the race-sensitive tests also passed `-race -count=5` |
+| `SPINE_TEST_DATABASE_URL=…/s007_r1store go test -tags integration -p 1 -count=1 -v ./adapters/store/...` | 36 pass, 1 fail: `TestRunModeDatabaseDefault` (pre-existing; `main` copy on `s007_r1storemain`: 34 pass, the same 1 fail). `TestCancelActiveAssignmentsForExecution` and `TestListAssignmentsByRunAndActor` pass. |
+| CI scenario-git-http: `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (`s007_r1scen`) | exit 0; 19 `--- PASS: TestGitHTTP_*`, 0 fail, 0 skip |
+| `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (branch `s007_r1scen`, `main` copy `s007_r1scenmain`) | 190 pass / 30 fail on both, **identical failure set** (pre-existing fixture/validation drift; the harness uses the zero-value policy). AC 21 stays "not green on `main` either". |
+| `golangci-lint run --allow-parallel-runners --max-issues-per-linter=0 --max-same-issues=0` on the touched packages, branch vs `main` (`git archive main`) | 193 vs 206; **0 new** (position-stripped issue diff empty) |
+| same with `--enable-only=gosec` | 1 vs 1 (pre-existing `core/workflow/service.go` G703); 0 new |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | "No actionable regressions were identified relative to the merge base." No P1/P2; nothing to fix or reject. |
+
+**SMP compatibility gate (review round 1).** Run in `i23/s-T007/smp`, detached at SMP `main` `7d4e7cc9` with `../spine` pointing at this worktree, and left clean (`git status` empty):
+
+- `go build ./...`: OK.
+- `go vet ./...` and `go vet -tags integration ./...`: clean.
+- `go test -p 4 -count=1` on every SMP package that imports a changed Spine package: all ok. Those packages are `cmd/customer-app` and `internal/customer/{eventdelivery,executionreadiness,githttp,projectionwriter,proposals,runner,spinecore/...,spineembedded/...,stepevents,workspace/...}`, plus `./internal/customer/run/...` and `./internal/engine/...`.
+- The ci.yml "Spine runtime integration suites" leg through `go run ./dev/testgate` passed: `4 packages, 1536 tests passed, 0 failed, 4 skipped (4 allowed)`.
+  - Databases: `TEST_SPINE_DB=…/s007_r1smpspine` (spine-runtime set) and `TEST_PLATFORM_DB=…/s007_r1smpplatform` (platform set).
+  - Allowed skips: `-allow-skip 'Un-skip to add an operator-level round-trip' -allow-skip 'TEST_PROVISIONING_DSN unset'`.
+  - The `TEST_PROVISIONING_DSN` skips are the same three dispatch-store tests as before, for the same reason.
+- `go run ./dev/testgate -- -race -count=1 -tags integration ./internal/customer/githttp/`: `140 tests passed, 0 failed`.
+
+All `s007_r1*` databases were dropped afterwards.
+
+### Review round 2 (2026-10-07)
+
+A second-round reviewer re-checked the branch after round 1. They re-ran about 35 mutants (the 12
+round-1 findings plus the AC mutations), and all were killed. They raised one finding and four
+gaps. Each was checked against the code before anything changed. Line numbers are from `c9579f6`.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P3 | The separation-of-duties bind lock from round-1 finding 6 is held much longer than the race needs. `AssignStep` took its stripe before `GetRun` (`assign.go:65`), and `ClaimStep` took it before `checkStepEntryActor` (`claim.go:84`). So the workflow load (`git show`), the actor resolver, the skill lookup and the precondition git reads all ran under a package-level `sync.Mutex`. That mutex is shared by every orchestrator, so in a multi-tenant embedder it is shared by every workspace, and waiters ignored their own context. In the reviewer's repro, a bind into another run on the same stripe, with a 100 ms context, waited 1.002 s for one run's paused workflow read. This is not a correctness or security issue. | **Fixed (verified real; both halves of the suggestion adopted).** See the notes below the table. |
+
+**Notes on finding 1.**
+
+- **Narrow section.** The new `sodBindSection(ctx, run, wfDef, stepDef, exec, actorID)` in
+  `step_entry.go` does three things:
+  - it takes the run's stripe;
+  - it re-runs `checkSeparationOfDuties` against fresh reads (`ListStepExecutionsByRun` and the
+    ledger read);
+  - it returns `unlock`. On a refusal it releases the stripe and returns the error, so nothing is
+    held and nothing is written.
+
+  Where each path calls it:
+  - `AssignStep` calls it immediately before `UpdateStepExecution`.
+  - `ClaimStep` calls it right after the preconditions, before `CreateAssignment` and
+    `UpdateStepExecution`.
+  - Checks 1-8 still run first, without the stripe, including the first check 7. So the error
+    order in Design §2 is unchanged.
+  - `ActivateStep` already held the stripe only for check 7 and its write. It now asks for the
+    stripe only under `SeparationOfDuties`; before, the call was a no-op without it.
+- **Context-aware wait.** `sodBindStripes` is now 64 one-slot `chan struct{}` semaphores, and the
+  call is `lockSoDBind(ctx, runID)`.
+  - A free stripe is taken at once.
+  - A contended stripe is waited for until `ctx.Done()`. The caller then gets `ErrUnavailable`
+    (503) wrapping `ctx.Err()`, with nothing held or written.
+  - `ActivateStep` returns that error and leaves the step as it was.
+  - `api/spec.yaml` lists this case under the assign endpoint's 503.
+- **Cost, accepted.** Under `SeparationOfDuties`, each assign or claim reads the run's executions
+  and the actor's ledger rows twice: once in order, once under the stripe. Each read is one indexed
+  query.
+  - The alternative was to run check 7 only under the stripe, after check 8. That would reorder
+    errors: a precondition 412 (and, on claim, the claim's own allow-list, type and skill errors)
+    would come before the separation-of-duties 403. Design §2 says the opposite.
+- **Zero value.** Without `SeparationOfDuties`, `lockSoDBind` and `sodBindSection` return at once.
+  They read nothing and take no stripe. SMP sets no policy, so its behaviour is unchanged (SMP gate
+  below).
+- **Tests.**
+  - `TestStepEntry_SoDBindLockCoversOnlyCheckAndWrite` is the row the reviewer suggested. It runs
+    under the strict policy with a canonical resolver. Run A's bind is paused in its workflow load,
+    its actor resolver or its precondition read, for assign and for claim. A bind into a run whose
+    ID hashes to the same stripe, with a 2 s context, must bind before run A's read is released.
+    Run A then binds. The claim workflow-load row pins that the load stays outside the stripe (it
+    always was).
+  - `TestStepEntry_SoDBindWaitHonoursContext` holds run-1's stripe. Assign, claim and
+    auto-selection with a 100 ms context must return `ErrUnavailable` wrapping
+    `context.DeadlineExceeded`. Nothing may change: no execution, assignment row or delivery. Each
+    must bind once the stripe is free. Zero-value rows bind while the stripe is held.
+  - `TestStepEntry_SoDBindsSerialisePerRun` is unchanged and still green. Its pause is in the
+    write, which is inside the section. Its doc comment now names the re-check mutants.
+- **Docs.**
+  - CHANGELOG: the standalone "serialised per run" bullet, plus a new "For embedders" bullet, "The
+    bind lock is narrow and context-aware".
+  - `KNOWN-LIMITATIONS.md`, `actor-model.md` §7.3 and `api/spec.yaml` (assign 503).
+  - The §15 review-round-2 note for SMP TASK-011.
+  - Doc comments on `AssignStep`, `ClaimStep`, `ActivateStep`, `sodBindStripes`, `lockSoDBind`,
+    `sodBindSection` and `checkSeparationOfDuties`.
+
+**Mutation pass (review round 2).** A scripted pass made one edit at a time, ran the three
+`TestStepEntry_SoDBind*` tests and reverted the edit. All 13 mutants were killed:
+
+- The round-1 placement in `AssignStep` (stripe taken before `GetRun`). Two variants: the wait
+  error propagated, and plain mutex semantics. The assign rows of the lock-scope test fail (503
+  after 2 s, or the 5 s guard).
+- The round-1 placement in `ClaimStep` (stripe taken before `checkStepEntryActor`), both variants.
+  The claim resolver and precondition rows fail.
+- `ClaimStep` taking the stripe just before its preconditions. The claim precondition row fails.
+- `sodBindSection` without the re-check, and with the re-check run before the stripe is taken.
+  All four `SerialisePerRun` cases fail.
+- The wait ignoring `ctx`. The three enforced rows of the context test fail.
+- `lockSoDBind` as a no-op.
+- `ActivateStep` without the stripe, and `ActivateStep` ignoring the wait error.
+- `AssignStep` without `sodBindSection`, and `ClaimStep` without it.
+
+**Gaps raised by the reviewer.**
+
+1. "None blocking": noted.
+2. AC 17 and `TestListAssignmentsByRunAndActor` run only by hand. They were re-run this round on
+   `s007_r2store`, and both pass. The suite gives 36 pass and 1 failure, the pre-existing
+   `TestRunModeDatabaseDefault`. A Spine CI store job stays a follow-up.
+3. AC 19: the `TEST_SPINE_DB` testgate leg was re-run this round against this branch: 1536 passed,
+   0 failed, 4 allowed skips. The `githttp` integration suite gives 140 passed. The three
+   `TEST_PROVISIONING_DSN` spinecore tests stay unrun, for the reason recorded above.
+4. AC 21: the full scenario suite was re-run this round on fresh databases, on the branch and on a
+   `main` copy. Both give 190 pass and 30 fail at top level (1475 and 57 with subtests), and the
+   failure sets are identical. `TestGitHTTP_*` gives 19 pass.
+
+**Commits (review round 2).**
+
+| Commit | Content |
+|---|---|
+| `a14cea8` | Finding 1: `sodBindSection`, context-aware stripes, the narrowed `AssignStep`, `ClaimStep` and `ActivateStep` sections; `step_entry_review2_test.go`. |
+| `0258508` | Finding 1 docs: CHANGELOG, KNOWN-LIMITATIONS, `actor-model.md`, `api/spec.yaml`, §15 note. |
+| this commit | This subsection. |
+
+**Gates (review round 2, run on `0258508`; 2026-10-07).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | OK (exit 0) |
+| `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 -count=1 ./...` | exit 0 |
+| `go test -race -p 4 -count=1` on every touched package (`adapters/scheduler adapters/store core/artifact core/domain core/engine core/workflow service/cmd/spine service/internal/gateway service/internal/workspace workflows`) | all ok. `go test -race -count=5 -run TestStepEntry_SoDBind ./core/engine/` ok. |
+| `SPINE_TEST_DATABASE_URL=…/s007_r2store go test -tags integration -p 1 -count=1 -v ./adapters/store/...` | 36 pass, 1 fail: `TestRunModeDatabaseDefault` (pre-existing). `TestCancelActiveAssignmentsForExecution` and `TestListAssignmentsByRunAndActor` pass. |
+| CI scenario-git-http: `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (`s007_r2git`) | exit 0; 19 `--- PASS: TestGitHTTP_*`, 0 fail, 0 skip |
+| `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (branch on `s007_r2scen`, `main` copy on `s007_r2scenmain`) | 190 pass / 30 fail on both. **Identical failure set**, including subtests (1475 / 57). |
+| `golangci-lint run --allow-parallel-runners --max-issues-per-linter=0 --max-same-issues=0` on the touched packages, branch vs `main` (`git archive main`) | 193 vs 206; **0 new** (the issue diff with positions stripped is empty) |
+| same with `--enable-only=gosec` | 1 vs 1 (pre-existing `core/workflow/service.go` G703); 0 new |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | "No actionable regressions were identified." No P1 or P2, so nothing to fix or reject. Its sandbox could not open listening sockets for the service and gateway suites; those suites ran in the gates above. |
+
+**SMP compatibility gate (review round 2).** This was run in `i23/s-T007/smp`, detached at SMP
+`main` `7d4e7cc9`, with `../spine` pointing at this worktree. The tree was left clean (`git status`
+empty).
+
+- `go build ./...`: OK.
+- `go vet ./...` and `go vet -tags integration ./...`: clean.
+- `go test -p 4 -count=1` on every SMP package that directly imports a changed Spine package (11,
+  the same list as round 1, found with `go list`; `core/engine` itself is imported by `spinecore`
+  and `spineembedded`), plus `./internal/customer/{spinecore,spineembedded,run,workspace}/...` and
+  `./internal/engine/...`: all ok.
+- The ci.yml "Spine runtime integration suites" leg through `go run ./dev/testgate` passed:
+  `4 packages, 1536 tests passed, 0 failed, 4 skipped (4 allowed)`.
+  - Databases: `TEST_SPINE_DB=…/s007_r2smpspine` (spine-runtime set) and
+    `TEST_PLATFORM_DB=…/s007_r2smpplatform` (platform set).
+  - Allowed skips: the same two allowances as round 1.
+- `go run ./dev/testgate -- -race -count=1 -tags integration ./internal/customer/githttp/`: `140
+  tests passed, 0 failed`.
+
+All `s007_r2*` databases were dropped afterwards.
+
+### Follow-ups (Out of scope, plus review round 1)
+
+TASK-008 must keep the run-terminated `ErrConflict` first in `IngestResult`'s terminal branch,
+move the scheduler hook behind its CAS `applied` result, and route `terminateLiveSteps`' write
+through its `writeStepExecution`. SMP TASK-011 adopts the policy (resolver, workflow fixes /
+legacy loader using `DeferredStatusPreconditions`, the SoD decision). An append-only binding
+ledger (OQ6) and a one-shot sweep of pre-upgrade live executions remain follow-ups. Review round 1
+adds two: a database-level per-run lock around the separation-of-duties check and bind, for
+embedders that run several replicas with `SeparationOfDuties` on; and a Spine CI job for the
+`-tags integration` store tests (AC 17, `TestListAssignmentsByRunAndActor`), which first needs the
+pre-existing `TestRunModeDatabaseDefault` failure fixed. SMP TASK-011's resolver must be canonical
+(§15 review-round-1 note).
+
+### Integration (wave 2 merge) (2026-10-08)
+
+Integration branch `init/INIT-023-wave2-integration` (worktree `i23/s-int2/spine`), cut from Spine
+local `main` `ee3c249`. Merge order, each `git merge --no-ff` and built and tested before the next:
+TASK-002 `b674b90`, TASK-016 `350fe87`, TASK-004 `50b9c8e`, TASK-009 `8925de9`, TASK-007 `2aca054`,
+TASK-011 `c90c049`, TASK-010 `1e63692`, TASK-013 `85bf4b3`. Coordination commits: `3b88fb1`
+(TreeEntryType joins the ref grammar), `0c26c91` (step-entry policy through the shared pool
+constructor), `9e43640` (a refused signing secret holds its deliveries), `d61359d` (security model:
+skills are a step-entry boundary), `1291e74` (codex round 1). Nothing was pushed; `main` and the task
+branches are unchanged.
+
+**This task in the integration.** Merge `2aca054`.
+
+- *Conflicts:* `serve_cmd.go`, `serve_resolver.go`, `serve_builders.go` (with TASK-009's
+  `buildServeWorkspaces` / `sharedModePoolConfig`; resolution under TASK-009's note), `CHANGELOG.md`,
+  `KNOWN-LIMITATIONS.md`. `0c26c91` adds `TestSharedModePoolConfig_BuilderInstallsStepEntryPolicy`
+  (strict, one switch, zero value; mutation "zero policy in the constructor" fails it).
+- *With TASK-013 (`d61359d`):* `architecture/security-model.md` §4.4.1 said `required_skills` becomes
+  a boundary only once TASK-013 lands; it now states that it is one (admin-only skill grants, §4.1).
+- *With TASK-016:* OQ4 needs nothing from this task (see TASK-016's note); TASK-016's divergence
+  `create_branch` binding uses the executions this task terminates as `skipped`, which never bind.
+- *With TASK-011:* `core/engine/merge.go` and `run.go` merged cleanly (`AuthoritativeBranch` next to
+  `terminateLiveSteps`). `epic-lifecycle.yaml` v1.1 passes TASK-011's shipped-workflow
+  `ProjectionDefinition` test.
+
+**Gates on the integration branch** (code at `d61359d`; `1291e74` changes one `adapters/git` test
+file, after which `go vet` and `go test -race ./adapters/git/...` were re-run, ok):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "library surface is sound" |
+| `go test -p 4 -count=1 ./...` | exit 0 (40 packages ok) |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 25 packages the eight tasks touched | 24 ok; `service/scenariotest/scenarios` has only `scenario`-tagged files |
+| `-tags integration`, one fresh `s2i_int_*` database per package | store 165 PASS + the pre-existing `TestRunModeDatabaseDefault`; delivery 314, projection 160, cmd/spine 168, workspace 223 (with `SPINE_REGISTRY_TEST_DATABASE_URL`, registry migrated from `migrations/registry`), testutil 4; 0 SKIP |
+| CI `scenario-git-http` job | `TestGitHTTP_*` 20 PASS, 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 FAIL, the **same set** as a `git archive main` export on its own database (1479 vs 1475 PASS, 6 SKIP for the registry env in both) |
+| `git-floor` job's two steps in `golang:1.26-bookworm` (git 2.39.5, read-only mounts, `GOPROXY=off`, `--pull=never`, `--rm`) | step 1: 73 PASS, 0 SKIP, 0 FAIL (includes the new `RefGrammar_TreeEntryType*`); step 2 all ok |
+| `golangci-lint run --build-tags scenario` on the touched packages | `--new-from-rev main` reports one QF1006 at `adapters/delivery/webhook_dispatcher_test.go:349`, present on `main` (TASK-010 changed the literal on that line). Full sets compared by (file, linter, text): 298 issues vs `main`'s 348, nothing new except three `rangeValCopy` whose byte count moved 224 → 248 (`store.EventSubscription` grew in TASK-009) |
+| `--enable-only=gosec` | 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| `codex review --base main` | round 1: one P2 (macOS xcrun cache in the TASK-002 leftover checks), fixed in `1291e74`; round 2: "No actionable regressions were identified relative to the merge base." |
+| SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 38 SMP packages depending on a changed Spine package (`go list -test -deps`) plus `./internal/customer/...` (67 packages): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2i_smp_spine_runtime` and `s2i_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. Extra: eventdelivery, projectionwriter, stepevents testgate: 35 passed, 6 allowed skips. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope). |
+
+All `s2i_*` databases were dropped afterwards; the only container started was removed.
+
+### Cross-task review (wave 2) (2026-10-08)
+
+**This task.** Finding 1: the separation-of-duties author set is widened to every step type
+push admission lets its bound actor write (all but `review` and `internal`); the §7 and interplay
+notes and Owner question 1 carry inline corrections. Owner question 1's default is amended
+accordingly (verify + review is still allowed).
+
+Wave 2 cross-task review of the integration branch at `2fab682`, five lenses (governance-engine,
+secrets-delivery, git-ref-surface, smp-compat, merge-ci). Each P1/P2 survived two adversarial
+skeptics. Every finding was re-verified against the code before it was fixed. Fixes are on
+`init/INIT-023-wave2-integration` (worktree `i23/s-int2/spine`). Nothing was pushed, and `main`
+and the task branches are unchanged.
+
+| # | Finding (lens) | Severity | Disposition | Commit | Regression test |
+|---|---|---|---|---|---|
+| 1 | Separation of duties counted only `manual`/`automated` executions as authorship, while TASK-016 lets the bound actor of every type but `review`/`internal` push the run branch: the evaluator of a `convergence` step (or of an untyped step) could push commits and then review the run (governance-engine) | P2 (both skeptics: P2) | **FIXED.** `isAuthorStepType` is `!refadmit.FrozenStepType`, used by `runAuthor`, the early return and the symmetric guard. KNOWN-LIMITATIONS, `architecture/actor-model.md`, CHANGELOG and the TASK-007 notes no longer claim full coverage, and they state the operator gap (operators push unbound and are invisible to SoD) | `b191be9` | `TestStepEntry_SoDAuthorshipCoversEveryPushableStepType` drives TASK-016's evaluator (orchestrator as step-definition source), then assign and claim, for every step type plus a live-reviewer case. Mutation: the old predicate fails 6 sub-tests. Also `TestIsAuthorStepType` |
+| 2 | `spine secrets reencrypt` without `--all-workspaces` bound the FileProvider's `default` fallback when `SPINE_WORKSPACE_ID` was unset. A migrate sweep then sealed legacy rows under `default` and reported the workspace clean, and serve, bound to its real id, refused every row (secrets-delivery) | P2 (both skeptics: P3) | **FIXED.** The command refuses ("nothing was changed") unless `SPINE_WORKSPACE_ID` is set or `--workspace` is given (`--workspace default` stays valid), as it already did for the mode. The header line prints `workspace_id=`. Integration guide, `.env.example` and CHANGELOG updated | `808bd6b` | `TestSecretsReencrypt_SingleWorkspaceRequiresExplicitID` (refusal before any database is opened); integration `TestSecretsReencrypt_SingleWorkspaceNeverGuessesTheID` (the reviewer's reproduction: both rows untouched; with the id stated, serve reads them). Mutation fails both |
+| 3 | An exploratory `branch_id` of `refs` (and a workflow-defined `refs`/`HEAD`) created `spine/<run>/<div>/refs`, which TASK-016 rule 0b refuses for every principal (git-ref-surface) | P3 | **FIXED for the API path:** `ValidateExploratoryBranchID` refuses `refs` (400). `HEAD` cannot match the lower-case grammar, and the run and divergence components the engine builds never equal either name. **Follow-up:** structured branch ids and divergence-point ids from a workflow definition are not validated. Checking them in `workflow.ValidateSemantic` changes validation output on SMP's `WorkflowWriter` path, and a `createBranchRecord` refusal changes embedded behaviour; under the INIT-023 rule both need an SMP-compat argument or an opt-in. The divergence-point id needs care too: one containing `/refs` produces the same component | `abfb014` | `TestValidateExploratoryBranchID_AgreesWithPushAdmission` classifies the ref of every admitted id with `refadmit.Classify` |
+| 4 | `resolveRev` is branch-first, so a contributor-pushed `refs/heads/<n>` overrides a same-named operator tag in bare-name reads (`?ref=` on the artifact, list and workflow APIs). git and Spine at `61994fe` read the tag (git-ref-surface) | P3 | **DOCUMENTED, follow-up.** A new KNOWN-LIMITATIONS residual under "Git Ref Arguments" gives the workarounds: name tags in full, or protect the branch namespace with a rule. Not fixed in `resolveRev` because each option changes engine-internal resolution for every embedder. Refusing an ambiguous bare name lets anyone who can push a same-named tag deny reads of a run branch where tags are not operator-only. Preferring the tag reopens F10's tag substitution. Follow-up (owner: TASK-002): qualify user-supplied `?ref=` at the standalone gateway and refuse a bare name that is both a branch and a tag, which costs one extra `show-ref` on that path only | `4849960` | — |
+| 5 | The first-sync workflow sweep judges rows at a head resolved before it lists them. It deleted a row another instance had projected at a newer head, then took the up-to-date early return without writing `sync_state`, so nothing re-diffed the window and the row stayed lost (smp-compat) | P3 | **FIXED.** The sweep reports whether it wrote a row. On the early-return path a sweep that wrote re-records `sync_state` (idle at the head it judged by), so if another instance advanced it, the next tick re-diffs and restores the row. A sweep that wrote nothing keeps the early return read-only. **Residual** (CHANGELOG): if the other instance's whole sync spans the sweep, the row can still be lost. That is the same window the diff path had before TASK-011. A compare-and-set on `sync_state` (an optional store capability) would close it; follow-up | `0fe5011` | `TestSweep_StaleHeadInstanceDoesNotLoseANewerRow` (two instances over one store; a stale-HEAD decorator lets the other instance sync between head resolution and the sweep's listing; mutation fails), `TestSweep_NoChangeKeepsTheEarlyReturnReadOnly` |
+| 6 | The CHANGELOG's TASK-004 entry said SMP's `validateRepoRelativePath` already refuses `a//b.md`, `a/./b.md` and a trailing `/`. It refuses only empty, absolute, NUL and `..` paths, and only in front of SMP's `RealGitOperator` (smp-compat) | P3 | **FIXED.** The CHANGELOG now says SMP is unaffected because its embedded entry points pass canonical paths (`normalizeTaskPath`, `path.Clean` equality, `BuildArtifactPath`; checked at SMP `6ca0eeb7`). The TASK-004 §1a note is corrected | `4849960` | — |
+| 7 | CHANGELOG statements that the merge made wrong: TASK-001 still said a control byte in `branch_id` is a 500, TASK-002 still "recommended" refusing object-id-named refs to TASK-016, and `TreeEntryType` (joined to the Rev grammar in `3b88fb1`) was missing from TASK-002's Rev lists and from TASK-011's `TreeEntryTyper` entry (merge-ci) | P3 | **FIXED** | `4849960` | — |
+
+Also checked and unaffected: under the zero-value step-entry policy (SMP today) finding 1's change
+is invisible, and no shipped Spine or SMP workflow has a `convergence` or untyped step. The
+`spine serve` strict scenario suite gives the same results before and after (below).
+
+**Gates** (code at `4849960`; the artifact notes were committed afterwards):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 25 packages touched since `main` | 24 ok; `service/scenariotest/scenarios` has only `scenario`-tagged files |
+| `-tags integration`, one fresh `s2f_int_*` database per package | store 165 PASS plus the pre-existing `TestRunModeDatabaseDefault` failure; delivery 314; projection 162 (+2); cmd/spine 170 (+2); workspace 223 (with `SPINE_REGISTRY_TEST_DATABASE_URL`, registry migrated from `migrations/registry`); testutil 4; 0 SKIP |
+| CI `scenario-git-http` job | `TestGitHTTP_*` 20 PASS, 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 FAIL, the **same set** as a `git archive 2fab682` export (the pre-review integration head) run on its own database: 1479 PASS and 6 SKIP in both |
+| `golangci-lint run --build-tags scenario --new-from-rev main` on the touched packages | 1 issue: the QF1006 at `adapters/delivery/webhook_dispatcher_test.go:349`, present on `main`. The full set is 298 issues, as at the integration, and none is in a file this review changed. `--build-tags integration --new-from-rev 2fab682` on `service/cmd/spine` and `adapters/projection`: 0 |
+| `--enable-only=gosec` | 0 issues |
+| `gofmt -l` on every `.go` file changed since `2fab682` | empty |
+| `codex review --base main` | "No actionable regressions were identified." |
+| SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 67 packages (dependents of a changed Spine package plus `./internal/customer/...`): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2f_smp_spine_runtime` and `s2f_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope) |
+
+All `s2f_*` databases were dropped afterwards, and no container was started.

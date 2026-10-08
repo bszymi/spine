@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -39,29 +38,17 @@ type SubscriptionTLSConfig struct {
 // when at least one field is populated. A malformed Metadata blob is
 // reported so operators can fix the misconfiguration rather than
 // silently falling back to the default client.
+//
+// It delegates to parseSubscriptionMetadata (INIT-023 TASK-010), the
+// single parser the dispatcher's resolver uses, so the two can never
+// disagree about a row. That parser also validates signature_version,
+// so metadata with an unknown version is now an error here too.
 func parseSubscriptionTLS(metadata []byte) (*SubscriptionTLSConfig, error) {
-	if len(metadata) == 0 {
-		return nil, nil
+	md, err := parseSubscriptionMetadata(metadata)
+	if err != nil {
+		return nil, err
 	}
-	var wrapper struct {
-		TLS *SubscriptionTLSConfig `json:"tls"`
-	}
-	if err := json.Unmarshal(metadata, &wrapper); err != nil {
-		return nil, fmt.Errorf("parse subscription metadata: %w", err)
-	}
-	if wrapper.TLS == nil {
-		return nil, nil
-	}
-	tls := wrapper.TLS
-	if tls.PinnedSPKISHA256 == "" && tls.CABundlePEM == "" {
-		return nil, nil
-	}
-	if tls.PinnedSPKISHA256 != "" {
-		if _, err := hex.DecodeString(tls.PinnedSPKISHA256); err != nil {
-			return nil, fmt.Errorf("pinned_spki_sha256 is not valid hex: %w", err)
-		}
-	}
-	return tls, nil
+	return md.TLS, nil
 }
 
 // buildTLSClient constructs an http.Client that honors a subscription's

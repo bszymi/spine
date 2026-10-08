@@ -2,6 +2,7 @@ package workflows_test
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/bszymi/spine/core/domain"
@@ -330,5 +331,54 @@ func TestNoBindingConflicts(t *testing.T) {
 	// Creation binding from workflow-lifecycle.yaml (ADR-008).
 	if id := bindingMap["Workflow:creation"]; id != "workflow-lifecycle" {
 		t.Errorf("expected Workflow:creation → workflow-lifecycle, got %s", id)
+	}
+}
+
+// TestReferenceWorkflows_NoDeferredStatusPreconditions (INIT-023 TASK-007
+// AC 15): no shipped workflow may require, on the run's own artifact, a
+// status that only an earlier outcome's commit block sets. Commit status is
+// applied at merge, so such a precondition can never hold mid-run and, under
+// an enforcing step-entry policy, strands every run of the workflow. If a
+// future change applies commit status mid-run (TASK-017), revisit
+// workflow.DeferredStatusPreconditions; this test will say so.
+func TestReferenceWorkflows_NoDeferredStatusPreconditions(t *testing.T) {
+	files, err := filepath.Glob("*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no reference workflows found")
+	}
+	for _, f := range files {
+		content, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		wf, err := workflow.Parse("workflows/"+f, content)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		for _, d := range workflow.DeferredStatusPreconditions(wf) {
+			t.Errorf("%s: %s", f, d)
+		}
+	}
+}
+
+func TestEpicLifecycleWorkflow_ExecuteHasNoDeferredStatusPrecondition(t *testing.T) {
+	content, err := os.ReadFile("epic-lifecycle.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, err := workflow.Parse("workflows/epic-lifecycle.yaml", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.Version != "1.1" {
+		t.Errorf("epic-lifecycle version = %q, want 1.1 (execute's unsatisfiable precondition removed)", wf.Version)
+	}
+	for _, s := range wf.Steps {
+		if s.ID == "execute" && len(s.Preconditions) != 0 {
+			t.Errorf("epic-lifecycle execute preconditions = %+v, want none", s.Preconditions)
+		}
 	}
 }

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // DiscoveryResult holds the results of a repository scan.
@@ -17,10 +17,18 @@ type DiscoveryResult struct {
 	Errors    []DiscoveryError   // files that failed to parse
 }
 
-// DiscoveryError records a file that was discovered but failed to parse.
+// DiscoveryError records a file that was discovered but failed to parse
+// or to read.
 type DiscoveryError struct {
 	Path    string
 	Message string
+	// Ref is the git ref the failed read was attempted at. Set on
+	// ChangeSet.ReadErrors; empty for parse errors.
+	Ref string
+	// Err is the underlying read error, kept (not only its text) so a
+	// caller can classify it (errors.Is / errors.As) together with Ref
+	// and Path. Set on ChangeSet.ReadErrors; nil for parse errors.
+	Err error
 }
 
 // ChangeSet represents artifacts affected by a Git diff.
@@ -28,6 +36,25 @@ type ChangeSet struct {
 	Created  []*domain.Artifact
 	Modified []*domain.Artifact
 	Deleted  []string // paths only (content no longer available)
+	// ReadErrors records every ReadFile failure discovery skipped past.
+	// The skip itself is unchanged (a path whose blob cannot be read is
+	// left out of Created/Modified/Deleted, as it always was), but the
+	// failure is no longer silent: the projection's IncrementalSync
+	// holds the sync on every one it cannot prove deterministic (from the
+	// commit's tree, not from git's stderr) instead of advancing past a
+	// change it never applied (INIT-023 TASK-011, audit P3-14 class).
+	// Callers that only need the change lists — branch validation — can
+	// ignore it.
+	ReadErrors []DiscoveryError
+}
+
+func (c *ChangeSet) recordReadError(path, ref string, err error) {
+	c.ReadErrors = append(c.ReadErrors, DiscoveryError{
+		Path:    path,
+		Message: err.Error(),
+		Ref:     ref,
+		Err:     err,
+	})
 }
 
 // DiscoverAll performs a full repository scan at the given ref.
@@ -124,7 +151,19 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 	if err != nil {
 		return nil, err
 	}
+	return DiscoverChangesFromDiffs(ctx, gitClient, fromRef, toRef, diffs)
+}
 
+// DiscoverChangesFromDiffs is DiscoverChanges over a diff the caller has
+// already computed. The projection computes one Diff per sync and feeds
+// the same list to artifact discovery and to its governance-file loop,
+// so the two can never see different windows and a failed second Diff
+// can no longer be dropped (INIT-023 TASK-011, audit P3-14).
+//
+// Every ReadFile failure that discovery skips past is recorded in
+// ChangeSet.ReadErrors. The returned error is reserved for failures that
+// make the whole changeset unusable; it is nil today.
+func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, fromRef, toRef string, diffs []git.FileDiff) (*ChangeSet, error) {
 	changeset := &ChangeSet{}
 
 	for _, diff := range diffs {
@@ -141,6 +180,7 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 			// Only include if the deleted file was actually an artifact at fromRef
 			oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.Path)
 			if err != nil {
+				changeset.recordReadError(diff.Path, fromRef, err)
 				continue
 			}
 			if IsArtifact(oldContent) {
@@ -150,6 +190,7 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 		case "added":
 			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
 			if err != nil {
+				changeset.recordReadError(diff.Path, toRef, err)
 				continue
 			}
 			if !IsArtifact(content) {
@@ -168,7 +209,9 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 			// Delete old path if it was an artifact
 			if diff.OldPath != "" && isMdOld {
 				oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.OldPath)
-				if err == nil && IsArtifact(oldContent) {
+				if err != nil {
+					changeset.recordReadError(diff.OldPath, fromRef, err)
+				} else if IsArtifact(oldContent) {
 					changeset.Deleted = append(changeset.Deleted, diff.OldPath)
 				}
 			}
@@ -179,6 +222,7 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 			}
 			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
 			if err != nil {
+				changeset.recordReadError(diff.Path, toRef, err)
 				continue
 			}
 			if !IsArtifact(content) {
@@ -198,12 +242,18 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 			// Check if file was an artifact at fromRef
 			wasArtifact := false
 			oldContent, oldErr := gitClient.ReadFile(ctx, fromRef, diff.Path)
-			if oldErr == nil && IsArtifact(oldContent) {
+			if oldErr != nil {
+				// Unreadable old blob is treated as "was not an
+				// artifact" (unchanged); record it so a transient
+				// failure cannot silently turn a delete into a skip.
+				changeset.recordReadError(diff.Path, fromRef, oldErr)
+			} else if IsArtifact(oldContent) {
 				wasArtifact = true
 			}
 
 			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
 			if err != nil {
+				changeset.recordReadError(diff.Path, toRef, err)
 				continue
 			}
 

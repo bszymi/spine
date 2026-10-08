@@ -354,3 +354,80 @@ func TestBranchWrite_CurrentBranch(t *testing.T) {
 		t.Errorf("CurrentBranch: got %q, want main", got)
 	}
 }
+
+// TrackedInHEAD decides whether a rollback may delete a file a failing hook
+// left at a path whose create failed to commit (INIT-023 TASK-004 review
+// round 2), so it must answer about HEAD only (not the index or the working
+// tree), match the path literally, and fail closed — an error, never
+// "untracked" — when HEAD cannot be read.
+func TestBranchWrite_TrackedInHEAD(t *testing.T) {
+	ctx := context.Background()
+	repo := testutil.NewTempRepo(t)
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	testutil.WriteFile(t, repo, "a/b.md", "b\n")
+	testutil.WriteFile(t, repo, "x*y.md", "glob-named\n")
+	testutil.WriteFile(t, repo, ":(glob)q.md", "magic-named\n")
+	run(repo, "add", "--", "a/b.md", ":(literal)x*y.md", ":(literal):(glob)q.md")
+	run(repo, "commit", "-q", "-m", "tracked")
+	testutil.WriteFile(t, repo, "staged.md", "s\n")
+	run(repo, "add", "--", "staged.md")
+	testutil.WriteFile(t, repo, "loose.md", "l\n")
+	testutil.WriteFile(t, repo, "xzy.md", "z\n")
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"a/b.md", true},
+		{"a", true}, // a directory entry counts
+		{"x*y.md", true},
+		{":(glob)q.md", true},
+		{"staged.md", false}, // in the index only
+		{"loose.md", false},  // in the working tree only
+		{"a/c.md", false},
+		{"x?y.md", false}, // no glob: would match x*y.md as a pattern
+		{"*.md", false},
+		{"xzy.md", false},
+		{":(glob)*.md", false}, // no pathspec magic
+	} {
+		got, err := git.TrackedInHEAD(ctx, repo, tc.path)
+		if err != nil {
+			t.Errorf("TrackedInHEAD(%q): %v", tc.path, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("TrackedInHEAD(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+
+	t.Run("answers for a linked worktree's own HEAD", func(t *testing.T) {
+		createBranch(t, repo, "side")
+		wt := filepath.Join(t.TempDir(), "wt")
+		run(repo, "worktree", "add", "-q", wt, "side")
+		t.Cleanup(func() { _ = exec.Command("git", "-C", repo, "worktree", "remove", "--force", wt).Run() })
+		testutil.WriteFile(t, wt, "side.md", "side\n")
+		run(wt, "add", "--", "side.md")
+		run(wt, "commit", "-q", "-m", "side")
+		if got, err := git.TrackedInHEAD(ctx, wt, "side.md"); err != nil || !got {
+			t.Errorf("worktree: TrackedInHEAD = %v, %v; want true", got, err)
+		}
+		if got, err := git.TrackedInHEAD(ctx, repo, "side.md"); err != nil || got {
+			t.Errorf("main tree: TrackedInHEAD = %v, %v; want false", got, err)
+		}
+	})
+
+	t.Run("unborn HEAD is an error, not untracked", func(t *testing.T) {
+		dir := t.TempDir()
+		run(dir, "init", "-q", "-b", "main")
+		if got, err := git.TrackedInHEAD(ctx, dir, "any.md"); err == nil {
+			t.Fatalf("TrackedInHEAD on an unborn HEAD = %v, nil; want an error", got)
+		}
+	})
+}

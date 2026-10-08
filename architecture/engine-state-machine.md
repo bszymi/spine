@@ -52,17 +52,17 @@ Both modes follow the same state machine. The mode does not introduce new states
 | `active` | `paused` | `step.blocked` | Step is waiting for external dependency or long-running human action | Record pause reason; emit `run_paused` |
 | `active` | `committing` | `step.completed` | Next step is `end` and outcome has `commit` effect | Begin Git commit (durable outcome + merge) |
 | `active` | `completed` | `step.completed` | Next step is `end` and outcome has no `commit` effect | Set `completed_at`; emit `run_completed` |
-| `active` | `failed` | `step.failed_permanently` | Step exhausted retries or permanent error | Preserve runtime state; emit `run_failed` |
+| `active` | `failed` | `step.failed_permanently` | Step exhausted retries or permanent error | Preserve runtime state; under the step-entry policy's `TerminateStepsOnCancel`, close live StepExecutions (`run.terminated` → `skipped`, `run_terminated`); emit `run_failed` |
 | `active` | `failed` | `divergence.failed` | Convergence failed (e.g., `require_all` with branch failure) | Preserve runtime state; emit `run_failed` |
-| `active` | `cancelled` | `run.cancel` | Operator issues cancellation | Terminate in-progress steps; set `completed_at`; emit `run_cancelled` |
+| `active` | `cancelled` | `run.cancel` | Operator issues cancellation | Terminate live steps (`run.terminated` → `skipped`, classification `run_terminated`, active assignments cancelled) when the step-entry policy sets `TerminateStepsOnCancel`; set `completed_at`; emit `run_cancelled`. The scheduler's run-timeout cancel does the same through its `WithRunTerminated` hook. |
 | `paused` | `active` | `run.resume` | Blocking condition resolved | Resume from current step; emit `run_resumed` |
-| `paused` | `cancelled` | `run.cancel` | Operator issues cancellation | Set `completed_at`; emit `run_cancelled` |
+| `paused` | `cancelled` | `run.cancel` | Operator issues cancellation | Terminate live steps as for `active → cancelled`; set `completed_at`; emit `run_cancelled` |
 | `committing` | `completed` | `git.commit_succeeded` | Git commit and merge confirmed | Set `completed_at`; emit `run_completed` |
 | `committing` | `committing` | `git.commit_failed_transient` | Transient Git failure, retries remain | Retry commit |
-| `committing` | `failed` | `git.commit_failed_permanent` | Git commit failed permanently after retries | Preserve runtime state; emit `run_failed` |
+| `committing` | `failed` | `git.commit_failed_permanent` | Git commit failed permanently after retries | Preserve runtime state; terminate live steps as for `active → failed`; emit `run_failed` |
 | `committing` | `partially-merged` | `git.code_repo_partial_failure` | Multi-repo run: primary merge landed, at least one code repo merge permanently failed | Preserve per-repo `RepositoryMergeOutcome` rows; emit `run_partially_merged` |
 | `partially-merged` | `committing` | `git.retry_partial_merge` | Operator resolved the failed code repo and requested retry | Re-enter merge pipeline; only repos with non-terminal outcomes are re-attempted |
-| `partially-merged` | `cancelled` | `run.cancel` | Operator cancels a partially-merged run instead of retrying | Set `completed_at`; `CleanupRunBranch` runs against per-repo outcomes (failed branches preserved, others deleted); emit `run_cancelled` |
+| `partially-merged` | `cancelled` | `run.cancel` | Operator cancels a partially-merged run instead of retrying | Terminate live steps as for `active → cancelled`; set `completed_at`; `CleanupRunBranch` runs against per-repo outcomes (failed branches preserved, others deleted); emit `run_cancelled` |
 
 ### 2.3 Invalid Transitions
 
@@ -109,10 +109,14 @@ After Workflow Engine crash, recovery proceeds based on the last persisted state
 
 | From | To | Trigger | Guard | Effects |
 |------|-----|---------|-------|---------|
-| `waiting` | `assigned` | `step.assign` | Eligible actor found; skill eligibility validated | Create ActorAssignment; set `actor_id`; emit `step_assigned` |
-| `waiting` | `assigned` | `step.claim` | Actor claims step; step is waiting and not blocked | Create ActorAssignment; set `actor_id`; emit `step_assigned` with `claim: true` |
+| `waiting` | `assigned` | `step.assign` | Eligible actor found; skill eligibility validated. Enforced by the engine only under the step-entry policy (§6.2): run `active`, step not engine-owned, mode-implied actor type, actor exists and is `active`, effective `eligible_actor_ids` and `eligible_actor_types`, `required_skills`, separation of duties, preconditions. Without the policy (the zero value) these are the caller's responsibility. | Create ActorAssignment; set `actor_id`; emit `step_assigned` |
+| `waiting` | `assigned` | `step.claim` | Actor claims step; step is waiting and not blocked; allow-list, `eligible_actor_types` and `required_skills` always checked. Under the step-entry policy also: run `active`, step not engine-owned, mode-implied actor type, actor exists and is `active`, separation of duties, preconditions. | Create ActorAssignment; set `actor_id`; emit `step_assigned` with `claim: true` |
 | `waiting` | `failed` | `step.timeout` | Step timeout reached while waiting | Set `outcome` to `timeout_outcome`; emit `step_timeout` |
 | `waiting` | `skipped` | `step.skip` | Workflow definition permits skipping | Emit `step_completed` with skip reason |
+| `waiting` | `skipped` | `run.terminated` | Run was cancelled or failed (step-entry policy `TerminateStepsOnCancel`) | Set `completed_at`; `error_detail.classification = run_terminated`, message names the cause; cancel active assignments. No per-step event (`run_cancelled` / `run_failed` signal the end). |
+| `assigned` | `skipped` | `run.terminated` | As above | As above |
+| `in_progress` | `skipped` | `run.terminated` | As above | As above |
+| `blocked` | `skipped` | `run.terminated` | As above | As above |
 | `assigned` | `in_progress` | `actor.acknowledged` | Actor confirmed receipt | Set `started_at`; emit `step_started` |
 | `assigned` | `failed` | `step.timeout` | Assignment timeout reached | Mark assignment as `timed_out`; emit `step_timeout` |
 | `assigned` | `waiting` | `actor.unavailable` | Actor became unavailable before starting | Cancel assignment; return to pool for reassignment |
@@ -148,6 +152,7 @@ Every `failed` StepExecution records a `failure_classification` to distinguish f
 | `invalid_result` | Actor returned invalid outcome or artifacts | Yes (if actor might correct) |
 | `git_conflict` | Git commit conflict during durable outcome | No (operator intervention) |
 | `timeout` | Step exceeded its configured timeout | Depends on `timeout_outcome` |
+| `run_terminated` | The step was live when its run was cancelled or failed; recorded on a `skipped` execution (the step status has no `cancelled` value) by the step-entry policy's `TerminateStepsOnCancel`. Under `EnforceRunStatus` a late result submission on such an execution answers 409. | No |
 
 The classification determines whether retry is attempted and informs operator diagnostics. It is stored in the `error_detail` JSONB field alongside the error message.
 
@@ -282,7 +287,8 @@ Actors do **not** drive state transitions directly. Actors submit results throug
 
 - An actor submitting a step result does not automatically complete the step — the engine validates the result first
 - An actor cannot cancel a Run or skip a step — those are engine or operator actions
-- An actor cannot assign themselves to a step — the engine performs selection (per [Actor Model](/architecture/actor-model.md) §4)
+- An actor cannot assign themselves to a step — the engine performs selection (per [Actor Model](/architecture/actor-model.md) §4). An actor may *claim* a waiting step (pull model), and an operator (standalone) or an embedder's member-facing API may *assign* one.
+- **Step-entry policy (INIT-023 TASK-007).** Whichever path binds an actor, the engine enforces the binding rules when the embedder installs an `engine.StepEntryPolicy` (`spine serve` installs the strict policy by default; `SPINE_STEP_ENTRY_POLICY=legacy` turns it off). Independent switches cover: run status (every step entry point — assign, claim, acknowledge, result submission, activation, retry — refuses a run that is not `active`, and the candidate listing hides such runs); eligibility (actor exists and is `active`, allow-list and declared actor types on assign); execution mode (engine-owned `internal` / `spine_only` steps are never assignable or claimable; `automated_only`, `ai_only`, `human_only` bind only `automated_system`, `ai_agent`, `human` actors); preconditions (evaluated by the engine at assign and claim, strictly — see [Workflow Definition Format](/architecture/workflow-definition-format.md) §5.2); `required_skills` on assign; separation of duties ([Actor Model](/architecture/actor-model.md) §7.3); and termination of live steps when a run ends (§2.2). The zero-value policy — what every embedder gets until it opts in — is the pre-INIT-023 behaviour.
 
 ### 6.3 Scheduler Functions
 

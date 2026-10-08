@@ -8,22 +8,28 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/auth"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
-	"github.com/bszymi/spine/adapters/delivery"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
 // workspaceOrchestratorBuilder constructs per-workspace engine orchestrator,
 // run starters, and scheduler callbacks from the ServiceSet's basic services.
-func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet) error {
+// stepEntryPolicy is the process-wide SPINE_STEP_ENTRY_POLICY selection, so
+// every workspace's orchestrator enforces the same step-entry checks as the
+// process-level one.
+func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet, stepEntryPolicy engine.StepEntryPolicy) error {
 	if ss.Store == nil {
 		return nil
 	}
@@ -88,6 +94,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 		return fmt.Errorf("workspace orchestrator branch-protect policy: %w", err)
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// Engine step-entry policy (INIT-023 TASK-007), same selection as the
+	// process-level orchestrator.
+	orch.WithStepEntryPolicy(stepEntryPolicy)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Mirrors the wiring on the process-level orchestrator so shared
 	// workspace deployments enforce the same invariants. The
@@ -179,6 +188,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 	ss.RunFailFn = func(ctx context.Context, runID, reason string) error {
 		return orch.FailRun(ctx, runID, reason)
 	}
+	// Run-timeout hook for the multi-workspace scheduler (INIT-023
+	// TASK-007); mirrors buildScheduler's WithRunTerminated.
+	ss.RunTerminatedFn = orch.TerminateLiveSteps
 
 	return nil
 }
@@ -195,9 +207,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet)
 // fires. The fix routes the same DeliverySubscriber + WebhookDispatcher
 // pair through every workspace's per-tenant store and event router,
 // with cancellation tied to ServiceSet eviction.
-func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Logger) workspace.ServiceSetBuilder {
+func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, stepEntryPolicy engine.StepEntryPolicy, log *slog.Logger) workspace.ServiceSetBuilder {
 	return func(ctx context.Context, ss *workspace.ServiceSet) error {
-		if err := workspaceOrchestratorBuilder(ctx, ss); err != nil {
+		if err := workspaceOrchestratorBuilder(ctx, ss, stepEntryPolicy); err != nil {
 			return err
 		}
 		if err := bootstrapInternalAdmin(ctx, ss, deliveryCfg, log); err != nil {
@@ -227,26 +239,109 @@ func newPooledWorkspaceBuilder(deliveryCfg workspaceDeliveryConfig, log *slog.Lo
 //     rather than the colliding auth.tokens row. Strict-startup is
 //     the same policy that gates SPINE_DEV_MODE,
 //     SPINE_CODE_REPO_BASE, and SPINE_SECRET_ENCRYPTION_KEY at boot.
-//   - All other errors (and the same collision off-production) are
-//     logged and swallowed so a transient store blip does not knock a
-//     workspace out of rotation. The collision specifically is also
-//     logged before being returned so the production failure has a
-//     structured log breadcrumb alongside the workspace-load error.
+//     Off production the collision is logged and swallowed, and not
+//     retried: it is deterministic until an operator cleans up the
+//     colliding row. It is logged before being returned too, so the
+//     production failure has a structured log breadcrumb alongside the
+//     workspace-load error.
+//   - All other errors are logged at Error and swallowed, so a
+//     transient store blip does not knock a workspace out of rotation,
+//     and the bootstrap is retried in the background
+//     (retryInternalAdminBootstrap) until it succeeds or this
+//     ServiceSet closes. The retry matters for security, not just
+//     availability: a failed bootstrap may have left a superseded
+//     bootstrap bearer live after an SMP_ADMIN_TOKEN rotation, and this
+//     builder only runs again when the ServiceSet is rebuilt — after an
+//     idle eviction, a binding invalidation or a restart, which a busy
+//     workspace may not see for as long as the process lives.
 func bootstrapInternalAdmin(ctx context.Context, ss *workspace.ServiceSet, cfg workspaceDeliveryConfig, log *slog.Logger) error {
 	if cfg.SMPAdminToken == "" || ss.Store == nil {
 		return nil
 	}
-	err := auth.BootstrapInternalAdmin(ctx, ss.Store, auth.BootstrapAdminConfig{
-		Token: cfg.SMPAdminToken,
-	})
+	// The builder runs on the pool's context, which names no workspace;
+	// core/auth logs (a revoked current bearer, a superseded row left in
+	// place, each revocation and its audit line) must say which
+	// workspace they concern, because the operator acts per workspace.
+	ctx = observe.WithWorkspaceID(ctx, ss.Config.ID)
+	err := runInternalAdminBootstrap(ctx, ss.Store, cfg)
 	if err == nil {
 		return nil
 	}
 	log.Error("workspace bootstrap internal admin failed", "workspace", ss.Config.ID, "error", err)
-	if cfg.ProductionStrict && errors.Is(err, auth.ErrAdminTokenHashCollision) {
-		return fmt.Errorf("workspace %q: %w", ss.Config.ID, err)
+	if errors.Is(err, auth.ErrAdminTokenHashCollision) {
+		if cfg.ProductionStrict {
+			return fmt.Errorf("workspace %q: %w", ss.Config.ID, err)
+		}
+		return nil
 	}
+	// ctx is the pool's lifetime context. The retry stops when this
+	// ServiceSet closes: AppendCloser cancels an attempt in flight on a
+	// normal close, and Done also covers a builder failure, whose
+	// teardown skips appended closers. The next build of the workspace
+	// runs the bootstrap afresh.
+	retryCtx, cancel := context.WithCancel(ctx)
+	ss.AppendCloser(func(string) { cancel() })
+	go retryInternalAdminBootstrap(retryCtx, ss.Store, ss.Done, ss.Config.ID, cfg, log,
+		internalAdminRetryInitialDelay, internalAdminRetryMaxDelay)
 	return nil
+}
+
+// runInternalAdminBootstrap is the one auth.BootstrapInternalAdmin call
+// shape, shared by the first attempt and the retries.
+func runInternalAdminBootstrap(ctx context.Context, st store.AuthStore, cfg workspaceDeliveryConfig) error {
+	return auth.BootstrapInternalAdmin(ctx, st, auth.BootstrapAdminConfig{
+		Token: cfg.SMPAdminToken,
+		// A rotation revokes only bootstrap rows created before this
+		// process booted (INIT-023 TASK-013): an old replica in a
+		// rolling deploy never revokes the newer bearer.
+		SupersededBefore: cfg.ProcessStart,
+	})
+}
+
+// Pacing of the background admin-bootstrap retry: exponential from the
+// initial delay, capped at the maximum, unbounded in count. Variables
+// so tests can shorten them; read once, by the goroutine that starts
+// the retry, so a retry in flight never reads them.
+var (
+	internalAdminRetryInitialDelay = time.Second
+	internalAdminRetryMaxDelay     = time.Minute
+)
+
+// retryInternalAdminBootstrap re-runs the idempotent admin bootstrap
+// after a failed first attempt (INIT-023 TASK-013 review round 1). It
+// returns on the first success, when ctx is cancelled or done closes
+// (the ServiceSet is closing), or on a hash collision, which retrying
+// cannot fix. Every failed attempt is logged at Error with its attempt
+// number: while it lasts, a superseded bootstrap bearer may still be
+// live in this workspace.
+func retryInternalAdminBootstrap(ctx context.Context, st store.AuthStore, done <-chan struct{}, workspaceID string,
+	cfg workspaceDeliveryConfig, log *slog.Logger, initialDelay, maxDelay time.Duration) {
+	delay := initialDelay
+	for attempt := 2; ; attempt++ {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-done:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		err := runInternalAdminBootstrap(ctx, st, cfg)
+		if err == nil {
+			log.Info("workspace bootstrap internal admin succeeded on retry", "workspace", workspaceID, "attempt", attempt)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.Error("workspace bootstrap internal admin failed", "workspace", workspaceID, "attempt", attempt, "error", err)
+		if errors.Is(err, auth.ErrAdminTokenHashCollision) {
+			return
+		}
+		delay = min(delay*2, maxDelay)
+	}
 }
 
 // wireWorkspaceDelivery starts a per-workspace DeliverySubscriber,
@@ -334,6 +429,35 @@ type resolverWiring struct {
 	SecretClient secrets.SecretClient
 }
 
+// sharedModePoolConfig is the ServicePool configuration of both shared
+// resolvers (db and platform-binding). It is one constructor so the
+// subscription-secret cipher and envelope mode — every per-workspace store
+// is bound and swept with them (INIT-023 TASK-009) — cannot be dropped
+// from one branch: "" means migrate, so a dropped mode would compile, log
+// the configured mode at startup, and still bind every store in migrate,
+// converting the legacy rows strict exists to refuse. buildWorkspaceResolver
+// calls it from exactly one place (newSharedPool), and the
+// TestBuildServeWorkspaces_* tests drive that place from the environment.
+func sharedModePoolConfig(
+	deliveryCfg workspaceDeliveryConfig,
+	log *slog.Logger,
+	secretCipher *spinecrypto.SecretCipher,
+	secretEnvelopeMode store.SecretEnvelopeMode,
+	secretClient secrets.SecretClient,
+	codeRepoBase string,
+	stepEntryPolicy engine.StepEntryPolicy,
+) workspace.PoolConfig {
+	return workspace.PoolConfig{
+		Builder:            newPooledWorkspaceBuilder(deliveryCfg, stepEntryPolicy, log),
+		SecretCipher:       secretCipher,
+		SecretEnvelopeMode: secretEnvelopeMode,
+		SecretClient:       secretClient,
+		DBPolicy:           dbPolicyFromEnv(),
+		IdleTimeout:        poolIdleTimeoutFromEnv(),
+		CodeRepoBase:       codeRepoBase,
+	}
+}
+
 // buildWorkspaceResolver initializes the workspace resolver based on
 // the WORKSPACE_RESOLVER env var (file | db | platform-binding).
 //
@@ -348,9 +472,11 @@ type resolverWiring struct {
 func buildWorkspaceResolver(
 	ctx context.Context,
 	secretCipher *spinecrypto.SecretCipher,
+	secretEnvelopeMode store.SecretEnvelopeMode,
 	log *slog.Logger,
 	deliveryCfg workspaceDeliveryConfig,
 	codeRepoBase string,
+	stepEntryPolicy engine.StepEntryPolicy,
 ) (*resolverWiring, error) {
 	resolver := strings.ToLower(strings.TrimSpace(os.Getenv("WORKSPACE_RESOLVER")))
 	legacyMode := os.Getenv("SPINE_WORKSPACE_MODE")
@@ -360,6 +486,17 @@ func buildWorkspaceResolver(
 			return nil, fmt.Errorf("SPINE_WORKSPACE_MODE=%q is no longer supported; set WORKSPACE_RESOLVER=file|db|platform-binding (see ADR-011)", legacyMode)
 		}
 		resolver = "file"
+	}
+
+	// newSharedPool is the one ServicePool constructor of both shared
+	// resolvers (db and platform-binding). The subscription-secret cipher
+	// and envelope mode enter it here, once; the branches below pass only
+	// what differs between them (the provider and its secret client), so
+	// no branch can bind its workspaces' stores in a mode other than the
+	// configured one (INIT-023 TASK-009, review round 2).
+	newSharedPool := func(provider workspace.Resolver, secretClient secrets.SecretClient) *workspace.ServicePool {
+		return workspace.NewServicePool(ctx, provider,
+			sharedModePoolConfig(deliveryCfg, log, secretCipher, secretEnvelopeMode, secretClient, codeRepoBase, stepEntryPolicy))
 	}
 
 	switch resolver {
@@ -405,14 +542,7 @@ func buildWorkspaceResolver(
 		if err != nil {
 			return nil, fmt.Errorf("connect to workspace registry: %w", err)
 		}
-		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
-			SecretCipher: secretCipher,
-			SecretClient: dbSecretClient,
-			DBPolicy:     dbPolicyFromEnv(),
-			IdleTimeout:  poolIdleTimeoutFromEnv(),
-			CodeRepoBase: codeRepoBase,
-		})
+		pool := newSharedPool(provider, dbSecretClient)
 		log.Info("workspace resolver: db", "registry_url", "***")
 		return &resolverWiring{Resolver: provider, DBProvider: provider, Pool: pool, SecretClient: dbSecretClient}, nil
 
@@ -442,14 +572,7 @@ func buildWorkspaceResolver(
 		// resolver so requests don't fall through to the
 		// process-level store. EPIC-003 (TASK-006/007) refines pool
 		// sizing and invalidation for this mode.
-		pool := workspace.NewServicePool(ctx, provider, workspace.PoolConfig{
-			Builder:      newPooledWorkspaceBuilder(deliveryCfg, log),
-			SecretCipher: secretCipher,
-			SecretClient: secretClient,
-			DBPolicy:     dbPolicyFromEnv(),
-			IdleTimeout:  poolIdleTimeoutFromEnv(),
-			CodeRepoBase: codeRepoBase,
-		})
+		pool := newSharedPool(provider, secretClient)
 		invalidator := &workspace.CombinedBindingInvalidator{
 			Provider: provider,
 			Pool:     pool,

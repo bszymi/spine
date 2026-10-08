@@ -4,7 +4,9 @@ import (
 	"net/http"
 
 	"github.com/bszymi/spine/core/actor"
+	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/observe"
 )
 
 type createActorRequest struct {
@@ -51,6 +53,21 @@ func (s *Server) handleActorCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Role ceiling (INIT-023 TASK-013, audit P3-33). actor.create is an
+	// operator operation, but a non-admin may only register roles
+	// strictly below its own — an operator registering admin actors
+	// would stage an escalation for the day any non-admin token path
+	// opens. A nil caller is dev mode, which authorize() already let
+	// through.
+	if caller := actorFromContext(r.Context()); caller != nil {
+		if err := auth.AuthorizeRoleGrant(caller, actorRole); err != nil {
+			observe.AuditLog(r.Context(), "actor_create_refused",
+				"granted_role", string(actorRole), "reason", errorReason(err))
+			WriteError(w, err)
+			return
+		}
+	}
+
 	actorID := req.ActorID
 	if actorID == "" {
 		id, err := generateID("actor")
@@ -73,6 +90,8 @@ func (s *Server) handleActorCreate(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
+	observe.AuditLog(r.Context(), "actor_created",
+		"created_actor_id", a.ActorID, "granted_role", string(a.Role))
 
 	WriteJSON(w, http.StatusCreated, a)
 }

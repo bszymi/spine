@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
@@ -21,9 +21,13 @@ type storeStepAssigner struct {
 }
 
 // assignerFor picks a StepAssigner for the current request. Priority:
-// 1. The workspace-scoped orchestrator on the request's ServiceSet (shared mode).
-// 2. The server's global orchestrator-backed assigner (single-workspace mode).
-// 3. A per-request fallback backed by the resolved store.
+//  1. The workspace-scoped orchestrator on the request's ServiceSet (shared mode).
+//  2. The server's global orchestrator-backed assigner (single-workspace mode).
+//  3. A per-request fallback backed by the resolved store — unless
+//     DisableStepAssignFallback is set: that binder performs none of the
+//     engine step-entry policy's checks (INIT-023 TASK-007), so with a
+//     policy installed a missing orchestrator answers 503 instead.
+//
 // Returns nil only when none of the above is available.
 func (s *Server) assignerFor(ctx context.Context) StepAssigner {
 	sa := resolve(ctx, func(ss *workspace.ServiceSet) StepAssigner {
@@ -34,6 +38,9 @@ func (s *Server) assignerFor(ctx context.Context) StepAssigner {
 	}, s.stepAssigner)
 	if sa != nil {
 		return sa
+	}
+	if s.disableStepAssignFallback {
+		return nil
 	}
 	st := s.storeFrom(ctx)
 	if st == nil {

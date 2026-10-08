@@ -78,6 +78,13 @@ jobs:
   #
   # Scoped to TestGitHTTP_* on purpose: the rest of the scenario suite
   # is not green on main today, and repairing it is outside this task.
+  #
+  # INIT-023 / EPIC-004 / TASK-013 adds the two bootstrap-admin
+  # scenarios (TestBootstrapInternalAdmin_*): the only Postgres-backed
+  # proof that an SMP_ADMIN_TOKEN rotation revokes the right
+  # auth.tokens row (ListTokensByActor + RevokeToken against real SQL)
+  # and that the old bearer then gets 401. Both are green and must
+  # never skip either.
   scenario-git-http:
     name: Git push scenarios (Postgres)
     runs-on: ubuntu-latest
@@ -119,3 +126,46 @@ jobs:
             echo "::error::no TestGitHTTP_Push* scenario passed"
             exit 1
           fi
+
+      - name: TestBootstrapInternalAdmin_* scenarios (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags scenario -count=1 -run '^TestBootstrapInternalAdmin_' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-bootstrap-admin.log
+          if grep -E '^[[:space:]]*--- SKIP: TestBootstrapInternalAdmin_' scenario-bootstrap-admin.log; then
+            echo "::error::a TestBootstrapInternalAdmin_ scenario or step skipped — they must pass, never skip"
+            exit 1
+          fi
+          for t in TestBootstrapInternalAdmin_IdempotencyAndRotation TestBootstrapInternalAdmin_PooledBuilderIdempotencyAndRotation; do
+            if ! grep -qE "^--- PASS: ${t} " scenario-bootstrap-admin.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+
+  # INIT-023 / EPIC-001 / TASK-002: the git client's ref grammar (exact
+  # `show-ref --verify` lookups, `--end-of-options`, `git switch
+  # --no-guess`, `<oid>^{commit}` push sources, `worktree add --detach`)
+  # must hold on the git that ships, not only on the runner's newer git:
+  # the standalone and customer-app images install Debian bookworm's git
+  # 2.39.5, and golang:1.26-bookworm carries the same package. The first
+  # step is the task's acceptance filter; the second runs the whole git
+  # adapter and the artifact/workflow services that drive it.
+  git-floor:
+    name: Ref grammar on shipped git (2.39.x)
+    runs-on: ubuntu-latest
+    needs: boundary-lint
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shipped git version
+        run: |
+          git --version
+          git --version | grep -Eq '^git version 2\.39\.' || { echo "::error::expected Debian bookworm's git 2.39.x"; exit 1; }
+
+      - name: Ref-grammar regression tests (git 2.39.x)
+        run: go test -count=1 ./adapters/git/... ./core/engine/ -run 'RefShadow|RefGrammar|Checkout|EnterBranch|CurrentBranch'
+
+      - name: Git adapter and services (git 2.39.x)
+        run: go test -count=1 ./adapters/git/... ./core/artifact/ ./core/workflow/

@@ -19,6 +19,9 @@ const (
 	StepTriggerSubmitInvalid StepTrigger = "step.submit_invalid"
 	StepTriggerBlocked       StepTrigger = "step.blocked"
 	StepTriggerUnblocked     StepTrigger = "step.unblocked"
+	// StepTriggerRunTerminated closes a live execution of a run that
+	// was cancelled or failed (INIT-023 TASK-007).
+	StepTriggerRunTerminated StepTrigger = "run.terminated"
 )
 
 // StepTransitionRequest describes a requested step state transition.
@@ -56,6 +59,24 @@ func EvaluateStepTransition(currentStatus domain.StepExecutionStatus, req StepTr
 	result := &StepTransitionResult{
 		FromStatus: currentStatus,
 		Trigger:    req.Trigger,
+	}
+
+	// run.terminated closes any live execution of a run that was cancelled
+	// or failed (INIT-023 TASK-007; engine-state-machine.md §2.2 "terminate
+	// in-progress steps"). `skipped` is used because the step status check
+	// constraint has no `cancelled` value; the run_terminated failure
+	// classification on error_detail carries the cause. Terminal states
+	// were refused above, so a terminated step is never re-terminated.
+	if req.Trigger == StepTriggerRunTerminated {
+		switch currentStatus {
+		case domain.StepStatusWaiting, domain.StepStatusAssigned,
+			domain.StepStatusInProgress, domain.StepStatusBlocked:
+			result.ToStatus = domain.StepStatusSkipped
+			return result, nil
+		default:
+			return nil, domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("invalid trigger %q for %s step", req.Trigger, currentStatus))
+		}
 	}
 
 	switch currentStatus {

@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/repository"
 )
 
 // branchCreationResult tracks which repos got which kinds of refs
@@ -184,11 +185,28 @@ func (o *Orchestrator) resolveCodeRepoForBranch(ctx context.Context, repoID stri
 		return nil, "", domain.NewError(domain.ErrPrecondition,
 			fmt.Sprintf("repository %q has no default_branch configured", repoID))
 	}
+	// P3-36: default_branch becomes `git branch <run> <base>` and a
+	// RefSHA argument. Refuse a non-branch value (or a refs/heads/ form:
+	// default_branch is a short name, the same rule as the repositories
+	// API) before the per-repo client is even built (no clone), so the
+	// caller rolls back the primary run branch and persists no run row.
+	if err := git.ValidateShortBranchName(repo.DefaultBranch); err != nil {
+		return nil, "", defaultBranchInvalid(repoID, err)
+	}
 	client, err := o.repoClients.Client(ctx, repoID)
 	if err != nil {
 		return nil, "", err
 	}
 	return client, repo.DefaultBranch, nil
+}
+
+// defaultBranchInvalid is the precondition both code-repo paths return
+// for a default_branch that fails the git branch grammar. The validation
+// error quotes the value with %q, so a control byte never reaches a log
+// line raw.
+func defaultBranchInvalid(repoID string, cause error) error {
+	return domain.NewError(domain.ErrPrecondition,
+		fmt.Sprintf("repository %q default_branch is not a valid branch name: %v", repoID, cause))
 }
 
 // rollbackRunBranches best-effort deletes refs created during
