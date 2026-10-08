@@ -603,6 +603,34 @@ questions stay in that task.
 
 ---
 
+## 7f. Progress
+
+- 2026-10-07 — **Wave 1:** TASK-001 (the P1: every pre-receive command line
+  is validated; `refname.ValidateQualified`; the branch-protection
+  control-byte deny) merged to local `main` after its own review rounds, a
+  cross-task review with SMP's fix of the same bug (INIT-027 EPIC-004
+  TASK-001), Spine CI and the SMP compatibility build. Not pushed.
+- 2026-10-08 — **Wave 2:** TASK-002, TASK-004, TASK-007, TASK-009, TASK-010,
+  TASK-011, TASK-013 and TASK-016 merged to local `main` through
+  `init/INIT-023-wave2-integration`. Each task was reviewed alone (three
+  lenses, two rounds, codex); the integration fixed four semantic conflicts
+  with tests (`TreeEntryType` follows the ref grammar; the step-entry policy
+  reaches every pooled workspace; a refused signing secret holds its
+  deliveries; docs). A cross-task review (git/ref surface,
+  governance/engine, secrets/delivery, SMP compatibility, merge audit; two
+  skeptics per P1/P2) confirmed two P2s, both fixed with tests: separation
+  of duties now counts every step type push admission lets write, and
+  `spine secrets reencrypt` never guesses the workspace id. Gates: Spine CI,
+  vet with every tag, race on the touched packages, integration and the
+  `TestGitHTTP_*` scenarios on PostgreSQL 17, golangci (no new issues),
+  codex clean; SMP `main` 6ca0eeb7 builds and passes its Spine-runtime and
+  gateway suites against the merged tree with no SMP change. Known
+  pre-existing failures, identical on `main`: 30 scenario tests,
+  `TestRunModeDatabaseDefault`. Tasks stay In Progress until GitHub CI runs
+  after a push. Not pushed.
+
+---
+
 ## 8. Exit Criteria
 
 INIT-023 may be marked complete when:
