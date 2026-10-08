@@ -27,8 +27,13 @@ services:
       - SPINE_PROJECTION_POLLING_INTERVAL=5s
       - SPINE_ORPHAN_THRESHOLD=720h
       - SPINE_LOG_LEVEL=debug
-      # Narrow to the compose bridge subnet below, not all RFC1918 space.
-      - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.0.0/16
+      # No git trusted-CIDR list by default: every git clone needs a
+      # bearer token (INIT-023 TASK-015). The whole bridge subnet
+      # (172.28.0.0/16) used to be trusted, and it contains the bridge
+      # gateway 172.28.0.1 — the source address Docker's userland proxy
+      # uses for the published port above — so any local process on the
+      # host could clone token-less. For token-less runner clones see
+      # docker-compose.override.yaml.example.
       - SPINE_INSECURE_LOCAL=1
     volumes:
       - repo:/repo

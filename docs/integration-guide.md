@@ -324,6 +324,17 @@ Response (200):
 
 Deactivation immediately stops serving requests for this workspace and invalidates caches.
 
+### Process Metrics
+
+```
+GET /platform/metrics
+Authorization: Bearer <operator-token>
+```
+
+Returns the full Prometheus export of the process: every workspace's `spine_workspace_pool_*` series plus the process-global counters, gauges and histograms. It answers `401` for a missing or wrong operator token and `503` when `SPINE_OPERATOR_TOKEN` is unset.
+
+`GET /system/metrics` (workspace-scoped, `system.metrics`, operator role) returns the full export only in single-workspace mode. In shared multi-workspace mode (`WORKSPACE_RESOLVER=db` or `platform-binding`) it returns only the caller's own workspace `spine_workspace_pool_*` series: the full export names every tenant and aggregates every tenant's activity (INIT-023 TASK-015). Point a shared-mode scraper at `/platform/metrics`.
+
 ---
 
 ## 4. Actor and Auth Integration
@@ -555,7 +566,8 @@ Last-Event-ID: <optional replay cursor>
 - `Last-Event-ID`: on reconnect, replays up to the last 100 missed events after that cursor.
 - Response headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`.
 - Heartbeat: `: keepalive` comment every 30s. Per-event write deadline is 5s — slow clients get dropped rather than back-pressuring the emitter.
-- Per-actor concurrency cap: default 5, tune via `SPINE_SSE_MAX_CONN_PER_ACTOR` (≤0 disables the cap — not recommended).
+- Per-actor concurrency cap: default 5, tune via `SPINE_SSE_MAX_CONN_PER_ACTOR` (≤0 disables the cap — not recommended). In shared multi-workspace mode the cap is counted per (workspace, actor): the same actor ID in another workspace (every workspace has its own `smp-admin`) has its own slots.
+- Frame safety (INIT-023 TASK-015). Event IDs embed workflow identifiers (step, divergence-point and branch IDs). An event whose ID contains a control character, invalid UTF-8, U+0085, U+2028 or U+2029 is sent **without its `id:` line** (an unsafe event type likewise loses its `event:` line); its JSON `data` still carries the true `event_id`. The client's last event ID therefore stays at the previous event, and a reconnect replays from there (at-least-once). `data:` lines never contain a raw line break, and U+0085, U+2028 and U+2029 inside JSON strings are written as `\u0085`, `\u2028` and `\u2029`, which decode to the same value. See `KNOWN-LIMITATIONS.md` for the replay residual.
 
 ### 6.3 Pull-Based Event Log
 
@@ -632,10 +644,16 @@ Delete every tag or other non-branch ref whose short name equals a branch name (
 
 ### Authentication
 
-Two acceptance paths:
+A **push always presents a bearer** (`Authorization: Bearer <token>`), validated and attached as the actor for ref admission, branch protection and audit; no setting lets a push skip it. A clone or fetch is accepted on one of three paths:
 
-1. **Trusted-CIDR bypass** — when the client's source IP falls inside `SPINE_GIT_HTTP_TRUSTED_CIDRS`, no bearer token is required. Set this only to the narrow subnet that runner containers live on (e.g. the Docker compose network). Unset means every caller needs a token.
-2. **Bearer token** — `Authorization: Bearer <token>` validated against the workspace's actor tokens (or the server-level operator token).
+1. **Bearer token** — `Authorization: Bearer <token>` validated against the workspace's actor tokens (or the server-level operator token).
+2. **Trusted-CIDR bypass (direct peers only)** — when the TCP peer is inside `SPINE_GIT_HTTP_TRUSTED_CIDRS` **and connected directly**, no bearer is required. Set this only to the runners' own addresses. Unset (the default) means every caller needs a token. Since INIT-023 TASK-015 a proxied request is never token-less:
+   - a request whose peer is a declared reverse proxy (`SPINE_TRUSTED_PROXY_CIDRS`) needs a token, and no `X-Forwarded-For` address is trusted for git access (a proxy that passes the client's header through would let the client name a runner address); `spine serve` logs a startup warning for any overlap between the two lists, because token-less clones from the overlap stop working;
+   - a request that carries `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`, `X-Forwarded-Proto` or `Via` came through some proxy and needs a token too (a rate-limited warning names `SPINE_TRUSTED_PROXY_CIDRS` when such a request comes from a trusted-CIDR address);
+   - a TCP-level proxy adds no header and cannot be detected. Never trust a Docker bridge gateway (the `.1` of the network): Docker's userland proxy connects to published ports from it, so trusting it lets any process on the host clone without a token. `docker-compose.override.yaml.example` shows runner-only recipes.
+3. **`SPINE_GIT_HTTP_DEV_NO_AUTH=1`** — local development only: clones and fetches need no token. `spine serve` refuses to start with it unless `SPINE_ENV=development`. Pushes still need a bearer.
+
+`SPINE_DEV_MODE` does not affect `/git` (it used to drop git authentication for clone and push).
 
 Example clone from a runner container on the same Docker network:
 
@@ -779,15 +797,16 @@ spec:
 | `SPINE_LOG_LEVEL` | No | `info` | Log level: debug, info, warn, error |
 | `SPINE_LOG_FORMAT` | No | `json` | Log format: json or text |
 | `SPINE_ENV` | No | - | Runtime environment: `production`, `staging`, `development`. When `production`, `SPINE_DEV_MODE` is refused and `SPINE_SECRET_ENCRYPTION_KEY` is required. |
-| `SPINE_DEV_MODE` | No | - | `1` or `true` lets unauthenticated requests through the auth gate. Dev-only; refused at startup when `SPINE_ENV=production`. |
+| `SPINE_DEV_MODE` | No | - | `1` or `true` lets unauthenticated requests through the `/api/v1` auth gate. Dev-only; refused at startup when `SPINE_ENV=production`. Does not affect the `/git` endpoint. |
+| `SPINE_GIT_HTTP_DEV_NO_AUTH` | No | - | `1`, `true`, `yes` or `on` lets every client clone/fetch over `/git` without a bearer. Development only: refused at startup unless `SPINE_ENV=development`. Pushes still need a bearer. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Yes (production) | - | Base64-encoded 32-byte AES-256 key for at-rest secret encryption (webhook signing secrets). Generate with `openssl rand -base64 32`. See [Secrets at Rest](#secrets-at-rest). |
 | `SPINE_SECRET_PREVIOUS_KEYS` | No | - | Comma-separated base64 32-byte keys that still decrypt values sealed before a key rotation; they never seal. Requires `SPINE_SECRET_ENCRYPTION_KEY`. See [Secrets at Rest](#secrets-at-rest). |
 | `SPINE_SECRET_ENVELOPE_MODE` | No for `spine serve`; **yes** for `spine secrets reencrypt` | `migrate` (serve only) | `migrate`, `strict` or `downgrade`: how legacy (`enc:v1`, plaintext) signing secrets are treated and which envelope is written. `strict` is required to close audit finding P3-10. `spine secrets reencrypt` refuses to run without it; set it to serve's mode. See [Envelope Modes](#secrets-at-rest). |
-| `SPINE_OPERATOR_TOKEN` | No | - | Static bearer token for system-level endpoints (workspace CRUD). Minimum 32 characters; shorter values are refused at startup. Unset: operator endpoints return 503. |
+| `SPINE_OPERATOR_TOKEN` | No | - | Static bearer token for system-level endpoints (workspace CRUD, `GET /api/v1/platform/metrics`). Minimum 32 characters; shorter values are refused at startup. Unset: operator endpoints return 503. |
 | `SMP_ADMIN_TOKEN` | No | - | Platform bearer seeded as the admin actor `smp-admin` into every workspace this process loads (db / platform-binding modes), so the management platform authenticates on its first request. Must be at least 32 characters with at least 8 distinct characters (generate with `openssl rand -hex 32`): a weaker value refuses to start when `SPINE_ENV=production` and logs a warning otherwise. Rotating it revokes the previous bootstrap bearer in each workspace on that workspace's first load after the restart, so switch the platform's bearer in the same change window (see the operator runbook, "Rotating `SMP_ADMIN_TOKEN`"). Unsetting it does not revoke the existing bearer. A suspended or deactivated `smp-admin` stays that way. Unset: no bootstrap. |
 | `SPINE_INSECURE_LOCAL` | No | - | Set to `1` only for local development with `sslmode=disable` DB URLs. |
-| `SPINE_TRUSTED_PROXY_CIDRS` | No | - | Comma-separated CIDRs of reverse proxies Spine should trust for `X-Forwarded-For`. Leave unset if directly internet-facing. |
-| `SPINE_GIT_HTTP_TRUSTED_CIDRS` | No | - | Comma-separated CIDRs allowed to clone/fetch over the internal git-HTTP endpoint without a bearer token (e.g. runner container network). Unset = require tokens from every caller. |
+| `SPINE_TRUSTED_PROXY_CIDRS` | No | - | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` (every header line) picks the rate-limit bucket. A request from one of them never gets token-less git access. Leave unset if directly internet-facing. |
+| `SPINE_GIT_HTTP_TRUSTED_CIDRS` | No | - | Comma-separated CIDRs whose **direct** peers may clone/fetch over `/git` without a bearer token (runner addresses only). Never applies to pushes, to a peer in `SPINE_TRUSTED_PROXY_CIDRS`, or to a request carrying a forwarding header; never include a Docker bridge gateway. Unset = require tokens from every caller. See §7. |
 | `SPINE_GIT_CREDENTIAL_HELPER` | No | - | Credential helper name, one of: `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended production mode. Non-allowlisted values are refused at startup. |
 | `SPINE_GIT_PUSH_TOKEN` | No | - | Static PAT/deploy token for HTTPS push. Scrubbed from process env after startup; ignored when `SPINE_GIT_CREDENTIAL_HELPER` is also set. |
 | `SPINE_GIT_PUSH_USERNAME` | No | `x-access-token` | Username for token-based push auth |
@@ -796,5 +815,5 @@ spec:
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
 | `SPINE_STEP_ENTRY_POLICY` | No | `strict` | Engine step-entry policy (INIT-023 TASK-007). `strict` (or unset): assign/claim enforce run status, actor eligibility, execution mode, preconditions, `required_skills` on assign and separation of duties; cancelled/failed runs close their live steps; the gateway's engine-less assign fallback is disabled. `legacy`: pre-INIT-023 behaviour, logged as a `WARN` at startup (migration escape hatch, to be removed). Any other value refuses to start. See [Security Model](/architecture/security-model.md) §4.4.1. |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
-| `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections (≤0 disables the cap) |
+| `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections, counted per (workspace, actor) in shared mode (≤0 disables the cap) |
 | `SPINE_EVENT_DELIVERY` | No | `false` | Feature flag — set to `true` to enable webhook / SSE / pull-log delivery. Without it, only projection polling works. |
