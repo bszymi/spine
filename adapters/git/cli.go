@@ -143,6 +143,21 @@ func WithoutCredentialHelper() CLIOption {
 	}
 }
 
+// WithoutPushToken clears a push token configured by an earlier option —
+// typically the process-wide SPINE_GIT_PUSH_TOKEN carried in base
+// options (PushAuthOpts) — so NewCLIClient creates no GIT_ASKPASS helper
+// and the client offers no token to any host. It mirrors
+// WithoutCredentialHelper. Additive (INIT-023 TASK-015): gitpool applies
+// both to a code repository that has no per-binding credential, so the
+// deployment's credentials never reach whatever host a binding's
+// clone_url names. No existing option or call path changes.
+func WithoutPushToken() CLIOption {
+	return func(c *CLIClient) {
+		c.pushToken = ""
+		c.pushUsername = ""
+	}
+}
+
 // NewCLIClient creates a new Git client for the repository at the given path.
 func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
 	c := &CLIClient{repoPath: repoPath}

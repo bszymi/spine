@@ -151,8 +151,9 @@ type serveDeps struct {
 	// git client pool to dereference per-binding `credentials_ref`
 	// fields (INIT-014 EPIC-003 TASK-006). Optional: when nil, code
 	// repos with a credentials_ref fail closed with a typed
-	// credentials-unavailable error; bindings without one keep working
-	// through the legacy SPINE_GIT_PUSH_TOKEN path.
+	// credentials-unavailable error; bindings without one clone and
+	// push with no credential at all — never the process-wide
+	// SPINE_GIT_PUSH_TOKEN or credential helper (INIT-023 TASK-015).
 	SecretClient        secrets.SecretClient
 	RuntimeEnv          string
 	DevMode             bool
@@ -238,18 +239,21 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// unchanged so governance services keep operating on the primary
 	// repo with no behavior change.
 	//
-	// WithCloner and the factory are both threaded with the full
-	// auth profile already baked into deps.GitClient — process-level
-	// SPINE_GIT_PUSH_TOKEN / credential-helper opts (PushAuthOpts)
-	// plus the dedicated-mode SMP_WORKSPACE_ID env. Without the SMP
-	// env, lazy code-repo clones that depend on a per-workspace
-	// credential helper would invoke the helper missing the workspace
-	// ID it needs to resolve credentials. SecretCredentialResolver
-	// layers a per-binding token on top via WithPushToken when the
-	// binding sets credentials_ref; the resolver is installed
-	// unconditionally (even when SecretClient is nil) so a
-	// misconfigured deployment with credentialed bindings fails
-	// closed instead of cloning unauthenticated.
+	// WithCloner and the factory are both threaded with the options
+	// baked into deps.GitClient — process-level SPINE_GIT_PUSH_TOKEN /
+	// credential-helper opts (PushAuthOpts) plus the dedicated-mode
+	// SMP_WORKSPACE_ID env. Code repos authenticate only with their own
+	// credentials_ref: SecretCredentialResolver layers a per-binding
+	// token on top via WithPushToken, and for a binding without one the
+	// cloner and factory strip the process token and credential helper
+	// (INIT-023 TASK-015; owner question 2 ruled "never", pending the
+	// owner), so the deployment's credential never reaches the host a
+	// binding's clone_url names. Only the primary repository (this
+	// deps.GitClient, returned by PrimaryClient) uses the process
+	// credentials. The resolver is installed unconditionally (even when
+	// SecretClient is nil) so a misconfigured deployment with
+	// credentialed bindings fails closed instead of cloning
+	// unauthenticated.
 	codeRepoOpts := append([]git.CLIOption{}, git.PushAuthOpts()...)
 	if deps.SMPWorkspaceID != "" {
 		codeRepoOpts = append(codeRepoOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+deps.SMPWorkspaceID))
