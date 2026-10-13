@@ -532,10 +532,61 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepSubmitResponse'
+        '400':
+          description: |
+            Invalid request (`invalid_params`). Besides an undefined outcome
+            or missing required outputs, a malformed or inapplicable
+            `expected_head_sha` (INIT-023 TASK-005): `detail.reason` is
+            `expected_head_sha_invalid` (not a full lowercase hex commit
+            id) or `expected_head_sha_not_applicable` (the run has no
+            branch, the step is on a divergence branch, or the step is an
+            internal engine step). A malformed assertion is refused before
+            the required-outputs check, so it never fails the step.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: |
+            Operation conflicts with current state. With SHA-bound merges
+            (INIT-023 TASK-005) `detail.reason` names a run-branch head
+            conflict, and `detail.head_sha` the head the server resolved:
+            - `run_branch_moved`: `expected_head_sha` is not the run
+              branch's current head (`detail.expected_head_sha`). Review
+              the current head and submit again.
+            - `run_branch_moved_since_gate`: a review or convergence step
+              submitted an outcome that leads to the merge, but the run
+              branch moved since the commit the previous step bound
+              (`detail.bound_sha`, `detail.bound_by`). The commits after
+              the binding were not validated, so only a rework outcome may
+              follow. This includes a fix-up the reviewer committed during
+              the review (`/artifacts/add`, `write_context`, a push): send
+              the work back so it is validated again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '503':
+          description: |
+            `service_unavailable`. With `detail.reason`
+            `run_branch_head_unavailable` the run-branch head could not be
+            resolved, so a submit that must bind it was not recorded (retry
+            later); with `expected_head_sha_unsupported` the deployment
+            cannot check an assertion (INIT-023 TASK-005).
 
   /runs/{run_id}/steps/{step_id}/assign:
     post:
@@ -1368,6 +1419,16 @@ components:
           type: string
           enum: [passed, failed, skipped, not_run]
           description: Self-reported validation status of produced artifacts
+        expected_head_sha:
+          type: string
+          pattern: '^([0-9a-f]{40}|[0-9a-f]{64})$'
+          description: |
+            Optional (INIT-023 TASK-005). The run-branch head the submitter
+            worked on: the commit a runner checked out and tested or pushed,
+            or the head a reviewer read the diff at. The submit is refused
+            with 409 `run_branch_moved` unless the run branch is still
+            there, and with 400 when the value is malformed or the step
+            cannot carry one. Checked whether or not merge binding is on.
 
     StepSubmitResponse:
       type: object

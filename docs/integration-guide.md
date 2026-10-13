@@ -798,3 +798,36 @@ spec:
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
 | `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections (≤0 disables the cap) |
 | `SPINE_EVENT_DELIVERY` | No | `false` | Feature flag — set to `true` to enable webhook / SSE / pull-log delivery. Without it, only projection polling works. |
+
+---
+
+## 9. Embedding: SHA-Bound Governed Merges
+
+INIT-023 TASK-005 binds the governed merge to the commit the run's steps validated and reviewed
+(see [Git Integration](/architecture/git-integration.md) §6.3). `spine serve` always enables it; an
+embedder opts in.
+
+1. **Implement `engine.CommitBinder` on the `GitOperator`** passed to `engine.New`
+   (`ResolveBranchHead`, `VerifyCommit`, `IsAncestor`, `CommitParents`, `CommitFilesOnto`,
+   `MergeBound`, `PushCommit`; contract in `core/engine/interfaces.go`). It is an optional
+   interface, found by type assertion. The rules that matter:
+   - `ResolveBranchHead` reads `refs/heads/<branch>` exactly, in the repository merges read from
+     (origin, for a remote-backed operator), never by DWIM;
+   - `VerifyCommit` accepts an id only when `rev-parse --verify <id>^{commit}` prints it back;
+   - `CommitFilesOnto` is plumbing on a private index and deterministic (dates pinned to the base
+     commit's committer date);
+   - `MergeBound` merges exactly `SourceSHA` and reports `BaseSHA`;
+   - `PushCommit` pushes `<sha>^{commit}:refs/heads/<branch>` with no force and no lease.
+2. **Run the conformance suite** against it:
+   `enginetest.RunCommitBinderConformance(t, enginetest.Harness{New: ...})`
+   (`core/engine/enginetest`). `adapters/git/commitbinder_test.go` shows the `CLIClient` harness.
+3. **Enable it:** `orch.EnableMergeBinding(engine.MergeBindingConfig{})` (policy `reject`;
+   `engine.MovedHeadRebind` accepts a moved head at the gate instead). It returns an error, and
+   leaves binding off, when the operator lacks the capability. Code-repository clients returned by
+   `RepositoryGitClients` must implement it too, or `StartRun` refuses multi-repo runs.
+4. **Send assertions:** carry the head a runner tested or pushed, or the head a reviewer read the
+   diff at, as `engine.SubmitRequest.ExpectedHeadSHA`. Binding refusals are `*domain.SpineError`
+   whose `Detail` is an `engine.HeadBindingDetail`; map `Reason` (`engine.ReasonRunBranchMoved`,
+   `engine.ReasonRunBranchMovedSinceGate`, …) to your own error codes.
+5. **Read the binding for display** from `runs.commit_meta` (`engine.CommitMetaBoundSHA`,
+   `engine.CommitMetaBoundBy`). Only the engine writes these keys; workflow outcomes cannot.

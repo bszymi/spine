@@ -175,6 +175,50 @@ This document tracks known gaps and deferred functionality.
   never hold mid-run (see `workflow.DeferredStatusPreconditions`). Custom workflows with such a
   precondition strand under the strict policy until it is removed.
 
+### Governed Merge Binding (INIT-023 TASK-005)
+SHA-bound governed merges (`Orchestrator.EnableMergeBinding`) close audit F2's merge half: the
+merge publishes the commit the run's steps validated and reviewed, never the run-branch tip (see
+`architecture/git-integration.md` §6.3). What remains:
+1. **Binding off, the merge uses the tip.** The zero value is the pre-INIT-023 behaviour. That is
+   SMP's state until SMP TASK-009 implements `engine.CommitBinder` on its operator and enables
+   binding; `spine serve` always enables it (no switch, owner question 6).
+2. **`automated` steps are not gates** (owner question 5). A `validate` step binds whatever head it
+   completes at, so window (a) — a push between the commit that was tested and the validate submit
+   — is closed only when the runner sends `expected_head_sha` with the commit it tested. A
+   compromised runner credential can submit `validate` without testing anything at all; binding
+   cannot protect "validated" against that holder. A declared per-step `binds_head` is a follow-up.
+3. **A workflow whose first step is a gate** has no earlier binding to compare with: its first
+   approval binds the head it approves (logged at Info). Binding at run start is a follow-up.
+4. **A gate binds only when its advancing outcome reaches the merge through gates or internal
+   steps.** In a shape such as `review → finalize (manual) → end + commit`, `finalize` is a producer
+   and rebinds to the tip, so the review does not decide what merges. No shipped workflow in Spine
+   or SMP has this shape.
+5. **Convergence residual:** the rebind after a convergence happens only when the head before
+   `EvaluateAndCommit` equals the binding, but a push between that read and the convergence merge
+   still rides along. Dormant: no shipped workflow diverges.
+6. **Code repositories (P3-37), binding off:** code-repository merges still merge the tip, and an
+   already-merged repository is skipped after a `merge_failed` loop-back, dropping the next round's
+   reviewed work. Under binding both are fixed. Both paths are dormant until a code-repository
+   catalog is wired.
+7. **Auto-push off:** with `SPINE_GIT_PUSH_ENABLED=false` the local `main` the merge moves is the
+   published branch, so the structural check of the merge result (DC-3) runs after the result is
+   already visible: a failed check refuses the run (`merge_failed`) but cannot take the merge back.
+   `git.CLIClient`'s `MergeBound` only produces accepted shapes; the check guards the push and other
+   `CommitBinder` implementations.
+8. **A garbage-collected bound commit fails closed.** If the run branch is force-pushed away from
+   the bound commit and `git gc` prunes it, the merge refuses (`precondition`) and a publish workflow
+   routes back to `execute`. Pinning the bound commit with a ref is a follow-up.
+9. **The recovery ledger under binding** is a child of the bound commit, referenced only by the
+   run's `commit_meta` until the resumed merge publishes it; a run that is never resumed leaves it
+   unreferenced (prunable). Its commit date is the bound commit's (the commit is built
+   deterministically); the time of the operator action is in the audit event.
+10. **Excluded commits are logged, not evented.** A run branch whose tip held commits the merge
+    left out is kept and a `merge_binding: commits after the bound head were not merged` warning
+    names `run_id`, `bound_sha` and `tip_sha`; a dedicated event type is a follow-up.
+11. **Collision renumber is skipped under binding** (planning runs whose artifact id collided at
+    merge fail instead of renumbering): the renumber commits on the branch tip. Neither product
+    wires a collision handler today.
+
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
   enforced (a file that fails either is not projected), but a workflow that fails the full

@@ -370,7 +370,39 @@ Merges into the authoritative branch are governed operations and must only occur
 - Workflow execution for the Run has reached a terminal or accepted outcome
 - All required validation steps have passed
 - No policy violations are present
- - All required Spine validations and tests have passed within the workflow execution
+- All required Spine validations and tests have passed within the workflow execution
+
+**What is merged — the bound commit (INIT-023 TASK-005).** With merge binding on
+(`Orchestrator.EnableMergeBinding`; always on in `spine serve`, opt-in for embedders), the content
+that reaches the authoritative branch is the commit the run's steps validated and reviewed, not
+whatever the run branch points at when the merge runs:
+
+- *Capture.* Every main-path step completion records the run-branch head the engine resolved at
+  that moment, in reserved `runs.commit_meta` keys (`spine.bound_sha`, `spine.bound_by`; code
+  repositories `spine.repo.<id>.bound_sha`). A submitter may also assert the head it worked on
+  (`expected_head_sha` on `step.submit`); a mismatch is `409 run_branch_moved`. Workflow outcomes
+  cannot set `spine.*` keys: they are stripped before storage.
+- *Moved-head policy.* A gate step (`type: review` or `convergence`) whose outcome leads to the
+  merge compares the current head with the previous binding. If the branch moved, the approval is
+  refused with `409 run_branch_moved_since_gate` (policy `reject`, the default): the commits after
+  the binding were not validated, so only a rework outcome may follow. Policy `rebind` accepts the
+  current head instead.
+- *The committing window.* From the approving completion onwards the binding is frozen: only the
+  engine moves it again (a convergence that ran from the bound head, a recovery ledger commit).
+  Every merge attempt — the immediate one, the publish handler, every scheduler retry, every
+  partially-merged resume — merges exactly the bound commit. A run with no binding the run itself
+  recorded (for example one in flight when binding was enabled) fails closed with a `precondition`
+  merge failure.
+- *Status cascade.* The commit-status rewrite is applied *at* the bound commit, as a plumbing commit
+  whose only parent is the bound commit (deterministic, so a retry recomputes the same object); it
+  never checks out or commits on the run branch, and reaches the authoritative branch only through
+  the merge.
+- *Structural check and push.* Before anything is pushed, the merge result must be built from
+  exactly the target's previous tip and the bound (or cascade) commit — a merge commit with those
+  two parents, a fast-forward, or "already up to date". The push publishes exactly that commit,
+  without force, so the remote accepts only a fast-forward. Commits on the run branch after the
+  binding are left out; the branch is then kept for inspection and a warning names the bound and
+  tip commits.
 
 Spine uses **fast-forward merges** when possible to preserve linear history.
 
