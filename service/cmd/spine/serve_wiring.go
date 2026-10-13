@@ -25,7 +25,6 @@ import (
 	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/core/refadmit"
 	"github.com/bszymi/spine/core/validation"
-	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/internal/config"
 	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/service/internal/workspace"
@@ -302,7 +301,10 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	if err != nil {
 		return nil, fmt.Errorf("artifact service: %w", err)
 	}
-	workflowSvc := workflow.NewService(primaryClient, deps.RepoPath)
+	workflowSvc, err := buildWorkflowService(primaryClient, deps.RepoPath, deps.Store)
+	if err != nil {
+		return nil, fmt.Errorf("workflow service: %w", err)
+	}
 
 	var projQuery *projection.QueryService
 	var projSync *projection.Service
@@ -430,13 +432,22 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 
 	var starter gateway.RunStarter
 	var planningStarter gateway.PlanningRunStarter
+	var wfPlanningStarter gateway.WorkflowPlanningRunStarter
 	var resultHandler gateway.ResultHandler
 	var stepAssigner gateway.StepAssigner
 	if orch != nil {
 		orch.WithArtifactWriter(artifactSvc)
 		orch.WithBlockingStore(deps.Store)
+		// Workflow-lifecycle planning runs (ADR-008) in single-workspace
+		// mode too (INIT-023 TASK-014, Decision 9). Pooled workspaces wire
+		// theirs in serve_resolver.go; before this, a file-resolver
+		// deployment had no workflow planning starter, and once reviewer
+		// workflow updates are routed through the lifecycle every one of
+		// them would have answered 503 with no governed path.
+		orch.WithWorkflowWriter(workflowSvc)
 		starter = &runAdapter{orch: orch}
 		planningStarter = &planningRunAdapter{orch: orch}
+		wfPlanningStarter = &workflowPlanningRunAdapter{orch: orch}
 		resultHandler = &resultAdapter{orch: orch}
 		stepAssigner = orch
 	}
@@ -476,6 +487,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 		Events:                     deps.Events,
 		RunStarter:                 starter,
 		PlanningRunStarter:         planningStarter,
+		WFPlanningStarter:          wfPlanningStarter,
 		ResultHandler:              resultHandler,
 		WorkspaceResolver:          deps.WSResolver,
 		ServicePool:                deps.WSServicePool,

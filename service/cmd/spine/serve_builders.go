@@ -56,6 +56,27 @@ func buildArtifactService(gitClient git.GitClient, events event.EventRouter, rep
 	return svc, nil
 }
 
+// buildWorkflowService constructs the workflow-definition service and wires
+// the same branch-protection policy buildArtifactService installs (ADR-009
+// §3; INIT-023 TASK-014, audit F7): the projection-backed policy with a
+// Store, the permissive one without (early bootstrap). With it, a
+// non-bypass workflow write to a protected main is refused at the service
+// even if a handler forgets the reviewer dispatch, and an ADR-008 bypass
+// needs an operator-or-above actor in the context.
+//
+// The policy-builder error is returned, never swallowed: a nil policy is
+// workflow.Service's "no protection" mode (I4), which only embedders that
+// write through actor-less bypass contexts (SMP) may run in.
+func buildWorkflowService(gitClient git.GitClient, repoPath string, st store.Store) (*workflow.Service, error) {
+	svc := workflow.NewService(gitClient, repoPath)
+	policy, err := buildBranchProtectPolicy(st)
+	if err != nil {
+		return nil, fmt.Errorf("workflow service branch-protect policy: %w", err)
+	}
+	svc.WithPolicy(policy)
+	return svc, nil
+}
+
 // buildBranchProtectPolicy returns a branchprotect.Policy suitable for
 // the Artifact Service's guard. When a Store is configured, the policy
 // reads the projection-backed rules; otherwise it falls back to a
