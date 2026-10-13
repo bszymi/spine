@@ -2,12 +2,12 @@
 id: TASK-014
 type: Task
 title: "Reviewer workflow updates go through governance; write_context limited to the run's assignee"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-13
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -1382,4 +1382,299 @@ An adversarial review on 2026-10-06 against Spine `61994fe` and SMP `80995559`.
 - The store-fallback `LookupStepDef` is not version-pinned (§4 note, item 4).
 
 ## Implementation Notes
+
+Implemented 2026-10-08 … 2026-10-13 on branch
+`init/INIT-023-TASK-014-workflow-and-write-context-governance`, cut from Spine local `main`
+`d23b897` (origin `61994fe` + the INIT-023 scaffold + waves 1 and 2, including TASK-004's confined
+writers, TASK-007's step-entry policy, TASK-011's write-path round-trip check and TASK-016's
+`core/refadmit`). Diff base: `git diff main...HEAD`. No migration, store method, environment
+variable or event type is added (I8).
+
+### Orchestrator rulings (recorded as defaults pending the owner)
+
+- **Owner question 1 — default: operators are not exempt from the API freeze.** Rule 3 of
+  `authorizeRunBranchWrite` applies to operators and admins (matrix rows `review freeze/op-1`,
+  `/admin-1`). The push path (TASK-016) exempts operators; operators recover through
+  `needs_rework`, cancel, or a push.
+- **Owner question 2 — default: a workflow `write_context` is limited to the workflow's own
+  lifecycle run** (`resolveWorkflowWriteContext`: `Mode == planning && TaskPath ==
+  workflows/<id>.yaml`).
+- **Owner question 3 — default: one open lifecycle run per workflow (409), for create and update**
+  (`refuseIfWorkflowRunOpen`, called by both dispatch paths).
+- **Owner question 4 — default: no auto-bind of a planning run's entry step.** Unchanged; the
+  first attempt stays claimable (residual below).
+- **Owner question 5 — already done by TASK-016.** The push path freezes run branches during
+  `review`/`internal` steps for non-operators. The API freeze uses the same step-type set,
+  `refadmit.FrozenStepType`, so the two paths cannot drift; for non-operators the API freeze *is*
+  refadmit's (the binding decision is `refadmit.Decide`, which applies the freeze to the bound
+  actor), and rule 3 adds it for operators and the dev-mode nil actor.
+- **Owner question 6 — default: the API freeze also covers `type: internal` steps** (matrix rows
+  `internal-step freeze`, `detail.step_type: internal`).
+- **Owner question 7 — default: the claim-takeover residual is accepted here, and the
+  re-offer-to-prior-holder rule is added to TASK-007's policy** as the opt-in
+  `StepEntryPolicy.ReofferToPriorHolder` (zero value off; on in `StrictStepEntryPolicy`, which
+  `spine serve` installs unless `SPINE_STEP_ENTRY_POLICY=legacy`). Details under Deviations 6.
+
+### What was built (commits)
+
+| Commit | Content |
+|---|---|
+| `3ba1300` | `core/workflow`: `WithPolicy`, `WithDefaultRef`, `ValidateID`, `FilePath`; `checkBranchProtection` before `enterBranch` (I2–I4); `policy_test.go` |
+| `11d0091` | `core/engine`: `WorkflowWriter.Update`, `StartWorkflowUpdatePlanningRun`, create pre-check (3b), failed transition on a branch-write failure (L1), `StartPlanningRun` refuses `workflows/` (I9); `workflow.InWorkflowsDir`; engine tests |
+| `57bbbcf` | `StepEntryPolicy.ReofferToPriorHolder` (Q7): claim check 6b, candidate-listing filter, strict default; tests |
+| `022c2d9` | gateway: `authorizeRunBranchWrite` (via `core/refadmit`), canonical `isWorkflowTarget`, I7 guards, `/artifacts/add` gate, `POST /runs` planning guard, update dispatch, `resolveWorkflowWriteContext`, `refuseIfWorkflowRunOpen`, widened starter + serve adapter (compile-time assertion); matrix, regression and table tests; shared fixtures |
+| `91bd17b` | wiring: `buildWorkflowService`, single-mode starter + workflow writer, pooled workflow policy; tests |
+| `e4a2996` | scenario step `StartWorkflowUpdatePlanningRun`; AC 13 and AC 19 scenarios |
+| `c4de89c` | docs (§7) |
+| `7f82e70` | codex round 1 fix (P2): a retry after a failed attempt is not re-offered |
+| `fcad5bb` | codex round 2 fix (P2): a released rework attempt is a hand-off |
+| `68c12ec` | lint: no new golangci-lint issues (test-only) |
+| `8607765` | the pooled-policy integration test migrates its database first |
+
+### Acceptance criteria — evidence
+
+1. **Policy on `workflow.Service`.** `core/workflow/policy_test.go`: (a)
+   `TestWorkflowService_Policy_DeniesNonBypassDirectWriteToMain` (update and create; 403, detail
+   `branch`/`reasons`, `main` unchanged, no worktree left); (b)
+   `TestWorkflowService_Policy_RunBranchWriteAllowed`; (c)
+   `TestWorkflowService_Policy_EvalErrorFailsClosed` (500, nothing written); (d)
+   `TestWorkflowService_Policy_BypassRequiresOperator` (reviewer, contributor, actor-less refused;
+   operator and admin land with `Workflow-Bypass: true`). Also `…_RequestShape` (bypass on main not
+   rule-evaluated; a bypass naming another branch is) and `…_DefaultRef`. Mutations: removing the
+   call fails (a) and four more; removing the bypass role check (m3) fails (d).
+2. **nil policy unchanged.** `TestWorkflowService_NilPolicy_KeepsPreTask014Behaviour` (actor-less
+   bypass create/update and actor-less non-bypass update all commit to `main`; also after
+   `WithPolicy(nil)`). Mutation m4 (nil fails closed) fails it.
+3. **Update-capable planning runs.** `TestStartWorkflowUpdatePlanningRun_WritesUpdateOnRunBranch`;
+   `…_RefusesBeforeAnyBranch` (missing → 404, same version → 422 with `Service.Update`'s exact
+   message, `../x` → 400, unparsable prior → 500, read failure, invalid body, id mismatch — no
+   branch, no run, no writer call). Every existing `TestStartWorkflowPlanningRun_*` passes with an
+   unmodified body (see Deviations 4). L1:
+   `TestStartWorkflowPlanningRun_ExistingID_RefusedBeforeAnyRun`,
+   `TestStartWorkflowPlanningRun_WriterFailure_MarksRunFailed` (create and update; branch cleanup
+   unchanged). Mutations: removing the create pre-check / the failed transition / update using
+   `Create` each fail their test.
+4. **F7 dispatch.** `TestWorkflowUpdate_RoleDispatchTable` (every role),
+   `TestWorkflowUpdate_ReviewerNoPlanner_Returns503`,
+   `TestWorkflowUpdate_ReviewerStarterNotFound_Returns404`.
+5. **Rewritten tests.** `TestWorkflowUpdate_Success` → `TestWorkflowUpdate_OperatorNoWriteContext_Bypass`
+   + `TestWorkflowUpdate_ReviewerNoWriteContext_StartsPlanningRun`; `TestWorkflowUpdate_NotFound`
+   now uses the operator role (reviewer variant above). These are the two intentional contract
+   changes.
+6. **Actionable 409.** `TestWorkflow_OpenLifecycleRun_Returns409` (POST and PUT × active, pending,
+   paused, committing; `detail.run_id`/`branch_name`/`status`; starter not called),
+   `TestWorkflow_TerminalOrForeignRunsDoNotBlock`, `TestWorkflowUpdate_FailedRunDoesNotBlock`,
+   `TestWorkflow_OpenRunCheckFailure_Returns503` (the store error text is not echoed).
+7. **Workflow `write_context`.** `TestWorkflowWriteContext_Rules` (`{}`/`task_path` only → 400 for
+   reviewer and operator; another workflow's run, an artifact planning run, a standard run on the
+   workflow path → 400; `override` → 400; the draft assignee → 201/200 `proposed` on the run
+   branch), plus `TestF7_EmptyWriteContext_RefusedOnWorkflowEndpoints` and
+   `TestF7_WorkflowWriteContext_OtherWorkflowsRun_Refused` against a real repository.
+8. **Binding and freeze.** `TestAuthorizeRunBranchWrite_Matrix`: 14 run states × callers × all five
+   sinks (POST/PUT `/artifacts`, POST/PUT `/workflows` with `write_context`, `/artifacts/add`), 209
+   subtests; dev-mode nil actor in `TestAuthorizeRunBranchWrite_DevModeNilActor` (internal: no HTTP
+   request reaches a handler without a bearer); `…_NoAssigner503`,
+   `…_NonEngineBranchOperatorOnly`. Mutations: m1 (no operator freeze) and m2 (no binding, 33
+   foreign-caller rows) fail; dropping `StepTypeInternal` from `refadmit.FrozenStepType` fails the
+   operator/admin internal rows.
+9. **Workflow runs carry no artifacts.** `TestWorkflowRun_AcceptsNoArtifactWrites` (artifact
+   `write_context` and `/artifacts/add`, every role, also a dot-segment task path).
+10. **Regression file.** `service/internal/gateway/security_f7_p36_regression_test.go` (seven F7/P3-6
+    tests, two guards). Against a `git archive` export of `61994fe` with the file copied in
+    (`GOFLAGS=-mod=mod GOPROXY=off go test -count=1 -run 'TestF7_|TestP36_'
+    ./service/internal/gateway/`): the seven FAIL (reviewer update 200 `authoritative`; empty
+    `write_context` 200/201 committing to `main`; another workflow's run 201 `proposed`; mallory 201
+    into alice's branch; mallory 200 during review; mallory's `/artifacts/add` 201) and both guards
+    PASS. On the task branch all nine pass. The draft was adjusted: engine-shaped branch names
+    (Deviations 1) and a seeded parent for the `/artifacts/add` test, so it fails on `61994fe`
+    because mallory's add succeeds (not on a missing parent), plus an assignee control.
+11. **Existing tests.** Only `handlers_workflows_test.go` and `handlers_artifact_entry_deep_test.go`
+    change among existing gateway tests: the shared fixtures (`workflowPlanningStore`,
+    `planningFakeStore` model a run whose draft step is held by the test actor, with an
+    engine-shaped run id and a workflow projection) and the two rewrites of AC 5.
+    `TestArtifactUpdate_WithPlanningWriteContext`, the four `/artifacts/add` tests,
+    `TestWorkflow{Create,Update}_WithWriteContext_RoutesToBranch` and TASK-004's
+    `TestF5_Gateway_*` (which postdate the design) pass through the fixtures with no body change.
+    `TestWorkflowCreate_RoleDispatchTable` and `TestResolveWriteContext_PlanningRunNoTaskPath` are
+    untouched and green.
+12. **Wiring.** `TestBuildServerConfig_WiresWorkflowGovernance` (non-nil orchestrator-backed
+    `WFPlanningStarter`; reviewer non-bypass write to `main` 403 under the bootstrap rule; reviewer
+    bypass refused; operator bypass lands), `TestBuildWorkflowService_InstallsPolicy`,
+    `TestBuildServiceSet_WorkflowServiceHasPolicy_NoStore` and (integration)
+    `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy`; `TestServerStartup_NoUnwiredServices`
+    green. Mutations (policy not installed; single-mode starter not wired; pooled permissive policy
+    removed) each fail.
+13. **Scenario.** `TestWorkflowLifecycle_UpdateExisting` passes (`main` untouched until approval,
+    then `version: "1.1"`).
+14. **Documentation.** `api-operations.md` §3.1/§3.2/§3.3, `api/spec.yaml` (WorkflowPlanningResponse,
+    409/503, `write_mode`, WriteContext, `/artifacts/add` 403/409, `POST /runs`),
+    `access-surface.md`, `security-model.md` §7.3, ADR-008 §1 amendment note, `CHANGELOG.md`
+    section (stale "does not consult `branchprotect.Policy` yet" bullet corrected),
+    `KNOWN-LIMITATIONS.md`.
+15. **No regression.** Gates below. No migration, environment variable or event type added. SMP
+    gate below.
+16. **PoC parity** (overlays in the scratchpad mapping the audit files into this worktree;
+    nothing copied into the repository):
+    - `poc/verify-r1-12`: logs `injection did not reach main`; the attack PUT is refused with 409.
+    - `poc/standalone-service` `TestPOC_ContributorWritesIntoForeignRunBranch`: mallory's write gets
+      409.
+    - Both refusals read "branch is not an engine run branch": the PoC fixtures name the branch
+      `spine/run/alice-task-001`, whose suffix resolves to `run-001`, not the run asked for
+      (Deviations 1). With engine-shaped names the same attacks get 403 (foreign) / 409 (frozen)
+      in the committed regression tests.
+    - The F7 PoCs (`verify-r1-5`, `poc_reviewer_workflow_update`) no longer compile ("does not
+      implement gateway.WorkflowPlanningRunStarter (missing method
+      StartWorkflowUpdatePlanningRun)", Decision 6). With a scratch shim adding only that method
+      they report "PoC did not reproduce": 201 planning, `main` unchanged, `workflow_review` gate
+      kept.
+    - `_work/task014-check`: `ArtifactPathDotSegments` — every write 400, the branch's
+      `workflows/` holds only the seeded file; `RunStartPlanning` — 400, nothing forwarded;
+      `CreateExistingWorkflow` — see Deviations 4.
+17. **One producer.** `TestIsWorkflowTarget_Canonical` (internal), `TestInWorkflowsDir`,
+    `TestArtifactWrite_DotSegmentWorkflowPath_Refused` (real artifact service; `workflows/` tree
+    hash identical), `…_GuardStandsAlone` (recording fake: zero writes),
+    `TestRunStart_Planning_WorkflowTaskPath_Refused`, `TestStartPlanningRun_RefusesWorkflowPath`.
+    Mutations: the raw prefix test fails the dot-segment rows; removing the `handleRunStart` guard
+    fails the run-start test; removing the engine guard fails its test. SMP CreateEntry tests pass
+    (SMP gate).
+18. **Residuals** — see "Residuals" below; also in Out of scope, `KNOWN-LIMITATIONS.md` and the
+    CHANGELOG ("P3-6 is closed for writes by actors who do not hold the step; who may claim a step
+    is governed by TASK-007's step-entry policy").
+19. **F7 end to end.** TASK-007 is on `main`, so the scenario is in this task:
+    `TestWorkflowLifecycle_UpdateExisting_DraftAuthorCannotReview` passes under
+    `StrictStepEntryPolicy()` (the draft author's review claim is 403; a second reviewer approves;
+    `main` carries 1.1). With separation of duties switched off the refusal step fails. The clause
+    stays open under `SPINE_STEP_ENTRY_POLICY=legacy`.
+
+### Deviations and additions (with reasons)
+
+1. **The binding is TASK-016's predicate, called on the run's branch, and must resolve back to the
+   same run.** `authorizeRunBranchWrite` calls `refadmit.NewEvaluator(st).WithStepDefs(assigner)
+   .Decide(refs/heads/<run.BranchName>)` as TASK-016's notes ask. An allow counts only if it is
+   `bound_actor` on a `run_branch` that resolves to the run the request named; anything else (an
+   ordinary or reserved branch name, a name whose suffix names another run) is operator-only, 409
+   — fail closed for legacy or inconsistent rows. Engine-made names always carry the run's suffix,
+   so production is unaffected; test fixtures were made engine-shaped.
+2. **Refusal detail comes from the execution list, the decision from refadmit.** refadmit returns
+   one `not_bound` reason; `bindingRefusal` reads the latest run-level execution only to choose
+   the wire answer (409 waiting/unassigned with `detail.execution_id`, 409 no open execution, 403
+   otherwise; the holder is never named). A store error during authorization is 500 (as the
+   TASK-016 divergence handler); `ListRunsByTask` failure is 503 as designed.
+3. **`InWorkflowsDir` folds case** (Unicode `EqualFold` on the first component) in addition to
+   `path.Clean`, because a case-insensitive server filesystem aliases `Workflows/` onto
+   `workflows/` (the TASK-016 DC-1 reasoning). It only refuses more.
+4. **Engine test helper and the L1 probe.** `stubGitOperator.ReadFile` answers `(nil, nil)` — "the
+   file exists" — for every path, so the create pre-check (3b) would refuse every existing
+   `TestStartWorkflowPlanningRun_*` while AC 3 requires them unmodified. The shared helper
+   `workflowPlanningOrchestrator` now wraps the double (`absentWorkflowReads`: an empty read under
+   `workflows/` is git's not-found); test bodies are unchanged. Consequence: the probe
+   `TestT014Check_CreateExistingWorkflow_LeavesPendingRun` models "exists" only through the
+   writer's error, so it now exercises the writer-failure path and logs the run left `failed`
+   (terminal, which neither the 409 nor scheduler recovery counts), not `pending`; it no longer
+   fails the way AC 3 anticipated. The pre-check itself is pinned by
+   `TestStartWorkflowPlanningRun_ExistingID_RefusedBeforeAnyRun` with a git double that serves the
+   file (no `CreateRun`, no branch).
+5. **`POST /runs` guard is planning-only, as designed.** Standard `StartRun` is unchanged: the
+   gateway's I7 guard refuses artifact writes on such a run, and the 409 / workflow `write_context`
+   match only `Mode == planning`.
+6. **Q7 rule shape.** Author step types only (`isAuthorStepType`, the types push admission lets the
+   bound actor write). Prior holder: the actor still on the row (restart recovery), else the actor
+   of the *immediately preceding* attempt of the same step and branch if it completed (rework) —
+   codex round 1 — unless the execution itself was claimed and released since — codex round 2;
+   detected through ledger rows with deterministic ids (`claim-<exec>-<actor>`,
+   `auto-<exec>-<actor>`, `<exec>`) via the existing `GetAssignment` (no new store method). Retries
+   after a failed attempt and released steps stay claimable by others; `AssignStep` (operator) is
+   never restricted; the candidate listing hides refusals; ledger or list failures fail the claim
+   closed (503). Residual: a claim row left by an actor other than the candidate holder (possible
+   only before the policy was on) is not probed. `ReleaseStep` is unchanged.
+7. **Scenario body.** The AC 13/19 update uses a fresh validator-clean `task-spike` body: the
+   harness-seeded one fails `workflow.Validate` (status `Draft`, no required skill), which every
+   write path enforces.
+8. **Pooled-mode starter type assertion.** `ServiceSet.WFPlanningStarter` is untyped, so a missing
+   adapter method would have compiled and answered 503 for every pooled reviewer workflow write; a
+   compile-time assertion now pins the adapter to the widened interface.
+9. **Commit attribution.** Seven commits (`022c2d9`, `91bd17b`, `e4a2996`, `c4de89c`, `7f82e70`,
+   `fcad5bb`, `68c12ec`) end with only the `Co-Authored-By` line: a session-level attribution
+   instruction in force at that time omitted the `Claude-Session` line. The others carry both
+   lines. History was not rewritten (no rebase allowed).
+10. **Environment.** The shared PostgreSQL at `localhost:55630` was not running at gate time, so
+    every database gate ran on a private PostgreSQL 17.10 cluster in this task's scratchpad
+    (`127.0.0.1:55714`, scram, TCP only; no pgvector, which neither Spine nor SMP's platform and
+    Spine-runtime sets need), stopped and deleted afterwards; the shared server and other tasks'
+    instances were not touched. The scratchpad golangci-lint binary named in the task was absent;
+    `/opt/homebrew/bin/golangci-lint` 2.12.2 (the repo's v2 config) was used. The codex config's
+    model is refused by the account; reviews ran with `-c model="gpt-6-astra"`.
+
+### Residuals (AC 18), with owners
+
+- **Claim takeover of a waiting step** (§4 note, item 2) → TASK-007's step-entry policy. Closed
+  under the strict policy for reworked and restart-recovered author steps (`ReofferToPriorHolder`);
+  still open for a never-held first attempt (owner question 4: no auto-bind), for a step its holder
+  released (a deliberate hand-off), under `legacy`, and in the embedded zero value. Attributed in
+  every case.
+- **Time-of-check gap** (§4 note, item 3) → TASK-005's reviewed-SHA binding.
+- **Idle-run 409 hold** (§3.3 note) → operator recovery (cancel or bypass).
+- **F7 second-reviewer clause** → closed under `spine serve`'s strict policy (AC 19); open under
+  `legacy`.
+- **SMP's own API writes onto planning branches** (`AddToRun`, `WriteContent`) → SMP TASK-007 or a
+  new SMP task (§9).
+
+### Gates (commands and results, final code `8607765`)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` |
+| `make build` | ok |
+| `go build -o …/embed-smoketest ./cmd/embed-smoketest && …/embed-smoketest` | "library surface is sound" |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | all clean |
+| `go test -p 4 ./...` | exit 0 (40 packages ok) |
+| `go test -race -p 4 -count=1 ./core/workflow/ ./core/engine/ ./service/internal/gateway/ ./service/cmd/spine/ ./service/internal/workspace/` | all ok, no race |
+| `SPINE_TEST_DATABASE_URL=…/s014_integ go test -tags integration -count=1 -p 1` on the same five packages | all ok (after `8607765`) |
+| `go test -tags scenario -count=1 -p 1 -timeout 30m ./service/scenariotest/...` on HEAD (`s014_scen`) and on a `main` export (`s014_scenmain`) | 30 failures each, the identical set (the known pre-existing ones); none new |
+| CI scenario-git-http job: `-run '^TestGitHTTP_' -v` and `-run '^TestBootstrapInternalAdmin_' -v` | 20 pass (8 `TestGitHTTP_Push*`), 0 fail, 0 skip; both bootstrap scenarios pass, 0 skip |
+| `go test -tags scenario -run '^TestWorkflowLifecycle_' -v` | 4/4 pass |
+| `golangci-lint run --build-tags=integration,scenario` on the touched packages, HEAD vs a `main` export, normalised without positions | **0 new issues** (5 fewer: import-order fixes in touched files) |
+| `golangci-lint run --enable-only=gosec ./...` | HEAD 0 issues, `main` 0 issues |
+| `gofmt -l` on every changed `.go` file | clean |
+| regression file against `61994fe` (AC 10) | 7 FAIL, 2 guards PASS |
+| `codex review --base main` (plain) | round 1: one P2 (fixed `7f82e70`); round 2: one P2 (fixed `fcad5bb`); round 3: "No actionable regressions"; round 4 on the final code (`8607765`): "No actionable regressions were identified" (codex's own run of the service tests was blocked by its sandbox's port restrictions; they pass here, rows above) |
+
+### SMP compatibility gate
+
+SMP checkout `f5c6fd6d` (detached, no `vendor/`, no `tmp/`, `../spine` → this worktree), never
+modified (tree clean after every command):
+
+- `go build ./...`, `go vet ./...`, `go vet -tags integration ./...`: clean.
+- SMP packages importing a changed Spine package (`core/workflow`, `core/engine`; `go list` with test
+  imports, cross-checked by grep): `internal/customer/executionreadiness`, `spinecore`,
+  `spineembedded`; plus `internal/customer/workflow` (named by the design check). `go test -p 4
+  -count=1` on all four: ok.
+- Platform migrations: `go run ./dev/apply-migrations -set platform -dir migrations` → 115 versions;
+  Spine runtime: `go run ./dev/apply-migrations -set spine-runtime` → 26 versions.
+- CI integration job's Spine-runtime step: `go run ./dev/testgate -- -race -count=1 -timeout 10m
+  ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/
+  ./internal/customer/executionreadiness/` with `TEST_SPINE_DB`, `TEST_PLATFORM_DB`,
+  `TEST_PROVISIONING_DSN` (roles `platform`, `platform_audit_retention`, `smp_prov` provisioned as
+  in CI): **1835 tests passed, 0 failed**. testgate exits 1 only for two skips that are
+  macOS-specific (`TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch`:
+  "ru_maxrss in KiB is the Linux contract"); they run on CI's Linux runner and touch nothing this
+  task changes.
+- API impact for SMP: additive only (`workflow.Service.WithPolicy`/`WithDefaultRef`,
+  `workflow.ValidateID`/`FilePath`/`InWorkflowsDir`, `Orchestrator.StartWorkflowUpdatePlanningRun`,
+  `engine.WorkflowWriter.Update`, `StepEntryPolicy.ReofferToPriorHolder`). SMP neither implements
+  `engine.WorkflowWriter` nor calls `WithWorkflowWriter` or the step-entry policy; its
+  `StartPlanningRun` caller builds `.md` paths, so the new refusal is never reached; its workflow
+  service has no policy, so its actor-less bypass writes are byte-for-byte unchanged (I4).
+
+### Not run (with the exact command)
+
+- `make lint` over the whole repository: `golangci-lint run` was run on the touched packages
+  against `main` (0 new) and gosec-only over `./...`; the full run carries pre-existing issues on
+  `main`.
+- `make test-scenario` with default package parallelism: run as `go test -tags scenario -count=1
+  -p 1 ./service/scenariotest/...` (packages share one database).
+- SMP's other gated suites (the platform-DB suites, faultinject, githttp, dockerexec): not named by
+  this task's gate; they need MinIO/Docker images this host does not provide.
+- SMP TASK-012 still owes the end-to-end check that the admin `PUT /workflows/{id}` returns 200
+  `write_mode: bypass` with the trailer on origin (§9).
 
