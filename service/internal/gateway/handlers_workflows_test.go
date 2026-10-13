@@ -8,10 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/internal/gateway"
 )
 
 // ── Fake Workflow Service ──
@@ -209,10 +210,18 @@ func TestWorkflowCreate_ValidationFailed(t *testing.T) {
 	}
 }
 
-func TestWorkflowUpdate_Success(t *testing.T) {
+// TestWorkflowUpdate_OperatorNoWriteContext_Bypass and
+// TestWorkflowUpdate_ReviewerNoWriteContext_StartsPlanningRun replace
+// TestWorkflowUpdate_Success, which encoded audit F7 as success: a
+// reviewer's PUT without write_context committed straight to main (200,
+// write_mode authoritative). INIT-023 TASK-014 routes the reviewer to an
+// update lifecycle run (201 planning); the operator keeps the ADR-008
+// bypass (200, write_mode bypass, Workflow-Bypass trailer).
+func TestWorkflowUpdate_OperatorNoWriteContext_Bypass(t *testing.T) {
 	svc := newFakeWorkflowSvc()
 	svc.stored["task-default"] = &domain.WorkflowDefinition{ID: "task-default", Version: "1.0.0", Path: "workflows/task-default.yaml"}
-	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
+	planner := &fakeWFPlanningStarter{}
+	ts, tok := newWorkflowServerWithPlanning(t, svc, planner, domain.RoleOperator)
 	defer ts.Close()
 
 	resp := doWorkflowJSON(t, "PUT", ts.URL+"/api/v1/workflows/task-default", tok, `{"body":"new"}`)
@@ -221,15 +230,56 @@ func TestWorkflowUpdate_Success(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: %d", resp.StatusCode)
 	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["write_mode"] != "bypass" || out["workflow_bypass"] != true {
+		t.Errorf("operator update: write_mode=%v workflow_bypass=%v, want bypass/true", out["write_mode"], out["workflow_bypass"])
+	}
 	if svc.lastUpdateID != "task-default" {
 		t.Errorf("id forwarded: %q", svc.lastUpdateID)
 	}
+	if !svc.lastUpdateBypass {
+		t.Error("expected service ctx to be marked as bypass write")
+	}
+	if planner.lastUpdateID != "" || planner.lastID != "" {
+		t.Errorf("operator update must not open a planning run (update=%q create=%q)", planner.lastUpdateID, planner.lastID)
+	}
 }
 
+func TestWorkflowUpdate_ReviewerNoWriteContext_StartsPlanningRun(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	svc.stored["task-default"] = &domain.WorkflowDefinition{ID: "task-default", Version: "1.0.0", Path: "workflows/task-default.yaml"}
+	planner := &fakeWFPlanningStarter{}
+	ts, tok := newWorkflowServerWithPlanning(t, svc, planner, domain.RoleReviewer)
+	defer ts.Close()
+
+	resp := doWorkflowJSON(t, "PUT", ts.URL+"/api/v1/workflows/task-default", tok, `{"body":"new"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["write_mode"] != "planning" || out["run_id"] != "run-abc" || out["workflow_id"] != "task-default" ||
+		out["workflow_path"] != "workflows/task-default.yaml" || out["branch_name"] != "spine/plan/wf-abc" {
+		t.Errorf("planning body: %v", out)
+	}
+	if planner.lastUpdateID != "task-default" || planner.lastBody != "new" || planner.lastID != "" {
+		t.Errorf("update starter: id=%q body=%q (create id=%q)", planner.lastUpdateID, planner.lastBody, planner.lastID)
+	}
+	if svc.lastUpdateID != "" {
+		t.Errorf("direct svc.Update must not run for a reviewer, got id=%q", svc.lastUpdateID)
+	}
+}
+
+// TestWorkflowUpdate_NotFound now uses the operator role: the reviewer path
+// dispatches to the update starter (see
+// TestWorkflowUpdate_ReviewerStarterNotFound_Returns404 for its 404).
 func TestWorkflowUpdate_NotFound(t *testing.T) {
 	svc := newFakeWorkflowSvc()
 	svc.updateErr = domain.NewError(domain.ErrNotFound, "missing")
-	ts, tok := newWorkflowServer(t, svc, domain.RoleReviewer)
+	ts, tok := newWorkflowServer(t, svc, domain.RoleOperator)
 	defer ts.Close()
 
 	resp := doWorkflowJSON(t, "PUT", ts.URL+"/api/v1/workflows/missing", tok, `{"body":"x"}`)
@@ -237,6 +287,23 @@ func TestWorkflowUpdate_NotFound(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status: %d", resp.StatusCode)
+	}
+}
+
+func TestWorkflowUpdate_ReviewerStarterNotFound_Returns404(t *testing.T) {
+	svc := newFakeWorkflowSvc()
+	planner := &fakeWFPlanningStarter{updateErr: domain.NewError(domain.ErrNotFound, "workflow not found: workflows/missing.yaml")}
+	ts, tok := newWorkflowServerWithPlanning(t, svc, planner, domain.RoleReviewer)
+	defer ts.Close()
+
+	resp := doWorkflowJSON(t, "PUT", ts.URL+"/api/v1/workflows/missing", tok, `{"body":"x"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	if planner.lastUpdateID != "missing" || svc.lastUpdateID != "" {
+		t.Fatalf("starter id=%q svc id=%q", planner.lastUpdateID, svc.lastUpdateID)
 	}
 }
 
@@ -415,16 +482,33 @@ func TestWorkflow_ListServiceError(t *testing.T) {
 	}
 }
 
-// fakeWFPlanningStarter captures StartWorkflowPlanningRun calls for tests.
+// fakeWFPlanningStarter captures StartWorkflowPlanningRun and
+// StartWorkflowUpdatePlanningRun calls for tests.
 type fakeWFPlanningStarter struct {
-	lastID   string
-	lastBody string
-	result   *gateway.PlanningRunResult
-	err      error
+	lastID       string
+	lastBody     string
+	lastUpdateID string
+	updateErr    error
+	result       *gateway.PlanningRunResult
+	err          error
+}
+
+// StartWorkflowUpdatePlanningRun satisfies the widened starter (INIT-023
+// TASK-014): reviewer PUT /workflows/{id} opens an update lifecycle run.
+func (f *fakeWFPlanningStarter) StartWorkflowUpdatePlanningRun(ctx context.Context, id, body string) (*gateway.PlanningRunResult, error) {
+	f.lastUpdateID = id
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	return f.startResult(id, body)
 }
 
 func (f *fakeWFPlanningStarter) StartWorkflowPlanningRun(_ context.Context, id, body string) (*gateway.PlanningRunResult, error) {
 	f.lastID = id
+	return f.startResult(id, body)
+}
+
+func (f *fakeWFPlanningStarter) startResult(id, body string) (*gateway.PlanningRunResult, error) {
 	f.lastBody = body
 	if f.err != nil {
 		return nil, f.err
@@ -447,18 +531,36 @@ func (f *fakeWFPlanningStarter) StartWorkflowPlanningRun(_ context.Context, id, 
 // workflowPlanningStore returns a planning-mode Active run from GetRun so that
 // resolveWriteContext routes writes to the run's branch without requiring a
 // task_path (the workflow lifecycle is a planning flow per ADR-006/008).
+//
+// INIT-023 TASK-014: the run is the lifecycle run that governs
+// workflows/task-default.yaml (a workflow write_context must name the
+// workflow's own lifecycle run), it is the run its branch belongs to
+// (spine/run/wf-42 ↔ run-42, whatever run_id was asked for), its draft step
+// is held by actor-1, and its workflow declares draft as a manual step
+// (run_branch_fixtures_test.go).
 type workflowPlanningStore struct {
 	fakeStore
 	branch string
 }
 
-func (s *workflowPlanningStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
+func (s *workflowPlanningStore) GetRun(_ context.Context, _ string) (*domain.Run, error) {
 	return &domain.Run{
-		RunID:      runID,
-		Status:     domain.RunStatusActive,
-		Mode:       domain.RunModePlanning,
-		BranchName: s.branch,
+		RunID:         runIDOfBranch(s.branch),
+		Status:        domain.RunStatusActive,
+		Mode:          domain.RunModePlanning,
+		BranchName:    s.branch,
+		TaskPath:      "workflows/task-default.yaml",
+		CurrentStepID: "draft",
+		WorkflowPath:  fixtureWorkflowPath,
 	}, nil
+}
+
+func (s *workflowPlanningStore) ListStepExecutionsByRun(_ context.Context, runID string) ([]domain.StepExecution, error) {
+	return stepHeldBy(runID, "draft", "actor-1"), nil
+}
+
+func (s *workflowPlanningStore) GetWorkflowProjection(_ context.Context, _ string) (*store.WorkflowProjection, error) {
+	return fixtureWorkflowProjection(), nil
 }
 
 func newWorkflowServerWithStore(t *testing.T, svc gateway.WorkflowService, store *workflowPlanningStore, role domain.ActorRole) (*httptest.Server, string) {

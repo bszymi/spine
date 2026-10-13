@@ -94,8 +94,24 @@ type workflowPlanningRunAdapter struct {
 	orch *engine.Orchestrator
 }
 
+// The pooled path stores the adapter in workspace.ServiceSet's untyped
+// WFPlanningStarter field and the gateway type-asserts it per request, so a
+// missing method would compile and then answer 503 for every reviewer
+// workflow write. Assert the interface here (INIT-023 TASK-014).
+var _ gateway.WorkflowPlanningRunStarter = (*workflowPlanningRunAdapter)(nil)
+
 func (a *workflowPlanningRunAdapter) StartWorkflowPlanningRun(ctx context.Context, workflowID, body string) (*gateway.PlanningRunResult, error) {
 	result, err := a.orch.StartWorkflowPlanningRun(ctx, workflowID, body)
+	if err != nil {
+		return nil, err
+	}
+	return planningRunResult(result), nil
+}
+
+// StartWorkflowUpdatePlanningRun opens the lifecycle run for an edit of an
+// existing workflow (INIT-023 TASK-014, audit F7).
+func (a *workflowPlanningRunAdapter) StartWorkflowUpdatePlanningRun(ctx context.Context, workflowID, body string) (*gateway.PlanningRunResult, error) {
+	result, err := a.orch.StartWorkflowUpdatePlanningRun(ctx, workflowID, body)
 	if err != nil {
 		return nil, err
 	}

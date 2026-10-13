@@ -67,6 +67,18 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	// Until that is implemented, planning requests are blocked to avoid creating
 	// runs that bind to execution workflows and immediately stall.
 	if req.Mode == "planning" {
+		// One producer of workflow task paths (INIT-023 TASK-014 I9, V4):
+		// a generic planning run must never carry workflows/<id>.yaml (any
+		// spelling). Such a run would merge its Markdown into workflows/
+		// under its own creation workflow's review, and its run.TaskPath is
+		// the key the one-open-lifecycle-run 409 and the workflow
+		// write_context binding trust — a contributor could lock any
+		// workflow against governed edits. Refused before the starter is
+		// called; the engine's StartPlanningRun refuses it too.
+		if isWorkflowTarget(req.TaskPath) {
+			WriteError(w, workflowRejection("create"))
+			return
+		}
 		prs := s.planningRunStarterFrom(r.Context())
 		if prs == nil {
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "planning run starter not configured"))
