@@ -96,6 +96,18 @@ func TestStepEntry_ReofferToPriorHolder(t *testing.T) {
 			t.Fatalf("retry claim by another actor: %v", err)
 		}
 	})
+	t.Run("a retry after a failed rework attempt is not re-offered to an older holder", func(t *testing.T) {
+		// codex review round 1: attempt 1 completed, rework attempt 2
+		// failed, RetryStep created attempt 3. The latest preceding attempt
+		// (2) failed, so nobody is re-offered the retry.
+		f := newSoDFixture(on,
+			reofferExec("run-1-execute-1", "execute", 1, domain.StepStatusCompleted, "member-1"),
+			reofferExec("run-1-execute-2", "execute", 2, domain.StepStatusFailed, "member-2"),
+			reofferExec("run-1-execute-3", "execute", 3, domain.StepStatusWaiting, ""))
+		if err := claim(t, f, "run-1-execute-3", "member-3"); err != nil {
+			t.Fatalf("retry claim by a third actor: %v", err)
+		}
+	})
 	t.Run("the latest completed attempt wins", func(t *testing.T) {
 		f := newSoDFixture(on,
 			reofferExec("run-1-execute-1", "execute", 1, domain.StepStatusCompleted, "member-1"),

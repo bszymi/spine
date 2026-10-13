@@ -80,9 +80,10 @@ type StepEntryPolicy struct {
 	//
 	//   - the actor still named on the execution being claimed — a waiting
 	//     row reset by scheduler restart recovery keeps its actor_id; or
-	//   - otherwise the actor of the latest earlier attempt of the same step
-	//     on the same branch that completed — a needs_rework loop creates a
-	//     new, unbound attempt of the author step.
+	//   - otherwise the actor of the immediately preceding attempt of the
+	//     same step on the same branch, if that attempt completed — a
+	//     needs_rework loop creates a new, unbound attempt of the author
+	//     step.
 	//
 	// A step never held in this run (a first attempt — owner question 4: no
 	// auto-bind at run start) stays claimable by any eligible actor, as
@@ -492,26 +493,31 @@ func priorHolderRefusal(run *domain.Run, stepDef *domain.StepDefinition, exec *d
 
 // priorHolder returns the actor a claimable execution is re-offered to, or
 // "" when it was never held in this run (see ReofferToPriorHolder): the
-// actor still named on the execution, else the actor of the highest
-// earlier attempt of the same step on the same branch that completed.
+// actor still named on the execution, else the actor of the immediately
+// preceding attempt of the same step on the same branch — only if that
+// attempt completed. The latest preceding attempt is chosen first and its
+// status judged afterwards (codex review round 1): a retry after a failed
+// rework attempt is not re-offered, even when an older attempt completed,
+// so an older completion cannot reinstate ownership across a failure.
 func priorHolder(exec *domain.StepExecution, execs []domain.StepExecution) string {
 	if exec.ActorID != "" {
 		return exec.ActorID
 	}
-	holder, best := "", 0
+	var prev *domain.StepExecution
 	for i := range execs {
 		e := &execs[i]
-		if e.ExecutionID == exec.ExecutionID || e.StepID != exec.StepID || e.BranchID != exec.BranchID {
+		if e.ExecutionID == exec.ExecutionID || e.StepID != exec.StepID || e.BranchID != exec.BranchID ||
+			e.Attempt >= exec.Attempt {
 			continue
 		}
-		if e.Status != domain.StepStatusCompleted || e.ActorID == "" || e.Attempt >= exec.Attempt {
-			continue
-		}
-		if e.Attempt > best {
-			holder, best = e.ActorID, e.Attempt
+		if prev == nil || e.Attempt > prev.Attempt {
+			prev = e
 		}
 	}
-	return holder
+	if prev == nil || prev.Status != domain.StepStatusCompleted {
+		return ""
+	}
+	return prev.ActorID
 }
 
 // assignmentHistory is the optional ledger read behind the separation-of-

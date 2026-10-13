@@ -138,7 +138,8 @@ This document tracks known gaps and deferred functionality.
     step is re-offered only to its prior holder (`ReofferToPriorHolder`); under `legacy` and in
     the embedded zero value it is open too. A step its holder **released** has no prior holder on
     the row, so it is claimable by others (release is the holder's own hand-off; it stays
-    attributed through the cancelled claim row). A retry of a failed attempt is not re-offered.
+    attributed through the cancelled claim row). A retry whose preceding attempt failed is not
+    re-offered.
   - **Time-of-check gap.** The run and its executions are read once, before the write. Only the
     bound actor passes, so the gap is that actor racing their own `step.submit` with a write (one
     request's duration). Binding the governed merge to the reviewed commit (INIT-023 TASK-005) is
