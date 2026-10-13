@@ -59,6 +59,13 @@ func TestRedactCloneURL_UnparsableValueRedacted(t *testing.T) {
 		" https://user:tok@github.com/a.git": " https://github.com/a.git",
 		"https://user:tok@[::1/a.git":        "https://[::1/a.git",
 		"not a url at all":                   "not a url at all",
+		// Codex review (P2): a credential with an unescaped delimiter.
+		"https://user:sec?ret@host/repo.git": "https://host/repo.git",
+		"https://user:sec#ret@host/repo.git": "https://host/repo.git",
+		"https://user:se/cret@host/repo.git": "https://host/repo.git",
+		"https://user:sec ret@host/repo.git": "https://host/repo.git",
+		"user:sec ret@host:repo.git":         "host:repo.git",
+		"https:user:tok@host/repo.git":       "host/repo.git",
 	} {
 		if got := repository.RedactCloneURL(raw); got != want {
 			t.Errorf("%q -> %q, want %q", raw, got, want)

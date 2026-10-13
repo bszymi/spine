@@ -110,9 +110,11 @@ func ValidateCloneURL(raw string) error {
 //     password. A bare user of an ssh URL (ssh://git@host/...,
 //     git+ssh://git@host/...) is the SSH login, not a credential, and
 //     is kept; so is the SCP-like form (user@host:path).
-//   - a value url.Parse refuses (only reachable for a row stored before
-//     ValidateCloneURL existed) loses everything before the last '@' of
-//     its authority, so a parse failure never echoes a credential.
+//   - a value url.Parse refuses, or an opaque one with an '@' (only
+//     reachable for a row stored before ValidateCloneURL existed), loses
+//     everything between its "://" (or its start) and its last '@', so
+//     it never echoes a credential, even one holding an unescaped '/',
+//     '?' or '#'.
 //
 // Operators often embed deploy tokens directly in HTTPS clone URLs, so
 // any code that surfaces such a URL must run it through this first.
@@ -121,7 +123,9 @@ func RedactCloneURL(raw string) string {
 		return raw
 	}
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || strings.Contains(u.Opaque, "@") {
+		// Unparsable, or an opaque form ("scheme:user:pw@host:path") whose
+		// userinfo url.Parse does not split out: fail closed.
 		return redactUnparsedUserinfo(raw)
 	}
 	if u.User == nil {
@@ -135,22 +139,21 @@ func RedactCloneURL(raw string) string {
 	return u.String()
 }
 
-// redactUnparsedUserinfo strips the userinfo of a "scheme://authority"
-// string url.Parse could not parse: everything between "://" and the
-// last '@' before the path, query or fragment. A string without "://" is
-// returned unchanged.
+// redactUnparsedUserinfo strips the userinfo of a clone URL url.Parse
+// could not parse. Such a value is malformed, so the authority's end
+// cannot be trusted: a legacy credential may hold an unescaped '/', '?'
+// or '#' (https://user:sec?ret@host/...). Everything between the
+// "://" (or the start of the value) and the LAST '@' is removed, which
+// can over-redact a malformed value with an '@' in its path but never
+// leaves a credential in place: userinfo always precedes an '@'. A
+// value without '@' is returned unchanged.
 func redactUnparsedUserinfo(raw string) string {
-	i := strings.Index(raw, "://")
-	if i < 0 {
-		return raw
+	prefix, rest := "", raw
+	if i := strings.Index(raw, "://"); i >= 0 {
+		prefix, rest = raw[:i+3], raw[i+3:]
 	}
-	rest := raw[i+3:]
-	end := strings.IndexAny(rest, "/?#")
-	if end < 0 {
-		end = len(rest)
-	}
-	if at := strings.LastIndex(rest[:end], "@"); at >= 0 {
-		return raw[:i+3] + rest[at+1:]
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		return prefix + rest[at+1:]
 	}
 	return raw
 }
