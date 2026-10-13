@@ -83,17 +83,16 @@ type StepEntryPolicy struct {
 	//   - otherwise the actor of the immediately preceding attempt of the
 	//     same step on the same branch, if that attempt completed — a
 	//     needs_rework loop creates a new, unbound attempt of the author
-	//     step.
+	//     step — unless this attempt itself was claimed and released since.
 	//
 	// A step never held in this run (a first attempt — owner question 4: no
 	// auto-bind at run start) stays claimable by any eligible actor, as
 	// does a retry of a failed attempt (a failed holder is not re-offered
 	// the work). AssignStep (step.assign, operator) is never restricted:
 	// "re-offered to the prior holder unless an operator assigns". The
-	// candidate listing hides what the claim would refuse. Releasing a step
-	// blanks its actor (ReleaseStep), so a first-attempt step its holder
+	// candidate listing hides what the claim would refuse. A step its holder
 	// released is claimable by others — release is the holder's own
-	// hand-off; it stays attributed through the cancelled claim row.
+	// hand-off, and it stays attributed through the cancelled claim row.
 	ReofferToPriorHolder bool
 	// TerminateStepsOnCancel (P3-16): CancelRun, FailRun, the permanent
 	// merge failure and the scheduler's run-timeout hook move every live
@@ -471,17 +470,21 @@ func (o *Orchestrator) checkPriorHolder(ctx context.Context, run *domain.Run, st
 	if err != nil {
 		return domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot list the run's executions", err)
 	}
-	return priorHolderRefusal(run, stepDef, exec, actorID, execs)
+	return o.priorHolderRefusal(ctx, run, stepDef, exec, actorID, execs)
 }
 
 // priorHolderRefusal is check 6b over an already-read execution list (the
-// candidate listing reads it once per run).
-func priorHolderRefusal(run *domain.Run, stepDef *domain.StepDefinition, exec *domain.StepExecution,
-	actorID string, execs []domain.StepExecution) error {
+// candidate listing reads it once per run): nil, ErrForbidden, or
+// ErrUnavailable when the assignment ledger cannot be read.
+func (o *Orchestrator) priorHolderRefusal(ctx context.Context, run *domain.Run, stepDef *domain.StepDefinition,
+	exec *domain.StepExecution, actorID string, execs []domain.StepExecution) error {
 	if !isAuthorStepType(stepDef.Type) {
 		return nil
 	}
-	holder := priorHolder(exec, execs)
+	holder, err := o.priorHolder(ctx, exec, execs)
+	if err != nil {
+		return err
+	}
 	if holder == "" || holder == actorID {
 		return nil
 	}
@@ -492,16 +495,22 @@ func priorHolderRefusal(run *domain.Run, stepDef *domain.StepDefinition, exec *d
 }
 
 // priorHolder returns the actor a claimable execution is re-offered to, or
-// "" when it was never held in this run (see ReofferToPriorHolder): the
-// actor still named on the execution, else the actor of the immediately
-// preceding attempt of the same step on the same branch — only if that
-// attempt completed. The latest preceding attempt is chosen first and its
-// status judged afterwards (codex review round 1): a retry after a failed
-// rework attempt is not re-offered, even when an older attempt completed,
-// so an older completion cannot reinstate ownership across a failure.
-func priorHolder(exec *domain.StepExecution, execs []domain.StepExecution) string {
+// "" when it has none (see ReofferToPriorHolder):
+//
+//  1. the actor still named on the execution (restart recovery keeps it);
+//  2. else the actor of the immediately preceding attempt of the same step
+//     on the same branch, only if that attempt completed — the latest
+//     preceding attempt is chosen first and judged afterwards (codex
+//     review round 1), so an older completion cannot reinstate ownership
+//     across a failed retry;
+//  3. but not when this execution itself was held and released since
+//     (codex review round 2): ReleaseStep blanks the row's actor, so a
+//     released rework attempt looks like a fresh one. A release is the
+//     holder's own hand-off and leaves the step claimable by others, as it
+//     does for a first attempt (releasedSince).
+func (o *Orchestrator) priorHolder(ctx context.Context, exec *domain.StepExecution, execs []domain.StepExecution) (string, error) {
 	if exec.ActorID != "" {
-		return exec.ActorID
+		return exec.ActorID, nil
 	}
 	var prev *domain.StepExecution
 	for i := range execs {
@@ -514,10 +523,50 @@ func priorHolder(exec *domain.StepExecution, execs []domain.StepExecution) strin
 			prev = e
 		}
 	}
-	if prev == nil || prev.Status != domain.StepStatusCompleted {
-		return ""
+	if prev == nil || prev.Status != domain.StepStatusCompleted || prev.ActorID == "" {
+		return "", nil
 	}
-	return prev.ActorID
+	released, err := o.releasedSince(ctx, exec, prev.ActorID)
+	if err != nil {
+		return "", err
+	}
+	if released {
+		return "", nil
+	}
+	return prev.ActorID, nil
+}
+
+// releasedSince reports whether exec — claimable, with no actor — was
+// bound and then released, judged from the assignment ledger rows the
+// engine writes with deterministic ids: ClaimStep's
+// claim-<execution>-<actor> and ActivateStep's auto-<execution>-<actor>
+// for the candidate holder (under this policy the only actor who can claim
+// the attempt), and TrackAssignment's <execution> for any actor. It reads
+// with GetAssignment only, so no store method is added. With no ledger
+// wired, ReleaseStep is unavailable, so nothing was released. A ledger
+// read other than not-found is ErrUnavailable (fail closed).
+func (o *Orchestrator) releasedSince(ctx context.Context, exec *domain.StepExecution, holder string) (bool, error) {
+	if o.assignments == nil {
+		return false, nil
+	}
+	for _, id := range []string{
+		"claim-" + exec.ExecutionID + "-" + holder,
+		"auto-" + exec.ExecutionID + "-" + holder,
+		exec.ExecutionID,
+	} {
+		a, err := o.assignments.GetAssignment(ctx, id)
+		if err != nil {
+			var se *domain.SpineError
+			if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+				continue
+			}
+			return false, domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot read the assignment ledger", err)
+		}
+		if a != nil && a.ExecutionID == exec.ExecutionID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // assignmentHistory is the optional ledger read behind the separation-of-

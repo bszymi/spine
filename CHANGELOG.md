@@ -40,7 +40,8 @@ release is cut — this file is a staging area.
   `spine serve` default): a waiting author step that was held before in its run — after a
   `needs_rework` loop, or a restart-recovered row that still names its actor — can be claimed only
   by that prior holder; an operator can still assign it to anyone. Without it a contributor could
-  claim a colleague's reworked draft and then write the branch as its bound actor.
+  claim a colleague's reworked draft and then write the branch as its bound actor. A step its
+  holder released stays claimable by others; a retry after a failed attempt is not re-offered.
 - **Workflow definitions have one producer (design-check V3, V4).** The artifact endpoints'
   workflow-path guard was a raw prefix test, so `./workflows/x`, `governance/../workflows/x` and
   `workflows//x` reached `workflows/` on a run branch (and `PUT /artifacts/./workflows/<id>.yaml`

@@ -248,5 +248,7 @@ func (o *Orchestrator) reofferHidesCandidate(ctx context.Context, run *domain.Ru
 		}
 		runExecs[run.RunID] = execs
 	}
-	return priorHolderRefusal(run, stepDef, exec, actorID, execs) != nil
+	var se *domain.SpineError
+	err = o.priorHolderRefusal(ctx, run, stepDef, exec, actorID, execs)
+	return errors.As(err, &se) && se.Code == domain.ErrForbidden
 }

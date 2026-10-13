@@ -136,6 +136,30 @@ func TestStepEntry_ReofferToPriorHolder(t *testing.T) {
 			t.Fatalf("claim on another branch: %v", err)
 		}
 	})
+	t.Run("a released rework attempt is handed off, not re-offered", func(t *testing.T) {
+		// codex review round 2: claim → release → claim by another actor
+		// on attempt 2. ReleaseStep blanks the row's actor; the cancelled
+		// claim row shows the attempt was held and released.
+		f := newSoDFixture(on, reworkExecs()...)
+		res, err := f.orch.ClaimStep(ctx, ClaimRequest{ActorID: "member-1", ExecutionID: "run-1-execute-2"})
+		if err != nil {
+			t.Fatalf("prior holder claims the rework: %v", err)
+		}
+		if err := f.orch.ReleaseStep(ctx, ReleaseRequest{ActorID: "member-1", AssignmentID: res.Assignment.AssignmentID, Reason: "hand-off"}); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+		if e := execByID(f.st, "run-1-execute-2"); e.Status != domain.StepStatusWaiting || e.ActorID != "" {
+			t.Fatalf("after release: %s %q", e.Status, e.ActorID)
+		}
+		if err := claim(t, f, "run-1-execute-2", "member-2"); err != nil {
+			t.Fatalf("another actor claims the released rework: %v", err)
+		}
+	})
+	t.Run("an unreadable assignment ledger fails closed", func(t *testing.T) {
+		f := newSoDFixture(on, reworkExecs()...)
+		f.orch.assignments = failingGetAssignments{f.as}
+		requireCode(t, claim(t, f, "run-1-execute-2", "member-2"), domain.ErrUnavailable, "ledger failure")
+	})
 	t.Run("an unreadable execution list fails closed", func(t *testing.T) {
 		f := newSoDFixture(on, reworkExecs()...)
 		f.orch.store = &listFailingRunStore{mockRunStore: f.st}
@@ -147,6 +171,13 @@ func TestStepEntry_ReofferToPriorHolder(t *testing.T) {
 			t.Fatalf("zero value: %v", err)
 		}
 	})
+}
+
+// failingGetAssignments fails GetAssignment only.
+type failingGetAssignments struct{ *memAssignmentStore }
+
+func (f failingGetAssignments) GetAssignment(context.Context, string) (*domain.Assignment, error) {
+	return nil, errors.New("ledger down")
 }
 
 // listFailingRunStore fails ListStepExecutionsByRun only.
