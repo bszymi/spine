@@ -44,13 +44,18 @@ func TestP330_GuardGitHTTPDevNoAuth(t *testing.T) {
 
 func TestP330_GitHTTPDevNoAuthEnabled(t *testing.T) {
 	for raw, want := range map[string]bool{
-		"1": true, "true": true, "TRUE": true, " on ": true, "yes": true, "Yes": true,
+		"1": true, "true": true, "TRUE": true, "on": true, "yes": true, "Yes": true,
 		"0": false, "": false, "false": false, "off": false, "maybe": false,
 	} {
 		t.Setenv("SPINE_GIT_HTTP_DEV_NO_AUTH", raw)
 		if got := gitHTTPDevNoAuthEnabled(); got != want {
 			t.Errorf("%q: got %v want %v", raw, got, want)
 		}
+	}
+	// Surrounding whitespace is ignored.
+	t.Setenv("SPINE_GIT_HTTP_DEV_NO_AUTH", "\ton \n")
+	if !gitHTTPDevNoAuthEnabled() {
+		t.Error("a padded affirmative value must be accepted")
 	}
 }
 

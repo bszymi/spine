@@ -236,7 +236,7 @@ func TestP330_RateLimitClientIP_ReadsAllForwardedLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "10.0.0.2:5555"
 	req.Header.Add("X-Forwarded-For", "1.2.3.4")     // client-forged
 	req.Header.Add("X-Forwarded-For", "203.0.113.9") // added by the proxy
@@ -256,7 +256,7 @@ func TestP330_RateLimitClientIP_ReadsAllForwardedLines(t *testing.T) {
 		{"198.51.100.7:1", []string{"1.2.3.4"}, "198.51.100.7"},
 		{"10.0.0.2:1", []string{"garbage, 203.0.113.9"}, "203.0.113.9"},
 	} {
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 		r.RemoteAddr = tc.remote
 		for _, v := range tc.xff {
 			r.Header.Add("X-Forwarded-For", v)

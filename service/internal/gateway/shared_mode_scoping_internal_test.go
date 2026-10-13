@@ -56,7 +56,7 @@ func TestP329_Metrics_SharedModeShowsOnlyCallerWorkspace(t *testing.T) {
 	observe.GlobalMetrics.RunsStarted.Inc()
 	s := t015SharedServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/metrics", nil).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/metrics", http.NoBody).
 		WithContext(t015Ctx("t015-ws-a", domain.RoleOperator, "op"))
 	w := httptest.NewRecorder()
 	s.handleMetrics(w, req)
@@ -79,7 +79,7 @@ func TestP329_Metrics_SharedModeShowsOnlyCallerWorkspace(t *testing.T) {
 
 	// No resolved workspace in shared mode fails closed instead of
 	// falling back to the full export.
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/system/metrics", nil).
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/system/metrics", http.NoBody).
 		WithContext(t015Ctx("", domain.RoleOperator, "op"))
 	w = httptest.NewRecorder()
 	s.handleMetrics(w, req)
@@ -99,7 +99,7 @@ func TestP329_Metrics_SingleModeUnchanged(t *testing.T) {
 		matched := false
 		for attempt := 0; attempt < 5 && !matched; attempt++ {
 			before := observe.ExportPrometheus()
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/system/metrics", nil).
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/system/metrics", http.NoBody).
 				WithContext(t015Ctx(ws, domain.RoleOperator, "op"))
 			w := httptest.NewRecorder()
 			s.handleMetrics(w, req)
@@ -129,7 +129,7 @@ func TestP329_PlatformMetrics_OperatorTokenOnly(t *testing.T) {
 	defer ts.Close()
 
 	get := func(bearer string) (int, string) {
-		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/platform/metrics", nil)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/platform/metrics", http.NoBody)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -184,7 +184,7 @@ func (p *t015ProjSync) FullRebuild(context.Context) error {
 func t015RebuildStatus(s *Server, ctx context.Context, id string) (int, map[string]any) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("rebuild_id", id)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/rebuild/"+id, nil).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/rebuild/"+id, http.NoBody).
 		WithContext(context.WithValue(ctx, chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
 	s.handleSystemRebuildStatus(w, req)
@@ -195,7 +195,7 @@ func t015RebuildStatus(s *Server, ctx context.Context, id string) (int, map[stri
 
 func t015StartRebuild(t *testing.T, s *Server, ctx context.Context) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/rebuild", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/rebuild", http.NoBody).WithContext(ctx)
 	w := httptest.NewRecorder()
 	s.handleSystemRebuild(w, req)
 	if w.Code != http.StatusAccepted {
@@ -270,7 +270,7 @@ func TestP329_SSELimiter_KeyedPerWorkspace(t *testing.T) {
 	}
 	open := func(ws string) stream {
 		ctx, cancel := context.WithCancel(t015Ctx(ws, domain.RoleReader, "smp-admin"))
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", nil).WithContext(ctx)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", http.NoBody).WithContext(ctx)
 		st := stream{w: httptest.NewRecorder(), cancel: cancel, done: make(chan struct{})}
 		go func() { s.handleEventStream(st.w, req); close(st.done) }()
 		return st

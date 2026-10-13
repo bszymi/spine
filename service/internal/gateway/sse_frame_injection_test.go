@@ -134,7 +134,7 @@ type sseStream struct {
 func openSSE(t *testing.T, url, token, lastEventID string) *sseStream {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/api/v1/events/stream", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/api/v1/events/stream", http.NoBody)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
@@ -227,7 +227,7 @@ func waitSubscribed(t *testing.T, s *sseStream, bcast *delivery.EventBroadcaster
 // stream: exactly the two test events, the unsafe event's JSON intact,
 // no forged run_completed frame, the client's last event ID never the
 // injected value, and the safe event still setting its ID.
-func assertNoInjection(t *testing.T, raw string, unicodeLines bool, evilID string, wantFirstType string, check func(t *testing.T, data string)) {
+func assertNoInjection(t *testing.T, raw string, unicodeLines bool, evilID, wantFirstType string, check func(t *testing.T, data string)) {
 	t.Helper()
 	got := parseSSE(raw, unicodeLines)
 	if len(got) != 2 {

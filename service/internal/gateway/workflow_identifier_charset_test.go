@@ -51,7 +51,8 @@ func decodeIdentifierErrors(t *testing.T, resp *http.Response) []string {
 	}
 	var fields []string
 	for _, e := range out.Errors {
-		for _, d := range e.Detail {
+		for i := range e.Detail {
+			d := &e.Detail[i]
 			if strings.Contains(d.Message, "\n") {
 				t.Errorf("error message carries a raw newline: %q", d.Message)
 			}
