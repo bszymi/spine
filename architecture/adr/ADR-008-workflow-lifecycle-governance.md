@@ -39,6 +39,14 @@ Every `workflow.create` / `workflow.update` from a reviewer flows through a plan
 
 This reuses the planning-run orchestrator, `write_context` resolution, and merge-on-completion machinery already built for ADR-006. No new edit protocol is introduced.
 
+> **Amended by INIT-023 TASK-014 (2026-10, audit F7 and P3-6).** The implementation had drifted from this section: a reviewer's `workflow.update` without `write_context` committed straight to the authoritative branch, `write_context: {}` did the same on create and update, a workflow `write_context` could name any planning run, and any contributor could write into another actor's run branch. Now:
+>
+> - **Updates open their own lifecycle run.** A reviewer's `workflow.update` without `write_context` starts an *update* planning run under `workflow-lifecycle` (same run shape as create; the body is written on the branch with the workflow writer's update and must bump the version). A missing workflow, an unchanged version or an invalid id is refused before any branch or Run exists; a create of an id that already exists is refused the same way.
+> - **One open lifecycle run per workflow.** While a non-terminal lifecycle run governs `workflows/<id>.yaml`, a reviewer create or update of that id answers `409` naming the run. A failed start leaves its Run `failed`, never `pending`, so it never holds the id.
+> - **A workflow `write_context` binds to that workflow's lifecycle run and to its draft assignee.** `run_id` is required; the run must be the planning run whose task path is `workflows/<id>.yaml`; the caller must hold its current step (or be an operator). Only the lifecycle starters can create a Run on a workflow path.
+> - **The branch is frozen during review.** While the run's current step is a `review` (or engine `internal`) step, no API write lands on its branch, for any role.
+> - Workflow writes are evaluated by branch protection ([ADR-009](/architecture/adr/ADR-009-branch-protection.md)); the §5 bypass requires an operator-or-above actor.
+
 ### 2. Approval Merges the Branch
 
 `workflow-lifecycle.yaml` has two steps:

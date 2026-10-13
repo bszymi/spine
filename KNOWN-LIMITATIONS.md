@@ -123,6 +123,41 @@ This document tracks known gaps and deferred functionality.
   matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
   below.
 
+### Run-Branch API Writes and Workflow Governance: What INIT-023 TASK-014 Leaves Open
+- On the standalone gateway, an API write onto a run branch (`write_context` with a `run_id`,
+  `POST /artifacts/add`) is accepted only from the actor bound to the run's current step or an
+  operator, never during a `review`/`internal` step; reviewer workflow writes go through a
+  `workflow-lifecycle` run; `workflow.Service` consults branch protection (audit F7, P3-6). Limits:
+  - **Claiming a never-held step is open.** The binding follows whoever holds the step. A step
+    that was never held in its run (the first attempt — the `draft` step right after a planning or
+    workflow run starts, owner question 4: no auto-bind at start) can be claimed by any eligible
+    actor, who can then write the branch as its bound actor. That takeover is attributed
+    (`step_executions.actor_id`, the claim row, a `step_assigned` event), the starter is locked
+    out, and the content still has to pass a frozen review that, under the strict step-entry
+    policy, its author cannot claim. Under that policy a *reworked* or restart-recovered author
+    step is re-offered only to its prior holder (`ReofferToPriorHolder`); under `legacy` and in
+    the embedded zero value it is open too. A step its holder **released** has no prior holder on
+    the row, so it is claimable by others (release is the holder's own hand-off; it stays
+    attributed through the cancelled claim row). A retry of a failed attempt is not re-offered.
+  - **Time-of-check gap.** The run and its executions are read once, before the write. Only the
+    bound actor passes, so the gap is that actor racing their own `step.submit` with a write (one
+    request's duration). Binding the governed merge to the reviewed commit (INIT-023 TASK-005) is
+    the backstop.
+  - **An idle lifecycle run holds its workflow.** Only one non-terminal lifecycle run may govern a
+    workflow (`409` names it). A reviewer who opens one and never submits blocks other reviewers'
+    edits of that workflow: `workflow-lifecycle`'s `draft` step has no timeout (only `review` has
+    `168h`). Recovery is an operator cancel or the operator bypass. Changing the timeout is a
+    governed workflow edit. Two first requests racing within milliseconds can both start a run;
+    the merge-conflict path is the backstop.
+  - **The store-fallback step lookup is not version-pinned.** With an orchestrator wired the
+    review freeze reads the run's pinned workflow; the engine-less fallback (no run engine at all)
+    reads the current projection. A missing step still refuses.
+  - **F7's "no second reviewer" clause** is closed only with TASK-007's separation of duties
+    (strict in `spine serve`) and TASK-013's admin-only skills: under `legacy`, one reviewer can
+    claim and submit `draft` and then claim and approve `review` of the same update run.
+  - **SMP's own API writes onto planning branches** (`AddToRun`, `WriteContent`) are outside this
+    task (SMP TASK-007 or a new SMP task).
+
 ### Step-Entry Checks Are Opt-In for Embedders (and Off Under `legacy`)
 - The engine's step-entry policy (`engine.StepEntryPolicy`, INIT-023 TASK-007) closes audit
   P3-3 (assign checks no actor constraints), P3-4 (precondition-failed steps stay bindable; two

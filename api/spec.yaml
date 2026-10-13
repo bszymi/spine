@@ -118,6 +118,15 @@ paths:
 
         Workflow definition paths are rejected — per ADR-007, workflow
         definitions must be created through `workflow.create` (`POST /workflows`).
+        A run that governs a workflow definition (task path under
+        `workflows/`) accepts no artifacts (400).
+
+        Only the actor bound to the run's draft step (its latest run-level
+        execution, assigned or in progress) or an operator may add to the
+        branch (INIT-023 TASK-014): 409 while the step is waiting or
+        unassigned (claim it first; `detail.execution_id`) or has no open
+        execution, 403 for any other caller. Authorization runs before any
+        branch read.
       tags: [Artifacts]
       parameters:
         - $ref: '#/components/parameters/XTraceId'
@@ -136,10 +145,15 @@ paths:
                 $ref: '#/components/schemas/ArtifactAddResponse'
         '400':
           $ref: '#/components/responses/InvalidParams'
+        '403':
+          description: The caller is not the actor bound to the run's draft step (and not an operator)
         '404':
           description: Run not found
         '409':
-          description: Run is past the draft step
+          description: |
+            Run is past the draft step, its draft step is waiting or
+            unassigned, it has no open execution for the draft step, or the
+            step definition cannot be resolved
 
   /artifacts/{path}:
     get:
@@ -263,6 +277,21 @@ paths:
         Creates a new workflow definition. The full workflow validation suite
         (per /architecture/workflow-validation.md) runs before commit. On
         validation failure, no Git state changes.
+
+        Dispatch (ADR-008, INIT-023 TASK-014):
+        - reviewer, no `write_context`: opens a `workflow-lifecycle`
+          planning run (201, `WorkflowPlanningResponse`); 503 when no
+          planning starter is configured; 409 when a non-terminal lifecycle
+          run is already open for the id (the error detail names it), or
+          when the id already exists (use `PUT /workflows/{id}`) — refused
+          before any branch or run exists;
+        - `write_context { run_id }`: writes on that run's branch (201,
+          `write_mode: proposed`); the run must be the planning run that
+          governs `workflows/<id>.yaml` and the caller its draft assignee
+          or an operator (see `WriteContext`);
+        - operator or admin, no `write_context`: the ADR-008 bypass, a
+          direct commit with a `Workflow-Bypass: true` trailer (201,
+          `write_mode: bypass`).
       tags: [Workflows]
       parameters:
         - $ref: '#/components/parameters/XTraceId'
@@ -275,21 +304,41 @@ paths:
               $ref: '#/components/schemas/WorkflowCreateRequest'
       responses:
         '201':
-          description: Workflow created
+          description: |
+            Workflow created (`WorkflowWriteResponse`: bypass or proposed),
+            or a workflow-lifecycle planning run opened for a reviewer
+            (`WorkflowPlanningResponse`, `write_mode: planning`).
           headers:
             X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WorkflowWriteResponse'
+                oneOf:
+                  - $ref: '#/components/schemas/WorkflowWriteResponse'
+                  - $ref: '#/components/schemas/WorkflowPlanningResponse'
         '400':
           $ref: '#/components/responses/InvalidParams'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
-          $ref: '#/components/responses/AlreadyExists'
+          description: |
+            The workflow already exists, a workflow-lifecycle run is already
+            open for it (`detail.run_id`), or the run named by
+            `write_context` is in a step that refuses writes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
     get:
       operationId: workflow.list
@@ -358,6 +407,18 @@ paths:
         Updates an existing workflow definition. Version bump relative to the
         prior definition is required. The full workflow validation suite runs
         before commit.
+
+        Dispatch is identical to `workflow.create` (ADR-008, INIT-023
+        TASK-014): a reviewer without `write_context` opens an update
+        `workflow-lifecycle` planning run (201, `WorkflowPlanningResponse`)
+        — before TASK-014 this committed straight to the authoritative
+        branch. A missing workflow (404), an unchanged version (422) or an
+        invalid id (400) is refused before any branch or run exists; 409
+        when a lifecycle run is already open for the id; 503 when no
+        planning starter is configured. `write_context { run_id }` writes
+        on the workflow's own lifecycle run (200, `write_mode: proposed`);
+        operators without `write_context` use the ADR-008 bypass (200,
+        `write_mode: bypass`).
       tags: [Workflows]
       parameters:
         - $ref: '#/components/parameters/WorkflowId'
@@ -371,21 +432,33 @@ paths:
               $ref: '#/components/schemas/WorkflowUpdateRequest'
       responses:
         '200':
-          description: Workflow updated
+          description: Workflow updated (bypass or proposed)
           headers:
             X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/WorkflowWriteResponse'
+        '201':
+          description: An update workflow-lifecycle planning run was opened (reviewer, no `write_context`)
+          headers:
+            X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowPlanningResponse'
         '400':
           $ref: '#/components/responses/InvalidParams'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/ValidationFailed'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
   /workflows/{id}/validate:
     post:
@@ -423,6 +496,11 @@ paths:
         Starts a standard run (default) or a planning run for governed artifact creation.
         Standard mode requires task_path. Planning mode requires artifact_content and
         creates the artifact on a branch via StartPlanningRun (per ADR-006).
+
+        A planning-mode task_path under `workflows/` (any spelling: dot
+        segments, repeated slashes, case folding) returns 400 with
+        `use_operation: workflow.create` — workflow definitions are created
+        only through the workflow-lifecycle planning run (INIT-023 TASK-014).
       tags: [Workflow]
       parameters:
         - $ref: '#/components/parameters/XTraceId'
@@ -1079,7 +1157,25 @@ components:
 
     WriteContext:
       type: object
-      description: Controls where artifact writes land (authoritative branch vs task branch) and opts into the branch-protection override surface.
+      description: |
+        Controls where artifact writes land (authoritative branch vs task branch) and opts into the branch-protection override surface.
+
+        A write with a `run_id` lands on that run's branch and is accepted
+        only from the actor bound to the run's current step (its latest
+        run-level execution, `assigned` or `in_progress`, on an `active`
+        run) or from an operator (INIT-023 TASK-014): 409 while the step is
+        `waiting` or unassigned (claim it first; `detail.execution_id`) or
+        has no open execution, 403 for any other caller (the response never
+        names the holder). While the current step is a `review` or
+        `internal` step the branch is frozen for every role, operators
+        included (409, `detail.step_type`). A run with no run-level current
+        step (legacy, or diverged) accepts API writes only from operators.
+        A run that governs a workflow definition accepts no artifact writes
+        (400).
+
+        On workflow endpoints `run_id` is required (`{}` is 400 for every
+        role: omit `write_context` instead) and must name the planning run
+        that governs `workflows/<id>.yaml`.
       properties:
         run_id:
           type: string
@@ -1099,7 +1195,9 @@ components:
             adds a `Branch-Protection-Override: true` commit trailer. Today
             only artifact endpoints honor this flag — workflow endpoints
             reject `override: true` with 400 (use the ADR-008 operator-
-            bypass path instead).
+            bypass path instead). Workflow writes are nevertheless evaluated
+            by branch protection: a non-bypass workflow write to a protected
+            branch is refused with 403.
 
     # ── Artifact Schemas ──
 
@@ -1265,6 +1363,30 @@ components:
         version: { type: string }
         commit_sha: { type: string }
         trace_id: { type: string }
+        write_mode:
+          type: string
+          enum: [proposed, bypass]
+          description: '`proposed` on a lifecycle run branch, `bypass` for the ADR-008 operator direct commit'
+        workflow_bypass: { type: boolean, description: Present and true on a bypass write }
+
+    WorkflowPlanningResponse:
+      type: object
+      description: |
+        A `workflow.create` or `workflow.update` by a caller below operator
+        with no `write_context` opened a `workflow-lifecycle` planning run
+        (ADR-008). The definition is on `branch_name`; the authoritative
+        branch changes only when the run's review approves.
+      required: [run_id, branch_name, workflow_id, workflow_path, write_mode]
+      properties:
+        run_id: { type: string }
+        branch_name: { type: string }
+        workflow_id: { type: string }
+        workflow_path: { type: string, description: 'workflows/<id>.yaml' }
+        governing_workflow_id: { type: string, description: The governing lifecycle workflow (workflow-lifecycle) }
+        status: { type: string }
+        mode: { type: string, enum: [planning] }
+        trace_id: { type: string }
+        write_mode: { type: string, enum: [planning] }
 
     WorkflowListResponse:
       allOf:
@@ -1548,6 +1670,19 @@ components:
 
     Forbidden:
       description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [error] }
+              errors:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Error'
+
+    Unavailable:
+      description: A required service is not configured on this server (for example no workflow planning starter), or a store read needed to decide failed
       content:
         application/json:
           schema:
