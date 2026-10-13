@@ -271,6 +271,12 @@ func (s *Service) Read(ctx context.Context, id, ref string) (*ReadResult, error)
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("workflow not found: %s at ref %s", path, ref))
 		}
+		// A blob over the git client's read limit (INIT-023 TASK-003) is
+		// 413, like an oversized worktree read (TASK-004).
+		if errors.Is(err, git.ErrBlobTooLarge) {
+			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
+				fmt.Sprintf("workflow %s at ref %s exceeds the read limit: %v", path, ref, err), err)
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
@@ -303,6 +309,11 @@ func (s *Service) List(ctx context.Context, opts ListOptions) ([]*domain.Workflo
 	var out []*domain.WorkflowDefinition
 	for _, f := range files {
 		if !strings.HasSuffix(f, ".yaml") && !strings.HasSuffix(f, ".yml") {
+			continue
+		}
+		// A path the projection refuses (INIT-023 TASK-003) stays out of
+		// the listing, as it was while git C-quoted it.
+		if domain.UnsafeRepositoryPath(f) {
 			continue
 		}
 		content, err := s.git.ReadFile(ctx, "HEAD", f)
