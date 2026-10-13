@@ -143,10 +143,20 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	if err != nil {
 		return s.markSyncError(ctx, prev, "discover artifacts", err)
 	}
-	wfPaths, err := s.workflowPathsAt(ctx, head, result.Workflows)
+	wfPaths, wfRefused, err := s.workflowPathsAt(ctx, head, result.Workflows)
 	if err != nil {
 		return s.markSyncError(ctx, prev, "discover workflows", err)
 	}
+	// Refused files (INIT-023 TASK-003) are reported, never counted as
+	// projection errors: DeleteAllProjections below removes any stale
+	// row, and nothing re-adds one.
+	var refused []artifact.RefusedFile
+	for _, r := range result.Refused {
+		if s.keepRefusal(r) {
+			refused = append(refused, r)
+		}
+	}
+	refused = append(refused, wfRefused...)
 	plans, err := s.planWorkflowRows(ctx, wfPaths, head)
 	if err != nil {
 		return s.markSyncError(ctx, prev, "plan workflow rows", err)
@@ -189,6 +199,8 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		projErrors++
 	}
 
+	s.recordRefused(ctx, head, refused)
+
 	// Update sync state — only mark idle if no errors
 	if projErrors > 0 {
 		if err := s.store.UpdateSyncState(ctx, &store.SyncState{
@@ -216,6 +228,7 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		"workflows", len(wfPaths),
 		"workflows_rejected", rejected,
 		"skipped", len(result.Skipped),
+		"refused", len(refused),
 		"errors", len(result.Errors),
 		"commit", head,
 	)
@@ -228,10 +241,14 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 // paths at head: DiscoverAll's workflow list (under artifacts_dir) plus,
 // when artifacts_dir is a subdirectory, the root workflows/ directory
 // (owner question 3), each filtered to direct children of a workflows/
-// directory.
-func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered []string) ([]string, error) {
+// directory. A root workflow at an unsafe path is returned as a refusal
+// instead (INIT-023 TASK-003; DiscoverAll already refuses those under
+// artifacts_dir): its path is the row key, and the store must never see
+// it.
+func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered []string) ([]string, []artifact.RefusedFile, error) {
 	seen := make(map[string]struct{}, len(discovered))
 	var out []string
+	var refused []artifact.RefusedFile
 	add := func(paths []string) {
 		for _, p := range paths {
 			if !s.scope.isWorkflow(p) {
@@ -241,6 +258,10 @@ func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered [
 				continue
 			}
 			seen[p] = struct{}{}
+			if artifact.UnsafePath(p) {
+				refused = append(refused, artifact.RefusedFile{Path: p, Reason: artifact.RefusedUnsafePath})
+				continue
+			}
 			out = append(out, p)
 		}
 	}
@@ -248,12 +269,12 @@ func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered [
 	if s.scope.dir != "" {
 		root, err := artifact.DiscoverWorkflows(ctx, s.git, head)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		add(root)
 	}
 	sort.Strings(out)
-	return out, nil
+	return out, refused, nil
 }
 
 // planWorkflowRows builds every workflow row at head and captures the
@@ -568,7 +589,15 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		}
 	}
 
-	// Workflows: the same raw diff, classified with the shared scope.
+	// Workflows: the same raw diff, classified with the shared scope. A
+	// workflow path that is UnsafePath never reaches the store (it is the
+	// row key; invalid UTF-8 would fail every sync): an added, modified or
+	// renamed-to one is refused and reported, a deleted or renamed-away
+	// one is ignored — no such row can exist (INIT-023 TASK-003).
+	refused := append([]artifact.RefusedFile(nil), changeset.Refused...)
+	refuseWorkflow := func(path string) {
+		refused = append(refused, artifact.RefusedFile{Path: path, Reason: artifact.RefusedUnsafePath})
+	}
 	var workflowsRejected int
 	syncWorkflow := func(path string) {
 		rejected, err := s.syncWorkflowFile(ctx, path, head)
@@ -591,23 +620,34 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		switch diff.Status {
 		case "added", "modified":
 			if s.scope.isWorkflow(diff.Path) {
+				if artifact.UnsafePath(diff.Path) {
+					refuseWorkflow(diff.Path)
+					continue
+				}
 				syncWorkflow(diff.Path)
 			}
 		case "deleted":
-			if s.scope.isWorkflow(diff.Path) {
+			if s.scope.isWorkflow(diff.Path) && !artifact.UnsafePath(diff.Path) {
 				deleteWorkflow(diff.Path)
 			}
 		case "renamed":
 			// The old row's delete error is counted: dropping it left
 			// the old Active row bindable while the sync advanced.
-			if diff.OldPath != "" && s.scope.isWorkflow(diff.OldPath) {
+			if diff.OldPath != "" && s.scope.isWorkflow(diff.OldPath) && !artifact.UnsafePath(diff.OldPath) {
 				deleteWorkflow(diff.OldPath)
 			}
 			if s.scope.isWorkflow(diff.Path) {
+				if artifact.UnsafePath(diff.Path) {
+					refuseWorkflow(diff.Path)
+					continue
+				}
 				syncWorkflow(diff.Path)
 			}
 		}
 	}
+
+	// Refusals never count as sync errors, so the sync still advances.
+	s.recordRefused(ctx, head, refused)
 
 	// Update sync state — only advance commit if no errors
 	if syncErrors > 0 {
@@ -633,6 +673,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		"deleted", len(changeset.Deleted),
 		"workflows_rejected", workflowsRejected,
 		"read_skipped", readSkipped,
+		"refused", len(refused),
 		"errors", syncErrors,
 		"from", shortSHA(state.LastSyncedCommit),
 		"to", shortSHA(head),
@@ -653,6 +694,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		"errors":             syncErrors,
 		"workflows_rejected": workflowsRejected,
 		"read_skipped":       readSkipped,
+		"refused":            len(refused),
 	})
 	event.EmitLogged(ctx, s.events, domain.Event{
 		EventID: fmt.Sprintf("sync-%s", head[:12]),

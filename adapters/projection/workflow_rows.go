@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
@@ -80,11 +81,15 @@ func (s *Service) WithStrictWorkflowValidation(strict bool) {
 // is a counted read_skipped; for the branch-protection config it is held
 // like a malformed config (readFileEntry and classifyReadFailure consult
 // it).
-// Nothing qualifies yet; the bounded-read work (INIT-023 TASK-003)
-// registers its oversize-blob sentinel here.
+//
+// The git client's size refusal qualifies (INIT-023 TASK-003): a blob
+// over the per-blob read limit (git.ErrBlobTooLarge, which also covers
+// git refusing an allocation over GIT_ALLOC_LIMIT while producing it)
+// can never become readable at that commit. Artifact discovery handles
+// oversized changed files itself (ChangeSet.Refused), so in practice
+// this matters for workflow files and the branch-protection config.
 func isContentReadError(err error) bool {
-	_ = err
-	return false
+	return errors.Is(err, git.ErrBlobTooLarge)
 }
 
 // buildWorkflowRow reads a workflow file at commit and turns it into a
