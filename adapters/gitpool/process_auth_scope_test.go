@@ -515,3 +515,73 @@ func TestLatentGitpool_CredentialLessCodeRepoIgnoresHostCredentials(t *testing.T
 		})
 	}
 }
+
+// t015FakeSSH puts a recording `ssh` first on PATH and gives the process
+// an ambient SSH identity: an agent socket and an operator
+// GIT_SSH_COMMAND naming a key file. It returns a function that reads
+// what the fake ssh was invoked with.
+func t015FakeSSH(t *testing.T) func() string {
+	t.Helper()
+	dir := t.TempDir()
+	rec := filepath.Join(dir, "ssh.record")
+	script := "#!/bin/sh\n{ printf 'ARGS'; for a in \"$@\"; do printf ' [%s]' \"$a\"; done; printf '\\nSOCK=[%s]\\n' \"$SSH_AUTH_SOCK\"; } >> '" + rec + "'\nexit 128\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/t015-ambient-agent.sock")
+	t.Setenv("GIT_SSH_COMMAND", "ssh -o IdentityFile=/operator/key")
+	return func() string {
+		b, _ := os.ReadFile(rec)
+		return string(b)
+	}
+}
+
+// Codex review round 2 (P1): for an ssh:// or SCP-style code repository
+// the process's SSH identity (agent, default and configured keys) is an
+// ambient credential too. A credential-less binding runs ssh with no
+// config, no agent and no key-based authentication.
+func TestLatentGitpool_CredentialLessSSHCodeRepoUsesNoSSHIdentity(t *testing.T) {
+	const sshURL = "ssh://git@127.0.0.1:2222/acme/x.git"
+	assertNoIdentity := func(t *testing.T, rec string) {
+		t.Helper()
+		if !strings.Contains(rec, "ARGS") {
+			t.Fatal("git never invoked ssh")
+		}
+		for _, want := range []string{"[-F] [none]", "[IdentityAgent=none]", "[PubkeyAuthentication=no]", "[BatchMode=yes]", "SOCK=[]"} {
+			if !strings.Contains(rec, want) {
+				t.Errorf("ssh invocation lacks %s:\n%s", want, rec)
+			}
+		}
+		if strings.Contains(rec, "/operator/key") || strings.Contains(rec, "t015-ambient-agent") {
+			t.Errorf("ssh invocation carries the process SSH identity:\n%s", rec)
+		}
+	}
+	t.Run("control: a plain client uses the process SSH identity", func(t *testing.T) {
+		t015Isolate(t)
+		read := t015FakeSSH(t)
+		cl := git.NewCLIClient(t.TempDir())
+		_ = cl.Clone(context.Background(), sshURL, filepath.Join(t.TempDir(), "c"))
+		if rec := read(); !strings.Contains(rec, "/operator/key") || !strings.Contains(rec, "SOCK=[/tmp/t015-ambient-agent.sock]") {
+			t.Fatalf("the fake ssh did not see the ambient identity:\n%s", rec)
+		}
+	})
+	t.Run("cloner", func(t *testing.T) {
+		t015Isolate(t)
+		read := t015FakeSSH(t)
+		_ = gitpool.NewCLICloner(git.WithPushToken(t015ProcessToken, "")).Clone(context.Background(), sshURL, filepath.Join(t.TempDir(), "clone"), gitpool.Credential{})
+		assertNoIdentity(t, read())
+	})
+	t.Run("factory push", func(t *testing.T) {
+		t015Isolate(t)
+		read := t015FakeSSH(t)
+		dir := filepath.Join(t.TempDir(), "code")
+		t015LocalRepo(t, dir, sshURL, "")
+		client := gitpool.NewCLIClientFactory(git.WithCredentialHelper("store"))(dir, gitpool.Credential{})
+		if cl, ok := client.(*git.CLIClient); ok {
+			defer cl.Close()
+		}
+		_ = client.Push(context.Background(), "origin", "main")
+		assertNoIdentity(t, read())
+	})
+}

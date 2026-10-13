@@ -167,17 +167,19 @@ func WithoutPushToken() CLIOption {
 // credential.helper in the global, system or repo-local git config (for
 // example the osxkeychain helper in Apple git's system config), and an
 // askpass program inherited through GIT_ASKPASS, core.askPass or
-// SSH_ASKPASS — and send what they return to whatever host the clone URL
-// or the remote names.
+// SSH_ASKPASS, and for ssh:// and SCP-style remotes the process's SSH
+// identity (ssh-agent, default and configured key files) — and send
+// what they return to whatever host the clone URL or the remote names.
 //
 // With it, a client that has no askpass token and no credential helper
 // runs clone and push with `-c credential.helper=` (an empty value resets
 // every configured helper, URL-scoped ones included), GIT_ASKPASS and
 // SSH_ASKPASS set empty (an empty GIT_ASKPASS also stops git from falling
-// back to core.askPass) and GIT_TERMINAL_PROMPT=0. A client that does
-// carry a token or helper is unchanged: its own credential is used as
-// before. Not covered: curl's ~/.netrc lookup, which git enables for
-// HTTP (KNOWN-LIMITATIONS.md).
+// back to core.askPass), GIT_TERMINAL_PROMPT=0, SSH_AUTH_SOCK empty, and
+// GIT_SSH_COMMAND set to noAmbientSSHCommand (which overrides GIT_SSH and
+// core.sshCommand). A client that does carry a token or helper is
+// unchanged: its own credential is used as before. Not covered: curl's
+// ~/.netrc lookup, which git enables for HTTP (KNOWN-LIMITATIONS.md).
 func WithoutAmbientCredentials() CLIOption {
 	return func(c *CLIClient) {
 		c.noAmbientAuth = true
@@ -191,9 +193,27 @@ func (c *CLIClient) ambientAuthDisabled() bool {
 	return c.noAmbientAuth && c.askpassPath == "" && c.credentialHelper == ""
 }
 
+// noAmbientSSHCommand is the ssh git runs for a client with ambient
+// credentials disabled: `-F none` reads no ssh_config (no IdentityFile,
+// ControlMaster/ControlPath, ProxyCommand or GSSAPI setting from the
+// host), IdentityAgent=none ignores any agent, PubkeyAuthentication=no
+// offers no key or certificate, password and keyboard-interactive
+// authentication are off, and BatchMode=yes never prompts. Such a client
+// therefore cannot authenticate over SSH at all; the gitpool has no
+// per-binding SSH credential, so an SSH code repository with no
+// credentials_ref can only be reached anonymously.
+const noAmbientSSHCommand = "ssh -F none -o BatchMode=yes -o IdentityAgent=none -o PubkeyAuthentication=no" +
+	" -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o ControlPath=none"
+
 // noAmbientAuthEnv is appended to the environment of a clone or push when
 // ambientAuthDisabled; os/exec keeps the last value of a duplicated key.
-var noAmbientAuthEnv = []string{"GIT_ASKPASS=", "SSH_ASKPASS=", "GIT_TERMINAL_PROMPT=0"}
+var noAmbientAuthEnv = []string{
+	"GIT_ASKPASS=",
+	"SSH_ASKPASS=",
+	"GIT_TERMINAL_PROMPT=0",
+	"SSH_AUTH_SOCK=",
+	"GIT_SSH_COMMAND=" + noAmbientSSHCommand,
+}
 
 // NewCLIClient creates a new Git client for the repository at the given path.
 func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {

@@ -625,9 +625,12 @@ type cliCloner struct {
 // the process-wide push token and credential helper from the base
 // options, and keep git from consulting the host's ambient credential
 // sources too (a global or system credential.helper, an inherited
-// GIT_ASKPASS / core.askPass / SSH_ASKPASS) — otherwise a host-keyed
-// helper would still answer for whatever host the binding names. An
-// empty Credential means "no auth", as the Cloner contract says.
+// GIT_ASKPASS / core.askPass / SSH_ASKPASS, and for SSH remotes the
+// process's ssh-agent and key files) — otherwise a host-keyed helper or
+// the platform's SSH key would still answer for whatever host the
+// binding names. An empty Credential means "no auth", as the Cloner
+// contract says; there is no per-binding SSH credential, so an SSH code
+// repo without one is reached anonymously or not at all.
 func withoutProcessAuth() []git.CLIOption {
 	return []git.CLIOption{git.WithoutPushToken(), git.WithoutCredentialHelper(), git.WithoutAmbientCredentials()}
 }
