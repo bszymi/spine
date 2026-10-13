@@ -83,6 +83,17 @@ const (
 	// (kept | not_projected | removed), kept_source_commit, quarantined,
 	// error. INIT-023 TASK-011; architecture/event-schemas.md.
 	EventProjectionWorkflowRejected EventType = "projection_workflow_rejected"
+
+	// EventProjectionFileSkipped is emitted once per file the projection
+	// declined to project because the file is over the git client's
+	// per-blob read limit (reason "oversized") or sits at a path Spine
+	// refuses to store (reason "unsafe_path": invalid UTF-8, control
+	// characters, U+2028/U+2029, bidi controls). Payload: path (Go-quoted
+	// for unsafe_path), reason, size_bytes and limit_bytes (null for
+	// unsafe_path; size_bytes -1 when the read overran the limit), commit.
+	// The event id is deterministic per (commit, reason, path). INIT-023
+	// TASK-003; architecture/event-schemas.md §4.15.
+	EventProjectionFileSkipped EventType = "projection_file_skipped"
 )
 
 // Event represents a domain or operational event emitted by the system.

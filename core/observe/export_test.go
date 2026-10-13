@@ -98,3 +98,15 @@ func TestAuditLog(t *testing.T) {
 	ctx := context.Background()
 	AuditLog(ctx, "test_operation", "key", "value")
 }
+
+// INIT-023 TASK-003: the skipped-file counter is exported next to
+// spine_projection_syncs_total.
+func TestExportPrometheus_ProjectionFilesSkipped(t *testing.T) {
+	GlobalMetrics.ProjectionFilesSkipped = Counter{}
+	GlobalMetrics.ProjectionFilesSkipped.Add(3)
+	output := ExportPrometheus()
+	if !strings.Contains(output, "# TYPE spine_projection_files_skipped_total counter") ||
+		!strings.Contains(output, "spine_projection_files_skipped_total 3") {
+		t.Fatalf("spine_projection_files_skipped_total missing or wrong:\n%s", output)
+	}
+}

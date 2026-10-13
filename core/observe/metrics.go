@@ -47,6 +47,11 @@ type Metrics struct {
 	OrphansDetected    Counter
 	RecoveriesExecuted Counter
 
+	// ProjectionFilesSkipped counts files the projection declined to
+	// project: over the git per-blob read limit, or at a path Spine
+	// refuses to store (INIT-023 TASK-003).
+	ProjectionFilesSkipped Counter
+
 	// StepRoutingExplicit and StepRoutingDefaultSpine count routing
 	// decisions per ADR-015: a step that declared `repository: <id>`
 	// vs a step that took the implicit `spine` default. Watching the
