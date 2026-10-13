@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -474,12 +475,21 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 // deleted branch, can never be merged in its place: a missing source
 // branch is ErrKindNotFound and no `git merge` runs. The lookup happens
 // before the switch to Target, so a missing source changes nothing.
+//
+// A non-empty SourceSHA (INIT-023 TASK-005) replaces Source: the commit
+// is verified (VerifyCommit's check) before any switch, exactly that
+// object id is merged, Source is never resolved, and BaseSHA reports the
+// target tip the merge was computed on. With an empty SourceSHA the argv
+// is unchanged.
 func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, error) {
 	if opts.Strategy == "abort" || opts.Source == "--abort" {
 		if _, err := c.run(ctx, "merge", "merge", "--abort"); err != nil {
 			return MergeResult{}, err
 		}
 		return MergeResult{}, nil
+	}
+	if opts.SourceSHA != "" {
+		return c.mergeSHA(ctx, opts)
 	}
 
 	// Phase 1: every argument, before any git process.
@@ -505,7 +515,12 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 			return MergeResult{}, err
 		}
 	}
+	return c.runMerge(ctx, opts, source)
+}
 
+// runMerge runs `git merge` of the already-resolved source object id
+// into the current branch and reports the resulting HEAD.
+func (c *CLIClient) runMerge(ctx context.Context, opts MergeOpts, source string) (MergeResult, error) {
 	args := []string{"merge"}
 	switch opts.Strategy {
 	case "fast-forward":
@@ -1005,15 +1020,22 @@ func buildCommitMessage(opts CommitOpts) string {
 				b.WriteString(val)
 			}
 		}
-		// Write any remaining trailers not in the standard set
-		for k, v := range opts.Trailers {
+		// Write any remaining trailers not in the standard set, sorted so
+		// the message (and so CommitFilesOnto's commit id) is
+		// deterministic (INIT-023 TASK-005 DC-2).
+		extra := make([]string, 0, len(opts.Trailers))
+		for k := range opts.Trailers {
 			if k == "Trace-ID" || k == "Actor-ID" || k == "Run-ID" || k == "Operation" {
 				continue
 			}
+			extra = append(extra, k)
+		}
+		sort.Strings(extra)
+		for _, k := range extra {
 			b.WriteString("\n")
 			b.WriteString(k)
 			b.WriteString(": ")
-			b.WriteString(v)
+			b.WriteString(opts.Trailers[k])
 		}
 	}
 
