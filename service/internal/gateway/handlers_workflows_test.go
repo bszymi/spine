@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bszymi/spine/adapters/store"
+	spinestore "github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/workflow"
@@ -559,7 +559,7 @@ func (s *workflowPlanningStore) ListStepExecutionsByRun(_ context.Context, runID
 	return stepHeldBy(runID, "draft", "actor-1"), nil
 }
 
-func (s *workflowPlanningStore) GetWorkflowProjection(_ context.Context, _ string) (*store.WorkflowProjection, error) {
+func (s *workflowPlanningStore) GetWorkflowProjection(_ context.Context, _ string) (*spinestore.WorkflowProjection, error) {
 	return fixtureWorkflowProjection(), nil
 }
 

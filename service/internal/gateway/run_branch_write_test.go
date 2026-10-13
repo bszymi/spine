@@ -65,9 +65,9 @@ func (s *rbwStore) ListRunsByTask(_ context.Context, taskPath string) ([]domain.
 		return nil, s.listRunsErr
 	}
 	var out []domain.Run
-	for _, r := range s.runsByTask {
-		if r.TaskPath == taskPath {
-			out = append(out, r)
+	for i := range s.runsByTask {
+		if s.runsByTask[i].TaskPath == taskPath {
+			out = append(out, s.runsByTask[i])
 		}
 	}
 	return out, nil
@@ -81,7 +81,7 @@ func (s rbwSteps) AssignStep(context.Context, engine.AssignRequest) (*engine.Ass
 	return nil, domain.NewError(domain.ErrUnavailable, "not used")
 }
 
-func (s rbwSteps) LookupStepDef(_ context.Context, _ string, stepID string) (*domain.StepDefinition, *domain.Run) {
+func (s rbwSteps) LookupStepDef(_ context.Context, _, stepID string) (*domain.StepDefinition, *domain.Run) {
 	t, ok := s.types[stepID]
 	if !ok {
 		return nil, nil

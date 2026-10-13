@@ -87,7 +87,7 @@ type secStepDefs struct{ types map[string]domain.StepType }
 func (s secStepDefs) AssignStep(context.Context, engine.AssignRequest) (*engine.AssignResult, error) {
 	return nil, domain.NewError(domain.ErrUnavailable, "not used")
 }
-func (s secStepDefs) LookupStepDef(_ context.Context, _ string, stepID string) (*domain.StepDefinition, *domain.Run) {
+func (s secStepDefs) LookupStepDef(_ context.Context, _, stepID string) (*domain.StepDefinition, *domain.Run) {
 	t, ok := s.types[stepID]
 	if !ok {
 		return nil, nil
@@ -160,7 +160,7 @@ func seedWorkflowRepo(t *testing.T, names ...string) (string, map[string]string)
 		}
 		b := strings.Replace(strings.Replace(string(raw), "    timeout: \"4h\"\n", "", 1), "    timeout: \"24h\"\n", "", 1)
 		bodies[n] = b
-		_ = os.WriteFile(filepath.Join(repo, "workflows", n+".yaml"), []byte(b), 0o644)
+		_ = os.WriteFile(filepath.Join(repo, "workflows", n+".yaml"), []byte(b), 0o644) //nolint:gosec // G703: test fixture path under t.TempDir(), not external input
 	}
 	secGit(t, repo, "add", ".")
 	secGit(t, repo, "commit", "-q", "-m", "seed")
@@ -345,7 +345,7 @@ func seedRunRepo(t *testing.T) (repo, reviewedSHA string) {
 	return repo, reviewedSHA
 }
 
-func secRunServer(t *testing.T, repo string, step string, execs []domain.StepExecution) (*secStore, *auth.Service, *httptest.Server) {
+func secRunServer(t *testing.T, repo, step string, execs []domain.StepExecution) (*secStore, *auth.Service, *httptest.Server) {
 	t.Helper()
 	base := newFakeStore()
 	secActor(base, "alice", domain.RoleContributor)
