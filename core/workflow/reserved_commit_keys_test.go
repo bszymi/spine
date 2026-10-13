@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -53,17 +52,4 @@ func TestValidate_ReservedCommitKeys(t *testing.T) {
 			t.Fatalf("a non-reserved commit key was refused: %+v", e)
 		}
 	}
-}
-
-// TestReservedCommitPrefixMatchesEngine pins the parser's copy of the
-// prefix to the engine's constant (core/workflow cannot import the
-// engine in production code; the test can).
-func TestReservedCommitPrefixMatchesEngine(t *testing.T) {
-	res := workflow.Validate(reservedKeyWorkflow(map[string]string{engine.ReservedCommitMetaPrefix + "x": "y"}))
-	for _, e := range res.Errors {
-		if e.Field == "steps[1].outcomes[1].commit" {
-			return
-		}
-	}
-	t.Fatalf("the engine's reserved prefix %q is not refused by Validate: %+v", engine.ReservedCommitMetaPrefix, res.Errors)
 }

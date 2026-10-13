@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/workflow"
 )
 
 func TestStripReserved(t *testing.T) {
@@ -183,6 +186,30 @@ func TestIsAdvancingOutcomeAndGates(t *testing.T) {
 	for step, gate := range map[string]bool{"execute": false, "validate": false, "review": true, "converge": true, "publish": false} {
 		if got := isGateStep(findStepDef(wf, step)); got != gate {
 			t.Errorf("isGateStep(%s) = %v, want %v", step, got, gate)
+		}
+	}
+}
+
+// TestReservedCommitPrefixMatchesValidate pins workflow.Validate's copy of
+// the reserved prefix (core/workflow cannot import the engine) to
+// ReservedCommitMetaPrefix: a key under it, in any letter case, is
+// refused at steps[i].outcomes[j].commit.
+func TestReservedCommitPrefixMatchesValidate(t *testing.T) {
+	for _, key := range []string{ReservedCommitMetaPrefix + "x", "SPINE.X", CommitMetaBoundSHA} {
+		wf := &domain.WorkflowDefinition{
+			ID: "wf", Name: "WF", Version: "1.0", Status: domain.WorkflowStatusActive, AppliesTo: []string{"Task"},
+			EntryStep: "s",
+			Steps: []domain.StepDefinition{{ID: "s", Name: "S", Type: domain.StepTypeManual,
+				Outcomes: []domain.OutcomeDefinition{{ID: "done", Name: "Done", NextStep: "end", Commit: map[string]string{key: "v"}}}}},
+		}
+		found := false
+		for _, e := range workflow.Validate(wf).Errors {
+			if e.Field == "steps[0].outcomes[0].commit" {
+				found = true
+			}
+		}
+		if !found || !isReservedCommitMetaKey(key) {
+			t.Fatalf("key %q: Validate refused=%v, engine reserved=%v; the two rules must agree", key, found, isReservedCommitMetaKey(key))
 		}
 	}
 }
