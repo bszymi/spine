@@ -395,12 +395,46 @@ func TestReadBounds_Defaults(t *testing.T) {
 			bounds{git.DefaultMaxBlobBytes, git.DefaultMaxOutputBytes, 64 << 20}},
 		{"too-small alloc is raised to blob+1", git.NewCLIClient(".", git.WithMaxBlobBytes(1<<20), git.WithMaxGitAllocBytes(1000)),
 			bounds{1 << 20, git.DefaultMaxOutputBytes, 1<<20 + 1}},
+		{"too-small explicit alloc with the default blob limit", git.NewCLIClient(".", git.WithMaxGitAllocBytes(1000)),
+			bounds{git.DefaultMaxBlobBytes, git.DefaultMaxOutputBytes, git.DefaultMaxBlobBytes + 1}},
+		// git's own fixed allocations (524 256 bytes in ls-tree, log,
+		// merge-base, diff) need a floor: 4 x 64 KiB would break them.
+		{"alloc floor under a small blob limit", git.NewCLIClient(".", git.WithMaxBlobBytes(64<<10)),
+			bounds{64 << 10, git.DefaultMaxOutputBytes, 1 << 20}},
+		{"alloc floor for an explicit value", git.NewCLIClient(".", git.WithMaxBlobBytes(1000), git.WithMaxGitAllocBytes(2000)),
+			bounds{1000, git.DefaultMaxOutputBytes, 1 << 20}},
 		{"explicit output", git.NewCLIClient(".", git.WithMaxOutputBytes(4096)),
 			bounds{git.DefaultMaxBlobBytes, 4096, 4 * git.DefaultMaxBlobBytes}},
 	} {
 		if got := get(tc.c); got != tc.want {
 			t.Errorf("%s: bounds = %+v, want %+v", tc.label, got, tc.want)
 		}
+	}
+}
+
+// A small per-blob limit leaves every read command working: the alloc
+// limit's floor covers git's own fixed allocations.
+func TestReadBounds_SmallBlobLimitKeepsReadsWorking(t *testing.T) {
+	ctx := context.Background()
+	dir, commit := blobRepo(t, map[string][]byte{"a.md": []byte("a\n"), "b/c.md": []byte("c\n")})
+	c := git.NewCLIClient(dir, git.WithMaxBlobBytes(1<<10))
+	if files, err := c.ListFiles(ctx, commit, ""); err != nil || len(files) != 2 {
+		t.Fatalf("ListFiles: %q, %v", files, err)
+	}
+	parent := t3git(t, dir, nil, "rev-parse", commit+"~1")
+	if diffs, err := c.Diff(ctx, parent, commit); err != nil || len(diffs) != 2 {
+		t.Fatalf("Diff: %+v, %v", diffs, err)
+	}
+	if _, err := c.MergeBase(ctx, parent, commit); err != nil {
+		t.Fatalf("MergeBase: %v", err)
+	}
+	t3git(t, dir, nil, "update-ref", "refs/heads/main", commit)
+	t3git(t, dir, nil, "symbolic-ref", "HEAD", "refs/heads/main")
+	if _, err := c.Log(ctx, git.LogOpts{Limit: 2}); err != nil {
+		t.Fatalf("Log: %v", err)
+	}
+	if got, err := c.ReadFile(ctx, commit, "b/c.md"); err != nil || string(got) != "c\n" {
+		t.Fatalf("ReadFile: %q, %v", got, err)
 	}
 }
 

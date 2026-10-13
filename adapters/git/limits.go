@@ -65,6 +65,15 @@ const (
 	// is still readable.
 	gitAllocFactor = 4
 
+	// minGitAllocBytes floors GIT_ALLOC_LIMIT whatever the options say.
+	// git makes fixed internal allocations unrelated to repository
+	// content — 524 256 bytes in ls-tree, log, merge-base and diff,
+	// measured on git 2.39.5 and 2.54 even in an empty repository — so a
+	// limit derived from a small per-blob limit (4 x 64 KiB) would make
+	// every listing fail. 1 MiB is twice the largest fixed allocation
+	// seen; it never applies with the default limits (16 MiB).
+	minGitAllocBytes int64 = 1 << 20
+
 	// maxStderrBytes bounds the stderr kept for classification: the first
 	// stderrHeadBytes and the last bytes up to the total, with a marker
 	// between them when anything was dropped. The deciding `fatal:` line
@@ -103,7 +112,8 @@ func WithMaxOutputBytes(n int64) CLIOption {
 // WithMaxGitAllocBytes sets GIT_ALLOC_LIMIT for read commands. n <= 0
 // keeps the derived default, 4 x the per-blob limit (computed after every
 // option has applied). A value below the per-blob limit + 1 is raised to
-// it: git's in-core read of an at-limit blob allocates size+1.
+// it (git's in-core read of an at-limit blob allocates size+1), and any
+// value below 1 MiB is raised to 1 MiB (git's own fixed allocations).
 func WithMaxGitAllocBytes(n int64) CLIOption {
 	return func(c *CLIClient) {
 		if n > 0 {
@@ -219,7 +229,8 @@ func (c *CLIClient) gitAllocLimit() int64 {
 }
 
 // deriveGitAllocLimit is the GIT_ALLOC_LIMIT rule: the explicit value,
-// or gitAllocFactor x blob when unset; never below blob+1.
+// or gitAllocFactor x blob when unset; never below blob+1, never below
+// minGitAllocBytes.
 func deriveGitAllocLimit(explicit, blob int64) int64 {
 	n := explicit
 	if n <= 0 {
@@ -232,7 +243,7 @@ func deriveGitAllocLimit(explicit, blob int64) int64 {
 	if blob < math.MaxInt64 && n < blob+1 {
 		n = blob + 1
 	}
-	return n
+	return max(n, minGitAllocBytes)
 }
 
 // --- output sinks ---
