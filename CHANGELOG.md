@@ -6,6 +6,94 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-001 TASK-003: bounded reads and NUL-delimited listings)
+
+### Security
+
+- **Git reads are bounded (audit F4, Spine half, P2).** The git CLI client buffered every
+  command's whole stdout and copied a `ReadFile` result twice more (an 8 MiB blob cost 49 MiB),
+  so a compressible pushed file of a few hundred MiB — a pack of well under a MiB — could take a
+  shared, multi-tenant process down on every projection sync, run-detail view or artifact read
+  that touched it. `ReadFile` now probes the blob's size (`git cat-file -s`) and refuses one over
+  the per-blob limit (`git.DefaultMaxBlobBytes`, 4 MiB, equal to the worktree read limit) before
+  reading it; the read itself fills one buffer pre-sized to the blob. Every other read command
+  fails past 16 MiB of output, stderr keeps 64 KiB (head and tail), and read commands run with
+  `GIT_ALLOC_LIMIT` (4 x the per-blob limit, at least 1 MiB) so git's own memory is bounded too —
+  a small blob stored as a delta on a huge base, or a gitlink named `*.md` that `git show` renders
+  as a commit with its patch, is refused by git instead of inflated. Mutating commands never fail
+  on output size (git applies a merge before it prints its diffstat); `git diff` gets the output
+  ceiling but no alloc limit (`KNOWN-LIMITATIONS.md`, "Git read bounds").
+- **Non-ASCII and control-character paths are no longer silently dropped (audit P3-9, Spine
+  half).** `Diff` and `ListFiles` parsed git's C-quoted output, so a governed artifact in a
+  directory with a non-ASCII letter — which `artifact.Slugify` produces from an ordinary
+  non-English title ("Wdrożenie") — was never projected, never status-cascaded at merge, and
+  `NextID` allocated its ID a second time. Both now read NUL-delimited output (`-z`) and return
+  raw paths. A path that is not valid UTF-8, or holds a control character (C0, DEL, C1),
+  U+2028/U+2029 or a bidi embedding/override/isolate control, is refused and recorded instead of
+  projected (owner question 2, default pending the owner); invalid UTF-8 would otherwise fail every
+  sync on PostgreSQL.
+
+### Changed
+
+- **413 for oversized reads:** `GET /api/v1/artifacts/<path>` (including `?ref=<run branch>`) and
+  the workflow read return `413 payload_too_large` ("… is N bytes, over the L-byte read limit")
+  for a blob over the per-blob limit. A miss keeps its kind and text (`bad revision`, 404).
+- **Projection:** an oversized `*.md` and any artifact or workflow candidate at a refused path are
+  skipped, recorded and advanced past — never a sync error. A projected artifact modified past the
+  limit loses its row. Each skip is a Warn line (`projection skipped file`), a
+  `spine_projection_files_skipped_total` increment and a new **`projection_file_skipped`** event
+  (`architecture/event-schemas.md` §4.15). `projection_synced` gains `refused`.
+- **An oversized workflow file is a `projection_workflow_rejected` with check `read_bounds`** (its
+  verified previous row kept quarantined, or not projected) and the sync advances. An oversized
+  `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- **A read-command output over 16 MiB fails closed:** a commit on `main` whose listing or diff
+  exceeds it makes `IncrementalSync`, `FullRebuild` and `NextID` fail for that workspace (sync
+  state `error`, nothing written) until the content is removed.
+- **Behaviour:** existing subscriptions that receive every event type now also receive
+  `projection_file_skipped`.
+- **Diff details:** a copy record (only with `diff.renames=copies`) is reported as `added` at the
+  copy's destination instead of `modified` at its source; a leading or trailing space in a listed
+  path is kept; a malformed `git diff -z` stream is an error, never a partial list.
+- `artifact.Service.List` and `workflow.Service.List` leave refused paths out, as they were while
+  git quoted them; `artifact.IsIDCollision` counts an oversized existing file as a collision.
+- **Cost:** one extra git process per `ReadFile`, two on a miss; a full rebuild of a large
+  repository takes roughly twice as long.
+
+### Upgrade note
+
+Run one projection rebuild per workspace after upgrading (standalone: `POST
+/api/v1/system/rebuild`). `IncrementalSync` processes only changes since the last synced commit,
+so artifacts and workflows already on `main` at a non-ASCII path are not picked up until they next
+change. After the rebuild, expect:
+
+- artifact IDs that the old `NextID` allocated twice (an `EPIC-001` alongside a hidden
+  `EPIC-001-résumé/`) to show up as two rows with the same ID — there is no uniqueness constraint,
+  so the rebuild does not fail; renumber them;
+- previously invisible workflow files with non-ASCII names to become active. List them first:
+  `git ls-tree -r -z --name-only main -- workflows .spine | LC_ALL=C grep -z '[^ -~]'`.
+
+SMP runs the rebuild per workspace in SMP INIT-027 EPIC-004 TASK-008 (owner question 3).
+
+### For embedders
+
+- **New in `adapters/git`:** `DefaultMaxBlobBytes`, `DefaultMaxOutputBytes`, `WithMaxBlobBytes`,
+  `WithMaxOutputBytes`, `WithMaxGitAllocBytes`, `ErrBlobTooLarge`, `ErrOutputTooLarge`,
+  `BlobTooLargeError`, `OutputTooLargeError`. Refusals are `*GitError{Kind: ErrKindPermanent}`
+  wrapping the typed cause, so `err.(*git.GitError)` keeps working. Every `NewCLIClient` gets the
+  defaults; nothing to configure.
+- **`Diff` and `ListFiles` return raw paths.** A caller that C-unquoted `Diff` paths must stop
+  (SMP INIT-027 EPIC-004 TASK-003 already moved its reader to its own NUL-delimited diff).
+- **New in `core/artifact`:** `RefusedFile`, `RefusalReason` (`RefusedOversized`,
+  `RefusedUnsafePath`), `UnsafePath`, `ReadLimitPhrase`, and additive `Refused` fields on
+  `DiscoveryResult` and `ChangeSet`. **New** `domain.UnsafeRepositoryPath`,
+  `domain.EventProjectionFileSkipped`, `observe.Metrics.ProjectionFilesSkipped`.
+- **A `GitClient` that wraps `ReadFile`** should make its too-large error match
+  `git.ErrBlobTooLarge` (`errors.Is`); until then discovery treats it as a read error and
+  `Service.Read` as a git error, exactly as before.
+- No interface, schema, migration, endpoint or environment variable changes.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-016: ref-class push admission)
 
 ### Security

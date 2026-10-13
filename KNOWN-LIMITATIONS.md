@@ -392,6 +392,54 @@ The following limitations have been resolved:
   reports `not_found`. No shipped build wires a code-repository catalog (P3-36, P3-37), so this is
   dormant.
 
+### Git Read Bounds
+- **Bounds** (INIT-023 TASK-003; audit F4): the git CLI client (`adapters/git.CLIClient`) never
+  buffers more than its limits. `ReadFile` probes the blob's size (`git cat-file -s`) and refuses
+  one over the per-blob limit before reading it (`git.DefaultMaxBlobBytes`, 4 MiB — the worktree
+  read limit too; `git.WithMaxBlobBytes`), with a permanent error matching `git.ErrBlobTooLarge`
+  (API 413). Every other read command — listings, diff, log, rev-parse, merge-base — fails past
+  16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`; `git.ErrOutputTooLarge`).
+  Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
+  git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses to inflate a small
+  blob stored as a delta on a huge base, or to render a gitlink `*.md` as a commit with its patch.
+  Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the first
+  16 MiB of their output and never fail on its size. Defaults pending the owner (task owner
+  questions 1 and 4).
+- **A read-command output over the ceiling fails closed.** A commit on `main` whose listing or
+  diff exceeds 16 MiB (roughly 50k files, or fewer with long paths) makes `IncrementalSync`,
+  `FullRebuild` and `NextID` fail for that workspace — the sync state is `error` at the previous
+  commit and nothing is written — until the content is removed or the limit raised. Reaching it
+  takes a governed merge. Before TASK-003 the same commit exhausted the process's memory instead.
+- **`diff` runs without `GIT_ALLOC_LIMIT`.** Rename detection loads both blobs of a candidate
+  pair, and a legitimate large rename on `main` must not fail `Diff`; so a large blob already on
+  the diff base can still be inflated in the git child while its rename is detected.
+- **Named-ref window.** The size probe and the read are two git processes. A ref given by *name*
+  can move between them; Spine's buffer stays capped (the read overruns into the same refusal, with
+  size -1) and git's memory stays under `GIT_ALLOC_LIMIT`. Projection reads use commit ids; the
+  window applies to reads by name (`?ref=<branch>`, and the merge-time status cascade, which reads
+  the run branch by name until INIT-023 TASK-005 pins it to the reviewed commit).
+- **Deltas on a large base are refused.** A legitimate artifact stored as a delta on a base larger
+  than `GIT_ALLOC_LIMIT` (16 MiB by default) cannot be read and is refused as oversized.
+- **What `git show` renders counts.** The limit applies to what is read for a path: a tree path's
+  listing, or a gitlink rendered as a commit with its patch, is refused like a large blob.
+- **Not covered:** receive-time inflation (`index-pack` reconstructs a pushed delta to hash it;
+  `receive.maxInputSize` bounds the pack, not the object), checkout-time inflation (`git worktree
+  add` / `checkout` of a branch holding an oversized blob, including the standalone branch-write
+  worktree), and wall-clock timeouts on git commands.
+- **Cost:** one extra git process per `ReadFile` (two on a miss: the probe, then the `git show`
+  that produces today's error), so a full rebuild of a large repository takes roughly twice as
+  long. A batched probe is a follow-up.
+- **Refused paths** (P3-9, owner question 2): `Diff` and `ListFiles` return raw NUL-delimited
+  paths, so non-ASCII artifacts are now projected. A path that is not valid UTF-8 or holds a
+  control character (C0, DEL, C1), U+2028/U+2029 or a bidi control (U+202A–U+202E,
+  U+2066–U+2069) is never projected (`projection_file_skipped`, reason `unsafe_path`) and is left
+  out of `artifact.Service.List` and `workflow.Service.List`, as it was while git quoted it.
+  `artifact.Slugify` never produces one. Other readers that take a path from the caller
+  (`artifact.Service.Read`, the merge-time status cascade) are unchanged.
+- **Embedders that wrap `ReadFile`** (SMP's bounded reader) return their own too-large error;
+  until it matches `git.ErrBlobTooLarge`, discovery files such a read under its read errors and
+  `Service.Read` reports a git error rather than 413 (SMP INIT-027 EPIC-004 TASK-008).
+
 ### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
 - **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the
   subscription (INIT-023 TASK-009). But the default `SPINE_SECRET_ENVELOPE_MODE=migrate` still

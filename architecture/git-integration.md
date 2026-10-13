@@ -481,6 +481,8 @@ The Artifact Service discovers artifacts by scanning the repository tree:
 - The `type` field in front matter determines the artifact type
 - Files in `/workflows/` matching `*.yaml` are workflow definitions
 - Files without recognized front matter are ignored
+- Discovery reads at most the git client's per-blob limit for one file (default 4 MiB, the same value as the worktree read limit; INIT-023 TASK-003). A larger file is never read: it is recorded as refused (`oversized`) and not projected. A file whose path is not valid UTF-8 or holds a control character, U+2028/U+2029 or a bidi control is recorded as refused (`unsafe_path`) without being read. Each refusal is a Warn log line, a `spine_projection_files_skipped_total` increment and a `projection_file_skipped` event ([Event Schemas](/architecture/event-schemas.md) §4.15); none is a sync error. An oversized workflow file is a `read_bounds` rejection (§4.14); an oversized branch-protection config is a sync error with the rules unchanged.
+- Read commands are bounded on both sides: Spine's buffer (the per-blob limit for a file, 16 MiB of output for any other read command) and git's own heap (`GIT_ALLOC_LIMIT`, 4 x the per-blob limit). A listing or diff over the output limit fails the sync rather than being truncated (`KNOWN-LIMITATIONS.md`, "Git read bounds").
 
 ### 8.2 Change Discovery
 
@@ -491,6 +493,8 @@ When processing a new commit (incremental sync):
 3. For changed artifacts, update the projection
 4. For deleted files, remove the projection
 5. For new files, create the projection
+
+Paths are read NUL-delimited (`git diff --name-status -z`, `git ls-tree -z`), so a path holding non-ASCII characters — which `artifact.Slugify` produces from a non-English title — is discovered under its raw name (before INIT-023 TASK-003 git C-quoted it and discovery dropped it silently). The refusals of §8.1 apply to changed files too, and a modified artifact that becomes oversized has its projection removed.
 
 ### 8.3 Discovery During Workflow Execution
 
