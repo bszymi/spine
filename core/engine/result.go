@@ -13,6 +13,9 @@ type SubmitRequest struct {
 	ExecutionID       string   // Step execution ID (assignment ID)
 	OutcomeID         string   // Selected outcome
 	ArtifactsProduced []string // Paths of artifacts produced
+	// ExpectedHeadSHA is the optional run-branch head assertion
+	// (StepResult.ExpectedHeadSHA, INIT-023 TASK-005).
+	ExpectedHeadSHA string
 }
 
 // IngestResult validates an actor's result against step requirements
@@ -122,6 +125,15 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 			fmt.Sprintf("outcome %q not defined for step %s", req.OutcomeID, exec.StepID))
 	}
 
+	// A head assertion that cannot apply is refused here, before the
+	// required-outputs check below can FAIL the step: a malformed or
+	// inapplicable expected_head_sha is a 400 that changes nothing
+	// (INIT-023 TASK-005 DC-8). Whether the head still matches is
+	// SubmitStepResult's check, made before the step changes.
+	if err := o.checkHeadAssertion(run, exec, stepDef, req.ExpectedHeadSHA); err != nil {
+		return nil, err
+	}
+
 	// Validate required_outputs are present.
 	if err := validateRequiredOutputs(stepDef.RequiredOutputs, req.ArtifactsProduced); err != nil {
 		log.Warn("required outputs missing",
@@ -138,6 +150,7 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 	if err := o.SubmitStepResult(ctx, req.ExecutionID, StepResult{
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: req.ArtifactsProduced,
+		ExpectedHeadSHA:   req.ExpectedHeadSHA,
 	}); err != nil {
 		return nil, err
 	}

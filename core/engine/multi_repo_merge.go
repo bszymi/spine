@@ -122,11 +122,31 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 			return fmt.Errorf("lookup existing outcome for %q: %w", repoID, lookupErr)
 		}
 		if existing != nil && existing.IsTerminal() {
-			log.Info("code repo merge already terminal, skipping retry",
+			// Merge binding (INIT-023 TASK-005 §8, P3-37): a `merged`
+			// repository is skipped only while its bound commit is on its
+			// default branch. After a merge_failed loop-back the run binds
+			// newly reviewed work, which the unconditional skip used to
+			// drop; it is merged again instead. A read failure is fail
+			// closed: the run stays in committing.
+			reMerge := false
+			if o.bindingOn && existing.Status == domain.RepositoryMergeStatusMerged {
+				contained, err := o.codeRepoBoundContained(ctx, run, repoID)
+				if err != nil {
+					return fmt.Errorf("check bound commit of %q on its default branch: %w", repoID, err)
+				}
+				reMerge = !contained
+			}
+			if !reMerge {
+				log.Info("code repo merge already terminal, skipping retry",
+					"run_id", run.RunID,
+					"repository_id", repoID,
+					"merge_status", string(existing.Status))
+				continue
+			}
+			log.Info("code repo merged earlier, but its bound commit is not on its default branch; merging again",
 				"run_id", run.RunID,
 				"repository_id", repoID,
-				"merge_status", string(existing.Status))
-			continue
+				"bound_sha", run.CommitMeta[RepoBoundSHAKey(repoID)])
 		}
 		outcome, err := o.attemptCodeRepositoryMerge(ctx, run, repoID)
 		if err != nil {
@@ -211,6 +231,9 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 	trailers := map[string]string{
 		"Run-ID":   run.RunID,
 		"Trace-ID": run.TraceID,
+	}
+	if o.bindingOn {
+		return o.attemptCodeRepositoryMergeBound(ctx, run, repoID, repo, client, outcome, trailers), nil
 	}
 	mergeResult, mergeErr := client.Merge(ctx, git.MergeOpts{
 		Source:   run.BranchName,
