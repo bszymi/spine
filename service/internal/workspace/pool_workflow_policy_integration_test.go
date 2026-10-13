@@ -24,6 +24,9 @@ func TestBuildServiceSet_WorkflowServiceHasProjectionPolicy(t *testing.T) {
 		t.Skip("SPINE_TEST_DATABASE_URL not set")
 	}
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	// buildServiceSet does not migrate; NewTestStore applies the schema
+	// (and the 018 bootstrap branch-protection seed) first.
+	_ = store.NewTestStore(t)
 	dsn := store.TestDSN()
 	cfg := Config{ID: "ws-wfpolicy-db", RepoPath: testutil.NewTempRepo(t), DatabaseURL: secrets.NewSecretValue([]byte(dsn))}
 	ss, err := buildServiceSet(context.Background(), cfg, nil, nil, "", nil, PoolPolicy{}, "")
