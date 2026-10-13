@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/testutil"
 )
 
@@ -346,4 +346,61 @@ func (b *codeRepoBehavior) PushBranch(ctx context.Context, remote, branch string
 
 func (b *codeRepoBehavior) DeleteRemoteBranch(ctx context.Context, remote, branch string) error {
 	return b.underlying.DeleteRemoteBranch(ctx, remote, branch)
+}
+
+// codeRepoBehavior forwards engine.CommitBinder to the underlying
+// *git.CLIClient, as production's gitpool clients expose it, so
+// SHA-bound merges (INIT-023 TASK-005, on by default in the harness) can
+// capture and merge code repositories. A queued merge or push failure
+// applies to MergeBound / PushCommit exactly as to Merge / Push.
+var _ engine.CommitBinder = (*codeRepoBehavior)(nil)
+
+func (b *codeRepoBehavior) binder() engine.CommitBinder {
+	return b.underlying.(engine.CommitBinder)
+}
+
+func (b *codeRepoBehavior) ResolveBranchHead(ctx context.Context, branch string) (string, error) {
+	return b.binder().ResolveBranchHead(ctx, branch)
+}
+
+func (b *codeRepoBehavior) VerifyCommit(ctx context.Context, sha string) error {
+	return b.binder().VerifyCommit(ctx, sha)
+}
+
+func (b *codeRepoBehavior) IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error) {
+	return b.binder().IsAncestor(ctx, ancestor, descendant)
+}
+
+func (b *codeRepoBehavior) CommitParents(ctx context.Context, sha string) ([]string, error) {
+	return b.binder().CommitParents(ctx, sha)
+}
+
+func (b *codeRepoBehavior) CommitFilesOnto(ctx context.Context, base string, files map[string]string, opts git.CommitOpts) (git.CommitResult, error) {
+	return b.binder().CommitFilesOnto(ctx, base, files, opts)
+}
+
+func (b *codeRepoBehavior) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	b.mu.Lock()
+	if b.mergeQueued {
+		err := b.mergeFailure
+		b.mergeFailure = nil
+		b.mergeQueued = false
+		b.mu.Unlock()
+		return git.MergeResult{}, err
+	}
+	b.mu.Unlock()
+	return b.binder().MergeBound(ctx, opts)
+}
+
+func (b *codeRepoBehavior) PushCommit(ctx context.Context, remote, branch, sha string) error {
+	b.mu.Lock()
+	if b.pushQueued {
+		err := b.pushFailure
+		b.pushFailure = nil
+		b.pushQueued = false
+		b.mu.Unlock()
+		return err
+	}
+	b.mu.Unlock()
+	return b.binder().PushCommit(ctx, remote, branch, sha)
 }

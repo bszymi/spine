@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/projection"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
-	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/adapters/projection"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/validation"
+	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -3382,5 +3382,59 @@ func TestRunStart_RepositoryPreconditionFailure_Surfaces412(t *testing.T) {
 	}
 	if got.Detail.Category != "not_found" {
 		t.Errorf("detail.category: got %q, want not_found", got.Detail.Category)
+	}
+}
+
+// capturingResultHandler records the submission the gateway built.
+type capturingResultHandler struct{ got []gateway.ResultSubmission }
+
+func (c *capturingResultHandler) IngestResult(_ context.Context, req gateway.ResultSubmission) (*gateway.ResultResponse, error) {
+	c.got = append(c.got, req)
+	return &gateway.ResultResponse{ExecutionID: req.ExecutionID, StepID: "review", Status: "completed", OutcomeID: req.OutcomeID}, nil
+}
+
+// TestStepSubmit_PassesExpectedHeadSHA is INIT-023 TASK-005 AC 4
+// (gateway): the JSON expected_head_sha reaches
+// ResultSubmission.ExpectedHeadSHA unchanged (the engine validates it),
+// and a submit without it carries none.
+func TestStepSubmit_PassesExpectedHeadSHA(t *testing.T) {
+	fs := newFakeStore()
+	fs.actors["alice"] = &domain.Actor{
+		ActorID: "alice", Type: domain.ActorTypeHuman, Name: "Alice",
+		Role: domain.RoleContributor, Status: domain.ActorStatusActive,
+	}
+	fs.stepExecOverride = &domain.StepExecution{
+		ExecutionID: "exec-review", RunID: "run-1", StepID: "review",
+		Status: domain.StepStatusAssigned, Attempt: 1, ActorID: "alice",
+	}
+	authSvc := auth.NewService(fs)
+	token, _, err := authSvc.CreateToken(context.Background(), "alice", "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rh := &capturingResultHandler{}
+	srv := gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc, ResultHandler: rh})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	head := strings.Repeat("ab", 20)
+	for _, body := range []string{
+		`{"outcome_id":"accepted","expected_head_sha":"` + head + `"}`,
+		`{"outcome_id":"accepted"}`,
+	} {
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v1/steps/exec-review/submit", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("submit %s: status %d", body, resp.StatusCode)
+		}
+	}
+	if len(rh.got) != 2 || rh.got[0].ExpectedHeadSHA != head || rh.got[1].ExpectedHeadSHA != "" {
+		t.Fatalf("submissions = %+v", rh.got)
 	}
 }
