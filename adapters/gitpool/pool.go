@@ -569,13 +569,12 @@ func (p *Pool) ListActive(ctx context.Context) ([]repository.Repository, error) 
 // String/MarshalJSON/LogValue keep them out of every other output.
 //
 // When the Credential is empty, the factory strips the process-wide
-// push token and credential helper from baseOpts (WithoutPushToken,
-// WithoutCredentialHelper). The client pushes to whatever its clone's
-// origin names, which a binding's clone_url — or a reused clone's
-// origin, or another binding's local_path — controls, so inheriting the
-// deployment's credential there would hand it to that host
-// (INIT-023 TASK-015). Helpers configured in the global or system git
-// config, outside Spine's options, are not affected.
+// push token and credential helper from baseOpts and switches off the
+// host's ambient credential sources (withoutProcessAuth). The client
+// pushes to whatever its clone's origin names, which a binding's
+// clone_url — or a reused clone's origin, or another binding's
+// local_path — controls, so inheriting any deployment or host
+// credential there would hand it to that host (INIT-023 TASK-015).
 func NewCLIClientFactory(baseOpts ...git.CLIOption) ClientFactory {
 	return func(localPath string, cred Credential) git.GitClient {
 		opts := append([]git.CLIOption{}, baseOpts...)
@@ -621,12 +620,16 @@ type cliCloner struct {
 	baseOpts []git.CLIOption
 }
 
-// withoutProcessAuth returns the options that strip the process-wide
-// push token and credential helper from a code-repo client or clone
-// whose binding has no credential of its own (INIT-023 TASK-015). An
+// withoutProcessAuth returns the options for a code-repo client or clone
+// whose binding has no credential of its own (INIT-023 TASK-015): strip
+// the process-wide push token and credential helper from the base
+// options, and keep git from consulting the host's ambient credential
+// sources too (a global or system credential.helper, an inherited
+// GIT_ASKPASS / core.askPass / SSH_ASKPASS) — otherwise a host-keyed
+// helper would still answer for whatever host the binding names. An
 // empty Credential means "no auth", as the Cloner contract says.
 func withoutProcessAuth() []git.CLIOption {
-	return []git.CLIOption{git.WithoutPushToken(), git.WithoutCredentialHelper()}
+	return []git.CLIOption{git.WithoutPushToken(), git.WithoutCredentialHelper(), git.WithoutAmbientCredentials()}
 }
 
 func (c *cliCloner) Clone(ctx context.Context, url, localPath string, cred Credential) error {

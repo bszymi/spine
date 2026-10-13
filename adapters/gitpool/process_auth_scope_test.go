@@ -411,3 +411,107 @@ func TestLatentGitpool_PerBindingCredentialStillUsed(t *testing.T) {
 		})
 	}
 }
+
+// t015AmbientAskpass writes an askpass program that answers every prompt
+// with the ambient credential and returns its path.
+func t015AmbientAskpass(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "ambient-askpass.sh")
+	script := "#!/bin/sh\ncase \"$1\" in\n  Username*) echo ambient-user ;;\n  *) echo ambient-secret ;;\nesac\n"
+	if err := os.WriteFile(p, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// Codex review (P1): stripping Spine's own options is not enough. A host
+// whose global or system git config names a credential helper (Apple
+// git's system config ships osxkeychain), or whose environment carries
+// GIT_ASKPASS, would still hand its credential to the host a
+// credential-less binding names. The cloner, the factory client and the
+// pool switch every ambient credential source off for such a binding.
+func TestLatentGitpool_CredentialLessCodeRepoIgnoresHostCredentials(t *testing.T) {
+	for _, src := range []struct {
+		name  string
+		setup func(t *testing.T, home, hostURL string)
+	}{
+		{"global credential.helper", func(t *testing.T, home, hostURL string) {
+			t015StoreCredential(t, home, hostURL)
+			if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper = store\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"URL-scoped global helper", func(t *testing.T, home, hostURL string) {
+			t015StoreCredential(t, home, hostURL)
+			cfg := "[credential \"" + hostURL + "\"]\n\thelper = store\n"
+			if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"inherited GIT_ASKPASS", func(t *testing.T, _, _ string) {
+			t.Setenv("GIT_ASKPASS", t015AmbientAskpass(t))
+		}},
+		{"core.askPass", func(t *testing.T, home, _ string) {
+			// git reads core.askPass only when GIT_ASKPASS is unset (an
+			// empty GIT_ASKPASS stops the lookup), so unset it here;
+			// t.Setenv restores it after the test.
+			t.Setenv("GIT_ASKPASS", "")
+			if err := os.Unsetenv("GIT_ASKPASS"); err != nil {
+				t.Fatal(err)
+			}
+			cfg := "[core]\n\taskPass = " + t015AmbientAskpass(t) + "\n"
+			if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(src.name, func(t *testing.T) {
+			sawAmbient := func(c *t015Capture) bool {
+				return c.sawPassword("store-secret") || c.sawPassword("ambient-secret")
+			}
+			// Positive control: a plain client does use the ambient source,
+			// so the assertions below are not vacuous.
+			t.Run("control", func(t *testing.T) {
+				home := t015Isolate(t)
+				srv, c := t015Host(t)
+				src.setup(t, home, srv.URL)
+				dir := filepath.Join(t.TempDir(), "control")
+				t015LocalRepo(t, dir, srv.URL+"/acme/x.git", "")
+				cl := git.NewCLIClient(dir)
+				defer cl.Close()
+				_ = cl.Push(context.Background(), "origin", "main")
+				if !sawAmbient(c) {
+					t.Fatalf("the ambient source did not answer for the test host (Authorization headers: %d)", c.authCount())
+				}
+			})
+			t.Run("cloner", func(t *testing.T) {
+				home := t015Isolate(t)
+				srv, c := t015Host(t)
+				src.setup(t, home, srv.URL)
+				_ = gitpool.NewCLICloner(git.WithPushToken(t015ProcessToken, "")).Clone(context.Background(), srv.URL+"/acme/x.git", filepath.Join(t.TempDir(), "clone"), gitpool.Credential{})
+				t015AssertNoProcessToken(t, c)
+			})
+			t.Run("factory push", func(t *testing.T) {
+				home := t015Isolate(t)
+				srv, c := t015Host(t)
+				src.setup(t, home, srv.URL)
+				dir := filepath.Join(t.TempDir(), "code")
+				t015LocalRepo(t, dir, srv.URL+"/acme/x.git", "")
+				client := gitpool.NewCLIClientFactory(git.WithPushToken(t015ProcessToken, ""))(dir, gitpool.Credential{})
+				if cl, ok := client.(*git.CLIClient); ok {
+					defer cl.Close()
+				}
+				_ = client.Push(context.Background(), "origin", "main")
+				t015AssertNoProcessToken(t, c)
+			})
+			t.Run("pool lazy clone", func(t *testing.T) {
+				home := t015Isolate(t)
+				srv, c := t015Host(t)
+				src.setup(t, home, srv.URL)
+				p := t015Pool(t, srv.URL+"/acme/x.git", filepath.Join(t.TempDir(), "evil"))
+				_, _ = p.RepositoryPath(context.Background(), "evil")
+				t015AssertNoProcessToken(t, c)
+			})
+		})
+	}
+}

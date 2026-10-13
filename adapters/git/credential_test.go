@@ -177,6 +177,20 @@ func TestWithoutPushToken_ClearsInheritedToken(t *testing.T) {
 	}
 }
 
+// WithoutAmbientCredentials never removes the client's own credential: a
+// token layered with it still creates the askpass helper (INIT-023
+// TASK-015). The gitpool tests drive the ambient sources it switches off.
+func TestWithoutAmbientCredentials_KeepsOwnToken(t *testing.T) {
+	client := git.NewCLIClient(t.TempDir(),
+		git.WithoutAmbientCredentials(),
+		git.WithPushToken("binding-tok", "x-access-token"),
+	)
+	defer client.Close()
+	if client.AskpassPathForTest() == "" {
+		t.Error("WithoutAmbientCredentials must not drop the client's own token")
+	}
+}
+
 func TestWithPushToken_LosesToCredentialHelperWithoutClear(t *testing.T) {
 	// Pin the documented "credential helper wins" semantics so the
 	// override path above is the only way a per-binding token can

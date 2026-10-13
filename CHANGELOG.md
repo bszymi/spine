@@ -55,10 +55,12 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   used `SPINE_GIT_CREDENTIAL_HELPER`, for a code-repo binding with no `credentials_ref` — against
   whatever host its `clone_url`, or a reused clone's `origin`/`pushurl`, named. Dormant (no
   code-repo catalog or `RepositoryManager` is wired in `spine serve`), P1 once one is. Both are now
-  stripped for such bindings, on every host.
+  stripped for such bindings, on every host, and git runs with the host's own credential sources
+  switched off too (global or system `credential.helper`, `GIT_ASKPASS`, `core.askPass`).
 - **`clone_url` redaction covers tokens in the username position (latent).**
   `GET /api/v1/repositories` echoed `https://<token>@host/...`; all userinfo of an `https` URL is
-  now redacted (SSH logins and the SCP form are kept). Stored values are unchanged.
+  now redacted (SSH logins and the SCP form are kept), and a malformed legacy value never echoes
+  anything before its last `@`. Stored values are unchanged.
 
 ### Breaking
 
@@ -104,11 +106,15 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   byte-identical.
 - **`adapters/git.WithoutPushToken()`** — additive `CLIOption`, mirroring
   `WithoutCredentialHelper`. No existing option, interface (`GitClient`) or call path changes.
+- **`adapters/git.WithoutAmbientCredentials()`** — additive, opt-in `CLIOption`: a client with no
+  token or helper of its own runs clone and push with `-c credential.helper=`, `GIT_ASKPASS` and
+  `SSH_ASKPASS` emptied and `GIT_TERMINAL_PROMPT=0`, so no host credential source answers. A client
+  with its own credential is unchanged; without the option nothing changes.
 - **`adapters/gitpool`**: `NewCLIClientFactory` and `NewCLICloner` strip the process push token and
-  credential helper from their base options for an empty `Credential`. SMP does not import
-  `adapters/gitpool`.
-- **`adapters/repository.RedactCloneURL`** redacts all `https` userinfo and never echoes an
-  unparsable value's userinfo. SMP does not call it.
+  credential helper from their base options for an empty `Credential`, and apply
+  `WithoutAmbientCredentials`. SMP does not import `adapters/gitpool`.
+- **`adapters/repository.RedactCloneURL`** redacts all `https` userinfo and never echoes the
+  userinfo of an unparsable or opaque value. SMP does not call it.
 - Core workflow validation, the projection, `workflow.Service` (SMP's `WorkflowWriter`) and
   `core/refadmit` behaviour are unchanged; the identifier rule lives in `service/` only.
 

@@ -314,13 +314,12 @@ The following limitations have been resolved:
 - Since INIT-023 TASK-015 a code repository with no `credentials_ref` clones and pushes with no
   credential: the gitpool cloner and client factory strip the process-wide `SPINE_GIT_PUSH_TOKEN`
   and `SPINE_GIT_CREDENTIAL_HELPER` for it, on every host (owner question 2 ruled "never", pending
-  the owner). A private code repository needs its own `credentials_ref`. Only the primary
-  repository uses the process credentials.
-- **Residual:** credential helpers configured in the host's **global or system** git config
-  (outside Spine's options, for example the `osxkeychain` helper in Apple git's system config) are
-  still consulted on such a clone or push. Run `spine serve` with no host-level helper, or set
-  `GIT_CONFIG_NOSYSTEM=1` and a clean `HOME`; passing `-c credential.helper=` on credential-less
-  code-repo commands is a follow-up.
+  the owner), and run git with every host credential source switched off — a `credential.helper`
+  in the global, system or repo-local git config (URL-scoped ones included), and `GIT_ASKPASS`,
+  `core.askPass` and `SSH_ASKPASS` (`git.WithoutAmbientCredentials`). A private code repository
+  needs its own `credentials_ref`. Only the primary repository uses the process credentials.
+- **Residual:** curl's `~/.netrc` lookup, which git enables for HTTP, still answers for a host it
+  lists. Do not keep a `.netrc` in the `HOME` of the `spine serve` process.
 - **Residual:** a reused clone whose `origin` differs from the binding's `clone_url` is not
   refused or re-cloned, so `/git/{ws}/{repo}` can serve a different repository than the binding
   names (no credential reaches it). Follow-up.
