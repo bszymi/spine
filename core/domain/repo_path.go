@@ -41,11 +41,11 @@ func UnsafeRepositoryPath(p string) bool {
 		switch {
 		case unicode.IsControl(r):
 			return true
-		case r == ' ' || r == ' ':
+		case r == '\u2028' || r == '\u2029':
 			return true
-		case r >= '‪' && r <= '‮':
+		case r >= '\u202a' && r <= '\u202e':
 			return true
-		case r >= '⁦' && r <= '⁩':
+		case r >= '\u2066' && r <= '\u2069':
 			return true
 		}
 	}

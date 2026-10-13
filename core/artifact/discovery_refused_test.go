@@ -103,8 +103,8 @@ func TestDiscoverAll_RefusesAndRecords(t *testing.T) {
 	big := "docs/big.md"
 	unsafe := []string{
 		"a\tb.md", "x\ny.md", "\xff.md", // design
-		"a\u0085b.md", "a b.md", "a‮b.md", // widened default (C1, LS, RLO)
-		"a b.md", "a⁦b.md", "a\x7fb.md", "dir\x01/x.md",
+		"a\u0085b.md", "a\u2028b.md", "a\u202eb.md", // widened default (C1, LS, RLO)
+		"a\u2029b.md", "a\u2066b.md", "a\x7fb.md", "dir\x01/x.md",
 	}
 	unsafeWorkflow := "workflows/a\tb.yaml"
 	files := map[string]string{
@@ -191,12 +191,12 @@ func TestUnsafePath(t *testing.T) {
 		{"文書/x.md", false},       // CJK
 		{"é/x.md", false},       // NFD combining mark: normalisation is not refused
 		{"\U0001F600.md", false}, // emoji
-		{"a‍b.md", false},        // ZWJ (format char, not in the refused set)
+		{"a\u200db.md", false},   // ZWJ (format char, not in the refused set)
 		{"a\tb.md", true}, {"a\nb.md", true}, {"a\rb.md", true}, {"a\x00b.md", true},
 		{"a\x1fb.md", true}, {"a\x7fb.md", true},
 		{"a\u0080b.md", true}, {"a\u0085b.md", true}, {"a\u009fb.md", true},
-		{"a b.md", true}, {"a b.md", true},
-		{"a‪b.md", true}, {"a‮b.md", true}, {"a⁦b.md", true}, {"a⁩b.md", true},
+		{"a\u2028b.md", true}, {"a\u2029b.md", true},
+		{"a\u202ab.md", true}, {"a\u202eb.md", true}, {"a\u2066b.md", true}, {"a\u2069b.md", true},
 		{"\xff.md", true}, {"a\xc3.md", true}, {"\xed\xa0\x80.md", true}, // invalid UTF-8, surrogate
 	} {
 		if got := artifact.UnsafePath(tc.p); got != tc.want {
@@ -204,7 +204,7 @@ func TestUnsafePath(t *testing.T) {
 		}
 	}
 	// Slugify output is never refused.
-	for _, title := range []string{"Wdrożenie", "Résumé", "Документ", "文書", "a\tb‮c d\u0085e"} {
+	for _, title := range []string{"Wdrożenie", "Résumé", "Документ", "文書", "a\tb\u202ec\u2028d\u0085e"} {
 		if s := artifact.Slugify(title); artifact.UnsafePath(s) {
 			t.Errorf("Slugify(%q) = %q is refused", title, s)
 		}
@@ -280,9 +280,9 @@ func TestDiscoverChangesFromDiffs_RefusalTable(t *testing.T) {
 		{"renamed to an oversized file", git.FileDiff{OldPath: "g.md", Path: "big.md", Status: "renamed"},
 			map[string]string{"from:g.md": refusedGovernance}, map[string]error{"to:big.md": tooLargeErr(to, "big.md")},
 			want{deleted: []string{"g.md"}, refused: []artifact.RefusedFile{big("big.md")}}},
-		{"renamed from an unsafe path", git.FileDiff{OldPath: "a‮b.md", Path: "g.md", Status: "renamed"},
+		{"renamed from an unsafe path", git.FileDiff{OldPath: "a\u202eb.md", Path: "g.md", Status: "renamed"},
 			map[string]string{"to:g.md": refusedGovernance}, nil,
-			want{created: []string{"g.md"}, noReads: []string{"a‮b.md"}}},
+			want{created: []string{"g.md"}, noReads: []string{"a\u202eb.md"}}},
 		{"modified unsafe", git.FileDiff{Path: "a\u0085b.md", Status: "modified"}, nil, nil,
 			want{refused: []artifact.RefusedFile{uns("a\u0085b.md")}, noReads: []string{"a\u0085b.md"}}},
 		{"modified to oversized, was an artifact", git.FileDiff{Path: "g.md", Status: "modified"},
@@ -406,11 +406,11 @@ func TestList_RawPathsWithoutUnsafeOnes(t *testing.T) {
 		return "id: " + id + "\nname: W\nversion: \"1\"\nstatus: Active\napplies_to: [Task]\nentry_step: s\nsteps:\n  - id: s\n    name: S\n    type: manual\n"
 	}
 	dir, _ := rawTreeRepo(t, map[string]string{
-		"governance/résumé.md": refusedGovernance,
-		"governance/a\tb.md":   refusedGovernance,
-		"governance/\xff.md":   refusedGovernance,
-		"workflows/wé.yaml":    wfBody("we"),
-		"workflows/a‮b.yaml":   wfBody("ab"),
+		"governance/résumé.md":    refusedGovernance,
+		"governance/a\tb.md":      refusedGovernance,
+		"governance/\xff.md":      refusedGovernance,
+		"workflows/wé.yaml":       wfBody("we"),
+		"workflows/a\u202eb.yaml": wfBody("ab"),
 	})
 	client := git.NewCLIClient(dir)
 	t3gitHead(t, dir) // workflow.Service.List reads HEAD

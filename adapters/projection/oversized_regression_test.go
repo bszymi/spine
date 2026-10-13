@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -28,7 +27,6 @@ import (
 
 type t3Store struct {
 	store.Store
-	mu        sync.Mutex
 	state     *store.SyncState
 	artifacts map[string]*store.ArtifactProjection
 }

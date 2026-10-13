@@ -57,7 +57,9 @@ func eightMiB(prefix string) string {
 func skipEvents(t *testing.T, r *recordingRouter) []map[string]any {
 	t.Helper()
 	var out []map[string]any
-	for _, e := range r.ofType(domain.EventProjectionFileSkipped) {
+	evs := r.ofType(domain.EventProjectionFileSkipped)
+	for i := range evs {
+		e := &evs[i]
 		var p map[string]any
 		dec := json.NewDecoder(bytes.NewReader(e.Payload))
 		dec.UseNumber() // exact byte counts
@@ -396,7 +398,7 @@ func TestProjection_UnsafePathsNeverReachTheStore(t *testing.T) {
 	ctx := context.Background()
 	unsafeArtifact := "initiatives/\xff/x.md"
 	unsafeWorkflow := "workflows/a\tb.yaml"
-	bidiArtifact := "governance/a‮b.md"
+	bidiArtifact := "governance/a\u202eb.md"
 
 	t.Run("FullRebuild", func(t *testing.T) {
 		repo := newScratchRepo(t)

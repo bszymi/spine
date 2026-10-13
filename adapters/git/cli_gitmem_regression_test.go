@@ -78,7 +78,7 @@ func TestT003_GitMemChild(t *testing.T) {
 		data, err := c.ReadFile(ctx, os.Getenv("T003_GITMEM_REF"), os.Getenv("T003_GITMEM_PATH"))
 		res.Len = len(data)
 		if want := os.Getenv("T003_GITMEM_WANT"); want != "" {
-			body, rerr := os.ReadFile(want)
+			body, rerr := os.ReadFile(want) //nolint:gosec // G703: a temp file path the parent test wrote
 			res.Match = rerr == nil && bytes.Equal(body, data)
 		}
 		if err != nil {
@@ -102,7 +102,7 @@ func TestT003_GitMemChild(t *testing.T) {
 
 func runGitMemChild(t *testing.T, env ...string) gitMemResult {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestT003_GitMemChild$", "-test.count=1", "-test.v")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestT003_GitMemChild$", "-test.count=1", "-test.v") //nolint:gosec // G702: re-exec of this test binary
 	cmd.Env = append(os.Environ(), env...)
 	out, _ := cmd.CombinedOutput()
 	for _, l := range strings.Split(string(out), "\n") {
