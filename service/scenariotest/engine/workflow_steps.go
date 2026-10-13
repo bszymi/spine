@@ -6,8 +6,8 @@ import (
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	spineEngine "github.com/bszymi/spine/core/engine"
-	"github.com/bszymi/spine/service/scenariotest/assert"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/service/scenariotest/assert"
 )
 
 // StartRun returns a step that starts a workflow run for the given task.
@@ -77,6 +77,36 @@ func StartWorkflowPlanningRun(workflowID, body string) Step {
 			result, err := sc.Runtime.Orchestrator.StartWorkflowPlanningRun(sc.Ctx, workflowID, body)
 			if err != nil {
 				return fmt.Errorf("start workflow planning run for %s: %w", workflowID, err)
+			}
+			sc.Set("run_id", result.Run.RunID)
+			sc.Set("run_status", string(result.Run.Status))
+			sc.Set("run_mode", string(result.Run.Mode))
+			sc.Set("run_workflow_id", result.Run.WorkflowID)
+			sc.Set("run_workflow_sha", result.Run.WorkflowVersion)
+			if result.EntryStep != nil {
+				sc.Set("current_execution_id", result.EntryStep.ExecutionID)
+				sc.Set("current_step_id", result.EntryStep.StepID)
+			}
+			return nil
+		},
+	}
+}
+
+// StartWorkflowUpdatePlanningRun returns a step that starts a planning run
+// governing an edit of an EXISTING workflow definition (ADR-008 §1;
+// INIT-023 TASK-014). Same shape as StartWorkflowPlanningRun; the body is
+// written on the run branch through the workflow writer's Update, so it
+// must bump the version of the definition on main.
+func StartWorkflowUpdatePlanningRun(workflowID, body string) Step {
+	return Step{
+		Name: "start-workflow-update-planning-run-" + workflowID,
+		Action: func(sc *ScenarioContext) error {
+			if sc.Runtime.Orchestrator == nil {
+				return fmt.Errorf("StartWorkflowUpdatePlanningRun requires WithOrchestrator() on the runtime")
+			}
+			result, err := sc.Runtime.Orchestrator.StartWorkflowUpdatePlanningRun(sc.Ctx, workflowID, body)
+			if err != nil {
+				return fmt.Errorf("start workflow update planning run for %s: %w", workflowID, err)
 			}
 			sc.Set("run_id", result.Run.RunID)
 			sc.Set("run_status", string(result.Run.Status))
