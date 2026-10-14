@@ -100,7 +100,8 @@ func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...s
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.repoPath
 	env := append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
-	cmd.Env = append(env, o.env...)
+	env = append(env, o.env...)
+	cmd.Env = env
 	if o.stdin != nil {
 		cmd.Stdin = o.stdin
 	}
