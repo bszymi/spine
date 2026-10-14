@@ -68,19 +68,24 @@ func runMergeResolveCmd() *cobra.Command {
 }
 
 func runMergeRetryCmd() *cobra.Command {
-	var reason string
+	var reason, headSHA string
 	cmd := &cobra.Command{
 		Use:   "retry <run_id> <repository_id>",
 		Short: "Retry a failed per-repo merge",
 		Long: "Reset a failed per-repo merge outcome to pending so the next scheduler\n" +
 			"tick re-attempts the merge. The reason is recorded as an audit event.\n" +
-			"Operator role required.",
+			"The retry merges the commit the run bound for that repository; pass\n" +
+			"--head-sha (the repository's current run-branch head) to rebind it to\n" +
+			"a fix you pushed to the branch. Operator role required.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if reason == "" {
 				return fmt.Errorf("--reason is required")
 			}
 			body := map[string]string{"reason": reason}
+			if headSHA != "" {
+				body["head_sha"] = headSHA
+			}
 			c := newAPIClient()
 			path := "/api/v1/runs/" + args[0] + "/repositories/" + args[1] + "/retry"
 			data, err := c.Post(context.Background(), path, body)
@@ -91,6 +96,7 @@ func runMergeRetryCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Audit reason for the retry (required)")
+	cmd.Flags().StringVar(&headSHA, "head-sha", "", "Rebind the repository to this run-branch head (its full commit id; must be the current head)")
 	return cmd
 }
 

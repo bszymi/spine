@@ -63,6 +63,7 @@ func (a *resultAdapter) IngestResult(ctx context.Context, req gateway.ResultSubm
 		ExecutionID:       req.ExecutionID,
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: req.ArtifactsProduced,
+		ExpectedHeadSHA:   req.ExpectedHeadSHA,
 	})
 	if err != nil {
 		return nil, err

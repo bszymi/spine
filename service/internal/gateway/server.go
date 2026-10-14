@@ -141,6 +141,15 @@ type RunMergeResolver interface {
 	RetryRepositoryMerge(ctx context.Context, runID, repositoryID, reason string) (*engine.MergeRecoveryResult, error)
 }
 
+// RunMergeHeadRetrier is the optional RunMergeResolver capability behind
+// the retry endpoint's head_sha (INIT-023 TASK-005 DC-7): rebind the code
+// repository to the named current run-branch head before the retry.
+// *engine.Orchestrator implements it; a resolver without it answers 503
+// to a request that carries head_sha rather than ignoring it.
+type RunMergeHeadRetrier interface {
+	RetryRepositoryMergeAt(ctx context.Context, runID, repositoryID, reason, headSHA string) (*engine.MergeRecoveryResult, error)
+}
+
 // PlanningRunResult contains the result of starting a planning run.
 // Mirrors engine.StartRunResult but avoids gateway importing engine.
 type PlanningRunResult struct {
@@ -263,6 +272,9 @@ type ResultSubmission struct {
 	ExecutionID       string
 	OutcomeID         string
 	ArtifactsProduced []string
+	// ExpectedHeadSHA is the optional run-branch head assertion
+	// (expected_head_sha, INIT-023 TASK-005).
+	ExpectedHeadSHA string
 }
 
 // ResultResponse is returned after result ingestion.

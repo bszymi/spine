@@ -158,7 +158,7 @@ A multi-repo run reached `partially-merged` because one or more code repositorie
 
 This walkthrough is the operational counterpart of [`/architecture/error-handling-and-recovery.md`](/architecture/error-handling-and-recovery.md) §5.4. The supported recovery surface is exactly two orchestrator APIs (each with a CLI counterpart):
 
-- `POST /api/v1/runs/{run_id}/repositories/{repository_id}/retry` (`spine run merge retry`) — flips the per-repo outcome from `failed` to `pending`. The next scheduler tick re-attempts the merge.
+- `POST /api/v1/runs/{run_id}/repositories/{repository_id}/retry` (`spine run merge retry`) — flips the per-repo outcome from `failed` to `pending`. The next scheduler tick re-attempts the merge. Under SHA-bound merges (INIT-023 TASK-005; always on in `spine serve`) the retry merges the commit the run's review bound for that repository, not the branch tip: a retry means "try again", not "approve what was pushed since". To have the retry merge a fix you pushed to the code repository's run branch, name it: `{"reason": "...", "head_sha": "<full commit id>"}` (`--head-sha`). It must be the branch's current head (otherwise `409 run_branch_moved` and nothing changes); the ledger commit records it as `Rebound-SHA` and the audit event as `rebound_sha`.
 - `POST /api/v1/runs/{run_id}/repositories/{repository_id}/resolve` (`spine run merge resolve`) — flips the outcome to `resolved-externally` and records the operator's audit reason. Use this when the conflict was resolved out of band (the operator has merged the branch through some other channel, or decided the work is no longer required).
 
 Both APIs write a primary-repo audit ledger commit and an audit event so the operator action is queryable.

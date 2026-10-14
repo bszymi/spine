@@ -141,7 +141,7 @@ Workflow Execution Operations control Run execution and task governance decision
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
-| `step.submit` | Submits a step result, may produce a Git commit | When an actor completes assigned work |
+| `step.submit` | Submits a step result, may produce a Git commit; records the run-branch head it completed at (merge binding) | When an actor completes assigned work |
 | `step.assign` | Assigns an actor to a step | When overriding automatic actor selection |
 
 **Task governance:**
@@ -158,6 +158,7 @@ Workflow Execution Operations control Run execution and task governance decision
 - `run.start` fails if an active Run already exists for the task, or if no active workflow matches the task's `(type, work_type)` pair
 - `run.start_planning` resolves to workflows with `mode: creation` and accepts artifact type, initial content, and optional parent path — the target artifact does not need to exist on the authoritative branch
 - `step.submit` validates the outcome against the workflow definition and checks actor assignment
+- `step.submit` may carry `expected_head_sha`, the run-branch head the submitter worked on (INIT-023 TASK-005). It is refused with `409` (`run_branch_moved`) unless the run branch is still at that commit, and with `400` when it is not a full lowercase hex commit id or the step cannot carry one (no run branch, a divergence-branch step, an internal step). With merge binding on (always in `spine serve`), every main-path completion binds the head the server resolved, and a `review` or `convergence` step's outcome that leads to the merge is refused with `409` (`run_branch_moved_since_gate`) when the branch moved since the previous step bound it. Commits pushed or written to the run branch *during* a review — including a reviewer's own fix-up through `/artifacts/add` or `write_context` — therefore cannot be approved in the same review: the reviewer sends the work back (a rework outcome) so it is validated again. The governed merge merges the bound commit, never the branch tip
 - Task governance operations (`accept`, `reject`, `cancel`, `abandon`, `supersede`) are Git writes — they produce durable commits that change the task artifact's front matter
 - `task.reject` requires a rationale; the `acceptance` field must be one of `rejected_with_followup` or `rejected_closed` (per [Task Lifecycle](/governance/task-lifecycle.md))
 

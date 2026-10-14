@@ -6,6 +6,122 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-005: SHA-bound governed merge)
+
+### Security
+
+- **The governed merge publishes the commit that was validated and reviewed, not the run-branch
+  tip (audit F2, merge half, P2; P3-37).** The merge resolved the run branch's *name* when it ran,
+  so a commit pushed after `validate` passed, after the reviewer read the diff, or while the run sat
+  in `committing` between merge attempts reached `main` under the trusted "Merge run …" message —
+  including `.spine/branch-protection.yaml` with `rules: []` and rewritten `workflows/**`. With merge
+  binding on:
+  - every main-path step completion records the run-branch head the engine resolved (reserved
+    `runs.commit_meta` keys `spine.bound_sha`, `spine.bound_by`, `spine.head.<step>`,
+    `spine.repo.<id>.bound_sha`; no schema change);
+  - a `review` or `convergence` step's outcome that leads to the merge is refused when the branch
+    moved since the previous binding (policy `reject`, the default; `rebind` accepts the new head);
+  - every merge attempt merges exactly the bound commit, applies the status cascade at that commit
+    with plumbing (never on the run branch), checks that the result is built from only the previous
+    target tip and that commit, and pushes it without force; the cascade and recovery-ledger
+    commits must be children of exactly the bound commit, and a merge result that fails the check
+    is taken back off the local target before anything else can build on it or publish it;
+  - a run with no binding the run itself recorded fails closed (`precondition`): a publish workflow
+    routes `merge_failed` back to `execute`, a legacy terminal-commit workflow fails the run.
+
+  The window after the reviewer read the diff is closed for clients that send `expected_head_sha`
+  (below). An approval without it binds the head at submit time: the moved-head check compares that
+  head with the previous binding, so a branch moved during the review and moved back to the bound
+  commit before the submit is not detected (KNOWN-LIMITATIONS "Governed Merge Binding").
+- **Workflow outcomes can no longer write `spine.*` commit metadata.** Reserved keys are stripped
+  from every outcome `commit:` map before storage, with binding on or off, and `workflow.Validate`
+  reports them (`steps[i].outcomes[j].commit`).
+- **Code repositories (P3-37, dormant):** under binding, a run whose code-repository clients cannot
+  bind is refused at `StartRun` before any branch exists; each code repository merges its bound
+  commit; an already-merged repository is merged again when its bound commit is not on its default
+  branch (the `merge_failed` loop-back no longer drops reviewed work); an operator retry rebinds
+  only to a `head_sha` it names.
+
+### Changed (standalone)
+
+`spine serve` enables merge binding on the process-level and every per-workspace orchestrator, with
+the `reject` policy and no switch to turn it off (owner questions 4 and 6; the rollback is the
+previous build). Externally visible:
+
+- **`POST /steps/{assignment_id}/submit` accepts `expected_head_sha`** (optional, a full lowercase
+  hex commit id): the head the submitter worked on. Answers, with `detail.reason`:
+  - `409 run_branch_moved` — the run branch is not at `expected_head_sha` (also with binding off);
+  - `409 run_branch_moved_since_gate` — a review/convergence approval of a branch that moved since
+    the previous step bound it; send the work back with a rework outcome;
+  - `400 expected_head_sha_invalid` / `expected_head_sha_not_applicable` — malformed, or on a run
+    with no branch, a divergence-branch step or an internal step; refused before the
+    required-outputs check, so it never fails the step;
+  - `503 run_branch_head_unavailable` — the head could not be resolved for a submit that must bind
+    it; nothing was recorded.
+
+  None of these answers changes the step: they come before the required-outputs check, so a submit
+  that is refused on its head and also lacks a required output is not failed for the output.
+- **UX change: a fix-up made during a review can no longer be approved in the same review.** A
+  commit on the run branch while a review is open — including the reviewer's own `/artifacts/add`
+  or `write_context` write — makes the approval answer `409 run_branch_moved_since_gate`. The
+  reviewer must choose a rework outcome so the change is validated again.
+- **Runs in flight at upgrade** that reach the merge without a binding fail closed (publish
+  workflows route back to `execute` and re-bind on the next round).
+- **The status cascade commit is no longer on the run branch**; it reaches `main` only through the
+  merge. A `merge_failed` loop-back no longer leaves `status: Completed` on the branch being
+  reworked.
+- **A run branch whose tip held commits the merge left out is kept** instead of deleted, and a
+  `WARN merge_binding: commits after the bound head were not merged` names `run_id`, `bound_sha`
+  and `tip_sha`. A tip that cannot be read or judged keeps the branch too (`WARN merge binding: run
+  branch tip unknown; keeping the run branch`); only a branch that no longer exists is not kept.
+- **Planning-run collision renumber is skipped** under binding (it committed on the branch tip).
+- **A merge the structural check refuses is taken back** off the local `main` (compare-and-swap
+  `update-ref`, the working tree following with a two-tree `read-tree -m -u`), so the next governed
+  merge or in-place write cannot publish it — also with `SPINE_GIT_PUSH_ENABLED=false`, where the
+  local `main` is the published branch. A write that landed on `main` between the merge's base read
+  and the merge is kept, and the run stays in `committing` (outcome class `remote_unavailable`) so
+  the next attempt merges on top of it instead of failing the run or routing it back to `execute`
+  (a write that lands during a replay of a landed merge is not kept: KNOWN-LIMITATIONS "Governed
+  Merge Binding" 7). A take-back that cannot run is an `ERROR merge binding: refused merge NOT
+  taken back` and is named in the merge outcome's failure detail.
+- **Merge retries add nothing.** A retry or resume after the merge landed on the local `main`
+  recomputes the same status-cascade commit — also when the run added child artifacts — so it finds
+  `main` already up to date instead of adding a second cascade commit and merge commit.
+- **`POST /runs/{run_id}/repositories/{repository_id}/retry` accepts `head_sha`** (and `spine run
+  merge retry --head-sha`): the code repository's current run-branch head to rebind to. Without it
+  the retry merges the bound commit again; a stale `head_sha` is `409 run_branch_moved`. The ledger
+  commit carries a `Rebound-SHA` trailer and the event a `rebound_sha` field. Under binding the
+  recovery ledger commit is built as a child of the bound commit and is not pushed to the run branch.
+- **Push of the merge:** `push --end-of-options origin <merge>^{commit}:refs/heads/main` (no force),
+  in place of `push origin <main oid>^{commit}:refs/heads/main`. A transient push failure recovers
+  on the next attempt; a non-fast-forward refusal stays permanent, as before.
+
+### Embedders (library)
+
+- New opt-in `Orchestrator.EnableMergeBinding(engine.MergeBindingConfig{MovedHead: ...})` and
+  `MergeBindingEnabled()`. It returns an error, leaving binding off, unless the `GitOperator`
+  implements the new optional `engine.CommitBinder` interface (`ResolveBranchHead`, `VerifyCommit`,
+  `IsAncestor`, `CommitParents`, `CommitFilesOnto`, `MergeBound`, `PushCommit`, `ResetBranch`). No method was added
+  to any interface an embedder implements. `*git.CLIClient` implements it; embedders run the shared
+  suite `core/engine/enginetest.RunCommitBinderConformance` against their own operator. The suite
+  accepts both forms of `ResetBranch` the contract allows — the local branch moved back, or dropped
+  by a remote-backed operator so the next `MergeBound` re-creates it from the remote (a clean working
+  tree either way) — and every commit it hands the binder is on a branch of `Source`, so a harness
+  whose `Sync` fetches sees it.
+- Additive fields: `git.MergeOpts.SourceSHA` (merge exactly that commit; `CLIClient.Merge` honours
+  it), `git.MergeResult.BaseSHA`, `engine.StepResult.ExpectedHeadSHA`,
+  `engine.SubmitRequest.ExpectedHeadSHA`. New: `Orchestrator.RetryRepositoryMergeAt`,
+  `engine.HeadBindingDetail` (the `Detail` of every binding refusal) and the `Reason*` constants,
+  the `CommitMeta*` key constants, `git.IsCanonicalObjectName`.
+- **Shared behaviour at the next bump, binding off:** reserved `spine.*` keys are stripped from
+  outcome `commit:` maps (no shipped workflow in Spine or SMP uses them); `workflow.Validate` now
+  rejects an outcome `commit:` key starting with `spine.` in any letter case, at
+  `steps[i].outcomes[j].commit` — not opt-in, so every workflow an embedder validates (SMP's workflow
+  writer and seeding included) is refused with such a key; a client that sends
+  `ExpectedHeadSHA` gets it checked (old clients never send it); `git.CommitOpts` trailers outside
+  the standard four are now written in sorted order instead of map order. Everything else — every
+  code path and git argv — is unchanged without `EnableMergeBinding`.
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-016: ref-class push admission)
 
 ### Security

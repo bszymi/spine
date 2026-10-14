@@ -316,6 +316,15 @@ func buildOrchestrator(
 		return nil
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// SHA-bound governed merges (INIT-023 TASK-005): `spine serve` always
+	// merges exactly the commit that passed validation and review, with
+	// the default moved-head policy (reject). There is deliberately no
+	// switch to turn it off (owner question 6); the rollback is the
+	// previous build.
+	if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
+		log.Error("merge binding init failed", "error", err)
+		return nil
+	}
 	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
 	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
 	orch.WithStepEntryPolicy(stepEntryPolicy)

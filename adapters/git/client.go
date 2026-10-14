@@ -53,17 +53,24 @@ type CommitResult struct {
 
 // MergeOpts defines options for merging branches.
 type MergeOpts struct {
-	Source   string // Branch to merge from
-	Target   string // Branch to merge into (empty = current branch)
-	Strategy string // "fast-forward" or "merge-commit"
-	Message  string // Merge commit message (for merge-commit strategy)
-	Trailers map[string]string
+	Source string // Branch to merge from
+	// SourceSHA, when set, is the exact commit to merge (a full lowercase
+	// hex object id); Source is then used only for messages. Callers
+	// that leave it empty get the branch-name merge (INIT-023 TASK-005).
+	SourceSHA string
+	Target    string // Branch to merge into (empty = current branch)
+	Strategy  string // "fast-forward" or "merge-commit"
+	Message   string // Merge commit message (for merge-commit strategy)
+	Trailers  map[string]string
 }
 
 // MergeResult contains the result of a successful merge.
 type MergeResult struct {
-	SHA         string // Resulting commit SHA
-	FastForward bool   // True if merge was fast-forward
+	SHA string // Resulting commit SHA
+	// BaseSHA is the target tip the merge was computed on (set by
+	// SHA-bound merges, INIT-023 TASK-005; empty otherwise).
+	BaseSHA     string
+	FastForward bool // True if merge was fast-forward
 }
 
 // LogOpts defines options for querying Git log.

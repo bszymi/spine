@@ -33,6 +33,10 @@ type stepSubmitRequest struct {
 	Output           *stepSubmitOutput `json:"output,omitempty"`
 	Rationale        string            `json:"rationale,omitempty"`
 	ValidationStatus string            `json:"validation_status,omitempty"`
+	// ExpectedHeadSHA is the run-branch head the submitter worked on
+	// (INIT-023 TASK-005). Optional; when present the engine refuses the
+	// submit unless the run branch is still there.
+	ExpectedHeadSHA string `json:"expected_head_sha,omitempty"`
 }
 
 type stepAssignRequest struct {
@@ -331,7 +335,23 @@ func (s *Server) handleRunRepositoryRetry(w http.ResponseWriter, r *http.Request
 	runID := chi.URLParam(r, "run_id")
 	repoID := chi.URLParam(r, "repository_id")
 
-	result, err := resolver.RetryRepositoryMerge(r.Context(), runID, repoID, req.Reason)
+	// head_sha (INIT-023 TASK-005 DC-7): the operator names the code
+	// repository's current run-branch head to rebind the merge to it.
+	// Without it the retry merges the bound commit again.
+	var (
+		result *engine.MergeRecoveryResult
+		err    error
+	)
+	if req.HeadSHA != "" {
+		at, ok := resolver.(RunMergeHeadRetrier)
+		if !ok {
+			WriteError(w, domain.NewError(domain.ErrUnavailable, "head_sha is not supported by this deployment"))
+			return
+		}
+		result, err = at.RetryRepositoryMergeAt(r.Context(), runID, repoID, req.Reason, req.HeadSHA)
+	} else {
+		result, err = resolver.RetryRepositoryMerge(r.Context(), runID, repoID, req.Reason)
+	}
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -371,6 +391,9 @@ func runMergeActionResponse(runID, repoID string, status domain.RepositoryMergeS
 type runMergeActionRequest struct {
 	Reason          string `json:"reason"`
 	TargetCommitSHA string `json:"target_commit_sha,omitempty"`
+	// HeadSHA is the retry path's optional rebind target (INIT-023
+	// TASK-005 DC-7); the resolve path ignores it.
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
@@ -444,6 +467,7 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		ExecutionID:       executionID,
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: artifactPaths,
+		ExpectedHeadSHA:   req.ExpectedHeadSHA,
 	})
 	if err != nil {
 		WriteError(w, err)

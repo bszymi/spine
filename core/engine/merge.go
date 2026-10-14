@@ -40,18 +40,28 @@ const AuthoritativeBranch = authoritativeBranch
 // caller should return" through its first return so MergeRunBranch
 // itself stays a flat orchestrator and every retry / permanent-fail /
 // success path remains in the same order as before extraction.
+//
+// With merge binding on (EnableMergeBinding, INIT-023 TASK-005)
+// resolveMergeSource runs after the preflight: it reads the run's frozen
+// binding (failing closed without one), applies the status cascade AT
+// the bound commit, and every later phase merges exactly that commit.
+// With binding off it returns the zero value and nothing changes.
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	run, done, err := o.preflightCheck(ctx, runID)
+	if err != nil || done {
+		return err
+	}
+	src, done, err := o.resolveMergeSource(ctx, run)
 	if err != nil || done {
 		return err
 	}
 	if retried, err := o.mergeCodeRepos(ctx, run); err != nil || retried {
 		return err
 	}
-	if done, err := o.mergePrimary(ctx, run); err != nil || done {
+	if done, err := o.mergePrimary(ctx, run, &src); err != nil || done {
 		return err
 	}
-	return o.verifyAndComplete(ctx, run)
+	return o.verifyAndComplete(ctx, run, src)
 }
 
 // preflightCheck loads the run, validates its state, runs branch protection,
@@ -104,8 +114,11 @@ func (o *Orchestrator) preflightCheck(ctx context.Context, runID string) (*domai
 	}
 
 	// Apply commit metadata (e.g., rewrite artifact status) on the branch
-	// before merging so the updated file lands on main.
-	if newStatus := run.CommitMeta["status"]; newStatus != "" {
+	// before merging so the updated file lands on main. Under merge
+	// binding the cascade runs at the bound commit instead
+	// (resolveMergeSource → applyCommitStatusAt) and never touches the
+	// run branch.
+	if newStatus := run.CommitMeta["status"]; newStatus != "" && !o.bindingOn {
 		if err := o.applyCommitStatus(ctx, run, newStatus); err != nil {
 			log.Warn("failed to apply commit status, proceeding with merge",
 				"run_id", runID, "error", err)
@@ -162,7 +175,12 @@ func (o *Orchestrator) mergeCodeRepos(ctx context.Context, run *domain.Run) (boo
 //   - (false, nil) — merge AND push (when enabled) both succeeded and
 //     the primary outcome row is recorded; caller advances to
 //     verifyAndComplete.
-func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run) (bool, error) {
+//
+// With merge binding on, mergePrimaryBound merges exactly src.sha instead.
+func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run, src *mergeSource) (bool, error) {
+	if o.bindingOn {
+		return o.mergePrimaryBound(ctx, run, src)
+	}
 	log := observe.Logger(ctx)
 
 	// Perform the merge into the authoritative branch explicitly.
@@ -281,7 +299,12 @@ func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run) (bool,
 //     internal, handler: merge) advance via the "published" outcome.
 //     No-op on workflows that model commit via terminal-outcome
 //     metadata — the merge has landed either way.
-func (o *Orchestrator) verifyAndComplete(ctx context.Context, run *domain.Run) error {
+//
+// Under merge binding a run branch whose tip held commits the merge left
+// out (src.excludedTip), or whose tip could not be judged
+// (src.tipUnknown), is kept for inspection instead of being cleaned up
+// (owner question 3).
+func (o *Orchestrator) verifyAndComplete(ctx context.Context, run *domain.Run, src mergeSource) error {
 	log := observe.Logger(ctx)
 
 	if failed, listErr := o.firstPermanentCodeRepoFailure(ctx, run.RunID); listErr != nil {
@@ -299,8 +322,15 @@ func (o *Orchestrator) verifyAndComplete(ctx context.Context, run *domain.Run) e
 		return o.transitionToPartiallyMerged(ctx, run, failed)
 	}
 
-	// Transition committing → completed (with branch cleanup).
-	if err := o.completeAfterMerge(ctx, run, true); err != nil {
+	// Transition committing → completed (with branch cleanup, unless a
+	// bound merge left commits on a run branch out: the primary's, or any
+	// code repository's — decided here, not from this attempt alone,
+	// because a code repository may have merged in an earlier attempt).
+	cleanup := true
+	if o.bindingOn {
+		cleanup = src.excludedTip == "" && !src.tipUnknown && !o.codeRepoHasExcludedCommits(ctx, run)
+	}
+	if err := o.completeAfterMerge(ctx, run, cleanup); err != nil {
 		return err
 	}
 	return o.advancePublishStepIfAny(ctx, run, "published")
@@ -610,37 +640,9 @@ func (o *Orchestrator) applyCommitStatus(ctx context.Context, run *domain.Run, n
 
 	paths := o.cascadePaths(ctx, run)
 
-	updates := make(map[string]string, len(paths))
-	for _, path := range paths {
-		content, err := o.git.ReadFile(ctx, run.BranchName, path)
-		if err != nil {
-			if path == run.TaskPath {
-				return fmt.Errorf("read artifact on branch %s: %w", run.BranchName, err)
-			}
-			log.Warn("skip cascade path, read failed",
-				"run_id", run.RunID, "artifact_path", path, "error", err)
-			continue
-		}
-		// For non-primary paths, require the file to parse as a Spine
-		// artifact before rewriting. This prevents commit.status from
-		// clobbering the `status:` field on incidental Markdown files
-		// (e.g., deliverables with their own YAML frontmatter) that a
-		// run happens to add on the branch.
-		if path != run.TaskPath && !artifact.IsArtifact(content) {
-			continue
-		}
-		original := string(content)
-		updated, err := rewriteStatusField(original, newStatus, path)
-		if err != nil {
-			if path == run.TaskPath {
-				return err
-			}
-			continue
-		}
-		if updated == original {
-			continue
-		}
-		updates[path] = updated
+	updates, err := o.collectStatusRewrites(ctx, run, run.BranchName, "on branch "+run.BranchName, paths, newStatus)
+	if err != nil {
+		return err
 	}
 
 	if len(updates) == 0 {
@@ -658,10 +660,7 @@ func (o *Orchestrator) applyCommitStatus(ctx context.Context, run *domain.Run, n
 			return fmt.Errorf("write updated artifact %s: %w", path, err)
 		}
 	}
-	msg := fmt.Sprintf("Update artifact status to %s", newStatus)
-	if len(updates) > 1 {
-		msg = fmt.Sprintf("Cascade artifact status to %s across %d artifacts", newStatus, len(updates))
-	}
+	msg := statusCascadeMessage(newStatus, len(updates))
 	if _, err := o.git.Commit(ctx, git.CommitOpts{
 		Message: msg,
 		Trailers: map[string]string{
@@ -681,6 +680,50 @@ func (o *Orchestrator) applyCommitStatus(ctx context.Context, run *domain.Run, n
 			"run_id", run.RunID, "artifact_path", path, "new_status", newStatus)
 	}
 	return nil
+}
+
+// collectStatusRewrites reads each cascade path at ref and returns the
+// files whose front-matter status must become newStatus (path → new
+// content). The primary artifact (run.TaskPath) must be readable and have
+// front matter; other paths are skipped when unreadable, when they are
+// not Spine artifacts, or when their front matter is malformed. where
+// describes ref in the primary read error ("on branch <b>", "at bound
+// commit <sha>").
+func (o *Orchestrator) collectStatusRewrites(ctx context.Context, run *domain.Run, ref, where string, paths []string, newStatus string) (map[string]string, error) {
+	log := observe.Logger(ctx)
+	updates := make(map[string]string, len(paths))
+	for _, path := range paths {
+		content, err := o.git.ReadFile(ctx, ref, path)
+		if err != nil {
+			if path == run.TaskPath {
+				return nil, fmt.Errorf("read artifact %s: %w", where, err)
+			}
+			log.Warn("skip cascade path, read failed",
+				"run_id", run.RunID, "artifact_path", path, "error", err)
+			continue
+		}
+		// For non-primary paths, require the file to parse as a Spine
+		// artifact before rewriting. This prevents commit.status from
+		// clobbering the `status:` field on incidental Markdown files
+		// (e.g., deliverables with their own YAML frontmatter) that a
+		// run happens to add on the branch.
+		if path != run.TaskPath && !artifact.IsArtifact(content) {
+			continue
+		}
+		original := string(content)
+		updated, err := rewriteStatusField(original, newStatus, path)
+		if err != nil {
+			if path == run.TaskPath {
+				return nil, err
+			}
+			continue
+		}
+		if updated == original {
+			continue
+		}
+		updates[path] = updated
+	}
+	return updates, nil
 }
 
 // cascadePaths returns run.TaskPath plus any additional .md files the run
@@ -708,7 +751,13 @@ func (o *Orchestrator) cascadePaths(ctx context.Context, run *domain.Run) []stri
 			"run_id", run.RunID, "error", err)
 		return paths
 	}
-	seen := map[string]struct{}{run.TaskPath: {}}
+	return appendAddedMarkdown(paths, run.TaskPath, diffs)
+}
+
+// appendAddedMarkdown appends every added .md path in diffs to paths,
+// once, skipping taskPath (already first).
+func appendAddedMarkdown(paths []string, taskPath string, diffs []git.FileDiff) []string {
+	seen := map[string]struct{}{taskPath: {}}
 	for _, d := range diffs {
 		if d.Status != "added" {
 			continue
