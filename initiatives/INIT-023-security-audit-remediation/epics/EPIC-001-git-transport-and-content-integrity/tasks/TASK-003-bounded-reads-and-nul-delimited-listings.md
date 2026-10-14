@@ -1237,6 +1237,10 @@ measurements.)*
 | `ff98809` | Docs: `event-schemas.md` §4.15 + emission map + `projection_synced.refused` + `read_bounds` note; `git-integration.md` §8.1/§8.2; `KNOWN-LIMITATIONS.md` "Git Read Bounds"; `CHANGELOG.md` |
 | `7f76d9e`, `ba2e1d2` | Lint: literal bidi / separator / ZWJ characters in source replaced by Go escapes (gosec G116, ST1018), `rangeValCopy`, nolint reasons, PoC fixture's unused mutex, a builtin shadow |
 | `9e5e38c` | Codex round 1 P2: read commands run in the C locale (Deviation 4) |
+| `b31da04` | These notes (first version) |
+| `7aa8689` | Codex round 3 P2: the per-command output limit is never below 4 KiB (Deviation 12) |
+| `f7e6ae6` | Codex round 4: `Clone`'s stderr bounded, the stderr tail a fixed ring (Deviation 13); `engine.ValidateBranch` fails each refused file (Deviation 14) |
+| `a7d0478` | gofmt of a test |
 
 No migration, column, table, configuration key, environment variable or endpoint was added
 (`git diff --stat main...HEAD -- migrations go.mod go.sum` and `git diff --stat 61994fe -- migrations`
@@ -1276,12 +1280,14 @@ scenario `codeRepoBehavior` was edited.
    `Log` over an 8 KiB message return `ErrOutputTooLarge` (typed `Op`/`Limit`); with the defaults
    both succeed. `TestStderr_KeepsHeadAndTail`: 1 MiB of `warning:` lines plus a final
    `index.lock` fatal, in four chunk sizes — kept text <= 64 KiB, keeps the last line, classifies
-   transient. Mutation (no ceiling): both cases succeed, fail the test.
+   transient. `TestStderr_RingMatchesReference` checks the ring against a reference at every
+   head/tail boundary length and seven chunk sizes. Mutation (no ceiling): both cases succeed,
+   fail the test.
 7. `TestReadBounds_Defaults`: `DefaultMaxBlobBytes` >= 512 KiB (API write cap, cited) and >=
    `yamlsafe.MaxBytes`; `DefaultMaxOutputBytes` >= `DefaultMaxBlobBytes`; `0`/`-1` keep the
    defaults; alloc = 4 x blob by default and after `WithMaxBlobBytes(1 MiB)` in either option order;
-   below blob+1 raised; the 1 MiB floor; a zero-value `CLIClient` is bounded too (export_test
-   accessor). `TestReadBounds_SmallBlobLimitKeepsReadsWorking` exercises the floor.
+   below blob+1 raised; the 1 MiB alloc floor; the 4 KiB output floor (`WithMaxOutputBytes(1)`); a
+   zero-value `CLIClient` is bounded too (export_test accessor). `TestReadBounds_SmallBlobLimitKeepsReadsWorking` exercises the floor.
 8. The two PoCs (raw `" lead.md"`, `"quoted.md`, `réview.md`, `tab\tfile.md`, `new\nline.md`,
    `plain.md`) plus `TestDiff_RawRenameCopyAndTypeChange` (rename to `re\nnamed.md`; with
    `diff.renames=copies` a `C100` record is `added` at the destination and the 4 records stay 4
@@ -1339,8 +1345,8 @@ scenario `codeRepoBehavior` was edited.
     entry.
 15. Gates below. `TestRepoArtifacts_ParseCleanlyUnderSpine` wall time: **13.5–13.7 s with Spine
     `main`** (SMP test run with every file this branch changed overlaid back to its `main` version),
-    **28.0–28.4 s on this branch** (about 2.1x, the extra `cat-file -s` per read; production SMP
-    already pays it in its own `gitread.Bounded`, which overrides `ReadFile`).
+    **28.0–28.4 s on this branch** (25.9 s at `a7d0478`; about 2x, the extra `cat-file -s` per
+    read; production SMP already pays it in its own `gitread.Bounded`, which overrides `ReadFile`).
 16. SMP gate below. `len(result.Refused) == 0` on SMP's repository (1 112 artifacts, 10 workflows,
     0 errors) and on Spine's (715 artifacts, 0 refused; its one discovery error is the pre-existing
     `INIT-014 initiative.md` "missing required field: created", an ASCII path, identical on `main`),
@@ -1359,6 +1365,8 @@ scenario `codeRepoBehavior` was edited.
 19. `TestMutatingCommands_DrainOutput`: under `WithMaxOutputBytes(4 KiB)`, `Commit` of 300 staged
     files and a fast-forward `Merge` of them succeed; `SHA` is the tip, `FastForward` true, and
     `refs/heads/main` is asserted to have moved. Mutation (failing sink for mutating ops): fails.
+    `TestMerge_TinyOutputLimitKeepsTheResult` (codex round 3): a fast-forward under
+    `WithMaxOutputBytes(1)` is reported as one (mutation without the output floor: fails).
 20. `TestIncrementalSync_ReadCeilingHitFailsClosed`: `WithMaxOutputBytes(4 KiB)` and a commit adding
     300 `.md` files → `errors.Is(err, git.ErrOutputTooLarge)`, state `error` at the old commit (TASK-011
     records it), zero store writes.
@@ -1422,8 +1430,26 @@ scenario `codeRepoBehavior` was edited.
     (TASK-011 could not). The container and everything in it were removed at the end.
 11. **Commit attribution** follows the two trailer lines on every commit (the first commit's message
     was amended once, before any later commit, to add the session line).
+12. **`WithMaxOutputBytes` is floored at 4 KiB** (codex round 3, P2). Below that, `git merge`'s drained
+    head lost its "Fast-forward" line (a fast-forward was reported as a merge) and the
+    `rev-parse HEAD` after every commit and merge could not fit one object id. No production caller
+    sets the option. `TestMerge_TinyOutputLimitKeepsTheResult`.
+13. **`Clone`'s stderr is bounded** (codex round 4, flagged P1 by codex). The design (§9) said `Clone`
+    was unaffected, but I1 says no method buffers more than its limit and `Clone`'s stderr relays the
+    remote's sideband into a plain buffer. It now uses the same sink, whose tail is a fixed ring
+    allocated once the head is full (arbitrarily long stderr costs O(1) memory). Local single-path
+    helpers outside `CLIClient` (`branchwrite.go`, `lookupBranch`, `CheckGitVersion`) keep their
+    buffers: their output is one line and not remote-controlled. `TestClone_StderrIsBounded`
+    (8 MiB of stderr → < 1 MiB allocated, final line still classified; mutation keeps 8 390 943
+    bytes and fails).
+14. **`engine.ValidateBranch` fails each refused file** (codex round 4, P2). It inspected only
+    `Created` and `Modified`, so a refused file (oversized, or at an unsafe path) would merge
+    unvalidated next to a valid artifact and then never be projected. Each refusal is now a failed
+    entry ("not validated: …", unsafe paths Go-quoted). The function has no caller in Spine or SMP
+    (dormant), so nothing observable changes today. `TestValidateBranch_RefusedFilesFail` (mutation:
+    fails); gofmt of the file also fixed a pre-existing import-order drift.
 
-### Gates (Spine suites at `9e5e38c`; lint, the SMP gate and `git-floor` at `ba2e1d2`, which only renames a test variable)
+### Gates (final code `a7d0478`; every row below was re-run there)
 
 | Command | Result |
 |---|---|
@@ -1431,19 +1457,22 @@ scenario `codeRepoBehavior` was edited.
 | `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | ok; `engine constructed and exercised; library surface is sound.` |
 | `go test -p 4 -count=1 ./...` | exit 0, 40 packages ok |
 | `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
-| `go test -race -p 4 -count=1` on `adapters/delivery`, `adapters/git/...`, `adapters/projection`, `core/artifact`, `core/domain`, `core/observe`, `core/workflow`, `service/internal/gateway`, `core/engine`, `core/evidence` | 11 ok |
+| `go test -race -p 4 -count=1` on `adapters/delivery`, `adapters/git/...`, `adapters/projection`, `core/artifact`, `core/domain`, `core/engine`, `core/observe`, `core/workflow`, `service/internal/gateway`, `core/evidence` | 11 ok |
 | `SPINE_TEST_DATABASE_URL=…/s003_proj go test -race -p 1 -count=1 -tags integration ./adapters/projection/`; same with `s003_deliv` for `./adapters/delivery/` | projection 101 top-level / 74 sub pass, 0 skip; delivery 139 / 176 pass, 0 skip |
 | `go test -p 1 -count=1 -tags scenario ./service/scenariotest/...` on `s003_scen`, and in a `git archive main` export on `s003_scen_main` | both 191 pass / 30 fail / 6 skip (subtests 1288 / 27), **0 outcome differences**; the 30 are the known pre-existing failures. CI's `scenario-git-http` set (`TestGitHTTP_*`, `TestBootstrapInternalAdmin_*`): 22 pass |
-| CI `git-floor` job in `golang:1.26-bookworm` (git 2.39.5, `--pull=never`, `--rm`, read-only mounts, `GOPROXY=off`) | step 1 (`-run 'RefShadow|RefGrammar|Checkout|EnterBranch|CurrentBranch'` on `adapters/git/...`, `core/engine`) ok; step 2 (`adapters/git/...`, `core/artifact`, `core/workflow`) ok |
-| `golangci-lint run` (v2 config) on the 8 touched packages, plain / `--build-tags integration` / `--build-tags scenario`, branch vs a `main` export, compared as (linter, file, message) multisets | **0 new issues** in each (157 vs 157) |
+| CI `git-floor` job in `golang:1.26-bookworm` (git 2.39.5, `--pull=never`, `--rm`, read-only mounts, `GOPROXY=off`) | step 1 (`-run 'RefShadow|RefGrammar|Checkout|EnterBranch|CurrentBranch'` on `adapters/git/...`, `core/engine`) ok; step 2 (`adapters/git/...`, `core/artifact`, `core/workflow`) ok, and `core/engine` too |
+| `golangci-lint run` (v2 config) on the 9 touched packages, plain / `--build-tags integration` / `--build-tags scenario`, branch vs a `main` export, compared as (linter, file, message) multisets | **0 new issues** in each (188 vs `main`'s 189: gofmt of `branch_validation.go` removed one) |
 | `golangci-lint run --enable-only=gosec` (plain and integration), same packages | 0 issues |
 | `gofmt -l` on every Go file in `git diff main...HEAD` | empty |
-| `codex review --base main` (`-c model=gpt-5.6-sol`: the configured default model is refused for this account) | round 1 (at `7f76d9e`): one P2, real — locale (fixed in `9e5e38c`, Deviation 4). Round 2 (at `9e5e38c`): no findings. Round 3 (final, with these notes): see below. No rejected findings |
+| `codex review --base main` (`-c model=gpt-5.6-sol`: the configured default model is refused for this account) | Round 1 (at `7f76d9e`): one P2 — locale (fixed `9e5e38c`, Deviation 4). Round 2 (`9e5e38c`): no findings. Round 3 (`b31da04`): one P2 — tiny output limit loses the merge result (fixed `7aa8689`, Deviation 12). Round 4 (`7aa8689`): a P1 — `Clone` stderr unbounded — and a P2 — refused files bypass `ValidateBranch` (both fixed `f7e6ae6`, Deviations 13, 14). Round 5 (`f7e6ae6`): no findings. Every finding was real; none rejected |
 
 Mutation runs (`go test -overlay`, worktree untouched; each made the named tests fail): no
 `GIT_ALLOC_LIMIT` (AC 18 (1)(2)); `GIT_ALLOC_LIMIT` on `diff` (AC 18 (4)); failing sink for mutating
 ops (AC 19); no probe comparison (AC 2 and the PoC); no stdout cap (AC 4, AC 6); `ls-tree` without
-`-z` (PoC, `TestListFiles*`); no C locale (`TestReadCommands_RunInTheCLocale`); `isContentReadError`
+`-z` (PoC, `TestListFiles*`); no C locale (`TestReadCommands_RunInTheCLocale`); no output floor
+(`TestMerge_TinyOutputLimitKeepsTheResult`); a plain buffer for `Clone`'s stderr
+(`TestClone_StderrIsBounded`); refusals not counted by `ValidateBranch`
+(`TestValidateBranch_RefusedFilesFail`); `isContentReadError`
 false (AC 11.4); no `Deleted` on modified-to-oversized (AC 9 table, AC 11.3); no unsafe check in the
 incremental workflow loop (AC 11.6).
 
@@ -1451,17 +1480,18 @@ incremental workflow loop (AC 11.6).
 
 `/Users/bartoszszymichowski/42sid/i23/s-T003/smp` detached at SMP `main` **`f5c6fd6d`** (EPIC-004 wave 1
 incl. SMP TASK-003, and TASK-004), `../spine` = this worktree, no `vendor/`, no `tmp/`; `git status`
-clean after every run. Final run at `9e5e38c`/`ba2e1d2`.
+clean after every run. Final run at `a7d0478` (fresh, re-migrated databases); the earlier runs at
+`ff98809` and `ba2e1d2` gave the same results.
 
 | Command (in the SMP checkout) | Result |
 |---|---|
 | `go build ./...`; `go vet ./...`; `go vet -tags integration ./...` | all ok |
-| `go test -race -p 4 -count=1` on the 36 packages that depend on a changed Spine package (`go list` deps, test imports included), no DB env | 2 350 pass / 3 fail / 246 skip — and **with every Spine file this branch changed overlaid back to its `main` version, exactly the same: 0 outcome differences** |
+| `go test -race -p 4 -count=1` on the 36 packages that depend on a changed Spine package (`go list` deps, test imports included; `core/engine` included), no DB env | 2 350 pass / 3 fail / 246 skip — and **with every Spine file this branch changed overlaid back to its `main` version, exactly the same: 0 outcome differences** |
 | The 3 failures (pre-existing, identical with Spine `main`): `gitread.TestBounded_ErrorContractEqualsCLIClient` (SMP's probe messages vs TASK-002's `bad revision`), `projectionwriter.TestBoundedProjection_IncrementalAddAndModifyOversized` (TASK-011 holds the sync on SMP's own too-large error, which does not match `ErrBlobTooLarge`), `projectionwriter.TestBoundedProjection_OversizedWorkflowStalls` (its fake store lacks `GetWorkflowProjection`, which TASK-011's rejection path calls; the panic aborts the package binary) | SMP TASK-004's tests pin SMP's current pin, not Spine `main`; the next SMP bump past wave 2 must adapt them (SMP TASK-008 / TASK-012). Not caused by this task |
 | `go run ./dev/apply-migrations -set platform -dir migrations` → `s003_smp_it` (pgvector); `-set spine-runtime` → `s003_spine_rt` | 115 and 26 versions |
 | CI's Spine-runtime step: `TEST_SPINE_DB=…s003_spine_rt TEST_PLATFORM_DB=…s003_smp_it TEST_PROVISIONING_DSN=…smp_prov go run ./dev/testgate -- -race -count=1 -timeout 15m ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` | 1 835 passed, 0 failed; the only 2 skips are Linux-only by design (`ru_maxrss` in KiB): `TestDiffChildMemory_MillionPaths` and `TestReceiveTimeMemory_RealGitReaderFetch`, both **PASS** on Linux in `golang:1.26-bookworm` |
 | The shared platform-DB step's members that depend on a changed Spine package, plus `docindex`: `go run ./dev/testgate -allow-skip 'TEST_MINIO' -allow-skip 'TEST_AWS_OBJECT_STORE_' -- -race -p 4 -count=1 -skip '^(TestBoundedProjection_OversizedWorkflowStalls|TestBoundedProjection_IncrementalAddAndModifyOversized)$' ./dev/apply-migrations/ ./internal/automation/ ./internal/customer/discovery/ ./internal/customer/eventdelivery/ ./internal/customer/profileinventory/ ./internal/customer/projectionwriter/ ./internal/customer/stepevents/ ./internal/customer/workspace/ ./internal/customer/workspace/workspacetest/ ./internal/import/ ./internal/customer/docindex/` (with `TEST_PROVISIONING_DSN`) | `testgate: PASS` — 1 182 passed, 0 failed, 6 allowed skips (MinIO, live AWS) |
-| `go run ./dev/testgate -- -race -count=1 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed; 1 Linux-only skip (`TestIntegration_ReceiveTimeMemoryBounded`), **PASS** on Linux in the image |
+| `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `testgate: PASS` — 246 passed, 0 failed; the 1 allowed skip (`TestIntegration_ReceiveTimeMemoryBounded`, Linux-only) **PASS**es on Linux in the image |
 | §10 named tests: `TestRealGitOperator_Diff_RawPaths_Integration` (raw `".spine/x.md"`, not decoded), `…_CascadeWrite_RawPaths_Integration`, `…_Diff_RefNamedFileInClone_Integration` (includes `RunBranchDiffReader.Changes`), `TestParseDiffNameStatusZ`, `TestBoundedReads_RunBranchDiffReader`, `TestRepoArtifacts_ParseCleanlyUnderSpine`, `TestWorker_Integration_ProjectsSeededRepo`, `…_SurfacesMalformedArtifact` (with `TEST_PROVISIONING_DSN`), `artifactservice_test.go` (in the runtime step) | all pass |
 | `grep -rn "unquoteDiffPaths\|unquoteGitPath" internal/` | empty |
 
