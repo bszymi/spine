@@ -320,7 +320,13 @@ now names the operator cancel as the recovery for a stale run.
   raw paths. A path that is not valid UTF-8, or holds a control character (C0, DEL, C1),
   U+2028/U+2029 or a bidi embedding/override/isolate control, is refused and recorded instead of
   projected (owner question 2, default pending the owner); invalid UTF-8 would otherwise fail every
-  sync on PostgreSQL.
+  sync on PostgreSQL. A row a projection built before this change holds at such a path — possible
+  only under `core.quotePath=false`, where git listed bytes >= 0x80 raw — no longer outlives its
+  file: an incremental sync deletes it when the file is deleted, renamed away or modified, and a
+  workflow row is kept quarantined, or removed when it does not verify, by the first sync's sweep
+  or a sync that changes the file (new `projection_workflow_rejected` check `unsafe_path`; wave 3
+  integration). Invalid UTF-8 still never reaches the store. An untouched artifact row at such a
+  path goes at the upgrade's projection rebuild.
 
 ### Changed
 

@@ -196,16 +196,20 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 // make the whole changeset unusable; it is nil today.
 //
 // Refusals (INIT-023 TASK-003). A path that is UnsafePath is never read
-// and never reaches Created, Modified or Deleted (no such path was ever
-// projected, and the store cannot hold one). A read the git client
-// refuses for size (git.ErrBlobTooLarge) is not a ReadError:
+// and never reaches Created or Modified. It reaches Deleted only when it
+// is a StoredUnsafePath (valid UTF-8): a projection built with
+// core.quotePath=false before TASK-003 may hold its row, which must not
+// outlive the file (wave 3 integration). Invalid UTF-8 never reaches the
+// store. A read the git client refuses for size (git.ErrBlobTooLarge) is
+// not a ReadError:
 //
 //	added     unsafe or oversized new path        → Refused
 //	deleted   old content oversized               → Deleted (idempotent: no stale row survives)
-//	          unsafe path                         → skipped (it was never projected)
+//	          unsafe path                         → Deleted when valid UTF-8 (unread), else skipped
 //	renamed   old side oversized                  → Deleted
+//	          old side unsafe                     → Deleted when valid UTF-8 (unread)
 //	          new side unsafe or oversized        → Refused
-//	modified  unsafe path                         → Refused
+//	modified  unsafe path                         → Refused, and Deleted when valid UTF-8
 //	          new content oversized               → Refused, and Deleted when the old
 //	                                                side was an artifact — the governed
 //	                                                row is removed, as for a parse failure
@@ -226,7 +230,10 @@ func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, from
 		switch diff.Status {
 		case "deleted":
 			if UnsafePath(diff.Path) {
-				continue // never projected, so nothing to delete
+				if StoredUnsafePath(diff.Path) {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+				}
+				continue
 			}
 			// Only include if the deleted file was actually an artifact at fromRef
 			oldContent, oldRefused, err := readForDiscovery(ctx, gitClient, fromRef, diff.Path)
@@ -265,8 +272,13 @@ func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, from
 			// Renames are modeled as delete old path + create new path
 			// This ensures path-keyed projections are updated correctly
 
-			// Delete old path if it was an artifact
-			if diff.OldPath != "" && isMdOld && !UnsafePath(diff.OldPath) {
+			// Delete old path if it was an artifact (an unsafe one is
+			// never read: removed when the store can hold it).
+			if diff.OldPath != "" && isMdOld && UnsafePath(diff.OldPath) {
+				if StoredUnsafePath(diff.OldPath) {
+					changeset.Deleted = append(changeset.Deleted, diff.OldPath)
+				}
+			} else if diff.OldPath != "" && isMdOld {
 				oldContent, oldRefused, err := readForDiscovery(ctx, gitClient, fromRef, diff.OldPath)
 				if err != nil {
 					changeset.recordReadError(diff.OldPath, fromRef, err)
@@ -307,6 +319,9 @@ func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, from
 			}
 			if UnsafePath(diff.Path) {
 				changeset.Refused = append(changeset.Refused, unsafeRefusal(diff.Path))
+				if StoredUnsafePath(diff.Path) {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+				}
 				continue
 			}
 

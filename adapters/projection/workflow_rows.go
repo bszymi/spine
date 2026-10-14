@@ -13,6 +13,7 @@ import (
 
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
@@ -28,6 +29,7 @@ const (
 	checkNotAFile     = "not_a_file"     // the commit's tree holds no file (blob) at the path (a gitlink, a directory); checked before every read
 	checkScope        = "scope"          // a stored row whose path is not a workflow location
 	checkAbsentAtHead = "absent_at_head" // a stored row whose file no longer exists at head
+	checkUnsafePath   = "unsafe_path"    // a stored row at a path INIT-023 TASK-003 refuses to project (artifact.StoredUnsafePath)
 )
 
 // What happened to the stored row for a rejected file.
@@ -235,6 +237,33 @@ func (s *Service) applyRejection(ctx context.Context, rej *WorkflowRejection) er
 		s.reportWorkflowRejection(ctx, rej, actionRemoved, nil)
 	}
 	return nil
+}
+
+// errStoredUnsafeWorkflowRow is the rejection cause of a stored row at
+// an UnsafePath.
+var errStoredUnsafeWorkflowRow = errors.New("stored row is at a path the projection refuses " +
+	"(a control, bidi or line-separator character in its name); it was projected before INIT-023 TASK-003 " +
+	"by a git configured with core.quotePath=false")
+
+// retireUnsafeWorkflowRow handles the stored row, if any, of a workflow
+// file at an UnsafePath that an incremental sync adds or modifies (INIT-023
+// wave 3 integration, codex review): its content is refused unread, so a
+// row projected before TASK-003 (see artifact.StoredUnsafePath) must not
+// keep serving the old content. It takes applyRejection's decision — kept
+// quarantined when it verifies, so runs pinned to it keep loading it but
+// no new run binds it; removed otherwise — and reports it as an
+// unsafe_path rejection. No row, or a path the store cannot hold
+// (invalid UTF-8), changes nothing and reports nothing beyond the
+// projection_file_skipped refusal.
+func (s *Service) retireUnsafeWorkflowRow(ctx context.Context, wfPath, head string) error {
+	if !artifact.StoredUnsafePath(wfPath) {
+		return nil
+	}
+	prev, err := s.getWorkflowRow(ctx, wfPath)
+	if err != nil || prev == nil {
+		return err
+	}
+	return s.applyRejection(ctx, &WorkflowRejection{Path: wfPath, Commit: head, Check: checkUnsafePath, Err: errStoredUnsafeWorkflowRow})
 }
 
 // getWorkflowRow returns the stored row for a path, nil when there is

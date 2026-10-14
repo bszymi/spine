@@ -307,6 +307,11 @@ func TestDiscoverChangesFromDiffs_RefusalTable(t *testing.T) {
 			map[string]error{"from:big.md": tooLargeErr(from, "big.md")}, want{deleted: []string{"big.md"}}},
 		{"deleted unsafe", git.FileDiff{Path: "\xff.md", Status: "deleted"}, nil, nil,
 			want{noReads: []string{"\xff.md"}}},
+		// Wave 3 integration (codex review): a valid-UTF-8 unsafe path
+		// may hold a row projected before TASK-003 under
+		// core.quotePath=false; it is removed, still unread.
+		{"deleted unsafe, valid UTF-8", git.FileDiff{Path: "a\u202eb.md", Status: "deleted"}, nil, nil,
+			want{deleted: []string{"a\u202eb.md"}, noReads: []string{"a\u202eb.md"}}},
 		{"deleted artifact (unchanged)", git.FileDiff{Path: "g.md", Status: "deleted"},
 			map[string]string{"from:g.md": refusedGovernance}, nil, want{deleted: []string{"g.md"}}},
 		{"renamed, old oversized", git.FileDiff{OldPath: "big.md", Path: "g.md", Status: "renamed"},
@@ -320,9 +325,14 @@ func TestDiscoverChangesFromDiffs_RefusalTable(t *testing.T) {
 			want{deleted: []string{"g.md"}, refused: []artifact.RefusedFile{big("big.md")}}},
 		{"renamed from an unsafe path", git.FileDiff{OldPath: "a\u202eb.md", Path: "g.md", Status: "renamed"},
 			map[string]string{"to:g.md": refusedGovernance}, nil,
-			want{created: []string{"g.md"}, noReads: []string{"a\u202eb.md"}}},
+			want{created: []string{"g.md"}, deleted: []string{"a\u202eb.md"}, noReads: []string{"a\u202eb.md"}}},
+		{"renamed from an invalid-UTF-8 path", git.FileDiff{OldPath: "a\xffb.md", Path: "g.md", Status: "renamed"},
+			map[string]string{"to:g.md": refusedGovernance}, nil,
+			want{created: []string{"g.md"}, noReads: []string{"a\xffb.md"}}},
 		{"modified unsafe", git.FileDiff{Path: "a\u0085b.md", Status: "modified"}, nil, nil,
-			want{refused: []artifact.RefusedFile{uns("a\u0085b.md")}, noReads: []string{"a\u0085b.md"}}},
+			want{refused: []artifact.RefusedFile{uns("a\u0085b.md")}, deleted: []string{"a\u0085b.md"}, noReads: []string{"a\u0085b.md"}}},
+		{"modified unsafe, invalid UTF-8", git.FileDiff{Path: "a\xffb.md", Status: "modified"}, nil, nil,
+			want{refused: []artifact.RefusedFile{uns("a\xffb.md")}, noReads: []string{"a\xffb.md"}}},
 		{"modified to oversized, was an artifact", git.FileDiff{Path: "g.md", Status: "modified"},
 			map[string]string{"from:g.md": refusedGovernance}, map[string]error{"to:g.md": tooLargeErr(to, "g.md")},
 			want{deleted: []string{"g.md"}, refused: []artifact.RefusedFile{big("g.md")}}},
@@ -376,8 +386,8 @@ func TestDiscoverChangesFromDiffs_RefusalTable(t *testing.T) {
 				}
 			}
 			for _, d := range cs.Deleted {
-				if artifact.UnsafePath(d) {
-					t.Errorf("unsafe path %q reached Deleted (the store would be called with it)", d)
+				if artifact.UnsafePath(d) && !artifact.StoredUnsafePath(d) {
+					t.Errorf("invalid-UTF-8 path %q reached Deleted (the store would be called with it)", d)
 				}
 			}
 		})

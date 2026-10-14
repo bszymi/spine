@@ -611,11 +611,16 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	}
 
 	// Workflows: the same raw diff, classified with the shared scope. A
-	// workflow path that is UnsafePath never reaches the store (it is the
-	// row key; invalid UTF-8 would fail every sync): an added, modified or
-	// renamed-to one was refused and reported above
-	// (unsafeWorkflowRefusals), a deleted or renamed-away one is ignored —
-	// no such row can exist (INIT-023 TASK-003).
+	// workflow file at an UnsafePath is never read or projected (INIT-023
+	// TASK-003): an added, modified or renamed-to one was refused and
+	// reported above (unsafeWorkflowRefusals). A row projected before
+	// TASK-003 can still exist at such a path when it is valid UTF-8
+	// (artifact.StoredUnsafePath: git listed it raw under
+	// core.quotePath=false), so it is retired like any other (wave 3
+	// integration): a deleted or renamed-away file's row is deleted, and
+	// an added or modified one's row is kept quarantined or removed
+	// (retireUnsafeWorkflowRow). Invalid UTF-8 never reaches the store (it
+	// is the row key; it would fail every sync).
 	var workflowsRejected int
 	syncWorkflow := func(path string) {
 		rejected, err := s.syncWorkflowFile(ctx, path, head)
@@ -634,28 +639,39 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 			syncErrors++
 		}
 	}
+	retireUnsafe := func(path string) {
+		if err := s.retireUnsafeWorkflowRow(ctx, path, head); err != nil {
+			log.Warn("failed to retire workflow row at an unsafe path", "error", err)
+			syncErrors++
+		}
+	}
+	storable := func(path string) bool {
+		return !artifact.UnsafePath(path) || artifact.StoredUnsafePath(path)
+	}
 	for _, diff := range diffs {
 		switch diff.Status {
 		case "added", "modified":
 			if s.scope.isWorkflow(diff.Path) {
 				if artifact.UnsafePath(diff.Path) {
-					continue // reported above
+					retireUnsafe(diff.Path) // the refusal is reported above
+					continue
 				}
 				syncWorkflow(diff.Path)
 			}
 		case "deleted":
-			if s.scope.isWorkflow(diff.Path) && !artifact.UnsafePath(diff.Path) {
+			if s.scope.isWorkflow(diff.Path) && storable(diff.Path) {
 				deleteWorkflow(diff.Path)
 			}
 		case "renamed":
 			// The old row's delete error is counted: dropping it left
 			// the old Active row bindable while the sync advanced.
-			if diff.OldPath != "" && s.scope.isWorkflow(diff.OldPath) && !artifact.UnsafePath(diff.OldPath) {
+			if diff.OldPath != "" && s.scope.isWorkflow(diff.OldPath) && storable(diff.OldPath) {
 				deleteWorkflow(diff.OldPath)
 			}
 			if s.scope.isWorkflow(diff.Path) {
 				if artifact.UnsafePath(diff.Path) {
-					continue // reported above
+					retireUnsafe(diff.Path) // the refusal is reported above
+					continue
 				}
 				syncWorkflow(diff.Path)
 			}

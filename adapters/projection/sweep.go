@@ -8,6 +8,7 @@ import (
 	"reflect"
 
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
@@ -174,8 +175,16 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 			continue
 		}
 
-		cand, rej, err := s.buildWorkflowRow(ctx, row.WorkflowPath, head)
-		if err != nil {
+		// A row at an UnsafePath (projected before INIT-023 TASK-003 by a
+		// git with core.quotePath=false; artifact.StoredUnsafePath) is
+		// never re-read or re-projected: TASK-003 never projects such a
+		// file, so it is rejected (unsafe_path) and kept quarantined or
+		// removed below, like any rejected file (wave 3 integration).
+		var cand *store.WorkflowProjection
+		var rej *WorkflowRejection
+		if artifact.UnsafePath(row.WorkflowPath) {
+			rej = &WorkflowRejection{Path: row.WorkflowPath, Commit: head, Check: checkUnsafePath, Err: errStoredUnsafeWorkflowRow}
+		} else if cand, rej, err = s.buildWorkflowRow(ctx, row.WorkflowPath, head); err != nil {
 			return changed, err
 		}
 		if rej == nil {

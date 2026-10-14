@@ -707,7 +707,12 @@ The following limitations have been resolved:
   control character (C0, DEL, C1), U+2028/U+2029 or a bidi control (U+202A–U+202E,
   U+2066–U+2069) is never projected (`projection_file_skipped`, reason `unsafe_path`) and is left
   out of `artifact.Service.List` and `workflow.Service.List`, as it was while git quoted it.
-  `artifact.Slugify` never produces one. Other readers that take a path from the caller
+  A row an earlier projection made at such a path — possible only under `core.quotePath=false`,
+  where git listed bytes >= 0x80 raw — is removed when its file is deleted, renamed away or
+  modified, and a workflow row is kept quarantined (or removed) by the first sync's sweep, or by a
+  sync that changes the file (wave 3 integration); an artifact row at such a path whose file
+  never changes stays until the upgrade's projection rebuild (CHANGELOG). `artifact.Slugify`
+  never produces one. Other readers that take a path from the caller
   (`artifact.Service.Read`, the merge-time status cascade) are unchanged.
 - **Embedders that wrap `ReadFile`** (SMP's bounded reader) return their own too-large error;
   until it matches `git.ErrBlobTooLarge`, discovery files such a read under its read errors and

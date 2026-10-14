@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/domain"
@@ -55,6 +56,19 @@ type RefusedFile struct {
 // domain.UnsafeRepositoryPath, which it is, for why each class is refused
 // (owner question 2). No path artifact.Slugify produces is refused.
 func UnsafePath(p string) bool { return domain.UnsafeRepositoryPath(p) }
+
+// StoredUnsafePath reports whether p is an UnsafePath a projection built
+// before INIT-023 TASK-003 may still hold a row for: one that is valid
+// UTF-8, so the store can hold it as a key (INIT-023 wave 3 integration,
+// codex review). Before TASK-003 git listed paths for discovery in its
+// quoted form, which C-quotes every byte >= 0x80 only while
+// core.quotePath is true (the default); with core.quotePath=false in the
+// repository, global or system git config a bidi control, U+2028/U+2029
+// or a C1 control was listed raw, so such an artifact or workflow could be
+// projected. Its row is removed when the file is deleted, renamed away or
+// modified (deleting a row that is not there is harmless); invalid UTF-8
+// never reaches the store.
+func StoredUnsafePath(p string) bool { return UnsafePath(p) && utf8.ValidString(p) }
 
 // readForDiscovery reads one candidate. It returns exactly one of: the
 // content; a RefusedOversized record when the git client refused the

@@ -24,9 +24,12 @@ import (
 // PostgreSQL rejects such a parameter (SQLSTATE 22021), so one such path
 // would fail every incremental sync and wedge the workspace's
 // projection. Before TASK-003 git C-quoted all of these (every byte
-// >= 0x80, every control byte), and the quoted form never ended in ".md"
-// or ".yaml", so no such path was ever projected or listed; with raw
-// NUL-delimited listings it would be.
+// >= 0x80, every control byte) under its default core.quotePath=true,
+// and the quoted form never ended in ".md" or ".yaml", so no such path
+// was projected or listed; with raw NUL-delimited listings it would be.
+// Under core.quotePath=false git listed bytes >= 0x80 raw, so a
+// valid-UTF-8 one could be projected then: discovery and the projection
+// retire such rows (artifact.StoredUnsafePath; wave 3 integration).
 //
 // artifact.Slugify keeps only letters, digits and "-", and none of these
 // are letters, so no path the platform creates is refused — "wdrożenie"

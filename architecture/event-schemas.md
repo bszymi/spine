@@ -441,7 +441,7 @@ Emitted when the projection refuses a workflow file because of its content (INIT
 payload:
   workflow_path: <string>        # Repository-relative workflow path
   commit: <string>               # Commit the file was read at (the sync head)
-  check: <string>                # parse | round_trip | validate | read_bounds | not_a_file | scope | absent_at_head
+  check: <string>                # parse | round_trip | validate | read_bounds | not_a_file | scope | absent_at_head | unsafe_path
   action: <string>               # kept | not_projected | removed
   kept_source_commit: <string>   # source_commit of the kept row ("" unless action is kept)
   quarantined: <boolean>         # true when the kept row's status column is Quarantined
@@ -454,6 +454,7 @@ payload:
 - `not_a_file`: the commit's tree holds no file (blob) at the path — a gitlink or a directory — so there is no content to project. The entry is typed before the file is read, so a gitlink is refused even when the id it records names a blob in the repository (which `git show` would print, though diffs show only a submodule pointer).
 - `validate`: `workflow.Validate` failed and strict projection validation is enabled (off by default).
 - `scope` / `absent_at_head`: the sweep found a stored row outside the workflow definition locations, or whose file no longer exists at head and did not exist at the last synced commit either (a file deleted after the last synced commit is removed like the pending diff would remove it, without a rejection).
+- `unsafe_path`: a stored row at a path INIT-023 TASK-003 refuses to project (a control, bidi or line-separator character in the file name). Such a row can only come from a projection built before TASK-003 by a git configured with `core.quotePath=false`, which listed those names raw. It is reported by the sweep when the file is still at head, and by an incremental sync that adds or modifies the file; the file itself is also reported as `projection_file_skipped` (`unsafe_path`) by the sync. A row whose file is deleted or renamed away is deleted without a rejection, as for any other path (INIT-023 wave 3 integration).
 - `kept`: the previous row verified and is kept for in-flight runs, with its status set to `Quarantined` so no new run binds it. `removed`: the previous row could not be verified and was deleted. `not_projected`: there was no row.
 
 `read_bounds` is where an oversized workflow file lands (INIT-023 TASK-003): a blob over the git client's per-blob read limit (`git.ErrBlobTooLarge`) is a rejection that advances the sync, not a sync error. Such a file is not also reported as `projection_file_skipped`.
