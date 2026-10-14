@@ -391,9 +391,13 @@ The catalog never advances ahead of a working binding, and the binding never lin
 
 Code repos may require authentication for clone and push operations. Credentials are managed per repository:
 
-- Stored in runtime configuration (not in Git)
-- Support the same credential methods as the primary repo (SSH key, PAT, OAuth)
-- Each repo can have independent credentials (different GitHub orgs, different platforms)
+- Stored in runtime configuration (not in Git): the binding's `credentials_ref` names a secret the workspace's secret client resolves at clone and push time (INIT-014 EPIC-003 TASK-006).
+- Each repo can have independent credentials (different GitHub orgs, different platforms).
+- **HTTPS token only.** `credentials_ref` resolves to a token sent over HTTPS (Basic, through a per-invocation `GIT_ASKPASS`). Per-binding SSH keys are not supported yet (follow-up), so a private code repo needs an `https` clone URL; an `ssh://` or SCP-style code repo can only be reached anonymously.
+- **No inherited credentials.** A code repo never uses the primary repo's credentials: not the process-wide `SPINE_GIT_PUSH_TOKEN` or `SPINE_GIT_CREDENTIAL_HELPER`, and not the host's own (a `credential.helper`, askpass program or `http.extraHeader` in the system or global git config, `GIT_ASKPASS`, the process's SSH agent or key files). A binding without `credentials_ref` clones and pushes with no credential at all, on every host — including the primary's own (INIT-023 TASK-015; owner question 2 ruled "never", pending the owner). One that declares a ref the deployment cannot resolve fails closed (`credentials-unavailable`).
+- Because the system and global git config are not read for a credential-less code repo's clone and push, their non-credential settings (CA bundle, proxy, `insteadOf`, `safe.directory`) do not apply to it either; the environment forms (`GIT_SSL_CAINFO`, `HTTPS_PROXY`, …) do.
+
+The residuals (curl's `~/.netrc`, a reused clone's own `.git/config`, git 2.30–2.31) are listed in [KNOWN-LIMITATIONS](/KNOWN-LIMITATIONS.md), "Code Repositories Authenticate Only With `credentials_ref`".
 
 ### 6.3 Deregistration
 

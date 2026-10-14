@@ -15,6 +15,11 @@ type DiscoveryResult struct {
 	Workflows []string           // paths to workflow YAML files
 	Skipped   []string           // paths skipped (non-artifact .md files)
 	Errors    []DiscoveryError   // files that failed to parse
+	// Refused lists the candidates discovery declined to project — an
+	// oversized .md, or an artifact or workflow candidate at an
+	// UnsafePath (INIT-023 TASK-003). They are not Errors: a refused file
+	// never makes a rebuild end in error.
+	Refused []RefusedFile
 }
 
 // DiscoveryError records a file that was discovered but failed to parse
@@ -46,6 +51,13 @@ type ChangeSet struct {
 	// Callers that only need the change lists — branch validation — can
 	// ignore it.
 	ReadErrors []DiscoveryError
+	// Refused lists the changed files discovery declined to project
+	// (INIT-023 TASK-003): an added, modified or renamed-to .md that is
+	// oversized or at an UnsafePath. A refused file is never in Created
+	// or Modified; a governed row it replaces is in Deleted. Refusals are
+	// deterministic for the commit, so they are not ReadErrors and never
+	// hold a sync.
+	Refused []RefusedFile
 }
 
 func (c *ChangeSet) recordReadError(path, ref string, err error) {
@@ -95,8 +107,13 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string, artif
 			artifactPath = strings.TrimPrefix(file, prefix)
 		}
 
-		// Workflow definitions
+		// Workflow definitions. An unsafe path is refused, never listed:
+		// the projection would otherwise pass it to the store.
 		if IsWorkflowPath(artifactPath) {
+			if UnsafePath(file) {
+				result.Refused = append(result.Refused, unsafeRefusal(file))
+				continue
+			}
 			result.Workflows = append(result.Workflows, file)
 			continue
 		}
@@ -115,12 +132,26 @@ func DiscoverAll(ctx context.Context, gitClient git.GitClient, ref string, artif
 			continue
 		}
 
-		content, err := gitClient.ReadFile(ctx, ref, file)
+		// An unsafe path is refused without reading it (INIT-023
+		// TASK-003): it can never be stored, so its content is moot.
+		if UnsafePath(file) {
+			result.Refused = append(result.Refused, unsafeRefusal(file))
+			continue
+		}
+
+		content, refused, err := readForDiscovery(ctx, gitClient, ref, file)
 		if err != nil {
 			result.Errors = append(result.Errors, DiscoveryError{
 				Path:    artifactPath,
 				Message: err.Error(),
 			})
+			continue
+		}
+		if refused != nil {
+			// Oversized: skip, record and advance (owner question 1).
+			// It cannot become readable at this commit, so failing the
+			// rebuild would buy nothing and let one push freeze it.
+			result.Refused = append(result.Refused, *refused)
 			continue
 		}
 
@@ -163,6 +194,27 @@ func DiscoverChanges(ctx context.Context, gitClient git.GitClient, fromRef, toRe
 // Every ReadFile failure that discovery skips past is recorded in
 // ChangeSet.ReadErrors. The returned error is reserved for failures that
 // make the whole changeset unusable; it is nil today.
+//
+// Refusals (INIT-023 TASK-003). A path that is UnsafePath is never read
+// and never reaches Created or Modified. It reaches Deleted only when it
+// is a StoredUnsafePath (valid UTF-8): a projection built with
+// core.quotePath=false before TASK-003 may hold its row, which must not
+// outlive the file (wave 3 integration). Invalid UTF-8 never reaches the
+// store. A read the git client refuses for size (git.ErrBlobTooLarge) is
+// not a ReadError:
+//
+//	added     unsafe or oversized new path        → Refused
+//	deleted   old content oversized               → Deleted (idempotent: no stale row survives)
+//	          unsafe path                         → Deleted when valid UTF-8 (unread), else skipped
+//	renamed   old side oversized                  → Deleted
+//	          old side unsafe                     → Deleted when valid UTF-8 (unread)
+//	          new side unsafe or oversized        → Refused
+//	modified  unsafe path                         → Refused, and Deleted when valid UTF-8
+//	          new content oversized               → Refused, and Deleted when the old
+//	                                                side was an artifact — the governed
+//	                                                row is removed, as for a parse failure
+//	          old content oversized               → treated as "was an artifact", so a
+//	                                                now-non-artifact file is Deleted
 func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, fromRef, toRef string, diffs []git.FileDiff) (*ChangeSet, error) {
 	changeset := &ChangeSet{}
 
@@ -177,20 +229,34 @@ func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, from
 
 		switch diff.Status {
 		case "deleted":
+			if UnsafePath(diff.Path) {
+				if StoredUnsafePath(diff.Path) {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+				}
+				continue
+			}
 			// Only include if the deleted file was actually an artifact at fromRef
-			oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.Path)
+			oldContent, oldRefused, err := readForDiscovery(ctx, gitClient, fromRef, diff.Path)
 			if err != nil {
 				changeset.recordReadError(diff.Path, fromRef, err)
 				continue
 			}
-			if IsArtifact(oldContent) {
+			if oldRefused != nil || IsArtifact(oldContent) {
 				changeset.Deleted = append(changeset.Deleted, diff.Path)
 			}
 
 		case "added":
-			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
+			if UnsafePath(diff.Path) {
+				changeset.Refused = append(changeset.Refused, unsafeRefusal(diff.Path))
+				continue
+			}
+			content, refused, err := readForDiscovery(ctx, gitClient, toRef, diff.Path)
 			if err != nil {
 				changeset.recordReadError(diff.Path, toRef, err)
+				continue
+			}
+			if refused != nil {
+				changeset.Refused = append(changeset.Refused, *refused)
 				continue
 			}
 			if !IsArtifact(content) {
@@ -206,12 +272,17 @@ func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, from
 			// Renames are modeled as delete old path + create new path
 			// This ensures path-keyed projections are updated correctly
 
-			// Delete old path if it was an artifact
-			if diff.OldPath != "" && isMdOld {
-				oldContent, err := gitClient.ReadFile(ctx, fromRef, diff.OldPath)
+			// Delete old path if it was an artifact (an unsafe one is
+			// never read: removed when the store can hold it).
+			if diff.OldPath != "" && isMdOld && UnsafePath(diff.OldPath) {
+				if StoredUnsafePath(diff.OldPath) {
+					changeset.Deleted = append(changeset.Deleted, diff.OldPath)
+				}
+			} else if diff.OldPath != "" && isMdOld {
+				oldContent, oldRefused, err := readForDiscovery(ctx, gitClient, fromRef, diff.OldPath)
 				if err != nil {
 					changeset.recordReadError(diff.OldPath, fromRef, err)
-				} else if IsArtifact(oldContent) {
+				} else if oldRefused != nil || IsArtifact(oldContent) {
 					changeset.Deleted = append(changeset.Deleted, diff.OldPath)
 				}
 			}
@@ -220,9 +291,17 @@ func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, from
 			if !isMdNew {
 				continue
 			}
-			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
+			if UnsafePath(diff.Path) {
+				changeset.Refused = append(changeset.Refused, unsafeRefusal(diff.Path))
+				continue
+			}
+			content, refused, err := readForDiscovery(ctx, gitClient, toRef, diff.Path)
 			if err != nil {
 				changeset.recordReadError(diff.Path, toRef, err)
+				continue
+			}
+			if refused != nil {
+				changeset.Refused = append(changeset.Refused, *refused)
 				continue
 			}
 			if !IsArtifact(content) {
@@ -238,22 +317,43 @@ func DiscoverChangesFromDiffs(ctx context.Context, gitClient git.GitClient, from
 			if !isMdNew {
 				continue
 			}
+			if UnsafePath(diff.Path) {
+				changeset.Refused = append(changeset.Refused, unsafeRefusal(diff.Path))
+				if StoredUnsafePath(diff.Path) {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+				}
+				continue
+			}
 
-			// Check if file was an artifact at fromRef
+			// Check if file was an artifact at fromRef. An oversized old
+			// blob counts as "was an artifact": it may have been
+			// projected before the read limit existed, and deleting a
+			// row that is not there is harmless.
 			wasArtifact := false
-			oldContent, oldErr := gitClient.ReadFile(ctx, fromRef, diff.Path)
-			if oldErr != nil {
+			oldContent, oldRefused, oldErr := readForDiscovery(ctx, gitClient, fromRef, diff.Path)
+			switch {
+			case oldErr != nil:
 				// Unreadable old blob is treated as "was not an
 				// artifact" (unchanged); record it so a transient
 				// failure cannot silently turn a delete into a skip.
 				changeset.recordReadError(diff.Path, fromRef, oldErr)
-			} else if IsArtifact(oldContent) {
+			case oldRefused != nil || IsArtifact(oldContent):
 				wasArtifact = true
 			}
 
-			content, err := gitClient.ReadFile(ctx, toRef, diff.Path)
+			content, refused, err := readForDiscovery(ctx, gitClient, toRef, diff.Path)
 			if err != nil {
 				changeset.recordReadError(diff.Path, toRef, err)
+				continue
+			}
+			if refused != nil {
+				// Modified past the read limit: the governed row is
+				// removed (as for a parse failure below) rather than
+				// left serving content that is no longer on main.
+				changeset.Refused = append(changeset.Refused, *refused)
+				if wasArtifact {
+					changeset.Deleted = append(changeset.Deleted, diff.Path)
+				}
 				continue
 			}
 

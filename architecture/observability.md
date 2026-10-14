@@ -329,7 +329,14 @@ Changes that alter the audit trail guarantees or traceability model should be ca
 
 ### A.1 Prometheus Metrics
 
-Available at `GET /api/v1/system/metrics` (unauthenticated).
+Two endpoints serve the Prometheus text format (INIT-023 TASK-015, audit P3-29):
+
+| Endpoint | Auth | Returns |
+|----------|------|---------|
+| `GET /api/v1/system/metrics` | bearer with `system.metrics` (operator role in the request's workspace) | Single-workspace mode: the full export below. Shared multi-workspace mode (`WORKSPACE_RESOLVER=db` or `platform-binding`): **only the caller's own** `spine_workspace_pool_*{workspace_id="<caller>"}` series — the process-global counters, gauges and histograms aggregate every tenant's activity and the full export names every tenant, so a tenant operator gets neither (`400` if no workspace resolved). |
+| `GET /api/v1/platform/metrics` | `SPINE_OPERATOR_TOKEN` (`401` for a wrong or missing token, `503` when unset) | The full export in every mode: all process-global series plus every workspace's `spine_workspace_pool_*` series. Point a shared-mode Prometheus scraper here. |
+
+The full export is the tables below plus the per-workspace connection-pool series (shared mode): gauges `spine_workspace_pool_size`, `spine_workspace_pool_in_use`, `spine_workspace_pool_idle`, `spine_workspace_pool_max` and counters `spine_workspace_pool_open_total`, `spine_workspace_pool_saturation_total`, `spine_workspace_pool_close_total{reason}`, each labelled `workspace_id`.
 
 **Counters:**
 
@@ -347,6 +354,7 @@ Available at `GET /api/v1/system/metrics` (unauthenticated).
 | `spine_git_commit_retries_total` | Total Git commit retry attempts |
 | `spine_events_emitted_total` | Total events emitted |
 | `spine_projection_syncs_total` | Total projection sync cycles |
+| `spine_projection_files_skipped_total` | Files the projection declined to project: over the git client's read limits, or at a path Spine refuses to store (INIT-023 TASK-003). Each one is also a Warn line and a `projection_file_skipped` event. Counted per report: a sync held in error re-reports its refusals on every retry |
 | `spine_scheduler_scans_total` | Total scheduler scan cycles |
 | `spine_timeouts_detected_total` | Total step/run timeouts detected |
 | `spine_orphans_detected_total` | Total orphaned runs detected |

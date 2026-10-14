@@ -12,12 +12,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/bszymi/spine/core/branchprotect"
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/adapters/gitpool"
 	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/core/branchprotect"
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
 
@@ -264,10 +264,12 @@ func TestHandleGit_DisabledPushDoesNotResolvePolicy(t *testing.T) {
 	}
 
 	var resolverCalled bool
+	// No auth bypass is configured: the flag-off short-circuit skips
+	// the auth gate on its own (before INIT-023 TASK-015 this test also
+	// set devMode, which no longer affects /git).
 	s := &Server{
 		gitHTTP:    handler,
 		wsResolver: resolver,
-		devMode:    true,
 		gitPushResolver: func(_ context.Context, _ string) (GitPushResources, func(), error) {
 			resolverCalled = true
 			return GitPushResources{Policy: branchprotect.NewPermissive()}, func() {}, nil
@@ -322,10 +324,13 @@ func TestHandleGit_PerWorkspacePolicyInvoked(t *testing.T) {
 
 	var resolvedFor string
 	var released bool
+	// A push always presents a bearer (INIT-023 TASK-015: devMode no
+	// longer skips git auth), validated here by a stub auth store.
+	authSvc, bearer := gitBearerAuth(t, "op-7", domain.RoleOperator)
 	s := &Server{
 		gitHTTP:    handler,
 		wsResolver: resolver,
-		devMode:    true, // bypass auth so we reach the policy resolver
+		auth:       authSvc,
 		gitPushResolver: func(_ context.Context, workspaceID string) (GitPushResources, func(), error) {
 			resolvedFor = workspaceID
 			return GitPushResources{Policy: branchprotect.NewPermissive()}, func() { released = true }, nil
@@ -334,6 +339,7 @@ func TestHandleGit_PerWorkspacePolicyInvoked(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/git/ws-7/git-receive-pack",
 		strings.NewReader(""))
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("workspace_id", "ws-7")
 	rctx.URLParams.Add("*", "git-receive-pack")
@@ -970,7 +976,9 @@ func TestHandleGit_PerRepoRouting_ReachesGitHandler(t *testing.T) {
 		gitHTTP:    handler,
 		wsResolver: wsResolver,
 		gitPool:    pool,
-		devMode:    true, // bypass auth so we reach the repo resolver
+		// SPINE_GIT_HTTP_DEV_NO_AUTH skips the read bearer so we reach
+		// the repo resolver (devMode no longer affects /git).
+		gitDevNoAuth: true,
 	}
 
 	req := httptest.NewRequest("GET",
@@ -1024,10 +1032,10 @@ func TestHandleGit_PerRepoRouting_UnknownRepoReturnsNotFound(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	s := &Server{
-		gitHTTP:    handler,
-		wsResolver: wsResolver,
-		gitPool:    pool,
-		devMode:    true,
+		gitHTTP:      handler,
+		wsResolver:   wsResolver,
+		gitPool:      pool,
+		gitDevNoAuth: true,
 	}
 
 	req := httptest.NewRequest("GET",
@@ -1071,10 +1079,10 @@ func TestHandleGit_PerRepoRouting_InactiveRepoReturnsPrecondition(t *testing.T) 
 		t.Fatalf("NewHandler: %v", err)
 	}
 	s := &Server{
-		gitHTTP:    handler,
-		wsResolver: wsResolver,
-		gitPool:    pool,
-		devMode:    true,
+		gitHTTP:      handler,
+		wsResolver:   wsResolver,
+		gitPool:      pool,
+		gitDevNoAuth: true,
 	}
 
 	req := httptest.NewRequest("GET",
@@ -1185,10 +1193,10 @@ func TestHandleGit_PerRepoRouting_PrimaryStillWorks(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	s := &Server{
-		gitHTTP:    handler,
-		wsResolver: wsResolver,
-		gitPool:    pool,
-		devMode:    true,
+		gitHTTP:      handler,
+		wsResolver:   wsResolver,
+		gitPool:      pool,
+		gitDevNoAuth: true,
 	}
 
 	req := httptest.NewRequest("GET",

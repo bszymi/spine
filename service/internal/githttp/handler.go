@@ -229,6 +229,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	gitPath := r.URL.Path
 	log := observe.Logger(r.Context())
 
+	// An info/refs query other than the three a git client sends is
+	// ambiguous: git-http-backend parses it with its own parser and
+	// may read a service this handler did not (infoRefsServiceOf).
+	// Refuse it before the push gate, the read gate and CGI. The raw
+	// query is not logged: it is client-chosen and unbounded.
+	if isInfoRefs(r) && infoRefsServiceOf(r.URL.RawQuery) == infoRefsNonCanonical {
+		log.Warn("git request rejected — non-canonical info/refs query",
+			"remote_addr", r.RemoteAddr,
+			"path", gitPath,
+			"query_bytes", len(r.URL.RawQuery),
+		)
+		http.Error(w, "unsupported info/refs query", http.StatusBadRequest)
+		return
+	}
+
 	// Push path: reachable only when ReceivePackEnabled is on. The
 	// flag default is false so existing deployments see no behaviour
 	// change on upgrade. When off, deny with a message that names the
@@ -798,10 +813,17 @@ func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) 
 func isReadOnly(r *http.Request) bool {
 	path := r.URL.Path
 
-	// GET /info/refs?service=git-upload-pack — ref advertisement for clone/fetch
-	if r.Method == http.MethodGet && strings.HasSuffix(path, "/info/refs") {
-		service := r.URL.Query().Get("service")
-		return service == "" || service == "git-upload-pack"
+	// GET /info/refs?service=git-upload-pack — ref advertisement for
+	// clone/fetch — and the bare GET /info/refs of the dumb protocol.
+	// Any other query is never a read (infoRefsServiceOf), including
+	// `service=` with an empty value, which git-http-backend refuses.
+	if isInfoRefs(r) {
+		switch infoRefsServiceOf(r.URL.RawQuery) {
+		case infoRefsDumb, infoRefsUploadPack:
+			return true
+		default:
+			return false
+		}
 	}
 
 	// POST /git-upload-pack — pack data for clone/fetch
@@ -831,13 +853,104 @@ func isReadOnly(r *http.Request) bool {
 func IsReceivePack(r *http.Request) bool {
 	path := r.URL.Path
 
-	if r.Method == http.MethodGet && strings.HasSuffix(path, "/info/refs") {
-		return r.URL.Query().Get("service") == "git-receive-pack"
+	if isInfoRefs(r) {
+		// A non-canonical query fails closed to "push": git-http-backend
+		// may read it as receive-pack (infoRefsServiceOf), so it needs a
+		// bearer at the gateway, and ServeHTTP then refuses it.
+		switch infoRefsServiceOf(r.URL.RawQuery) {
+		case infoRefsReceivePack, infoRefsNonCanonical:
+			return true
+		default:
+			return false
+		}
 	}
 	if r.Method == http.MethodPost && strings.HasSuffix(path, "/git-receive-pack") {
 		return true
 	}
 	return false
+}
+
+// IsNonCanonicalInfoRefs reports whether r is a GET .../info/refs whose
+// query is none of the three a git client sends (infoRefsNonCanonical):
+// IsReceivePack counts it as a push, and ServeHTTP refuses it with 400.
+// Exported so the gateway keeps such a request out of its
+// push-disabled auth bypass (wave 3 review): it must meet the auth gate
+// like a read, or an unauthenticated caller could tell an existing
+// workspace (the handler's 400) from a missing one (the gate's uniform
+// 401).
+func IsNonCanonicalInfoRefs(r *http.Request) bool {
+	return isInfoRefs(r) && infoRefsServiceOf(r.URL.RawQuery) == infoRefsNonCanonical
+}
+
+// isInfoRefs reports whether r is the ref advertisement request, the
+// only git-http-backend route that reads the query string (its
+// get_info_refs reads `service`; every other route ignores the query).
+// HEAD, which git-http-backend serves as GET, is neither a read nor a
+// push here, so ServeHTTP refuses it before CGI.
+func isInfoRefs(r *http.Request) bool {
+	return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs")
+}
+
+// infoRefsService is the advertisement a GET .../info/refs query asks
+// git-http-backend for (infoRefsServiceOf).
+type infoRefsService int
+
+const (
+	// infoRefsDumb: the empty query — the dumb-protocol ref list, a read.
+	infoRefsDumb infoRefsService = iota
+	// infoRefsUploadPack: exactly `service=git-upload-pack` (clone, fetch).
+	infoRefsUploadPack
+	// infoRefsReceivePack: exactly `service=git-receive-pack` (push).
+	infoRefsReceivePack
+	// infoRefsNonCanonical: any other query. Never a read, always a
+	// possible push, and refused by ServeHTTP.
+	infoRefsNonCanonical
+)
+
+// infoRefsServiceOf classifies the raw query of a GET .../info/refs
+// request by its exact bytes. Only the three queries a git client sends
+// are recognised: the empty query (the dumb protocol), and
+// `service=git-upload-pack` / `service=git-receive-pack` (remote-curl
+// appends exactly `service=<name>` to the info/refs URL; protocol v2
+// travels in the Git-Protocol header, not the query). Everything else is
+// infoRefsNonCanonical.
+//
+// The classification has to be the one git-http-backend acts on, and
+// git-http-backend parses QUERY_STRING — r.URL.RawQuery verbatim
+// (net/http/cgi) — with its own parser (http-backend.c get_parameters,
+// url.c url_decode_parameter_name / _value), not url.ParseQuery. The two
+// disagree on inputs no client sends, in both directions:
+//
+//   - git keeps the LAST value of a repeated parameter, url.Values.Get
+//     the FIRST: `service=git-upload-pack&service=git-receive-pack`;
+//   - git ends a name at '&' or '=', consumes that byte, and then reads
+//     the value up to the next '&', so a name without '=' takes the NEXT
+//     segment as its value: `service&git-receive-pack` is
+//     service=git-receive-pack to git, but service="" plus an unrelated
+//     key to url.ParseQuery (and `x&service=git-receive-pack` is x=… to
+//     git, with no service at all);
+//   - git keeps ';', "%00" and an invalid escape literally where
+//     url.ParseQuery drops the pair or decodes it.
+//
+// Each of the first two made a request that this package classified as
+// a read reach git-http-backend as the receive-pack advertisement, on the
+// gateway's token-less read paths (the trusted-CIDR runner bypass and
+// SPINE_GIT_HTTP_DEV_NO_AUTH): INIT-023 TASK-015 review rounds 1 and 2.
+// Comparing the exact bytes needs no model of either parser: each
+// recognised query is one name, one '=' and one value, with no byte
+// either parser treats specially, so both read it the same way, and
+// anything else never reaches git-http-backend.
+func infoRefsServiceOf(rawQuery string) infoRefsService {
+	switch rawQuery {
+	case "":
+		return infoRefsDumb
+	case "service=git-upload-pack":
+		return infoRefsUploadPack
+	case "service=git-receive-pack":
+		return infoRefsReceivePack
+	default:
+		return infoRefsNonCanonical
+	}
 }
 
 // findGitHTTPBackend locates the git-http-backend binary.

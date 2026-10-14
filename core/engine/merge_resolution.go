@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/core/domain"
+	"github.com/bszymi/spine/core/observe"
 )
 
 // MergeRecoveryResult is returned by Resolve / Retry so callers can
@@ -174,7 +176,7 @@ func (o *Orchestrator) ResolveRepositoryMergeExternally(ctx context.Context, run
 		}
 	}
 
-	o.emitMergeResolutionEvent(ctx, run, repositoryID, actor.ActorID, reason, ledgerSHA,
+	o.emitMergeResolutionEvent(ctx, run, repositoryID, actor.ActorID, reason, ledgerSHA, "",
 		domain.EventRunRepositoryMergeResolved, "resolved")
 	observe.Logger(ctx).Info("merge outcome resolved externally",
 		"run_id", runID, "repository_id", repositoryID,
@@ -210,6 +212,22 @@ func (o *Orchestrator) ResolveRepositoryMergeExternally(ctx context.Context, run
 // gate keeps the run parked; the caller surfaces the BlockingRepositories
 // list so the operator can continue the recovery batch.
 func (o *Orchestrator) RetryRepositoryMerge(ctx context.Context, runID, repositoryID, reason string) (*MergeRecoveryResult, error) {
+	return o.RetryRepositoryMergeAt(ctx, runID, repositoryID, reason, "")
+}
+
+// RetryRepositoryMergeAt is RetryRepositoryMerge with an optional head_sha
+// (INIT-023 TASK-005 DC-7, owner question 7). An operator's retry means
+// "try again", not "approve whatever was pushed since the gate": under
+// merge binding a retry without head_sha keeps the code repository's
+// binding and merges the bound commit again. With head_sha — the full
+// lowercase hex id of the code repository's CURRENT run-branch head, which
+// the operator names explicitly — the retry rebinds the repository to it
+// (an operator fixing a conflict on the branch); the new id is recorded
+// as a Rebound-SHA trailer on the ledger commit and in the event payload.
+// A head_sha that is not the current head is ErrConflict
+// (run_branch_moved) and changes nothing; head_sha with binding off is
+// ErrUnavailable.
+func (o *Orchestrator) RetryRepositoryMergeAt(ctx context.Context, runID, repositoryID, reason, headSHA string) (*MergeRecoveryResult, error) {
 	actor := domain.ActorFromContext(ctx)
 	if actor == nil {
 		return nil, domain.NewError(domain.ErrUnauthorized,
@@ -223,6 +241,12 @@ func (o *Orchestrator) RetryRepositoryMerge(ctx context.Context, runID, reposito
 	if runID == "" || repositoryID == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams,
 			"run_id and repository_id are required")
+	}
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA != "" && !isBoundObjectID(headSHA) {
+		return nil, bindingError(domain.ErrInvalidParams,
+			"head_sha must be a full lowercase hex commit id (40 or 64 characters)",
+			HeadBindingDetail{Reason: ReasonExpectedHeadInvalid, RepositoryID: repositoryID})
 	}
 
 	run, err := o.store.GetRun(ctx, runID)
@@ -260,10 +284,18 @@ func (o *Orchestrator) RetryRepositoryMerge(ctx context.Context, runID, reposito
 				repositoryID, runID, existing.Status))
 	}
 
+	// The head check runs before the ledger commit, so a stale head_sha
+	// changes nothing.
+	rebound, err := o.checkRetryHeadSHA(ctx, run, repositoryID, headSHA)
+	if err != nil {
+		return nil, err
+	}
+
 	ledgerSHA, err := o.writeMergeRecoveryLedgerCommit(ctx, run, repositoryID, mergeRecoveryAction{
-		Operation: "merge_recovery_retry",
-		ActorID:   actor.ActorID,
-		Reason:    reason,
+		Operation:  "merge_recovery_retry",
+		ActorID:    actor.ActorID,
+		Reason:     reason,
+		ReboundSHA: rebound,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ledger commit: %w", err)
@@ -311,7 +343,7 @@ func (o *Orchestrator) RetryRepositoryMerge(ctx context.Context, runID, reposito
 		}
 	}
 
-	o.emitMergeResolutionEvent(ctx, run, repositoryID, actor.ActorID, reason, ledgerSHA,
+	o.emitMergeResolutionEvent(ctx, run, repositoryID, actor.ActorID, reason, ledgerSHA, rebound,
 		domain.EventRunRepositoryMergeRetryRequested, "retry-requested")
 	observe.Logger(ctx).Info("merge outcome retry requested",
 		"run_id", runID, "repository_id", repositoryID,
@@ -399,7 +431,7 @@ func guardPartialMergeRecovery(run *domain.Run, repositoryID string) error {
 func (o *Orchestrator) emitMergeResolutionEvent(
 	ctx context.Context,
 	run *domain.Run,
-	repositoryID, actorID, reason, ledgerSHA string,
+	repositoryID, actorID, reason, ledgerSHA, reboundSHA string,
 	eventType domain.EventType,
 	action string,
 ) {
@@ -415,6 +447,9 @@ func (o *Orchestrator) emitMergeResolutionEvent(
 	}
 	if ledgerSHA != "" {
 		payloadMap["ledger_commit_sha"] = ledgerSHA
+	}
+	if reboundSHA != "" {
+		payloadMap["rebound_sha"] = reboundSHA
 	}
 	payload, _ := json.Marshal(payloadMap)
 	tracePrefix := run.TraceID
@@ -456,6 +491,172 @@ func validateSingleLineAuditValue(field, v string) error {
 	return nil
 }
 
+// ledgerCommitOpts builds the recovery ledger commit. Trailers are
+// single-line key/value pairs by spec (RFC 822-ish); the free-form
+// operator reason goes in the commit body so a newline-bearing reason
+// cannot forge a Resolved-By trailer. Operator-supplied single-line
+// fields (Target-Commit-SHA) are validated before we get here — see
+// ResolveRepositoryMergeExternally; Rebound-SHA is a checked object id.
+//
+// Actor-ID is the §5-required canonical actor trailer that every
+// Spine commit carries. Resolved-By / Requested-By are operation-
+// specific synonyms (audit semantics: "who pressed the resolve
+// button" vs "who pressed retry") and carry the same value here
+// only by coincidence; downstream queries that key on Actor-ID
+// (per architecture/git-integration.md §5) must still resolve.
+func ledgerCommitOpts(run *domain.Run, repositoryID string, action mergeRecoveryAction) git.CommitOpts {
+	trailers := map[string]string{
+		"Operation":     action.Operation,
+		"Run-ID":        run.RunID,
+		"Trace-ID":      run.TraceID,
+		"Actor-ID":      action.ActorID,
+		"Repository-ID": repositoryID,
+	}
+	switch action.Operation {
+	case "merge_recovery_resolve":
+		trailers["Resolved-By"] = action.ActorID
+	case "merge_recovery_retry":
+		trailers["Requested-By"] = action.ActorID
+	}
+	if action.TargetCommitSHA != "" {
+		trailers["Target-Commit-SHA"] = action.TargetCommitSHA
+	}
+	if action.ReboundSHA != "" {
+		trailers["Rebound-SHA"] = action.ReboundSHA
+	}
+
+	summary := fmt.Sprintf("Resolve external merge for run %s (%s)", run.RunID, repositoryID)
+	if action.Operation == "merge_recovery_retry" {
+		summary = fmt.Sprintf("Retry merge for run %s (%s)", run.RunID, repositoryID)
+	}
+
+	return git.CommitOpts{
+		Message:    summary,
+		Body:       "Reason:\n" + indentBody(action.Reason),
+		Trailers:   trailers,
+		AllowEmpty: true,
+	}
+}
+
+// writeBoundLedgerCommit is the recovery ledger under merge binding
+// (INIT-023 TASK-005 §8). The ledger commit is built with plumbing as a
+// child of the run's trusted primary binding (CommitFilesOnto, no files)
+// and becomes the new binding — bound_by merge_recovery:<run>:<operation>
+// — so the resumed merge publishes it, as the ledger on the run branch
+// did before. There is no checkout, no commit on the run branch and no
+// branch push: a commit on the branch's tip would re-open the window
+// binding closes. A retry's head_sha rebind is stored in the same write.
+//
+// The write replaces the whole commit_meta map, and the ledger chains on
+// the binding it read, so two recovery requests for one run must not both
+// build on one snapshot (wave 3 review): the later write would restore the
+// other repository's old binding and drop the other ledger from the
+// published ancestry. The ledger is therefore built and recorded under
+// the run's recovery stripe (lockRecoveryBinding), from a fresh read of
+// the run taken under it — the caller's run is used only for its
+// identity — and the read must still be a partially-merged run with
+// repositoryID affected (guardPartialMergeRecovery), since the run may
+// have resumed while the request waited.
+func (o *Orchestrator) writeBoundLedgerCommit(ctx context.Context, stale *domain.Run, repositoryID string, action mergeRecoveryAction) (string, error) {
+	unlock, err := lockRecoveryBinding(ctx, stale.RunID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	run, err := o.store.GetRun(ctx, stale.RunID)
+	if err != nil {
+		return "", fmt.Errorf("re-read run: %w", err)
+	}
+	if err := guardPartialMergeRecovery(run, repositoryID); err != nil {
+		return "", err
+	}
+	bound, err := trustedPrimaryBinding(run)
+	if err != nil {
+		return "", domain.NewErrorWithCause(domain.ErrPrecondition,
+			fmt.Sprintf("run %s has no merge binding this run recorded; cannot write recovery ledger", run.RunID), err)
+	}
+	result, err := o.binder.CommitFilesOnto(ctx, bound, nil, ledgerCommitOpts(run, repositoryID, action))
+	if err != nil {
+		return "", fmt.Errorf("ledger commit onto %s: %w", bound, err)
+	}
+	if !isBoundObjectID(result.SHA) {
+		return "", fmt.Errorf("ledger commit onto %s returned no commit id", bound)
+	}
+	// The ledger becomes the binding, so it must be a child of exactly the
+	// bound commit (review round 1): a commit built on the run-branch tip
+	// would carry unreviewed commits into the resumed merge.
+	if err := requireChildOf(ctx, o.binder, result.SHA, bound, "recovery ledger"); err != nil {
+		return "", err
+	}
+	b := &headBinding{head: result.SHA, by: boundByRecovery(run.RunID, action.Operation)}
+	if action.ReboundSHA != "" {
+		b.repoHeads = map[string]string{repositoryID: action.ReboundSHA}
+	}
+	if err := o.store.SetCommitMeta(ctx, run.RunID, withEngineBinding(run.CommitMeta, b)); err != nil {
+		return "", fmt.Errorf("record ledger binding: %w", err)
+	}
+	observe.Logger(ctx).Info("merge recovery ledger commit",
+		"run_id", run.RunID,
+		"repository_id", repositoryID,
+		"operation", action.Operation,
+		"ledger_commit_sha", result.SHA,
+		"bound_from", bound,
+		"rebound_sha", action.ReboundSHA,
+		"actor_id", action.ActorID,
+	)
+	return result.SHA, nil
+}
+
+// recoveryBindingStripes serialises, within one process, the bound
+// recovery ledger's read-modify-write of a run's binding
+// (writeBoundLedgerCommit): the fresh read of the run, the ledger commit
+// built on its binding and the commit_meta write. Without it two recovery
+// requests for one run (say a retry with head_sha on one code repository
+// and a resolve on another) both chained their ledger on the same binding
+// and the later SetCommitMeta — a whole-map replace from its own snapshot
+// — restored the other repository's old binding and left the other ledger
+// out of the published ancestry (wave 3 review).
+//
+// Package level, like sodBindStripes, because `spine serve` builds an
+// orchestrator per workspace and the pool rebuilds them; striped by run
+// ID, so two runs sharing a stripe only serialise needlessly. Each stripe
+// is a one-slot semaphore so a waiter honours its context. The section
+// holds no other stripe and emits nothing.
+//
+// Residual (KNOWN-LIMITATIONS "Governed Merge Binding"): requests served
+// by different processes sharing one database are not serialised;
+// closing that needs a compare-and-swap on commit_meta or a database lock
+// per run.
+var recoveryBindingStripes = func() (s [64]chan struct{}) {
+	for i := range s {
+		s[i] = make(chan struct{}, 1)
+	}
+	return s
+}()
+
+// lockRecoveryBinding takes runID's recovery stripe and returns an
+// idempotent release. A free stripe is taken even when ctx is already
+// done; a contended one is waited for only until ctx ends, and then the
+// error is ErrUnavailable wrapping ctx.Err(), with nothing held. unlock is
+// never nil.
+func lockRecoveryBinding(ctx context.Context, runID string) (unlock func(), err error) {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(runID))
+	sem := recoveryBindingStripes[h.Sum32()%uint32(len(recoveryBindingStripes))]
+	select {
+	case sem <- struct{}{}:
+	default:
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return func() {}, domain.NewErrorWithCause(domain.ErrUnavailable,
+				fmt.Sprintf("merge recovery: gave up waiting for another recovery action on run %s", runID), ctx.Err())
+		}
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-sem }) }, nil
+}
+
 // mergeRecoveryAction is the structured input for writing one
 // primary-repo ledger commit. Captured here so the helper signature
 // stays narrow as more fields accrete.
@@ -464,6 +665,9 @@ type mergeRecoveryAction struct {
 	ActorID         string
 	Reason          string
 	TargetCommitSHA string // optional — only the resolve path carries one
+	// ReboundSHA is the code repository's new bound head when a retry
+	// named it with head_sha (merge binding only, INIT-023 TASK-005 DC-7).
+	ReboundSHA string
 }
 
 // writeMergeRecoveryLedgerCommit lands an empty commit on the run
@@ -510,6 +714,9 @@ func (o *Orchestrator) writeMergeRecoveryLedgerCommit(
 		return "", domain.NewError(domain.ErrPrecondition,
 			fmt.Sprintf("run %s has no branch; cannot write recovery ledger", run.RunID))
 	}
+	if o.bindingOn {
+		return o.writeBoundLedgerCommit(ctx, run, repositoryID, action)
+	}
 	// The checkout restore at the end runs on a separate, bounded
 	// context so it survives the request being cancelled mid-flight.
 	// Without this, an HTTP client disconnect after the run-branch
@@ -540,36 +747,7 @@ func (o *Orchestrator) writeMergeRecoveryLedgerCommit(
 	// button" vs "who pressed retry") and carry the same value here
 	// only by coincidence; downstream queries that key on Actor-ID
 	// (per architecture/git-integration.md §5) must still resolve.
-	trailers := map[string]string{
-		"Operation":     action.Operation,
-		"Run-ID":        run.RunID,
-		"Trace-ID":      run.TraceID,
-		"Actor-ID":      action.ActorID,
-		"Repository-ID": repositoryID,
-	}
-	switch action.Operation {
-	case "merge_recovery_resolve":
-		trailers["Resolved-By"] = action.ActorID
-	case "merge_recovery_retry":
-		trailers["Requested-By"] = action.ActorID
-	}
-	if action.TargetCommitSHA != "" {
-		trailers["Target-Commit-SHA"] = action.TargetCommitSHA
-	}
-
-	summary := fmt.Sprintf("Resolve external merge for run %s (%s)", run.RunID, repositoryID)
-	if action.Operation == "merge_recovery_retry" {
-		summary = fmt.Sprintf("Retry merge for run %s (%s)", run.RunID, repositoryID)
-	}
-
-	body := "Reason:\n" + indentBody(action.Reason)
-
-	result, err := o.git.Commit(ctx, git.CommitOpts{
-		Message:    summary,
-		Body:       body,
-		Trailers:   trailers,
-		AllowEmpty: true,
-	})
+	result, err := o.git.Commit(ctx, ledgerCommitOpts(run, repositoryID, action))
 	if err != nil {
 		return "", fmt.Errorf("commit on %s: %w", run.BranchName, err)
 	}

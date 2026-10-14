@@ -222,6 +222,21 @@ func (s *Server) handleArtifactAdd(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// INIT-023 TASK-014 (audit P3-6): the same run-branch gate as
+	// write_context. A run that governs a workflow definition accepts no
+	// artifacts (I7), and only the actor bound to the current step — or an
+	// operator, never during a review or internal step — may add to the
+	// branch (authorizeRunBranchWrite). Both run before any branch read,
+	// so an unbound caller learns nothing about the run branch's tree.
+	if isWorkflowTarget(run.TaskPath) {
+		WriteError(w, workflowRunArtifactRejection(req.RunID))
+		return
+	}
+	if err := s.authorizeRunBranchWrite(ctx, run); err != nil {
+		WriteError(w, err)
+		return
+	}
+
 	// Try to find parent on the branch first, then fall back to main.
 	parentArtifactPath, parentDir, parentMeta, err := resolveParentFromRef(ctx, artSvc, gitReader, req.Parent, artType, run.BranchName)
 	if err != nil {

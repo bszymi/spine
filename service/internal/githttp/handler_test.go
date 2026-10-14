@@ -120,6 +120,28 @@ func TestIsReadOnly(t *testing.T) {
 		{"GET objects", "GET", "/objects/pack/pack-abc.pack", "", true},
 		{"GET HEAD", "GET", "/HEAD", "", true},
 		{"random POST", "POST", "/something", "", false},
+		// Review round 1 (INIT-023 TASK-015): git-http-backend keeps the
+		// last of a repeated parameter, url.Values.Get the first, so a
+		// repeated service is never a read.
+		{"info refs repeated service, receive-pack last", "GET", "/info/refs", "service=git-upload-pack&service=git-receive-pack", false},
+		{"info refs repeated service, receive-pack first", "GET", "/info/refs", "service=git-receive-pack&service=git-upload-pack", false},
+		{"info refs repeated upload-pack", "GET", "/info/refs", "service=git-upload-pack&service=git-upload-pack", false},
+		// Review round 2 (INIT-023 TASK-015): git-http-backend ends a name
+		// at '&' or '=' and reads the value up to the next '&', so a name
+		// without '=' takes the next segment as its value:
+		// `service&git-receive-pack` is service=git-receive-pack to git and
+		// service="" to url.ParseQuery. Only the three queries a git client
+		// sends are classified; any other is never a read.
+		{"info refs valueless service, receive-pack next", "GET", "/info/refs", "service&git-receive-pack", false},
+		{"info refs valueless service, receive-pack next, trailing pair", "GET", "/info/refs", "service&git-receive-pack&x=1", false},
+		{"info refs valueless service, upload-pack next", "GET", "/info/refs", "service&git-upload-pack", false},
+		{"info refs valueless service", "GET", "/info/refs", "service", false},
+		{"info refs empty service value", "GET", "/info/refs", "service=", false},
+		{"info refs upload-pack plus another pair", "GET", "/info/refs", "service=git-upload-pack&x=1", false},
+		{"info refs upload-pack escaped", "GET", "/info/refs", "service=git-upload-p%61ck", false},
+		{"info refs other key only", "GET", "/info/refs", "x=1", false},
+		{"info refs empty query (ForceQuery)", "GET", "/info/refs?", "", true},
+		{"HEAD info refs upload-pack", "HEAD", "/info/refs", "service=git-upload-pack", false},
 	}
 
 	for _, tt := range tests {
@@ -152,6 +174,24 @@ func TestIsReceivePack(t *testing.T) {
 		{"POST upload-pack", "POST", "/git-upload-pack", "", false},
 		{"GET HEAD", "GET", "/HEAD", "", false},
 		{"GET objects", "GET", "/objects/pack/pack-abc.pack", "", false},
+		// Review round 1 (INIT-023 TASK-015): any receive-pack value of a
+		// repeated service makes the request a push, whichever comes last.
+		{"info refs repeated service, receive-pack last", "GET", "/info/refs", "service=git-upload-pack&service=git-receive-pack", true},
+		{"info refs repeated service, receive-pack first", "GET", "/info/refs", "service=git-receive-pack&service=git-upload-pack", true},
+		// Review round 2 (INIT-023 TASK-015): any query other than the
+		// three a git client sends fails closed to "push" — git-http-backend
+		// may read a receive-pack service url.ParseQuery does not see
+		// (`service&git-receive-pack` is service=git-receive-pack to git).
+		// A repeated upload-pack is therefore a push too.
+		{"info refs repeated upload-pack", "GET", "/info/refs", "service=git-upload-pack&service=git-upload-pack", true},
+		{"info refs valueless service, receive-pack next", "GET", "/info/refs", "service&git-receive-pack", true},
+		{"info refs valueless service, receive-pack next, trailing pair", "GET", "/info/refs", "service&git-receive-pack&x=1", true},
+		{"info refs valueless service", "GET", "/info/refs", "service", true},
+		{"info refs empty service value", "GET", "/info/refs", "service=", true},
+		{"info refs receive-pack plus another pair", "GET", "/info/refs", "service=git-receive-pack&x=1", true},
+		{"info refs receive-pack escaped", "GET", "/info/refs", "service=git-receive-p%61ck", true},
+		{"info refs empty query (ForceQuery)", "GET", "/info/refs?", "", false},
+		{"GET objects with receive-pack query", "GET", "/objects/pack/pack-abc.pack", "service=git-receive-pack", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -229,6 +269,54 @@ func TestServeHTTP_PushRejectedWhenFlagOff(t *testing.T) {
 					w.Body.String())
 			}
 		})
+	}
+}
+
+// Review rounds 1 and 2 (INIT-023 TASK-015): an info/refs query other
+// than the empty one, `service=git-upload-pack` and
+// `service=git-receive-pack` is refused before the push gate, the read
+// gate and git-http-backend, whatever the receive-pack flag: the handler
+// and git-http-backend parse queries differently (a repeated value is
+// first vs last; a name without '=' takes the next segment as its value
+// in git-http-backend), so they could read different services.
+func TestServeHTTP_RepeatedServiceParameterRefused(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		h, err := NewHandler(Config{
+			ResolveRepoPath:    func(_ context.Context, _ string) (string, error) { return "/tmp", nil },
+			ReceivePackEnabled: enabled,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{
+			"service=git-upload-pack&service=git-receive-pack",
+			"service=git-receive-pack&service=git-upload-pack",
+			"service=git-upload-pack&service=git-upload-pack",
+			"service=git-upload-pack&service=",
+			// Review round 2: a name without '=' takes the next segment
+			// as its value in git-http-backend, and any query other
+			// than the three a git client sends is refused.
+			"service&git-receive-pack",
+			"service&git-receive-pack&x=1",
+			"service&git-upload-pack",
+			"service",
+			"service=",
+			"service=git-upload-pack&x=1",
+			"x=1&service=git-upload-pack",
+			"service=git-upload-p%61ck",
+			"service=git-upload-pack;",
+			"%73ervice=git-receive-pack",
+		} {
+			req := httptest.NewRequest("GET", "/info/refs?"+q, http.NoBody)
+			// A path that is not a repository: reaching
+			// ensureReceivePackConfig or CGI would answer 500.
+			req = req.WithContext(WithRepoPath(req.Context(), "/nonexistent/definitely/not/a/repo"))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("receive-pack enabled=%v, %s: status %d, want 400", enabled, q, w.Code)
+			}
+		}
 	}
 }
 

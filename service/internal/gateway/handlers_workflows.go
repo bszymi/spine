@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 
@@ -28,6 +31,101 @@ type workflowValidateRequest struct {
 	Body string `json:"body"`
 }
 
+// workflowIdentifierPattern is the charset the standalone gateway accepts
+// for the workflow identifiers the engine embeds in event IDs, execution
+// IDs and branch names: step IDs, divergence-point IDs, divergence-branch
+// IDs and convergence-point IDs (core/engine "evt-<trace>-<step>-
+// completed", core/divergence "<run>-div-<dp>"). INIT-023 TASK-015, audit
+// P3-28; the default of owner question 7, pending the owner.
+//
+// It is enforced here, on the standalone API write path only, and
+// deliberately not in core/workflow validation (Decision 3): workflows
+// already on a branch or in the projection — and every workflow SMP's
+// embedded WorkflowWriter writes — keep loading and validating unchanged.
+// The SSE writer refuses unsafe field values on its own
+// (formatSSEEvent), which also covers workflows that arrive by git push
+// or governed merge; this rule is defence in depth. Upper case, "." and
+// "/" are refused: step IDs appear in URL paths
+// (/runs/{run_id}/steps/{step_id}/assign). The 64-character cap matches
+// the trace-ID and repository-ID caps and bounds event-ID growth.
+var workflowIdentifierPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// workflowIdentifierCheckPath is the path the identifier check decodes a
+// request body under. The body, not the path, carries the identifiers.
+const workflowIdentifierCheckPath = workflow.WorkflowsDir + "/identifier-check.yaml"
+
+// maxIdentifierEcho bounds how much of a refused identifier an error
+// message (or a log line, warnUnsafeSSEFields) repeats.
+const maxIdentifierEcho = 80
+
+// boundedEcho returns v, or its first maxIdentifierEcho bytes cut back to
+// a rune boundary plus "...", so an attacker-sized identifier cannot grow
+// an error message or a log line. Callers quote the result (%q, slog).
+func boundedEcho(v string) string {
+	if len(v) <= maxIdentifierEcho {
+		return v
+	}
+	cut := maxIdentifierEcho
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return v[:cut] + "..."
+}
+
+// workflowIdentifierErrors returns one schema error per identifier in
+// body that does not match workflowIdentifierPattern. The body is decoded
+// with workflow.ProjectionDefinition — the decoder the write path itself
+// uses (INIT-023 TASK-011) — so the check sees exactly the document that
+// would be written. A body that does not decode returns nil: the
+// workflow service owns that error (strict decoding refuses case-variant
+// keys such as `ID:`, so a body cannot hide an identifier from this check
+// and still be written). Empty identifiers are left to core validation
+// ("required field missing").
+func workflowIdentifierErrors(body string) []domain.ValidationError {
+	wf, _, err := workflow.ProjectionDefinition(workflowIdentifierCheckPath, []byte(body))
+	if err != nil {
+		return nil
+	}
+	var bad []domain.ValidationError
+	check := func(field, v string) {
+		if v == "" || workflowIdentifierPattern.MatchString(v) {
+			return
+		}
+		bad = append(bad, domain.ValidationError{
+			RuleID:   "schema",
+			Field:    field,
+			Severity: "error",
+			Message:  fmt.Sprintf("identifier %q must match %s", boundedEcho(v), workflowIdentifierPattern.String()),
+		})
+	}
+	for i := range wf.Steps {
+		check(fmt.Sprintf("steps[%d].id", i), wf.Steps[i].ID)
+	}
+	for i := range wf.DivergencePoints {
+		dp := &wf.DivergencePoints[i]
+		check(fmt.Sprintf("divergence_points[%d].id", i), dp.ID)
+		for j := range dp.Branches {
+			check(fmt.Sprintf("divergence_points[%d].branches[%d].id", i, j), dp.Branches[j].ID)
+		}
+	}
+	for i := range wf.ConvergencePoints {
+		check(fmt.Sprintf("convergence_points[%d].id", i), wf.ConvergencePoints[i].ID)
+	}
+	return bad
+}
+
+// checkWorkflowIdentifiers returns ErrValidationFailed (422) carrying
+// workflowIdentifierErrors, or nil. POST and PUT call it right after the
+// body checks, before any dispatch, so the direct-commit path and the
+// planning-run path refuse the same bodies and nothing is written.
+func checkWorkflowIdentifiers(body string) error {
+	bad := workflowIdentifierErrors(body)
+	if len(bad) == 0 {
+		return nil
+	}
+	return domain.NewErrorWithDetail(domain.ErrValidationFailed, "workflow identifiers contain unsupported characters", bad)
+}
+
 func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r, "workflow.create") {
 		return
@@ -41,6 +139,12 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "id and body required"))
 		return
 	}
+	// Before the planning-run dispatch below, so a reviewer's planning
+	// run and an operator's direct commit refuse the same bodies.
+	if err := checkWorkflowIdentifiers(req.Body); err != nil {
+		WriteError(w, err)
+		return
+	}
 
 	// If this 503 fires in production, a new service was added to
 	// gateway.ServerConfig without being wired in cmd/spine buildServerConfig.
@@ -52,66 +156,33 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	// Dispatch per ADR-008:
-	//   - write_context present → branch-scoped write via resolveWriteContext
-	//   - no write_context + reviewer → planning run under workflow-lifecycle
+	// Dispatch per ADR-008, identical for create and update (INIT-023
+	// TASK-014, audit F7):
+	//   - write_context present → the workflow's own lifecycle run branch
+	//     (resolveWorkflowWriteContext: run_id required, the run must govern
+	//     workflows/<id>.yaml, the caller must be its bound actor)
+	//   - no write_context + below operator → a workflow-lifecycle planning
+	//     run (409 while one is already open for the id)
 	//   - no write_context + operator/admin → direct commit (bypass), tagged
-	//     with a Workflow-Bypass trailer for audit
+	//     with a Workflow-Bypass trailer for audit; workflow.Service re-checks
+	//     the operator role when a branch-protection policy is installed
 	if req.WriteContext == nil && !callerHasOperatorPrivileges(ctx) {
-		starter := s.wfPlanningStarterFrom(ctx)
-		if starter == nil {
-			// No planning starter wired — refuse rather than silently
-			// demoting the reviewer to a direct commit that would skip
-			// both the lifecycle review AND the bypass trailer. Bootstrap
-			// recovery is the operator-bypass path (ADR-008 §5).
-			WriteError(w, domain.NewError(domain.ErrUnavailable,
-				"workflow planning run starter not configured; reviewer writes require the governance flow"))
-			return
-		}
-		planning, err := starter.StartWorkflowPlanningRun(ctx, req.ID, req.Body)
+		planning, err := s.startWorkflowLifecycleRun(ctx, req.ID, req.Body, false)
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
-		WriteJSON(w, http.StatusCreated, map[string]any{
-			"run_id":                planning.RunID,
-			"branch_name":           planning.BranchName,
-			"workflow_id":           req.ID,
-			"workflow_path":         planning.TaskPath,
-			"governing_workflow_id": planning.WorkflowID,
-			"status":                planning.Status,
-			"mode":                  planning.Mode,
-			"trace_id":              planning.TraceID,
-			"write_mode":            "planning",
-		})
+		WriteJSON(w, http.StatusCreated, workflowPlanningResponse(planning, req.ID))
 		return
 	}
 	if req.WriteContext != nil {
-		// ADR-009 §4 names both artifact and workflow endpoints as
-		// carrying write_context.override, but enforcement is currently
-		// wired only on the Artifact Service (TASK-001 of this epic).
-		// workflow.Service does not consult branchprotect.Policy, so an
-		// accepted override here would silently succeed without the
-		// mandatory audit event or commit trailer — worse than rejecting.
-		// Operators needing a direct-commit write to a workflow already
-		// have the ADR-008 operator-bypass path (omit write_context as
-		// operator+ role, which adds a Workflow-Bypass trailer). Wiring
-		// branchprotect into workflow.Service is tracked as follow-up
-		// work; until then this returns 400 with the bypass hint.
-		if req.WriteContext.Override {
-			WriteError(w, domain.NewError(domain.ErrInvalidParams,
-				"write_context.override is not yet supported on workflow endpoints (use ADR-008 operator bypass: omit write_context entirely as operator+ role)"))
-			return
-		}
-		branch, _, err := s.resolveWriteContext(ctx, req.WriteContext)
+		branch, err := s.resolveWorkflowWriteContext(ctx, req.WriteContext, req.ID)
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
-		if branch != "" {
-			ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
-		}
-	} else if callerHasOperatorPrivileges(ctx) {
+		ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
+	} else {
 		// Operator direct-commit path: tag the commit for audit.
 		ctx = workflow.WithBypass(ctx)
 	}
@@ -152,6 +223,10 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 		WriteError(w, domain.NewError(domain.ErrInvalidParams, "body required"))
 		return
 	}
+	if err := checkWorkflowIdentifiers(req.Body); err != nil {
+		WriteError(w, err)
+		return
+	}
 
 	svc, ok := s.needWorkflows(w, r)
 	if !ok {
@@ -159,24 +234,27 @@ func (s *Server) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id
 	}
 
 	ctx := r.Context()
-	if req.WriteContext != nil {
-		// See handleWorkflowCreate for the rationale; override on the
-		// workflow surface is rejected until workflow.Service consults
-		// branchprotect.Policy.
-		if req.WriteContext.Override {
-			WriteError(w, domain.NewError(domain.ErrInvalidParams,
-				"write_context.override is not yet supported on workflow endpoints (use ADR-008 operator bypass: omit write_context entirely as operator+ role)"))
-			return
-		}
-		branch, _, err := s.resolveWriteContext(ctx, req.WriteContext)
+	// Same dispatch as handleWorkflowCreate (INIT-023 TASK-014, audit F7).
+	// Before it, a reviewer's PUT without write_context set neither a branch
+	// nor the bypass and committed straight to main ("authoritative"),
+	// skipping both the ADR-008 lifecycle and branch protection.
+	if req.WriteContext == nil && !callerHasOperatorPrivileges(ctx) {
+		planning, err := s.startWorkflowLifecycleRun(ctx, id, req.Body, true)
 		if err != nil {
 			WriteError(w, err)
 			return
 		}
-		if branch != "" {
-			ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
+		WriteJSON(w, http.StatusCreated, workflowPlanningResponse(planning, id))
+		return
+	}
+	if req.WriteContext != nil {
+		branch, err := s.resolveWorkflowWriteContext(ctx, req.WriteContext, id)
+		if err != nil {
+			WriteError(w, err)
+			return
 		}
-	} else if callerHasOperatorPrivileges(ctx) {
+		ctx = workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
+	} else {
 		// Operator direct-commit path: tag the commit for audit (ADR-008).
 		ctx = workflow.WithBypass(ctx)
 	}
@@ -287,6 +365,12 @@ func (s *Server) handleWorkflowValidate(w http.ResponseWriter, r *http.Request, 
 	}
 
 	result := svc.ValidateBody(r.Context(), id, req.Body)
+	// Report the gateway's identifier rule too, so /validate never passes
+	// a body that POST and PUT refuse.
+	if bad := workflowIdentifierErrors(req.Body); len(bad) > 0 {
+		result.Errors = append(result.Errors, bad...)
+		result.Status = "failed"
+	}
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"workflow_id": id,
 		"status":      result.Status,
@@ -344,4 +428,160 @@ func workflowWriteResponse(result *workflow.WriteResult, ctx context.Context, wc
 		resp["workflow_bypass"] = true
 	}
 	return resp
+}
+
+// startWorkflowLifecycleRun opens the workflow-lifecycle planning run for a
+// caller below operator with no write_context: a create run for POST
+// /workflows, an update run for PUT /workflows/{id} (ADR-008 §1). No starter
+// wired is a 503 rather than a silent demotion to a direct commit, which
+// would skip both the lifecycle review and the bypass trailer; bootstrap
+// recovery is the operator bypass (ADR-008 §5). A lifecycle run already
+// open for the id is a 409 naming it (refuseIfWorkflowRunOpen).
+func (s *Server) startWorkflowLifecycleRun(ctx context.Context, id, body string, update bool) (*PlanningRunResult, error) {
+	starter := s.wfPlanningStarterFrom(ctx)
+	if starter == nil {
+		return nil, domain.NewError(domain.ErrUnavailable,
+			"workflow planning run starter not configured; reviewer writes require the governance flow")
+	}
+	if err := s.refuseIfWorkflowRunOpen(ctx, id); err != nil {
+		return nil, err
+	}
+	if update {
+		return starter.StartWorkflowUpdatePlanningRun(ctx, id, body)
+	}
+	return starter.StartWorkflowPlanningRun(ctx, id, body)
+}
+
+// workflowPlanningResponse is the 201 body for a write routed to a
+// workflow-lifecycle planning run (create and update).
+func workflowPlanningResponse(planning *PlanningRunResult, id string) map[string]any {
+	return map[string]any{
+		"run_id":                planning.RunID,
+		"branch_name":           planning.BranchName,
+		"workflow_id":           id,
+		"workflow_path":         planning.TaskPath,
+		"governing_workflow_id": planning.WorkflowID,
+		"status":                planning.Status,
+		"mode":                  planning.Mode,
+		"trace_id":              planning.TraceID,
+		"write_mode":            "planning",
+	}
+}
+
+// resolveWorkflowWriteContext resolves write_context on a workflow endpoint
+// (INIT-023 TASK-014). Unlike the artifact endpoints it never yields an
+// authoritative write:
+//
+//  1. override → 400: ADR-009 override is not wired on the workflow
+//     surface (workflow.Service emits no override event or trailer);
+//     operators use the ADR-008 bypass instead.
+//  2. run_id is required → 400 (V1: on 61994fe `write_context: {}`
+//     resolved to "no branch, no bypass" and committed to main with no
+//     trailer, for reviewers and operators alike).
+//  3. The run must be the planning run that governs workflows/<id>.yaml
+//     (I7, V2: a workflow write could name any planning run — another
+//     workflow's, an artifact-creation run, or a task run whose task_path
+//     the caller echoed — and reach main under that run's review instead
+//     of workflow_review). Owner question 2 (default): only the workflow's
+//     own lifecycle run. Only the workflow starters can create such a run
+//     (I9: POST /runs and StartPlanningRun refuse workflow paths), so
+//     Mode + TaskPath identify it. Then the run must be active and have a
+//     branch.
+//  4. The caller must be allowed to write the branch
+//     (authorizeRunBranchWrite: its draft assignee, or an operator, never
+//     during review).
+func (s *Server) resolveWorkflowWriteContext(ctx context.Context, wc *writeContextRequest, id string) (string, error) {
+	if wc.Override {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			"write_context.override is not supported on workflow endpoints (use ADR-008 operator bypass: omit write_context entirely as operator+ role)")
+	}
+	if wc.RunID == "" {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			"write_context.run_id is required on workflow endpoints; omit write_context to open a workflow-lifecycle planning run (operators: omit it for the ADR-008 bypass)")
+	}
+	if err := workflow.ValidateID(id); err != nil {
+		return "", err
+	}
+	st := s.storeFrom(ctx)
+	if st == nil {
+		return "", domain.NewError(domain.ErrUnavailable, "store not configured")
+	}
+	run, err := st.GetRun(ctx, wc.RunID)
+	if err != nil {
+		return "", fmt.Errorf("resolve write context: %w", err)
+	}
+	want := workflow.FilePath(id)
+	if run.Mode != domain.RunModePlanning || run.TaskPath != want {
+		return "", domain.NewErrorWithDetail(domain.ErrInvalidParams,
+			fmt.Sprintf("run %s does not govern %s; a workflow edit is written only on that workflow's own lifecycle run (ADR-008)", wc.RunID, want),
+			map[string]string{"run_task_path": run.TaskPath, "workflow_path": want})
+	}
+	if run.Status != domain.RunStatusActive {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("run %s is not active (status: %s)", wc.RunID, run.Status))
+	}
+	if run.BranchName == "" {
+		return "", domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("run %s has no branch", wc.RunID))
+	}
+	if err := s.authorizeRunBranchWrite(ctx, run); err != nil {
+		return "", err
+	}
+	return run.BranchName, nil
+}
+
+// refuseIfWorkflowRunOpen answers 409 when a non-terminal planning run
+// already governs workflows/<id>.yaml, naming it so the caller can stack
+// edits there (as its draft assignee, with write_context {run_id}) or wait
+// (INIT-023 TASK-014 §3.3; owner question 3 default: for create and
+// update). Two lifecycle runs on one file both pass the version-bump check
+// against main; edits to disjoint lines would merge cleanly into a
+// definition no reviewer saw, under one ambiguous version label.
+//
+// Best effort: two first requests can race; the merge-conflict path is
+// the backstop. A failed workflow start leaves its record failed, not
+// pending (engine, design-check L1), so only a live run holds the id. An
+// idle lifecycle run does hold it until it finishes; recovery is an
+// operator cancel or the operator bypass. A store read failure is 503
+// (fail closed); with no store the check is skipped, because the starter
+// cannot run without one either.
+func (s *Server) refuseIfWorkflowRunOpen(ctx context.Context, id string) error {
+	if err := workflow.ValidateID(id); err != nil {
+		return err
+	}
+	st := s.storeFrom(ctx)
+	if st == nil {
+		return nil
+	}
+	path := workflow.FilePath(id)
+	runs, err := st.ListRunsByTask(ctx, path)
+	if err != nil {
+		observe.Logger(ctx).Error("workflow lifecycle: list runs for the workflow failed",
+			"workflow_path", path, "error", err)
+		return domain.NewError(domain.ErrUnavailable,
+			fmt.Sprintf("cannot check for an open workflow-lifecycle run on %s", path))
+	}
+	for i := range runs {
+		r := &runs[i]
+		if r.Mode != domain.RunModePlanning || r.Status.IsTerminal() {
+			continue
+		}
+		// The message names the operator cancel too (review round 1): an
+		// idle run, or a run a failed start left behind before INIT-023
+		// TASK-014 (its branch deleted, possibly promoted to active by
+		// scheduler recovery), never finishes on its own, and only an
+		// operator can cancel it (run.cancel). CHANGELOG has the upgrade
+		// recipe for finding such runs.
+		return domain.NewErrorWithDetail(domain.ErrConflict,
+			fmt.Sprintf("workflow-lifecycle run %s is already open for %s; stack edits on it with write_context {run_id} as its draft assignee, "+
+				"wait for it to finish, or, if it is stale, ask an operator to cancel it (POST /runs/%s/cancel)",
+				r.RunID, path, r.RunID),
+			map[string]string{
+				"run_id":          r.RunID,
+				"branch_name":     r.BranchName,
+				"status":          string(r.Status),
+				"current_step_id": r.CurrentStepID,
+			})
+	}
+	return nil
 }

@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
@@ -210,6 +212,21 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	if artifactPath == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "artifact_path is required")
 	}
+	// One producer of workflow task paths (INIT-023 TASK-014 I9, V4): only
+	// the workflow starters below may create a run whose TaskPath is under
+	// workflows/. A generic planning run there would merge its Markdown into
+	// workflows/ under its own creation workflow's review (not
+	// workflow_review), and would carry the exact run.TaskPath key the
+	// standalone gateway's one-open-lifecycle-run rule and lifecycle
+	// write_context binding trust — letting a contributor lock any workflow
+	// against governed edits. Refused before Parse, so nothing is persisted.
+	// The test is canonical (dot segments, case folding): see
+	// workflow.InWorkflowsDir. SMP's only caller (CreateEntry) builds .md
+	// paths under the artifact type directories, never under workflows/.
+	if workflow.InWorkflowsDir(artifactPath) {
+		return nil, domain.NewError(domain.ErrInvalidParams,
+			"workflow definitions are created through the workflow-lifecycle planning run (ADR-007/ADR-008)")
+	}
 
 	parsed, err := artifact.Parse(artifactPath, []byte(artifactContent))
 	if err != nil {
@@ -284,11 +301,47 @@ func (o *Orchestrator) StartPlanningRun(ctx context.Context, artifactPath, artif
 	})
 }
 
-// StartWorkflowPlanningRun creates a planning-mode run governing a workflow
-// definition edit (ADR-008). The workflow body is validated, written to a
-// fresh task branch, and the governing workflow is resolved as the
-// `applies_to: [Workflow]` / `mode: creation` binding (today: workflow-lifecycle).
+// StartWorkflowPlanningRun creates a planning-mode run governing the
+// creation of a NEW workflow definition (ADR-008). The workflow body is
+// validated, written to a fresh task branch, and the governing workflow is
+// resolved as the `applies_to: [Workflow]` / `mode: creation` binding
+// (today: workflow-lifecycle).
+//
+// An id whose definition already exists at the ref the run branch is cut
+// from is refused with ErrAlreadyExists before any branch or run record
+// exists (INIT-023 TASK-014, design-check L1); StartWorkflowUpdatePlanningRun
+// is the path for an existing definition.
 func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID, body string) (*StartRunResult, error) {
+	return o.startWorkflowPlanningRun(ctx, workflowID, body, false)
+}
+
+// StartWorkflowUpdatePlanningRun creates a planning-mode run governing an
+// edit of an EXISTING workflow definition (ADR-008 §1; INIT-023 TASK-014,
+// audit F7). Before it, a reviewer had no governed way to edit an existing
+// workflow — StartWorkflowPlanningRun always wrote through Create, which
+// fails on an existing file — while workflow.update committed straight to
+// main.
+//
+// The run is shaped exactly like a create run (Mode planning, TaskPath
+// workflows/<id>.yaml, governed by the Workflow/creation binding, a
+// spine/plan/... branch); only the branch write differs: the workflow
+// writer's Update, which re-checks the version bump against the branch's
+// copy. The prior definition is read first, at the ref the run branch is cut
+// from, so a missing workflow (ErrNotFound), an unparsable prior file
+// (ErrInternal) or an unchanged version (ErrValidationFailed, the message
+// workflow.Service.Update uses) is refused before any branch or run record
+// exists. The authoritative branch is untouched until the lifecycle review
+// approves and the governed merge runs.
+func (o *Orchestrator) StartWorkflowUpdatePlanningRun(ctx context.Context, workflowID, body string) (*StartRunResult, error) {
+	return o.startWorkflowPlanningRun(ctx, workflowID, body, true)
+}
+
+// workflowPlanningBaseRef is the ref createRunBranches cuts the primary run
+// branch from (multi_repo_branch.go). The pre-checks read the definition at
+// the same ref, so they judge exactly what the branch will start from.
+const workflowPlanningBaseRef = "HEAD"
+
+func (o *Orchestrator) startWorkflowPlanningRun(ctx context.Context, workflowID, body string, update bool) (*StartRunResult, error) {
 	if o.workflowWriter == nil {
 		return nil, domain.NewError(domain.ErrUnavailable, "workflow writer not configured")
 	}
@@ -298,8 +351,13 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 	if body == "" {
 		return nil, domain.NewError(domain.ErrInvalidParams, "workflow body is required")
 	}
+	// Before TASK-014 a bad id failed only inside onBranch, after the run
+	// record and branch existed.
+	if err := workflow.ValidateID(workflowID); err != nil {
+		return nil, err
+	}
 
-	path := workflow.WorkflowsDir + "/" + workflowID + ".yaml"
+	path := workflow.FilePath(workflowID)
 
 	// ProjectionDefinition, not bare Parse: the body is what the
 	// projection will read after the planning run merges, so a body it
@@ -319,6 +377,15 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 			"workflow validation failed", vResult.Errors)
 	}
 
+	// Existence pre-checks, before ResolveWorkflowForMode and therefore
+	// before any branch or run record exists. Before TASK-014 a create of
+	// an existing id failed only inside onBranch (the writer's Create
+	// reported already_exists) and left a pending run behind, which
+	// scheduler recovery could later promote to active (design-check L1).
+	if err := o.workflowPlanningPreCheck(ctx, path, parsed, update); err != nil {
+		return nil, err
+	}
+
 	binding, err := o.workflows.ResolveWorkflowForMode(ctx, string(domain.ArtifactTypeWorkflow), "", "creation")
 	if err != nil {
 		return nil, fmt.Errorf("resolve governing workflow: %w", err)
@@ -327,10 +394,10 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 		return nil, domain.NewError(domain.ErrInvalidParams, "governing workflow has no entry_step")
 	}
 
-	// Workflow-creation planning runs only touch the primary Spine
-	// repo. Validate the governing workflow's step routing against an
-	// empty opt-in set so a `repository: <code-repo>` declaration is
-	// rejected here rather than producing a clone-time failure later.
+	// Workflow planning runs only touch the primary Spine repo. Validate
+	// the governing workflow's step routing against an empty opt-in set so
+	// a `repository: <code-repo>` declaration is rejected here rather than
+	// producing a clone-time failure later.
 	if err := o.validateStepRouting(ctx, binding.Workflow, &domain.Artifact{Path: path, Type: domain.ArtifactTypeWorkflow}); err != nil {
 		return nil, err
 	}
@@ -341,6 +408,11 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 	}
 	runID := fmt.Sprintf("run-%s", traceID[:8])
 	branchName := generateBranchNameWithSuffix(domain.RunModePlanning, parsed.ID, path, runID)
+
+	write, verb := o.workflowWriter.Create, "create"
+	if update {
+		write, verb = o.workflowWriter.Update, "update"
+	}
 
 	return o.startRunCommon(ctx, startRunParams{
 		run: &domain.Run{
@@ -365,7 +437,7 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 			branchCtx := workflow.WithWriteContext(ctx, workflow.WriteContext{Branch: branch})
 			branchCtx = observe.WithTraceID(branchCtx, traceID)
 			branchCtx = observe.WithRunID(branchCtx, runID)
-			if _, err := o.workflowWriter.Create(branchCtx, workflowID, body); err != nil {
+			if _, err := write(branchCtx, workflowID, body); err != nil {
 				if delErr := o.git.DeleteBranch(ctx, branch); delErr != nil {
 					log.Warn("failed to clean up workflow planning branch", "branch", branch, "error", delErr)
 				}
@@ -374,11 +446,62 @@ func (o *Orchestrator) StartWorkflowPlanningRun(ctx context.Context, workflowID,
 						log.Warn("auto-push: failed to clean up remote workflow planning branch", "branch", branch, "error", delErr)
 					}
 				}
-				return fmt.Errorf("create workflow on branch: %w", err)
+				o.failOrphanWorkflowRun(ctx, runID)
+				return fmt.Errorf("%s workflow on branch: %w", verb, err)
 			}
 			return nil
 		},
 	})
+}
+
+// workflowPlanningPreCheck reads the definition at the ref the run branch
+// is cut from. Create: an existing file is ErrAlreadyExists. Update: a
+// missing file is ErrNotFound, an unparsable prior file ErrInternal, and an
+// unchanged version ErrValidationFailed. A read failure other than git's
+// not-found is returned wrapped (fail closed: no run is started).
+func (o *Orchestrator) workflowPlanningPreCheck(ctx context.Context, path string, submitted *domain.WorkflowDefinition, update bool) error {
+	prior, err := o.git.ReadFile(ctx, workflowPlanningBaseRef, path)
+	if err != nil {
+		var gerr *git.GitError
+		if !errors.As(err, &gerr) || gerr.Kind != git.ErrKindNotFound {
+			return fmt.Errorf("read %s at %s: %w", path, workflowPlanningBaseRef, err)
+		}
+		if update {
+			return domain.NewError(domain.ErrNotFound, fmt.Sprintf("workflow not found: %s", path))
+		}
+		return nil
+	}
+	if !update {
+		return domain.NewError(domain.ErrAlreadyExists,
+			fmt.Sprintf("workflow already exists: %s; use PUT /workflows/{id} to open an update run", path))
+	}
+	priorDef, err := workflow.Parse(path, prior)
+	if err != nil {
+		return domain.NewError(domain.ErrInternal, fmt.Sprintf("parse existing workflow: %v", err))
+	}
+	if priorDef.Version == submitted.Version {
+		return domain.NewError(domain.ErrValidationFailed,
+			fmt.Sprintf("workflow.update requires a version bump (prior=%s, submitted=%s)",
+				priorDef.Version, submitted.Version))
+	}
+	return nil
+}
+
+// failOrphanWorkflowRun marks a workflow planning run whose branch write
+// failed as failed (design-check L1). startRunCommon persists the run
+// before onBranch runs, so without this the record stays pending with its
+// branch deleted: scheduler recovery promotes pending runs to active, and
+// the standalone gateway's one-open-lifecycle-run rule would then answer
+// 409 for that workflow until an operator cancelled the orphan. Best
+// effort: a failed transition is logged and the writer's error is still
+// what the caller sees. The transition is a compare-and-swap from pending,
+// through the existing RunStore method (no new store method).
+func (o *Orchestrator) failOrphanWorkflowRun(ctx context.Context, runID string) {
+	applied, err := o.store.TransitionRunStatus(context.WithoutCancel(ctx), runID, domain.RunStatusPending, domain.RunStatusFailed)
+	if err != nil || !applied {
+		observe.Logger(ctx).Warn("workflow planning run start failed; could not mark the run failed",
+			"run_id", runID, "applied", applied, "error", err)
+	}
 }
 
 // CompleteRun transitions an active run to completed (or committing if

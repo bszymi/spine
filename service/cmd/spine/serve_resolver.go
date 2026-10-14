@@ -94,6 +94,12 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 		return fmt.Errorf("workspace orchestrator branch-protect policy: %w", err)
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// SHA-bound governed merges (INIT-023 TASK-005), as on the
+	// process-level orchestrator; ss.GitClient is a *git.CLIClient, which
+	// implements engine.CommitBinder.
+	if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
+		return fmt.Errorf("workspace orchestrator merge binding: %w", err)
+	}
 	// Engine step-entry policy (INIT-023 TASK-007), same selection as the
 	// process-level orchestrator.
 	orch.WithStepEntryPolicy(stepEntryPolicy)

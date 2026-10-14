@@ -143,10 +143,31 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	if err != nil {
 		return s.markSyncError(ctx, prev, "discover artifacts", err)
 	}
-	wfPaths, err := s.workflowPathsAt(ctx, head, result.Workflows)
+	// Refused files (INIT-023 TASK-003) are reported, never counted as
+	// projection errors: DeleteAllProjections below removes any stale
+	// row, and nothing re-adds one. They are reported as soon as discovery
+	// has decided them, before anything after it can fail the rebuild
+	// (review round 2): a rebuild failed by an unrelated store or read
+	// error used to report none of them, for as long as the failure
+	// lasted. DiscoverAll's refusals go out before the root-workflow
+	// listing (a second ListFiles when artifacts_dir is a subdirectory)
+	// can fail (wave 3 review), that listing's own refusals right after
+	// it. A failed rebuild's retry reports them again, under the same
+	// deterministic event ids.
+	var refused []artifact.RefusedFile
+	for _, r := range result.Refused {
+		if s.keepRefusal(r) {
+			refused = append(refused, r)
+		}
+	}
+	s.recordRefused(ctx, head, refused)
+	wfPaths, wfRefused, err := s.workflowPathsAt(ctx, head, result.Workflows)
 	if err != nil {
 		return s.markSyncError(ctx, prev, "discover workflows", err)
 	}
+	s.recordRefused(ctx, head, wfRefused)
+	refused = append(refused, wfRefused...)
+
 	plans, err := s.planWorkflowRows(ctx, wfPaths, head)
 	if err != nil {
 		return s.markSyncError(ctx, prev, "plan workflow rows", err)
@@ -216,6 +237,7 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		"workflows", len(wfPaths),
 		"workflows_rejected", rejected,
 		"skipped", len(result.Skipped),
+		"refused", len(refused),
 		"errors", len(result.Errors),
 		"commit", head,
 	)
@@ -228,10 +250,14 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 // paths at head: DiscoverAll's workflow list (under artifacts_dir) plus,
 // when artifacts_dir is a subdirectory, the root workflows/ directory
 // (owner question 3), each filtered to direct children of a workflows/
-// directory.
-func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered []string) ([]string, error) {
+// directory. A root workflow at an unsafe path is returned as a refusal
+// instead (INIT-023 TASK-003; DiscoverAll already refuses those under
+// artifacts_dir): its path is the row key, and the store must never see
+// it.
+func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered []string) ([]string, []artifact.RefusedFile, error) {
 	seen := make(map[string]struct{}, len(discovered))
 	var out []string
+	var refused []artifact.RefusedFile
 	add := func(paths []string) {
 		for _, p := range paths {
 			if !s.scope.isWorkflow(p) {
@@ -241,6 +267,10 @@ func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered [
 				continue
 			}
 			seen[p] = struct{}{}
+			if artifact.UnsafePath(p) {
+				refused = append(refused, artifact.RefusedFile{Path: p, Reason: artifact.RefusedUnsafePath})
+				continue
+			}
 			out = append(out, p)
 		}
 	}
@@ -248,12 +278,12 @@ func (s *Service) workflowPathsAt(ctx context.Context, head string, discovered [
 	if s.scope.dir != "" {
 		root, err := artifact.DiscoverWorkflows(ctx, s.git, head)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		add(root)
 	}
 	sort.Strings(out)
-	return out, nil
+	return out, refused, nil
 }
 
 // planWorkflowRows builds every workflow row at head and captures the
@@ -432,14 +462,13 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 			// changed one) looks absent or different at this head, so the
 			// sweep just deleted or replaced it. Every other path that
 			// writes rows also writes sync_state; do the same here and
-			// re-record the state this sync is based on, so that if it was
-			// advanced meanwhile the next tick re-diffs from this head and
-			// restores what the sweep undid (INIT-023 wave 2 cross-task
-			// review). When nothing moved, the write changes nothing.
-			if err := s.store.UpdateSyncState(ctx, &store.SyncState{
-				LastSyncedCommit: head,
-				Status:           "idle",
-			}); err != nil {
+			// re-record the baseline this sync is based on, so that if it
+			// was advanced meanwhile the next tick re-diffs from this head
+			// and restores what the sweep undid (INIT-023 wave 2
+			// cross-task review). Only the baseline: a status another
+			// instance wrote meanwhile is kept (resetSyncBaseline). When
+			// nothing moved, the write changes nothing.
+			if err := s.resetSyncBaseline(ctx, head); err != nil {
 				return fmt.Errorf("update sync state: %w", err)
 			}
 		}
@@ -463,6 +492,22 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	if err != nil {
 		return s.markSyncError(ctx, state, "discover changes", err)
 	}
+
+	// Refused files (INIT-023 TASK-003) are known once discovery has run:
+	// the changeset's, plus every workflow definition the diff adds,
+	// modifies or renames to at an UnsafePath. They are reported here,
+	// before anything below can hold the sync (review round 2). Reporting
+	// them only after the changeset was applied let an unrelated
+	// infrastructure read failure in the same window — the early return
+	// just below — suppress every refusal in it for as long as the failure
+	// lasted, while a sync held by an error later in the loop reported
+	// them. A held sync re-reports on each retry: the event ids are
+	// deterministic, so the delivery queue de-duplicates them; the counter
+	// counts each report.
+	refused := append([]artifact.RefusedFile(nil), changeset.Refused...)
+	refused = append(refused, s.unsafeWorkflowRefusals(diffs)...)
+	s.recordRefused(ctx, head, refused)
+
 	readSkipped, readErr := s.classifyReadErrors(ctx, changeset.ReadErrors)
 	if readErr != nil {
 		return s.markSyncError(ctx, state, "read changed artifact", readErr)
@@ -568,7 +613,17 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		}
 	}
 
-	// Workflows: the same raw diff, classified with the shared scope.
+	// Workflows: the same raw diff, classified with the shared scope. A
+	// workflow file at an UnsafePath is never read or projected (INIT-023
+	// TASK-003): an added, modified or renamed-to one was refused and
+	// reported above (unsafeWorkflowRefusals). A row projected before
+	// TASK-003 can still exist at such a path when it is valid UTF-8
+	// (artifact.StoredUnsafePath: git listed it raw under
+	// core.quotePath=false), so it is retired like any other (wave 3
+	// integration): a deleted or renamed-away file's row is deleted, and
+	// an added or modified one's row is kept quarantined or removed
+	// (retireUnsafeWorkflowRow). Invalid UTF-8 never reaches the store (it
+	// is the row key; it would fail every sync).
 	var workflowsRejected int
 	syncWorkflow := func(path string) {
 		rejected, err := s.syncWorkflowFile(ctx, path, head)
@@ -587,27 +642,47 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 			syncErrors++
 		}
 	}
+	retireUnsafe := func(path string) {
+		if err := s.retireUnsafeWorkflowRow(ctx, path, head); err != nil {
+			log.Warn("failed to retire workflow row at an unsafe path", "error", err)
+			syncErrors++
+		}
+	}
+	storable := func(path string) bool {
+		return !artifact.UnsafePath(path) || artifact.StoredUnsafePath(path)
+	}
 	for _, diff := range diffs {
 		switch diff.Status {
 		case "added", "modified":
 			if s.scope.isWorkflow(diff.Path) {
+				if artifact.UnsafePath(diff.Path) {
+					retireUnsafe(diff.Path) // the refusal is reported above
+					continue
+				}
 				syncWorkflow(diff.Path)
 			}
 		case "deleted":
-			if s.scope.isWorkflow(diff.Path) {
+			if s.scope.isWorkflow(diff.Path) && storable(diff.Path) {
 				deleteWorkflow(diff.Path)
 			}
 		case "renamed":
 			// The old row's delete error is counted: dropping it left
 			// the old Active row bindable while the sync advanced.
-			if diff.OldPath != "" && s.scope.isWorkflow(diff.OldPath) {
+			if diff.OldPath != "" && s.scope.isWorkflow(diff.OldPath) && storable(diff.OldPath) {
 				deleteWorkflow(diff.OldPath)
 			}
 			if s.scope.isWorkflow(diff.Path) {
+				if artifact.UnsafePath(diff.Path) {
+					retireUnsafe(diff.Path) // the refusal is reported above
+					continue
+				}
 				syncWorkflow(diff.Path)
 			}
 		}
 	}
+
+	// Refusals (reported above) never count as sync errors, so the sync
+	// still advances past them.
 
 	// Update sync state — only advance commit if no errors
 	if syncErrors > 0 {
@@ -633,6 +708,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		"deleted", len(changeset.Deleted),
 		"workflows_rejected", workflowsRejected,
 		"read_skipped", readSkipped,
+		"refused", len(refused),
 		"errors", syncErrors,
 		"from", shortSHA(state.LastSyncedCommit),
 		"to", shortSHA(head),
@@ -653,6 +729,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		"errors":             syncErrors,
 		"workflows_rejected": workflowsRejected,
 		"read_skipped":       readSkipped,
+		"refused":            len(refused),
 	})
 	event.EmitLogged(ctx, s.events, domain.Event{
 		EventID: fmt.Sprintf("sync-%s", head[:12]),

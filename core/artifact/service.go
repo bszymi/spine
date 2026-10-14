@@ -403,6 +403,12 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("artifact not found: %s at ref %s", path, ref))
 		}
+		// A blob over the git client's read limit (INIT-023 TASK-003) is
+		// 413, the status an oversized worktree read gets (TASK-004).
+		if errors.Is(err, git.ErrBlobTooLarge) {
+			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
+				fmt.Sprintf("artifact %s at ref %s %s", path, ref, ReadLimitPhrase(err)), err)
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
@@ -462,6 +468,13 @@ func (s *Service) List(ctx context.Context, ref string) ([]*domain.Artifact, err
 	for _, file := range files {
 		// Only include .md files when using directory prefix filter.
 		if !strings.HasSuffix(file, ".md") {
+			continue
+		}
+		// Raw listings (INIT-023 TASK-003) now carry paths git used to
+		// C-quote — and the quoted form never ended in ".md". A path
+		// discovery refuses to project is left out here too, exactly as
+		// it was before.
+		if UnsafePath(file) {
 			continue
 		}
 

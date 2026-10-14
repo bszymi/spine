@@ -64,7 +64,14 @@ Write context is expressed explicitly in artifact write requests via `write_cont
 
 **Planning run writes:**
 
-Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) produce proposed writes that include artifact creation on a branch. The `write_context` for planning runs accepts `run_id` without `task_path` validation, since the run owns a constrained creation scope on the branch for multi-artifact writes. Planning run writes are restricted to creating new artifacts only — they may not update, delete, or mutate pre-existing artifacts on the authoritative branch.
+Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) produce proposed writes that include artifact creation on a branch. The `write_context` for planning runs accepts `run_id` without `task_path` validation, since the run owns a constrained creation scope on the branch for multi-artifact writes. Planning run writes are restricted to creating new artifacts only — they may not update, delete, or mutate pre-existing artifacts on the authoritative branch. The documented exception is the `workflow-lifecycle` planning run (ADR-008): it carries exactly one workflow definition, new or updated, written only through the `workflow.*` operations (§3.2).
+
+**Who may write a run branch (INIT-023 TASK-014).** A write that lands on a run branch — `write_context` with a `run_id` on any artifact or workflow write, and `artifact.add` — is accepted only from:
+
+- the actor bound to the run's current step: the latest run-level execution of that step, `assigned` or `in_progress`, on an `active` run (the same predicate the git gateway applies to pushes, `core/refadmit`); or
+- an operator or admin.
+
+While that step is `waiting` or unassigned the write is refused with `409 conflict` (claim the step first, `POST /execution/claim`, or have an operator assign it; `detail.execution_id` names the execution); with no open execution, `409`; any other caller gets `403 forbidden` (the response never names the holder). While the run's current step is a `review` or `internal` step (for example task-default's `publish`, between approval and the governed merge) the branch is frozen for **every** role, operators included: `409` with `detail.step_type`. API writes land on the run's branch in the primary repository, so while the current step is routed to a code repository ([ADR-015](/architecture/adr/ADR-015-multi-repo-step-routing.md) `repository: <id>`; a step writes only its own repository) that branch accepts them only from operators: the step's holder gets `409` with `detail.repository_id` (a push of the branch to the primary repository is refused the same way). A run with no run-level current step (a legacy row, or a diverged run) accepts API writes only from operators. A step definition that cannot be resolved refuses the write (`409`). A run that governs a workflow definition (task path under `workflows/`) accepts no artifact writes (`400`).
 
 ---
 
@@ -74,7 +81,7 @@ Planning runs (per [ADR-006](/architecture/adr/ADR-006-planning-runs.md)) produc
 
 Artifact operations create, read, and modify governed artifacts in Git.
 
-Workflow definitions are **not** governed by this category. Per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md), they are a separate resource with dedicated operations (see §3.2). Requests to `artifact.create`, `artifact.update`, or `artifact.add` that target a workflow path (prefix `/workflows/`) or declared type are rejected with `400 invalid_params` and an error payload pointing to the corresponding `workflow.*` operation. `artifact.read` against a workflow path returns the same summary projection as `query.artifacts` — not the executable body.
+Workflow definitions are **not** governed by this category. Per [ADR-007](/architecture/adr/ADR-007-workflow-resource-separation.md), they are a separate resource with dedicated operations (see §3.2). Requests to `artifact.create`, `artifact.update`, or `artifact.add` that target a workflow path (prefix `/workflows/`) or declared type are rejected with `400 invalid_params` and an error payload pointing to the corresponding `workflow.*` operation. The workflow-path test is canonical, whatever the spelling: dot segments (`./workflows/x`, `governance/../workflows/x`), repeated or leading slashes and a case-folded first component (`Workflows/x`) all name a workflow path. `artifact.read` against a workflow path returns the same summary projection as `query.artifacts` — not the executable body.
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
@@ -90,9 +97,9 @@ Workflow definitions are **not** governed by this category. Per [ADR-007](/archi
 **Domain rules:**
 - `artifact.create` rejects duplicates (same path or same ID within scope)
 - `artifact.entry` allocates the next sequential ID within the parent scope (e.g., TASK-006 if TASK-001 through TASK-005 exist), generates a slug from the title, builds schema-valid front-matter content, and delegates to `run.start_planning`. The parent must exist and be the correct type (tasks require epic parent, epics require initiative parent). Supported types: Task, Epic, Initiative. ADR and document types use separate creation workflows.
-- `artifact.add` writes to a planning run's branch, scanning the branch (not main) for the next ID. Only works while the run is in the `draft` step. The parent can exist on the branch or on main.
+- `artifact.add` writes to a planning run's branch, scanning the branch (not main) for the next ID. Only works while the run is in the `draft` step, and only for the draft step's bound actor or an operator (see "Who may write a run branch" above; `403` / `409`). The parent can exist on the branch or on main.
 - `artifact.update` validates the full artifact (schema + cross-artifact) before committing
-- Write operations target the authoritative branch by default; when a `write_context` with `run_id` is provided, they target the task branch instead
+- Write operations target the authoritative branch by default; when a `write_context` with `run_id` is provided, they target the task branch instead, subject to the run-branch write rule above
 - Merge-time collision detection: if two planning runs allocate the same ID, the collision is detected at merge time. The artifact is renumbered and the merge retried (max 2 attempts).
 - Write operations are designed to produce a single atomic Git commit with structured trailers (per [Git Integration](/architecture/git-integration.md) §5). This is a target architectural invariant — implementations must treat partial commits as bugs
 - `artifact.create`, `artifact.update`, and `artifact.add` reject workflow targets with `400 invalid_params`; the error payload identifies the corresponding `workflow.*` operation to use instead
@@ -114,13 +121,14 @@ Workflow Definition Operations create, read, and modify workflow definition arti
 - `workflow.update` enforces a version bump relative to the prior definition on **every** call — including repeated updates within the same planning run. A reviewer stacking edits on a single `run_id` must bump `version` on each body; the prior definition is read from the branch tip, not from `main`. Bodies that keep the version unchanged are rejected with `validation_failed`.
 - Workflow writes produce a single atomic Git commit with structured trailers, consistent with the artifact write invariant in [Git Integration](/architecture/git-integration.md) §5.
 - Reviewer role is required for `workflow.create` and `workflow.update`. `workflow.read`, `workflow.list`, and `workflow.validate` require reader.
+- Workflow writes are evaluated by branch protection ([ADR-009](/architecture/adr/ADR-009-branch-protection.md)): a non-bypass write is an `OpDirectWrite` on its real target branch, so the bootstrap `main: no-direct-write` rule refuses a direct workflow commit to `main` (`403`). The ADR-008 bypass requires an operator-or-above actor. `write_context.override` is not supported on workflow endpoints (`400`); operators use the bypass.
 - `workflow.read` is the **only** way to retrieve an executable workflow body. `artifact.read`, `query.artifacts`, and `query.graph` return summary metadata only (id, path, version, status, applies_to).
 - Run binding resolution (see §3.3) uses `workflow.read` internally to pin a definition version to a Run; callers do not need to pre-resolve.
 
 **Lifecycle governance (per [ADR-008](/architecture/adr/ADR-008-workflow-lifecycle-governance.md)):**
-- `workflow.create` and `workflow.update` dispatch based on caller role and `write_context`:
-  - **Reviewer, no `write_context`** — opens a planning-mode Run under the seeded `workflow-lifecycle` workflow; the response returns `run_id`, `branch_name`, `workflow_path`, and `write_mode: planning`. Approval on the `review` step merges the branch; `needs_rework` loops back to `draft` with the branch kept alive.
-  - **`write_context { run_id }` present** — commits to the run's task branch via worktree. Response includes `write_mode: proposed`.
+- `workflow.create` and `workflow.update` dispatch identically, based on caller role and `write_context`:
+  - **Reviewer, no `write_context`** — opens a planning-mode Run under the seeded `workflow-lifecycle` workflow: a create run for `workflow.create`, an update run for `workflow.update` (INIT-023 TASK-014; before it, a reviewer's update committed straight to `main`). `201` with `run_id`, `branch_name`, `workflow_path`, and `write_mode: planning`. Approval on the `review` step merges the branch; `needs_rework` loops back to `draft` with the branch kept alive. An update of a missing workflow (`404`), with an unchanged version (`422 validation_failed`) or an invalid id (`400`), and a create of an id that already exists (`409 already_exists`), are refused before any branch or Run exists. No planning starter configured: `503`. A non-terminal lifecycle run already open for the id: `409 conflict` naming it (`detail.run_id`, `branch_name`, `status`, `current_step_id`) — stack edits on that run, or wait; a failed start leaves its Run `failed`, so it never holds the id.
+  - **`write_context { run_id }` present** — commits to the run's branch via worktree, `write_mode: proposed`. The `run_id` is required (`write_context: {}` is `400` for every role) and must name the planning run that governs `workflows/<id>.yaml` — never another workflow's run, an artifact planning run or a task run (`400`) — and the caller must be allowed to write that branch (its draft assignee or an operator, never during review; see §3.1).
   - **Operator (or admin), no `write_context`** — commits directly to the authoritative branch as a recovery escape hatch. The commit carries a `Workflow-Bypass: true` trailer and the response includes `write_mode: bypass` plus `workflow_bypass: true`. The bypass exists for bootstrap/recovery when the lifecycle flow itself is unavailable; it is not a routine operator path.
 - Existing Runs are unaffected by subsequent workflow edits — they stay pinned to the workflow commit SHA captured at `run.start` (per [ADR-001](/architecture/adr/ADR-001-workflow-definition-storage-and-execution-recording.md)).
 
@@ -141,7 +149,7 @@ Workflow Execution Operations control Run execution and task governance decision
 
 | Operation | Effect | When to Use |
 |-----------|--------|-------------|
-| `step.submit` | Submits a step result, may produce a Git commit | When an actor completes assigned work |
+| `step.submit` | Submits a step result, may produce a Git commit; records the run-branch head it completed at (merge binding) | When an actor completes assigned work |
 | `step.assign` | Assigns an actor to a step | When overriding automatic actor selection |
 
 **Task governance:**
@@ -156,8 +164,9 @@ Workflow Execution Operations control Run execution and task governance decision
 
 **Domain rules:**
 - `run.start` fails if an active Run already exists for the task, or if no active workflow matches the task's `(type, work_type)` pair
-- `run.start_planning` resolves to workflows with `mode: creation` and accepts artifact type, initial content, and optional parent path — the target artifact does not need to exist on the authoritative branch
+- `run.start_planning` resolves to workflows with `mode: creation` and accepts artifact type, initial content, and optional parent path — the target artifact does not need to exist on the authoritative branch. A task path under `workflows/` (any spelling) is refused with `400` (`use_operation: workflow.create`): only the workflow-lifecycle starters create a Run on a workflow definition path
 - `step.submit` validates the outcome against the workflow definition and checks actor assignment
+- `step.submit` may carry `expected_head_sha`, the run-branch head the submitter worked on (INIT-023 TASK-005). It is refused with `409` (`run_branch_moved`) unless the run branch is still at that commit, and with `400` when it is not a full lowercase hex commit id or the step cannot carry one (no run branch, a divergence-branch step, an internal step). With merge binding on (always in `spine serve`), every main-path completion binds the head the server resolved, and a `review` or `convergence` step's outcome that leads to the merge is refused with `409` (`run_branch_moved_since_gate`) when the branch moved since the previous step bound it. Commits that reach the run branch *during* a review therefore cannot be approved in the same review: the reviewer sends the work back (a rework outcome) so it is validated again. In `spine serve` such a commit can only be an operator's push, a push started before the review that lands during it, or an API write (`/artifacts/add`, `write_context`) authorized during the step before the review that lands after that step's submit (the gateway reads the run once, before the write) — API writes are refused during a `review` step for every role (INIT-023 TASK-014, §3.1) and pushes for non-operators (TASK-016) — so a reviewer's fix-up goes through a rework round. A commit that lands after a producer's submit but before a later producer step completes (an `automated` validate or summarize re-binds to the head it completes at unless its submitter sends `expected_head_sha`) is bound by that step and merged; see KNOWN-LIMITATIONS "Governed Merge Binding" 2. The governed merge merges the bound commit, never the branch tip
 - Task governance operations (`accept`, `reject`, `cancel`, `abandon`, `supersede`) are Git writes — they produce durable commits that change the task artifact's front matter
 - `task.reject` requires a rationale; the `acceptance` field must be one of `rejected_with_followup` or `rejected_closed` (per [Task Lifecycle](/governance/task-lifecycle.md))
 
@@ -288,7 +297,7 @@ Workspace-scoped operations for the multi-repository model defined by [ADR-013](
 }
 ```
 
-**Redaction:** any embedded user:password component in `clone_url` is stripped from responses. SCP-like syntax (`git@host:path`) is left intact — the `git` user there is the SSH login, not a credential. `credentials_ref` is a pointer into the secrets backend (ADR-010/011), not the secret material itself, and is surfaced as-is so operators can manage it.
+**Redaction:** credentials embedded in `clone_url` are stripped from responses: all userinfo of an `https` URL (a bare token in the username position, `https://<token>@host/...`, is a credential too; INIT-023 TASK-015), and the `user:password` component of any other URL. An SSH login without a password (`ssh://git@host/...`, `git+ssh://git@host/...`) and SCP-like syntax (`git@host:path`) are left intact — the `git` user there is the SSH login, not a credential. The stored value is unchanged. `credentials_ref` is a pointer into the secrets backend (ADR-010/011), not the secret material itself, and is surfaced as-is so operators can manage it.
 
 **Wiring note:** the API surface, validation, redaction, and orchestration are in place. A `serve` configuration without a `RepositoryManager` returns `503 service_unavailable: repository manager not configured` for every endpoint above. Production wiring requires a Git-backed `CatalogStore` that commits `/.spine/repositories.yaml` on the primary repo — that piece is intentionally deferred so the volatile `InMemoryCatalogStore` cannot ship as a default and silently drop registrations on restart.
 

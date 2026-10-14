@@ -11,6 +11,7 @@ import (
 
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/git/refname"
+	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/worktreefs"
@@ -43,14 +44,53 @@ type ReadResult struct {
 // commit to the authoritative branch; when a WriteContext with a branch is
 // attached to the operation context, writes are scoped to that branch via a
 // git worktree (ADR-008 — workflow edits through the lifecycle workflow).
+//
+// Branch protection (ADR-009 §3, INIT-023 TASK-014, audit F7). With a policy
+// installed (WithPolicy), every write is checked before any worktree or file
+// is touched: a non-bypass write is evaluated as an OpDirectWrite on its real
+// target branch — the WriteContext branch, or the authoritative branch
+// (WithDefaultRef, default "main") — so the bootstrap `main: no-direct-write`
+// rule now applies to workflow files too; an ADR-008 bypass write
+// (WithBypass) requires an operator-or-above domain.Actor in the context and
+// skips rule evaluation on the authoritative branch, because the bypass IS
+// the sanctioned, trailer-audited operator direct commit.
+//
+// The zero value (no policy) is the pre-TASK-014 behaviour, byte for byte:
+// no rule is evaluated and no role is checked, bypass or not. Unlike
+// artifact.Service, a nil policy is NOT fail-closed: embedders (SMP) build
+// this service with no policy and write only through actor-less bypass
+// contexts, and every one of those writes would otherwise be refused.
+// Standalone `spine serve` gets protection by wiring the policy, not by
+// changing the zero value. An embedder that installs a policy must bind a
+// domain.Actor of role >= operator into every bypass write context.
 type Service struct {
-	git  git.GitClient
-	repo string
+	git        git.GitClient
+	repo       string
+	policy     branchprotect.Policy // nil = no evaluation, no bypass role check (pre-TASK-014)
+	defaultRef string               // branch reported to the policy when no WriteContext branch is set
 }
 
-// NewService constructs a workflow Service.
+// NewService constructs a workflow Service with no branch-protection policy
+// (see Service) and "main" as the authoritative branch reported to a policy
+// installed later.
 func NewService(gitClient git.GitClient, repoPath string) *Service {
-	return &Service{git: gitClient, repo: repoPath}
+	return &Service{git: gitClient, repo: repoPath, defaultRef: "main"}
+}
+
+// WithPolicy installs the ADR-009 branch-protection guard on the write path
+// (INIT-023 TASK-014). Passing nil restores the no-policy behaviour (see
+// Service): no rule evaluation and no role check on bypass writes.
+func (s *Service) WithPolicy(p branchprotect.Policy) {
+	s.policy = p
+}
+
+// WithDefaultRef sets the authoritative branch reported to the policy when a
+// write carries no WriteContext branch (default "main"). An empty ref is
+// ignored.
+func (s *Service) WithDefaultRef(ref string) {
+	if ref != "" {
+		s.defaultRef = ref
+	}
 }
 
 // enterBranch prepares an isolated working directory when a WriteContext
@@ -119,10 +159,10 @@ type wfWriteOp struct {
 }
 
 func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWriteOp) (*WriteResult, error) {
-	if err := validateID(id); err != nil {
+	if err := ValidateID(id); err != nil {
 		return nil, err
 	}
-	path := filePath(id)
+	path := FilePath(id)
 
 	// ProjectionDefinition, not bare Parse: a body the projection would
 	// refuse (strict-parse failure, or a definition whose stored JSON
@@ -148,6 +188,13 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 	rel, err := worktreefs.Clean(path)
 	if err != nil {
 		return nil, worktreeError(ctx, path, "validate path", err)
+	}
+
+	// Branch protection runs before enterBranch, the same placement as
+	// artifact.Service: a refused write never creates a worktree or
+	// touches a file (INIT-023 TASK-014 I3).
+	if err := s.checkBranchProtection(ctx, op.operation); err != nil {
+		return nil, err
 	}
 
 	scope, err := s.enterBranch(ctx)
@@ -257,19 +304,28 @@ func claimUntracked(ctx context.Context, repoDir, rel string) func() bool {
 // Read returns the executable workflow definition at the given ref. Empty ref
 // means HEAD on the authoritative branch.
 func (s *Service) Read(ctx context.Context, id, ref string) (*ReadResult, error) {
-	if err := validateID(id); err != nil {
+	if err := ValidateID(id); err != nil {
 		return nil, err
 	}
 	if ref == "" {
 		ref = "HEAD"
 	}
 
-	path := filePath(id)
+	path := FilePath(id)
 	content, err := s.git.ReadFile(ctx, ref, path)
 	if err != nil {
 		if gitErr, ok := err.(*git.GitError); ok && gitErr.Kind == git.ErrKindNotFound {
 			return nil, domain.NewError(domain.ErrNotFound,
 				fmt.Sprintf("workflow not found: %s at ref %s", path, ref))
+		}
+		// A blob over the git client's read limit (INIT-023 TASK-003) is
+		// 413, like an oversized worktree read (TASK-004).
+		if errors.Is(err, git.ErrBlobTooLarge) {
+			// The cause's own text names the limit that refused it: the
+			// per-blob read limit, or git's allocation limit for a file
+			// stored as a delta on a large base.
+			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
+				fmt.Sprintf("workflow %s at ref %s is refused by the read limits: %v", path, ref, err), err)
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
@@ -305,6 +361,11 @@ func (s *Service) List(ctx context.Context, opts ListOptions) ([]*domain.Workflo
 		if !strings.HasSuffix(f, ".yaml") && !strings.HasSuffix(f, ".yml") {
 			continue
 		}
+		// A path the projection refuses (INIT-023 TASK-003) stays out of
+		// the listing, as it was while git C-quoted it.
+		if domain.UnsafeRepositoryPath(f) {
+			continue
+		}
 		content, err := s.git.ReadFile(ctx, "HEAD", f)
 		if err != nil {
 			continue
@@ -334,7 +395,7 @@ func (s *Service) List(ctx context.Context, opts ListOptions) ([]*domain.Workflo
 // would not project faithfully reports RuleID "projection_round_trip"
 // (INIT-023 TASK-011 §7).
 func (s *Service) ValidateBody(ctx context.Context, id, body string) domain.ValidationResult {
-	path := filePath(id)
+	path := FilePath(id)
 	wf, _, err := ProjectionDefinition(path, []byte(body))
 	if err != nil {
 		ruleID := "parse"
@@ -392,7 +453,11 @@ func worktreeError(ctx context.Context, path, action string, err error) error {
 		fmt.Sprintf("%s %s failed", action, path), err)
 }
 
-func validateID(id string) error {
+// ValidateID reports whether id is a valid workflow id: ErrInvalidParams
+// unless it matches idPattern. The id becomes a repository path component
+// (FilePath), so traversal and shell-unsafe characters are refused here.
+// Planning-run starters call it before any branch or run record exists.
+func ValidateID(id string) error {
 	if !idPattern.MatchString(id) {
 		return domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("invalid workflow id %q (must match %s)", id, idPattern.String()))
@@ -400,7 +465,11 @@ func validateID(id string) error {
 	return nil
 }
 
-func filePath(id string) string {
+// FilePath is the repo-relative path of workflow id's definition:
+// workflows/<id>.yaml. It is also the TaskPath of the workflow-lifecycle
+// planning run that governs that definition (ADR-008). Callers validate id
+// first (ValidateID).
+func FilePath(id string) string {
 	return WorkflowsDir + "/" + id + ".yaml"
 }
 

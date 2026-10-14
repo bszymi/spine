@@ -3,11 +3,11 @@ package engine
 import (
 	"context"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -139,12 +139,19 @@ type ArtifactWriter interface {
 	Create(ctx context.Context, path, content string) (*artifact.WriteResult, error)
 }
 
-// WorkflowWriter creates workflow definitions on branches during workflow
-// planning runs (ADR-008). The shape mirrors ArtifactWriter but targets YAML
-// workflow files — which are routed through the separate workflow.Service
-// (ADR-007) — rather than Markdown artifacts.
+// WorkflowWriter creates and updates workflow definitions on branches during
+// workflow planning runs (ADR-008). The shape mirrors ArtifactWriter but
+// targets YAML workflow files — which are routed through the separate
+// workflow.Service (ADR-007) — rather than Markdown artifacts.
+// *workflow.Service implements it.
+//
+// Update was added by INIT-023 TASK-014 for update-capable lifecycle runs
+// (StartWorkflowUpdatePlanningRun). Its only implementer in Spine is
+// *workflow.Service; SMP neither implements this interface nor calls
+// WithWorkflowWriter.
 type WorkflowWriter interface {
 	Create(ctx context.Context, id, body string) (*workflow.WriteResult, error)
+	Update(ctx context.Context, id, body string) (*workflow.WriteResult, error)
 }
 
 // CollisionHandler detects and resolves artifact ID collisions during merge.
@@ -172,4 +179,58 @@ type GitOperator interface {
 	DeleteRemoteBranch(ctx context.Context, remote, branch string) error
 	ReadFile(ctx context.Context, ref, path string) ([]byte, error)
 	WriteAndStageFile(ctx context.Context, path, content string) error
+}
+
+// CommitBinder is the optional capability SHA-bound governed merges need
+// (INIT-023 TASK-005; audit F2 merge half, P3-37). It is not part of
+// GitOperator, so embedders whose operator lacks it keep compiling and
+// keep today's behaviour; EnableMergeBinding type-asserts it on the
+// GitOperator (and, for code repositories, on each per-repository
+// client) and refuses to turn binding on without it.
+//
+// Every object id is a full lowercase hex id (40 or 64 digits). The
+// shared conformance suite in core/engine/enginetest pins the contract
+// for any implementation (*git.CLIClient passes it).
+type CommitBinder interface {
+	// ResolveBranchHead returns the full object id that refs/heads/<branch>
+	// points at in the repository merges read from (origin, for
+	// remote-backed operators). It never applies DWIM: a refs/tags/<branch>
+	// or any other shadow must not answer for the branch, and a missing
+	// branch is an error.
+	ResolveBranchHead(ctx context.Context, branch string) (string, error)
+	// VerifyCommit returns nil only for a full lowercase hex object id that
+	// names a commit object available to MergeBound and CommitFilesOnto.
+	VerifyCommit(ctx context.Context, sha string) error
+	// IsAncestor reports whether ancestor is reachable from descendant (a
+	// commit is its own ancestor). A missing object is an error.
+	IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error)
+	// CommitParents returns the full ids of a commit's parents, in order.
+	CommitParents(ctx context.Context, sha string) ([]string, error)
+	// CommitFilesOnto creates a commit whose only parent is base and whose
+	// tree is base's tree with files replaced. It moves no ref and touches
+	// neither HEAD, the index nor a working tree, and it is deterministic:
+	// the same base, files and options always give the same commit.
+	CommitFilesOnto(ctx context.Context, base string, files map[string]string, opts git.CommitOpts) (git.CommitResult, error)
+	// MergeBound merges exactly opts.SourceSHA (required) into opts.Target
+	// and reports MergeResult.BaseSHA, the target tip the merge was
+	// computed on. A replay of a landed merge is "already up to date"
+	// (SHA == BaseSHA).
+	MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error)
+	// PushCommit sets <remote> refs/heads/<branch> to exactly sha with a
+	// non-forced push of the object (not of a local ref): the remote
+	// accepts it only as a fast-forward or when it already holds sha.
+	PushCommit(ctx context.Context, remote, branch, sha string) error
+	// ResetBranch takes back a merge the engine refused after MergeBound
+	// moved the local target: it moves the local refs/heads/<branch> to
+	// `to` only if it is still at expected (compare-and-swap), and a
+	// working tree that has the branch checked out ends up clean at to's
+	// tree; a branch that is not at expected is left alone and reported as
+	// an error. It never touches a remote. A remote-backed implementation
+	// whose local branch only caches the remote may instead drop the
+	// local branch under the same check, so the next MergeBound re-creates
+	// it from the remote (which never received the refused merge). Either
+	// way the working tree is left clean (nothing of the refused merge
+	// staged or checked out), and the next MergeBound on branch must not
+	// compute on expected. The conformance suite accepts both forms.
+	ResetBranch(ctx context.Context, branch, to, expected string) error
 }

@@ -370,7 +370,50 @@ Merges into the authoritative branch are governed operations and must only occur
 - Workflow execution for the Run has reached a terminal or accepted outcome
 - All required validation steps have passed
 - No policy violations are present
- - All required Spine validations and tests have passed within the workflow execution
+- All required Spine validations and tests have passed within the workflow execution
+
+**What is merged — the bound commit (INIT-023 TASK-005).** With merge binding on
+(`Orchestrator.EnableMergeBinding`; always on in `spine serve`, opt-in for embedders), the content
+that reaches the authoritative branch is the commit the run's steps validated and reviewed, not
+whatever the run branch points at when the merge runs:
+
+- *Capture.* Every main-path step completion records the run-branch head the engine resolved at
+  that moment, in reserved `runs.commit_meta` keys (`spine.bound_sha`, `spine.bound_by`; code
+  repositories `spine.repo.<id>.bound_sha`). A submitter may also assert the head it worked on
+  (`expected_head_sha` on `step.submit`); a mismatch is `409 run_branch_moved`. Workflow outcomes
+  cannot set `spine.*` keys: they are stripped before storage.
+- *Moved-head policy.* A gate step (`type: review` or `convergence`) whose outcome leads to the
+  merge compares the current head with the previous binding. If the branch moved, the approval is
+  refused with `409 run_branch_moved_since_gate` (policy `reject`, the default): the commits after
+  the binding were not validated, so only a rework outcome may follow. Policy `rebind` accepts the
+  current head instead. The check compares the head *at submit* with the previous binding; what a
+  reviewer actually read is pinned only by the reviewer's `expected_head_sha`. Without it, a branch
+  moved while the reviewer read the diff and moved back to the bound commit before the submit is
+  not detected (KNOWN-LIMITATIONS "Governed Merge Binding").
+- *The committing window.* From the approving completion onwards the binding is frozen: only the
+  engine moves it again (a convergence that ran from the bound head, a recovery ledger commit).
+  Every merge attempt — the immediate one, the publish handler, every scheduler retry, every
+  partially-merged resume — merges exactly the bound commit. A run with no binding the run itself
+  recorded (for example one in flight when binding was enabled) fails closed with a `precondition`
+  merge failure.
+- *Status cascade.* The commit-status rewrite is applied *at* the bound commit, as a plumbing commit
+  whose only parent is the bound commit (deterministic, so a retry recomputes the same object); it
+  never checks out or commits on the run branch, and reaches the authoritative branch only through
+  the merge. It rewrites the run's task and the artifacts the bound commit added since its
+  merge-base with the authoritative branch. A retry after the merge landed takes the merge-base
+  from just before the run's earlier merge, and a merge counts as the run's only when its second
+  parent is exactly the cascade commit the run builds against it — another run's merge of the same
+  commit never widens the cascade.
+- *Structural check and push.* Before anything is pushed, the merge result must be built from
+  exactly the target's previous tip and the bound (or cascade) commit — a merge commit with those
+  two parents, a fast-forward, or "already up to date"; a status-cascade or recovery-ledger commit
+  must be a child of exactly the bound commit. A refused merge is taken back off the local target
+  (compare-and-swap) before anything else can build on it, so neither the next governed merge nor
+  an in-place write publishes it. A merge refused only because the target moved during it (its
+  first parent a newer write, its second the merged commit) is taken back to that write and
+  retried, not failed. The push publishes exactly the verified commit, without force, so
+  the remote accepts only a fast-forward. Commits on the run branch after the binding are left out;
+  the branch is then kept for inspection and a warning names the bound and tip commits.
 
 Spine uses **fast-forward merges** when possible to preserve linear history.
 
@@ -481,6 +524,8 @@ The Artifact Service discovers artifacts by scanning the repository tree:
 - The `type` field in front matter determines the artifact type
 - Files in `/workflows/` matching `*.yaml` are workflow definitions
 - Files without recognized front matter are ignored
+- Discovery reads at most the git client's per-blob limit for one file (default 4 MiB, the same value as the worktree read limit; INIT-023 TASK-003). A larger file is never read: it is recorded as refused (`oversized`) and not projected. A file whose path is not valid UTF-8 or holds a control character, U+2028/U+2029 or a bidi control is recorded as refused (`unsafe_path`) without being read; a row an earlier projection made at such a valid-UTF-8 path (under `core.quotePath=false`) is removed with its file, and a workflow row is quarantined or removed (`projection_workflow_rejected`, check `unsafe_path`). Each refusal is a Warn log line, a `spine_projection_files_skipped_total` increment and a `projection_file_skipped` event ([Event Schemas](/architecture/event-schemas.md) §4.15); none is a sync error. An oversized workflow file is a `read_bounds` rejection (§4.14); an oversized branch-protection config is a sync error with the rules unchanged.
+- Read commands are bounded on both sides: Spine's buffer (the per-blob limit for a file, 16 MiB of output for any other read command) and git's own heap — each single allocation (`GIT_ALLOC_LIMIT`, 4 x the per-blob limit) and git's delta-base cache (pinned to the per-blob limit), which leaves about three times the alloc limit per concurrent read, not one. A listing or diff over the output limit fails the sync rather than being truncated (`KNOWN-LIMITATIONS.md`, "Git read bounds").
 
 ### 8.2 Change Discovery
 
@@ -491,6 +536,8 @@ When processing a new commit (incremental sync):
 3. For changed artifacts, update the projection
 4. For deleted files, remove the projection
 5. For new files, create the projection
+
+Paths are read NUL-delimited (`git diff --name-status -z`, `git ls-tree -z`), so a path holding non-ASCII characters — which `artifact.Slugify` produces from a non-English title — is discovered under its raw name (before INIT-023 TASK-003 git C-quoted it and discovery dropped it silently). The refusals of §8.1 apply to changed files too, and a modified artifact that becomes oversized has its projection removed.
 
 ### 8.3 Discovery During Workflow Execution
 

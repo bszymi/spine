@@ -5,7 +5,7 @@ title: "Projection sync integrity: close the workflow parser differential, stop 
 status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-10-14
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-003-secrets-delivery-and-projection/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -331,6 +331,12 @@ func ProjectionDefinition(path string, content []byte) (*domain.WorkflowDefiniti
 // byte cap, and JSON has no aliases.
 func VerifyProjectionDefinition(def []byte) error
 ```
+
+*(Corrected by the codex 6.1 catch-up, 2026-10-14. In step 2, "decoded into `any`" by
+`json.Unmarshal` turns every number into a float64. An integer above 2^53, which
+`ProjectionDefinition` stores exactly, then made a valid stored row fail verification. Step 2 now
+decodes with `UseNumber`: an integer that fits an int64 stays exact, and any other number reads as
+before. The sweep's `sameRow` (§6) compares definitions the same way. See "Codex 6.1 catch-up".)*
 
 Verified with overlay probes on 2026-10-06:
 
@@ -764,7 +770,8 @@ func (s *Service) reconcileActiveWorkflows(ctx context.Context, head string) err
    - **Present at `head`:** build `head`'s row with `buildWorkflowRow`.
      - **Accepted:** if `sameRow(cand, r)` holds, the row is **untouched** (no re-stamp).
        `sameRow` compares ID, Name, Version and Status, plus `AppliesTo` and `Definition` as
-       decoded JSON (`any` plus `DeepEqual`). JSONB normalises key order and spacing. If it does
+       decoded JSON (`any` plus `DeepEqual`; integers kept exact since the codex 6.1 catch-up).
+       JSONB normalises key order and spacing. If it does
        not hold, upsert `cand`; the row was stale.
      - **Rejected:** if `VerifyProjectionDefinition(r.Definition) == nil`, keep the row untouched
        and report `kept`. Otherwise delete it and report `removed`. A row smuggled before the
@@ -824,7 +831,9 @@ Non-Active rows are not swept. They are not bindable, and a `FullRebuild` re-der
 >      that deleted or rewrote a row from a stale head also wrote `sync_state`, so a cross-instance
 >      race healed on the next tick; the sweep followed by the up-to-date early return did not, and
 >      could lose a row another instance projected at a newer head for good. A sweep that writes
->      now re-records `sync_state` on that path — see "Cross-task review (wave 2)".)*
+>      now re-records `sync_state` on that path — see "Cross-task review (wave 2)". Since the
+>      codex 6.1 catch-up it moves only `last_synced_commit` and keeps the status another
+>      instance wrote — see "Codex 6.1 catch-up".)*
 
 ### 7. Write-path parity
 
@@ -2128,3 +2137,51 @@ is invisible, and no shipped Spine or SMP workflow has a `convergence` or untype
 | SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 67 packages (dependents of a changed Spine package plus `./internal/customer/...`): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2f_smp_spine_runtime` and `s2f_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope) |
 
 All `s2f_*` databases were dropped afterwards, and no container was started.
+
+### Codex 6.1 catch-up (2026-10-14)
+
+A catch-up review of the merged waves 1 and 2 ran on Codex `gpt-6.1-sol`; the earlier reviews ran
+on an older model. Each P1/P2 survived two skeptics, both of whom checked it against Spine local
+`main` `d23b897`. Fixes are on `init/INIT-023-codex61-catchup` (worktree `i23/s-cx/spine`, cut
+from `d23b897`). Nothing was pushed, and `main` and the other branches are unchanged. The third
+finding (range `sp-w2int`) is on the wave 2 cross-task review's `0fe5011`, which amended this
+task's §6 sweep, so it is recorded here.
+
+**This task.** Two findings, plus one sibling found while verifying them. TASK-004's finding (a
+leaf swapped for a FIFO) is recorded in that task.
+
+| # | Finding | Severity | Disposition | Commit | Regression test |
+|---|---|---|---|---|---|
+| 1 | `VerifyProjectionDefinition` (`projection_definition.go:140-141`) built its strict reading by running `json.Unmarshal` into `any`, which rounds an integer above 2^53 through float64. `ProjectionDefinition` stores such an integer exactly (`retry.limit`, `min_branches`, `max_branches`, for example `9007199254740993`), and the folding reader decodes it exactly, so a definition it had accepted failed verification. On a later rejected edit of the file, all three rejection paths (`applyRejection`, the sweep, `planWorkflowRows`) deleted the row instead of keeping it quarantined for the runs pinned to it | Codex P2. Skeptics: P3, P3 (an absurd value, and it fails closed) | **FIXED.** `decodeStoredJSON` decodes with `UseNumber`. An integer literal that fits an int64 becomes an int64, which `yaml.Marshal` writes digit for digit, and every other number becomes the float64 it was. Trailing data and out-of-range numbers are still refused | `334ee23` | `TestVerifyProjectionDefinition_AcceptsEveryStoredInteger` covers every int field (`retry.limit`, both `min_branches`, `max_branches`) at 2^53+1, 2^62+1 and -(2^53+1). Max int64 passed on `main` only because arm64 saturates a float-to-int conversion. `TestIncrementalSync_RejectedEditKeepsARowWithALargeInteger`. On real PostgreSQL, `TestIntegration_LargeIntegerRowSurvivesSweepAndRejection` (`0811ff3`) shows jsonb returns the exact digits; neither skeptic could check that live. All fail on `main`. Guards: `TestVerifyProjectionDefinition_RefusesAnIntegerNoFieldHolds`; `trailing_value` and `trailing_garbage` in `RejectsStoredOddities`, which also pass on `main` |
+| 1a | *Sibling, not reported:* the sweep's `sameJSON` (`sweep.go`) has the same root cause. Two definitions that differ only in such an integer compared equal, so a drifted row was counted unchanged and never repaired | P3 | **FIXED** with the same exact decode (`decodeExactJSON`). Integers in accepted definitions are always int64 digit strings (Go's `json.Marshal` writes them so, and jsonb returns them unchanged), so no row that compared equal before is re-stamped unless its content really differs | `334ee23` | `TestSweep_ReplacesARowThatDiffersOnlyInALargeInteger` fails on `main`. `TestSweep_KeepsAnUnchangedRowWithALargeInteger` (no re-stamp), and the real-PostgreSQL test above checks the same on jsonb |
+| 2 | The swept early return (`service.go:439-442`, added by `0fe5011`) wrote an unconditional `UpdateSyncState{head, idle}`. Another instance can write `sync_state` after this sync read `idle@head`, and the write then replaced: `rebuilding` (a reader saw `idle` over a half-written projection); `error` (a same-head rebuild failure was erased, so the next tick took the up-to-date return and skipped the forced branch-protection retry); and the no-baseline `error@""` a partial wipe records (the next sync diffed instead of rebuilding, so the wiped rows stayed missing; this case was not in the finding) | Codex P2. Skeptics: P3, P3 (the newest copy of the protocol's existing last-writer-wins race) | **FIXED.** The write needs only the baseline, so the next tick re-diffs from the head the sweep judged by. `resetSyncBaseline` asserts a new optional store capability, `SetSyncBaseline(ctx, commit)`. On `*store.PostgresStore` it is one `UPDATE` of `last_synced_commit`, applied only when the stored commit is not empty, and it leaves status and `error_detail` alone. As with `ListWorkflowProjections` (design-check note to §6), it is asserted rather than added to `store.Store`, so no stub or embedder store breaks. A store without it keeps the plain `idle@head` write. Compile-time assertions pin both capabilities on `PostgresStore`. No schema change. The wider residual (every `sync_state` write is last-writer-wins, including the existing "a sync spanning the sweep") is now a KNOWN-LIMITATIONS entry, with compare-and-set or a lock as the follow-up | `26111a9` | `TestSweep_BaselineResetKeepsAConcurrentStatus` (`rebuilding`, `error`, `no_baseline`): a stale-head instance sweeps while another instance projects c2 and records that status. Every sub-test fails on `main`. The `error` case then checks that the next tick restores the row and re-projects branch protection. `TestSweep_StaleHeadInstanceDoesNotLoseANewerRow` now runs both through the capability and through the plain-store fallback. Integration: `TestSetSyncBaseline_MovesOnlyTheBaseline` |
+
+**SMP impact.** SMP's projection writer and provisioning build `projectionsvc.New(repoPath,
+spinestore.NewPostgresStoreWithQuerier(pool), ...)`, so they get `SetSyncBaseline` with no SMP
+change. The only behaviour that differs is when another instance writes `sync_state` inside the
+sweep's window; any sync without such a concurrent write ends `idle@head` as before. Finding 1
+changes the outcome only for a definition holding an integer above 2^53, which no Spine or SMP
+workflow has. SMP's test store `bpStore` embeds `store.Store`, so it does not have the capability
+and keeps the old write.
+
+**Gates** (code at `2aa99d6`; these notes were committed afterwards). Run from the Spine worktree
+unless noted.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go test -p 4 -count=1 ./...` | exit 0, 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the four touched packages (`core/worktreefs`, `core/workflow`, `adapters/projection`, `adapters/store`) | 4 ok |
+| Linux: `golang:1.26-bookworm` (already present; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), `go test -race ./core/worktreefs/ ./core/workflow/` | ok. The FIFO tests fail there on `main` too. Windows: `GOOS=windows go build` and `go vet ./core/worktreefs` OK |
+| `-tags integration`, one fresh `cxp_*` database per package | store: 171 PASS (counting subtests) plus the pre-existing `TestRunModeDatabaseDefault` failure; projection: 171 PASS, 0 FAIL, 0 SKIP, plus the new real-PostgreSQL test. None of the touched packages has any other integration suite |
+| CI `scenario-git-http` job | `TestGitHTTP_*`: 20 PASS, 0 SKIP. `TestBootstrapInternalAdmin_*`: 2 PASS (`IdempotencyAndRotation`, `PooledBuilderIdempotencyAndRotation`) |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` | 30 top-level FAIL, the **same set at every level** as a `git archive d23b897` export run on its own database. 1479 PASS and 6 SKIP in both |
+| `golangci-lint run --new-from-rev d23b897` on the touched packages, with default, `integration` and `scenario` tags | 0 issues (after `2aa99d6`, which fixed one G115 and one stringXbytes from `de9c013`) |
+| `--enable-only=gosec` | 0 issues. With `integration`: one G602 at `adapters/store/postgres_integration_test.go:1563`, a file this branch does not touch; the same issue is on `main` |
+| `gofmt -l` on every `.go` file changed since `d23b897` | empty |
+| `codex review --base main` (CLI 0.162.1, no model override) | round 1: "No actionable regressions were found in the changes." Model confirmed: the newest session with `source: {"subagent": "review"}` (`rollout-2026-10-14T12-56-38-01a13a45-8a5b-…`, cwd = this worktree) shows `"model":"gpt-6.1-sol"` |
+| SMP compat (`i23/s-cx/smp` = SMP `f5c6fd6d` detached, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `dev/lint-spine-internals.sh`: OK. `go test -p 4` on the 43 SMP packages depending on a changed Spine package (`go list -test -deps`): 39 ok, 2 without tests, 2 FAIL. The failures are `gitread` `TestBounded_ErrorContractEqualsCLIClient` and `projectionwriter` `TestBoundedProjection_IncrementalAddAndModifyOversized` / `…OversizedWorkflowStalls`, the last a nil-pointer panic in `bpStore.GetWorkflowProjection` reached through `getWorkflowRow`. A `git archive f5c6fd6d` copy run against a Spine `d23b897` export gives the identical failure set and panic frame. They are pre-existing: SMP `main` pins `.spine-revision` `61994fe`, and its INIT-027 TASK-004 tests assert that revision's behaviour. With `-race` on the same 43 packages: the same result (39 ok, 2 without tests, the same 2 packages and failure set) and no data race reported |
+
+All `cxp_*` databases were dropped afterwards. The only containers started were the `--rm` test
+runs above.

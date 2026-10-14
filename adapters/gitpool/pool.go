@@ -33,9 +33,9 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // Resolver is the subset of repository.Registry the pool depends on.
@@ -52,12 +52,15 @@ type Resolver interface {
 // without touching the filesystem.
 //
 // cred is the resolved credential for the binding — empty (zero
-// Credential) for the primary repo, public code repos, and any
-// pool built without a CredentialResolver. Implementations that
-// honour cred must inject it via in-memory mechanisms only (e.g.
+// Credential) for public code repos and any pool built without a
+// CredentialResolver (the primary repository never goes through the
+// factory: Client returns the pool's primary client). Implementations
+// that honour cred must inject it via in-memory mechanisms only (e.g.
 // GIT_ASKPASS env at command time); writing the token into argv
 // or .git/config is forbidden by the credential-redaction
-// requirement (TASK-006 ACs).
+// requirement (TASK-006 ACs). An empty cred means no auth: an
+// implementation must not fall back to process-wide credentials
+// (INIT-023 TASK-015; see Credential).
 type ClientFactory func(localPath string, cred Credential) git.GitClient
 
 // Cloner performs a Git clone from a remote URL to a local path with
@@ -67,7 +70,8 @@ type ClientFactory func(localPath string, cred Credential) git.GitClient
 // client; tests inject a fake that materialises a directory without
 // shelling out.
 //
-// An empty Credential means "no auth" — clone the URL as-is.
+// An empty Credential means "no auth" — clone the URL as-is, with no
+// process-wide token or credential helper (INIT-023 TASK-015).
 type Cloner interface {
 	Clone(ctx context.Context, url, localPath string, cred Credential) error
 }
@@ -102,9 +106,11 @@ func WithRepoBase(base string) Option {
 // gitpool.ErrCredentialsUnavailable wrapped in domain.ErrPrecondition.
 //
 // Without this option, code repos resolve through the plain factory
-// path with the zero Credential — appropriate for public mirrors,
-// single-tenant deployments using the legacy SPINE_GIT_PUSH_TOKEN env,
-// and unit tests that don't exercise credential paths.
+// path with the zero Credential — appropriate for public mirrors and
+// unit tests that don't exercise credential paths. The zero Credential
+// never inherits the process-wide SPINE_GIT_PUSH_TOKEN or credential
+// helper (INIT-023 TASK-015), so a private code repo needs a
+// credentials_ref and this resolver.
 func WithCredentialResolver(r CredentialResolver) Option {
 	return func(p *Pool) {
 		if r != nil {
@@ -551,11 +557,9 @@ func (p *Pool) ListActive(ctx context.Context) ([]repository.Repository, error) 
 }
 
 // NewCLIClientFactory returns a production ClientFactory that builds
-// a *git.CLIClient rooted at the given local path. The returned
-// factory threads baseOpts (process-wide push token, credential
-// helper, etc.) through to every code-repo client so bindings without
-// a per-repo credential reference still inherit the workspace's
-// default auth profile.
+// a *git.CLIClient rooted at the given local path from baseOpts (the
+// process git options: push env such as SMP_WORKSPACE_ID, and the
+// process-wide push token or credential helper).
 //
 // When the binding has a non-empty Credential — resolved via
 // gitpool.SecretCredentialResolver from binding.CredentialsRef — the
@@ -563,10 +567,20 @@ func (p *Pool) ListActive(ctx context.Context) ([]repository.Repository, error) 
 // token wins for fetch and push. The resolved bytes are revealed only
 // here, at the boundary with the git CLI; SecretValue's redacting
 // String/MarshalJSON/LogValue keep them out of every other output.
+//
+// When the Credential is empty, the factory strips the process-wide
+// push token and credential helper from baseOpts and switches off the
+// host's ambient credential sources (withoutProcessAuth). The client
+// pushes to whatever its clone's origin names, which a binding's
+// clone_url — or a reused clone's origin, or another binding's
+// local_path — controls, so inheriting any deployment or host
+// credential there would hand it to that host (INIT-023 TASK-015).
 func NewCLIClientFactory(baseOpts ...git.CLIOption) ClientFactory {
 	return func(localPath string, cred Credential) git.GitClient {
 		opts := append([]git.CLIOption{}, baseOpts...)
-		if !cred.IsEmpty() {
+		if cred.IsEmpty() {
+			opts = append(opts, withoutProcessAuth()...)
+		} else {
 			// WithoutCredentialHelper before WithPushToken so the
 			// per-binding token wins even when baseOpts carries a
 			// process-level SPINE_GIT_CREDENTIAL_HELPER. Without this
@@ -598,11 +612,28 @@ func NewCLICloner(baseOpts ...git.CLIOption) Cloner {
 
 // cliCloner is the default Cloner: per Clone call it constructs a
 // throwaway *git.CLIClient configured with baseOpts plus (if cred is
-// non-empty) WithPushToken. The throwaway is closed after the clone
+// non-empty) WithPushToken, or, for an empty cred, minus the process
+// token and credential helper. The throwaway is closed after the clone
 // so its temp askpass script is cleaned up; the cached runtime
 // client built by ClientFactory is what survives for fetch/push.
 type cliCloner struct {
 	baseOpts []git.CLIOption
+}
+
+// withoutProcessAuth returns the options for a code-repo client or clone
+// whose binding has no credential of its own (INIT-023 TASK-015): strip
+// the process-wide push token and credential helper from the base
+// options, and keep git from consulting the host's ambient credential
+// sources too (the system and global git config with any
+// credential.helper, http.extraHeader or askpass set there, an inherited
+// GIT_ASKPASS / SSH_ASKPASS, and for SSH remotes the process's ssh-agent
+// and key files) — otherwise a host-keyed helper, a configured header or
+// the platform's SSH key would still answer for whatever host the
+// binding names. An empty Credential means "no auth", as the Cloner
+// contract says; there is no per-binding SSH credential, so an SSH code
+// repo without one is reached anonymously or not at all.
+func withoutProcessAuth() []git.CLIOption {
+	return []git.CLIOption{git.WithoutPushToken(), git.WithoutCredentialHelper(), git.WithoutAmbientCredentials()}
 }
 
 func (c *cliCloner) Clone(ctx context.Context, url, localPath string, cred Credential) error {
@@ -616,7 +647,11 @@ func (c *cliCloner) Clone(ctx context.Context, url, localPath string, cred Crede
 		return fmt.Errorf("clone url: %w", err)
 	}
 	opts := append([]git.CLIOption{}, c.baseOpts...)
-	if !cred.IsEmpty() {
+	if cred.IsEmpty() {
+		// "No auth": never offer the deployment's token or helper to
+		// the host the clone URL names (same rule as the factory).
+		opts = append(opts, withoutProcessAuth()...)
+	} else {
 		// Same per-binding-overrides-helper rule as the factory:
 		// strip any inherited credential helper before layering the
 		// resolved token, so the askpass path actually engages.

@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/gitpool"
 	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // fakeSecretClient is a minimal in-memory secrets.SecretClient for
@@ -826,8 +826,11 @@ func TestPool_ConcurrentMidFlightRotationCoalescesClone(t *testing.T) {
 func TestPool_NoResolverPassesEmptyCredentialThrough(t *testing.T) {
 	// A pool built without WithCredentialResolver is the public-repo
 	// / dev-mode default. The factory and cloner must observe the
-	// zero Credential — it's the explicit "no auth" signal that
-	// keeps the legacy SPINE_GIT_PUSH_TOKEN path working.
+	// zero Credential — the explicit "no auth" signal, for which the
+	// production cloner and factory strip the process-wide
+	// SPINE_GIT_PUSH_TOKEN and credential helper and switch off the
+	// host's ambient credentials (INIT-023 TASK-015; covered by
+	// process_auth_scope_test.go).
 	base := t.TempDir()
 	localPath := filepath.Join(base, "public")
 	cloner := &recordingCloner{inner: &fakeCloner{}}

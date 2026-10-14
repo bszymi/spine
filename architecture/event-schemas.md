@@ -428,6 +428,7 @@ payload:
   errors: <integer>              # Counted sync errors (state stays at from_commit when > 0)
   workflows_rejected: <integer>  # Workflow files refused for their content (never counted in errors)
   read_skipped: <integer>        # Changed artifact files git could not read because the commit's tree holds no file at the path (a gitlink to an object not in the repository, a directory); skipped, logged at Warn
+  refused: <integer>             # Changed files not projected because they are oversized or at an unsafe path (one projection_file_skipped each; never counted in errors)
 ```
 
 ### 4.14 `projection_workflow_rejected`
@@ -440,7 +441,7 @@ Emitted when the projection refuses a workflow file because of its content (INIT
 payload:
   workflow_path: <string>        # Repository-relative workflow path
   commit: <string>               # Commit the file was read at (the sync head)
-  check: <string>                # parse | round_trip | validate | read_bounds | not_a_file | scope | absent_at_head
+  check: <string>                # parse | round_trip | validate | read_bounds | not_a_file | scope | absent_at_head | unsafe_path
   action: <string>               # kept | not_projected | removed
   kept_source_commit: <string>   # source_commit of the kept row ("" unless action is kept)
   quarantined: <boolean>         # true when the kept row's status column is Quarantined
@@ -453,7 +454,33 @@ payload:
 - `not_a_file`: the commit's tree holds no file (blob) at the path — a gitlink or a directory — so there is no content to project. The entry is typed before the file is read, so a gitlink is refused even when the id it records names a blob in the repository (which `git show` would print, though diffs show only a submodule pointer).
 - `validate`: `workflow.Validate` failed and strict projection validation is enabled (off by default).
 - `scope` / `absent_at_head`: the sweep found a stored row outside the workflow definition locations, or whose file no longer exists at head and did not exist at the last synced commit either (a file deleted after the last synced commit is removed like the pending diff would remove it, without a rejection).
+- `unsafe_path`: a stored row at a path INIT-023 TASK-003 refuses to project (a control, bidi or line-separator character in the file name). Such a row can only come from a projection built before TASK-003 by a git configured with `core.quotePath=false`, which listed those names raw. It is reported by the sweep when the file is still at head, and by an incremental sync that adds or modifies the file; the file itself is also reported as `projection_file_skipped` (`unsafe_path`) by the sync. A row whose file is deleted or renamed away is deleted without a rejection, as for any other path (INIT-023 wave 3 integration).
 - `kept`: the previous row verified and is kept for in-flight runs, with its status set to `Quarantined` so no new run binds it. `removed`: the previous row could not be verified and was deleted. `not_projected`: there was no row.
+
+`read_bounds` is where an oversized workflow file lands (INIT-023 TASK-003): a blob over the git client's per-blob read limit (`git.ErrBlobTooLarge`) is a rejection that advances the sync, not a sync error. Such a file is not also reported as `projection_file_skipped`.
+
+### 4.15 `projection_file_skipped`
+
+Emitted once per file the projection declined to project (INIT-023 TASK-003): a file over the git client's per-blob read limit (default 4 MiB, `git.WithMaxBlobBytes`), or a candidate at a path Spine refuses to store. A skip is never a sync error: `FullRebuild` and `IncrementalSync` advance past it. Each one is also logged at Warn (`projection skipped file`) and counted in `spine_projection_files_skipped_total`. It is reported as soon as discovery has decided it, before any later step can hold the sync: a sync held in `error` for another reason (an unreadable changed file, a failed store write or wipe) still reports it, and every retry reports it again under the same event id (the delivery queue de-duplicates; the counter counts each report). `artifact_path` on the envelope is the reported `path` (repository-relative, never stripped of `artifacts_dir`, since a skipped file has no projection key).
+
+**Source:** Projection Service (`FullRebuild` and `IncrementalSync`)
+
+**When it fires:**
+
+- `oversized`: an artifact candidate (`*.md`) whose blob is over the read limit, or that git cannot produce within its allocation limit (`git_alloc_limit_bytes` set: a small file stored as a delta on a large base, or a gitlink rendered with its patch) — added, modified, renamed to, or present at the rebuild head. Its content is never read, so it is reported whether or not it is a governed artifact. A projected artifact modified past the limit also loses its row (as for a parse failure). An oversized *workflow* file is a `projection_workflow_rejected` with check `read_bounds` instead (§4.14); an oversized `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- `unsafe_path`: an artifact or workflow-definition candidate whose path is not valid UTF-8 or holds a control character (C0, DEL, C1), U+2028/U+2029, or a bidi embedding, override or isolate control (U+202A–U+202E, U+2066–U+2069). The file is never read, and no store call carries its path. A deleted or renamed-away unsafe path is ignored (no such row can exist).
+
+```yaml
+payload:
+  path: <string>          # Repository-relative path; for unsafe_path, Go-quoted (strconv.Quote: one line, valid UTF-8, every control and bidi character escaped)
+  reason: <string>        # oversized | unsafe_path
+  size_bytes: <integer>   # oversized: the blob's size, or -1 when the read overran the limit (git refused an allocation — see git_alloc_limit_bytes — or `git show` rendered more than the probed object); null for unsafe_path
+  limit_bytes: <integer>  # oversized: the limit it exceeded (-1 if the git client did not report it); null for unsafe_path
+  git_alloc_limit_bytes: <integer>  # oversized, when git itself refused an allocation over this GIT_ALLOC_LIMIT while producing the content (size_bytes is then -1): the file may be under limit_bytes, and what is too large is a delta base it is stored on or a gitlink's patch; null otherwise
+  commit: <string>        # The sync head the file was found at (full SHA)
+```
+
+**Idempotency:** the event id is deterministic — `projskip-` + the first 12 characters of `commit` + `-` + the first 12 hex characters of SHA-256 over `reason`, a NUL byte and the raw path — so a rebuild or a retried sync at the same commit re-emits the same id, which the delivery queue de-duplicates. Existing subscriptions that receive every event type receive this one too.
 
 ---
 
@@ -628,6 +655,7 @@ All event types are emitted from the following code paths:
 | `engine_recovered` | `Scheduler.RecoverOnStartup` | scheduler/recovery.go |
 | `projection_synced` | `projection.Service.IncrementalSync` | projection/service.go |
 | `projection_workflow_rejected` | `projection.Service` | projection/service.go |
+| `projection_file_skipped` | `projection.Service.FullRebuild`, `IncrementalSync` | projection/refused.go |
 | `validation_passed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `validation_failed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `step_assignment_failed` | `Orchestrator.ActivateStep` | engine/step.go |

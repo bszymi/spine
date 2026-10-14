@@ -43,9 +43,10 @@ type TestRuntime struct {
 type RuntimeOption func(*runtimeConfig)
 
 type runtimeConfig struct {
-	withEvents       bool
-	withValidation   bool
-	withOrchestrator bool
+	withEvents          bool
+	withValidation      bool
+	withOrchestrator    bool
+	withoutMergeBinding bool
 }
 
 // WithEvents enables the event system (MemoryQueue + QueueRouter).
@@ -71,6 +72,17 @@ func WithOrchestrator() RuntimeOption {
 	return func(c *runtimeConfig) {
 		c.withOrchestrator = true
 		c.withEvents = true
+	}
+}
+
+// WithoutMergeBinding builds the orchestrator WITHOUT SHA-bound governed
+// merges (INIT-023 TASK-005). The harness enables binding by default,
+// mirroring `spine serve`; a scenario that must commit to the run branch
+// during a gate step (which binding refuses, owner question 4) opts out
+// here and states its reason in a comment at the call site.
+func WithoutMergeBinding() RuntimeOption {
+	return func(c *runtimeConfig) {
+		c.withoutMergeBinding = true
 	}
 }
 
@@ -173,6 +185,13 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 		// so a permissive policy matches the scenario harness's
 		// intent: "route through the guard, but do not block".
 		orch.WithBranchProtectPolicy(branchprotect.NewPermissive())
+		// SHA-bound governed merges are on by default, as in `spine
+		// serve` (INIT-023 TASK-005); WithoutMergeBinding opts out.
+		if !cfg.withoutMergeBinding {
+			if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
+				t.Fatalf("enable merge binding: %v", err)
+			}
+		}
 		rt.Orchestrator = orch
 	}
 

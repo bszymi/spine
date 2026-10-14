@@ -64,18 +64,22 @@ func (f *fakeWSResolver) List(_ context.Context) ([]workspace.Config, error) {
 //   - "gw_auth"   — *auth.Service
 //   - "repo_path" — filesystem path to the test repo
 func setupGitHTTPServer() scenarioEngine.Step {
-	return setupGitHTTPServerWithOptions(false, false, nil, nil)
+	return setupGitHTTPServerWithOptions(false, nil, nil)
 }
 
 // setupGitHTTPServerWithOptions is setupGitHTTPServer with knobs that a
-// handful of scenarios need (receive-pack gate, devMode for auth
-// bypass, branch-protection policy). The default helper keeps the
-// previous read-only shape.
+// handful of scenarios need (receive-pack gate, branch-protection
+// policy). The default helper keeps the previous read-only shape.
+//
+// Clones come from 127.0.0.1, a direct peer inside the trusted
+// 127.0.0.0/8 CIDR, so they need no token. Pushes always do (INIT-023
+// TASK-015: no switch lets a push skip the bearer): mint one with
+// mintPushToken and push with bearerPushCmd.
 //
 // When pushEvents is non-nil, it is wired as the push-path event
 // sink so tests can assert branch_protection.override emission from
 // the Git path without subscribing through the full event router.
-func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool, policy branchprotect.Policy, pushEvents event.Emitter) scenarioEngine.Step {
+func setupGitHTTPServerWithOptions(receivePackEnabled bool, policy branchprotect.Policy, pushEvents event.Emitter) scenarioEngine.Step {
 	return scenarioEngine.Step{
 		Name: "setup-git-http-server",
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
@@ -133,7 +137,6 @@ func setupGitHTTPServerWithOptions(receivePackEnabled, devMode bool, policy bran
 				WorkspaceResolver: wsResolver,
 				GitHTTP:           gitHandler,
 				GitPushResolver:   pushResolver,
-				DevMode:           devMode,
 			}
 
 			srv := gateway.NewServer(":0", cfg)
@@ -544,15 +547,12 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 			harness.WithGovernance(),
 		},
 		Steps: []scenarioEngine.Step{
-			// Push is gated on a bearer token in production (the
-			// trusted-CIDR bypass deliberately does NOT apply to
-			// receive-pack). Minting a test token here would require
-			// wiring the token store; for this scenario's scope —
-			// does the flag actually let the CGI push through? —
-			// devMode bypasses auth and keeps the test focused on
-			// the receive-pack gate. A separate unit test covers
-			// the push-requires-auth contract.
-			setupGitHTTPServerWithOptions(true, true, nil, nil),
+			// Every push presents a bearer (the trusted-CIDR bypass
+			// never applies to receive-pack, and since INIT-023
+			// TASK-015 SPINE_DEV_MODE no longer skips git auth): a
+			// contributor's token, minted here.
+			setupGitHTTPServerWithOptions(true, nil, nil),
+			mintPushToken("push-contributor", domain.RoleContributor),
 			enableGitHTTPExport(),
 			{
 				// Server is a non-bare repo; pushing to its
@@ -586,9 +586,7 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 					// Create a new branch, add a file, commit. An
 					// ordinary branch: since INIT-023 TASK-016 the
 					// reserved spine/** namespace is operator-only, and
-					// this devMode push is anonymous
-					// (TestGitHTTP_PushReservedRefRejectedAnonymously
-					// pins that).
+					// this push is a contributor's.
 					branchCmds := [][]string{
 						{"checkout", "-b", "feature/push"},
 					}
@@ -614,9 +612,8 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 						}
 					}
 
-					// Push to the HTTP endpoint.
-					push := exec.Command("git", "push", "origin", "feature/push")
-					push.Dir = cloneDir
+					// Push to the HTTP endpoint with the bearer.
+					push := bearerPushCmd(sc, cloneDir, "origin", "feature/push")
 					if out, err := push.CombinedOutput(); err != nil {
 						return fmt.Errorf("git push failed: %w\n%s", err, out)
 					}
@@ -635,24 +632,49 @@ func TestGitHTTP_PushAcceptedWhenFlagOn(t *testing.T) {
 	})
 }
 
-// TestGitHTTP_PushReservedRefRejectedAnonymously pins the ref-class
-// admission (INIT-023 TASK-016) end to end: in devMode the git endpoint
-// skips auth, so the push reaches the pre-receive gate with no actor,
-// and a push into the reserved spine/** namespace (the shape
-// TestGitHTTP_PushAcceptedWhenFlagOn pushed before TASK-016) is refused
-// with a ref-admission line and leaves no ref on the server. No
-// branch-protection policy is wired: admission runs without one.
+// TestGitHTTP_PushReservedRefRejectedAnonymously pins that an anonymous
+// push never reaches the server: every push presents a bearer (INIT-023
+// TASK-015 removed the SPINE_DEV_MODE git bypass, the only anonymous push
+// path), so the push advertisement and the pack upload answer 401 and a
+// push into the reserved spine/** namespace leaves no ref. Before
+// TASK-015 this scenario pushed anonymously under SPINE_DEV_MODE and asserted
+// TASK-016's ref-admission refusal; the bound-contributor refusal of a
+// reserved ref is pinned by TASK-016's gateway tests
+// (TestGitPush_InitAndReservedNamespace).
 func TestGitHTTP_PushReservedRefRejectedAnonymously(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	scenarioEngine.RunScenario(t, scenarioEngine.Scenario{
 		Name:        "git-http-push-reserved-ref-anonymous",
-		Description: "An anonymous devMode push into spine/** is refused by ref-class admission",
+		Description: "An anonymous push into spine/** gets 401 and leaves no ref",
 		EnvOpts: []harness.EnvOption{
 			harness.WithGovernance(),
 		},
 		Steps: []scenarioEngine.Step{
-			setupGitHTTPServerWithOptions(true, true, nil, nil),
+			setupGitHTTPServerWithOptions(true, nil, nil),
 			enableGitHTTPExport(),
+			{
+				Name: "anonymous-push-endpoints-answer-401",
+				Action: func(sc *scenarioEngine.ScenarioContext) error {
+					base := sc.MustGet("gw_url").(string)
+					resp, err := http.Get(base + "/git/info/refs?service=git-receive-pack")
+					if err != nil {
+						return err
+					}
+					resp.Body.Close()
+					if resp.StatusCode != http.StatusUnauthorized {
+						return fmt.Errorf("anonymous push advertisement: %d, want 401", resp.StatusCode)
+					}
+					resp, err = http.Post(base+"/git/git-receive-pack", "application/x-git-receive-pack-request", nil)
+					if err != nil {
+						return err
+					}
+					resp.Body.Close()
+					if resp.StatusCode != http.StatusUnauthorized {
+						return fmt.Errorf("anonymous pack upload: %d, want 401", resp.StatusCode)
+					}
+					return nil
+				},
+			},
 			{
 				Name: "push-reserved-ref-anonymously",
 				Action: func(sc *scenarioEngine.ScenarioContext) error {
@@ -675,14 +697,17 @@ func TestGitHTTP_PushReservedRefRejectedAnonymously(t *testing.T) {
 						}
 					}
 
-					push := exec.Command("git", "push", "origin", "spine/test/push")
+					// No credential of any kind: no helper (a host
+					// keychain must not answer), no prompt.
+					push := exec.Command("git", "-c", "credential.helper=", "push", "origin", "spine/test/push")
 					push.Dir = cloneDir
+					push.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=")
 					out, err := push.CombinedOutput()
 					if err == nil {
-						return fmt.Errorf("anonymous push into spine/** succeeded; expected a ref-admission refusal\n%s", out)
+						return fmt.Errorf("anonymous push into spine/** succeeded; expected 401\n%s", out)
 					}
-					if !strings.Contains(string(out), "ref-admission: spine/test/push is in the reserved spine namespace; operator role required") {
-						return fmt.Errorf("expected the reserved-namespace ref-admission line, got:\n%s", out)
+					if bytes.Contains(out, []byte("ref-admission")) {
+						return fmt.Errorf("an anonymous push reached the pre-receive gate:\n%s", out)
 					}
 
 					show := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/spine/test/push")
@@ -715,12 +740,13 @@ func TestGitHTTP_PushRejectedByPreReceivePolicy(t *testing.T) {
 			// will try to push a new branch refs/heads/release/1.x; the
 			// gate must reject it before git-http-backend advances the
 			// ref.
-			setupGitHTTPServerWithOptions(true, true, branchprotect.New(
+			setupGitHTTPServerWithOptions(true, branchprotect.New(
 				branchprotect.StaticRules([]config.Rule{{
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDirectWrite},
 				}}),
 			), nil),
+			mintPushToken("policy-contributor", domain.RoleContributor),
 			enableGitHTTPExport(),
 			{
 				Name: "clone-and-attempt-protected-push",
@@ -767,8 +793,7 @@ func TestGitHTTP_PushRejectedByPreReceivePolicy(t *testing.T) {
 					}
 
 					// The push MUST fail.
-					push := exec.Command("git", "push", "origin", "release/1.x")
-					push.Dir = cloneDir
+					push := bearerPushCmd(sc, cloneDir, "origin", "release/1.x")
 					out, err := push.CombinedOutput()
 					if err == nil {
 						return fmt.Errorf("expected git push to fail under no-direct-write policy, but it succeeded:\n%s", out)
@@ -836,19 +861,18 @@ func TestGitHTTP_PushOverrideHonouredForOperator(t *testing.T) {
 		},
 		Steps: []scenarioEngine.Step{
 			// release/* is protected with no-direct-write. The
-			// push below includes spine.override=true; devMode
-			// bypasses bearer auth, and the actor the gateway
-			// attaches in devMode has operator role so the
-			// role gate lets the override through.
-			setupGitHTTPServerWithOptionsAndActor(
-				true, true,
+			// push below includes spine.override=true and presents
+			// an operator's bearer, so the role gate lets the
+			// override through.
+			setupGitHTTPServerWithOptions(
+				true,
 				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDirectWrite},
 				}})),
 				recorder,
-				&domain.Actor{ActorID: "op-scenario", Role: domain.RoleOperator},
 			),
+			mintPushToken("op-scenario", domain.RoleOperator),
 			enableGitHTTPExport(),
 			{
 				Name: "operator-overrides-protected-push",
@@ -893,11 +917,10 @@ func TestGitHTTP_PushOverrideHonouredForOperator(t *testing.T) {
 					}
 
 					// Push with the override option.
-					push := exec.Command("git", "push",
+					push := bearerPushCmd(sc, cloneDir,
 						"-o", "spine.override=true",
 						"origin", "release/2.x",
 					)
-					push.Dir = cloneDir
 					if out, err := push.CombinedOutput(); err != nil {
 						return fmt.Errorf("override push failed (should succeed): %w\n%s", err, out)
 					}
@@ -936,82 +959,45 @@ func TestGitHTTP_PushOverrideHonouredForOperator(t *testing.T) {
 	_ = event.Emitter(nil) // keep import referenced on all platforms
 }
 
-// setupGitHTTPServerWithOptionsAndActor is a variant of
-// setupGitHTTPServerWithOptions that also attaches a fixed actor to
-// each push request via a small gateway middleware. devMode alone
-// would accept the request but leaves the actor blank, which makes
-// the branch-protection override role-gate fail; the scenario tests
-// explicitly exercising override need an operator on the context.
-func setupGitHTTPServerWithOptionsAndActor(receivePackEnabled, devMode bool, policy branchprotect.Policy, pushEvents event.Emitter, actor *domain.Actor) scenarioEngine.Step {
+// mintPushToken creates an active actor with the given role in the
+// scenario store and mints a bearer for it (state key "push_token").
+// Every push presents it through bearerPushCmd, so the gateway validates
+// it and attaches the actor for ref admission, branch protection and
+// audit, exactly as for a production push (INIT-023 TASK-015 migrated
+// these scenarios off the SPINE_DEV_MODE anonymous push and the
+// actor-injection wrapper they used to need).
+func mintPushToken(actorID string, role domain.ActorRole) scenarioEngine.Step {
 	return scenarioEngine.Step{
-		Name: "setup-git-http-server-with-actor",
+		Name: "mint-push-token-" + actorID,
 		Action: func(sc *scenarioEngine.ScenarioContext) error {
-			repoPath := sc.Repo.Dir
-
-			wsResolver := &fakeWSResolver{
-				workspaces: map[string]*workspace.Config{
-					"default": {
-						ID:       "default",
-						RepoPath: repoPath,
-						Status:   workspace.StatusActive,
-					},
-				},
+			if err := sc.Runtime.Store.CreateActor(sc.Ctx, &domain.Actor{
+				ActorID: actorID,
+				Type:    domain.ActorTypeHuman,
+				Name:    actorID,
+				Role:    role,
+				Status:  domain.ActorStatusActive,
+			}); err != nil {
+				return fmt.Errorf("create actor %s: %w", actorID, err)
 			}
-
-			gitHandler, err := githttp.NewHandler(githttp.Config{
-				ResolveRepoPath: func(ctx context.Context, workspaceID string) (string, error) {
-					cfg, err := wsResolver.Resolve(ctx, workspaceID)
-					if err != nil {
-						return "", err
-					}
-					return cfg.RepoPath, nil
-				},
-				TrustedCIDRs:       []string{"127.0.0.0/8"},
-				MaxConcurrent:      5,
-				ReceivePackEnabled: receivePackEnabled,
-				Policy:             policy,
-			})
+			authSvc := sc.MustGet("gw_auth").(*auth.Service)
+			tok, _, err := authSvc.CreateToken(sc.Ctx, actorID, "git-push-scenario", nil)
 			if err != nil {
-				return fmt.Errorf("create git HTTP handler: %w", err)
+				return fmt.Errorf("create token for %s: %w", actorID, err)
 			}
-
-			authSvc := auth.NewService(sc.Runtime.Store)
-
-			pushResolver := gateway.GitPushResolverFunc(func(_ context.Context, _ string) (gateway.GitPushResources, func(), error) {
-				return gateway.GitPushResources{Policy: policy, Events: pushEvents}, func() {}, nil
-			})
-
-			cfg := gateway.ServerConfig{
-				Store:             sc.Runtime.Store,
-				Auth:              authSvc,
-				Artifacts:         sc.Runtime.Artifacts,
-				ProjQuery:         projection.NewQueryService(sc.Runtime.Store, sc.Repo.Git),
-				ProjSync:          sc.Runtime.Projections,
-				WorkspaceResolver: wsResolver,
-				GitHTTP:           gitHandler,
-				GitPushResolver:   pushResolver,
-				DevMode:           devMode,
-			}
-
-			srv := gateway.NewServer(":0", cfg)
-			// Wrap the handler with an actor-injection middleware so
-			// the pre-receive gate sees the scenario's chosen role.
-			inner := srv.Handler()
-			wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if actor != nil {
-					r = r.WithContext(domain.WithActor(r.Context(), actor))
-				}
-				inner.ServeHTTP(w, r)
-			})
-			ts := httptest.NewServer(wrapped)
-			sc.ParentT.Cleanup(ts.Close)
-
-			sc.Set("gw_url", ts.URL)
-			sc.Set("gw_auth", authSvc)
-			sc.Set("repo_path", repoPath)
+			sc.Set("push_token", tok)
 			return nil
 		},
 	}
+}
+
+// bearerPushCmd builds `git push <args...>` in dir authenticated with the
+// bearer minted by mintPushToken. The header is passed command-scoped
+// (`git -c http.extraHeader=...`), as INIT-023 TASK-016's push tests do,
+// so it is never written to the clone's config.
+func bearerPushCmd(sc *scenarioEngine.ScenarioContext, dir string, args ...string) *exec.Cmd {
+	tok := sc.MustGet("push_token").(string)
+	full := append([]string{"-c", "http.extraHeader=Authorization: Bearer " + tok, "-C", dir, "push"}, args...)
+	return exec.Command("git", full...)
 }
 
 // pushClientClone clones the test repo into a fresh directory and
@@ -1072,15 +1058,15 @@ func TestGitHTTP_PushDeleteRejectedByNoDelete(t *testing.T) {
 					return runGit(t, sc.Repo.Dir, "update-server-info")
 				},
 			},
-			setupGitHTTPServerWithOptionsAndActor(
-				true, true,
+			setupGitHTTPServerWithOptions(
+				true,
 				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDelete},
 				}})),
 				nil,
-				&domain.Actor{ActorID: "c-1", Role: domain.RoleContributor},
 			),
+			mintPushToken("c-1", domain.RoleContributor),
 			{
 				Name: "attempt-delete",
 				Action: func(sc *scenarioEngine.ScenarioContext) error {
@@ -1089,7 +1075,7 @@ func TestGitHTTP_PushDeleteRejectedByNoDelete(t *testing.T) {
 						return err
 					}
 					// git push --delete.
-					out, err := exec.Command("git", "-C", cloneDir, "push", "origin", "--delete", "release/prod").CombinedOutput()
+					out, err := bearerPushCmd(sc, cloneDir, "origin", "--delete", "release/prod").CombinedOutput()
 					if err == nil {
 						return fmt.Errorf("expected delete push to fail under no-delete rule, succeeded:\n%s", out)
 					}
@@ -1122,15 +1108,15 @@ func TestGitHTTP_PushOverrideRejectedForContributor(t *testing.T) {
 			harness.WithGovernance(),
 		},
 		Steps: []scenarioEngine.Step{
-			setupGitHTTPServerWithOptionsAndActor(
-				true, true,
+			setupGitHTTPServerWithOptions(
+				true,
 				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDirectWrite},
 				}})),
 				recorder,
-				&domain.Actor{ActorID: "c-1", Role: domain.RoleContributor},
 			),
+			mintPushToken("c-1", domain.RoleContributor),
 			enableGitHTTPExport(),
 			{
 				Name: "contributor-override-rejected",
@@ -1152,7 +1138,7 @@ func TestGitHTTP_PushOverrideRejectedForContributor(t *testing.T) {
 						return err
 					}
 
-					out, err := exec.Command("git", "-C", cloneDir, "push",
+					out, err := bearerPushCmd(sc, cloneDir,
 						"-o", "spine.override=true",
 						"origin", "release/contrib").CombinedOutput()
 					if err == nil {
@@ -1191,15 +1177,15 @@ func TestGitHTTP_UnusedOverrideEmitsNoEvent(t *testing.T) {
 			harness.WithGovernance(),
 		},
 		Steps: []scenarioEngine.Step{
-			setupGitHTTPServerWithOptionsAndActor(
-				true, true,
+			setupGitHTTPServerWithOptions(
+				true,
 				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDirectWrite},
 				}})),
 				recorder,
-				&domain.Actor{ActorID: "op-unused", Role: domain.RoleOperator},
 			),
+			mintPushToken("op-unused", domain.RoleOperator),
 			enableGitHTTPExport(),
 			{
 				Name: "push-with-unused-override",
@@ -1221,7 +1207,7 @@ func TestGitHTTP_UnusedOverrideEmitsNoEvent(t *testing.T) {
 					if err := runGit(t, cloneDir, "commit", "-m", "f"); err != nil {
 						return err
 					}
-					out, err := exec.Command("git", "-C", cloneDir, "push",
+					out, err := bearerPushCmd(sc, cloneDir,
 						"-o", "spine.override=true",
 						"origin", "feature/untouched").CombinedOutput()
 					if err != nil {
@@ -1250,15 +1236,15 @@ func TestGitHTTP_MixedPushRejectedAllOrNothing(t *testing.T) {
 			harness.WithGovernance(),
 		},
 		Steps: []scenarioEngine.Step{
-			setupGitHTTPServerWithOptionsAndActor(
-				true, true,
+			setupGitHTTPServerWithOptions(
+				true,
 				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDirectWrite},
 				}})),
 				nil,
-				&domain.Actor{ActorID: "c-mixed", Role: domain.RoleContributor},
 			),
+			mintPushToken("c-mixed", domain.RoleContributor),
 			enableGitHTTPExport(),
 			{
 				Name: "mixed-push",
@@ -1294,7 +1280,7 @@ func TestGitHTTP_MixedPushRejectedAllOrNothing(t *testing.T) {
 						}
 					}
 
-					out, err := exec.Command("git", "-C", cloneDir, "push", "origin",
+					out, err := bearerPushCmd(sc, cloneDir, "origin",
 						"feature/a", "release/3.x").CombinedOutput()
 					if err == nil {
 						return fmt.Errorf("mixed push should be rejected, got success:\n%s", out)
@@ -1327,15 +1313,15 @@ func TestGitHTTP_PushedCommitIsByteIdentical(t *testing.T) {
 			harness.WithGovernance(),
 		},
 		Steps: []scenarioEngine.Step{
-			setupGitHTTPServerWithOptionsAndActor(
-				true, true,
+			setupGitHTTPServerWithOptions(
+				true,
 				branchprotect.New(branchprotect.StaticRules([]config.Rule{{
 					Branch:      "release/*",
 					Protections: []config.RuleKind{config.KindNoDirectWrite},
 				}})),
 				&pushEventRecorder{},
-				&domain.Actor{ActorID: "op-bytes", Role: domain.RoleOperator},
 			),
+			mintPushToken("op-bytes", domain.RoleOperator),
 			enableGitHTTPExport(),
 			{
 				Name: "override-push-preserves-sha",
@@ -1363,7 +1349,7 @@ func TestGitHTTP_PushedCommitIsByteIdentical(t *testing.T) {
 					}
 					clientSHA := strings.TrimSpace(string(clientSHAOut))
 
-					out, err := exec.Command("git", "-C", cloneDir, "push",
+					out, err := bearerPushCmd(sc, cloneDir,
 						"-o", "spine.override=true",
 						"origin", "release/bytes").CombinedOutput()
 					if err != nil {

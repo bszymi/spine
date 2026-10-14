@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -124,9 +126,10 @@ func ProjectionDefinition(path string, content []byte) (*domain.WorkflowDefiniti
 //
 //  1. It must decode through UnmarshalProjectionDefinition (the loaders'
 //     decoder: case-insensitive, unknown fields refused).
-//  2. The same JSON is decoded into `any`, re-emitted with yaml.Marshal
-//     and decoded with a yaml.v3 Decoder with KnownFields(true): exact,
-//     case-sensitive keys, the yaml:"-" fields refused.
+//  2. The same JSON is decoded into `any` with every integer kept exact
+//     (decodeStoredJSON), re-emitted with yaml.Marshal and decoded with a
+//     yaml.v3 Decoder with KnownFields(true): exact, case-sensitive keys,
+//     the yaml:"-" fields refused.
 //  3. Both results must be DeepEqual after the Mode normalisation.
 //
 // The input is our own JSONB, so the yaml.v3 decoder is used directly:
@@ -137,8 +140,8 @@ func VerifyProjectionDefinition(def []byte) error {
 	if err != nil {
 		return fmt.Errorf("%w: decode stored definition: %v", ErrProjectionRoundTrip, err)
 	}
-	var raw any
-	if err := json.Unmarshal(def, &raw); err != nil {
+	raw, err := decodeStoredJSON(def)
+	if err != nil {
 		return fmt.Errorf("%w: decode stored definition: %v", ErrProjectionRoundTrip, err)
 	}
 	if where, found := findNUL(raw, ""); found {
@@ -160,6 +163,62 @@ func VerifyProjectionDefinition(def []byte) error {
 		return fmt.Errorf("%w: field %q differs between the folding and the strict reading", ErrProjectionRoundTrip, firstDifferingField(got, &strict))
 	}
 	return nil
+}
+
+// decodeStoredJSON decodes a stored definition into `any` as json.Unmarshal
+// does (one value, nothing after it, the same errors) except that numbers
+// stay exact: an integer literal that fits an int64 becomes an int64, which
+// yaml.Marshal writes digit for digit; any other number becomes the
+// float64 json.Unmarshal would give. json.Unmarshal reads every number as
+// a float64, which rounds an integer above 2^53: the strict reading of a
+// definition ProjectionDefinition had stored (`retry: {limit:
+// 9007199254740993}`) then differed from the folding one, the row failed
+// verification, and a later rejected edit deleted it instead of keeping it
+// quarantined (INIT-023 codex 6.1 catch-up).
+func decodeStoredJSON(def []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(def))
+	dec.UseNumber()
+	var raw any
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("invalid data after the top-level value")
+	}
+	return exactNumbers(raw)
+}
+
+// exactNumbers replaces, in place, every json.Number in a value decoded
+// with UseNumber (see decodeStoredJSON).
+func exactNumbers(v any) (any, error) {
+	switch t := v.(type) {
+	case json.Number:
+		if i, err := strconv.ParseInt(t.String(), 10, 64); err == nil {
+			return i, nil
+		}
+		f, err := t.Float64()
+		if err != nil {
+			return nil, fmt.Errorf("number %s: %w", t, err)
+		}
+		return f, nil
+	case map[string]any:
+		for k, child := range t {
+			n, err := exactNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[k] = n
+		}
+	case []any:
+		for i, child := range t {
+			n, err := exactNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[i] = n
+		}
+	}
+	return v, nil
 }
 
 // encodeProjection is the projection's historical encoder: bound the

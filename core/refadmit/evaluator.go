@@ -54,8 +54,9 @@ type Request struct {
 	Ref string
 	// Delete is true when the update deletes the ref.
 	Delete bool
-	// Actor is the authenticated principal; nil means unauthenticated
-	// (for example the standalone gateway's devMode).
+	// Actor is the authenticated principal; nil means unauthenticated.
+	// The standalone gateway never forwards an anonymous push (INIT-023
+	// TASK-015 removed its devMode git bypass); an embedder's might.
 	Actor *domain.Actor
 	// RepositoryID is the repository the push targets; "" and
 	// domain.PrimaryRepositoryID both mean the workspace primary.

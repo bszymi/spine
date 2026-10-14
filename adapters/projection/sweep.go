@@ -1,13 +1,17 @@
 package projection
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"strconv"
 
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
@@ -21,6 +25,43 @@ import (
 type allWorkflowRowsLister interface {
 	ListWorkflowProjections(ctx context.Context) ([]store.WorkflowProjection, error)
 }
+
+// syncBaselineSetter is an optional store capability: move the sync
+// baseline (last_synced_commit) and leave status and error_detail alone.
+// *store.PostgresStore implements it; asserted like allWorkflowRowsLister
+// so that no store.Store implementation has to change. See
+// resetSyncBaseline.
+type syncBaselineSetter interface {
+	SetSyncBaseline(ctx context.Context, commit string) error
+}
+
+// resetSyncBaseline re-records head as the commit the next sync diffs
+// from, after a sweep wrote rows judged at head (IncrementalSync's
+// up-to-date path). This sync read idle@head before resolving head and
+// sweeping; another instance may have written sync_state since. Through
+// syncBaselineSetter only last_synced_commit moves, so a status written
+// meanwhile is kept (INIT-023 codex 6.1 catch-up): "rebuilding" (a reader
+// such as SMP's idle gate must not see idle over a half-written
+// projection), "error" (the next tick must still retry, forcing the
+// branch-protection re-projection) and "syncing"; and a state with no
+// baseline (a partial wipe) is left to rebuild. A store without the
+// capability gets the plain idle@head write the path had before.
+func (s *Service) resetSyncBaseline(ctx context.Context, head string) error {
+	if setter, ok := s.store.(syncBaselineSetter); ok {
+		return setter.SetSyncBaseline(ctx, head)
+	}
+	return s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: head,
+		Status:           "idle",
+	})
+}
+
+// *store.PostgresStore has both optional capabilities: a rename on either
+// side fails the build here instead of silently taking the fallback.
+var (
+	_ allWorkflowRowsLister = (*store.PostgresStore)(nil)
+	_ syncBaselineSetter    = (*store.PostgresStore)(nil)
+)
 
 // ensureWorkflowsVerified runs the workflow-row sweep once per Service
 // instance, single-flight. Every IncrementalSync that finds the flag
@@ -174,8 +215,16 @@ func (s *Service) reconcileWorkflowRows(ctx context.Context, head, from string) 
 			continue
 		}
 
-		cand, rej, err := s.buildWorkflowRow(ctx, row.WorkflowPath, head)
-		if err != nil {
+		// A row at an UnsafePath (projected before INIT-023 TASK-003 by a
+		// git with core.quotePath=false; artifact.StoredUnsafePath) is
+		// never re-read or re-projected: TASK-003 never projects such a
+		// file, so it is rejected (unsafe_path) and kept quarantined or
+		// removed below, like any rejected file (wave 3 integration).
+		var cand *store.WorkflowProjection
+		var rej *WorkflowRejection
+		if artifact.UnsafePath(row.WorkflowPath) {
+			rej = &WorkflowRejection{Path: row.WorkflowPath, Commit: head, Check: checkUnsafePath, Err: errStoredUnsafeWorkflowRow}
+		} else if cand, rej, err = s.buildWorkflowRow(ctx, row.WorkflowPath, head); err != nil {
 			return changed, err
 		}
 		if rej == nil {
@@ -222,12 +271,64 @@ func sameWorkflowRow(a, b *store.WorkflowProjection) bool {
 }
 
 func sameJSON(a, b []byte) bool {
-	var va, vb any
-	if err := json.Unmarshal(a, &va); err != nil {
+	va, err := decodeExactJSON(a)
+	if err != nil {
 		return false
 	}
-	if err := json.Unmarshal(b, &vb); err != nil {
+	vb, err := decodeExactJSON(b)
+	if err != nil {
 		return false
 	}
 	return reflect.DeepEqual(va, vb)
+}
+
+// decodeExactJSON is json.Unmarshal into `any` (one value, nothing after
+// it) with integers kept exact: an integer literal that fits an int64
+// becomes an int64, any other number the float64 json.Unmarshal would
+// give. With plain float64s two definitions differing only in an integer
+// above 2^53 compared equal, so the sweep left a stale row in place
+// (INIT-023 codex 6.1 catch-up; core/workflow's VerifyProjectionDefinition
+// reads stored definitions the same way).
+func decodeExactJSON(b []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("invalid data after the top-level value")
+	}
+	return exactJSONNumbers(v)
+}
+
+func exactJSONNumbers(v any) (any, error) {
+	switch t := v.(type) {
+	case json.Number:
+		if i, err := strconv.ParseInt(t.String(), 10, 64); err == nil {
+			return i, nil
+		}
+		f, err := t.Float64()
+		if err != nil {
+			return nil, err
+		}
+		return f, nil
+	case map[string]any:
+		for k, child := range t {
+			n, err := exactJSONNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[k] = n
+		}
+	case []any:
+		for i, child := range t {
+			n, err := exactJSONNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[i] = n
+		}
+	}
+	return v, nil
 }

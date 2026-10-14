@@ -257,10 +257,14 @@ type PoolConfig struct {
 	// pool as the credential resolver for per-binding `credentials_ref`
 	// references (INIT-014 EPIC-003 TASK-006). The same client must
 	// satisfy ADR-010 redaction guarantees; the pool reveals bytes only
-	// at the boundary with the git CLI's GIT_ASKPASS env. When nil,
-	// bindings without credentials_ref keep working through the
-	// process-wide SPINE_GIT_PUSH_TOKEN; bindings that declare a ref
-	// fail closed with a typed credentials-unavailable error.
+	// at the boundary with the git CLI's GIT_ASKPASS env. Whether or
+	// not it is set, a binding without credentials_ref clones and
+	// pushes with no credential at all: the gitpool never lends it the
+	// process-wide SPINE_GIT_PUSH_TOKEN or credential helper, nor the
+	// host's own git credentials (INIT-023 TASK-015, owner question 2
+	// ruled "never"), so only a public code repo works without a ref.
+	// When nil, a binding that declares a ref fails closed with a typed
+	// credentials-unavailable error.
 	SecretClient secrets.SecretClient
 
 	// DBPolicy is the per-workspace connection-pool policy from
@@ -907,20 +911,26 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	// builds a fresh *git.CLIClient per clone, so per-binding
 	// credentials can be threaded through GIT_ASKPASS for one
 	// invocation without leaking into a long-lived shared client.
-	// gitOpts (the workspace's process-level auth profile) flows into
-	// every clone as a baseline; SecretCredentialResolver layers a
+	// gitOpts (the process-level options) is the baseline of every
+	// clone and code-repo client; SecretCredentialResolver layers a
 	// per-binding token on top when the binding sets credentials_ref.
 	//
 	// The credential resolver is wired from cfg.SecretClient when
 	// available — that's the same SecretClient the workspace already
 	// uses for runtime/projection DB credentials (ADR-010), so adding
 	// a per-binding `credentials_ref` reuses existing infrastructure
-	// instead of introducing a parallel secret pipeline. Workspaces
-	// without a SecretClient (single-workspace dev mode) fall back to
-	// the legacy process-wide SPINE_GIT_PUSH_TOKEN path baked into
-	// gitOpts: bindings without credentials_ref still work, and any
-	// binding that does declare one fails closed with a typed
-	// credentials-unavailable error.
+	// instead of introducing a parallel secret pipeline. A binding
+	// without credentials_ref clones and pushes with no credential at
+	// all: the gitpool cloner and factory strip the process-wide
+	// SPINE_GIT_PUSH_TOKEN and credential helper from gitOpts for it
+	// (INIT-023 TASK-015). Those are the platform's credentials, and in
+	// shared mode one tenant's binding must never borrow them — even on
+	// the platform's own git host, where a host-keyed helper would
+	// answer. No process-auth exception is configured here. Workspaces
+	// without a SecretClient (single-workspace dev mode) can therefore
+	// use public code repos only; any binding that declares a
+	// credentials_ref fails closed with a typed credentials-unavailable
+	// error.
 	// SecretCredentialResolver is installed unconditionally so a
 	// binding with a non-empty CredentialsRef in a workspace that
 	// happens to lack a SecretClient (single-workspace dev mode, DB
@@ -987,8 +997,22 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 
 	// Workflow service (ADR-007): dedicated surface for workflow definition
 	// writes, kept separate from the generic artifact service so the
-	// workflow validation suite owns the write path.
+	// workflow validation suite owns the write path. It gets the same
+	// branch-protection policy as the artifact service (INIT-023 TASK-014,
+	// audit F7): projection-backed with a Store, permissive without one.
 	workflowSvc := workflow.NewService(primaryClient, repoPath)
+	if st != nil {
+		rs, err := bpprojection.New(st)
+		if err != nil {
+			for i := len(closers) - 1; i >= 0; i-- {
+				closers[i]("init-error")
+			}
+			return nil, fmt.Errorf("workflow branch-protect policy: %w", err)
+		}
+		workflowSvc.WithPolicy(branchprotect.New(rs))
+	} else {
+		workflowSvc.WithPolicy(branchprotect.NewPermissive())
+	}
 
 	// Projection services.
 	var projQuery *projection.QueryService

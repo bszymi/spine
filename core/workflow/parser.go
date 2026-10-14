@@ -3,6 +3,8 @@ package workflow
 import (
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/bszymi/spine/core/domain"
@@ -207,6 +209,14 @@ func validateStep(step *domain.StepDefinition, prefix string, stepIDs map[string
 			errors = append(errors, schemaError(oPrefix+".next_step", "required field missing"))
 		} else if outcome.NextStep != "end" && !stepIDs[outcome.NextStep] {
 			errors = append(errors, schemaError(oPrefix+".next_step", fmt.Sprintf("references unknown step %q", outcome.NextStep)))
+		}
+		// "spine." commit keys are reserved for the engine's merge binding
+		// (INIT-023 TASK-005). This is a user-experience check only: the
+		// engine strips reserved keys from every outcome before storing it,
+		// because a projected workflow is not always validated.
+		if reserved := reservedCommitKeys(outcome.Commit); len(reserved) > 0 {
+			errors = append(errors, schemaError(oPrefix+".commit",
+				fmt.Sprintf("commit keys %q are reserved: keys starting with %q (any letter case) belong to the engine", reserved, reservedCommitKeyPrefix)))
 		}
 	}
 
@@ -525,4 +535,22 @@ func semanticError(message string) domain.ValidationError {
 		Severity: "error",
 		Message:  message,
 	}
+}
+
+// reservedCommitKeyPrefix is the engine-reserved commit_meta namespace
+// (engine.ReservedCommitMetaPrefix; core/workflow cannot import the
+// engine, so the rule is repeated here and pinned by a test).
+const reservedCommitKeyPrefix = "spine."
+
+// reservedCommitKeys returns the sorted commit keys in the reserved
+// namespace, compared case-insensitively.
+func reservedCommitKeys(commit map[string]string) []string {
+	var out []string
+	for k := range commit {
+		if strings.HasPrefix(strings.ToLower(k), reservedCommitKeyPrefix) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

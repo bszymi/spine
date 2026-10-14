@@ -70,6 +70,14 @@ func (o *Orchestrator) createRunBranches(ctx context.Context, run *domain.Run) (
 		return result, domain.NewError(domain.ErrPrecondition,
 			"multi-repo run requires WithRepositoryGitClients and WithRepositoryResolver wirings")
 	}
+	// Merge binding (INIT-023 TASK-005 §8, P3-37): every code repository
+	// is captured and merged by SHA, so its client must be a CommitBinder.
+	// Refuse before any branch exists in any repository.
+	if hasCodeRepo && o.bindingOn {
+		if err := o.requireCodeRepoBinders(ctx, run); err != nil {
+			return result, err
+		}
+	}
 
 	log := observe.Logger(ctx)
 	pushOn := autoPushEnabled()

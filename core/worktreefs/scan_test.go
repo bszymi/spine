@@ -45,6 +45,9 @@ var allowed = map[string]bool{
 	"adapters/git/cli.go:createAskpassScript": true, // GIT_ASKPASS helper in os.TempDir
 	"adapters/git/cli.go:CLIClient.Close":     true, // removes that helper
 	"adapters/git/branchwrite.go:EnterBranch": true, // MkdirTemp/RemoveAll of the private worktree parent (RemoveAll never follows links inside it)
+	// MkdirTemp/RemoveAll of the private GIT_INDEX_FILE directory in
+	// os.TempDir (INIT-023 TASK-005): plumbing only, no working tree.
+	"adapters/git/commitbinder.go:CLIClient.CommitFilesOnto": true,
 }
 
 func set(names ...string) map[string]bool {

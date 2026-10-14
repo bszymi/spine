@@ -6,6 +6,620 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-004 TASK-015: SSE field safety, shared-mode scoping, git-endpoint auth, gitpool credential scoping)
+
+Standalone `spine serve` hardening (audit P3-28, P3-29, P3-30) plus the latent gitpool
+credential item. Owner questions answered by their defaults, pending the owner, except question 2
+(ruled "never" by the orchestrator; the design default was "yes, on the primary's own host").
+
+### Security
+
+- **SSE frames cannot be injected by workflow identifiers (P3-28).** Event IDs embed step,
+  divergence-point and branch IDs, and core validation accepts a step ID with a line break, so a
+  workflow on the authoritative branch could make every SSE reader dispatch a forged event (for
+  example a fake `run_completed`) and adopt an attacker-chosen `Last-Event-ID`, live and on
+  replay. The writer now omits an `id:` or `event:` line whose value holds a control character,
+  invalid UTF-8, U+0085, U+2028 or U+2029 (a Warn, at most once a minute, with the count it did not
+  log and the identifier cut to 80 bytes), writes `data` one line per
+  `data:` line, and escapes U+0085/U+2028/U+2029 inside the JSON data. Every engine event's frame
+  is byte-identical to before.
+- **Workflow identifiers are checked on the standalone API (P3-28, defence in depth).**
+  `POST`/`PUT /api/v1/workflows` refuse step, divergence-point, divergence-branch and
+  convergence-point IDs outside `^[a-z0-9][a-z0-9_-]{0,63}$` with `422 validation_failed` (one
+  `schema` error per field) before anything is written or a planning run starts;
+  `POST /workflows/{id}/validate` reports them with `status: failed`.
+- **Shared-mode state is scoped to the workspace (P3-29).** With a workspace `ServicePool`
+  (`WORKSPACE_RESOLVER=db|platform-binding`): `/system/metrics` returns only the caller's
+  `spine_workspace_pool_*` series (it used to name every tenant and carry the all-tenant
+  counters); the rebuild registry is keyed by (workspace, `rebuild_id`), so another tenant reusing
+  your `X-Trace-Id` prefix gets `404` instead of reading or replacing your rebuild; the SSE
+  connection cap is counted per (workspace, actor), so streams in one workspace no longer exhaust
+  the same actor ID's slots (every workspace's `smp-admin`) in another.
+- **Token-less git access only for direct peers (P3-30).** The `SPINE_GIT_HTTP_TRUSTED_CIDRS`
+  bypass was judged against the raw TCP peer, so a reverse proxy — or Docker's bridge gateway
+  fronting the published port, inside the compose default `172.28.0.0/16` — gave every client it
+  relayed token-less read access to every workspace's repository. A request whose peer is in
+  `SPINE_TRUSTED_PROXY_CIDRS`, or that carries `X-Forwarded-For`, `Forwarded`, `X-Real-IP`,
+  `X-Forwarded-Host`, `X-Forwarded-Proto` or `Via`, now needs a bearer; no forwarded address is
+  trusted for access. A refused trusted-CIDR peer logs a rate-limited Warn naming
+  `SPINE_TRUSTED_PROXY_CIDRS`.
+- **`GET /git/…/info/refs` accepts only the queries a git client sends (P3-30 companion).** The
+  push/read classifier parsed the query with Go's `url.ParseQuery`, while git-http-backend parses
+  it with its own parser, and the two disagree on queries no client sends: git keeps the last of a
+  repeated `service` (Go the first), and a name without `=` takes the next segment as its value
+  (`service&git-receive-pack` is `service=git-receive-pack` to git, an empty `service` to Go). So
+  `info/refs?service=git-upload-pack&service=git-receive-pack` and `info/refs?service&git-receive-pack`
+  counted as reads for the token-less paths (a trusted-CIDR runner, `SPINE_GIT_HTTP_DEV_NO_AUTH`)
+  and returned the receive-pack advertisement (the push-side ref and capability list; the pack
+  upload itself always needed a bearer). `info/refs` now accepts, byte for byte, only an empty
+  query, `service=git-upload-pack` or `service=git-receive-pack`. Any other query counts as a push
+  (it needs a bearer) and is refused with `400` before git-http-backend; that includes `service=`
+  with an empty value, which git-http-backend used to refuse with `403`. With receive-pack off (the
+  default) such a query does not take the push-disabled auth bypass either (wave 3 review): through
+  it an unauthenticated caller got `400` for an existing workspace and the uniform `401` for a
+  missing one, the workspace-existence oracle EPIC-004 TASK-031 closed. A token-less one, a
+  trusted-CIDR runner's included, now gets `401` whether or not the workspace exists; an
+  authenticated one still gets the `400`.
+- **`SPINE_DEV_MODE` no longer drops git authentication (P3-30).** It is accepted whenever
+  `SPINE_ENV` is not `production`, and it removed authentication from clone **and push**
+  (anonymous pushes reached the pre-receive gate). Pushes now always present a validated bearer.
+  The new `SPINE_GIT_HTTP_DEV_NO_AUTH` opens clone/fetch only, and `spine serve` refuses it unless
+  `SPINE_ENV=development`.
+- **Rate-limit bucket reads every `X-Forwarded-For` line (P3-30).** It read only the first line,
+  so behind a proxy that adds its own line (HAProxy `option forwardfor`) a client picked its own
+  bucket.
+- **A credential-less code repository never uses the process git credentials (latent gitpool
+  item).** The gitpool cloner and client factory sent the process-wide `SPINE_GIT_PUSH_TOKEN`, and
+  used `SPINE_GIT_CREDENTIAL_HELPER`, for a code-repo binding with no `credentials_ref` — against
+  whatever host its `clone_url`, or a reused clone's `origin`/`pushurl`, named. Dormant (no
+  code-repo catalog or `RepositoryManager` is wired in `spine serve`), P1 once one is. Both are now
+  stripped for such bindings, on every host, and git runs with the host's own credential sources
+  switched off too (no system or global git config — so no `credential.helper`,
+  `http.extraHeader` or askpass configured there — no `GIT_ASKPASS`, and no process SSH agent or
+  key for `ssh://` URLs).
+- **`clone_url` redaction covers tokens in the username position (latent).**
+  `GET /api/v1/repositories` echoed `https://<token>@host/...`; all userinfo of an `https` URL is
+  now redacted (SSH logins and the SCP form are kept), and a malformed legacy value never echoes
+  anything before its last `@`. Stored values are unchanged.
+
+### Breaking
+
+- **Workflow identifier rule (all standalone deployments).** A workflow whose step, divergence,
+  branch or convergence IDs use upper case, `.`, `/`, spaces or more than 64 characters keeps
+  loading and running (core validation is unchanged), but `PUT /api/v1/workflows/{id}` on it is
+  refused with `422` until the identifiers are renamed (in-flight runs are pinned to their version,
+  so a rename is safe for them). The rule is documented in `architecture/workflow-definition-format.md`
+  §3.6. All shipped Spine and SMP workflows conform.
+- **Shared-mode metrics scrapers** must move to `GET /api/v1/platform/metrics` (operator token) to
+  keep the full export; `/system/metrics` in shared mode now returns the caller's workspace series
+  only. Single-workspace mode is unchanged.
+- **Runners behind a reverse proxy** need a bearer to clone (owner question 6 default).
+
+### Breaking (dev setups)
+
+- `SPINE_DEV_MODE` no longer gives token-less git access, for clone or push. For token-less local
+  clones set `SPINE_GIT_HTTP_DEV_NO_AUTH=1` **and** `SPINE_ENV=development` (startup fails
+  otherwise, including with `SPINE_ENV` unset); push with a token (`git -c
+  http.extraHeader="Authorization: Bearer <token>" push …`).
+- `docker-compose.yaml` no longer sets `SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.0.0/16`, so every clone
+  through the compose stack needs a token by default (owner question 4 default).
+  `docker-compose.override.yaml.example` documents runner-only recipes that exclude the bridge
+  gateway.
+- A trusted git CIDR that overlaps `SPINE_TRUSTED_PROXY_CIDRS` stops granting token-less clones;
+  `spine serve` logs the overlap at startup.
+- A code repository with no `credentials_ref` that relied on the process push token, the process
+  or a host-level credential helper, or the process's SSH identity now clones and pushes
+  unauthenticated: give it an `https` clone URL and a `credentials_ref` (there is no per-binding SSH
+  credential yet). Its clone and push also ignore the rest of the system and global git config — a
+  CA bundle or `sslVerify`, `http.proxy`, `url.<base>.insteadOf`, `safe.directory`: use the
+  environment forms (`GIT_SSL_CAINFO`, `HTTPS_PROXY`, …), which still apply, and keep its clone
+  owned by the `spine serve` uid (KNOWN-LIMITATIONS). Dormant today: `spine serve` wires no
+  code-repository catalog.
+
+### Changed
+
+- New route `GET /api/v1/platform/metrics` (full export, `SPINE_OPERATOR_TOKEN`; `401` for a wrong
+  token, `503` when unset). New environment variable `SPINE_GIT_HTTP_DEV_NO_AUTH`. No migration,
+  schema, event type or `rebuild_id` format change.
+- `/system/metrics` in shared mode answers `400` if no workspace resolved (unreachable past
+  authentication).
+- New logs: `sse: omitting unsafe event fields (rate-limited)` (Warn, at most once a minute, with
+  `suppressed_since_last_warn`), the rate-limited proxied-peer Warn on `/git`, `git request rejected
+  — non-canonical info/refs query` (Warn, with the query's length, never its bytes), the startup Warns for `SPINE_GIT_HTTP_DEV_NO_AUTH` and for
+  a CIDR overlap.
+
+### For embedders
+
+- **`core/observe.ExportPrometheusWorkspace(workspaceID)`** — additive; `ExportPrometheus` output is
+  byte-identical.
+- **`adapters/git.WithoutPushToken()`** — additive `CLIOption`, mirroring
+  `WithoutCredentialHelper`. No existing option, interface (`GitClient`) or call path changes.
+- **`adapters/git.WithoutAmbientCredentials()`** — additive, opt-in `CLIOption`: a client with no
+  token or helper of its own runs clone and push without the system and global git config
+  (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` = null device) or environment-injected config, with
+  `-c credential.helper=` and `-c http.extraHeader=`, `GIT_ASKPASS`, `SSH_ASKPASS` and
+  `SSH_AUTH_SOCK` emptied, `GIT_TERMINAL_PROMPT=0`, and a `GIT_SSH_COMMAND` that reads no
+  ssh_config and disables the agent and key-based authentication, so no host credential source
+  answers. Non-credential system and global settings (CA bundle, proxy, `insteadOf`,
+  `safe.directory`) are dropped with them for that clone or push; their environment forms still
+  apply. A client with its own credential is unchanged; without the option nothing changes.
+- **`adapters/gitpool`**: `NewCLIClientFactory` and `NewCLICloner` strip the process push token and
+  credential helper from their base options for an empty `Credential`, and apply
+  `WithoutAmbientCredentials`. SMP does not import `adapters/gitpool`.
+- **`adapters/repository.RedactCloneURL`** redacts all `https` userinfo and never echoes the
+  userinfo of an unparsable or opaque value. SMP does not call it.
+- Core workflow validation, the projection, `workflow.Service` (SMP's `WorkflowWriter`) and
+  `core/refadmit` behaviour are unchanged; the identifier rule lives in `service/` only.
+
+---
+
+## INIT-023 — Security Audit Remediation (EPIC-004 TASK-014: workflow and write-context governance)
+
+### Security
+
+- **A reviewer can no longer commit a workflow straight to `main` (audit F7, P2).** On the
+  standalone gateway a reviewer's `PUT /workflows/{id}` without `write_context` committed to the
+  authoritative branch (`write_mode: authoritative`), skipping both the ADR-008 lifecycle and
+  branch protection — enough to drop `task-default`'s review gate or neuter `workflow-lifecycle`
+  itself. It now opens an **update** `workflow-lifecycle` planning run, exactly as `POST
+  /workflows` already did for creates (new `Orchestrator.StartWorkflowUpdatePlanningRun`).
+- **`write_context: {}` on workflow endpoints is refused (V1).** It skipped the reviewer dispatch
+  on create *and* update and committed to `main` with no `Workflow-Bypass` trailer, for every
+  role. A workflow `write_context` now needs a `run_id` naming that workflow's own lifecycle run
+  (V2: before, any planning run — another workflow's, an artifact-creation run — or a task run
+  whose `task_path` the caller echoed was accepted, and the workflow then reached `main` under that
+  run's review instead of `workflow_review`).
+- **`workflow.Service` consults branch protection.** With a policy installed (`spine serve` installs
+  the projection-backed one), a non-bypass workflow write is an `OpDirectWrite` on its real target,
+  so the bootstrap `main: no-direct-write` rule refuses a direct workflow commit (`403`), and an
+  ADR-008 bypass needs an operator-or-above actor.
+- **Run branches have one writer on the API path (audit P3-6, P3).** `write_context` with a
+  `run_id` (artifact and workflow writes) and `POST /artifacts/add` let any contributor commit into
+  another actor's run branch, even while it sat in review; the governed merge then published the
+  injection. Such a write is now accepted only from the actor bound to the run's current step —
+  TASK-016's `core/refadmit` predicate, so pushes and API writes follow one rule — or an operator.
+  While the current step is a `review` or `internal` step (task-default's `publish`, between
+  approval and the merge) the branch is frozen for **every** role, operators included. P3-6 is
+  closed for writes by actors who do not hold the step; who may *claim* a step is governed by
+  TASK-007's step-entry policy, which gains the rule below.
+- **A reworked step is re-offered only to its prior holder (P3-6 residual, owner question 7).**
+  New opt-in `StepEntryPolicy.ReofferToPriorHolder`, on in `StrictStepEntryPolicy` (the
+  `spine serve` default): a waiting author step that was held before in its run — after a
+  `needs_rework` loop, or a restart-recovered row that still names its actor — can be claimed only
+  by that prior holder; an operator can still assign it to anyone. Without it a contributor could
+  claim a colleague's reworked draft and then write the branch as its bound actor. A step its
+  holder released stays claimable by others; a retry after a failed attempt is not re-offered;
+  nor is an attempt whose prior holder the claim itself would refuse — the holder no longer
+  resolves, is not `active`, is off the execution's `eligible_actor_ids`, is of a type the step
+  does not admit, or lacks one of its `required_skills` (only an `active` skill counts, as for any
+  claim) — since that holder could never take it back. Each of those follows an operator or admin
+  action (suspension, `actor.remove_skill`, `skill.deprecate`, a `step.assign` allow-list), never
+  a contributor's. With `EnforceExecutionMode` on (strict), `automated_only` and `ai_only` steps
+  are not re-offered at all: only operator-provisioned machine actors can bind them, and
+  auto-selection already hands their rework to any eligible pool member, so pinning the claim to
+  one runner or agent identity would only strand the attempt when it has gone.
+- **Workflow definitions have one producer (design-check V3, V4).** The artifact endpoints'
+  workflow-path guard was a raw prefix test, so `./workflows/x`, `governance/../workflows/x` and
+  `workflows//x` reached `workflows/` on a run branch (and `PUT /artifacts/./workflows/<id>.yaml`
+  replaced a workflow with artifact Markdown). The test is now canonical (dot segments, repeated
+  slashes, case folding). `POST /runs` with `mode: planning` and a `workflows/` task path, which
+  minted a non-lifecycle run that could lock that workflow against governed edits, is refused, and
+  so is the same path in the engine's `StartPlanningRun`.
+- **Not closed here: workflow edits by push.** "Workflow edits ride only their own run" (V2) is
+  enforced on the API path. A git push is admitted by the binding alone (INIT-023 TASK-016) and the
+  pre-receive gate checks no paths, so the actor bound to a task run's (or a lifecycle run's) current
+  step can still push changes under `workflows/` — or any other governed path — onto that run
+  branch, and the governed merge then publishes them under that run's review rather than
+  `workflow_review`. Closing that is the governance path guard (INIT-023 TASK-006); see
+  `KNOWN-LIMITATIONS.md`.
+
+### Changed
+
+- **`PUT /workflows/{id}` by a reviewer without `write_context`:** `200` + commit → **`201`**
+  with a planning body (`run_id`, `branch_name`, `workflow_path`, `write_mode: planning`); `503`
+  when no planning starter is wired; `404` (missing workflow), `422` (no version bump) or `400`
+  (bad id) before any branch or run exists. The `spine workflow update` CLI accepts any status
+  below 400 and needs no change.
+- **One open lifecycle run per workflow:** a reviewer `POST`/`PUT /workflows` while a
+  non-terminal planning run governs `workflows/<id>.yaml` is `409 conflict` naming it
+  (`detail.run_id`, `branch_name`, `status`, `current_step_id`); a store failure is `503`.
+- **`POST /workflows` for an id that already exists** still answers `409 already_exists`, but now
+  before any branch or run exists. A workflow planning run whose branch write fails is marked
+  `failed` (was: left `pending`, which scheduler recovery promoted to `active`).
+- **Workflow `write_context`:** `{}` (or `task_path` only) → `400` for every role; a `run_id` whose
+  run does not govern `workflows/<id>.yaml` → `400` (detail `run_task_path`, `workflow_path`).
+  Operators who sent `write_context: {}` got an untrailered direct commit; they now omit
+  `write_context` for the audited bypass.
+- **Run-branch writes** (`write_context` with `run_id`, `POST /artifacts/add`): `409` while the
+  current step is waiting or unassigned (claim it first, `POST /execution/claim`;
+  `detail.execution_id`) or has no open execution; `403` for any other non-operator (the holder is
+  never named); `409` (`detail.step_type`) during a `review` or `internal` step for every role;
+  `409` operator-only when the run has no run-level cursor (legacy or diverged) or its branch is
+  not an engine run branch; `409` when the step definition cannot be resolved; `503` when no step
+  assigner is configured. API writes land on the run's branch in the primary repository, so while
+  the current step is routed to a code repository (ADR-015 `repository: <id>`) only operators may
+  write it: the step's holder gets `409` with `detail.repository_id` (the same rule as a push of
+  that branch to the primary repository; before, any contributor could write it). After `POST /artifacts/entry` or a workflow planning run starts, the
+  author claims the draft step before stacking edits (the same claim was already required to submit
+  it); after `needs_rework`, the reworked step is claimed again.
+- **A run that governs a workflow definition accepts no artifact writes** (`400`).
+- **Artifact writes to a dot-segment or case-variant `workflows/` path** → `400`
+  (`use_operation: workflow.*`).
+- **`POST /runs` planning with a `workflows/` task path** → `400` (`use_operation: workflow.create`).
+- **Under the strict step-entry policy**, an actor other than the prior holder claiming a reworked
+  or restart-recovered author step gets `403`, and such steps are hidden from that actor's
+  candidate listing; the reviewer who sent work back can no longer self-claim the rework.
+- **Wiring:** single-workspace `spine serve` now wires the workflow planning starter (pooled
+  workspaces already had one) and installs the branch-protection policy on every
+  `workflow.Service`. No event type, schema, migration or environment variable is added.
+
+### Upgrade note: workflow runs left behind by failed starts
+
+Before this change a failed workflow-lifecycle start — a reviewer `POST /workflows` for an id that
+already exists, or a git error on the branch write — left its planning run `pending` with the run
+branch deleted, and scheduler recovery promotes such runs to `active` with a waiting `draft` step.
+They never finish. After the upgrade the one-open-run rule counts them, so every reviewer `POST` /
+`PUT` of that workflow answers `409` naming the run (`write_context` on it fails, its branch being
+gone). Operators should look for them once and cancel them:
+
+```sql
+SELECT run_id, task_path, status, branch_name, current_step_id
+  FROM runtime.runs
+ WHERE mode = 'planning' AND task_path LIKE 'workflows/%'
+   AND status NOT IN ('completed', 'failed', 'cancelled');
+```
+
+For each row whose `branch_name` no longer exists in the served repository (`git -C <repo>
+rev-parse --verify --quiet refs/heads/<branch_name>` prints nothing), run `spine run cancel
+<run_id>` (or `POST /api/v1/runs/{run_id}/cancel`) as an operator. Without database access, `GET
+/api/v1/query/runs?task_path=workflows/<id>.yaml` lists the runs of one workflow. The `409` message
+now names the operator cancel as the recovery for a stale run.
+
+### For embedders
+
+- `workflow.Service` gains `WithPolicy` and `WithDefaultRef`; `workflow.ValidateID`,
+  `workflow.FilePath` and `workflow.InWorkflowsDir` are exported. **The zero value is unchanged:**
+  with no policy no rule is evaluated and no role is checked on bypass writes (SMP's admin writes
+  are actor-less bypass writes and keep working byte for byte). Do not call `WithPolicy` unless
+  every bypass write context also binds a `domain.Actor` of role ≥ operator.
+- `engine.WorkflowWriter` gains `Update` (`*workflow.Service` already has it).
+  `Orchestrator.StartWorkflowUpdatePlanningRun` is new; `StartWorkflowPlanningRun` now refuses an
+  existing id before any run exists and marks a run whose branch write failed `failed`.
+- `Orchestrator.StartPlanningRun` refuses a path under `workflows/` (any spelling) with
+  `ErrInvalidParams`. SMP's only caller (`CreateEntry`) builds `.md` paths under the artifact type
+  directories, so its behaviour is unchanged.
+- `StepEntryPolicy.ReofferToPriorHolder` (zero value off; on in `StrictStepEntryPolicy`). SMP does
+  not use the step-entry policy today; an embedder that adopts `StrictStepEntryPolicy` gets it.
+
+---
+
+## INIT-023 — Security Audit Remediation (EPIC-001 TASK-003: bounded reads and NUL-delimited listings)
+
+### Security
+
+- **Git reads are bounded (audit F4, Spine half, P2).** The git CLI client buffered every
+  command's whole stdout and copied a `ReadFile` result twice more (an 8 MiB blob cost 49 MiB),
+  so a compressible pushed file of a few hundred MiB — a pack of well under a MiB — could take a
+  shared, multi-tenant process down on every projection sync, run-detail view or artifact read
+  that touched it. `ReadFile` now probes the blob's size (`git cat-file -s`) and refuses one over
+  the per-blob limit (`git.DefaultMaxBlobBytes`, 4 MiB, equal to the worktree read limit) before
+  reading it; the read itself fills one buffer pre-sized to the blob. Every other read command
+  fails past 16 MiB of output, stderr keeps 64 KiB (head and tail) for every command — `Clone`'s
+  included, which relays the remote's sideband — and read commands run with
+  `GIT_ALLOC_LIMIT` (4 x the per-blob limit, at least 1 MiB), so git refuses any single
+  allocation over it: a small blob stored as a delta on a huge base, or a gitlink named `*.md`
+  that `git show` renders as a commit with its patch, is refused instead of inflated. That limit
+  is per allocation, not git's total: read and diff commands also pin git's delta-base cache
+  (`core.deltaBaseCacheLimit` = the per-blob limit; 96 MiB by default), which a chain of
+  sub-limit delta bases otherwise filled (a 3 MB read cost 127 MiB in the git child; now 49–52 MiB).
+  Each concurrent read can still hold about three times the alloc limit in git (about 50 MiB with
+  the defaults). A command's output is held once (the parsed result shares its buffer). Mutating
+  commands never fail on output size (git applies a merge before it prints its diffstat);
+  `git diff` gets the output ceiling and the pinned cache but no alloc limit
+  (`KNOWN-LIMITATIONS.md`, "Git read bounds").
+- **Non-ASCII and control-character paths are no longer silently dropped (audit P3-9, Spine
+  half).** `Diff` and `ListFiles` parsed git's C-quoted output, so a governed artifact in a
+  directory with a non-ASCII letter — which `artifact.Slugify` produces from an ordinary
+  non-English title ("Wdrożenie") — was never projected, never status-cascaded at merge, and
+  `NextID` allocated its ID a second time. Both now read NUL-delimited output (`-z`) and return
+  raw paths. A path that is not valid UTF-8, or holds a control character (C0, DEL, C1),
+  U+2028/U+2029 or a bidi embedding/override/isolate control, is refused and recorded instead of
+  projected (owner question 2, default pending the owner); invalid UTF-8 would otherwise fail every
+  sync on PostgreSQL. A row a projection built before this change holds at such a path — possible
+  only under `core.quotePath=false`, where git listed bytes >= 0x80 raw — no longer outlives its
+  file: an incremental sync deletes it when the file is deleted, renamed away or modified, and a
+  workflow row is kept quarantined, or removed when it does not verify, by the first sync's sweep
+  or a sync that changes the file (new `projection_workflow_rejected` check `unsafe_path`; wave 3
+  integration). Invalid UTF-8 still never reaches the store. An untouched artifact row at such a
+  path goes at the upgrade's projection rebuild.
+
+### Changed
+
+- **413 for oversized reads:** `GET /api/v1/artifacts/<path>` (including `?ref=<run branch>`) and
+  the workflow read return `413 payload_too_large` ("… is N bytes, over the L-byte read limit")
+  for a blob over the per-blob limit, and ("… cannot be read within the read limits: git needed an
+  allocation over the A-byte git allocation limit …") for a file git refuses to produce — the
+  file itself may be small (a delta on a large base, or a gitlink's patch). A miss keeps its kind
+  and text (`bad revision`, 404).
+- **Projection:** an oversized `*.md` and any artifact or workflow candidate at a refused path are
+  skipped, recorded and advanced past — never a sync error. A projected artifact modified past the
+  limit loses its row. Each skip is a Warn line (`projection skipped file`), a
+  `spine_projection_files_skipped_total` increment and a new **`projection_file_skipped`** event
+  (`architecture/event-schemas.md` §4.15); `git_alloc_limit_bytes` says when it was git's
+  allocation limit, not the file's size, that refused it. `projection_synced` gains `refused`.
+  A skip is reported as soon as discovery decides it, so a sync held in `error` for another
+  reason (an unreadable changed file, a failed wipe, a failed second listing of the root
+  `workflows/` when `artifacts_dir` is a subdirectory — wave 3 review) still reports it, and
+  re-reports it on each retry under the same event id; the counter counts each report.
+- **The status cascade skips an added file at a refused path** (wave 3 review, codex): with the
+  raw `Diff` listing such a file was read and rewritten, and under merge binding the cascade commit
+  — which refuses a control byte in a path — then failed as a whole, so the run merged with its
+  task's status unchanged. It is skipped, as it was while git quoted it (binding off too).
+- **An oversized workflow file is a `projection_workflow_rejected` with check `read_bounds`** (its
+  verified previous row kept quarantined, or not projected) and the sync advances. An oversized
+  `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- **A read-command output over 16 MiB fails closed:** a commit on `main` whose listing or diff
+  exceeds it makes `IncrementalSync`, `FullRebuild` and `NextID` fail for that workspace (sync
+  state `error`, nothing written) until the content is removed.
+- **Behaviour:** existing subscriptions that receive every event type now also receive
+  `projection_file_skipped`.
+- **Diff details:** a copy record (only with `diff.renames=copies`) is reported as `added` at the
+  copy's destination instead of `modified` at its source; a leading or trailing space in a listed
+  path is kept; a malformed `git diff -z` stream is an error, never a partial list.
+- `artifact.Service.List` and `workflow.Service.List` leave refused paths out, as they were while
+  git quoted them; `artifact.IsIDCollision` counts an oversized existing file as a collision;
+  `engine.ValidateBranch` (no caller in Spine or SMP) fails each refused file ("not validated: …")
+  instead of letting it merge unvalidated.
+- **Cost:** one extra git process per `ReadFile`, two on a miss; a full rebuild of a large
+  repository takes roughly twice as long.
+- **Read commands and `git diff` run in the C locale** (`LC_ALL=C`, `LANGUAGE=`; listings, diff,
+  log, show, cat-file, rev-parse, merge-base), as the exact branch lookup already did: git
+  translates the prefix of its alloc-limit refusal, which must be recognised. On a host with a
+  translated git their error text is now English, so a miss that a translated message used to
+  hide is classified `not_found` as on an English host. Their output does not depend on the
+  locale. They also get `GIT_CONFIG_PARAMETERS` with the delta-base cache pin appended to any
+  inherited value (the argv is unchanged).
+
+### Upgrade note
+
+Run one projection rebuild per workspace after upgrading (standalone: `POST
+/api/v1/system/rebuild`). `IncrementalSync` processes only changes since the last synced commit,
+so artifacts and workflows already on `main` at a non-ASCII path are not picked up until they next
+change. After the rebuild, expect:
+
+- artifact IDs that the old `NextID` allocated twice (an `EPIC-001` alongside a hidden
+  `EPIC-001-résumé/`) to show up as two rows with the same ID — there is no uniqueness constraint,
+  so the rebuild does not fail; renumber them;
+- previously invisible workflow files with non-ASCII names to become active. List them first:
+  `git ls-tree -r -z --name-only main -- workflows .spine | LC_ALL=C grep -z '[^ -~]'`.
+
+SMP runs the rebuild per workspace in SMP INIT-027 EPIC-004 TASK-008 (owner question 3).
+
+### For embedders
+
+- **New in `adapters/git`:** `DefaultMaxBlobBytes`, `DefaultMaxOutputBytes`, `WithMaxBlobBytes`,
+  `WithMaxOutputBytes`, `WithMaxGitAllocBytes`, `ErrBlobTooLarge`, `ErrOutputTooLarge`,
+  `BlobTooLargeError` (with `GitAllocLimit` set when git refused an allocation), `OutputTooLargeError`
+  (`WithMaxOutputBytes` is floored at 4 KiB and the
+  alloc limit at 1 MiB, below which ordinary git output and git's own fixed allocations stop
+  fitting). Refusals are `*GitError{Kind: ErrKindPermanent}`
+  wrapping the typed cause, so `err.(*git.GitError)` keeps working. Every `NewCLIClient` gets the
+  defaults; nothing to configure.
+- **`Diff` and `ListFiles` return raw paths.** A caller that C-unquoted `Diff` paths must stop
+  (SMP INIT-027 EPIC-004 TASK-003 already moved its reader to its own NUL-delimited diff).
+- **New in `core/artifact`:** `RefusedFile`, `RefusalReason` (`RefusedOversized`,
+  `RefusedUnsafePath`; `RefusedFile.GitAllocLimit`), `UnsafePath`, `ReadLimitPhrase`, and additive `Refused` fields on
+  `DiscoveryResult` and `ChangeSet`. **New** `domain.UnsafeRepositoryPath`,
+  `domain.EventProjectionFileSkipped`, `observe.Metrics.ProjectionFilesSkipped`.
+- **A `GitClient` that wraps `ReadFile`** should make its too-large error match
+  `git.ErrBlobTooLarge` (`errors.Is`); until then discovery treats it as a read error and
+  `Service.Read` as a git error, exactly as before.
+- No interface, schema, migration, endpoint or environment variable changes.
+
+---
+
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-005: SHA-bound governed merge)
+
+### Security
+
+- **The governed merge publishes the commit that was validated and reviewed, not the run-branch
+  tip (audit F2, merge half, P2; P3-37).** The merge resolved the run branch's *name* when it ran,
+  so a commit pushed after `validate` passed, after the reviewer read the diff, or while the run sat
+  in `committing` between merge attempts reached `main` under the trusted "Merge run …" message —
+  including `.spine/branch-protection.yaml` with `rules: []` and rewritten `workflows/**`. With merge
+  binding on:
+  - every main-path step completion records the run-branch head the engine resolved (reserved
+    `runs.commit_meta` keys `spine.bound_sha`, `spine.bound_by`, `spine.head.<step>`,
+    `spine.repo.<id>.bound_sha`; no schema change). The binding is stored before the execution is
+    marked completed (wave 3 integration): the scheduler's step recovery re-submits a completed
+    execution without resolving the head again, so a failed `commit_meta` write or a crash after
+    the completion used to leave the run without that step's binding, and the next gate, with
+    nothing to compare against, approved whatever the branch then held. A failed write now leaves
+    the step open; it is still one `SetCommitMeta` per completion, with the outcome's commit map;
+  - a `review` or `convergence` step's outcome that leads to the merge is refused when the branch
+    moved since the previous binding (policy `reject`, the default; `rebind` accepts the new head);
+  - every merge attempt merges exactly the bound commit, applies the status cascade at that commit
+    with plumbing (never on the run branch), checks that the result is built from only the previous
+    target tip and that commit, and pushes it without force; the cascade and recovery-ledger
+    commits must be children of exactly the bound commit, and a merge result that fails the check
+    is taken back off the local target before anything else can build on it or publish it;
+  - the cascade rewrites only what the bound commit added since its merge-base with `main`. When
+    `main` already holds the bound commit, a retry recomputes against `main` as it was before this
+    run's earlier merge, and that merge counts as this run's only when its second parent is exactly
+    the cascade commit this run builds against it (wave 3 review). Matching the commit graph alone
+    let a run whose branch was reset onto another run's merged commit — the bound actor may
+    force-push — take that run's merge for its own and rewrite the `status:` of every artifact
+    that run added, with an empty reviewed diff; it now cascades `run.TaskPath` only, as with
+    binding off;
+  - a run with no binding the run itself recorded fails closed (`precondition`): a publish workflow
+    routes `merge_failed` back to `execute`, a legacy terminal-commit workflow fails the run.
+
+  The window after the reviewer read the diff is closed for clients that send `expected_head_sha`
+  (below). An approval without it binds the head at submit time: the moved-head check compares that
+  head with the previous binding, so a branch moved during the review and moved back to the bound
+  commit before the submit is not detected (KNOWN-LIMITATIONS "Governed Merge Binding").
+- **Workflow outcomes can no longer write `spine.*` commit metadata.** Reserved keys are stripped
+  from every outcome `commit:` map before storage, with binding on or off, and `workflow.Validate`
+  reports them (`steps[i].outcomes[j].commit`).
+- **Code repositories (P3-37, dormant):** under binding, a run whose code-repository clients cannot
+  bind is refused at `StartRun` before any branch exists; each code repository merges its bound
+  commit; an already-merged repository is merged again when its bound commit is not on its default
+  branch (the `merge_failed` loop-back no longer drops reviewed work); an operator retry rebinds
+  only to a `head_sha` it names.
+
+### Changed (standalone)
+
+`spine serve` enables merge binding on the process-level and every per-workspace orchestrator, with
+the `reject` policy and no switch to turn it off (owner questions 4 and 6; the rollback is the
+previous build). Externally visible:
+
+- **`POST /steps/{assignment_id}/submit` accepts `expected_head_sha`** (optional, a full lowercase
+  hex commit id): the head the submitter worked on. Answers, with `detail.reason`:
+  - `409 run_branch_moved` — the run branch is not at `expected_head_sha` (also with binding off);
+  - `409 run_branch_moved_since_gate` — a review/convergence approval of a branch that moved since
+    the previous step bound it; send the work back with a rework outcome;
+  - `400 expected_head_sha_invalid` / `expected_head_sha_not_applicable` — malformed, or on a run
+    with no branch, a divergence-branch step or an internal step; refused before the
+    required-outputs check, so it never fails the step;
+  - `503 run_branch_head_unavailable` — the head could not be resolved for a submit that must bind
+    it; nothing was recorded.
+
+  None of these answers changes the step: they come before the required-outputs check, so a submit
+  that is refused on its head and also lacks a required output is not failed for the output.
+- **UX change: a commit made during a review can no longer be approved in the same review.** A
+  commit that reaches the run branch while a review is open makes the approval answer
+  `409 run_branch_moved_since_gate`; the reviewer must choose a rework outcome so the change is
+  validated again. In `spine serve` such a commit can only be an operator's push, a push started
+  before the review that lands during it, or an API write (`/artifacts/add`, `write_context`)
+  authorized during the step before the review that lands after that step's submit (the gateway
+  reads the run once before the write; `service/internal/gateway/run_branch_write.go`): API writes
+  are refused during a `review` step for every role (INIT-023 TASK-014) and pushes for
+  non-operators (TASK-016), so a reviewer's fix-up goes through a rework round, not the open
+  review. A commit that lands after a producer's submit is merged when a later producer step — an
+  `automated` validate or summarize, which re-binds to the head it completes at — completes after
+  it without `expected_head_sha` (KNOWN-LIMITATIONS "Governed Merge Binding" 2).
+- **Runs in flight at upgrade** that reach the merge without a binding fail closed (publish
+  workflows route back to `execute` and re-bind on the next round).
+- **The status cascade commit is no longer on the run branch**; it reaches `main` only through the
+  merge. A `merge_failed` loop-back no longer leaves `status: Completed` on the branch being
+  reworked.
+- **A run branch whose tip held commits the merge left out is kept** instead of deleted, and a
+  `WARN merge_binding: commits after the bound head were not merged` names `run_id`, `bound_sha`
+  and `tip_sha`. A tip that cannot be read or judged keeps the branch too (`WARN merge binding: run
+  branch tip unknown; keeping the run branch`); only a branch that no longer exists is not kept.
+- **Planning-run collision renumber is skipped** under binding (it committed on the branch tip).
+- **A merge the structural check refuses is taken back** off the local `main` (compare-and-swap
+  `update-ref`, the working tree following with a two-tree `read-tree -m -u`), so the next governed
+  merge or in-place write cannot publish it — also with `SPINE_GIT_PUSH_ENABLED=false`, where the
+  local `main` is the published branch. A write that landed on `main` between the merge's base read
+  and the merge is kept, and the run stays in `committing` (outcome class `remote_unavailable`) so
+  the next attempt merges on top of it instead of failing the run or routing it back to `execute`
+  (a write that lands during a replay of a landed merge is not kept: KNOWN-LIMITATIONS "Governed
+  Merge Binding" 7). A take-back that cannot run is an `ERROR merge binding: refused merge NOT
+  taken back` and is named in the merge outcome's failure detail.
+- **Merge retries add nothing.** A retry or resume after the merge landed on the local `main`
+  recomputes the same status-cascade commit — also when the run added child artifacts — so it finds
+  `main` already up to date instead of adding a second cascade commit and merge commit. The earlier
+  merge is recognised by recomputing this run's cascade commit against it (wave 3 review), never by
+  the commit graph alone.
+- **Operator recovery actions on one run are serialised** under binding (wave 3 review). Two
+  overlapping `retry` / `resolve-externally` requests for one partially-merged run each chained
+  their ledger on the binding they had read and replaced the whole `commit_meta` from that
+  snapshot, so the later one restored the other repository's old binding (an operator's
+  `head_sha` rebind was lost and the old commit merged) and left the other ledger out of the
+  published history. The ledger is now built and recorded under a per-run in-process stripe from
+  a fresh read of the run; a request whose run is no longer partially merged by then is
+  `409`, and one whose context ends while it waits is `503`, both with nothing written. Requests
+  served by different processes sharing a database are not serialised (KNOWN-LIMITATIONS
+  "Governed Merge Binding" 15).
+- **`POST /runs/{run_id}/repositories/{repository_id}/retry` accepts `head_sha`** (and `spine run
+  merge retry --head-sha`): the code repository's current run-branch head to rebind to. Without it
+  the retry merges the bound commit again; a stale `head_sha` is `409 run_branch_moved`. The ledger
+  commit carries a `Rebound-SHA` trailer and the event a `rebound_sha` field. Under binding the
+  recovery ledger commit is built as a child of the bound commit and is not pushed to the run branch.
+- **Push of the merge:** `push --end-of-options origin <merge>^{commit}:refs/heads/main` (no force),
+  in place of `push origin <main oid>^{commit}:refs/heads/main`. A transient push failure recovers
+  on the next attempt; a non-fast-forward refusal stays permanent, as before.
+
+### Embedders (library)
+
+- New opt-in `Orchestrator.EnableMergeBinding(engine.MergeBindingConfig{MovedHead: ...})` and
+  `MergeBindingEnabled()`. It returns an error, leaving binding off, unless the `GitOperator`
+  implements the new optional `engine.CommitBinder` interface (`ResolveBranchHead`, `VerifyCommit`,
+  `IsAncestor`, `CommitParents`, `CommitFilesOnto`, `MergeBound`, `PushCommit`, `ResetBranch`). No method was added
+  to any interface an embedder implements. `*git.CLIClient` implements it; embedders run the shared
+  suite `core/engine/enginetest.RunCommitBinderConformance` against their own operator. The suite
+  accepts both forms of `ResetBranch` the contract allows — the local branch moved back, or dropped
+  by a remote-backed operator so the next `MergeBound` re-creates it from the remote (a clean working
+  tree either way) — and every commit it hands the binder is on a branch of `Source`, so a harness
+  whose `Sync` fetches sees it. `*git.CLIClient`'s `CommitBinder` commands run under TASK-003's
+  read bounds (wave 3 integration): the C locale, so a lock race stays a retryable error on a
+  translated host, the per-command output limit (`git.ErrOutputTooLarge`) and the bounded stderr;
+  not `GIT_ALLOC_LIMIT` (KNOWN-LIMITATIONS "Git Read Bounds").
+- Additive fields: `git.MergeOpts.SourceSHA` (merge exactly that commit; `CLIClient.Merge` honours
+  it), `git.MergeResult.BaseSHA`, `engine.StepResult.ExpectedHeadSHA`,
+  `engine.SubmitRequest.ExpectedHeadSHA`. New: `Orchestrator.RetryRepositoryMergeAt`,
+  `engine.HeadBindingDetail` (the `Detail` of every binding refusal) and the `Reason*` constants,
+  the `CommitMeta*` key constants, `git.IsCanonicalObjectName`.
+- **Shared behaviour at the next bump, binding off:** reserved `spine.*` keys are stripped from
+  outcome `commit:` maps (no shipped workflow in Spine or SMP uses them); `workflow.Validate` now
+  rejects an outcome `commit:` key starting with `spine.` in any letter case, at
+  `steps[i].outcomes[j].commit` — not opt-in, so every workflow an embedder validates (SMP's workflow
+  writer and seeding included) is refused with such a key; a client that sends
+  `ExpectedHeadSHA` gets it checked (old clients never send it); `git.CommitOpts` trailers outside
+  the standard four are now written in sorted order instead of map order. Everything else — every
+  code path and git argv — is unchanged without `EnableMergeBinding`.
+
+---
+
+## INIT-023 — Codex 6.1 catch-up review of waves 1 and 2
+
+### Changed
+
+- **Worktree reads and creates no longer wait on a FIFO** (`core/worktreefs`, TASK-004). After its
+  checks, a leaf is opened by name once more: `ReadFile`'s read, and `Create`'s read-only pin of
+  the file it has just made. That open is now non-blocking, so a leaf swapped for a named pipe in
+  the window is refused with `ReasonChanged` instead of blocking the call, and the handles it
+  holds, until a writer appears. Request cancellation could not interrupt the wait. `ReadFile`
+  also requires the opened file to still be a regular file, because `SameFile` cannot catch every
+  swap: on Linux a leaf deleted and re-created as a FIFO can reuse the freed inode number. Git
+  cannot check out a FIFO, so only a local process writing inside the worktree could do this.
+  Nothing changes for any other input.
+- **Stored workflow definitions holding an integer above 2^53 now verify** (`core/workflow`,
+  `adapters/projection`, TASK-011). `workflow.VerifyProjectionDefinition` decoded the stored JSON
+  through float64, so a definition that `ProjectionDefinition` had accepted and stored (for example
+  `retry: {limit: 9007199254740993}`) then failed its own verification. A later rejected edit of
+  that file deleted the row instead of keeping it quarantined for the runs pinned to it. Integers
+  that fit an int64 are now read exactly, and every other number reads as before. The first-sync
+  reconciliation compares stored and head definitions the same way, so a row that differs from head
+  only in such an integer is replaced instead of being counted unchanged. Definitions whose
+  integers are all at or below 2^53, which includes every shipped Spine and SMP workflow, see no
+  change.
+- **The reconciliation's baseline reset keeps a concurrent status** (`adapters/projection`, the
+  TASK-011 sweep as amended by the wave 2 cross-task review). When the first-sync reconciliation
+  writes a row on an otherwise up-to-date sync, it re-records the head it judged by. That write
+  was an unconditional `idle` at that head, which replaced any status another instance had written
+  since this sync read `idle@head`:
+  - `rebuilding`: a reader saw `idle` over a half-written projection;
+  - `error`: a same-head rebuild failure was erased, and the next tick took the up-to-date return
+    and skipped the forced branch-protection retry;
+  - the no-baseline `error` a partial wipe records: the next sync diffed from the head instead of
+    rebuilding, so the wiped rows stayed missing.
+
+  Now only `last_synced_commit` moves, in a single `UPDATE`, and a state with no baseline is left
+  alone. When no other writer is involved the result is `idle@head` as before.
+
+### For embedders
+
+- **New optional store capability:** `(*store.PostgresStore).SetSyncBaseline(ctx, commit) error`.
+  `projection.Service` asserts it and it is not added to `store.Store`, like
+  `ListWorkflowProjections`. A custom store without it keeps the previous `idle@head` write. SMP's
+  projection writer and provisioning pass `*store.PostgresStore` and get the new behaviour with no
+  change. For SMP it differs from before only when another instance writes `sync_state` inside that
+  window.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-016: ref-class push admission)
 
 ### Security
@@ -51,7 +665,8 @@ release is cut — this file is a staging area.
   other than the bound run/divergence branch; any delete of such a branch by a non-operator; any
   non-branch ref (tag, note, …) by a non-operator; shadowing names by anyone. In `SPINE_DEV_MODE`
   (no git authentication) every push into `spine/**` and every tag push is refused, since the gate
-  sees no actor. Refusals arrive as `remote: ref-admission: …` lines with per-ref `ng` status
+  sees no actor. *(Superseded by INIT-023 TASK-015: `SPINE_DEV_MODE` no longer skips git
+  authentication, and every push presents a bearer.)* Refusals arrive as `remote: ref-admission: …` lines with per-ref `ng` status
   (catalogue: `docs/git-push-guide.md` §5; how to push a run branch: §6). Pre-receive stays
   all-or-nothing.
 - **Exploratory divergence branches** can be created only by an operator or by the actor bound to
@@ -1243,12 +1858,15 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
     step profiles: an Active nested definition (for example in an imported repository) is removed
     and reported, and in-flight runs pinned to it lose their row;
   - when that reconciliation writes a row (deletes, replaces or quarantines one) on a sync that is
-    otherwise up to date, it re-records `sync_state` (`idle` at the head it judged by) instead of
-    returning without a write. Its head is resolved before the rows are listed, so another instance
-    (an SMP replica, a re-warmed workspace) may have projected a newer head in between; if it did,
-    the next tick re-diffs from this head and restores what the reconciliation undid. A row whose
-    projecting sync spans the whole reconciliation can still be lost, as with any two instances
-    projecting at different heads;
+    otherwise up to date, it re-records the head it judged by as `sync_state`'s
+    `last_synced_commit` instead of returning without a write. Its head is resolved before the rows
+    are listed, so another instance (an SMP replica, a re-warmed workspace) may have projected a
+    newer head in between; if it did, the next tick re-diffs from this head and restores what the
+    reconciliation undid. Through `(*store.PostgresStore).SetSyncBaseline` the status another
+    instance wrote meanwhile is kept, and a state with no baseline is left alone (codex 6.1
+    catch-up; a store without the capability writes `idle` at that head). A row whose projecting
+    sync spans the whole reconciliation can still be lost, as with any two instances projecting at
+    different heads;
   - incremental sync no longer projects `templates/`;
   - a `Diff` failure, a `Head()` failure (previously the state was left untouched), and a read of a
     changed file that git itself failed (a lock, a killed or unspawnable process) are each an
@@ -1340,12 +1958,13 @@ bearer path are all retained.
 ### Not yet implemented (follow-up)
 
 - Workflow endpoints (`workflow.create`, `workflow.update`) reject
-  `write_context.override: true` with `400` today — `workflow.Service`
-  does not consult `branchprotect.Policy` yet. Operators writing
-  directly to a workflow definition use the ADR-008 operator-bypass
-  path instead (omit `write_context` as `operator+` role — adds a
-  `Workflow-Bypass` trailer). Unifying the two bypass mechanisms is
-  tracked in the TASK-003 scope-decision note.
+  `write_context.override: true` with `400` today: `workflow.Service`
+  consults `branchprotect.Policy` (since INIT-023 TASK-014) but emits no
+  ADR-009 override event or trailer. Operators writing directly to a
+  workflow definition use the ADR-008 operator-bypass path instead (omit
+  `write_context` as `operator+` role — adds a `Workflow-Bypass`
+  trailer). Unifying the two bypass mechanisms is tracked in the
+  TASK-003 scope-decision note.
 - Git push path enforcement (EPIC-004) — the pre-receive handler is the
   subject of a follow-up epic.
 

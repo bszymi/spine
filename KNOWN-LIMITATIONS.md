@@ -101,16 +101,23 @@ This document tracks known gaps and deferred functionality.
     context and does not bound `git-http-backend`, and the pusher influences the processing time
     through the pack it sends. The review freeze is checked at the same moment, so a push started
     before the step was submitted can still land during review. Binding the governed merge to the
-    reviewed commit (INIT-023 TASK-005) is the content control for that window; until it lands,
-    the bound actor can still move the tip after validation. A real bound needs `git-http-backend`
+    reviewed commit (INIT-023 TASK-005; always on in `spine serve`) is the content control for that
+    window: a push that lands after the step's submit bound the head is not merged unless a later
+    producer step binds it — an `automated` step (a validate or summarize) re-binds to whatever head
+    it completes at unless its submitter sends `expected_head_sha` ("Governed Merge Binding" 2; the
+    shipped `artifact-creation`, `adr-creation`, `document-creation` and `task-spike` workflows have
+    such a step before their review, and no Spine client sends the assertion yet) — and an approval
+    of a branch that moved since the previous binding is refused
+    (`409 run_branch_moved_since_gate`); an embedder that does not enable merge binding keeps the
+    gap. A real bound needs `git-http-backend`
     run in its own process group under a deadline (a deadline would also cut legitimate large
     pushes and clones, which today outlive `OpTimeout`), or a post-unpack re-check; both are
     INIT-023 EPIC-001 follow-ups.
   - **Force-push by the bound actor is allowed.** Fast-forward-only cannot be enforced per actor
     before the pack is unpacked, and `receive.denyNonFastForwards` would also block operators.
-  - **Dev mode pushes are anonymous.** `SPINE_DEV_MODE` skips git authentication, so dev pushes
-    reach the gate with no actor and can write ordinary branches only. Validating a presented
-    bearer in dev mode belongs to INIT-023 TASK-015.
+  - ~~**Dev mode pushes are anonymous.**~~ Resolved by INIT-023 TASK-015: `SPINE_DEV_MODE` no
+    longer affects `/git`, and every push presents a validated bearer, so the gate always sees an
+    actor.
 - **Exploratory divergence branches: creation is bound to the run, their refs are operator-only.**
   Creating one (`POST /runs/{run_id}/divergences/{divergence_id}/branches`) needs an operator, or
   the actor who submitted the run-level step that triggered the divergence (while the run's cursor
@@ -122,6 +129,73 @@ This document tracks known gaps and deferred functionality.
   folding, so case-variant spellings are operator-only on any filesystem. Branch-protection rule
   matching does not fold; see "Served Repositories Need Case- and Normalization-Sensitive Storage"
   below.
+
+### Run-Branch API Writes and Workflow Governance: What INIT-023 TASK-014 Leaves Open
+- On the standalone gateway, an API write onto a run branch (`write_context` with a `run_id`,
+  `POST /artifacts/add`) is accepted only from the actor bound to the run's current step or an
+  operator, never during a `review`/`internal` step; reviewer workflow writes go through a
+  `workflow-lifecycle` run; `workflow.Service` consults branch protection (audit F7, P3-6). Limits:
+  - **Claiming a never-held step is open.** The binding follows whoever holds the step. A step
+    that was never held in its run (the first attempt — the `draft` step right after a planning or
+    workflow run starts, owner question 4: no auto-bind at start) can be claimed by any eligible
+    actor, who can then write the branch as its bound actor. That takeover is attributed
+    (`step_executions.actor_id`, the claim row, a `step_assigned` event), the starter is locked
+    out, and the content still has to pass a frozen review that, under the strict step-entry
+    policy, its author cannot claim. Under that policy a *reworked* or restart-recovered author
+    step is re-offered only to its prior holder (`ReofferToPriorHolder`); under `legacy` and in
+    the embedded zero value it is open too. A step its holder **released** — a first attempt or a
+    reworked one — is claimable by others (release is the holder's own hand-off; it stays
+    attributed through the cancelled claim row, which is how the engine tells a released attempt
+    from a fresh one). A retry whose preceding attempt failed is not re-offered, nor is an attempt
+    whose prior holder the engine's own claim checks would refuse: the holder no longer resolves,
+    is not `active`, is off the execution's `eligible_actor_ids`, is of a type the step does not
+    admit, or lacks one of its `required_skills`. The host's authorization is not among those
+    checks: the engine cannot see it, and judging it from the actor's role would lift every
+    re-offer for an embedder whose resolver leaves the role empty. So a prior holder whose role an
+    admin lowers below `spine serve`'s `execution.claim` (contributor) keeps the rework pinned
+    until the role is restored or an operator assigns it. With `EnforceExecutionMode` on,
+    `automated_only` / `ai_only` steps are never re-offered (their claimers are
+    operator-provisioned pool members). A reworked `hybrid` / `human_only` / unmoded author step
+    whose prior holder is still `active` but no longer working on it (a person who left the work,
+    a pooled agent identity that was scaled down) waits for that holder or an operator assign
+    (`POST /runs/{run_id}/steps/{step_id}/assign`); it is hidden from everyone else's candidate
+    listing.
+  - **Time-of-check gap.** The run and its executions are read once, before the write. Only the
+    bound actor passes, so the gap is that actor racing their own `step.submit` with a write (one
+    request's duration). Binding the governed merge to the reviewed commit (INIT-023 TASK-005) is
+    the backstop.
+  - **An idle lifecycle run holds its workflow.** Only one non-terminal lifecycle run may govern a
+    workflow (`409` names it). A reviewer who opens one and never submits blocks other reviewers'
+    edits of that workflow: `workflow-lifecycle`'s `draft` step has no timeout (only `review` has
+    `168h`). Recovery is an operator cancel or the operator bypass. Changing the timeout is a
+    governed workflow edit. Two first requests racing within milliseconds can both start a run;
+    the merge-conflict path is the backstop.
+  - **Runs left behind by failed workflow starts before the upgrade hold their workflow.** A run
+    a failed start left `pending` (branch deleted; scheduler recovery may since have made it
+    `active`) never finishes, so the one-open-run `409` names it on every reviewer edit of that
+    workflow until an operator cancels it. New failures leave the run `failed`. The CHANGELOG
+    upgrade note has the query to find such runs.
+  - **A step routed to a code repository writes no primary run branch through the API.** API
+    writes land on the run's branch in the primary repository; ADR-015 has a step write only its
+    own repository, so while the current step is routed elsewhere (`repository: <id>`) only an
+    operator may write that branch, the step's holder included (`409`, `detail.repository_id`), as
+    for a push. A workflow whose code step must also update the task artifact does it in a step
+    routed to the primary repository.
+  - **Workflow edits by push are not confined to the lifecycle run.** I7 ("a workflow edit rides
+    only its own lifecycle run") and the V2 closure hold on the API path only. Push admission
+    (INIT-023 TASK-016) admits the bound actor by binding alone and the pre-receive gate checks no
+    paths, so the actor bound to a task run's current step can push a commit that changes
+    `workflows/**` (or any other governed path) onto that run branch, and the governed merge
+    publishes it under that run's ordinary review, not `workflow_review`. Owner: INIT-023 TASK-006
+    (governance path guard).
+  - **The store-fallback step lookup is not version-pinned.** With an orchestrator wired the
+    review freeze reads the run's pinned workflow; the engine-less fallback (no run engine at all)
+    reads the current projection. A missing step still refuses.
+  - **F7's "no second reviewer" clause** is closed only with TASK-007's separation of duties
+    (strict in `spine serve`) and TASK-013's admin-only skills: under `legacy`, one reviewer can
+    claim and submit `draft` and then claim and approve `review` of the same update run.
+  - **SMP's own API writes onto planning branches** (`AddToRun`, `WriteContent`) are outside this
+    task (SMP TASK-007 or a new SMP task).
 
 ### Step-Entry Checks Are Opt-In for Embedders (and Off Under `legacy`)
 - The engine's step-entry policy (`engine.StepEntryPolicy`, INIT-023 TASK-007) closes audit
@@ -175,6 +249,121 @@ This document tracks known gaps and deferred functionality.
   never hold mid-run (see `workflow.DeferredStatusPreconditions`). Custom workflows with such a
   precondition strand under the strict policy until it is removed.
 
+### Governed Merge Binding (INIT-023 TASK-005)
+SHA-bound governed merges (`Orchestrator.EnableMergeBinding`) close audit F2's merge half: the
+merge publishes the commit the run's steps validated and reviewed, never the run-branch tip (see
+`architecture/git-integration.md` §6.3). What remains:
+1. **Binding off, the merge uses the tip.** The zero value is the pre-INIT-023 behaviour. That is
+   SMP's state until SMP TASK-009 implements `engine.CommitBinder` on its operator and enables
+   binding; `spine serve` always enables it (no switch, owner question 6).
+2. **`automated` steps are not gates** (owner question 5). A `validate` step binds whatever head it
+   completes at, so window (a) — a push between the commit that was tested and the validate submit
+   — is closed only when the runner sends `expected_head_sha` with the commit it tested. A
+   compromised runner credential can submit `validate` without testing anything at all; binding
+   cannot protect "validated" against that holder. A declared per-step `binds_head` is a follow-up.
+3. **A workflow whose first step is a gate** has no earlier binding to compare with: its first
+   approval binds the head it approves (logged at Info). Binding at run start is a follow-up.
+4. **A gate binds only when its advancing outcome reaches the merge through gates or internal
+   steps.** In a shape such as `review → finalize (manual) → end + commit`, `finalize` is a producer
+   and rebinds to the tip, so the review does not decide what merges. No shipped workflow in Spine
+   or SMP has this shape.
+5. **Convergence residual:** the rebind after a convergence happens only when the head before
+   `EvaluateAndCommit` equals the binding, but a push between that read and the convergence merge
+   still rides along. Dormant: no shipped workflow diverges.
+6. **Code repositories (P3-37), binding off:** code-repository merges still merge the tip, and an
+   already-merged repository is skipped after a `merge_failed` loop-back, dropping the next round's
+   reviewed work. Under binding both are fixed. Both paths are dormant until a code-repository
+   catalog is wired.
+7. **A refused merge is on the local `main` until it is taken back.** `MergeBound` moves the local
+   target before the structural check (DC-3) runs. A refused result is then taken back,
+   compare-and-swap, to the state before the merge, so neither the next governed merge nor an
+   in-place write's auto-push publishes it. Until then — and for good when the take-back cannot run
+   (the target moved on, or a local change in the shared working tree would be overwritten; logged
+   at `ERROR` and named in the outcome's failure detail) — it is on the local `main`, which with
+   `SPINE_GIT_PUSH_ENABLED=false` is the published branch. `git.CLIClient`'s `MergeBound` produces
+   only accepted shapes unless the target moves concurrently (until TASK-012 nothing serializes the
+   worktree); the check guards the push and other `CommitBinder` implementations. When a write lands
+   on the target between the merge's base read and the merge, the merge commit's parents are
+   `[write, merged commit]`: it is refused and taken back to the write (the merge's first parent,
+   when that is a newer descendant of the reported base), and the run stays in `committing` —
+   outcome class `remote_unavailable` — so the scheduler's next attempt merges on top of the write.
+   Only a take-back that could not restore the write sends the run down the permanent route (a
+   legacy terminal-commit workflow fails the run, a publish workflow routes `merge_failed` back to
+   `execute`). Two residuals of the race: a `CommitBinder` that itself committed onto the target
+   before merging is not fully undone (its commit is kept as the "write", and a binder that does so
+   on every attempt, or that persistently reports a stale `BaseSHA`, keeps the run retrying in
+   `committing`; nothing is pushed on that path, and the conformance suite pins `BaseSHA`); and a
+   write that lands during a *replay* (the bound commit already on the local `main`, after a failed
+   push or a partially-merged resume) is not kept: `git merge` is then "already up to date" and
+   reports the write itself as its result, which the check cannot tell from a commit the binder
+   made, so it is refused and taken back to the base. The write is then dropped from the local
+   `main` (with auto-push off, from the published branch; with auto-push on, a write its writer
+   already pushed stays on origin and the local `main` must be re-synced before the next governed
+   push succeeds), and the run takes the permanent route. TASK-012 runs the merge, the check and the
+   take-back under one worktree lock, which closes both.
+8. **A garbage-collected bound commit fails closed.** If the run branch is force-pushed away from
+   the bound commit and `git gc` prunes it, the merge refuses (`precondition`) and a publish workflow
+   routes back to `execute`. Pinning the bound commit with a ref is a follow-up.
+9. **The recovery ledger under binding** is a child of the bound commit, referenced only by the
+   run's `commit_meta` until the resumed merge publishes it: it lives only in the object store of
+   the repository that wrote it and is not pushed anywhere (with binding off it was committed on the
+   run branch and pushed). A resumed merge that runs after `git gc` pruned it (unreachable objects
+   older than `gc.pruneExpire`, two weeks by default) or in another clone (a remote-backed embedder
+   with several clones) cannot verify it and fails closed (`precondition`) — nothing unreviewed can
+   merge — and the ledger is visible in git only once merged (the event carries
+   `ledger_commit_sha`). Dormant: the ledger exists only for multi-repository partially-merged runs,
+   and no code-repository catalog is wired in Spine or SMP. Pinning the bound and ledger commits
+   with a durable ref is the follow-up (it is the same gap as item 8). Its commit date is the bound
+   commit's (the commit is built deterministically); the time of the operator action is in the
+   audit event.
+10. **Excluded commits are logged, not evented.** When the primary's or any code repository's run
+    branch holds commits the merge left out — or its tip cannot be read or judged — every run branch
+    of the run is kept (not only the one with excluded commits) and a `merge_binding: commits after
+    the bound head were not merged` warning names `run_id`, `bound_sha` and `tip_sha` (a `run branch
+    tip unknown` warning names the branch and the error); a dedicated event type is a follow-up. Only
+    code repositories this run merged are judged: one resolved externally or skipped is cleaned up
+    as with binding off.
+11. **Collision renumber is skipped under binding** (planning runs whose artifact id collided at
+    merge fail instead of renumbering): the renumber commits on the branch tip. Neither product
+    wires a collision handler today.
+12. **Without `expected_head_sha` an approval binds the head at submit time, not the head the
+    reviewer read.** The moved-head check compares the head at submit with the previous binding. If
+    the run branch is moved while the reviewer reads the diff (say, a commit that hides a hunk) and
+    moved back to exactly the bound commit before the submit, the check passes and the bound commit
+    — hunk included — merges, although the diff the reviewer read never showed it. Window (b) is
+    therefore closed only for clients that send `expected_head_sha`, which no Spine client does
+    yet (no CLI flag; the bound head is not returned to reviewers) and SMP TASK-009 will. In
+    standalone, TASK-016's review freeze limits who can push the run branch during a review to
+    operators. Making the assertion mandatory on advancing gate submits is owner question 1;
+    returning the bound head in the submit response is a follow-up.
+13. **Convergence merges into the checked-out branch (audit F8, owned by TASK-012).**
+    `CommitConvergence` merges the selected divergence branches with no target, so in standalone
+    (where the shared worktree has `main` checked out) the converged content reaches `main`
+    directly, without the bound merge or its structural check, and the post-convergence rebind
+    (§5, DC-6) sees an unmoved run branch. The rebind guard is exercised only against a fake
+    convergence. Dormant: no shipped workflow in Spine or SMP diverges. TASK-012 gives the
+    convergence an explicit run-branch target.
+14. **A replay finds the run's earlier merge within 64 first-parent commits.** A retry or resume
+    after the merge landed diffs the status cascade against `main` as it was just before that merge,
+    found on `main`'s first-parent chain, so it recomputes the same cascade commit. A merge there
+    counts as this run's only when its second parent is exactly the cascade commit this run builds
+    against that merge's first parent (it carries the run's `Run-ID` and `Trace-ID` trailers; wave 3
+    review) — never on the commit graph alone, which let a run whose branch was reset onto another
+    run's merged commit cascade that run's artifacts. If more than 64 first-parent commits landed on
+    `main` between the attempts, `main`'s history cannot be read, or the recompute fails (a read of
+    a cascade path failing in between), the cascade falls back to the current merge-base: a run
+    that added child artifacts then gets a second cascade commit and merge commit (no content
+    beyond the reviewed one).
+15. **Recovery actions are serialised per process only.** The bound recovery ledger is built and
+    its binding recorded under a per-run in-process stripe, from a fresh read of the run (wave 3
+    review), so overlapping `retry` / `resolve-externally` requests for one run in one process
+    chain their ledgers and keep each other's `head_sha` rebinds. Requests served by different
+    processes sharing one runtime database are not serialised: the later `commit_meta` write
+    (a whole-map replace) can still restore the other's bindings. What merges is then an earlier
+    reviewed binding, never unreviewed content; closing it needs a compare-and-swap on
+    `commit_meta` or a database lock per run. Dormant: recovery applies only to multi-repository
+    partially-merged runs, and no code-repository catalog is wired in Spine or SMP.
+
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
   enforced (a file that fails either is not projected), but a workflow that fails the full
@@ -190,6 +379,18 @@ This document tracks known gaps and deferred functionality.
 - **Non-Active workflow rows are only swept on stores with the all-rows capability.**
   `*store.PostgresStore` has it; a custom `store.Store` without `ListWorkflowProjections` gets an
   Active-only sweep.
+- **Several projection instances over one store share `sync_state` by last writer wins.** This
+  happens with SMP replicas, a re-warmed workspace, or a provisioning rebuild next to the sync loop.
+  Each sync's final `idle` or `error` write is unconditional, so it can replace a status or
+  baseline another instance wrote while it ran.
+  - **What it costs:** a rebuild in flight on one instance can briefly show as `idle` over a
+    half-written projection. A workflow row that a stale-head reconciliation deleted can be lost
+    if the instance that projected it finishes a whole sync during that reconciliation; the row
+    comes back when its file next changes or on a full rebuild.
+  - **What is narrowed:** the reconciliation's own baseline reset moves only `last_synced_commit`
+    (`SetSyncBaseline`, codex 6.1 catch-up), so it no longer erases a concurrent status. A custom
+    `store.Store` without that capability gets the plain `idle@head` write.
+  - **Follow-up:** a compare-and-set on every `sync_state` write, or a lock across instances.
 - **Incremental deletes leave the task's execution projection row** (`projection.execution_projections`)
   until the next full rebuild. This predates INIT-023; incremental sync never called
   `DeleteExecutionProjection`.
@@ -269,9 +470,85 @@ The following limitations have been resolved:
 - Not bcrypt/argon2 — tokens are not user-chosen passwords, they are cryptographically random
 
 ### Auth Bypass in Dev Mode
-- When `SPINE_DATABASE_URL` is not set, auth service is nil
-- Auth middleware returns 503 (fail closed) — no bypass
-- Production deployments MUST configure database and auth
+- **No auth service:** when `SPINE_DATABASE_URL` is not set the auth service is nil, and the auth
+  middleware answers 503 (fail closed) — no bypass. Production deployments MUST configure a
+  database and auth.
+- **`SPINE_DEV_MODE` (API only).** `1`/`true` lets unauthenticated requests through `authorize()`
+  on `/api/v1`. It is refused at startup only when `SPINE_ENV=production`, so it is accepted with
+  `SPINE_ENV` unset or `staging` (INIT-023 TASK-015 owner question 5: unchanged, pending the
+  owner). Since INIT-023 TASK-015 it has **no effect on `/git`**; it used to drop git
+  authentication for clone and push.
+- **`SPINE_GIT_HTTP_DEV_NO_AUTH` (git reads only).** `1`/`true`/`yes`/`on` lets every client clone
+  and fetch over `/git` without a bearer. `spine serve` refuses to start with it unless
+  `SPINE_ENV=development` (unset or `staging` is refused too). It never covers a push: pushes
+  always present a bearer, validated and attached as the actor. The two flags accept different
+  value sets (`SPINE_DEV_MODE` only `1`/`true`); aligning them is a follow-up.
+
+### Git HTTP: Token-Less Clones Are for Direct Peers Only
+- Since INIT-023 TASK-015 (audit P3-30) the `SPINE_GIT_HTTP_TRUSTED_CIDRS` bypass applies only to a
+  clone or fetch whose TCP peer is inside the list, is **not** in `SPINE_TRUSTED_PROXY_CIDRS`, and
+  sent no `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`, `X-Forwarded-Proto` or
+  `Via`. No forwarded address is trusted for access (owner question 6: a runner behind a reverse
+  proxy presents a token; pending the owner).
+- **Residual: TCP-level proxies are invisible.** A proxy that relays connections without adding a
+  header — Docker's userland proxy for a published port, which connects from the bridge gateway
+  (`x.y.z.1`), or an L4 load balancer — looks like a direct peer. Never put such an address in
+  `SPINE_GIT_HTTP_TRUSTED_CIDRS`; the compose file no longer trusts its whole bridge subnet, and
+  `docker-compose.override.yaml.example` shows runner-only recipes.
+- **Residual: process-wide git capacity.** In shared mode the git concurrency cap (5 in-flight
+  pack operations) and the per-client-IP rate limiter are process-wide: one tenant's slow clones
+  can fill every git slot and make every tenant's git requests answer `503`. They key on network
+  address and capacity, not tenant identity; a per-workspace fair share is a follow-up.
+
+### SSE: An Event With an Unsafe ID Does Not Advance the Client Cursor
+- Since INIT-023 TASK-015 (audit P3-28) an event whose ID (or type) contains a control character,
+  invalid UTF-8, U+0085, U+2028 or U+2029 is streamed without its `id:` (or `event:`) line, so a
+  workflow identifier cannot inject SSE frames. Omitting the ID keeps the client's cursor at the
+  previous event: a reconnect replays that event again (at-least-once, never a gap).
+- **Residual:** if more than 100 (`sseReplayCap`) unsafe-ID events follow the last safe one, every
+  reconnect replays the same first 100 and never catches up through replay; live events still
+  arrive. Such IDs can come only from a workflow whose identifiers break the identifier rule, which
+  the standalone API refuses (`workflow-definition-format.md` §3.6) but a git push or a governed
+  merge can still land, and core validation (shared with embedders) does not apply.
+
+### Code Repositories Authenticate Only With `credentials_ref`
+- Since INIT-023 TASK-015 a code repository with no `credentials_ref` clones and pushes with no
+  credential: the gitpool cloner and client factory strip the process-wide `SPINE_GIT_PUSH_TOKEN`
+  and `SPINE_GIT_CREDENTIAL_HELPER` for it, on every host (owner question 2 ruled "never", pending
+  the owner), and run git with every host credential source switched off
+  (`git.WithoutAmbientCredentials`): no system or global git config is read (so no
+  `credential.helper`, askpass program, `http.extraHeader` or `core.sshCommand` configured there,
+  URL-scoped ones included), no config injected through `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`,
+  `GIT_ASKPASS`, `SSH_ASKPASS` and `SSH_AUTH_SOCK` are emptied, and for `ssh://` / SCP-style URLs ssh
+  runs with no ssh_config, no agent and no key-based authentication. A private code repository
+  needs its own `credentials_ref`. Only the primary repository uses the process credentials.
+- **SSH code repositories cannot authenticate.** `credentials_ref` resolves to an HTTPS token only;
+  there is no per-binding SSH key, so an `ssh://` code repository with no credential is reached
+  anonymously or not at all. Use an `https` clone URL with a `credentials_ref`. Per-binding SSH
+  credentials are a follow-up.
+- **No host git config at all, credential or not.** Because the system and global config are not
+  read, their non-credential settings do not apply to a credential-less code repository's clone or
+  push either: a CA bundle (`http.sslCAInfo` / `http.sslCAPath`, `http.sslVerify`), a proxy
+  (`http.proxy`), URL rewrites (`url.<base>.insteadOf`), `safe.directory`, `http.version` and the
+  like. The environment equivalents still apply — `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`,
+  `GIT_SSL_NO_VERIFY`, `HTTPS_PROXY` / `https_proxy` / `ALL_PROXY` — so set those in the
+  environment of `spine serve` instead. `safe.directory` and `insteadOf` have no environment form:
+  every clone under `SPINE_CODE_REPO_BASE` must be owned by the uid `spine serve` runs as
+  (otherwise that repository's commits work, through the operator's `safe.directory`, but its
+  push fails with "detected dubious ownership"), and a clone URL must name its real host. The
+  same client's local operations (commit, merge, log) still read the host config. Passing
+  Spine-controlled values for these on the command line is a follow-up for when code repositories
+  are wired; `TestLatentGitpool_CredentialLessCodeRepoReadsNoHostConfig`
+  (`adapters/gitpool/process_auth_scope_test.go`) pins the current behaviour.
+- **Residuals:** curl's `~/.netrc` lookup, which git enables for HTTP, still answers for a host it
+  lists — do not keep a `.netrc` in the `HOME` of the `spine serve` process. Config in a reused
+  clone's own `.git/config` still applies (only filesystem access can write it). On git 2.30–2.31,
+  which ignore `GIT_CONFIG_GLOBAL`, the global config is still read; generic `credential.helper`
+  and `http.extraHeader` values are reset on the command line there, but a URL-scoped
+  `http.<url>.extraHeader` in the global config is not (git ≥ 2.32 is unaffected).
+- **Residual:** a reused clone whose `origin` differs from the binding's `clone_url` is not
+  refused or re-cloned, so `/git/{ws}/{repo}` can serve a different repository than the binding
+  names (no credential reaches it). Follow-up.
 
 ### Path Traversal
 - Worktree file I/O (artifact create/update and their rollbacks, acceptance/successor reads,
@@ -391,6 +668,86 @@ The following limitations have been resolved:
   `origin/<d>` by guessing; the merge is now refused too (`switch --no-guess`), and run start
   reports `not_found`. No shipped build wires a code-repository catalog (P3-36, P3-37), so this is
   dormant.
+
+### Git Read Bounds
+- **Bounds** (INIT-023 TASK-003; audit F4): the git CLI client (`adapters/git.CLIClient`) never
+  buffers more than its limits. `ReadFile` probes the blob's size (`git cat-file -s`) and refuses
+  one over the per-blob limit before reading it (`git.DefaultMaxBlobBytes`, 4 MiB — the worktree
+  read limit too; `git.WithMaxBlobBytes`), with a permanent error matching `git.ErrBlobTooLarge`
+  (API 413). Every other read command — listings, diff, log, rev-parse, merge-base — fails past
+  16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
+  `git.ErrOutputTooLarge`).
+  Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
+  git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses any single
+  allocation over it — it will not inflate a small blob stored as a delta on a huge base, or render
+  a gitlink `*.md` as a commit with its patch — and read and diff commands pin git's delta-base
+  cache to the per-blob limit (`core.deltaBaseCacheLimit`, passed in `GIT_CONFIG_PARAMETERS`
+  after any inherited entries); they run in the C locale so git's refusal is recognised whatever
+  the host's language. A command's output is held once: the parsed paths and messages share its
+  buffer, which grows in powers of two (so while it grows it is briefly held at half and full
+  size). Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the
+  first 16 MiB of their output and never fail on its size. Defaults pending the owner (task owner
+  questions 1 and 4).
+- **git's memory per read is about three times the alloc limit, not one.** `GIT_ALLOC_LIMIT` is
+  checked per allocation. An object at the end of a delta chain whose bases are each just under
+  the limit is rebuilt base by base, so one step holds the base being patched, its result and the
+  delta-base cache — about 50 MiB in the git child with the defaults (49–52 MiB measured for a
+  3 MB file on a chain of eight 15 MiB bases; 124–127 MiB before the cache was pinned). Each
+  concurrent read pays it, so a replica serving N such reads at once needs about N x 50 MiB of
+  headroom for git. Lowering it means lowering the alloc limit (owner question 4), which refuses
+  more legitimate deltas.
+- **A read-command output over the ceiling fails closed.** A commit on `main` whose listing or
+  diff exceeds 16 MiB (roughly 50k files, or fewer with long paths) makes `IncrementalSync`,
+  `FullRebuild` and `NextID` fail for that workspace — the sync state is `error` at the previous
+  commit and nothing is written — until the content is removed or the limit raised. Reaching it
+  takes a governed merge. Before TASK-003 the same commit exhausted the process's memory instead.
+- **`diff` runs without `GIT_ALLOC_LIMIT`.** Rename detection loads both blobs of a candidate
+  pair, and a legitimate large rename on `main` must not fail `Diff`; so a large blob already on
+  the diff base can still be inflated in the git child while its rename is detected (its
+  delta-base cache is pinned like a read command's).
+- **Named-ref window.** The size probe and the read are two git processes. A ref given by *name*
+  can move between them; Spine's buffer stays capped (the read overruns into the same refusal, with
+  size -1) and git's memory stays within the per-read bound above. Projection reads use commit ids; the
+  window applies to reads by name (`?ref=<branch>`, and the merge-time status cascade with merge
+  binding off, which reads the run branch by name; with binding on — always in `spine serve` —
+  INIT-023 TASK-005 reads it at the bound commit).
+- **Deltas on a large base are refused.** A legitimate artifact stored as a delta on a base larger
+  than `GIT_ALLOC_LIMIT` (16 MiB by default) cannot be read and is refused as oversized. The
+  refusal says so (`git.BlobTooLargeError.GitAllocLimit`, `git_alloc_limit_bytes` on
+  `projection_file_skipped`, and the 413 message names the git allocation limit), because the
+  file itself may be well under the per-blob limit.
+- **What `git show` renders counts.** The limit applies to what is read for a path: a tree path's
+  listing, or a gitlink rendered as a commit with its patch, is refused like a large blob.
+- **The merge-binding plumbing** (INIT-023 TASK-005's `CommitBinder` methods: `rev-parse
+  --verify`, `rev-list --parents`, `merge-base --is-ancestor`, `ls-tree`, the private-index
+  `read-tree` / `hash-object` / `update-index` / `write-tree` / `commit-tree`, `update-ref`,
+  `read-tree -m -u`, `symbolic-ref`) runs in the C locale with the per-command output limit and the
+  bounded stderr (wave 3 integration), but without `GIT_ALLOC_LIMIT` or the pinned delta-base
+  cache: the take-back's `read-tree -m -u` materialises the working tree like checkout, and the
+  read-only commands parse the commit being merged, which the merge itself then reads without an
+  allocation limit.
+- **Not covered:** receive-time inflation (`index-pack` reconstructs a pushed delta to hash it;
+  `receive.maxInputSize` bounds the pack, not the object), checkout-time inflation (`git worktree
+  add` / `checkout` of a branch holding an oversized blob, including the standalone branch-write
+  worktree), and wall-clock timeouts on git commands.
+- **Cost:** one extra git process per `ReadFile` (two on a miss: the probe, then the `git show`
+  that produces today's error), so a full rebuild of a large repository takes roughly twice as
+  long. A batched probe is a follow-up.
+- **Refused paths** (P3-9, owner question 2): `Diff` and `ListFiles` return raw NUL-delimited
+  paths, so non-ASCII artifacts are now projected. A path that is not valid UTF-8 or holds a
+  control character (C0, DEL, C1), U+2028/U+2029 or a bidi control (U+202A–U+202E,
+  U+2066–U+2069) is never projected (`projection_file_skipped`, reason `unsafe_path`) and is left
+  out of `artifact.Service.List` and `workflow.Service.List`, as it was while git quoted it.
+  A row an earlier projection made at such a path — possible only under `core.quotePath=false`,
+  where git listed bytes >= 0x80 raw — is removed when its file is deleted, renamed away or
+  modified, and a workflow row is kept quarantined (or removed) by the first sync's sweep, or by a
+  sync that changes the file (wave 3 integration); an artifact row at such a path whose file
+  never changes stays until the upgrade's projection rebuild (CHANGELOG). `artifact.Slugify`
+  never produces one. Other readers that take a path from the caller
+  (`artifact.Service.Read`, the merge-time status cascade) are unchanged.
+- **Embedders that wrap `ReadFile`** (SMP's bounded reader) return their own too-large error;
+  until it matches `git.ErrBlobTooLarge`, discovery files such a read under its read errors and
+  `Service.Read` reports a git error rather than 413 (SMP INIT-027 EPIC-004 TASK-008).
 
 ### Webhook Signing Secrets: `migrate` Mode Does Not Close the Cross-Workspace Transplant
 - **What:** signing secrets are sealed in the `enc:v2` envelope, bound to the workspace and the

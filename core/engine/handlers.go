@@ -232,7 +232,7 @@ func (o *Orchestrator) advancePublishStepIfAny(ctx context.Context, run *domain.
 		log.Info("publish step merge_failed, routing run back",
 			"run_id", run.RunID, "next_step", outcome.NextStep)
 
-		return o.routeStepOutcome(ctx, stepDef, outcome, stepExec, run, wfDef, now)
+		return o.routeStepOutcome(ctx, stepDef, outcome, stepExec, run, wfDef, now, nil, false)
 	}
 
 	log.Info("publish step advanced",

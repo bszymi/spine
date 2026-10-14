@@ -33,6 +33,10 @@ type stepSubmitRequest struct {
 	Output           *stepSubmitOutput `json:"output,omitempty"`
 	Rationale        string            `json:"rationale,omitempty"`
 	ValidationStatus string            `json:"validation_status,omitempty"`
+	// ExpectedHeadSHA is the run-branch head the submitter worked on
+	// (INIT-023 TASK-005). Optional; when present the engine refuses the
+	// submit unless the run branch is still there.
+	ExpectedHeadSHA string `json:"expected_head_sha,omitempty"`
 }
 
 type stepAssignRequest struct {
@@ -67,6 +71,18 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	// Until that is implemented, planning requests are blocked to avoid creating
 	// runs that bind to execution workflows and immediately stall.
 	if req.Mode == "planning" {
+		// One producer of workflow task paths (INIT-023 TASK-014 I9, V4):
+		// a generic planning run must never carry workflows/<id>.yaml (any
+		// spelling). Such a run would merge its Markdown into workflows/
+		// under its own creation workflow's review, and its run.TaskPath is
+		// the key the one-open-lifecycle-run 409 and the workflow
+		// write_context binding trust — a contributor could lock any
+		// workflow against governed edits. Refused before the starter is
+		// called; the engine's StartPlanningRun refuses it too.
+		if isWorkflowTarget(req.TaskPath) {
+			WriteError(w, workflowRejection("create"))
+			return
+		}
 		prs := s.planningRunStarterFrom(r.Context())
 		if prs == nil {
 			WriteError(w, domain.NewError(domain.ErrUnavailable, "planning run starter not configured"))
@@ -331,7 +347,23 @@ func (s *Server) handleRunRepositoryRetry(w http.ResponseWriter, r *http.Request
 	runID := chi.URLParam(r, "run_id")
 	repoID := chi.URLParam(r, "repository_id")
 
-	result, err := resolver.RetryRepositoryMerge(r.Context(), runID, repoID, req.Reason)
+	// head_sha (INIT-023 TASK-005 DC-7): the operator names the code
+	// repository's current run-branch head to rebind the merge to it.
+	// Without it the retry merges the bound commit again.
+	var (
+		result *engine.MergeRecoveryResult
+		err    error
+	)
+	if req.HeadSHA != "" {
+		at, ok := resolver.(RunMergeHeadRetrier)
+		if !ok {
+			WriteError(w, domain.NewError(domain.ErrUnavailable, "head_sha is not supported by this deployment"))
+			return
+		}
+		result, err = at.RetryRepositoryMergeAt(r.Context(), runID, repoID, req.Reason, req.HeadSHA)
+	} else {
+		result, err = resolver.RetryRepositoryMerge(r.Context(), runID, repoID, req.Reason)
+	}
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -371,6 +403,9 @@ func runMergeActionResponse(runID, repoID string, status domain.RepositoryMergeS
 type runMergeActionRequest struct {
 	Reason          string `json:"reason"`
 	TargetCommitSHA string `json:"target_commit_sha,omitempty"`
+	// HeadSHA is the retry path's optional rebind target (INIT-023
+	// TASK-005 DC-7); the resolve path ignores it.
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
@@ -444,6 +479,7 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 		ExecutionID:       executionID,
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: artifactPaths,
+		ExpectedHeadSHA:   req.ExpectedHeadSHA,
 	})
 	if err != nil {
 		WriteError(w, err)

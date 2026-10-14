@@ -5,7 +5,7 @@ title: Security Audit Remediation
 status: Pending
 owner: bszymi
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-14
 links:
   - type: related_to
     target: /initiatives/INIT-018-branch-protection/initiative.md
@@ -628,6 +628,39 @@ questions stay in that task.
   pre-existing failures, identical on `main`: 30 scenario tests,
   `TestRunModeDatabaseDefault`. Tasks stay In Progress until GitHub CI runs
   after a push. Not pushed.
+- 2026-10-14 — **Codex 6.1 catch-up of waves 1 and 2.** The earlier codex
+  rounds had run on older models (the CLI refused the configured gpt-6.1-sol).
+  After a CLI update, every merged wave 1 and wave 2 range was re-reviewed on
+  gpt-6.1-sol with two skeptics per P1/P2. Three real P3s were fixed with tests
+  on `init/INIT-023-codex61-catchup`: a FIFO leaf is opened non-blocking in
+  `worktreefs`, workflow integers above 2^53 are decoded exactly, and the
+  projection sweep resets its baseline through `SetSyncBaseline`.
+- 2026-10-14 — **Wave 3:** TASK-003 (bounded blob reads, NUL-delimited
+  `Diff`/`ListFiles`), TASK-005 (the governed merge is bound to the reviewed
+  commit), TASK-014 (reviewer workflow updates go through governance;
+  `write_context` limited to the assignee) and TASK-015 (SSE field safety,
+  shared-mode tenant scoping, git-endpoint auth, gitpool token-host scoping)
+  merged to local `main` through `init/INIT-023-wave3-integration`, together
+  with the catch-up. Each task was reviewed alone (three lenses, two rounds,
+  codex); the integration fixed two semantic conflicts (the commit binder's
+  git runner now has TASK-003's output bounds and the C locale; docs) and
+  codex's P2s (the binding is written before the step completes; refusals are
+  reported before root workflows are listed). The cross-task review (two
+  skeptics per P1/P2) confirmed two more P2s, both fixed with tests: the
+  binding-on status cascade could take another run's merge as its own replay,
+  and concurrent recovery requests could lose a binding update (now under a
+  per-run lock). Gates: Spine CI, vet with every tag, race on the touched
+  packages, integration and the `scenario-git-http` job on PostgreSQL 18, the
+  `git-floor` job on git 2.39.5, golangci (no new issues), codex on
+  gpt-6.1-sol clean in two rounds on the final tree. SMP `main` f5c6fd6d
+  builds against it and passes its Spine-runtime and gateway suites; SMP's
+  wave 3 integration (`.spine-revision` d23b897) also builds and passes
+  against it. Known pre-existing failures, identical on `main`: 31 scenario
+  tests (30 + `TestWorkspace_ScopedServices` with a migrated registry),
+  `TestRunModeDatabaseDefault`. Open for the owner: TASK-015 OQ2 ruled
+  "never" (a deviation from its default); whether the commit binder should
+  get `GIT_ALLOC_LIMIT` (KNOWN-LIMITATIONS "Git Read Bounds"). Tasks stay In
+  Progress until GitHub CI runs after a push. Not pushed.
 
 ---
 

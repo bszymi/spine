@@ -308,6 +308,10 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 	rec := testutil.InstallGitRecorder(t)
 	ctx := context.Background()
 	lookup := func(n string) []string { return []string{"show-ref", "--verify", "--hash", "refs/heads/" + n} }
+	// probe is ReadFile's size probe (INIT-023 TASK-003), which precedes
+	// the unchanged `git show`; a failed probe still runs the show, so a
+	// miss keeps the show's error.
+	probe := func(spec string) []string { return []string{"cat-file", "-s", "--end-of-options", spec} }
 	cloneDst := filepath.Join(t.TempDir(), "clone")
 	abbrev := featOID[:12]
 	// notFound keeps a step whose expected result is ErrKindNotFound
@@ -346,19 +350,19 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		{"DeleteBranch", func() error { return c.DeleteBranch(ctx, "n1") },
 			[][]string{{"branch", "-D", "--end-of-options", "n1"}}},
 		{"Diff branches", func() error { _, err := c.Diff(ctx, "main", "feat"); return err },
-			[][]string{lookup("main"), lookup("feat"), {"diff", "--name-status", "--end-of-options", mainOID, featOID, "--"}}},
+			[][]string{lookup("main"), lookup("feat"), {"diff", "--name-status", "-z", "--end-of-options", mainOID, featOID, "--"}}},
 		{"Diff pass-through refs", func() error { _, err := c.Diff(ctx, "refs/tags/t1", "HEAD"); return err },
-			[][]string{{"diff", "--name-status", "--end-of-options", "refs/tags/t1", "HEAD", "--"}}},
+			[][]string{{"diff", "--name-status", "-z", "--end-of-options", "refs/tags/t1", "HEAD", "--"}}},
 		{"Log since+path", func() error { _, err := c.Log(ctx, git.LogOpts{Limit: 2, Since: "main", Path: "f.txt"}); return err },
 			[][]string{lookup("main"), {"log", logFormat, "-n2", "--end-of-options", mainOID + "..HEAD", "--", "f.txt"}}},
 		{"Log plain", func() error { _, err := c.Log(ctx, git.LogOpts{}); return err },
 			[][]string{{"log", logFormat, "--end-of-options", "--"}}},
 		{"ReadFile branch", func() error { _, err := c.ReadFile(ctx, "feat", "f.txt"); return err },
-			[][]string{lookup("feat"), {"show", "--end-of-options", featOID + ":f.txt", "--"}}},
+			[][]string{lookup("feat"), probe(featOID + ":f.txt"), {"show", "--end-of-options", featOID + ":f.txt", "--"}}},
 		{"ReadFile tag-only name", func() error { _, err := c.ReadFile(ctx, "t1", "f.txt"); return err },
-			[][]string{lookup("t1"), {"show", "--end-of-options", "t1:f.txt", "--"}}},
+			[][]string{lookup("t1"), probe("t1:f.txt"), {"show", "--end-of-options", "t1:f.txt", "--"}}},
 		{"ReadFile HEAD", func() error { _, err := c.ReadFile(ctx, "HEAD", "f.txt"); return err },
-			[][]string{{"show", "--end-of-options", "HEAD:f.txt", "--"}}},
+			[][]string{probe("HEAD:f.txt"), {"show", "--end-of-options", "HEAD:f.txt", "--"}}},
 		// The read-cost classes CHANGELOG and KNOWN-LIMITATIONS document
 		// (review round 2): every bare name that is a valid branch name
 		// pays one lookup whether or not the branch exists (tag, abbreviated
@@ -366,23 +370,23 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		// the lookup, then NotFound); a full object id, HEAD (above) and
 		// any other refs/* pay none.
 		{"ReadFile abbreviated id", func() error { _, err := c.ReadFile(ctx, abbrev, "f.txt"); return err },
-			[][]string{lookup(abbrev), {"show", "--end-of-options", abbrev + ":f.txt", "--"}}},
+			[][]string{lookup(abbrev), probe(abbrev + ":f.txt"), {"show", "--end-of-options", abbrev + ":f.txt", "--"}}},
 		{"ReadFile remote-tracking short name", func() error { _, err := c.ReadFile(ctx, "origin/tracked", "f.txt"); return err },
-			[][]string{lookup("origin/tracked"), {"show", "--end-of-options", "origin/tracked:f.txt", "--"}}},
+			[][]string{lookup("origin/tracked"), probe("origin/tracked:f.txt"), {"show", "--end-of-options", "origin/tracked:f.txt", "--"}}},
 		{"ReadFile missing bare name", func() error { _, err := c.ReadFile(ctx, "nope", "f.txt"); return notFound(err) },
-			[][]string{lookup("nope"), {"show", "--end-of-options", "nope:f.txt", "--"}}},
+			[][]string{lookup("nope"), probe("nope:f.txt"), {"show", "--end-of-options", "nope:f.txt", "--"}}},
 		{"ReadFile refs/heads/ branch", func() error { _, err := c.ReadFile(ctx, "refs/heads/feat", "f.txt"); return err },
-			[][]string{lookup("feat"), {"show", "--end-of-options", featOID + ":f.txt", "--"}}},
+			[][]string{lookup("feat"), probe(featOID + ":f.txt"), {"show", "--end-of-options", featOID + ":f.txt", "--"}}},
 		{"ReadFile missing refs/heads/ branch", func() error { _, err := c.ReadFile(ctx, "refs/heads/nope", "f.txt"); return notFound(err) },
 			[][]string{lookup("nope")}},
 		{"ReadFile object id", func() error { _, err := c.ReadFile(ctx, featOID, "f.txt"); return err },
-			[][]string{{"show", "--end-of-options", featOID + ":f.txt", "--"}}},
+			[][]string{probe(featOID + ":f.txt"), {"show", "--end-of-options", featOID + ":f.txt", "--"}}},
 		{"ReadFile refs/tags/", func() error { _, err := c.ReadFile(ctx, "refs/tags/t1", "f.txt"); return err },
-			[][]string{{"show", "--end-of-options", "refs/tags/t1:f.txt", "--"}}},
+			[][]string{probe("refs/tags/t1:f.txt"), {"show", "--end-of-options", "refs/tags/t1:f.txt", "--"}}},
 		{"ReadFile refs/remotes/", func() error { _, err := c.ReadFile(ctx, "refs/remotes/origin/tracked", "f.txt"); return err },
-			[][]string{{"show", "--end-of-options", "refs/remotes/origin/tracked:f.txt", "--"}}},
+			[][]string{probe("refs/remotes/origin/tracked:f.txt"), {"show", "--end-of-options", "refs/remotes/origin/tracked:f.txt", "--"}}},
 		{"ListFiles branch", func() error { _, err := c.ListFiles(ctx, "feat", ""); return err },
-			[][]string{lookup("feat"), {"ls-tree", "-r", "--name-only", "--end-of-options", featOID}}},
+			[][]string{lookup("feat"), {"ls-tree", "-r", "--name-only", "-z", "--end-of-options", featOID}}},
 		{"RefSHA branch", func() error { _, err := c.RefSHA(ctx, "feat"); return err },
 			[][]string{lookup("feat")}},
 		{"RefSHA HEAD", func() error { _, err := c.RefSHA(ctx, "HEAD"); return err },

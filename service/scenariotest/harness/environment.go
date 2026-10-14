@@ -62,6 +62,15 @@ func WithRuntimeOrchestrator() EnvOption {
 	}
 }
 
+// WithRuntimeWithoutMergeBinding builds the runtime's orchestrator without
+// SHA-bound governed merges (see WithoutMergeBinding). Every use must say
+// why in a comment.
+func WithRuntimeWithoutMergeBinding() EnvOption {
+	return func(c *envConfig) {
+		c.runtimeOpts = append(c.runtimeOpts, WithoutMergeBinding())
+	}
+}
+
 // WithArtifactsDir configures the artifacts directory for the test environment.
 // Seeds and artifact service use this directory instead of the repo root.
 func WithArtifactsDir(dir string) EnvOption {

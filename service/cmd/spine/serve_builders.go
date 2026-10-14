@@ -56,6 +56,27 @@ func buildArtifactService(gitClient git.GitClient, events event.EventRouter, rep
 	return svc, nil
 }
 
+// buildWorkflowService constructs the workflow-definition service and wires
+// the same branch-protection policy buildArtifactService installs (ADR-009
+// §3; INIT-023 TASK-014, audit F7): the projection-backed policy with a
+// Store, the permissive one without (early bootstrap). With it, a
+// non-bypass workflow write to a protected main is refused at the service
+// even if a handler forgets the reviewer dispatch, and an ADR-008 bypass
+// needs an operator-or-above actor in the context.
+//
+// The policy-builder error is returned, never swallowed: a nil policy is
+// workflow.Service's "no protection" mode (I4), which only embedders that
+// write through actor-less bypass contexts (SMP) may run in.
+func buildWorkflowService(gitClient git.GitClient, repoPath string, st store.Store) (*workflow.Service, error) {
+	svc := workflow.NewService(gitClient, repoPath)
+	policy, err := buildBranchProtectPolicy(st)
+	if err != nil {
+		return nil, fmt.Errorf("workflow service branch-protect policy: %w", err)
+	}
+	svc.WithPolicy(policy)
+	return svc, nil
+}
+
 // buildBranchProtectPolicy returns a branchprotect.Policy suitable for
 // the Artifact Service's guard. When a Store is configured, the policy
 // reads the projection-backed rules; otherwise it falls back to a
@@ -316,6 +337,15 @@ func buildOrchestrator(
 		return nil
 	}
 	orch.WithBranchProtectPolicy(bpPolicy)
+	// SHA-bound governed merges (INIT-023 TASK-005): `spine serve` always
+	// merges exactly the commit that passed validation and review, with
+	// the default moved-head policy (reject). There is deliberately no
+	// switch to turn it off (owner question 6); the rollback is the
+	// previous build.
+	if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
+		log.Error("merge binding init failed", "error", err)
+		return nil
+	}
 	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
 	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
 	orch.WithStepEntryPolicy(stepEntryPolicy)
@@ -410,7 +440,13 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 		return nil
 	}
 	if len(trustedCIDRs) == 0 {
-		log.Warn("git HTTP endpoint enabled with no trusted CIDRs; all clients must present a bearer token. Set SPINE_GIT_HTTP_TRUSTED_CIDRS to a narrow runner subnet to opt in to token-less access.")
+		// Recommend the runners' own addresses, never a subnet: a
+		// range that contains a Docker bridge gateway or a reverse
+		// proxy hands token-less reads to every client it relays — the
+		// compose /16 default INIT-023 TASK-015 (P3-30) removed.
+		log.Warn("git HTTP endpoint enabled with no trusted CIDRs; all clients must present a bearer token. " +
+			"To let runners clone token-less, set SPINE_GIT_HTTP_TRUSTED_CIDRS to the runners' own addresses only " +
+			"(never a range containing a Docker bridge gateway or a reverse proxy; see docker-compose.override.yaml.example).")
 	} else {
 		log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
 	}

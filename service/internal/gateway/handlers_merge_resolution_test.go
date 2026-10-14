@@ -292,3 +292,57 @@ func TestHandleRunRepositoryRetry_RequiresReason(t *testing.T) {
 		t.Fatalf("resolver should not be called when reason missing")
 	}
 }
+
+// headRetryResolver adds the optional head_sha capability.
+type headRetryResolver struct {
+	fakeRunMergeResolver
+	headCalls []resolverCall
+}
+
+func (h *headRetryResolver) RetryRepositoryMergeAt(_ context.Context, runID, repositoryID, reason, headSHA string) (*engine.MergeRecoveryResult, error) {
+	h.headCalls = append(h.headCalls, resolverCall{runID, repositoryID, reason, headSHA})
+	return &engine.MergeRecoveryResult{LedgerCommitSHA: "ledger-test-sha", ReadyToResume: true}, nil
+}
+
+// TestHandleRunRepositoryRetry_HeadSHA is INIT-023 TASK-005 DC-7: a
+// retry that names head_sha reaches RetryRepositoryMergeAt; a resolver
+// without that capability answers 503 instead of ignoring it; a retry
+// without head_sha keeps the existing call.
+func TestHandleRunRepositoryRetry_HeadSHA(t *testing.T) {
+	head := strings.Repeat("cd", 20)
+	post := func(t *testing.T, ts *httptest.Server, token, body string) int {
+		t.Helper()
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v1/runs/run-1/repositories/payments-service/retry", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	resolver := &headRetryResolver{}
+	ts, token := setupResolverServer(t, resolver, domain.RoleOperator)
+	defer ts.Close()
+	if code := post(t, ts, token, `{"reason":"fixed","head_sha":"`+head+`"}`); code != http.StatusOK {
+		t.Fatalf("retry with head_sha: %d", code)
+	}
+	if len(resolver.headCalls) != 1 || resolver.headCalls[0].targetSHA != head || len(resolver.retryCalls) != 0 {
+		t.Fatalf("head calls %+v, plain calls %+v", resolver.headCalls, resolver.retryCalls)
+	}
+	if code := post(t, ts, token, `{"reason":"again"}`); code != http.StatusOK || len(resolver.retryCalls) != 1 {
+		t.Fatalf("retry without head_sha: %d, plain calls %d", code, len(resolver.retryCalls))
+	}
+
+	plain := &fakeRunMergeResolver{}
+	ts2, token2 := setupResolverServer(t, plain, domain.RoleOperator)
+	defer ts2.Close()
+	if code := post(t, ts2, token2, `{"reason":"fixed","head_sha":"`+head+`"}`); code != http.StatusServiceUnavailable {
+		t.Fatalf("head_sha against a resolver without the capability: %d, want 503", code)
+	}
+	if len(plain.retryCalls) != 0 {
+		t.Fatal("head_sha was silently dropped into a plain retry")
+	}
+}

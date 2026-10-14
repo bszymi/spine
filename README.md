@@ -46,7 +46,7 @@ spine validate --all
 
 | Variable | Purpose |
 |----------|---------|
-| `SPINE_ENV=production` | Activates production checks (refuses dev-mode auth bypass, requires secret encryption). |
+| `SPINE_ENV=production` | Activates production checks (refuses dev-mode auth bypass, requires secret encryption). `SPINE_GIT_HTTP_DEV_NO_AUTH` is refused unless `SPINE_ENV=development`. |
 | `SPINE_DATABASE_URL=…?sslmode=require` | `sslmode=disable` is refused unless `SPINE_INSECURE_LOCAL=1`. |
 | `SPINE_SECRET_ENCRYPTION_KEY` | Base64 32-byte AES-256 key for at-rest webhook-secret encryption. Generate with `openssl rand -base64 32`. |
 | `SPINE_SECRET_PREVIOUS_KEYS` | Optional. Comma-separated previous keys that still decrypt during a key rotation (never seal). |
@@ -54,12 +54,14 @@ spine validate --all
 | `SPINE_OPERATOR_TOKEN` | Bearer token for workspace-management endpoints. Minimum 32 characters. Leave unset to return 503 on those endpoints. |
 | `SMP_ADMIN_TOKEN` | Platform bootstrap bearer, seeded as admin into every workspace. When set: minimum 32 characters and 8 distinct characters (`openssl rand -hex 32`); weaker values refuse to start in production. Rotation revokes the previous bearer per workspace on first load — see `docs/operator-runbook.md` §5.6. |
 | `SPINE_GIT_CREDENTIAL_HELPER` | One of `cache`, `store`, `osxkeychain`, `manager`, `pass`. Recommended over `SPINE_GIT_PUSH_TOKEN`. |
-| `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. |
+| `SPINE_TRUSTED_PROXY_CIDRS` | CIDRs of reverse proxies whose `X-Forwarded-For` Spine should trust for rate-limiting. A request from one of them never gets token-less git access. |
+| `SPINE_DEV_MODE` | Development only (refused in production): lets unauthenticated requests through the `/api/v1` auth gate. Does not affect `/git`. |
+| `SPINE_GIT_HTTP_DEV_NO_AUTH` | Development only: `/git` clones and fetches need no token. Refused at startup unless `SPINE_ENV=development`; pushes always need a token. |
 
 ### Integrations
 
 - **Webhook / SSE / pull event delivery** — see [integration-guide §6](/docs/integration-guide.md#6-event-integration). Gated by `SPINE_EVENT_DELIVERY=true`.
-- **Git HTTP clone endpoint for runners** — see [integration-guide §7](/docs/integration-guide.md#7-git-http-serve-endpoint). Scope callers via `SPINE_GIT_HTTP_TRUSTED_CIDRS`.
+- **Git HTTP clone endpoint for runners** — see [integration-guide §7](/docs/integration-guide.md#7-git-http-serve-endpoint). Token-less clones are limited to direct peers in `SPINE_GIT_HTTP_TRUSTED_CIDRS` (never a proxy, never a Docker bridge gateway).
 
 ---
 
@@ -266,7 +268,8 @@ spine validate [path] [--all]
 | Method | Path | Operation |
 |--------|------|-----------|
 | GET | /api/v1/system/health | Health check |
-| GET | /api/v1/system/metrics | Prometheus metrics |
+| GET | /api/v1/system/metrics | Prometheus metrics (shared mode: the caller's workspace series only) |
+| GET | /api/v1/platform/metrics | Full Prometheus export (`SPINE_OPERATOR_TOKEN`) |
 | POST | /api/v1/system/rebuild | Projection rebuild |
 | POST | /api/v1/system/validate | Validate all artifacts |
 | POST | /api/v1/artifacts | Create artifact (low-level) |

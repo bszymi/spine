@@ -85,6 +85,7 @@ func ExportPrometheus() string {
 	writeCounter(&b, "spine_git_commit_retries_total", m.GitCommitRetries.Value())
 	writeCounter(&b, "spine_events_emitted_total", m.EventsEmitted.Value())
 	writeCounter(&b, "spine_projection_syncs_total", m.ProjectionSyncs.Value())
+	writeCounter(&b, "spine_projection_files_skipped_total", m.ProjectionFilesSkipped.Value())
 	writeCounter(&b, "spine_scheduler_scans_total", m.SchedulerScans.Value())
 	writeCounter(&b, "spine_timeouts_detected_total", m.TimeoutsDetected.Value())
 	writeCounter(&b, "spine_orphans_detected_total", m.OrphansDetected.Value())
@@ -100,16 +101,44 @@ func ExportPrometheus() string {
 	writeHistogram(&b, "spine_run_duration_seconds", m.RunDuration)
 	writeHistogram(&b, "spine_step_duration_seconds", m.StepDuration)
 
-	writePoolMetrics(&b)
+	writePoolMetrics(&b, nil)
 
+	return b.String()
+}
+
+// ExportPrometheusWorkspace renders, in Prometheus text format, only the
+// per-workspace series of workspaceID: the ADR-012
+// spine_workspace_pool_* gauges and counters whose workspace_id label
+// equals the argument. It omits every process-global counter, gauge and
+// histogram, because in a process serving several workspaces those
+// aggregate every tenant's activity, and it omits every other
+// workspace's series, whose labels name the other tenants.
+//
+// Additive (INIT-023 TASK-015, audit P3-29): ExportPrometheus is
+// unchanged. The standalone gateway serves this export to a tenant
+// operator in shared multi-workspace mode; an unknown or empty ID
+// renders the empty string.
+func ExportPrometheusWorkspace(workspaceID string) string {
+	var b strings.Builder
+	writePoolMetrics(&b, func(id string) bool { return id == workspaceID })
 	return b.String()
 }
 
 // writePoolMetrics emits the per-workspace connection-pool series
 // from ADR-012. Gauges are read live from the workspace pool
-// registry; counters live in poolStatsRegistry.
-func writePoolMetrics(b *strings.Builder) {
+// registry; counters live in poolStatsRegistry. A nil keep emits every
+// workspace; otherwise only the workspaces keep reports true for.
+func writePoolMetrics(b *strings.Builder, keep func(workspaceID string) bool) {
 	gauges := currentPoolGauges()
+	if keep != nil {
+		kept := gauges[:0:0]
+		for _, g := range gauges {
+			if keep(g.WorkspaceID) {
+				kept = append(kept, g)
+			}
+		}
+		gauges = kept
+	}
 	if len(gauges) > 0 {
 		sort.Slice(gauges, func(i, j int) bool { return gauges[i].WorkspaceID < gauges[j].WorkspaceID })
 		fmt.Fprintf(b, "# TYPE spine_workspace_pool_size gauge\n")
@@ -131,6 +160,15 @@ func writePoolMetrics(b *strings.Builder) {
 	}
 
 	stats := listPoolStats()
+	if keep != nil {
+		kept := stats[:0:0]
+		for _, st := range stats {
+			if keep(st.id) {
+				kept = append(kept, st)
+			}
+		}
+		stats = kept
+	}
 	if len(stats) == 0 {
 		return
 	}
