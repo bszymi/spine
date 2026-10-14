@@ -711,3 +711,23 @@ func TestBoundLedgerMustBeAChildOfTheBinding(t *testing.T) {
 		})
 	}
 }
+
+// TestColonStepIDBindingIsTrusted: a binding recorded at a step whose id
+// contains ":" (workflow validation allows it) is this run's own and
+// merges, instead of failing closed as untrusted (codex review, round 1).
+func TestColonStepIDBindingIsTrusted(t *testing.T) {
+	bound, base, m := sha40('a'), sha40('b'), sha40('c')
+	f := committingFix(t, false, true)
+	f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("code:review", bindRunID+"-code:review-1")}
+	f.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+	f.git.parents[m] = []string{base, bound}
+	if err := f.merge(); err != nil {
+		t.Fatalf("MergeRunBranch: %v", err)
+	}
+	if len(f.git.merges) != 1 || f.git.merges[0].SourceSHA != bound {
+		t.Fatalf("MergeBound calls = %+v, want one of the bound commit", f.git.merges)
+	}
+	if f.run.Status != domain.RunStatusCompleted {
+		t.Fatalf("run status = %s, want completed", f.run.Status)
+	}
+}

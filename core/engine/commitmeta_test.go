@@ -146,6 +146,11 @@ func TestBoundByNamesRun(t *testing.T) {
 		{"merge_recovery:run-abc12345", false},        // no operation
 		{"manual:run-abc12345:x", false},              // unknown kind
 		{"STEP:review:run-abc12345-review-1", false},  // kinds are exact
+		// A step id may contain ":" (codex review, round 1).
+		{boundByStep("build:lint", "run-abc12345-build:lint-2"), true},
+		{boundByStep("a:b:c", "run-abc12345-a:b:c-1"), true},
+		{boundByStep("build:lint", "run-deadbeef-build:lint-2"), false}, // another run
+		{"step:build:lint:run-abc12345-", false},                        // no execution suffix
 	}
 	for _, tc := range cases {
 		if got := boundByNamesRun(tc.by, "run-abc12345"); got != tc.want {

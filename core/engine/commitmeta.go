@@ -221,6 +221,10 @@ func boundByRecovery(runID, operation string) string {
 // and names runID (DC-9). A step binding names the run through its
 // execution id, which always starts with "<run_id>-" (StartRun,
 // advanceToNextStep, tryConvergence and RetryStep all build it that way).
+// A step id may itself contain ":" (workflow validation allows it), so
+// the execution id is found by its "<run_id>-" prefix, not by the first
+// colon (codex review, round 1): "step:build:lint:<run>-build:lint-1"
+// names the run. Run ids contain no ":" ("run-" plus trace-id hex).
 func boundByNamesRun(by, runID string) bool {
 	if runID == "" || by == "" {
 		return false
@@ -231,8 +235,12 @@ func boundByNamesRun(by, runID string) bool {
 	}
 	switch kind {
 	case "step":
-		stepID, execID, ok := strings.Cut(rest, ":")
-		return ok && stepID != "" && strings.HasPrefix(execID, runID+"-") && len(execID) > len(runID)+1
+		i := strings.Index(rest, ":"+runID+"-")
+		if i <= 0 {
+			return false // no execution id of this run, or no step id
+		}
+		execID := rest[i+1:]
+		return len(execID) > len(runID)+1
 	case "convergence", "merge_recovery":
 		id, tail, ok := strings.Cut(rest, ":")
 		return ok && id == runID && tail != ""
