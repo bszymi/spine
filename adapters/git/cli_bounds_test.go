@@ -661,7 +661,7 @@ func TestReadCommands_RunInTheCLocale(t *testing.T) {
 	}
 	ctx := context.Background()
 	dir, commit := blobRepo(t, map[string][]byte{"t.md": []byte("small\n")})
-	real, err := exec.LookPath("git")
+	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +671,7 @@ func TestReadCommands_RunInTheCLocale(t *testing.T) {
 		"  if [ \"$LC_ALL\" = C ]; then p=fatal; else p=Schwerwiegend; fi\n" +
 		"  echo \"$p: attempting to allocate 99999999 over limit $GIT_ALLOC_LIMIT\" >&2; exit 128;;\n" +
 		"esac\n" +
-		"exec " + real + " \"$@\"\n"
+		"exec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test wrapper
 		t.Fatal(err)
 	}
