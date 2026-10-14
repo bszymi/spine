@@ -744,6 +744,108 @@ func TestConsumer_RedeliveryFinishesIncompleteRouting(t *testing.T) {
 	})
 }
 
+// branchWorkflow has two steps that run on a divergence branch.
+func branchWorkflow() *domain.WorkflowDefinition {
+	return &domain.WorkflowDefinition{
+		ID: "wf-branch", Path: "workflows/wf-branch.yaml", EntryStep: "split",
+		Steps: []domain.StepDefinition{
+			{ID: "split", Name: "Split", Type: domain.StepTypeManual,
+				Outcomes: []domain.OutcomeDefinition{{ID: "done", Name: "Done", NextStep: "end"}}},
+			{ID: "draft", Name: "Draft", Type: domain.StepTypeManual,
+				Outcomes: []domain.OutcomeDefinition{{ID: "done", Name: "Done", NextStep: "polish"}}},
+			{ID: "polish", Name: "Polish", Type: domain.StepTypeManual,
+				Outcomes: []domain.OutcomeDefinition{{ID: "done", Name: "Done", NextStep: "end"}}},
+		},
+	}
+}
+
+// Codex review, round 5: a completed divergence-branch execution whose
+// branch routing did not finish is recovered on the BRANCH cursor — the
+// run's cursor is divergence:<id> — and one that was routed is refused.
+// Mutation: dropping the branch dispatch in RecoverCompletedStep (the
+// run-cursor check refuses every branch execution) fails the first two.
+func TestRecoverCompletedStep_DivergenceBranch(t *testing.T) {
+	setup := func(t *testing.T, branchCursor string) (*casFix, *domain.StepExecution) {
+		f := newCasFix(t, branchWorkflow(), true)
+		f.st.branches["b1"] = &domain.Branch{BranchID: "b1", RunID: f.runID, DivergenceID: "div-1",
+			Status: domain.BranchStatusInProgress, CurrentStepID: branchCursor}
+		created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		done := created.Add(time.Second)
+		e := &domain.StepExecution{ExecutionID: f.runID + "-b1-draft-1", RunID: f.runID, StepID: "draft", BranchID: "b1",
+			Status: domain.StepStatusCompleted, ActorID: "actor-a", OutcomeID: "done", Attempt: 1, CreatedAt: created, CompletedAt: &done}
+		f.st.steps[e.ExecutionID] = copyExec(e)
+		f.st.runs[f.runID].CurrentStepID = "divergence:div-1"
+		return f, e
+	}
+	for _, tc := range []struct{ name, cursor string }{
+		{"routing never ran", "draft"},
+		{"branch cursor moved, next execution never created", "polish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, e := setup(t, tc.cursor)
+			if err := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID); err != nil {
+				t.Fatalf("RecoverCompletedStep: %v", err)
+			}
+			if f.st.exec(f.runID+"-b1-polish-1") == nil {
+				t.Fatal("the branch's next execution was not created")
+			}
+			b, _ := f.st.GetBranch(context.Background(), "b1")
+			if b.CurrentStepID != "polish" {
+				t.Fatalf("branch cursor = %q, want polish", b.CurrentStepID)
+			}
+			if got := f.st.run(f.runID).CurrentStepID; got != "divergence:div-1" {
+				t.Fatalf("run cursor = %q, want it left at the divergence", got)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(f *casFix)
+	}{
+		{"routed: the next execution exists", func(f *casFix) {
+			f.st.steps[f.runID+"-b1-polish-1"] = &domain.StepExecution{ExecutionID: f.runID + "-b1-polish-1", RunID: f.runID,
+				StepID: "polish", BranchID: "b1", Status: domain.StepStatusWaiting, Attempt: 1,
+				CreatedAt: time.Date(2026, 10, 1, 12, 0, 5, 0, time.UTC)}
+		}},
+		{"branch completed", func(f *casFix) { f.st.branches["b1"].Status = domain.BranchStatusCompleted }},
+		{"run not at this divergence", func(f *casFix) { f.st.runs[f.runID].CurrentStepID = "divergence:div-2" }},
+	} {
+		t.Run("refuses: "+tc.name, func(t *testing.T) {
+			f, e := setup(t, "polish")
+			tc.setup(f)
+			before := len(f.st.steps)
+			err := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID)
+			requireCode(t, err, domain.ErrConflict, tc.name)
+			if len(f.st.steps) != before {
+				t.Fatal("a refused branch recovery created executions")
+			}
+		})
+	}
+}
+
+// Codex review, round 5: a stale delivery whose execution was rebound and
+// then resolved by the new owner has nothing left to submit (nil, not a
+// retryable 403); one whose execution is still live keeps the refusal.
+func TestConsumer_StaleDeliveryAfterRebind(t *testing.T) {
+	req := func(f *casFix, id string) actor.AssignmentRequest {
+		return actor.AssignmentRequest{AssignmentID: id, RunID: f.runID, StepID: "execute", ActorID: "actor-a"}
+	}
+	f := newCasFix(t, casWorkflow(), true)
+	e := f.addExec("execute", domain.StepStatusCompleted, "actor-b") // rebound to b, b completed it
+	f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+	f.addExec("review", domain.StepStatusWaiting, "")
+	if err := NewConsumer(nil, f.orch).executeAndSubmit(context.Background(), discardLogger(), req(f, e.ExecutionID), staticProvider{outcome: "completed"}); err != nil {
+		t.Fatalf("stale delivery for a resolved execution = %v, want nil", err)
+	}
+	g := newCasFix(t, casWorkflow(), true)
+	live := g.addExec("execute", domain.StepStatusInProgress, "actor-b")
+	err := NewConsumer(nil, g.orch).executeAndSubmit(context.Background(), discardLogger(), req(g, live.ExecutionID), staticProvider{outcome: "completed"})
+	var se *domain.SpineError
+	if !errors.As(err, &se) || se.Code != domain.ErrForbidden {
+		t.Fatalf("stale delivery for a live rebound execution = %v, want forbidden", err)
+	}
+}
+
 // failingCancelAssignments fails every UpdateAssignmentStatus.
 type failingCancelAssignments struct{ *memAssignmentStore }
 

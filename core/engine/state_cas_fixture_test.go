@@ -49,6 +49,7 @@ type casStore struct {
 	transitions []stepTransitionCall
 	metaWrites  []map[string]string
 	outcomes    map[string]domain.RepositoryMergeOutcome
+	branches    map[string]*domain.Branch
 
 	// transitionRunErr makes TransitionRunStatus fail like SMP's store does
 	// for a missing row.
@@ -60,7 +61,7 @@ func newCasStore() *casStore {
 	return &casStore{
 		runs: map[string]*domain.Run{}, steps: map[string]*domain.StepExecution{},
 		runReads: map[string]int{}, execReads: map[string]int{}, listReads: map[string]int{},
-		outcomes: map[string]domain.RepositoryMergeOutcome{},
+		outcomes: map[string]domain.RepositoryMergeOutcome{}, branches: map[string]*domain.Branch{},
 	}
 }
 
@@ -269,10 +270,29 @@ func (s *casStore) UpdateDivergenceContext(context.Context, *domain.DivergenceCo
 func (s *casStore) GetDivergenceContext(context.Context, string) (*domain.DivergenceContext, error) {
 	return nil, domain.NewError(domain.ErrNotFound, "divergence not found")
 }
-func (s *casStore) CreateBranch(context.Context, *domain.Branch) error { return nil }
-func (s *casStore) UpdateBranch(context.Context, *domain.Branch) error { return nil }
-func (s *casStore) GetBranch(context.Context, string) (*domain.Branch, error) {
-	return nil, domain.NewError(domain.ErrNotFound, "branch not found")
+func (s *casStore) CreateBranch(_ context.Context, b *domain.Branch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *b
+	s.branches[b.BranchID] = &cp
+	return nil
+}
+func (s *casStore) UpdateBranch(_ context.Context, b *domain.Branch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *b
+	s.branches[b.BranchID] = &cp
+	return nil
+}
+func (s *casStore) GetBranch(_ context.Context, id string) (*domain.Branch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.branches[id]
+	if !ok {
+		return nil, domain.NewError(domain.ErrNotFound, "branch not found")
+	}
+	cp := *b
+	return &cp, nil
 }
 func (s *casStore) ListBranchesByDivergence(context.Context, string) ([]domain.Branch, error) {
 	return nil, nil

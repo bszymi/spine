@@ -296,6 +296,9 @@ terminal execution from being routed twice and lets the engine verify the submit
    re-route created a duplicate successor attempt). A crash after the cursor moved but before the
    successor was activated is not: recovery leaves a `waiting` current step alone, so a
    machine-selected or internal successor is not activated until an operator acts (pre-existing).
+   A divergence-branch execution is recovered on its branch's cursor (only the queue consumer
+   reaches that today; the scheduler's recovery follows the run cursor, which is
+   `divergence:<id>`); a branch marked completed whose convergence check never ran is not.
 8. **A release whose assignment cancel fails is compensated, not atomic.** With the step
    capability `ReleaseStep` writes the step first and cancels the assignment row after it; if the
    cancel fails, the step is put back (conditionally) and the error returned. A writer that took

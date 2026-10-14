@@ -131,7 +131,10 @@ func (c *Consumer) executeAndSubmit(ctx context.Context, log *slog.Logger, req a
 		ArtifactsProduced: result.ArtifactsProduced,
 		ActorID:           req.ActorID,
 	}); err != nil {
-		if errors.Is(err, ErrStepStateChanged) {
+		// A lost race, or an ownership refusal for an execution rebound
+		// while the provider ran (codex review, round 5): when the
+		// execution is already resolved there is nothing left to submit.
+		if errors.Is(err, ErrStepStateChanged) || isForbidden(err) {
 			// Only an execution someone else already resolved (terminal)
 			// means there is nothing left to do (codex review, round 3: a
 			// concurrent acknowledgment by the same actor is absorbed by
@@ -161,6 +164,12 @@ func (c *Consumer) executeAndSubmit(ctx context.Context, log *slog.Logger, req a
 
 	log.Info("assignment completed", "outcome_id", result.OutcomeID)
 	return nil
+}
+
+// isForbidden reports whether err is a domain ErrForbidden.
+func isForbidden(err error) bool {
+	var se *domain.SpineError
+	return errors.As(err, &se) && se.Code == domain.ErrForbidden
 }
 
 // isConflict reports whether err is a domain ErrConflict.
