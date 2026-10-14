@@ -16,7 +16,7 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/cgi"
+	"net/http/cgi" //nolint:gosec // G504: CVE-2016-5386 is a pre-1.6.3 Go issue; this codebase runs 1.26+
 	"net/http/httptest"
 	"os/exec"
 	"strings"
