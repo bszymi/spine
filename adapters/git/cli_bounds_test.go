@@ -403,6 +403,8 @@ func TestReadBounds_Defaults(t *testing.T) {
 			bounds{64 << 10, git.DefaultMaxOutputBytes, 1 << 20}},
 		{"alloc floor for an explicit value", git.NewCLIClient(".", git.WithMaxBlobBytes(1000), git.WithMaxGitAllocBytes(2000)),
 			bounds{1000, git.DefaultMaxOutputBytes, 1 << 20}},
+		{"output floor", git.NewCLIClient(".", git.WithMaxOutputBytes(1)),
+			bounds{git.DefaultMaxBlobBytes, 4096, 4 * git.DefaultMaxBlobBytes}},
 		{"explicit output", git.NewCLIClient(".", git.WithMaxOutputBytes(4096)),
 			bounds{git.DefaultMaxBlobBytes, 4096, 4 * git.DefaultMaxBlobBytes}},
 	} {
@@ -681,4 +683,34 @@ func TestReadCommands_RunInTheCLocale(t *testing.T) {
 
 	_, err = git.NewCLIClient(dir).ReadFile(ctx, commit, "t.md")
 	assertBlobTooLarge(t, "translated host", err, commit, "t.md", -1, git.DefaultMaxBlobBytes)
+}
+
+// Codex review round 3 (P2): Merge reads its result from the head of
+// `git merge`'s drained output, and every commit and merge ends with a
+// `rev-parse HEAD`, so the per-command limit is floored at 4 KiB: even
+// WithMaxOutputBytes(1) reports a fast-forward as one.
+func TestMerge_TinyOutputLimitKeepsTheResult(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	t3git(t, dir, nil, "init", "-q", "-b", "main")
+	t3git(t, dir, nil, "config", "user.email", "t@t")
+	t3git(t, dir, nil, "config", "user.name", "t")
+	t3git(t, dir, nil, "commit", "-q", "--allow-empty", "-m", "seed")
+	t3git(t, dir, nil, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "f.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t3git(t, dir, nil, "add", "-A")
+	t3git(t, dir, nil, "commit", "-q", "-m", "one file")
+	tip := t3git(t, dir, nil, "rev-parse", "HEAD")
+	t3git(t, dir, nil, "checkout", "-q", "main")
+
+	c := git.NewCLIClient(dir, git.WithMaxOutputBytes(1))
+	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature"})
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if mr.SHA != tip || !mr.FastForward {
+		t.Fatalf("Merge = %+v, want SHA %s and FastForward (the result line was truncated away)", mr, tip)
+	}
 }

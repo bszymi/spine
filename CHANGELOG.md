@@ -83,7 +83,9 @@ SMP runs the rebuild per workspace in SMP INIT-027 EPIC-004 TASK-008 (owner ques
 
 - **New in `adapters/git`:** `DefaultMaxBlobBytes`, `DefaultMaxOutputBytes`, `WithMaxBlobBytes`,
   `WithMaxOutputBytes`, `WithMaxGitAllocBytes`, `ErrBlobTooLarge`, `ErrOutputTooLarge`,
-  `BlobTooLargeError`, `OutputTooLargeError`. Refusals are `*GitError{Kind: ErrKindPermanent}`
+  `BlobTooLargeError`, `OutputTooLargeError` (`WithMaxOutputBytes` is floored at 4 KiB and the
+  alloc limit at 1 MiB, below which ordinary git output and git's own fixed allocations stop
+  fitting). Refusals are `*GitError{Kind: ErrKindPermanent}`
   wrapping the typed cause, so `err.(*git.GitError)` keeps working. Every `NewCLIClient` gets the
   defaults; nothing to configure.
 - **`Diff` and `ListFiles` return raw paths.** A caller that C-unquoted `Diff` paths must stop

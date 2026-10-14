@@ -398,7 +398,8 @@ The following limitations have been resolved:
   one over the per-blob limit before reading it (`git.DefaultMaxBlobBytes`, 4 MiB — the worktree
   read limit too; `git.WithMaxBlobBytes`), with a permanent error matching `git.ErrBlobTooLarge`
   (API 413). Every other read command — listings, diff, log, rev-parse, merge-base — fails past
-  16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`; `git.ErrOutputTooLarge`).
+  16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
+  `git.ErrOutputTooLarge`).
   Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
   git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses to inflate a small
   blob stored as a delta on a huge base, or to render a gitlink `*.md` as a commit with its patch;

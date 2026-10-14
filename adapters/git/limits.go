@@ -85,6 +85,14 @@ const (
 
 	// maxProbeBytes bounds `git cat-file -s` output: one decimal size.
 	maxProbeBytes = 64
+
+	// minOutputBytes floors the per-command stdout limit, whatever
+	// WithMaxOutputBytes says (codex review round 3). Below it, ordinary
+	// output stops fitting: Merge reads its result ("Updating <a>..<b>",
+	// "Fast-forward") from the head of `git merge`'s drained output, and
+	// the `rev-parse HEAD` after every commit and merge prints one object
+	// id. 4 KiB holds both many times over and is still a bound.
+	minOutputBytes int64 = 4 << 10
 )
 
 // WithMaxBlobBytes sets the per-blob ReadFile limit. n <= 0 keeps the
@@ -99,8 +107,9 @@ func WithMaxBlobBytes(n int64) CLIOption {
 
 // WithMaxOutputBytes sets the stdout limit of every command other than
 // ReadFile's content read. n <= 0 keeps the default
-// (DefaultMaxOutputBytes). Read commands fail when they exceed it;
-// mutating commands keep the head and discard the rest.
+// (DefaultMaxOutputBytes); a value below 4 KiB is raised to 4 KiB. Read
+// commands fail when they exceed it; mutating commands keep the head and
+// discard the rest.
 func WithMaxOutputBytes(n int64) CLIOption {
 	return func(c *CLIClient) {
 		if n > 0 {
@@ -219,7 +228,7 @@ func (c *CLIClient) blobLimit() int64 {
 
 func (c *CLIClient) outputLimit() int64 {
 	if c.maxOutputBytes > 0 {
-		return c.maxOutputBytes
+		return max(c.maxOutputBytes, minOutputBytes)
 	}
 	return DefaultMaxOutputBytes
 }
