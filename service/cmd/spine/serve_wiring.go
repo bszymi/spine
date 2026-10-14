@@ -67,6 +67,13 @@ var _ engine.RunCursorTransitioner = (*store.PostgresStore)(nil)
 // recovery (INIT-023 TASK-008 review round 1, codex).
 var _ engine.BranchCursorTransitioner = (*store.PostgresStore)(nil)
 
+// And for the removal of a lost claim's assignment row (INIT-023 TASK-008
+// review round 2, codex). Without the port the row would be left
+// cancelled: the separation-of-duties ledger would then count the lost
+// claimant as a run author, and the prior-holder re-offer would read the
+// row as a release.
+var _ engine.AssignmentRowDeleter = (*store.PostgresStore)(nil)
+
 // resultAdapter adapts engine.Orchestrator to gateway.ResultHandler.
 type resultAdapter struct {
 	orch *engine.Orchestrator

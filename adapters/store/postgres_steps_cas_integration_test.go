@@ -340,3 +340,77 @@ func TestTransitionBranchCursor(t *testing.T) {
 		t.Fatalf("missing branch = (%v, %v), want (false, nil)", applied, err)
 	}
 }
+
+// TestDeleteAssignment: the removal of a lost claim's row (INIT-023
+// TASK-008 review round 2, codex). It deletes only the row that still
+// names the execution and the actor, in any status. Deleting nothing is
+// not an error, and once the row is gone the same deterministic id can be
+// created again. Under a cancelled row that id collided on the primary
+// key, so the actor could never claim that execution again.
+func TestDeleteAssignment(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	t.Cleanup(func() { // runs before casFixture's cleanup (LIFO): rows reference the run
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.actor_assignments WHERE run_id = $1`, runID)
+	})
+	e := casExec(t, s, ctx, runID, "execute", domain.StepStatusWaiting, "")
+	other := casExec(t, s, ctx, runID, "review", domain.StepStatusWaiting, "")
+	id := "claim-" + e.ExecutionID + "-actor-a"
+	create := func(t *testing.T) {
+		t.Helper()
+		if err := s.CreateAssignment(ctx, &domain.Assignment{AssignmentID: id, RunID: runID, ExecutionID: e.ExecutionID,
+			ActorID: "actor-a", Status: domain.AssignmentStatusActive, AssignedAt: time.Now().UTC()}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	exists := func(t *testing.T) bool {
+		t.Helper()
+		_, err := s.GetAssignment(ctx, id)
+		if err == nil {
+			return true
+		}
+		var se *domain.SpineError
+		if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+			return false
+		}
+		t.Fatalf("get %s: %v", id, err)
+		return false
+	}
+
+	create(t)
+	for _, miss := range []struct{ name, exec, actor string }{
+		{"another actor", e.ExecutionID, "actor-b"},
+		{"another execution", other.ExecutionID, "actor-a"},
+	} {
+		if err := s.DeleteAssignment(ctx, id, miss.exec, miss.actor); err != nil {
+			t.Fatalf("%s: %v", miss.name, err)
+		}
+		if !exists(t) {
+			t.Fatalf("%s: the row was deleted although it names %s / actor-a", miss.name, e.ExecutionID)
+		}
+	}
+	if err := s.DeleteAssignment(ctx, id, e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if exists(t) {
+		t.Fatal("the row survived its delete")
+	}
+	if err := s.DeleteAssignment(ctx, id, e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("deleting nothing: %v, want nil", err)
+	}
+
+	// The same id is free again: the actor's next claim does not collide.
+	create(t)
+	// A row a terminating cancel already closed goes too.
+	if err := s.UpdateAssignmentStatus(ctx, id, domain.AssignmentStatusCancelled, timePtr(time.Now().UTC())); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if err := s.DeleteAssignment(ctx, id, e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("delete cancelled: %v", err)
+	}
+	if exists(t) {
+		t.Fatal("a cancelled row survived its delete")
+	}
+	if err := s.DeleteAssignment(ctx, "claim-ghost", e.ExecutionID, "actor-a"); err != nil {
+		t.Fatalf("missing row: %v, want nil", err)
+	}
+}

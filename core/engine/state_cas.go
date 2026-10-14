@@ -45,6 +45,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
@@ -175,6 +176,63 @@ func (o *Orchestrator) moveCursorIfAt(ctx context.Context, runID, from, to strin
 // UpdateBranch, which narrows the window but does not close it.
 type BranchCursorTransitioner interface {
 	TransitionBranchCursor(ctx context.Context, branchID, fromStepID, toStepID string) (bool, error)
+}
+
+// AssignmentRowDeleter is an OPTIONAL AssignmentStore capability (INIT-023
+// TASK-008 review round 2, codex): it removes the assignment row
+// assignmentID only while that row still names executionID and actorID,
+// and deleting nothing is not an error. ClaimStep uses it for one row
+// only: the claim-<execution>-<actor> row it created in the same call,
+// before its conditional step write lost the race (discardLostClaimRow).
+// Detected by type assertion on the assignment store, so
+// engine.AssignmentStore gains no method; *store.PostgresStore implements
+// it (asserted in service/cmd/spine). It matters only together with
+// StepExecutionTransitioner, because a blind step write never loses.
+type AssignmentRowDeleter interface {
+	DeleteAssignment(ctx context.Context, assignmentID, executionID, actorID string) error
+}
+
+// discardLostClaimRow undoes the assignment row of a claim whose step
+// write lost its compare-and-swap. ClaimStep creates the row first, because
+// the active-assignment unique index is what serialises two claims, so when
+// the step write then misses, the row records a binding that never took
+// effect. It must not stay in any status:
+//
+//   - not active: the unique index would refuse every later claim of the
+//     execution;
+//   - not cancelled either. The separation-of-duties author ledger
+//     (runAuthor) counts claim rows in every status, because a cancelled
+//     claim row is how an executor who released stays an author. A lost
+//     claimant would therefore be refused as a reviewer of a run it never
+//     wrote. The prior-holder re-offer (releasedSince) reads a
+//     claim-<execution>-<holder> row in any status as "held and released".
+//     So a prior holder's lost claim would open its re-offered rework
+//     attempt to every other actor. The deterministic id would also make
+//     the same actor's next claim of the execution collide on the
+//     primary key.
+//
+// With AssignmentRowDeleter the row is removed, so the lost claim leaves no
+// trace, which matches its error answer and the step_assigned event it
+// never emitted. Without the port, or when the delete fails, the row is
+// cancelled as before so that it does not block other claimants. That
+// residual is documented in KNOWN-LIMITATIONS "Engine State Writes …". The
+// caller holds the run's separation-of-duties bind stripe when that policy
+// is on, so an in-process SoD check never sees the transient row.
+func (o *Orchestrator) discardLostClaimRow(ctx context.Context, a *domain.Assignment) {
+	log := observe.Logger(ctx)
+	if d, ok := o.assignments.(AssignmentRowDeleter); ok {
+		err := d.DeleteAssignment(ctx, a.AssignmentID, a.ExecutionID, a.ActorID)
+		if err == nil {
+			return
+		}
+		log.Warn("claim lost a race; could not delete its assignment row; cancelling it instead",
+			"execution_id", a.ExecutionID, "assignment_id", a.AssignmentID, "error", err)
+	}
+	cancelledAt := time.Now()
+	if err := o.assignments.UpdateAssignmentStatus(ctx, a.AssignmentID, domain.AssignmentStatusCancelled, &cancelledAt); err != nil {
+		log.Warn("claim lost a race; could not cancel its assignment row",
+			"execution_id", a.ExecutionID, "assignment_id", a.AssignmentID, "error", err)
+	}
 }
 
 // moveBranchCursorIfAt moves branchID's cursor from `from` to `to` only

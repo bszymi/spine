@@ -112,6 +112,27 @@ func (s *PostgresStore) CancelActiveAssignmentsForExecution(ctx context.Context,
 	return int(tag.RowsAffected()), nil
 }
 
+// DeleteAssignment removes the assignment row assignmentID, only while it
+// still names executionID and actorID; deleting nothing is not an error.
+// The engine calls it (as the optional engine.AssignmentRowDeleter port,
+// type-asserted on its assignment store) for exactly one row: the one a
+// ClaimStep created in the same call before its conditional step write
+// lost the race (INIT-023 TASK-008 review round 2, codex). That claim never
+// bound its actor, and the separation-of-duties author ledger and the
+// prior-holder re-offer read claim rows in every status, so a cancelled
+// row would record a binding that never happened. The execution and actor
+// guard keeps the statement from ever removing another claim's row should
+// two deterministic ids coincide. No schema change; deliberately not part
+// of the AssignmentStore interface, so embedders' fakes keep compiling.
+func (s *PostgresStore) DeleteAssignment(ctx context.Context, assignmentID, executionID, actorID string) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM runtime.actor_assignments
+		WHERE assignment_id = $1 AND execution_id = $2 AND actor_id = $3`,
+		assignmentID, executionID, actorID,
+	)
+	return err
+}
+
 func (s *PostgresStore) ListExpiredAssignments(ctx context.Context, before time.Time) ([]domain.Assignment, error) {
 	return queryAll(ctx, s.pool, `
 		SELECT assignment_id, run_id, execution_id, actor_id, status, assigned_at, responded_at, timeout_at

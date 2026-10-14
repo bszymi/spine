@@ -1195,9 +1195,15 @@ func TestStepWriters_LostRaceHasNoSideEffects(t *testing.T) {
 		if got := f.st.exec(e.ExecutionID).ActorID; got != "actor-x" {
 			t.Fatalf("lost claim overwrote the assign: %q", got)
 		}
-		row := f.asg.assignments["claim-"+e.ExecutionID+"-actor-a"]
-		if row == nil || row.Status != domain.AssignmentStatusCancelled {
-			t.Fatalf("the lost claim's assignment row = %+v, want cancelled", row)
+		// Review round 2: the row is removed (AssignmentRowDeleter), not
+		// left cancelled; TestClaimStep_LostRaceLeavesNoLedgerRow.
+		if row := f.asg.assignments["claim-"+e.ExecutionID+"-actor-a"]; row != nil {
+			t.Fatalf("the lost claim's assignment row = %+v, want removed", row)
+		}
+		for _, a := range f.asg.assignments {
+			if a.ExecutionID == e.ExecutionID && a.Status == domain.AssignmentStatusActive {
+				t.Fatalf("an active assignment row survived the lost claim: %+v", a)
+			}
 		}
 		if len(f.events(domain.EventStepAssigned)) != 0 {
 			t.Fatal("a lost claim emitted step_assigned")

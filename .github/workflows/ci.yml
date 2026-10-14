@@ -179,7 +179,8 @@ jobs:
 
       # INIT-023 / EPIC-002 / TASK-008: the PostgreSQL store's conditional
       # step-execution, run-status, run-cursor and branch-cursor writes (audit P3-24: a
-      # lost race writes nothing; one of two racers applies), and the two
+      # lost race writes nothing; one of two racers applies), the removal of a
+      # lost claim's assignment row (review round 2), and the two
       # scenarios that carry P3-19/P3-24 end to end — step-output evidence
       # recorded at submit and read back for run detail after the run's
       # event-log rows are deleted, and a completed execution never routed
@@ -187,13 +188,13 @@ jobs:
       - name: TASK-008 store compare-and-swap and step-output evidence (must pass, never skip)
         shell: bash
         run: |
-          go test -tags integration -count=1 -run '^(TestTransitionStepExecution_|TestTransitionRunStatusAt$|TestTransitionCurrentStep$|TestTransitionBranchCursor$)' -v ./adapters/store/ 2>&1 | tee integration-step-cas.log
+          go test -tags integration -count=1 -run '^(TestTransitionStepExecution_|TestTransitionRunStatusAt$|TestTransitionCurrentStep$|TestTransitionBranchCursor$|TestDeleteAssignment$)' -v ./adapters/store/ 2>&1 | tee integration-step-cas.log
           go test -tags scenario -count=1 -run '^(TestStepOutputEvidence_RecordedAndReadBack|TestCompletedStep_IsNotReRouted)$' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-step-evidence.log
           if grep -hE '^[[:space:]]*--- SKIP: ' integration-step-cas.log scenario-step-evidence.log; then
             echo "::error::a TASK-008 store or scenario test skipped — they must pass, never skip"
             exit 1
           fi
-          for t in TestTransitionStepExecution_AppliesOnMatch TestTransitionStepExecution_MissesOnMismatch TestTransitionStepExecution_MissingRow TestTransitionStepExecution_OneOfTwoRacersApplies TestTransitionRunStatusAt TestTransitionCurrentStep TestTransitionBranchCursor; do
+          for t in TestTransitionStepExecution_AppliesOnMatch TestTransitionStepExecution_MissesOnMismatch TestTransitionStepExecution_MissingRow TestTransitionStepExecution_OneOfTwoRacersApplies TestTransitionRunStatusAt TestTransitionCurrentStep TestTransitionBranchCursor TestDeleteAssignment; do
             if ! grep -qE "^--- PASS: ${t} " integration-step-cas.log; then
               echo "::error::${t} did not pass"
               exit 1

@@ -200,14 +200,10 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 		if isStepStateChanged(err) && o.assignments != nil {
 			// The execution moved between the read above and this write
 			// (an assign, an activation or a cancel won; INIT-023
-			// TASK-008). The assignment row created above must not stay
-			// active: the active-assignment unique index would block
-			// every later claim of this execution.
-			cancelledAt := time.Now()
-			if cerr := o.assignments.UpdateAssignmentStatus(ctx, assignment.AssignmentID, domain.AssignmentStatusCancelled, &cancelledAt); cerr != nil {
-				log.Warn("claim lost a race; could not cancel its assignment row",
-					"execution_id", req.ExecutionID, "assignment_id", assignment.AssignmentID, "error", cerr)
-			}
+			// TASK-008). The assignment row created above records a
+			// binding that never happened: it is removed, or at least
+			// cancelled (discardLostClaimRow, review round 2).
+			o.discardLostClaimRow(ctx, assignment)
 		}
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
