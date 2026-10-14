@@ -624,9 +624,10 @@ type cliCloner struct {
 // whose binding has no credential of its own (INIT-023 TASK-015): strip
 // the process-wide push token and credential helper from the base
 // options, and keep git from consulting the host's ambient credential
-// sources too (a global or system credential.helper, an inherited
-// GIT_ASKPASS / core.askPass / SSH_ASKPASS, and for SSH remotes the
-// process's ssh-agent and key files) — otherwise a host-keyed helper or
+// sources too (the system and global git config with any
+// credential.helper, http.extraHeader or askpass set there, an inherited
+// GIT_ASKPASS / SSH_ASKPASS, and for SSH remotes the process's ssh-agent
+// and key files) — otherwise a host-keyed helper, a configured header or
 // the platform's SSH key would still answer for whatever host the
 // binding names. An empty Credential means "no auth", as the Cloner
 // contract says; there is no per-binding SSH credential, so an SSH code

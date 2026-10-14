@@ -22,10 +22,10 @@ import (
 // URL for it, and they strip the process-wide push token
 // (SPINE_GIT_PUSH_TOKEN) and the process credential helper
 // (SPINE_GIT_CREDENTIAL_HELPER) that their base options carry, and they
-// switch off the host's ambient credential sources (a global or system
-// credential.helper, GIT_ASKPASS, core.askPass, and the process's SSH
-// agent and key files for SSH remotes). Those are the
-// deployment's credentials, not the binding's: a code repository
+// switch off the host's ambient credential sources (the system and
+// global git config — helpers, http.extraHeader, askpass — GIT_ASKPASS,
+// and the process's SSH agent and key files for SSH remotes). Those are
+// the deployment's credentials, not the binding's: a code repository
 // with no credentials_ref must never authenticate with them against the
 // host its clone_url names (INIT-023 TASK-015, the audit's latent gitpool
 // item; owner question 2 ruled "never", pending the owner). A private

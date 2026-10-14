@@ -314,18 +314,23 @@ The following limitations have been resolved:
 - Since INIT-023 TASK-015 a code repository with no `credentials_ref` clones and pushes with no
   credential: the gitpool cloner and client factory strip the process-wide `SPINE_GIT_PUSH_TOKEN`
   and `SPINE_GIT_CREDENTIAL_HELPER` for it, on every host (owner question 2 ruled "never", pending
-  the owner), and run git with every host credential source switched off — a `credential.helper`
-  in the global, system or repo-local git config (URL-scoped ones included), `GIT_ASKPASS`,
-  `core.askPass` and `SSH_ASKPASS`, and for `ssh://` / SCP-style URLs the process's SSH identity:
-  ssh runs with no ssh_config, no agent and no key-based authentication
-  (`git.WithoutAmbientCredentials`). A private code repository needs its own `credentials_ref`.
-  Only the primary repository uses the process credentials.
+  the owner), and run git with every host credential source switched off
+  (`git.WithoutAmbientCredentials`): no system or global git config is read (so no
+  `credential.helper`, askpass program, `http.extraHeader` or `core.sshCommand` configured there,
+  URL-scoped ones included), no config injected through `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`,
+  `GIT_ASKPASS`, `SSH_ASKPASS` and `SSH_AUTH_SOCK` are emptied, and for `ssh://` / SCP-style URLs ssh
+  runs with no ssh_config, no agent and no key-based authentication. A private code repository
+  needs its own `credentials_ref`. Only the primary repository uses the process credentials.
 - **SSH code repositories cannot authenticate.** `credentials_ref` resolves to an HTTPS token only;
   there is no per-binding SSH key, so an `ssh://` code repository with no credential is reached
   anonymously or not at all. Use an `https` clone URL with a `credentials_ref`. Per-binding SSH
   credentials are a follow-up.
-- **Residual:** curl's `~/.netrc` lookup, which git enables for HTTP, still answers for a host it
-  lists. Do not keep a `.netrc` in the `HOME` of the `spine serve` process.
+- **Residuals:** curl's `~/.netrc` lookup, which git enables for HTTP, still answers for a host it
+  lists — do not keep a `.netrc` in the `HOME` of the `spine serve` process. Config in a reused
+  clone's own `.git/config` still applies (only filesystem access can write it). On git 2.30–2.31,
+  which ignore `GIT_CONFIG_GLOBAL`, the global config is still read; generic `credential.helper`
+  and `http.extraHeader` values are reset on the command line there, but a URL-scoped
+  `http.<url>.extraHeader` in the global config is not (git ≥ 2.32 is unaffected).
 - **Residual:** a reused clone whose `origin` differs from the binding's `clone_url` is not
   refused or re-cloned, so `/git/{ws}/{repo}` can serve a different repository than the binding
   names (no credential reaches it). Follow-up.

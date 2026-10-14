@@ -56,8 +56,9 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   whatever host its `clone_url`, or a reused clone's `origin`/`pushurl`, named. Dormant (no
   code-repo catalog or `RepositoryManager` is wired in `spine serve`), P1 once one is. Both are now
   stripped for such bindings, on every host, and git runs with the host's own credential sources
-  switched off too (global or system `credential.helper`, `GIT_ASKPASS`, `core.askPass`, and the
-  process's SSH agent and keys for `ssh://` URLs).
+  switched off too (no system or global git config — so no `credential.helper`,
+  `http.extraHeader` or askpass configured there — no `GIT_ASKPASS`, and no process SSH agent or
+  key for `ssh://` URLs).
 - **`clone_url` redaction covers tokens in the username position (latent).**
   `GET /api/v1/repositories` echoed `https://<token>@host/...`; all userinfo of an `https` URL is
   now redacted (SSH logins and the SCP form are kept), and a malformed legacy value never echoes
@@ -110,11 +111,12 @@ credential item. Owner questions answered by their defaults, pending the owner, 
 - **`adapters/git.WithoutPushToken()`** — additive `CLIOption`, mirroring
   `WithoutCredentialHelper`. No existing option, interface (`GitClient`) or call path changes.
 - **`adapters/git.WithoutAmbientCredentials()`** — additive, opt-in `CLIOption`: a client with no
-  token or helper of its own runs clone and push with `-c credential.helper=`, `GIT_ASKPASS`,
-  `SSH_ASKPASS` and `SSH_AUTH_SOCK` emptied, `GIT_TERMINAL_PROMPT=0`, and a `GIT_SSH_COMMAND` that
-  reads no ssh_config and disables the agent and key-based authentication, so no host credential
-  source answers. A client with its own credential is unchanged; without the option nothing
-  changes.
+  token or helper of its own runs clone and push without the system and global git config
+  (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` = null device) or environment-injected config, with
+  `-c credential.helper=` and `-c http.extraHeader=`, `GIT_ASKPASS`, `SSH_ASKPASS` and
+  `SSH_AUTH_SOCK` emptied, `GIT_TERMINAL_PROMPT=0`, and a `GIT_SSH_COMMAND` that reads no
+  ssh_config and disables the agent and key-based authentication, so no host credential source
+  answers. A client with its own credential is unchanged; without the option nothing changes.
 - **`adapters/gitpool`**: `NewCLIClientFactory` and `NewCLICloner` strip the process push token and
   credential helper from their base options for an empty `Credential`, and apply
   `WithoutAmbientCredentials`. SMP does not import `adapters/gitpool`.

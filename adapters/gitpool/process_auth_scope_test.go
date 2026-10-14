@@ -412,6 +412,10 @@ func TestLatentGitpool_PerBindingCredentialStillUsed(t *testing.T) {
 	}
 }
 
+// t015AmbientHeader is an http.extraHeader carrying the ambient
+// credential (Basic ambient-user:ambient-secret).
+const t015AmbientHeader = "Authorization: Basic YW1iaWVudC11c2VyOmFtYmllbnQtc2VjcmV0"
+
 // t015AmbientAskpass writes an askpass program that answers every prompt
 // with the ambient credential and returns its path.
 func t015AmbientAskpass(t *testing.T) string {
@@ -450,6 +454,50 @@ func TestLatentGitpool_CredentialLessCodeRepoIgnoresHostCredentials(t *testing.T
 		}},
 		{"inherited GIT_ASKPASS", func(t *testing.T, _, _ string) {
 			t.Setenv("GIT_ASKPASS", t015AmbientAskpass(t))
+		}},
+		// Codex review round 3 (P2): an http.extraHeader is a credential
+		// too, generic or URL-scoped, from a config file or injected
+		// through the environment.
+		{"global http.extraHeader", func(t *testing.T, home, _ string) {
+			cfg := "[http]\n\textraHeader = " + t015AmbientHeader + "\n"
+			if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"URL-scoped global http.extraHeader", func(t *testing.T, home, hostURL string) {
+			cfg := "[http \"" + hostURL + "\"]\n\textraHeader = " + t015AmbientHeader + "\n"
+			if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"system credential.helper", func(t *testing.T, home, hostURL string) {
+			t015StoreCredential(t, home, hostURL)
+			sys := filepath.Join(t.TempDir(), "gitconfig")
+			if err := os.WriteFile(sys, []byte("[credential]\n\thelper = store\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GIT_CONFIG_SYSTEM", sys)
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "")
+			if err := os.Unsetenv("GIT_CONFIG_NOSYSTEM"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"system URL-scoped http.extraHeader", func(t *testing.T, _, hostURL string) {
+			sys := filepath.Join(t.TempDir(), "gitconfig")
+			cfg := "[http \"" + hostURL + "\"]\n\textraHeader = " + t015AmbientHeader + "\n"
+			if err := os.WriteFile(sys, []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GIT_CONFIG_SYSTEM", sys)
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "")
+			if err := os.Unsetenv("GIT_CONFIG_NOSYSTEM"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"GIT_CONFIG_COUNT URL-scoped http.extraHeader", func(t *testing.T, _, hostURL string) {
+			t.Setenv("GIT_CONFIG_COUNT", "1")
+			t.Setenv("GIT_CONFIG_KEY_0", "http."+hostURL+".extraHeader")
+			t.Setenv("GIT_CONFIG_VALUE_0", t015AmbientHeader)
 		}},
 		{"core.askPass", func(t *testing.T, home, _ string) {
 			// git reads core.askPass only when GIT_ASKPASS is unset (an

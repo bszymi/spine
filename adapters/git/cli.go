@@ -172,14 +172,29 @@ func WithoutPushToken() CLIOption {
 // what they return to whatever host the clone URL or the remote names.
 //
 // With it, a client that has no askpass token and no credential helper
-// runs clone and push with `-c credential.helper=` (an empty value resets
-// every configured helper, URL-scoped ones included), GIT_ASKPASS and
-// SSH_ASKPASS set empty (an empty GIT_ASKPASS also stops git from falling
-// back to core.askPass), GIT_TERMINAL_PROMPT=0, SSH_AUTH_SOCK empty, and
-// GIT_SSH_COMMAND set to noAmbientSSHCommand (which overrides GIT_SSH and
-// core.sshCommand). A client that does carry a token or helper is
-// unchanged: its own credential is used as before. Not covered: curl's
-// ~/.netrc lookup, which git enables for HTTP (KNOWN-LIMITATIONS.md).
+// runs clone and push without the host's git configuration and without
+// the inherited credential environment:
+//
+//   - GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL set to the null device
+//     (git >= 2.32): no system or global config is read, so no helper,
+//     askpass program, http.extraHeader (URL-scoped ones included),
+//     sshCommand or URL rewrite configured there applies;
+//     GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are cleared, so no
+//     config injected through the environment applies either;
+//   - `-c credential.helper=` and `-c http.extraHeader=` reset the
+//     generic keys on every supported git version, including 2.30-2.31,
+//     which do not know GIT_CONFIG_GLOBAL;
+//   - GIT_ASKPASS and SSH_ASKPASS empty (an empty GIT_ASKPASS also stops
+//     the core.askPass fallback), GIT_TERMINAL_PROMPT=0, SSH_AUTH_SOCK
+//     empty, and GIT_SSH_COMMAND=noAmbientSSHCommand (which overrides
+//     GIT_SSH and core.sshCommand).
+//
+// A client that does carry a token or helper is unchanged: its own
+// credential is used as before. Not covered (KNOWN-LIMITATIONS.md):
+// curl's ~/.netrc lookup, which git enables for HTTP; config in the
+// repository's own .git/config (a reused clone), which only someone with
+// filesystem access can write; and, on git 2.30-2.31, a URL-scoped
+// http.extraHeader in the global config.
 func WithoutAmbientCredentials() CLIOption {
 	return func(c *CLIClient) {
 		c.noAmbientAuth = true
@@ -208,12 +223,21 @@ const noAmbientSSHCommand = "ssh -F none -o BatchMode=yes -o IdentityAgent=none 
 // noAmbientAuthEnv is appended to the environment of a clone or push when
 // ambientAuthDisabled; os/exec keeps the last value of a duplicated key.
 var noAmbientAuthEnv = []string{
+	"GIT_CONFIG_NOSYSTEM=1",
+	"GIT_CONFIG_GLOBAL=" + os.DevNull,
+	"GIT_CONFIG_PARAMETERS=",
+	"GIT_CONFIG_COUNT=0",
 	"GIT_ASKPASS=",
 	"SSH_ASKPASS=",
 	"GIT_TERMINAL_PROMPT=0",
 	"SSH_AUTH_SOCK=",
 	"GIT_SSH_COMMAND=" + noAmbientSSHCommand,
 }
+
+// noAmbientAuthArgs are the command-scoped resets placed before the
+// subcommand of a clone or push when ambientAuthDisabled. An empty value
+// clears every value of the key accumulated from config files.
+var noAmbientAuthArgs = []string{"-c", "credential.helper=", "-c", "http.extraHeader="}
 
 // NewCLIClient creates a new Git client for the repository at the given path.
 func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
@@ -436,9 +460,9 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		// lose to the still-on-disk helper.
 		args = append(args, "-c", "credential.helper="+c.credentialHelper)
 	case c.ambientAuthDisabled():
-		// No credential at all (WithoutAmbientCredentials): the empty
-		// value disables every configured helper for this command.
-		args = append(args, "-c", "credential.helper=")
+		// No credential at all (WithoutAmbientCredentials): reset every
+		// configured helper and extra header for this command.
+		args = append(args, noAmbientAuthArgs...)
 	}
 	// `--` ends option parsing so a poisoned URL like `--upload-pack=cmd`
 	// cannot be re-interpreted as a flag. ValidateCloneURL already
@@ -1020,8 +1044,9 @@ func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string,
 		args = append([]string{"-c", "credential.helper=" + c.credentialHelper}, args...)
 	case op == "push" && c.ambientAuthDisabled():
 		// WithoutAmbientCredentials and no credential of its own: no
-		// configured helper may answer (the same rule as Clone).
-		args = append([]string{"-c", "credential.helper="}, args...)
+		// configured helper or extra header applies (the same rule as
+		// Clone).
+		args = append(append([]string{}, noAmbientAuthArgs...), args...)
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.repoPath
