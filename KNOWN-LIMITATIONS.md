@@ -216,9 +216,17 @@ merge publishes the commit the run's steps validated and reviewed, never the run
    the bound commit and `git gc` prunes it, the merge refuses (`precondition`) and a publish workflow
    routes back to `execute`. Pinning the bound commit with a ref is a follow-up.
 9. **The recovery ledger under binding** is a child of the bound commit, referenced only by the
-   run's `commit_meta` until the resumed merge publishes it; a run that is never resumed leaves it
-   unreferenced (prunable). Its commit date is the bound commit's (the commit is built
-   deterministically); the time of the operator action is in the audit event.
+   run's `commit_meta` until the resumed merge publishes it: it lives only in the object store of
+   the repository that wrote it and is not pushed anywhere (with binding off it was committed on the
+   run branch and pushed). A resumed merge that runs after `git gc` pruned it (unreachable objects
+   older than `gc.pruneExpire`, two weeks by default) or in another clone (a remote-backed embedder
+   with several clones) cannot verify it and fails closed (`precondition`) — nothing unreviewed can
+   merge — and the ledger is visible in git only once merged (the event carries
+   `ledger_commit_sha`). Dormant: the ledger exists only for multi-repository partially-merged runs,
+   and no code-repository catalog is wired in Spine or SMP. Pinning the bound and ledger commits
+   with a durable ref is the follow-up (it is the same gap as item 8). Its commit date is the bound
+   commit's (the commit is built deterministically); the time of the operator action is in the
+   audit event.
 10. **Excluded commits are logged, not evented.** When the primary's or any code repository's run
     branch holds commits the merge left out, every run branch of the run is kept (not only the one
     with excluded commits) and a `merge_binding: commits after the bound head were not merged`
