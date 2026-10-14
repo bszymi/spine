@@ -1843,7 +1843,10 @@ have one root cause, and so do 3 and 8.
     distinct `409` (`detail.repository_id`), as for a push. Reasons are under finding 1.
 12. **The re-offer is narrower (finding 2).** There is no re-offer to a holder who cannot claim
     (inactive or unknown), and none on `automated_only` / `ai_only` steps while
-    `EnforceExecutionMode` is on.
+    `EnforceExecutionMode` is on. *(Amended in review round 2: "cannot claim" now covers every
+    claimer-dependent refusal in `ClaimStep` — also the execution's `eligible_actor_ids`,
+    `eligible_actor_types`, the mode-implied type and `required_skills` — and the host's
+    authorization is recorded as the one residual. See "Review round 2", finding 1.)*
 
 **Residuals added** (they extend AC 18's list; all are in `KNOWN-LIMITATIONS.md`):
 
@@ -1872,3 +1875,110 @@ have one root cause, and so do 3 and 8.
 | SMP `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` | 115 / 26 versions |
 | SMP CI Spine-runtime step: `go run ./dev/testgate -- -race -count=1 -timeout 10m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` | **1835 passed, 0 failed**; the same two macOS-only `ru_maxrss` skips as before (Linux-only contract, run on CI) |
 | `codex review --base main` (plain; `-c model="gpt-6-astra"`, the configured model is refused by the account) | "No actionable regressions were identified" (codex's own service-suite runs were blocked by its sandbox's socket restrictions; they pass here) |
+
+### Review round 2 (2026-10-14)
+
+A second-round reviewer examined `main...fcc7928` after the round-1 fixes. It reported one
+finding and one evidence gap. Both were checked against the code before anything changed. The
+fixes are commits `6b81ca9` (engine), `0c71b9d` (CHANGELOG and KNOWN-LIMITATIONS) and `74247ba`
+(comment wording).
+
+**Findings.**
+
+1. **P3. The round-1 re-offer fix covered only inactive or unknown holders. FIXED.**
+   - *Verified.* `priorHolderCanClaim` checked only `a.Status == active`. `ClaimStep` also
+     refuses a claimer for other reasons. Those that depend on who claims are: the execution's
+     `eligible_actor_ids`, `eligible_actor_types`, the mode-implied type (under
+     `EnforceExecutionMode`) and `required_skills`. The reviewer's probe was ported as the first
+     row of the new `TestStepEntry_ReofferSkipsHolderTheClaimWouldRefuse`
+     (`StrictStepEntryPolicy()`, a `hybrid` `execute` that requires `go`, member-1 lost `go`). On
+     `fcc7928` it failed as described: member-1's own claim got `409 actor missing required
+     skills: [go]`, and member-2 got the re-offer `403`. Five more rows failed the same way: a
+     deprecated skill, the holder off the allow-list, a holder type the step does not admit, a
+     non-human holder of a `human_only` step, and a failing skill lookup that answered `403`
+     instead of failing closed. The listing row failed too: the rework was hidden from member-2.
+   - *Change.*
+     - `priorHolderCanClaim(ctx, stepDef, exec, holder)` now mirrors `ClaimStep`'s
+       claimer-dependent checks, in its order. If any of them would refuse the holder, there is
+       no re-offer:
+       1. `eligible_actor_ids`. This check is pure, so it also applies with no actor lookup
+          wired.
+       2. The holder resolves and is `active` (round 1).
+       3. With `EnforceExecutionMode`, the mode-implied type. Only `human_only` is left here,
+          because `reofferExempt` already covers the machine modes.
+       4. `eligible_actor_types`.
+       5. `required_skills`, read through the same skill lookup as the claim. A skill lookup
+          failure is `503` with a message that does not name the holder. With no skill lookup
+          wired, `ClaimStep` skips the skill check, so the holder passes and the re-offer stands.
+     - `ClaimStep`, `RequireSkillsOnAssign` and the holder check now share one active-skill rule,
+       `missingRequiredSkills`. The extraction does not change behaviour: same loop, same order,
+       same message.
+   - *Who can trigger the exception.* Each of these refusals follows an operator or admin
+     action, never a contributor's, so a contributor cannot lift a colleague's re-offer:
+     - `actor.remove_skill` and `skill.deprecate` are admin-only, and so is suspension;
+     - `UpdateActor` never writes an actor's type;
+     - only `step.assign` (operator) writes `eligible_actor_ids`.
+   - *Deliberately not mirrored* (stated in the function comment):
+     - *Checks that refuse every claimer alike* (run status, engine-owned steps,
+       preconditions). The re-offer adds no strand there.
+     - *Separation of duties.* Under that rule the holder of an author step can never be bound to
+       a review of the run afterwards. A live review it held before (rows from before the policy)
+       ends with that review, so the refusal is transient, not a strand.
+     - *The host's authorization.* `spine serve`'s `execution.claim` needs contributor, but the
+       engine cannot see that check. Judging it from `Actor.Role` would also silently lift every
+       re-offer for an embedder whose resolver leaves `Role` empty, which is the unsafe
+       direction. So a holder whose role an admin lowers below contributor keeps the rework
+       pinned until the role is restored or an operator assigns it. This is recorded in
+       `KNOWN-LIMITATIONS.md`.
+   - *Tests.*
+     - `TestStepEntry_ReofferSkipsHolderTheClaimWouldRefuse` has ten rows: seven where the
+       re-offer is dropped and three controls where it stands. Each row whose holder cannot claim
+       also asserts the holder's own claim code.
+     - `TestStepEntry_CandidateListingOffersReworkWhenHolderCannotClaim` covers the listing
+       mirror.
+   - *Mutations* (`-overlay`, the worktree untouched). Each of these fails at least one row:
+     - dropping the allow-list, status, implied-type, `eligible_actor_types` or skill check;
+     - removing the `EnforceExecutionMode` guard (fails the "mode not enforced" control);
+     - turning the skill-lookup failure into "cannot claim", or a missing skill lister into
+       "cannot claim";
+     - counting non-`active` skills in `missingRequiredSkills`.
+   - *Docs.* The `ReofferToPriorHolder` field comment, the CHANGELOG "Security" bullet and
+     `KNOWN-LIMITATIONS.md` now list every exception and the role residual. Deviation 12 is
+     amended in place.
+   - *SMP.* No change. SMP installs no `StepEntryPolicy` (grep over the SMP checkout), so
+     `priorHolderCanClaim` and `requireSkillsOnAssign` are unreachable from it. Its
+     `ClaimStep`'s skill check is the same rule, now extracted.
+
+**Gap.**
+
+- **AC 12, AC 13/19 and AC 15 database evidence was not re-checked by the reviewer. RE-RUN on
+  the final code.** The shared server at `localhost:55630` was still down (port closed), and the
+  named `psql` path was absent. So, as in round 1, a private PostgreSQL 17.10 cluster ran in this
+  task's scratchpad: `127.0.0.1:55781`, scram, TCP only, no Unix socket. Only `s014_*` databases
+  were used (`s014_integ`, `s014_scen`, `s014_scenmain`, `s014_smp_it`,
+  `s014_spine_runtime_it`), plus the SMP roles its CI provisions and SMP's own test allocations.
+  The cluster was stopped and deleted afterwards. Results are in the table below:
+  - `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` passes with no skip, in the
+    package suite and in the CI step run verbatim;
+  - `TestWorkflowLifecycle_*` passes 4/4 with no skip;
+  - the scenario-suite failure set is identical to `main`'s.
+
+**Gates (round 2, final code).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o …/embed-smoketest ./cmd/embed-smoketest && …/embed-smoketest` | OK; ok; "library surface is sound" |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
+| `go test -p 4 -count=1 ./...` | exit 0 (40 packages ok) |
+| `go test -race -p 4 -count=1` on `core/workflow`, `core/engine`, `service/internal/gateway`, `service/cmd/spine`, `service/internal/workspace` | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s014_integ go test -tags integration -count=1 -p 1` on the same five | all ok; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS (`-v`, no skip) |
+| CI `scenario-git-http` job, all four steps run verbatim with `bash -eo pipefail` (logs moved to the scratchpad) on `s014_scen` | exit 0 each: `TestGitHTTP_*` 20 PASS, `TestBootstrapInternalAdmin_*` 2 PASS, `TestWorkflowLifecycle_*` 4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), the AC 12 integration step PASS; 0 FAIL, 0 SKIP |
+| `go test -tags scenario -count=1 -p 1 -timeout 40m ./service/scenariotest/...` on HEAD (`s014_scen`, recreated) and on a fresh `git archive main` export (`s014_scenmain`) | 30 failures each, the identical set (the known pre-existing ones, also identical to round 1's list); none new |
+| `golangci-lint run --build-tags=integration,scenario` on the touched packages (the five above plus `service/scenariotest/...`), HEAD vs the `main` export, normalised without positions | **0 new issues** (189 vs 194; the 5 fewer are the gofmt fixes in touched files) |
+| `golangci-lint run --enable-only=gosec ./...` | 0 issues |
+| `gofmt -l` on every changed `.go` file (36) | clean |
+| SMP gate (`f5c6fd6d`, `../spine` → this worktree, tree clean after every command): `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` | clean |
+| SMP `go test -p 4 -count=1` on the importers of changed Spine packages (`go list` with test imports: `executionreadiness`, `spinecore`, `spineembedded`) and `internal/customer/workflow` | all ok |
+| SMP `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` | 115 / 26 versions |
+| SMP CI Spine-runtime step: `go run ./dev/testgate -- -race -count=1 -timeout 10m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` | **1835 passed, 0 failed**; the same two macOS-only `ru_maxrss` skips as rounds 0 and 1 (Linux-only contract, run on CI's Linux runner) |
+| `codex review --base main` (plain; the configured model `gpt-6.1-sol` is refused by the account — "not supported when using Codex with a ChatGPT account" — so, as in round 1, `-c model="gpt-6-astra"`) on `0c71b9d`; `74247ba` after it is comment-only | "No actionable regressions were identified" (no P1/P2; codex's own gateway and server suite runs were blocked by its sandbox's listening-port restriction; they pass here, rows above) |
