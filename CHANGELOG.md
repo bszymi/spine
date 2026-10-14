@@ -30,7 +30,10 @@ through reserved `commit_meta` keys (5).
   serve`) every engine step write is conditional on the (status, actor) it read. A submit that
   races the timeout scanner no longer overwrites the failed step and routes its outcome; two merge
   attempts no longer both advance the publish step; a lost activation delivers no assignment and
-  runs no handler; a lost claim cancels its own assignment row; a lost failure creates no retry.
+  runs no handler; a lost claim removes its own assignment row (it never bound its actor, so
+  neither the separation-of-duties author ledger nor the prior-holder re-offer may read it as a
+  binding; without the optional `engine.AssignmentRowDeleter` it is cancelled); a lost failure
+  creates no retry.
   The timeout scanner, startup recovery and the gateway's fallback assigner are conditional too.
 - **A completed step is never routed twice (P3-24, design check).** `step.submit` on `completed`
   is an accepted no-op transition, so a second submit that re-read the row after the first one
@@ -97,6 +100,9 @@ through reserved `commit_meta` keys (5).
   `(*store.PostgresStore).TransitionCurrentStep` (crash recovery's conditional cursor move) and
   `engine.BranchCursorTransitioner` with `(*store.PostgresStore).TransitionBranchCursor` (the same
   for a divergence branch's cursor: cursor only, while the branch is open);
+  `engine.AssignmentRowDeleter` with `(*store.PostgresStore).DeleteAssignment` (type-asserted on
+  the assignment store: a claim whose conditional step write lost removes the row it created,
+  only while the row names that execution and actor);
   `Orchestrator.RecoverCompletedStep` and
   `Orchestrator.StepOutputEvidence`; the types `engine.BranchChange` and
   `engine.StepOutputEvidence` with their `BranchChange*` / `EvidenceReason*` constants (an

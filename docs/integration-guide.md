@@ -899,7 +899,12 @@ embedder (through `TransitionRunStatus`, which every `engine.RunStore` has); the
    not advance with `Orchestrator.RecoverCompletedStep` (implement the optional
    `engine.RunCursorTransitioner` and `engine.BranchCursorTransitioner` too —
    `(*store.PostgresStore).TransitionCurrentStep` / `TransitionBranchCursor` — so its resume of a
-   routing successor never rewinds a run or branch cursor a live submit moved on).
+   routing successor never rewinds a run or branch cursor a live submit moved on). On the
+   assignment store, implement the optional `engine.AssignmentRowDeleter` (delegate to
+   `(*store.PostgresStore).DeleteAssignment`) together with the step compare-and-swap. A claim
+   whose step write lost then removes the row it created; without the port the row stays
+   cancelled, and separation of duties and the prior-holder re-offer read it as a binding
+   (KNOWN-LIMITATIONS "Engine State Writes …" 11).
 4. **Show the evidence.** `step_completed` carries `branch_change` and
    `required_outputs_unchanged` (architecture/event-schemas.md §4.2), and
    `Orchestrator.StepOutputEvidence(ctx, runID)` returns the persisted per-execution evidence for

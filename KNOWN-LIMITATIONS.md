@@ -333,6 +333,18 @@ terminal execution from being routed twice and lets the engine verify the submit
 10. **`ProcessResult` (`core/actor`) has no production caller.** It now refuses failed and skipped
    executions and a foreign actor and writes conditionally when it can; deleting the dead path is a
    follow-up.
+11. **A lost claim's assignment row is removed only with `engine.AssignmentRowDeleter`.**
+   `ClaimStep` creates its `claim-<execution>-<actor>` row before the conditional step write,
+   because the active-assignment unique index is what serialises two claims. When the step write
+   loses, the claim never bound its actor, so the row is deleted. That row would otherwise be read
+   as a binding: the separation-of-duties ledger counts claim rows in every status, the
+   prior-holder re-offer reads one as "held and released", and its id would collide with the same
+   actor's next claim. The PostgreSQL store implements the port. An assignment store without it
+   (or a failing delete) cancels the row instead, so no claim is blocked, and the three effects
+   remain: the lost claimant is refused as a reviewer of that run, a prior holder's lost claim
+   opens its re-offered rework attempt to others, and that actor cannot claim the execution again.
+   It is reachable only together with `engine.StepExecutionTransitioner`, because a blind step
+   write never loses.
 
 ### Governed Merge Binding (INIT-023 TASK-005)
 SHA-bound governed merges (`Orchestrator.EnableMergeBinding`) close audit F2's merge half: the

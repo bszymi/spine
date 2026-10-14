@@ -345,7 +345,11 @@ State transitions within a single entity are atomic:
   supports it** (the optional `engine.StepExecutionTransitioner`; the standalone
   PostgreSQL store does, an embedder opts in). A writer that lost its race writes
   nothing and stops without side effects: no event, no routing, no assignment
-  delivery, no handler run, no retry execution. Without the capability step writes
+  delivery, no handler run, no retry execution. A claim that lost removes the
+  assignment row it created first, because the claim never bound its actor
+  (`engine.AssignmentRowDeleter` on the assignment store; without it the row is
+  cancelled, and separation of duties and the prior-holder re-offer then read it as a
+  binding: KNOWN-LIMITATIONS "Engine State Writes …" 11). Without the capability step writes
   stay blind (an embedder serialises them itself). An acknowledgment that loses to the
   same actor's identical transition (a concurrent retry, or the actor's own submit
   auto-acknowledging) answers like the sequential retry — the idempotent `in_progress`
