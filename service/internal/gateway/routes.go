@@ -80,6 +80,9 @@ func (s *Server) routes() http.Handler {
 			r.Post("/runs/{run_id}/cancel", s.handleRunCancel)
 			r.Post("/runs/{run_id}/repositories/{repository_id}/resolve", s.handleRunRepositoryResolve)
 			r.Post("/runs/{run_id}/repositories/{repository_id}/retry", s.handleRunRepositoryRetry)
+			// Governance-path guard (INIT-023 TASK-006, ADR-016).
+			r.Post("/runs/{run_id}/governance-decision", s.handleRunGovernanceDecision)
+			r.Get("/runs/{run_id}/governance", s.handleRunGovernanceStatus)
 			r.Post("/runs/{run_id}/steps/{step_id}/assign", s.handleStepAssign)
 
 			// Divergence
