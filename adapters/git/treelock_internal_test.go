@@ -1,0 +1,291 @@
+package git
+
+// INIT-023 TASK-012 AC 10: the shared working-tree lock (treelock.go).
+// Run under -race too.
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// tlRun runs git in dir with a fixed identity and fails the test on error.
+func tlRun(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	full := append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.test",
+		"-c", "commit.gpgsign=false"}, args...)
+	out, err := exec.Command("git", full...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// tlRepo is a repository on main with a second branch "feature".
+func tlRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	tlRun(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tlRun(t, dir, "add", "a.md")
+	tlRun(t, dir, "commit", "-q", "-m", "init")
+	tlRun(t, dir, "branch", "feature")
+	return dir
+}
+
+// tlHold takes the tree through c in a goroutine and keeps it until the
+// returned release is called.
+func tlHold(t *testing.T, c *CLIClient) (release func()) {
+	t.Helper()
+	entered, done, exited := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		_ = c.WithWorkingTree(context.Background(), func(context.Context) error {
+			close(entered)
+			<-done
+			return nil
+		})
+	}()
+	<-entered
+	var released bool
+	return func() {
+		if !released {
+			released = true
+			close(done)
+			<-exited
+		}
+	}
+}
+
+// tlBlocks reports whether call is still running after d.
+func tlBlocks(call func() error, d time.Duration) (blocked bool, result chan error) {
+	result = make(chan error, 1)
+	go func() { result <- call() }()
+	select {
+	case err := <-result:
+		result <- err
+		return false, result
+	case <-time.After(d):
+		return true, result
+	}
+}
+
+func tlRegistered(dir string) bool {
+	treeMu.Lock()
+	defer treeMu.Unlock()
+	_, ok := treeLocks[canonicalTreeKey(dir)]
+	return ok
+}
+
+// (a) A nested stateful call inside WithWorkingTree re-enters.
+func TestTreeLock_NestedCallReenters(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := c.WithWorkingTree(ctx, func(ctx context.Context) error {
+		if err := c.Checkout(ctx, "feature"); err != nil {
+			return err
+		}
+		return c.WithWorkingTree(ctx, func(ctx context.Context) error { return c.Checkout(ctx, "main") })
+	})
+	if err != nil {
+		t.Fatalf("nested calls inside WithWorkingTree: %v", err)
+	}
+}
+
+// (b) A second client on the same directory, spelled differently, waits.
+func TestTreeLock_SameTreeDifferentSpellingShareOneLock(t *testing.T) {
+	dir := tlRepo(t)
+	c1 := NewCLIClient(dir)
+	c2 := NewCLIClient(filepath.Join(dir, ".")) // "repo/."
+	release := tlHold(t, c1)
+	defer release()
+	blocked, res := tlBlocks(func() error { return c2.Checkout(context.Background(), "feature") }, 300*time.Millisecond)
+	if !blocked {
+		t.Fatalf("a second client on %s/. ran while the first held the tree (err=%v)", dir, <-res)
+	}
+	release()
+	if err := <-res; err != nil {
+		t.Fatalf("Checkout after release: %v", err)
+	}
+}
+
+// (c) Waiting ends with the ctx: a *TreeWaitError that unwraps to it.
+func TestTreeLock_WaitHonoursContext(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	release := tlHold(t, c)
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	ran := false
+	err := c.WithWorkingTree(ctx, func(context.Context) error { ran = true; return nil })
+	var we *TreeWaitError
+	if !errors.As(err, &we) || !errors.Is(err, context.DeadlineExceeded) || ran {
+		t.Fatalf("WithWorkingTree while held = %v (ran=%v), want *TreeWaitError wrapping DeadlineExceeded and fn not run", err, ran)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel2()
+	if err := c.Checkout(ctx2, "feature"); !errors.As(err, &we) {
+		t.Fatalf("Checkout while held = %v, want *TreeWaitError", err)
+	}
+}
+
+// (d) The registry entry is gone once every holder and waiter left.
+func TestTreeLock_RegistryEmptyAfterRelease(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	release := tlHold(t, c)
+	waited := make(chan error, 1)
+	go func() { waited <- c.Checkout(context.Background(), "feature") }()
+	time.Sleep(50 * time.Millisecond)
+	if !tlRegistered(dir) {
+		t.Fatal("no registry entry while the tree is held")
+	}
+	release()
+	if err := <-waited; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WithWorkingTree(context.Background(), func(ctx context.Context) error {
+		return c.Checkout(ctx, "main")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if tlRegistered(dir) {
+		t.Fatal("the lock registry kept an entry after every holder released")
+	}
+}
+
+// (e) A ticket that escaped a released sequence is not honoured.
+func TestTreeLock_StaleTicketDoesNotBypass(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	var leaked context.Context
+	if err := c.WithWorkingTree(context.Background(), func(ctx context.Context) error {
+		leaked = ctx
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	release := tlHold(t, c)
+	defer release()
+	blocked, res := tlBlocks(func() error { return c.Checkout(context.WithoutCancel(leaked), "feature") }, 300*time.Millisecond)
+	if !blocked {
+		t.Fatalf("a released sequence's ticket bypassed the lock (err=%v)", <-res)
+	}
+	release()
+	if err := <-res; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// (f) An in-place write scope holds the tree until Cleanup.
+func TestTreeLock_InPlaceScopeHoldsTree(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	scope, err := EnterBranch(context.Background(), dir, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, res := tlBlocks(func() error { return c.Checkout(context.Background(), "feature") }, 300*time.Millisecond)
+	if !blocked {
+		scope.Cleanup()
+		t.Fatalf("Checkout ran inside an open in-place scope (err=%v)", <-res)
+	}
+	scope.Cleanup()
+	scope.Cleanup() // idempotent
+	if err := <-res; err != nil {
+		t.Fatalf("Checkout after Cleanup: %v", err)
+	}
+}
+
+// (g) Inside an in-place scope, scope.Context(ctx) re-enters; the plain
+// ctx waits for the scope itself until its deadline (the documented trap).
+func TestTreeLock_InPlaceScopeContextReenters(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	ctx := context.Background()
+	scope, err := EnterBranch(ctx, dir, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scope.Cleanup()
+	done := make(chan error, 1)
+	go func() { done <- c.Checkout(scope.Context(ctx), "feature") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Checkout(scope.Context(ctx)): %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a call made with scope.Context(ctx) waited for its own scope")
+	}
+	plain, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = c.Checkout(plain, "main")
+	var we *TreeWaitError
+	if !errors.As(err, &we) || time.Since(start) < 250*time.Millisecond {
+		t.Fatalf("Checkout(plain ctx) inside the scope = %v after %v, want *TreeWaitError at the deadline", err, time.Since(start))
+	}
+}
+
+// (h) A done ctx never acquires, even when the lock is free.
+func TestTreeLock_DoneContextNeverAcquires(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ran := 0
+	for i := 0; i < 200; i++ {
+		err := c.WithWorkingTree(ctx, func(context.Context) error { ran++; return nil })
+		var we *TreeWaitError
+		if !errors.As(err, &we) {
+			t.Fatalf("call %d: WithWorkingTree(done ctx) = %v, want *TreeWaitError", i, err)
+		}
+	}
+	if ran != 0 {
+		t.Fatalf("fn ran %d/200 times with a done ctx", ran)
+	}
+	if tlRegistered(dir) {
+		t.Fatal("refused acquisitions left a registry entry")
+	}
+}
+
+// (i) On a home-branch tree, fn's ctx survives the caller's cancellation
+// and is bounded by treeSequenceTimeout.
+func TestTreeLock_SequenceIsDetachedAndBounded(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir, WithHomeBranch("main"))
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	var errAfter error
+	var deadline time.Time
+	var hasDeadline bool
+	err := c.WithWorkingTree(ctx, func(fctx context.Context) error {
+		cancel()
+		errAfter = fctx.Err()
+		deadline, hasDeadline = fctx.Deadline()
+		return c.Checkout(fctx, "feature") // still runs: the sequence is not abandoned
+	})
+	if err != nil {
+		t.Fatalf("WithWorkingTree: %v", err)
+	}
+	if errAfter != nil {
+		t.Fatalf("fn's ctx was cancelled with the caller's: %v", errAfter)
+	}
+	if !hasDeadline || deadline.After(start.Add(treeSequenceTimeout+time.Second)) {
+		t.Fatalf("fn's ctx deadline = %v (set %v), want at most treeSequenceTimeout (%v) from the start", deadline, hasDeadline, treeSequenceTimeout)
+	}
+	if got := tlRun(t, dir, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+		t.Fatalf("exit restore did not return the tree home: HEAD=%s", got)
+	}
+}

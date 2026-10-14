@@ -97,7 +97,7 @@ type runOpts struct {
 // merge itself then reads without an allocation limit (KNOWN-LIMITATIONS,
 // "Git read bounds").
 func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = c.repoPath
 	env := append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
 	env = append(env, o.env...)
@@ -465,7 +465,9 @@ func (c *CLIClient) MergeBound(ctx context.Context, opts MergeOpts) (MergeResult
 // mergeSHA is the SourceSHA path shared by Merge and MergeBound: every
 // argument is checked, the commit is verified, the target (when given)
 // is switched to and its tip recorded as BaseSHA, then exactly SourceSHA
-// is merged. Source is never resolved.
+// is merged. Source is never resolved. Everything after the argument
+// checks holds the working tree (INIT-023 TASK-012), so no other writer
+// can move the target between the base read and the merge in-process.
 func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, error) {
 	if err := checkObjectName("merge", "source sha", opts.SourceSHA); err != nil {
 		return MergeResult{}, err
@@ -478,6 +480,12 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 		}
 		target = short
 	}
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	defer h.release()
+	ctx = h.ctx
 	if err := c.verifyCommitOID(ctx, "merge", "source sha", opts.SourceSHA); err != nil {
 		return MergeResult{}, err
 	}
@@ -537,6 +545,15 @@ func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string
 	if err := checkObjectName(op, "expected", expected); err != nil {
 		return err
 	}
+	// The ref move and the index/tree follow-up hold the working tree
+	// (INIT-023 TASK-012); inside the governed merge's sequence this
+	// re-enters.
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	ctx = h.ctx
 	if err := c.verifyCommitOID(ctx, op, "target", to); err != nil {
 		return err
 	}

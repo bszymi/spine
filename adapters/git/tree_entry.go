@@ -75,7 +75,7 @@ func (c *CLIClient) TreeEntryType(ctx context.Context, ref, path string) (string
 	if path == "" {
 		return "", errors.New("tree entry: empty path")
 	}
-	rev, err := c.resolveRev(ctx, "tree_entry", "ref", ref)
+	rev, err := c.resolveRev(ctx, "tree_entry", "ref", c.homeRev(ref))
 	if err != nil {
 		return "", err
 	}
