@@ -56,6 +56,8 @@ This reuses the planning-run orchestrator, `write_context` resolution, and merge
   - `approved` — merges the run's branch into the authoritative branch. The workflow becomes Active at the merge commit. The governing run transitions to `committing` → `completed` via the standard merge path (ADR-006 §6).
   - `needs_rework` — loops back to `draft`, keeps the branch alive, preserves the run for further `workflow.update` calls on the same `run_id`.
 
+> **Amended by [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) (2026-10, INIT-023 TASK-006, audit F3).** With the governance-path guard on, the `approved` merge is a governance-changing merge (it changes `workflows/<id>.yaml`) and is held for an operator approval of the bound commit, unless the deployment enables the lifecycle exemption (on in `spine serve`). The exemption lets a lifecycle run merge **its own** workflow file without operator approval only when the task path is exactly `workflows/<id>.yaml` for the parsed id, it is not the governing lifecycle workflow itself, neither the edited file nor its previous version declares `applies_to: [Workflow]`, and the reviewer is not an actor who completed a non-review step of the run. Every other governance path the run touches still needs an operator approval.
+
 ### 3. The Governing Workflow Is Seeded, Self-Hosted
 
 `spine init-repo` seeds `workflows/workflow-lifecycle.yaml` as part of the initial commit. Teams that want stricter governance (additional reviewers, extra automated checks, different rework policies) edit that one file.

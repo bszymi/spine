@@ -1,0 +1,155 @@
+---
+id: ADR-016
+type: ADR
+title: Governance-Path Guard on Governed Merges
+status: Proposed
+date: 2026-10-14
+decision_makers: Spine Architecture (owner sign-off on the authorization model pending — INIT-023 TASK-006 owner question 1)
+---
+
+# ADR-016 — Governance-Path Guard on Governed Merges
+
+---
+
+## Context
+
+[ADR-009](/architecture/adr/ADR-009-branch-protection.md) made branch protection branch-level and flat (branch + kind) and allowed every governed merge (`OpGovernedMerge`) unconditionally. It named the resulting gap explicitly (§1 bullet 2, §5, Consequences): a run branch can carry changes to governance files — `/.spine/branch-protection.yaml`, workflow definitions, `.spine.yaml` — and the governing workflow's review step is the only gate on that path. It deferred a merge-time path guard to "a future ADR … once there is evidence it is warranted".
+
+The 2026-10-06 security audit is that evidence (finding F3, "run-branch slippage", both Spine and the Spine Management Platform). A single contributor who can pass or skip review (in SMP one member could self-assign and self-accept the review step) commits `rules: []` and a review-less `workflows/task-default.yaml` to their run branch, review accepts, the publish step merges, and the projection installs zero branch-protection rules and the review-less workflow as live policy. Any contributor may then direct-write or delete `main`, every later run uses the review-less workflow, and no `branch_protection.override` event is ever emitted. The projection never asked how the change arrived.
+
+Two further facts shape the design:
+
+- [INIT-023 TASK-005](/initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/tasks/TASK-005-merge-bound-reviewed-sha.md) binds every governed merge to one commit (`spine.bound_sha`) and merges exactly that commit. A guard that evaluates a branch name would be bypassed by anything pushed between the guard and the merge; a guard that evaluates the bound commit is not.
+- A single `merge-base` is not enough. When a run branch has two merge bases with `main` (a criss-cross history: the run branch merged another run's branch and resolved a governance file back to its old content, and that other run then landed on `main`), `Diff(merge-base(main, S), S)` does not list the file, yet git's recursive merge reverts it on `main`. This was reproduced against the real `git.CLIClient`.
+
+---
+
+## Decision
+
+### 1. What this supersedes
+
+This ADR supersedes ADR-009's decision not to add a merge-time path guard in v1 (§1 bullet 2, §1's closing paragraph, §5's two "v1 does not add a merge-time path guard" statements, and Consequences, negative bullet 3). It does **not** add a branch-protection rule kind: the ruleset in `/.spine/branch-protection.yaml` stays flat (ADR-009 §2/§6). The guard is a merge-authorization rule configured by the deployment, not a per-branch rule.
+
+### 2. Guarded paths
+
+A governed merge is **governance-changing** when it changes any path under a guarded entry. The default entries are `.spine/`, `.spine.yaml` and `workflows/`, plus every workflow directory the projection installs definitions from — `<artifacts_dir>/workflows/` when `.spine.yaml` names an `artifacts_dir` (the projection's `WorkflowDirs`). The set is configurable per deployment.
+
+- Matching is a case-folded prefix match on git paths, so a case-insensitive checkout cannot dodge it. Every entry also covers what lies beneath it (`.spine.yaml/x`, a file named `workflows`), so replacing a directory with a file, or the reverse, is governed too.
+- Both sides of a rename count, and so do deletions.
+- A path the guard cannot read safely — git's C-quoted form, a control byte — counts as governed.
+- **Own-run evidence carve-out** (TASK-006 owner question 9). Paths under `.spine/runs/<the run's own id>/evidence/` (compared byte-exactly) never need approval; this is the documented execution-evidence location ([Execution Evidence](/architecture/execution-evidence.md) §6.1). Another run's evidence directory stays governed: writing it would forge that run's evidence.
+- AI-agent configuration (`.claude/`, `.codex/`, `AGENTS.md`, …) is **not** guarded by default (TASK-006 owner question 2). It does not change governance; SMP already flags it on the run page.
+
+### 3. The changed-path set is evaluated in two parts
+
+- **Before the merge**, the changed paths are the union of `Diff(B, S)` over **every** merge base `B` of `main` and `S` (`git merge-base --all`), where `S` is the commit the merge will actually merge: the bound commit, or the status-cascade commit the engine builds on it. If `S` agrees with every merge base on a path, git's virtual merge base agrees too (recursively merging identical sides is a no-op), so a standard merge keeps `main`'s version of that path.
+- **After the merge, before the push**, the governed paths the merge actually changed (`Diff(BaseSHA, M)`) must be a subset of what the first part evaluated. This covers merge behaviour the first part cannot see (`merge.directoryRenames`, merge drivers from the host's git configuration). A violation is a **permanent refusal** (TASK-006 owner question 6): the local target is restored to `BaseSHA`, nothing is pushed, and the run takes the workflow's `merge_failed` route (or fails, on a workflow with no publish step).
+
+If the set cannot be computed — a git error, no merge base, no bound commit — the merge is refused, never allowed.
+
+### 4. Authorization: an operator approves the exact bound commit
+
+This is TASK-006 owner question 1, default **(a)**:
+
+- A governance-changing merge is **held**. The run stays in `committing`, nothing is merged (no code repository either), and the hold is recorded on the run's publish step (or, on a workflow with no publish step, its last completed step) as `error_detail.classification = governance_approval_required`, with a `governance.merge_held` event.
+- An actor with role **operator or higher** approves or rejects through an engine API (`DecideGovernanceMerge`; standalone `POST /runs/{run_id}/governance-decision`). The approval names the bound commit and is recorded server-side under reserved `runs.commit_meta` keys (`spine.governance_approval.*`) and audited by a `governance.merge_decided` event. It is never read from commit text, branch content or workflow-authored data: workflow outcomes cannot write reserved keys (TASK-005 strips them).
+- An approval binds to the bound commit, not to a branch: a run that loops back and binds a new commit needs a new approval, and an approval for another commit is reported as stale.
+- **Approve** records the approval and runs the merge at once; approving again is a manual merge retry. **Reject** clears any approval (the keys are emptied; JSONB merge cannot delete a key) and takes the workflow's `merge_failed` route — back to `execute` in `task-default` — or fails the run on a workflow with no publish step, with the branch preserved. Cancel is not allowed from `committing`, so reject is the way out.
+- There is no separation-of-duties rule on the approver: an operator can already land any change with an override push (ADR-009 §4/§5), so a self-approval grants nothing new, and requiring a second operator would deadlock single-operator workspaces.
+
+The decision is one pure function (`branchprotect.EvaluateGovernance`), consulted through `Policy.Evaluate` (the facts travel on `branchprotect.Request.Governance`) **and** by the engine itself, so a permissive or custom policy cannot turn the guard off.
+
+### 5. ADR-008 interaction (lifecycle exemption)
+
+A workflow-lifecycle planning run may merge its **own** workflow file without operator approval when the deployment enables the exemption (TASK-006 owner question 3: on in `spine serve`, off in the embedded library's zero value). It applies only when all of these hold (owner question 10):
+
+- the run is a planning run whose task path is exactly `workflows/<id>.yaml`, `<id>` being the parsed workflow's id (byte-exact);
+- the task path is not the governing workflow's own path, and the governing workflow declares `applies_to: [Workflow]`;
+- neither the edited file nor its merge-base version declares `applies_to: [Workflow]` (an exempt edit can never create or shadow a workflow-governing binding);
+- the last completed review step was completed by someone other than every actor that completed a non-review step of the run (a local separation-of-duties check that holds whatever the deployment's step-entry policy says).
+
+Every other governance path in that run still needs approval. ADR-008 §2 carries an "Amended by ADR-016" note.
+
+### 6. Projection protection-removal guard
+
+The projection never installs a branch-protection config that removes protection from the authoritative branch (the kinds the installed rules apply to `main` are not a subset of the candidate's) unless a **database record of an operator act that changed the config** matches the content being installed (owner question 8):
+
+- an honoured `branch_protection.override` git push whose old→new range changed `.spine/branch-protection.yaml` (`runtime.event_log`), or
+- an approved governed merge whose recorded `BaseSHA`→`M` changed it (`runtime.runs.commit_meta`, the consumption marker the engine writes before the push).
+
+A record matches when it is a full commit id, reachable from the sync head, newer than the installed rules (the installed rows' `source_commit`, or — while the bootstrap rows are installed — the sync's starting commit), and its config bytes equal the candidate's. Commit trailers are never used: any run-branch author can forge them.
+
+When no record matches, the previous rules stay installed, a `branch_protection.removal_refused` event is emitted and a Warn is logged. This is **not a sync error** (owner question 7; INIT-023 TASK-011 D2): the sync advances, so the diff window does not grow without bound and SMP's governed document index (which reconciles only at `idle`) does not stall. The refusal is re-evaluated on the next change to the file and on every full rebuild. The guard covers the authoritative branch only (owner question 5).
+
+### 7. Opt-in for embedders, on in `spine serve`
+
+Both guards are off at their zero value, and the embedded library then behaves exactly as before (SMP adopts them in its TASK-010). `spine serve` turns both on; `SPINE_GOVERNANCE_GUARD=off` (`false`, `0`, `no`) restores v1 behaviour (owner question 4). The merge guard requires SHA-bound merges (TASK-005) and a git operator that can list every merge base; enabling it without them is a configuration error.
+
+### 8. Accepted gaps
+
+- While the installed rules no longer carry `no-direct-write` on the authoritative branch, the projection guard is inactive. This keeps ADR-009 §1 bullet 3 consistent: self-protection is already off, and direct pushes produce no override event to vouch for anything.
+- A database rebuilt from git refuses a relaxed config until an operator re-affirms it with an override push that **edits** the file (a comment line is enough). An override push that does not touch the file proves nothing.
+- Override provenance exists only where override events are persisted to `runtime.event_log`: always in SMP; in standalone only with event delivery on (`SPINE_EVENT_DELIVERY=true`). Without it, relaxing protection takes a governed run with an operator approval.
+- Convergence merges that move content into `main` outside `MergeRunBranch` (audit F8) are not seen by this guard; INIT-023 TASK-012 owns that path.
+
+---
+
+## Consequences
+
+### Positive
+
+- A run branch can no longer change governance files on `main` — branch protection, workflow definitions, `.spine.yaml`, agent definitions under `.spine/` — without an operator approving the exact commit. F3 is closed in standalone by default.
+- The projection no longer trusts content that reached `main` by any route: a relaxation needs a matching operator record, so a bypass of the merge guard does not silently unprotect `main`.
+- The approval is a server-side record bound to one commit, audited by events, and consumed exactly once by the merge it authorised.
+
+### Negative
+
+- Runs whose agents legitimately edit `workflows/**` or `.spine/**` (for example step profiles or agent definitions) now wait for an operator. Lifecycle runs editing their own workflow are exempt only under the conditions in §5.
+- A held run stays in `committing` until an operator decides; there is no timeout. The standalone commit-retry sweep re-evaluates it each tick without logging an error.
+- Recovery after a database rebuild needs an operator re-affirmation (§8).
+
+### Neutral
+
+- No schema change: the approval and the consumption marker live in reserved `runs.commit_meta` keys, the hold in `step_executions.error_detail`, and the audit in three new event types.
+- No branch-protection rule kind is added; ADR-009's flat ruleset is unchanged.
+
+---
+
+## Alternatives Considered
+
+### Refuse every governance-changing merge (owner question 1, option b)
+
+Governance files would then change only through an override push or the ADR-008 operator bypass. Rejected as the default: it removes the governed path for legitimate governance work and pushes every such change onto the least-audited path.
+
+### A second reviewer instead of an operator (owner question 1, option c)
+
+Depends on separation of duties (TASK-007) and is weaker than ADR-009 §5's operator-only intent for protection changes.
+
+### A single `merge-base` diff
+
+Provably bypassable by a criss-cross history (Context). The union over every merge base plus the post-merge assertion is exact under default git configuration and independent of merge semantics otherwise.
+
+### `git merge-tree --write-tree` to precompute the result
+
+Needs git 2.38+ on every image and a new operator method every embedder must implement; the union plus the post-merge assertion gives the same guarantee.
+
+### Provenance from commit trailers or a first-parent path log
+
+Trailers are forgeable by any run-branch author. A path log needs a new `git.GitClient` method, which would break embedders' implementations of the interface.
+
+### Make a refused relaxation a sync error
+
+More visible, but it freezes `last_synced_commit` (the diff window grows every tick) and stops SMP's governed document index for the workspace until an operator acts.
+
+---
+
+## Links
+
+- [ADR-008 — Workflow Lifecycle Governance](/architecture/adr/ADR-008-workflow-lifecycle-governance.md)
+- [ADR-009 — Branch Protection](/architecture/adr/ADR-009-branch-protection.md)
+- [INIT-023 TASK-006 — Governance-path guard](/initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/tasks/TASK-006-governance-path-guard.md)
+- [INIT-023 TASK-005 — Merge bound to the reviewed commit](/initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/tasks/TASK-005-merge-bound-reviewed-sha.md)
+- [Security Model](/architecture/security-model.md)
+- [Event Schemas](/architecture/event-schemas.md)
+- [Engine State Machine](/architecture/engine-state-machine.md)
+- [Git Push Guide](/docs/git-push-guide.md)
