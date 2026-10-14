@@ -865,3 +865,38 @@ embedder opts in.
    `engine.ReasonRunBranchMovedSinceGate`, …) to your own error codes.
 5. **Read the binding for display** from `runs.commit_meta` (`engine.CommitMetaBoundSHA`,
    `engine.CommitMetaBoundBy`). Only the engine writes these keys; workflow outcomes cannot.
+
+---
+
+## 10. Embedding: Submitter Identity, Compare-and-Swap State Writes and Step-Output Evidence
+
+INIT-023 TASK-008 (audit P3-17, P3-19, P3-24). Run-status writes are compare-and-swap for every
+embedder (through `TransitionRunStatus`, which every `engine.RunStore` has); the rest is opt-in:
+
+1. **Send the submitter.** Set `engine.SubmitRequest.ActorID` to the authenticated actor on every
+   submit you can attribute. `IngestResult` then refuses (`domain.ErrForbidden`) a submission for an
+   execution bound to another actor, before any other check. A server-internal system submit with
+   no requester (for example a stuck-step recovery) leaves it empty; an empty value keeps your own
+   ownership check as the only one. A queue-consumer style caller of `SubmitStepResult` sets
+   `engine.StepResult.ActorID` to the actor the assignment was delivered to.
+2. **Opt into the step compare-and-swap** by implementing the optional
+   `engine.StepExecutionTransitioner` on your `RunStore`:
+   `TransitionStepExecution(ctx, exec, fromStatus, fromActorID) (applied bool, err error)` writes
+   exactly `UpdateStepExecution`'s columns only while the row still holds `fromStatus` and
+   `fromActorID` (NULL and "" both meaning "no actor"); `(false, nil)` when the row moved; a domain
+   `ErrNotFound` when it does not exist. A PostgreSQL-backed store can delegate to
+   `(*store.PostgresStore).TransitionStepExecution`. Assert it at compile time
+   (`var _ engine.StepExecutionTransitioner = (*YourStore)(nil)`): the engine finds it by type
+   assertion, so a store that loses the method silently falls back to blind writes. Keep any
+   in-process locks you have; the compare-and-swap is what protects a second replica.
+3. **Handle the new answers.** A lost race is `domain.ErrConflict` wrapping
+   `engine.ErrStepStateChanged` (step) or `engine.ErrRunStateChanged` (run, after three
+   re-evaluations); test them with `errors.Is`. `IngestResult` already maps a lost submit race to
+   the persisted state with a nil error, like a sequential duplicate. `SubmitStepResult` no longer
+   routes an execution that is terminal when read: re-route a completed execution whose run did
+   not advance with `Orchestrator.RecoverCompletedStep`.
+4. **Show the evidence.** `step_completed` carries `branch_change` and
+   `required_outputs_unchanged` (architecture/event-schemas.md §4.2), and
+   `Orchestrator.StepOutputEvidence(ctx, runID)` returns the persisted per-execution evidence for
+   run detail (`engine.StepOutputEvidence`). Both need merge binding (§9): without it every entry
+   is `unknown`/`head_sha_unrecorded` and nothing is persisted.

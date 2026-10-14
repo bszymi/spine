@@ -659,7 +659,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/RunCancelResponse'
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: |
+            Operation conflicts with current state — including a cancel that
+            lost a race to a merge start (the run is now `committing`, where
+            cancel is invalid) or to another writer (INIT-023 TASK-008: run
+            status writes are compare-and-swap; retry against the new state).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
 
   /steps/{assignment_id}/submit:
     post:
@@ -681,7 +695,11 @@ paths:
               $ref: '#/components/schemas/StepSubmitRequest'
       responses:
         '200':
-          description: Step result accepted
+          description: |
+            Step result accepted, or — for a duplicate submission or one that
+            lost a race to another writer (another submit, the timeout
+            scanner; INIT-023 TASK-008) — the execution's persisted terminal
+            state, unchanged.
           headers:
             X-Trace-Id: { $ref: '#/components/headers/XTraceId' }
           content:
@@ -708,9 +726,18 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            `forbidden`: the step execution is bound to another actor. The
+            gateway checks it, and the engine checks it again with the
+            authenticated actor (INIT-023 TASK-008), before anything else —
+            on a completed execution too — so a non-owner can neither
+            complete nor fail another actor's step.
         '409':
           description: |
-            Operation conflicts with current state. With SHA-bound merges
+            Operation conflicts with current state — including an execution
+            that moved (rebound, released) between the submission's
+            validation and its write (INIT-023 TASK-008). With SHA-bound merges
             (INIT-023 TASK-005) `detail.reason` names a run-branch head
             conflict, and `detail.head_sha` the head the server resolved:
             - `run_branch_moved`: `expected_head_sha` is not the run
@@ -1582,6 +1609,61 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/StepExecution'
+        step_output_evidence:
+          type: array
+          description: |
+            Step-output evidence (INIT-023 TASK-008, audit P3-19), one entry
+            per completed primary-branch execution that recorded it, oldest
+            first. Read from the run's reserved `commit_meta` keys
+            (`spine.evidence.<execution_id>`), so it survives event-log
+            retention; recorded only with SHA-bound merges on. Absent when
+            there is none or the reader failed (logged).
+          items:
+            $ref: '#/components/schemas/StepOutputEvidence'
+
+    StepOutputEvidence:
+      type: object
+      required: [execution_id, step_id, attempt, outcome_id, branch_change, required_outputs_unchanged]
+      properties:
+        execution_id: { type: string }
+        step_id: { type: string }
+        attempt: { type: integer }
+        actor_id: { type: string }
+        outcome_id: { type: string }
+        required_outputs:
+          type: array
+          items: { type: string }
+          description: The step's declared required_outputs (logical labels).
+        required_outputs_unchanged:
+          type: boolean
+          description: The step declared required_outputs and the run branch is provably unchanged.
+        branch_change:
+          $ref: '#/components/schemas/BranchChange'
+
+    BranchChange:
+      type: object
+      required: [repository_id, status]
+      description: |
+        Whether the run branch moved between the run's previous recorded
+        head and the head recorded for one execution (primary repository
+        only). Evidence, not enforcement.
+      properties:
+        repository_id: { type: string, enum: [spine] }
+        status: { type: string, enum: [unchanged, changed, unknown, not_applicable] }
+        head_sha: { type: string }
+        previous_sha: { type: string }
+        previous_source:
+          type: string
+          description: The previous binding's `spine.bound_by`, or `baseline`.
+        changed_paths:
+          type: integer
+          description: 0 when unchanged; the diff's entry count when changed; absent otherwise.
+        reason:
+          type: string
+          description: |
+            For `unknown` / `not_applicable`: `head_sha_unrecorded`,
+            `no_previous_sha`, `diff_failed:<kind>`, `divergence_branch`,
+            `no_run_branch` or `recovered`.
 
     RunCancelResponse:
       type: object

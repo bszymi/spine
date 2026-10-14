@@ -227,6 +227,13 @@ Emitted when a step execution completes successfully.
 
 **Source:** Workflow Engine
 
+**Event ID:** `evt-<trace_id[:12]>-<execution_id>-completed` — one per step
+*execution* (INIT-023 TASK-008), so every rework attempt is recorded (the per-step
+ID used before made the event log's `ON CONFLICT (event_id) DO NOTHING` drop
+attempt 2 onwards). A crash-recovery re-emission of the same execution
+(`Orchestrator.RecoverCompletedStep`) carries the same ID, so the log keeps the
+original. The envelope's `actor_id` is the execution's actor.
+
 ```yaml
 payload:
   step_id: <string>
@@ -234,10 +241,49 @@ payload:
   outcome: <string>              # Workflow-defined outcome value
   next_step: <string>            # Next step to execute (or "end")
   attempt: <integer>
-  duration_ms: <integer>         # Step execution duration
+  duration_ms: <integer>         # Step execution duration (absent when the step never started)
   has_commit: <boolean>          # Whether this outcome produced a Git commit
   branch_id: <string|null>
+  execution_id: <string>         # INIT-023 TASK-008
+  actor_id: <string>             # the execution's actor (absent when none)
+  # Step-output evidence (INIT-023 TASK-008, audit P3-19). Absent on the
+  # engine-owned publish step (type: internal, handler: merge), which carries
+  # the fields above only.
+  required_outputs: [<string>]   # the step's declared required_outputs (absent when none)
+  artifacts_produced: [<string>] # the submitter's attested list: at most 32 entries,
+                                 # each cut to at most 512 bytes (client-supplied)
+  artifacts_produced_count: <integer>  # exact length of the attested list
+  branch_change:
+    repository_id: spine         # primary repository only (v1)
+    status: unchanged | changed | unknown | not_applicable
+    head_sha: <string>           # the run-branch head recorded for this submit (TASK-005's capture)
+    previous_sha: <string>       # the run's previous trusted binding, else the branch baseline
+    previous_source: <string>    # that binding's spine.bound_by verbatim
+                                 # ("step:<step_id>:<execution_id>", "convergence:…",
+                                 # "merge_recovery:…") or "baseline"
+    changed_paths: <integer>     # 0 when unchanged, the diff's entry count when changed;
+                                 # absent otherwise
+    reason: <string>             # unknown / not_applicable only: head_sha_unrecorded,
+                                 # no_previous_sha, diff_failed:<kind>, divergence_branch,
+                                 # no_run_branch, recovered
+  required_outputs_unchanged: <boolean>  # the step declared required_outputs and the
+                                         # branch is provably unchanged
 ```
+
+`branch_change` is evidence, not enforcement: `required_outputs` are logical
+labels the submitter attests (KNOWN-LIMITATIONS "Step Outputs Are Self-Attested
+Labels"). `unchanged` needs no git call (the recorded head equals the previous
+one); otherwise the engine diffs the two under a 3 s timeout, and a failure or a
+timeout gives `unknown` with `diff_failed:<kind>` (`kind` is a git error kind,
+`timeout`, `canceled` or `error`; the git message is logged, never put in the
+event). With merge binding off and no `expected_head_sha` nothing is captured:
+`status: unknown`, `reason: head_sha_unrecorded`, no git call. A crash-recovery
+re-emission carries `unknown`/`recovered`. When the step declared outputs and the
+branch is unchanged, the engine also logs `WARN required outputs declared but run
+branch unchanged`. The same `branch_change` and `required_outputs_unchanged` are
+persisted for run detail (`GET /runs/{run_id}` → `step_output_evidence`) as the
+reserved `runs.commit_meta` key `spine.evidence.<execution_id>`, with merge
+binding on only.
 
 ### 4.3 `step_failed`
 
@@ -640,7 +686,7 @@ All event types are emitted from the following code paths:
 | `run_resumed` | `Orchestrator.ResumeRun` | engine/run.go |
 | `step_assigned` | `Orchestrator.ActivateStep` | engine/step.go |
 | `step_started` | `Orchestrator.SubmitStepResult` (auto-acknowledge) | engine/step.go |
-| `step_completed` | `Orchestrator.SubmitStepResult` | engine/step.go |
+| `step_completed` | `Orchestrator.SubmitStepResult` (also `RecoverCompletedStep`, and `advancePublishStepIfAny` for the publish step) | engine/step.go, engine/handlers.go |
 | `step_failed` | `Orchestrator.RetryStep` (non-retryable only) | engine/retry.go |
 | `step_timeout` | `Scheduler.handleStepTimeout` | scheduler/timeout.go |
 | `retry_attempted` | `Orchestrator.RetryStep` | engine/retry.go |
