@@ -870,6 +870,18 @@ func IsReceivePack(r *http.Request) bool {
 	return false
 }
 
+// IsNonCanonicalInfoRefs reports whether r is a GET .../info/refs whose
+// query is none of the three a git client sends (infoRefsNonCanonical):
+// IsReceivePack counts it as a push, and ServeHTTP refuses it with 400.
+// Exported so the gateway keeps such a request out of its
+// push-disabled auth bypass (wave 3 review): it must meet the auth gate
+// like a read, or an unauthenticated caller could tell an existing
+// workspace (the handler's 400) from a missing one (the gate's uniform
+// 401).
+func IsNonCanonicalInfoRefs(r *http.Request) bool {
+	return isInfoRefs(r) && infoRefsServiceOf(r.URL.RawQuery) == infoRefsNonCanonical
+}
+
 // isInfoRefs reports whether r is the ref advertisement request, the
 // only git-http-backend route that reads the query string (its
 // get_info_refs reads `service`; every other route ignores the query).

@@ -53,8 +53,13 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   and returned the receive-pack advertisement (the push-side ref and capability list; the pack
   upload itself always needed a bearer). `info/refs` now accepts, byte for byte, only an empty
   query, `service=git-upload-pack` or `service=git-receive-pack`. Any other query counts as a push
-  (it needs a bearer when push is enabled) and is refused with `400` before git-http-backend;
-  that includes `service=` with an empty value, which git-http-backend used to refuse with `403`.
+  (it needs a bearer) and is refused with `400` before git-http-backend; that includes `service=`
+  with an empty value, which git-http-backend used to refuse with `403`. With receive-pack off (the
+  default) such a query does not take the push-disabled auth bypass either (wave 3 review): through
+  it an unauthenticated caller got `400` for an existing workspace and the uniform `401` for a
+  missing one, the workspace-existence oracle EPIC-004 TASK-031 closed. A token-less one, a
+  trusted-CIDR runner's included, now gets `401` whether or not the workspace exists; an
+  authenticated one still gets the `400`.
 - **`SPINE_DEV_MODE` no longer drops git authentication (P3-30).** It is accepted whenever
   `SPINE_ENV` is not `production`, and it removed authentication from clone **and push**
   (anonymous pushes reached the pre-receive gate). Pushes now always present a validated bearer.

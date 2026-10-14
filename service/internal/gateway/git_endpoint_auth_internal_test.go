@@ -154,9 +154,11 @@ func TestP330_DirectRunnerStillTrusted(t *testing.T) {
 	if w := t015GitResponse(sp, http.MethodGet, t015ValuelessPushInfoRefs, "172.28.0.5:40000"); w.Code != http.StatusUnauthorized {
 		t.Fatalf("direct trusted runner, valueless service parameter: status %d (%s), want 401", w.Code, w.Header().Get("Content-Type"))
 	}
-	// With push off, it is refused by Spine (400) before git-http-backend.
-	if w := t015GitResponse(s, http.MethodGet, t015ValuelessPushInfoRefs, "172.28.0.5:40000"); w.Code != http.StatusBadRequest {
-		t.Fatalf("direct trusted runner, valueless service parameter, push off: status %d (%s), want 400", w.Code, w.Header().Get("Content-Type"))
+	// With push off it needs a bearer too (wave 3 review: it no longer
+	// takes the push-disabled bypass, whose 400 told an existing
+	// workspace from a missing one).
+	if w := t015GitResponse(s, http.MethodGet, t015ValuelessPushInfoRefs, "172.28.0.5:40000"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("direct trusted runner, valueless service parameter, push off: status %d (%s), want 401", w.Code, w.Header().Get("Content-Type"))
 	}
 }
 
@@ -208,9 +210,12 @@ func TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement(t *testing.T) 
 		{"trusted runner, upload twice", trustedPushOn, uploadTwice, "172.28.0.5:40000", nil, http.StatusUnauthorized},
 		{"trusted runner, push on, valueless service", trustedPushOn, valueless, "172.28.0.5:40000", nil, http.StatusUnauthorized},
 		{"trusted runner, push on, valueless service, trailing pair", trustedPushOn, valuelessTrailing, "172.28.0.5:40000", nil, http.StatusUnauthorized},
-		{"trusted runner, push off", trustedPushOff, uploadThenReceive, "172.28.0.5:40000", nil, http.StatusBadRequest},
-		{"trusted runner, push off, valueless service", trustedPushOff, valueless, "172.28.0.5:40000", nil, http.StatusBadRequest},
-		{"trusted runner, push off, upload twice", trustedPushOff, uploadTwice, "172.28.0.5:40000", nil, http.StatusBadRequest},
+		// Wave 3 review: with push off a non-canonical query no longer
+		// takes the push-disabled bypass (its 400 was a workspace
+		// existence oracle), so a token-less one meets the auth gate.
+		{"trusted runner, push off", trustedPushOff, uploadThenReceive, "172.28.0.5:40000", nil, http.StatusUnauthorized},
+		{"trusted runner, push off, valueless service", trustedPushOff, valueless, "172.28.0.5:40000", nil, http.StatusUnauthorized},
+		{"trusted runner, push off, upload twice", trustedPushOff, uploadTwice, "172.28.0.5:40000", nil, http.StatusUnauthorized},
 		{"authenticated pusher", authed, uploadThenReceive, "198.51.100.7:40000", []string{"Authorization", "Bearer " + bearer}, http.StatusBadRequest},
 		{"authenticated pusher, valueless service", authed, valueless, "198.51.100.7:40000", []string{"Authorization", "Bearer " + bearer}, http.StatusBadRequest},
 		{"authenticated pusher, valueless service, trailing pair", authed, valuelessTrailing, "198.51.100.7:40000", []string{"Authorization", "Bearer " + bearer}, http.StatusBadRequest},
@@ -449,5 +454,65 @@ func TestP330_ProxiedTrustedPeerWarnIsRateLimited(t *testing.T) {
 	}
 	if !strings.Contains(out, "SPINE_TRUSTED_PROXY_CIDRS") || strings.Contains(out, "203.0.113.9") {
 		t.Errorf("warn must name SPINE_TRUSTED_PROXY_CIDRS and no header value:\n%s", out)
+	}
+}
+
+// wave3GitResponse drives handleGit for /git/<ws>/<gitPath>.
+func wave3GitResponse(s *Server, ws, gitPath, remoteAddr string, headers ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/git/"+ws+"/"+gitPath, http.NoBody)
+	req.RemoteAddr = remoteAddr
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Add(headers[i], headers[i+1])
+	}
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspace_id", ws)
+	wildcard, _, _ := strings.Cut(gitPath, "?")
+	rctx.URLParams.Add("*", wildcard)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	s.handleGit(w, req)
+	return w
+}
+
+// Wave 3 review (P3, TASK-015 with EPIC-004 TASK-031): with receive-pack
+// off (the default), a non-canonical info/refs query counts as a push and
+// used to take the push-disabled auth bypass whenever the workspace
+// resolved, so an unauthenticated caller got the handler's 400 for an
+// existing workspace and the auth gate's uniform 401 for a missing one —
+// the workspace-existence oracle TASK-031 closed for /git/{ws}/info/refs.
+// Now both answer the same 401; an authenticated caller still gets the
+// 400, and the canonical receive-pack request keeps its operator-friendly
+// 403 for an existing workspace.
+func TestWave3_NonCanonicalInfoRefsIsNoWorkspaceOracle(t *testing.T) {
+	s := t015GitServer(t, nil, "", false)
+	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
+	s.auth = authSvc
+	const peer = "198.51.100.7:40000"
+	for _, q := range []string{
+		t015SmuggledPushInfoRefs,
+		t015ValuelessPushInfoRefs,
+		"info/refs?service=git-upload-pack&service=git-upload-pack",
+		"info/refs?z",
+	} {
+		existing := wave3GitResponse(s, "ws-1", q, peer)
+		missing := wave3GitResponse(s, "no-such-ws", q, peer)
+		if existing.Code != http.StatusUnauthorized || missing.Code != http.StatusUnauthorized {
+			t.Errorf("%s, unauthenticated: existing workspace %d, missing workspace %d; want 401 for both", q, existing.Code, missing.Code)
+		}
+		if existing.Body.String() != missing.Body.String() {
+			t.Errorf("%s, unauthenticated: bodies differ (existing %q, missing %q)", q, existing.Body.String(), missing.Body.String())
+		}
+		if w := wave3GitResponse(s, "ws-1", q, peer, "Authorization", "Bearer "+bearer); w.Code != http.StatusBadRequest {
+			t.Errorf("%s, authenticated: status %d, want 400", q, w.Code)
+		}
+	}
+	// Guard: the canonical push advertisement with push off is unchanged —
+	// 403 naming the flag for an existing workspace, 401 for a missing one.
+	if w := wave3GitResponse(s, "ws-1", t015PushInfoRefs, peer); w.Code != http.StatusForbidden ||
+		!strings.Contains(w.Body.String(), "SPINE_GIT_RECEIVE_PACK_ENABLED") {
+		t.Errorf("canonical push advertisement, push off, existing workspace: status %d (%q), want 403 naming the flag", w.Code, w.Body.String())
+	}
+	if w := wave3GitResponse(s, "no-such-ws", t015PushInfoRefs, peer); w.Code != http.StatusUnauthorized {
+		t.Errorf("canonical push advertisement, push off, missing workspace: status %d, want 401", w.Code)
 	}
 }

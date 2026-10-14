@@ -130,7 +130,15 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// the auth gate and collapse to a uniform 401, while a flag-off
 	// request against a real workspace still surfaces the operator-
 	// friendly 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED` guidance.
-	pushDisabledShortCircuit := push && !s.gitHTTP.ReceivePackEnabled() && resolveErr == nil
+	//
+	// A non-canonical info/refs query never takes it (wave 3 review): the
+	// handler answers it 400, not the flag's 403, so through the bypass an
+	// unauthenticated caller got 400 for an existing workspace and the
+	// gate's uniform 401 for a missing one — the TASK-031 enumeration
+	// oracle again. It meets the auth gate like a read; an authenticated
+	// caller still gets the 400.
+	pushDisabledShortCircuit := push && !githttp.IsNonCanonicalInfoRefs(r) &&
+		!s.gitHTTP.ReceivePackEnabled() && resolveErr == nil
 	trustedBypass := false
 	if !push {
 		if ip := gitPeerIP(r, s.trustedProxyCIDRs); ip != nil {
