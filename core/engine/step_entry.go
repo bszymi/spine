@@ -88,7 +88,11 @@ type StepEntryPolicy struct {
 	// A step never held in this run (a first attempt — owner question 4: no
 	// auto-bind at run start) stays claimable by any eligible actor, as
 	// does a retry of a failed attempt (a failed holder is not re-offered
-	// the work). AssignStep (step.assign, operator) is never restricted:
+	// the work), an attempt whose prior holder no longer resolves or is not
+	// active (it could never claim it back), and — with EnforceExecutionMode
+	// on — an automated_only or ai_only step, whose claimers are
+	// operator-provisioned pool members (reofferExempt; review round 1).
+	// AssignStep (step.assign, operator) is never restricted:
 	// "re-offered to the prior holder unless an operator assigns". The
 	// candidate listing hides what the claim would refuse. A step its holder
 	// released is claimable by others — release is the holder's own
@@ -463,7 +467,7 @@ func (o *Orchestrator) requireSkillsOnAssign(ctx context.Context, stepDef *domai
 // refusal does not tell a caller who holds a run).
 func (o *Orchestrator) checkPriorHolder(ctx context.Context, run *domain.Run, stepDef *domain.StepDefinition,
 	exec *domain.StepExecution, actorID string) error {
-	if !isAuthorStepType(stepDef.Type) {
+	if !isAuthorStepType(stepDef.Type) || o.entryPolicy.reofferExempt(stepDef) {
 		return nil
 	}
 	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
@@ -478,7 +482,7 @@ func (o *Orchestrator) checkPriorHolder(ctx context.Context, run *domain.Run, st
 // ErrUnavailable when the assignment ledger cannot be read.
 func (o *Orchestrator) priorHolderRefusal(ctx context.Context, run *domain.Run, stepDef *domain.StepDefinition,
 	exec *domain.StepExecution, actorID string, execs []domain.StepExecution) error {
-	if !isAuthorStepType(stepDef.Type) {
+	if !isAuthorStepType(stepDef.Type) || o.entryPolicy.reofferExempt(stepDef) {
 		return nil
 	}
 	holder, err := o.priorHolder(ctx, exec, execs)
@@ -488,10 +492,65 @@ func (o *Orchestrator) priorHolderRefusal(ctx context.Context, run *domain.Run, 
 	if holder == "" || holder == actorID {
 		return nil
 	}
+	canClaim, err := o.priorHolderCanClaim(ctx, holder)
+	if err != nil {
+		return err
+	}
+	if !canClaim {
+		return nil
+	}
 	return domain.NewError(domain.ErrForbidden,
 		fmt.Sprintf("step %q of run %s is re-offered to the actor who held it before (rework or restart recovery); "+
 			"only that actor may claim it, or an operator may assign it to another actor (POST /runs/%s/steps/%s/assign)",
 			stepDef.ID, run.RunID, run.RunID, stepDef.ID))
+}
+
+// reofferExempt reports whether a step's claimers are interchangeable pool
+// members, to which the re-offer does not apply (review round 1): with
+// EnforceExecutionMode on, an automated_only or ai_only step binds only
+// automated_system or ai_agent actors, which only operators provision
+// (actor.create), so no contributor can claim it to take over a
+// colleague's work. Its rework is also already open to the pool on the
+// path that usually binds it: ActivateStep's auto-selection picks any
+// eligible actor of the mode's type, never the prior holder. Re-offering
+// the claim to one pool identity would only strand the attempt when that
+// runner or agent has gone (scaled down, or replaced by a new identity)
+// — the step then waits, hidden from every other pool member,
+// until an operator assigns it. Without EnforceExecutionMode the mode does
+// not restrict who claims, so the re-offer stays.
+func (p StepEntryPolicy) reofferExempt(stepDef *domain.StepDefinition) bool {
+	if !p.EnforceExecutionMode {
+		return false
+	}
+	_, implied := modeActorType(stepDef)
+	return implied == domain.ActorTypeAutomated || implied == domain.ActorTypeAIAgent
+}
+
+// priorHolderCanClaim reports whether the prior holder could still claim
+// the attempt it is re-offered (review round 1). An actor that no longer
+// resolves, or is not active, can never claim it — EnforceEligibility
+// refuses it, and a suspended or deactivated identity must not keep work
+// pinned to itself — so re-offering would strand the attempt until an
+// operator assigns it; it is then open to any eligible actor, as a first
+// attempt is (attributed by the claim like any other). With no actor lookup
+// wired the holder cannot be judged and the re-offer stands (the stricter
+// answer). A lookup failure fails the claim closed (503); neither answer
+// names the holder.
+func (o *Orchestrator) priorHolderCanClaim(ctx context.Context, holder string) (bool, error) {
+	if o.entryPolicy.Actors == nil {
+		if _, ok := o.blocking.(entryActorLoader); !ok {
+			return true, nil
+		}
+	}
+	a, err := o.policyActor(ctx, holder)
+	if err != nil {
+		var se *domain.SpineError
+		if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+			return false, nil
+		}
+		return false, domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot resolve the prior holder", err)
+	}
+	return a.Status == domain.ActorStatusActive, nil
 }
 
 // priorHolder returns the actor a claimable execution is re-offered to, or
