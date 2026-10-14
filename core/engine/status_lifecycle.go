@@ -44,6 +44,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os/exec"
 	"strconv"
 	"strings"
 	"unicode"
@@ -190,12 +192,12 @@ func (e *StatusLifecycleError) Is(target error) bool { return target == ErrStatu
 
 // lifecycleText renders author-controlled text for logs and outcome rows:
 // "" as `""`, short printable single-line text as is, anything else quoted
-// and cut to max bytes.
-func lifecycleText(s string, max int) string {
+// and cut to limit bytes.
+func lifecycleText(s string, limit int) string {
 	if s == "" {
 		return `""`
 	}
-	plain := utf8.ValidString(s) && len(s) <= max
+	plain := utf8.ValidString(s) && len(s) <= limit
 	if plain {
 		for _, r := range s {
 			if !unicode.IsPrint(r) {
@@ -207,8 +209,8 @@ func lifecycleText(s string, max int) string {
 	if plain {
 		return s
 	}
-	if len(s) > max {
-		s = s[:max]
+	if len(s) > limit {
+		s = s[:limit]
 	}
 	return strconv.QuoteToASCII(s)
 }
@@ -263,20 +265,42 @@ func readSide(content []byte, path string) side {
 	return sd
 }
 
-// lifecycleReadErr classifies a git read error (DC-6): a retryable
-// *git.GitError and any non-git error are transient (the caller returns
-// them and the run stays in committing); any other git error is
-// permanent.
-func lifecycleReadErr(err error) (transient bool) {
-	var gitErr *git.GitError
-	if errors.As(err, &gitErr) {
-		return gitErr.IsRetryable()
+// lifecycleTransient classifies a git read error (DC-6). Transient — the
+// caller returns it and the run stays in committing — are a retryable
+// *git.GitError, any non-git (store, transport) error, and every sign that
+// git itself did not get to judge the object: the context is done, git
+// could not start (*exec.Error, *fs.PathError) or was killed by a signal.
+// The CLI client reports all of those as an ErrKindPermanent GitError with
+// empty stderr, and treating them as a verdict on the author's content
+// would refuse — route back, or fail — a run over a shutdown or a missing
+// binary. Every other git error is permanent: an oversized blob or output,
+// a not-found for a path the diff lists, a git that ran to completion and
+// refused the object (a gitlink, a tree).
+func lifecycleTransient(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
 	}
-	return true
+	var gitErr *git.GitError
+	if !errors.As(err, &gitErr) {
+		return true
+	}
+	if gitErr.IsRetryable() {
+		return true
+	}
+	var execErr *exec.Error
+	var pathErr *fs.PathError
+	if errors.As(err, &execErr) || errors.As(err, &pathErr) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && !exitErr.Exited() {
+		return true
+	}
+	return false
 }
 
 // cQuotedMarkdown reports a diff path that git C-quoted (core.quotePath)
-// and that names a Markdown file: `"…​.md"`. Rule Q (and Q′ for the old
+// and that names a Markdown file (`"<path>.md"`). Rule Q (and Q′ for the old
 // side of a rename): a transitional guard for GitOperator implementations
 // whose Diff is not NUL-delimited (adapters/git has been since INIT-023
 // TASK-003, so for the CLI client it is dead code).
@@ -319,7 +343,7 @@ func (p *planner) read(ctx context.Context, ref, path string, absentOK bool) (si
 	if err == nil {
 		return readSide(content, path), true, nil
 	}
-	if lifecycleReadErr(err) {
+	if lifecycleTransient(ctx, err) {
 		return side{}, false, fmt.Errorf("status lifecycle: read %s at %s: %w", path, ref, err)
 	}
 	var gitErr *git.GitError
@@ -350,7 +374,7 @@ func (o *Orchestrator) planStatusLifecycle(ctx context.Context, run *domain.Run,
 
 	diffs, err := o.git.Diff(ctx, base, bound)
 	if err != nil {
-		if lifecycleReadErr(err) {
+		if lifecycleTransient(ctx, err) {
 			return nil, fmt.Errorf("status lifecycle: diff %s..%s: %w", base, bound, err)
 		}
 		return nil, &StatusLifecycleError{Violations: []StatusLifecycleViolation{{Reason: LifecycleUnreadableDiff}}}
@@ -664,10 +688,10 @@ func (p *planner) runSCChecks(ctx context.Context) error {
 		}
 		var rules []string
 		seen := map[string]bool{}
-		for _, e := range res.Errors {
-			if e.Severity == "error" && !seen[e.RuleID] {
-				seen[e.RuleID] = true
-				rules = append(rules, e.RuleID)
+		for i := range res.Errors {
+			if id := res.Errors[i].RuleID; res.Errors[i].Severity == "error" && !seen[id] {
+				seen[id] = true
+				rules = append(rules, id)
 			}
 		}
 		if len(rules) > 0 {
@@ -684,10 +708,14 @@ func (p *planner) runSCChecks(ctx context.Context) error {
 // any other error keeps the run in committing. The merge-base is
 // cascadeBaseAt's, so a replay after a landed merge judges — and builds
 // the same cascade commit — against main as it was before this run merged.
+// On such a replay the status-conflict gate (O4) is skipped: unlike every
+// other rule it reads the projection, which may have moved since the merge
+// it judged landed, and refusing now would route back a run whose content
+// is already on the local main.
 func (o *Orchestrator) applyStatusLifecycleAt(ctx context.Context, run *domain.Run, newStatus, bound string) (string, *lifecyclePlan, error) {
-	base, err := o.cascadeBaseAt(ctx, run, newStatus, bound)
+	base, replay, err := o.cascadeBase(ctx, run, newStatus, bound)
 	if err != nil {
-		if lifecycleReadErr(err) {
+		if lifecycleTransient(ctx, err) {
 			return "", nil, fmt.Errorf("status lifecycle: merge-base of main and %s: %w", bound, err)
 		}
 		return "", nil, &StatusLifecycleError{Violations: []StatusLifecycleViolation{{Reason: LifecycleUnreadableDiff}}}
@@ -695,7 +723,7 @@ func (o *Orchestrator) applyStatusLifecycleAt(ctx context.Context, run *domain.R
 	if !isBoundObjectID(base) {
 		return "", nil, &StatusLifecycleError{Violations: []StatusLifecycleViolation{{Reason: LifecycleUnreadableDiff}}}
 	}
-	return o.lifecycleCascadeFrom(ctx, run, newStatus, bound, base, true)
+	return o.lifecycleCascadeFrom(ctx, run, newStatus, bound, base, !replay)
 }
 
 // lifecycleCascadeFrom plans the bound diff against base and commits the
@@ -784,7 +812,7 @@ func (o *Orchestrator) verifyLifecycleMerge(ctx context.Context, plan *lifecycle
 		if j.fromMain {
 			c, err := o.git.ReadFile(ctx, base, j.mainPath)
 			if err != nil {
-				if lifecycleReadErr(err) {
+				if lifecycleTransient(ctx, err) {
 					return transient(err)
 				}
 				mismatch(j, "", "")
@@ -799,7 +827,7 @@ func (o *Orchestrator) verifyLifecycleMerge(ctx context.Context, plan *lifecycle
 		}
 		c, err := o.git.ReadFile(ctx, m, j.path)
 		if err != nil {
-			if lifecycleReadErr(err) {
+			if lifecycleTransient(ctx, err) {
 				return transient(err)
 			}
 			mismatch(j, want, "")

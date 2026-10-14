@@ -996,14 +996,23 @@ const priorMergeWalkLimit = 64
 // plain merge-base, the pre-review-round behaviour, whose cascade is
 // run.TaskPath alone.
 func (o *Orchestrator) cascadeBaseAt(ctx context.Context, run *domain.Run, newStatus, bound string) (string, error) {
+	base, _, err := o.cascadeBase(ctx, run, newStatus, bound)
+	return base, err
+}
+
+// cascadeBase is cascadeBaseAt that also reports whether the base came
+// from this run's earlier merge found on main (a replay). The status
+// lifecycle (INIT-023 TASK-017) uses the flag to skip its projection-based
+// status-conflict gate on a replay: that merge was judged and has landed.
+func (o *Orchestrator) cascadeBase(ctx context.Context, run *domain.Run, newStatus, bound string) (string, bool, error) {
 	base, err := o.git.MergeBase(ctx, authoritativeBranch, bound)
 	if err != nil || base != bound {
-		return base, err
+		return base, false, err
 	}
 	if prior, ok := o.priorMergeBase(ctx, run, newStatus, bound); ok {
-		return prior, nil
+		return prior, true, nil
 	}
-	return base, nil
+	return base, false, nil
 }
 
 // priorMergeBase walks main's first-parent chain from its tip for this

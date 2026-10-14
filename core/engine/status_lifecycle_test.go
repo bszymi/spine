@@ -132,8 +132,22 @@ func (r *lcRepo) statusAt(rev, path string) string {
 // countingCLI counts the merges an orchestrator asks for.
 type countingCLI struct {
 	*git.CLIClient
-	mu     sync.Mutex
-	merges int
+	mu         sync.Mutex
+	merges     int
+	failPushes int // PushCommit fails transiently this many times
+}
+
+func (c *countingCLI) PushCommit(ctx context.Context, remote, branch, sha string) error {
+	c.mu.Lock()
+	fail := c.failPushes > 0
+	if fail {
+		c.failPushes--
+	}
+	c.mu.Unlock()
+	if fail {
+		return &git.GitError{Kind: git.ErrKindTransient, Op: "push", Message: "network error"}
+	}
+	return c.CLIClient.PushCommit(ctx, remote, branch, sha)
 }
 
 func (c *countingCLI) Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
@@ -858,4 +872,59 @@ func TestStatusLifecycle_RefusalRouting(t *testing.T) {
 	if r.head("main") != e.main0 {
 		t.Fatal("main moved")
 	}
+}
+
+// TestStatusLifecycle_ReplayAfterTransientPush: a transient push failure
+// leaves the judged merge on the local main; the retry replays it — the
+// same cascade commit, no second merge — and the projection-based
+// status-conflict gate, which has moved meanwhile, is not consulted again.
+func TestStatusLifecycle_ReplayAfterTransientPush(t *testing.T) {
+	const epic = "initiatives/init-001/epics/epic-001/epic.md"
+	r := newLCRepo(t, map[string]string{epic: lcArt("EPIC-001", "Epic", "Pending")})
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	r.git("init", "-q", "--bare", origin)
+	r.git("remote", "add", "origin", origin)
+	r.git("push", "-q", "origin", "main")
+	t.Setenv("SPINE_GIT_PUSH_ENABLED", "true")
+	r.onRun("work", func() { r.write("notes.txt", "done\n") })
+
+	e := newLCEnv(t, r, lcOpts{taskPath: epic, meta: map[string]string{"status": "Completed"}})
+	v := &scValidator{res: domain.ValidationResult{Status: "passed"}}
+	e.orch.WithValidator(v)
+	e.git.failPushes = 1
+	e.merge()
+	if e.run.Status != domain.RunStatusCommitting {
+		t.Fatalf("after the failed push: run %s, want committing", e.run.Status)
+	}
+	localMerge := r.head("main")
+	if localMerge == e.main0 || len(v.calls) != 1 {
+		t.Fatalf("first attempt: main %s (was %s), SC calls %v", localMerge, e.main0, v.calls)
+	}
+
+	// The projection now reports an open child: a fresh judgement would
+	// refuse. The replay must not.
+	v.res = domain.ValidationResult{Status: "failed", Errors: []domain.ValidationError{{RuleID: "SC-002", Severity: "error"}}}
+	e.merge()
+	if e.run.Status != domain.RunStatusCompleted {
+		t.Fatalf("replay: run %s (outcome %+v), want completed", e.run.Status, e.outcome())
+	}
+	if len(v.calls) != 1 {
+		t.Fatalf("the replay consulted the SC gate again: %v", v.calls)
+	}
+	if got := r.head("main"); got != localMerge {
+		t.Fatalf("the replay merged again: %s -> %s", localMerge, got)
+	}
+	if got := strings.TrimSpace(gitIn(t, origin, "rev-parse", "main")); got != localMerge {
+		t.Fatalf("origin main = %s, want the judged merge %s", got, localMerge)
+	}
+	if got := r.statusAt("main", epic); got != "Completed" {
+		t.Fatalf("main epic = %s", got)
+	}
+
+	// Control: a non-replay attempt does consult the gate and refuses.
+	r2 := newLCRepo(t, map[string]string{epic: lcArt("EPIC-001", "Epic", "Pending")})
+	r2.onRun("work", func() { r2.write("notes.txt", "done\n") })
+	e2 := newLCEnv(t, r2, lcOpts{taskPath: epic, meta: map[string]string{"status": "Completed"}})
+	e2.orch.WithValidator(&scValidator{res: v.res})
+	e2.requireRefused(LifecycleStatusConflict)
 }

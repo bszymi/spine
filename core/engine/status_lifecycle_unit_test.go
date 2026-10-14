@@ -8,6 +8,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -126,7 +127,7 @@ func TestStatusLifecycle_RuleTable(t *testing.T) {
 		base     files // at the merge-base
 		tip      files // at the bound commit
 		diff     []git.FileDiff
-		want     string // reason, "" = accepted
+		want     string // the expected reason; empty when accepted
 		updates  []string
 	}{
 		{name: "illegal_transition", status: "Pending",
@@ -549,6 +550,41 @@ func TestStatusLifecycle_WorkflowPlanningRunCommitStatus(t *testing.T) {
 		}
 		if err != nil || w.createCalls != 1 {
 			t.Fatalf("lifecycle off (zero value): err=%v writer=%d", err, w.createCalls)
+		}
+	}
+}
+
+// TestStatusLifecycle_TransientClassification pins DC-6's split: only a
+// verdict git reached on the object is permanent.
+func TestStatusLifecycle_TransientClassification(t *testing.T) {
+	ctx := context.Background()
+	wrap := func(err error) error {
+		return &git.GitError{Kind: git.ErrKindPermanent, Op: "read_file", Message: "", Err: err}
+	}
+	runErr := func(name string, args ...string) error {
+		return exec.Command(name, args...).Run() //nolint:gosec // G204: fixed test commands
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	for _, c := range []struct {
+		name      string
+		ctx       context.Context
+		err       error
+		transient bool
+	}{
+		{"retryable", ctx, &git.GitError{Kind: git.ErrKindTransient, Op: "x", Message: "repository locked"}, true},
+		{"non-git", ctx, errors.New("connection reset"), true},
+		{"context done", cancelled, wrap(errors.New("signal: killed")), true},
+		{"git could not start", ctx, wrap(runErr("spine-no-such-binary-017")), true},
+		{"git killed by a signal", ctx, wrap(runErr("sh", "-c", "kill -9 $$")), true},
+		{"git exited with an error", ctx, wrap(runErr("sh", "-c", "exit 128")), false},
+		{"classified permanent", ctx, &git.GitError{Kind: git.ErrKindPermanent, Op: "read_file", Message: "fatal: not a blob"}, false},
+		{"not found", ctx, &git.GitError{Kind: git.ErrKindNotFound, Op: "read_file", Message: "does not exist"}, false},
+		{"blob too large", ctx, &git.GitError{Kind: git.ErrKindPermanent, Op: "read_file", Message: "blob exceeds read limit",
+			Err: &git.BlobTooLargeError{Size: 5 << 20, Limit: 4 << 20}}, false},
+	} {
+		if got := lifecycleTransient(c.ctx, c.err); got != c.transient {
+			t.Errorf("%s: transient = %v, want %v (%v)", c.name, got, c.transient, c.err)
 		}
 	}
 }

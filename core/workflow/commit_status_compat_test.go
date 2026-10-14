@@ -120,8 +120,8 @@ func checkAccepted(l *domain.StatusLifecycle, c mergeCheck) bool {
 // commitStatuses lists every outcome's commit.status, in file order.
 func commitStatuses(wf *domain.WorkflowDefinition) []string {
 	var out []string
-	for _, s := range wf.Steps {
-		for _, o := range s.Outcomes {
+	for i := range wf.Steps {
+		for _, o := range wf.Steps[i].Outcomes {
 			if st := o.Commit["status"]; st != "" {
 				out = append(out, st)
 			}

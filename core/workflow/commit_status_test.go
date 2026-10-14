@@ -7,6 +7,7 @@ package workflow_test
 // rule: a projection-time check would drop workflows already on main).
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -136,7 +137,7 @@ func TestCommitStatus_ServiceUpdateRefused(t *testing.T) {
 	requireCommitStatusErrors(t, detailErrors(t, err),
 		"steps[0].outcomes[0].commit.status", "steps[0].outcomes[1].commit.status")
 	after, _ := os.ReadFile(filepath.Join(repo, "workflows", "foreign-status.yaml"))
-	if string(after) != string(before) || headOf(t, repo) != head {
+	if !bytes.Equal(after, before) || headOf(t, repo) != head {
 		t.Fatal("the refused update changed the file or HEAD")
 	}
 }

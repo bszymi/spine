@@ -95,7 +95,7 @@ func TestPathScope(t *testing.T) {
 		{root, "initiatives/x.md", "initiatives/x.md", true, true, "root"},
 		{root, "templates/x.md", "", false, false, "templates excluded"},
 		{root, "src/x.go", "", false, false, "not markdown"},
-		{root, "a/‮x.md", "a/‮x.md", true, false, "bidi control: projected never"},
+		{root, "a/\u202ex.md", "a/\u202ex.md", true, false, "bidi control: projected never"},
 		{sub, "spine/initiatives/x.md", "initiatives/x.md", true, true, "in dir"},
 		{sub, "initiatives/x.md", "", false, false, "outside dir"},
 		{sub, "spine/templates/x.md", "", false, false, "templates under dir"},
