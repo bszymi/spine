@@ -97,8 +97,16 @@ type PlanningRunStarter interface {
 // WorkflowPlanningRunStarter starts planning runs that govern workflow
 // definition edits (ADR-008). Separate from PlanningRunStarter because the
 // body is a YAML workflow definition, not a Markdown artifact.
+//
+// StartWorkflowUpdatePlanningRun (INIT-023 TASK-014, audit F7) opens the
+// lifecycle run for an edit of an EXISTING definition; reviewer PUT
+// /workflows/{id} dispatches to it exactly as reviewer POST /workflows
+// dispatches to StartWorkflowPlanningRun. The interface is widened rather
+// than split into an optional one, so every wired starter carries updates
+// (a compile-time guarantee; this package is internal to Spine).
 type WorkflowPlanningRunStarter interface {
 	StartWorkflowPlanningRun(ctx context.Context, workflowID, body string) (*PlanningRunResult, error)
+	StartWorkflowUpdatePlanningRun(ctx context.Context, workflowID, body string) (*PlanningRunResult, error)
 }
 
 // RunCanceller cancels an active or paused run through the engine,

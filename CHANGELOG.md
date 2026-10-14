@@ -6,6 +6,146 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-004 TASK-014: workflow and write-context governance)
+
+### Security
+
+- **A reviewer can no longer commit a workflow straight to `main` (audit F7, P2).** On the
+  standalone gateway a reviewer's `PUT /workflows/{id}` without `write_context` committed to the
+  authoritative branch (`write_mode: authoritative`), skipping both the ADR-008 lifecycle and
+  branch protection — enough to drop `task-default`'s review gate or neuter `workflow-lifecycle`
+  itself. It now opens an **update** `workflow-lifecycle` planning run, exactly as `POST
+  /workflows` already did for creates (new `Orchestrator.StartWorkflowUpdatePlanningRun`).
+- **`write_context: {}` on workflow endpoints is refused (V1).** It skipped the reviewer dispatch
+  on create *and* update and committed to `main` with no `Workflow-Bypass` trailer, for every
+  role. A workflow `write_context` now needs a `run_id` naming that workflow's own lifecycle run
+  (V2: before, any planning run — another workflow's, an artifact-creation run — or a task run
+  whose `task_path` the caller echoed was accepted, and the workflow then reached `main` under that
+  run's review instead of `workflow_review`).
+- **`workflow.Service` consults branch protection.** With a policy installed (`spine serve` installs
+  the projection-backed one), a non-bypass workflow write is an `OpDirectWrite` on its real target,
+  so the bootstrap `main: no-direct-write` rule refuses a direct workflow commit (`403`), and an
+  ADR-008 bypass needs an operator-or-above actor.
+- **Run branches have one writer on the API path (audit P3-6, P3).** `write_context` with a
+  `run_id` (artifact and workflow writes) and `POST /artifacts/add` let any contributor commit into
+  another actor's run branch, even while it sat in review; the governed merge then published the
+  injection. Such a write is now accepted only from the actor bound to the run's current step —
+  TASK-016's `core/refadmit` predicate, so pushes and API writes follow one rule — or an operator.
+  While the current step is a `review` or `internal` step (task-default's `publish`, between
+  approval and the merge) the branch is frozen for **every** role, operators included. P3-6 is
+  closed for writes by actors who do not hold the step; who may *claim* a step is governed by
+  TASK-007's step-entry policy, which gains the rule below.
+- **A reworked step is re-offered only to its prior holder (P3-6 residual, owner question 7).**
+  New opt-in `StepEntryPolicy.ReofferToPriorHolder`, on in `StrictStepEntryPolicy` (the
+  `spine serve` default): a waiting author step that was held before in its run — after a
+  `needs_rework` loop, or a restart-recovered row that still names its actor — can be claimed only
+  by that prior holder; an operator can still assign it to anyone. Without it a contributor could
+  claim a colleague's reworked draft and then write the branch as its bound actor. A step its
+  holder released stays claimable by others; a retry after a failed attempt is not re-offered;
+  nor is an attempt whose prior holder the claim itself would refuse — the holder no longer
+  resolves, is not `active`, is off the execution's `eligible_actor_ids`, is of a type the step
+  does not admit, or lacks one of its `required_skills` (only an `active` skill counts, as for any
+  claim) — since that holder could never take it back. Each of those follows an operator or admin
+  action (suspension, `actor.remove_skill`, `skill.deprecate`, a `step.assign` allow-list), never
+  a contributor's. With `EnforceExecutionMode` on (strict), `automated_only` and `ai_only` steps
+  are not re-offered at all: only operator-provisioned machine actors can bind them, and
+  auto-selection already hands their rework to any eligible pool member, so pinning the claim to
+  one runner or agent identity would only strand the attempt when it has gone.
+- **Workflow definitions have one producer (design-check V3, V4).** The artifact endpoints'
+  workflow-path guard was a raw prefix test, so `./workflows/x`, `governance/../workflows/x` and
+  `workflows//x` reached `workflows/` on a run branch (and `PUT /artifacts/./workflows/<id>.yaml`
+  replaced a workflow with artifact Markdown). The test is now canonical (dot segments, repeated
+  slashes, case folding). `POST /runs` with `mode: planning` and a `workflows/` task path, which
+  minted a non-lifecycle run that could lock that workflow against governed edits, is refused, and
+  so is the same path in the engine's `StartPlanningRun`.
+- **Not closed here: workflow edits by push.** "Workflow edits ride only their own run" (V2) is
+  enforced on the API path. A git push is admitted by the binding alone (INIT-023 TASK-016) and the
+  pre-receive gate checks no paths, so the actor bound to a task run's (or a lifecycle run's) current
+  step can still push changes under `workflows/` — or any other governed path — onto that run
+  branch, and the governed merge then publishes them under that run's review rather than
+  `workflow_review`. Closing that is the governance path guard (INIT-023 TASK-006); see
+  `KNOWN-LIMITATIONS.md`.
+
+### Changed
+
+- **`PUT /workflows/{id}` by a reviewer without `write_context`:** `200` + commit → **`201`**
+  with a planning body (`run_id`, `branch_name`, `workflow_path`, `write_mode: planning`); `503`
+  when no planning starter is wired; `404` (missing workflow), `422` (no version bump) or `400`
+  (bad id) before any branch or run exists. The `spine workflow update` CLI accepts any status
+  below 400 and needs no change.
+- **One open lifecycle run per workflow:** a reviewer `POST`/`PUT /workflows` while a
+  non-terminal planning run governs `workflows/<id>.yaml` is `409 conflict` naming it
+  (`detail.run_id`, `branch_name`, `status`, `current_step_id`); a store failure is `503`.
+- **`POST /workflows` for an id that already exists** still answers `409 already_exists`, but now
+  before any branch or run exists. A workflow planning run whose branch write fails is marked
+  `failed` (was: left `pending`, which scheduler recovery promoted to `active`).
+- **Workflow `write_context`:** `{}` (or `task_path` only) → `400` for every role; a `run_id` whose
+  run does not govern `workflows/<id>.yaml` → `400` (detail `run_task_path`, `workflow_path`).
+  Operators who sent `write_context: {}` got an untrailered direct commit; they now omit
+  `write_context` for the audited bypass.
+- **Run-branch writes** (`write_context` with `run_id`, `POST /artifacts/add`): `409` while the
+  current step is waiting or unassigned (claim it first, `POST /execution/claim`;
+  `detail.execution_id`) or has no open execution; `403` for any other non-operator (the holder is
+  never named); `409` (`detail.step_type`) during a `review` or `internal` step for every role;
+  `409` operator-only when the run has no run-level cursor (legacy or diverged) or its branch is
+  not an engine run branch; `409` when the step definition cannot be resolved; `503` when no step
+  assigner is configured. API writes land on the run's branch in the primary repository, so while
+  the current step is routed to a code repository (ADR-015 `repository: <id>`) only operators may
+  write it: the step's holder gets `409` with `detail.repository_id` (the same rule as a push of
+  that branch to the primary repository; before, any contributor could write it). After `POST /artifacts/entry` or a workflow planning run starts, the
+  author claims the draft step before stacking edits (the same claim was already required to submit
+  it); after `needs_rework`, the reworked step is claimed again.
+- **A run that governs a workflow definition accepts no artifact writes** (`400`).
+- **Artifact writes to a dot-segment or case-variant `workflows/` path** → `400`
+  (`use_operation: workflow.*`).
+- **`POST /runs` planning with a `workflows/` task path** → `400` (`use_operation: workflow.create`).
+- **Under the strict step-entry policy**, an actor other than the prior holder claiming a reworked
+  or restart-recovered author step gets `403`, and such steps are hidden from that actor's
+  candidate listing; the reviewer who sent work back can no longer self-claim the rework.
+- **Wiring:** single-workspace `spine serve` now wires the workflow planning starter (pooled
+  workspaces already had one) and installs the branch-protection policy on every
+  `workflow.Service`. No event type, schema, migration or environment variable is added.
+
+### Upgrade note: workflow runs left behind by failed starts
+
+Before this change a failed workflow-lifecycle start — a reviewer `POST /workflows` for an id that
+already exists, or a git error on the branch write — left its planning run `pending` with the run
+branch deleted, and scheduler recovery promotes such runs to `active` with a waiting `draft` step.
+They never finish. After the upgrade the one-open-run rule counts them, so every reviewer `POST` /
+`PUT` of that workflow answers `409` naming the run (`write_context` on it fails, its branch being
+gone). Operators should look for them once and cancel them:
+
+```sql
+SELECT run_id, task_path, status, branch_name, current_step_id
+  FROM runtime.runs
+ WHERE mode = 'planning' AND task_path LIKE 'workflows/%'
+   AND status NOT IN ('completed', 'failed', 'cancelled');
+```
+
+For each row whose `branch_name` no longer exists in the served repository (`git -C <repo>
+rev-parse --verify --quiet refs/heads/<branch_name>` prints nothing), run `spine run cancel
+<run_id>` (or `POST /api/v1/runs/{run_id}/cancel`) as an operator. Without database access, `GET
+/api/v1/query/runs?task_path=workflows/<id>.yaml` lists the runs of one workflow. The `409` message
+now names the operator cancel as the recovery for a stale run.
+
+### For embedders
+
+- `workflow.Service` gains `WithPolicy` and `WithDefaultRef`; `workflow.ValidateID`,
+  `workflow.FilePath` and `workflow.InWorkflowsDir` are exported. **The zero value is unchanged:**
+  with no policy no rule is evaluated and no role is checked on bypass writes (SMP's admin writes
+  are actor-less bypass writes and keep working byte for byte). Do not call `WithPolicy` unless
+  every bypass write context also binds a `domain.Actor` of role ≥ operator.
+- `engine.WorkflowWriter` gains `Update` (`*workflow.Service` already has it).
+  `Orchestrator.StartWorkflowUpdatePlanningRun` is new; `StartWorkflowPlanningRun` now refuses an
+  existing id before any run exists and marks a run whose branch write failed `failed`.
+- `Orchestrator.StartPlanningRun` refuses a path under `workflows/` (any spelling) with
+  `ErrInvalidParams`. SMP's only caller (`CreateEntry`) builds `.md` paths under the artifact type
+  directories, so its behaviour is unchanged.
+- `StepEntryPolicy.ReofferToPriorHolder` (zero value off; on in `StrictStepEntryPolicy`). SMP does
+  not use the step-entry policy today; an embedder that adopts `StrictStepEntryPolicy` gets it.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-003: bounded reads and NUL-delimited listings)
 
 ### Security
@@ -1572,12 +1712,13 @@ bearer path are all retained.
 ### Not yet implemented (follow-up)
 
 - Workflow endpoints (`workflow.create`, `workflow.update`) reject
-  `write_context.override: true` with `400` today — `workflow.Service`
-  does not consult `branchprotect.Policy` yet. Operators writing
-  directly to a workflow definition use the ADR-008 operator-bypass
-  path instead (omit `write_context` as `operator+` role — adds a
-  `Workflow-Bypass` trailer). Unifying the two bypass mechanisms is
-  tracked in the TASK-003 scope-decision note.
+  `write_context.override: true` with `400` today: `workflow.Service`
+  consults `branchprotect.Policy` (since INIT-023 TASK-014) but emits no
+  ADR-009 override event or trailer. Operators writing directly to a
+  workflow definition use the ADR-008 operator-bypass path instead (omit
+  `write_context` as `operator+` role — adds a `Workflow-Bypass`
+  trailer). Unifying the two bypass mechanisms is tracked in the
+  TASK-003 scope-decision note.
 - Git push path enforcement (EPIC-004) — the pre-receive handler is the
   subject of a follow-up epic.
 

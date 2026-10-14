@@ -17,9 +17,10 @@ const stepEntryPolicyEnv = "SPINE_STEP_ENTRY_POLICY"
 //
 //   - unset, "" or "strict" → engine.StrictStepEntryPolicy(): run-status
 //     guards, actor eligibility, execution-mode table, strict preconditions,
-//     required_skills on assign, separation of duties, and termination of
-//     live steps when a run ends. This is the standalone default (Owner
-//     question 2).
+//     required_skills on assign, separation of duties, the re-offer of a
+//     reworked or restart-recovered author step to its prior holder
+//     (INIT-023 TASK-014 owner question 7), and termination of live steps
+//     when a run ends. This is the standalone default (Owner question 2).
 //   - "legacy" → the zero value: the pre-INIT-023 behaviour, an escape hatch
 //     for operators migrating custom workflows. serve logs a WARN at startup.
 //   - anything else → error; serve refuses to start rather than guess.
@@ -43,7 +44,7 @@ func stepEntryPolicyFromEnv() (engine.StepEntryPolicy, error) {
 // escape hatch is a WARN naming what stays open, so it stands out in logs.
 func logStepEntryPolicy(log *slog.Logger, p engine.StepEntryPolicy) {
 	if p.IsZero() {
-		log.Warn(stepEntryPolicyEnv+"=legacy: engine step-entry checks are OFF — assign and claim do not check run status, actor eligibility, execution mode, preconditions or separation of duties, and a cancelled or failed run keeps live step executions (INIT-023 audit P3-3, P3-4, P3-15, P3-16 remain open). Use only while migrating custom workflows; the escape hatch will be removed.",
+		log.Warn(stepEntryPolicyEnv+"=legacy: engine step-entry checks are OFF — assign and claim do not check run status, actor eligibility, execution mode, preconditions or separation of duties, any eligible actor can claim another actor's reworked step, and a cancelled or failed run keeps live step executions (INIT-023 audit P3-3, P3-4, P3-15, P3-16 and the P3-6 claim-takeover residual remain open). Use only while migrating custom workflows; the escape hatch will be removed.",
 			"env", stepEntryPolicyEnv)
 		return
 	}

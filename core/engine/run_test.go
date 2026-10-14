@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/workflow"
@@ -1232,9 +1233,15 @@ type mockWorkflowWriter struct {
 	createdBody string
 	branch      string
 	err         error
+	// Update side (INIT-023 TASK-014).
+	updatedID   string
+	updatedBody string
+	updateCalls int
+	createCalls int
 }
 
 func (m *mockWorkflowWriter) Create(ctx context.Context, id, body string) (*workflow.WriteResult, error) {
+	m.createCalls++
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -1247,6 +1254,24 @@ func (m *mockWorkflowWriter) Create(ctx context.Context, id, body string) (*work
 		Workflow:  &domain.WorkflowDefinition{ID: id, Path: "workflows/" + id + ".yaml"},
 		Path:      "workflows/" + id + ".yaml",
 		CommitSHA: "wf-commit",
+	}, nil
+}
+
+// Update satisfies the widened WorkflowWriter (INIT-023 TASK-014).
+func (m *mockWorkflowWriter) Update(ctx context.Context, id, body string) (*workflow.WriteResult, error) {
+	m.updateCalls++
+	if m.err != nil {
+		return nil, m.err
+	}
+	m.updatedID = id
+	m.updatedBody = body
+	if wc := workflow.GetWriteContext(ctx); wc != nil {
+		m.branch = wc.Branch
+	}
+	return &workflow.WriteResult{
+		Workflow:  &domain.WorkflowDefinition{ID: id, Path: "workflows/" + id + ".yaml"},
+		Path:      "workflows/" + id + ".yaml",
+		CommitSHA: "wf-update-commit",
 	}, nil
 }
 
@@ -1295,13 +1320,30 @@ func workflowPlanningOrchestrator(writer WorkflowWriter, resolver WorkflowResolv
 		actors:    &stubActorAssigner{},
 		artifacts: &mockArtifactReader{},
 		events:    events,
-		git:       gitOp,
+		git:       absentWorkflowReads{gitOp},
 		wfLoader:  &stubWorkflowLoader{},
 	}
 	if writer != nil {
 		o.workflowWriter = writer
 	}
 	return o
+}
+
+// absentWorkflowReads adapts the shared git doubles to the existence
+// pre-check the workflow starters run before any branch exists (INIT-023
+// TASK-014, design-check L1). stubGitOperator.ReadFile answers (nil, nil) —
+// "the file exists and is empty" — for every path; through this wrapper a
+// read that returns no content under workflows/ is git's not-found, so a
+// create sees a new id, exactly what the existing tests mean. A double that
+// serves real content (workflowReadGit) is passed through unchanged.
+type absentWorkflowReads struct{ GitOperator }
+
+func (a absentWorkflowReads) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
+	b, err := a.GitOperator.ReadFile(ctx, ref, path)
+	if err == nil && b == nil && strings.HasPrefix(path, workflow.WorkflowsDir+"/") {
+		return nil, &git.GitError{Kind: git.ErrKindNotFound, Op: "show", Message: "not found"}
+	}
+	return b, err
 }
 
 func TestStartWorkflowPlanningRun_HappyPath(t *testing.T) {

@@ -139,12 +139,19 @@ type ArtifactWriter interface {
 	Create(ctx context.Context, path, content string) (*artifact.WriteResult, error)
 }
 
-// WorkflowWriter creates workflow definitions on branches during workflow
-// planning runs (ADR-008). The shape mirrors ArtifactWriter but targets YAML
-// workflow files — which are routed through the separate workflow.Service
-// (ADR-007) — rather than Markdown artifacts.
+// WorkflowWriter creates and updates workflow definitions on branches during
+// workflow planning runs (ADR-008). The shape mirrors ArtifactWriter but
+// targets YAML workflow files — which are routed through the separate
+// workflow.Service (ADR-007) — rather than Markdown artifacts.
+// *workflow.Service implements it.
+//
+// Update was added by INIT-023 TASK-014 for update-capable lifecycle runs
+// (StartWorkflowUpdatePlanningRun). Its only implementer in Spine is
+// *workflow.Service; SMP neither implements this interface nor calls
+// WithWorkflowWriter.
 type WorkflowWriter interface {
 	Create(ctx context.Context, id, body string) (*workflow.WriteResult, error)
+	Update(ctx context.Context, id, body string) (*workflow.WriteResult, error)
 }
 
 // CollisionHandler detects and resolves artifact ID collisions during merge.

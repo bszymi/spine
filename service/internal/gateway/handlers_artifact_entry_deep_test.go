@@ -8,24 +8,41 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/auth"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/service/internal/gateway"
 )
 
 // planningFakeStore embeds fakeStore and overrides GetRun to return a planning run.
+//
+// INIT-023 TASK-014: the run is the one its branch belongs to
+// (spine/run/plan-branch ↔ run-branch, whatever run_id was asked for), its
+// draft step is held by contrib-1 — the actor every user of this fixture
+// authenticates as — and its workflow declares draft as a manual step, so
+// run-branch writes by contrib-1 pass authorizeRunBranchWrite
+// (run_branch_fixtures_test.go).
 type planningFakeStore struct {
 	*fakeStore
 }
 
-func (p *planningFakeStore) GetRun(_ context.Context, runID string) (*domain.Run, error) {
+func (p *planningFakeStore) GetRun(_ context.Context, _ string) (*domain.Run, error) {
 	return &domain.Run{
-		RunID:         runID,
+		RunID:         runIDOfBranch("spine/run/plan-branch"),
 		Mode:          domain.RunModePlanning,
 		Status:        domain.RunStatusActive,
 		CurrentStepID: "draft",
 		BranchName:    "spine/run/plan-branch",
+		WorkflowPath:  fixtureWorkflowPath,
 	}, nil
+}
+
+func (p *planningFakeStore) ListStepExecutionsByRun(_ context.Context, runID string) ([]domain.StepExecution, error) {
+	return stepHeldBy(runID, "draft", "contrib-1"), nil
+}
+
+func (p *planningFakeStore) GetWorkflowProjection(_ context.Context, _ string) (*store.WorkflowProjection, error) {
+	return fixtureWorkflowProjection(), nil
 }
 
 // newArtifactEntryFullServer creates a server with planningRunStarter + artSvc + gitReader.

@@ -987,8 +987,22 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 
 	// Workflow service (ADR-007): dedicated surface for workflow definition
 	// writes, kept separate from the generic artifact service so the
-	// workflow validation suite owns the write path.
+	// workflow validation suite owns the write path. It gets the same
+	// branch-protection policy as the artifact service (INIT-023 TASK-014,
+	// audit F7): projection-backed with a Store, permissive without one.
 	workflowSvc := workflow.NewService(primaryClient, repoPath)
+	if st != nil {
+		rs, err := bpprojection.New(st)
+		if err != nil {
+			for i := len(closers) - 1; i >= 0; i-- {
+				closers[i]("init-error")
+			}
+			return nil, fmt.Errorf("workflow branch-protect policy: %w", err)
+		}
+		workflowSvc.WithPolicy(branchprotect.New(rs))
+	} else {
+		workflowSvc.WithPolicy(branchprotect.NewPermissive())
+	}
 
 	// Projection services.
 	var projQuery *projection.QueryService

@@ -68,6 +68,39 @@ type StepEntryPolicy struct {
 	// actor holding a live review execution cannot be bound to an author
 	// step of the same run.
 	SeparationOfDuties bool
+	// ReofferToPriorHolder (audit P3-6 residual; INIT-023 TASK-014 owner
+	// question 7): ClaimStep of an author step (isAuthorStepType — every
+	// type whose bound actor may write the run or divergence branch through
+	// push admission or the standalone API) is refused (403) for any actor
+	// other than the step's prior holder in this run. TASK-014 limits API
+	// writes to a run branch to the actor bound to the run's current step,
+	// and TASK-016 does the same for pushes; without this rule an eligible
+	// contributor could still claim a colleague's step the moment it is
+	// waiting again and then write as its bound actor. The prior holder is:
+	//
+	//   - the actor still named on the execution being claimed — a waiting
+	//     row reset by scheduler restart recovery keeps its actor_id; or
+	//   - otherwise the actor of the immediately preceding attempt of the
+	//     same step on the same branch, if that attempt completed — a
+	//     needs_rework loop creates a new, unbound attempt of the author
+	//     step — unless this attempt itself was claimed and released since.
+	//
+	// A step never held in this run (a first attempt — owner question 4: no
+	// auto-bind at run start) stays claimable by any eligible actor, as
+	// does a retry of a failed attempt (a failed holder is not re-offered
+	// the work), an attempt whose prior holder ClaimStep would refuse (it
+	// no longer resolves, is not active, is off the execution's
+	// eligible_actor_ids, is of a type the step does not admit, or lacks
+	// one of its required_skills: priorHolderCanClaim, review rounds 1 and
+	// 2), and, with EnforceExecutionMode on, an automated_only or ai_only
+	// step, whose claimers are operator-provisioned pool members
+	// (reofferExempt; review round 1).
+	// AssignStep (step.assign, operator) is never restricted:
+	// "re-offered to the prior holder unless an operator assigns". The
+	// candidate listing hides what the claim would refuse. A step its holder
+	// released is claimable by others — release is the holder's own
+	// hand-off, and it stays attributed through the cancelled claim row.
+	ReofferToPriorHolder bool
 	// TerminateStepsOnCancel (P3-16): CancelRun, FailRun, the permanent
 	// merge failure and the scheduler's run-timeout hook move every live
 	// execution of the run to `skipped` with classification run_terminated
@@ -125,6 +158,7 @@ func StrictStepEntryPolicy() StepEntryPolicy {
 		EnforcePreconditions:   true,
 		RequireSkillsOnAssign:  true,
 		SeparationOfDuties:     true,
+		ReofferToPriorHolder:   true,
 		TerminateStepsOnCancel: true,
 	}
 }
@@ -142,7 +176,8 @@ func (p StepEntryPolicy) IsZero() bool {
 // pre-INIT-023 code.
 func (p StepEntryPolicy) gatesBinding() bool {
 	return p.EnforceRunStatus || p.EnforceEligibility || p.EnforceExecutionMode ||
-		p.EnforcePreconditions || p.RequireSkillsOnAssign || p.SeparationOfDuties
+		p.EnforcePreconditions || p.RequireSkillsOnAssign || p.SeparationOfDuties ||
+		p.ReofferToPriorHolder
 }
 
 // WithStepEntryPolicy installs the step-entry policy. The zero value (the
@@ -303,6 +338,9 @@ func modeActorType(stepDef *domain.StepDefinition) (engineOwned bool, implied do
 //  6. required_skills                    (RequireSkillsOnAssign) 409 / 503  assign only
 //  7. separation of duties               (SeparationOfDuties)    403 / 503
 //
+// Check 6b, claim only, runs between 6 and 7: the prior holder
+// (ReofferToPriorHolder, INIT-023 TASK-014), 403 / 503.
+//
 // Check 8, preconditions, is checkStepEntryPreconditions; it runs last
 // because it may read git. allow is the effective eligible_actor_ids list
 // (assign: the request's list when non-empty, else the stored one). ClaimStep
@@ -377,6 +415,12 @@ func (o *Orchestrator) checkStepEntryActor(ctx context.Context, op entryOp, run 
 		}
 	}
 
+	if op == entryClaim && p.ReofferToPriorHolder {
+		if err := o.checkPriorHolder(ctx, run, stepDef, exec, actorID); err != nil {
+			return err
+		}
+	}
+
 	if p.SeparationOfDuties {
 		if err := o.checkSeparationOfDuties(ctx, run, wfDef, stepDef, exec, actorID); err != nil {
 			return err
@@ -402,6 +446,174 @@ func (o *Orchestrator) requireSkillsOnAssign(ctx context.Context, stepDef *domai
 	if err != nil {
 		return domain.NewErrorWithCause(domain.ErrUnavailable, "required_skills cannot be checked: skill lookup failed", err)
 	}
+	if missing := missingRequiredSkills(stepDef.Execution.RequiredSkills, skills); len(missing) > 0 {
+		return domain.NewError(domain.ErrConflict, fmt.Sprintf("actor missing required skills: %v", missing))
+	}
+	return nil
+}
+
+// checkPriorHolder is check 6b (ReofferToPriorHolder, claim only). It
+// reads the run's executions once; a read failure fails closed (503). The
+// refusal never names the prior holder (the TASK-016 wire-message rule: a
+// refusal does not tell a caller who holds a run).
+func (o *Orchestrator) checkPriorHolder(ctx context.Context, run *domain.Run, stepDef *domain.StepDefinition,
+	exec *domain.StepExecution, actorID string) error {
+	if !isAuthorStepType(stepDef.Type) || o.entryPolicy.reofferExempt(stepDef) {
+		return nil
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot list the run's executions", err)
+	}
+	return o.priorHolderRefusal(ctx, run, stepDef, exec, actorID, execs)
+}
+
+// priorHolderRefusal is check 6b over an already-read execution list (the
+// candidate listing reads it once per run): nil, ErrForbidden, or
+// ErrUnavailable when the assignment ledger cannot be read.
+func (o *Orchestrator) priorHolderRefusal(ctx context.Context, run *domain.Run, stepDef *domain.StepDefinition,
+	exec *domain.StepExecution, actorID string, execs []domain.StepExecution) error {
+	if !isAuthorStepType(stepDef.Type) || o.entryPolicy.reofferExempt(stepDef) {
+		return nil
+	}
+	holder, err := o.priorHolder(ctx, exec, execs)
+	if err != nil {
+		return err
+	}
+	if holder == "" || holder == actorID {
+		return nil
+	}
+	canClaim, err := o.priorHolderCanClaim(ctx, stepDef, exec, holder)
+	if err != nil {
+		return err
+	}
+	if !canClaim {
+		return nil
+	}
+	return domain.NewError(domain.ErrForbidden,
+		fmt.Sprintf("step %q of run %s is re-offered to the actor who held it before (rework or restart recovery); "+
+			"only that actor may claim it, or an operator may assign it to another actor (POST /runs/%s/steps/%s/assign)",
+			stepDef.ID, run.RunID, run.RunID, stepDef.ID))
+}
+
+// reofferExempt reports whether a step's claimers are interchangeable pool
+// members, to which the re-offer does not apply (review round 1): with
+// EnforceExecutionMode on, an automated_only or ai_only step binds only
+// automated_system or ai_agent actors, which only operators provision
+// (actor.create), so no contributor can claim it to take over a
+// colleague's work. Its rework is also already open to the pool on the
+// path that usually binds it: ActivateStep's auto-selection picks any
+// eligible actor of the mode's type, never the prior holder. Re-offering
+// the claim to one pool identity would only strand the attempt when that
+// runner or agent has gone (scaled down, or replaced by a new identity)
+// — the step then waits, hidden from every other pool member,
+// until an operator assigns it. Without EnforceExecutionMode the mode does
+// not restrict who claims, so the re-offer stays.
+func (p StepEntryPolicy) reofferExempt(stepDef *domain.StepDefinition) bool {
+	if !p.EnforceExecutionMode {
+		return false
+	}
+	_, implied := modeActorType(stepDef)
+	return implied == domain.ActorTypeAutomated || implied == domain.ActorTypeAIAgent
+}
+
+// priorHolderCanClaim reports whether the prior holder's own claim of exec
+// would pass ClaimStep's claimer-dependent checks (review rounds 1 and 2);
+// the re-offer applies only then. Re-offering to a holder ClaimStep
+// refuses strands the attempt: the holder cannot take it back, every other
+// eligible actor gets the 403 and the candidate listing hides it from
+// them, until an operator assigns it. Such an attempt is instead open to
+// any eligible actor, as a first attempt is (attributed by the claim like
+// any other). The checks mirror ClaimStep's, in its order:
+//
+//  1. the execution's eligible_actor_ids allow-list — pure, so it applies
+//     even with no actor lookup wired;
+//  2. the holder resolves and is `active`, whether or not
+//     EnforceEligibility is on: a suspended or deactivated identity must
+//     not keep work pinned to itself;
+//  3. with EnforceExecutionMode, the mode-implied actor type (only
+//     human_only is left: reofferExempt took the machine modes);
+//  4. the step's eligible_actor_types;
+//  5. the step's required_skills, through ClaimStep's skill lookup and its
+//     rule (missingRequiredSkills: only an active skill counts). With no
+//     skill lookup wired ClaimStep skips the check, so the holder passes.
+//
+// Each of these refuses the holder only after an administrator or operator
+// acted on it: actor.remove_skill, skill.deprecate and suspension are
+// admin-only, an actor's type is immutable (UpdateActor never writes it),
+// and eligible_actor_ids is written only by step.assign (operator). A
+// contributor cannot lift a colleague's re-offer.
+//
+// Deliberately not mirrored:
+//
+//   - checks that do not depend on the claimer (run status, engine-owned
+//     steps, preconditions): they refuse every claimer alike, so the
+//     re-offer strands nothing they do not;
+//   - separation of duties: under it the holder of an author step can
+//     never be bound to a review of the run afterwards, and a live review
+//     it held before (rows from before the policy) ends with that review —
+//     the refusal is transient, not a strand;
+//   - the host's authorization (`spine serve`'s execution.claim needs
+//     contributor): the engine does not see it, and judging it from
+//     Actor.Role would silently lift every re-offer for an embedder whose
+//     resolver leaves Role empty. A holder whose role an admin lowers below
+//     the claim permission waits for the role or an operator assign
+//     (KNOWN-LIMITATIONS.md).
+//
+// With no actor lookup wired the holder cannot be judged past check 1 and
+// the re-offer stands (the stricter answer). An actor or skill lookup
+// failure fails the claim closed (503). No answer names the holder.
+func (o *Orchestrator) priorHolderCanClaim(ctx context.Context, stepDef *domain.StepDefinition,
+	exec *domain.StepExecution, holder string) (bool, error) {
+	if len(exec.EligibleActorIDs) > 0 && !containsStr(exec.EligibleActorIDs, holder) {
+		return false, nil
+	}
+	if o.entryPolicy.Actors == nil {
+		if _, ok := o.blocking.(entryActorLoader); !ok {
+			return true, nil
+		}
+	}
+	a, err := o.policyActor(ctx, holder)
+	if err != nil {
+		var se *domain.SpineError
+		if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+			return false, nil
+		}
+		return false, domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot resolve the prior holder", err)
+	}
+	if a.Status != domain.ActorStatusActive {
+		return false, nil
+	}
+	if o.entryPolicy.EnforceExecutionMode {
+		if _, implied := modeActorType(stepDef); implied != "" && a.Type != implied {
+			return false, nil
+		}
+	}
+	if stepDef.Execution == nil {
+		return true, nil
+	}
+	if len(stepDef.Execution.EligibleActorTypes) > 0 && !containsStr(stepDef.Execution.EligibleActorTypes, string(a.Type)) {
+		return false, nil
+	}
+	if len(stepDef.Execution.RequiredSkills) == 0 {
+		return true, nil
+	}
+	lister, ok := o.blocking.(entrySkillLister)
+	if !ok {
+		return true, nil
+	}
+	skills, err := lister.ListActorSkills(ctx, holder)
+	if err != nil {
+		return false, domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot read the prior holder's skills", err)
+	}
+	return len(missingRequiredSkills(stepDef.Execution.RequiredSkills, skills)) == 0, nil
+}
+
+// missingRequiredSkills is ClaimStep's skill rule, shared by every check
+// that applies it (ClaimStep, RequireSkillsOnAssign and the prior-holder
+// re-offer) so they cannot drift: a skill counts only while its status is
+// active, and the result keeps the declaration order of required.
+func missingRequiredSkills(required []string, skills []domain.Skill) []string {
 	held := make(map[string]bool, len(skills))
 	for i := range skills {
 		if skills[i].Status == domain.SkillStatusActive {
@@ -409,15 +621,87 @@ func (o *Orchestrator) requireSkillsOnAssign(ctx context.Context, stepDef *domai
 		}
 	}
 	var missing []string
-	for _, s := range stepDef.Execution.RequiredSkills {
+	for _, s := range required {
 		if !held[s] {
 			missing = append(missing, s)
 		}
 	}
-	if len(missing) > 0 {
-		return domain.NewError(domain.ErrConflict, fmt.Sprintf("actor missing required skills: %v", missing))
+	return missing
+}
+
+// priorHolder returns the actor a claimable execution is re-offered to, or
+// "" when it has none (see ReofferToPriorHolder):
+//
+//  1. the actor still named on the execution (restart recovery keeps it);
+//  2. else the actor of the immediately preceding attempt of the same step
+//     on the same branch, only if that attempt completed — the latest
+//     preceding attempt is chosen first and judged afterwards (codex
+//     review round 1), so an older completion cannot reinstate ownership
+//     across a failed retry;
+//  3. but not when this execution itself was held and released since
+//     (codex review round 2): ReleaseStep blanks the row's actor, so a
+//     released rework attempt looks like a fresh one. A release is the
+//     holder's own hand-off and leaves the step claimable by others, as it
+//     does for a first attempt (releasedSince).
+func (o *Orchestrator) priorHolder(ctx context.Context, exec *domain.StepExecution, execs []domain.StepExecution) (string, error) {
+	if exec.ActorID != "" {
+		return exec.ActorID, nil
 	}
-	return nil
+	var prev *domain.StepExecution
+	for i := range execs {
+		e := &execs[i]
+		if e.ExecutionID == exec.ExecutionID || e.StepID != exec.StepID || e.BranchID != exec.BranchID ||
+			e.Attempt >= exec.Attempt {
+			continue
+		}
+		if prev == nil || e.Attempt > prev.Attempt {
+			prev = e
+		}
+	}
+	if prev == nil || prev.Status != domain.StepStatusCompleted || prev.ActorID == "" {
+		return "", nil
+	}
+	released, err := o.releasedSince(ctx, exec, prev.ActorID)
+	if err != nil {
+		return "", err
+	}
+	if released {
+		return "", nil
+	}
+	return prev.ActorID, nil
+}
+
+// releasedSince reports whether exec — claimable, with no actor — was
+// bound and then released, judged from the assignment ledger rows the
+// engine writes with deterministic ids: ClaimStep's
+// claim-<execution>-<actor> and ActivateStep's auto-<execution>-<actor>
+// for the candidate holder (under this policy the only actor who can claim
+// the attempt), and TrackAssignment's <execution> for any actor. It reads
+// with GetAssignment only, so no store method is added. With no ledger
+// wired, ReleaseStep is unavailable, so nothing was released. A ledger
+// read other than not-found is ErrUnavailable (fail closed).
+func (o *Orchestrator) releasedSince(ctx context.Context, exec *domain.StepExecution, holder string) (bool, error) {
+	if o.assignments == nil {
+		return false, nil
+	}
+	for _, id := range []string{
+		"claim-" + exec.ExecutionID + "-" + holder,
+		"auto-" + exec.ExecutionID + "-" + holder,
+		exec.ExecutionID,
+	} {
+		a, err := o.assignments.GetAssignment(ctx, id)
+		if err != nil {
+			var se *domain.SpineError
+			if errors.As(err, &se) && se.Code == domain.ErrNotFound {
+				continue
+			}
+			return false, domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot read the assignment ledger", err)
+		}
+		if a != nil && a.ExecutionID == exec.ExecutionID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // assignmentHistory is the optional ledger read behind the separation-of-

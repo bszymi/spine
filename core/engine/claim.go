@@ -144,19 +144,9 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 				if err != nil {
 					return nil, fmt.Errorf("check actor skills: %w", err)
 				}
-				skillNames := make(map[string]bool, len(skills))
-				for i := range skills {
-					if skills[i].Status == domain.SkillStatusActive {
-						skillNames[skills[i].Name] = true
-					}
-				}
-				var missing []string
-				for _, req := range stepDef.Execution.RequiredSkills {
-					if !skillNames[req] {
-						missing = append(missing, req)
-					}
-				}
-				if len(missing) > 0 {
+				// The same rule the prior-holder re-offer applies to the
+				// holder (missingRequiredSkills), so the two cannot drift.
+				if missing := missingRequiredSkills(stepDef.Execution.RequiredSkills, skills); len(missing) > 0 {
 					return nil, domain.NewError(domain.ErrConflict,
 						fmt.Sprintf("actor missing required skills: %v", missing))
 				}

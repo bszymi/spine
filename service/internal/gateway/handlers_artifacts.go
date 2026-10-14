@@ -4,20 +4,29 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/workflow"
 )
 
 // isWorkflowTarget reports whether a path points at a workflow definition.
 // Per ADR-007, generic artifact write operations must reject such targets.
+//
+// The test is canonical (workflow.InWorkflowsDir; INIT-023 TASK-014 §3.5,
+// V3): on 61994fe it was a raw prefix test on the request path while
+// artifact.Service joins and cleans that path, so "./workflows/x",
+// "governance/../workflows/x" and "workflows//x" passed the guard and
+// landed under workflows/ on a run branch — and PUT
+// /artifacts/./workflows/task-default.yaml replaced a workflow file with
+// artifact Markdown. TASK-004's service-level Clean also refuses those
+// spellings; this guard stands on its own so the refusal does not depend
+// on it.
 func isWorkflowTarget(path string) bool {
-	p := strings.TrimPrefix(path, "/")
-	return strings.HasPrefix(p, "workflows/")
+	return workflow.InWorkflowsDir(path)
 }
 
 // workflowRejection returns the canonical 400 error that generic artifact
@@ -412,11 +421,22 @@ func (s *Server) handleArtifactLinks(w http.ResponseWriter, r *http.Request, pat
 	})
 }
 
-// resolveWriteContext resolves a WriteContext request (run_id + task_path)
-// into the destination branch and the override flag. Empty run_id yields
-// ("", override, nil) — an authoritative-branch write, the case where the
+// resolveWriteContext resolves an artifact WriteContext request (run_id +
+// task_path) into the destination branch and the override flag. Empty
+// run_id yields ("", override, nil) — an authoritative-branch write, gated
+// by artifact.Service's branch-protection policy, the case where the
 // override flag is actually meaningful. Planning runs skip task_path
 // validation per ADR-006 §7.
+//
+// A run_id write lands on a run branch, so (INIT-023 TASK-014):
+//
+//   - a run that governs a workflow definition (TaskPath under workflows/)
+//     accepts no artifact writes (I7: a workflow lifecycle run carries
+//     exactly one workflow definition, written through the workflow
+//     endpoints);
+//   - the caller must be allowed to write that branch
+//     (authorizeRunBranchWrite: the current step's bound actor or an
+//     operator, never during a review or internal step).
 func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextRequest) (string, bool, error) {
 	if wc.RunID == "" {
 		return "", wc.Override, nil
@@ -436,20 +456,33 @@ func (s *Server) resolveWriteContext(ctx context.Context, wc *writeContextReques
 		return "", false, domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("run %s has no branch", wc.RunID))
 	}
-
-	// Planning runs: skip task_path validation. The run owns a constrained
-	// creation scope on the branch for multi-artifact writes.
-	if run.Mode == domain.RunModePlanning {
-		return run.BranchName, wc.Override, nil
+	if isWorkflowTarget(run.TaskPath) {
+		return "", false, workflowRunArtifactRejection(wc.RunID)
 	}
 
-	// Standard runs: require task_path and validate it matches the run.
-	if wc.TaskPath == "" {
-		return "", false, domain.NewError(domain.ErrInvalidParams, "write_context.task_path is required when run_id is provided")
+	// Planning runs skip task_path validation: the run owns a constrained
+	// creation scope on the branch for multi-artifact writes. Standard
+	// runs require task_path and validate it matches the run.
+	if run.Mode != domain.RunModePlanning {
+		if wc.TaskPath == "" {
+			return "", false, domain.NewError(domain.ErrInvalidParams, "write_context.task_path is required when run_id is provided")
+		}
+		if run.TaskPath != wc.TaskPath {
+			return "", false, domain.NewError(domain.ErrInvalidParams,
+				fmt.Sprintf("task_path mismatch: run %s belongs to %s, not %s", wc.RunID, run.TaskPath, wc.TaskPath))
+		}
 	}
-	if run.TaskPath != wc.TaskPath {
-		return "", false, domain.NewError(domain.ErrInvalidParams,
-			fmt.Sprintf("task_path mismatch: run %s belongs to %s, not %s", wc.RunID, run.TaskPath, wc.TaskPath))
+
+	if err := s.authorizeRunBranchWrite(ctx, run); err != nil {
+		return "", false, err
 	}
 	return run.BranchName, wc.Override, nil
+}
+
+// workflowRunArtifactRejection is the 400 for an artifact write onto a run
+// that governs a workflow definition (I7).
+func workflowRunArtifactRejection(runID string) error {
+	return domain.NewErrorWithDetail(domain.ErrInvalidParams,
+		fmt.Sprintf("run %s governs a workflow definition; artifact writes are not accepted on it (write the definition through the workflow endpoints)", runID),
+		map[string]string{"run_id": runID, "use_operation": "workflow.update", "adr": "ADR-008"})
 }

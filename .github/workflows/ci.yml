@@ -142,6 +142,41 @@ jobs:
             fi
           done
 
+      # INIT-023 / EPIC-004 / TASK-014: the workflow-lifecycle scenarios
+      # (a reviewer's update of an existing workflow reaches main only
+      # through its lifecycle run's review, and under spine serve's strict
+      # step-entry policy the draft author cannot approve it) and the
+      # pooled workflow service's projection-backed branch-protection
+      # policy are the Postgres-backed evidence for audit F7. Both are
+      # green and must never skip.
+      - name: TestWorkflowLifecycle_* scenarios (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags scenario -count=1 -run '^TestWorkflowLifecycle_' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-workflow-lifecycle.log
+          if grep -E '^[[:space:]]*--- SKIP: TestWorkflowLifecycle_' scenario-workflow-lifecycle.log; then
+            echo "::error::a TestWorkflowLifecycle_ scenario or step skipped — they must pass, never skip"
+            exit 1
+          fi
+          for t in TestWorkflowLifecycle_UpdateExisting TestWorkflowLifecycle_UpdateExisting_DraftAuthorCannotReview; do
+            if ! grep -qE "^--- PASS: ${t} " scenario-workflow-lifecycle.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+
+      - name: Pooled workflow-service branch protection (integration; must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags integration -count=1 -run '^TestBuildServiceSet_WorkflowServiceHasProjectionPolicy$' -v ./service/internal/workspace/ 2>&1 | tee integration-workflow-policy.log
+          if grep -E '^[[:space:]]*--- SKIP: ' integration-workflow-policy.log; then
+            echo "::error::the pooled workflow-policy integration test skipped — it must pass, never skip"
+            exit 1
+          fi
+          if ! grep -qE '^--- PASS: TestBuildServiceSet_WorkflowServiceHasProjectionPolicy ' integration-workflow-policy.log; then
+            echo "::error::TestBuildServiceSet_WorkflowServiceHasProjectionPolicy did not pass"
+            exit 1
+          fi
+
   # INIT-023 / EPIC-001 / TASK-002: the git client's ref grammar (exact
   # `show-ref --verify` lookups, `--end-of-options`, `git switch
   # --no-guess`, `<oid>^{commit}` push sources, `worktree add --detach`)
