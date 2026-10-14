@@ -270,6 +270,30 @@ func TestCodeRepoBinding_PushAfterCaptureNotMerged(t *testing.T) {
 	if r := e.runNow(); r.Status != domain.RunStatusCompleted {
 		t.Fatalf("run status = %s", r.Status)
 	}
+	// The excluded commit is kept for inspection (owner question 3), in
+	// the code repository as for the primary (codex review round 1).
+	if got := crGit(t, e.codeWork, "for-each-ref", "--format=%(objectname)", "refs/heads/"+e.run.BranchName); got != sneak {
+		t.Fatalf("code repository run branch = %q, want it kept at the excluded commit %s", got, sneak)
+	}
+}
+
+// TestCodeRepoBinding_CleanMergeDeletesBranches: with nothing excluded,
+// the code repository's run branch is cleaned up as before.
+func TestCodeRepoBinding_CleanMergeDeletesBranches(t *testing.T) {
+	e := mustCREnv(t, true)
+	r1 := e.commitCode("feature.go", "package x\n")
+	if err := e.submit("execute", "completed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.submit("review", "accepted"); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.runNow(); r.Status != domain.RunStatusCompleted || !e.originHas(r1) {
+		t.Fatalf("run status %s, origin has R1=%v", r.Status, e.originHas(r1))
+	}
+	if got := crGit(t, e.codeWork, "for-each-ref", "refs/heads/"+e.run.BranchName); got != "" {
+		t.Fatalf("code repository run branch not cleaned up: %s", got)
+	}
 }
 
 // TestCodeRepoBinding_MissingCapabilityRefusesStart is AC 15(b).

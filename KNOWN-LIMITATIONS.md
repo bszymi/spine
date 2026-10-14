@@ -212,9 +212,10 @@ merge publishes the commit the run's steps validated and reviewed, never the run
    run's `commit_meta` until the resumed merge publishes it; a run that is never resumed leaves it
    unreferenced (prunable). Its commit date is the bound commit's (the commit is built
    deterministically); the time of the operator action is in the audit event.
-10. **Excluded commits are logged, not evented.** A run branch whose tip held commits the merge
-    left out is kept and a `merge_binding: commits after the bound head were not merged` warning
-    names `run_id`, `bound_sha` and `tip_sha`; a dedicated event type is a follow-up.
+10. **Excluded commits are logged, not evented.** When the primary's or any code repository's run
+    branch holds commits the merge left out, every run branch of the run is kept (not only the one
+    with excluded commits) and a `merge_binding: commits after the bound head were not merged`
+    warning names `run_id`, `bound_sha` and `tip_sha`; a dedicated event type is a follow-up.
 11. **Collision renumber is skipped under binding** (planning runs whose artifact id collided at
     merge fail instead of renumbering): the renumber commits on the branch tip. Neither product
     wires a collision handler today.

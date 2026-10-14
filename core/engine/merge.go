@@ -321,9 +321,15 @@ func (o *Orchestrator) verifyAndComplete(ctx context.Context, run *domain.Run, s
 		return o.transitionToPartiallyMerged(ctx, run, failed)
 	}
 
-	// Transition committing → completed (with branch cleanup, unless the
-	// bound merge left commits on the branch out).
-	if err := o.completeAfterMerge(ctx, run, src.excludedTip == ""); err != nil {
+	// Transition committing → completed (with branch cleanup, unless a
+	// bound merge left commits on a run branch out: the primary's, or any
+	// code repository's — decided here, not from this attempt alone,
+	// because a code repository may have merged in an earlier attempt).
+	cleanup := true
+	if o.bindingOn {
+		cleanup = src.excludedTip == "" && !o.codeRepoHasExcludedCommits(ctx, run)
+	}
+	if err := o.completeAfterMerge(ctx, run, cleanup); err != nil {
 		return err
 	}
 	return o.advancePublishStepIfAny(ctx, run, "published")

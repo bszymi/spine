@@ -760,6 +760,60 @@ func (o *Orchestrator) codeRepoBoundContained(ctx context.Context, run *domain.R
 	return binder.IsAncestor(ctx, repoBound, head)
 }
 
+// codeRepoHasExcludedCommits reports whether any code repository's run
+// branch holds commits its default branch does not contain after the
+// bound merges — commits the binding deliberately left out, which branch
+// cleanup would otherwise delete (owner question 3 applies to every
+// repository, not only the primary). It is decided from git state at
+// completion, so a repository merged in an earlier attempt counts too.
+// Any failure to decide answers true: keeping a branch is always safe,
+// deleting one with unmerged commits is not. A branch that no longer
+// exists has nothing to keep.
+func (o *Orchestrator) codeRepoHasExcludedCommits(ctx context.Context, run *domain.Run) bool {
+	log := observe.Logger(ctx)
+	for _, repoID := range codeRepoIDs(run) {
+		keep := func(reason string, err error) bool {
+			log.Warn("merge_binding: keeping run branches; code repository branch state unknown",
+				"run_id", run.RunID, "repository_id", repoID, "reason", reason, "error", err)
+			return true
+		}
+		if o.repositories == nil {
+			return keep("no repository resolver", nil)
+		}
+		repo, err := o.repositories.Lookup(ctx, repoID)
+		if err != nil {
+			return keep("lookup", err)
+		}
+		binder, err := o.codeRepoBinder(ctx, repoID)
+		if err != nil {
+			return keep("client", err)
+		}
+		tip, err := binder.ResolveBranchHead(ctx, runBranchIn(run, repoID))
+		if err != nil {
+			var gitErr *git.GitError
+			if errors.As(err, &gitErr) && gitErr.Kind == git.ErrKindNotFound {
+				continue // no run branch left in this repository
+			}
+			return keep("run branch head", err)
+		}
+		head, err := binder.ResolveBranchHead(ctx, repo.DefaultBranch)
+		if err != nil {
+			return keep("default branch head", err)
+		}
+		in, err := binder.IsAncestor(ctx, tip, head)
+		if err != nil {
+			return keep("ancestry", err)
+		}
+		if !in {
+			log.Warn("merge_binding: commits after the bound head were not merged; keeping run branches",
+				"run_id", run.RunID, "repository_id", repoID, "tip_sha", tip,
+				"bound_sha", run.CommitMeta[RepoBoundSHAKey(repoID)])
+			return true
+		}
+	}
+	return false
+}
+
 // attemptCodeRepositoryMergeBound is attemptCodeRepositoryMerge with
 // binding on: MergeBound of the repository's bound commit, the structural
 // check and a non-forced push. A missing binding or a client without the
