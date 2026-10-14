@@ -415,6 +415,10 @@ type mergeSource struct {
 	// as for excluded commits: it may be the only ref to them (codex
 	// review, round 2; the code-repository check already kept it).
 	tipUnknown bool
+	// lifecycle is the status-lifecycle plan of the bound diff (INIT-023
+	// TASK-017), nil with the lifecycle off; mergePrimaryBound checks the
+	// merge result against it before any push (V1).
+	lifecycle *lifecyclePlan
 }
 
 // resolveMergeSource is the binding-on entry of every merge attempt. It
@@ -445,22 +449,17 @@ func (o *Orchestrator) resolveMergeSource(ctx context.Context, run *domain.Run) 
 		return o.bindingFailure(ctx, run, fmt.Sprintf("bound commit %s is not available: %v", bound, err))
 	}
 	src := mergeSource{bound: bound, sha: bound}
+	if o.lifecycle != nil {
+		// The declared status lifecycle (INIT-023 TASK-017) replaces this
+		// step: it judges the bound diff even with no commit.status and
+		// never degrades to merging bound unjudged.
+		return o.resolveLifecycleSource(ctx, run, src)
+	}
 	if newStatus := run.CommitMeta["status"]; newStatus != "" {
 		c, err := o.applyCommitStatusAt(ctx, run, newStatus, bound)
 		switch {
 		case errors.Is(err, errNotChildOfBound):
-			// Not a failed rewrite but a commit that would carry more than
-			// the bound commit into the merge (review round 1): refused like
-			// a structural violation of the merge itself. Nothing has been
-			// merged yet, so there is nothing to take back.
-			observe.Logger(ctx).Error("merge binding: status cascade commit is not a child of the bound commit; refusing to merge",
-				"run_id", run.RunID, "bound_sha", bound, "error", err)
-			violation := &git.GitError{Kind: git.ErrKindPermanent, Op: "merge_binding",
-				Message: "merge binding violation: " + err.Error()}
-			if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", violation, ""); recErr != nil {
-				return mergeSource{}, true, recErr
-			}
-			return mergeSource{}, true, o.handlePermanentMergeFailure(ctx, run, violation)
+			return mergeSource{}, true, o.refuseNotChildOfBound(ctx, run, bound, err)
 		case err != nil:
 			// Today's "proceed with merge" semantics: a failed status rewrite
 			// must not block the merge of the bound commit.
@@ -471,6 +470,22 @@ func (o *Orchestrator) resolveMergeSource(ctx context.Context, run *domain.Run) 
 		}
 	}
 	return src, false, nil
+}
+
+// refuseNotChildOfBound refuses a merge whose status cascade commit is not
+// a child of exactly the bound commit: not a failed rewrite but a commit
+// that would carry more than the bound commit into the merge (review round
+// 1), refused like a structural violation of the merge itself. Nothing has
+// been merged yet, so there is nothing to take back.
+func (o *Orchestrator) refuseNotChildOfBound(ctx context.Context, run *domain.Run, bound string, err error) error {
+	observe.Logger(ctx).Error("merge binding: status cascade commit is not a child of the bound commit; refusing to merge",
+		"run_id", run.RunID, "bound_sha", bound, "error", err)
+	violation := &git.GitError{Kind: git.ErrKindPermanent, Op: "merge_binding",
+		Message: "merge binding violation: " + err.Error()}
+	if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", violation, ""); recErr != nil {
+		return recErr
+	}
+	return o.handlePermanentMergeFailure(ctx, run, violation)
 }
 
 // bindingFailure refuses a merge whose binding is missing, invalid or
@@ -737,7 +752,13 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		return true, o.handlePermanentMergeFailure(ctx, run, mergeErr)
 	}
 
-	if err := o.verifyBoundMerge(ctx, o.binder, run.BranchName, src, mergeResult); err != nil {
+	verr := o.verifyBoundMerge(ctx, o.binder, run.BranchName, src, mergeResult)
+	if verr == nil && src.lifecycle != nil {
+		// V1 (INIT-023 TASK-017): what the merge lands is what the status
+		// lifecycle judged.
+		verr = o.verifyLifecycleMerge(ctx, src.lifecycle, mergeResult)
+	}
+	if err := verr; err != nil {
 		// The take-back runs before anything else can build on the
 		// refused merge (TASK-012 moves this whole sequence under its
 		// worktree lock).
@@ -755,6 +776,11 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 				"run_id", run.RunID, "bound_sha", src.bound, "merge_sha", mergeResult.SHA,
 				"base_sha", mergeResult.BaseSHA, "restored_to", tb.restoredTo, "error", err)
 			return true, o.retryMerge(ctx, run)
+		}
+		var le *StatusLifecycleError
+		if errors.As(err, &le) {
+			le.Context = tb.detail
+			return true, o.refuseStatusLifecycle(ctx, run, mergeResult.SHA, le)
 		}
 		violation := &git.GitError{Kind: git.ErrKindPermanent, Op: "merge_binding",
 			Message: "merge binding violation: " + err.Error() + "; " + tb.detail}
@@ -851,6 +877,19 @@ func (o *Orchestrator) cascadeCommitFrom(ctx context.Context, run *domain.Run, n
 	if len(updates) == 0 {
 		return bound, nil, nil
 	}
+	c, err := o.commitCascadeOnto(ctx, run, newStatus, bound, updates)
+	if err != nil {
+		return "", nil, err
+	}
+	return c, updates, nil
+}
+
+// commitCascadeOnto writes the status cascade's rewrites as one
+// CommitFilesOnto commit whose only parent is bound, with the cascade's
+// message and this run's Run-ID / Trace-ID trailers (deterministic: the
+// same inputs give the same commit). Shared by the binding-on cascade and
+// the status lifecycle's (INIT-023 TASK-017).
+func (o *Orchestrator) commitCascadeOnto(ctx context.Context, run *domain.Run, newStatus, bound string, updates map[string]string) (string, error) {
 	res, err := o.binder.CommitFilesOnto(ctx, bound, updates, git.CommitOpts{
 		Message: statusCascadeMessage(newStatus, len(updates)),
 		Trailers: map[string]string{
@@ -859,15 +898,15 @@ func (o *Orchestrator) cascadeCommitFrom(ctx context.Context, run *domain.Run, n
 		},
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("commit status update onto %s: %w", bound, err)
+		return "", fmt.Errorf("commit status update onto %s: %w", bound, err)
 	}
 	if !isBoundObjectID(res.SHA) {
-		return "", nil, fmt.Errorf("commit status update onto %s returned no commit id", bound)
+		return "", fmt.Errorf("commit status update onto %s returned no commit id", bound)
 	}
 	if err := requireChildOf(ctx, o.binder, res.SHA, bound, "status cascade"); err != nil {
-		return "", nil, err
+		return "", err
 	}
-	return res.SHA, updates, nil
+	return res.SHA, nil
 }
 
 // errNotChildOfBound marks a commit the engine asked CommitFilesOnto to
@@ -1024,7 +1063,15 @@ func (o *Orchestrator) thisRunsCascadeMerge(ctx context.Context, run *domain.Run
 			"run_id", run.RunID, "first_parent", first, "error", err)
 		return "", false
 	}
-	c, _, err := o.cascadeCommitFrom(ctx, run, newStatus, bound, prior)
+	var c string
+	if o.lifecycle != nil {
+		// The status lifecycle's cascade (INIT-023 TASK-017): owned paths
+		// only. The status-conflict gate reads the projection, not git, so
+		// it is not part of the recomputation.
+		c, _, err = o.lifecycleCascadeFrom(ctx, run, newStatus, bound, prior, false)
+	} else {
+		c, _, err = o.cascadeCommitFrom(ctx, run, newStatus, bound, prior)
+	}
 	if err != nil {
 		log.Warn("merge binding: could not recompute the cascade of an earlier merge of the bound commit; not taken as this run's",
 			"run_id", run.RunID, "merged_sha", second, "error", err)

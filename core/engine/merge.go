@@ -77,7 +77,11 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 //
 // applyCommitStatus failures are logged and swallowed — exactly as in the
 // pre-extraction code — because the merge itself is the contract: a
-// failed status rewrite must not block the merge.
+// failed status rewrite must not block the merge. That holds only with the
+// status lifecycle off: with it on (INIT-023 TASK-017) binding is
+// required — the combination with binding off is refused here as a
+// configuration error — and the lifecycle judges the bound commit in
+// resolveMergeSource, failing closed.
 func (o *Orchestrator) preflightCheck(ctx context.Context, runID string) (*domain.Run, bool, error) {
 	log := observe.Logger(ctx)
 
@@ -111,6 +115,16 @@ func (o *Orchestrator) preflightCheck(ctx context.Context, runID string) (*domai
 	// evaluator short-circuits before loading rules, by design.
 	if err := o.checkBranchProtectMerge(ctx, run); err != nil {
 		return nil, false, err
+	}
+
+	// The status lifecycle judges the bound commit (INIT-023 TASK-017
+	// DC-2): without binding the tip could move between the judgement and
+	// the merge, so the combination is a configuration error, refused
+	// before anything is written (like a nil policy). The run stays in
+	// committing; no outcome is recorded.
+	if o.lifecycle != nil && !o.bindingOn {
+		return nil, false, domain.NewError(domain.ErrUnavailable,
+			"engine: the status lifecycle requires merge binding (EnableMergeBinding); refusing to merge")
 	}
 
 	// Apply commit metadata (e.g., rewrite artifact status) on the branch
@@ -526,11 +540,16 @@ func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.
 		return
 	}
 
-	// Classify based on error type: merge conflicts get git_conflict,
-	// other permanent merge errors get permanent_error.
+	// Classify based on error type: a status-lifecycle refusal gets
+	// status_lifecycle_violation (INIT-023 TASK-017), merge conflicts get
+	// git_conflict, other permanent merge errors get permanent_error.
 	classification := domain.FailurePermanent
 	var gitErr *git.GitError
-	if errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict") {
+	var lifecycleErr *StatusLifecycleError
+	switch {
+	case errors.As(mergeErr, &lifecycleErr):
+		classification = domain.FailureStatusLifecycle
+	case errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict"):
 		classification = domain.FailureGitConflict
 	}
 

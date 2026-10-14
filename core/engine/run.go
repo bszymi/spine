@@ -376,6 +376,14 @@ func (o *Orchestrator) startWorkflowPlanningRun(ctx context.Context, workflowID,
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"workflow validation failed", vResult.Errors)
 	}
+	// Declared commit.status (INIT-023 TASK-017), with the orchestrator's
+	// lifecycle: refused here, before any branch or run record exists, the
+	// way workflow.Service refuses it inside the write (which would leave
+	// a pending run behind). nil lifecycle = no check.
+	if errs := workflow.ValidateCommitStatuses(parsed, o.lifecycle); len(errs) > 0 {
+		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
+			"workflow validation failed", errs)
+	}
 
 	// Existence pre-checks, before ResolveWorkflowForMode and therefore
 	// before any branch or run record exists. Before TASK-014 a create of

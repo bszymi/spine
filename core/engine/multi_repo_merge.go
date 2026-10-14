@@ -329,6 +329,14 @@ func classifyMergeFailure(err error) (domain.MergeFailureClass, string) {
 		return domain.MergeFailureUnknown, ""
 	}
 
+	// A status-lifecycle refusal (INIT-023 TASK-017) reuses the
+	// precondition class — a new class would need migration 022's CHECK
+	// changed — with a detail that starts "status_lifecycle_violation:".
+	var lifecycleErr *StatusLifecycleError
+	if errors.As(err, &lifecycleErr) {
+		return domain.MergeFailurePrecondition, lifecycleErr.Error()
+	}
+
 	var gitErr *git.GitError
 	if !errors.As(err, &gitErr) {
 		return domain.MergeFailureUnknown, err.Error()
