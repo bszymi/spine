@@ -54,8 +54,9 @@ type Env struct {
 	// Local, when set, is the non-bare repository MergeBound and
 	// CommitFilesOnto work in (CLIClient: Source). The suite then also
 	// checks there that CommitFilesOnto moves no ref and leaves HEAD, the
-	// index and the working tree alone, and plants local shadow refs.
-	// Empty skips those checks.
+	// index and the working tree alone, plants local shadow refs, and
+	// checks that ResetBranch leaves the local branch at its target or
+	// drops it, with a clean working tree. Empty skips those checks.
 	Local string
 }
 
@@ -627,13 +628,22 @@ func testMergeBoundRecomputedCascade(t *testing.T, e *suiteEnv) {
 // testResetBranch pins the take-back of a refused merge (TASK-005 review
 // round 1): a compare-and-swap that moves the local branch only while it
 // is still at the refused merge, after which the next MergeBound on that
-// branch computes on the restored commit, not on the refused one.
+// branch computes on the restored commit, not on the refused one. Both
+// forms the contract allows pass (review round 2): the local branch moved
+// to `to`, or — for a remote-backed operator whose local branch only
+// caches the remote — dropped, so the next MergeBound re-creates it from
+// the remote. Either way the local repository is left clean (nothing of
+// the refused merge staged or in the tree, where a later commit would
+// record it), and the next MergeBound computes on `to`.
 func testResetBranch(t *testing.T, e *suiteEnv) {
 	base := mainTip(t, e)
 	b := e.src.commit("reset target base", map[string]entry{"t.txt": {content: "t"}}, base)
 	s1 := e.src.commit("refused content", map[string]entry{"evil.md": {content: "unreviewed"}}, base)
 	s2 := e.src.commit("next run", map[string]entry{"next.txt": {content: "2"}}, base)
 	e.src.setRef("refs/heads/rb-target", b)
+	// On branches, so a remote-backed binder can fetch them.
+	e.src.setRef("refs/heads/rb-refused", s1)
+	e.src.setRef("refs/heads/rb-next", s2)
 	e.sync(t)
 	opts := func(sha string) git.MergeOpts {
 		return git.MergeOpts{SourceSHA: sha, Target: "rb-target", Strategy: "merge-commit", Message: "Merge run rb"}
@@ -669,8 +679,8 @@ func testResetBranch(t *testing.T, e *suiteEnv) {
 	}
 	if e.Local != "" {
 		local := fixtureRepo{t: t, dir: e.Local}
-		if got := local.ref("refs/heads/rb-target"); got != b {
-			t.Fatalf("local rb-target = %s, want %s", got, b)
+		if got := local.ref("refs/heads/rb-target"); got != b && got != "" {
+			t.Fatalf("local rb-target = %s, want %s (moved back) or absent (dropped)", got, b)
 		}
 		if st := local.git("status", "--porcelain"); st != "" {
 			t.Fatalf("ResetBranch left the working tree dirty:\n%s", st)

@@ -222,6 +222,8 @@ type CommitBinder interface {
 	// whose local branch only caches the remote may instead drop the
 	// local branch under the same check, so the next MergeBound re-creates
 	// it from the remote (which never received the refused merge). Either
-	// way, the next MergeBound on branch must not compute on expected.
+	// way the working tree is left clean (nothing of the refused merge
+	// staged or checked out), and the next MergeBound on branch must not
+	// compute on expected. The conformance suite accepts both forms.
 	ResetBranch(ctx context.Context, branch, to, expected string) error
 }

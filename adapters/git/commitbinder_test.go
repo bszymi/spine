@@ -47,6 +47,82 @@ func TestCommitBinder_CLIClientConformance(t *testing.T) {
 	enginetest.RunCommitBinderConformance(t, enginetest.Harness{New: cliBinderEnv})
 }
 
+// dropLocalBinder is a minimal remote-backed CommitBinder — the shape of
+// SMP TASK-009's persistent clone — for a self-test of the suite (review
+// round 2): its repository is a clone of an upstream (the suite's
+// Source), whose refs/heads/* it reads directly, and its local branches
+// only cache upstream's. ResetBranch takes the other form the contract
+// allows: after the same compare-and-swap it drops the local branch, and
+// the next MergeBound re-creates the branch from upstream, which never
+// received the refused merge.
+type dropLocalBinder struct {
+	*git.CLIClient // the clone
+	upstream       *git.CLIClient
+	t              *testing.T
+	clone          string
+}
+
+func (d *dropLocalBinder) ResolveBranchHead(ctx context.Context, branch string) (string, error) {
+	return d.upstream.ResolveBranchHead(ctx, branch)
+}
+
+func (d *dropLocalBinder) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if opts.Target != "" && opts.SourceSHA != "" {
+		ref := "refs/heads/" + strings.TrimPrefix(opts.Target, "refs/heads/")
+		if runGitAllowFail(d.clone, "rev-parse", "--verify", "--quiet", ref) == "" {
+			up, err := d.upstream.ResolveBranchHead(ctx, opts.Target)
+			if err != nil {
+				return git.MergeResult{}, err
+			}
+			runGit(d.t, d.clone, "update-ref", ref, up)
+		}
+	}
+	return d.CLIClient.MergeBound(ctx, opts)
+}
+
+func (d *dropLocalBinder) ResetBranch(ctx context.Context, branch, to, expected string) error {
+	if err := d.CLIClient.ResetBranch(ctx, branch, to, expected); err != nil {
+		return err
+	}
+	ref := "refs/heads/" + strings.TrimPrefix(branch, "refs/heads/")
+	runGit(d.t, d.clone, "checkout", "-q", "--detach", to)
+	runGit(d.t, d.clone, "update-ref", "-d", ref, to)
+	return nil
+}
+
+// dropLocalBinderEnv: Source is a bare upstream, Local the binder's
+// clone, Sync a fetch, and the push remote a separate bare origin.
+func dropLocalBinderEnv(t *testing.T) enginetest.Env {
+	t.Helper()
+	testutil.HermeticGit(t)
+	root := t.TempDir()
+	upstream := filepath.Join(root, "upstream.git")
+	runGit(t, root, "clone", "-q", "--bare", testutil.NewTempRepo(t), upstream)
+	clone := filepath.Join(root, "clone")
+	runGit(t, root, "clone", "-q", "-o", "upstream", upstream, clone)
+	origin := filepath.Join(root, "origin.git")
+	runGit(t, root, "init", "-q", "--bare", origin)
+	runGit(t, clone, "remote", "add", "origin", origin)
+	return enginetest.Env{
+		Binder: &dropLocalBinder{CLIClient: git.NewCLIClient(clone), upstream: git.NewCLIClient(upstream), t: t, clone: clone},
+		Source: upstream,
+		Sync: func(t *testing.T) {
+			runGit(t, clone, "fetch", "-q", "--no-tags", "upstream", "+refs/heads/*:refs/remotes/upstream/*")
+		},
+		Remote:    "origin",
+		RemoteDir: origin,
+		Local:     clone,
+	}
+}
+
+// TestCommitBinder_DropLocalBranchConformance: the suite accepts both
+// forms of ResetBranch the contract (and the SMP TASK-009 handoff)
+// allows — the suite used to demand the local branch at `to` whenever
+// Local was set, failing a correct remote-backed operator that drops it.
+func TestCommitBinder_DropLocalBranchConformance(t *testing.T) {
+	enginetest.RunCommitBinderConformance(t, enginetest.Harness{New: dropLocalBinderEnv})
+}
+
 // TestCommitBinder_PushCommitArgvHasNoForce is AC 13's argv case and
 // mutation M10's catcher: the push is exactly
 // `push --end-of-options <remote> <sha>^{commit}:refs/heads/<n>`.
