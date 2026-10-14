@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-13
+last_updated: 2026-10-14
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -1670,7 +1670,7 @@ modified (tree clean after every command):
 
 - `make lint` over the whole repository: `golangci-lint run` was run on the touched packages
   against `main` (0 new) and gosec-only over `./...`; the full run carries pre-existing issues on
-  `main`.
+  `main`. *(Run in review round 1: 0 new issues against `main`; see below.)*
 - `make test-scenario` with default package parallelism: run as `go test -tags scenario -count=1
   -p 1 ./service/scenariotest/...` (packages share one database).
 - SMP's other gated suites (the platform-DB suites, faultinject, githttp, dockerexec): not named by
@@ -1678,3 +1678,197 @@ modified (tree clean after every command):
 - SMP TASK-012 still owes the end-to-end check that the admin `PUT /workflows/{id}` returns 200
   `write_mode: bypass` with the trailer on origin (§9).
 
+### Review round 1 (2026-10-14)
+
+Three reviewers (correctness and compatibility, adversarial security, completeness and tests)
+reviewed `main...47a1703`. Each finding was checked against the code before it was acted on. The
+fixes are commits `8066fed` (gateway), `1deae3f` (engine re-offer), `3a5f033` (real-git
+starter test), `1252756` (integration test and CI) and `5f165b1` (docs). Findings 1, 4 and 6
+have one root cause, and so do 3 and 8.
+
+**Findings.**
+
+1. **P2 (finding 6), with P3 findings 1 and 4. The holder of a step routed to a code repository
+   got a 403 saying they were not the assignee. FIXED.**
+   - *Verified.* A new matrix row on the pre-fix code (an `in_progress` holder whose execution has
+     `RepositoryID: payments`) got `403 "accepts writes only from the actor assigned to its
+     current step"` on all five sinks. A `waiting` code-repository step answered "claim it
+     first". A claim would not have made the write possible.
+   - *Cause.* `authorizeBoundWriter` asks refadmit about the primary repository, because every
+     API sink writes there. refadmit binds a holder only for the repository its execution
+     targets (`core/refadmit/evaluator.go`, rule 7). `bindingRefusal` ignored the repository.
+   - *Rule chosen: keep the same-repository binding.* The alternative was to drop the
+     repository term for API writes. It was rejected for three reasons:
+     - ADR-015 has a step write exactly one repository (its "one repository per step"
+       decision, which rejects multi-repository steps).
+     - TASK-016 refuses the same holder a push of the primary run branch. Admitting the API
+       write would make the push path and the API path two rules again, against the design's
+       "one predicate governs both" (§4).
+     - The design's own call shape (§4: `Request{Ref, Actor}`, no repository) already means the
+       primary repository.
+
+     Before this task, *any* contributor could write that branch (P3-6). So no legitimate
+     contract is lost: a code step that must also update the task artifact does so in a step
+     routed to the primary repository.
+   - *Change.* `bindingRefusal` returns `409` with `detail.repository_id` to the holder of an
+     open code-repository step, and to anyone while that step is unclaimed. A caller who does not
+     hold a claimed step still gets the 403, so the binding stays the first answer, as for the
+     freeze. Operators are unaffected.
+   - *Docs.* spec `WriteContext` and the `artifact.add` 409, `api-operations.md` §3.1, CHANGELOG
+     "Changed", `KNOWN-LIMITATIONS.md`.
+   - *Tests.* Four matrix row groups across the five sinks: held, assigned, waiting, and
+     `repository: spine` by name (allowed).
+   - Recorded as Deviation 11 below.
+2. **P3. The re-offer stranded attempts. FIXED.** The problem was a prior holder who no longer
+   resolves or is not `active`, and machine-pool steps.
+   - *Verified.* Two cases stranded the attempt until an operator assigned it, and
+     `ListStepExecutions` hid it from everyone else:
+     - `priorHolder` re-offered to a suspended, deactivated or deleted actor, whom
+       `EnforceEligibility` refuses;
+     - it pinned `automated_only` / `ai_only` reworks to one pool identity.
+
+     For machine modes the pin was also incoherent. `ActivateStep`'s auto-selection binds such a
+     rework to *any* eligible actor of the type (`resolveAutoActorID`, `StrategyAnyEligible`), so
+     the claim path, and with it the re-offer, applies only when no eligible actor was found.
+   - *Change.*
+     - `priorHolderCanClaim`: an inactive or unknown holder means no re-offer. A lookup failure
+       fails the claim closed (503) with a message that does not name the holder. With no actor
+       lookup wired, the re-offer stands.
+     - `StepEntryPolicy.reofferExempt`: with `EnforceExecutionMode` on, `automated_only` and
+       `ai_only` steps are not re-offered. Their claimers are machine actors, which only operators
+       create (`actor.create`), so no contributor can claim them. Without `EnforceExecutionMode`
+       the mode restricts nobody, so the re-offer stays.
+   - *Tests.*
+     - `TestStepEntry_ReofferToPriorHolder` gains suspended, deactivated, unknown, an inactive
+       holder on a restart-recovered row, a lookup failure (no holder named) and no lookup wired.
+       Its fixture now registers its actors as active.
+     - New `TestStepEntry_ReofferExemptsMachinePoolSteps`.
+   - *Mutations.* Dropping the holder check fails 4 rows. Dropping the exemption fails 2.
+     Dropping its `EnforceExecutionMode` guard fails 1.
+   - *Not changed.* A `hybrid` / `human_only` rework whose holder is still `active` but idle waits
+     for that holder or an operator assign. Humans can claim those steps, so the re-offer is what
+     closes the takeover. This is documented in `KNOWN-LIMITATIONS.md`.
+3. **P3 (finding 3), with P3 finding 8. Runs left by a failed start before the upgrade lock their
+   workflow. FIXED (docs and message).**
+   - *Verified.* `refuseIfWorkflowRunOpen` counts any non-terminal planning run. Its message said
+     "wait for it to finish", but such a run never finishes. `recoverPendingRuns` does not check
+     the branch (`adapters/scheduler/recovery.go`).
+   - *Change.*
+     - The 409 now ends "…or, if it is stale, ask an operator to cancel it (`POST
+       /runs/<id>/cancel`)". `TestWorkflow_OpenLifecycleRun_Returns409` asserts this.
+     - A CHANGELOG upgrade note gives a `runtime.runs` query (non-terminal planning runs on
+       `workflows/%`), a `git rev-parse --verify --quiet refs/heads/<branch_name>` check, and
+       `spine run cancel` / `POST /runs/{id}/cancel`. `GET /query/runs?task_path=…` is the
+       alternative without database access.
+     - `KNOWN-LIMITATIONS.md` has the residual.
+   - *Not done: skipping or annotating a branchless run in the 409 path.* That would need a ref
+     read on every refusal. The gateway's `GitReader` has no ref-existence call, and a git error
+     there is a new failure mode. Skipping would also let a second run open while the orphan stays
+     non-terminal. A one-time operator clean-up is enough, and new failures already leave the run
+     `failed`.
+4. *(see 1)*
+5. **P3. KNOWN-LIMITATIONS did not say I7/V2 hold only on the API path. FIXED (docs).**
+   - *Verified.* refadmit admits the bound actor by binding alone, and
+     `service/internal/githttp/prereceive.go` has no path checks. TASK-006 is `Pending`.
+   - *Change.* A residual bullet in `KNOWN-LIMITATIONS.md` and a CHANGELOG Security bullet ("Not
+     closed here: workflow edits by push"). Owner: TASK-006.
+6. *(see 1)*
+7. **P3. The AC 12 pooled-policy integration test could pass by skipping, and no CI job ran it.
+   FIXED.**
+   - *Verified.* After `DELETE FROM projection.branch_protection_rules`, the pre-fix file
+     (`-overlay`) reported `SKIP … nothing to deny`.
+   - *How the table can be empty.* `adapters/store`'s `TestBranchProtectionRulesProjection` ends
+     on an empty ruleset before its cleanup reseeds, and the rule source has no bootstrap
+     fallback.
+   - *Change.* The test installs the bootstrap row through `UpsertBranchProtectionRules`,
+     restores it in `t.Cleanup`, and turns a missing rule into `t.Fatalf`. On the emptied table
+     the fixed test passes.
+   - *CI.* The `scenario-git-http` job (Postgres) gains two must-pass, never-skip steps:
+     - `TestWorkflowLifecycle_*` (AC 13 and AC 19 scenarios);
+     - this integration test (AC 12).
+
+     Both were run verbatim against a private database. The rest of the scenario suite stays
+     out of CI, because it is red on `main` (the job's own comment).
+8. *(see 3)*
+9. **P3. The spec did not declare the new 403/409 on artifact create/update. FIXED.**
+   `artifact.create` gains `403`, and its `409` now covers `conflict` as well as
+   `already_exists`. `artifact.update` gains `403` and `409`. Each points to the `WriteContext`
+   rule. The spec was parsed with `gopkg.in/yaml.v3` after the edit.
+
+**Acceptance-criteria gaps.**
+
+- **AC 16 / AC 3 probe (`CreateExistingWorkflow`). FIXED with new evidence.** The probe models
+  "the id exists" only through the writer's error, so on this branch it reaches the
+  writer-failure path and leaves a `failed` run (Deviation 4).
+  - The new `TestWorkflowStarters_RealGit_PreChecks` (`core/engine`) uses a real `CLIClient` and a
+    real `workflow.Service`:
+    - a create of an existing id leaves **no run record, no ref and no commit**;
+    - a create of a new id proceeds (real git's not-found counts as "absent");
+    - an update of a missing id returns 404 with no run.
+  - Mutation: removing the create pre-check fails the first row (a `failed` run left behind).
+- **AC 3 "every existing `TestStartWorkflowPlanningRun_*` passes unmodified". NOT A DEFECT.**
+  - The bodies are unmodified. The shared helper's wrapper (`absentWorkflowReads`) is needed
+    because `stubGitOperator.ReadFile` answers "exists, empty" for every path, so the create
+    pre-check would refuse every one of those tests.
+  - This was disclosed as Deviation 4. The real-git test above now covers the pre-check without
+    any double.
+- **AC 8 "unresolvable step definition: 409 for every role". NOT A DEFECT; now pinned.**
+  - Rule 2 (binding) runs before rule 3 (freeze, definition lookup), exactly as AC 8's own review
+    row has a foreign contributor get 403. "Every role" is read as every role the binding admits:
+    holder, operator, admin.
+  - The matrix row now also asserts `403` for a foreign contributor.
+- **AC 8 "the assignee in `assigned`/`in_progress` is allowed". FIXED** as finding 1. The
+  assignee of a primary-repository step is allowed. The assignee of a code-repository step gets
+  the 409, by the same rule as pushes. Both are now in the matrix.
+- **AC 15 "CI integration and scenario suites". FIXED as far as it applies.** Spine CI has no
+  integration job. The task's database evidence now runs in the Postgres job (finding 7).
+- **AC 15 `make lint`. FIXED (run).**
+  - `./dev/lint-boundaries.sh && golangci-lint run` (the scratchpad v2 binary) over the whole
+    repository: HEAD 270 issues, `main` 275. The position-normalised diff shows **0 new**, and 5
+    fewer: gofmt fixes in touched files.
+- **AC 12 / 13 / 15 / 19 database gates. RE-RUN.** The shared server at `localhost:55630` was
+  still down, and the named `psql` path was absent. So every database gate below ran on a private
+  PostgreSQL 17.10 cluster in this task's scratchpad (`127.0.0.1:55742`, scram, TCP only, its own
+  roles), using only `s014_*` databases plus SMP's own allocations. The cluster was stopped and
+  deleted afterwards.
+- **Re-verified, no gap.** The SMP gate and the AC 10 regression file need no change. The file is
+  unchanged this round, and the gateway package passes.
+
+**Deviations added in round 1.**
+
+11. **Run-branch API writes follow the execution's repository (finding 1).** The design's I5 /
+    AC 8 wording ("the actor bound to the run's current step") has no repository qualifier. The
+    implemented binding is the design's own refadmit call (primary repository), so the holder of
+    a step routed to a code repository is not the primary run branch's API writer. They get a
+    distinct `409` (`detail.repository_id`), as for a push. Reasons are under finding 1.
+12. **The re-offer is narrower (finding 2).** There is no re-offer to a holder who cannot claim
+    (inactive or unknown), and none on `automated_only` / `ai_only` steps while
+    `EnforceExecutionMode` is on.
+
+**Residuals added** (they extend AC 18's list; all are in `KNOWN-LIMITATIONS.md`):
+
+- workflow edits by push are not confined to the lifecycle run → TASK-006;
+- runs left by failed starts before the upgrade → one-time operator clean-up (CHANGELOG
+  upgrade note);
+- an idle but `active` prior holder of a human-claimable rework → that holder or an operator
+  assign.
+
+**Gates (round 1, final code `5f165b1`).**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o …/embed-smoketest ./cmd/embed-smoketest && …/embed-smoketest` | OK; ok; "library surface is sound" |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | all clean |
+| `go test -p 4 ./...` | exit 0 (40 packages ok) |
+| `go test -race -p 4 -count=1` on `core/workflow`, `core/engine`, `service/internal/gateway`, `service/cmd/spine`, `service/internal/workspace` | all ok |
+| `go test -tags integration -count=1 -p 1` on the same five (`s014_integ`) | all ok; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS, also right after `adapters/store`'s projection test and on an emptied rule table |
+| `go test -tags scenario -count=1 -p 1 ./service/scenariotest/...` on HEAD (`s014_scen`) and on a `main` export (`s014_scenmain`) | 30 failures each, the identical set (known pre-existing); none new |
+| the two new CI steps, run verbatim | `TestWorkflowLifecycle_*` 4/4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), no skip; the integration step PASS, no skip |
+| `golangci-lint run` (whole repository, `make lint`'s second half) HEAD vs `main` export, position-normalised | **0 new** (270 vs 275) |
+| `golangci-lint run --enable-only=gosec ./...` | 0 issues |
+| `gofmt -l` on every changed `.go` file | clean |
+| SMP gate (`f5c6fd6d`, `../spine` → this worktree, tree clean after): `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` | clean |
+| SMP `go test -p 4 -count=1` on the direct importers of `core/engine` / `core/workflow` (`executionreadiness`, `spinecore`, `spineembedded`) and `internal/customer/workflow` | all ok; SMP uses no `StepEntryPolicy` (grep), so the re-offer change cannot reach it |
+| SMP `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` | 115 / 26 versions |
+| SMP CI Spine-runtime step: `go run ./dev/testgate -- -race -count=1 -timeout 10m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` | **1835 passed, 0 failed**; the same two macOS-only `ru_maxrss` skips as before (Linux-only contract, run on CI) |
+| `codex review --base main` (plain; `-c model="gpt-6-astra"`, the configured model is refused by the account) | "No actionable regressions were identified" (codex's own service-suite runs were blocked by its sandbox's socket restrictions; they pass here) |
