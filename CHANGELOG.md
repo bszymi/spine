@@ -19,6 +19,16 @@ release is cut — this file is a staging area.
   swap: on Linux a leaf deleted and re-created as a FIFO can reuse the freed inode number. Git
   cannot check out a FIFO, so only a local process writing inside the worktree could do this.
   Nothing changes for any other input.
+- **Stored workflow definitions holding an integer above 2^53 now verify** (`core/workflow`,
+  `adapters/projection`, TASK-011). `workflow.VerifyProjectionDefinition` decoded the stored JSON
+  through float64, so a definition that `ProjectionDefinition` had accepted and stored (for example
+  `retry: {limit: 9007199254740993}`) then failed its own verification. A later rejected edit of
+  that file deleted the row instead of keeping it quarantined for the runs pinned to it. Integers
+  that fit an int64 are now read exactly, and every other number reads as before. The first-sync
+  reconciliation compares stored and head definitions the same way, so a row that differs from head
+  only in such an integer is replaced instead of being counted unchanged. Definitions whose
+  integers are all at or below 2^53, which includes every shipped Spine and SMP workflow, see no
+  change.
 
 ---
 

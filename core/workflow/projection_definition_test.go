@@ -344,6 +344,10 @@ func TestVerifyProjectionDefinition_RejectsStoredOddities(t *testing.T) {
 		"path_key":      `{"id":"x","path":"workflows/y.yaml"}`,
 		"commit_sha":    `{"id":"x","commit_sha":"abc"}`,
 		"nul_value":     `{"id":"x","name":"a\u0000b"}`,
+		// The folding reader decodes one value and ignores what follows;
+		// the strict reading refuses it, as json.Unmarshal did.
+		"trailing_value":   `{"id":"x"} {"id":"y"}`,
+		"trailing_garbage": `{"id":"x"} x`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := workflow.VerifyProjectionDefinition([]byte(def))
@@ -370,5 +374,62 @@ func TestProjectionDefinition_ReturnsParsedDefinition(t *testing.T) {
 	}
 	if bytes.Contains(def, []byte(`"mode"`)) || bytes.Contains(def, []byte(`"path"`)) {
 		t.Fatalf("stored JSON must keep the authored shape (no injected mode/path): %s", def)
+	}
+}
+
+// INIT-023 codex 6.1 catch-up: every definition ProjectionDefinition
+// stores must pass VerifyProjectionDefinition, or a later rejected edit of
+// the file deletes the row (it looks unverifiable) instead of keeping it
+// quarantined for the runs pinned to it. An integer the stored JSON holds
+// exactly but float64 cannot (above 2^53) used to fail the verification:
+// its strict reading decoded the JSON into `any`, which rounds through
+// float64.
+//
+// Mutation check: decoding into `any` without UseNumber fails every
+// "above_2^53" case.
+func TestVerifyProjectionDefinition_AcceptsEveryStoredInteger(t *testing.T) {
+	for _, n := range []string{
+		"3",
+		"9007199254740992",    // 2^53: still exact in float64
+		"9007199254740993",    // 2^53+1: above_2^53
+		"4611686018427387905", // 2^62+1: above_2^53
+		"9223372036854775807", // max int64: above_2^53
+		"-9007199254740993",   // above_2^53, negative
+	} {
+		for field, body := range map[string]string{
+			"retry.limit": rtBase + rtStepsWith("    retry: {limit: "+n+", backoff: fixed}\n", ""),
+			"divergence_points.min_branches+max_branches": rtBase + rtSteps +
+				"divergence_points:\n  - {id: d, mode: exploratory, min_branches: " + n + ", max_branches: " + n + "}\n",
+			"convergence_points.min_branches": rtBase + rtSteps +
+				"convergence_points:\n  - {id: c, strategy: select_one, entry_policy: all_branches_terminal, evaluation_step: a, min_branches: " + n + "}\n",
+		} {
+			t.Run(field+"="+n, func(t *testing.T) {
+				_, def, err := workflow.ProjectionDefinition("workflows/task-default.yaml", []byte(body))
+				if err != nil {
+					t.Fatalf("precondition: ProjectionDefinition accepts the body: %v", err)
+				}
+				if !bytes.Contains(def, []byte(n)) {
+					t.Fatalf("precondition: the stored JSON holds %s exactly: %s", n, def)
+				}
+				if err := workflow.VerifyProjectionDefinition(def); err != nil {
+					t.Fatalf("a stored definition ProjectionDefinition accepted fails verification: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// The exact reading must not let a stored integer that no int field can
+// hold through: it is refused by the folding reader (step 1) as before.
+func TestVerifyProjectionDefinition_RefusesAnIntegerNoFieldHolds(t *testing.T) {
+	for _, def := range []string{
+		`{"id":"x","steps":[{"id":"a","retry":{"limit":9223372036854775808}}]}`,
+		`{"id":"x","steps":[{"id":"a","retry":{"limit":1.5}}]}`,
+		`{"id":"x","steps":[{"id":"a","retry":{"limit":1e3}}]}`,
+	} {
+		err := workflow.VerifyProjectionDefinition([]byte(def))
+		if !errors.Is(err, workflow.ErrProjectionRoundTrip) {
+			t.Fatalf("VerifyProjectionDefinition(%s) = %v, want ErrProjectionRoundTrip", def, err)
+		}
 	}
 }

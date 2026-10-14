@@ -1,11 +1,14 @@
 package projection
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"strconv"
 
 	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
@@ -222,12 +225,64 @@ func sameWorkflowRow(a, b *store.WorkflowProjection) bool {
 }
 
 func sameJSON(a, b []byte) bool {
-	var va, vb any
-	if err := json.Unmarshal(a, &va); err != nil {
+	va, err := decodeExactJSON(a)
+	if err != nil {
 		return false
 	}
-	if err := json.Unmarshal(b, &vb); err != nil {
+	vb, err := decodeExactJSON(b)
+	if err != nil {
 		return false
 	}
 	return reflect.DeepEqual(va, vb)
+}
+
+// decodeExactJSON is json.Unmarshal into `any` (one value, nothing after
+// it) with integers kept exact: an integer literal that fits an int64
+// becomes an int64, any other number the float64 json.Unmarshal would
+// give. With plain float64s two definitions differing only in an integer
+// above 2^53 compared equal, so the sweep left a stale row in place
+// (INIT-023 codex 6.1 catch-up; core/workflow's VerifyProjectionDefinition
+// reads stored definitions the same way).
+func decodeExactJSON(b []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("invalid data after the top-level value")
+	}
+	return exactJSONNumbers(v)
+}
+
+func exactJSONNumbers(v any) (any, error) {
+	switch t := v.(type) {
+	case json.Number:
+		if i, err := strconv.ParseInt(t.String(), 10, 64); err == nil {
+			return i, nil
+		}
+		f, err := t.Float64()
+		if err != nil {
+			return nil, err
+		}
+		return f, nil
+	case map[string]any:
+		for k, child := range t {
+			n, err := exactJSONNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[k] = n
+		}
+	case []any:
+		for i, child := range t {
+			n, err := exactJSONNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[i] = n
+		}
+	}
+	return v, nil
 }
