@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -544,7 +546,30 @@ func ledgerCommitOpts(run *domain.Run, repositoryID string, action mergeRecovery
 // did before. There is no checkout, no commit on the run branch and no
 // branch push: a commit on the branch's tip would re-open the window
 // binding closes. A retry's head_sha rebind is stored in the same write.
-func (o *Orchestrator) writeBoundLedgerCommit(ctx context.Context, run *domain.Run, repositoryID string, action mergeRecoveryAction) (string, error) {
+//
+// The write replaces the whole commit_meta map, and the ledger chains on
+// the binding it read, so two recovery requests for one run must not both
+// build on one snapshot (wave 3 review): the later write would restore the
+// other repository's old binding and drop the other ledger from the
+// published ancestry. The ledger is therefore built and recorded under
+// the run's recovery stripe (lockRecoveryBinding), from a fresh read of
+// the run taken under it — the caller's run is used only for its
+// identity — and the read must still be a partially-merged run with
+// repositoryID affected (guardPartialMergeRecovery), since the run may
+// have resumed while the request waited.
+func (o *Orchestrator) writeBoundLedgerCommit(ctx context.Context, stale *domain.Run, repositoryID string, action mergeRecoveryAction) (string, error) {
+	unlock, err := lockRecoveryBinding(ctx, stale.RunID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	run, err := o.store.GetRun(ctx, stale.RunID)
+	if err != nil {
+		return "", fmt.Errorf("re-read run: %w", err)
+	}
+	if err := guardPartialMergeRecovery(run, repositoryID); err != nil {
+		return "", err
+	}
 	bound, err := trustedPrimaryBinding(run)
 	if err != nil {
 		return "", domain.NewErrorWithCause(domain.ErrPrecondition,
@@ -580,6 +605,56 @@ func (o *Orchestrator) writeBoundLedgerCommit(ctx context.Context, run *domain.R
 		"actor_id", action.ActorID,
 	)
 	return result.SHA, nil
+}
+
+// recoveryBindingStripes serialises, within one process, the bound
+// recovery ledger's read-modify-write of a run's binding
+// (writeBoundLedgerCommit): the fresh read of the run, the ledger commit
+// built on its binding and the commit_meta write. Without it two recovery
+// requests for one run (say a retry with head_sha on one code repository
+// and a resolve on another) both chained their ledger on the same binding
+// and the later SetCommitMeta — a whole-map replace from its own snapshot
+// — restored the other repository's old binding and left the other ledger
+// out of the published ancestry (wave 3 review).
+//
+// Package level, like sodBindStripes, because `spine serve` builds an
+// orchestrator per workspace and the pool rebuilds them; striped by run
+// ID, so two runs sharing a stripe only serialise needlessly. Each stripe
+// is a one-slot semaphore so a waiter honours its context. The section
+// holds no other stripe and emits nothing.
+//
+// Residual (KNOWN-LIMITATIONS "Governed Merge Binding"): requests served
+// by different processes sharing one database are not serialised;
+// closing that needs a compare-and-swap on commit_meta or a database lock
+// per run.
+var recoveryBindingStripes = func() (s [64]chan struct{}) {
+	for i := range s {
+		s[i] = make(chan struct{}, 1)
+	}
+	return s
+}()
+
+// lockRecoveryBinding takes runID's recovery stripe and returns an
+// idempotent release. A free stripe is taken even when ctx is already
+// done; a contended one is waited for only until ctx ends, and then the
+// error is ErrUnavailable wrapping ctx.Err(), with nothing held. unlock is
+// never nil.
+func lockRecoveryBinding(ctx context.Context, runID string) (unlock func(), err error) {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(runID))
+	sem := recoveryBindingStripes[h.Sum32()%uint32(len(recoveryBindingStripes))]
+	select {
+	case sem <- struct{}{}:
+	default:
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return func() {}, domain.NewErrorWithCause(domain.ErrUnavailable,
+				fmt.Sprintf("merge recovery: gave up waiting for another recovery action on run %s", runID), ctx.Err())
+		}
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-sem }) }, nil
 }
 
 // mergeRecoveryAction is the structured input for writing one

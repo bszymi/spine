@@ -349,6 +349,15 @@ merge publishes the commit the run's steps validated and reviewed, never the run
     a cascade path failing in between), the cascade falls back to the current merge-base: a run
     that added child artifacts then gets a second cascade commit and merge commit (no content
     beyond the reviewed one).
+15. **Recovery actions are serialised per process only.** The bound recovery ledger is built and
+    its binding recorded under a per-run in-process stripe, from a fresh read of the run (wave 3
+    review), so overlapping `retry` / `resolve-externally` requests for one run in one process
+    chain their ledgers and keep each other's `head_sha` rebinds. Requests served by different
+    processes sharing one runtime database are not serialised: the later `commit_meta` write
+    (a whole-map replace) can still restore the other's bindings. What merges is then an earlier
+    reviewed binding, never unreviewed content; closing it needs a compare-and-swap on
+    `commit_meta` or a database lock per run. Dormant: recovery applies only to multi-repository
+    partially-merged runs, and no code-repository catalog is wired in Spine or SMP.
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are

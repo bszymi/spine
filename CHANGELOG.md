@@ -507,6 +507,16 @@ previous build). Externally visible:
   `main` already up to date instead of adding a second cascade commit and merge commit. The earlier
   merge is recognised by recomputing this run's cascade commit against it (wave 3 review), never by
   the commit graph alone.
+- **Operator recovery actions on one run are serialised** under binding (wave 3 review). Two
+  overlapping `retry` / `resolve-externally` requests for one partially-merged run each chained
+  their ledger on the binding they had read and replaced the whole `commit_meta` from that
+  snapshot, so the later one restored the other repository's old binding (an operator's
+  `head_sha` rebind was lost and the old commit merged) and left the other ledger out of the
+  published history. The ledger is now built and recorded under a per-run in-process stripe from
+  a fresh read of the run; a request whose run is no longer partially merged by then is
+  `409`, and one whose context ends while it waits is `503`, both with nothing written. Requests
+  served by different processes sharing a database are not serialised (KNOWN-LIMITATIONS
+  "Governed Merge Binding" 15).
 - **`POST /runs/{run_id}/repositories/{repository_id}/retry` accepts `head_sha`** (and `spine run
   merge retry --head-sha`): the code repository's current run-branch head to rebind to. Without it
   the retry merges the bound commit again; a stale `head_sha` is `409 run_branch_moved`. The ledger

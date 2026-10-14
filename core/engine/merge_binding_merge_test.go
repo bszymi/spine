@@ -901,6 +901,11 @@ func TestBoundLedgerMustBeAChildOfTheBinding(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := committingFix(t, false, true)
+			// Recovery applies to a partially-merged run on an affected
+			// code repository (writeBoundLedgerCommit re-checks it on its
+			// fresh read; wave 3 review).
+			f.run.Status = domain.RunStatusPartiallyMerged
+			f.run.AffectedRepositories = []string{"spine", "code-a"}
 			f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
 			f.git.ontoSHA = l
 			if tc.parents != nil {
