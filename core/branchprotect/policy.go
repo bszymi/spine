@@ -46,7 +46,8 @@ type policy struct {
 // Evaluate implements Policy. The decision matrix (ADR-009 §2–§4):
 //
 //   - OpGovernedMerge → Allow, reason=governed_merge. Governed merges are
-//     the authorised write path; rules do not gate them.
+//     the authorised write path; rules do not gate them. With
+//     req.Governance set, EvaluateGovernance decides instead (ADR-016).
 //   - OpDelete / OpDirectWrite against a branch with no matching rule →
 //     Allow, reason=no_matching_rule.
 //   - OpDelete / OpDirectWrite against a matching no-delete /
@@ -100,8 +101,15 @@ func (p *policy) Evaluate(ctx context.Context, req Request) (Decision, []Reason,
 
 	// OpGovernedMerge is unconditional — even if an operator happens to
 	// mark Override on a governed merge, we do not emit an override
-	// reason because there was nothing to override.
+	// reason because there was nothing to override. With governance facts
+	// on the request (ADR-016; INIT-023 TASK-006) the governance-path
+	// guard's decision applies instead; it loads no rules either, so a
+	// rule-source outage still cannot surface on the merge path.
 	if req.Kind == OpGovernedMerge {
+		if req.Governance != nil {
+			decision, reasons := EvaluateGovernance(req.Governance)
+			return decision, reasons, nil
+		}
 		return DecisionAllow, []Reason{{
 			Code:    ReasonGovernedMerge,
 			Message: "governed merge — branch protection does not gate this operation",
