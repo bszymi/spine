@@ -230,6 +230,36 @@ func TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement(t *testing.T) 
 	}
 }
 
+// Review round 2 (guard): git-http-backend serves HEAD exactly as GET, so
+// a HEAD of info/refs?service=git-receive-pack that reached it would be
+// the push advertisement. The classifiers treat HEAD as neither a read nor
+// a push, so on the token-less paths it reaches the handler, which must
+// refuse it before CGI. Whatever the query, a token-less HEAD never gets
+// the receive-pack advertisement and never a push-side 200.
+func TestP330_HeadInfoRefsNeverServesPushAdvertisement(t *testing.T) {
+	devNoAuth := t015GitServer(t, nil, "", true)
+	devNoAuth.gitDevNoAuth = true
+	trusted := t015GitServer(t, []string{"172.28.0.0/16"}, "", true)
+	for _, tc := range []struct {
+		name string
+		s    *Server
+		peer string
+	}{
+		{"dev no-auth", devNoAuth, "198.51.100.7:40000"},
+		{"trusted runner", trusted, "172.28.0.5:40000"},
+	} {
+		for _, q := range []string{t015PushInfoRefs, t015ValuelessPushInfoRefs, t015SmuggledPushInfoRefs, t015InfoRefs} {
+			w := t015GitResponse(tc.s, http.MethodHead, q, tc.peer)
+			if ct := w.Header().Get("Content-Type"); ct == t015ReceivePackAdvertisement {
+				t.Errorf("%s, HEAD %s: git-http-backend served the receive-pack advertisement (status %d)", tc.name, q, w.Code)
+			}
+			if q != t015InfoRefs && w.Code == http.StatusOK {
+				t.Errorf("%s, HEAD %s: status 200 without a token", tc.name, q)
+			}
+		}
+	}
+}
+
 // AC 20: a peer inside the git CIDRs that is NOT declared as a proxy but
 // sends a forwarding header is a proxy the operator did not declare (the
 // audit's literal scenario: Docker's bridge gateway or a reverse proxy at
