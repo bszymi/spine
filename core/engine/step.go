@@ -399,6 +399,28 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return err
 	}
 
+	// A captured binding is stored BEFORE the execution completes (INIT-023
+	// wave 3 integration, codex review). The scheduler's step recovery
+	// re-submits a completed execution without capturing again
+	// (captureHead skips terminal executions: the head may have moved
+	// since), so a binding written only after the completion — lost to a
+	// failed SetCommitMeta or a crash in between — left the run with the
+	// previous step's binding, or with none, and a gate then compares
+	// against nothing and accepts whatever the branch holds. Written here,
+	// a completed execution always has its binding; a failed write leaves
+	// the execution uncompleted (auto-acknowledged at most), so it can be
+	// submitted again. It is the same single commit_meta write
+	// routeStepOutcome made (outcome commit map and binding together),
+	// only earlier; with no capture (binding off, among others) it stays
+	// where it was.
+	metaRecorded := false
+	if hb != nil {
+		if err := o.recordStepCommitMeta(ctx, stepDef, outcome, exec, run, wfDef, hb); err != nil {
+			return err
+		}
+		metaRecorded = true
+	}
+
 	now := time.Now()
 	exec.Status = stepTResult.ToStatus
 	exec.OutcomeID = result.OutcomeID
@@ -416,7 +438,7 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		observe.GlobalMetrics.StepDuration.ObserveDuration(time.Since(*exec.StartedAt))
 	}
 
-	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, now, hb)
+	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, now, hb, metaRecorded)
 }
 
 // autoAcknowledgeStep transitions an assigned step to in_progress before the
@@ -452,16 +474,14 @@ func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.Ste
 // a divergence-branch step, and a step that starts a divergence does not
 // store its outcome's commit map (only an hb binding, with binding on).
 // Binding off, the write happens exactly when it did before: the outcome
-// has a commit and the step does not start a divergence.
-func (o *Orchestrator) routeStepOutcome(ctx context.Context, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, exec *domain.StepExecution, run *domain.Run, wfDef *domain.WorkflowDefinition, now time.Time, hb *headBinding) error {
+// has a commit and the step does not start a divergence. metaRecorded
+// means SubmitStepResult already made that write, before the execution
+// completed (a captured binding; see there), so it is not repeated.
+func (o *Orchestrator) routeStepOutcome(ctx context.Context, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, exec *domain.StepExecution, run *domain.Run, wfDef *domain.WorkflowDefinition, now time.Time, hb *headBinding, metaRecorded bool) error {
 	startsDivergence := stepDef.Diverge != "" && o.divergence != nil
-	if exec.BranchID == "" {
-		logStrippedReserved(ctx, wfDef.ID, stepDef.ID, outcome.ID, outcome.Commit)
-		storeCommit := len(outcome.Commit) > 0 && !startsDivergence
-		if meta, write := mergeCommitMeta(run.CommitMeta, outcome.Commit, storeCommit, o.bindingOn, hb); write {
-			if err := o.store.SetCommitMeta(ctx, exec.RunID, meta); err != nil {
-				return fmt.Errorf("set commit meta: %w", err)
-			}
+	if !metaRecorded {
+		if err := o.recordStepCommitMeta(ctx, stepDef, outcome, exec, run, wfDef, hb); err != nil {
+			return err
 		}
 	}
 	if startsDivergence {
@@ -484,6 +504,25 @@ func (o *Orchestrator) routeStepOutcome(ctx context.Context, stepDef *domain.Ste
 		return nil
 	}
 	return o.advanceToNextStep(ctx, exec, nextStepID, "", now, wfDef)
+}
+
+// recordStepCommitMeta is a main-path step completion's single
+// commit_meta write (see routeStepOutcome): nothing for a
+// divergence-branch step; otherwise mergeCommitMeta's result, when it
+// says to write.
+func (o *Orchestrator) recordStepCommitMeta(ctx context.Context, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, exec *domain.StepExecution, run *domain.Run, wfDef *domain.WorkflowDefinition, hb *headBinding) error {
+	if exec.BranchID != "" {
+		return nil
+	}
+	startsDivergence := stepDef.Diverge != "" && o.divergence != nil
+	logStrippedReserved(ctx, wfDef.ID, stepDef.ID, outcome.ID, outcome.Commit)
+	storeCommit := len(outcome.Commit) > 0 && !startsDivergence
+	if meta, write := mergeCommitMeta(run.CommitMeta, outcome.Commit, storeCommit, o.bindingOn, hb); write {
+		if err := o.store.SetCommitMeta(ctx, exec.RunID, meta); err != nil {
+			return fmt.Errorf("set commit meta: %w", err)
+		}
+	}
+	return nil
 }
 
 // advanceToNextStep creates the next step execution, updates current_step_id, and activates.

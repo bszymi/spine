@@ -414,7 +414,12 @@ SMP runs the rebuild per workspace in SMP INIT-027 EPIC-004 TASK-008 (owner ques
   binding on:
   - every main-path step completion records the run-branch head the engine resolved (reserved
     `runs.commit_meta` keys `spine.bound_sha`, `spine.bound_by`, `spine.head.<step>`,
-    `spine.repo.<id>.bound_sha`; no schema change);
+    `spine.repo.<id>.bound_sha`; no schema change). The binding is stored before the execution is
+    marked completed (wave 3 integration): the scheduler's step recovery re-submits a completed
+    execution without resolving the head again, so a failed `commit_meta` write or a crash after
+    the completion used to leave the run without that step's binding, and the next gate, with
+    nothing to compare against, approved whatever the branch then held. A failed write now leaves
+    the step open; it is still one `SetCommitMeta` per completion, with the outcome's commit map;
   - a `review` or `convergence` step's outcome that leads to the merge is refused when the branch
     moved since the previous binding (policy `reject`, the default; `rebind` accepts the new head);
   - every merge attempt merges exactly the bound commit, applies the status cascade at that commit
