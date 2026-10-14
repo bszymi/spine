@@ -88,13 +88,13 @@ type StepEntryPolicy struct {
 	// A step never held in this run (a first attempt — owner question 4: no
 	// auto-bind at run start) stays claimable by any eligible actor, as
 	// does a retry of a failed attempt (a failed holder is not re-offered
-	// the work), an attempt whose prior holder ClaimStep would refuse — it
+	// the work), an attempt whose prior holder ClaimStep would refuse (it
 	// no longer resolves, is not active, is off the execution's
 	// eligible_actor_ids, is of a type the step does not admit, or lacks
-	// one of its required_skills (priorHolderCanClaim; review rounds 1 and
-	// 2) — and — with EnforceExecutionMode
-	// on — an automated_only or ai_only step, whose claimers are
-	// operator-provisioned pool members (reofferExempt; review round 1).
+	// one of its required_skills: priorHolderCanClaim, review rounds 1 and
+	// 2), and, with EnforceExecutionMode on, an automated_only or ai_only
+	// step, whose claimers are operator-provisioned pool members
+	// (reofferExempt; review round 1).
 	// AssignStep (step.assign, operator) is never restricted:
 	// "re-offered to the prior holder unless an operator assigns". The
 	// candidate listing hides what the claim would refuse. A step its holder
