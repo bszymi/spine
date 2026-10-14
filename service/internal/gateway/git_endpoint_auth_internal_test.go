@@ -54,6 +54,11 @@ func t015GitServer(t *testing.T, trustedCIDRs []string, proxyCIDRs string, recei
 // with the given extra headers (name, value pairs; repeated names add
 // header lines) and returns the status.
 func t015GitRequest(s *Server, method, gitPath, remoteAddr string, headers ...string) int {
+	return t015GitResponse(s, method, gitPath, remoteAddr, headers...).Code
+}
+
+// t015GitResponse is t015GitRequest returning the whole response.
+func t015GitResponse(s *Server, method, gitPath, remoteAddr string, headers ...string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, "/git/ws-1/"+gitPath, http.NoBody)
 	req.RemoteAddr = remoteAddr
 	for i := 0; i+1 < len(headers); i += 2 {
@@ -66,13 +71,20 @@ func t015GitRequest(s *Server, method, gitPath, remoteAddr string, headers ...st
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	w := httptest.NewRecorder()
 	s.handleGit(w, req)
-	return w.Code
+	return w
 }
 
 const (
 	t015InfoRefs     = "info/refs?service=git-upload-pack"
 	t015PushInfoRefs = "info/refs?service=git-receive-pack"
+	// t015SmuggledPushInfoRefs repeats `service`: url.Values.Get returns
+	// the first value, git-http-backend keeps the last (review round 1).
+	t015SmuggledPushInfoRefs = "info/refs?service=git-upload-pack&service=git-receive-pack"
 )
+
+// t015ReceivePackAdvertisement is the content type git-http-backend
+// answers the push-side ref advertisement with.
+const t015ReceivePackAdvertisement = "application/x-git-receive-pack-advertisement"
 
 func TestP330_ProxyAddressIsNeverATrustedGitPeer(t *testing.T) {
 	// 172.28.0.1 is a declared reverse proxy (or Docker's bridge gateway
@@ -126,6 +138,67 @@ func TestP330_DirectRunnerStillTrusted(t *testing.T) {
 	s6 := t015GitServer(t, []string{"fd00:28::/64"}, "", false)
 	if code := t015GitRequest(s6, http.MethodGet, t015InfoRefs, "[fd00:28::5]:40000"); code != http.StatusOK {
 		t.Fatalf("direct trusted IPv6 runner: status %d, want 200", code)
+	}
+	// Review round 1: the token-less runner read does not stretch to a
+	// push advertisement smuggled in a repeated `service` parameter.
+	sp := t015GitServer(t, []string{"172.28.0.0/16"}, "", true)
+	if w := t015GitResponse(sp, http.MethodGet, t015SmuggledPushInfoRefs, "172.28.0.5:40000"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("direct trusted runner, repeated service parameter: status %d (%s), want 401", w.Code, w.Header().Get("Content-Type"))
+	}
+}
+
+// Review round 1 (P3): git-http-backend keeps the LAST value of a
+// repeated query parameter, url.Values.Get returns the FIRST. When the
+// push/read classifier read one value,
+// `info/refs?service=git-upload-pack&service=git-receive-pack` was a read
+// for the token-less paths (trusted CIDR, SPINE_GIT_HTTP_DEV_NO_AUTH) and
+// git-http-backend answered it with the receive-pack advertisement. A
+// repeated `service` now counts as a push when any value names
+// receive-pack (so it needs a bearer), and the handler refuses it (400)
+// once past the auth gate, so git-http-backend never sees an ambiguous
+// request.
+func TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement(t *testing.T) {
+	devNoAuth := t015GitServer(t, nil, "", true)
+	devNoAuth.gitDevNoAuth = true
+	trustedPushOn := t015GitServer(t, []string{"172.28.0.0/16"}, "", true)
+	trustedPushOff := t015GitServer(t, []string{"172.28.0.0/16"}, "", false)
+	authed := t015GitServer(t, nil, "", true)
+	authSvc, bearer := gitBearerAuth(t, "dev-1", domain.RoleContributor)
+	authed.auth = authSvc
+
+	const (
+		uploadThenReceive = t015SmuggledPushInfoRefs
+		receiveThenUpload = "info/refs?service=git-receive-pack&service=git-upload-pack"
+		uploadTwice       = "info/refs?service=git-upload-pack&service=git-upload-pack"
+	)
+	for _, tc := range []struct {
+		name    string
+		s       *Server
+		query   string
+		peer    string
+		headers []string
+		want    int
+	}{
+		{"dev no-auth, upload then receive", devNoAuth, uploadThenReceive, "198.51.100.7:40000", nil, http.StatusUnauthorized},
+		{"dev no-auth, receive then upload", devNoAuth, receiveThenUpload, "198.51.100.7:40000", nil, http.StatusUnauthorized},
+		{"dev no-auth, upload twice", devNoAuth, uploadTwice, "198.51.100.7:40000", nil, http.StatusBadRequest},
+		{"trusted runner, push on", trustedPushOn, uploadThenReceive, "172.28.0.5:40000", nil, http.StatusUnauthorized},
+		{"trusted runner, upload twice", trustedPushOn, uploadTwice, "172.28.0.5:40000", nil, http.StatusBadRequest},
+		{"trusted runner, push off", trustedPushOff, uploadThenReceive, "172.28.0.5:40000", nil, http.StatusBadRequest},
+		{"authenticated pusher", authed, uploadThenReceive, "198.51.100.7:40000", []string{"Authorization", "Bearer " + bearer}, http.StatusBadRequest},
+	} {
+		w := t015GitResponse(tc.s, http.MethodGet, tc.query, tc.peer, tc.headers...)
+		if ct := w.Header().Get("Content-Type"); ct == t015ReceivePackAdvertisement {
+			t.Errorf("%s: git-http-backend served the receive-pack advertisement (status %d)", tc.name, w.Code)
+		}
+		if w.Code != tc.want {
+			t.Errorf("%s: status %d, want %d", tc.name, w.Code, tc.want)
+		}
+	}
+	// Guard: a single service value is unchanged.
+	if w := t015GitResponse(authed, http.MethodGet, t015PushInfoRefs, "198.51.100.7:40000", "Authorization", "Bearer "+bearer); w.Code != http.StatusOK ||
+		w.Header().Get("Content-Type") != t015ReceivePackAdvertisement {
+		t.Fatalf("authenticated push advertisement: status %d (%s), want 200 %s", w.Code, w.Header().Get("Content-Type"), t015ReceivePackAdvertisement)
 	}
 }
 
@@ -218,6 +291,10 @@ func TestP330_GitDevNoAuth_ReadsOnly(t *testing.T) {
 	}
 	if code := t015GitRequest(s, http.MethodGet, t015PushInfoRefs, "198.51.100.7:40000"); code != http.StatusUnauthorized {
 		t.Errorf("push advertisement with SPINE_GIT_HTTP_DEV_NO_AUTH: status %d, want 401", code)
+	}
+	// Review round 1: nor through a repeated `service` parameter.
+	if code := t015GitRequest(s, http.MethodGet, t015SmuggledPushInfoRefs, "198.51.100.7:40000"); code != http.StatusUnauthorized {
+		t.Errorf("push advertisement (repeated service) with SPINE_GIT_HTTP_DEV_NO_AUTH: status %d, want 401", code)
 	}
 	if code := t015GitRequest(s, http.MethodPost, "git-receive-pack", "198.51.100.7:40000"); code != http.StatusUnauthorized {
 		t.Errorf("push with SPINE_GIT_HTTP_DEV_NO_AUTH: status %d, want 401", code)

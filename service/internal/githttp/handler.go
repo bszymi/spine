@@ -229,6 +229,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	gitPath := r.URL.Path
 	log := observe.Logger(r.Context())
 
+	// A repeated `service` parameter is ambiguous: this handler and
+	// git-http-backend would read different values (serviceParams).
+	// No git client sends one; refuse it before any gate or CGI.
+	if repeatedService(r) {
+		log.Warn("git request rejected — repeated service parameter",
+			"remote_addr", r.RemoteAddr,
+			"path", gitPath,
+		)
+		http.Error(w, "repeated service parameter", http.StatusBadRequest)
+		return
+	}
+
 	// Push path: reachable only when ReceivePackEnabled is on. The
 	// flag default is false so existing deployments see no behaviour
 	// change on upgrade. When off, deny with a message that names the
@@ -798,10 +810,18 @@ func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) 
 func isReadOnly(r *http.Request) bool {
 	path := r.URL.Path
 
-	// GET /info/refs?service=git-upload-pack — ref advertisement for clone/fetch
+	// GET /info/refs?service=git-upload-pack — ref advertisement for clone/fetch.
+	// A repeated service is never a read (serviceParams).
 	if r.Method == http.MethodGet && strings.HasSuffix(path, "/info/refs") {
-		service := r.URL.Query().Get("service")
-		return service == "" || service == "git-upload-pack"
+		services := serviceParams(r)
+		switch len(services) {
+		case 0:
+			return true
+		case 1:
+			return services[0] == "" || services[0] == "git-upload-pack"
+		default:
+			return false
+		}
 	}
 
 	// POST /git-upload-pack — pack data for clone/fetch
@@ -832,12 +852,49 @@ func IsReceivePack(r *http.Request) bool {
 	path := r.URL.Path
 
 	if r.Method == http.MethodGet && strings.HasSuffix(path, "/info/refs") {
-		return r.URL.Query().Get("service") == "git-receive-pack"
+		// Any receive-pack value counts, whichever position it holds
+		// (serviceParams): a repeated service fails closed to "push".
+		for _, v := range serviceParams(r) {
+			if v == "git-receive-pack" {
+				return true
+			}
+		}
+		return false
 	}
 	if r.Method == http.MethodPost && strings.HasSuffix(path, "/git-receive-pack") {
 		return true
 	}
 	return false
+}
+
+// serviceParams returns every `service` query value of r. A real git
+// client sends at most one.
+//
+// The classifiers must not read just one of several: git-http-backend's
+// get_parameters keeps the LAST value of a repeated query parameter,
+// while url.Values.Get returns the FIRST. When IsReceivePack and
+// isReadOnly read only the first,
+// `info/refs?service=git-upload-pack&service=git-receive-pack` was a read
+// to the gateway's token-less paths (the trusted-CIDR runner bypass and
+// SPINE_GIT_HTTP_DEV_NO_AUTH) while git-http-backend answered it with the
+// receive-pack advertisement (INIT-023 TASK-015 review round 1). So
+// IsReceivePack treats a request as a push when any value names
+// receive-pack, isReadOnly never treats a repeated service as a read,
+// and ServeHTTP refuses a repeated service outright (repeatedService),
+// so git-http-backend never sees one.
+//
+// Both parsers split on '&' and '=' and decode %XX and '+' alike, so
+// with a single value they agree: url.ParseQuery drops a pair with a
+// ';' or an invalid escape, which git-http-backend keeps as a literal
+// value that names no service and that it refuses.
+func serviceParams(r *http.Request) []string {
+	return r.URL.Query()["service"]
+}
+
+// repeatedService reports whether r carries more than one `service`
+// query value (serviceParams).
+func repeatedService(r *http.Request) bool {
+	return len(serviceParams(r)) > 1
 }
 
 // findGitHTTPBackend locates the git-http-backend binary.
