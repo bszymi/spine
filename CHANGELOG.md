@@ -457,10 +457,13 @@ previous build). Externally visible:
 
   None of these answers changes the step: they come before the required-outputs check, so a submit
   that is refused on its head and also lacks a required output is not failed for the output.
-- **UX change: a fix-up made during a review can no longer be approved in the same review.** A
-  commit on the run branch while a review is open — including the reviewer's own `/artifacts/add`
-  or `write_context` write — makes the approval answer `409 run_branch_moved_since_gate`. The
-  reviewer must choose a rework outcome so the change is validated again.
+- **UX change: a commit made during a review can no longer be approved in the same review.** A
+  commit that reaches the run branch while a review is open makes the approval answer
+  `409 run_branch_moved_since_gate`; the reviewer must choose a rework outcome so the change is
+  validated again. In `spine serve` such a commit can only be an operator's push or a push started
+  before the review that lands during it: API writes (`/artifacts/add`, `write_context`) are
+  refused during a `review` step for every role (INIT-023 TASK-014) and pushes for non-operators
+  (TASK-016), so a reviewer's fix-up goes through a rework round, not the open review.
 - **Runs in flight at upgrade** that reach the merge without a binding fail closed (publish
   workflows route back to `execute` and re-bind on the next round).
 - **The status cascade commit is no longer on the run branch**; it reaches `main` only through the

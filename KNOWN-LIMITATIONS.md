@@ -101,8 +101,10 @@ This document tracks known gaps and deferred functionality.
     context and does not bound `git-http-backend`, and the pusher influences the processing time
     through the pack it sends. The review freeze is checked at the same moment, so a push started
     before the step was submitted can still land during review. Binding the governed merge to the
-    reviewed commit (INIT-023 TASK-005) is the content control for that window; until it lands,
-    the bound actor can still move the tip after validation. A real bound needs `git-http-backend`
+    reviewed commit (INIT-023 TASK-005; always on in `spine serve`) is the content control for that
+    window: a push that lands after the step's submit bound the head is not merged, and an approval
+    of a branch that moved since is refused (`409 run_branch_moved_since_gate`); an embedder that
+    does not enable merge binding keeps the gap. A real bound needs `git-http-backend`
     run in its own process group under a deadline (a deadline would also cut legitimate large
     pushes and clones, which today outlive `OpTimeout`), or a post-unpack re-check; both are
     INIT-023 EPIC-001 follow-ups.

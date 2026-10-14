@@ -721,9 +721,11 @@ paths:
               branch moved since the commit the previous step bound
               (`detail.bound_sha`, `detail.bound_by`). The commits after
               the binding were not validated, so only a rework outcome may
-              follow. This includes a fix-up the reviewer committed during
-              the review (`/artifacts/add`, `write_context`, a push): send
-              the work back so it is validated again.
+              follow. This includes a commit that reached the branch during
+              the review (an operator's push, or a push started before it;
+              `/artifacts/add` and `write_context` writes are refused during
+              a review step, INIT-023 TASK-014): send the work back so it is
+              validated again.
             Both are answered before the required-outputs check, so a
             submit that also lacks a required output is refused with the
             409 and the step is not failed.
