@@ -343,8 +343,9 @@ now names the operator cancel as the recovery for a stale run.
   (`architecture/event-schemas.md` §4.15); `git_alloc_limit_bytes` says when it was git's
   allocation limit, not the file's size, that refused it. `projection_synced` gains `refused`.
   A skip is reported as soon as discovery decides it, so a sync held in `error` for another
-  reason (an unreadable changed file, a failed wipe) still reports it, and re-reports it on
-  each retry under the same event id; the counter counts each report.
+  reason (an unreadable changed file, a failed wipe, a failed second listing of the root
+  `workflows/` when `artifacts_dir` is a subdirectory — wave 3 review) still reports it, and
+  re-reports it on each retry under the same event id; the counter counts each report.
 - **An oversized workflow file is a `projection_workflow_rejected` with check `read_bounds`** (its
   verified previous row kept quarantined, or not projected) and the sync advances. An oversized
   `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.

@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -778,4 +779,83 @@ func TestRefusals_ReportedWhenTheSyncIsHeld(t *testing.T) {
 		}
 		assertReports(t, ev, head, 2)
 	})
+}
+
+// listFailGit fails the failAt-th ListFiles call (1-based) while armed.
+type listFailGit struct {
+	git.GitClient
+	mu     sync.Mutex
+	armed  bool
+	calls  int
+	failAt int
+}
+
+func (g *listFailGit) ListFiles(ctx context.Context, ref, path string) ([]string, error) {
+	g.mu.Lock()
+	g.calls++
+	fail := g.armed && g.calls == g.failAt
+	g.mu.Unlock()
+	if fail {
+		return nil, &git.GitError{Kind: git.ErrKindTransient, Op: "ls-tree", Message: "simulated spawn failure"}
+	}
+	return g.GitClient.ListFiles(ctx, ref, path)
+}
+
+// Wave 3 review: with artifacts_dir a subdirectory, FullRebuild lists the
+// tree a second time for the root workflows/ directory. A failure of that
+// listing returned before any refusal DiscoverAll had already decided was
+// reported. They are now reported first; the root workflows' own refusals
+// follow the listing, and the retry reports everything again under the
+// same ids.
+func TestFullRebuild_RefusalsReportedBeforeTheRootWorkflowListing(t *testing.T) {
+	ctx := context.Background()
+	const unsafeRootWorkflow = "workflows/a\tb.yaml"
+	repo := newScratchRepo(t)
+	head := commitRaw(t, repo, "", map[string]string{
+		"spine/governance/g.md": refusedGovDoc,
+		"spine/docs/notes.md":   eightMiB("# Notes\n\n"),
+		unsafeRootWorkflow:      reviewedWorkflow,
+	})
+	g := &listFailGit{GitClient: boundedClient(repo.dir), armed: true, failAt: 2}
+	st := newMapStore()
+	ev := &recordingRouter{}
+	svc := NewService(g, st, ev, 0)
+	svc.WithArtifactsDir("spine")
+	before := observe.GlobalMetrics.ProjectionFilesSkipped.Value()
+
+	err := svc.FullRebuild(ctx)
+	if err == nil || !strings.Contains(err.Error(), "discover workflows") {
+		t.Fatalf("a failed root-workflow listing must fail the rebuild, got %v", err)
+	}
+	if got := st.syncState(); got.Status != "error" {
+		t.Fatalf("sync state = %+v, want error", got)
+	}
+	oversized := wantSkipID(head, "oversized", "spine/docs/notes.md")
+	unsafe := wantSkipID(head, "unsafe_path", unsafeRootWorkflow)
+	ids := func() map[string]int {
+		out := map[string]int{}
+		for _, e := range skipEvents(t, ev) {
+			out[fmt.Sprint(e["_event_id"])]++
+		}
+		return out
+	}
+	if got := ids(); len(got) != 1 || got[oversized] != 1 {
+		t.Fatalf("projection_file_skipped ids after the failed listing = %v, want only %s once", got, oversized)
+	}
+	if d := observe.GlobalMetrics.ProjectionFilesSkipped.Value() - before; d != 1 {
+		t.Errorf("ProjectionFilesSkipped rose by %d, want 1", d)
+	}
+
+	g.mu.Lock()
+	g.armed = false
+	g.mu.Unlock()
+	if err := svc.FullRebuild(ctx); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != head {
+		t.Fatalf("sync state after retry = %+v, want idle@%s", got, head)
+	}
+	if got := ids(); len(got) != 2 || got[oversized] != 2 || got[unsafe] != 1 {
+		t.Fatalf("projection_file_skipped ids after the retry = %v, want %s twice and %s once", got, oversized, unsafe)
+	}
 }

@@ -143,26 +143,30 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	if err != nil {
 		return s.markSyncError(ctx, prev, "discover artifacts", err)
 	}
-	wfPaths, wfRefused, err := s.workflowPathsAt(ctx, head, result.Workflows)
-	if err != nil {
-		return s.markSyncError(ctx, prev, "discover workflows", err)
-	}
 	// Refused files (INIT-023 TASK-003) are reported, never counted as
 	// projection errors: DeleteAllProjections below removes any stale
 	// row, and nothing re-adds one. They are reported as soon as discovery
-	// has decided them, before the planning and the wipe below can fail
-	// the rebuild (review round 2): a rebuild failed by an unrelated store
-	// or read error used to report none of them, for as long as the
-	// failure lasted. A failed rebuild's retry reports them again, under
-	// the same deterministic event ids.
+	// has decided them, before anything after it can fail the rebuild
+	// (review round 2): a rebuild failed by an unrelated store or read
+	// error used to report none of them, for as long as the failure
+	// lasted. DiscoverAll's refusals go out before the root-workflow
+	// listing (a second ListFiles when artifacts_dir is a subdirectory)
+	// can fail (wave 3 review), that listing's own refusals right after
+	// it. A failed rebuild's retry reports them again, under the same
+	// deterministic event ids.
 	var refused []artifact.RefusedFile
 	for _, r := range result.Refused {
 		if s.keepRefusal(r) {
 			refused = append(refused, r)
 		}
 	}
-	refused = append(refused, wfRefused...)
 	s.recordRefused(ctx, head, refused)
+	wfPaths, wfRefused, err := s.workflowPathsAt(ctx, head, result.Workflows)
+	if err != nil {
+		return s.markSyncError(ctx, prev, "discover workflows", err)
+	}
+	s.recordRefused(ctx, head, wfRefused)
+	refused = append(refused, wfRefused...)
 
 	plans, err := s.planWorkflowRows(ctx, wfPaths, head)
 	if err != nil {
