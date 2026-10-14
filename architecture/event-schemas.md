@@ -482,6 +482,66 @@ payload:
 
 **Idempotency:** the event id is deterministic — `projskip-` + the first 12 characters of `commit` + `-` + the first 12 hex characters of SHA-256 over `reason`, a NUL byte and the raw path — so a rebuild or a retried sync at the same commit re-emits the same id, which the delivery queue de-duplicates. Existing subscriptions that receive every event type receive this one too.
 
+### 4.16 `governance.merge_held`
+
+Emitted by the governance-path guard (ADR-016; INIT-023 TASK-006) when a governed merge changes governance paths (`.spine/`, `.spine.yaml`, `workflows/`, `<artifacts_dir>/workflows/`) and no operator approval of its bound commit is recorded: the run stays `committing`, nothing is merged, and the hold is recorded on the publish step (or the last completed step of a workflow with no publish step) as `error_detail.classification = governance_approval_required`. Also emitted, with `post_merge: true`, when the post-merge assertion refuses a merge that changed governed paths the evaluation did not cover (a permanent refusal: nothing pushed, the run takes `merge_failed` or fails).
+
+**Source:** Orchestrator (`MergeRunBranch` → `governanceGate` / `assertGovernedMerge`)
+
+```yaml
+payload:
+  run_id: <string>
+  task_path: <string>
+  bound_sha: <string>             # The commit the merge is bound to (the approval binds to it)
+  paths: [<string>]               # Governed paths the merge changes (capped, MaxReportedPaths, default 100)
+  path_count: <integer>
+  exempt_paths: [<string>]        # Changed paths excused by the lifecycle exemption or the own-run evidence carve-out
+  stale_approval_sha: <string>    # Present when an approval of another commit is recorded
+  post_merge: <boolean>
+  extra_paths: [<string>]         # post_merge only: governed paths the merge changed that were not evaluated
+  extra_path_count: <integer>     # post_merge only
+```
+
+**Idempotency:** the id is `evt-<trace12>-governance-held-<bound_sha12>-<episode>`, where the episode is the hold target's execution id (a new publish execution, or a new review, after a reject and resubmit), so re-evaluation on every scheduler tick emits one id per episode. A post-merge refusal's id ends in `-post-merge`.
+
+### 4.17 `governance.merge_decided`
+
+Emitted when an operator approves or rejects a held merge (`POST /runs/{run_id}/governance-decision`, engine `DecideGovernanceMerge`). A reject that loses the race to a merge that completed meanwhile returns `409` and emits nothing.
+
+**Source:** Orchestrator (`DecideGovernanceMerge`)
+
+```yaml
+payload:
+  run_id: <string>
+  bound_sha: <string>
+  decision: <string>      # approved | rejected
+  actor_id: <string>
+  actor_role: <string>    # operator | admin
+  reason: <string>        # Required for rejected (at most 2000 bytes)
+  paths: [<string>]       # capped
+  path_count: <integer>
+```
+
+**Idempotency:** `evt-<trace12>-governance-approve-<bound_sha12>-<unixmilli>` / `…-governance-reject-…`; every decision is its own event.
+
+### 4.18 `branch_protection.removal_refused`
+
+Emitted by the projection's protection-removal guard (ADR-016 §6; INIT-023 TASK-006) when a branch-protection config at the sync head removes a protection kind the installed rules apply to the authoritative branch and no database record of an operator act that changed the config matches it (an honoured `branch_protection.override` push, or an approved governed merge's consumption marker). The previous rules stay installed; the sync is **not** marked `error` (it advances), and the refusal is re-evaluated on the next change to the file and on every full rebuild.
+
+**Source:** Projection Service (`FullRebuild`, `IncrementalSync`)
+
+```yaml
+payload:
+  branch: <string>                  # The authoritative branch
+  installed_kinds: [<string>]       # Kinds the installed rules apply to it
+  candidate_kinds: [<string>]       # Kinds the refused config would apply
+  head_commit: <string>
+  installed_source_commit: <string> # The installed rows' source commit ("bootstrap" for the seed rows)
+  records_checked: <integer>
+```
+
+**Idempotency:** `bp-removal-refused-<head12>`: once per head.
+
 ---
 
 ## 5. Event Versioning
@@ -656,6 +716,9 @@ All event types are emitted from the following code paths:
 | `projection_synced` | `projection.Service.IncrementalSync` | projection/service.go |
 | `projection_workflow_rejected` | `projection.Service` | projection/service.go |
 | `projection_file_skipped` | `projection.Service.FullRebuild`, `IncrementalSync` | projection/refused.go |
+| `branch_protection.removal_refused` | `projection.Service.FullRebuild`, `IncrementalSync` | projection/protection_guard.go |
+| `governance.merge_held` | `Orchestrator.MergeRunBranch` (governance gate, post-merge assertion) | engine/governance_guard.go |
+| `governance.merge_decided` | `Orchestrator.DecideGovernanceMerge` | engine/governance_decision.go |
 | `validation_passed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `validation_failed` | `gateway.handleSystemValidate` | gateway/handlers_system.go |
 | `step_assignment_failed` | `Orchestrator.ActivateStep` | engine/step.go |

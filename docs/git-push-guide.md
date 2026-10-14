@@ -91,6 +91,23 @@ git -c http.extraHeader="Authorization: Bearer $SPINE_TOKEN" \
 4. The client-produced commit is pushed byte-identically — Spine does not rewrite the commit to add a trailer. The event is the sole audit record on this path.
 5. Pushing `-o spine.override=true` to a branch that does not need override (no matching rule) is allowed silently — no event is emitted.
 
+### Changing `.spine/branch-protection.yaml` (and re-affirming a relaxation)
+
+With the governance-path guards on (the `spine serve` default; ADR-016, INIT-023 TASK-006):
+
+- **A run cannot change the config on its own.** A governed merge that touches `.spine/branch-protection.yaml` (or anything else under `.spine/`, `.spine.yaml` or a workflows directory) is held until an operator approves the run's bound commit: `GET /api/v1/runs/{run_id}/governance` shows the commit and the paths, `POST /api/v1/runs/{run_id}/governance-decision` with `{"decision":"approve","commit_sha":"<bound commit>"}` merges it (`"reject"`, with a `reason`, sends the run back).
+- **The projection installs a relaxation only with an operator record.** A config that removes `no-direct-write` or `no-delete` from `main` is installed only when an honoured override push, or an approved governed merge, **changed** the file to exactly those bytes. Otherwise the previous rules stay and the server logs a Warn and emits `branch_protection.removal_refused`.
+- **Re-affirming.** If a relaxation was refused (it arrived another way, or the runtime database was rebuilt from git and has no record of the original authorisation), an operator re-affirms it with an override push that **edits** the file — a changed comment line is enough:
+
+  ```bash
+  echo "# re-affirmed $(date -u +%F) by $USER" >> .spine/branch-protection.yaml
+  git commit -am "Re-affirm branch protection"
+  git -c http.extraHeader="Authorization: Bearer $SPINE_TOKEN" \
+    push -o spine.override=true origin main
+  ```
+
+  An override push that does not change the file proves nothing about it and is ignored for this purpose. In standalone Spine the override event is the record, and it is persisted to `runtime.event_log` only with event delivery on (`SPINE_EVENT_DELIVERY=true`); without it, relax protection through a governed run that an operator approves. Tightening the rules never needs a record.
+
 ### Deleting a protected branch
 
 ```bash

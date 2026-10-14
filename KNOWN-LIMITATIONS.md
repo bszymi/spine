@@ -364,6 +364,56 @@ merge publishes the commit the run's steps validated and reviewed, never the run
     `commit_meta` or a database lock per run. Dormant: recovery applies only to multi-repository
     partially-merged runs, and no code-repository catalog is wired in Spine or SMP.
 
+### Governance-Path Guard (INIT-023 TASK-006, ADR-016)
+
+The merge guard holds a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/` or
+`<artifacts_dir>/workflows/` until an operator approves the bound commit; the projection guard
+refuses an unprovenanced branch-protection removal. What remains:
+
+1. **Opt-in for embedders.** The library's zero value is v1: until an embedder calls
+   `WithGovernanceGuard` and `WithProtectionRemovalGuard` (SMP: its TASK-010), F3 stays open
+   there. `spine serve` turns both on; `SPINE_GOVERNANCE_GUARD=off` restores v1.
+2. **Override provenance needs the event log.** An honoured override push vouches for a
+   relaxation only through its `branch_protection.override` row in `runtime.event_log`. In
+   standalone that row is written only with event delivery on (`SPINE_EVENT_DELIVERY=true`; the
+   server warns at startup otherwise); without it, relaxing protection takes a governed run with an
+   operator approval. The event log is pruned by retention, so a database rebuilt long after a
+   relaxation — or a fresh database restored from git — refuses it until an operator re-affirms it
+   with an override push that **edits** the file (`docs/git-push-guide.md` §4).
+3. **A refusal is not a sync error** (owner question 7). `sync_state` does not show it; the signals
+   are the Warn log, `branch_protection.removal_refused`, and installed rows whose `source_commit`
+   is older than the file at head. It is re-evaluated on the next change to the file and on every
+   full rebuild. A provenance or rule-store read failure, by contrast, holds the sync in `error`
+   and is retried.
+4. **Scope of the projection guard** (owner question 5): the authoritative branch only. Removing
+   protection from other patterns (`release/*`, `staging`) is installed without a record. While the
+   installed rules carry no `no-direct-write` on the authoritative branch the guard is inactive
+   (ADR-009 §1 bullet 3).
+5. **Paths outside `MergeRunBranch`.** Convergence merges that move content into `main` directly
+   (audit F8, INIT-023 TASK-012), operator override pushes and ADR-008 operator bypass writes are
+   not held by the merge guard (operators may land changes directly by design). Workflow
+   definitions get no projection provenance check.
+6. **Post-merge refusals are permanent** (owner question 6). A merge whose result changes a
+   governed path the pre-merge evaluation did not cover (only under non-default git merge
+   configuration such as `merge.directoryRenames` or custom merge drivers) takes `merge_failed`
+   on every attempt; an operator must land such a change directly.
+7. **Held runs have no timeout.** Cancel is not allowed from `committing`; an operator approves or
+   rejects. The decision API runs the approved merge inside the request.
+8. **Decision races.** A reject that lands while an approved merge is already in flight returns
+   `409` (the merge won), but its revocation still empties the approval keys, so that merge loses
+   its projection provenance: a relaxation it carried is refused until re-affirmed (fail-safe).
+   Stores without the atomic `MergeCommitMeta` capability (an embedder's `RunStore`) use a
+   read-modify-write, which can drop a concurrent engine write to the same run's reserved keys;
+   `*store.PostgresStore` has the capability. Full serialisation needs TASK-012's worktree lock.
+9. **Symlinks.** A symlink that is itself a guarded path is a governed change, but edits to the
+   target of a symlink already on `main` that points outside the guarded trees are not. A symlink
+   inside the run's own evidence directory is exempt like any evidence file. Spine's projection
+   reads by git path and does not follow links; an embedder's runner may.
+10. **Approval records are not branch-scoped.** A consumed approval names the engine's merge
+    target (`main`); the projection proves landing by reachability from its own authoritative head.
+11. **The lifecycle exemption's separation-of-duties check** compares completed step executions
+    only (an actor who drafted and abandoned an execution is not counted).
+
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
   enforced (a file that fails either is not projected), but a workflow that fails the full

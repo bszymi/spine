@@ -6,6 +6,98 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-006: governance-path guard)
+
+Audit F3 (P2, both surfaces), "run-branch slippage": a run branch could carry governance files
+into `main` through a governed merge, and the projection installed them as live policy. ADR-016
+supersedes ADR-009's v1 decision not to guard governed merges by path. Owner questions take their
+defaults, pending the owner (authorization model (a): operator approval of the bound commit; the
+ADR is `Proposed` until the owner signs it off). No migration.
+
+### Security
+
+- **A governed merge that changes governance paths waits for an operator.** With the guard on
+  (`spine serve` default), a merge that changes `.spine/`, `.spine.yaml`, `workflows/` or
+  `<artifacts_dir>/workflows/` is held: the run stays `committing`, nothing is merged (no code
+  repository either), the publish step (or the last completed step of a workflow with no publish
+  step) carries `error_detail.classification = governance_approval_required`, and
+  `governance.merge_held` is emitted once per bound commit and hold episode. An `operator`/`admin`
+  approves or rejects exactly the bound commit (`POST /api/v1/runs/{run_id}/governance-decision`);
+  approve merges at once, reject revokes the approval and takes `merge_failed` (or fails a
+  no-publish run, branch kept). The approval lives in reserved `runs.commit_meta` keys
+  (`spine.governance_approval.*`) that workflow outcomes cannot write. Closes the self-reviewed
+  `rules: []` / review-less `task-default` PoC.
+- **Every merge base, and a post-merge check.** The changed paths are the union of the diffs from
+  every merge base of `main` and the merged commit (`git merge-base --all`): with one merge base a
+  criss-cross history let a run revert another run's tightened `.spine/branch-protection.yaml` or
+  workflow unseen. After the merge, before the push, a merge that changed a governed path the
+  evaluation did not cover (non-default merge configuration) is refused permanently, taken back to
+  the base and never pushed.
+- **The projection refuses an unprovenanced protection removal.** A branch-protection config that
+  removes a protection kind from the authoritative branch is installed only when a database record
+  of an operator act that **changed** the config matches it byte for byte, is reachable from the
+  sync head and is newer than the installed rules: an honoured override push
+  (`runtime.event_log`), or an approved governed merge's consumption marker
+  (`spine.governance_approval.merge_sha`/`base_sha`, written before the push). Otherwise the rules
+  stay, `branch_protection.removal_refused` is emitted and a Warn logged. Commit trailers are
+  never trusted. Inactive while `no-direct-write` is already off on the authoritative branch.
+
+### Changed (standalone)
+
+- **`spine serve` turns both guards on.** `SPINE_GOVERNANCE_GUARD=off` (`false`, `0`, `no`)
+  restores v1; any unrecognised value keeps them on with a startup Warn. The lifecycle exemption
+  (a workflow-lifecycle planning run may merge its own `workflows/<id>.yaml` — never the governing
+  workflow, never a file that declares `applies_to: [Workflow]` now or before, and only when the
+  reviewer completed no other step of the run) and the own-run evidence carve-out
+  (`.spine/runs/<run id>/evidence/`) are on.
+- **Runs whose agents edit `workflows/**` or `.spine/**` now wait for an operator** (for example
+  step profiles or agent definitions). Operators decide through the new routes
+  (`POST /runs/{run_id}/governance-decision`, permission `run.governance.decide`; read the state
+  with `GET /runs/{run_id}/governance`); statuses 400/403/404/409/412/503 as in `api/spec.yaml`.
+- **The commit-retry sweep no longer logs a held merge at Error** each tick (Debug instead).
+- **A refused relaxation is not a sync error.** The sync advances (`idle`), so the diff window
+  does not grow and nothing downstream stalls; the rules shown by `branch_protection_rules` keep
+  their old `source_commit`. Recovery: an operator override push that **edits** the file
+  (`docs/git-push-guide.md`). A database rebuilt from git refuses a relaxed config until then.
+- **Override provenance needs event delivery.** Override events reach `runtime.event_log` only
+  with `SPINE_EVENT_DELIVERY=true`; without it `spine serve` warns at startup, and relaxing
+  protection takes a governed run with an operator approval.
+- New events (operational, in `allEventTypes()`): `governance.merge_held`,
+  `governance.merge_decided`, `branch_protection.removal_refused` (`architecture/event-schemas.md`
+  §4.16–§4.18). New step failure classification `governance_approval_required`.
+
+### Changed (embedders)
+
+All opt-in; the zero value is today's behaviour, and no interface an embedder implements grew.
+
+- `engine.(*Orchestrator).WithGovernanceGuard(engine.GovernanceGuard{...})` — call after
+  `EnableMergeBinding`; it errors (guard left off) without merge binding or without a
+  `GitOperator` that implements the new optional `engine.MergeBaseLister`
+  (`MergeBases(ctx, a, b) ([]string, error)`; `*git.CLIClient` has it). Fields: `Paths` (replaces
+  the defaults), `WorkflowDirs` (pass `projection.WorkflowDirs(artifactsDir)` or the projection
+  service's `WorkflowDirs()`), `ExemptWorkflowLifecycleTaskPath`, `ExemptOwnRunEvidence`,
+  `MaxReportedPaths`. `GovernanceGuardEnabled()`, `GovernanceGuardConfig()`.
+- `MergeRunBranch` returns a `precondition_failed` error wrapping
+  `engine.ErrGovernanceApprovalRequired` for a held merge (the run stays `committing`). Retry
+  loops should treat it as waiting, not failed, and not count it against a retry budget.
+- `DecideGovernanceMerge(ctx, engine.GovernanceDecisionRequest)` and
+  `GovernanceMergeStatus(ctx, runID)` are the decision and read APIs (the engine checks the
+  operator role itself). Optional store capability `MergeCommitMeta(ctx, runID, patch)` (atomic
+  `commit_meta || patch`; `*store.PostgresStore` has it; without it the engine falls back to
+  read-modify-write).
+- `projection.(*Service).WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{...})`
+  with a `projection.GovernanceProvenanceReader` (`*store.PostgresStore.ListGovernanceAuthorizations`);
+  a nil reader refuses every removal. `projection.ErrProtectionRemovalUnauthorized`.
+- `branchprotect.Request.Governance` (`*branchprotect.GovernanceCheck`), consulted only for
+  `OpGovernedMerge`; `EvaluateGovernance`, `GovernancePaths`, three reason codes
+  (`governance_approved`, `governance_approval_required`, `governance_unevaluable`). A nil
+  `Governance` keeps the v1 decision. A custom `Policy` that denies governed merges with the hold
+  reason code gets a plain refusal, never a hold — only the engine's own decision holds.
+- Reserved key constants `domain.CommitMetaGovernanceApproval*`, `domain.FailureGovernanceApprovalRequired`,
+  the three event types in `core/domain`.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-004 TASK-015: SSE field safety, shared-mode scoping, git-endpoint auth, gitpool credential scoping)
 
 Standalone `spine serve` hardening (audit P3-28, P3-29, P3-30) plus the latent gitpool
