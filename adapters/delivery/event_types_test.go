@@ -46,3 +46,28 @@ func TestAllEventTypes_IncludesProjectionFileSkipped(t *testing.T) {
 		t.Fatal("projection_file_skipped is operational, not a domain event")
 	}
 }
+
+// INIT-023 TASK-006 AC 25: the governance-path guard's three events are
+// subscribable, operational, and keep their wire names.
+func TestAllEventTypes_IncludesGovernanceGuardEvents(t *testing.T) {
+	want := map[domain.EventType]string{
+		domain.EventGovernanceMergeHeld:            "governance.merge_held",
+		domain.EventGovernanceMergeDecided:         "governance.merge_decided",
+		domain.EventBranchProtectionRemovalRefused: "branch_protection.removal_refused",
+	}
+	seen := map[domain.EventType]int{}
+	for _, et := range allEventTypes() {
+		seen[et]++
+	}
+	for et, wire := range want {
+		if seen[et] != 1 {
+			t.Errorf("allEventTypes() lists %q %d times, want once", et, seen[et])
+		}
+		if string(et) != wire {
+			t.Errorf("wire name drifted: %q, want %q", et, wire)
+		}
+		if isDomainEvent(string(et)) {
+			t.Errorf("%q is operational, not a domain event", et)
+		}
+	}
+}

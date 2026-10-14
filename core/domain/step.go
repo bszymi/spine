@@ -50,6 +50,12 @@ const (
 	// (as `skipped`) because its run was cancelled or failed
 	// (INIT-023 TASK-007). Not retryable.
 	FailureRunTerminated FailureClassification = "run_terminated"
+	// FailureGovernanceApprovalRequired marks the step a governed merge is
+	// held on (the publish step, or the last completed step on a workflow
+	// with no publish step) while it waits for an operator to approve or
+	// reject a governance change (ADR-016; INIT-023 TASK-006). Not
+	// retryable: the decision API, not a retry, clears it.
+	FailureGovernanceApprovalRequired FailureClassification = "governance_approval_required"
 )
 
 // IsRetryable returns true if this failure classification allows retry.
