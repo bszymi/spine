@@ -1515,3 +1515,102 @@ adapted at the first bump past Spine wave 2.
 - A batched size probe (`ls-tree -r -l -z <sha>` per rebuild) to remove the extra process per read.
 - Receive-time and checkout-time inflation; `diff` rename-detection inflation (KNOWN-LIMITATIONS).
 - SMP TASK-008: §10 items 1–7, plus the two SMP points above.
+
+### Review round 1 (2026-10-14)
+
+Three reviewers (correctness and compatibility, adversarial security, completeness and tests)
+examined the branch at `8ac951e`. Every finding was verified against the code first. All six were
+real, and all six are fixed with a test that fails on the old code (overlay mutations, worktree
+untouched). Commits: `fceaf76` (git adapter), `fa83c8e` (downstream), `a86ddc3` (docs) and this
+note.
+
+**Findings**
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P2 | `GIT_ALLOC_LIMIT` checks one allocation, not git's total. A 3 MB tip on a delta chain of sub-limit bases was read with git's delta-base cache (96 MiB default) full. The docs overstated the bound. | **FIXED.** Reproduced: plain `git show` at 134 MB; through `CLIClient` at 127 MiB (macOS, git 2.54) and 124 MiB (Linux, git 2.39.5). Read and diff commands now pin `core.deltaBaseCacheLimit` to the per-blob limit (`deltaBaseCacheEnv`), giving 52 MiB and 49 MiB. New AC 18 row `TestGitMem_DeltaChainOfSubLimitBasesStaysBounded`: a fast-import chain with `fastimport.unpackLimit=1` and 8 x 15 MiB bases; the fixture asserts tip depth >= 8 and that `cat-file -s` sees only the tip. The read must be byte-identical with git-child RSS < 3 x alloc + 16 MiB (64 MiB); without the pin it fails at 127 MiB. The remaining bound, about 3 x the alloc limit per concurrent read (one chain step: base, result, cache), is now what `cli.go`, `limits.go`, CHANGELOG, KNOWN-LIMITATIONS and `git-integration.md` say. Lowering it means lowering the alloc limit (owner question 4). |
+| 2 | P3 | CHANGELOG and KNOWN-LIMITATIONS said `diff` runs in the C locale; it did not. | **FIXED in code, not the docs.** `diff`'s stdout is locale-independent (`-z`, fixed status letters), and its errors are classified by English text. A translated `bad revision` was `ErrKindPermanent` instead of not-found. `TestReadCommands_RunInTheCLocale` now also asserts that a translated `diff` miss is `ErrKindNotFound` (mutation without the locale: fails). |
+| 3 | P3 | A git alloc refusal became `BlobTooLargeError{Size: -1, Limit: blob}`, so a 3 MB file read as "exceeds the 4 MiB read limit". | **FIXED.** `BlobTooLargeError.GitAllocLimit` carries the cause: the message names the git allocation limit, and the envelope says "blob read exceeds git allocation limit". The cause propagates to `RefusedFile.GitAllocLimit`, to the Warn line and `projection_file_skipped` (`git_alloc_limit_bytes`, null otherwise; event-schemas §4.15), to the artifact and workflow 413 messages (`ReadLimitPhrase`), and to `ValidateBranch`'s report. Tests: `TestFullRebuild_GitAllocRefusalNamesItsLimit` (a gitlink `*.md`, real git), `TestGitAllocRefusalKeepsItsCause`, `TestRefusalReport_NamesTheLimitThatRefused`, and the gitmem refusals assert the 16 MiB cause. Mutations: dropping the cause in `readOverrun` or in `readForDiscovery` fails them. |
+| 4 | P3 | `run()` copied stdout (`string(out)`), so ListFiles, Diff and Log held their output twice. I1 held only for ReadFile. | **FIXED, differently from the suggestion.** Parsing `[]byte` and converting each path would not have lowered the peak for an unfiltered listing: the per-path strings are the same bytes again, in many size-class-rounded allocations. Instead, read commands write into a text-mode sink (`strings.Builder`), whose `String()` hands the buffer over without a copy; the parsed paths and messages are substrings of it. Growth is in powers of two from 512 bytes, capped at the limit, so the cost depends only on output size. `ListFiles` and `parseNameStatusZ` scan instead of `strings.Split` (no intermediate field slice). `TestRun_OutputIsHeldOnce`: a 3.5 MiB Log allocates 8 241 KiB against a bound of 9 984 KiB; with a copy it fails. `TestStdoutSink_GrowthAndHandOver`: kept bytes, overflow, power-of-two caps, and zero allocations on hand-over, in both modes and both sink kinds. |
+| 5 | P3 | Only `read_file` was proven to get `GIT_ALLOC_LIMIT` and the C locale. Reclassifying `log`, `list_files`, `merge-base` or `tree_entry` passed every test. | **FIXED.** `TestEveryOpHasAnOutputClass` compares the whole op-to-class table. `TestCommands_RunUnderTheirClassEnvironment` has a git wrapper record every invocation's argv and env across all public methods (ReadFile through Push and DeleteBranch). It pins read (alloc limit, C locale, cache pin, inherited `GIT_CONFIG_PARAMETERS` kept), diff (no alloc limit), mutate (inherited env untouched) and the exact branch lookup, and requires every class to be seen. `TestReadCommands_GitAllocLimitBoundsEveryReadOp` (real git): a 1.5 MB tree and a 2 MiB commit message under a 1 MiB alloc limit make ListFiles, TreeEntryType, Log, HasCommitWithTrailer, MergeBase and ReadFile's probe refuse with `GitAlloc`, while the defaults read them all. `TestGitMem_LogCommitMessageIsRefusedInGit`: a 64 MiB message is refused at 4 MiB (macOS) / 7 MiB (Linux) git RSS. Mutations: `log` to diff fails 4 tests, and `list_files` to diff fails 3. |
+| 6 | P3 | `spine_projection_files_skipped_total` was missing from the observability A.1 metrics table. | **FIXED.** Row added under `spine_projection_syncs_total`. |
+
+**Acceptance-criteria gaps raised**
+
+- **AC 16 (three failing SMP tests): not caused by this task, not fixable here.** Re-verified at
+  this round: SMP `f5c6fd6d` gives 2 350 pass / 3 fail / 246 skip (top level) across the 36
+  dependent packages. With every Spine file this branch changes overlaid back to `main`, the
+  result is identical: 0 outcome differences across 5 132 test outcomes, subtests included. The
+  three are `gitread.TestBounded_ErrorContractEqualsCLIClient`,
+  `projectionwriter.TestBoundedProjection_IncrementalAddAndModifyOversized` and
+  `…_OversizedWorkflowStalls`. They pin SMP's current Spine pin against wave 2 (TASK-002's
+  `bad revision`, TASK-011's rejection path). The SMP checkout must not be edited, so SMP
+  TASK-008 / TASK-012 adapt them at the bump. **Open for the orchestrator:** AC 16 is "passes
+  except for these pre-existing three".
+- **AC 5 (unknown ref, on-disk-only rows) and AC 11.4 (oversized workflow):** these are
+  Deviations 2 and 1, already recorded. **Open:** they need the owner's amendment and sign-off.
+- **AC 17:** the PR and its description are the orchestrator's. The precondition holds: SMP
+  TASK-003 is on SMP `f5c6fd6d`, and `grep -rn "unquoteDiffPaths\|unquoteGitPath" internal/` is
+  empty.
+- **AC 18 (delta chain):** closed by finding 1, which adds a fifth row. The other reviewer
+  comments on AC 18 confirmed the existing rows; no action was needed.
+- Other comments were confirmations (all 22 ACs re-verified, the PoCs re-run on `d23b897`, the
+  diff residual correctly scoped). They needed no action.
+
+**Deviations added this round**
+
+15. **The cache pin goes through `GIT_CONFIG_PARAMETERS`, not `git -c`.** It is the same channel
+    `-c` uses (highest config precedence; repository, global and system values cannot loosen it).
+    The argv stays exactly as TASK-002 pinned it (`TestRefGrammar_ArgvShape`, and wrappers that
+    match `"$1"`). The value uses the original `'key=value'` form, which the 2.30 floor reads
+    (`GIT_CONFIG_COUNT` needs 2.31). An inherited value of either form is kept, with ours appended
+    last so it wins (`TestDeltaBaseCacheEnv` checks this against real git). The value is the
+    per-blob limit: 0, 4 MiB and 16 MiB give the same peak for the chain (55 MB), and a non-zero
+    cache keeps tree reads fast. On the SMP repository (best of 4): `ls-tree -r` 27 ms → 15 ms,
+    `log -n 500` 40 ms → 33 ms, a 300-commit `diff` 101 ms → 101 ms. Interleaved over 900
+    processes: 14.0 ms vs 12.9 ms per process, so no measurable cost.
+16. **`diff` gets the C locale and the cache pin, but still no `GIT_ALLOC_LIMIT`.** Both refuse
+    nothing, so §2a's rename-detection exemption is untouched (`TestGitMem_DiffIsExempt` passes).
+17. **`projection_file_skipped` carries a sixth payload field, `git_alloc_limit_bytes`,** beyond
+    §7's five. It is null unless git refused an allocation. The event is new in this task, so the
+    field is always present rather than optional.
+18. **Stdout sink growth is in powers of two** (from 512 bytes, capped at the limit), instead of
+    doubling from the first write. What a command's output costs is then a function of its size,
+    which makes the no-copy bound testable. Pre-sized ReadFile buffers are unchanged
+    (AC 3 / AC 4 pass).
+
+**Gates at this round (code `a86ddc3`; every row re-run)**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `lint-boundaries: OK`; ok; `engine constructed and exercised; library surface is sound.` |
+| `go build ./...`; `go vet ./...`, `-tags integration`, `-tags scenario` | all clean |
+| `go test -p 4 -count=1 ./...` | exit 0, 40 packages ok |
+| `go test -race -p 4 -count=1` on the 11 touched packages (`adapters/delivery`, `adapters/git/...`, `adapters/projection`, `core/artifact`, `core/domain`, `core/engine`, `core/observe`, `core/workflow`, `service/internal/gateway`, `core/evidence`) | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s003_proj go test -race -p 1 -count=1 -tags integration ./adapters/projection/`; `…/s003_deliv … ./adapters/delivery/` | projection 102 top-level / 74 sub pass (one new test), delivery 139 / 176 pass; 0 fail, 0 skip |
+| `go test -p 1 -count=1 -tags scenario ./service/scenariotest/...` on `s003_scen`, and in a `git archive main` export on `s003_scen_main` | both 191 pass / 30 fail / 6 skip (subtests 1 288 / 27); **0 outcome differences**. CI's `scenario-git-http` set: 22 pass |
+| CI `git-floor` steps in `golang:1.26-bookworm` (git 2.39.5, `--pull=never`, `--rm`, read-only mounts, `GOPROXY=off`), plus `core/engine` and `adapters/projection` | all ok. gitmem rows on Linux: delta base 9 MiB, gitlink 11 MiB, chain 49 MiB, log 7 MiB |
+| `golangci-lint run` on the 9 touched packages, plain / `--build-tags=integration` / `--build-tags=scenario`, branch vs a `main` export as (linter, file, message) multisets | **0 new issues** in each (188 vs 189) |
+| `golangci-lint run --enable-only=gosec`, all three tag sets | 0 issues |
+| `gofmt -l` on every changed Go file | empty |
+| `codex review --base main` (`-c model=gpt-5.6-sol`; the configured default `gpt-6.1-sol` is refused for this account) | "no actionable correctness regression was identified": no findings |
+
+Database: the shared server on 55630 was down again. Every DB step ran on a private,
+tmpfs-backed `pgvector/pgvector:pg18` container (PostgreSQL 18.4, `--pull=never`,
+127.0.0.1:55933). It held `s003_*` databases and the SMP CI roles (`platform`,
+`platform_audit_retention`, `smp_prov`, posture `f`). The container and everything in it were
+removed at the end.
+
+**SMP compatibility gate at this round** (`/Users/bartoszszymichowski/42sid/i23/s-T003/smp`
+detached at **`f5c6fd6d`**, `../spine` = this worktree; `git status` clean after every run):
+
+| Command (in the SMP checkout) | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...` | all ok |
+| `go test -race -p 4 -count=1 -json` on the 36 dependent packages, no DB env, then the same with every changed Spine file overlaid back to `main` | 2 350 / 3 / 246 both ways; **0 outcome differences** (the three above) |
+| `go run ./dev/apply-migrations -set platform -dir migrations` (`s003_smp_it`, pgvector); `-set spine-runtime` (`s003_spine_rt`) | 115 and 26 versions |
+| Spine-runtime step: `TEST_SPINE_DB=… TEST_PLATFORM_DB=… TEST_PROVISIONING_DSN=…smp_prov go run ./dev/testgate -- -race -count=1 -timeout 15m ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` | 1 835 passed, 0 failed. The 2 skips are the Linux-only `ru_maxrss` tests (`TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch`), the same two as at `a7d0478`. testgate allows no skip in this step, so it reports `FAIL (2)` on macOS for them alone |
+| Platform-DB members that depend on a changed Spine package, plus `docindex` (the command in "SMP compatibility gate" above, with the same `-skip` of the two failing SMP TASK-004 tests) | 1 181 passed, 1 failed, 6 allowed skips. The failure was `workspace.TestPostgresAllocator_LockdownRefusesForeignPublicOwner`, in its cleanup (`DROP DATABASE … permission denied to terminate process`) under `-p 4`. It passes 3/3 standalone, and the whole `./internal/customer/workspace/` package then passes under testgate (586 passed, 6 allowed skips). It is a timing-sensitive DB-cleanup race in an SMP allocator test, with no Spine git path involved |
+| `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `testgate: PASS`, 246 passed |
+| AC 16 note: `DiscoverAll` with a default client (overlay-only test file, no tree touched) | SMP 1 112 artifacts, 10 workflows, 0 errors, **0 refused**; Spine 715 artifacts, 0 refused, plus the existing ASCII `INIT-014 initiative.md` parse error |
+| `TestRepoArtifacts_ParseCleanlyUnderSpine` (AC 15 timing) | 32–37 s on a loaded machine. Back to back with only this round's env change reverted: 32.4 / 31.7 s vs 36.0 / 32.6 s, within noise (see Deviation 15's per-process measurement) |
