@@ -846,6 +846,84 @@ func TestConsumer_StaleDeliveryAfterRebind(t *testing.T) {
 	}
 }
 
+// Codex review, round 6: two recoveries of one completed execution that
+// both pass the checks route it once — the second's create of the pinned
+// successor loses the primary key — instead of creating review-2 beside
+// review-1. Mutation: numbering the successor from a fresh listing (as
+// advanceToNextStep does) fails both cases.
+func TestRecoverCompletedStep_ConcurrentRecoveriesRouteOnce(t *testing.T) {
+	t.Run("main path", func(t *testing.T) {
+		f := newCasFix(t, casWorkflow(), true)
+		e := f.addExec("execute", domain.StepStatusCompleted, "actor-a")
+		f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+		var second error
+		f.afterNextList(func() { // A has its listing; B recovers fully now
+			f.st.afterList = nil
+			second = f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID)
+		})
+		first := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID)
+		if second != nil {
+			t.Fatalf("the inner recovery: %v", second)
+		}
+		requireCode(t, first, domain.ErrConflict, "the recovery that lost the claim")
+		if f.st.exec(f.runID+"-review-2") != nil {
+			t.Fatal("a second attempt of the successor was created")
+		}
+		if f.st.exec(f.runID+"-review-1") == nil || f.st.run(f.runID).CurrentStepID != "review" {
+			t.Fatalf("not routed once: cursor %q", f.st.run(f.runID).CurrentStepID)
+		}
+	})
+	t.Run("divergence branch", func(t *testing.T) {
+		f := newCasFix(t, branchWorkflow(), true)
+		f.st.branches["b1"] = &domain.Branch{BranchID: "b1", RunID: f.runID, DivergenceID: "div-1",
+			Status: domain.BranchStatusInProgress, CurrentStepID: "draft"}
+		created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		e := &domain.StepExecution{ExecutionID: f.runID + "-b1-draft-1", RunID: f.runID, StepID: "draft", BranchID: "b1",
+			Status: domain.StepStatusCompleted, ActorID: "actor-a", OutcomeID: "done", Attempt: 1, CreatedAt: created}
+		f.st.steps[e.ExecutionID] = copyExec(e)
+		f.st.runs[f.runID].CurrentStepID = "divergence:div-1"
+		var second error
+		f.afterNextList(func() {
+			f.st.afterList = nil
+			second = f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID)
+		})
+		first := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID)
+		if second != nil {
+			t.Fatalf("the inner recovery: %v", second)
+		}
+		requireCode(t, first, domain.ErrConflict, "the branch recovery that lost the claim")
+		if f.st.exec(f.runID+"-b1-polish-2") != nil {
+			t.Fatal("a second attempt of the branch successor was created")
+		}
+		if f.st.exec(f.runID+"-b1-polish-1") == nil {
+			t.Fatal("the branch successor was not created")
+		}
+	})
+}
+
+// A recovery that created the branch successor but stopped before moving
+// the branch cursor is finished by the next recovery.
+func TestRecoverCompletedStep_BranchResumesItsOwnClaim(t *testing.T) {
+	f := newCasFix(t, branchWorkflow(), true)
+	f.st.branches["b1"] = &domain.Branch{BranchID: "b1", RunID: f.runID, DivergenceID: "div-1",
+		Status: domain.BranchStatusInProgress, CurrentStepID: "draft"}
+	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	e := &domain.StepExecution{ExecutionID: f.runID + "-b1-draft-1", RunID: f.runID, StepID: "draft", BranchID: "b1",
+		Status: domain.StepStatusCompleted, ActorID: "actor-a", OutcomeID: "done", Attempt: 1, CreatedAt: created}
+	f.st.steps[e.ExecutionID] = copyExec(e)
+	f.st.steps[f.runID+"-b1-polish-1"] = &domain.StepExecution{ExecutionID: f.runID + "-b1-polish-1", RunID: f.runID,
+		StepID: "polish", BranchID: "b1", Status: domain.StepStatusWaiting, Attempt: 1, CreatedAt: created.Add(time.Second)}
+	f.st.runs[f.runID].CurrentStepID = "divergence:div-1"
+	before := len(f.st.steps)
+	if err := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID); err != nil {
+		t.Fatalf("RecoverCompletedStep: %v", err)
+	}
+	b, _ := f.st.GetBranch(context.Background(), "b1")
+	if b.CurrentStepID != "polish" || len(f.st.steps) != before {
+		t.Fatalf("branch cursor = %q, executions %d -> %d; want polish and no new execution", b.CurrentStepID, before, len(f.st.steps))
+	}
+}
+
 // failingCancelAssignments fails every UpdateAssignmentStatus.
 type failingCancelAssignments struct{ *memAssignmentStore }
 

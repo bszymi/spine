@@ -288,10 +288,14 @@ terminal execution from being routed twice and lets the engine verify the submit
 6. **A failed retry and the scheduler's failed-step recovery can race** to create the next
    attempt; both build the same deterministic execution id, so the loser's `CreateStepExecution`
    fails on the primary key. No duplicate is possible; the loser logs an error.
-7. **Two replicas recovering the same completed execution** both pass `RecoverCompletedStep`'s
-   checks and compute the same next execution id; the second `CreateStepExecution` fails on the
-   primary key, and `step_completed` is re-emitted under the execution's own id (the event log
-   keeps the first copy). A crash between creating the next execution and moving the run's
+7. **Two replicas recovering the same completed execution** may both pass `RecoverCompletedStep`'s
+   checks; the routing is claimed by creating the successor first under an attempt pinned from
+   the checked listing, so one wins the primary key and the other gets a conflict, and
+   `step_completed` is re-emitted under the execution's own id (the event log keeps the first
+   copy). A *live* submit routing the same execution at that moment numbers its successor from
+   its own later listing (`advanceToNextStep`), so it can create a second attempt beside the
+   recovery's — a multi-replica rolling-restart window of milliseconds; the run cursor
+   compare-and-swap keeps the cursor from being rewound. A crash between creating the next execution and moving the run's
    cursor is finished by recovery (cursor moved, the `waiting` successor activated; before, the
    re-route created a duplicate successor attempt). A crash after the cursor moved but before the
    successor was activated is not: recovery leaves a `waiting` current step alone, so a

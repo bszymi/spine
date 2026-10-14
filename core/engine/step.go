@@ -535,12 +535,18 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 // branch's divergence and the branch still open (pending or in progress);
 // a later execution on the branch means it was routed. Then:
 //
-//   - the branch cursor is still at this step: nothing of the routing ran,
-//     so the stored outcome is routed again (step_completed is re-emitted
-//     with branch_change unknown/recovered);
-//   - the branch cursor is at the outcome's next step with no execution of
-//     it: the routing stopped between the two writes, so the next
-//     execution is created and activated (advanceBranchStep).
+//   - an outcome that ends the branch, with the branch cursor still at this
+//     step and no later execution: completeBranchStep runs again (branch
+//     completed, convergence checked);
+//   - otherwise the next execution is claimed like recoverAdvance claims
+//     it — created first under a pinned attempt, so of two recoveries one
+//     wins the primary key — when the branch cursor is still at this step
+//     (nothing of the routing ran; step_completed is re-emitted with
+//     branch_change unknown/recovered) or already at the next step (the
+//     routing stopped before creating it); only the creator then moves the
+//     branch cursor and activates the step;
+//   - a successor this recovery created whose branch cursor it did not
+//     move (it stopped in between) is finished: cursor moved, activated.
 //
 // Anything else is ErrConflict and changes nothing. A branch that was
 // marked completed but whose convergence check never ran is not covered
@@ -562,12 +568,12 @@ func (o *Orchestrator) recoverBranchStep(ctx context.Context, run *domain.Run, e
 	if err != nil {
 		return fmt.Errorf("list step executions: %w", err)
 	}
+	var later []*domain.StepExecution
 	for i := range execs {
 		e := &execs[i]
 		if e.ExecutionID != exec.ExecutionID && e.BranchID == exec.BranchID &&
 			(e.CreatedAt.After(exec.CreatedAt) || (e.StepID == exec.StepID && e.Attempt > exec.Attempt)) {
-			return domain.NewError(domain.ErrConflict,
-				fmt.Sprintf("branch %s already has a later execution (%s); step %s was routed", branch.BranchID, e.ExecutionID, exec.ExecutionID))
+			later = append(later, e)
 		}
 	}
 	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
@@ -583,29 +589,98 @@ func (o *Orchestrator) recoverBranchStep(ctx context.Context, run *domain.Run, e
 		return domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("stored outcome %q not defined for step %s", exec.OutcomeID, exec.StepID))
 	}
+	routed := func(why string) error {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("branch %s: step %s is not re-routed (%s)", branch.BranchID, exec.ExecutionID, why))
+	}
 	log := observe.Logger(ctx)
 	next := outcome.NextStep
-	switch {
-	case branch.CurrentStepID == exec.StepID:
-		log.Info("re-routing a completed branch step after recovery",
-			"run_id", run.RunID, "branch_id", branch.BranchID, "execution_id", exec.ExecutionID, "outcome_id", exec.OutcomeID)
-		o.CompleteAssignment(ctx, exec.ExecutionID)
-		completedAt := time.Now()
-		if exec.CompletedAt != nil {
-			completedAt = *exec.CompletedAt
+	if next == "" || next == "end" {
+		// completeBranchStep marks the branch completed and checks
+		// convergence; nothing to re-run when the branch moved or a later
+		// execution exists.
+		if len(later) > 0 || branch.CurrentStepID != exec.StepID {
+			return routed("the branch moved on")
 		}
-		recovered := BranchChange{RepositoryID: domain.PrimaryRepositoryID, Status: BranchChangeUnknown, Reason: EvidenceReasonRecovered}
-		o.emitStepCompleted(ctx, run, exec,
-			baseStepCompletedPayload(stepDef, outcome, exec, completedAt).withEvidence(stepDef, nil, recovered, false))
+		o.emitRecoveredBranchStep(ctx, run, exec, stepDef, outcome)
 		return o.completeBranchStep(ctx, run, exec, outcome, time.Now(), wfDef)
-	case next != "" && next != "end" && branch.CurrentStepID == next:
-		log.Info("recovery: branch routing stopped before the next execution was created; creating it",
-			"run_id", run.RunID, "branch_id", branch.BranchID, "execution_id", exec.ExecutionID, "next_step", next)
-		return o.advanceBranchStep(ctx, exec, next, exec.BranchID, time.Now(), wfDef)
-	default:
-		return domain.NewError(domain.ErrConflict,
-			fmt.Sprintf("branch %s is at %q; step %s is not re-routed", branch.BranchID, branch.CurrentStepID, exec.ExecutionID))
 	}
+
+	// The successor exists but the branch cursor was not moved: a
+	// recovery created it (the claim below) and stopped. Finish it.
+	if len(later) == 1 && later[0].StepID == next && later[0].Status == domain.StepStatusWaiting &&
+		later[0].ExecutionID == fmt.Sprintf("%s-%s-%s-%d", run.RunID, exec.BranchID, next, later[0].Attempt) &&
+		branch.CurrentStepID == exec.StepID {
+		branch.CurrentStepID = next
+		if err := o.store.UpdateBranch(ctx, branch); err != nil {
+			return fmt.Errorf("update branch current step: %w", err)
+		}
+		log.Info("recovery: resumed a branch successor whose branch cursor had not moved",
+			"run_id", run.RunID, "branch_id", branch.BranchID, "successor", later[0].ExecutionID)
+		if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+			log.Warn("branch step activation failed", "step_id", next, "error", err)
+		}
+		return nil
+	}
+	if len(later) > 0 {
+		return routed("a later execution exists on the branch")
+	}
+	if branch.CurrentStepID != exec.StepID && branch.CurrentStepID != next {
+		return routed(fmt.Sprintf("the branch is at %q", branch.CurrentStepID))
+	}
+
+	// Claim the routing by creating the successor under a pinned attempt
+	// (see recoverAdvance), then move the branch cursor — only the
+	// recovery that created it writes the cursor.
+	attempt := 1
+	for i := range execs {
+		if execs[i].StepID == next && execs[i].Attempt >= attempt {
+			attempt = execs[i].Attempt + 1
+		}
+	}
+	nextRepoID := resolveStepRepoIDByStepID(wfDef, next)
+	nextExec := &domain.StepExecution{
+		ExecutionID:  fmt.Sprintf("%s-%s-%s-%d", run.RunID, exec.BranchID, next, attempt),
+		RunID:        run.RunID,
+		StepID:       next,
+		BranchID:     exec.BranchID,
+		RepositoryID: nextRepoID,
+		Status:       domain.StepStatusWaiting,
+		Attempt:      attempt,
+		CreatedAt:    time.Now(),
+	}
+	if branch.CurrentStepID == exec.StepID {
+		o.emitRecoveredBranchStep(ctx, run, exec, stepDef, outcome)
+	}
+	if err := o.claimSuccessor(ctx, nextExec, exec); err != nil {
+		return err
+	}
+	recordStepRoutingDecision(ctx, run.RunID, next, findStepDef(wfDef, next), nextRepoID)
+	if branch.CurrentStepID != next {
+		branch.CurrentStepID = next
+		if err := o.store.UpdateBranch(ctx, branch); err != nil {
+			return fmt.Errorf("update branch current step: %w", err)
+		}
+	}
+	log.Info("branch step progressed (recovery)",
+		"run_id", run.RunID, "branch_id", branch.BranchID, "completed_step", exec.StepID, "next_step", next)
+	if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+		log.Warn("branch step activation failed", "step_id", next, "error", err)
+	}
+	return nil
+}
+
+// emitRecoveredBranchStep re-emits a recovered branch execution's
+// step_completed (same per-execution id; the event log keeps the first).
+func (o *Orchestrator) emitRecoveredBranchStep(ctx context.Context, run *domain.Run, exec *domain.StepExecution, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition) {
+	o.CompleteAssignment(ctx, exec.ExecutionID)
+	completedAt := time.Now()
+	if exec.CompletedAt != nil {
+		completedAt = *exec.CompletedAt
+	}
+	recovered := BranchChange{RepositoryID: domain.PrimaryRepositoryID, Status: BranchChangeUnknown, Reason: EvidenceReasonRecovered}
+	o.emitStepCompleted(ctx, run, exec,
+		baseStepCompletedPayload(stepDef, outcome, exec, completedAt).withEvidence(stepDef, nil, recovered, false))
 }
 
 // resumeRoutedSuccessor is RecoverCompletedStep's tail when routing
@@ -712,10 +787,11 @@ func checkSubmitter(exec *domain.StepExecution, submitter string) error {
 // It makes no step write and routes the STORED outcome. It emits
 // step_completed again under the execution's own event id with
 // branch_change unknown/recovered; an event log that already has the
-// original keeps it (ON CONFLICT DO NOTHING). Two replicas recovering the
-// same execution at once both pass the checks, then compute the same
-// deterministic next execution id, so the second CreateStepExecution fails
-// on the primary key.
+// original keeps it (ON CONFLICT DO NOTHING). Two recoveries of the same
+// execution at once may both pass the checks; the routing to a next step
+// is claimed by creating the successor first under an attempt pinned from
+// the checked listing (recoverAdvance), so exactly one creates it and the
+// other gets a conflict (codex review, round 6).
 func (o *Orchestrator) RecoverCompletedStep(ctx context.Context, executionID string) error {
 	exec, err := o.store.GetStepExecution(ctx, executionID)
 	if err != nil {
@@ -785,7 +861,89 @@ func (o *Orchestrator) RecoverCompletedStep(ctx context.Context, executionID str
 	o.emitStepCompleted(ctx, run, exec,
 		baseStepCompletedPayload(stepDef, outcome, exec, completedAt).withEvidence(stepDef, nil, recovered, false))
 
-	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, time.Now(), nil, false)
+	next := outcome.NextStep
+	if next == "" || next == "end" || (stepDef.Diverge != "" && o.divergence != nil) {
+		// Run completion and divergence start go through the normal
+		// routing: CompleteRun is a run compare-and-swap, so a second
+		// recovery gets its conflict.
+		return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, time.Now(), nil, false)
+	}
+	return o.recoverAdvance(ctx, run, exec, stepDef, outcome, wfDef, execs, next)
+}
+
+// recoverAdvance is RecoverCompletedStep's routing to a next step (codex
+// review, round 6). advanceToNextStep numbers the next attempt from the
+// executions it lists when it runs, so a second recovery that passed the
+// same checks a moment after the first one routed would create a second
+// attempt of the successor (review-2 beside review-1) and rewind the
+// cursor with its plain write. Recovery therefore claims the routing: the
+// attempt is pinned from the listing its checks used, the successor is
+// created FIRST under advanceToNextStep's deterministic id — so of two
+// recoveries exactly one creates it, the other fails on the primary key
+// and answers a conflict — and only then is the cursor moved, with the
+// conditional cursor move, and the successor activated. A crash between
+// the create and the cursor move is what resumeRoutedSuccessor finishes.
+func (o *Orchestrator) recoverAdvance(ctx context.Context, run *domain.Run, exec *domain.StepExecution, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, wfDef *domain.WorkflowDefinition, listed []domain.StepExecution, next string) error {
+	log := observe.Logger(ctx)
+	if err := o.recordStepCommitMeta(ctx, stepDef, outcome, exec, run, wfDef, nil); err != nil {
+		return err
+	}
+	attempt := 1
+	for i := range listed {
+		if listed[i].StepID == next && listed[i].Attempt >= attempt {
+			attempt = listed[i].Attempt + 1
+		}
+	}
+	if attempt > domain.MaxReworkCycles {
+		log.Warn("rework cycle limit exceeded",
+			"run_id", run.RunID, "step_id", next, "attempt", attempt, "max", domain.MaxReworkCycles)
+		return o.FailRun(ctx, run.RunID,
+			fmt.Sprintf("rework cycle limit exceeded for step %s (attempt %d)", next, attempt))
+	}
+	nextRepoID := resolveStepRepoIDByStepID(wfDef, next)
+	nextExec := &domain.StepExecution{
+		ExecutionID:  fmt.Sprintf("%s-%s-%d", run.RunID, next, attempt),
+		RunID:        run.RunID,
+		StepID:       next,
+		RepositoryID: nextRepoID,
+		Status:       domain.StepStatusWaiting,
+		Attempt:      attempt,
+		CreatedAt:    time.Now(),
+	}
+	if err := o.claimSuccessor(ctx, nextExec, exec); err != nil {
+		return err
+	}
+	recordStepRoutingDecision(ctx, run.RunID, next, findStepDef(wfDef, next), nextRepoID)
+	moved, err := o.moveCursorIfAt(ctx, run.RunID, exec.StepID, next)
+	if err != nil {
+		return err
+	}
+	if !moved {
+		log.Warn("recovery: created the successor but the run's cursor had moved; not activating it",
+			"run_id", run.RunID, "execution_id", exec.ExecutionID, "successor", nextExec.ExecutionID)
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s moved on while step %s was being recovered", run.RunID, exec.ExecutionID))
+	}
+	log.Info("step progressed (recovery)", "run_id", run.RunID, "completed_step", exec.StepID, "next_step", next)
+	if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+		log.Warn("next step activation failed", "step_id", next, "error", err)
+	}
+	return nil
+}
+
+// claimSuccessor creates a recovery's successor execution. The create is
+// the claim: when it fails because the execution already exists, another
+// recovery (or the original routing) created it first, which is a
+// conflict with nothing changed; any other failure is returned.
+func (o *Orchestrator) claimSuccessor(ctx context.Context, next, from *domain.StepExecution) error {
+	if err := o.store.CreateStepExecution(ctx, next); err != nil {
+		if _, gerr := o.store.GetStepExecution(ctx, next.ExecutionID); gerr == nil {
+			return domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("step %s was routed concurrently (%s exists)", from.ExecutionID, next.ExecutionID))
+		}
+		return fmt.Errorf("create next step: %w", err)
+	}
+	return nil
 }
 
 // autoAcknowledgeStep transitions an assigned step to in_progress before the
