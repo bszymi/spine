@@ -6,6 +6,22 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Codex 6.1 catch-up review of waves 1 and 2
+
+### Changed
+
+- **Worktree reads and creates no longer wait on a FIFO** (`core/worktreefs`, TASK-004). After its
+  checks, a leaf is opened by name once more: `ReadFile`'s read, and `Create`'s read-only pin of
+  the file it has just made. That open is now non-blocking, so a leaf swapped for a named pipe in
+  the window is refused with `ReasonChanged` instead of blocking the call, and the handles it
+  holds, until a writer appears. Request cancellation could not interrupt the wait. `ReadFile`
+  also requires the opened file to still be a regular file, because `SameFile` cannot catch every
+  swap: on Linux a leaf deleted and re-created as a FIFO can reuse the freed inode number. Git
+  cannot check out a FIFO, so only a local process writing inside the worktree could do this.
+  Nothing changes for any other input.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-001 TASK-016: ref-class push admission)
 
 ### Security
