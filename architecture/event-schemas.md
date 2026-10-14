@@ -263,27 +263,40 @@ payload:
                                  # "merge_recovery:…") or "baseline"
     changed_paths: <integer>     # 0 when unchanged, the diff's entry count when changed;
                                  # absent otherwise
-    reason: <string>             # unknown / not_applicable only: head_sha_unrecorded,
+    reason: <string>             # unknown / not_applicable: head_sha_unrecorded,
                                  # no_previous_sha, diff_failed:<kind>, divergence_branch,
-                                 # no_run_branch, recovered
+                                 # no_run_branch, recovered; unchanged:
+                                 # head_moved_tree_unchanged when the head moved but the
+                                 # diff found no changed path (absent when head == previous)
   required_outputs_unchanged: <boolean>  # the step declared required_outputs and the
-                                         # branch is provably unchanged
+                                         # branch content is provably unchanged
 ```
 
 `branch_change` is evidence, not enforcement: `required_outputs` are logical
 labels the submitter attests (KNOWN-LIMITATIONS "Step Outputs Are Self-Attested
-Labels"). `unchanged` needs no git call (the recorded head equals the previous
-one); otherwise the engine diffs the two under a 3 s timeout, and a failure or a
-timeout gives `unknown` with `diff_failed:<kind>` (`kind` is a git error kind,
-`timeout`, `canceled` or `error`; the git message is logged, never put in the
-event). With merge binding off and no `expected_head_sha` nothing is captured:
-`status: unknown`, `reason: head_sha_unrecorded`, no git call. A crash-recovery
-re-emission carries `unknown`/`recovered`. When the step declared outputs and the
-branch is unchanged, the engine also logs `WARN required outputs declared but run
-branch unchanged`. The same `branch_change` and `required_outputs_unchanged` are
-persisted for run detail (`GET /runs/{run_id}` → `step_output_evidence`) as the
-reserved `runs.commit_meta` key `spine.evidence.<execution_id>`, with merge
-binding on only.
+Labels"). `unchanged` needs no git call when the recorded head equals the
+previous one; otherwise the engine diffs the two under a 3 s timeout. A diff with
+entries is `changed`; a diff with none is `unchanged` too, with `reason:
+head_moved_tree_unchanged` — the commits in between (an empty commit, a change and
+its revert) left the tree as it was, so the step is flagged: the flag is judged on
+the content, not the SHA. A failure or a timeout gives `unknown` with
+`diff_failed:<kind>` (`kind` is a git error kind, `timeout`, `canceled` or
+`error`; the git message is logged, never put in the event). With merge binding
+off and no `expected_head_sha` nothing is captured: `status: unknown`, `reason:
+head_sha_unrecorded`, no git call. A crash-recovery re-emission carries
+`unknown`/`recovered`. When the step declared outputs and the branch is unchanged,
+the engine also logs `WARN required outputs declared but run branch unchanged`,
+once the submission's terminal write has applied (never for a submission that was
+refused or lost its race). The same `branch_change` and
+`required_outputs_unchanged` are persisted for run detail (`GET /runs/{run_id}` →
+`step_output_evidence`) as the reserved `runs.commit_meta` key
+`spine.evidence.<execution_id>`, with merge binding on only.
+
+Upgrade note: an execution completed by a binary before INIT-023 TASK-008 was
+logged under the per-step id `evt-<trace>-<step_id>-completed`. If a crash
+interrupted its routing and the process restarts on a newer binary, recovery
+re-emits it under the per-execution id, so that execution's `step_completed` is
+logged and delivered twice (once per id). This is a one-off, standalone only.
 
 ### 4.3 `step_failed`
 

@@ -284,7 +284,9 @@ terminal execution from being routed twice and lets the engine verify the submit
    compare-and-swap has already written them; `commit_meta` writes remain whole-map,
    last-writer-wins replaces built from the writer's own read of the run (TASK-005). The window is
    between the two writes of one submit; the recovery ledger's per-run lock does not cover step
-   submits.
+   submits. Only the persisted key is left behind: the `required outputs declared but run branch
+   unchanged` Warn and `step_completed` follow an applied terminal write only, and run detail
+   returns completed executions only.
 6. **A failed retry and the scheduler's failed-step recovery can race** to create the next
    attempt; both build the same deterministic execution id, so the loser's `CreateStepExecution`
    fails on the primary key. No duplicate is possible; the loser logs an error.
@@ -295,7 +297,12 @@ terminal execution from being routed twice and lets the engine verify the submit
    copy). A *live* submit routing the same execution at that moment numbers its successor from
    its own later listing (`advanceToNextStep`), so it can create a second attempt beside the
    recovery's — a multi-replica rolling-restart window of milliseconds; the run cursor
-   compare-and-swap keeps the cursor from being rewound. A crash between creating the next execution and moving the run's
+   compare-and-swap keeps the cursor from being rewound. The queue consumer (dormant: no production
+   caller) recovers a completed execution its own redelivery was refused for, but not while another
+   delivery of the same assignment is still inside `SubmitStepResult` in that consumer — that one
+   may be the winner, about to route — and the last delivery out recovers instead; a winner in
+   another process, or a submit that does not go through the consumer, is not seen, so the same
+   window applies there. A crash between creating the next execution and moving the run's
    cursor is finished by recovery (cursor moved, the `waiting` successor activated; before, the
    re-route created a duplicate successor attempt). A crash after the cursor moved but before the
    successor was activated is not: recovery leaves a `waiting` current step alone, so a
@@ -303,6 +310,14 @@ terminal execution from being routed twice and lets the engine verify the submit
    A divergence-branch execution is recovered on its branch's cursor (only the queue consumer
    reaches that today; the scheduler's recovery follows the run cursor, which is
    `divergence:<id>`); a branch marked completed whose convergence check never ran is not.
+   **Upgrade note:** recovery re-emits `step_completed` under the per-execution id
+   (`evt-<trace>-<execution_id>-completed`). An execution completed by a pre-TASK-008 binary was
+   logged under the per-step id (`evt-<trace>-<step_id>-completed`), so if a crash interrupted its
+   routing and the process restarts on this version, that one execution's `step_completed` is
+   logged and delivered twice (once per id). It is a one-off at the upgrade, standalone only (no
+   embedder calls recovery). Recovery cannot tell such an execution apart without a schema change,
+   and skipping the re-emission would lose the event of every completion a crash interrupted before
+   it was emitted.
 8. **A release whose assignment cancel fails is compensated, not atomic.** With the step
    capability `ReleaseStep` writes the step first and cancels the assignment row after it; if the
    cancel fails, the step is put back (conditionally) and the error returned. A writer that took
@@ -918,10 +933,13 @@ The following limitations have been resolved:
   - SMP's executors always attest the constant `deliverable` (`cmd/runner/operational_client.go:139`,
     `internal/engine/runner.go:379`, `internal/engine/adapters.go:232`).
 - **What is recorded instead (INIT-023 TASK-008, audit P3-19; evidence, not enforcement — owner
-  question 1: flag only):** `step_completed` carries `branch_change` (did the run branch move
-  between the previous recorded head and this submit's head; `unchanged` needs no git call) and
-  `required_outputs_unchanged` (declared outputs, branch unchanged), plus a
-  `WARN required outputs declared but run branch unchanged`; run detail (`GET /runs/{run_id}`)
+  question 1: flag only):** `step_completed` carries `branch_change` (did the run branch's content
+  change between the previous recorded head and this submit's head; `unchanged` needs no git call
+  when the heads are equal, and a head moved by commits that change no path — an empty commit, a
+  change and its revert — is `unchanged` too, `reason: head_moved_tree_unchanged`) and
+  `required_outputs_unchanged` (declared outputs, content unchanged), plus a
+  `WARN required outputs declared but run branch unchanged` once the submission applied; run
+  detail (`GET /runs/{run_id}`)
   returns the same as `step_output_evidence`, from the reserved `spine.evidence.<execution_id>`
   `commit_meta` keys (it survives event-log retention). **Review remains the control.**
 - **Evidence follows merge binding.** With binding off (an embedder without `EnableMergeBinding`,
@@ -931,7 +949,8 @@ The following limitations have been resolved:
   step's diff when no earlier head is recorded (`previous_source: baseline` shows it). A changed
   count is best-effort: a diff that fails or exceeds 3 s gives `unknown`/`diff_failed:<kind>`
   (an embedder's operator that resolves arguments by branch name first, as SMP's does, may lose
-  the count when a branch is named like the SHA; the `unchanged` signal is unaffected).
+  the count — or a moved head's `unchanged` — when a branch is named like the SHA; the
+  `unchanged` signal for equal heads needs no git call and is unaffected).
 - Enforcing outputs needs path-typed outputs in the workflow format (both corpora) behind an
   opt-in flag; a follow-up.
 

@@ -892,7 +892,9 @@ embedder (through `TransitionRunStatus`, which every `engine.RunStore` has); the
 3. **Handle the new answers.** A lost race is `domain.ErrConflict` wrapping
    `engine.ErrStepStateChanged` (step) or `engine.ErrRunStateChanged` (run, after three
    re-evaluations); test them with `errors.Is`. `IngestResult` already maps a lost submit race to
-   the persisted state with a nil error, like a sequential duplicate. `SubmitStepResult` no longer
+   the persisted state with a nil error, like a sequential duplicate, and `AcknowledgeStep` answers
+   an acknowledgment lost to the same actor's own (a concurrent retry, or its submit
+   auto-acknowledging) with the idempotent `in_progress` result. `SubmitStepResult` no longer
    routes an execution that is terminal when read: re-route a completed execution whose run did
    not advance with `Orchestrator.RecoverCompletedStep` (implement the optional
    `engine.RunCursorTransitioner` too — `(*store.PostgresStore).TransitionCurrentStep` — so its

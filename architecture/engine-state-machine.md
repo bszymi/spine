@@ -346,7 +346,10 @@ State transitions within a single entity are atomic:
   PostgreSQL store does, an embedder opts in). A writer that lost its race writes
   nothing and stops without side effects: no event, no routing, no assignment
   delivery, no handler run, no retry execution. Without the capability step writes
-  stay blind (an embedder serialises them itself).
+  stay blind (an embedder serialises them itself). An acknowledgment that loses to the
+  same actor's identical transition (a concurrent retry, or the actor's own submit
+  auto-acknowledging) answers like the sequential retry — the idempotent `in_progress`
+  result, subject to the run-status check — and any other lost race keeps the 409.
 - **A terminal execution is never routed twice.** `step.submit` on `completed` is a
   no-op transition, which a (status, actor) comparison cannot see, so the submit path
   refuses an execution that is terminal when read, and one that moved since the

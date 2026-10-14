@@ -59,8 +59,14 @@ through reserved `commit_meta` keys (5).
   `artifacts_produced` (at most 32 entries of 512 bytes; `artifacts_produced_count` exact),
   `branch_change` and `required_outputs_unchanged` (architecture/event-schemas.md §4.2). The id is
   `evt-<trace>-<execution_id>-completed`, so every rework attempt is recorded and delivered (the
-  per-step id made the event log and the delivery queue drop attempt 2 onwards). A changed branch
-  costs one `git diff` of at most 3 s at submit; an unchanged one none.
+  per-step id made the event log and the delivery queue drop attempt 2 onwards). A moved head
+  costs one `git diff` of at most 3 s at submit; an unmoved one none. `branch_change` is judged on
+  the content: a head moved by commits that change no path (an empty commit, a change and its
+  revert) is `unchanged` with `reason: head_moved_tree_unchanged`, and flagged.
+  **Upgrade note:** an execution completed by an earlier binary was logged under the per-step id;
+  if a crash interrupted its routing and the restart runs this version, crash recovery re-emits it
+  under the per-execution id, so that one execution's `step_completed` is logged and delivered
+  twice (KNOWN-LIMITATIONS "Engine State Writes …" 7).
 - **`GET /runs/{run_id}` adds `step_output_evidence`** (one entry per completed step that recorded
   it), read from the reserved `runs.commit_meta` keys `spine.evidence.<execution_id>` — no git call
   beyond the workflow load, and it survives event-log retention.
@@ -69,7 +75,10 @@ through reserved `commit_meta` keys (5).
   the engine-less fallback answers 409 when the step was bound meanwhile.
 - **A lost submit race answers 200 with the winner's persisted state** — what a sequential
   duplicate submit already got — or 409 when the execution is still live but moved (rebound,
-  released). The step's own actor acknowledging it concurrently is not a conflict.
+  released). The step's own actor acknowledging it concurrently is not a conflict. Likewise
+  `POST /steps/{execution_id}/acknowledge` that loses to the same actor's identical transition (a
+  concurrent retry, or its own submit auto-acknowledging) answers the idempotent `in_progress`
+  result a sequential retry gets, not 409; any other lost race stays 409.
 - **A submit that loses to the timeout scanner** leaves the step failed (no `step_timeout` is
   emitted, and `spine_timeouts_detected_total` is not incremented, when the submit won instead).
   A run that moved to `committing` between the run-timeout re-read and its cancel is not cancelled.
@@ -88,7 +97,8 @@ through reserved `commit_meta` keys (5).
   `(*store.PostgresStore).TransitionCurrentStep` (crash recovery's conditional cursor move);
   `Orchestrator.RecoverCompletedStep` and
   `Orchestrator.StepOutputEvidence`; the types `engine.BranchChange` and
-  `engine.StepOutputEvidence` with their `BranchChange*` / `EvidenceReason*` constants,
+  `engine.StepOutputEvidence` with their `BranchChange*` / `EvidenceReason*` constants (an
+  `unchanged` entry whose head moved carries `EvidenceReasonTreeUnchanged`),
   `engine.CommitMetaEvidencePrefix`, `engine.ErrRunStateChanged`, `engine.ErrStepStateChanged`.
 - **Shared behaviour at the next bump (not opt-in):**
   - Run-status writes go through `TransitionRunStatus` (every `RunStore` has it). A `CancelRun`
@@ -108,6 +118,9 @@ through reserved `commit_meta` keys (5).
   - With merge binding on, a step capture's single `commit_meta` write also carries
     `spine.evidence.<execution_id>` (inside the reserved `spine.` prefix; `stripReserved` keeps
     workflows from writing it), and evidence costs at most one 3 s diff on the submit path.
+  - `AcknowledgeStep` with the step capability: losing its compare-and-swap to the same actor's
+    identical transition returns the idempotent `in_progress` result (a store without the
+    capability never misses, so nothing changes there).
   - `ReleaseStep` refuses (`ErrForbidden`) an execution bound to an actor other than the releasing
     one. With the step capability it writes the step before cancelling the assignment row, and
     puts the step back (conditionally) when that cancel fails.

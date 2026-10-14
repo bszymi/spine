@@ -1636,7 +1636,10 @@ components:
           description: The step's declared required_outputs (logical labels).
         required_outputs_unchanged:
           type: boolean
-          description: The step declared required_outputs and the run branch is provably unchanged.
+          description: |
+            The step declared required_outputs and the run branch content is
+            provably unchanged (`branch_change.status` `unchanged`, including a
+            moved head whose diff found no changed path).
         branch_change:
           $ref: '#/components/schemas/BranchChange'
 
@@ -1663,7 +1666,11 @@ components:
           description: |
             For `unknown` / `not_applicable`: `head_sha_unrecorded`,
             `no_previous_sha`, `diff_failed:<kind>`, `divergence_branch`,
-            `no_run_branch` or `recovered`.
+            `no_run_branch` or `recovered`. For `unchanged`:
+            `head_moved_tree_unchanged` when the head moved but the diff of
+            the previous and the recorded head found no changed path (an
+            empty commit, a change and its revert); absent when the two heads
+            are equal.
 
     RunCancelResponse:
       type: object
