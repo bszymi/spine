@@ -347,6 +347,7 @@ Available at `GET /api/v1/system/metrics` (unauthenticated).
 | `spine_git_commit_retries_total` | Total Git commit retry attempts |
 | `spine_events_emitted_total` | Total events emitted |
 | `spine_projection_syncs_total` | Total projection sync cycles |
+| `spine_projection_files_skipped_total` | Files the projection declined to project: over the git client's read limits, or at a path Spine refuses to store (INIT-023 TASK-003). Each one is also a Warn line and a `projection_file_skipped` event |
 | `spine_scheduler_scans_total` | Total scheduler scan cycles |
 | `spine_timeouts_detected_total` | Total step/run timeouts detected |
 | `spine_orphans_detected_total` | Total orphaned runs detected |

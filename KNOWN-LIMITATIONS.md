@@ -401,12 +401,24 @@ The following limitations have been resolved:
   16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
   `git.ErrOutputTooLarge`).
   Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
-  git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses to inflate a small
-  blob stored as a delta on a huge base, or to render a gitlink `*.md` as a commit with its patch;
-  they run in the C locale so git's refusal is recognised whatever the host's language.
-  Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the first
-  16 MiB of their output and never fail on its size. Defaults pending the owner (task owner
+  git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses any single
+  allocation over it — it will not inflate a small blob stored as a delta on a huge base, or render
+  a gitlink `*.md` as a commit with its patch — and read and diff commands pin git's delta-base
+  cache to the per-blob limit (`core.deltaBaseCacheLimit`, passed in `GIT_CONFIG_PARAMETERS`
+  after any inherited entries); they run in the C locale so git's refusal is recognised whatever
+  the host's language. A command's output is held once: the parsed paths and messages share its
+  buffer, which grows in powers of two (so while it grows it is briefly held at half and full
+  size). Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the
+  first 16 MiB of their output and never fail on its size. Defaults pending the owner (task owner
   questions 1 and 4).
+- **git's memory per read is about three times the alloc limit, not one.** `GIT_ALLOC_LIMIT` is
+  checked per allocation. An object at the end of a delta chain whose bases are each just under
+  the limit is rebuilt base by base, so one step holds the base being patched, its result and the
+  delta-base cache — about 50 MiB in the git child with the defaults (49–52 MiB measured for a
+  3 MB file on a chain of eight 15 MiB bases; 124–127 MiB before the cache was pinned). Each
+  concurrent read pays it, so a replica serving N such reads at once needs about N x 50 MiB of
+  headroom for git. Lowering it means lowering the alloc limit (owner question 4), which refuses
+  more legitimate deltas.
 - **A read-command output over the ceiling fails closed.** A commit on `main` whose listing or
   diff exceeds 16 MiB (roughly 50k files, or fewer with long paths) makes `IncrementalSync`,
   `FullRebuild` and `NextID` fail for that workspace — the sync state is `error` at the previous
@@ -414,14 +426,18 @@ The following limitations have been resolved:
   takes a governed merge. Before TASK-003 the same commit exhausted the process's memory instead.
 - **`diff` runs without `GIT_ALLOC_LIMIT`.** Rename detection loads both blobs of a candidate
   pair, and a legitimate large rename on `main` must not fail `Diff`; so a large blob already on
-  the diff base can still be inflated in the git child while its rename is detected.
+  the diff base can still be inflated in the git child while its rename is detected (its
+  delta-base cache is pinned like a read command's).
 - **Named-ref window.** The size probe and the read are two git processes. A ref given by *name*
   can move between them; Spine's buffer stays capped (the read overruns into the same refusal, with
-  size -1) and git's memory stays under `GIT_ALLOC_LIMIT`. Projection reads use commit ids; the
+  size -1) and git's memory stays within the per-read bound above. Projection reads use commit ids; the
   window applies to reads by name (`?ref=<branch>`, and the merge-time status cascade, which reads
   the run branch by name until INIT-023 TASK-005 pins it to the reviewed commit).
 - **Deltas on a large base are refused.** A legitimate artifact stored as a delta on a base larger
-  than `GIT_ALLOC_LIMIT` (16 MiB by default) cannot be read and is refused as oversized.
+  than `GIT_ALLOC_LIMIT` (16 MiB by default) cannot be read and is refused as oversized. The
+  refusal says so (`git.BlobTooLargeError.GitAllocLimit`, `git_alloc_limit_bytes` on
+  `projection_file_skipped`, and the 413 message names the git allocation limit), because the
+  file itself may be well under the per-blob limit.
 - **What `git show` renders counts.** The limit applies to what is read for a path: a tree path's
   listing, or a gitlink rendered as a commit with its patch, is refused like a large blob.
 - **Not covered:** receive-time inflation (`index-pack` reconstructs a pushed delta to hash it;

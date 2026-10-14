@@ -466,15 +466,16 @@ Emitted once per file the projection declined to project (INIT-023 TASK-003): a 
 
 **When it fires:**
 
-- `oversized`: an artifact candidate (`*.md`) whose blob is over the read limit — added, modified, renamed to, or present at the rebuild head. Its content is never read, so it is reported whether or not it is a governed artifact. A projected artifact modified past the limit also loses its row (as for a parse failure). An oversized *workflow* file is a `projection_workflow_rejected` with check `read_bounds` instead (§4.14); an oversized `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- `oversized`: an artifact candidate (`*.md`) whose blob is over the read limit, or that git cannot produce within its allocation limit (`git_alloc_limit_bytes` set: a small file stored as a delta on a large base, or a gitlink rendered with its patch) — added, modified, renamed to, or present at the rebuild head. Its content is never read, so it is reported whether or not it is a governed artifact. A projected artifact modified past the limit also loses its row (as for a parse failure). An oversized *workflow* file is a `projection_workflow_rejected` with check `read_bounds` instead (§4.14); an oversized `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
 - `unsafe_path`: an artifact or workflow-definition candidate whose path is not valid UTF-8 or holds a control character (C0, DEL, C1), U+2028/U+2029, or a bidi embedding, override or isolate control (U+202A–U+202E, U+2066–U+2069). The file is never read, and no store call carries its path. A deleted or renamed-away unsafe path is ignored (no such row can exist).
 
 ```yaml
 payload:
   path: <string>          # Repository-relative path; for unsafe_path, Go-quoted (strconv.Quote: one line, valid UTF-8, every control and bidi character escaped)
   reason: <string>        # oversized | unsafe_path
-  size_bytes: <integer>   # oversized: the blob's size, or -1 when the read overran the limit (git refused an allocation, or `git show` rendered more than the probed object); null for unsafe_path
+  size_bytes: <integer>   # oversized: the blob's size, or -1 when the read overran the limit (git refused an allocation — see git_alloc_limit_bytes — or `git show` rendered more than the probed object); null for unsafe_path
   limit_bytes: <integer>  # oversized: the limit it exceeded (-1 if the git client did not report it); null for unsafe_path
+  git_alloc_limit_bytes: <integer>  # oversized, when git itself refused an allocation over this GIT_ALLOC_LIMIT while producing the content (size_bytes is then -1): the file may be under limit_bytes, and what is too large is a delta base it is stored on or a gitlink's patch; null otherwise
   commit: <string>        # The sync head the file was found at (full SHA)
 ```
 

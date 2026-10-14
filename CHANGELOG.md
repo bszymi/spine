@@ -19,11 +19,17 @@ release is cut — this file is a staging area.
   reading it; the read itself fills one buffer pre-sized to the blob. Every other read command
   fails past 16 MiB of output, stderr keeps 64 KiB (head and tail) for every command — `Clone`'s
   included, which relays the remote's sideband — and read commands run with
-  `GIT_ALLOC_LIMIT` (4 x the per-blob limit, at least 1 MiB) so git's own memory is bounded too —
-  a small blob stored as a delta on a huge base, or a gitlink named `*.md` that `git show` renders
-  as a commit with its patch, is refused by git instead of inflated. Mutating commands never fail
-  on output size (git applies a merge before it prints its diffstat); `git diff` gets the output
-  ceiling but no alloc limit (`KNOWN-LIMITATIONS.md`, "Git read bounds").
+  `GIT_ALLOC_LIMIT` (4 x the per-blob limit, at least 1 MiB), so git refuses any single
+  allocation over it: a small blob stored as a delta on a huge base, or a gitlink named `*.md`
+  that `git show` renders as a commit with its patch, is refused instead of inflated. That limit
+  is per allocation, not git's total: read and diff commands also pin git's delta-base cache
+  (`core.deltaBaseCacheLimit` = the per-blob limit; 96 MiB by default), which a chain of
+  sub-limit delta bases otherwise filled (a 3 MB read cost 127 MiB in the git child; now 49–52 MiB).
+  Each concurrent read can still hold about three times the alloc limit in git (about 50 MiB with
+  the defaults). A command's output is held once (the parsed result shares its buffer). Mutating
+  commands never fail on output size (git applies a merge before it prints its diffstat);
+  `git diff` gets the output ceiling and the pinned cache but no alloc limit
+  (`KNOWN-LIMITATIONS.md`, "Git read bounds").
 - **Non-ASCII and control-character paths are no longer silently dropped (audit P3-9, Spine
   half).** `Diff` and `ListFiles` parsed git's C-quoted output, so a governed artifact in a
   directory with a non-ASCII letter — which `artifact.Slugify` produces from an ordinary
@@ -38,12 +44,16 @@ release is cut — this file is a staging area.
 
 - **413 for oversized reads:** `GET /api/v1/artifacts/<path>` (including `?ref=<run branch>`) and
   the workflow read return `413 payload_too_large` ("… is N bytes, over the L-byte read limit")
-  for a blob over the per-blob limit. A miss keeps its kind and text (`bad revision`, 404).
+  for a blob over the per-blob limit, and ("… cannot be read within the read limits: git needed an
+  allocation over the A-byte git allocation limit …") for a file git refuses to produce — the
+  file itself may be small (a delta on a large base, or a gitlink's patch). A miss keeps its kind
+  and text (`bad revision`, 404).
 - **Projection:** an oversized `*.md` and any artifact or workflow candidate at a refused path are
   skipped, recorded and advanced past — never a sync error. A projected artifact modified past the
   limit loses its row. Each skip is a Warn line (`projection skipped file`), a
   `spine_projection_files_skipped_total` increment and a new **`projection_file_skipped`** event
-  (`architecture/event-schemas.md` §4.15). `projection_synced` gains `refused`.
+  (`architecture/event-schemas.md` §4.15); `git_alloc_limit_bytes` says when it was git's
+  allocation limit, not the file's size, that refused it. `projection_synced` gains `refused`.
 - **An oversized workflow file is a `projection_workflow_rejected` with check `read_bounds`** (its
   verified previous row kept quarantined, or not projected) and the sync advances. An oversized
   `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
@@ -61,11 +71,13 @@ release is cut — this file is a staging area.
   instead of letting it merge unvalidated.
 - **Cost:** one extra git process per `ReadFile`, two on a miss; a full rebuild of a large
   repository takes roughly twice as long.
-- **Read commands run in the C locale** (`LC_ALL=C`, `LANGUAGE=`; listings, diff, log, show,
-  rev-parse, merge-base), as the exact branch lookup already did: git translates the prefix of
-  its alloc-limit refusal, which must be recognised. On a host with a translated git their error
-  text is now English, so a miss that a translated message used to hide is classified
-  `not_found` as on an English host. Their output does not depend on the locale.
+- **Read commands and `git diff` run in the C locale** (`LC_ALL=C`, `LANGUAGE=`; listings, diff,
+  log, show, cat-file, rev-parse, merge-base), as the exact branch lookup already did: git
+  translates the prefix of its alloc-limit refusal, which must be recognised. On a host with a
+  translated git their error text is now English, so a miss that a translated message used to
+  hide is classified `not_found` as on an English host. Their output does not depend on the
+  locale. They also get `GIT_CONFIG_PARAMETERS` with the delta-base cache pin appended to any
+  inherited value (the argv is unchanged).
 
 ### Upgrade note
 
@@ -86,7 +98,8 @@ SMP runs the rebuild per workspace in SMP INIT-027 EPIC-004 TASK-008 (owner ques
 
 - **New in `adapters/git`:** `DefaultMaxBlobBytes`, `DefaultMaxOutputBytes`, `WithMaxBlobBytes`,
   `WithMaxOutputBytes`, `WithMaxGitAllocBytes`, `ErrBlobTooLarge`, `ErrOutputTooLarge`,
-  `BlobTooLargeError`, `OutputTooLargeError` (`WithMaxOutputBytes` is floored at 4 KiB and the
+  `BlobTooLargeError` (with `GitAllocLimit` set when git refused an allocation), `OutputTooLargeError`
+  (`WithMaxOutputBytes` is floored at 4 KiB and the
   alloc limit at 1 MiB, below which ordinary git output and git's own fixed allocations stop
   fitting). Refusals are `*GitError{Kind: ErrKindPermanent}`
   wrapping the typed cause, so `err.(*git.GitError)` keeps working. Every `NewCLIClient` gets the
@@ -94,7 +107,7 @@ SMP runs the rebuild per workspace in SMP INIT-027 EPIC-004 TASK-008 (owner ques
 - **`Diff` and `ListFiles` return raw paths.** A caller that C-unquoted `Diff` paths must stop
   (SMP INIT-027 EPIC-004 TASK-003 already moved its reader to its own NUL-delimited diff).
 - **New in `core/artifact`:** `RefusedFile`, `RefusalReason` (`RefusedOversized`,
-  `RefusedUnsafePath`), `UnsafePath`, `ReadLimitPhrase`, and additive `Refused` fields on
+  `RefusedUnsafePath`; `RefusedFile.GitAllocLimit`), `UnsafePath`, `ReadLimitPhrase`, and additive `Refused` fields on
   `DiscoveryResult` and `ChangeSet`. **New** `domain.UnsafeRepositoryPath`,
   `domain.EventProjectionFileSkipped`, `observe.Metrics.ProjectionFilesSkipped`.
 - **A `GitClient` that wraps `ReadFile`** should make its too-large error match
