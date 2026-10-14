@@ -42,11 +42,15 @@ release is cut — this file is a staging area.
   by that prior holder; an operator can still assign it to anyone. Without it a contributor could
   claim a colleague's reworked draft and then write the branch as its bound actor. A step its
   holder released stays claimable by others; a retry after a failed attempt is not re-offered;
-  nor is an attempt whose prior holder no longer resolves or is not `active` (it could never claim
-  it back). With `EnforceExecutionMode` on (strict), `automated_only` and `ai_only` steps are not
-  re-offered at all: only operator-provisioned machine actors can bind them, and auto-selection
-  already hands their rework to any eligible pool member, so pinning the claim to one runner or
-  agent identity would only strand the attempt when it has gone.
+  nor is an attempt whose prior holder the claim itself would refuse — the holder no longer
+  resolves, is not `active`, is off the execution's `eligible_actor_ids`, is of a type the step
+  does not admit, or lacks one of its `required_skills` (only an `active` skill counts, as for any
+  claim) — since that holder could never take it back. Each of those follows an operator or admin
+  action (suspension, `actor.remove_skill`, `skill.deprecate`, a `step.assign` allow-list), never
+  a contributor's. With `EnforceExecutionMode` on (strict), `automated_only` and `ai_only` steps
+  are not re-offered at all: only operator-provisioned machine actors can bind them, and
+  auto-selection already hands their rework to any eligible pool member, so pinning the claim to
+  one runner or agent identity would only strand the attempt when it has gone.
 - **Workflow definitions have one producer (design-check V3, V4).** The artifact endpoints'
   workflow-path guard was a raw prefix test, so `./workflows/x`, `governance/../workflows/x` and
   `workflows//x` reached `workflows/` on a run branch (and `PUT /artifacts/./workflows/<id>.yaml`

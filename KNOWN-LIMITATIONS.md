@@ -140,7 +140,13 @@ This document tracks known gaps and deferred functionality.
     reworked one — is claimable by others (release is the holder's own hand-off; it stays
     attributed through the cancelled claim row, which is how the engine tells a released attempt
     from a fresh one). A retry whose preceding attempt failed is not re-offered, nor is an attempt
-    whose prior holder no longer resolves or is not `active`. With `EnforceExecutionMode` on,
+    whose prior holder the engine's own claim checks would refuse: the holder no longer resolves,
+    is not `active`, is off the execution's `eligible_actor_ids`, is of a type the step does not
+    admit, or lacks one of its `required_skills`. The host's authorization is not among those
+    checks: the engine cannot see it, and judging it from the actor's role would lift every
+    re-offer for an embedder whose resolver leaves the role empty. So a prior holder whose role an
+    admin lowers below `spine serve`'s `execution.claim` (contributor) keeps the rework pinned
+    until the role is restored or an operator assigns it. With `EnforceExecutionMode` on,
     `automated_only` / `ai_only` steps are never re-offered (their claimers are
     operator-provisioned pool members). A reworked `hybrid` / `human_only` / unmoded author step
     whose prior holder is still `active` but no longer working on it (a person who left the work,
