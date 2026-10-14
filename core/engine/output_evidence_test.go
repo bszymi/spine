@@ -10,9 +10,11 @@ package engine
 // RequiredOutputs condition fails (e).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -329,6 +331,134 @@ func TestStepCompleted_FlagsRequiredOutputsWithoutBranchChange(t *testing.T) {
 		}
 		if got := f.st.run(f.runID).CommitMeta["note"]; got != "x" {
 			t.Fatalf("non-reserved outcome key lost: %q", got)
+		}
+	})
+
+	// Review round 1 (P2): the flag is judged on the tree, not the SHA. An
+	// empty commit (or a change and its revert) moves the head, and the
+	// diff succeeds with no entry: that proves the content unchanged, so
+	// the step is flagged and the Warn logged. Before: changed with
+	// changed_paths 0, flag false, no Warn. Mutation: dropping the
+	// zero-entry branch in branchChangeAtSubmit fails it.
+	t.Run("(j) head moved, tree unchanged: unchanged, flagged, Warn", func(t *testing.T) {
+		logs := captureEngineLogs(t)
+		f := newEvidenceFix(t, casWorkflow(), true)
+		f.eg.diffN = 0
+		f.git.setHead(branch, sha40('1'))
+		e := f.addExec("execute", domain.StepStatusInProgress, "actor-a")
+		if err := f.orch.SubmitStepResult(ctx, e.ExecutionID, StepResult{OutcomeID: "completed", ArtifactsProduced: []string{"deliverable"}}); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		_, p, _ := f.completedPayload(t, e.ExecutionID)
+		want := BranchChange{RepositoryID: "spine", Status: BranchChangeUnchanged, HeadSHA: sha40('1'),
+			PreviousSHA: base, PreviousSource: EvidencePreviousSourceBaseline, ChangedPaths: intPtr(0),
+			Reason: EvidenceReasonTreeUnchanged}
+		if !reflect.DeepEqual(p.BranchChange, &want) {
+			t.Fatalf("branch_change = %+v, want %+v", p.BranchChange, want)
+		}
+		if p.RequiredOutputsUnchanged == nil || !*p.RequiredOutputsUnchanged {
+			t.Fatal("an empty commit dodged required_outputs_unchanged")
+		}
+		if got := f.git.callCount("Diff " + base + " " + sha40('1')); got != 1 {
+			t.Fatalf("Diff(previous, head) calls = %d, want 1", got)
+		}
+		if rec, ok := f.storedEvidence(t, e.ExecutionID); !ok || !reflect.DeepEqual(rec.BranchChange, want) || !rec.RequiredOutputsUnchanged {
+			t.Fatalf("stored evidence = %+v (present %v), want the event's, flagged", rec, ok)
+		}
+		if n := strings.Count(logs.String(), requiredOutputsWarn); n != 1 {
+			t.Fatalf("%d %q warnings, want 1:\n%s", n, requiredOutputsWarn, logs)
+		}
+	})
+}
+
+const requiredOutputsWarn = "required outputs declared but run branch unchanged"
+
+// captureEngineLogs routes slog to a buffer for the rest of the test (no
+// test in this package runs in parallel).
+func captureEngineLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// failCommitMeta fails every SetCommitMeta.
+type failCommitMeta struct{ condStore }
+
+func (failCommitMeta) SetCommitMeta(context.Context, string, map[string]string) error {
+	return errors.New("store: connection reset")
+}
+
+// Review round 1 (P3): the P3-19 Warn is one of the flag's three carriers,
+// so it is logged only for a submission whose terminal write applied — not
+// for one that loses its compare-and-swap (to the timeout scanner here) or
+// is refused after the evidence was derived (a failed commit_meta write).
+// The derivation itself still ran: the losing submit stored its evidence
+// key, flagged (KNOWN-LIMITATIONS "Engine State Writes …" 5). Mutation:
+// logging in requiredOutputsUnchanged (before the write) fails the two
+// refusals.
+func TestStepCompleted_WarnOnlyAfterTheSubmitApplied(t *testing.T) {
+	ctx := context.Background()
+	submit := func(f *evidenceFix, id string) error {
+		return f.orch.SubmitStepResult(ctx, id, StepResult{OutcomeID: "completed", ArtifactsProduced: []string{"deliverable"}})
+	}
+	setup := func(t *testing.T) (*evidenceFix, *domain.StepExecution) {
+		f := newEvidenceFix(t, casWorkflow(), true)
+		f.orch.store = condStore{f.st}
+		f.git.setHead("spine/run/run-1", sha40('b')) // == baseline: unchanged
+		e := f.addExec("execute", domain.StepStatusInProgress, "actor-a")
+		return f, e
+	}
+
+	t.Run("applied: one Warn", func(t *testing.T) {
+		logs := captureEngineLogs(t)
+		f, e := setup(t)
+		if err := submit(f, e.ExecutionID); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		if n := strings.Count(logs.String(), requiredOutputsWarn); n != 1 {
+			t.Fatalf("%d warnings, want 1:\n%s", n, logs)
+		}
+	})
+	t.Run("lost to the timeout scanner: no Warn", func(t *testing.T) {
+		logs := captureEngineLogs(t)
+		f, e := setup(t)
+		f.st.afterGetExec = func(id string, n int) {
+			if n == 1 { // SubmitStepResult has its snapshot; the scanner fails the step
+				f.st.mutateExec(id, func(x *domain.StepExecution) {
+					now := time.Now()
+					x.Status, x.CompletedAt = domain.StepStatusFailed, &now
+					x.ErrorDetail = &domain.ErrorDetail{Classification: domain.FailureTimeout, Message: "timed out"}
+				})
+			}
+		}
+		if err := submit(f, e.ExecutionID); !errors.Is(err, ErrStepStateChanged) {
+			t.Fatalf("err = %v, want ErrStepStateChanged", err)
+		}
+		if rec, ok := f.storedEvidence(t, e.ExecutionID); !ok || !rec.RequiredOutputsUnchanged {
+			t.Fatalf("the losing submit's evidence = %+v (present %v); the test must exercise a flagged derivation", rec, ok)
+		}
+		if strings.Contains(logs.String(), requiredOutputsWarn) {
+			t.Fatalf("a submission that lost its race logged the audit warning:\n%s", logs)
+		}
+		if n := len(f.events(domain.EventStepCompleted)); n != 0 {
+			t.Fatalf("%d step_completed for a lost submission", n)
+		}
+	})
+	t.Run("refused after the derivation (commit_meta write failed): no Warn", func(t *testing.T) {
+		logs := captureEngineLogs(t)
+		f, e := setup(t)
+		f.orch.store = failCommitMeta{condStore{f.st}}
+		if err := submit(f, e.ExecutionID); err == nil {
+			t.Fatal("submit: want the commit_meta error")
+		}
+		if got := f.st.exec(e.ExecutionID).Status; got != domain.StepStatusInProgress {
+			t.Fatalf("execution = %s, want in_progress", got)
+		}
+		if strings.Contains(logs.String(), requiredOutputsWarn) {
+			t.Fatalf("a refused submission logged the audit warning:\n%s", logs)
 		}
 	})
 }

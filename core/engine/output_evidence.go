@@ -23,7 +23,11 @@ package engine
 //     are no longer deduplicated away; a crash-recovery re-emission of the
 //     same execution keeps its id and stays idempotent.
 //   - required_outputs_unchanged is true when the step declared outputs and
-//     the branch is provably unchanged; the engine also logs a Warn.
+//     the branch content is provably unchanged — the recorded head equals
+//     the previous one, or it moved but the diff of the two found no
+//     changed path (an empty commit, or a change and its revert: review
+//     round 1, the flag is judged on the tree, not the SHA). The engine
+//     also logs a Warn, once the submission's terminal write has applied.
 //   - With merge binding on, the same branch_change is persisted for run
 //     detail as the reserved commit_meta key spine.evidence.<execution_id>
 //     (owner question 5), in the single commit_meta write the binding
@@ -76,7 +80,9 @@ type BranchChange struct {
 	ChangedPaths *int `json:"changed_paths,omitempty"`
 	// Reason explains unknown and not_applicable (EvidenceReason*), or is
 	// "diff_failed:<kind>" with kind a git.GitErrorKind, "timeout",
-	// "canceled" or "error".
+	// "canceled" or "error". On unchanged it is empty when the head equals
+	// the previous head, and EvidenceReasonTreeUnchanged when the head
+	// moved but the diff found no changed path.
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -96,6 +102,11 @@ const (
 	EvidenceReasonNoRunBranch      = "no_run_branch"
 	EvidenceReasonRecovered        = "recovered"
 	EvidenceReasonDiffFailedPrefix = "diff_failed:"
+	// EvidenceReasonTreeUnchanged qualifies an unchanged whose head moved:
+	// the diff between the previous and the recorded head succeeded with no
+	// entry, so the commits in between (an empty commit, a change and its
+	// revert) left the tree as it was (review round 1).
+	EvidenceReasonTreeUnchanged = "head_moved_tree_unchanged"
 )
 
 // EvidencePreviousSourceBaseline is BranchChange.PreviousSource when the
@@ -201,6 +212,15 @@ func (o *Orchestrator) branchChangeAtSubmit(ctx context.Context, run *domain.Run
 		bc.Status, bc.Reason = BranchChangeUnknown, EvidenceReasonDiffFailedPrefix+kind
 		return bc
 	}
+	if len(diffs) == 0 {
+		// The head moved but the tree did not (review round 1): an empty
+		// commit — or a change and its revert — must not dodge the flag.
+		// A diff that succeeded with no entry proves the content is the
+		// previous head's, which is what "unchanged" means for P3-19; the
+		// SHAs and the reason keep the move visible.
+		bc.Status, bc.ChangedPaths, bc.Reason = BranchChangeUnchanged, intPtr(0), EvidenceReasonTreeUnchanged
+		return bc
+	}
 	bc.Status, bc.ChangedPaths = BranchChangeChanged, intPtr(len(diffs))
 	return bc
 }
@@ -234,16 +254,25 @@ func diffFailureKind(diffCtx context.Context, err error) string {
 }
 
 // requiredOutputsUnchanged is the P3-19 flag: the step declared outputs and
-// the branch is provably unchanged. Logged at Warn when true.
-func requiredOutputsUnchanged(ctx context.Context, stepDef *domain.StepDefinition, exec *domain.StepExecution, bc BranchChange) bool {
-	flag := len(stepDef.RequiredOutputs) > 0 && bc.Status == BranchChangeUnchanged
-	if flag {
-		observe.Logger(ctx).Warn("required outputs declared but run branch unchanged",
-			"run_id", exec.RunID, "step_id", exec.StepID, "execution_id", exec.ExecutionID,
-			"actor_id", exec.ActorID, "required_outputs", stepDef.RequiredOutputs, "head_sha", bc.HeadSHA,
-			"previous_source", bc.PreviousSource)
-	}
-	return flag
+// the branch content is provably unchanged (bc.Status unchanged, which
+// branchChangeAtSubmit also records for a moved head whose diff found no
+// path). It has no side effect: SubmitStepResult derives it before its
+// commit_meta write (the evidence key rides the binding's write) and logs
+// it with warnRequiredOutputsUnchanged only after the terminal write
+// applied (review round 1).
+func requiredOutputsUnchanged(stepDef *domain.StepDefinition, bc BranchChange) bool {
+	return len(stepDef.RequiredOutputs) > 0 && bc.Status == BranchChangeUnchanged
+}
+
+// warnRequiredOutputsUnchanged logs the P3-19 audit warning for an
+// execution whose submission completed it. It is one of the flag's three
+// carriers (with step_completed and run detail), so it is never logged for
+// a submission that was refused or lost its race.
+func warnRequiredOutputsUnchanged(ctx context.Context, stepDef *domain.StepDefinition, exec *domain.StepExecution, bc BranchChange) {
+	observe.Logger(ctx).Warn("required outputs declared but run branch unchanged",
+		"run_id", exec.RunID, "step_id", exec.StepID, "execution_id", exec.ExecutionID,
+		"actor_id", exec.ActorID, "required_outputs", stepDef.RequiredOutputs, "head_sha", bc.HeadSHA,
+		"previous_sha", bc.PreviousSHA, "previous_source", bc.PreviousSource, "reason", bc.Reason)
 }
 
 // evidenceMetaEntry returns the reserved commit_meta key and value
@@ -259,7 +288,14 @@ func evidenceMetaEntry(executionID string, bc BranchChange, unchanged bool) (str
 // stepCompletedEventID is step_completed's event id: per execution
 // (Decision D8), so every rework attempt is recorded, and stable for one
 // execution, so a crash-recovery re-emission is deduplicated against the
-// original (the event log keeps the first copy).
+// original (the event log keeps the first copy). Upgrade note (review
+// round 1): an execution completed by a binary before INIT-023 TASK-008
+// was logged under the per-step id evt-<trace>-<step_id>-completed, so
+// recovering one whose routing a crash interrupted across the upgrade
+// emits a second step_completed (KNOWN-LIMITATIONS "Engine State Writes
+// …" 7). Recovery cannot tell such an execution apart without a schema
+// change, and skipping the re-emission would lose the event of every
+// execution whose completion a crash interrupted before it was emitted.
 func stepCompletedEventID(run *domain.Run, exec *domain.StepExecution) string {
 	return fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.ExecutionID)
 }

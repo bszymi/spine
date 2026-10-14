@@ -371,7 +371,8 @@ func (o *Orchestrator) trackStepTimeout(ctx context.Context, exec *domain.StepEx
 // Every write is conditional on the (status, actor) read (writeStepExecution;
 // the terminal write expects the post-acknowledge state), so with a store
 // that implements StepExecutionTransitioner a submit that loses a race
-// stops before CompleteAssignment, step_completed and routing.
+// stops before CompleteAssignment, the required-outputs Warn,
+// step_completed and routing.
 func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string, result StepResult) error {
 	exec, err := o.store.GetStepExecution(ctx, executionID)
 	if err != nil {
@@ -442,9 +443,12 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	// capture and the run's previous binding as read above, before this
 	// submit's commit_meta write. At most one time-boxed diff; it never
 	// fails the submit. With a capture it is persisted in the binding's
-	// own commit_meta write below (hb.extra).
+	// own commit_meta write below (hb.extra). The derivation has no other
+	// side effect: the flag's Warn is logged only once the terminal write
+	// below has applied (review round 1), so a submission that is refused
+	// or loses its race leaves no audit warning behind.
 	change := o.branchChangeAtSubmit(ctx, run, exec, hb)
-	unchanged := requiredOutputsUnchanged(ctx, stepDef, exec, change)
+	unchanged := requiredOutputsUnchanged(stepDef, change)
 	if hb != nil {
 		key, val, err := evidenceMetaEntry(exec.ExecutionID, change, unchanged)
 		if err != nil {
@@ -518,6 +522,9 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 
 	o.CompleteAssignment(ctx, executionID)
 
+	if unchanged {
+		warnRequiredOutputsUnchanged(ctx, stepDef, exec, change)
+	}
 	o.emitStepCompleted(ctx, run, exec,
 		baseStepCompletedPayload(stepDef, outcome, exec, now).withEvidence(stepDef, result.ArtifactsProduced, change, unchanged))
 
