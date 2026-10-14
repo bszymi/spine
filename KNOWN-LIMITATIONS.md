@@ -395,25 +395,38 @@ refuses an unprovenanced branch-protection removal. What remains:
    (audit F8, INIT-023 TASK-012), operator override pushes and ADR-008 operator bypass writes are
    not held by the merge guard (operators may land changes directly by design). Workflow
    definitions get no projection provenance check.
-6. **Post-merge refusals are permanent** (owner question 6). A merge whose result changes a
+6. **A refused merge that cannot be taken back blocks every governed merge.** If the post-merge
+   assertion refuses a merge and `ResetBranch` fails, the refused commit is still on the local
+   `main`, and the next governed merge — of any run — would build on it and publish it. The
+   refusing run therefore stays `committing` with the block on its `commit_meta`
+   (`spine.governance.blocked_target`), and every governed merge is refused as unavailable until
+   the local `main` no longer contains the refused merge (each attempt retries the take-back; an
+   operator can reset `main` by hand, after which the block clears by itself). The block of other
+   runs is held in process: after a restart only the refusing run's own retries see it, so
+   another run merging first could still publish the refused commit. INIT-023 TASK-012's worktree
+   lock makes the take-back itself reliable. Merge binding's own refusals have the same residual
+   ("Governed Merge Binding" 7).
+7. **Post-merge refusals are permanent** (owner question 6). A merge whose result changes a
    governed path the pre-merge evaluation did not cover (only under non-default git merge
    configuration such as `merge.directoryRenames` or custom merge drivers) takes `merge_failed`
    on every attempt; an operator must land such a change directly.
-7. **Held runs have no timeout.** Cancel is not allowed from `committing`; an operator approves or
-   rejects. The decision API runs the approved merge inside the request.
-8. **Decision races.** A reject that lands while an approved merge is already in flight returns
+8. **Held runs have no timeout.** Cancel is not allowed from `committing`; an operator approves or
+   rejects. The decision API runs the approved merge inside the request. Re-evaluating a held run
+   on every scheduler tick re-emits `governance.merge_held` under the same event id (the event log
+   and delivery queue de-duplicate it; live SSE listeners can see the repeat).
+9. **Decision races.** A reject that lands while an approved merge is already in flight returns
    `409` (the merge won), but its revocation still empties the approval keys, so that merge loses
    its projection provenance: a relaxation it carried is refused until re-affirmed (fail-safe).
    Stores without the atomic `MergeCommitMeta` capability (an embedder's `RunStore`) use a
    read-modify-write, which can drop a concurrent engine write to the same run's reserved keys;
    `*store.PostgresStore` has the capability. Full serialisation needs TASK-012's worktree lock.
-9. **Symlinks.** A symlink that is itself a guarded path is a governed change, but edits to the
+10. **Symlinks.** A symlink that is itself a guarded path is a governed change, but edits to the
    target of a symlink already on `main` that points outside the guarded trees are not. A symlink
    inside the run's own evidence directory is exempt like any evidence file. Spine's projection
    reads by git path and does not follow links; an embedder's runner may.
-10. **Approval records are not branch-scoped.** A consumed approval names the engine's merge
+11. **Approval records are not branch-scoped.** A consumed approval names the engine's merge
     target (`main`); the projection proves landing by reachability from its own authoritative head.
-11. **The lifecycle exemption's separation-of-duties check** compares completed step executions
+12. **The lifecycle exemption's separation-of-duties check** compares completed step executions
     only (an actor who drafted and abandoned an execution is not counted).
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open

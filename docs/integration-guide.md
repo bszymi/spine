@@ -907,7 +907,7 @@ an embedder opts in. The library's zero value is the v1 behaviour.
 5. **Atomic writes (recommended).** If your `RunStore` can implement
    `MergeCommitMeta(ctx, runID string, patch map[string]string) error` (`commit_meta || patch`),
    the engine uses it; otherwise it falls back to read-modify-write (KNOWN-LIMITATIONS
-   "Governance-Path Guard" 8). `*store.PostgresStore` implements it.
+   "Governance-Path Guard" 9). `*store.PostgresStore` implements it.
 6. **Enable the projection guard:**
    ```go
    projectionSvc.WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{

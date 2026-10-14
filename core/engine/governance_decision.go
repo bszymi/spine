@@ -184,7 +184,7 @@ func (o *Orchestrator) approveGovernanceMerge(ctx context.Context, run *domain.R
 		return nil, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("run %s left committing (%s) while the approval was recorded; nothing was merged", run.RunID, fresh.Status))
 	}
-	o.emitGovernanceDecided(ctx, run, gc, touched, "approved", req, fmt.Sprintf("approve-%s-%d", shortSHA12(gc.BoundSHA), now.UnixMilli()))
+	o.emitGovernanceDecided(ctx, run, gc, touched, "approved", req, decisionEventSuffix("approve", gc.BoundSHA))
 	log.Info("governance guard: governance change approved",
 		"run_id", run.RunID, "bound_sha", gc.BoundSHA, "actor_id", req.Actor.ActorID, "actor_role", string(req.Actor.Role))
 	o.clearGovernanceHold(ctx, fresh)
@@ -203,6 +203,17 @@ func (o *Orchestrator) approveGovernanceMerge(ctx context.Context, run *domain.R
 
 func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Run, gc *branchprotect.GovernanceCheck, touched []string, req GovernanceDecisionRequest, result *GovernanceDecisionResult) (*GovernanceDecisionResult, error) {
 	log := observe.Logger(ctx)
+	// Decide the route before writing anything (codex review round 2): a
+	// workflow or execution lookup that fails must not be mistaken for "no
+	// publish step" and fail a run that should have been routed back.
+	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+	if err != nil || wfDef == nil {
+		return nil, domain.NewErrorWithCause(domain.ErrUnavailable, "the run's workflow could not be loaded; try again", err)
+	}
+	publish, err := o.activePublishExecution(ctx, run, wfDef)
+	if err != nil {
+		return nil, domain.NewErrorWithCause(domain.ErrUnavailable, "the run's step executions could not be read; try again", err)
+	}
 	// Revoke first: TASK-005 keeps reserved keys across later outcome
 	// writes, so an approval that survived the reject would merge the same
 	// commit when the author resubmits it unchanged after the loop-back.
@@ -221,27 +232,25 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 	rejectErr := &git.GitError{Kind: git.ErrKindPermanent, Op: "governance_guard",
 		Message: fmt.Sprintf("governance change rejected by %s: %s", req.Actor.ActorID, req.Reason)}
 
-	if wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion); err == nil && wfDef != nil {
-		if exec, _ := o.findActiveMergeStep(ctx, run, wfDef); exec != nil {
-			// Publish step: the merge_failed route, whose run transition is
-			// a compare-and-swap from committing (advancePublishStepIfAny).
-			o.recordGitConflictOnStep(ctx, run, rejectErr)
-			if err := o.advancePublishStepIfAny(ctx, run, "merge_failed"); err != nil {
-				return nil, domain.NewErrorWithCause(domain.ErrInternal, "route the rejected merge back", err)
-			}
-			after, err := o.store.GetRun(ctx, run.RunID)
-			if err == nil && (after.Status == domain.RunStatusCompleted || after.Status == domain.RunStatusCommitting) {
-				return nil, domain.NewError(domain.ErrConflict,
-					fmt.Sprintf("run %s is %s: the reject did not take effect", run.RunID, after.Status))
-			}
-			o.emitGovernanceDecided(ctx, run, gc, touched, "rejected", req, fmt.Sprintf("reject-%s-%d", shortSHA12(gc.BoundSHA), time.Now().UnixMilli()))
-			log.Info("governance guard: governance change rejected; run routed back",
-				"run_id", run.RunID, "bound_sha", gc.BoundSHA, "actor_id", req.Actor.ActorID)
-			if err == nil {
-				result.RunStatus = after.Status
-			}
-			return result, nil
+	if publish {
+		// Publish step: the merge_failed route, whose run transition is a
+		// compare-and-swap from committing (advancePublishStepIfAny).
+		o.recordGitConflictOnStep(ctx, run, rejectErr)
+		if err := o.advancePublishStepIfAny(ctx, run, "merge_failed"); err != nil {
+			return nil, domain.NewErrorWithCause(domain.ErrInternal, "route the rejected merge back", err)
 		}
+		after, err := o.store.GetRun(ctx, run.RunID)
+		if err == nil && (after.Status == domain.RunStatusCompleted || after.Status == domain.RunStatusCommitting) {
+			return nil, domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("run %s is %s: the reject did not take effect", run.RunID, after.Status))
+		}
+		o.emitGovernanceDecided(ctx, run, gc, touched, "rejected", req, decisionEventSuffix("reject", gc.BoundSHA))
+		log.Info("governance guard: governance change rejected; run routed back",
+			"run_id", run.RunID, "bound_sha", gc.BoundSHA, "actor_id", req.Actor.ActorID)
+		if err == nil {
+			result.RunStatus = after.Status
+		}
+		return result, nil
 	}
 
 	// No publish step: fail the run, compare-and-swap from committing
@@ -259,11 +268,50 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 	o.terminateLiveSteps(ctx, run.RunID, "run failed: governance change rejected")
 	o.emitEvent(ctx, domain.EventRunFailed, run.RunID, run.TraceID,
 		fmt.Sprintf("evt-%s-failed", shortTraceID(run.TraceID)), nil)
-	o.emitGovernanceDecided(ctx, run, gc, touched, "rejected", req, fmt.Sprintf("reject-%s-%d", shortSHA12(gc.BoundSHA), time.Now().UnixMilli()))
+	o.emitGovernanceDecided(ctx, run, gc, touched, "rejected", req, decisionEventSuffix("reject", gc.BoundSHA))
 	log.Info("governance guard: governance change rejected; run failed, branch preserved",
 		"run_id", run.RunID, "bound_sha", gc.BoundSHA, "actor_id", req.Actor.ActorID)
 	result.RunStatus = domain.RunStatusFailed
 	return result, nil
+}
+
+// activePublishExecution reports whether the run's workflow has a publish
+// (merge-handler) step with a live execution — the reject's route-back.
+// Unlike findActiveMergeStep, a store failure is an error, not "none".
+func (o *Orchestrator) activePublishExecution(ctx context.Context, run *domain.Run, wfDef *domain.WorkflowDefinition) (bool, error) {
+	var publishID string
+	for i := range wfDef.Steps {
+		s := &wfDef.Steps[i]
+		if s.Type == domain.StepTypeInternal && s.Execution != nil && s.Execution.Handler == "merge" {
+			publishID = s.ID
+			break
+		}
+	}
+	if publishID == "" {
+		return false, nil
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return false, err
+	}
+	for i := range execs {
+		if execs[i].StepID == publishID && !execs[i].Status.IsTerminal() {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// decisionEventSuffix makes each decision's event id unique (codex review
+// round 2): two decisions on the same commit within one second — concurrent
+// operators, a manual retry — must not collapse into one audit event in the
+// de-duplicating event log.
+func decisionEventSuffix(kind, sha string) string {
+	rnd, err := observe.GenerateTraceID()
+	if err != nil || len(rnd) < 12 {
+		rnd = fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s-%s-%d-%s", kind, shortSHA12(sha), time.Now().UnixMilli(), rnd[:12])
 }
 
 func (o *Orchestrator) emitGovernanceDecided(ctx context.Context, run *domain.Run, gc *branchprotect.GovernanceCheck, touched []string, decision string, req GovernanceDecisionRequest, suffix string) {

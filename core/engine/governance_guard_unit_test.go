@@ -674,3 +674,107 @@ func (p gateOnlyPolicy) Evaluate(ctx context.Context, req branchprotect.Request)
 	}
 	return p.gate.Evaluate(ctx, req)
 }
+
+// TestGovernanceGuard_FailedTakeBackBlocksMerges (codex review round 2,
+// P1): when the post-merge assertion refuses a merge and the take-back
+// fails, the refused merge is still on the local main. The run stays
+// committing with the block recorded on it, every governed merge — another
+// run's included — is refused as unavailable without merging, and once the
+// take-back succeeds the block clears and the refusal takes its permanent
+// route.
+func TestGovernanceGuard_FailedTakeBackBlocksMerges(t *testing.T) {
+	f := newGovFake(t, publishWorkflow(), defaultGuard(), true, "src/a.go")
+	// The merge itself changes a governed path the evaluation never saw.
+	f.g.diffs[gBase+" "+gMerge] = []git.FileDiff{{Path: ".spine/branch-protection.yaml", Status: "modified"}}
+	f.g.resetErr = &git.GitError{Kind: git.ErrKindTransient, Op: "reset_branch", Message: "repository locked"}
+	f.g.setHead("main", gMerge) // MergeBound moved the local main
+	_ = f.merge()
+	if f.run.Status != domain.RunStatusCommitting {
+		t.Fatalf("run = %s, want committing (blocked, not routed away)", f.run.Status)
+	}
+	if got := f.run.CommitMeta[CommitMetaGovernanceBlockedTarget]; got != gMerge+" "+gBase {
+		t.Fatalf("blocked-target key = %q", got)
+	}
+	if len(f.g.pushes) != 0 || f.g.callCount("binder:MergeBound") != 1 {
+		t.Fatalf("pushes %v, merges %d", f.g.pushes, f.g.callCount("binder:MergeBound"))
+	}
+
+	// Another committing run in the same process is blocked too.
+	run2 := &domain.Run{RunID: "run-other999", TraceID: "trace-ffffffffffffffff", Status: domain.RunStatusCommitting,
+		TaskPath: "tasks/u.md", WorkflowPath: f.wf.Path, WorkflowID: f.wf.ID, WorkflowVersion: "v1",
+		BranchName: "spine/run/run-other999", CurrentStepID: "publish",
+		CommitMeta: map[string]string{CommitMetaBoundSHA: sha40('7'), CommitMetaBoundBy: boundByStep("review", "run-other999-review-1")}}
+	f.store.runs[run2.RunID] = run2
+	f.g.setHead(run2.BranchName, sha40('7'))
+	err := f.orch.MergeRunBranch(context.Background(), run2.RunID)
+	requireSpineCode(t, err, domain.ErrUnavailable)
+	if !errors.Is(err, errGovernanceTargetBlocked) || f.g.callCount("binder:MergeBound") != 1 {
+		t.Fatalf("other run: err %v, merges %d; want blocked before merging", err, f.g.callCount("binder:MergeBound"))
+	}
+
+	// The take-back works again: the block clears, the refused run merges
+	// again, is refused again with a clean take-back, and routes back.
+	f.g.resetErr = nil
+	_ = f.merge()
+	if f.run.CommitMeta[CommitMetaGovernanceBlockedTarget] != "" {
+		t.Fatalf("block not cleared: %q", f.run.CommitMeta[CommitMetaGovernanceBlockedTarget])
+	}
+	if f.run.Status != domain.RunStatusActive || f.step("publish").OutcomeID != "merge_failed" {
+		t.Fatalf("run %s publish %q, want the permanent refusal route", f.run.Status, f.step("publish").OutcomeID)
+	}
+	if len(f.g.pushes) != 0 {
+		t.Fatalf("pushed %v", f.g.pushes)
+	}
+	// The other run is no longer blocked by it.
+	f.orch.governance.mu.Lock()
+	n := len(f.orch.governance.blocks)
+	f.orch.governance.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("in-process blocks left: %d", n)
+	}
+}
+
+// TestGovernanceDecision_RejectLookupFailureIsRetryable (codex review
+// round 2): a reject whose route cannot be determined — the workflow or
+// the step executions cannot be read — is refused as unavailable before
+// anything is written, instead of failing a run that should route back.
+func TestGovernanceDecision_RejectLookupFailureIsRetryable(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		breakIt func(*govFake)
+	}{
+		{"workflow load", func(f *govFake) { f.orch.wfLoader = &mockWorkflowLoader{err: errors.New("git down")} }},
+		{"execution list", func(f *govFake) { f.store.listErr = errors.New("database down") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newGovFake(t, publishWorkflow(), defaultGuard(), true, govPaths...)
+			requireHoldErr(t, f.merge())
+			c.breakIt(f)
+			_, err := f.decide(GovernanceReject, gBound, govOperator, "no")
+			requireSpineCode(t, err, domain.ErrUnavailable)
+			if f.run.Status != domain.RunStatusCommitting || len(f.merger.mergeCalls) != 0 {
+				t.Fatalf("run %s, commit_meta writes %v; want committing and nothing written", f.run.Status, f.merger.mergeCalls)
+			}
+			if len(f.eventsOf(domain.EventGovernanceMergeDecided)) != 0 || len(f.eventsOf(domain.EventRunFailed)) != 0 {
+				t.Fatal("events emitted for a refused reject")
+			}
+		})
+	}
+}
+
+// TestGovernanceDecision_UniqueEventIDs (codex review round 2): two
+// approvals of the same commit in quick succession (a retry after a
+// transient merge failure) are two audit events, not one de-duplicated id.
+func TestGovernanceDecision_UniqueEventIDs(t *testing.T) {
+	f := newGovFake(t, publishWorkflow(), defaultGuard(), true, govPaths...)
+	f.g.mergeErr = &git.GitError{Kind: git.ErrKindTransient, Op: "merge", Message: "repository locked"}
+	for i := 0; i < 2; i++ {
+		if _, err := f.decide(GovernanceApprove, gBound, govOperator, ""); err != nil {
+			t.Fatalf("approve %d: %v", i, err)
+		}
+	}
+	ev := f.eventsOf(domain.EventGovernanceMergeDecided)
+	if len(ev) != 2 || ev[0].EventID == ev[1].EventID {
+		t.Fatalf("decision events = %+v, want two distinct ids", ev)
+	}
+}

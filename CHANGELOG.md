@@ -32,7 +32,9 @@ ADR is `Proposed` until the owner signs it off). No migration.
   criss-cross history let a run revert another run's tightened `.spine/branch-protection.yaml` or
   workflow unseen. After the merge, before the push, a merge that changed a governed path the
   evaluation did not cover (non-default merge configuration) is refused permanently, taken back to
-  the base and never pushed.
+  the base and never pushed. If that take-back fails, the run stays `committing` and every
+  governed merge is refused as unavailable until the local `main` no longer contains the refused
+  merge (each attempt retries the take-back).
 - **The projection refuses an unprovenanced protection removal.** A branch-protection config that
   removes a protection kind from the authoritative branch is installed only when a database record
   of an operator act that **changed** the config matches it byte for byte, is reachable from the

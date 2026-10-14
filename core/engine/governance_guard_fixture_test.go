@@ -100,7 +100,15 @@ type govStore struct {
 	stepWrites  int
 	holdWrites  int
 	setMetaErr  error
+	listErr     error
 	beforeWrite func(kind string) // called once per commit_meta write, before it applies
+}
+
+func (s *govStore) ListStepExecutionsByRun(ctx context.Context, runID string) ([]domain.StepExecution, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.mockRunStore.ListStepExecutionsByRun(ctx, runID)
 }
 
 func newGovStore(run *domain.Run, steps ...*domain.StepExecution) *govStore {

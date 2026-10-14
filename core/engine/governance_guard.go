@@ -54,6 +54,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -122,13 +123,30 @@ const GovernanceHoldRuleID = "governance-path-guard"
 // defaultMaxReportedPaths caps reported path lists.
 const defaultMaxReportedPaths = 100
 
-// governanceGuard is the validated configuration.
+// governanceGuard is the validated configuration, plus the in-process
+// record of refused merges that could not be taken back (blocks).
 type governanceGuard struct {
 	cfg         GovernanceGuard
 	paths       branchprotect.GovernancePaths
 	bases       MergeBaseLister
 	maxReported int
+
+	mu sync.Mutex
+	// blocks maps a refused merge commit still on the local target to the
+	// base it must be taken back to (recordGovernanceBlock).
+	blocks map[string]string
 }
+
+// CommitMetaGovernanceBlockedTarget is the reserved commit_meta key a run
+// carries while a merge the guard refused for it could not be taken back:
+// "<merge sha> <base sha>". It survives a restart (the in-process block
+// does not), so the run's own retries restore the target before anything
+// else (codex review round 2).
+const CommitMetaGovernanceBlockedTarget = "spine.governance.blocked_target"
+
+// errGovernanceTargetBlocked is the cause of the error for a merge refused
+// because a refused merge is still on the local target.
+var errGovernanceTargetBlocked = errors.New("engine: a merge the governance guard refused is still on the local target")
 
 // WithGovernanceGuard configures the governance-path guard. With Enabled
 // false it turns the guard off. With Enabled true it returns an error, and
@@ -209,6 +227,9 @@ func (o *Orchestrator) governanceGate(ctx context.Context, run *domain.Run, src 
 		return false, nil
 	}
 	log := observe.Logger(ctx)
+	if err := o.checkGovernanceBlocks(ctx, run); err != nil {
+		return true, err
+	}
 	gc, err := o.buildGovernanceCheck(ctx, run, *src)
 	if err != nil {
 		log.Error("governance guard: cannot compute the merge's changed paths; merge refused",
@@ -775,6 +796,24 @@ func (o *Orchestrator) assertGovernedMerge(ctx context.Context, run *domain.Run,
 	}
 
 	tb := o.takeBackGovernedMerge(ctx, res)
+	if !tb.clean {
+		// The refused merge is still on the local target (codex review
+		// round 2): routing the run away would leave it there for the next
+		// governed merge — of any run — to build on and publish. Block every
+		// governed merge until the target is restored, and keep this run in
+		// committing so its retries keep trying the take-back.
+		o.recordGovernanceBlock(ctx, run, res.SHA, res.BaseSHA)
+		blocked := &git.GitError{Kind: git.ErrKindTransient, Op: "governance_guard",
+			Message: "governance guard: a refused merge could not be taken back; governed merges are blocked until the local " +
+				authoritativeBranch + " is restored to " + res.BaseSHA + " (will retry): " + tb.detail}
+		if recErr := o.recordPrimaryMergeOutcome(ctx, run, res.SHA, blocked, ""); recErr != nil {
+			return false, recErr
+		}
+		log.Error("governance guard: refused merge could not be taken back; governed merges are blocked until the local target is restored",
+			"run_id", run.RunID, "merge_sha", res.SHA, "base_sha", res.BaseSHA, "extra_path_count", len(extra), "error", derr)
+		o.emitGovernanceHeld(ctx, run, gc, pass.touched, "attempt-"+shortSHA12(res.SHA), "", true, extra)
+		return true, o.retryMerge(ctx, run)
+	}
 	if derr != nil {
 		var gitErr *git.GitError
 		if tb.clean && errors.As(derr, &gitErr) && gitErr.IsRetryable() {
@@ -842,4 +881,88 @@ func (o *Orchestrator) takeBackGovernedMerge(ctx context.Context, res git.MergeR
 		return takeBack{detail: "the local " + authoritativeBranch + " still holds the refused merge (take-back failed)"}
 	}
 	return takeBack{detail: "the local " + authoritativeBranch + " was restored to " + res.BaseSHA, clean: true, restoredTo: res.BaseSHA}
+}
+
+// recordGovernanceBlock remembers a refused merge that is still on the
+// local target: in process (every run's gate checks it) and on the run
+// (CommitMetaGovernanceBlockedTarget, so the run's own retries restore the
+// target after a restart).
+func (o *Orchestrator) recordGovernanceBlock(ctx context.Context, run *domain.Run, merge, base string) {
+	g := o.governance
+	g.mu.Lock()
+	if g.blocks == nil {
+		g.blocks = map[string]string{}
+	}
+	g.blocks[merge] = base
+	g.mu.Unlock()
+	if err := o.mergeRunCommitMeta(ctx, run.RunID, map[string]string{CommitMetaGovernanceBlockedTarget: merge + " " + base}); err != nil {
+		observe.Logger(ctx).Error("governance guard: failed to persist the blocked target on the run",
+			"run_id", run.RunID, "merge_sha", merge, "error", err)
+	}
+}
+
+// checkGovernanceBlocks runs before any governed merge while the guard is
+// on. For every refused merge still recorded (in process, or on this run):
+// if it is no longer in the local target's history the block is cleared;
+// if the target is still exactly at it, it is taken back now
+// (compare-and-swap) and cleared; otherwise — the take-back fails, or
+// something was committed on top of it — the merge is refused as
+// unavailable (the run stays committing), because merging now would
+// publish the refused content. An operator clears a stuck block by
+// resetting the local target so it no longer contains the refused merge.
+func (o *Orchestrator) checkGovernanceBlocks(ctx context.Context, run *domain.Run) error {
+	g := o.governance
+	g.mu.Lock()
+	blocks := make(map[string]string, len(g.blocks)+1)
+	for m, b := range g.blocks {
+		blocks[m] = b
+	}
+	g.mu.Unlock()
+	own := ""
+	if v := run.CommitMeta[CommitMetaGovernanceBlockedTarget]; v != "" {
+		if m, b, ok := strings.Cut(v, " "); ok && isBoundObjectID(m) && isBoundObjectID(b) {
+			blocks[m] = b
+			own = m
+		}
+	}
+	if len(blocks) == 0 {
+		return nil
+	}
+	log := observe.Logger(ctx)
+	unavailable := func(msg string, cause error) error {
+		log.Error("governance guard: governed merge refused; "+msg, "run_id", run.RunID, "error", cause)
+		return domain.NewErrorWithCause(domain.ErrUnavailable, "governance guard: "+msg, errors.Join(errGovernanceTargetBlocked, cause))
+	}
+	for m, b := range blocks {
+		tip, err := o.binder.ResolveBranchHead(ctx, authoritativeBranch)
+		if err != nil {
+			return unavailable("the local "+authoritativeBranch+" could not be read to check a refused merge", err)
+		}
+		in, err := o.binder.IsAncestor(ctx, m, tip)
+		if err != nil {
+			return unavailable("could not check whether refused merge "+m+" is still on the local "+authoritativeBranch, err)
+		}
+		if in && tip == m {
+			if err := o.binder.ResetBranch(ctx, authoritativeBranch, b, m); err != nil {
+				return unavailable("refused merge "+m+" is still on the local "+authoritativeBranch+" and could not be taken back to "+b, err)
+			}
+			log.Warn("governance guard: refused merge taken back", "merge_sha", m, "restored_to", b)
+			in = false
+		}
+		if in {
+			return unavailable("refused merge "+m+" is in the history of the local "+authoritativeBranch+
+				" (something was committed on top of it); reset it so it no longer contains the refused merge", nil)
+		}
+		g.mu.Lock()
+		delete(g.blocks, m)
+		g.mu.Unlock()
+		if m == own {
+			if err := o.mergeRunCommitMeta(ctx, run.RunID, map[string]string{CommitMetaGovernanceBlockedTarget: ""}); err != nil {
+				log.Warn("governance guard: failed to clear the blocked target on the run", "run_id", run.RunID, "error", err)
+			} else if run.CommitMeta != nil {
+				run.CommitMeta[CommitMetaGovernanceBlockedTarget] = ""
+			}
+		}
+	}
+	return nil
 }
