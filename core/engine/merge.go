@@ -756,6 +756,15 @@ func (o *Orchestrator) cascadePaths(ctx context.Context, run *domain.Run) []stri
 
 // appendAddedMarkdown appends every added .md path in diffs to paths,
 // once, skipping taskPath (already first).
+//
+// A path discovery refuses (domain.UnsafeRepositoryPath: a control
+// character, U+2028/U+2029, a bidi control, invalid UTF-8) is skipped too
+// (wave 3 review, codex): it is never a projected artifact, and since
+// TASK-003's NUL-delimited Diff lists it raw instead of C-quoted, it was
+// read and rewritten, and the cascade commit then failed as a whole on
+// it — CommitFilesOnto refuses a control byte in a path — so a run that
+// added one such file merged with its task's status never updated. Before
+// TASK-003 git's quoted listing made its read fail, which skipped it.
 func appendAddedMarkdown(paths []string, taskPath string, diffs []git.FileDiff) []string {
 	seen := map[string]struct{}{taskPath: {}}
 	for _, d := range diffs {
@@ -763,6 +772,9 @@ func appendAddedMarkdown(paths []string, taskPath string, diffs []git.FileDiff) 
 			continue
 		}
 		if !strings.HasSuffix(d.Path, ".md") {
+			continue
+		}
+		if domain.UnsafeRepositoryPath(d.Path) {
 			continue
 		}
 		if _, ok := seen[d.Path]; ok {

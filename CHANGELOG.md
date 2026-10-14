@@ -351,6 +351,10 @@ now names the operator cancel as the recovery for a stale run.
   reason (an unreadable changed file, a failed wipe, a failed second listing of the root
   `workflows/` when `artifacts_dir` is a subdirectory — wave 3 review) still reports it, and
   re-reports it on each retry under the same event id; the counter counts each report.
+- **The status cascade skips an added file at a refused path** (wave 3 review, codex): with the
+  raw `Diff` listing such a file was read and rewritten, and under merge binding the cascade commit
+  — which refuses a control byte in a path — then failed as a whole, so the run merged with its
+  task's status unchanged. It is skipped, as it was while git quoted it (binding off too).
 - **An oversized workflow file is a `projection_workflow_rejected` with check `read_bounds`** (its
   verified previous row kept quarantined, or not projected) and the sync advances. An oversized
   `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.

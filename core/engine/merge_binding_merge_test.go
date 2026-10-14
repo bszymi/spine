@@ -948,3 +948,24 @@ func TestColonStepIDBindingIsTrusted(t *testing.T) {
 		t.Fatalf("run status = %s, want completed", f.run.Status)
 	}
 }
+
+// TestAppendAddedMarkdownSkipsUnsafePaths (wave 3 review, codex round 1):
+// an added .md file at a path discovery refuses is never a cascade path,
+// with binding on or off (both cascades use appendAddedMarkdown).
+func TestAppendAddedMarkdownSkipsUnsafePaths(t *testing.T) {
+	diffs := []git.FileDiff{
+		{Path: "tasks/child.md", Status: "added"},
+		{Path: "docs/bad\nname.md", Status: "added"},
+		{Path: "docs/tab\tname.md", Status: "added"},
+		{Path: "docs/bidi‮name.md", Status: "added"},
+		{Path: "docs/line sep.md", Status: "added"},
+		{Path: "docs/r\xe9sum\xe9.md", Status: "added"}, // invalid UTF-8
+		{Path: "docs/résumé.md", Status: "added"},       // safe non-ASCII
+		{Path: "tasks/t.md", Status: "added"},
+	}
+	got := appendAddedMarkdown([]string{"tasks/t.md"}, "tasks/t.md", diffs)
+	want := []string{"tasks/t.md", "tasks/child.md", "docs/résumé.md"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("cascade paths = %q, want %q", got, want)
+	}
+}
