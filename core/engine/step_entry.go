@@ -88,8 +88,11 @@ type StepEntryPolicy struct {
 	// A step never held in this run (a first attempt — owner question 4: no
 	// auto-bind at run start) stays claimable by any eligible actor, as
 	// does a retry of a failed attempt (a failed holder is not re-offered
-	// the work), an attempt whose prior holder no longer resolves or is not
-	// active (it could never claim it back), and — with EnforceExecutionMode
+	// the work), an attempt whose prior holder ClaimStep would refuse — it
+	// no longer resolves, is not active, is off the execution's
+	// eligible_actor_ids, is of a type the step does not admit, or lacks
+	// one of its required_skills (priorHolderCanClaim; review rounds 1 and
+	// 2) — and — with EnforceExecutionMode
 	// on — an automated_only or ai_only step, whose claimers are
 	// operator-provisioned pool members (reofferExempt; review round 1).
 	// AssignStep (step.assign, operator) is never restricted:
@@ -443,19 +446,7 @@ func (o *Orchestrator) requireSkillsOnAssign(ctx context.Context, stepDef *domai
 	if err != nil {
 		return domain.NewErrorWithCause(domain.ErrUnavailable, "required_skills cannot be checked: skill lookup failed", err)
 	}
-	held := make(map[string]bool, len(skills))
-	for i := range skills {
-		if skills[i].Status == domain.SkillStatusActive {
-			held[skills[i].Name] = true
-		}
-	}
-	var missing []string
-	for _, s := range stepDef.Execution.RequiredSkills {
-		if !held[s] {
-			missing = append(missing, s)
-		}
-	}
-	if len(missing) > 0 {
+	if missing := missingRequiredSkills(stepDef.Execution.RequiredSkills, skills); len(missing) > 0 {
 		return domain.NewError(domain.ErrConflict, fmt.Sprintf("actor missing required skills: %v", missing))
 	}
 	return nil
@@ -492,7 +483,7 @@ func (o *Orchestrator) priorHolderRefusal(ctx context.Context, run *domain.Run, 
 	if holder == "" || holder == actorID {
 		return nil
 	}
-	canClaim, err := o.priorHolderCanClaim(ctx, holder)
+	canClaim, err := o.priorHolderCanClaim(ctx, stepDef, exec, holder)
 	if err != nil {
 		return err
 	}
@@ -526,17 +517,57 @@ func (p StepEntryPolicy) reofferExempt(stepDef *domain.StepDefinition) bool {
 	return implied == domain.ActorTypeAutomated || implied == domain.ActorTypeAIAgent
 }
 
-// priorHolderCanClaim reports whether the prior holder could still claim
-// the attempt it is re-offered (review round 1). An actor that no longer
-// resolves, or is not active, can never claim it — EnforceEligibility
-// refuses it, and a suspended or deactivated identity must not keep work
-// pinned to itself — so re-offering would strand the attempt until an
-// operator assigns it; it is then open to any eligible actor, as a first
-// attempt is (attributed by the claim like any other). With no actor lookup
-// wired the holder cannot be judged and the re-offer stands (the stricter
-// answer). A lookup failure fails the claim closed (503); neither answer
-// names the holder.
-func (o *Orchestrator) priorHolderCanClaim(ctx context.Context, holder string) (bool, error) {
+// priorHolderCanClaim reports whether the prior holder's own claim of exec
+// would pass ClaimStep's claimer-dependent checks (review rounds 1 and 2);
+// the re-offer applies only then. Re-offering to a holder ClaimStep
+// refuses strands the attempt: the holder cannot take it back, every other
+// eligible actor gets the 403 and the candidate listing hides it from
+// them, until an operator assigns it. Such an attempt is instead open to
+// any eligible actor, as a first attempt is (attributed by the claim like
+// any other). The checks mirror ClaimStep's, in its order:
+//
+//  1. the execution's eligible_actor_ids allow-list — pure, so it applies
+//     even with no actor lookup wired;
+//  2. the holder resolves and is `active`, whether or not
+//     EnforceEligibility is on: a suspended or deactivated identity must
+//     not keep work pinned to itself;
+//  3. with EnforceExecutionMode, the mode-implied actor type (only
+//     human_only is left: reofferExempt took the machine modes);
+//  4. the step's eligible_actor_types;
+//  5. the step's required_skills, through ClaimStep's skill lookup and its
+//     rule (missingRequiredSkills: only an active skill counts). With no
+//     skill lookup wired ClaimStep skips the check, so the holder passes.
+//
+// Each of these refuses the holder only after an administrator or operator
+// acted on it: actor.remove_skill, skill.deprecate and suspension are
+// admin-only, an actor's type is immutable (UpdateActor never writes it),
+// and eligible_actor_ids is written only by step.assign (operator). A
+// contributor cannot lift a colleague's re-offer.
+//
+// Deliberately not mirrored:
+//
+//   - checks that do not depend on the claimer (run status, engine-owned
+//     steps, preconditions): they refuse every claimer alike, so the
+//     re-offer strands nothing they do not;
+//   - separation of duties: under it the holder of an author step can
+//     never be bound to a review of the run afterwards, and a live review
+//     it held before (rows from before the policy) ends with that review —
+//     the refusal is transient, not a strand;
+//   - the host's authorization (`spine serve`'s execution.claim needs
+//     contributor): the engine does not see it, and judging it from
+//     Actor.Role would silently lift every re-offer for an embedder whose
+//     resolver leaves Role empty. A holder whose role an admin lowers below
+//     the claim permission waits for the role or an operator assign
+//     (KNOWN-LIMITATIONS.md).
+//
+// With no actor lookup wired the holder cannot be judged past check 1 and
+// the re-offer stands (the stricter answer). An actor or skill lookup
+// failure fails the claim closed (503). No answer names the holder.
+func (o *Orchestrator) priorHolderCanClaim(ctx context.Context, stepDef *domain.StepDefinition,
+	exec *domain.StepExecution, holder string) (bool, error) {
+	if len(exec.EligibleActorIDs) > 0 && !containsStr(exec.EligibleActorIDs, holder) {
+		return false, nil
+	}
 	if o.entryPolicy.Actors == nil {
 		if _, ok := o.blocking.(entryActorLoader); !ok {
 			return true, nil
@@ -550,7 +581,52 @@ func (o *Orchestrator) priorHolderCanClaim(ctx context.Context, holder string) (
 		}
 		return false, domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot resolve the prior holder", err)
 	}
-	return a.Status == domain.ActorStatusActive, nil
+	if a.Status != domain.ActorStatusActive {
+		return false, nil
+	}
+	if o.entryPolicy.EnforceExecutionMode {
+		if _, implied := modeActorType(stepDef); implied != "" && a.Type != implied {
+			return false, nil
+		}
+	}
+	if stepDef.Execution == nil {
+		return true, nil
+	}
+	if len(stepDef.Execution.EligibleActorTypes) > 0 && !containsStr(stepDef.Execution.EligibleActorTypes, string(a.Type)) {
+		return false, nil
+	}
+	if len(stepDef.Execution.RequiredSkills) == 0 {
+		return true, nil
+	}
+	lister, ok := o.blocking.(entrySkillLister)
+	if !ok {
+		return true, nil
+	}
+	skills, err := lister.ListActorSkills(ctx, holder)
+	if err != nil {
+		return false, domain.NewErrorWithCause(domain.ErrUnavailable, "prior-holder check: cannot read the prior holder's skills", err)
+	}
+	return len(missingRequiredSkills(stepDef.Execution.RequiredSkills, skills)) == 0, nil
+}
+
+// missingRequiredSkills is ClaimStep's skill rule, shared by every check
+// that applies it (ClaimStep, RequireSkillsOnAssign and the prior-holder
+// re-offer) so they cannot drift: a skill counts only while its status is
+// active, and the result keeps the declaration order of required.
+func missingRequiredSkills(required []string, skills []domain.Skill) []string {
+	held := make(map[string]bool, len(skills))
+	for i := range skills {
+		if skills[i].Status == domain.SkillStatusActive {
+			held[skills[i].Name] = true
+		}
+	}
+	var missing []string
+	for _, s := range required {
+		if !held[s] {
+			missing = append(missing, s)
+		}
+	}
+	return missing
 }
 
 // priorHolder returns the actor a claimable execution is re-offered to, or

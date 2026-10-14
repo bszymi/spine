@@ -378,3 +378,223 @@ func TestStepEntry_CandidateListingHidesReofferedRework(t *testing.T) {
 		}
 	}
 }
+
+// reofferSkilledWorkflow is sodWorkflow's execute → review → (rework)
+// loop with claim-side eligibility on the author steps: execute is a
+// hybrid step that requires the `go` skill, typed admits only humans
+// through eligible_actor_types, and human-only implies the human type
+// through its mode.
+func reofferSkilledWorkflow() *domain.WorkflowDefinition {
+	done := []domain.OutcomeDefinition{{ID: "done", Name: "Done", NextStep: "end"}}
+	return &domain.WorkflowDefinition{ID: "skilled", EntryStep: "execute", Steps: []domain.StepDefinition{
+		{ID: "execute", Name: "Execute", Type: domain.StepTypeManual,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeHybrid, RequiredSkills: []string{"go"}},
+			Outcomes:  []domain.OutcomeDefinition{{ID: "completed", Name: "Done", NextStep: "review"}}},
+		{ID: "review", Name: "Review", Type: domain.StepTypeReview,
+			Outcomes: []domain.OutcomeDefinition{
+				{ID: "accepted", Name: "Accepted", NextStep: "end"},
+				{ID: "needs_rework", Name: "Rework", NextStep: "execute"},
+			}},
+		{ID: "typed", Name: "Typed", Type: domain.StepTypeManual,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeHybrid, EligibleActorTypes: []string{string(domain.ActorTypeHuman)}},
+			Outcomes:  done},
+		{ID: "human-only", Name: "Human only", Type: domain.StepTypeManual,
+			Execution: &domain.ExecutionConfig{Mode: domain.ExecModeHumanOnly}, Outcomes: done},
+	}}
+}
+
+// actorOnlyBlocking resolves actors but has no skill lookup, so ClaimStep
+// skips required_skills (its silent skip) for every claimer.
+type actorOnlyBlocking struct {
+	*fakeBlockingStore
+	actors map[string]*domain.Actor
+}
+
+func (a actorOnlyBlocking) GetActor(_ context.Context, actorID string) (*domain.Actor, error) {
+	if act, ok := a.actors[actorID]; ok {
+		return act, nil
+	}
+	return nil, domain.NewError(domain.ErrNotFound, "actor not found")
+}
+
+// namingSkillsFailure fails ListActorSkills with an untyped error naming
+// the actor, as a driver error can.
+type namingSkillsFailure struct{ *claimBlockingStore }
+
+func (namingSkillsFailure) ListActorSkills(_ context.Context, actorID string) ([]domain.Skill, error) {
+	return nil, errors.New("connection reset while reading the skills of " + actorID)
+}
+
+// Review round 2: the re-offer applies only when the prior holder's own
+// claim would pass ClaimStep's claimer-dependent checks — the execution's
+// eligible_actor_ids, eligible_actor_types, the mode-implied type under
+// EnforceExecutionMode, and required_skills by ClaimStep's active-skill
+// rule — not just when the holder is active. Otherwise an admin's
+// actor.remove_skill (or an operator's narrowed allow-list) left the
+// rework pinned to a holder who gets 409 while every other eligible actor
+// gets 403. From the reviewer's probe: StrictStepEntryPolicy, a hybrid
+// execute requiring `go`, member-1 did attempt 1 and lost `go`.
+// Mutation: dropping each check in priorHolderCanClaim fails its row;
+// dropping the EnforceExecutionMode guard on the implied type fails the
+// "mode not enforced" control; turning a skill-lookup failure into
+// "cannot claim" fails the fail-closed row.
+func TestStepEntry_ReofferSkipsHolderTheClaimWouldRefuse(t *testing.T) {
+	ctx := context.Background()
+	strict := StrictStepEntryPolicy()
+	modeOff := StepEntryPolicy{ReofferToPriorHolder: true}
+	rework := func(stepID, holder string, allow ...string) []*domain.StepExecution {
+		prev := reofferExec("run-1-"+stepID+"-1", stepID, 1, domain.StepStatusCompleted, holder)
+		rev := reofferExec("run-1-review-1", "review", 1, domain.StepStatusCompleted, "erin")
+		rev.OutcomeID = "needs_rework"
+		next := reofferExec("run-1-"+stepID+"-2", stepID, 2, domain.StepStatusWaiting, "")
+		next.EligibleActorIDs = allow
+		return []*domain.StepExecution{prev, rev, next}
+	}
+	goSkill := func(status domain.SkillStatus) []domain.Skill {
+		return []domain.Skill{{Name: "go", Status: status}}
+	}
+	type setup func(f sodFixture, bs *claimBlockingStore)
+	withSkills := func(skills map[string][]domain.Skill) setup {
+		return func(_ sodFixture, bs *claimBlockingStore) {
+			for id, s := range skills {
+				bs.skills[id] = s
+			}
+		}
+	}
+	both := map[string][]domain.Skill{"member-1": goSkill(domain.SkillStatusActive), "member-2": goSkill(domain.SkillStatusActive)}
+	for _, c := range []struct {
+		name    string
+		policy  StepEntryPolicy
+		execs   []*domain.StepExecution
+		setup   setup
+		holder  string // the prior holder's own claim; "" skips it
+		holderW domain.ErrorCode
+		claimer string
+		want    domain.ErrorCode // "" = the claimer binds
+	}{
+		{name: "a holder who lost a required skill is not re-offered the rework", policy: strict,
+			execs:  rework("execute", "member-1"),
+			setup:  withSkills(map[string][]domain.Skill{"member-2": goSkill(domain.SkillStatusActive)}),
+			holder: "member-1", holderW: domain.ErrConflict, claimer: "member-2"},
+		{name: "only an active skill counts for the holder, as for the claim", policy: strict,
+			execs: rework("execute", "member-1"),
+			setup: withSkills(map[string][]domain.Skill{
+				"member-1": goSkill(domain.SkillStatusDeprecated), "member-2": goSkill(domain.SkillStatusActive)}),
+			holder: "member-1", holderW: domain.ErrConflict, claimer: "member-2"},
+		{name: "a holder who keeps the skill is re-offered the rework (control)", policy: strict,
+			execs: rework("execute", "member-1"), setup: withSkills(both),
+			claimer: "member-2", want: domain.ErrForbidden},
+		{name: "a holder left off the execution's allow-list is not re-offered the rework", policy: strict,
+			execs: rework("execute", "member-1", "member-2"), setup: withSkills(both),
+			holder: "member-1", holderW: domain.ErrForbidden, claimer: "member-2"},
+		{name: "a holder on the execution's allow-list is re-offered the rework (control)", policy: strict,
+			execs: rework("execute", "member-1", "member-1", "member-2"), setup: withSkills(both),
+			claimer: "member-2", want: domain.ErrForbidden},
+		{name: "a holder of a type the step does not admit is not re-offered the rework", policy: strict,
+			execs:  rework("typed", "agent-1"),
+			holder: "agent-1", holderW: domain.ErrConflict, claimer: "member-2"},
+		{name: "a non-human holder of a human_only step is not re-offered the rework", policy: strict,
+			execs:  rework("human-only", "runner-1"),
+			holder: "runner-1", holderW: domain.ErrConflict, claimer: "member-2"},
+		{name: "mode not enforced: the mode-implied type refuses nobody, the re-offer stands", policy: modeOff,
+			execs: rework("human-only", "runner-1"), claimer: "member-2", want: domain.ErrForbidden},
+		{name: "with no skill lookup wired ClaimStep skips skills, so the re-offer stands", policy: strict,
+			execs: rework("execute", "member-1"),
+			setup: func(f sodFixture, bs *claimBlockingStore) {
+				f.orch.blocking = actorOnlyBlocking{fakeBlockingStore: newFakeBlockingStore(), actors: bs.actors}
+			},
+			claimer: "member-2", want: domain.ErrForbidden},
+		{name: "an unreadable holder skill set fails closed", policy: strict,
+			execs:   rework("execute", "member-1"),
+			setup:   func(f sodFixture, bs *claimBlockingStore) { f.orch.blocking = namingSkillsFailure{bs} },
+			claimer: "member-2", want: domain.ErrUnavailable},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newReofferFixture(c.policy, c.execs...)
+			f.orch.wfLoader = &claimTestWFLoader{wf: reofferSkilledWorkflow()}
+			bs := f.orch.blocking.(*claimBlockingStore)
+			bs.actors["agent-1"] = &domain.Actor{ActorID: "agent-1", Type: domain.ActorTypeAIAgent, Role: domain.RoleContributor, Status: domain.ActorStatusActive}
+			bs.actors["runner-1"] = &domain.Actor{ActorID: "runner-1", Type: domain.ActorTypeAutomated, Role: domain.RoleContributor, Status: domain.ActorStatusActive}
+			if c.setup != nil {
+				c.setup(f, bs)
+			}
+			execID := c.execs[2].ExecutionID
+			if c.holder != "" {
+				_, err := f.orch.ClaimStep(ctx, ClaimRequest{ActorID: c.holder, ExecutionID: execID})
+				requireCode(t, err, c.holderW, "the prior holder's own claim")
+			}
+			before := snapshotExecs(f.st)
+			_, err := f.orch.ClaimStep(ctx, ClaimRequest{ActorID: c.claimer, ExecutionID: execID})
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("claim by %s of a rework its prior holder cannot claim: %v", c.claimer, err)
+				}
+				if e := execByID(f.st, execID); e.ActorID != c.claimer || e.Status != domain.StepStatusAssigned {
+					t.Fatalf("claim bound %q (%s)", e.ActorID, e.Status)
+				}
+				return
+			}
+			requireCode(t, err, c.want, c.name)
+			requireExecsUnchanged(t, f.st, before, "refused claim")
+			var se *domain.SpineError
+			if errors.As(err, &se) && strings.Contains(se.Message, "member-1") {
+				t.Fatalf("refusal names the prior holder: %q", se.Message)
+			}
+		})
+	}
+}
+
+// skillListingBlockingStore adds a skill lookup to the listing double.
+type skillListingBlockingStore struct {
+	*stepListingBlockingStore
+	skills map[string][]domain.Skill
+}
+
+func (s skillListingBlockingStore) ListActorSkills(_ context.Context, actorID string) ([]domain.Skill, error) {
+	return s.skills[actorID], nil
+}
+
+// The candidate listing mirrors the claim: a rework whose prior holder
+// lost a required skill is offered to the other eligible actors, and is
+// hidden from them while the holder keeps it.
+func TestStepEntry_CandidateListingOffersReworkWhenHolderCannotClaim(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name       string
+		holderGo   bool
+		wantListed bool
+	}{
+		{"holder lost the skill", false, true},
+		{"holder keeps the skill", true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := &mockRunStore{runs: map[string]*domain.Run{"run-1": runFixture("run-1", domain.RunStatusActive)}}
+			inner := &stepListingBlockingStore{runs: st.runs, actors: map[string]*domain.Actor{
+				"member-1": {ActorID: "member-1", Type: domain.ActorTypeHuman, Status: domain.ActorStatusActive},
+				"member-2": {ActorID: "member-2", Type: domain.ActorTypeHuman, Status: domain.ActorStatusActive},
+			}}
+			bs := skillListingBlockingStore{stepListingBlockingStore: inner, skills: map[string][]domain.Skill{
+				"member-2": skillSet("go")}}
+			if c.holderGo {
+				bs.skills["member-1"] = skillSet("go")
+			}
+			for _, e := range reworkExecs() {
+				cp := *e
+				st.createdSteps = append(st.createdSteps, &cp)
+				if !cp.Status.IsTerminal() {
+					inner.execs = append(inner.execs, cp)
+				}
+			}
+			o := &Orchestrator{blocking: bs, wfLoader: &stepListingWFLoader{wf: reofferSkilledWorkflow()}, store: st}
+			o.WithStepEntryPolicy(StrictStepEntryPolicy())
+			items, err := o.ListStepExecutions(ctx, StepExecutionQuery{ActorID: "member-2", Limit: 50})
+			if err != nil {
+				t.Fatal(err)
+			}
+			listed := len(items) == 1 && items[0].ExecutionID == "run-1-execute-2"
+			if listed != c.wantListed || len(items) > 1 {
+				t.Fatalf("listing for member-2: %+v, want listed=%v", items, c.wantListed)
+			}
+		})
+	}
+}
