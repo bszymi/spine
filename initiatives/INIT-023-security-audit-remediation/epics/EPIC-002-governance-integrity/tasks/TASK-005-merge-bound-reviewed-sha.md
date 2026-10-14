@@ -1848,3 +1848,116 @@ provisioned as in SMP CI. The container was removed after the gate.
 - **TASK-012:** under the worktree lock a `[P, S]` merge with `P != BaseSHA` can only be a binder
   fault, so the lock can make `refusalRetryable`'s target-move case permanent again. The lock also
   closes the replay-drop residual (KNOWN-LIMITATIONS 7).
+
+### Integration (wave 3 merge) (2026-10-14)
+
+Integration branch `init/INIT-023-wave3-integration` (worktree `i23/s-int3/spine`), cut from Spine
+local `main` `d23b897` (origin `61994fe` + the INIT-023 scaffold + waves 1 and 2). Merge order, each
+`git merge --no-ff`, built and tested on its touched packages before the next: TASK-005 `06ccca2`
+(merge `1f7af13`, clean), TASK-003 `b5ad640` (merge `88df8bb`; conflicts `CHANGELOG.md`, the
+`adapters/git/cli.go` imports), TASK-014 `9c1778a` (merge `4ed5195`; `CHANGELOG.md`), TASK-015
+`2096c1f` (merge `5029321`; `CHANGELOG.md`, the `CLIClient` fields in `adapters/git/cli.go`, the
+`workflow.create` / `workflow.update` descriptions in `api/spec.yaml`). Every conflict kept both
+sides: each task's CHANGELOG section (newest merge on top), both import sets, both field sets, and
+TASK-015's identifier rule beside TASK-014's dispatch text. Coordination commits: `70d6c8e` (the
+merge-binding plumbing runs under TASK-003's read bounds) with `f5b4347` (its lint), `94017aa`
+(docs: review-time writes and the push window), `b911c04` (codex round 2: a captured binding is
+stored before the step completes), `70bed62` (codex round 3: rows a pre-TASK-003 projection holds
+at a refused path are retired). Nothing was pushed; `main` and the task branches are unchanged.
+
+**This task in the integration.** Merge `1f7af13` (first in the order; no conflict).
+
+- *With TASK-003 — a coordination fix (`70d6c8e`, `f5b4347`).* `CommitBinder`'s commands ran
+  through this task's own `runWith`, which buffered stdout and stderr whole and ran in the host's
+  locale, outside TASK-003's bounds. On the merged tree that broke TASK-003's "no `CLIClient` method
+  buffers past its limit" and "stderr keeps 64 KiB for every command", and it mattered to this
+  task's engine path: `resolveMergeSource` retries a `VerifyCommit` failure only when it is
+  retryable, and a translated git words a lock race so that `classifyGitError` calls it permanent,
+  which refused the binding of a correctly reviewed run. `runWith` now runs in the C locale, fails
+  past the per-command output limit (`git.ErrOutputTooLarge`) and keeps stderr in TASK-003's
+  head-and-tail sink; it does not take `GIT_ALLOC_LIMIT` (the take-back's `read-tree -m -u`
+  materialises the tree like checkout, and the reads parse the commit the merge then reads without
+  a limit — KNOWN-LIMITATIONS "Git Read Bounds"). `CommitFilesOnto`'s commit ids are unchanged
+  (pinned). Tests: `adapters/git/commitbinder_bounds_test.go` (every `CommitBinder` subcommand in
+  the C locale and `CommitFilesOnto` deterministic across it; a translated lock race stays a
+  retryable `ErrKindTransient`; bounded stderr; stdout past the limit is never parsed), each
+  failing against the previous `runWith` (`-overlay`). The conformance suite passes unchanged, also
+  on git 2.39.5. The bound cascade reads through TASK-003's bounded `ReadFile` and `-z` `Diff`
+  unchanged (§15): an oversized task file fails the cascade read, another oversized path is
+  skipped, as with binding off.
+- *Codex round 2, P2 — fixed (`b911c04`).* `SubmitStepResult` persisted the completed execution
+  and only then wrote `commit_meta`. A failed `SetCommitMeta`, or a crash in between, lost the
+  binding for good: the scheduler's step recovery re-submits a completed execution and
+  `captureHead` skips terminal executions. With no earlier binding the next gate had nothing to
+  compare against (`checkMovedHead`: no previous binding accepts) — reproduced on the previous
+  order: after the producer's submit at head 1, a failed write, a commit at head 2 and the
+  recovery re-submit, the review approved and bound head 2, so window (a) reopened. Now a captured
+  binding is written after the transition check and before `UpdateStepExecution`, as the same
+  single `commit_meta` write (`recordStepCommitMeta`; `routeStepOutcome` skips it when
+  `metaRecorded`). A failed write leaves the step uncompleted. Without a capture — binding off (SMP
+  today), internal and divergence-branch steps, terminal re-submits — the write stays after the
+  completion, unchanged. This amends Implementation Notes "What was built" ("`routeStepOutcome`
+  makes one `SetCommitMeta` per main-path completion before the dispatch"): still one write per
+  completion, made before the completion when a head was captured. Tests:
+  `core/engine/merge_binding_recovery_test.go` (the binding survives a failure after completion
+  and the moved branch gets 409 `run_branch_moved_since_gate` at the review; a failed binding
+  write leaves the step open; still one write carrying the outcome's commit map, binding off
+  untouched); the first two fail against the previous order. Every existing `core/engine` test
+  passes unchanged. CHANGELOG Security bullet amended.
+- *With TASK-014 (API review freeze).* TASK-014 refuses `/artifacts/add` and `write_context`
+  writes to a run branch during a `review` or `internal` step for every role (409
+  `detail.step_type`), and TASK-016 refuses non-operator pushes, so in `spine serve` the commit
+  that moves a branch under review is an operator's push or a push started before the review. The
+  docs that named "a reviewer's own `/artifacts/add` or `write_context` fix-up" as the 409 case are
+  corrected (`94017aa`: CHANGELOG UX bullet, `api/spec.yaml` `step.submit` 409, `api-operations.md`).
+  No code conflict: `takeBackRefusedMerge` / `ResetBranch` move the local target (`main`), never the
+  run branch, and the freeze is the gateway's; while a refused merge retries in `committing` the
+  run's current step is `publish` (`internal`), so the run branch stays frozen and the retry merges
+  the bound commit anyway. TASK-014's lifecycle runs (`workflow-lifecycle`, legacy terminal commit
+  `commit: {merge: "true"}`) merge under binding: the draft binds at submit, the review's moved-head
+  check holds, `TestWorkflowLifecycle_*` pass with the harness's binding on. TASK-014's re-offer
+  applies to a publish run's `merge_failed` loop-back to `execute` like any rework (the new attempt
+  is re-offered to the holder of the immediately preceding completed attempt); no change.
+- *With TASK-016 (docs).* The push-window limit (KNOWN-LIMITATIONS "Run-Branch Admission Is a
+  Push-Start Check", `security-model.md`) still called this task planned; it now says what binding
+  does for that window and that an embedder without binding keeps the gap (`94017aa`).
+- *With TASK-015.* `PushCommit` runs as op `push`, so TASK-015's `WithoutAmbientCredentials`
+  applies to a credential-less code repository's bound push; `runWith` never contacts a remote.
+  Gitpool's code-repository clients are `*git.CLIClient`, so `createRunBranches`' binder check
+  holds for them.
+
+**Gates on the integration branch** (code at `70bed62`; only these artifact notes were committed
+afterwards):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 17 non-scenario packages the four tasks and the coordination commits touched | all ok |
+| `-tags integration -race -p 1` (`SPINE_TEST_DATABASE_URL` = `s3i_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3i_reg`, migrated from `migrations/registry`) on the touched packages with integration tests | `adapters/delivery` 315, `adapters/projection` 180, `service/cmd/spine` 184, `service/internal/workspace` 225 PASS (subtests counted), 0 FAIL, 0 SKIP |
+| CI `scenario-git-http` job, its four steps run verbatim (`bash -eo pipefail`) on a fresh `s3i_ci3` | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS; `TestWorkflowLifecycle_*` 4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), with the harness's merge binding on; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (`s3i_scen3`, registry `s3i_reg3` migrated) vs a `git archive main` export on its own databases | 31 top-level FAIL, the **same set as `main`**: the 30 known pre-existing failures plus `TestWorkspace_ScopedServices` (pre-existing with the registry URL set). With an unmigrated registry database both trees also fail `TestWorkspace_BatchMigration` and `TestWorkspace_Lifecycle` (33 each, identical sorted `--- FAIL` lists, 70 lines with subtests); `main` passes those two with the registry migrated (checked) |
+| `golangci-lint` v2.11.4 (`tmp/init027-orchestration/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
+| `--enable-only=gosec` on the touched packages (`integration,scenario` tags) and on `./...` | 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| CI `git-floor` steps in the local `golang:1.26-bookworm` image (git 2.39.5; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), plus `adapters/projection` | all ok; no container left |
+| `codex review --base main` (codex-cli 0.162.1, the configured default model, **no `-c model=` override**; each review session's `session_meta` has `source: {"subagent":"review"}` and `"model":"gpt-6.1-sol"`, the newest `rollout-2026-10-14T13-49-08-…`) | round 1 (`f5b4347`): "No actionable regressions were identified". Round 2 (`f5b4347`): one P2, TASK-005 — fixed in `b911c04`. Round 3 (`b911c04`): one P2, TASK-003 with TASK-011's sweep — fixed in `70bed62`. Three rounds is the cap, so `70bed62` itself was not reviewed by codex again (open question for the orchestrator). The earlier task rounds that ran on older models (`-c model="gpt-5.5"`, `gpt-5.6-sol`, `gpt-6-astra` because the default was refused then) are superseded by these gpt-6.1-sol rounds over the whole wave-3 diff |
+
+**SMP compatibility** (`i23/s-int3/smp` = SMP `main` `f5c6fd6d`, detached, `../spine` = this
+worktree, `GOFLAGS=-mod=readonly`; never modified, `git status` clean after every step):
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on the 13 SMP packages importing a changed Spine package (`go list` with test imports) plus `internal/customer/workflow` | 11 ok, `projectionsvc` has no tests; `gitread` (`TestBounded_ErrorContractEqualsCLIClient`: `bad_ref`, `bad_sha`, `missing_path`, `path_beyond_a_symlinked_dir`) and `projectionwriter` (`TestBoundedProjection_IncrementalAddAndModifyOversized`, `…_OversizedWorkflowStalls`, a nil-pointer panic) fail — the **identical** `--- FAIL` list against a Spine `main` `d23b897` export through a scratch `-modfile`: pre-existing, SMP TASK-004 tests that SMP TASK-006 adapts at the bump |
+| SMP TASK-006 tip `935852b5` (a temporary detached SMP worktree beside this one, removed afterwards) against this Spine | `gitread` and `projectionwriter` **pass**; `go build ./...`, `go vet` plain and `-tags integration` OK. TASK-006's adaptations fix the two pre-existing failures, also with wave 3 |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s3c_smp_it` with `vector`, `s3c_spine_runtime_it`) | 115 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 25m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov` as in CI) | 1835 passed, 0 failed, 2 allowed skips (the Linux-only `ru_maxrss` tests; macOS host); `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -p 4 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed Linux-only skip; `testgate: PASS` |
+
+Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3i_*` (Spine) and
+`s3c_*` (SMP) databases were created, and all were dropped afterwards; the SMP suites' own `ws_*`
+databases and roles were cleaned up by the suites (none left, checked). The only containers
+started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
+`spine-management-platform/tmp/init027-orchestration/wave3-int/`.

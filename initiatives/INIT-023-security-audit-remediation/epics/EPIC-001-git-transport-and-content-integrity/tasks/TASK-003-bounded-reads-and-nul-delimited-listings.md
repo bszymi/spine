@@ -1762,3 +1762,107 @@ on a private, tmpfs-backed `pgvector/pgvector:pg18` container (PostgreSQL 18.4, 
 127.0.0.1:55934). It held `s003_*` databases and the SMP CI roles (`platform`,
 `platform_audit_retention`, `smp_prov`, posture `f`). The container and everything in it were
 removed at the end, as were the two `golang:1.26-bookworm` containers (`--rm`).
+
+### Integration (wave 3 merge) (2026-10-14)
+
+Integration branch `init/INIT-023-wave3-integration` (worktree `i23/s-int3/spine`), cut from Spine
+local `main` `d23b897` (origin `61994fe` + the INIT-023 scaffold + waves 1 and 2). Merge order, each
+`git merge --no-ff`, built and tested on its touched packages before the next: TASK-005 `06ccca2`
+(merge `1f7af13`, clean), TASK-003 `b5ad640` (merge `88df8bb`; conflicts `CHANGELOG.md`, the
+`adapters/git/cli.go` imports), TASK-014 `9c1778a` (merge `4ed5195`; `CHANGELOG.md`), TASK-015
+`2096c1f` (merge `5029321`; `CHANGELOG.md`, the `CLIClient` fields in `adapters/git/cli.go`, the
+`workflow.create` / `workflow.update` descriptions in `api/spec.yaml`). Every conflict kept both
+sides: each task's CHANGELOG section (newest merge on top), both import sets, both field sets, and
+TASK-015's identifier rule beside TASK-014's dispatch text. Coordination commits: `70d6c8e` (the
+merge-binding plumbing runs under TASK-003's read bounds) with `f5b4347` (its lint), `94017aa`
+(docs: review-time writes and the push window), `b911c04` (codex round 2: a captured binding is
+stored before the step completes), `70bed62` (codex round 3: rows a pre-TASK-003 projection holds
+at a refused path are retired). Nothing was pushed; `main` and the task branches are unchanged.
+
+**This task in the integration.** Merge `88df8bb` (conflicts: `CHANGELOG.md`, both sections kept;
+`adapters/git/cli.go` imports, `sort` from TASK-005 and `strconv` from this task).
+
+- *With TASK-005 — a coordination fix (`70d6c8e`, `f5b4347`).* TASK-005's `CommitBinder` methods
+  start git through their own `runWith`, outside `runSink`, so this task's I1 and its "stderr keeps
+  64 KiB for every command" did not hold for them, and they ran in the host's locale. `runWith` now
+  takes the C locale, the per-command output limit and the head-and-tail stderr sink; not
+  `GIT_ALLOC_LIMIT` or the pinned delta-base cache (residual added to KNOWN-LIMITATIONS "Git Read
+  Bounds": the take-back's `read-tree -m -u` materialises the tree like checkout, and the reads
+  parse the commit the merge then reads without a limit). `TestEveryOpHasAnOutputClass` covers
+  `run`/`runBounded` op names only; the new `adapters/git/commitbinder_bounds_test.go` covers the
+  `runWith` commands' environment and bounds. The named-ref-window bullet now says TASK-005 reads
+  the cascade at the bound commit with binding on (always in `spine serve`).
+- *Codex round 3, P2 — fixed (`70bed62`), with TASK-011's sweep.* This task refused an
+  `UnsafePath` unread and assumed no row could exist at one. Before it, git listed paths in its
+  quoted form, which leaves every byte >= 0x80 raw under `core.quotePath=false` (repository, global
+  or system config), so a bidi-control, U+2028/U+2029 or C1-control name could be projected. After
+  the upgrade a deletion, rename or modification skipped its row: a stale artifact and its links
+  stayed for good, and a stale workflow row stayed Active and bindable — TASK-011's sweep even
+  re-read such a file and kept the row. Now, for `artifact.StoredUnsafePath` (an `UnsafePath` that
+  is valid UTF-8, so the store can hold it): discovery puts a deleted, renamed-away or modified one
+  in `Deleted` (still unread); the incremental workflow loop deletes the row of a deleted or
+  renamed-away one and retires the row of an added or modified one as `applyRejection` does (kept
+  quarantined when it verifies, else removed), reported as `projection_workflow_rejected` with the
+  new check `unsafe_path`; the sweep rejects a stored row at an unsafe path the same way instead of
+  re-reading it. Invalid UTF-8 still never reaches the store. Under the default
+  `core.quotePath=true` no such row exists and nothing changes but an idempotent delete call.
+  Residual (KNOWN-LIMITATIONS): an artifact row at such a path whose file never changes stays until
+  the upgrade's projection rebuild (the CHANGELOG note; SMP TASK-008 runs it). Tests:
+  `adapters/projection/stored_unsafe_rows_test.go` (pre-seeded rows; each of the discovery, loop
+  and sweep parts fails against its previous code by `-overlay`, the rename branch separately);
+  the refusal table in `core/artifact/discovery_refused_test.go` now expects `Deleted` for
+  valid-UTF-8 unsafe paths (`a\u202eb.md` renamed away, `a\u0085b.md` modified, a new
+  deleted-bidi row) and still never for invalid UTF-8 (two new rows). This amends design §5's table
+  and the design-check premise that "git's quoting kept every byte ≥ 0x80 out of the projection"
+  (true only under the default `core.quotePath=true`). Docs: `event-schemas.md` (check `unsafe_path`),
+  CHANGELOG, `git-integration.md` §8.1, the `UnsafeRepositoryPath` comment.
+- *With TASK-011 (read errors) and TASK-004 (worktree cap).* As built: `git.ErrBlobTooLarge` is in
+  `isContentReadError` (an oversized workflow is a `read_bounds` rejection), and the AC 21 parity
+  test (`DefaultMaxBlobBytes` = `worktreefs.DefaultMaxReadBytes`) passes on the merged tree.
+- *With TASK-015.* `Clone` keeps both this task's bounded stderr and TASK-015's ambient-credential
+  reset; `runSink`'s push environment keeps TASK-015's reset (push is `opMutate`, so it never gets
+  the read-class environment); `CLIClient` carries both field sets. The new
+  `spine_projection_files_skipped_total` is process-global and unlabelled, so in shared mode it is
+  in `GET /api/v1/platform/metrics`, not a tenant's `/system/metrics` (TASK-015's scoping), which
+  the docs already say for every process-global series. `projection_file_skipped` event ids are hex
+  (`projskip-<12>-<12>`) and its path is quoted for display, so TASK-015's SSE writer never omits
+  them.
+- *With TASK-014.* `workflowPlanningPreCheck` reads the existing definition with this task's
+  bounded `ReadFile`: a definition over the read limit (workflows are capped at 64 KiB by
+  `yamlsafe` anyway) fails closed, as any non-not-found read error does.
+
+**Gates on the integration branch** (code at `70bed62`; only these artifact notes were committed
+afterwards):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 17 non-scenario packages the four tasks and the coordination commits touched | all ok |
+| `-tags integration -race -p 1` (`SPINE_TEST_DATABASE_URL` = `s3i_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3i_reg`, migrated from `migrations/registry`) on the touched packages with integration tests | `adapters/delivery` 315, `adapters/projection` 180, `service/cmd/spine` 184, `service/internal/workspace` 225 PASS (subtests counted), 0 FAIL, 0 SKIP |
+| CI `scenario-git-http` job, its four steps run verbatim (`bash -eo pipefail`) on a fresh `s3i_ci3` | `TestGitHTTP_*` 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; `TestBootstrapInternalAdmin_*` 2 PASS; `TestWorkflowLifecycle_*` 4 PASS (incl. `_UpdateExisting`, `_UpdateExisting_DraftAuthorCannotReview`), with the harness's merge binding on; `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (`s3i_scen3`, registry `s3i_reg3` migrated) vs a `git archive main` export on its own databases | 31 top-level FAIL, the **same set as `main`**: the 30 known pre-existing failures plus `TestWorkspace_ScopedServices` (pre-existing with the registry URL set). With an unmigrated registry database both trees also fail `TestWorkspace_BatchMigration` and `TestWorkspace_Lifecycle` (33 each, identical sorted `--- FAIL` lists, 70 lines with subtests); `main` passes those two with the registry migrated (checked) |
+| `golangci-lint` v2.11.4 (`tmp/init027-orchestration/bin`) `run --new-from-rev main` on the touched packages: plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each (one gocritic `appendAssign` on the first `runWith` change was fixed in `f5b4347`) |
+| `--enable-only=gosec` on the touched packages (`integration,scenario` tags) and on `./...` | 0 issues |
+| `gofmt -l` on every changed `.go` file | empty |
+| CI `git-floor` steps in the local `golang:1.26-bookworm` image (git 2.39.5; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), plus `adapters/projection` | all ok; no container left |
+| `codex review --base main` (codex-cli 0.162.1, the configured default model, **no `-c model=` override**; each review session's `session_meta` has `source: {"subagent":"review"}` and `"model":"gpt-6.1-sol"`, the newest `rollout-2026-10-14T13-49-08-…`) | round 1 (`f5b4347`): "No actionable regressions were identified". Round 2 (`f5b4347`): one P2, TASK-005 — fixed in `b911c04`. Round 3 (`b911c04`): one P2, TASK-003 with TASK-011's sweep — fixed in `70bed62`. Three rounds is the cap, so `70bed62` itself was not reviewed by codex again (open question for the orchestrator). The earlier task rounds that ran on older models (`-c model="gpt-5.5"`, `gpt-5.6-sol`, `gpt-6-astra` because the default was refused then) are superseded by these gpt-6.1-sol rounds over the whole wave-3 diff |
+
+**SMP compatibility** (`i23/s-int3/smp` = SMP `main` `f5c6fd6d`, detached, `../spine` = this
+worktree, `GOFLAGS=-mod=readonly`; never modified, `git status` clean after every step):
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on the 13 SMP packages importing a changed Spine package (`go list` with test imports) plus `internal/customer/workflow` | 11 ok, `projectionsvc` has no tests; `gitread` (`TestBounded_ErrorContractEqualsCLIClient`: `bad_ref`, `bad_sha`, `missing_path`, `path_beyond_a_symlinked_dir`) and `projectionwriter` (`TestBoundedProjection_IncrementalAddAndModifyOversized`, `…_OversizedWorkflowStalls`, a nil-pointer panic) fail — the **identical** `--- FAIL` list against a Spine `main` `d23b897` export through a scratch `-modfile`: pre-existing, SMP TASK-004 tests that SMP TASK-006 adapts at the bump |
+| SMP TASK-006 tip `935852b5` (a temporary detached SMP worktree beside this one, removed afterwards) against this Spine | `gitread` and `projectionwriter` **pass**; `go build ./...`, `go vet` plain and `-tags integration` OK. TASK-006's adaptations fix the two pre-existing failures, also with wave 3 |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s3c_smp_it` with `vector`, `s3c_spine_runtime_it`) | 115 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 25m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov` as in CI) | 1835 passed, 0 failed, 2 allowed skips (the Linux-only `ru_maxrss` tests; macOS host); `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -p 4 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed Linux-only skip; `testgate: PASS` |
+
+Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3i_*` (Spine) and
+`s3c_*` (SMP) databases were created, and all were dropped afterwards; the SMP suites' own `ws_*`
+databases and roles were cleaned up by the suites (none left, checked). The only containers
+started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
+`spine-management-platform/tmp/init027-orchestration/wave3-int/`.
