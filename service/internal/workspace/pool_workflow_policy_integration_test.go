@@ -16,17 +16,35 @@ import (
 )
 
 // INIT-023 TASK-014 AC 12: with a store, the pooled workflow service reads
-// the projection-backed rules (migration 018 seeds the bootstrap
-// `main: no-delete, no-direct-write` row), so a reviewer's non-bypass write
-// to main is refused at the service.
+// the projection-backed rules, so a reviewer's non-bypass write to main is
+// refused at the service.
+//
+// The test installs the bootstrap `main: no-delete, no-direct-write` row
+// itself (review round 1) rather than trusting migration 018's seed: the
+// projection rule source has no bootstrap fallback, and the shared test
+// database's rules are whatever the last test left (adapters/store's
+// projection test ends on an empty ruleset before its cleanup reseeds),
+// so a missing row must not turn the test into a silent skip. The cleanup
+// restores the same bootstrap row, the state CleanupTestData leaves.
 func TestBuildServiceSet_WorkflowServiceHasProjectionPolicy(t *testing.T) {
 	if os.Getenv("SPINE_TEST_DATABASE_URL") == "" {
 		t.Skip("SPINE_TEST_DATABASE_URL not set")
 	}
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	// buildServiceSet does not migrate; NewTestStore applies the schema
-	// (and the 018 bootstrap branch-protection seed) first.
-	_ = store.NewTestStore(t)
+	// first.
+	ts := store.NewTestStore(t)
+	bootstrap := []store.BranchProtectionRuleProjection{
+		{BranchPattern: "main", RuleOrder: 0, Protections: []byte(`["no-delete","no-direct-write"]`)},
+	}
+	if err := ts.UpsertBranchProtectionRules(context.Background(), bootstrap, "bootstrap"); err != nil {
+		t.Fatalf("seed the main rule: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ts.UpsertBranchProtectionRules(context.Background(), bootstrap, "bootstrap"); err != nil {
+			t.Errorf("restore the bootstrap rule: %v", err)
+		}
+	})
 	dsn := store.TestDSN()
 	cfg := Config{ID: "ws-wfpolicy-db", RepoPath: testutil.NewTempRepo(t), DatabaseURL: secrets.NewSecretValue([]byte(dsn))}
 	ss, err := buildServiceSet(context.Background(), cfg, nil, nil, "", nil, PoolPolicy{}, "")
@@ -45,7 +63,7 @@ func TestBuildServiceSet_WorkflowServiceHasProjectionPolicy(t *testing.T) {
 		}
 	}
 	if !mainProtected {
-		t.Skip("test database has no rule for main; the projection-backed policy has nothing to deny")
+		t.Fatalf("the workspace store does not read the seeded main rule (rules %+v)", rules)
 	}
 
 	ctx := observe.WithActorID(context.Background(), "rev")
