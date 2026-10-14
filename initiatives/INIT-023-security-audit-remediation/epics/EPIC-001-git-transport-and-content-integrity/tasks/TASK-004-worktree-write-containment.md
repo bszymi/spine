@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transp
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-07
+last_updated: 2026-10-14
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -346,6 +346,13 @@ func (u *Undo) Release()        // close held handles without removing anything
   > Opening with `O_NONBLOCK` is unnecessary: a FIFO or device cannot pass step 1, git cannot check
   > one out, and a link swapped in after step 1 that points outside the parent directory (for
   > example `/dev/zero`) is refused by `os.Root` ("path escapes from parent").
+  >
+  > *(Corrected by the codex 6.1 catch-up, 2026-10-14. A leaf **replaced** by a FIFO between step 1
+  > and step 2 does not need a link. Step 2's plain `O_RDONLY` then blocks until a writer appears,
+  > before step 3 can refuse it, and `Create`'s pin has the same shape. Both opens are now
+  > `O_NONBLOCK`, and the read descriptor is made blocking again once the checks pass. Step 3 also
+  > requires the opened file to be regular: nothing holds the checked inode, so on Linux the FIFO
+  > can take the freed inode number and pass `SameFile`. See "Codex 6.1 catch-up".)*
 
 **1d. Why `os.Root` and the walk are both needed (AC3).**
 
@@ -1581,3 +1588,29 @@ is invisible, and no shipped Spine or SMP workflow has a `convergence` or untype
 | SMP compat (`i23/s-int2/smp` = SMP `6ca0eeb7`, `../spine` = this worktree, `GOFLAGS=-mod=readonly`, never modified) | `go build ./...`; `go vet` plain, `integration`, `scenario`, `faultinject`: OK. `go test -race -p 4` on the 67 packages (dependents of a changed Spine package plus `./internal/customer/...`): 62 ok, 5 without tests. `dev/testgate -allow-skip TEST_PROVISIONING_DSN -- -race` on spinecore, spineembedded, runner, executionreadiness (`s2f_smp_spine_runtime` and `s2f_smp_platform`, migrated with `dev/apply-migrations`): 1785 passed, 0 failed, 3 allowed skips. githttp `-tags integration` testgate: 208 passed. `dev/lint-spine-internals.sh` OK. `TEST_PROVISIONING_DSN` suites not run (out of scope) |
 
 All `s2f_*` databases were dropped afterwards, and no container was started.
+
+### Codex 6.1 catch-up (2026-10-14)
+
+A catch-up review of the merged waves 1 and 2 ran on Codex `gpt-6.1-sol`; the earlier reviews ran
+on an older model. Each P1/P2 survived two skeptics, both of whom checked it against Spine local
+`main` `d23b897`. Fixes are on `init/INIT-023-codex61-catchup` (worktree `i23/s-cx/spine`, cut
+from `d23b897`). Nothing was pushed, and `main` and the other branches are unchanged.
+
+**This task.** One finding (range `sp-T004`).
+
+| # | Finding | Severity | Disposition | Commit | Regression test |
+|---|---|---|---|---|---|
+| 1 | `Create`'s pin re-opens the leaf it has just made with a plain `O_RDONLY` (`tree.go:763`). If the leaf is swapped for a FIFO after the `O_EXCL` create, the open blocks until a writer appears, before the `SameFile` check can refuse it. `Create` takes no context, so it hangs with three descriptors held, and request cancellation cannot reach it. A skeptic found the same shape in `ReadFileLimit` (`tree.go:478-493`) | Codex P2. Skeptics: not a bug (outside the threat model) and P3. **Accepted as P3** | **FIXED** (cheap, and makes the code's `SameFile` comment hold). Both opens add `O_NONBLOCK` on unix (`openNoBlock` in `nonblock_unix.go`; 0 in `nonblock_other.go`, because no FIFO lives in a directory tree there). `ReadFileLimit` puts its descriptor back into blocking mode after the checks, so the read is unchanged. Running the tests in Linux turned up a gap: `ext4`/`overlayfs` give the deleted leaf's freed inode number straight to the new FIFO, so `SameFile` passed and the non-blocking read returned empty content. `ReadFileLimit` now also requires the opened file to be regular. The pin needs no such check: the `O_EXCL` descriptor keeps its inode allocated, so its `SameFile` check is exact. The §1c design-check note is corrected in place | `de9c013`; lint `2aa99d6` | `TestTree_CreateLeafSwappedForFIFOBeforePin` and `TestTree_ReadLeafSwappedForFIFOAfterCheck` (`fifo_unix_test.go`). They use the existing `pin`/`read` hooks to swap in a FIFO; if the call is still running after 3 s they open a writer and fail. Both fail on `main` on macOS and on Linux ("the call blocked"). Dropping the regular-file check fails the read test on Linux. `TestTree_ReadFileThroughNonBlockingOpen` reads a 1 MiB file in full |
+
+**Severity reasoning.** Git cannot check out a FIFO. Runners reach the worktree only through the
+git gateway, and the worktrees are server-private (`0700`). So only a local process writing inside
+the server's worktree can trigger this, which §1b places outside the threat model. Such a process
+could already corrupt the worktree directly. The hang is confined to the one request's goroutine:
+the callers take no repo-wide lock around `Create`.
+
+**Unchanged for every other input.** `O_NONBLOCK` has no effect when opening a regular file or a
+directory. The read descriptor is blocking again before its first read. Windows builds and vets
+(`GOOS=windows go vet ./core/worktreefs`).
+
+**Gates and the Codex round** are recorded once, in TASK-011's "Codex 6.1 catch-up" subsection
+(the same branch, the same runs).

@@ -569,6 +569,51 @@ previous build). Externally visible:
   `ExpectedHeadSHA` gets it checked (old clients never send it); `git.CommitOpts` trailers outside
   the standard four are now written in sorted order instead of map order. Everything else — every
   code path and git argv — is unchanged without `EnableMergeBinding`.
+## INIT-023 — Codex 6.1 catch-up review of waves 1 and 2
+
+### Changed
+
+- **Worktree reads and creates no longer wait on a FIFO** (`core/worktreefs`, TASK-004). After its
+  checks, a leaf is opened by name once more: `ReadFile`'s read, and `Create`'s read-only pin of
+  the file it has just made. That open is now non-blocking, so a leaf swapped for a named pipe in
+  the window is refused with `ReasonChanged` instead of blocking the call, and the handles it
+  holds, until a writer appears. Request cancellation could not interrupt the wait. `ReadFile`
+  also requires the opened file to still be a regular file, because `SameFile` cannot catch every
+  swap: on Linux a leaf deleted and re-created as a FIFO can reuse the freed inode number. Git
+  cannot check out a FIFO, so only a local process writing inside the worktree could do this.
+  Nothing changes for any other input.
+- **Stored workflow definitions holding an integer above 2^53 now verify** (`core/workflow`,
+  `adapters/projection`, TASK-011). `workflow.VerifyProjectionDefinition` decoded the stored JSON
+  through float64, so a definition that `ProjectionDefinition` had accepted and stored (for example
+  `retry: {limit: 9007199254740993}`) then failed its own verification. A later rejected edit of
+  that file deleted the row instead of keeping it quarantined for the runs pinned to it. Integers
+  that fit an int64 are now read exactly, and every other number reads as before. The first-sync
+  reconciliation compares stored and head definitions the same way, so a row that differs from head
+  only in such an integer is replaced instead of being counted unchanged. Definitions whose
+  integers are all at or below 2^53, which includes every shipped Spine and SMP workflow, see no
+  change.
+- **The reconciliation's baseline reset keeps a concurrent status** (`adapters/projection`, the
+  TASK-011 sweep as amended by the wave 2 cross-task review). When the first-sync reconciliation
+  writes a row on an otherwise up-to-date sync, it re-records the head it judged by. That write
+  was an unconditional `idle` at that head, which replaced any status another instance had written
+  since this sync read `idle@head`:
+  - `rebuilding`: a reader saw `idle` over a half-written projection;
+  - `error`: a same-head rebuild failure was erased, and the next tick took the up-to-date return
+    and skipped the forced branch-protection retry;
+  - the no-baseline `error` a partial wipe records: the next sync diffed from the head instead of
+    rebuilding, so the wiped rows stayed missing.
+
+  Now only `last_synced_commit` moves, in a single `UPDATE`, and a state with no baseline is left
+  alone. When no other writer is involved the result is `idle@head` as before.
+
+### For embedders
+
+- **New optional store capability:** `(*store.PostgresStore).SetSyncBaseline(ctx, commit) error`.
+  `projection.Service` asserts it and it is not added to `store.Store`, like
+  `ListWorkflowProjections`. A custom store without it keeps the previous `idle@head` write. SMP's
+  projection writer and provisioning pass `*store.PostgresStore` and get the new behaviour with no
+  change. For SMP it differs from before only when another instance writes `sync_state` inside that
+  window.
 
 ---
 
@@ -1810,12 +1855,15 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
     step profiles: an Active nested definition (for example in an imported repository) is removed
     and reported, and in-flight runs pinned to it lose their row;
   - when that reconciliation writes a row (deletes, replaces or quarantines one) on a sync that is
-    otherwise up to date, it re-records `sync_state` (`idle` at the head it judged by) instead of
-    returning without a write. Its head is resolved before the rows are listed, so another instance
-    (an SMP replica, a re-warmed workspace) may have projected a newer head in between; if it did,
-    the next tick re-diffs from this head and restores what the reconciliation undid. A row whose
-    projecting sync spans the whole reconciliation can still be lost, as with any two instances
-    projecting at different heads;
+    otherwise up to date, it re-records the head it judged by as `sync_state`'s
+    `last_synced_commit` instead of returning without a write. Its head is resolved before the rows
+    are listed, so another instance (an SMP replica, a re-warmed workspace) may have projected a
+    newer head in between; if it did, the next tick re-diffs from this head and restores what the
+    reconciliation undid. Through `(*store.PostgresStore).SetSyncBaseline` the status another
+    instance wrote meanwhile is kept, and a state with no baseline is left alone (codex 6.1
+    catch-up; a store without the capability writes `idle` at that head). A row whose projecting
+    sync spans the whole reconciliation can still be lost, as with any two instances projecting at
+    different heads;
   - incremental sync no longer projects `templates/`;
   - a `Diff` failure, a `Head()` failure (previously the state was left untouched), and a read of a
     changed file that git itself failed (a lock, a killed or unspawnable process) are each an

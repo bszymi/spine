@@ -274,8 +274,22 @@ func (s *mapStore) clone() *mapStore {
 	return c
 }
 
-// allRowsStore adds the optional all-rows capability the sweep asserts.
+// allRowsStore adds the optional capabilities *store.PostgresStore has and
+// the projection asserts: the all-rows listing the sweep uses, and
+// SetSyncBaseline.
 type allRowsStore struct{ *mapStore }
+
+// SetSyncBaseline mirrors *store.PostgresStore's: only last_synced_commit
+// moves, and a state with no baseline (or no state) is left alone.
+func (s allRowsStore) SetSyncBaseline(_ context.Context, commit string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == nil || s.state.LastSyncedCommit == "" {
+		return nil
+	}
+	s.state.LastSyncedCommit = commit
+	return nil
+}
 
 func (s allRowsStore) ListWorkflowProjections(context.Context) ([]store.WorkflowProjection, error) {
 	s.mu.Lock()

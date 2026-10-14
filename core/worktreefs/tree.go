@@ -489,8 +489,11 @@ func (t *Tree) ReadFileLimit(rel string, limit int64) ([]byte, error) {
 	// O_RDONLY on the held parent: a single component, so nothing above
 	// the leaf is resolved again. os.Root would follow a link swapped in at
 	// the leaf only if it stays inside this directory; the SameFile check
-	// below refuses that case.
-	f, err := openFileIn(w.parent(), w.leaf, os.O_RDONLY, 0)
+	// below refuses that case. openNoBlock: a leaf swapped for a FIFO since
+	// the Lstat would otherwise block this open until a writer appeared,
+	// before the checks below could refuse it (INIT-023 codex 6.1
+	// catch-up); once they pass, the descriptor is made blocking again.
+	f, err := openFileIn(w.parent(), w.leaf, os.O_RDONLY|openNoBlock, 0)
 	if err != nil {
 		return nil, relErr(err, w.rel)
 	}
@@ -500,9 +503,17 @@ func (t *Tree) ReadFileLimit(rel string, limit int64) ([]byte, error) {
 		if err != nil {
 			return nil, relErr(err, w.rel)
 		}
-		if !os.SameFile(lfi, ffi) {
+		// The opened file must still be a regular file, not only the same
+		// identity: nothing holds the checked inode open, so a leaf
+		// deleted and re-created since the Lstat can carry the freed
+		// inode number (ext4, overlayfs and tmpfs reuse it at once), and
+		// SameFile alone would admit a FIFO made there.
+		if !os.SameFile(lfi, ffi) || !ffi.Mode().IsRegular() {
 			return nil, &PathError{Path: w.rel, Component: w.rel, Reason: ReasonChanged}
 		}
+	}
+	if err := clearNoBlock(f); err != nil {
+		return nil, relErr(err, w.rel)
 	}
 	return readCapped(f, w.rel, lfi.Size(), limit)
 }
@@ -759,8 +770,12 @@ func (t *Tree) Create(rel string, data []byte, perm fs.FileMode) (_ *Undo, err e
 	// Pin the created inode (see Undo.pin) with a read-only descriptor,
 	// opened through the held parent while f still holds the inode. A leaf
 	// swapped since the O_EXCL create (os.Root follows a same-directory
-	// link for O_RDONLY) fails the SameFile check.
-	pin, perr := openFileIn(parent, w.leaf, os.O_RDONLY, 0)
+	// link for O_RDONLY) fails the SameFile check, which is exact here
+	// because f keeps the created inode, and its number, allocated.
+	// openNoBlock: a leaf swapped for a FIFO must reach that check instead
+	// of blocking the open until a writer appears (INIT-023 codex 6.1
+	// catch-up). The pin is never read, so it stays non-blocking.
+	pin, perr := openFileIn(parent, w.leaf, os.O_RDONLY|openNoBlock, 0)
 	if perr != nil {
 		perr = relErr(perr, w.rel)
 	} else if pfi, e := pin.Stat(); e != nil || !os.SameFile(pfi, info) {
