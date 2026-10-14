@@ -568,6 +568,9 @@ paths:
               follow. This includes a fix-up the reviewer committed during
               the review (`/artifacts/add`, `write_context`, a push): send
               the work back so it is validated again.
+            Both are answered before the required-outputs check, so a
+            submit that also lacks a required output is refused with the
+            409 and the step is not failed.
           content:
             application/json:
               schema:
@@ -585,8 +588,9 @@ paths:
             `service_unavailable`. With `detail.reason`
             `run_branch_head_unavailable` the run-branch head could not be
             resolved, so a submit that must bind it was not recorded (retry
-            later); with `expected_head_sha_unsupported` the deployment
-            cannot check an assertion (INIT-023 TASK-005).
+            later; the step is not failed, also when the submit lacks a
+            required output); with `expected_head_sha_unsupported` the
+            deployment cannot check an assertion (INIT-023 TASK-005).
 
   /runs/{run_id}/steps/{step_id}/assign:
     post:

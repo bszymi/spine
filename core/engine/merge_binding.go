@@ -410,6 +410,11 @@ type mergeSource struct {
 	// excludedTip is the run-branch tip at merge time when it was not
 	// contained in the merge (commits after the binding were left out).
 	excludedTip string
+	// tipUnknown: the run branch exists (or could not be read) but whether
+	// the merge contains its tip could not be decided. The branch is kept,
+	// as for excluded commits: it may be the only ref to them (codex
+	// review, round 2; the code-repository check already kept it).
+	tipUnknown bool
 }
 
 // resolveMergeSource is the binding-on entry of every merge attempt. It
@@ -496,7 +501,8 @@ func (o *Orchestrator) bindingFailure(ctx context.Context, run *domain.Run, reas
 // a violation. The run-branch tip is read only to report excluded
 // commits: it never fails the merge, because anyone who can push the run
 // branch could otherwise reset it (for example to main's tip) and refuse
-// every approved merge.
+// every approved merge. A tip it cannot judge keeps the branch
+// (src.tipUnknown); only a missing branch counts as nothing excluded.
 func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder, branch string, src *mergeSource, res git.MergeResult) error {
 	m, base := res.SHA, res.BaseSHA
 	if !isBoundObjectID(base) {
@@ -536,14 +542,24 @@ func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder
 	}
 
 	tip, err := binder.ResolveBranchHead(ctx, branch)
-	if err != nil || !isBoundObjectID(tip) {
-		observe.Logger(ctx).Info("merge binding: run branch tip not resolvable for the excluded-commits report",
+	if err == nil && !isBoundObjectID(tip) {
+		err = fmt.Errorf("operator returned a malformed head %q", truncateForLog(tip))
+	}
+	if err != nil {
+		var gitErr *git.GitError
+		if errors.As(err, &gitErr) && gitErr.Kind == git.ErrKindNotFound {
+			return nil // no run branch left: no commit of it can be lost
+		}
+		observe.Logger(ctx).Warn("merge binding: run branch tip unknown; keeping the run branch",
 			"branch", branch, "error", err)
+		src.tipUnknown = true
 		return nil
 	}
 	in, err := binder.IsAncestor(ctx, tip, m)
 	if err != nil {
-		observe.Logger(ctx).Info("merge binding: excluded-commits check failed", "branch", branch, "error", err)
+		observe.Logger(ctx).Warn("merge binding: excluded-commits check failed; keeping the run branch",
+			"branch", branch, "tip_sha", tip, "error", err)
+		src.tipUnknown = true
 		return nil
 	}
 	if !in {

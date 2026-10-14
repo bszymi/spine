@@ -301,8 +301,9 @@ func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run, src *m
 //     metadata — the merge has landed either way.
 //
 // Under merge binding a run branch whose tip held commits the merge left
-// out (src.excludedTip) is kept for inspection instead of being cleaned
-// up (owner question 3).
+// out (src.excludedTip), or whose tip could not be judged
+// (src.tipUnknown), is kept for inspection instead of being cleaned up
+// (owner question 3).
 func (o *Orchestrator) verifyAndComplete(ctx context.Context, run *domain.Run, src mergeSource) error {
 	log := observe.Logger(ctx)
 
@@ -327,7 +328,7 @@ func (o *Orchestrator) verifyAndComplete(ctx context.Context, run *domain.Run, s
 	// because a code repository may have merged in an earlier attempt).
 	cleanup := true
 	if o.bindingOn {
-		cleanup = src.excludedTip == "" && !o.codeRepoHasExcludedCommits(ctx, run)
+		cleanup = src.excludedTip == "" && !src.tipUnknown && !o.codeRepoHasExcludedCommits(ctx, run)
 	}
 	if err := o.completeAfterMerge(ctx, run, cleanup); err != nil {
 		return err

@@ -243,9 +243,10 @@ merge publishes the commit the run's steps validated and reviewed, never the run
    commit's (the commit is built deterministically); the time of the operator action is in the
    audit event.
 10. **Excluded commits are logged, not evented.** When the primary's or any code repository's run
-    branch holds commits the merge left out, every run branch of the run is kept (not only the one
-    with excluded commits) and a `merge_binding: commits after the bound head were not merged`
-    warning names `run_id`, `bound_sha` and `tip_sha`; a dedicated event type is a follow-up. Only
+    branch holds commits the merge left out — or its tip cannot be read or judged — every run branch
+    of the run is kept (not only the one with excluded commits) and a `merge_binding: commits after
+    the bound head were not merged` warning names `run_id`, `bound_sha` and `tip_sha` (a `run branch
+    tip unknown` warning names the branch and the error); a dedicated event type is a follow-up. Only
     code repositories this run merged are judged: one resolved externally or skipped is cleaned up
     as with binding off.
 11. **Collision renumber is skipped under binding** (planning runs whose artifact id collided at

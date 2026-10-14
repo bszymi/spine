@@ -376,6 +376,71 @@ func TestRecoveryResubmitAndAssertionOrdering(t *testing.T) {
 			t.Fatal("control: missing output accepted")
 		}
 	})
+	// Codex review, round 2: a head refusal wins over the missing-output
+	// failure, which would otherwise fail the step for a submit the head
+	// check refuses.
+	t.Run("head refusals before required outputs", func(t *testing.T) {
+		wf := testBindingWorkflow()
+		findStepDef(wf, "review").RequiredOutputs = []string{"report.md"}
+		for _, tc := range []struct {
+			name      string
+			bindingOn bool
+			setup     func(f *bindFix)
+			outcome   string
+			expected  string
+			code      domain.ErrorCode
+			reason    string
+		}{
+			{"stale assertion, binding on", true, func(f *bindFix) { f.git.setHead(f.run.BranchName, sha40('a')) },
+				"rework", sha40('b'), domain.ErrConflict, ReasonRunBranchMoved},
+			{"stale assertion, binding off", false, func(f *bindFix) { f.git.setHead(f.run.BranchName, sha40('a')) },
+				"accepted", sha40('b'), domain.ErrConflict, ReasonRunBranchMoved},
+			{"approval of a moved branch", true, func(f *bindFix) {
+				f.bindAt(sha40('1'), "execute")
+				f.git.setHead(f.run.BranchName, sha40('2'))
+			}, "accepted", "", domain.ErrConflict, ReasonRunBranchMovedSinceGate},
+			{"head unresolvable", true, func(f *bindFix) { f.git.headErr = errors.New("transport down") },
+				"accepted", "", domain.ErrUnavailable, ReasonRunBranchHeadUnavailable},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newBindFix(t, wf, tc.bindingOn, "")
+				tc.setup(f)
+				e := f.exec("review", domain.StepStatusAssigned)
+				before := stepSnapshot(e)
+				_, err := f.orch.IngestResult(context.Background(), SubmitRequest{
+					ExecutionID: e.ExecutionID, OutcomeID: tc.outcome, ExpectedHeadSHA: tc.expected,
+				})
+				requireBindingErr(t, err, tc.code, tc.reason)
+				if got := stepSnapshot(f.latestExec("review")); got != before {
+					t.Fatalf("step changed %s -> %s; a head refusal must not fail the step", before, got)
+				}
+			})
+		}
+		// Controls: a matching assertion, or binding off without one (SMP
+		// today: no head read at all), still fails the step for the
+		// missing output.
+		for _, on := range []bool{true, false} {
+			f := newBindFix(t, wf, on, "")
+			f.git.setHead(f.run.BranchName, sha40('a'))
+			expected := ""
+			if on {
+				f.bindAt(sha40('a'), "execute")
+				expected = sha40('a')
+			}
+			e := f.exec("review", domain.StepStatusAssigned)
+			_, err := f.orch.IngestResult(context.Background(), SubmitRequest{ExecutionID: e.ExecutionID, OutcomeID: "accepted", ExpectedHeadSHA: expected})
+			var se *domain.SpineError
+			if !errors.As(err, &se) || se.Code != domain.ErrInvalidParams {
+				t.Fatalf("binding=%v: err = %v, want the missing-output ErrInvalidParams", on, err)
+			}
+			if got := f.latestExec("review"); got.Status != domain.StepStatusFailed {
+				t.Fatalf("binding=%v: review status = %s, want failed for the missing output", on, got.Status)
+			}
+			if !on && f.git.callCount("binder:ResolveBranchHead") != 0 {
+				t.Fatal("binding off without an assertion resolved the head")
+			}
+		}
+	})
 	t.Run("assertion reaches SubmitStepResult through IngestResult", func(t *testing.T) {
 		f := newBindFix(t, testBindingWorkflow(), true, "")
 		f.git.setHead(f.run.BranchName, sha40('a'))

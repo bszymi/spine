@@ -30,10 +30,13 @@ const bindRunID = "run-abc12345"
 type fakeBinderGit struct {
 	stubGitOperator
 
-	mu      sync.Mutex
-	calls   []string
-	heads   map[string]string // branch → head
-	headErr error
+	mu       sync.Mutex
+	calls    []string
+	heads    map[string]string // branch → head
+	headErr  error
+	headErrs map[string]error // ResolveBranchHead error for one branch
+
+	ancestorErr map[string]error // "anc>desc" → IsAncestor error
 
 	verifyErr   error
 	notAncestor map[string]bool // "anc>desc" → not an ancestor
@@ -59,7 +62,8 @@ type fakeBinderGit struct {
 }
 
 func newFakeBinderGit() *fakeBinderGit {
-	return &fakeBinderGit{heads: map[string]string{}, notAncestor: map[string]bool{}, parents: map[string][]string{}, parentsErr: map[string]error{},
+	return &fakeBinderGit{heads: map[string]string{}, headErrs: map[string]error{}, ancestorErr: map[string]error{},
+		notAncestor: map[string]bool{}, parents: map[string][]string{}, parentsErr: map[string]error{},
 		files: map[string]string{}, mergeBases: map[string]string{}, diffs: map[string][]git.FileDiff{}}
 }
 
@@ -94,6 +98,9 @@ func (f *fakeBinderGit) ResolveBranchHead(_ context.Context, branch string) (str
 	if f.headErr != nil {
 		return "", f.headErr
 	}
+	if err := f.headErrs[branch]; err != nil {
+		return "", err
+	}
 	h, ok := f.heads[branch]
 	if !ok {
 		return "", &git.GitError{Kind: git.ErrKindNotFound, Op: "resolve_branch_head", Message: "no branch " + branch}
@@ -108,6 +115,9 @@ func (f *fakeBinderGit) VerifyCommit(_ context.Context, sha string) error {
 
 func (f *fakeBinderGit) IsAncestor(_ context.Context, a, d string) (bool, error) {
 	f.record("binder:IsAncestor " + a + ">" + d)
+	if err := f.ancestorErr[a+">"+d]; err != nil {
+		return false, err
+	}
 	if a == d {
 		return true, nil
 	}

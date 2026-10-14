@@ -58,6 +58,9 @@ previous build). Externally visible:
     required-outputs check, so it never fails the step;
   - `503 run_branch_head_unavailable` — the head could not be resolved for a submit that must bind
     it; nothing was recorded.
+
+  None of these answers changes the step: they come before the required-outputs check, so a submit
+  that is refused on its head and also lacks a required output is not failed for the output.
 - **UX change: a fix-up made during a review can no longer be approved in the same review.** A
   commit on the run branch while a review is open — including the reviewer's own `/artifacts/add`
   or `write_context` write — makes the approval answer `409 run_branch_moved_since_gate`. The
@@ -69,7 +72,8 @@ previous build). Externally visible:
   reworked.
 - **A run branch whose tip held commits the merge left out is kept** instead of deleted, and a
   `WARN merge_binding: commits after the bound head were not merged` names `run_id`, `bound_sha`
-  and `tip_sha`.
+  and `tip_sha`. A tip that cannot be read or judged keeps the branch too (`WARN merge binding: run
+  branch tip unknown; keeping the run branch`); only a branch that no longer exists is not kept.
 - **Planning-run collision renumber is skipped** under binding (it committed on the branch tip).
 - **A merge the structural check refuses is taken back** off the local `main` (compare-and-swap
   `update-ref`, the working tree following with a two-tree `read-tree -m -u`), so the next governed

@@ -136,6 +136,18 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 
 	// Validate required_outputs are present.
 	if err := validateRequiredOutputs(stepDef.RequiredOutputs, req.ArtifactsProduced); err != nil {
+		// Every head refusal leaves the step exactly as it was, so it
+		// wins over the missing-output failure below (codex review,
+		// round 2): an expected_head_sha that no longer matches the run
+		// branch answers its 409 run_branch_moved, a gate approval of a
+		// moved branch its 409 run_branch_moved_since_gate, and an
+		// unresolvable head its 503 — none fails the step. captureHead
+		// only reads, and with binding off and no assertion it reads
+		// nothing; it runs only on this failure path, so a valid
+		// submission still resolves the head once, in SubmitStepResult.
+		if _, headErr := o.captureHead(ctx, run, exec, stepDef, outcome, wfDef, req.ExpectedHeadSHA); headErr != nil {
+			return nil, headErr
+		}
 		log.Warn("required outputs missing",
 			"execution_id", req.ExecutionID,
 			"step_id", exec.StepID,

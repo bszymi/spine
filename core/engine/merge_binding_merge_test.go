@@ -463,6 +463,45 @@ func TestRefusedMergeTakeBackFailure(t *testing.T) {
 	requireMergeFailedRoute(t, f, false)
 }
 
+// TestUnknownTipKeepsBranch (codex review, round 2): a run-branch tip
+// the excluded-commits check cannot judge keeps the branch — it may be
+// the only ref to commits the merge left out — while a branch that no
+// longer exists is nothing to keep. The merge itself completes either way.
+func TestUnknownTipKeepsBranch(t *testing.T) {
+	bound, base, tip, m := sha40('a'), sha40('b'), sha40('f'), sha40('c')
+	blip := &git.GitError{Kind: git.ErrKindTransient, Op: "resolve_branch_head", Message: "repository locked"}
+	for _, tc := range []struct {
+		name  string
+		setup func(f *bindFix)
+		keep  bool
+	}{
+		{"tip unreadable", func(f *bindFix) { f.git.headErrs[f.run.BranchName] = blip }, true},
+		{"tip malformed", func(f *bindFix) { f.git.setHead(f.run.BranchName, "not-a-sha") }, true},
+		{"ancestry unreadable", func(f *bindFix) {
+			f.git.setHead(f.run.BranchName, tip)
+			f.git.ancestorErr[tip+">"+m] = errors.New("object store unavailable")
+		}, true},
+		{"no run branch left", func(*bindFix) {}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := committingFix(t, false, true)
+			f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+			f.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+			f.git.parents[m] = []string{base, bound}
+			tc.setup(f)
+			if err := f.merge(); err != nil {
+				t.Fatalf("MergeRunBranch: %v", err)
+			}
+			if f.run.Status != domain.RunStatusCompleted || len(f.git.pushes) != 1 {
+				t.Fatalf("run status = %s, pushes = %v; want completed with the merge pushed", f.run.Status, f.git.pushes)
+			}
+			if deleted := f.git.callCount("DeleteBranch") > 0; deleted == tc.keep {
+				t.Fatalf("branch deleted = %v, want kept = %v", deleted, tc.keep)
+			}
+		})
+	}
+}
+
 // TestExcludedTipKeepsBranch: a tip the merge did not contain is
 // reported and the run branch is kept (owner question 3); a contained
 // tip is cleaned up.
