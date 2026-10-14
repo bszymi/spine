@@ -189,6 +189,14 @@ func WithoutPushToken() CLIOption {
 //     empty, and GIT_SSH_COMMAND=noAmbientSSHCommand (which overrides
 //     GIT_SSH and core.sshCommand).
 //
+// Because no system or global config is read, the host's
+// non-credential git settings do not apply to such a clone or push
+// either: a CA bundle or sslVerify, http.proxy, url.<base>.insteadOf,
+// safe.directory. Their environment forms (GIT_SSL_CAINFO,
+// GIT_SSL_NO_VERIFY, HTTPS_PROXY, ...) are left alone and still apply;
+// safe.directory and insteadOf have none (KNOWN-LIMITATIONS.md). The
+// client's other operations (commit, merge, log) are unaffected.
+//
 // A client that does carry a token or helper is unchanged: its own
 // credential is used as before. Not covered (KNOWN-LIMITATIONS.md):
 // curl's ~/.netrc lookup, which git enables for HTTP; config in the

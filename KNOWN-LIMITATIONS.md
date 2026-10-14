@@ -325,6 +325,20 @@ The following limitations have been resolved:
   there is no per-binding SSH key, so an `ssh://` code repository with no credential is reached
   anonymously or not at all. Use an `https` clone URL with a `credentials_ref`. Per-binding SSH
   credentials are a follow-up.
+- **No host git config at all, credential or not.** Because the system and global config are not
+  read, their non-credential settings do not apply to a credential-less code repository's clone or
+  push either: a CA bundle (`http.sslCAInfo` / `http.sslCAPath`, `http.sslVerify`), a proxy
+  (`http.proxy`), URL rewrites (`url.<base>.insteadOf`), `safe.directory`, `http.version` and the
+  like. The environment equivalents still apply — `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`,
+  `GIT_SSL_NO_VERIFY`, `HTTPS_PROXY` / `https_proxy` / `ALL_PROXY` — so set those in the
+  environment of `spine serve` instead. `safe.directory` and `insteadOf` have no environment form:
+  every clone under `SPINE_CODE_REPO_BASE` must be owned by the uid `spine serve` runs as
+  (otherwise that repository's commits work, through the operator's `safe.directory`, but its
+  push fails with "detected dubious ownership"), and a clone URL must name its real host. The
+  same client's local operations (commit, merge, log) still read the host config. Passing
+  Spine-controlled values for these on the command line is a follow-up for when code repositories
+  are wired; `TestLatentGitpool_CredentialLessCodeRepoReadsNoHostConfig`
+  (`adapters/gitpool/process_auth_scope_test.go`) pins the current behaviour.
 - **Residuals:** curl's `~/.netrc` lookup, which git enables for HTTP, still answers for a host it
   lists — do not keep a `.netrc` in the `HOME` of the `spine serve` process. Config in a reused
   clone's own `.git/config` still applies (only filesystem access can write it). On git 2.30–2.31,

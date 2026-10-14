@@ -633,3 +633,89 @@ func TestLatentGitpool_CredentialLessSSHCodeRepoUsesNoSSHIdentity(t *testing.T) 
 		assertNoIdentity(t, read())
 	})
 }
+
+// Review round 1 (P3, two reviewers): WithoutAmbientCredentials reads no
+// system or global git config at all, so the host's non-credential git
+// settings do not apply to a credential-less code repository either — a
+// CA bundle or sslVerify, http.proxy, url.<base>.insteadOf,
+// safe.directory. Their environment equivalents (GIT_SSL_CAINFO,
+// GIT_SSL_NO_VERIFY, HTTPS_PROXY, ...) still apply. Pinned here because
+// KNOWN-LIMITATIONS ("Code Repositories Authenticate Only With
+// credentials_ref") documents it; a change to either half is deliberate.
+func TestLatentGitpool_CredentialLessCodeRepoReadsNoHostConfig(t *testing.T) {
+	// hostTLSFromConfig moves TLS trust for the self-signed test host
+	// from the environment into the global config (http.sslVerify=false
+	// stands in for http.sslCAInfo). GIT_SSL_NO_VERIFY is read by
+	// presence, so it is unset, not emptied.
+	hostTLSFromConfig := func(t *testing.T, home, extra string) {
+		t.Helper()
+		t.Setenv("GIT_SSL_NO_VERIFY", "")
+		if err := os.Unsetenv("GIT_SSL_NO_VERIFY"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[http]\n\tsslVerify = false\n"+extra), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("control: a plain client honours the global TLS setting", func(t *testing.T) {
+		home := t015Isolate(t)
+		hostTLSFromConfig(t, home, "")
+		srv, c := t015Host(t)
+		dir := filepath.Join(t.TempDir(), "control")
+		t015LocalRepo(t, dir, srv.URL+"/acme/x.git", "")
+		cl := git.NewCLIClient(dir)
+		defer cl.Close()
+		_ = cl.Push(context.Background(), "origin", "main")
+		if c.hitCount() == 0 {
+			t.Fatal("the global http.sslVerify did not apply to a plain client; the cases below would be vacuous")
+		}
+	})
+	t.Run("cloner ignores the global TLS setting", func(t *testing.T) {
+		home := t015Isolate(t)
+		hostTLSFromConfig(t, home, "")
+		srv, c := t015Host(t)
+		_ = gitpool.NewCLICloner(git.WithPushToken(t015ProcessToken, "")).Clone(context.Background(), srv.URL+"/acme/x.git", filepath.Join(t.TempDir(), "clone"), gitpool.Credential{})
+		if n := c.hitCount(); n != 0 {
+			t.Fatalf("a credential-less clone applied the global git config (%d requests reached the host)", n)
+		}
+	})
+	t.Run("factory push ignores the global TLS setting", func(t *testing.T) {
+		home := t015Isolate(t)
+		hostTLSFromConfig(t, home, "")
+		srv, c := t015Host(t)
+		dir := filepath.Join(t.TempDir(), "code")
+		t015LocalRepo(t, dir, srv.URL+"/acme/x.git", "")
+		client := gitpool.NewCLIClientFactory(git.WithPushToken(t015ProcessToken, ""))(dir, gitpool.Credential{})
+		if cl, ok := client.(*git.CLIClient); ok {
+			defer cl.Close()
+		}
+		_ = client.Push(context.Background(), "origin", "main")
+		if n := c.hitCount(); n != 0 {
+			t.Fatalf("a credential-less push applied the global git config (%d requests reached the host)", n)
+		}
+	})
+	t.Run("cloner ignores a global insteadOf rewrite", func(t *testing.T) {
+		home := t015Isolate(t)
+		srv, c := t015Host(t)
+		rewrite := "[url \"" + srv.URL + "/\"]\n\tinsteadOf = https://t015-rewrite.invalid/\n"
+		if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(rewrite), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Control: a plain client follows the rewrite to the test host.
+		_ = git.NewCLIClient(t.TempDir()).Clone(context.Background(), "https://t015-rewrite.invalid/acme/x.git", filepath.Join(t.TempDir(), "control"))
+		if c.hitCount() == 0 {
+			t.Fatal("the global insteadOf did not apply to a plain client")
+		}
+		before := c.hitCount()
+		_ = gitpool.NewCLICloner().Clone(context.Background(), "https://t015-rewrite.invalid/acme/x.git", filepath.Join(t.TempDir(), "clone"), gitpool.Credential{})
+		if c.hitCount() != before {
+			t.Fatal("a credential-less clone applied the global url.insteadOf")
+		}
+	})
+	t.Run("the environment equivalent still applies", func(t *testing.T) {
+		t015Isolate(t) // TLS trust through GIT_SSL_NO_VERIFY=1, in the environment
+		srv, c := t015Host(t)
+		_ = gitpool.NewCLICloner(git.WithPushToken(t015ProcessToken, "")).Clone(context.Background(), srv.URL+"/acme/x.git", filepath.Join(t.TempDir(), "clone"), gitpool.Credential{})
+		t015AssertNoProcessToken(t, c) // reached the host, sent no credential
+	})
+}
