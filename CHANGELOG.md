@@ -94,7 +94,9 @@ through reserved `commit_meta` keys (5).
   type assertion (no interface an embedder implements gained a method; without it every step write
   is the blind `UpdateStepExecution`, unchanged); `(*store.PostgresStore).TransitionStepExecution`
   and `TransitionRunStatusAt`; the optional `engine.RunCursorTransitioner` with
-  `(*store.PostgresStore).TransitionCurrentStep` (crash recovery's conditional cursor move);
+  `(*store.PostgresStore).TransitionCurrentStep` (crash recovery's conditional cursor move) and
+  `engine.BranchCursorTransitioner` with `(*store.PostgresStore).TransitionBranchCursor` (the same
+  for a divergence branch's cursor: cursor only, while the branch is open);
   `Orchestrator.RecoverCompletedStep` and
   `Orchestrator.StepOutputEvidence`; the types `engine.BranchChange` and
   `engine.StepOutputEvidence` with their `BranchChange*` / `EvidenceReason*` constants (an

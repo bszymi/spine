@@ -897,8 +897,9 @@ embedder (through `TransitionRunStatus`, which every `engine.RunStore` has); the
    auto-acknowledging) with the idempotent `in_progress` result. `SubmitStepResult` no longer
    routes an execution that is terminal when read: re-route a completed execution whose run did
    not advance with `Orchestrator.RecoverCompletedStep` (implement the optional
-   `engine.RunCursorTransitioner` too — `(*store.PostgresStore).TransitionCurrentStep` — so its
-   resume of a routing successor never rewinds a cursor a live submit moved on).
+   `engine.RunCursorTransitioner` and `engine.BranchCursorTransitioner` too —
+   `(*store.PostgresStore).TransitionCurrentStep` / `TransitionBranchCursor` — so its resume of a
+   routing successor never rewinds a run or branch cursor a live submit moved on).
 4. **Show the evidence.** `step_completed` carries `branch_change` and
    `required_outputs_unchanged` (architecture/event-schemas.md §4.2), and
    `Orchestrator.StepOutputEvidence(ctx, runID)` returns the persisted per-execution evidence for

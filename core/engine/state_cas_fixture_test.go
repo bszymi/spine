@@ -331,7 +331,21 @@ type condStore struct{ *casStore }
 var (
 	_ StepExecutionTransitioner = condStore{}
 	_ RunCursorTransitioner     = condStore{}
+	_ BranchCursorTransitioner  = condStore{}
 )
+
+// TransitionBranchCursor is (*store.PostgresStore).TransitionBranchCursor
+// over the same rows: the cursor only, while the branch is open and at from.
+func (s condStore) TransitionBranchCursor(_ context.Context, branchID, from, to string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.branches[branchID]
+	if !ok || (b.Status != domain.BranchStatusPending && b.Status != domain.BranchStatusInProgress) || b.CurrentStepID != from {
+		return false, nil
+	}
+	b.CurrentStepID = to
+	return true, nil
+}
 
 func (s condStore) TransitionCurrentStep(_ context.Context, runID, from, to string) (bool, error) {
 	s.mu.Lock()

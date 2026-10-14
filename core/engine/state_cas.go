@@ -160,6 +160,44 @@ func (o *Orchestrator) moveCursorIfAt(ctx context.Context, runID, from, to strin
 	return true, nil
 }
 
+// BranchCursorTransitioner is an OPTIONAL RunStore capability (INIT-023
+// TASK-008 review round 1, codex): it moves a divergence branch's
+// current_step_id from fromStepID to toStepID only while the branch is
+// still open (pending or in_progress) and at fromStepID, writing no other
+// column; (false, nil) otherwise. RecoverCompletedStep's branch path uses
+// it so that of two recoveries finishing the same routing only one moves
+// the cursor (and activates the successor), and neither writes back a
+// stale branch snapshot — UpdateBranch replaces the status and the cursor
+// together, so a late one could rewind a branch the successor had moved
+// on, or reopen one it had completed. Detected by type assertion;
+// *store.PostgresStore implements it (asserted in service/cmd/spine).
+// Without it recovery re-reads the branch right before a plain
+// UpdateBranch, which narrows the window but does not close it.
+type BranchCursorTransitioner interface {
+	TransitionBranchCursor(ctx context.Context, branchID, fromStepID, toStepID string) (bool, error)
+}
+
+// moveBranchCursorIfAt moves branchID's cursor from `from` to `to` only
+// while the branch is open and still at `from` (see
+// BranchCursorTransitioner).
+func (o *Orchestrator) moveBranchCursorIfAt(ctx context.Context, branchID, from, to string) (bool, error) {
+	if t, ok := o.store.(BranchCursorTransitioner); ok {
+		return t.TransitionBranchCursor(ctx, branchID, from, to)
+	}
+	b, err := o.store.GetBranch(ctx, branchID)
+	if err != nil {
+		return false, fmt.Errorf("get branch: %w", err)
+	}
+	if (b.Status != domain.BranchStatusPending && b.Status != domain.BranchStatusInProgress) || b.CurrentStepID != from {
+		return false, nil
+	}
+	b.CurrentStepID = to
+	if err := o.store.UpdateBranch(ctx, b); err != nil {
+		return false, fmt.Errorf("update branch current step: %w", err)
+	}
+	return true, nil
+}
+
 // stepState is the (status, actor) expectation a conditional step write
 // is judged against: what the caller read before deciding on the write.
 type stepState struct {

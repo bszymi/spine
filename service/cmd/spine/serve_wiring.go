@@ -63,6 +63,10 @@ var _ engine.StepExecutionTransitioner = (*store.PostgresStore)(nil)
 // routing successor (INIT-023 TASK-008, codex review round 2).
 var _ engine.RunCursorTransitioner = (*store.PostgresStore)(nil)
 
+// And for the conditional branch-cursor move of a divergence-branch
+// recovery (INIT-023 TASK-008 review round 1, codex).
+var _ engine.BranchCursorTransitioner = (*store.PostgresStore)(nil)
+
 // resultAdapter adapts engine.Orchestrator to gateway.ResultHandler.
 type resultAdapter struct {
 	orch *engine.Orchestrator

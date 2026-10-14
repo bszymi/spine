@@ -277,3 +277,66 @@ func TestTransitionCurrentStep(t *testing.T) {
 		t.Fatalf("missing run = (%v, %v), want (false, nil)", applied, err)
 	}
 }
+
+// Review round 1 (codex): the conditional branch-cursor move a
+// divergence-branch recovery uses. Only current_step_id is written, only
+// while the branch is open and at the expected step (NULL matching "");
+// a closed, moved or missing branch is (false, nil) and unchanged.
+func TestTransitionBranchCursor(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	divID, branchID := "div-t008", runID+"-b1"
+	t.Cleanup(func() {
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.branches WHERE run_id = $1`, runID)
+		_ = s.ExecRaw(ctx, `DELETE FROM runtime.divergence_contexts WHERE run_id = $1`, runID)
+	})
+	if err := s.CreateDivergenceContext(ctx, &domain.DivergenceContext{DivergenceID: divID, RunID: runID,
+		Status: domain.DivergenceStatusActive, DivergenceMode: domain.DivergenceModeStructured}); err != nil {
+		t.Fatalf("create divergence: %v", err)
+	}
+	if err := s.CreateBranch(ctx, &domain.Branch{BranchID: branchID, RunID: runID, DivergenceID: divID,
+		Status: domain.BranchStatusPending, ArtifactsProduced: []string{"a.md"}}); err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+	get := func() *domain.Branch {
+		t.Helper()
+		b, err := s.GetBranch(ctx, branchID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	// NULL cursor matches "".
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "", "draft"); err != nil || !applied {
+		t.Fatalf("NULL → draft = (%v, %v), want (true, nil)", applied, err)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "review", "polish"); err != nil || applied {
+		t.Fatalf("wrong from = (%v, %v), want (false, nil)", applied, err)
+	}
+	if b := get(); b.CurrentStepID != "draft" {
+		t.Fatalf("cursor = %q after a miss, want draft", b.CurrentStepID)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "draft", "polish"); err != nil || !applied {
+		t.Fatalf("hit = (%v, %v), want (true, nil)", applied, err)
+	}
+	b := get()
+	if b.CurrentStepID != "polish" || b.Status != domain.BranchStatusPending || len(b.ArtifactsProduced) != 1 {
+		t.Fatalf("branch = %+v; want cursor polish and every other column untouched", b)
+	}
+
+	// Closed: no move, and the stored status is not rewritten.
+	done := time.Now().UTC().Truncate(time.Microsecond)
+	b.Status, b.CompletedAt = domain.BranchStatusCompleted, &done
+	if err := s.UpdateBranch(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID, "polish", "end"); err != nil || applied {
+		t.Fatalf("completed branch = (%v, %v), want (false, nil)", applied, err)
+	}
+	if b := get(); b.Status != domain.BranchStatusCompleted || b.CurrentStepID != "polish" {
+		t.Fatalf("completed branch changed: %+v", b)
+	}
+	if applied, err := s.TransitionBranchCursor(ctx, branchID+"-ghost", "polish", "end"); err != nil || applied {
+		t.Fatalf("missing branch = (%v, %v), want (false, nil)", applied, err)
+	}
+}

@@ -555,6 +555,12 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 //   - a successor this recovery created whose branch cursor it did not
 //     move (it stopped in between) is finished: cursor moved, activated.
 //
+// Every branch-cursor move is conditional (moveBranchCursorIfAt, review
+// round 1): only while the branch is open and still at this step, and
+// only the cursor is written, so a recovery never writes back a stale
+// branch snapshot over a branch that moved on or completed; a miss is a
+// conflict and nothing is activated.
+//
 // Anything else is ErrConflict and changes nothing. A branch that was
 // marked completed but whose convergence check never ran is not covered
 // (KNOWN-LIMITATIONS "Engine State Writes …").
@@ -614,13 +620,19 @@ func (o *Orchestrator) recoverBranchStep(ctx context.Context, run *domain.Run, e
 	}
 
 	// The successor exists but the branch cursor was not moved: a
-	// recovery created it (the claim below) and stopped. Finish it.
+	// recovery created it (the claim below) and stopped. Finish it. Two
+	// recoveries can both get here; the cursor move is conditional
+	// (review round 1, codex), so only one moves it and activates, and
+	// neither writes back its stale snapshot of the branch.
 	if len(later) == 1 && later[0].StepID == next && later[0].Status == domain.StepStatusWaiting &&
 		later[0].ExecutionID == fmt.Sprintf("%s-%s-%s-%d", run.RunID, exec.BranchID, next, later[0].Attempt) &&
 		branch.CurrentStepID == exec.StepID {
-		branch.CurrentStepID = next
-		if err := o.store.UpdateBranch(ctx, branch); err != nil {
-			return fmt.Errorf("update branch current step: %w", err)
+		moved, err := o.moveBranchCursorIfAt(ctx, branch.BranchID, exec.StepID, next)
+		if err != nil {
+			return err
+		}
+		if !moved {
+			return routed("the branch moved on while it was being recovered")
 		}
 		log.Info("recovery: resumed a branch successor whose branch cursor had not moved",
 			"run_id", run.RunID, "branch_id", branch.BranchID, "successor", later[0].ExecutionID)
@@ -664,9 +676,16 @@ func (o *Orchestrator) recoverBranchStep(ctx context.Context, run *domain.Run, e
 	}
 	recordStepRoutingDecision(ctx, run.RunID, next, findStepDef(wfDef, next), nextRepoID)
 	if branch.CurrentStepID != next {
-		branch.CurrentStepID = next
-		if err := o.store.UpdateBranch(ctx, branch); err != nil {
-			return fmt.Errorf("update branch current step: %w", err)
+		// Conditional, as on the main path (moveCursorIfAt): a branch that
+		// moved since the read is not rewound with this snapshot.
+		moved, err := o.moveBranchCursorIfAt(ctx, branch.BranchID, exec.StepID, next)
+		if err != nil {
+			return err
+		}
+		if !moved {
+			log.Warn("recovery: created the branch successor but the branch had moved; not activating it",
+				"run_id", run.RunID, "branch_id", branch.BranchID, "successor", nextExec.ExecutionID)
+			return routed("the branch moved on while it was being recovered")
 		}
 	}
 	log.Info("branch step progressed (recovery)",

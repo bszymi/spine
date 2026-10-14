@@ -10,6 +10,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -284,4 +285,88 @@ func TestConsumer_OverlappingDeliveriesRouteOnce(t *testing.T) {
 		}
 		routedOnce(t, f)
 	})
+}
+
+// Codex review (review round 1): a divergence-branch recovery never writes
+// back a stale branch snapshot. Both cursor moves of recoverBranchStep are
+// conditional on the branch still being open and at the recovered step;
+// UpdateBranch replaced status and cursor together, so a late recovery
+// could reopen a branch its successor had completed. With and without the
+// store capability (the fallback re-reads right before writing).
+// Mutation: a plain UpdateBranch of the snapshot in either path fails it.
+func TestRecoverCompletedStep_BranchCursorNeverRewound(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T, capability bool) (*casFix, *domain.StepExecution) {
+		f := newCasFix(t, branchWorkflow(), capability)
+		f.st.branches["b1"] = &domain.Branch{BranchID: "b1", RunID: f.runID, DivergenceID: "div-1",
+			Status: domain.BranchStatusInProgress, CurrentStepID: "draft"}
+		created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		done := created.Add(time.Second)
+		e := &domain.StepExecution{ExecutionID: f.runID + "-b1-draft-1", RunID: f.runID, StepID: "draft", BranchID: "b1",
+			Status: domain.StepStatusCompleted, ActorID: "actor-a", OutcomeID: "done", Attempt: 1, CreatedAt: created, CompletedAt: &done}
+		f.st.steps[e.ExecutionID] = copyExec(e)
+		f.st.runs[f.runID].CurrentStepID = "divergence:div-1"
+		return f, e
+	}
+	completeBranch := func(f *casFix) {
+		f.st.mu.Lock()
+		defer f.st.mu.Unlock()
+		now := time.Now()
+		b := f.st.branches["b1"]
+		b.Status, b.CompletedAt = domain.BranchStatusCompleted, &now
+	}
+	branch := func(f *casFix) domain.Branch {
+		b, _ := f.st.GetBranch(ctx, "b1")
+		return *b
+	}
+	for _, capability := range []bool{false, true} {
+		// Two recoveries finish the same stranded claim (polish-1 created,
+		// branch cursor still at draft); the first moves the cursor and the
+		// successor then completes the branch before the second writes.
+		t.Run(fmt.Sprintf("two recoveries finish one claim, capability=%v", capability), func(t *testing.T) {
+			f, e := setup(t, capability)
+			f.st.steps[f.runID+"-b1-polish-1"] = &domain.StepExecution{ExecutionID: f.runID + "-b1-polish-1", RunID: f.runID,
+				StepID: "polish", BranchID: "b1", Status: domain.StepStatusWaiting, Attempt: 1,
+				CreatedAt: time.Date(2026, 10, 1, 12, 0, 5, 0, time.UTC)}
+			var second error
+			armed := true
+			f.st.afterList = func(string, int) {
+				if !armed {
+					return
+				}
+				armed = false // the first recovery has its branch snapshot and listing
+				second = f.orch.RecoverCompletedStep(ctx, e.ExecutionID)
+				completeBranch(f)
+			}
+			err := f.orch.RecoverCompletedStep(ctx, e.ExecutionID)
+			if second != nil {
+				t.Fatalf("the recovery that finished the claim: %v", second)
+			}
+			requireCode(t, err, domain.ErrConflict, "the late recovery")
+			if b := branch(f); b.Status != domain.BranchStatusCompleted || b.CurrentStepID != "polish" {
+				t.Fatalf("branch = %s at %q; the late recovery wrote back its snapshot (want completed at polish)", b.Status, b.CurrentStepID)
+			}
+		})
+		// The claim's creator: the branch completed between its read and its
+		// cursor move; it created the successor but must not reopen the
+		// branch or activate the successor.
+		t.Run(fmt.Sprintf("the creator over a branch that moved, capability=%v", capability), func(t *testing.T) {
+			f, e := setup(t, capability)
+			armed := true
+			f.st.afterList = func(string, int) {
+				if armed {
+					armed = false
+					completeBranch(f)
+				}
+			}
+			err := f.orch.RecoverCompletedStep(ctx, e.ExecutionID)
+			requireCode(t, err, domain.ErrConflict, "a creator whose branch moved")
+			if b := branch(f); b.Status != domain.BranchStatusCompleted || b.CurrentStepID != "draft" {
+				t.Fatalf("branch = %s at %q; want it left completed at draft", b.Status, b.CurrentStepID)
+			}
+			if got := f.st.exec(f.runID + "-b1-polish-1"); got == nil || got.Status != domain.StepStatusWaiting {
+				t.Fatalf("successor = %+v; want it created and left waiting (not activated)", got)
+			}
+		})
+	}
 }
