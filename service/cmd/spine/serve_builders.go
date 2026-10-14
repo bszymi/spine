@@ -410,7 +410,13 @@ func buildGitHTTPHandler(wsResolver workspace.Resolver, trustedCIDRs []string, r
 		return nil
 	}
 	if len(trustedCIDRs) == 0 {
-		log.Warn("git HTTP endpoint enabled with no trusted CIDRs; all clients must present a bearer token. Set SPINE_GIT_HTTP_TRUSTED_CIDRS to a narrow runner subnet to opt in to token-less access.")
+		// Recommend the runners' own addresses, never a subnet: a
+		// range that contains a Docker bridge gateway or a reverse
+		// proxy hands token-less reads to every client it relays — the
+		// compose /16 default INIT-023 TASK-015 (P3-30) removed.
+		log.Warn("git HTTP endpoint enabled with no trusted CIDRs; all clients must present a bearer token. " +
+			"To let runners clone token-less, set SPINE_GIT_HTTP_TRUSTED_CIDRS to the runners' own addresses only " +
+			"(never a range containing a Docker bridge gateway or a reverse proxy; see docker-compose.override.yaml.example).")
 	} else {
 		log.Info("git HTTP endpoint enabled", "trusted_cidrs", trustedCIDRs)
 	}

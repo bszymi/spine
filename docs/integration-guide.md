@@ -626,7 +626,7 @@ The endpoint ships with push **disabled** (`http.receivepack=false` pinned in th
 
 Set `SPINE_GIT_RECEIVE_PACK_ENABLED=true` (accepted values: `1`, `true`, `yes`, `on`) to reach the push endpoint. Flipping this on is a deliberate opt-in — an existing deployment that upgrades past this change keeps the read-only behaviour it had before.
 
-Auth on push is **stricter** than on clone/fetch: the trusted-CIDR bypass does not apply to `git-receive-pack`. Every push must carry `Authorization: Bearer <token>` so an actor identity is pinned for audit and the pre-receive branch-protection check — a runner subnet configured for token-less cloning still needs a token to push.
+Auth on push is **stricter** than on clone/fetch: the trusted-CIDR bypass does not apply to `git-receive-pack`. Every push must carry `Authorization: Bearer <token>` so an actor identity is pinned for audit and the pre-receive branch-protection check — a runner trusted for token-less cloning still needs a token to push.
 
 **Branch-protection pre-receive enforcement.** When the flag is on, every push is intercepted at the HTTP layer before `git-http-backend` writes any ref: the command section of the request body is parsed into `(old, new, ref)` triples, each triple is classified (`delete` if `new == 0000...`, else `direct-write`), and each is evaluated against the projection-backed `branchprotect.Policy`. Any Deny rejects the **entire** push (pre-receive semantics — no partial application), and the client sees the rejection as `remote: branch-protection: <rule> denies <branch>` lines plus a per-ref `ng <ref> pre-receive hook declined`. Before the policy runs, every ref update is also admitted by **ref class** (INIT-023 TASK-016), whether or not a policy is wired: tags, notes and other non-branch refs, `spine/init` and the rest of the reserved `spine/**` namespace are operator-only; a run, planning or divergence branch can be pushed only by the actor bound to its current step (or an operator) and deleted only by an operator. Refs under `spine/*` still skip the *policy* — they are out of scope for user-authored rules (ADR-009 §3) — but not this admission. Refusals read `remote: ref-admission: …` (see `docs/git-push-guide.md` §5).
 
@@ -655,15 +655,17 @@ A **push always presents a bearer** (`Authorization: Bearer <token>`), validated
 
 `SPINE_DEV_MODE` does not affect `/git` (it used to drop git authentication for clone and push).
 
-Example clone from a runner container on the same Docker network:
+Example clone from a runner container on the same Docker network. The stock `docker-compose.yaml` trusts no address, so the clone presents a bearer (`git -c` applies the header to this command only; it is not written to the clone's `.git/config`):
 
 ```bash
-git clone \
+git -c http.extraHeader="Authorization: Bearer $SPINE_TOKEN" clone \
   http://spine:8080/git/ws-abc123 \
   --branch spine/run/task-001-implement-x \
   --depth 1 \
   /workspace
 ```
+
+The same command without the header works only from a runner whose own address is in `SPINE_GIT_HTTP_TRUSTED_CIDRS` and that connects directly (path 2 above; `docker-compose.override.yaml.example` shows the runner-only recipes). Otherwise it fails with `401` "authorization required for external git access".
 
 ### Limits
 

@@ -19,7 +19,8 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   workflow on the authoritative branch could make every SSE reader dispatch a forged event (for
   example a fake `run_completed`) and adopt an attacker-chosen `Last-Event-ID`, live and on
   replay. The writer now omits an `id:` or `event:` line whose value holds a control character,
-  invalid UTF-8, U+0085, U+2028 or U+2029 (one Warn per omission), writes `data` one line per
+  invalid UTF-8, U+0085, U+2028 or U+2029 (a Warn, at most once a minute, with the count it did not
+  log and the identifier cut to 80 bytes), writes `data` one line per
   `data:` line, and escapes U+0085/U+2028/U+2029 inside the JSON data. Every engine event's frame
   is byte-identical to before.
 - **Workflow identifiers are checked on the standalone API (P3-28, defence in depth).**
@@ -42,6 +43,13 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   `X-Forwarded-Host`, `X-Forwarded-Proto` or `Via`, now needs a bearer; no forwarded address is
   trusted for access. A refused trusted-CIDR peer logs a rate-limited Warn naming
   `SPINE_TRUSTED_PROXY_CIDRS`.
+- **A repeated `service` query parameter on `/git` is refused (P3-30 companion).** The push/read
+  classifier read the first `service` value and git-http-backend the last, so
+  `info/refs?service=git-upload-pack&service=git-receive-pack` counted as a read for the
+  token-less paths (a trusted-CIDR runner, `SPINE_GIT_HTTP_DEV_NO_AUTH`) and returned the
+  receive-pack advertisement (the push-side ref and capability list; the pack upload itself always
+  needed a bearer). Such a request now counts as a push when any value names receive-pack, so it
+  needs a bearer, and is then refused with `400`. No git client sends one.
 - **`SPINE_DEV_MODE` no longer drops git authentication (P3-30).** It is accepted whenever
   `SPINE_ENV` is not `production`, and it removed authentication from clone **and push**
   (anonymous pushes reached the pre-receive gate). Pushes now always present a validated bearer.
@@ -92,7 +100,11 @@ credential item. Owner questions answered by their defaults, pending the owner, 
 - A code repository with no `credentials_ref` that relied on the process push token, the process
   or a host-level credential helper, or the process's SSH identity now clones and pushes
   unauthenticated: give it an `https` clone URL and a `credentials_ref` (there is no per-binding SSH
-  credential yet). Dormant today: `spine serve` wires no code-repository catalog.
+  credential yet). Its clone and push also ignore the rest of the system and global git config — a
+  CA bundle or `sslVerify`, `http.proxy`, `url.<base>.insteadOf`, `safe.directory`: use the
+  environment forms (`GIT_SSL_CAINFO`, `HTTPS_PROXY`, …), which still apply, and keep its clone
+  owned by the `spine serve` uid (KNOWN-LIMITATIONS). Dormant today: `spine serve` wires no
+  code-repository catalog.
 
 ### Changed
 
@@ -101,8 +113,10 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   schema, event type or `rebuild_id` format change.
 - `/system/metrics` in shared mode answers `400` if no workspace resolved (unreachable past
   authentication).
-- New logs: `sse: omitting unsafe event id` / `… event type` (Warn), the rate-limited proxied-peer
-  Warn on `/git`, the startup Warns for `SPINE_GIT_HTTP_DEV_NO_AUTH` and for a CIDR overlap.
+- New logs: `sse: omitting unsafe event fields (rate-limited)` (Warn, at most once a minute, with
+  `suppressed_since_last_warn`), the rate-limited proxied-peer Warn on `/git`, `git request rejected
+  — repeated service parameter` (Warn), the startup Warns for `SPINE_GIT_HTTP_DEV_NO_AUTH` and for
+  a CIDR overlap.
 
 ### For embedders
 
@@ -116,7 +130,9 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   `-c credential.helper=` and `-c http.extraHeader=`, `GIT_ASKPASS`, `SSH_ASKPASS` and
   `SSH_AUTH_SOCK` emptied, `GIT_TERMINAL_PROMPT=0`, and a `GIT_SSH_COMMAND` that reads no
   ssh_config and disables the agent and key-based authentication, so no host credential source
-  answers. A client with its own credential is unchanged; without the option nothing changes.
+  answers. Non-credential system and global settings (CA bundle, proxy, `insteadOf`,
+  `safe.directory`) are dropped with them for that clone or push; their environment forms still
+  apply. A client with its own credential is unchanged; without the option nothing changes.
 - **`adapters/gitpool`**: `NewCLIClientFactory` and `NewCLICloner` strip the process push token and
   credential helper from their base options for an empty `Credential`, and apply
   `WithoutAmbientCredentials`. SMP does not import `adapters/gitpool`.

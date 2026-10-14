@@ -257,10 +257,14 @@ type PoolConfig struct {
 	// pool as the credential resolver for per-binding `credentials_ref`
 	// references (INIT-014 EPIC-003 TASK-006). The same client must
 	// satisfy ADR-010 redaction guarantees; the pool reveals bytes only
-	// at the boundary with the git CLI's GIT_ASKPASS env. When nil,
-	// bindings without credentials_ref keep working through the
-	// process-wide SPINE_GIT_PUSH_TOKEN; bindings that declare a ref
-	// fail closed with a typed credentials-unavailable error.
+	// at the boundary with the git CLI's GIT_ASKPASS env. Whether or
+	// not it is set, a binding without credentials_ref clones and
+	// pushes with no credential at all: the gitpool never lends it the
+	// process-wide SPINE_GIT_PUSH_TOKEN or credential helper, nor the
+	// host's own git credentials (INIT-023 TASK-015, owner question 2
+	// ruled "never"), so only a public code repo works without a ref.
+	// When nil, a binding that declares a ref fails closed with a typed
+	// credentials-unavailable error.
 	SecretClient secrets.SecretClient
 
 	// DBPolicy is the per-workspace connection-pool policy from
