@@ -811,8 +811,13 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 // through the merge. It returns bound unchanged when nothing needs
 // rewriting.
 func (o *Orchestrator) applyCommitStatusAt(ctx context.Context, run *domain.Run, newStatus, bound string) (string, error) {
-	paths := o.cascadePathsAt(ctx, run, bound)
-	updates, err := o.collectStatusRewrites(ctx, run, bound, "at bound commit "+bound, paths, newStatus)
+	base, err := o.cascadeBaseAt(ctx, run, newStatus, bound)
+	if err != nil || base == "" {
+		observe.Logger(ctx).Warn("merge-base for status cascade failed, falling back to primary only",
+			"run_id", run.RunID, "error", err)
+		base = ""
+	}
+	c, updates, err := o.cascadeCommitFrom(ctx, run, newStatus, bound, base)
 	if err != nil {
 		return "", err
 	}
@@ -820,6 +825,31 @@ func (o *Orchestrator) applyCommitStatusAt(ctx context.Context, run *domain.Run,
 		observe.Logger(ctx).Info("artifact statuses already match at the bound commit, no cascade commit needed",
 			"run_id", run.RunID, "status", newStatus)
 		return bound, nil
+	}
+	for path := range updates {
+		observe.Logger(ctx).Info("artifact status updated at the bound commit",
+			"run_id", run.RunID, "artifact_path", path, "new_status", newStatus, "cascade_sha", c)
+	}
+	return c, nil
+}
+
+// cascadeCommitFrom builds the bound cascade against base: run.TaskPath
+// plus every .md file bound added since base (only run.TaskPath when base
+// is ""), read at bound, rewritten into one CommitFilesOnto commit whose
+// only parent is bound. It returns bound and no updates when nothing needs
+// rewriting. It logs nothing on success, so cascadeBaseAt can use it to
+// recompute an earlier attempt's cascade commit. CommitFilesOnto is
+// deterministic and the commit carries this run's Run-ID and Trace-ID
+// trailers, so the same run, status, bound commit and base always give the
+// same commit, and another run's cascade never equals it.
+func (o *Orchestrator) cascadeCommitFrom(ctx context.Context, run *domain.Run, newStatus, bound, base string) (string, map[string]string, error) {
+	paths := o.cascadePathsFrom(ctx, run, base, bound)
+	updates, err := o.collectStatusRewrites(ctx, run, bound, "at bound commit "+bound, paths, newStatus)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(updates) == 0 {
+		return bound, nil, nil
 	}
 	res, err := o.binder.CommitFilesOnto(ctx, bound, updates, git.CommitOpts{
 		Message: statusCascadeMessage(newStatus, len(updates)),
@@ -829,19 +859,15 @@ func (o *Orchestrator) applyCommitStatusAt(ctx context.Context, run *domain.Run,
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("commit status update onto %s: %w", bound, err)
+		return "", nil, fmt.Errorf("commit status update onto %s: %w", bound, err)
 	}
 	if !isBoundObjectID(res.SHA) {
-		return "", fmt.Errorf("commit status update onto %s returned no commit id", bound)
+		return "", nil, fmt.Errorf("commit status update onto %s returned no commit id", bound)
 	}
 	if err := requireChildOf(ctx, o.binder, res.SHA, bound, "status cascade"); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	for path := range updates {
-		observe.Logger(ctx).Info("artifact status updated at the bound commit",
-			"run_id", run.RunID, "artifact_path", path, "new_status", newStatus, "cascade_sha", res.SHA)
-	}
-	return res.SHA, nil
+	return res.SHA, updates, nil
 }
 
 // errNotChildOfBound marks a commit the engine asked CommitFilesOnto to
@@ -870,16 +896,13 @@ func requireChildOf(ctx context.Context, binder CommitBinder, c, bound, what str
 	return nil
 }
 
-// cascadePathsAt is cascadePaths for the bound commit: run.TaskPath plus
-// every .md file bound added since its merge-base with main
-// (cascadeBaseAt). A file added after the bound commit is never
-// considered.
-func (o *Orchestrator) cascadePathsAt(ctx context.Context, run *domain.Run, bound string) []string {
+// cascadePathsFrom is cascadePaths for the bound commit: run.TaskPath plus
+// every .md file bound added since base (cascadeBaseAt). A file added
+// after the bound commit is never considered. An empty base, or a diff
+// that fails, gives run.TaskPath alone.
+func (o *Orchestrator) cascadePathsFrom(ctx context.Context, run *domain.Run, base, bound string) []string {
 	paths := []string{run.TaskPath}
-	base, err := o.cascadeBaseAt(ctx, run, bound)
-	if err != nil || base == "" {
-		observe.Logger(ctx).Warn("merge-base for status cascade failed, falling back to primary only",
-			"run_id", run.RunID, "error", err)
+	if base == "" {
 		return paths
 	}
 	diffs, err := o.git.Diff(ctx, base, bound)
@@ -910,38 +933,44 @@ const priorMergeWalkLimit = 64
 // added a child artifact, so the replay merged a second cascade commit
 // and a second merge commit instead of finding main up to date.
 //
-// So when main already contains bound, the merge that brought it in is
-// looked for on main's first-parent chain (from the tip that
-// ResolveBranchHead reports — the same main MergeBase reads, local for
-// CLIClient, origin for a remote-backed operator), and the merge-base is
-// taken against that merge's first parent: main just before this run
-// merged. The merge must be this run's: a two-parent commit whose second
-// parent is bound or a child of exactly bound (the cascade commit).
-// Anything else — bound on main for another reason (a run with no
-// commits; a branch reset onto main), a walk past the limit, a read
-// error — keeps the plain merge-base, the pre-review-round behaviour.
-func (o *Orchestrator) cascadeBaseAt(ctx context.Context, run *domain.Run, bound string) (string, error) {
+// So when main already contains bound, this run's earlier merge is looked
+// for on main's first-parent chain (from the tip that ResolveBranchHead
+// reports — the same main MergeBase reads, local for CLIClient, origin for
+// a remote-backed operator), and the merge-base is taken against that
+// merge's first parent: main just before this run merged.
+//
+// The merge must provably be this run's (wave 3 review): a two-parent
+// commit [P, C] whose second parent C is exactly the cascade commit this
+// run computes against MergeBase(P, bound) (cascadeCommitFrom; it carries
+// the run's Run-ID and Trace-ID trailers). Matching only the graph — "the
+// second parent is bound or a child of bound" — let a run whose branch was
+// reset onto an earlier run's merged commit B0 (the bound actor may
+// force-push the branch) take that run's merge [x, B0] for its own: the
+// cascade then diffed MergeBase(x, B0)..B0 and rewrote the status of every
+// artifact the earlier run added, although this run's reviewed diff was
+// empty. A merge of bound itself is never taken: it can only be this run's
+// if the cascade needed no commit against its base, and then the plain
+// merge-base (whose paths are a subset) needs none either, so the replay
+// finds main up to date all the same. Anything else — bound on main for
+// another reason (a run with no commits; a branch reset onto main or onto
+// another run's commit), a walk past the limit, a read error — keeps the
+// plain merge-base, the pre-review-round behaviour, whose cascade is
+// run.TaskPath alone.
+func (o *Orchestrator) cascadeBaseAt(ctx context.Context, run *domain.Run, newStatus, bound string) (string, error) {
 	base, err := o.git.MergeBase(ctx, authoritativeBranch, bound)
 	if err != nil || base != bound {
 		return base, err
 	}
-	first, ok := o.priorMergeFirstParent(ctx, run, bound)
-	if !ok {
-		return base, nil
+	if prior, ok := o.priorMergeBase(ctx, run, newStatus, bound); ok {
+		return prior, nil
 	}
-	prior, err := o.git.MergeBase(ctx, first, bound)
-	if err != nil || prior == "" {
-		observe.Logger(ctx).Warn("merge binding: merge-base against this run's earlier merge failed; the cascade uses the plain merge-base",
-			"run_id", run.RunID, "first_parent", first, "error", err)
-		return base, nil
-	}
-	return prior, nil
+	return base, nil
 }
 
-// priorMergeFirstParent walks main's first-parent chain from its tip for
-// this run's earlier merge of bound (see cascadeBaseAt) and returns that
-// merge's first parent.
-func (o *Orchestrator) priorMergeFirstParent(ctx context.Context, run *domain.Run, bound string) (string, bool) {
+// priorMergeBase walks main's first-parent chain from its tip for this
+// run's earlier merge of bound (see cascadeBaseAt) and returns the
+// merge-base the cascade of that merge was computed against.
+func (o *Orchestrator) priorMergeBase(ctx context.Context, run *domain.Run, newStatus, bound string) (string, bool) {
 	log := observe.Logger(ctx)
 	x, err := o.binder.ResolveBranchHead(ctx, authoritativeBranch)
 	if err != nil || !isBoundObjectID(x) {
@@ -959,30 +988,54 @@ func (o *Orchestrator) priorMergeFirstParent(ctx context.Context, run *domain.Ru
 		if len(parents) == 0 {
 			return "", false
 		}
-		if len(parents) == 2 && isBoundObjectID(parents[0]) && o.isMergeOfBound(ctx, parents[1], bound) {
-			return parents[0], true
+		if len(parents) == 2 && isBoundObjectID(parents[0]) {
+			if prior, ok := o.thisRunsCascadeMerge(ctx, run, newStatus, bound, parents[0], parents[1]); ok {
+				return prior, true
+			}
 		}
 		x = parents[0]
 	}
 	if x != bound {
-		log.Warn("merge binding: replay check found no earlier merge of the bound commit within the walk limit; the cascade uses the plain merge-base",
+		log.Warn("merge binding: replay check found no earlier merge of this run within the walk limit; the cascade uses the plain merge-base",
 			"run_id", run.RunID, "bound_sha", bound, "limit", priorMergeWalkLimit)
 	}
 	return "", false
 }
 
-// isMergeOfBound reports whether p — a merge commit's second parent — is
-// what this run's merge of bound merged: bound itself, or a commit whose
-// only parent is bound (the status cascade).
-func (o *Orchestrator) isMergeOfBound(ctx context.Context, p, bound string) bool {
-	if p == bound {
-		return true
+// thisRunsCascadeMerge reports whether the merge [first, second] on main
+// is this run's earlier merge of bound, and returns the merge-base its
+// cascade was computed against: second must be a child of exactly bound
+// and equal the cascade commit this run builds against
+// MergeBase(first, bound). Anything it cannot read or build is "not this
+// run's" (the caller keeps walking, then falls back to the plain
+// merge-base).
+func (o *Orchestrator) thisRunsCascadeMerge(ctx context.Context, run *domain.Run, newStatus, bound, first, second string) (string, bool) {
+	if !isBoundObjectID(second) || second == bound {
+		return "", false
 	}
-	if !isBoundObjectID(p) {
-		return false
+	pp, err := o.binder.CommitParents(ctx, second)
+	if err != nil || len(pp) != 1 || pp[0] != bound {
+		return "", false
 	}
-	pp, err := o.binder.CommitParents(ctx, p)
-	return err == nil && len(pp) == 1 && pp[0] == bound
+	log := observe.Logger(ctx)
+	prior, err := o.git.MergeBase(ctx, first, bound)
+	if err != nil || prior == "" {
+		log.Warn("merge binding: merge-base against an earlier merge of the bound commit failed; not taken as this run's",
+			"run_id", run.RunID, "first_parent", first, "error", err)
+		return "", false
+	}
+	c, _, err := o.cascadeCommitFrom(ctx, run, newStatus, bound, prior)
+	if err != nil {
+		log.Warn("merge binding: could not recompute the cascade of an earlier merge of the bound commit; not taken as this run's",
+			"run_id", run.RunID, "merged_sha", second, "error", err)
+		return "", false
+	}
+	if c != second {
+		log.Info("merge binding: an earlier merge of the bound commit on main is not this run's; the replay check ignores it",
+			"run_id", run.RunID, "bound_sha", bound, "merged_sha", second, "recomputed_sha", c)
+		return "", false
+	}
+	return prior, true
 }
 
 // rebindAfterConvergence moves the binding to the run-branch head the

@@ -399,7 +399,11 @@ whatever the run branch points at when the merge runs:
 - *Status cascade.* The commit-status rewrite is applied *at* the bound commit, as a plumbing commit
   whose only parent is the bound commit (deterministic, so a retry recomputes the same object); it
   never checks out or commits on the run branch, and reaches the authoritative branch only through
-  the merge.
+  the merge. It rewrites the run's task and the artifacts the bound commit added since its
+  merge-base with the authoritative branch. A retry after the merge landed takes the merge-base
+  from just before the run's earlier merge, and a merge counts as the run's only when its second
+  parent is exactly the cascade commit the run builds against it — another run's merge of the same
+  commit never widens the cascade.
 - *Structural check and push.* Before anything is pushed, the merge result must be built from
   exactly the target's previous tip and the bound (or cascade) commit — a merge commit with those
   two parents, a fast-forward, or "already up to date"; a status-cascade or recovery-ledger commit

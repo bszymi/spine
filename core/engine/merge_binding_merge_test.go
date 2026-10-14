@@ -679,14 +679,25 @@ func TestCascadeAtBoundCommit_Unit(t *testing.T) {
 // TestCascadeBaseAtReplay: when main already contains the bound commit,
 // the cascade diffs against main as it was just before this run's earlier
 // merge (review round 1), found on main's first-parent chain; anything
-// else keeps the plain merge-base.
+// else keeps the plain merge-base. The earlier merge counts as this run's
+// only when its second parent is exactly the cascade commit this run
+// builds against that merge's first parent (wave 3 review: a merge of
+// bound itself, or another run's cascade of the same bound commit, is not
+// this run's). The fake CommitFilesOnto answers ontoSHA whatever it is
+// given, so "this run's cascade" is whatever ontoSHA is set to.
 func TestCascadeBaseAtReplay(t *testing.T) {
 	bound, c, orig := sha40('a'), sha40('7'), sha40('1')
 	first, merge, write := sha40('2'), sha40('3'), sha40('4')
+	const status = "Completed"
 	newFix := func(t *testing.T) *bindFix {
 		f := committingFix(t, false, true)
 		f.git.mergeBases["main "+bound] = bound // main contains bound
 		f.git.mergeBases[first+" "+bound] = orig
+		// The task file needs a rewrite at bound, so the recomputed
+		// cascade is a commit (ontoSHA, a child of bound).
+		f.git.files[bound+":tasks/t.md"] = "---\nid: TASK-1\nstatus: In Progress\n---\n"
+		f.git.ontoSHA = c
+		f.git.parents[c] = []string{bound}
 		return f
 	}
 	t.Run("this run's merge behind an in-place write", func(t *testing.T) {
@@ -694,17 +705,53 @@ func TestCascadeBaseAtReplay(t *testing.T) {
 		f.git.setHead("main", write)
 		f.git.parents[write] = []string{merge}
 		f.git.parents[merge] = []string{first, c}
-		f.git.parents[c] = []string{bound}
-		if got, err := f.orch.cascadeBaseAt(context.Background(), f.run, bound); err != nil || got != orig {
+		if got, err := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); err != nil || got != orig {
 			t.Fatalf("cascadeBaseAt = %s, %v; want the merge-base against the earlier merge's first parent %s", got, err, orig)
 		}
+		if n := f.git.callCount("binder:CommitFilesOnto " + bound); n != 1 {
+			t.Fatalf("CommitFilesOnto calls = %d, want the one recompute of this run's cascade", n)
+		}
 	})
-	t.Run("the merge merged the bound commit itself", func(t *testing.T) {
+	t.Run("a merge of the bound commit itself is not taken", func(t *testing.T) {
 		f := newFix(t)
 		f.git.setHead("main", merge)
 		f.git.parents[merge] = []string{first, bound}
-		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != orig {
-			t.Fatalf("cascadeBaseAt = %s, want %s", got, orig)
+		f.git.parents[first] = []string{bound}
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); got != bound {
+			t.Fatalf("cascadeBaseAt = %s, want the plain merge-base %s", got, bound)
+		}
+	})
+	t.Run("another run's cascade of the same bound commit is not this run's", func(t *testing.T) {
+		f := newFix(t)
+		other := sha40('8') // a child of bound, but not this run's cascade (c)
+		f.git.setHead("main", merge)
+		f.git.parents[merge] = []string{first, other}
+		f.git.parents[other] = []string{bound}
+		f.git.parents[first] = []string{bound}
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); got != bound {
+			t.Fatalf("cascadeBaseAt = %s, want the plain merge-base %s", got, bound)
+		}
+	})
+	t.Run("this run's merge behind another run's merge of the same bound commit", func(t *testing.T) {
+		f := newFix(t)
+		other, top := sha40('8'), sha40('9')
+		f.git.setHead("main", top)
+		f.git.parents[top] = []string{merge, other}
+		f.git.parents[other] = []string{bound}
+		f.git.mergeBases[merge+" "+bound] = bound
+		f.git.parents[merge] = []string{first, c}
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); got != orig {
+			t.Fatalf("cascadeBaseAt = %s, want %s from this run's own merge", got, orig)
+		}
+	})
+	t.Run("a recompute that fails is not this run's", func(t *testing.T) {
+		f := newFix(t)
+		f.git.ontoErr = errors.New("object store full")
+		f.git.setHead("main", merge)
+		f.git.parents[merge] = []string{first, c}
+		f.git.parents[first] = []string{bound}
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); got != bound {
+			t.Fatalf("cascadeBaseAt = %s, want the plain merge-base %s", got, bound)
 		}
 	})
 	t.Run("another run's merge is not this run's", func(t *testing.T) {
@@ -714,7 +761,7 @@ func TestCascadeBaseAtReplay(t *testing.T) {
 		f.git.parents[merge] = []string{first, other}
 		f.git.parents[other] = []string{sha40('6')}
 		f.git.parents[first] = []string{bound}
-		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != bound {
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); got != bound {
 			t.Fatalf("cascadeBaseAt = %s, want the plain merge-base %s", got, bound)
 		}
 	})
@@ -723,7 +770,7 @@ func TestCascadeBaseAtReplay(t *testing.T) {
 		x := sha40('d')
 		f.git.setHead("main", x)
 		f.git.parents[x] = []string{x} // an endless first-parent chain
-		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != bound {
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); got != bound {
 			t.Fatalf("cascadeBaseAt = %s, want the plain merge-base %s", got, bound)
 		}
 		if n := f.git.callCount("binder:CommitParents " + x); n != priorMergeWalkLimit {
@@ -733,7 +780,7 @@ func TestCascadeBaseAtReplay(t *testing.T) {
 	t.Run("main does not contain bound: plain merge-base, no walk", func(t *testing.T) {
 		f := committingFix(t, false, true)
 		f.git.mergeBases["main "+bound] = orig
-		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != orig {
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, status, bound); got != orig {
 			t.Fatalf("cascadeBaseAt = %s, want %s", got, orig)
 		}
 		if n := f.git.callCount("binder:"); n != 0 {

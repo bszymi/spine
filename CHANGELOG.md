@@ -433,6 +433,14 @@ SMP runs the rebuild per workspace in SMP INIT-027 EPIC-004 TASK-008 (owner ques
     target tip and that commit, and pushes it without force; the cascade and recovery-ledger
     commits must be children of exactly the bound commit, and a merge result that fails the check
     is taken back off the local target before anything else can build on it or publish it;
+  - the cascade rewrites only what the bound commit added since its merge-base with `main`. When
+    `main` already holds the bound commit, a retry recomputes against `main` as it was before this
+    run's earlier merge, and that merge counts as this run's only when its second parent is exactly
+    the cascade commit this run builds against it (wave 3 review). Matching the commit graph alone
+    let a run whose branch was reset onto another run's merged commit — the bound actor may
+    force-push — take that run's merge for its own and rewrite the `status:` of every artifact
+    that run added, with an empty reviewed diff; it now cascades `run.TaskPath` only, as with
+    binding off;
   - a run with no binding the run itself recorded fails closed (`precondition`): a publish workflow
     routes `merge_failed` back to `execute`, a legacy terminal-commit workflow fails the run.
 
@@ -496,7 +504,9 @@ previous build). Externally visible:
   taken back` and is named in the merge outcome's failure detail.
 - **Merge retries add nothing.** A retry or resume after the merge landed on the local `main`
   recomputes the same status-cascade commit — also when the run added child artifacts — so it finds
-  `main` already up to date instead of adding a second cascade commit and merge commit.
+  `main` already up to date instead of adding a second cascade commit and merge commit. The earlier
+  merge is recognised by recomputing this run's cascade commit against it (wave 3 review), never by
+  the commit graph alone.
 - **`POST /runs/{run_id}/repositories/{repository_id}/retry` accepts `head_sha`** (and `spine run
   merge retry --head-sha`): the code repository's current run-branch head to rebind to. Without it
   the retry merges the bound commit again; a stale `head_sha` is `409 run_branch_moved`. The ledger

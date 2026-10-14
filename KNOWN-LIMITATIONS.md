@@ -340,10 +340,15 @@ merge publishes the commit the run's steps validated and reviewed, never the run
     convergence an explicit run-branch target.
 14. **A replay finds the run's earlier merge within 64 first-parent commits.** A retry or resume
     after the merge landed diffs the status cascade against `main` as it was just before that merge,
-    found on `main`'s first-parent chain, so it recomputes the same cascade commit. If more than 64
-    first-parent commits landed on `main` between the attempts, or `main`'s history cannot be read,
-    the cascade falls back to the current merge-base: a run that added child artifacts then gets a
-    second cascade commit and merge commit (no content beyond the reviewed one).
+    found on `main`'s first-parent chain, so it recomputes the same cascade commit. A merge there
+    counts as this run's only when its second parent is exactly the cascade commit this run builds
+    against that merge's first parent (it carries the run's `Run-ID` and `Trace-ID` trailers; wave 3
+    review) — never on the commit graph alone, which let a run whose branch was reset onto another
+    run's merged commit cascade that run's artifacts. If more than 64 first-parent commits landed on
+    `main` between the attempts, `main`'s history cannot be read, or the recompute fails (a read of
+    a cascade path failing in between), the cascade falls back to the current merge-base: a run
+    that added child artifacts then gets a second cascade commit and merge commit (no content
+    beyond the reviewed one).
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are
