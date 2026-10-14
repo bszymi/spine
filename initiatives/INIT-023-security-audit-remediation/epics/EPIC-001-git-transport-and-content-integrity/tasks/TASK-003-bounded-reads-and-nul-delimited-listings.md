@@ -572,6 +572,10 @@ the `ErrKindNotFound` branch. `List` (`:239-258`) is unchanged; it already skips
     ignored.
   - Refused files never increment `syncErrors`, so the sync advances to `head`.
   - The `projection_synced` payload (`:345-352`) gains `"refused": n`.
+
+  > **Implementation note (2026-10-14, review round 2) — timing superseded.** Both entry points
+  > report refusals as soon as discovery has decided them, before anything that can hold the sync
+  > or fail the rebuild, not after the changeset is applied (Deviation 19).
 - **`projectWorkflow` and `projectBranchProtection`** (`:500`, `:569`) are unchanged.
   - An oversized workflow or config now fails at `ReadFile` instead of at `yamlsafe.Decode`.
   - It is still a sync error with the old projection retained (I4).
@@ -965,6 +969,13 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
      - unknown ref → `ErrKindPermanent`;
      - path present in the working tree but not at the ref → `ErrKindPermanent`;
      - tree path → output byte-identical to `git show <ref>:<dir>`.
+   > **Implementation note (2026-10-14) — pending the owner's amendment.** The unknown-ref and
+   > on-disk-only rows were right on `61994fe` (`invalid object name`, `exists on disk, but not
+   > in`: both `ErrKindPermanent`) and are superseded by TASK-002 on Spine `main` (its AC 10 and
+   > review row R3): with its trailing `--`, every `ReadFile` miss is `fatal: bad revision`
+   > (`ErrKindNotFound`). The test pins Kind and Message parity with the unbounded read on `main`
+   > instead (Deviation 2). The proposed replacement text is in Implementation Notes, Review
+   > round 2.
 6. **Output ceiling.** With `WithMaxOutputBytes(4 KiB)`:
    - `ListFiles` over 300 files → `errors.Is(err, git.ErrOutputTooLarge)`;
    - `Log` over a commit whose message is 8 KiB → the same.
@@ -1027,6 +1038,11 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
        at the new head.
     4. An oversized `workflows/x.yaml`: the state is `error`, `LastSyncedCommit` does not advance,
        and the previous workflow projection stays (I4). `TotalAlloc` < 2 MiB.
+       > **Implementation note (2026-10-14) — pending the owner's amendment.** Superseded by
+       > TASK-011 D2 and its design-check note on this task (orchestrator ruling): an oversized
+       > workflow is a `read_bounds` rejection and the sync advances; only
+       > `.spine/branch-protection.yaml` stays a held sync error (Deviation 1). The proposed
+       > replacement text is in Implementation Notes, Review round 2.
     5. `FullRebuild` over `initiatives/\xff/x.md`: `UpsertArtifactProjection` is **never called
        with invalid UTF-8**. The fake store fails the test if it is.
     6. An unsafe-named `workflows/a\tb.yaml` added on `main` is recorded and not projected.
@@ -1057,8 +1073,14 @@ explicit options, or derived from the exported defaults, so owner question 1 doe
     *(Design-check note, 2026-10-06:)* also record that `TestRepoArtifacts_ParseCleanlyUnderSpine`
     reports `len(result.Refused) == 0` on SMP's own repository. That shows §2a's alloc limit and
     §5's unsafe-path rule refuse nothing real.
+    > **Implementation note (2026-10-14) — for the orchestrator to record.** It passes except for
+    > three SMP tests that fail identically with Spine `main` (SMP TASK-004's tests pin SMP's
+    > pre-wave-2 Spine; SMP TASK-008 / TASK-012 adapt them at the bump). See Review round 2.
 17. **Merge ordering.** The PR merges to Spine `main` only after SMP TASK-003 is on SMP `main`.
     The PR description names the SMP commit.
+    > **Implementation note (2026-10-14) — the orchestrator's.** The precondition holds: SMP
+    > TASK-003 is on SMP `main` `f5c6fd6d`. The PR and its description are not made from the
+    > branch.
 
 *ACs 18–22 were added by the 2026-10-06 design check.*
 
@@ -1420,6 +1442,7 @@ scenario `codeRepoBehavior` was edited.
    them (a sync held for another reason re-reports; ids de-duplicate, the counter counts again), and
    `FullRebuild` reports after its writes rather than straight after `DiscoverAll`. Nested
    `workflows/**` unsafe files are not reported: they are never projected, refused or not.
+   *(Review round 2: the reporting point is superseded by Deviation 19.)*
 9. **`event-schemas.md` section number:** TASK-011 took §4.13 (`projection_synced`) and §4.14, so the
    new event is §4.15.
 10. **Database.** The shared PostgreSQL on 55630 was not running; other sessions run private
@@ -1614,3 +1637,128 @@ detached at **`f5c6fd6d`**, `../spine` = this worktree; `git status` clean after
 | `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `testgate: PASS`, 246 passed |
 | AC 16 note: `DiscoverAll` with a default client (overlay-only test file, no tree touched) | SMP 1 112 artifacts, 10 workflows, 0 errors, **0 refused**; Spine 715 artifacts, 0 refused, plus the existing ASCII `INIT-014 initiative.md` parse error |
 | `TestRepoArtifacts_ParseCleanlyUnderSpine` (AC 15 timing) | 32–37 s on a loaded machine. Back to back with only this round's env change reverted: 32.4 / 31.7 s vs 36.0 / 32.6 s, within noise (see Deviation 15's per-process measurement) |
+
+### Review round 2 (2026-10-14)
+
+A second-round reviewer examined the branch at `d92e8cf`, after the round 1 fixes. They raised
+**no findings** and four acceptance-criteria gaps. Each gap was checked against the code, real git
+and the sibling artifacts. None is a code defect, and none can be closed from the branch: ACs 5
+and 11.4 need the owner's amendment, AC 16 needs the orchestrator's record, and AC 17 belongs to
+the orchestrator. Each of these ACs now carries a one-paragraph pointer to this section. This
+round's `codex review --base main` raised one P2. It was real and is fixed in `02000ff`; the
+re-review at `02000ff` raised nothing.
+
+**Codex finding**
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| C1 | P2 | `IncrementalSync` reported refusals only after applying the changeset. When the same diff held a refused file and a changed artifact whose read `classifyReadErrors` treats as an infrastructure failure, the `read changed artifact` early return came first, so no Warn line, counter or `projection_file_skipped` was produced. A persistent read failure suppressed them indefinitely. | **FIXED** (`02000ff`). Verified first: a sync held by an error *inside* the apply loop (a failed upsert, a workflow infrastructure error) did report its refusals, but one held by the read-error return did not. `FullRebuild` had the same gap: it reported after its writes, so a failed plan or wipe reported nothing. Both entry points now report as soon as discovery has decided. In `IncrementalSync` that is after `DiscoverChangesFromDiffs` and before `classifyReadErrors`. The changeset's refusals are joined by each unsafe-named workflow definition that the diff adds, modifies or renames to (`unsafeWorkflowRefusals`, exactly the set the workflow loop skips, so nothing is reported twice). In `FullRebuild` it is after `DiscoverAll` and `workflowPathsAt`, before planning and the wipe. A discovery that fails decides nothing, so it reports nothing. Test `TestRefusals_ReportedWhenTheSyncIsHeld` puts an 8 MiB `docs/notes.md` and `workflows/a\tb.yaml` in two settings. (1) Next to a changed task whose git read is killed (TASK-011's `killingGit` wrapper): the sync is held `error@c1` with nothing applied, both refusals are reported once, and the counter rises by 2. After the failure clears, the retry is `idle@c2` and reports both again under the same ids; `projection_synced.refused` is 2. (2) Next to a failing `DeleteAllProjections`: the same, through `FullRebuild`. On the previous code (overlay, worktree untouched) both subtests fail with zero events. Docs: CHANGELOG, event-schemas §4.15 and the observability metric row. |
+
+**Acceptance-criteria gaps raised**
+
+- **AC 5 (unknown ref and on-disk-only rows): confirmed. It cannot be met as written without
+  regressing TASK-002, so it needs the owner's amendment.** Real git 2.54 shows the following.
+  - `61994fe`'s argv (`git show <ref>:<path>`) prints `invalid object name 'badref'.` and
+    `path 'disk-only.md' exists on disk, but not in 'HEAD'`. Neither matches a not-found pattern
+    in `61994fe`'s `classifyGitError`, so both were `ErrKindPermanent`, as the AC says.
+  - TASK-002's `git show --end-of-options <spec> --` prints `fatal: bad revision '<spec>'` for
+    both, which is `ErrKindNotFound`.
+  - `cat-file -s` still prints the old two texts, so the size probe's own error would bring
+    `ErrKindPermanent` back. That is why a non-size probe failure falls back to the `git show`
+    (Deviation 2). TASK-002's AC 10 requires `ReadFile` on an unknown ref to be `ErrKindNotFound`,
+    and its `TestRefShadow_ReadFileMissIsNotFound` pins the on-disk case. Returning the probe's
+    error would fail both.
+
+  `TestReadFile_ErrorKindParity` asserts both rows by name. Their Kind (`ErrKindNotFound`) and
+  Message must equal the unbounded `main` read's; changing the expected kind fails it. Proposed
+  amendment:
+
+  > - unknown ref → `ErrKindNotFound`, and path present in the working tree but not at the ref →
+  >   `ErrKindNotFound` (both as on Spine `main` after TASK-002: `fatal: bad revision`), with Kind
+  >   and Message equal to the unbounded `git show [eoo] <spec> --`;
+
+  The amendment also re-bases I2 from "every input `61994fe` handled" to "every input Spine
+  `main` (after TASK-002) handled". *Observation for the orchestrator, not changed here:*
+  TASK-002's AC 10 ("as at `61994fe`") and its CHANGELOG line "Every other read miss was already
+  `not_found`" do not hold for an unknown ref, which was `ErrKindPermanent` on `61994fe`. The
+  change itself is TASK-002's, and its effect is the correct 404.
+- **AC 11.4 (oversized workflow): confirmed. Its behaviour is set by TASK-011, so the AC needs the
+  owner's amendment.** The authority for the change sits in TASK-011's artifact: its D2 ("A
+  content rejection is not a sync error"), its design-check note "Spine TASK-003 contradicts this
+  task and must be amended" (I4 reworded, the sentinel registered in `isContentReadError`, and a
+  new AC), and row 6 of its Design check table. It is recorded here as an orchestrator ruling. This
+  task's own design check did not amend AC 11.4, so the text still reads `error`. If the AC were
+  implemented as written, `isContentReadError` would lose `ErrBlobTooLarge`. That would bring
+  back the wedge that TASK-011 D2 exists to prevent: an oversized workflow would hold the sync in
+  `error` on every tick. `TestProjection_OversizedGovernanceFiles` pins the amended behaviour. Its
+  mutation (`isContentReadError` false) fails the test. Proposed amendment (it is the AC that
+  TASK-011's design-check note prescribes for this task):
+
+  > 4. An oversized `workflows/x.yaml` is a `projection_workflow_rejected` with check `read_bounds`
+  >    (TASK-011 D2): a verified previous row stays quarantined at its commit, a new file is not
+  >    projected, no `projection_file_skipped` is emitted, and the state is `idle` at the new head.
+  >    An oversized `.spine/branch-protection.yaml` holds the state at `error`, `LastSyncedCommit`
+  >    does not advance, and the rules stay (I4). `TotalAlloc` < 2 MiB.
+
+- **AC 16 (three SMP tests): re-verified at `02000ff`, and the disposition is unchanged.** The
+  three tests fail identically with this branch and with Spine `main`, and nothing in the 43
+  dependent SMP packages differs between the two runs (gate table below). Proposed record for the
+  orchestrator: *"AC 16 passes on SMP `f5c6fd6d` except
+  `gitread.TestBounded_ErrorContractEqualsCLIClient`,
+  `projectionwriter.TestBoundedProjection_IncrementalAddAndModifyOversized` and
+  `projectionwriter.TestBoundedProjection_OversizedWorkflowStalls`. All three fail identically
+  with Spine `main` `d23b897`. SMP TASK-004's tests pin SMP's pre-wave-2 Spine (TASK-002's
+  `bad revision`, TASK-011's rejection path), and SMP TASK-008 / TASK-012 adapt them at the
+  bump."*
+- **AC 17 (merge ordering, PR description): the orchestrator's.** The precondition still holds:
+  SMP TASK-003 is on SMP `main` `f5c6fd6d`, and `grep -rn "unquoteDiffPaths\|unquoteGitPath"
+  internal/` there is empty.
+
+**Deviation added this round**
+
+19. **Refusals are reported once discovery has decided them, not after the changeset is applied**
+    (codex C1). This supersedes §7's "runs after the changeset is applied" and Deviation 8's
+    "`FullRebuild` reports after its writes". A held sync or a failed rebuild re-reports on each
+    retry under the same deterministic event id. The delivery queue de-duplicates the events, and
+    the counter counts each report. A sync held by an in-loop error already behaved this way, so
+    the rule is now the same for every held sync.
+
+**Gates at this round (code `02000ff`; every row re-run after the fix)**
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `lint-boundaries: OK`; ok; `engine constructed and exercised; library surface is sound.` |
+| `go build ./...`; `go vet ./...`, `-tags integration`, `-tags scenario` | all clean |
+| `go test -p 4 -count=1 ./...` | exit 0, 40 packages ok |
+| `go test -race -p 4 -count=1` on the 11 touched packages (`adapters/delivery`, `adapters/git/...`, `adapters/projection`, `core/artifact`, `core/domain`, `core/engine`, `core/observe`, `core/workflow`, `service/internal/gateway`, `core/evidence`) | all ok |
+| `SPINE_TEST_DATABASE_URL=…/s003_proj go test -race -p 1 -count=1 -tags integration ./adapters/projection/`; `…/s003_deliv … ./adapters/delivery/` (fresh databases) | projection 103 top-level / 76 sub pass (the new test and its two subtests), delivery 139 / 176 pass; 0 fail, 0 skip. The pre-fix run of the same command, at load average 12.9, failed `TestQueuePG_CircuitOpenDoesNotStarve`. That is TASK-010's breaker test, which has a 10 s budget. It passed 3/3 standalone (2.4 s each) and passed in the post-fix run. The only change this task makes in `adapters/delivery` is the event-type registration |
+| `go test -p 1 -count=1 -tags scenario ./service/scenariotest/...` on `s003_scen`, against the same suite in a `git archive main` export on `s003_scen_main` | both 191 pass / 30 fail / 6 skip (subtests 1 288 / 27), **0 outcome differences**; the 30 are the known pre-existing failures. CI's `scenario-git-http` set: 20 `TestGitHTTP_*` + 2 `TestBootstrapInternalAdmin_*` pass, no skip |
+| CI `git-floor` steps in `golang:1.26-bookworm` (git 2.39.5, `--pull=never`, `--rm`, read-only mounts, `GOPROXY=off`), plus `core/engine` and `adapters/projection` | all ok |
+| `golangci-lint run` on the 9 touched packages, plain / `--build-tags=integration` / `--build-tags=scenario`, branch vs a `main` export as (linter, file, message) multisets | **0 new issues** in each (188 vs 189: the `branch_validation.go` gofmt fix) |
+| `golangci-lint run --enable-only=gosec`, all three tag sets | 0 issues |
+| `gofmt -l` on every changed Go file | empty |
+| `codex review --base main` | Plain, it stops with `The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account`, as in every earlier round. With `-c model=gpt-5.6-sol`, the run at `d92e8cf` raised one P2 (C1, fixed in `02000ff`), and the run at `02000ff` said "No actionable correctness regressions were identified" |
+| `git diff --stat 61994fe -- migrations/`; `git diff --stat main...HEAD -- migrations go.mod go.sum` | empty (no schema change) |
+
+**SMP compatibility gate at this round** (`/Users/bartoszszymichowski/42sid/i23/s-T003/smp`
+detached at **`f5c6fd6d`**, `../spine` = this worktree; `git status` clean after every run):
+
+| Command (in the SMP checkout) | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...` | all ok |
+| `go test -race -p 4 -count=1 -json` on the **43** SMP packages that depend on a changed Spine package (`go list -test` deps, test imports included; round 1 counted 36), with no DB env. Then the same run with `-modfile` pointing `replace` at a `git archive main` export of Spine `d23b897`. The modfile lives in the scratchpad, so the SMP checkout is not touched | 2 493 pass / 3 fail / 291 skip at top level (subtests 2 645 / 5 / 14) **both ways: 0 outcome differences** |
+| The three failures, run verbose against both | The messages are the same both ways. `gitread.TestBounded_ErrorContractEqualsCLIClient` fails `missing_path`, `bad_ref`, `bad_sha` and `path_beyond_a_symlinked_dir`: SMP's own `Bounded` reader still says `invalid object name` / `exists on disk, but not in` / `does not exist in` where Spine's `CLIClient` says TASK-002's `bad revision`, the AC 5 point above. `…_IncrementalAddAndModifyOversized` fails with `read changed artifact: … gitread: blob of 8388608 bytes exceeds the 1048576-byte read limit`: TASK-011 holds the sync on SMP's own error type. `…_OversizedWorkflowStalls` panics with a SIGSEGV in `bpStore.GetWorkflowProjection` (the fake's nil embedded store), called from TASK-011's `applyRejection` |
+| `go run ./dev/apply-migrations -set platform -dir migrations` (`s003_smp_it`, pgvector); `-set spine-runtime` (`s003_spine_rt`) | 115 and 26 versions |
+| Spine-runtime step: `TEST_SPINE_DB=… TEST_PLATFORM_DB=… TEST_PROVISIONING_DSN=…smp_prov go run ./dev/testgate -- -race -count=1 -timeout 15m ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` | 1 835 passed, 0 failed. The 2 skips are the Linux-only `ru_maxrss` tests, so testgate (which allows no skip here) says `FAIL (2)` on macOS for them alone. Both **PASS** in `golang:1.26-bookworm`: `TestDiffChildMemory_MillionPaths` and `TestReceiveTimeMemory_RealGitReaderFetch` |
+| Platform-DB members that depend on a changed Spine package (17 packages: `dev/apply-migrations`, `automation`, `customer/{brain,discovery,eventdelivery,notification,profileinventory,projectionwriter,provenance,spineruntime,stepevents,workspace,workspace/workspacetest,docindex}`, `import`, `observability/opshealth`, `recovery`), with `TEST_PROVISIONING_DSN`, `-allow-skip 'TEST_MINIO' -allow-skip 'TEST_AWS_OBJECT_STORE_'` and the `-skip` of the two failing SMP TASK-004 tests | `testgate: PASS`: 1 524 passed, 0 failed, 7 allowed skips (MinIO, live AWS) |
+| `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `testgate: PASS`, 246 passed. The allowed skip, `TestIntegration_ReceiveTimeMemoryBounded`, **PASS**es in the image |
+| CI's verify-children step (`-tags integration -run '^TestVerifyChildrenProfile_ThroughGateway$' ./internal/automation/dockerexec/`) | `testgate: PASS`, 13 passed |
+| `TestRepoArtifacts_ParseCleanlyUnderSpine` (AC 15 timing) | PASS, 31.7 s on a loaded machine (load average above 12) |
+| AC 16 `len(result.Refused) == 0` | Not re-run. `core/` and `adapters/git/` are unchanged since round 1 (`git diff --stat a86ddc3 HEAD -- core/ adapters/git/` is empty), and this round's change only moves when the projection reports. The round 1 result stands |
+| `grep -rn "unquoteDiffPaths\|unquoteGitPath" internal/` | empty |
+
+Database: the shared server on 55630 was down again (`pg_isready`: no response). Every DB step ran
+on a private, tmpfs-backed `pgvector/pgvector:pg18` container (PostgreSQL 18.4, `--pull=never`,
+127.0.0.1:55934). It held `s003_*` databases and the SMP CI roles (`platform`,
+`platform_audit_retention`, `smp_prov`, posture `f`). The container and everything in it were
+removed at the end, as were the two `golang:1.26-bookworm` containers (`--rm`).
