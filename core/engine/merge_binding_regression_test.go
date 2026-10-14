@@ -578,7 +578,14 @@ func atoi(t *testing.T, s string) int {
 
 func (e *regEnv) driveTaskDefaultToApproval() {
 	e.t.Helper()
-	e.commitOnRun("legit deliverable", map[string]string{"src/feature.go": "package src\n// legit\n"})
+	e.driveTaskDefaultWith(map[string]string{"src/feature.go": "package src\n// legit\n"})
+}
+
+// driveTaskDefaultWith commits files on the run branch and submits
+// execute, validate and an approving review.
+func (e *regEnv) driveTaskDefaultWith(files map[string]string) {
+	e.t.Helper()
+	e.commitOnRun("legit deliverable", files)
 	if err := e.submit(0, "completed", ""); err != nil {
 		e.t.Fatal(err)
 	}
@@ -590,82 +597,274 @@ func (e *regEnv) driveTaskDefaultToApproval() {
 	}
 }
 
+const childDraft = "---\nid: TASK-002\ntype: Task\ntitle: Child\nstatus: Draft\n---\n# Child\n"
+
 // TestMergeBindingRegression_TransientPushRecovers is AC 24 (DC-1, DC-2).
+// Each case runs with a cascade that rewrites only the task file and with
+// one that also rewrites a child artifact the run added (review round 1:
+// a replay after the local merge landed used to diff against a main that
+// already held the bound commit, shrink the cascade to the task file and
+// merge a second cascade commit and a second merge commit).
 func TestMergeBindingRegression_TransientPushRecovers(t *testing.T) {
-	for _, lands := range []bool{false, true} {
-		name := "push never landed"
-		if lands {
-			name = "push landed, client saw an error"
+	for _, child := range []bool{false, true} {
+		for _, lands := range []bool{false, true} {
+			name := "push never landed"
+			if lands {
+				name = "push landed, client saw an error"
+			}
+			if child {
+				name += ", cascade with a child artifact"
+			}
+			t.Run(name, func(t *testing.T) {
+				testTransientPushRecovers(t, lands, child)
+			})
+		}
+	}
+}
+
+func testTransientPushRecovers(t *testing.T, lands, child bool) {
+	e := newRegEnv(t, taskDefaultWorkflow(), regOpts{autoPush: true})
+	e.flaky.failPushes, e.flaky.pushLands = 1, lands
+	files := map[string]string{"src/feature.go": "package src\n// legit\n"}
+	if child {
+		files["tasks/child.md"] = childDraft
+	}
+	e.driveTaskDefaultWith(files)
+	if r := e.runNow(); r.Status != domain.RunStatusCommitting {
+		t.Fatalf("run status after the push blip = %s, want committing", r.Status)
+	}
+	if err := e.orch.MergeRunBranch(context.Background(), e.run.RunID); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if r := e.runNow(); r.Status != domain.RunStatusCompleted {
+		t.Fatalf("run status after the retry = %s, want completed", r.Status)
+	}
+	if p := e.execOf("publish"); p.OutcomeID != "published" {
+		t.Fatalf("publish outcome = %q, want published (no merge_failed route)", p.OutcomeID)
+	}
+	if e.execOf("execute").Attempt != 1 {
+		t.Fatal("merge_failed routed the run back to execute")
+	}
+	bound := e.runNow().CommitMeta[engine.CommitMetaBoundSHA]
+	if exec.Command("git", "-C", e.origin, "merge-base", "--is-ancestor", bound, "refs/heads/main").Run() != nil {
+		t.Fatal("origin main lacks the bound commit")
+	}
+	if m, c := e.originCounts(); m != 1 || c != 1 {
+		t.Fatalf("origin main carries %d merge and %d cascade commits for the run, want 1 and 1:\n%s",
+			m, c, regGit(t, e.origin, "log", "--oneline", "--graph", "refs/heads/main"))
+	}
+	if child {
+		if got := regGit(t, e.origin, "show", "refs/heads/main:tasks/child.md"); !strings.Contains(got, "status: Completed") {
+			t.Fatalf("origin main:tasks/child.md = %q, want the cascade's status Completed", got)
+		}
+	}
+
+	// (d) Replay after a landed merge: the partially-merged resume
+	// shape moves the run back to committing; nothing is added.
+	mainBefore := regGit(t, e.origin, "rev-parse", "refs/heads/main")
+	localBefore := e.git("rev-parse", "refs/heads/main")
+	if err := e.store.UpdateRunStatus(context.Background(), e.run.RunID, domain.RunStatusCommitting); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.orch.MergeRunBranch(context.Background(), e.run.RunID); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if got := regGit(t, e.origin, "rev-parse", "refs/heads/main"); got != mainBefore {
+		t.Fatalf("replay moved origin main %s -> %s:\n%s", mainBefore, got, regGit(t, e.origin, "log", "--oneline", "--graph", "refs/heads/main"))
+	}
+	if got := e.git("rev-parse", "refs/heads/main"); got != localBefore {
+		t.Fatalf("replay moved local main %s -> %s", localBefore, got)
+	}
+
+	if lands {
+		return
+	}
+	// (c) No workspace wedge: an unrelated second run merges and
+	// pushes.
+	res, err := e.orch.StartRun(context.Background(), "tasks/t.md")
+	if err != nil {
+		t.Fatalf("second StartRun: %v", err)
+	}
+	second := &regEnv{t: t, dir: e.dir, origin: e.origin, cli: e.cli, flaky: e.flaky, store: e.store,
+		actors: e.actors, orch: e.orch, run: res.Run, branch: res.Run.BranchName}
+	second.commitOnRun("second deliverable", map[string]string{"src/second.go": "package src\n"})
+	for _, st := range []struct{ step, outcome string }{{"execute", "completed"}, {"validate", "passed"}, {"review", "accepted"}} {
+		ex := second.execOf(st.step)
+		if err := e.orch.SubmitStepResult(context.Background(), ex.ExecutionID, engine.StepResult{OutcomeID: st.outcome}); err != nil {
+			t.Fatalf("second run %s: %v", st.step, err)
+		}
+	}
+	if r := second.runNow(); r.Status != domain.RunStatusCompleted {
+		t.Fatalf("second run status = %s, want completed", r.Status)
+	}
+	if exec.Command("git", "-C", e.origin, "cat-file", "-e", "refs/heads/main:src/second.go").Run() != nil {
+		t.Fatal("origin main lacks the second run's deliverable")
+	}
+}
+
+// misMergingCLI stands in for a faulty CommitBinder (the structural check
+// guards implementations other than CLIClient, such as SMP TASK-009's):
+// while armed, MergeBound merges `instead` — a commit the review never saw
+// — in place of opts.SourceSHA. With concurrentWrite set it instead
+// models the unserialized-worktree race: another writer commits on the
+// target between the base read and the merge, so the merge's first parent
+// is that write while the reported base is the tip before it.
+type misMergingCLI struct {
+	*git.CLIClient
+	dir             string
+	t               *testing.T
+	armed           bool
+	instead         string
+	concurrentWrite bool
+	write           string // the concurrent write's commit
+	refused         git.MergeResult
+}
+
+func (f *misMergingCLI) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if !f.armed {
+		return f.CLIClient.MergeBound(ctx, opts)
+	}
+	f.armed = false
+	if f.concurrentWrite {
+		base := regGit(f.t, f.dir, "rev-parse", "refs/heads/main")
+		regGit(f.t, f.dir, "checkout", "-q", "main")
+		if err := os.WriteFile(filepath.Join(f.dir, "concurrent.md"), []byte("an in-place write\n"), 0o644); err != nil { //nolint:gosec // G306: test fixture
+			f.t.Fatal(err)
+		}
+		regGit(f.t, f.dir, "add", "concurrent.md")
+		regGit(f.t, f.dir, "commit", "-q", "-m", "in-place write during the merge")
+		f.write = regGit(f.t, f.dir, "rev-parse", "HEAD")
+		res, err := f.CLIClient.MergeBound(ctx, opts)
+		res.BaseSHA = base // the tip the merge read before the write landed
+		f.refused = res
+		return res, err
+	}
+	opts.SourceSHA = f.instead
+	res, err := f.CLIClient.MergeBound(ctx, opts)
+	f.refused = res
+	return res, err
+}
+
+// TestMergeBindingRegression_RefusedMergeTakenBack (review round 1): a
+// merge the structural check refuses is taken off the local main, so the
+// next governed merge neither builds on it nor publishes it. Before the
+// take-back, the refused merge stayed on local main: the next round's
+// MergeBound computed on it, passed its own check with it as first parent,
+// and its non-forced push published the sneak to origin; with auto-push
+// off the local main is the published branch.
+func TestMergeBindingRegression_RefusedMergeTakenBack(t *testing.T) {
+	for _, autoPush := range []bool{true, false} {
+		name := "auto-push on"
+		if !autoPush {
+			name = "auto-push off"
 		}
 		t.Run(name, func(t *testing.T) {
-			e := newRegEnv(t, taskDefaultWorkflow(), regOpts{autoPush: true})
-			e.flaky.failPushes, e.flaky.pushLands = 1, lands
-			e.driveTaskDefaultToApproval()
-			if r := e.runNow(); r.Status != domain.RunStatusCommitting {
-				t.Fatalf("run status after the push blip = %s, want committing", r.Status)
-			}
-			if err := e.orch.MergeRunBranch(context.Background(), e.run.RunID); err != nil {
-				t.Fatalf("retry: %v", err)
-			}
-			if r := e.runNow(); r.Status != domain.RunStatusCompleted {
-				t.Fatalf("run status after the retry = %s, want completed", r.Status)
-			}
-			if p := e.execOf("publish"); p.OutcomeID != "published" {
-				t.Fatalf("publish outcome = %q, want published (no merge_failed route)", p.OutcomeID)
-			}
-			if e.execOf("execute").Attempt != 1 {
-				t.Fatal("merge_failed routed the run back to execute")
-			}
-			bound := e.runNow().CommitMeta[engine.CommitMetaBoundSHA]
-			if exec.Command("git", "-C", e.origin, "merge-base", "--is-ancestor", bound, "refs/heads/main").Run() != nil {
-				t.Fatal("origin main lacks the bound commit")
-			}
-			if m, c := e.originCounts(); m != 1 || c != 1 {
-				t.Fatalf("origin main carries %d merge and %d cascade commits for the run, want 1 and 1", m, c)
-			}
+			var mm *misMergingCLI
+			e := newRegEnv(t, taskDefaultWorkflow(), regOpts{autoPush: autoPush, op: func(c *git.CLIClient) engine.GitOperator {
+				mm = &misMergingCLI{CLIClient: c, t: t}
+				return mm
+			}})
+			mm.dir = e.dir
+			// The commit the faulty binder merges: carries evil.md and
+			// rules: [], and was never on the run branch the review saw.
+			e.git("checkout", "-q", "-b", "sneak-side", "main")
+			e.write("evil.md", "unreviewed\n")
+			e.write(".spine/branch-protection.yaml", "version: 1\nrules: []\n")
+			e.git("add", "-A")
+			e.git("commit", "-q", "-m", "sneak")
+			mm.instead = e.git("rev-parse", "HEAD")
+			e.git("checkout", "-q", "main")
+			mm.armed = true
+			baseBefore := e.git("rev-parse", "refs/heads/main")
 
-			// (d) Replay after a landed merge: the partially-merged resume
-			// shape moves the run back to committing; nothing is added.
-			mainBefore := regGit(t, e.origin, "rev-parse", "refs/heads/main")
-			localBefore := e.git("rev-parse", "refs/heads/main")
-			if err := e.store.UpdateRunStatus(context.Background(), e.run.RunID, domain.RunStatusCommitting); err != nil {
-				t.Fatal(err)
+			e.driveTaskDefaultWith(map[string]string{"src/feature.go": "package src\n// legit\n"})
+			if p := e.execOf("publish"); p.OutcomeID != "merge_failed" {
+				t.Fatalf("publish outcome = %q, want merge_failed (the refused merge)", p.OutcomeID)
 			}
-			if err := e.orch.MergeRunBranch(context.Background(), e.run.RunID); err != nil {
-				t.Fatalf("replay: %v", err)
+			if mm.refused.SHA == "" || mm.refused.SHA == baseBefore {
+				t.Fatalf("the faulty MergeBound made no merge: %+v", mm.refused)
 			}
-			if got := regGit(t, e.origin, "rev-parse", "refs/heads/main"); got != mainBefore {
-				t.Fatalf("replay moved origin main %s -> %s", mainBefore, got)
+			if got := e.git("rev-parse", "refs/heads/main"); got != baseBefore {
+				t.Fatalf("local main = %s after the refusal, want it taken back to %s", got, baseBefore)
 			}
-			if got := e.git("rev-parse", "refs/heads/main"); got != localBefore {
-				t.Fatalf("replay moved local main %s -> %s", localBefore, got)
+			if e.isAncestor(mm.instead, "refs/heads/main") || e.mainHas("main", "evil.md") {
+				t.Fatal("local main still carries the refused merge")
 			}
-
-			if lands {
-				return
+			if st := e.git("status", "--porcelain"); st != "" {
+				t.Fatalf("the take-back left the working tree dirty:\n%s", st)
 			}
-			// (c) No workspace wedge: an unrelated second run merges and
-			// pushes.
-			res, err := e.orch.StartRun(context.Background(), "tasks/t.md")
-			if err != nil {
-				t.Fatalf("second StartRun: %v", err)
-			}
-			second := &regEnv{t: t, dir: e.dir, origin: e.origin, cli: e.cli, flaky: e.flaky, store: e.store,
-				actors: e.actors, orch: e.orch, run: res.Run, branch: res.Run.BranchName}
-			second.commitOnRun("second deliverable", map[string]string{"src/second.go": "package src\n"})
-			for _, st := range []struct{ step, outcome string }{{"execute", "completed"}, {"validate", "passed"}, {"review", "accepted"}} {
-				ex := second.execOf(st.step)
-				if err := e.orch.SubmitStepResult(context.Background(), ex.ExecutionID, engine.StepResult{OutcomeID: st.outcome}); err != nil {
-					t.Fatalf("second run %s: %v", st.step, err)
+			if autoPush {
+				if got := regGit(t, e.origin, "rev-parse", "refs/heads/main"); got != baseBefore {
+					t.Fatalf("origin main moved to %s on a refused merge", got)
 				}
 			}
-			if r := second.runNow(); r.Status != domain.RunStatusCompleted {
-				t.Fatalf("second run status = %s, want completed", r.Status)
+
+			// The next governed merge (the rework round) builds on the
+			// restored main and publishes only reviewed content.
+			e.commitOnRun("rework", map[string]string{"src/feature.go": "package src\n// legit v2\n"})
+			for _, st := range []struct{ step, outcome string }{{"execute", "completed"}, {"validate", "passed"}, {"review", "accepted"}} {
+				var ex *domain.StepExecution
+				for _, s := range e.store.steps {
+					if s.RunID == e.run.RunID && s.StepID == st.step && !s.Status.IsTerminal() {
+						ex = s
+					}
+				}
+				if ex == nil {
+					t.Fatalf("no live %s execution in the rework round", st.step)
+				}
+				if err := e.orch.SubmitStepResult(context.Background(), ex.ExecutionID, engine.StepResult{OutcomeID: st.outcome}); err != nil {
+					t.Fatalf("rework %s: %v", st.step, err)
+				}
 			}
-			if exec.Command("git", "-C", e.origin, "cat-file", "-e", "refs/heads/main:src/second.go").Run() != nil {
-				t.Fatal("origin main lacks the second run's deliverable")
+			if r := e.runNow(); r.Status != domain.RunStatusCompleted {
+				t.Fatalf("run status after the rework round = %s, want completed", r.Status)
+			}
+			published := "refs/heads/main"
+			repo := e.dir
+			if autoPush {
+				repo = e.origin
+			}
+			if exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", mm.refused.SHA, published).Run() == nil {
+				t.Fatalf("the refused merge %s reached the published main", mm.refused.SHA)
+			}
+			if exec.Command("git", "-C", repo, "cat-file", "-e", published+":evil.md").Run() == nil {
+				t.Fatal("the published main carries evil.md")
+			}
+			if got := regGit(t, repo, "show", published+":.spine/branch-protection.yaml"); got != strings.TrimSpace(protectedMain) {
+				t.Fatalf("the published branch protection = %q, want the main rule", got)
+			}
+			if exec.Command("git", "-C", repo, "cat-file", "-e", published+":src/feature.go").Run() != nil {
+				t.Fatal("the published main lacks the reviewed deliverable")
 			}
 		})
+	}
+}
+
+// TestMergeBindingRegression_RefusedMergeKeepsAConcurrentWrite: when the
+// refusal comes from main moving between the base read and the merge
+// (another writer — the worktree is not serialized until TASK-012), the
+// take-back restores main to that write, not to the older base: the
+// write is kept and only the refused merge goes.
+func TestMergeBindingRegression_RefusedMergeKeepsAConcurrentWrite(t *testing.T) {
+	var mm *misMergingCLI
+	e := newRegEnv(t, taskDefaultWorkflow(), regOpts{op: func(c *git.CLIClient) engine.GitOperator {
+		mm = &misMergingCLI{CLIClient: c, t: t, concurrentWrite: true}
+		return mm
+	}})
+	mm.dir = e.dir
+	mm.armed = true
+	e.driveTaskDefaultWith(map[string]string{"src/feature.go": "package src\n// legit\n"})
+	if p := e.execOf("publish"); p.OutcomeID != "merge_failed" {
+		t.Fatalf("publish outcome = %q, want merge_failed (first parent is not the reported base)", p.OutcomeID)
+	}
+	if got := e.git("rev-parse", "refs/heads/main"); got != mm.write {
+		t.Fatalf("local main = %s, want the concurrent write %s kept", got, mm.write)
+	}
+	if !e.mainHas("main", "concurrent.md") || e.mainHas("main", "src/feature.go") {
+		t.Fatal("main must keep the concurrent write and drop only the refused merge")
+	}
+	if st := e.git("status", "--porcelain"); st != "" {
+		t.Fatalf("working tree dirty after the take-back:\n%s", st)
 	}
 }
 

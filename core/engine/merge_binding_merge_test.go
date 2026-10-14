@@ -212,22 +212,36 @@ func TestMissingOrInvalidBindingFailsClosed(t *testing.T) {
 
 // TestVerifyBoundMergeRefusesOtherShapes is AC 12 (with DC-3): every
 // result that is not built from exactly the base and the bound commit is
-// refused before any push.
+// refused before any push — and taken back (review round 1): the local
+// target goes back to the state before the merge, compare-and-swap on
+// the refused merge, so the next governed merge cannot build on it.
 func TestVerifyBoundMergeRefusesOtherShapes(t *testing.T) {
-	bound, base, tip, m, x := sha40('a'), sha40('b'), sha40('f'), sha40('c'), sha40('9')
+	bound, base, tip, m, x, w := sha40('a'), sha40('b'), sha40('f'), sha40('c'), sha40('9'), sha40('8')
 	cases := []struct {
 		name  string
 		res   git.MergeResult
 		setup func(g *fakeBinderGit)
+		reset string // the expected ResetBranch call, "" for none
 	}{
-		{"merged the tip instead", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{base, tip} }},
-		{"merged the bound commit and the tip", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{base, bound, tip} }},
-		{"first parent is not the base (a rewind)", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{x, bound} }},
-		{"parents swapped", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{bound, base} }},
-		{"up to date but the base lacks the bound commit", git.MergeResult{SHA: base, BaseSHA: base}, func(g *fakeBinderGit) { g.notAncestor[bound+">"+base] = true }},
-		{"fast-forward that does not descend from the base", git.MergeResult{SHA: bound, BaseSHA: base}, func(g *fakeBinderGit) { g.notAncestor[base+">"+bound] = true }},
-		{"empty BaseSHA", git.MergeResult{SHA: m}, func(g *fakeBinderGit) { g.parents[m] = []string{base, bound} }},
-		{"parents unreadable", git.MergeResult{SHA: m, BaseSHA: base}, func(*fakeBinderGit) {}},
+		{"merged the tip instead", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{base, tip} }, "main " + base + " " + m},
+		{"merged the bound commit and the tip", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{base, bound, tip} }, "main " + base + " " + m},
+		{"first parent is not the base (a rewind)", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) {
+			g.parents[m] = []string{x, bound}
+			g.notAncestor[base+">"+x] = true
+		}, "main " + base + " " + m},
+		// The target moved between the base read and the merge (another
+		// writer; no worktree lock until TASK-012): the take-back keeps
+		// that write — it goes back to the merge's first parent, which
+		// descends from the base — instead of dropping it with the merge.
+		{"first parent is a newer target (a concurrent write)", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{w, bound} }, "main " + w + " " + m},
+		{"parents swapped", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) {
+			g.parents[m] = []string{bound, base}
+			g.notAncestor[base+">"+bound] = true
+		}, "main " + base + " " + m},
+		{"up to date but the base lacks the bound commit", git.MergeResult{SHA: base, BaseSHA: base}, func(g *fakeBinderGit) { g.notAncestor[bound+">"+base] = true }, ""},
+		{"fast-forward that does not descend from the base", git.MergeResult{SHA: bound, BaseSHA: base}, func(g *fakeBinderGit) { g.notAncestor[base+">"+bound] = true }, "main " + base + " " + bound},
+		{"empty BaseSHA", git.MergeResult{SHA: m}, func(g *fakeBinderGit) { g.parents[m] = []string{base, bound} }, ""},
+		{"parents unreadable", git.MergeResult{SHA: m, BaseSHA: base}, func(*fakeBinderGit) {}, "main " + base + " " + m},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,6 +261,14 @@ func TestVerifyBoundMergeRefusesOtherShapes(t *testing.T) {
 				t.Fatalf("primary outcome = %+v, want failed", po)
 			}
 			requireMergeFailedRoute(t, f, false)
+			switch {
+			case tc.reset == "" && len(f.git.resets) != 0:
+				t.Fatalf("ResetBranch calls = %v, want none (the target did not move, or no base is known)", f.git.resets)
+			case tc.reset != "" && (len(f.git.resets) != 1 || f.git.resets[0] != tc.reset):
+				t.Fatalf("ResetBranch calls = %v, want exactly [%s]", f.git.resets, tc.reset)
+			case tc.reset != "" && !strings.Contains(po.FailureDetail, "was restored to"):
+				t.Fatalf("failure detail %q does not say the merge was taken back", po.FailureDetail)
+			}
 		})
 	}
 	for name, res := range map[string]git.MergeResult{
@@ -265,11 +287,77 @@ func TestVerifyBoundMergeRefusesOtherShapes(t *testing.T) {
 			if len(f.git.pushes) != 1 || f.git.pushes[0] != "origin main "+res.SHA {
 				t.Fatalf("pushes = %v, want exactly the merge result", f.git.pushes)
 			}
+			if len(f.git.resets) != 0 {
+				t.Fatalf("an accepted merge was taken back: %v", f.git.resets)
+			}
 			if f.run.Status != domain.RunStatusCompleted {
 				t.Fatalf("run status = %s", f.run.Status)
 			}
 		})
 	}
+}
+
+// TestTransientVerificationFailureRetries: a read the structural check
+// needs that fails transiently is not a verdict on the merge (review
+// round 1). After the take-back the run stays in committing for the
+// scheduler's retry instead of taking the merge_failed route, nothing is
+// pushed — and if the take-back could not run, it is a refusal after all
+// (a retry would otherwise meet the unverified merge on the target and
+// accept it as "already up to date").
+func TestTransientVerificationFailureRetries(t *testing.T) {
+	bound, base, m := sha40('a'), sha40('b'), sha40('c')
+	blip := &git.GitError{Kind: git.ErrKindTransient, Op: "commit_parents", Message: "repository locked"}
+	for _, resetFails := range []bool{false, true} {
+		f := committingFix(t, false, true)
+		f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+		f.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+		f.git.parentsErr[m] = blip
+		if resetFails {
+			f.git.resetErr = &git.GitError{Kind: git.ErrKindPermanent, Op: "reset_branch", Message: "cannot lock ref"}
+		}
+		if err := f.merge(); err != nil {
+			t.Fatalf("resetFails=%v: MergeRunBranch: %v", resetFails, err)
+		}
+		if len(f.git.pushes) != 0 {
+			t.Fatalf("resetFails=%v: pushed an unverified merge: %v", resetFails, f.git.pushes)
+		}
+		if len(f.git.resets) != 1 || f.git.resets[0] != "main "+base+" "+m {
+			t.Fatalf("resetFails=%v: ResetBranch calls = %v", resetFails, f.git.resets)
+		}
+		if resetFails {
+			requireMergeFailedRoute(t, f, false)
+			continue
+		}
+		if f.run.Status != domain.RunStatusCommitting {
+			t.Fatalf("run status = %s, want committing (transient: the scheduler retries)", f.run.Status)
+		}
+		if p := f.latestExec("publish"); p.OutcomeID != "" {
+			t.Fatalf("publish outcome = %q, want none yet", p.OutcomeID)
+		}
+	}
+}
+
+// TestRefusedMergeTakeBackFailure: a take-back the binder refuses (the
+// target moved on) still refuses the merge and pushes nothing, and the
+// outcome says the local target still holds the refused merge.
+func TestRefusedMergeTakeBackFailure(t *testing.T) {
+	bound, base, tip, m := sha40('a'), sha40('b'), sha40('f'), sha40('c')
+	f := committingFix(t, false, true)
+	f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+	f.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+	f.git.parents[m] = []string{base, tip}
+	f.git.resetErr = &git.GitError{Kind: git.ErrKindPermanent, Op: "reset_branch", Message: "cannot lock ref"}
+	if err := f.merge(); err != nil {
+		t.Fatalf("MergeRunBranch: %v", err)
+	}
+	if len(f.git.pushes) != 0 {
+		t.Fatalf("pushed: %v", f.git.pushes)
+	}
+	po := f.primaryOutcome()
+	if po == nil || po.Status != domain.RepositoryMergeStatusFailed || !strings.Contains(po.FailureDetail, "still holds the refused merge") {
+		t.Fatalf("primary outcome = %+v, want failed and naming the leftover merge", po)
+	}
+	requireMergeFailedRoute(t, f, false)
 }
 
 // TestExcludedTipKeepsBranch: a tip the merge did not contain is
@@ -374,11 +462,12 @@ func TestPushFailureClassificationUnderBinding(t *testing.T) {
 }
 
 func TestCascadeAtBoundCommit_Unit(t *testing.T) {
-	bound, base, c, m := sha40('a'), sha40('b'), sha40('7'), sha40('c')
+	bound, base, c, m, tip := sha40('a'), sha40('b'), sha40('7'), sha40('c'), sha40('f')
 	f := committingFix(t, false, true)
 	f.run.CommitMeta = map[string]string{"status": "Completed", CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
 	f.git.files[bound+":tasks/t.md"] = "---\nid: TASK-1\nstatus: In Progress\n---\n"
 	f.git.ontoSHA = c
+	f.git.parents[c] = []string{bound}
 	f.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
 	f.git.parents[m] = []string{base, c}
 	if err := f.merge(); err != nil {
@@ -395,17 +484,230 @@ func TestCascadeAtBoundCommit_Unit(t *testing.T) {
 			t.Fatalf("binding-on cascade touched the run branch or the working tree: %q", call)
 		}
 	}
-	// A failed cascade falls back to the bound commit.
-	f2 := committingFix(t, false, true)
-	f2.run.CommitMeta = f.run.CommitMeta
-	f2.git.files[bound+":tasks/t.md"] = "---\nid: TASK-1\nstatus: In Progress\n---\n"
-	f2.git.ontoErr = errors.New("object store full")
-	f2.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
-	f2.git.parents[m] = []string{base, bound}
-	if err := f2.merge(); err != nil {
-		t.Fatalf("MergeRunBranch: %v", err)
+	// A failed cascade falls back to the bound commit — including a
+	// cascade commit whose parents cannot be read.
+	for name, setup := range map[string]func(g *fakeBinderGit){
+		"CommitFilesOnto failed": func(g *fakeBinderGit) { g.ontoErr = errors.New("object store full") },
+		"parents unreadable":     func(g *fakeBinderGit) { g.ontoSHA = c },
+	} {
+		f2 := committingFix(t, false, true)
+		f2.run.CommitMeta = f.run.CommitMeta
+		f2.git.files[bound+":tasks/t.md"] = "---\nid: TASK-1\nstatus: In Progress\n---\n"
+		setup(f2.git)
+		f2.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+		f2.git.parents[m] = []string{base, bound}
+		if err := f2.merge(); err != nil {
+			t.Fatalf("%s: MergeRunBranch: %v", name, err)
+		}
+		if len(f2.git.merges) != 1 || f2.git.merges[0].SourceSHA != bound {
+			t.Fatalf("%s: fallback MergeBound = %+v, want the bound commit", name, f2.git.merges)
+		}
 	}
-	if len(f2.git.merges) != 1 || f2.git.merges[0].SourceSHA != bound {
-		t.Fatalf("fallback MergeBound = %+v, want the bound commit", f2.git.merges)
+	// A cascade commit that is not a child of exactly the bound commit —
+	// built on the run-branch tip, say — would carry unreviewed commits
+	// into a merge whose parents are [base, it]: refused, nothing merged
+	// (review round 1).
+	for name, parents := range map[string][]string{
+		"built on the tip": {tip},
+		"two parents":      {bound, tip},
+		"root commit":      {},
+	} {
+		f3 := committingFix(t, false, true)
+		f3.run.CommitMeta = f.run.CommitMeta
+		f3.git.files[bound+":tasks/t.md"] = "---\nid: TASK-1\nstatus: In Progress\n---\n"
+		f3.git.ontoSHA = c
+		f3.git.parents[c] = parents
+		if err := f3.merge(); err != nil {
+			t.Fatalf("%s: MergeRunBranch: %v", name, err)
+		}
+		if n := f3.git.callCount("binder:MergeBound"); n != 0 {
+			t.Fatalf("%s: merged a cascade commit that is not a child of the bound commit", name)
+		}
+		if len(f3.git.pushes) != 0 {
+			t.Fatalf("%s: pushed: %v", name, f3.git.pushes)
+		}
+		po := f3.primaryOutcome()
+		if po == nil || po.Status != domain.RepositoryMergeStatusFailed || !strings.Contains(po.FailureDetail, "child of the bound commit") {
+			t.Fatalf("%s: primary outcome = %+v, want a failed binding violation", name, po)
+		}
+		requireMergeFailedRoute(t, f3, false)
+	}
+}
+
+// TestCascadeBaseAtReplay: when main already contains the bound commit,
+// the cascade diffs against main as it was just before this run's earlier
+// merge (review round 1), found on main's first-parent chain; anything
+// else keeps the plain merge-base.
+func TestCascadeBaseAtReplay(t *testing.T) {
+	bound, c, orig := sha40('a'), sha40('7'), sha40('1')
+	first, merge, write := sha40('2'), sha40('3'), sha40('4')
+	newFix := func(t *testing.T) *bindFix {
+		f := committingFix(t, false, true)
+		f.git.mergeBases["main "+bound] = bound // main contains bound
+		f.git.mergeBases[first+" "+bound] = orig
+		return f
+	}
+	t.Run("this run's merge behind an in-place write", func(t *testing.T) {
+		f := newFix(t)
+		f.git.setHead("main", write)
+		f.git.parents[write] = []string{merge}
+		f.git.parents[merge] = []string{first, c}
+		f.git.parents[c] = []string{bound}
+		if got, err := f.orch.cascadeBaseAt(context.Background(), f.run, bound); err != nil || got != orig {
+			t.Fatalf("cascadeBaseAt = %s, %v; want the merge-base against the earlier merge's first parent %s", got, err, orig)
+		}
+	})
+	t.Run("the merge merged the bound commit itself", func(t *testing.T) {
+		f := newFix(t)
+		f.git.setHead("main", merge)
+		f.git.parents[merge] = []string{first, bound}
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != orig {
+			t.Fatalf("cascadeBaseAt = %s, want %s", got, orig)
+		}
+	})
+	t.Run("another run's merge is not this run's", func(t *testing.T) {
+		f := newFix(t)
+		other := sha40('5')
+		f.git.setHead("main", merge)
+		f.git.parents[merge] = []string{first, other}
+		f.git.parents[other] = []string{sha40('6')}
+		f.git.parents[first] = []string{bound}
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != bound {
+			t.Fatalf("cascadeBaseAt = %s, want the plain merge-base %s", got, bound)
+		}
+	})
+	t.Run("the walk is bounded", func(t *testing.T) {
+		f := newFix(t)
+		x := sha40('d')
+		f.git.setHead("main", x)
+		f.git.parents[x] = []string{x} // an endless first-parent chain
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != bound {
+			t.Fatalf("cascadeBaseAt = %s, want the plain merge-base %s", got, bound)
+		}
+		if n := f.git.callCount("binder:CommitParents " + x); n != priorMergeWalkLimit {
+			t.Fatalf("walked %d steps, want the limit %d", n, priorMergeWalkLimit)
+		}
+	})
+	t.Run("main does not contain bound: plain merge-base, no walk", func(t *testing.T) {
+		f := committingFix(t, false, true)
+		f.git.mergeBases["main "+bound] = orig
+		if got, _ := f.orch.cascadeBaseAt(context.Background(), f.run, bound); got != orig {
+			t.Fatalf("cascadeBaseAt = %s, want %s", got, orig)
+		}
+		if n := f.git.callCount("binder:"); n != 0 {
+			t.Fatalf("the replay walk ran on a first attempt: %v", f.git.calls)
+		}
+	})
+}
+
+// TestCodeRepoMergeBoundRefusesOtherShapes is AC 12 for a code
+// repository (review round 1): the structural check refuses every shape
+// but the three allowed ones, pushes nothing, takes the local default
+// branch back, and an accepted merge pushes exactly the merge commit with
+// PushCommit — never the local ref with Push.
+func TestCodeRepoMergeBoundRefusesOtherShapes(t *testing.T) {
+	repoBound, base, tip, m := sha40('a'), sha40('b'), sha40('f'), sha40('c')
+	newCodeFix := func(t *testing.T) (*bindFix, *fakeBinderGit) {
+		f := committingFix(t, false, true)
+		f.run.AffectedRepositories = []string{"spine", "code-a"}
+		f.run.CommitMeta = map[string]string{
+			CommitMetaBoundSHA:        sha40('e'),
+			CommitMetaBoundBy:         boundByStep("review", bindRunID+"-review-1"),
+			RepoBoundSHAKey("code-a"): repoBound,
+		}
+		code := newFakeBinderGit()
+		code.setHead(f.run.BranchName, tip)
+		f.orch.WithRepositoryResolver(newRepoResolver(map[string]repoLookup{"code-a": activeRepoLookup("code-a", "main")}))
+		f.orch.WithRepositoryGitClients(realRepoClients{"code-a": fakeCodeBinder{code}})
+		return f, code
+	}
+	for _, tc := range []struct {
+		name  string
+		res   git.MergeResult
+		setup func(g *fakeBinderGit)
+		reset string
+	}{
+		{"[base, tip]", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{base, tip} }, "main " + base + " " + m},
+		{"[base, bound, tip]", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{base, repoBound, tip} }, "main " + base + " " + m},
+		{"first parent not the base", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) {
+			g.parents[m] = []string{tip, repoBound}
+			g.notAncestor[base+">"+tip] = true
+		}, "main " + base + " " + m},
+		{"empty BaseSHA", git.MergeResult{SHA: m}, func(g *fakeBinderGit) { g.parents[m] = []string{base, repoBound} }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, code := newCodeFix(t)
+			code.mergeRes = tc.res
+			tc.setup(code)
+			out, err := f.orch.attemptCodeRepositoryMerge(context.Background(), f.run, "code-a")
+			if err != nil {
+				t.Fatalf("attemptCodeRepositoryMerge: %v", err)
+			}
+			if out.Status != domain.RepositoryMergeStatusFailed {
+				t.Fatalf("outcome = %s, want failed", out.Status)
+			}
+			if len(code.pushes) != 0 || len(code.plainPushes) != 0 {
+				t.Fatalf("a refused code-repository merge was pushed: %v %v", code.pushes, code.plainPushes)
+			}
+			if tc.reset == "" && len(code.resets) != 0 || tc.reset != "" && (len(code.resets) != 1 || code.resets[0] != tc.reset) {
+				t.Fatalf("ResetBranch calls = %v, want %q", code.resets, tc.reset)
+			}
+		})
+	}
+	t.Run("accepted: pushes exactly the merge commit", func(t *testing.T) {
+		f, code := newCodeFix(t)
+		code.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+		code.parents[m] = []string{base, repoBound}
+		out, err := f.orch.attemptCodeRepositoryMerge(context.Background(), f.run, "code-a")
+		if err != nil || out.Status != domain.RepositoryMergeStatusMerged || out.MergeCommitSHA != m {
+			t.Fatalf("outcome = %+v, %v; want merged at %s", out, err, m)
+		}
+		if len(code.merges) != 1 || code.merges[0].SourceSHA != repoBound {
+			t.Fatalf("MergeBound calls = %+v, want exactly one of the bound commit", code.merges)
+		}
+		if len(code.pushes) != 1 || code.pushes[0] != "origin main "+m || len(code.plainPushes) != 0 {
+			t.Fatalf("pushes = %v, plain = %v; want exactly PushCommit origin main %s", code.pushes, code.plainPushes, m)
+		}
+		if len(code.resets) != 0 {
+			t.Fatalf("an accepted merge was taken back: %v", code.resets)
+		}
+	})
+}
+
+// TestBoundLedgerMustBeAChildOfTheBinding: the recovery ledger becomes
+// the binding, so a CommitFilesOnto result that is not a child of exactly
+// the bound commit is refused and nothing is recorded (review round 1).
+func TestBoundLedgerMustBeAChildOfTheBinding(t *testing.T) {
+	bound, tip, l := sha40('a'), sha40('f'), sha40('5')
+	for name, tc := range map[string]struct {
+		parents []string
+		ok      bool
+	}{
+		"child of the bound commit": {[]string{bound}, true},
+		"built on the tip":          {[]string{tip}, false},
+		"parents unreadable":        {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := committingFix(t, false, true)
+			f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+			f.git.ontoSHA = l
+			if tc.parents != nil {
+				f.git.parents[l] = tc.parents
+			}
+			got, err := f.orch.writeMergeRecoveryLedgerCommit(context.Background(), f.run, "code-a",
+				mergeRecoveryAction{Operation: "merge_recovery_retry", ActorID: "operator-1", Reason: "retry"})
+			if tc.ok {
+				if err != nil || got != l || f.run.CommitMeta[CommitMetaBoundSHA] != l {
+					t.Fatalf("ledger = %s, %v; binding %s; want %s bound", got, err, f.run.CommitMeta[CommitMetaBoundSHA], l)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ledger %s accepted with parents %v", got, tc.parents)
+			}
+			if len(f.store.metaWrites) != 0 || f.run.CommitMeta[CommitMetaBoundSHA] != bound {
+				t.Fatalf("a refused ledger changed the binding: %v", f.store.metaWrites)
+			}
+		})
 	}
 }

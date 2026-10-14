@@ -50,12 +50,31 @@ func crIsAncestor(dir, a, d string) bool {
 
 // failingCLI wraps a CLIClient: the next failBound MergeBound calls (and,
 // for binding off, failMerge plain non-abort Merge calls) fail with err.
+// While misMerge is set, the next MergeBound merges it in place of
+// opts.SourceSHA (a faulty binder). It records every push.
 type failingCLI struct {
 	*git.CLIClient
-	mu        sync.Mutex
-	failBound int
-	failMerge int
-	err       error
+	mu          sync.Mutex
+	failBound   int
+	failMerge   int
+	err         error
+	misMerge    string
+	pushCommits []string // "remote branch sha"
+	plainPushes []string // "remote ref"
+}
+
+func (f *failingCLI) PushCommit(ctx context.Context, remote, branch, sha string) error {
+	f.mu.Lock()
+	f.pushCommits = append(f.pushCommits, remote+" "+branch+" "+sha)
+	f.mu.Unlock()
+	return f.CLIClient.PushCommit(ctx, remote, branch, sha)
+}
+
+func (f *failingCLI) Push(ctx context.Context, remote, ref string) error {
+	f.mu.Lock()
+	f.plainPushes = append(f.plainPushes, remote+" "+ref)
+	f.mu.Unlock()
+	return f.CLIClient.Push(ctx, remote, ref)
 }
 
 func (f *failingCLI) take(n *int) bool {
@@ -72,6 +91,11 @@ func (f *failingCLI) MergeBound(ctx context.Context, o git.MergeOpts) (git.Merge
 	if f.take(&f.failBound) {
 		return git.MergeResult{}, f.err
 	}
+	f.mu.Lock()
+	if f.misMerge != "" {
+		o.SourceSHA, f.misMerge = f.misMerge, ""
+	}
+	f.mu.Unlock()
 	return f.CLIClient.MergeBound(ctx, o)
 }
 
@@ -278,7 +302,10 @@ func TestCodeRepoBinding_PushAfterCaptureNotMerged(t *testing.T) {
 }
 
 // TestCodeRepoBinding_CleanMergeDeletesBranches: with nothing excluded,
-// the code repository's run branch is cleaned up as before.
+// the code repository's run branch is cleaned up as before. The code
+// repository's merge is published with exactly one PushCommit of the
+// merge commit and never with a push of the local ref (DC-1 for code
+// repositories, the AC 26 shape; review round 1).
 func TestCodeRepoBinding_CleanMergeDeletesBranches(t *testing.T) {
 	e := mustCREnv(t, true)
 	r1 := e.commitCode("feature.go", "package x\n")
@@ -293,6 +320,166 @@ func TestCodeRepoBinding_CleanMergeDeletesBranches(t *testing.T) {
 	}
 	if got := crGit(t, e.codeWork, "for-each-ref", "refs/heads/"+e.run.BranchName); got != "" {
 		t.Fatalf("code repository run branch not cleaned up: %s", got)
+	}
+	m := e.codeOutcome().MergeCommitSHA
+	if len(e.code.pushCommits) != 1 || e.code.pushCommits[0] != "origin main "+m {
+		t.Fatalf("code PushCommit calls = %q, want exactly [origin main %s]", e.code.pushCommits, m)
+	}
+	if len(e.code.plainPushes) != 0 {
+		t.Fatalf("the code repository's merge was pushed by local ref: %q", e.code.plainPushes)
+	}
+	if got := crGit(t, e.codeOrigin, "rev-parse", "refs/heads/main"); got != m {
+		t.Fatalf("code origin main = %s, want the merge commit %s", got, m)
+	}
+}
+
+// TestCodeRepoBinding_MovedHeadAtGate: a push to the code repository's
+// run branch after the producer bound it and before the review approves
+// is refused at the gate (§4 rule 6) — 409 run_branch_moved_since_gate
+// naming the repository, nothing recorded — and is accepted as the new
+// binding only under the rebind policy (review round 1: windows (a)/(b)
+// for code repositories had no test).
+func TestCodeRepoBinding_MovedHeadAtGate(t *testing.T) {
+	t.Run("reject", func(t *testing.T) {
+		e := mustCREnv(t, true)
+		r1 := e.commitCode("feature.go", "package x\n")
+		if err := e.submit("execute", "completed"); err != nil {
+			t.Fatal(err)
+		}
+		if got := e.runNow().CommitMeta[RepoBoundSHAKey("code-a")]; got != r1 {
+			t.Fatalf("code-a binding after execute = %s, want %s", got, r1)
+		}
+		metaBefore := e.runNow().CommitMeta
+		sneak := e.commitCode("backdoor.go", "package x // unreviewed\n")
+		err := e.submit("review", "accepted")
+		var se *domain.SpineError
+		if !errors.As(err, &se) || se.Code != domain.ErrConflict {
+			t.Fatalf("review accepted over a moved code repository = %v, want ErrConflict", err)
+		}
+		d, ok := se.Detail.(HeadBindingDetail)
+		if !ok || d.Reason != ReasonRunBranchMovedSinceGate || d.RepositoryID != "code-a" || d.HeadSHA != sneak || d.BoundSHA != r1 {
+			t.Fatalf("detail = %#v, want run_branch_moved_since_gate for code-a (head %s, bound %s)", se.Detail, sneak, r1)
+		}
+		if got := e.runNow().CommitMeta; !mapsEqual(got, metaBefore) {
+			t.Fatalf("commit_meta changed on a refused gate: %v -> %v", metaBefore, got)
+		}
+		var review *domain.StepExecution
+		for _, s := range e.store.createdSteps {
+			if s.StepID == "review" {
+				review = s
+			}
+		}
+		if review == nil || review.Status == domain.StepStatusCompleted || review.OutcomeID != "" {
+			t.Fatalf("review execution changed on a refused gate: %+v", review)
+		}
+		if e.originHas(sneak) {
+			t.Fatal("the unreviewed code commit reached the code repository's origin main")
+		}
+	})
+	t.Run("rebind", func(t *testing.T) {
+		e := mustCREnv(t, true)
+		if err := e.orch.EnableMergeBinding(MergeBindingConfig{MovedHead: MovedHeadRebind}); err != nil {
+			t.Fatal(err)
+		}
+		e.commitCode("feature.go", "package x\n")
+		if err := e.submit("execute", "completed"); err != nil {
+			t.Fatal(err)
+		}
+		moved := e.commitCode("fixup.go", "package x // reviewer saw this\n")
+		if err := e.submit("review", "accepted"); err != nil {
+			t.Fatalf("review accepted under rebind: %v", err)
+		}
+		if r := e.runNow(); r.Status != domain.RunStatusCompleted || !e.originHas(moved) {
+			t.Fatalf("run %s, origin has the rebound head=%v; want completed with it merged", r.Status, e.originHas(moved))
+		}
+	})
+}
+
+// TestCodeRepoBinding_RefusedMergeTakenBack: a code-repository merge the
+// structural check refuses (a faulty binder merged another commit) is
+// not pushed and is taken off the code repository's local default
+// branch, so a later merge there neither builds on it nor publishes it
+// (review round 1).
+func TestCodeRepoBinding_RefusedMergeTakenBack(t *testing.T) {
+	e := mustCREnv(t, true)
+	crGit(t, e.codeWork, "checkout", "-q", "-b", "sneak-side", "main")
+	if err := os.WriteFile(filepath.Join(e.codeWork, "backdoor.go"), []byte("package x // never reviewed\n"), 0o644); err != nil { //nolint:gosec // G306: test fixture
+		t.Fatal(err)
+	}
+	crGit(t, e.codeWork, "add", "backdoor.go")
+	crGit(t, e.codeWork, "commit", "-q", "-m", "sneak")
+	sneak := crGit(t, e.codeWork, "rev-parse", "HEAD")
+	crGit(t, e.codeWork, "checkout", "-q", "main")
+	baseBefore := crGit(t, e.codeWork, "rev-parse", "refs/heads/main")
+
+	r1 := e.commitCode("feature.go", "package x\n")
+	if err := e.submit("execute", "completed"); err != nil {
+		t.Fatal(err)
+	}
+	e.code.misMerge = sneak
+	if err := e.submit("review", "accepted"); err != nil {
+		t.Fatal(err)
+	}
+	o := e.codeOutcome()
+	if o.Status != domain.RepositoryMergeStatusFailed || !strings.Contains(o.FailureDetail, "was restored to "+baseBefore) {
+		t.Fatalf("code outcome = %s %q, want failed and taken back to %s", o.Status, o.FailureDetail, baseBefore)
+	}
+	if len(e.code.pushCommits) != 0 || len(e.code.plainPushes) != 0 {
+		t.Fatalf("a refused code-repository merge was pushed: %q %q", e.code.pushCommits, e.code.plainPushes)
+	}
+	if got := crGit(t, e.codeWork, "rev-parse", "refs/heads/main"); got != baseBefore {
+		t.Fatalf("code repository local main = %s, want it taken back to %s", got, baseBefore)
+	}
+	if st := crGit(t, e.codeWork, "status", "--porcelain"); st != "" {
+		t.Fatalf("the take-back left the code working tree dirty:\n%s", st)
+	}
+
+	// The operator retries; the resumed merge publishes the bound commit
+	// and nothing of the refused merge.
+	if r := e.runNow(); r.Status != domain.RunStatusPartiallyMerged {
+		t.Fatalf("run status = %s, want partially-merged", r.Status)
+	}
+	if _, err := e.orch.RetryRepositoryMerge(e.ctx, e.run.RunID, "code-a", "faulty merge refused, try again"); err != nil {
+		t.Fatalf("RetryRepositoryMerge: %v", err)
+	}
+	e.resume()
+	if !e.originHas(r1) || e.originHas(sneak) {
+		t.Fatalf("code origin main has R1=%v sneak=%v; want R1 only", e.originHas(r1), e.originHas(sneak))
+	}
+}
+
+// TestCodeRepoBinding_ResolvedExternallyCleansUp: a code repository the
+// operator resolved externally is not judged for excluded commits (its
+// default branch here need not contain the run tip), so the completed
+// run's branches are cleaned up as with binding off, not all kept under
+// a false warning (review round 1).
+func TestCodeRepoBinding_ResolvedExternallyCleansUp(t *testing.T) {
+	for _, bindingOn := range []bool{true, false} {
+		e := mustCREnv(t, bindingOn)
+		e.commitCode("v1.go", "package x // 1\n")
+		if err := e.submit("execute", "completed"); err != nil {
+			t.Fatal(err)
+		}
+		e.code.failBound, e.code.failMerge = 1, 1 // binding on merges with MergeBound, off with Merge
+		if err := e.submit("review", "accepted"); err != nil {
+			t.Fatal(err)
+		}
+		if r := e.runNow(); r.Status != domain.RunStatusPartiallyMerged {
+			t.Fatalf("binding=%v: run status = %s, want partially-merged", bindingOn, r.Status)
+		}
+		if _, err := e.orch.ResolveRepositoryMergeExternally(e.ctx, e.run.RunID, "code-a", "merged by hand", ""); err != nil {
+			t.Fatalf("binding=%v: ResolveRepositoryMergeExternally: %v", bindingOn, err)
+		}
+		e.resume()
+		if r := e.runNow(); r.Status != domain.RunStatusCompleted {
+			t.Fatalf("binding=%v: run status = %s, want completed", bindingOn, r.Status)
+		}
+		if got := crGit(t, e.codeWork, "for-each-ref", "refs/heads/"+e.run.BranchName); got != "" {
+			t.Fatalf("binding=%v: code repository run branch kept: %s", bindingOn, got)
+		}
+		if got := crGit(t, e.primary, "for-each-ref", "refs/heads/"+e.run.BranchName); got != "" {
+			t.Fatalf("binding=%v: primary run branch kept: %s", bindingOn, got)
+		}
 	}
 }
 

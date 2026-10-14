@@ -557,6 +557,12 @@ func (o *Orchestrator) writeBoundLedgerCommit(ctx context.Context, run *domain.R
 	if !isBoundObjectID(result.SHA) {
 		return "", fmt.Errorf("ledger commit onto %s returned no commit id", bound)
 	}
+	// The ledger becomes the binding, so it must be a child of exactly the
+	// bound commit (review round 1): a commit built on the run-branch tip
+	// would carry unreviewed commits into the resumed merge.
+	if err := requireChildOf(ctx, o.binder, result.SHA, bound, "recovery ledger"); err != nil {
+		return "", err
+	}
 	b := &headBinding{head: result.SHA, by: boundByRecovery(run.RunID, action.Operation)}
 	if action.ReboundSHA != "" {
 		b.repoHeads = map[string]string{repositoryID: action.ReboundSHA}
