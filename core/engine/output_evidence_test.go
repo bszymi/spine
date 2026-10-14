@@ -75,9 +75,10 @@ func (f *evidenceFix) seedBinding(sha, by string) {
 func (f *evidenceFix) completedPayload(t *testing.T, execID string) (domain.Event, stepCompletedPayload, map[string]any) {
 	t.Helper()
 	var found []domain.Event
-	for _, e := range f.events(domain.EventStepCompleted) {
-		if strings.Contains(e.EventID, execID) {
-			found = append(found, e)
+	evs := f.events(domain.EventStepCompleted)
+	for i := range evs {
+		if strings.Contains(evs[i].EventID, execID) {
+			found = append(found, evs[i])
 		}
 	}
 	if len(found) != 1 {

@@ -318,11 +318,11 @@ func capArtifacts(in []string) []string {
 	return out
 }
 
-func truncateUTF8(s string, max int) string {
-	if len(s) <= max {
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	cut := max
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}

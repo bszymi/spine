@@ -296,9 +296,9 @@ func (s *casStore) ListRepositoryMergeOutcomes(_ context.Context, runID string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []domain.RepositoryMergeOutcome{}
-	for _, o := range s.outcomes {
-		if o.RunID == runID {
-			out = append(out, o)
+	for k := range s.outcomes {
+		if s.outcomes[k].RunID == runID {
+			out = append(out, s.outcomes[k])
 		}
 	}
 	return out, nil
@@ -412,9 +412,9 @@ func (f *casFix) afterNextList(fn func()) {
 
 func (f *casFix) events(tp domain.EventType) []domain.Event {
 	var out []domain.Event
-	for _, e := range f.ev.events {
-		if e.Type == tp {
-			out = append(out, e)
+	for i := range f.ev.events {
+		if f.ev.events[i].Type == tp {
+			out = append(out, f.ev.events[i])
 		}
 	}
 	return out

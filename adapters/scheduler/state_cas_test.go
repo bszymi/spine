@@ -68,15 +68,16 @@ func (c *casStore) TransitionStepExecution(_ context.Context, e *domain.StepExec
 func (c *casStore) TransitionRunStatusAt(_ context.Context, runID string, from, to domain.RunStatus, at time.Time) (bool, error) {
 	c.runCAS++
 	for i := range c.runs {
-		if c.runs[i].RunID == runID {
-			if c.runs[i].Status != from {
-				return false, nil
-			}
-			c.runs[i].Status = to
-			c.runs[i].CompletedAt = &at
-			c.updatedRuns[runID] = to
-			return true, nil
+		if c.runs[i].RunID != runID {
+			continue
 		}
+		if c.runs[i].Status != from {
+			return false, nil
+		}
+		c.runs[i].Status = to
+		c.runs[i].CompletedAt = &at
+		c.updatedRuns[runID] = to
+		return true, nil
 	}
 	return false, nil
 }
