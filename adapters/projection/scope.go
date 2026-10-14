@@ -27,16 +27,11 @@ type pathScope struct {
 }
 
 // newPathScope normalises artifacts_dir exactly like
-// service/internal/config.normalizePath: surrounding whitespace is
-// trimmed; "", ".", "./" and "/" mean the root; otherwise one leading
-// "./" and one trailing "/" are trimmed.
+// service/internal/config.normalizePath (artifact.NewPathScope: surrounding
+// whitespace is trimmed; "", ".", "./" and "/" mean the root; otherwise
+// one leading "./" and one trailing "/" are trimmed).
 func newPathScope(artifactsDir string) pathScope {
-	d := strings.TrimSpace(artifactsDir)
-	if d == "" || d == "." || d == "./" || d == "/" {
-		return pathScope{}
-	}
-	d = strings.TrimPrefix(d, "./")
-	d = strings.TrimSuffix(d, "/")
+	d := artifact.NewPathScope(artifactsDir).Dir()
 	if d == "" {
 		return pathScope{}
 	}
@@ -47,21 +42,11 @@ func newPathScope(artifactsDir string) pathScope {
 // artifact.DiscoverAll exactly: the path must sit under <dir>/ (any path
 // when dir is the root), end in ".md" and not be under templates/
 // relative to the scope. The key is the path with the prefix stripped.
+// The predicate itself is artifact.PathScope.ArtifactKey (INIT-023
+// TASK-017), which the governed-merge status lifecycle shares, so the
+// merge judges exactly the paths the projection reads.
 func (p pathScope) artifactKey(repoPath string) (string, bool) {
-	rel := repoPath
-	if p.prefix != "" {
-		if !strings.HasPrefix(repoPath, p.prefix) {
-			return "", false
-		}
-		rel = strings.TrimPrefix(repoPath, p.prefix)
-	}
-	if rel == "" || !strings.HasSuffix(rel, ".md") {
-		return "", false
-	}
-	if artifact.IsTemplatePath(rel) {
-		return "", false
-	}
-	return rel, true
+	return artifact.NewPathScope(p.dir).ArtifactKey(repoPath)
 }
 
 // isWorkflow reports whether a repository path is a workflow definition
