@@ -432,14 +432,13 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 			// changed one) looks absent or different at this head, so the
 			// sweep just deleted or replaced it. Every other path that
 			// writes rows also writes sync_state; do the same here and
-			// re-record the state this sync is based on, so that if it was
-			// advanced meanwhile the next tick re-diffs from this head and
-			// restores what the sweep undid (INIT-023 wave 2 cross-task
-			// review). When nothing moved, the write changes nothing.
-			if err := s.store.UpdateSyncState(ctx, &store.SyncState{
-				LastSyncedCommit: head,
-				Status:           "idle",
-			}); err != nil {
+			// re-record the baseline this sync is based on, so that if it
+			// was advanced meanwhile the next tick re-diffs from this head
+			// and restores what the sweep undid (INIT-023 wave 2
+			// cross-task review). Only the baseline: a status another
+			// instance wrote meanwhile is kept (resetSyncBaseline). When
+			// nothing moved, the write changes nothing.
+			if err := s.resetSyncBaseline(ctx, head); err != nil {
 				return fmt.Errorf("update sync state: %w", err)
 			}
 		}

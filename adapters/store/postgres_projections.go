@@ -407,6 +407,27 @@ func (s *PostgresStore) UpdateSyncState(ctx context.Context, state *SyncState) e
 	return err
 }
 
+// SetSyncBaseline moves the sync baseline (last_synced_commit) to commit
+// and leaves status and error_detail as the last writer set them. It is
+// the optional capability the projection's workflow-row sweep asserts
+// (adapters/projection, INIT-023 codex 6.1 catch-up): a sweep that wrote
+// rows judged at commit needs the next sync to diff from there, but
+// whether the projection is idle, syncing, rebuilding or in error is
+// another instance's to say. A state with no baseline ("": a first
+// rebuild in flight or failed, or a partial wipe) is left alone, so the
+// next sync still rebuilds rather than diffs. With no state row it does
+// nothing. It is one UPDATE, so no other write lands between its read
+// and its write.
+func (s *PostgresStore) SetSyncBaseline(ctx context.Context, commit string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE projection.sync_state
+		SET last_synced_commit = $1, last_synced_at = now()
+		WHERE id = 'global' AND last_synced_commit <> ''`,
+		commit,
+	)
+	return err
+}
+
 // ── Execution Projections ──
 
 func (s *PostgresStore) UpsertExecutionProjection(ctx context.Context, proj *ExecutionProjection) error {

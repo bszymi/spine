@@ -25,6 +25,43 @@ type allWorkflowRowsLister interface {
 	ListWorkflowProjections(ctx context.Context) ([]store.WorkflowProjection, error)
 }
 
+// syncBaselineSetter is an optional store capability: move the sync
+// baseline (last_synced_commit) and leave status and error_detail alone.
+// *store.PostgresStore implements it; asserted like allWorkflowRowsLister
+// so that no store.Store implementation has to change. See
+// resetSyncBaseline.
+type syncBaselineSetter interface {
+	SetSyncBaseline(ctx context.Context, commit string) error
+}
+
+// resetSyncBaseline re-records head as the commit the next sync diffs
+// from, after a sweep wrote rows judged at head (IncrementalSync's
+// up-to-date path). This sync read idle@head before resolving head and
+// sweeping; another instance may have written sync_state since. Through
+// syncBaselineSetter only last_synced_commit moves, so a status written
+// meanwhile is kept (INIT-023 codex 6.1 catch-up): "rebuilding" (a reader
+// such as SMP's idle gate must not see idle over a half-written
+// projection), "error" (the next tick must still retry, forcing the
+// branch-protection re-projection) and "syncing"; and a state with no
+// baseline (a partial wipe) is left to rebuild. A store without the
+// capability gets the plain idle@head write the path had before.
+func (s *Service) resetSyncBaseline(ctx context.Context, head string) error {
+	if setter, ok := s.store.(syncBaselineSetter); ok {
+		return setter.SetSyncBaseline(ctx, head)
+	}
+	return s.store.UpdateSyncState(ctx, &store.SyncState{
+		LastSyncedCommit: head,
+		Status:           "idle",
+	})
+}
+
+// *store.PostgresStore has both optional capabilities: a rename on either
+// side fails the build here instead of silently taking the fallback.
+var (
+	_ allWorkflowRowsLister = (*store.PostgresStore)(nil)
+	_ syncBaselineSetter    = (*store.PostgresStore)(nil)
+)
+
 // ensureWorkflowsVerified runs the workflow-row sweep once per Service
 // instance, single-flight. Every IncrementalSync that finds the flag
 // unset waits for the mutex, so the event-handler and sync-loop syncs

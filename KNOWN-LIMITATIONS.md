@@ -190,6 +190,18 @@ This document tracks known gaps and deferred functionality.
 - **Non-Active workflow rows are only swept on stores with the all-rows capability.**
   `*store.PostgresStore` has it; a custom `store.Store` without `ListWorkflowProjections` gets an
   Active-only sweep.
+- **Several projection instances over one store share `sync_state` by last writer wins.** This
+  happens with SMP replicas, a re-warmed workspace, or a provisioning rebuild next to the sync loop.
+  Each sync's final `idle` or `error` write is unconditional, so it can replace a status or
+  baseline another instance wrote while it ran.
+  - **What it costs:** a rebuild in flight on one instance can briefly show as `idle` over a
+    half-written projection. A workflow row that a stale-head reconciliation deleted can be lost
+    if the instance that projected it finishes a whole sync during that reconciliation; the row
+    comes back when its file next changes or on a full rebuild.
+  - **What is narrowed:** the reconciliation's own baseline reset moves only `last_synced_commit`
+    (`SetSyncBaseline`, codex 6.1 catch-up), so it no longer erases a concurrent status. A custom
+    `store.Store` without that capability gets the plain `idle@head` write.
+  - **Follow-up:** a compare-and-set on every `sync_state` write, or a lock across instances.
 - **Incremental deletes leave the task's execution projection row** (`projection.execution_projections`)
   until the next full rebuild. This predates INIT-023; incremental sync never called
   `DeleteExecutionProjection`.

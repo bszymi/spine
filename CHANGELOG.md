@@ -29,6 +29,28 @@ release is cut — this file is a staging area.
   only in such an integer is replaced instead of being counted unchanged. Definitions whose
   integers are all at or below 2^53, which includes every shipped Spine and SMP workflow, see no
   change.
+- **The reconciliation's baseline reset keeps a concurrent status** (`adapters/projection`, the
+  TASK-011 sweep as amended by the wave 2 cross-task review). When the first-sync reconciliation
+  writes a row on an otherwise up-to-date sync, it re-records the head it judged by. That write
+  was an unconditional `idle` at that head, which replaced any status another instance had written
+  since this sync read `idle@head`:
+  - `rebuilding`: a reader saw `idle` over a half-written projection;
+  - `error`: a same-head rebuild failure was erased, and the next tick took the up-to-date return
+    and skipped the forced branch-protection retry;
+  - the no-baseline `error` a partial wipe records: the next sync diffed from the head instead of
+    rebuilding, so the wiped rows stayed missing.
+
+  Now only `last_synced_commit` moves, in a single `UPDATE`, and a state with no baseline is left
+  alone. When no other writer is involved the result is `idle@head` as before.
+
+### For embedders
+
+- **New optional store capability:** `(*store.PostgresStore).SetSyncBaseline(ctx, commit) error`.
+  `projection.Service` asserts it and it is not added to `store.Store`, like
+  `ListWorkflowProjections`. A custom store without it keeps the previous `idle@head` write. SMP's
+  projection writer and provisioning pass `*store.PostgresStore` and get the new behaviour with no
+  change. For SMP it differs from before only when another instance writes `sync_state` inside that
+  window.
 
 ---
 
@@ -1269,12 +1291,15 @@ All of the HTTP and startup changes below are in standalone `spine serve` (`serv
     step profiles: an Active nested definition (for example in an imported repository) is removed
     and reported, and in-flight runs pinned to it lose their row;
   - when that reconciliation writes a row (deletes, replaces or quarantines one) on a sync that is
-    otherwise up to date, it re-records `sync_state` (`idle` at the head it judged by) instead of
-    returning without a write. Its head is resolved before the rows are listed, so another instance
-    (an SMP replica, a re-warmed workspace) may have projected a newer head in between; if it did,
-    the next tick re-diffs from this head and restores what the reconciliation undid. A row whose
-    projecting sync spans the whole reconciliation can still be lost, as with any two instances
-    projecting at different heads;
+    otherwise up to date, it re-records the head it judged by as `sync_state`'s
+    `last_synced_commit` instead of returning without a write. Its head is resolved before the rows
+    are listed, so another instance (an SMP replica, a re-warmed workspace) may have projected a
+    newer head in between; if it did, the next tick re-diffs from this head and restores what the
+    reconciliation undid. Through `(*store.PostgresStore).SetSyncBaseline` the status another
+    instance wrote meanwhile is kept, and a state with no baseline is left alone (codex 6.1
+    catch-up; a store without the capability writes `idle` at that head). A row whose projecting
+    sync spans the whole reconciliation can still be lost, as with any two instances projecting at
+    different heads;
   - incremental sync no longer projects `templates/`;
   - a `Diff` failure, a `Head()` failure (previously the state was left untouched), and a read of a
     changed file that git itself failed (a lock, a killed or unspawnable process) are each an
