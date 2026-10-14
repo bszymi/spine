@@ -90,7 +90,7 @@ Steps describe what must happen at each stage of execution. Each step correspond
 
 ```yaml
 steps:
-  - id: <string>                   # Unique step identifier within workflow
+  - id: <string>                   # Unique step identifier within workflow (format: §3.6)
     name: <string>                 # Human-readable step name
     type: <enum>                   # manual, automated, review, convergence
     repository: <string>           # Reserved (do not commit until TASK-004 ships). Optional target repository ID. Default: spine. Per ADR-015.
@@ -155,11 +155,11 @@ Divergence and convergence points are declared as named constructs referenced by
 
 ```yaml
 divergence_points:
-  - id: <string>                   # Unique divergence identifier
+  - id: <string>                   # Unique divergence identifier (format: §3.6)
     name: <string>
     mode: structured               # Default; branches are predefined
     branches:                      # Parallel branches to create
-      - id: <string>
+      - id: <string>               # Branch identifier (format: §3.6)
         name: <string>
         start_step: <step_id>      # Which step each branch starts at
 ```
@@ -168,7 +168,7 @@ divergence_points:
 
 ```yaml
 divergence_points:
-  - id: <string>                   # Unique divergence identifier
+  - id: <string>                   # Unique divergence identifier (format: §3.6)
     name: <string>
     mode: exploratory              # Branches created at runtime
     branch_step: <step_id>         # Step template each new branch starts at
@@ -180,7 +180,7 @@ divergence_points:
 
 ```yaml
 convergence_points:
-  - id: <string>                   # Unique convergence identifier
+  - id: <string>                   # Unique convergence identifier (format: §3.6)
     name: <string>
     branches: [<branch_id>, ...]   # For structured; omit for exploratory
     strategy: <enum>               # select_one, select_subset, merge, require_all, experiment
@@ -278,6 +278,34 @@ applies_to:
 An artifact type may be governed by at most one active workflow definition at a time per `work_type` value. A general workflow (no `work_type` filter) and a specific workflow (with `work_type` filter) may coexist for the same artifact type, as long as they do not overlap on the same `work_type` value.
 
 The full resolution algorithm and precedence rules are defined in the [Task-to-Workflow Binding Model](/architecture/task-workflow-binding.md).
+
+### 3.6 Identifier Format
+
+The engine embeds four workflow identifiers in event IDs, execution IDs and branch names, so they
+must be safe in those positions:
+
+- `steps[].id`
+- `divergence_points[].id`
+- `divergence_points[].branches[].id`
+- `convergence_points[].id`
+
+Each must match `^[a-z0-9][a-z0-9_-]{0,63}$`: lower-case ASCII letters, digits, `_` and `-`,
+starting with a letter or digit, at most 64 characters.
+
+**Where it is enforced (INIT-023 TASK-015).** The standalone `spine serve` API refuses a body that
+breaks the rule with `422 validation_failed`, naming each offending field:
+`POST /api/v1/workflows`, `PUT /api/v1/workflows/{id}` (before a reviewer's planning run is
+started, and before anything is written), and `POST /api/v1/workflows/{id}/validate` reports the
+same errors with `status: failed`. Core workflow validation (`workflow.Validate`) does **not**
+apply the rule, so a workflow that already exists on a branch or in the projection keeps loading
+and running, and embedders that write workflows through `workflow.Service` are unaffected. A
+workflow written before the rule existed, or landed by git push or governed merge, is accepted
+until its next API update, which must rename the offending identifiers first (in-flight runs are
+pinned to their workflow version, so a rename is safe for them).
+
+Independently of the rule, the SSE event stream never writes an event ID that contains a control
+character, invalid UTF-8, U+0085, U+2028 or U+2029: such an event is sent without its `id:` line
+(see the [Integration Guide](/docs/integration-guide.md) §6.2).
 
 ---
 

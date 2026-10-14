@@ -103,6 +103,15 @@ func extractIP(r *http.Request) string {
 // when RemoteAddr is not among them, the function returns
 // RemoteAddr — naive X-Forwarded-For trust would let any client forge
 // a source IP and evade the limiter.
+//
+// The hops come from every X-Forwarded-For header line (forwardedHops),
+// not only the first: a proxy that adds its own line instead of
+// appending to the client's (HAProxy "option forwardfor") leaves the
+// client-forged line first, and reading only that line let a client
+// pick its own bucket (INIT-023 TASK-015, audit P3-30). With no usable
+// hop the bucket falls back to RemoteAddr — some bucket is better than
+// none. This is a bucketing decision only: no forwarded address ever
+// grants access (see gitPeerIP).
 func clientIPForRateLimit(r *http.Request, trustedProxies []*net.IPNet) string {
 	remote := extractIP(r)
 	if len(trustedProxies) == 0 {
@@ -112,11 +121,7 @@ func clientIPForRateLimit(r *http.Request, trustedProxies []*net.IPNet) string {
 	if remoteIP == nil || !ipInNets(remoteIP, trustedProxies) {
 		return remote
 	}
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
-		return remote
-	}
-	parts := strings.Split(xff, ",")
+	parts := forwardedHops(r)
 	for i := len(parts) - 1; i >= 0; i-- {
 		candidate := strings.TrimSpace(parts[i])
 		ip := net.ParseIP(candidate)
@@ -129,6 +134,18 @@ func clientIPForRateLimit(r *http.Request, trustedProxies []*net.IPNet) string {
 		return candidate
 	}
 	return remote
+}
+
+// forwardedHops returns every X-Forwarded-For hop across all header
+// lines, in arrival order (lines joined, then split on commas). Entries
+// are untrimmed and may be empty or unparsable; callers skip those. A
+// request with no X-Forwarded-For header yields no hops.
+func forwardedHops(r *http.Request) []string {
+	lines := r.Header.Values("X-Forwarded-For")
+	if len(lines) == 0 {
+		return nil
+	}
+	return strings.Split(strings.Join(lines, ","), ",")
 }
 
 func ipInNets(ip net.IP, nets []*net.IPNet) bool {

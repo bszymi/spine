@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/adapters/secrets"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // Credential carries the resolved authentication material for a single
@@ -17,9 +17,19 @@ import (
 // output: the only deliberate accessor is Token.Reveal, which the pool
 // calls at the in-process boundary with the git CLI client.
 //
-// An empty Credential (zero value) means "public repo, no auth" — the
-// pool treats it as a no-op and never sets GIT_ASKPASS or rewrites the
-// remote URL.
+// An empty Credential (zero value) means "no auth": the production
+// cloner and client factory never set GIT_ASKPASS or rewrite the remote
+// URL for it, and they strip the process-wide push token
+// (SPINE_GIT_PUSH_TOKEN) and the process credential helper
+// (SPINE_GIT_CREDENTIAL_HELPER) that their base options carry, and they
+// switch off the host's ambient credential sources (the system and
+// global git config — helpers, http.extraHeader, askpass — GIT_ASKPASS,
+// and the process's SSH agent and key files for SSH remotes). Those are
+// the deployment's credentials, not the binding's: a code repository
+// with no credentials_ref must never authenticate with them against the
+// host its clone_url names (INIT-023 TASK-015, the audit's latent gitpool
+// item; owner question 2 ruled "never", pending the owner). A private
+// code repository therefore needs its own credentials_ref.
 type Credential struct {
 	// Username is the HTTP Basic-auth username paired with the token.
 	// Empty means "use x-access-token" (the GitHub/GitLab convention

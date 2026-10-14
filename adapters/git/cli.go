@@ -112,6 +112,7 @@ type CLIClient struct {
 	pushToken        string   // token for HTTPS push auth (SPINE_GIT_PUSH_TOKEN)
 	pushUsername     string   // username for token auth (default: x-access-token)
 	askpassPath      string   // path to temporary GIT_ASKPASS script (created from pushToken)
+	noAmbientAuth    bool     // WithoutAmbientCredentials: clone and push consult no host credential source
 
 	// Read bounds (limits.go). Zero means the default, so even a
 	// CLIClient not built by NewCLIClient is bounded.
@@ -167,6 +168,109 @@ func WithoutCredentialHelper() CLIOption {
 		c.credentialHelper = ""
 	}
 }
+
+// WithoutPushToken clears a push token configured by an earlier option —
+// typically the process-wide SPINE_GIT_PUSH_TOKEN carried in base
+// options (PushAuthOpts) — so NewCLIClient creates no GIT_ASKPASS helper
+// and the client offers no token to any host. It mirrors
+// WithoutCredentialHelper. Additive (INIT-023 TASK-015): gitpool applies
+// both to a code repository that has no per-binding credential, so the
+// deployment's credentials never reach whatever host a binding's
+// clone_url names. No existing option or call path changes.
+func WithoutPushToken() CLIOption {
+	return func(c *CLIClient) {
+		c.pushToken = ""
+		c.pushUsername = ""
+	}
+}
+
+// WithoutAmbientCredentials makes clone and push authenticate with
+// nothing but the client's own options (WithPushToken,
+// WithCredentialHelper). Additive and opt-in (INIT-023 TASK-015, codex
+// review): without it, a client with no token or helper of its own still
+// lets git consult the host's ambient credential sources — a
+// credential.helper in the global, system or repo-local git config (for
+// example the osxkeychain helper in Apple git's system config), and an
+// askpass program inherited through GIT_ASKPASS, core.askPass or
+// SSH_ASKPASS, and for ssh:// and SCP-style remotes the process's SSH
+// identity (ssh-agent, default and configured key files) — and send
+// what they return to whatever host the clone URL or the remote names.
+//
+// With it, a client that has no askpass token and no credential helper
+// runs clone and push without the host's git configuration and without
+// the inherited credential environment:
+//
+//   - GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL set to the null device
+//     (git >= 2.32): no system or global config is read, so no helper,
+//     askpass program, http.extraHeader (URL-scoped ones included),
+//     sshCommand or URL rewrite configured there applies;
+//     GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are cleared, so no
+//     config injected through the environment applies either;
+//   - `-c credential.helper=` and `-c http.extraHeader=` reset the
+//     generic keys on every supported git version, including 2.30-2.31,
+//     which do not know GIT_CONFIG_GLOBAL;
+//   - GIT_ASKPASS and SSH_ASKPASS empty (an empty GIT_ASKPASS also stops
+//     the core.askPass fallback), GIT_TERMINAL_PROMPT=0, SSH_AUTH_SOCK
+//     empty, and GIT_SSH_COMMAND=noAmbientSSHCommand (which overrides
+//     GIT_SSH and core.sshCommand).
+//
+// Because no system or global config is read, the host's
+// non-credential git settings do not apply to such a clone or push
+// either: a CA bundle or sslVerify, http.proxy, url.<base>.insteadOf,
+// safe.directory. Their environment forms (GIT_SSL_CAINFO,
+// GIT_SSL_NO_VERIFY, HTTPS_PROXY, ...) are left alone and still apply;
+// safe.directory and insteadOf have none (KNOWN-LIMITATIONS.md). The
+// client's other operations (commit, merge, log) are unaffected.
+//
+// A client that does carry a token or helper is unchanged: its own
+// credential is used as before. Not covered (KNOWN-LIMITATIONS.md):
+// curl's ~/.netrc lookup, which git enables for HTTP; config in the
+// repository's own .git/config (a reused clone), which only someone with
+// filesystem access can write; and, on git 2.30-2.31, a URL-scoped
+// http.extraHeader in the global config.
+func WithoutAmbientCredentials() CLIOption {
+	return func(c *CLIClient) {
+		c.noAmbientAuth = true
+	}
+}
+
+// ambientAuthDisabled reports whether clone and push must run with every
+// host credential source switched off: WithoutAmbientCredentials was set
+// and the client has no credential of its own.
+func (c *CLIClient) ambientAuthDisabled() bool {
+	return c.noAmbientAuth && c.askpassPath == "" && c.credentialHelper == ""
+}
+
+// noAmbientSSHCommand is the ssh git runs for a client with ambient
+// credentials disabled: `-F none` reads no ssh_config (no IdentityFile,
+// ControlMaster/ControlPath, ProxyCommand or GSSAPI setting from the
+// host), IdentityAgent=none ignores any agent, PubkeyAuthentication=no
+// offers no key or certificate, password and keyboard-interactive
+// authentication are off, and BatchMode=yes never prompts. Such a client
+// therefore cannot authenticate over SSH at all; the gitpool has no
+// per-binding SSH credential, so an SSH code repository with no
+// credentials_ref can only be reached anonymously.
+const noAmbientSSHCommand = "ssh -F none -o BatchMode=yes -o IdentityAgent=none -o PubkeyAuthentication=no" +
+	" -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o ControlPath=none"
+
+// noAmbientAuthEnv is appended to the environment of a clone or push when
+// ambientAuthDisabled; os/exec keeps the last value of a duplicated key.
+var noAmbientAuthEnv = []string{
+	"GIT_CONFIG_NOSYSTEM=1",
+	"GIT_CONFIG_GLOBAL=" + os.DevNull,
+	"GIT_CONFIG_PARAMETERS=",
+	"GIT_CONFIG_COUNT=0",
+	"GIT_ASKPASS=",
+	"SSH_ASKPASS=",
+	"GIT_TERMINAL_PROMPT=0",
+	"SSH_AUTH_SOCK=",
+	"GIT_SSH_COMMAND=" + noAmbientSSHCommand,
+}
+
+// noAmbientAuthArgs are the command-scoped resets placed before the
+// subcommand of a clone or push when ambientAuthDisabled. An empty value
+// clears every value of the key accumulated from config files.
+var noAmbientAuthArgs = []string{"-c", "credential.helper=", "-c", "http.extraHeader="}
 
 // NewCLIClient creates a new Git client for the repository at the given path.
 //
@@ -400,6 +504,10 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		// otherwise a later rotation to a per-binding token would
 		// lose to the still-on-disk helper.
 		args = append(args, "-c", "credential.helper="+c.credentialHelper)
+	case c.ambientAuthDisabled():
+		// No credential at all (WithoutAmbientCredentials): reset every
+		// configured helper and extra header for this command.
+		args = append(args, noAmbientAuthArgs...)
 	}
 	// `--` ends option parsing so a poisoned URL like `--upload-pack=cmd`
 	// cannot be re-interpreted as a flag. ValidateCloneURL already
@@ -421,10 +529,13 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 	// the env in the helper-only branch would drop WithPushEnv
 	// entries and leave the helper invoking without its required
 	// context, so any non-empty pushEnv triggers env injection.
-	if c.askpassPath != "" || len(c.pushEnv) > 0 {
+	if c.askpassPath != "" || len(c.pushEnv) > 0 || c.ambientAuthDisabled() {
 		env := os.Environ()
 		if len(c.pushEnv) > 0 {
 			env = append(env, c.pushEnv...)
+		}
+		if c.ambientAuthDisabled() {
+			env = append(env, noAmbientAuthEnv...)
 		}
 		if c.askpassPath != "" {
 			username := c.pushUsername
@@ -1268,6 +1379,11 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 		args = append([]string{"-c", "credential.helper="}, args...)
 	case op == "push" && c.credentialHelper != "":
 		args = append([]string{"-c", "credential.helper=" + c.credentialHelper}, args...)
+	case op == "push" && c.ambientAuthDisabled():
+		// WithoutAmbientCredentials and no credential of its own: no
+		// configured helper or extra header applies (the same rule as
+		// Clone).
+		args = append(append([]string{}, noAmbientAuthArgs...), args...)
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.repoPath
@@ -1276,11 +1392,14 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 	// helpers (SMP_WORKSPACE_ID) and token-based auth (GIT_ASKPASS).
 	if op == "push" {
 		var env []string
-		if len(c.pushEnv) > 0 || c.askpassPath != "" {
+		if len(c.pushEnv) > 0 || c.askpassPath != "" || c.ambientAuthDisabled() {
 			env = os.Environ()
 		}
 		if len(c.pushEnv) > 0 {
 			env = append(env, c.pushEnv...)
+		}
+		if c.ambientAuthDisabled() {
+			env = append(env, noAmbientAuthEnv...)
 		}
 		if c.askpassPath != "" {
 			username := c.pushUsername

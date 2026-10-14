@@ -11,17 +11,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bszymi/spine/core/actor"
-	"github.com/bszymi/spine/core/auth"
-	"github.com/bszymi/spine/service/internal/gateway"
 	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/service/internal/githttp"
 	"github.com/bszymi/spine/adapters/gitpool"
 	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/core/actor"
+	"github.com/bszymi/spine/core/auth"
+	"github.com/bszymi/spine/service/internal/gateway"
+	"github.com/bszymi/spine/service/internal/githttp"
+	"github.com/bszymi/spine/service/internal/workspace"
 	scenarioEngine "github.com/bszymi/spine/service/scenariotest/engine"
 	"github.com/bszymi/spine/service/scenariotest/harness"
-	"github.com/bszymi/spine/service/internal/workspace"
 )
 
 // TestRunnerCloneContext_AssignmentPayloadDrivesClone is the AC anchor
@@ -192,7 +192,10 @@ func setupRunnerCloneScenario(repoID, branchName string) scenarioEngine.Step {
 				WorkspaceResolver: wsResolver,
 				GitHTTP:           gitHandler,
 				GitPool:           pool,
-				DevMode:           true,
+				// Clone only: SPINE_GIT_HTTP_DEV_NO_AUTH opens git reads
+				// (SPINE_DEV_MODE no longer affects /git, INIT-023
+				// TASK-015).
+				GitHTTPDevNoAuth: true,
 			}
 			srv := gateway.NewServer(":0", cfg)
 			ts := httptest.NewServer(srv.Handler())

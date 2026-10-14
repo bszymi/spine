@@ -108,9 +108,9 @@ This document tracks known gaps and deferred functionality.
     INIT-023 EPIC-001 follow-ups.
   - **Force-push by the bound actor is allowed.** Fast-forward-only cannot be enforced per actor
     before the pack is unpacked, and `receive.denyNonFastForwards` would also block operators.
-  - **Dev mode pushes are anonymous.** `SPINE_DEV_MODE` skips git authentication, so dev pushes
-    reach the gate with no actor and can write ordinary branches only. Validating a presented
-    bearer in dev mode belongs to INIT-023 TASK-015.
+  - ~~**Dev mode pushes are anonymous.**~~ Resolved by INIT-023 TASK-015: `SPINE_DEV_MODE` no
+    longer affects `/git`, and every push presents a validated bearer, so the gate always sees an
+    actor.
 - **Exploratory divergence branches: creation is bound to the run, their refs are operator-only.**
   Creating one (`POST /runs/{run_id}/divergences/{divergence_id}/branches`) needs an operator, or
   the actor who submitted the run-level step that triggered the divergence (while the run's cursor
@@ -437,9 +437,85 @@ The following limitations have been resolved:
 - Not bcrypt/argon2 — tokens are not user-chosen passwords, they are cryptographically random
 
 ### Auth Bypass in Dev Mode
-- When `SPINE_DATABASE_URL` is not set, auth service is nil
-- Auth middleware returns 503 (fail closed) — no bypass
-- Production deployments MUST configure database and auth
+- **No auth service:** when `SPINE_DATABASE_URL` is not set the auth service is nil, and the auth
+  middleware answers 503 (fail closed) — no bypass. Production deployments MUST configure a
+  database and auth.
+- **`SPINE_DEV_MODE` (API only).** `1`/`true` lets unauthenticated requests through `authorize()`
+  on `/api/v1`. It is refused at startup only when `SPINE_ENV=production`, so it is accepted with
+  `SPINE_ENV` unset or `staging` (INIT-023 TASK-015 owner question 5: unchanged, pending the
+  owner). Since INIT-023 TASK-015 it has **no effect on `/git`**; it used to drop git
+  authentication for clone and push.
+- **`SPINE_GIT_HTTP_DEV_NO_AUTH` (git reads only).** `1`/`true`/`yes`/`on` lets every client clone
+  and fetch over `/git` without a bearer. `spine serve` refuses to start with it unless
+  `SPINE_ENV=development` (unset or `staging` is refused too). It never covers a push: pushes
+  always present a bearer, validated and attached as the actor. The two flags accept different
+  value sets (`SPINE_DEV_MODE` only `1`/`true`); aligning them is a follow-up.
+
+### Git HTTP: Token-Less Clones Are for Direct Peers Only
+- Since INIT-023 TASK-015 (audit P3-30) the `SPINE_GIT_HTTP_TRUSTED_CIDRS` bypass applies only to a
+  clone or fetch whose TCP peer is inside the list, is **not** in `SPINE_TRUSTED_PROXY_CIDRS`, and
+  sent no `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`, `X-Forwarded-Proto` or
+  `Via`. No forwarded address is trusted for access (owner question 6: a runner behind a reverse
+  proxy presents a token; pending the owner).
+- **Residual: TCP-level proxies are invisible.** A proxy that relays connections without adding a
+  header — Docker's userland proxy for a published port, which connects from the bridge gateway
+  (`x.y.z.1`), or an L4 load balancer — looks like a direct peer. Never put such an address in
+  `SPINE_GIT_HTTP_TRUSTED_CIDRS`; the compose file no longer trusts its whole bridge subnet, and
+  `docker-compose.override.yaml.example` shows runner-only recipes.
+- **Residual: process-wide git capacity.** In shared mode the git concurrency cap (5 in-flight
+  pack operations) and the per-client-IP rate limiter are process-wide: one tenant's slow clones
+  can fill every git slot and make every tenant's git requests answer `503`. They key on network
+  address and capacity, not tenant identity; a per-workspace fair share is a follow-up.
+
+### SSE: An Event With an Unsafe ID Does Not Advance the Client Cursor
+- Since INIT-023 TASK-015 (audit P3-28) an event whose ID (or type) contains a control character,
+  invalid UTF-8, U+0085, U+2028 or U+2029 is streamed without its `id:` (or `event:`) line, so a
+  workflow identifier cannot inject SSE frames. Omitting the ID keeps the client's cursor at the
+  previous event: a reconnect replays that event again (at-least-once, never a gap).
+- **Residual:** if more than 100 (`sseReplayCap`) unsafe-ID events follow the last safe one, every
+  reconnect replays the same first 100 and never catches up through replay; live events still
+  arrive. Such IDs can come only from a workflow whose identifiers break the identifier rule, which
+  the standalone API refuses (`workflow-definition-format.md` §3.6) but a git push or a governed
+  merge can still land, and core validation (shared with embedders) does not apply.
+
+### Code Repositories Authenticate Only With `credentials_ref`
+- Since INIT-023 TASK-015 a code repository with no `credentials_ref` clones and pushes with no
+  credential: the gitpool cloner and client factory strip the process-wide `SPINE_GIT_PUSH_TOKEN`
+  and `SPINE_GIT_CREDENTIAL_HELPER` for it, on every host (owner question 2 ruled "never", pending
+  the owner), and run git with every host credential source switched off
+  (`git.WithoutAmbientCredentials`): no system or global git config is read (so no
+  `credential.helper`, askpass program, `http.extraHeader` or `core.sshCommand` configured there,
+  URL-scoped ones included), no config injected through `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS`,
+  `GIT_ASKPASS`, `SSH_ASKPASS` and `SSH_AUTH_SOCK` are emptied, and for `ssh://` / SCP-style URLs ssh
+  runs with no ssh_config, no agent and no key-based authentication. A private code repository
+  needs its own `credentials_ref`. Only the primary repository uses the process credentials.
+- **SSH code repositories cannot authenticate.** `credentials_ref` resolves to an HTTPS token only;
+  there is no per-binding SSH key, so an `ssh://` code repository with no credential is reached
+  anonymously or not at all. Use an `https` clone URL with a `credentials_ref`. Per-binding SSH
+  credentials are a follow-up.
+- **No host git config at all, credential or not.** Because the system and global config are not
+  read, their non-credential settings do not apply to a credential-less code repository's clone or
+  push either: a CA bundle (`http.sslCAInfo` / `http.sslCAPath`, `http.sslVerify`), a proxy
+  (`http.proxy`), URL rewrites (`url.<base>.insteadOf`), `safe.directory`, `http.version` and the
+  like. The environment equivalents still apply — `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`,
+  `GIT_SSL_NO_VERIFY`, `HTTPS_PROXY` / `https_proxy` / `ALL_PROXY` — so set those in the
+  environment of `spine serve` instead. `safe.directory` and `insteadOf` have no environment form:
+  every clone under `SPINE_CODE_REPO_BASE` must be owned by the uid `spine serve` runs as
+  (otherwise that repository's commits work, through the operator's `safe.directory`, but its
+  push fails with "detected dubious ownership"), and a clone URL must name its real host. The
+  same client's local operations (commit, merge, log) still read the host config. Passing
+  Spine-controlled values for these on the command line is a follow-up for when code repositories
+  are wired; `TestLatentGitpool_CredentialLessCodeRepoReadsNoHostConfig`
+  (`adapters/gitpool/process_auth_scope_test.go`) pins the current behaviour.
+- **Residuals:** curl's `~/.netrc` lookup, which git enables for HTTP, still answers for a host it
+  lists — do not keep a `.netrc` in the `HOME` of the `spine serve` process. Config in a reused
+  clone's own `.git/config` still applies (only filesystem access can write it). On git 2.30–2.31,
+  which ignore `GIT_CONFIG_GLOBAL`, the global config is still read; generic `credential.helper`
+  and `http.extraHeader` values are reset on the command line there, but a URL-scoped
+  `http.<url>.extraHeader` in the global config is not (git ≥ 2.32 is unaffected).
+- **Residual:** a reused clone whose `origin` differs from the binding's `clone_url` is not
+  refused or re-cloned, so `/git/{ws}/{repo}` can serve a different repository than the binding
+  names (no credential reaches it). Follow-up.
 
 ### Path Traversal
 - Worktree file I/O (artifact create/update and their rollbacks, acceptance/successor reads,

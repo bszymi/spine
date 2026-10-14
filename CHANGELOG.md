@@ -6,6 +6,148 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-004 TASK-015: SSE field safety, shared-mode scoping, git-endpoint auth, gitpool credential scoping)
+
+Standalone `spine serve` hardening (audit P3-28, P3-29, P3-30) plus the latent gitpool
+credential item. Owner questions answered by their defaults, pending the owner, except question 2
+(ruled "never" by the orchestrator; the design default was "yes, on the primary's own host").
+
+### Security
+
+- **SSE frames cannot be injected by workflow identifiers (P3-28).** Event IDs embed step,
+  divergence-point and branch IDs, and core validation accepts a step ID with a line break, so a
+  workflow on the authoritative branch could make every SSE reader dispatch a forged event (for
+  example a fake `run_completed`) and adopt an attacker-chosen `Last-Event-ID`, live and on
+  replay. The writer now omits an `id:` or `event:` line whose value holds a control character,
+  invalid UTF-8, U+0085, U+2028 or U+2029 (a Warn, at most once a minute, with the count it did not
+  log and the identifier cut to 80 bytes), writes `data` one line per
+  `data:` line, and escapes U+0085/U+2028/U+2029 inside the JSON data. Every engine event's frame
+  is byte-identical to before.
+- **Workflow identifiers are checked on the standalone API (P3-28, defence in depth).**
+  `POST`/`PUT /api/v1/workflows` refuse step, divergence-point, divergence-branch and
+  convergence-point IDs outside `^[a-z0-9][a-z0-9_-]{0,63}$` with `422 validation_failed` (one
+  `schema` error per field) before anything is written or a planning run starts;
+  `POST /workflows/{id}/validate` reports them with `status: failed`.
+- **Shared-mode state is scoped to the workspace (P3-29).** With a workspace `ServicePool`
+  (`WORKSPACE_RESOLVER=db|platform-binding`): `/system/metrics` returns only the caller's
+  `spine_workspace_pool_*` series (it used to name every tenant and carry the all-tenant
+  counters); the rebuild registry is keyed by (workspace, `rebuild_id`), so another tenant reusing
+  your `X-Trace-Id` prefix gets `404` instead of reading or replacing your rebuild; the SSE
+  connection cap is counted per (workspace, actor), so streams in one workspace no longer exhaust
+  the same actor ID's slots (every workspace's `smp-admin`) in another.
+- **Token-less git access only for direct peers (P3-30).** The `SPINE_GIT_HTTP_TRUSTED_CIDRS`
+  bypass was judged against the raw TCP peer, so a reverse proxy — or Docker's bridge gateway
+  fronting the published port, inside the compose default `172.28.0.0/16` — gave every client it
+  relayed token-less read access to every workspace's repository. A request whose peer is in
+  `SPINE_TRUSTED_PROXY_CIDRS`, or that carries `X-Forwarded-For`, `Forwarded`, `X-Real-IP`,
+  `X-Forwarded-Host`, `X-Forwarded-Proto` or `Via`, now needs a bearer; no forwarded address is
+  trusted for access. A refused trusted-CIDR peer logs a rate-limited Warn naming
+  `SPINE_TRUSTED_PROXY_CIDRS`.
+- **`GET /git/…/info/refs` accepts only the queries a git client sends (P3-30 companion).** The
+  push/read classifier parsed the query with Go's `url.ParseQuery`, while git-http-backend parses
+  it with its own parser, and the two disagree on queries no client sends: git keeps the last of a
+  repeated `service` (Go the first), and a name without `=` takes the next segment as its value
+  (`service&git-receive-pack` is `service=git-receive-pack` to git, an empty `service` to Go). So
+  `info/refs?service=git-upload-pack&service=git-receive-pack` and `info/refs?service&git-receive-pack`
+  counted as reads for the token-less paths (a trusted-CIDR runner, `SPINE_GIT_HTTP_DEV_NO_AUTH`)
+  and returned the receive-pack advertisement (the push-side ref and capability list; the pack
+  upload itself always needed a bearer). `info/refs` now accepts, byte for byte, only an empty
+  query, `service=git-upload-pack` or `service=git-receive-pack`. Any other query counts as a push
+  (it needs a bearer when push is enabled) and is refused with `400` before git-http-backend;
+  that includes `service=` with an empty value, which git-http-backend used to refuse with `403`.
+- **`SPINE_DEV_MODE` no longer drops git authentication (P3-30).** It is accepted whenever
+  `SPINE_ENV` is not `production`, and it removed authentication from clone **and push**
+  (anonymous pushes reached the pre-receive gate). Pushes now always present a validated bearer.
+  The new `SPINE_GIT_HTTP_DEV_NO_AUTH` opens clone/fetch only, and `spine serve` refuses it unless
+  `SPINE_ENV=development`.
+- **Rate-limit bucket reads every `X-Forwarded-For` line (P3-30).** It read only the first line,
+  so behind a proxy that adds its own line (HAProxy `option forwardfor`) a client picked its own
+  bucket.
+- **A credential-less code repository never uses the process git credentials (latent gitpool
+  item).** The gitpool cloner and client factory sent the process-wide `SPINE_GIT_PUSH_TOKEN`, and
+  used `SPINE_GIT_CREDENTIAL_HELPER`, for a code-repo binding with no `credentials_ref` — against
+  whatever host its `clone_url`, or a reused clone's `origin`/`pushurl`, named. Dormant (no
+  code-repo catalog or `RepositoryManager` is wired in `spine serve`), P1 once one is. Both are now
+  stripped for such bindings, on every host, and git runs with the host's own credential sources
+  switched off too (no system or global git config — so no `credential.helper`,
+  `http.extraHeader` or askpass configured there — no `GIT_ASKPASS`, and no process SSH agent or
+  key for `ssh://` URLs).
+- **`clone_url` redaction covers tokens in the username position (latent).**
+  `GET /api/v1/repositories` echoed `https://<token>@host/...`; all userinfo of an `https` URL is
+  now redacted (SSH logins and the SCP form are kept), and a malformed legacy value never echoes
+  anything before its last `@`. Stored values are unchanged.
+
+### Breaking
+
+- **Workflow identifier rule (all standalone deployments).** A workflow whose step, divergence,
+  branch or convergence IDs use upper case, `.`, `/`, spaces or more than 64 characters keeps
+  loading and running (core validation is unchanged), but `PUT /api/v1/workflows/{id}` on it is
+  refused with `422` until the identifiers are renamed (in-flight runs are pinned to their version,
+  so a rename is safe for them). The rule is documented in `architecture/workflow-definition-format.md`
+  §3.6. All shipped Spine and SMP workflows conform.
+- **Shared-mode metrics scrapers** must move to `GET /api/v1/platform/metrics` (operator token) to
+  keep the full export; `/system/metrics` in shared mode now returns the caller's workspace series
+  only. Single-workspace mode is unchanged.
+- **Runners behind a reverse proxy** need a bearer to clone (owner question 6 default).
+
+### Breaking (dev setups)
+
+- `SPINE_DEV_MODE` no longer gives token-less git access, for clone or push. For token-less local
+  clones set `SPINE_GIT_HTTP_DEV_NO_AUTH=1` **and** `SPINE_ENV=development` (startup fails
+  otherwise, including with `SPINE_ENV` unset); push with a token (`git -c
+  http.extraHeader="Authorization: Bearer <token>" push …`).
+- `docker-compose.yaml` no longer sets `SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.0.0/16`, so every clone
+  through the compose stack needs a token by default (owner question 4 default).
+  `docker-compose.override.yaml.example` documents runner-only recipes that exclude the bridge
+  gateway.
+- A trusted git CIDR that overlaps `SPINE_TRUSTED_PROXY_CIDRS` stops granting token-less clones;
+  `spine serve` logs the overlap at startup.
+- A code repository with no `credentials_ref` that relied on the process push token, the process
+  or a host-level credential helper, or the process's SSH identity now clones and pushes
+  unauthenticated: give it an `https` clone URL and a `credentials_ref` (there is no per-binding SSH
+  credential yet). Its clone and push also ignore the rest of the system and global git config — a
+  CA bundle or `sslVerify`, `http.proxy`, `url.<base>.insteadOf`, `safe.directory`: use the
+  environment forms (`GIT_SSL_CAINFO`, `HTTPS_PROXY`, …), which still apply, and keep its clone
+  owned by the `spine serve` uid (KNOWN-LIMITATIONS). Dormant today: `spine serve` wires no
+  code-repository catalog.
+
+### Changed
+
+- New route `GET /api/v1/platform/metrics` (full export, `SPINE_OPERATOR_TOKEN`; `401` for a wrong
+  token, `503` when unset). New environment variable `SPINE_GIT_HTTP_DEV_NO_AUTH`. No migration,
+  schema, event type or `rebuild_id` format change.
+- `/system/metrics` in shared mode answers `400` if no workspace resolved (unreachable past
+  authentication).
+- New logs: `sse: omitting unsafe event fields (rate-limited)` (Warn, at most once a minute, with
+  `suppressed_since_last_warn`), the rate-limited proxied-peer Warn on `/git`, `git request rejected
+  — non-canonical info/refs query` (Warn, with the query's length, never its bytes), the startup Warns for `SPINE_GIT_HTTP_DEV_NO_AUTH` and for
+  a CIDR overlap.
+
+### For embedders
+
+- **`core/observe.ExportPrometheusWorkspace(workspaceID)`** — additive; `ExportPrometheus` output is
+  byte-identical.
+- **`adapters/git.WithoutPushToken()`** — additive `CLIOption`, mirroring
+  `WithoutCredentialHelper`. No existing option, interface (`GitClient`) or call path changes.
+- **`adapters/git.WithoutAmbientCredentials()`** — additive, opt-in `CLIOption`: a client with no
+  token or helper of its own runs clone and push without the system and global git config
+  (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` = null device) or environment-injected config, with
+  `-c credential.helper=` and `-c http.extraHeader=`, `GIT_ASKPASS`, `SSH_ASKPASS` and
+  `SSH_AUTH_SOCK` emptied, `GIT_TERMINAL_PROMPT=0`, and a `GIT_SSH_COMMAND` that reads no
+  ssh_config and disables the agent and key-based authentication, so no host credential source
+  answers. Non-credential system and global settings (CA bundle, proxy, `insteadOf`,
+  `safe.directory`) are dropped with them for that clone or push; their environment forms still
+  apply. A client with its own credential is unchanged; without the option nothing changes.
+- **`adapters/gitpool`**: `NewCLIClientFactory` and `NewCLICloner` strip the process push token and
+  credential helper from their base options for an empty `Credential`, and apply
+  `WithoutAmbientCredentials`. SMP does not import `adapters/gitpool`.
+- **`adapters/repository.RedactCloneURL`** redacts all `https` userinfo and never echoes the
+  userinfo of an unparsable or opaque value. SMP does not call it.
+- Core workflow validation, the projection, `workflow.Service` (SMP's `WorkflowWriter`) and
+  `core/refadmit` behaviour are unchanged; the identifier rule lives in `service/` only.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-004 TASK-014: workflow and write-context governance)
 
 ### Security
@@ -423,7 +565,8 @@ previous build). Externally visible:
   other than the bound run/divergence branch; any delete of such a branch by a non-operator; any
   non-branch ref (tag, note, …) by a non-operator; shadowing names by anyone. In `SPINE_DEV_MODE`
   (no git authentication) every push into `spine/**` and every tag push is refused, since the gate
-  sees no actor. Refusals arrive as `remote: ref-admission: …` lines with per-ref `ng` status
+  sees no actor. *(Superseded by INIT-023 TASK-015: `SPINE_DEV_MODE` no longer skips git
+  authentication, and every push presents a bearer.)* Refusals arrive as `remote: ref-admission: …` lines with per-ref `ng` status
   (catalogue: `docs/git-push-guide.md` §5; how to push a run branch: §6). Pre-receive stays
   all-or-nothing.
 - **Exploratory divergence branches** can be created only by an operator or by the actor bound to

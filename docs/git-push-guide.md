@@ -154,7 +154,7 @@ Run, planning and divergence branches (`refs/heads/spine/**`) are admitted by **
 
 **Admission is decided when the push starts.** The gate decides as soon as the push's command section arrives; git updates the ref only after the pack has been uploaded **and processed** (indexed, deltas resolved, connectivity checked). A push *started* while you are bound can therefore still land after you have submitted the step, while review is open. That window has no fixed bound: the upload is limited by the server's HTTP `ReadTimeout` (30 s in `spine serve`), but git's processing of the received pack is not — `git-http-backend` runs under Go's `net/http/cgi`, which neither honours the request context nor bounds the child process — and how long it takes depends on the pack the pusher sends. "Only the bound actor writes the run branch", and the review freeze (item 4), are push-start checks, not write-time ones; merging exactly the reviewed commit (INIT-023 TASK-005) is the content control for that window.
 
-**Operators** may push, force-push and delete any of these refs with no binding; the server logs each such admission. In `SPINE_DEV_MODE` the git endpoint skips authentication, so dev pushes carry no actor and can write ordinary branches only.
+**Operators** may push, force-push and delete any of these refs with no binding; the server logs each such admission. Every push presents a bearer token (`git -c http.extraHeader="Authorization: Bearer <token>" push …`): since INIT-023 TASK-015 no setting lets a push skip authentication — `SPINE_DEV_MODE` does not affect the git endpoint, and `SPINE_GIT_HTTP_DEV_NO_AUTH` (development only) opens clones and fetches only.
 
 ---
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -80,26 +82,45 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// status by walking /git/{id}/info/refs (EPIC-004 TASK-031).
 	cfg, resolveErr := s.resolveGitWorkspace(r.Context(), workspaceID)
 
-	// Auth gate.
+	// Auth gate (INIT-023 TASK-015, audit P3-30 — invariants I3, I4).
 	//
-	//  - Read-only (clone/fetch): trusted-CIDR source IPs bypass the
-	//    bearer-token check. This is the original runner-container
-	//    affordance.
-	//  - Push (git-receive-pack) with the flag ON: the trusted-CIDR
-	//    bypass does NOT apply. Every push must carry a bearer token
-	//    so an actor identity is pinned for the upcoming
-	//    branch-protection pre-receive check (EPIC-004 TASK-002) and
-	//    for audit. Without this split, a runner subnet configured
-	//    for token-less cloning could also push anonymously once
-	//    receive-pack is on.
+	//  - Read-only (clone/fetch) from a trusted-CIDR peer skips the
+	//    bearer check: the runner-container affordance. The peer is
+	//    the TCP peer of a DIRECT connection only (gitPeerIP). A request
+	//    whose peer is a declared reverse proxy
+	//    (SPINE_TRUSTED_PROXY_CIDRS), or that carries a forwarding
+	//    header (X-Forwarded-For, Forwarded, X-Real-IP, ...), relays some
+	//    other client and is never token-less: a proxy whose own address
+	//    sat inside SPINE_GIT_HTTP_TRUSTED_CIDRS (Docker's bridge gateway
+	//    fronting a published port, the compose default /16) gave every
+	//    client it relayed token-less read access to every workspace's
+	//    repository. No forwarded address is trusted either, because a
+	//    proxy that passes the client's header through lets the client
+	//    name a runner address (owner question 6 default, pending the
+	//    owner). A TCP-level proxy that adds no header cannot be seen
+	//    here; the docs and the compose default cover it.
+	//  - Push (git-receive-pack) with the flag ON: no bypass applies.
+	//    Every push carries a bearer, validated and attached as the
+	//    actor for ref admission (TASK-016), branch protection and
+	//    audit.
 	//  - Push with the flag OFF: skip the auth gate so the handler
 	//    can return its documented 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED`
 	//    guidance. Authenticating a request we are about to reject
 	//    adds no security value and hides the flag name from
 	//    unauthenticated callers who are exactly the ones most likely
 	//    to hit it.
-	//  - devMode bypasses auth entirely so local development does not
-	//    require wiring a token.
+	//  - SPINE_DEV_MODE has no effect here (it used to drop git auth for
+	//    clone AND push whenever SPINE_ENV was not production). Only the
+	//    dedicated SPINE_GIT_HTTP_DEV_NO_AUTH flag, which cmd/spine
+	//    refuses unless SPINE_ENV=development, skips the bearer — and
+	//    only for reads.
+	//
+	// "Push" is githttp.IsReceivePack, which also counts an info/refs
+	// query other than the three a git client sends as a push: git-http-
+	// backend parses the query itself and may read receive-pack where
+	// url.ParseQuery does not (`service&git-receive-pack`), so such a
+	// request never takes a token-less read path, and the handler then
+	// refuses it with 400 (INIT-023 TASK-015 review round 2).
 	push := githttp.IsReceivePack(r)
 	// pushDisabledShortCircuit only bypasses auth when the workspace
 	// actually resolved. Otherwise an untrusted unauthenticated client
@@ -110,8 +131,16 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	// request against a real workspace still surfaces the operator-
 	// friendly 403 with `SPINE_GIT_RECEIVE_PACK_ENABLED` guidance.
 	pushDisabledShortCircuit := push && !s.gitHTTP.ReceivePackEnabled() && resolveErr == nil
-	trustedBypass := !push && s.gitHTTP.IsTrustedIP(r.RemoteAddr)
-	authBypass := pushDisabledShortCircuit || trustedBypass || s.devMode
+	trustedBypass := false
+	if !push {
+		if ip := gitPeerIP(r, s.trustedProxyCIDRs); ip != nil {
+			trustedBypass = s.gitHTTP.IsTrustedIP(ip.String())
+		} else if s.gitHTTP.IsTrustedIP(r.RemoteAddr) {
+			s.warnProxiedTrustedGitPeer(r)
+		}
+	}
+	devBypass := !push && s.gitDevNoAuth
+	authBypass := pushDisabledShortCircuit || trustedBypass || devBypass
 	var actor *domain.Actor
 	if !authBypass {
 		// validateGitAuth tolerates a nil cfg — when workspace
@@ -467,4 +496,86 @@ func (s *Server) validateGitAuth(r *http.Request, cfg *workspace.Config) (*domai
 	}
 
 	return authSvc.ValidateToken(r.Context(), token)
+}
+
+// gitForwardingHeaders are request headers a proxy adds. Their presence
+// shows the request was relayed, so its TCP peer is not the client.
+var gitForwardingHeaders = []string{
+	"X-Forwarded-For",
+	"Forwarded",
+	"X-Real-Ip",
+	"X-Forwarded-Host",
+	"X-Forwarded-Proto",
+	"Via",
+}
+
+// forwardingHeadersPresent returns the names (from gitForwardingHeaders)
+// of the forwarding headers r carries, present even if empty. Matching
+// ignores case, so a header map built in-process without canonical keys
+// is judged the same as one net/http parsed.
+func forwardingHeadersPresent(r *http.Request) []string {
+	var out []string
+	for _, h := range gitForwardingHeaders {
+		for k := range r.Header {
+			if strings.EqualFold(k, h) {
+				out = append(out, h)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// gitPeerIP returns the client address the git trusted-CIDR bypass is
+// evaluated against, or nil when the request must present a token
+// (INIT-023 TASK-015, audit P3-30, invariant I3). Only a direct peer
+// qualifies:
+//
+//   - RemoteAddr inside SPINE_TRUSTED_PROXY_CIDRS: nil. A declared proxy
+//     relays arbitrary clients, and its X-Forwarded-For is not trusted
+//     for access either: a proxy that passes the client's own header
+//     through lets the client name a runner address. (The rate limiter
+//     does read it, to pick a bucket — clientIPForRateLimit.)
+//   - A forwarding header (gitForwardingHeaders) present: nil. The
+//     request came through a proxy the operator did not declare. A
+//     direct git client sends none of them, and a client that adds one
+//     only loses the bypass.
+//   - Otherwise the parsed RemoteAddr; an unparsable one is nil.
+func gitPeerIP(r *http.Request, trustedProxies []*net.IPNet) net.IP {
+	remote := net.ParseIP(extractIP(r))
+	if remote == nil {
+		return nil
+	}
+	if ipInNets(remote, trustedProxies) {
+		return nil
+	}
+	if len(forwardingHeadersPresent(r)) > 0 {
+		return nil
+	}
+	return remote
+}
+
+// gitProxyWarnInterval bounds how often warnProxiedTrustedGitPeer logs.
+const gitProxyWarnInterval = time.Minute
+
+// warnProxiedTrustedGitPeer logs, at most once per gitProxyWarnInterval,
+// that a read whose TCP peer is inside SPINE_GIT_HTTP_TRUSTED_CIDRS was
+// not given token-less access because it was proxied — the case where
+// behaviour changed in INIT-023 TASK-015. Header values are not logged.
+func (s *Server) warnProxiedTrustedGitPeer(r *http.Request) {
+	now := time.Now().UnixNano()
+	last := s.gitProxyWarnAt.Load()
+	if last != 0 && now-last < int64(gitProxyWarnInterval) {
+		return
+	}
+	if !s.gitProxyWarnAt.CompareAndSwap(last, now) {
+		return
+	}
+	remote := net.ParseIP(extractIP(r))
+	observe.Logger(r.Context()).Warn("git: token-less access refused for a trusted-CIDR peer because the request was proxied; "+
+		"a peer in SPINE_TRUSTED_PROXY_CIDRS or a request carrying a forwarding header must present a bearer token "+
+		"(rate-limited; declare reverse proxies in SPINE_TRUSTED_PROXY_CIDRS)",
+		"remote_addr", r.RemoteAddr,
+		"declared_proxy", remote != nil && ipInNets(remote, s.trustedProxyCIDRs),
+		"forwarding_headers", forwardingHeadersPresent(r))
 }

@@ -29,3 +29,63 @@ services:
     volumes:
       - ./:/repo
       - worktrees:/var/spine/worktrees
+
+# --- Optional: token-less git clones for runner containers ---
+#
+# The base compose file trusts no network for /git: every clone presents
+# a bearer token. To let runner containers clone token-less, trust ONLY
+# the runners' own addresses, never a range that contains the bridge
+# gateway (x.y.z.1): Docker's userland proxy forwards connections to the
+# published port from that address, so trusting it lets any process on
+# the host clone every workspace's repository without a token.
+# Requests that arrive through a declared reverse proxy
+# (SPINE_TRUSTED_PROXY_CIDRS) or that carry a forwarding header
+# (X-Forwarded-For, Forwarded, X-Real-IP, ...) are never token-less
+# either, whatever their address. Pushes always need a token.
+#
+# Option A (tightest): pin each runner to a fixed address and list each
+# one as a /32.
+#
+#   services:
+#     spine:
+#       environment:
+#         - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.1.10/32,172.28.1.11/32
+#     runner-1:
+#       networks:
+#         spine-internal:
+#           ipv4_address: 172.28.1.10
+#
+# Option B: a dedicated runner network whose ip_range excludes its own
+# gateway, attached to spine and the runners only.
+#
+#   networks:
+#     spine-runners:
+#       driver: bridge
+#       ipam:
+#         config:
+#           - subnet: 172.29.0.0/16
+#             ip_range: 172.29.1.0/24     # excludes the gateway 172.29.0.1
+#   services:
+#     spine:
+#       networks: [spine-internal, spine-runners]
+#       environment:
+#         - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.29.1.0/24
+#
+# Option C: an ip_range on spine-internal itself. Note that ip_range
+# applies to EVERY container on the network (spine, the databases and
+# the runners), not only to runners; it still excludes the gateway.
+#
+#   networks:
+#     spine-internal:
+#       ipam:
+#         config:
+#           - subnet: 172.28.0.0/16
+#             ip_range: 172.28.1.0/24
+#   services:
+#     spine:
+#       environment:
+#         - SPINE_GIT_HTTP_TRUSTED_CIDRS=172.28.1.0/24
+#
+# Local development only: SPINE_GIT_HTTP_DEV_NO_AUTH=1 lets every client
+# clone without a token, and spine serve refuses it unless
+# SPINE_ENV=development.

@@ -297,7 +297,7 @@ Workspace-scoped operations for the multi-repository model defined by [ADR-013](
 }
 ```
 
-**Redaction:** any embedded user:password component in `clone_url` is stripped from responses. SCP-like syntax (`git@host:path`) is left intact — the `git` user there is the SSH login, not a credential. `credentials_ref` is a pointer into the secrets backend (ADR-010/011), not the secret material itself, and is surfaced as-is so operators can manage it.
+**Redaction:** credentials embedded in `clone_url` are stripped from responses: all userinfo of an `https` URL (a bare token in the username position, `https://<token>@host/...`, is a credential too; INIT-023 TASK-015), and the `user:password` component of any other URL. An SSH login without a password (`ssh://git@host/...`, `git+ssh://git@host/...`) and SCP-like syntax (`git@host:path`) are left intact — the `git` user there is the SSH login, not a credential. The stored value is unchanged. `credentials_ref` is a pointer into the secrets backend (ADR-010/011), not the secret material itself, and is surfaced as-is so operators can manage it.
 
 **Wiring note:** the API surface, validation, redaction, and orchestration are in place. A `serve` configuration without a `RepositoryManager` returns `503 service_unavailable: repository manager not configured` for every endpoint above. Production wiring requires a Git-backed `CatalogStore` that commits `/.spine/repositories.yaml` on the primary repo — that piece is intentionally deferred so the volatile `InMemoryCatalogStore` cannot ship as a default and silently drop registrations on restart.
 
