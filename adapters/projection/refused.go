@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
@@ -23,6 +24,13 @@ import (
 // one push freeze the workspace's projection. Before TASK-003 such a file
 // either took the process down (an unbounded read) or vanished without a
 // trace (a C-quoted path that no longer ended in ".md").
+//
+// Both entry points report a refusal as soon as discovery has decided it,
+// before any later step can hold the sync or fail the rebuild (review
+// round 2): a failure unrelated to the refused file — an unreadable
+// changed artifact, a store error during the wipe — must not hide it for
+// as long as that failure lasts. A held sync or a failed rebuild re-reports
+// on its retry under the same event id; the counter counts each report.
 //
 // An oversized WORKFLOW file is not reported here: it reaches the
 // workflow row builder, which reports it as a read_bounds rejection
@@ -48,6 +56,25 @@ func refusedDisplayPath(p string) string {
 // are never projected, refused or not, so they are not reported.
 func (s *Service) keepRefusal(r artifact.RefusedFile) bool {
 	return strings.HasSuffix(r.Path, ".md") || s.scope.isWorkflow(r.Path)
+}
+
+// unsafeWorkflowRefusals returns one unsafe_path refusal for each
+// workflow definition path the diff adds, modifies or renames to at an
+// artifact.UnsafePath. IncrementalSync skips exactly these in its
+// workflow loop. A deleted or renamed-away unsafe path is not one: no row
+// can exist for it.
+func (s *Service) unsafeWorkflowRefusals(diffs []git.FileDiff) []artifact.RefusedFile {
+	var out []artifact.RefusedFile
+	for i := range diffs {
+		d := &diffs[i]
+		switch d.Status {
+		case "added", "modified", "renamed":
+			if s.scope.isWorkflow(d.Path) && artifact.UnsafePath(d.Path) {
+				out = append(out, artifact.RefusedFile{Path: d.Path, Reason: artifact.RefusedUnsafePath})
+			}
+		}
+	}
+	return out
 }
 
 // recordRefused reports every refusal at head: one Warn line, one

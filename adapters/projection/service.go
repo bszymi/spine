@@ -149,7 +149,12 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	}
 	// Refused files (INIT-023 TASK-003) are reported, never counted as
 	// projection errors: DeleteAllProjections below removes any stale
-	// row, and nothing re-adds one.
+	// row, and nothing re-adds one. They are reported as soon as discovery
+	// has decided them, before the planning and the wipe below can fail
+	// the rebuild (review round 2): a rebuild failed by an unrelated store
+	// or read error used to report none of them, for as long as the
+	// failure lasted. A failed rebuild's retry reports them again, under
+	// the same deterministic event ids.
 	var refused []artifact.RefusedFile
 	for _, r := range result.Refused {
 		if s.keepRefusal(r) {
@@ -157,6 +162,8 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		}
 	}
 	refused = append(refused, wfRefused...)
+	s.recordRefused(ctx, head, refused)
+
 	plans, err := s.planWorkflowRows(ctx, wfPaths, head)
 	if err != nil {
 		return s.markSyncError(ctx, prev, "plan workflow rows", err)
@@ -198,8 +205,6 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 		)
 		projErrors++
 	}
-
-	s.recordRefused(ctx, head, refused)
 
 	// Update sync state — only mark idle if no errors
 	if projErrors > 0 {
@@ -484,6 +489,22 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	if err != nil {
 		return s.markSyncError(ctx, state, "discover changes", err)
 	}
+
+	// Refused files (INIT-023 TASK-003) are known once discovery has run:
+	// the changeset's, plus every workflow definition the diff adds,
+	// modifies or renames to at an UnsafePath. They are reported here,
+	// before anything below can hold the sync (review round 2). Reporting
+	// them only after the changeset was applied let an unrelated
+	// infrastructure read failure in the same window — the early return
+	// just below — suppress every refusal in it for as long as the failure
+	// lasted, while a sync held by an error later in the loop reported
+	// them. A held sync re-reports on each retry: the event ids are
+	// deterministic, so the delivery queue de-duplicates them; the counter
+	// counts each report.
+	refused := append([]artifact.RefusedFile(nil), changeset.Refused...)
+	refused = append(refused, s.unsafeWorkflowRefusals(diffs)...)
+	s.recordRefused(ctx, head, refused)
+
 	readSkipped, readErr := s.classifyReadErrors(ctx, changeset.ReadErrors)
 	if readErr != nil {
 		return s.markSyncError(ctx, state, "read changed artifact", readErr)
@@ -592,12 +613,9 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 	// Workflows: the same raw diff, classified with the shared scope. A
 	// workflow path that is UnsafePath never reaches the store (it is the
 	// row key; invalid UTF-8 would fail every sync): an added, modified or
-	// renamed-to one is refused and reported, a deleted or renamed-away
-	// one is ignored — no such row can exist (INIT-023 TASK-003).
-	refused := append([]artifact.RefusedFile(nil), changeset.Refused...)
-	refuseWorkflow := func(path string) {
-		refused = append(refused, artifact.RefusedFile{Path: path, Reason: artifact.RefusedUnsafePath})
-	}
+	// renamed-to one was refused and reported above
+	// (unsafeWorkflowRefusals), a deleted or renamed-away one is ignored —
+	// no such row can exist (INIT-023 TASK-003).
 	var workflowsRejected int
 	syncWorkflow := func(path string) {
 		rejected, err := s.syncWorkflowFile(ctx, path, head)
@@ -621,8 +639,7 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		case "added", "modified":
 			if s.scope.isWorkflow(diff.Path) {
 				if artifact.UnsafePath(diff.Path) {
-					refuseWorkflow(diff.Path)
-					continue
+					continue // reported above
 				}
 				syncWorkflow(diff.Path)
 			}
@@ -638,16 +655,15 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 			}
 			if s.scope.isWorkflow(diff.Path) {
 				if artifact.UnsafePath(diff.Path) {
-					refuseWorkflow(diff.Path)
-					continue
+					continue // reported above
 				}
 				syncWorkflow(diff.Path)
 			}
 		}
 	}
 
-	// Refusals never count as sync errors, so the sync still advances.
-	s.recordRefused(ctx, head, refused)
+	// Refusals (reported above) never count as sync errors, so the sync
+	// still advances past them.
 
 	// Update sync state — only advance commit if no errors
 	if syncErrors > 0 {

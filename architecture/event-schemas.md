@@ -460,7 +460,7 @@ payload:
 
 ### 4.15 `projection_file_skipped`
 
-Emitted once per file the projection declined to project (INIT-023 TASK-003): a file over the git client's per-blob read limit (default 4 MiB, `git.WithMaxBlobBytes`), or a candidate at a path Spine refuses to store. A skip is never a sync error: `FullRebuild` and `IncrementalSync` advance past it. Each one is also logged at Warn (`projection skipped file`) and counted in `spine_projection_files_skipped_total`. `artifact_path` on the envelope is the reported `path` (repository-relative, never stripped of `artifacts_dir`, since a skipped file has no projection key).
+Emitted once per file the projection declined to project (INIT-023 TASK-003): a file over the git client's per-blob read limit (default 4 MiB, `git.WithMaxBlobBytes`), or a candidate at a path Spine refuses to store. A skip is never a sync error: `FullRebuild` and `IncrementalSync` advance past it. Each one is also logged at Warn (`projection skipped file`) and counted in `spine_projection_files_skipped_total`. It is reported as soon as discovery has decided it, before any later step can hold the sync: a sync held in `error` for another reason (an unreadable changed file, a failed store write or wipe) still reports it, and every retry reports it again under the same event id (the delivery queue de-duplicates; the counter counts each report). `artifact_path` on the envelope is the reported `path` (repository-relative, never stripped of `artifacts_dir`, since a skipped file has no projection key).
 
 **Source:** Projection Service (`FullRebuild` and `IncrementalSync`)
 

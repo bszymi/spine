@@ -657,3 +657,125 @@ func TestUpgrade_NonASCIIArtifactNeedsARebuild(t *testing.T) {
 		t.Fatal("FullRebuild did not project the non-ASCII artifact")
 	}
 }
+
+// Review round 2 (codex P2): a refusal is reported even when a failure
+// unrelated to the refused file holds the sync or fails the rebuild.
+// IncrementalSync reported refusals only after applying the changeset,
+// so an unreadable changed artifact in the same window (the "read changed
+// artifact" early return) hid every refusal in it for as long as the read
+// kept failing; FullRebuild reported only after its writes, so a failed
+// wipe did the same. The retry reports again under the same event ids.
+func TestRefusals_ReportedWhenTheSyncIsHeld(t *testing.T) {
+	ctx := context.Background()
+	const unsafeWorkflow = "workflows/a\tb.yaml"
+	notes := eightMiB("# Notes\n\n")
+
+	// assertReports: each of the two refusals at head was reported exactly
+	// n times, under its deterministic id, with nothing else skipped.
+	assertReports := func(t *testing.T, ev *recordingRouter, head string, n int) {
+		t.Helper()
+		evs := skipEvents(t, ev)
+		ids := map[string]int{}
+		for _, e := range evs {
+			ids[fmt.Sprint(e["_event_id"])]++
+		}
+		want := map[string]int{
+			wantSkipID(head, "oversized", "docs/notes.md"):  n,
+			wantSkipID(head, "unsafe_path", unsafeWorkflow): n,
+		}
+		if len(evs) != 2*n || fmt.Sprint(ids) != fmt.Sprint(want) {
+			t.Fatalf("projection_file_skipped ids = %v, want %v (events %+v)", ids, want, evs)
+		}
+	}
+
+	t.Run("IncrementalSync/unreadable changed artifact", func(t *testing.T) {
+		repo := newScratchRepo(t)
+		repo.write(taskPath, taskDoc("Pending", "T"))
+		c1 := repo.commit("c1")
+		st := allRowsStore{newMapStore()}
+		ev := &recordingRouter{}
+		svc := NewService(boundedClient(repo.dir), st, ev, 0)
+		if err := svc.FullRebuild(ctx); err != nil {
+			t.Fatal(err)
+		}
+		c2 := commitRaw(t, repo, c1, map[string]string{
+			taskPath:        taskDoc("Completed", "T"),
+			"docs/notes.md": notes,
+			unsafeWorkflow:  reviewedWorkflow,
+		})
+		flag := killingGit(t, taskPath, "silent_exit")
+		if err := os.WriteFile(flag, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ev.reset()
+		before := observe.GlobalMetrics.ProjectionFilesSkipped.Value()
+
+		err := svc.IncrementalSync(ctx)
+		if err == nil || !strings.Contains(err.Error(), "read changed artifact") {
+			t.Fatalf("an unreadable changed artifact must hold the sync, got %v", err)
+		}
+		if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != c1 {
+			t.Fatalf("sync state = %+v, want error@%s", got, c1)
+		}
+		if a := st.artifacts[taskPath]; a == nil || a.Status != "Pending" || len(st.workflows) != 0 {
+			t.Fatalf("nothing may be applied past the failed read: task %+v, workflows %v", a, st.workflows)
+		}
+		assertReports(t, ev, c2, 1)
+		if d := observe.GlobalMetrics.ProjectionFilesSkipped.Value() - before; d != 2 {
+			t.Errorf("ProjectionFilesSkipped rose by %d, want 2", d)
+		}
+
+		if err := os.Remove(flag); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.IncrementalSync(ctx); err != nil {
+			t.Fatalf("retry: %v", err)
+		}
+		if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != c2 {
+			t.Fatalf("sync state after retry = %+v, want idle@%s", got, c2)
+		}
+		if a := st.artifacts[taskPath]; a == nil || a.Status != "Completed" || len(st.workflows) != 0 {
+			t.Fatalf("retry: task %+v, workflows %v", a, st.workflows)
+		}
+		assertReports(t, ev, c2, 2)
+		if p := syncedPayload(t, ev); fmt.Sprint(p["refused"]) != "2" || fmt.Sprint(p["errors"]) != "0" {
+			t.Errorf("projection_synced = %+v, want refused 2, errors 0", p)
+		}
+	})
+
+	t.Run("FullRebuild/failed wipe", func(t *testing.T) {
+		repo := newScratchRepo(t)
+		head := commitRaw(t, repo, "", map[string]string{
+			"governance/g.md": refusedGovDoc,
+			"docs/notes.md":   notes,
+			unsafeWorkflow:    reviewedWorkflow,
+		})
+		st := newMapStore()
+		st.deleteAllErr = errSimulated
+		ev := &recordingRouter{}
+		svc := NewService(boundedClient(repo.dir), st, ev, 0)
+
+		err := svc.FullRebuild(ctx)
+		if err == nil || !strings.Contains(err.Error(), "delete projections") {
+			t.Fatalf("a failed wipe must fail the rebuild, got %v", err)
+		}
+		if got := st.syncState(); got.Status != "error" {
+			t.Fatalf("sync state = %+v, want error", got)
+		}
+		assertReports(t, ev, head, 1)
+
+		st.mu.Lock()
+		st.deleteAllErr = nil
+		st.mu.Unlock()
+		if err := svc.FullRebuild(ctx); err != nil {
+			t.Fatalf("retry: %v", err)
+		}
+		if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != head {
+			t.Fatalf("sync state after retry = %+v, want idle@%s", got, head)
+		}
+		if len(st.artifacts) != 1 || st.artifacts["governance/g.md"] == nil || len(st.workflows) != 0 {
+			t.Fatalf("retry: artifacts %v, workflows %v; want only governance/g.md", keysOf(st.artifacts), st.workflows)
+		}
+		assertReports(t, ev, head, 2)
+	})
+}
