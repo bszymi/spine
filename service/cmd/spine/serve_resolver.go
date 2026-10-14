@@ -100,6 +100,15 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 	if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
 		return fmt.Errorf("workspace orchestrator merge binding: %w", err)
 	}
+	// Governance-path guards (INIT-023 TASK-006), as on the process-level
+	// orchestrator and projection: the engine guard over this workspace
+	// projection's workflow directories, and the projection's
+	// protection-removal guard. The builder runs before the ServiceSet is
+	// returned, so no sync has run yet.
+	if err := enableGovernanceGuard(orch, workspaceWorkflowDirs(ss)); err != nil {
+		return fmt.Errorf("workspace orchestrator governance guard: %w", err)
+	}
+	enableProtectionRemovalGuard(ss.ProjSync, ss.Store)
 	// Engine step-entry policy (INIT-023 TASK-007), same selection as the
 	// process-level orchestrator.
 	orch.WithStepEntryPolicy(stepEntryPolicy)
@@ -178,9 +187,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 		ss.EvidenceQuerier = evidence.NewQuerier(ss.GitClient)
 	}
 
-	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
+	ss.CommitRetryFn = governanceAwareCommitRetry(func(ctx context.Context, runID string) error {
 		return orch.MergeRunBranch(ctx, runID)
-	}
+	})
 	ss.StepRecoveryFn = func(ctx context.Context, execID string) error {
 		exec, err := ss.Store.GetStepExecution(ctx, execID)
 		if err != nil {
@@ -199,6 +208,16 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 	ss.RunTerminatedFn = orch.TerminateLiveSteps
 
 	return nil
+}
+
+// workspaceWorkflowDirs is the workflow-directory set of a workspace's
+// projection (its artifacts_dir), or the root set when the ServiceSet has
+// no projection service.
+func workspaceWorkflowDirs(ss *workspace.ServiceSet) []string {
+	if ss.ProjSync != nil {
+		return ss.ProjSync.WorkflowDirs()
+	}
+	return workflowDirsFor(nil)
 }
 
 // newPooledWorkspaceBuilder composes the orchestrator wiring with

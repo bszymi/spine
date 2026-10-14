@@ -97,6 +97,9 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 			logStepEntryPolicy(log, stepEntryPolicy)
+			// Governance-path guards (INIT-023 TASK-006): on unless
+			// SPINE_GOVERNANCE_GUARD=off; read by every builder.
+			logGovernanceGuard(log, deliveryCfg.Enabled)
 
 			// The subscription-secret key ring and envelope mode, the
 			// workspace resolver (with its ServicePool in shared mode) and

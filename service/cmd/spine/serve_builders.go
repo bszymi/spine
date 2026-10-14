@@ -303,6 +303,7 @@ func buildOrchestrator(
 	artifactSvc *artifact.Service,
 	validator *validation.Engine,
 	stepEntryPolicy engine.StepEntryPolicy,
+	workflowDirs []string,
 	log *slog.Logger,
 ) *engine.Orchestrator {
 	if st == nil || wfProvider == nil {
@@ -344,6 +345,13 @@ func buildOrchestrator(
 	// previous build.
 	if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
 		log.Error("merge binding init failed", "error", err)
+		return nil
+	}
+	// Governance-path guard (INIT-023 TASK-006): on unless
+	// SPINE_GOVERNANCE_GUARD=off; workflowDirs are the projection's
+	// workflow directories (<artifacts_dir>/workflows/ included).
+	if err := enableGovernanceGuard(orch, workflowDirs); err != nil {
+		log.Error("governance guard init failed", "error", err)
 		return nil
 	}
 	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
@@ -394,9 +402,11 @@ func buildScheduler(
 			// TASK-007). A no-op unless the step-entry policy sets
 			// TerminateStepsOnCancel.
 			scheduler.WithRunTerminated(orch.TerminateLiveSteps),
-			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
+			// A merge held for an operator governance decision is not a
+			// failed retry (INIT-023 TASK-006).
+			scheduler.WithCommitRetry(governanceAwareCommitRetry(func(ctx context.Context, runID string) error {
 				return orch.MergeRunBranch(ctx, runID)
-			}, 3, 2*time.Minute),
+			}), 3, 2*time.Minute),
 		)
 	}
 	return scheduler.New(st, events, opts...)
