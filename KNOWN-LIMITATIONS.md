@@ -401,7 +401,8 @@ The following limitations have been resolved:
   16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`; `git.ErrOutputTooLarge`).
   Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
   git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses to inflate a small
-  blob stored as a delta on a huge base, or to render a gitlink `*.md` as a commit with its patch.
+  blob stored as a delta on a huge base, or to render a gitlink `*.md` as a commit with its patch;
+  they run in the C locale so git's refusal is recognised whatever the host's language.
   Mutating commands (checkout, merge, commit, add, branch, config, push) keep only the first
   16 MiB of their output and never fail on its size. Defaults pending the owner (task owner
   questions 1 and 4).

@@ -650,3 +650,35 @@ func TestEveryOpHasAnOutputClass(t *testing.T) {
 		t.Fatalf("found only %d run calls; the pattern no longer matches the source", seen)
 	}
 }
+
+// Codex review round 1 (P2): git translates the "fatal: " / "error: "
+// prefix of its alloc refusal, so read commands run in the C locale. A
+// git wrapper that answers like a translated git unless LC_ALL=C (and
+// echoes the limit it was given) must still yield ErrBlobTooLarge.
+func TestReadCommands_RunInTheCLocale(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell wrapper")
+	}
+	ctx := context.Background()
+	dir, commit := blobRepo(t, map[string][]byte{"t.md": []byte("small\n")})
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in cat-file|show)\n" +
+		"  if [ \"$LC_ALL\" = C ]; then p=fatal; else p=Schwerwiegend; fi\n" +
+		"  echo \"$p: attempting to allocate 99999999 over limit $GIT_ALLOC_LIMIT\" >&2; exit 128;;\n" +
+		"esac\n" +
+		"exec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test wrapper
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+
+	_, err = git.NewCLIClient(dir).ReadFile(ctx, commit, "t.md")
+	assertBlobTooLarge(t, "translated host", err, commit, "t.md", -1, git.DefaultMaxBlobBytes)
+}

@@ -1236,10 +1236,17 @@ func (c *CLIClient) runBounded(ctx context.Context, op string, limit, sizeHint i
 
 	// Read commands inherit the parent environment, as before, plus
 	// GIT_ALLOC_LIMIT (a later duplicate wins in os/exec, so an inherited
-	// value cannot loosen it).
+	// value cannot loosen it) and the C locale. git translates the
+	// "fatal: " / "error: " prefix of its alloc refusal, which
+	// isGitAllocRefusal must recognise, and the English stderr is also
+	// what classifyGitError's patterns expect (lookupBranch forces it for
+	// the same reason). Read commands' stdout does not depend on the
+	// locale: paths are raw (-z), blobs are bytes, dates are ISO.
 	allocLimit := c.gitAllocLimit()
 	if class == opRead {
-		cmd.Env = append(os.Environ(), "GIT_ALLOC_LIMIT="+strconv.FormatInt(allocLimit, 10))
+		cmd.Env = append(os.Environ(),
+			"GIT_ALLOC_LIMIT="+strconv.FormatInt(allocLimit, 10),
+			"LC_ALL=C", "LANGUAGE=")
 	}
 
 	stdout := newStdoutSink(limit, sizeHint, class != opMutate)

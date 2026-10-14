@@ -58,6 +58,11 @@ release is cut — this file is a staging area.
   git quoted them; `artifact.IsIDCollision` counts an oversized existing file as a collision.
 - **Cost:** one extra git process per `ReadFile`, two on a miss; a full rebuild of a large
   repository takes roughly twice as long.
+- **Read commands run in the C locale** (`LC_ALL=C`, `LANGUAGE=`; listings, diff, log, show,
+  rev-parse, merge-base), as the exact branch lookup already did: git translates the prefix of
+  its alloc-limit refusal, which must be recognised. On a host with a translated git their error
+  text is now English, so a miss that a translated message used to hide is classified
+  `not_found` as on an English host. Their output does not depend on the locale.
 
 ### Upgrade note
 
