@@ -38,12 +38,15 @@ type fakeBinderGit struct {
 	verifyErr   error
 	notAncestor map[string]bool // "anc>desc" → not an ancestor
 	parents     map[string][]string
+	parentsErr  map[string]error // CommitParents error for a commit
 
 	mergeRes  git.MergeResult
 	mergeErr  error
 	merges    []git.MergeOpts // MergeBound calls
 	pushErr   error
 	pushes    []string // "remote branch sha"
+	resetErr  error
+	resets    []string // "branch to expected" (ResetBranch calls)
 	ontoSHA   string
 	ontoErr   error
 	ontoCalls []map[string]string
@@ -51,10 +54,13 @@ type fakeBinderGit struct {
 	plainMerges []git.MergeOpts
 	plainPushes []string
 	files       map[string]string // "ref:path" → content for ReadFile
+	mergeBases  map[string]string // "a b" → MergeBase answer (default sha40('0'))
+	diffs       map[string][]git.FileDiff
 }
 
 func newFakeBinderGit() *fakeBinderGit {
-	return &fakeBinderGit{heads: map[string]string{}, notAncestor: map[string]bool{}, parents: map[string][]string{}, files: map[string]string{}}
+	return &fakeBinderGit{heads: map[string]string{}, notAncestor: map[string]bool{}, parents: map[string][]string{}, parentsErr: map[string]error{},
+		files: map[string]string{}, mergeBases: map[string]string{}, diffs: map[string][]git.FileDiff{}}
 }
 
 func (f *fakeBinderGit) record(s string) {
@@ -110,6 +116,9 @@ func (f *fakeBinderGit) IsAncestor(_ context.Context, a, d string) (bool, error)
 
 func (f *fakeBinderGit) CommitParents(_ context.Context, sha string) ([]string, error) {
 	f.record("binder:CommitParents " + sha)
+	if err := f.parentsErr[sha]; err != nil {
+		return nil, err
+	}
 	p, ok := f.parents[sha]
 	if !ok {
 		return nil, errors.New("unknown commit")
@@ -136,6 +145,14 @@ func (f *fakeBinderGit) PushCommit(_ context.Context, remote, branch, sha string
 	f.record("binder:PushCommit " + remote + " " + branch + " " + sha)
 	f.pushes = append(f.pushes, remote+" "+branch+" "+sha)
 	return f.pushErr
+}
+
+func (f *fakeBinderGit) ResetBranch(_ context.Context, branch, to, expected string) error {
+	f.record("binder:ResetBranch " + branch + " " + to + " " + expected)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resets = append(f.resets, branch+" "+to+" "+expected)
+	return f.resetErr
 }
 
 func (f *fakeBinderGit) Merge(_ context.Context, opts git.MergeOpts) (git.MergeResult, error) {
@@ -175,18 +192,31 @@ func (f *fakeBinderGit) ReadFile(_ context.Context, ref, p string) ([]byte, erro
 
 func (f *fakeBinderGit) MergeBase(_ context.Context, a, b string) (string, error) {
 	f.record("MergeBase " + a + " " + b)
+	if mb, ok := f.mergeBases[a+" "+b]; ok {
+		return mb, nil
+	}
 	return sha40('0'), nil
 }
 
 func (f *fakeBinderGit) Diff(_ context.Context, a, b string) ([]git.FileDiff, error) {
 	f.record("Diff " + a + " " + b)
-	return nil, nil
+	return f.diffs[a+" "+b], nil
 }
 
 func (f *fakeBinderGit) DeleteBranch(_ context.Context, name string) error {
 	f.record("DeleteBranch " + name)
 	return nil
 }
+
+// fakeCodeBinder is fakeBinderGit as a code repository's git.GitClient.
+type fakeCodeBinder struct{ *fakeBinderGit }
+
+func (fakeCodeBinder) Clone(context.Context, string, string) error { return nil }
+func (fakeCodeBinder) Log(context.Context, git.LogOpts) ([]git.CommitInfo, error) {
+	return nil, nil
+}
+func (fakeCodeBinder) ListFiles(context.Context, string, string) ([]string, error) { return nil, nil }
+func (fakeCodeBinder) RefSHA(context.Context, string) (string, error)              { return sha40('0'), nil }
 
 // plainGit is a GitOperator with no CommitBinder capability.
 type plainGit struct{ stubGitOperator }

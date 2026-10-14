@@ -404,3 +404,7 @@ func (b *codeRepoBehavior) PushCommit(ctx context.Context, remote, branch, sha s
 	b.mu.Unlock()
 	return b.binder().PushCommit(ctx, remote, branch, sha)
 }
+
+func (b *codeRepoBehavior) ResetBranch(ctx context.Context, branch, to, expected string) error {
+	return b.binder().ResetBranch(ctx, branch, to, expected)
+}

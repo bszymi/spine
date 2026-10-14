@@ -474,6 +474,80 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 	return res, nil
 }
 
+// ResetBranch takes back a merge the engine refused (INIT-023 TASK-005
+// review round 1): it moves refs/heads/<branch> from expected to `to`
+// only if the branch is still at expected — `update-ref <ref> <to>
+// <expected>`, git's own compare-and-swap — so a branch another writer
+// moved meanwhile is left alone and reported. Without it, MergeBound has
+// already moved the local branch to the refused merge, and "nothing is
+// pushed" holds only until the next writer builds on it: the next
+// governed merge's base is that merge, its own check passes, and its push
+// publishes the refused commit; with auto-push off the local branch is
+// the published one.
+//
+// When the branch is checked out here, the index and the working tree
+// follow with `read-tree -m -u <expected> <to>`, a two-tree switch that
+// refuses to overwrite a local change rather than discarding it. If it
+// refuses, the ref is moved forward to expected again, so the branch, the
+// index and the tree never disagree: an index left at the refused merge's
+// tree on a branch reset to `to` would make the next ordinary commit on
+// the branch record that tree — the refused content — as a plain commit.
+// No remote is touched.
+func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string) error {
+	const op = "reset_branch"
+	_, full, err := checkBranch(op, "branch", branch)
+	if err != nil {
+		return err
+	}
+	if err := checkObjectName(op, "target", to); err != nil {
+		return err
+	}
+	if err := checkObjectName(op, "expected", expected); err != nil {
+		return err
+	}
+	if err := c.verifyCommitOID(ctx, op, "target", to); err != nil {
+		return err
+	}
+	if err := c.verifyCommitOID(ctx, op, "expected", expected); err != nil {
+		return err
+	}
+	attached, err := c.headIsBranch(ctx, op, full)
+	if err != nil {
+		return err
+	}
+	if _, _, err := c.runWith(ctx, op, runOpts{},
+		"update-ref", "-m", "spine: take back a refused bound merge", "--end-of-options", full, to, expected); err != nil {
+		return err
+	}
+	if !attached || to == expected {
+		return nil
+	}
+	if _, _, err := c.runWith(ctx, op, runOpts{}, "read-tree", "-m", "-u", "--end-of-options", expected, to); err != nil {
+		if _, _, fwdErr := c.runWith(ctx, op, runOpts{},
+			"update-ref", "-m", "spine: keep the merge (working tree not restorable)", "--end-of-options", full, expected, to); fwdErr != nil {
+			return &GitError{Kind: ErrKindPermanent, Op: op,
+				Message: fmt.Sprintf("%s was reset to %s but its working tree could not follow (%v), and moving it back to %s failed (%v): the branch, index and working tree disagree",
+					full, to, err, expected, fwdErr)}
+		}
+		return err
+	}
+	return nil
+}
+
+// headIsBranch reports whether HEAD is attached to full (refs/heads/<n>).
+// A detached HEAD is "not attached", not an error.
+func (c *CLIClient) headIsBranch(ctx context.Context, op, full string) (bool, error) {
+	out, _, err := c.runWith(ctx, op, runOpts{}, "symbolic-ref", "-q", "HEAD")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.TrimSpace(out) == full, nil
+}
+
 // PushCommit sets <remote> refs/heads/<branch> to exactly sha with a
 // NON-forced push: `push --end-of-options <remote>
 // <sha>^{commit}:refs/heads/<n>`. git accepts it only when the remote

@@ -82,6 +82,7 @@ func RunCommitBinderConformance(t *testing.T, h Harness) {
 		{"MergeBound", testMergeBound},
 		{"MergeBoundAlreadyUpToDateAfterRecomputedCascade", testMergeBoundRecomputedCascade},
 		{"PushCommit", testPushCommit},
+		{"ResetBranch", testResetBranch},
 	}
 	for _, c := range cases {
 		c := c
@@ -620,6 +621,70 @@ func testMergeBoundRecomputedCascade(t *testing.T, e *suiteEnv) {
 	}
 	if replay.SHA != first.SHA || replay.BaseSHA != first.SHA {
 		t.Fatalf("replay with a recomputed cascade = {SHA %s, BaseSHA %s}; want already up to date at %s", replay.SHA, replay.BaseSHA, first.SHA)
+	}
+}
+
+// testResetBranch pins the take-back of a refused merge (TASK-005 review
+// round 1): a compare-and-swap that moves the local branch only while it
+// is still at the refused merge, after which the next MergeBound on that
+// branch computes on the restored commit, not on the refused one.
+func testResetBranch(t *testing.T, e *suiteEnv) {
+	base := mainTip(t, e)
+	b := e.src.commit("reset target base", map[string]entry{"t.txt": {content: "t"}}, base)
+	s1 := e.src.commit("refused content", map[string]entry{"evil.md": {content: "unreviewed"}}, base)
+	s2 := e.src.commit("next run", map[string]entry{"next.txt": {content: "2"}}, base)
+	e.src.setRef("refs/heads/rb-target", b)
+	e.sync(t)
+	opts := func(sha string) git.MergeOpts {
+		return git.MergeOpts{SourceSHA: sha, Target: "rb-target", Strategy: "merge-commit", Message: "Merge run rb"}
+	}
+	refused, err := e.Binder.MergeBound(ctx(), opts(s1))
+	if err != nil || refused.BaseSHA != b {
+		t.Fatalf("MergeBound = %+v, %v; want a merge on %s", refused, err, b)
+	}
+
+	for _, bad := range []struct{ name, branch, to, expected string }{
+		{"option-like branch", "-x", b, refused.SHA},
+		{"tag as branch", "refs/tags/rb-target", b, refused.SHA},
+		{"abbreviated target", "rb-target", b[:7], refused.SHA},
+		{"uppercase target", "rb-target", strings.ToUpper(b), refused.SHA},
+		{"name as expected", "rb-target", b, "rb-target"},
+	} {
+		if err := e.Binder.ResetBranch(ctx(), bad.branch, bad.to, bad.expected); err == nil {
+			t.Fatalf("ResetBranch(%s): want a refusal", bad.name)
+		}
+	}
+
+	// A branch that is not at expected is left alone.
+	if err := e.Binder.ResetBranch(ctx(), "rb-target", b, s2); err == nil {
+		t.Fatal("ResetBranch with a stale expected value: want an error")
+	}
+	again, err := e.Binder.MergeBound(ctx(), opts(s1))
+	if err != nil || again.SHA != refused.SHA || again.BaseSHA != refused.SHA {
+		t.Fatalf("after a refused ResetBranch, MergeBound = %+v, %v; want the target still at %s", again, err, refused.SHA)
+	}
+
+	if err := e.Binder.ResetBranch(ctx(), "rb-target", b, refused.SHA); err != nil {
+		t.Fatalf("ResetBranch: %v", err)
+	}
+	if e.Local != "" {
+		local := fixtureRepo{t: t, dir: e.Local}
+		if got := local.ref("refs/heads/rb-target"); got != b {
+			t.Fatalf("local rb-target = %s, want %s", got, b)
+		}
+		if st := local.git("status", "--porcelain"); st != "" {
+			t.Fatalf("ResetBranch left the working tree dirty:\n%s", st)
+		}
+	}
+	next, err := e.Binder.MergeBound(ctx(), opts(s2))
+	if err != nil {
+		t.Fatalf("MergeBound after ResetBranch: %v", err)
+	}
+	if next.BaseSHA != b {
+		t.Fatalf("MergeBound after ResetBranch computed on %s, want the restored %s (not the refused %s)", next.BaseSHA, b, refused.SHA)
+	}
+	if in, err := e.Binder.IsAncestor(ctx(), s1, next.SHA); err != nil || in {
+		t.Fatalf("the refused content is in the next merge (in=%v, err=%v)", in, err)
 	}
 }
 

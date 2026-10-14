@@ -12,6 +12,7 @@ package git_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,6 +112,9 @@ func TestCommitBinder_RefusalsStartNoGit(t *testing.T) {
 			_, err := c.Merge(ctx, git.MergeOpts{SourceSHA: mainOID[:12], Target: "main", Strategy: "merge-commit"})
 			return err
 		}},
+		{"ResetBranch branch", func() error { return c.ResetBranch(ctx, "--orphan", mainOID, mainOID) }},
+		{"ResetBranch target", func() error { return c.ResetBranch(ctx, "main", "HEAD~1", mainOID) }},
+		{"ResetBranch expected", func() error { return c.ResetBranch(ctx, "main", mainOID, strings.ToUpper(mainOID)) }},
 	}
 	for _, tc := range calls {
 		rec.Reset(t)
@@ -166,5 +170,98 @@ func TestCommitBinder_VerifyCommitErrorKinds(t *testing.T) {
 	}
 	if err := c.VerifyCommit(ctx, mainOID); err != nil {
 		t.Fatalf("VerifyCommit(main) = %v", err)
+	}
+}
+
+func readRepoFile(t *testing.T, repo, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repo, rel)) //nolint:gosec // G304: test fixture path
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// refusedMerge merges feat into main (a stand-in for a merge the engine
+// refused) and returns the merge commit; main stays checked out.
+func refusedMerge(t *testing.T, c *git.CLIClient, featOID string) git.MergeResult {
+	t.Helper()
+	res, err := c.MergeBound(context.Background(), git.MergeOpts{SourceSHA: featOID, Target: "main", Strategy: "merge-commit", Message: "Merge refused"})
+	if err != nil {
+		t.Fatalf("MergeBound: %v", err)
+	}
+	return res
+}
+
+// TestCommitBinder_ResetBranchRestoresTheCheckedOutTree: the take-back of
+// a refused merge on the checked-out branch (TASK-005 review round 1)
+// moves the ref, the index and the working tree together.
+func TestCommitBinder_ResetBranchRestoresTheCheckedOutTree(t *testing.T) {
+	c, repo, _, mainOID, featOID := grammarRepo(t)
+	res := refusedMerge(t, c, featOID)
+	if err := c.ResetBranch(context.Background(), "main", mainOID, res.SHA); err != nil {
+		t.Fatalf("ResetBranch: %v", err)
+	}
+	if got := runGit(t, repo, "rev-parse", "refs/heads/main"); got != mainOID {
+		t.Fatalf("main = %s, want %s", got, mainOID)
+	}
+	if st := runGit(t, repo, "status", "--porcelain"); st != "" {
+		t.Fatalf("working tree not restored:\n%s", st)
+	}
+	if got := readRepoFile(t, repo, "f.txt"); got != "base\n" {
+		t.Fatalf("f.txt = %q, want the restored base content", got)
+	}
+	if got := runGit(t, repo, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+		t.Fatalf("HEAD = %s, want it still on main", got)
+	}
+}
+
+// TestCommitBinder_ResetBranchKeepsLocalChanges: a local change the
+// switch would overwrite refuses the take-back, and the ref is moved
+// forward again, so the branch, index and working tree never disagree
+// and the change is kept.
+func TestCommitBinder_ResetBranchKeepsLocalChanges(t *testing.T) {
+	c, repo, _, mainOID, featOID := grammarRepo(t)
+	res := refusedMerge(t, c, featOID)
+	testutil.WriteFile(t, repo, "f.txt", "someone's edit\n")
+	if err := c.ResetBranch(context.Background(), "main", mainOID, res.SHA); err == nil {
+		t.Fatal("ResetBranch over a conflicting local change: want an error")
+	}
+	if got := runGit(t, repo, "rev-parse", "refs/heads/main"); got != res.SHA {
+		t.Fatalf("main = %s, want it back at the merge %s", got, res.SHA)
+	}
+	if got := readRepoFile(t, repo, "f.txt"); got != "someone's edit\n" {
+		t.Fatalf("local change lost: f.txt = %q", got)
+	}
+	if out := runGit(t, repo, "diff", "--cached", "--name-only", "HEAD"); out != "" {
+		t.Fatalf("index disagrees with HEAD after the refusal: %s", out)
+	}
+}
+
+// TestCommitBinder_ResetBranchCompareAndSwap: a branch not at the
+// expected commit is left alone; a branch that is not checked out moves
+// without touching the working tree.
+func TestCommitBinder_ResetBranchCompareAndSwap(t *testing.T) {
+	c, repo, _, mainOID, featOID := grammarRepo(t)
+	ctx := context.Background()
+	res := refusedMerge(t, c, featOID)
+	if err := c.ResetBranch(ctx, "main", mainOID, featOID); err == nil {
+		t.Fatal("ResetBranch with a stale expected value: want an error")
+	}
+	if got := runGit(t, repo, "rev-parse", "refs/heads/main"); got != res.SHA {
+		t.Fatalf("main moved to %s on a compare-and-swap mismatch", got)
+	}
+	runGit(t, repo, "branch", "side", res.SHA)
+	if err := c.ResetBranch(ctx, "side", mainOID, res.SHA); err != nil {
+		t.Fatalf("ResetBranch(side): %v", err)
+	}
+	if got := runGit(t, repo, "rev-parse", "refs/heads/side"); got != mainOID {
+		t.Fatalf("side = %s, want %s", got, mainOID)
+	}
+	if got := readRepoFile(t, repo, "f.txt"); got != "feat\n" {
+		t.Fatalf("the checked-out main's tree changed: f.txt = %q", got)
+	}
+	if st := runGit(t, repo, "status", "--porcelain"); st != "" {
+		t.Fatalf("working tree changed:\n%s", st)
 	}
 }

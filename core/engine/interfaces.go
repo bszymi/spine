@@ -213,4 +213,15 @@ type CommitBinder interface {
 	// non-forced push of the object (not of a local ref): the remote
 	// accepts it only as a fast-forward or when it already holds sha.
 	PushCommit(ctx context.Context, remote, branch, sha string) error
+	// ResetBranch takes back a merge the engine refused after MergeBound
+	// moved the local target: it moves the local refs/heads/<branch> to
+	// `to` only if it is still at expected (compare-and-swap), and a
+	// working tree that has the branch checked out ends up clean at to's
+	// tree; a branch that is not at expected is left alone and reported as
+	// an error. It never touches a remote. A remote-backed implementation
+	// whose local branch only caches the remote may instead drop the
+	// local branch under the same check, so the next MergeBound re-creates
+	// it from the remote (which never received the refused merge). Either
+	// way, the next MergeBound on branch must not compute on expected.
+	ResetBranch(ctx context.Context, branch, to, expected string) error
 }
