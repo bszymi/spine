@@ -570,6 +570,101 @@ func TestRecoverCompletedStep_ResumesStrandedSuccessor(t *testing.T) {
 	})
 }
 
+// Codex review, round 2: resuming the successor never rewinds a cursor a
+// live submit moved on in the meantime — with the store's conditional
+// cursor move, and with the re-read fallback. Mutation: an unconditional
+// UpdateCurrentStep in resumeRoutedSuccessor fails both.
+func TestRecoverCompletedStep_DoesNotRewindAMovedCursor(t *testing.T) {
+	for _, capability := range []bool{true, false} {
+		t.Run(fmt.Sprintf("capability=%v", capability), func(t *testing.T) {
+			f := newCasFix(t, casWorkflow(), capability)
+			e := f.addExec("execute", domain.StepStatusCompleted, "actor-a")
+			f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+			succ := f.addExec("review", domain.StepStatusWaiting, "")
+			f.st.mu.Lock()
+			f.st.runs[f.runID].CurrentStepID = "execute"
+			f.st.mu.Unlock()
+			// The live submit finishes its routing after recovery listed the
+			// executions: cursor to review, review taken and in progress.
+			f.afterNextList(func() {
+				f.st.mu.Lock()
+				f.st.runs[f.runID].CurrentStepID = "review"
+				f.st.mu.Unlock()
+				f.st.mutateExec(succ.ExecutionID, func(x *domain.StepExecution) {
+					x.Status, x.ActorID = domain.StepStatusInProgress, "actor-r"
+				})
+			})
+			err := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID)
+			requireCode(t, err, domain.ErrConflict, "recovery after the live submit moved the cursor")
+			if got := f.st.run(f.runID).CurrentStepID; got != "review" {
+				t.Fatalf("cursor = %q, want the live submit's review", got)
+			}
+			if got := f.st.exec(succ.ExecutionID); got.Status != domain.StepStatusInProgress || got.ActorID != "actor-r" {
+				t.Fatalf("successor = %s/%q, want the live submit's in_progress/actor-r", got.Status, got.ActorID)
+			}
+		})
+	}
+	// The cursor itself: a live submit that moved it past the successor is
+	// not rewound (the conditional move misses).
+	f := newCasFix(t, casWorkflow(), true)
+	e := f.addExec("execute", domain.StepStatusCompleted, "actor-a")
+	f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+	f.addExec("review", domain.StepStatusWaiting, "")
+	f.st.mu.Lock()
+	f.st.runs[f.runID].CurrentStepID = "execute"
+	f.st.mu.Unlock()
+	f.afterNextList(func() {
+		f.st.mu.Lock()
+		f.st.runs[f.runID].CurrentStepID = "later-step"
+		f.st.mu.Unlock()
+	})
+	if err := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID); err == nil {
+		t.Fatal("recovery resumed a run whose cursor had moved on")
+	}
+	if got := f.st.run(f.runID).CurrentStepID; got != "later-step" {
+		t.Fatalf("cursor rewound to %q", got)
+	}
+}
+
+// failingCancelAssignments fails every UpdateAssignmentStatus.
+type failingCancelAssignments struct{ *memAssignmentStore }
+
+func (failingCancelAssignments) UpdateAssignmentStatus(context.Context, string, domain.AssignmentStatus, *time.Time) error {
+	return errors.New("assignment store unavailable")
+}
+
+// Codex review, round 2: with the conditional store the step is written
+// before the assignment row is cancelled; when the cancel fails the step is
+// put back, so no unbound execution sits next to a still-active row.
+// Without the capability the original order (row first) leaves the step
+// untouched. Mutation: dropping the compensation fails the first case.
+func TestReleaseStep_FailedCancelLeavesConsistentState(t *testing.T) {
+	for _, capability := range []bool{true, false} {
+		t.Run(fmt.Sprintf("capability=%v", capability), func(t *testing.T) {
+			f := newCasFix(t, casWorkflow(), capability)
+			e := f.addExec("execute", domain.StepStatusAssigned, "actor-a")
+			f.asg.assignments["claim-a"] = &domain.Assignment{AssignmentID: "claim-a", RunID: f.runID,
+				ExecutionID: e.ExecutionID, ActorID: "actor-a", Status: domain.AssignmentStatusActive}
+			f.orch.assignments = failingCancelAssignments{f.asg}
+			before := f.st.exec(e.ExecutionID)
+			err := f.orch.ReleaseStep(context.Background(), ReleaseRequest{ActorID: "actor-a", AssignmentID: "claim-a"})
+			if err == nil {
+				t.Fatal("release succeeded although the assignment could not be cancelled")
+			}
+			got := f.st.exec(e.ExecutionID)
+			if got.Status != before.Status || got.ActorID != before.ActorID {
+				t.Fatalf("execution = %s/%q, want it back at %s/%q", got.Status, got.ActorID, before.Status, before.ActorID)
+			}
+			if got := f.asg.assignments["claim-a"].Status; got != domain.AssignmentStatusActive {
+				t.Fatalf("assignment row = %s, want active", got)
+			}
+			if len(f.events(domain.EventTaskReleased)) != 0 {
+				t.Fatal("a failed release emitted its event")
+			}
+		})
+	}
+}
+
 // AC 10. Every engine step writer, with the capability, stops without side
 // effects when it loses its race. Each row's hook commits a concurrent
 // writer's change right after the writer's read.

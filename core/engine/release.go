@@ -73,6 +73,7 @@ func (o *Orchestrator) ReleaseStep(ctx context.Context, req ReleaseRequest) erro
 			fmt.Sprintf("step execution %s is in terminal state %q, cannot release", assignment.ExecutionID, exec.Status))
 	}
 	prior := stateOf(exec)
+	original := *exec
 
 	now := time.Now()
 	if o.stepTransitioner() == nil {
@@ -96,6 +97,18 @@ func (o *Orchestrator) ReleaseStep(ctx context.Context, req ReleaseRequest) erro
 		// assignment row untouched; the row is cancelled only after the
 		// write applied.
 		if err := o.assignments.UpdateAssignmentStatus(ctx, req.AssignmentID, domain.AssignmentStatusCancelled, &now); err != nil {
+			// Compensate (codex review, round 2): an unbound waiting
+			// execution next to a still-active assignment row would block
+			// every later claim (the active-assignment unique index), and
+			// once another actor is bound the owner guard above stops this
+			// actor's retry from cancelling the row. Put the execution back
+			// as it was read — conditionally, so a writer that took the
+			// released step meanwhile is not overwritten — and report the
+			// failure; the caller can retry the release.
+			if cerr := o.writeStepExecution(ctx, &original, stateOf(exec)); cerr != nil {
+				log.Error("release: assignment not cancelled and the step could not be restored",
+					"assignment_id", req.AssignmentID, "execution_id", exec.ExecutionID, "error", err, "restore_error", cerr)
+			}
 			return fmt.Errorf("cancel assignment: %w", err)
 		}
 	}

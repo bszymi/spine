@@ -187,6 +187,24 @@ func (s *PostgresStore) UpdateCurrentStep(ctx context.Context, runID, stepID str
 	return mustAffect(tag, "run not found")
 }
 
+// TransitionCurrentStep moves an ACTIVE run's cursor from fromStepID to
+// toStepID, only while the run is still active and at fromStepID (INIT-023
+// TASK-008, codex review round 2). It implements the engine's optional
+// engine.RunCursorTransitioner: crash recovery resumes a routing successor
+// with it, so a cursor a live submit has already moved on is never
+// rewound. (false, nil) when the run moved, is not active, or does not
+// exist. An unset cursor compares as the empty string.
+func (s *PostgresStore) TransitionCurrentStep(ctx context.Context, runID, fromStepID, toStepID string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.runs SET current_step_id = $1
+		WHERE run_id = $2 AND status = 'active' AND COALESCE(current_step_id, '') = $3`,
+		toStepID, runID, fromStepID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (s *PostgresStore) ListRunsByTask(ctx context.Context, taskPath string) ([]domain.Run, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+runColumns+` FROM runtime.runs WHERE task_path = $1 ORDER BY created_at DESC`, taskPath)

@@ -308,7 +308,21 @@ func (s *casStore) ListRepositoryMergeOutcomes(_ context.Context, runID string) 
 // standalone PostgresStore's conditional write, over the same rows.
 type condStore struct{ *casStore }
 
-var _ StepExecutionTransitioner = condStore{}
+var (
+	_ StepExecutionTransitioner = condStore{}
+	_ RunCursorTransitioner     = condStore{}
+)
+
+func (s condStore) TransitionCurrentStep(_ context.Context, runID, from, to string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.runs[runID]
+	if !ok || r.Status != domain.RunStatusActive || r.CurrentStepID != from {
+		return false, nil
+	}
+	r.CurrentStepID = to
+	return true, nil
+}
 
 func (s condStore) TransitionStepExecution(_ context.Context, e *domain.StepExecution, from domain.StepExecutionStatus, fromActor string) (bool, error) {
 	s.mu.Lock()

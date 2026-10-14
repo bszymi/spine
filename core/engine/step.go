@@ -535,10 +535,24 @@ func (o *Orchestrator) resumeRoutedSuccessor(ctx context.Context, run *domain.Ru
 			fmt.Sprintf("run %s already has a later execution (%s); step %s was routed", run.RunID, succ.ExecutionID, exec.ExecutionID))
 	}
 	log := observe.Logger(ctx)
-	log.Info("recovery: routing stopped before the run's cursor moved; resuming the successor",
+	// The cursor moves only while the run is still active and at this
+	// step (codex review, round 2): a live submit finishing the same
+	// routing may already have moved it — and gone further — so a plain
+	// write could rewind it to a step that was routed.
+	moved, err := o.moveCursorIfAt(ctx, run.RunID, exec.StepID, next)
+	if err != nil {
+		return err
+	}
+	if !moved {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s moved on while step %s was being recovered; nothing to resume", run.RunID, exec.ExecutionID))
+	}
+	log.Info("recovery: routing stopped before the run's cursor moved; resumed the successor",
 		"run_id", run.RunID, "execution_id", exec.ExecutionID, "next_step", next, "successor", succ.ExecutionID)
-	if err := o.store.UpdateCurrentStep(ctx, run.RunID, next); err != nil {
-		return fmt.Errorf("update current step: %w", err)
+	// Activate only a successor that is still waiting; one a live submit
+	// activated (or finished) meanwhile is left to it.
+	if cur, err := o.store.GetStepExecution(ctx, succ.ExecutionID); err != nil || cur.Status != domain.StepStatusWaiting {
+		return nil
 	}
 	if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
 		// As in advanceToNextStep: the cursor moved; an activation that

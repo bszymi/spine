@@ -245,3 +245,35 @@ func TestTransitionRunStatusAt(t *testing.T) {
 		t.Fatalf("missing run = (%v, %v), want (false, nil)", applied, err)
 	}
 }
+
+// TransitionCurrentStep (codex review round 2): the conditional cursor move
+// crash recovery uses.
+func TestTransitionCurrentStep(t *testing.T) {
+	s, ctx, runID := casFixture(t)
+	if err := s.UpdateCurrentStep(ctx, runID, "execute"); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID, "review", "publish"); err != nil || applied {
+		t.Fatalf("wrong from = (%v, %v), want (false, nil)", applied, err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID, "execute", "review"); err != nil || !applied {
+		t.Fatalf("hit = (%v, %v), want (true, nil)", applied, err)
+	}
+	run, err := s.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CurrentStepID != "review" {
+		t.Fatalf("cursor = %q, want review", run.CurrentStepID)
+	}
+	// Not active: no move.
+	if err := s.UpdateRunStatus(ctx, runID, domain.RunStatusCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID, "review", "publish"); err != nil || applied {
+		t.Fatalf("cancelled run = (%v, %v), want (false, nil)", applied, err)
+	}
+	if applied, err := s.TransitionCurrentStep(ctx, runID+"-ghost", "review", "publish"); err != nil || applied {
+		t.Fatalf("missing run = (%v, %v), want (false, nil)", applied, err)
+	}
+}

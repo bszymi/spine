@@ -83,7 +83,9 @@ through reserved `commit_meta` keys (5).
   caller-enforced ownership); the optional `engine.StepExecutionTransitioner` store port, found by
   type assertion (no interface an embedder implements gained a method; without it every step write
   is the blind `UpdateStepExecution`, unchanged); `(*store.PostgresStore).TransitionStepExecution`
-  and `TransitionRunStatusAt`; `Orchestrator.RecoverCompletedStep` and
+  and `TransitionRunStatusAt`; the optional `engine.RunCursorTransitioner` with
+  `(*store.PostgresStore).TransitionCurrentStep` (crash recovery's conditional cursor move);
+  `Orchestrator.RecoverCompletedStep` and
   `Orchestrator.StepOutputEvidence`; the types `engine.BranchChange` and
   `engine.StepOutputEvidence` with their `BranchChange*` / `EvidenceReason*` constants,
   `engine.CommitMetaEvidencePrefix`, `engine.ErrRunStateChanged`, `engine.ErrStepStateChanged`.
@@ -106,7 +108,8 @@ through reserved `commit_meta` keys (5).
     `spine.evidence.<execution_id>` (inside the reserved `spine.` prefix; `stripReserved` keeps
     workflows from writing it), and evidence costs at most one 3 s diff on the submit path.
   - `ReleaseStep` refuses (`ErrForbidden`) an execution bound to an actor other than the releasing
-    one. With the step capability it writes the step before cancelling the assignment row.
+    one. With the step capability it writes the step before cancelling the assignment row, and
+    puts the step back (conditionally) when that cancel fails.
   - `core/actor.Gateway.ProcessResult` (no production caller) refuses a failed or skipped
     execution and a foreign actor.
 

@@ -128,6 +128,38 @@ type StepExecutionTransitioner interface {
 	TransitionStepExecution(ctx context.Context, exec *domain.StepExecution, fromStatus domain.StepExecutionStatus, fromActorID string) (bool, error)
 }
 
+// RunCursorTransitioner is an OPTIONAL RunStore capability (INIT-023
+// TASK-008, codex review round 2): it moves an active run's
+// current_step_id from fromStepID to toStepID only while the run is still
+// active and at fromStepID; (false, nil) otherwise. RecoverCompletedStep
+// uses it to resume a routing successor without rewinding a cursor a live
+// submit has moved on. Detected by type assertion; *store.PostgresStore
+// implements it (asserted in service/cmd/spine). Without it recovery
+// re-reads the run right before a plain UpdateCurrentStep, which narrows
+// the window but does not close it.
+type RunCursorTransitioner interface {
+	TransitionCurrentStep(ctx context.Context, runID, fromStepID, toStepID string) (bool, error)
+}
+
+// moveCursorIfAt moves runID's cursor from `from` to `to` only while the
+// run is active and still at `from` (see RunCursorTransitioner).
+func (o *Orchestrator) moveCursorIfAt(ctx context.Context, runID, from, to string) (bool, error) {
+	if t, ok := o.store.(RunCursorTransitioner); ok {
+		return t.TransitionCurrentStep(ctx, runID, from, to)
+	}
+	run, err := o.store.GetRun(ctx, runID)
+	if err != nil {
+		return false, fmt.Errorf("get run: %w", err)
+	}
+	if run.Status != domain.RunStatusActive || run.CurrentStepID != from {
+		return false, nil
+	}
+	if err := o.store.UpdateCurrentStep(ctx, runID, to); err != nil {
+		return false, fmt.Errorf("update current step: %w", err)
+	}
+	return true, nil
+}
+
 // stepState is the (status, actor) expectation a conditional step write
 // is judged against: what the caller read before deciding on the write.
 type stepState struct {

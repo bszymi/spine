@@ -59,6 +59,10 @@ func (a *runAdapter) StartRun(ctx context.Context, taskPath string) (*gateway.Ru
 // back to the blind UpdateStepExecution.
 var _ engine.StepExecutionTransitioner = (*store.PostgresStore)(nil)
 
+// The same for the conditional cursor move crash recovery uses to resume a
+// routing successor (INIT-023 TASK-008, codex review round 2).
+var _ engine.RunCursorTransitioner = (*store.PostgresStore)(nil)
+
 // resultAdapter adapts engine.Orchestrator to gateway.ResultHandler.
 type resultAdapter struct {
 	orch *engine.Orchestrator
