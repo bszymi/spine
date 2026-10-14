@@ -43,13 +43,18 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   `X-Forwarded-Host`, `X-Forwarded-Proto` or `Via`, now needs a bearer; no forwarded address is
   trusted for access. A refused trusted-CIDR peer logs a rate-limited Warn naming
   `SPINE_TRUSTED_PROXY_CIDRS`.
-- **A repeated `service` query parameter on `/git` is refused (P3-30 companion).** The push/read
-  classifier read the first `service` value and git-http-backend the last, so
-  `info/refs?service=git-upload-pack&service=git-receive-pack` counted as a read for the
-  token-less paths (a trusted-CIDR runner, `SPINE_GIT_HTTP_DEV_NO_AUTH`) and returned the
-  receive-pack advertisement (the push-side ref and capability list; the pack upload itself always
-  needed a bearer). Such a request now counts as a push when any value names receive-pack, so it
-  needs a bearer, and is then refused with `400`. No git client sends one.
+- **`GET /git/…/info/refs` accepts only the queries a git client sends (P3-30 companion).** The
+  push/read classifier parsed the query with Go's `url.ParseQuery`, while git-http-backend parses
+  it with its own parser, and the two disagree on queries no client sends: git keeps the last of a
+  repeated `service` (Go the first), and a name without `=` takes the next segment as its value
+  (`service&git-receive-pack` is `service=git-receive-pack` to git, an empty `service` to Go). So
+  `info/refs?service=git-upload-pack&service=git-receive-pack` and `info/refs?service&git-receive-pack`
+  counted as reads for the token-less paths (a trusted-CIDR runner, `SPINE_GIT_HTTP_DEV_NO_AUTH`)
+  and returned the receive-pack advertisement (the push-side ref and capability list; the pack
+  upload itself always needed a bearer). `info/refs` now accepts, byte for byte, only an empty
+  query, `service=git-upload-pack` or `service=git-receive-pack`. Any other query counts as a push
+  (it needs a bearer when push is enabled) and is refused with `400` before git-http-backend;
+  that includes `service=` with an empty value, which git-http-backend used to refuse with `403`.
 - **`SPINE_DEV_MODE` no longer drops git authentication (P3-30).** It is accepted whenever
   `SPINE_ENV` is not `production`, and it removed authentication from clone **and push**
   (anonymous pushes reached the pre-receive gate). Pushes now always present a validated bearer.
@@ -115,7 +120,7 @@ credential item. Owner questions answered by their defaults, pending the owner, 
   authentication).
 - New logs: `sse: omitting unsafe event fields (rate-limited)` (Warn, at most once a minute, with
   `suppressed_since_last_warn`), the rate-limited proxied-peer Warn on `/git`, `git request rejected
-  — repeated service parameter` (Warn), the startup Warns for `SPINE_GIT_HTTP_DEV_NO_AUTH` and for
+  — non-canonical info/refs query` (Warn, with the query's length, never its bytes), the startup Warns for `SPINE_GIT_HTTP_DEV_NO_AUTH` and for
   a CIDR overlap.
 
 ### For embedders
