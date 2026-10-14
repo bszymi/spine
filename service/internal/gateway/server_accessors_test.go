@@ -19,7 +19,7 @@ import (
 // stubBranchCreator implements BranchCreator for testing.
 type stubBranchCreator struct{}
 
-func (s *stubBranchCreator) CreateExploratoryBranch(_ context.Context, _ *domain.DivergenceContext, _, _ string) (*domain.Branch, error) {
+func (s *stubBranchCreator) CreateExploratoryBranch(_ context.Context, _ *domain.Run, _ *domain.DivergenceContext, _, _ string) (*domain.Branch, error) {
 	return nil, nil
 }
 func (s *stubBranchCreator) CloseWindow(_ context.Context, _ *domain.DivergenceContext) error {

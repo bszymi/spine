@@ -18,7 +18,7 @@ type fakeBranchCreator struct {
 	calls  int
 }
 
-func (f *fakeBranchCreator) CreateExploratoryBranch(_ context.Context, _ *domain.DivergenceContext, branchID, _ string) (*domain.Branch, error) {
+func (f *fakeBranchCreator) CreateExploratoryBranch(_ context.Context, _ *domain.Run, _ *domain.DivergenceContext, branchID, _ string) (*domain.Branch, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, f.err

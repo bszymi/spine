@@ -337,7 +337,8 @@ func TestCommitConvergence(t *testing.T) {
 		SelectedArtifacts: []string{"art1.md"},
 	}
 
-	if err := svc.CommitConvergence(context.Background(), divCtx, output); err != nil {
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
+	if err := svc.CommitConvergence(context.Background(), run, divCtx, output); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
@@ -385,7 +386,8 @@ func TestCommitConvergenceMultipleBranches(t *testing.T) {
 		},
 	}
 
-	if err := svc.CommitConvergence(context.Background(), divCtx, output); err != nil {
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
+	if err := svc.CommitConvergence(context.Background(), run, divCtx, output); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
@@ -400,7 +402,7 @@ func TestEvaluateAndCommit_EndToEnd(t *testing.T) {
 	events := &fakeEventRouter{}
 	svc := divergence.NewService(fs, gitClient, events)
 
-	run := &domain.Run{RunID: "run-1"}
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
 	divDef := domain.DivergenceDefinition{
 		ID:       "div-1",
 		Mode:     domain.DivergenceModeStructured,
@@ -425,7 +427,7 @@ func TestEvaluateAndCommit_EndToEnd(t *testing.T) {
 		_ = fs.UpdateBranch(context.Background(), &branches[i])
 	}
 
-	err = svc.EvaluateAndCommit(context.Background(), divCtx, convDef)
+	err = svc.EvaluateAndCommit(context.Background(), run, divCtx, convDef)
 	if err != nil {
 		t.Fatalf("evaluate and commit: %v", err)
 	}

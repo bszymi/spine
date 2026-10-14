@@ -89,7 +89,14 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	branch, err := bc.CreateExploratoryBranch(r.Context(), divCtx, req.BranchID, req.StartStep)
+	// The branch forks from the run's branch, and the divergence service
+	// refuses any run that is not the divergence's (INIT-023 TASK-012).
+	run, err := st.GetRun(r.Context(), divCtx.RunID)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+	branch, err := bc.CreateExploratoryBranch(r.Context(), run, divCtx, req.BranchID, req.StartStep)
 	if err != nil {
 		WriteError(w, err)
 		return

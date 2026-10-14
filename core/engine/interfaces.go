@@ -116,16 +116,26 @@ type RepositoryGitClients interface {
 }
 
 // DivergenceHandler manages divergence lifecycle for the orchestrator.
+//
+// CreateExploratoryBranch takes the divergence's run (INIT-023 TASK-012):
+// the new branch forks from its run branch and is refused for any other
+// run.
 type DivergenceHandler interface {
 	StartDivergence(ctx context.Context, run *domain.Run, divDef domain.DivergenceDefinition, convergenceID string) (*domain.DivergenceContext, error)
-	CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
+	CreateExploratoryBranch(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
 	CloseWindow(ctx context.Context, divCtx *domain.DivergenceContext) error
 }
 
 // ConvergenceHandler manages convergence lifecycle for the orchestrator.
+//
+// EvaluateAndCommit takes the divergence's run (INIT-023 TASK-012, audit
+// F8): the selected branches are merged into run.BranchName — never into
+// whatever a working tree has checked out — and a run that is not the
+// divergence's, or has no spine/ branch, is refused before anything
+// changes.
 type ConvergenceHandler interface {
 	CheckEntryPolicy(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) (bool, error)
-	EvaluateAndCommit(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error
+	EvaluateAndCommit(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error
 }
 
 // DiscussionChecker checks discussion thread state for precondition evaluation.

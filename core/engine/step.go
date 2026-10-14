@@ -727,7 +727,7 @@ func (o *Orchestrator) tryConvergence(ctx context.Context, run *domain.Run, dive
 		h0, h0Err = o.binder.ResolveBranchHead(ctx, run.BranchName)
 	}
 
-	if err := o.convergence.EvaluateAndCommit(ctx, divCtx, *convDef); err != nil {
+	if err := o.convergence.EvaluateAndCommit(ctx, run, divCtx, *convDef); err != nil {
 		return fmt.Errorf("evaluate and commit convergence: %w", err)
 	}
 	if o.bindingOn && run.BranchName != "" {

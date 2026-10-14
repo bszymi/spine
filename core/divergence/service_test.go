@@ -168,7 +168,7 @@ func TestCreateExploratoryBranch(t *testing.T) {
 	events := &fakeEventRouter{}
 	svc := divergence.NewService(fs, gitClient, events)
 
-	run := &domain.Run{RunID: "run-1"}
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
 	divDef := domain.DivergenceDefinition{
 		ID:   "div-1",
 		Mode: domain.DivergenceModeExploratory,
@@ -176,7 +176,7 @@ func TestCreateExploratoryBranch(t *testing.T) {
 
 	divCtx, _ := svc.StartDivergence(context.Background(), run, divDef, "")
 
-	branch, err := svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-1", "step-1")
+	branch, err := svc.CreateExploratoryBranch(context.Background(), run, divCtx, "variant-1", "step-1")
 	if err != nil {
 		t.Fatalf("create branch: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestCreateBranchOnStructuredFails(t *testing.T) {
 	events := &fakeEventRouter{}
 	svc := divergence.NewService(fs, gitClient, events)
 
-	run := &domain.Run{RunID: "run-1"}
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
 	divDef := domain.DivergenceDefinition{
 		ID:   "div-1",
 		Mode: domain.DivergenceModeStructured,
@@ -199,7 +199,7 @@ func TestCreateBranchOnStructuredFails(t *testing.T) {
 
 	divCtx, _ := svc.StartDivergence(context.Background(), run, divDef, "")
 
-	_, err := svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-1", "step-1")
+	_, err := svc.CreateExploratoryBranch(context.Background(), run, divCtx, "variant-1", "step-1")
 	if err == nil {
 		t.Error("expected error creating branch on structured divergence")
 	}
@@ -211,7 +211,7 @@ func TestCreateExploratoryBranchWindowClosed(t *testing.T) {
 	events := &fakeEventRouter{}
 	svc := divergence.NewService(fs, gitClient, events)
 
-	run := &domain.Run{RunID: "run-1"}
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
 	divDef := domain.DivergenceDefinition{
 		ID:   "div-1",
 		Mode: domain.DivergenceModeExploratory,
@@ -221,7 +221,7 @@ func TestCreateExploratoryBranchWindowClosed(t *testing.T) {
 	divCtx.DivergenceWindow = "closed"
 	fs.divContexts[divCtx.DivergenceID] = divCtx
 
-	_, err := svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-1", "step-1")
+	_, err := svc.CreateExploratoryBranch(context.Background(), run, divCtx, "variant-1", "step-1")
 	if err == nil {
 		t.Error("expected error creating branch with closed window")
 	}
@@ -255,7 +255,7 @@ func TestCreateExploratoryBranch_AutoClosesOnMax(t *testing.T) {
 	events := &fakeEventRouter{}
 	svc := divergence.NewService(fs, gitClient, events)
 
-	run := &domain.Run{RunID: "run-1"}
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
 	divDef := domain.DivergenceDefinition{
 		ID:          "div-1",
 		Mode:        domain.DivergenceModeExploratory,
@@ -265,7 +265,7 @@ func TestCreateExploratoryBranch_AutoClosesOnMax(t *testing.T) {
 	divCtx, _ := svc.StartDivergence(context.Background(), run, divDef, "")
 
 	// Create first branch — window should remain open.
-	_, err := svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-1", "step-1")
+	_, err := svc.CreateExploratoryBranch(context.Background(), run, divCtx, "variant-1", "step-1")
 	if err != nil {
 		t.Fatalf("create branch 1: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestCreateExploratoryBranch_AutoClosesOnMax(t *testing.T) {
 	}
 
 	// Create second branch — should auto-close window (max=2 reached).
-	_, err = svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-2", "step-2")
+	_, err = svc.CreateExploratoryBranch(context.Background(), run, divCtx, "variant-2", "step-2")
 	if err != nil {
 		t.Fatalf("create branch 2: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestCreateExploratoryBranch_AutoClosesOnMax(t *testing.T) {
 	}
 
 	// Third branch should be rejected.
-	_, err = svc.CreateExploratoryBranch(context.Background(), divCtx, "variant-3", "step-3")
+	_, err = svc.CreateExploratoryBranch(context.Background(), run, divCtx, "variant-3", "step-3")
 	if err == nil {
 		t.Error("expected error creating branch after window closed")
 	}

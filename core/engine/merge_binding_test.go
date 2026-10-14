@@ -464,7 +464,7 @@ func (c *headMovingConvergence) CheckEntryPolicy(context.Context, *domain.Diverg
 	return true, nil
 }
 
-func (c *headMovingConvergence) EvaluateAndCommit(context.Context, *domain.DivergenceContext, domain.ConvergenceDefinition) error {
+func (c *headMovingConvergence) EvaluateAndCommit(context.Context, *domain.Run, *domain.DivergenceContext, domain.ConvergenceDefinition) error {
 	c.g.setHead(c.branch, c.to)
 	return nil
 }
