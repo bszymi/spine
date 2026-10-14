@@ -102,9 +102,14 @@ This document tracks known gaps and deferred functionality.
     through the pack it sends. The review freeze is checked at the same moment, so a push started
     before the step was submitted can still land during review. Binding the governed merge to the
     reviewed commit (INIT-023 TASK-005; always on in `spine serve`) is the content control for that
-    window: a push that lands after the step's submit bound the head is not merged, and an approval
-    of a branch that moved since is refused (`409 run_branch_moved_since_gate`); an embedder that
-    does not enable merge binding keeps the gap. A real bound needs `git-http-backend`
+    window: a push that lands after the step's submit bound the head is not merged unless a later
+    producer step binds it — an `automated` step (a validate or summarize) re-binds to whatever head
+    it completes at unless its submitter sends `expected_head_sha` ("Governed Merge Binding" 2; the
+    shipped `artifact-creation`, `adr-creation`, `document-creation` and `task-spike` workflows have
+    such a step before their review, and no Spine client sends the assertion yet) — and an approval
+    of a branch that moved since the previous binding is refused
+    (`409 run_branch_moved_since_gate`); an embedder that does not enable merge binding keeps the
+    gap. A real bound needs `git-http-backend`
     run in its own process group under a deadline (a deadline would also cut legitimate large
     pushes and clones, which today outlive `OpTimeout`), or a post-unpack re-check; both are
     INIT-023 EPIC-001 follow-ups.

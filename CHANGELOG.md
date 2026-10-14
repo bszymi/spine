@@ -485,10 +485,15 @@ previous build). Externally visible:
 - **UX change: a commit made during a review can no longer be approved in the same review.** A
   commit that reaches the run branch while a review is open makes the approval answer
   `409 run_branch_moved_since_gate`; the reviewer must choose a rework outcome so the change is
-  validated again. In `spine serve` such a commit can only be an operator's push or a push started
-  before the review that lands during it: API writes (`/artifacts/add`, `write_context`) are
-  refused during a `review` step for every role (INIT-023 TASK-014) and pushes for non-operators
-  (TASK-016), so a reviewer's fix-up goes through a rework round, not the open review.
+  validated again. In `spine serve` such a commit can only be an operator's push, a push started
+  before the review that lands during it, or an API write (`/artifacts/add`, `write_context`)
+  authorized during the step before the review that lands after that step's submit (the gateway
+  reads the run once before the write; `service/internal/gateway/run_branch_write.go`): API writes
+  are refused during a `review` step for every role (INIT-023 TASK-014) and pushes for
+  non-operators (TASK-016), so a reviewer's fix-up goes through a rework round, not the open
+  review. A commit that lands after a producer's submit is merged when a later producer step — an
+  `automated` validate or summarize, which re-binds to the head it completes at — completes after
+  it without `expected_head_sha` (KNOWN-LIMITATIONS "Governed Merge Binding" 2).
 - **Runs in flight at upgrade** that reach the merge without a binding fail closed (publish
   workflows route back to `execute` and re-bind on the next round).
 - **The status cascade commit is no longer on the run branch**; it reaches `main` only through the
