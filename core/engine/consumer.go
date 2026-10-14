@@ -139,6 +139,17 @@ func (c *Consumer) executeAndSubmit(ctx context.Context, log *slog.Logger, req a
 			// execution that moved — released, rebound — keeps the error:
 			// the result was not applied.
 			if cur, rerr := c.orchestrator.store.GetStepExecution(ctx, req.AssignmentID); rerr == nil && cur.Status.IsTerminal() {
+				// A completed execution whose routing never finished (a
+				// redelivery after the first submit completed it and then
+				// failed to create the next execution) is routed now (codex
+				// review, round 4); RecoverCompletedStep refuses — a
+				// conflict, nothing changed — when it was routed.
+				if cur.Status == domain.StepStatusCompleted {
+					if rerr := c.orchestrator.RecoverCompletedStep(ctx, req.AssignmentID); rerr != nil && !isConflict(rerr) {
+						log.Error("completed step could not be recovered", "error", rerr)
+						return fmt.Errorf("recover completed step: %w", rerr)
+					}
+				}
 				log.Info("step result not applied; the execution was resolved concurrently",
 					"status", cur.Status, "error", err)
 				return nil
@@ -150,6 +161,12 @@ func (c *Consumer) executeAndSubmit(ctx context.Context, log *slog.Logger, req a
 
 	log.Info("assignment completed", "outcome_id", result.OutcomeID)
 	return nil
+}
+
+// isConflict reports whether err is a domain ErrConflict.
+func isConflict(err error) bool {
+	var se *domain.SpineError
+	return errors.As(err, &se) && se.Code == domain.ErrConflict
 }
 
 // findProvider returns the first provider that can handle the given step type.

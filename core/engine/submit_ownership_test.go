@@ -145,10 +145,12 @@ func TestSubmitOwnership_TerminalParityAndReread(t *testing.T) {
 	t.Run("(c) the consumer maps an already-resolved step to nil", func(t *testing.T) {
 		f := newCasFix(t, casWorkflow(), false)
 		e := f.addExec("execute", domain.StepStatusCompleted, "actor-a")
+		f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+		f.addExec("review", domain.StepStatusWaiting, "") // routed
 		c := NewConsumer(nil, f.orch)
 		req := actor.AssignmentRequest{AssignmentID: e.ExecutionID, RunID: f.runID, StepID: "execute", ActorID: "actor-a"}
 		if err := c.executeAndSubmit(ctx, discardLogger(), req, staticProvider{outcome: "completed"}); err != nil {
-			t.Fatalf("redelivered assignment for a completed step = %v, want nil", err)
+			t.Fatalf("redelivered assignment for a completed, routed step = %v, want nil", err)
 		}
 	})
 }

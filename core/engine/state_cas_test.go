@@ -709,6 +709,41 @@ func TestSubmit_ConcurrentAcknowledgeIsNotAConflict(t *testing.T) {
 	})
 }
 
+// Codex review, round 4: a redelivered assignment for a step its first
+// submit completed but whose routing failed finishes the routing (through
+// RecoverCompletedStep) instead of being acknowledged with the run
+// stranded; a redelivery for a step that was routed changes nothing.
+// Mutation: dropping the RecoverCompletedStep call fails the first case.
+func TestConsumer_RedeliveryFinishesIncompleteRouting(t *testing.T) {
+	req := func(f *casFix, id string) actor.AssignmentRequest {
+		return actor.AssignmentRequest{AssignmentID: id, RunID: f.runID, StepID: "execute", ActorID: "actor-a"}
+	}
+	t.Run("routing never ran", func(t *testing.T) {
+		f := newCasFix(t, casWorkflow(), true)
+		e := f.addExec("execute", domain.StepStatusCompleted, "actor-a")
+		f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+		if err := NewConsumer(nil, f.orch).executeAndSubmit(context.Background(), discardLogger(), req(f, e.ExecutionID), staticProvider{outcome: "completed"}); err != nil {
+			t.Fatalf("redelivery: %v", err)
+		}
+		if f.st.exec(f.runID+"-review-1") == nil || f.st.run(f.runID).CurrentStepID != "review" {
+			t.Fatal("the completed step's routing was not finished")
+		}
+	})
+	t.Run("already routed", func(t *testing.T) {
+		f := newCasFix(t, casWorkflow(), true)
+		e := f.addExec("execute", domain.StepStatusCompleted, "actor-a")
+		f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+		f.addExec("review", domain.StepStatusWaiting, "") // routed: the cursor is at review
+		before := len(f.st.steps)
+		if err := NewConsumer(nil, f.orch).executeAndSubmit(context.Background(), discardLogger(), req(f, e.ExecutionID), staticProvider{outcome: "completed"}); err != nil {
+			t.Fatalf("redelivery: %v", err)
+		}
+		if len(f.st.steps) != before {
+			t.Fatal("a routed step was routed again")
+		}
+	})
+}
+
 // failingCancelAssignments fails every UpdateAssignmentStatus.
 type failingCancelAssignments struct{ *memAssignmentStore }
 
