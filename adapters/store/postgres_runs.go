@@ -137,6 +137,26 @@ func (s *PostgresStore) UpdateRunStatusAt(ctx context.Context, runID string, sta
 	return mustAffect(tag, "run not found")
 }
 
+// TransitionRunStatusAt is UpdateRunStatusAt made conditional on the run
+// still being in fromStatus (INIT-023 TASK-008): the same column logic,
+// including the caller-supplied completed_at that keeps the scheduler's
+// injected-clock seam (RunStore.UpdateRunStatusAt), plus AND status = $4.
+// (false, nil) when the run is missing or has moved on; the scheduler's
+// run-timeout cancel uses it so a run that progressed between its re-read
+// and this write (committing, completed, cancelled) is not overwritten.
+func (s *PostgresStore) TransitionRunStatusAt(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus, completedAt time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.runs
+		SET status = $1,
+			started_at = CASE WHEN $1 = 'active' AND started_at IS NULL THEN now() ELSE started_at END,
+			completed_at = CASE WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN $3 ELSE completed_at END
+		WHERE run_id = $2 AND status = $4`, toStatus, runID, completedAt, fromStatus)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (s *PostgresStore) TransitionRunStatus(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE runtime.runs
