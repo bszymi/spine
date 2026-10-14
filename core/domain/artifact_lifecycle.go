@@ -247,3 +247,34 @@ func sortedStatuses(set map[ArtifactStatus]bool) []ArtifactStatus {
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
+
+// WithoutTransition returns a copy of l without the edge from -> to of
+// type t (l itself is unchanged). It exists for compatibility gates that
+// prove a shipped workflow depends on a particular edge (TASK-017 AC 2):
+// the gate must fail against the table minus that edge. A nil l returns
+// nil.
+func (l *StatusLifecycle) WithoutTransition(t ArtifactType, from, to ArtifactStatus) *StatusLifecycle {
+	if l == nil {
+		return nil
+	}
+	out := &StatusLifecycle{types: make(map[ArtifactType]typeLifecycle, len(l.types))}
+	for typ, tl := range l.types {
+		cp := typeLifecycle{
+			states:  tl.states,
+			initial: tl.initial,
+			edges:   make(map[ArtifactStatus]map[ArtifactStatus]bool, len(tl.edges)),
+		}
+		for f, tos := range tl.edges {
+			m := make(map[ArtifactStatus]bool, len(tos))
+			for to2 := range tos {
+				if typ == t && f == from && to2 == to {
+					continue
+				}
+				m[to2] = true
+			}
+			cp.edges[f] = m
+		}
+		out.types[typ] = cp
+	}
+	return out
+}

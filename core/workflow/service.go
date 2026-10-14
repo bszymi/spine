@@ -68,6 +68,10 @@ type Service struct {
 	repo       string
 	policy     branchprotect.Policy // nil = no evaluation, no bypass role check (pre-TASK-014)
 	defaultRef string               // branch reported to the policy when no WriteContext branch is set
+	// lifecycle, when set, refuses a body whose commit.status is not a
+	// declared status of its applies_to types (INIT-023 TASK-017). nil =
+	// no check (the pre-TASK-017 behaviour).
+	lifecycle *domain.StatusLifecycle
 }
 
 // NewService constructs a workflow Service with no branch-protection policy
@@ -91,6 +95,18 @@ func (s *Service) WithDefaultRef(ref string) {
 	if ref != "" {
 		s.defaultRef = ref
 	}
+}
+
+// WithStatusLifecycle installs the declared artifact-status lifecycle
+// (INIT-023 TASK-017, audit P3-21): Create and Update then refuse, before
+// anything is written, a body whose commit.status is not a declared status
+// of every applies_to type (ValidateCommitStatuses), and ValidateBody
+// reports the same errors. nil (the default) turns the check off. The
+// check is deliberately not part of Validate, the projection or the
+// loaders (see ValidateCommitStatuses). Like the other With* setters it is
+// a setup-time call.
+func (s *Service) WithStatusLifecycle(l *domain.StatusLifecycle) {
+	s.lifecycle = l
 }
 
 // enterBranch prepares an isolated working directory when a WriteContext
@@ -181,6 +197,13 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 	if result := Validate(wf); result.Status == "failed" {
 		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
 			"workflow validation failed", result.Errors)
+	}
+	// Declared commit.status (INIT-023 TASK-017): refused before the
+	// branch-protection check and enterBranch, so nothing is written or
+	// committed.
+	if errs := ValidateCommitStatuses(wf, s.lifecycle); len(errs) > 0 {
+		return nil, domain.NewErrorWithDetail(domain.ErrValidationFailed,
+			"workflow validation failed", errs)
 	}
 
 	// workflows/<id>.yaml is already constrained by idPattern; Clean adds
@@ -411,7 +434,14 @@ func (s *Service) ValidateBody(ctx context.Context, id, body string) domain.Vali
 			}},
 		}
 	}
-	return Validate(wf)
+	result := Validate(wf)
+	// The same commit.status errors Create/Update refuse with (INIT-023
+	// TASK-017), so the validate preview matches create.
+	if errs := ValidateCommitStatuses(wf, s.lifecycle); len(errs) > 0 {
+		result.Errors = append(result.Errors, errs...)
+		result.Status = "failed"
+	}
+	return result
 }
 
 // ProjectionRoundTripRuleID is the validation rule id ValidateBody reports

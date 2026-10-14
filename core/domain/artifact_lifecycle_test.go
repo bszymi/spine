@@ -275,3 +275,21 @@ func TestDefaultStatusLifecycle_Prohibited(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusLifecycle_WithoutTransition(t *testing.T) {
+	l := domain.DefaultStatusLifecycle()
+	m := l.WithoutTransition(domain.ArtifactTypeTask, pending, inProg)
+	if m.Allows(domain.ArtifactTypeTask, pending, inProg) {
+		t.Fatal("the removed edge is still allowed")
+	}
+	if !l.Allows(domain.ArtifactTypeTask, pending, inProg) {
+		t.Fatal("WithoutTransition changed the original")
+	}
+	if !m.Allows(domain.ArtifactTypeTask, pending, done) || !m.Allows(domain.ArtifactTypeEpic, pending, inProg) ||
+		!m.IsState(domain.ArtifactTypeTask, inProg) {
+		t.Fatal("WithoutTransition removed more than one edge")
+	}
+	if got, want := len(m.Transitions(domain.ArtifactTypeTask)), len(l.Transitions(domain.ArtifactTypeTask))-1; got != want {
+		t.Fatalf("Task edges = %d, want %d", got, want)
+	}
+}
