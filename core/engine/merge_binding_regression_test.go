@@ -71,9 +71,9 @@ func (s *outcomeStore) ListRepositoryMergeOutcomes(_ context.Context, runID stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []domain.RepositoryMergeOutcome
-	for _, o := range s.outcomes {
-		if o.RunID == runID {
-			out = append(out, o)
+	for k := range s.outcomes {
+		if s.outcomes[k].RunID == runID {
+			out = append(out, s.outcomes[k])
 		}
 	}
 	return out, nil

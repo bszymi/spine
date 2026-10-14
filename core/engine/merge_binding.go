@@ -491,8 +491,8 @@ func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder
 	if !isBoundObjectID(m) {
 		return fmt.Errorf("merge reported no result commit")
 	}
-	switch {
-	case m == base:
+	switch m {
+	case base:
 		in, err := binder.IsAncestor(ctx, src.sha, base)
 		if err != nil {
 			return fmt.Errorf("check the bound commit is in the base: %w", err)
@@ -500,7 +500,7 @@ func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder
 		if !in {
 			return fmt.Errorf("merge result %s is the base, which does not contain the bound commit %s", m, src.sha)
 		}
-	case m == src.sha:
+	case src.sha:
 		in, err := binder.IsAncestor(ctx, base, src.sha)
 		if err != nil {
 			return fmt.Errorf("check the fast-forward from the base: %w", err)
