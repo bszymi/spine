@@ -430,6 +430,61 @@ merge publishes the commit the run's steps validated and reviewed, never the run
   from a first rebuild still running on another instance; run `POST /api/v1/system/rebuild`. A first
   rebuild that *fails* records `error` and is retried by the next sync.
 
+### Artifact Status Lifecycle: What INIT-023 TASK-017 Leaves Open
+
+The governed merge judges artifact-status changes against the declared lifecycle
+(`architecture/engine-state-machine.md` §5A). What it does not cover:
+
+- **Embedders get it only by opting in.** `Orchestrator.WithStatusLifecycle`,
+  `workflow.Service.WithStatusLifecycle` and `validation.WithBlockingStatusConflicts` are off by
+  default; `spine serve` turns all three on. SMP adopts them in SMP INIT-027 EPIC-004 TASK-011.
+- **Direct authoritative writes are not lifecycle-checked**: artifact API create/update on `main`
+  and the task governance actions (`handlers_tasks.go`), which are operator-authority paths behind
+  branch protection. Their status rewrite uses the same byte-preserving regex as the cascade and
+  does not re-parse its result (follow-up).
+- **Deleting an artifact the run added on the same branch is not checked** (it never existed on
+  `main`), and that includes a planning run's own additions. Deleting the run's TaskPath, and any
+  artifact the run does not own, is refused.
+- **Undeclared statuses already on `main`** (`Architecture: Active`, `Product: Draft for Review`,
+  `ADR: Superseded by ADR-027` exist in real repositories; `artifact.Parse` never checked status
+  values) are kept as they are: a body edit merges (raw comparison), a run that *normalises* one
+  it does not own is refused `non_owned_status_change`, and a run that owns one is refused
+  `undeclared_status`. Normalising needs a direct authoritative write.
+- **The status-conflict merge gate reads the projection**, so it can lag `main` by one sync
+  (standalone polls every 30 s). Within that window an epic completion can be refused
+  `status_conflict` although `main` is consistent; an `epic-lifecycle` run has no publish step, so
+  such a refusal fails the run and the author starts a new one. Children the same run adds are
+  invisible to the gate, so an `epic-lifecycle` run that also adds a `Pending` task under the epic
+  completes it (SC-002 after the fact). Evaluating the rules from the bound tree needs a listing
+  port on `GitOperator` (follow-up).
+- **A violation the author cannot fix on the branch loops in a publish-step workflow.** When the
+  workflow's own target is illegal from `main`'s state (for example `task-default` started on a
+  task that is `Completed` on `main`) or the merge-base status is undeclared, every attempt routes
+  back to `execute` (owner question 10, default). The step classification and the outcome detail
+  name the cause.
+- **Link edits that change blocking are not status changes.** A run can still edit a non-owned
+  task's `blocked_by` links, which un-blocks or re-blocks it with no status transition; the
+  reviewer sees the edit (follow-up).
+- **Artifact `id`s are not unique by construction.** A run can add a new path carrying an existing
+  `id` with an initial status; the projection is keyed by path (follow-up with the ID-allocation
+  work).
+- **Exotic but valid status encodings on an owned artifact are refused** (`status_rewrite_failed`):
+  a quoted key, `status : X`, a complex key, a continuation line, or an empty value followed by
+  another key. The byte-preserving writer cannot rewrite them; the author writes a plain
+  `status: X` line. A YAML-node writer would lift this (follow-up).
+- **An unreadable Markdown file in a run's diff refuses the merge** (`unreadable_artifact`): a
+  `.md` inside the artifact scope over the read limit (4 MiB), a non-blob entry at an artifact path,
+  or a listed path that does not read. This is permanent by design — a retry could never succeed.
+- **A gitlink whose recorded id names a blob in the repository is read as that blob**, exactly as
+  the projection reads it (see "Projection Sync" above); replacing an artifact with such a gitlink
+  of the same content is therefore not a removal to either.
+- **The merge-result check runs after the code repositories merged** (code-repository-first
+  ordering) and after the local merge, like TASK-005's structural check: a refused merge is taken
+  back off the local `main` and never pushed, but with auto-push off the local `main` briefly held
+  it (TASK-005 / TASK-012).
+- **Runs in flight at the upgrade** whose branch carries status edits on artifacts they do not own
+  are refused at the merge; a publish-step workflow routes them back to `execute`.
+
 ## Resolved (Previously Listed)
 
 The following limitations have been resolved:

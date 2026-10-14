@@ -216,6 +216,16 @@ Each governed operation produces exactly one Git commit:
 
 Multiple file changes within a single operation are grouped into a single commit. Operations must not produce partial commits — if any file in the operation fails validation, the entire commit is aborted.
 
+**The merge-time status cascade (INIT-023 TASK-017).** A `commit.status` effect is applied at the
+governed merge as one cascade commit. Without the declared status lifecycle it rewrites the run's
+TaskPath and every Markdown artifact the run branch added. With the lifecycle on
+(`Orchestrator.WithStatusLifecycle`, on in `spine serve`), it touches only artifacts the run
+**owns** — its TaskPath, plus the artifacts a planning run adds — and only after the whole bound
+diff has been judged: a status change on any other artifact, an undeclared transition, or a
+rewrite that does not re-parse to the judged status refuses the merge before any commit is made
+and before any ref advances, and the merge result is re-checked before it is pushed
+([Engine State Machine](/architecture/engine-state-machine.md) §5A).
+
 ### 5.5 Operational vs Governed Commits
 
 Spine distinguishes between two categories of commits:

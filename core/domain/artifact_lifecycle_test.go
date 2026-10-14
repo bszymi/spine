@@ -3,7 +3,10 @@ package domain_test
 // INIT-023 TASK-017 AC 1: the declared artifact-status lifecycle table.
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/core/domain"
@@ -291,5 +294,50 @@ func TestStatusLifecycle_WithoutTransition(t *testing.T) {
 	}
 	if got, want := len(m.Transitions(domain.ArtifactTypeTask)), len(l.Transitions(domain.ArtifactTypeTask))-1; got != want {
 		t.Fatalf("Task edges = %d, want %d", got, want)
+	}
+}
+
+// TestStatusLifecycleDocTable pins the table in
+// architecture/engine-state-machine.md §5A to DefaultStatusLifecycle
+// (TASK-017 AC 16): a table edit must change the doc, and the doc cannot
+// drift.
+func TestStatusLifecycleDocTable(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "architecture", "engine-state-machine.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	begin := strings.Index(doc, "<!-- status-lifecycle-table:begin")
+	end := strings.Index(doc, "<!-- status-lifecycle-table:end -->")
+	if begin < 0 || end < begin {
+		t.Fatal("status-lifecycle table markers not found")
+	}
+	got := map[string][2]string{}
+	for _, line := range strings.Split(doc[begin:end], "\n") {
+		if !strings.HasPrefix(line, "| ") || strings.HasPrefix(line, "| Type ") {
+			continue
+		}
+		cells := strings.Split(strings.Trim(line, "| "), " | ")
+		if len(cells) != 3 {
+			t.Fatalf("malformed row %q", line)
+		}
+		got[cells[0]] = [2]string{cells[1], cells[2]}
+	}
+	l := domain.DefaultStatusLifecycle()
+	if len(got) != len(l.Types()) {
+		t.Fatalf("doc rows %v, want one per type %v", got, l.Types())
+	}
+	for _, typ := range l.Types() {
+		var initial, edges []string
+		for _, s := range l.Initial(typ) {
+			initial = append(initial, string(s))
+		}
+		for _, e := range l.Transitions(typ) {
+			edges = append(edges, string(e.From)+" → "+string(e.To))
+		}
+		want := [2]string{strings.Join(initial, ", "), strings.Join(edges, ", ")}
+		if got[string(typ)] != want {
+			t.Errorf("%s: doc row %q, want %q", typ, got[string(typ)], want)
+		}
 	}
 }

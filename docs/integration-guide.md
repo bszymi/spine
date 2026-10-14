@@ -865,3 +865,33 @@ embedder opts in.
    `engine.ReasonRunBranchMovedSinceGate`, …) to your own error codes.
 5. **Read the binding for display** from `runs.commit_meta` (`engine.CommitMetaBoundSHA`,
    `engine.CommitMetaBoundBy`). Only the engine writes these keys; workflow outcomes cannot.
+
+## 10. Embedding: The Declared Artifact-Status Lifecycle
+
+INIT-023 TASK-017 (audit P3-21). The governed merge can judge every artifact-status change a run
+branch carries against a declared lifecycle (`architecture/engine-state-machine.md` §5A). It is
+off for embedders until they opt in; `spine serve` turns it on. Three independent options:
+
+1. **The merge:** `orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())`. It needs merge
+   binding (§9) — with binding off every merge is refused with `ErrUnavailable` — and, when the
+   artifact service is configured with an `artifacts_dir`, `orch.WithArtifactsDir(dir)` with the
+   same value (TaskPaths are artifact-relative; diffs are repository-relative). A refusal is a
+   failed primary merge outcome of class `precondition` whose detail starts
+   `status_lifecycle_violation:`, and the last completed step's `error_detail.classification` is
+   `status_lifecycle_violation`.
+2. **Workflow writes:** `workflowSvc.WithStatusLifecycle(domain.DefaultStatusLifecycle())`. Create
+   and Update then refuse a body whose `commit.status` is not a declared status of its
+   `applies_to` types, and `ValidateBody` reports it (`rule_id: commit_status`). An embedder with
+   its own validate preview appends `workflow.ValidateCommitStatuses(wf, lifecycle)` so the preview
+   matches create.
+3. **Blocking status conflicts:**
+   `validation.NewEngine(st, validation.WithBlockingStatusConflicts(validation.DefaultBlockingStatusConflicts...))`.
+   `*validation.Engine` implements the optional `engine.StatusChangeValidator`, so an orchestrator
+   whose validator is that engine (or embeds it) also checks an owned status transition against
+   the blocking rules at the merge.
+
+Before turning the merge option on, check that every workflow's merge-time transition is in the
+table (`core/workflow/commit_status_compat_test.go` is Spine's gate; SMP's `task-default` relies on
+Task `Pending → In Progress`). A planning run's additions are stamped with the outcome's status; a
+standard run's additions keep their authored status, which must be an initial status of their
+type.
