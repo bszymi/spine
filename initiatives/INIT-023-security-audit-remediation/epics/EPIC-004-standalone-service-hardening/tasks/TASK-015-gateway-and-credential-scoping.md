@@ -2,12 +2,12 @@
 id: TASK-015
 type: Task
 title: "SSE field safety, shared-mode tenant scoping, git-endpoint auth and gitpool token-host scoping"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-14
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone-service-hardening/epic.md
@@ -1274,3 +1274,356 @@ trust for runners behind a proxy) and 7 (identifier strictness), plus notes on O
 residual).
 
 ## Implementation Notes
+
+*(Implementation, 2026-10-08 to 2026-10-14. Branch `init/INIT-023-TASK-015-gateway-and-credential-scoping`,
+cut from Spine local `main` `d23b897` (`61994fe` + the INIT-023 scaffold + waves 1 and 2, including
+TASK-016's `core/refadmit` admission and TASK-011's `workflow.ProjectionDefinition`). The
+orchestrator named the branch. macOS (APFS), git 2.54.0 (Apple), go 1.26.5, PostgreSQL 17.10; Linux
+checks in the local `golang:1.26-bookworm` image (git 2.39.5). The design's line numbers were
+re-located on `d23b897`.)*
+
+### Orchestrator rulings (recorded as defaults, pending the owner, except OQ2)
+
+| Question | Ruling | Where |
+|---|---|---|
+| OQ1 `SPINE_GIT_HTTP_DEV_NO_AUTH` strictness | Default: accepted only with `SPINE_ENV=development`; startup fails otherwise, including unset | `guardGitHTTPDevNoAuth`, `serveCmd` |
+| **OQ2** credential-less code repo on the primary's own host | **"Never" — an orchestrator ruling and a deviation from the design default ("yes, exact host and port"); recorded for the owner.** A code repo with no `credentials_ref` never uses the process push token or the process credential helper, on any host: no `WithProcessAuthHosts`, no `Credential.InheritProcessAuth`, no origin reads. Code repos are not wired in `spine serve` today, so nothing working is lost | `gitpool.NewCLIClientFactory`, `cliCloner.Clone` |
+| OQ3 tenant view of `/system/metrics` (shared mode) | Default: only the caller's `spine_workspace_pool_*` series; the full export at `GET /api/v1/platform/metrics` behind `SPINE_OPERATOR_TOKEN` | `handleMetrics`, `handlePlatformMetrics` |
+| OQ4 compose token-less clones | Default: dropped (the `/16` line removed); the override example documents runner-only recipes | `docker-compose.yaml`, `docker-compose.override.yaml.example` |
+| OQ5 `SPINE_DEV_MODE` to development-only | Default: unchanged | — |
+| OQ6 runner behind a proxy trusted by `X-Forwarded-For` | Default: no — a proxied request always needs a token | `gitPeerIP` |
+| OQ7 workflow identifier strictness | Default: `^[a-z0-9][a-z0-9_-]{0,63}$`, in `service/` only, so SMP's workflows are unaffected | `workflowIdentifierPattern` |
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `2f3f22a` | P3-28 writer: `sseFieldSafe` (C0, DEL, invalid UTF-8, U+0085/U+2028/U+2029), `formatSSEEvent` (unsafe `id:`/`event:` omitted, one `data:` line per line, JSON escapes for the three separators, one `Write`), `warnUnsafeSSEFields` on the live and replay loops. AC 1, 2, 19 |
+| `48e2036` | P3-28 gateway rule: `workflowIdentifierPattern`, `workflowIdentifierErrors` / `checkWorkflowIdentifiers` (decoded with TASK-011's `workflow.ProjectionDefinition`), wired into create (before the planning dispatch), update and validate; `architecture/workflow-definition-format.md` §3.6 and `api/spec.yaml`. AC 3 + guards |
+| `0045987` | P3-29: `observe.ExportPrometheusWorkspace` (additive; `writePoolMetrics` gains a nil-means-all filter), `handleMetrics` scoped when a `ServicePool` is wired, `GET /api/v1/platform/metrics` in the operator-token group, `rebuildRegistryKey`, `sseLimiterKey`. AC 5, 6, 7 |
+| `dbcb2ba` | P3-30: `gitPeerIP` (the design-check gate), `forwardingHeadersPresent`, the rate-limited `warnProxiedTrustedGitPeer`, `gitDevNoAuth` / `ServerConfig.GitHTTPDevNoAuth`, `forwardedHops` in the rate limiter; `gitHTTPDevNoAuthEnabled`, `guardGitHTTPDevNoAuth`, `overlappingCIDRs`, the serve wiring and startup Warns; the five `handleGit` unit tests migrated; a `core/refadmit` comment. AC 8, 9, 10, 20 |
+| `a5da4db` | AC 23: scenario migration (`mintPushToken`, `bearerPushCmd`; the anonymous reserved-ref scenario asserts 401) and the two clone scenarios moved to `GitHTTPDevNoAuth` |
+| `c646048` | Latent gitpool item under the OQ2 "never" ruling: `git.WithoutPushToken()` (additive); the cloner and factory strip the process token and helper for an empty `Credential`; the contract and wiring comments corrected. AC 11, 12, 21, 22 |
+| `f454258` | `RedactCloneURL` removes all `https` userinfo. AC 14; `api-operations.md`, `operator-runbook.md` |
+| `75ede23` | Compose default, override recipes, `.env.example`, integration guide §3/§6.2/§7/env table, README, git push guide, security model, KNOWN-LIMITATIONS, CHANGELOG |
+| `404d9d1`, `0129a08` | Test hygiene: a locked log buffer (race-safe under `slog.SetDefault`), and the 13 gocritic findings on the new tests |
+| `1686f18` | Codex P2: a malformed or opaque `clone_url` never echoes anything before its last `@` |
+| `5b274f5` | Codex P1: `git.WithoutAmbientCredentials()` (additive, opt-in); gitpool's "no auth" path no longer lets a host-level helper or askpass answer |
+| `2070df7` | Codex round 2 P1: the same option drops the process SSH identity (agent, keys, ssh_config) for `ssh://` and SCP remotes |
+| `95f8fc1` | Codex round 3 P2: the same option reads no system or global git config and no environment-injected config (`http.extraHeader`, URL-scoped entries) |
+
+No migration, schema, table, column, event type, webhook payload or `rebuild_id` format change
+(§7). One new route (`GET /api/v1/platform/metrics`) and one new environment variable
+(`SPINE_GIT_HTTP_DEV_NO_AUTH`). No interface changed: `GitClient`, `engine.GitOperator` and the
+gitpool `ClientFactory` / `Cloner` signatures are as before.
+
+### Per-AC evidence
+
+"Fails at the merge base" means: the test file run with `go test -overlay` replacing the fixed
+production file(s) with `main`'s (`d23b897`), plus a one-line shim where a test calls a new helper
+(for example `sseLimiterKey` returning the bare actor ID, `gitPeerIP` returning `RemoteAddr` — the
+merge base's behaviour).
+
+1. **SSE injection, live and replay.** `TestP328_SSE_WorkflowIdentifierCannotInjectFrames` and
+   `TestP328_SSE_ReplayCannotInjectFrames` (`service/internal/gateway/sse_frame_injection_test.go`)
+   build the engine's `evt-<trace>-<step>-completed` ID from the PoC step ID and drive the real
+   router and broadcaster (live) and the fake event log (replay), with LF, CR and CRLF variants and a
+   WHATWG parser. Exactly the two events dispatch, the JSON carries the true `event_id`, the client's
+   last ID is never `x-completed` and never holds CR/LF, and the safe sentinel sets its ID. The live
+   test waits for a probe event instead of sleeping. At the merge base both fail with the audit's
+   reproduction: 3 events, a forged `message` with `{"type":"run_completed"}`, last ID `x-completed`.
+2. **Frame contract.** `TestP328_FormatSSEEvent`: safe frames byte-identical to the old `Fprintf`
+   format (three shapes, one with non-ASCII data); LF, CR, CRLF, NUL, TAB, DEL, U+0085, U+2028,
+   U+2029 and invalid UTF-8 in the ID omitted; unsafe types omitted; multi-line data split; a
+   non-ASCII ID kept. `TestP328_SSEFieldSafe` pins the predicate.
+3. **Gateway identifier rule.** `TestP328_WorkflowCreate_OperatorDirectCommit_RefusesUnsafeStepID`,
+   `…_ReviewerPlanningRun_RefusesUnsafeStepID`, `TestP328_WorkflowUpdate_RefusesUnsafeStepID`
+   (`422`, service and planning starter not called) and `TestP328_WorkflowValidate_ReportsUnsafeIdentifiers`
+   (`failed` with the divergence, branch and convergence fields, and POST refusing the same three).
+   At the merge base: 201 / 201 / 200 / `passed`. Guards: `TestP328_ShippedWorkflowsConform` (all 8
+   shipped workflows get 201) and `TestP328_ShippedWorkflowIdentifiersChecked` (each decodes through
+   the check's decoder, so the guard is not vacuous). Extra: `TestP328_WorkflowIdentifierPattern`,
+   `TestP328_WorkflowIdentifierErrorEchoBounded`, `TestP328_WorkflowCreate_UnparsableBodyLeftToService`.
+   SMP's 7 workflows were probed once with the same functions (overlay, not committed): all conform.
+4. **Core unchanged.** The audit PoC `TestPoC_StepIDWithNewlineAccepted`, overlaid on `core/workflow`
+   at the branch head, passes: core still accepts the ID; AC 3 shows the gateway refusing it.
+5. **Metrics.** `TestP329_Metrics_SharedModeShowsOnlyCallerWorkspace` (own series, no `ws-b`, no
+   `spine_runs_started_total`; no workspace → 400, never the full export), guard
+   `TestP329_Metrics_SingleModeUnchanged` (with and without a file-mode workspace config, byte-equal
+   to `ExportPrometheus()`, retried until the global metrics are quiescent),
+   `TestP329_PlatformMetrics_OperatorTokenOnly` (200 with the token and `ws-b` in the body; 401 for a
+   wrong or missing token; 503 when unset). `core/observe` `TestExportPrometheusWorkspace` covers
+   gauges, counters and close reasons. At the merge base the first fails (both leaks, and 200 without
+   a workspace) and the platform test gets 404.
+6. **Rebuild registry.** `TestP329_Rebuild_RegistryScopedToWorkspace`: the same `X-Trace-Id` in both
+   tenants gives `rb-deadbeef`; B reads A's ID → 404; B starting its rebuild leaves A's `started_at`;
+   each reads its own. Merge base: 200.
+7. **SSE limiter.** `TestP329_SSELimiter_KeyedPerWorkspace` through `handleEventStream`, cap 1,
+   waiting on the limiter's own count instead of sleeping: B's `smp-admin` gets a stream, a second
+   stream in A gets 429. `TestP329_SSELimiterKey` pins the key (an empty actor ID stays empty, so the
+   limiter's "no limit" case is unchanged). Merge base: B gets 429.
+8. **Real peer** (real `git-http-backend`, bare repository, `git_endpoint_auth_internal_test.go`).
+   `TestP330_ProxyAddressIsNeverATrustedGitPeer` (git CIDR `172.28.0.0/16`, proxy `172.28.0.1/32`):
+   all five cases 401; merge base 200 for all five. `TestP330_ProxiedRequestIsNeverTokenless`
+   (amended AC 8: proxy `10.0.0.0/8`, peer `10.0.0.2`): `X-Forwarded-For`, `Forwarded` and
+   `X-Real-IP` naming `172.28.0.5` all 401 (the merge base also answers 401 here — the proxy address
+   is outside the git CIDR — so this test targets the original prototype; its mutation is below).
+   Guard `TestP330_DirectRunnerStillTrusted` (direct `172.28.0.5` 200, outsider 401, and an IPv6
+   direct peer 200). `TestP330_GitPeerIP` pins each rule, including a non-canonical header key.
+9. **Rate-limit XFF.** `TestP330_RateLimitClientIP_ReadsAllForwardedLines`: two lines bucket on
+   `203.0.113.9`, not the forged `1.2.3.4` (the merge base buckets on `1.2.3.4`); no header, an
+   all-proxy chain, an empty line and an untrusted peer still fall back to `RemoteAddr`.
+10. **Dev mode and the dev flag.** `TestP330_DevModeNoLongerDropsGitAuth` (`devMode=true`:
+    token-less clone, push advertisement and `POST git-receive-pack` all 401; merge base 200/200/200)
+    and `TestP330_GitDevNoAuth_ReadsOnly` (clone 200, push advertisement and push 401, a bearer push
+    advertisement 200). `service/cmd/spine/git_dev_no_auth_test.go`: `TestP330_GuardGitHTTPDevNoAuth`
+    (only `development`; `""`, `staging`, `production` refused; the error names the flag and the
+    remedy), `TestP330_GitHTTPDevNoAuthEnabled`, `TestP330_OverlappingCIDRs`,
+    `TestP330_BuildServerConfigWiresGitDevNoAuth`, and `TestP330_ServeRefusesGitDevNoAuthOutsideDevelopment`,
+    which runs `serveCmd().RunE` with an unreachable database URL: it fails on the flag, so the guard
+    runs before any store, secret or listener (it sits right after `guardDevModeEnv`).
+11. **Token never offered to a code-repo host** (`adapters/gitpool/process_auth_scope_test.go`, a TLS
+    test host that challenges with Basic and records `Authorization`):
+    `TestLatentGitpool_PoolNeverOffersProcessTokenToCodeRepoHost`,
+    `…_RegistryCatalogPathDoesNotLeak` (real registry with a catalog listing the code repo),
+    `…_ClonerZeroCredentialSendsNoProcessToken`, `…_FactoryClientPushSendsNoProcessToken`. Each
+    asserts the host was contacted and received no `Authorization` at all. All four fail at the merge
+    base ("the process-wide push token was sent").
+12. **What must still work.** Under OQ2 "never" there is no allowed host, so the first half of AC 12
+    is not applicable. `TestLatentGitpool_PerBindingCredentialStillUsed`: a per-binding `Credential`
+    sends the binding token and never the process token, for the cloner and the factory push, with
+    either the process token or the process helper in the base options.
+13. **Host scope and wiring.** Not applicable under OQ2 "never": `hostKey`, `inheritsProcessAuth`,
+    `WithProcessAuthHosts`, `RemoteURL` and `codeRepoProcessAuthHosts` were not built.
+    `grep -rn "WithProcessAuthHosts\|InheritProcessAuth" --include='*.go' .` returns nothing, so
+    neither `serve_wiring.go` nor `workspace/pool.go` configures a process-auth exception.
+14. **Clone-URL redaction.** `TestRedactCloneURL_TokenInUsernameIsRedacted` (5 shapes; merge base: 2
+    of 5 leak), guard `TestRedactCloneURL_SSHLoginKept` (unchanged before and after), and
+    `TestRedactCloneURL_UnparsableValueRedacted` (malformed and opaque legacy values; codex P2).
+15. **Audit PoC parity** — see "Audit PoC parity" below: every expected outcome holds.
+16. **No regression.** `go test ./...`, `go vet` (plain, `integration`, `scenario`), the boundary
+    lint, the integration suites, the full scenario suite (the same 30 failures as `main`, all
+    pre-existing) and CI's `scenario-git-http` job; no migration; no interface change. Table below.
+17. **SMP compatibility gate** — below. No SMP change.
+18. **Documentation.** §11 applied (integration guide §3, §6.2, §7, env table; README; KNOWN-LIMITATIONS
+    "Auth Bypass in Dev Mode" rewritten); `grep -c SPINE_GIT_HTTP_TRUSTED_CIDRS docker-compose.yaml`
+    → 0; `.env.example` documents `SPINE_GIT_HTTP_DEV_NO_AUTH`, the bridge-gateway caveat and that
+    proxied and header-carrying requests are never token-less; CHANGELOG has `Security`, a general
+    `Breaking` (the identifier rule), `Breaking (dev setups)`, `Changed` and `For embedders`;
+    `workflow-definition-format.md` §3.6 documents the pattern; KNOWN-LIMITATIONS records the
+    omitted-`id:` cursor residual.
+19. **Unicode separators.** `TestP328_SSE_UnicodeSeparatorsNotSplit` (live and replay, each of U+0085,
+    U+2028, U+2029, plus invalid UTF-8 live) with a parser that also splits like Python's
+    `str.splitlines`: exactly the two events, and the decoded data equals the input value (live:
+    U+0085 in the run ID, which `json.Marshal` does not escape). `TestP328_FormatSSEEvent_DataEscapesKeepJSONValue`
+    re-joins the `data:` lines and compares JSON values.
+20. **Undeclared proxy.** `TestP330_ForwardingHeaderFromUndeclaredPeerIsNotTrusted` (no
+    `SPINE_TRUSTED_PROXY_CIDRS`, peer `172.28.0.1`): `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, an
+    empty `X-Forwarded-For` and `Via` all 401; the same peer with no header 200. Merge base: 200 for
+    every header.
+21. **Reused clone with a foreign origin.** `TestLatentGitpool_ReusedCloneForeignOriginNeverInherits`
+    (through `Pool.Client`; the clone's `origin`, or only its `remote.origin.pushurl`, names the TLS
+    host while the binding's `clone_url` names another): the push contacts the host and sends no
+    `Authorization`. Merge base: the token is sent in both cases.
+22. **Process credential helper.** `TestLatentGitpool_NonInheritingCodeRepoDropsProcessHelper`
+    (`WithCredentialHelper("store")` in the base options, a `store` file holding a credential for the
+    test host; cloner, factory push and pool clone send nothing). Its positive control shows a plain
+    client with the helper does send the stored credential. The `InheritProcessAuth=true` half is not
+    applicable under OQ2. Merge base: 1 `Authorization` in each case.
+23. **Scenario migration.** `grep -n "DevMode" service/scenariotest/scenarios/git_http_serve_test.go`
+    → nothing. Every push scenario mints its bearer (`mintPushToken`: an actor with the role it needs,
+    `auth.Service.CreateToken`) and pushes with `git -c http.extraHeader=…`. TASK-016's anonymous
+    reserved-ref scenario asserts 401 on the push advertisement and the pack upload, a failing
+    credential-less push with no `ref-admission` line, and no ref on the server. 20 `TestGitHTTP_*`
+    PASS, 0 SKIP; without the bearer the push scenarios fail (mutation below).
+
+### Mutation checks
+
+Each applied alone through `go test -overlay` (never in the worktree):
+
+| Mutation | Result (first failing test) |
+|---|---|
+| `sseFieldSafe` always true | killed — `TestP328_SSE_WorkflowIdentifierCannotInjectFrames`, `TestP328_SSE_ReplayCannotInjectFrames` |
+| `data` not split | killed — `TestP328_FormatSSEEvent` |
+| no CR normalisation | killed — `TestP328_FormatSSEEvent` |
+| code-point check dropped | killed — `TestP328_SSE_UnicodeSeparatorsNotSplit`, `TestP328_FormatSSEEvent` |
+| data escapes dropped | killed — `TestP328_SSE_UnicodeSeparatorsNotSplit` |
+| UTF-8 check dropped | killed — `TestP328_FormatSSEEvent`, `TestP328_SSEFieldSafe` |
+| `checkWorkflowIdentifiers` returns nil | killed — the three create/update tests |
+| `workflowIdentifierErrors` returns nil | killed — all four AC 3 tests |
+| divergence / branch / convergence check dropped (each) | killed — `TestP328_WorkflowValidate_ReportsUnsafeIdentifiers` |
+| `/validate` does not fail | killed — `TestP328_WorkflowValidate_ReportsUnsafeIdentifiers` |
+| pattern widened to upper case and `.` | killed — `TestP328_WorkflowIdentifierPattern` |
+| metrics ignore `servicePool` | killed — `TestP329_Metrics_SharedModeShowsOnlyCallerWorkspace` |
+| tenant export unfiltered | killed — `TestExportPrometheusWorkspace`, `TestP329_Metrics_SharedModeShowsOnlyCallerWorkspace` |
+| counter filter dropped | killed — `TestExportPrometheusWorkspace` |
+| rebuild key bare | killed — `TestP329_Rebuild_RegistryScopedToWorkspace` |
+| SSE key bare / Acquire with the bare ID | killed — `TestP329_SSELimiter_KeyedPerWorkspace` |
+| `gitPeerIP` returns `RemoteAddr` | killed — `TestP330_ProxyAddressIsNeverATrustedGitPeer`, `TestP330_ForwardingHeaderFromUndeclaredPeerIsNotTrusted` |
+| `gitPeerIP` trusts the right-most forwarded hop (original §4.1) | killed — `TestP330_ProxiedRequestIsNeverTokenless` |
+| forwarding headers ignored | killed — `TestP330_ForwardingHeaderFromUndeclaredPeerIsNotTrusted` |
+| header match case-sensitive | killed — `TestP330_GitPeerIP` |
+| `devMode` back in the bypass | killed — `TestP330_DevModeNoLongerDropsGitAuth` |
+| `!push` dropped from `devBypass` | killed — `TestP330_GitDevNoAuth_ReadsOnly` |
+| rate limiter reads the first line only | killed — `TestP330_RateLimitClientIP_ReadsAllForwardedLines` |
+| proxied-peer Warn not rate-limited | killed — `TestP330_ProxiedTrustedPeerWarnIsRateLimited` |
+| guard refuses production only | killed — `TestP330_GuardGitHTTPDevNoAuth`, `TestP330_ServeRefusesGitDevNoAuthOutsideDevelopment` |
+| guard not called in `serveCmd` | killed — `TestP330_ServeRefusesGitDevNoAuthOutsideDevelopment` |
+| flag not wired into `ServerConfig` | killed — `TestP330_BuildServerConfigWiresGitDevNoAuth` |
+| overlap never detected | killed — `TestP330_OverlappingCIDRs` |
+| scenario pushes without the bearer | killed — `TestGitHTTP_PushAcceptedWhenFlagOn`, `…OverrideHonouredForOperator`, `…UnusedOverrideEmitsNoEvent`, `…PushedCommitIsByteIdentical` |
+| cloner strip dropped | killed — the pool, registry and cloner AC 11 tests |
+| factory strip dropped | killed — `…FactoryClientPushSendsNoProcessToken`, `…ReusedCloneForeignOriginNeverInherits` |
+| token stripped but not the helper | killed — `…NonInheritingCodeRepoDropsProcessHelper` |
+| strip applied to per-binding credentials too | killed — `…PerBindingCredentialStillUsed` |
+| redaction password-only / all userinfo stripped / parse failure echoed raw | killed — `TestRedactCloneURL_TokenInUsernameIsRedacted` / `…SSHLoginKept` / `…UnparsableValueRedacted` |
+| fallback stops at a delimiter / no opaque check | killed — `TestRedactCloneURL_UnparsableValueRedacted` |
+| `WithoutAmbientCredentials` not applied by gitpool | killed — `TestLatentGitpool_CredentialLessCodeRepoIgnoresHostCredentials` |
+| no helper reset on clone / on push | killed — same test (`global credential.helper`, `URL-scoped …`) |
+| askpass environment not blanked | killed — same test (`inherited GIT_ASKPASS`) |
+| `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_COUNT=0` dropped (each) | killed — same test (URL-scoped global, system, environment-injected header) |
+| `-c http.extraHeader=` or `-c credential.helper=` dropped | survives on git ≥ 2.32 by design (the config switches cover it); killed with `GIT_CONFIG_GLOBAL` also dropped, which simulates git 2.30–2.31 |
+| no `GIT_SSH_COMMAND` / agent socket kept / pubkey allowed | killed — `TestLatentGitpool_CredentialLessSSHCodeRepoUsesNoSSHIdentity` |
+
+### Deviations and additions (with reasons)
+
+- **OQ2 "never"** (orchestrator ruling, above). Not built: §5.1 `RemoteURL`, §5.2
+  `Credential.InheritProcessAuth`, `WithProcessAuthHosts`, `hostKey`, `inheritsProcessAuth`, §5.3
+  `codeRepoProcessAuthHosts`. AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true` case
+  are not applicable; AC 21 holds trivially and is still tested. The strip is in gitpool itself, so
+  any caller gets "an empty Credential means no auth".
+- **Ambient credentials (codex rounds 1–3, beyond the design).** The design listed host-level helpers
+  as a follow-up. Codex rated the gap P1, so it is closed with the additive, opt-in
+  `git.WithoutAmbientCredentials()`, which gitpool's "no auth" path applies: no system or global git
+  config (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL` = null device), no config injected through
+  `GIT_CONFIG_PARAMETERS` / `GIT_CONFIG_COUNT`, `-c credential.helper=` and `-c http.extraHeader=`
+  (the fallback for git 2.30–2.31), empty `GIT_ASKPASS` / `SSH_ASKPASS` / `SSH_AUTH_SOCK`,
+  `GIT_TERMINAL_PROMPT=0`, and a `GIT_SSH_COMMAND` with no ssh_config, no agent and no key-based
+  authentication. **Consequence for the owner:** `credentials_ref` carries an HTTPS token only and
+  there is no per-binding SSH key, so an `ssh://` code repository with no credential is reached
+  anonymously or not at all (dormant today; documented in KNOWN-LIMITATIONS and CHANGELOG).
+- **The identifier check uses `workflow.ProjectionDefinition`** (TASK-011 had landed, as §2 asks) and
+  is split into `workflowIdentifierErrors` (used by `/validate`) and `checkWorkflowIdentifiers` (the
+  422). A refused identifier is echoed `%q`-quoted and capped at 80 bytes.
+- **Forwarding headers.** Beyond the three the design names, `X-Forwarded-Host`, `X-Forwarded-Proto`
+  and `Via` also mark a request as proxied (stricter, fail closed), matched case-insensitively. The
+  Warn fires only when the raw peer is itself in the git CIDRs (the case whose behaviour changed), at
+  most once a minute, and logs header names, never values.
+- **SSE.** An unsafe event type is logged too (its own Warn). `sseLimiterKey` keeps an empty actor ID
+  empty so the limiter's existing "no limit" case is unchanged.
+- **Redaction.** Beyond §5.4, a value `url.Parse` refuses, or an opaque one with an `@`, loses
+  everything before its last `@` (codex P2) instead of being echoed raw.
+- **Scenario helpers.** `setupGitHTTPServerWithOptionsAndActor` and its actor-injection wrapper are
+  removed; `mintPushToken` + `bearerPushCmd` replace them, which exercises the production
+  bearer-to-actor path.
+- **Docs beyond §11:** `api/spec.yaml`, `architecture/api-operations.md`, `docs/operator-runbook.md`,
+  `docs/git-push-guide.md`, `architecture/security-model.md`; TASK-016's CHANGELOG devMode sentence
+  is marked superseded. `core/refadmit/evaluator.go` changes one comment (no code).
+- **Test infrastructure.** The shared PostgreSQL server (`localhost:55630`) was down from
+  2026-10-13 (its install under the old scratchpad had been removed). The integration and
+  `TestGitHTTP_*` runs of 2026-10-08 used it; every later database gate ran on a private,
+  throwaway PostgreSQL 17.10 cluster (Homebrew binaries) in this session's scratchpad on
+  `localhost:55715`, TCP only, which touched nothing shared. The `s015_scen1`, `s015_int_cmd`,
+  `s015_int_ws` and `s015_int_wsreg` databases created on the shared server could not be dropped
+  because the server is down; drop them if it returns. golangci-lint is the Homebrew v2.12.2 binary
+  (the scratchpad one was gone). Codex's configured model is not available to this account, so
+  every round ran with `-c model="gpt-5.6-sol"`; no config file was changed.
+- **Commit trailers.** `0129a08` was first committed without the `Claude-Session` line (the harness
+  briefly said to omit it); the unpushed commit's message was amended to restore it.
+
+### Merge-base grep (§6)
+
+`grep -rn "devMode\|DevMode" --include='*_test.go' service` at `d23b897`: `handlers_git_test.go` (6
+hits; five relied on the git bypass — migrated, the sixth, the design's `TestHandleGit_PushFlagOff`, is `TestHandleGit_DisabledPushDoesNotResolvePolicy`
+and no longer sets it), `git_http_serve_test.go` (12; the eight push scenarios and TASK-016's anonymous scenario relied
+on it — migrated), `git_http_per_repo_test.go` and `runner_clone_context_test.go` (1 each; clone only
+— moved to `GitHTTPDevNoAuth`), `githttp/ref_admission_tags_test.go` (a comment — updated). Not git
+related, unchanged: `handlers_tokens_test.go` (3, API) and `service/cmd/spine` (9, the API dev mode
+in `serveDeps` and the `guardDevModeEnv` table).
+
+### Gates
+
+Code at `95f8fc1` unless stated.
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | clean |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 2 without tests, no failures |
+| `go test -race -p 4 -count=1` on the 9 touched packages (`adapters/git`, `adapters/gitpool`, `adapters/repository`, `core/observe`, `core/refadmit`, `service/cmd/spine`, `service/internal/gateway`, `service/internal/githttp`, `service/internal/workspace`) | all ok, no races; also `gateway` `-race -count=3`, the new gateway tests `-count=20` and the gitpool tests `-count=5`: ok |
+| `-tags integration` on `service/cmd/spine` and `service/internal/workspace` (fresh databases; the workspace registry migrated from `migrations/registry`) | 178 and 223 PASS, 0 FAIL, 0 SKIP (the same counts on 2026-10-08) |
+| CI `scenario-git-http`: `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` and `-run '^TestBootstrapInternalAdmin_'` (fresh database) | 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; 2 PASS, 0 SKIP |
+| `go test -tags scenario -p 1 -count=1 ./service/scenariotest/...` (fresh database) vs a `git archive main` export on its own database | 30 FAIL, the **same 30 as `main`** (the known pre-existing set: `TestSchemaMatchesProduction`, the gateway, divergence and artifact-mutation scenarios, …); 1488 PASS lines vs 1479 on `main` (the 9 new scenario steps); 6 SKIP in both |
+| CI `git-floor` steps in `golang:1.26-bookworm` (git 2.39.5; `--pull=never --rm`, read-only mounts, `GOPROXY=off`), plus `adapters/gitpool`, `adapters/repository`, `gateway`, `cmd/spine`, `workspace` there | all ok, including every `TestLatentGitpool_*` and the SSE/P3-30 tests on Linux; no container left |
+| `golangci-lint run --build-tags scenario --new-from-rev main` on the 10 touched packages (and `--build-tags integration` on `cmd/spine`, `workspace`) | 0 issues (13 gocritic findings on the first draft of the new tests were fixed in `0129a08`) |
+| full issue count on the same packages, branch vs `main` export | 179 vs 185 (6 fewer `gofmt`; nothing new) |
+| `golangci-lint run --enable-only=gosec` on the same packages | 0 issues |
+| `git diff --name-only main...HEAD \| grep '\.go$' \| xargs gofmt -l` | empty |
+| Audit PoCs overlaid (see below) | as AC 4 and AC 15 require |
+
+### Codex review (`codex review --base main`, `-c model="gpt-5.6-sol"`)
+
+| Round | Code | Findings | Disposition |
+|---|---|---|---|
+| — | `0129a08` | the configured model `gpt-6.1-sol` (and `gpt-6-sol`) is refused for this account | re-run with `gpt-5.6-sol` |
+| 1 | `0129a08` | **P1** a credential-less clone or push still consults a global or system `credential.helper` and an inherited `GIT_ASKPASS`; **P2** the malformed-URL fallback stops at `?`/`#`, so a legacy credential with that character is echoed | both **fixed** (`5b274f5`, `1686f18`) with tests and mutations |
+| 2 | `5b274f5` | **P1** for `ssh://` / SCP remotes the process's SSH agent and keys still authenticate | **fixed** (`2070df7`); consequence for SSH code repos recorded above |
+| 3 | `2070df7` | **P2** an `http.extraHeader` in host config still rides the request | **fixed** (`95f8fc1`), generalised to "no system or global config" because a URL-scoped header outranks a generic `-c` reset |
+| 4 | `95f8fc1` | "The changes consistently implement the intended credential isolation, tenant scoping, SSE sanitization, and Git endpoint authentication behavior. The full Go test suite passes, and no actionable correctness regressions were identified." | — |
+
+No finding was rejected.
+
+### SMP compatibility gate
+
+SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T015/smp`, detached at `f5c6fd6d`, no `vendor/`
+or `tmp/`; `go list -m github.com/bszymi/spine` resolves to this worktree; `GOFLAGS=-mod=readonly`;
+`git status` clean after every step. Spine at `95f8fc1`.
+
+| Command (in the SMP checkout) | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `-tags integration`; `-tags scenario`; `-tags faultinject` | OK, all clean |
+| `go test -race -p 4 -count=1` on the 43 SMP packages whose test dependencies include a changed Spine package (`adapters/git`, `adapters/gitpool`, `adapters/repository`, `core/observe`, `core/refadmit`; `go list -test -f …`) | 39 ok, 2 without tests, **2 FAIL — pre-existing, not caused by this task**: `internal/customer/gitread` `TestBounded_ErrorContractEqualsCLIClient` and `internal/customer/projectionwriter` `TestBoundedProjection_IncrementalAddAndModifyOversized` / `…_OversizedWorkflowStalls` (a nil-pointer panic). They fail identically with `../spine` pointed at a `main` (`d23b897`) export through a scratch `-modfile`, and pass with it pointed at SMP's pin `61994fe`: SMP `main`'s INIT-027 TASK-004 bounded-read contract tests disagree with Spine's waves 1–2 `CLIClient` (TASK-002's argv/error changes). Reported as an open question |
+| SMP CI "Apply platform migrations" / "Apply Spine runtime migrations" (`go run ./dev/apply-migrations -set platform -dir migrations`; `-set spine-runtime`) on fresh databases (roles `platform`, `platform_audit_retention`, `smp_prov` as in CI) | 115 and 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -timeout 10m ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` with `TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` | 1835 passed, 0 failed, 2 allowed skips (Linux-only `ru_maxrss` memory tests; this host is macOS); `testgate: PASS` |
+| `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed Linux-only skip; `testgate: PASS` |
+| `./dev/lint-spine-internals.sh` | OK |
+
+SMP never imports `adapters/gitpool` or calls `RedactCloneURL`, `ExportPrometheus` or the new options;
+`adapters/git` and `core/observe` gain only additive symbols, and `WithPushToken`, `NewCLIClient`,
+`Clone` and `run` behave identically for a client without `WithoutAmbientCredentials`. No SMP change.
+
+### Audit PoC parity (AC 4, AC 15)
+
+Overlaid at `95f8fc1` (`go test -overlay`, the PoC copied into a `zz_poc_*_test.go` overlay path,
+nothing written to the tree):
+
+| PoC | Result |
+|---|---|
+| `gitpool_tokenleak` `TestPOC_LibraryLeaksProcessTokenToBindingHost` | fails: "token not observed at evil host (hits=1)" |
+| `gitpool_tokenleak` `TestPOC_ProductionCatalogNeverReachesCloner` | passes |
+| `verify-r1-3` `TestPoC_LatentMechanism_CloneSendsProcessTokenToArbitraryHost` | fails: "process token NOT sent to attacker host" |
+| `verify-r1-3` `TestPoC_ProductionWiring_CodeRepoNeverResolvedSoNoClone` | passes |
+| `crypto-secrets-auth/pushtoken_exfil_test.go` | fails: "token was not sent to attacker host" |
+| `crypto-secrets-auth/redact_cloneurl_test.go` | fails: "no leak reproduced" |
+| `verify-r1-3` gateway `TestPoC_ProductionLikeConfig_RepositoryCreateRefused`, `TestPoC_SharedMode_RepositoryCreateRefused` | pass (both 503) |
+| `delivery-scheduler/poc_stepid_test.go` (AC 4) | passes: core still accepts the step ID |
+
+### Not run
+
+- **CI on GitHub** (PostgreSQL 18, Linux runners): needs a push, which the orchestrator owns. Locally
+  PostgreSQL 17.10 was used; nothing here uses a PostgreSQL 18-only feature, and the Linux checks ran
+  in `golang:1.26-bookworm`.
+- **SMP's other gated suites** (the platform-DB, faultinject, workspace-schema and provisioning
+  steps of SMP `ci.yml`): the artifact names only the Spine-runtime step and the platform migrations,
+  and those need MinIO and pgvector, which the private cluster lacks.
+- **A live Docker check** of the bridge-gateway source address (out of scope, §Out of scope).
+- **Old git (2.30–2.31)** for the `GIT_CONFIG_GLOBAL` fallback: simulated by mutation only.
+
+### Follow-ups (added by this implementation)
+
+- Per-binding SSH credentials for code repositories (SSH code repos cannot authenticate today).
+- `~/.netrc` for credential-less code repos; a reused clone whose `origin` differs from its binding
+  (both in KNOWN-LIMITATIONS).
+- The SMP `gitread` / `projectionwriter` contract-test failures against Spine waves 1–2 (above).
+- Align the value sets of `SPINE_DEV_MODE` and `SPINE_GIT_HTTP_DEV_NO_AUTH` (design-check
+  follow-up, recorded in KNOWN-LIMITATIONS).
