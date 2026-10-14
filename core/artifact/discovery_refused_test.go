@@ -236,6 +236,44 @@ func tooLargeErr(ref, path string) error {
 		Err: &git.BlobTooLargeError{Ref: ref, Path: path, Size: 5 << 20, Limit: 4 << 20}}
 }
 
+// Review round 1 (P3): when git refused an allocation over its alloc
+// limit (a small file stored as a delta on a large base, a gitlink's
+// patch), the refusal keeps that cause through discovery and
+// Service.Read: the record carries the alloc limit, and the 413 message
+// names it instead of calling a 3 MB file "over" a 4 MiB read limit.
+func TestGitAllocRefusalKeepsItsCause(t *testing.T) {
+	ctx := context.Background()
+	const path = "governance/d.md"
+	allocErr := &git.GitError{Kind: git.ErrKindPermanent, Op: "read_file", Message: "blob read exceeds git allocation limit",
+		Err: &git.BlobTooLargeError{Ref: "main", Path: path, Size: -1, Limit: 4 << 20, GitAllocLimit: 16 << 20}}
+	g := &tableGit{errs: map[string]error{"main:" + path: allocErr}, reads: map[string]int{}}
+
+	cs, err := artifact.DiscoverChangesFromDiffs(ctx, g, "base", "main",
+		[]git.FileDiff{{Path: path, Status: "added"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []artifact.RefusedFile{{Path: path, Reason: artifact.RefusedOversized, Size: -1, Limit: 4 << 20, GitAllocLimit: 16 << 20}}
+	if !reflect.DeepEqual(cs.Refused, want) {
+		t.Fatalf("Refused = %+v, want %+v", cs.Refused, want)
+	}
+
+	_, err = artifact.NewService(g, nil, t.TempDir()).Read(ctx, path, "main")
+	var se *domain.SpineError
+	if !errors.As(err, &se) || se.Code != domain.ErrPayloadTooLarge {
+		t.Fatalf("Read = %v, want ErrPayloadTooLarge", err)
+	}
+	if !strings.Contains(se.Message, "16777216-byte git allocation limit") || strings.Contains(se.Message, "over the 4194304") ||
+		strings.Contains(se.Message, "exceeds the 4194304") {
+		t.Errorf("message %q: want the git allocation limit named, and no claim that the file is over the read limit", se.Message)
+	}
+	for _, msg := range []string{allocErr.Error(), artifact.ReadLimitPhrase(allocErr)} {
+		if !strings.Contains(msg, "read limit") || !strings.Contains(msg, "16777216-byte git allocation limit") {
+			t.Errorf("refusal text %q: want it to name the read limits and the git allocation limit", msg)
+		}
+	}
+}
+
 // AC 9 (DiscoverChanges): every row of the design's §5 table.
 func TestDiscoverChangesFromDiffs_RefusalTable(t *testing.T) {
 	const from, to = "from", "to"

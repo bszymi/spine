@@ -274,8 +274,11 @@ func (s *Service) Read(ctx context.Context, id, ref string) (*ReadResult, error)
 		// A blob over the git client's read limit (INIT-023 TASK-003) is
 		// 413, like an oversized worktree read (TASK-004).
 		if errors.Is(err, git.ErrBlobTooLarge) {
+			// The cause's own text names the limit that refused it: the
+			// per-blob read limit, or git's allocation limit for a file
+			// stored as a delta on a large base.
 			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
-				fmt.Sprintf("workflow %s at ref %s exceeds the read limit: %v", path, ref, err), err)
+				fmt.Sprintf("workflow %s at ref %s is refused by the read limits: %v", path, ref, err), err)
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}

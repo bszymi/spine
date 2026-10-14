@@ -79,8 +79,15 @@ func wantSkipID(head, reason, path string) string {
 }
 
 // assertOneSkip checks the single projection_file_skipped event and its
-// payload (§7: path, reason, size_bytes, limit_bytes, commit).
+// payload (§7: path, reason, size_bytes, limit_bytes, commit; plus
+// git_alloc_limit_bytes, null unless git refused an allocation — review
+// round 1).
 func assertOneSkip(t *testing.T, r *recordingRouter, head, path, reason string, size, limit any) {
+	t.Helper()
+	assertOneSkipAlloc(t, r, head, path, reason, size, limit, nil)
+}
+
+func assertOneSkipAlloc(t *testing.T, r *recordingRouter, head, path, reason string, size, limit, gitAlloc any) {
 	t.Helper()
 	evs := skipEvents(t, r)
 	if len(evs) != 1 {
@@ -92,7 +99,8 @@ func assertOneSkip(t *testing.T, r *recordingRouter, head, path, reason string, 
 		display = strconv.Quote(path)
 	}
 	want := map[string]any{
-		"path": display, "reason": reason, "size_bytes": size, "limit_bytes": limit, "commit": head,
+		"path": display, "reason": reason, "size_bytes": size, "limit_bytes": limit,
+		"git_alloc_limit_bytes": gitAlloc, "commit": head,
 		"_event_id": wantSkipID(head, reason, path), "_artifact_path": display,
 	}
 	for k, v := range want {
@@ -185,6 +193,41 @@ func TestFullRebuild_OversizedArtifactIsSkippedAndRecorded(t *testing.T) {
 	if again := ev.ofType(domain.EventProjectionFileSkipped); len(again) != 1 || again[0].EventID != first {
 		t.Fatalf("second rebuild events = %+v, want the same id %s", again, first)
 	}
+}
+
+// Review round 1 (P3): a file git refuses to produce under its
+// allocation limit is reported with that limit. Here a gitlink named
+// *.md records an in-repo commit that adds an 8 MiB blob: the size probe
+// sees the small commit object, and `git show` would render the commit
+// with its patch, so git refuses the allocation. The record must say
+// which limit refused it (git_alloc_limit_bytes = the 4 MiB alloc limit
+// that WithMaxBlobBytes(1 MiB) derives) instead of reading as a file
+// "over" the 1 MiB read limit, and the rebuild still advances.
+func TestFullRebuild_GitAllocRefusalNamesItsLimit(t *testing.T) {
+	ctx := context.Background()
+	repo := newScratchRepo(t)
+	repo.write("governance/g.md", refusedGovDoc)
+	repo.commit("seed")
+	repo.run("checkout", "-q", "-b", "side")
+	repo.write("big.bin", eightMiB(""))
+	side := repo.commit("big")
+	repo.run("checkout", "-q", "main")
+	repo.addGitlinkTo("initiatives/g.md", side)
+	head := repo.commitIndex("gitlink")
+	st := newMapStore()
+	ev := &recordingRouter{}
+	const allocLimit = 4 * refusedTestLimit // the documented default: 4 x the per-blob limit
+	svc := NewService(boundedClient(repo.dir), st, ev, 0)
+	if err := svc.FullRebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.artifacts["initiatives/g.md"]; ok {
+		t.Fatal("the gitlink was projected")
+	}
+	if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != head {
+		t.Fatalf("sync state = %+v, want idle@%s", got, head)
+	}
+	assertOneSkipAlloc(t, ev, head, "initiatives/g.md", "oversized", -1, refusedTestLimit, allocLimit)
 }
 
 // AC 11.3: a projected artifact modified past the limit loses its row
@@ -511,7 +554,7 @@ func assertSkips(t *testing.T, ev *recordingRouter, head string, paths ...string
 	for _, p := range paths {
 		e := got[strconv.Quote(p)]
 		if e == nil || e["reason"] != "unsafe_path" || e["size_bytes"] != nil || e["limit_bytes"] != nil ||
-			e["commit"] != head || e["_event_id"] != wantSkipID(head, "unsafe_path", p) {
+			e["git_alloc_limit_bytes"] != nil || e["commit"] != head || e["_event_id"] != wantSkipID(head, "unsafe_path", p) {
 			t.Errorf("skip event for %q = %+v", p, e)
 		}
 	}

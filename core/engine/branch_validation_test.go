@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/testutil"
 )
@@ -170,5 +171,20 @@ func TestValidateBranch_RefusedFilesFail(t *testing.T) {
 	}
 	if !strings.Contains(got[strconv.Quote("governance/a\tb.md")], "not validated") {
 		t.Errorf("unsafe-path detail missing or not quoted: %+v", got)
+	}
+}
+
+// Review round 1 (P3): a file git refused to produce under its
+// allocation limit is reported with that limit, not as "over" a per-blob
+// read limit it may well be under.
+func TestRefusalReport_NamesTheLimitThatRefused(t *testing.T) {
+	alloc := refusalReport(artifact.RefusedFile{Path: "x.md", Reason: artifact.RefusedOversized,
+		Size: -1, Limit: 4 << 20, GitAllocLimit: 16 << 20})
+	if !strings.Contains(alloc, "16777216-byte git allocation limit") || strings.Contains(alloc, "4194304") {
+		t.Errorf("alloc refusal report = %q, want the git allocation limit and not the read limit", alloc)
+	}
+	size := refusalReport(artifact.RefusedFile{Path: "x.md", Reason: artifact.RefusedOversized, Size: 5 << 20, Limit: 4 << 20})
+	if !strings.Contains(size, "5242880 bytes, over the 4194304-byte git read limit") {
+		t.Errorf("size refusal report = %q", size)
 	}
 }

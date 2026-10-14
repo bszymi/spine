@@ -61,14 +61,24 @@ func (s *Service) recordRefused(ctx context.Context, head string, refused []arti
 	for _, r := range refused {
 		display := refusedDisplayPath(r.Path)
 		var size, limit any // null for unsafe_path
+		var gitAlloc any    // null unless git refused an allocation
 		if r.Reason == artifact.RefusedOversized {
 			size, limit = r.Size, r.Limit
+			if r.GitAllocLimit > 0 {
+				// The file may be under limit_bytes: git could not
+				// allocate something larger it needed to produce it (a
+				// delta base, a gitlink's patch). Saying which limit
+				// refused it keeps a 3 MB file from reading as "over
+				// 4 MiB" (review round 1).
+				gitAlloc = r.GitAllocLimit
+			}
 		}
 		log.Warn("projection skipped file",
 			"path", display,
 			"reason", string(r.Reason),
 			"size_bytes", size,
 			"limit_bytes", limit,
+			"git_alloc_limit_bytes", gitAlloc,
 			"commit", shortSHA(head),
 		)
 		observe.GlobalMetrics.ProjectionFilesSkipped.Inc()
@@ -76,11 +86,12 @@ func (s *Service) recordRefused(ctx context.Context, head string, refused []arti
 			continue
 		}
 		payload, err := json.Marshal(map[string]any{
-			"path":        display,
-			"reason":      string(r.Reason),
-			"size_bytes":  size,
-			"limit_bytes": limit,
-			"commit":      head,
+			"path":                  display,
+			"reason":                string(r.Reason),
+			"size_bytes":            size,
+			"limit_bytes":           limit,
+			"git_alloc_limit_bytes": gitAlloc,
+			"commit":                head,
 		})
 		if err != nil {
 			log.Warn("projection: marshal skipped-file event", "error", err)

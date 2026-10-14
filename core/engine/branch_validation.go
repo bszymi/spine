@@ -124,6 +124,9 @@ func refusedPathForReport(p string) string {
 
 func refusalReport(r artifact.RefusedFile) string {
 	if r.Reason == artifact.RefusedOversized {
+		if r.GitAllocLimit > 0 {
+			return fmt.Sprintf("not validated: reading it needs a git allocation over the %d-byte git allocation limit", r.GitAllocLimit)
+		}
 		if r.Size >= 0 {
 			return fmt.Sprintf("not validated: %d bytes, over the %d-byte git read limit", r.Size, r.Limit)
 		}

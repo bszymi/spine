@@ -40,6 +40,12 @@ type RefusedFile struct {
 	// report it). Both are 0 for RefusedUnsafePath.
 	Size  int64
 	Limit int64
+	// GitAllocLimit is set for RefusedOversized when git itself refused
+	// an allocation over this GIT_ALLOC_LIMIT while producing the content
+	// (git.BlobTooLargeError.GitAllocLimit; Size is then -1). The file
+	// may be under Limit: what is too large is a delta base it is stored
+	// on, or a gitlink's patch. 0 otherwise.
+	GitAllocLimit int64
 }
 
 // UnsafePath reports whether p is a repository path discovery refuses to
@@ -63,7 +69,7 @@ func readForDiscovery(ctx context.Context, gitClient git.GitClient, ref, path st
 		rf := &RefusedFile{Path: path, Reason: RefusedOversized, Size: -1, Limit: -1}
 		var tl *git.BlobTooLargeError
 		if errors.As(err, &tl) {
-			rf.Size, rf.Limit = tl.Size, tl.Limit
+			rf.Size, rf.Limit, rf.GitAllocLimit = tl.Size, tl.Limit, tl.GitAllocLimit
 		}
 		return nil, rf, nil
 	}
@@ -75,11 +81,18 @@ func unsafeRefusal(path string) RefusedFile {
 }
 
 // ReadLimitPhrase renders a size refusal for an API message: "is <n>
-// bytes, over the <limit>-byte read limit", or "exceeds the read limit"
+// bytes, over the <limit>-byte read limit", "cannot be read within the
+// read limits: git needed an allocation over …" when git refused an
+// allocation (the file itself may be small), or "exceeds the read limit"
 // when the sizes are unknown. err should match git.ErrBlobTooLarge.
 func ReadLimitPhrase(err error) string {
 	var tl *git.BlobTooLargeError
 	if errors.As(err, &tl) {
+		if tl.GitAllocLimit > 0 {
+			return fmt.Sprintf("cannot be read within the read limits: git needed an allocation over the "+
+				"%d-byte git allocation limit to produce it (a delta on a large base, or a gitlink rendered "+
+				"with its patch)", tl.GitAllocLimit)
+		}
 		if tl.Size >= 0 {
 			return fmt.Sprintf("is %d bytes, over the %d-byte read limit", tl.Size, tl.Limit)
 		}
