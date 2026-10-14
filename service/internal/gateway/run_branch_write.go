@@ -42,7 +42,9 @@ const divergenceCursorPrefix = "divergence:"
 //     the review freeze (refadmit.FrozenStepType). A refusal is explained
 //     from the run's executions (bindingRefusal): 409 while the step is
 //     waiting or unassigned (claim it first), 409 with no open execution,
-//     403 for anyone else — never naming the holder. A run whose branch is
+//     409 for the holder of a step routed to a code repository (the API
+//     writes the primary repository, which that step does not write;
+//     ADR-015), 403 for anyone else — never naming the holder. A run whose branch is
 //     not an engine run branch (refadmit does not classify it as one, or
 //     resolves it to another run) is operator-only (fail closed).
 //  3. Review freeze (I6, amended), for operators and the dev-mode nil
@@ -106,6 +108,11 @@ func (s *Server) authorizeBoundWriter(ctx context.Context, run *domain.Run, acto
 		return domain.NewError(domain.ErrUnavailable, "store not configured")
 	}
 	defs := &recordingStepDefs{inner: assigner}
+	// RepositoryID is left empty on purpose: every API sink writes the
+	// run's branch in the primary repository, so the binding is judged
+	// for that repository, exactly as a push of run.BranchName to the
+	// primary repository is. A holder whose step is routed to a code
+	// repository is therefore not bound here (bindingRefusal says why).
 	dec, err := refadmit.NewEvaluator(st).WithStepDefs(defs).Decide(ctx, refadmit.Request{
 		Ref:   "refs/heads/" + run.BranchName,
 		Actor: actor,
@@ -151,6 +158,20 @@ func (s *Server) authorizeBoundWriter(ctx context.Context, run *domain.Run, acto
 // bindingRefusal explains a not_bound decision from the latest run-level
 // execution of the current step (the execution refadmit judged; store
 // order is created_at, latest attempt wins). It never names the holder.
+//
+// A step routed to a code repository (ADR-015 `repository: <id>`) is a
+// case of its own (review round 1). The execution's repository is part of
+// the binding: refadmit admits only a holder whose execution targets the
+// repository being written, and every API sink writes the run's branch in
+// the primary repository (authorizeBoundWriter asks for it). ADR-015 has a
+// step write exactly one repository, so while the current step is routed
+// elsewhere nobody below operator writes the primary run branch, the
+// holder included — the same answer a push of that branch gets. The holder
+// is told so (409, detail.repository_id) rather than the generic 403 that
+// says they are not the assignee, and an unclaimed step is not answered
+// "claim it first", since a claim would not make the write possible. A
+// caller who does not hold a claimed step still gets the 403, so the
+// binding stays the first answer for anyone else (as for the freeze).
 func bindingRefusal(ctx context.Context, st store.Store, run *domain.Run, actor *domain.Actor) error {
 	execs, err := st.ListStepExecutionsByRun(ctx, run.RunID)
 	if err != nil {
@@ -164,12 +185,19 @@ func bindingRefusal(ctx context.Context, st store.Store, run *domain.Run, actor 
 			latest = &execs[i]
 		}
 	}
+	unclaimed := latest != nil && (latest.ActorID == "" || latest.Status == domain.StepStatusWaiting)
 	switch {
 	case latest == nil || !openExecution(latest.Status):
 		return domain.NewErrorWithDetail(domain.ErrConflict,
 			fmt.Sprintf("run %s has no open execution for its current step %q; its branch accepts no writes", run.RunID, run.CurrentStepID),
 			map[string]string{"run_id": run.RunID, "step_id": run.CurrentStepID})
-	case latest.ActorID == "" || latest.Status == domain.StepStatusWaiting:
+	case !isPrimaryRepository(latest.RepositoryID) && (unclaimed || latest.ActorID == actor.ActorID):
+		return domain.NewErrorWithDetail(domain.ErrConflict,
+			fmt.Sprintf("current step %q of run %s is routed to repository %q; API writes land on the run's branch in the primary repository, "+
+				"which accepts writes only from operators while that step is current (a step writes only its own repository, ADR-015)",
+				run.CurrentStepID, run.RunID, latest.RepositoryID),
+			map[string]string{"run_id": run.RunID, "step_id": run.CurrentStepID, "repository_id": latest.RepositoryID})
+	case unclaimed:
 		return domain.NewErrorWithDetail(domain.ErrConflict,
 			fmt.Sprintf("current step %q of run %s is not assigned; claim it (POST /execution/claim) or have an operator assign it (POST /runs/%s/steps/%s/assign) before writing to the run branch",
 				run.CurrentStepID, run.RunID, run.RunID, run.CurrentStepID),
@@ -182,6 +210,13 @@ func bindingRefusal(ctx context.Context, st store.Store, run *domain.Run, actor 
 
 func openExecution(s domain.StepExecutionStatus) bool {
 	return s == domain.StepStatusWaiting || s == domain.StepStatusAssigned || s == domain.StepStatusInProgress
+}
+
+// isPrimaryRepository mirrors refadmit's repoOrPrimary: "" (rows written
+// before ADR-015) and domain.PrimaryRepositoryID both name the primary
+// repository.
+func isPrimaryRepository(repo string) bool {
+	return repo == "" || repo == domain.PrimaryRepositoryID
 }
 
 func frozenStepError(run *domain.Run, t domain.StepType) error {

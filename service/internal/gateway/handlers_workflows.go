@@ -453,9 +453,16 @@ func (s *Server) refuseIfWorkflowRunOpen(ctx context.Context, id string) error {
 		if r.Mode != domain.RunModePlanning || r.Status.IsTerminal() {
 			continue
 		}
+		// The message names the operator cancel too (review round 1): an
+		// idle run, or a run a failed start left behind before INIT-023
+		// TASK-014 (its branch deleted, possibly promoted to active by
+		// scheduler recovery), never finishes on its own, and only an
+		// operator can cancel it (run.cancel). CHANGELOG has the upgrade
+		// recipe for finding such runs.
 		return domain.NewErrorWithDetail(domain.ErrConflict,
-			fmt.Sprintf("workflow-lifecycle run %s is already open for %s; stack edits on it with write_context {run_id} as its draft assignee, or wait for it to finish",
-				r.RunID, path),
+			fmt.Sprintf("workflow-lifecycle run %s is already open for %s; stack edits on it with write_context {run_id} as its draft assignee, "+
+				"wait for it to finish, or, if it is stale, ask an operator to cancel it (POST /runs/%s/cancel)",
+				r.RunID, path, r.RunID),
 			map[string]string{
 				"run_id":          r.RunID,
 				"branch_name":     r.BranchName,

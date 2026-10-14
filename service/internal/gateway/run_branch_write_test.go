@@ -245,6 +245,12 @@ func rbwExec(stepID string, status domain.StepExecutionStatus, actorID string) d
 		Status: status, ActorID: actorID, Attempt: 1, CreatedAt: time.Now()}
 }
 
+// rbwRepoExec routes e to repository repo (ADR-015 step routing).
+func rbwRepoExec(e domain.StepExecution, repo string) domain.StepExecution {
+	e.RepositoryID = repo
+	return e
+}
+
 // rbwRow is one run state and the outcome expected per caller.
 type rbwRow struct {
 	name   string
@@ -306,9 +312,37 @@ func TestAuthorizeRunBranchWrite_Matrix(t *testing.T) {
 		{name: "divergence cursor", cursor: "divergence:run-a1b2-div-1",
 			execs: []domain.StepExecution{rbwExec("draft", domain.StepStatusCompleted, rbwHolder)},
 			want:  map[string]int{"op-1": allowed, rbwHolder: 409}},
+		// AC 8 reads "409 for every role" as every role the binding admits:
+		// the binding runs first, so a caller who does not hold the step is
+		// refused (403) before the definition is looked up, as for the
+		// review freeze.
 		{name: "unresolvable step definition", cursor: "draft", steps: rbwSteps{types: map[string]domain.StepType{}},
 			execs: []domain.StepExecution{rbwExec("draft", domain.StepStatusInProgress, rbwHolder)},
-			want:  map[string]int{rbwHolder: 409, "op-1": 409, "admin-1": 409}},
+			want:  map[string]int{rbwHolder: 409, "op-1": 409, "admin-1": 409, rbwOther: 403}},
+		// Review round 1 (P2): a step routed to a code repository (ADR-015
+		// `repository: <id>`) writes only that repository, and every API
+		// sink writes the primary one, so its holder is not the primary run
+		// branch's writer — the same rule push admission applies (refadmit
+		// compares the execution's repository with the pushed one). The
+		// holder gets a 409 naming the repository, never the generic 403
+		// that tells them they are not the assignee; a caller who does not
+		// hold it still gets 403; an unclaimed one is not "claim it first",
+		// since a claim would not make the write possible.
+		{name: "step routed to a code repository, held", cursor: "draft",
+			execs:      []domain.StepExecution{rbwRepoExec(rbwExec("draft", domain.StepStatusInProgress, rbwHolder), "payments")},
+			want:       map[string]int{rbwHolder: 409, rbwOther: 403, "op-1": allowed, "admin-1": allowed},
+			wantDetail: map[string]string{rbwHolder: "repository_id"}},
+		{name: "step routed to a code repository, assigned", cursor: "draft",
+			execs:      []domain.StepExecution{rbwRepoExec(rbwExec("draft", domain.StepStatusAssigned, rbwHolder), "payments")},
+			want:       map[string]int{rbwHolder: 409, rbwOther: 403},
+			wantDetail: map[string]string{rbwHolder: "repository_id"}},
+		{name: "step routed to a code repository, waiting", cursor: "draft",
+			execs:      []domain.StepExecution{rbwRepoExec(rbwExec("draft", domain.StepStatusWaiting, ""), "payments")},
+			want:       map[string]int{rbwHolder: 409, rbwOther: 409, "op-1": allowed},
+			wantDetail: map[string]string{rbwHolder: "repository_id", rbwOther: "repository_id"}},
+		{name: "step routed to the primary repository by name", cursor: "draft",
+			execs: []domain.StepExecution{rbwRepoExec(rbwExec("draft", domain.StepStatusInProgress, rbwHolder), domain.PrimaryRepositoryID)},
+			want:  map[string]int{rbwHolder: allowed, rbwOther: 403}},
 	}
 
 	for _, sink := range rbwSinks {
@@ -536,6 +570,11 @@ func TestWorkflow_OpenLifecycleRun_Returns409(t *testing.T) {
 				detail, _ := er.Errors[0].Detail.(map[string]any)
 				if detail["run_id"] != "run-open1" || detail["branch_name"] != "spine/plan/wf-x-open1" || detail["status"] != string(status) {
 					t.Fatalf("409 detail = %v", detail)
+				}
+				// A stale run (idle, or left by a failed start before the
+				// upgrade) never finishes: the answer names the recovery.
+				if !strings.Contains(er.Errors[0].Message, "ask an operator to cancel it (POST /runs/run-open1/cancel)") {
+					t.Fatalf("409 message does not name the operator cancel: %q", er.Errors[0].Message)
 				}
 				if planner.lastID != "" || planner.lastUpdateID != "" {
 					t.Fatal("the starter must not be called while a lifecycle run is open")
