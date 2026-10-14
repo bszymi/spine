@@ -438,6 +438,21 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return err
 	}
 
+	// Step-output evidence (INIT-023 TASK-008, P3-19), derived from the
+	// capture and the run's previous binding as read above, before this
+	// submit's commit_meta write. At most one time-boxed diff; it never
+	// fails the submit. With a capture it is persisted in the binding's
+	// own commit_meta write below (hb.extra).
+	change := o.branchChangeAtSubmit(ctx, run, exec, hb)
+	unchanged := requiredOutputsUnchanged(ctx, stepDef, exec, change)
+	if hb != nil {
+		key, val, err := evidenceMetaEntry(exec.ExecutionID, change, unchanged)
+		if err != nil {
+			return fmt.Errorf("encode step output evidence: %w", err)
+		}
+		hb.extra = map[string]string{key: val}
+	}
+
 	// If step is assigned, auto-acknowledge to in_progress first. The
 	// terminal write below must then expect the acknowledged state
 	// (in_progress, actor), not the (assigned, actor) read above.
@@ -468,8 +483,8 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	// completed execution always has its binding; a failed write leaves the
 	// execution uncompleted (auto-acknowledged at most), so it can be
 	// submitted again. It is the same single commit_meta write
-	// routeStepOutcome made (outcome commit map and binding together),
-	// only earlier; with no capture
+	// routeStepOutcome made (outcome commit map and binding together, plus
+	// this execution's evidence key), only earlier; with no capture
 	// (binding off, among others) it stays where it was.
 	metaRecorded := false
 	if hb != nil {
@@ -492,8 +507,8 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 
 	o.CompleteAssignment(ctx, executionID)
 
-	o.emitEvent(ctx, domain.EventStepCompleted, exec.RunID, run.TraceID,
-		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID), nil)
+	o.emitStepCompleted(ctx, run, exec,
+		baseStepCompletedPayload(stepDef, outcome, exec, now).withEvidence(stepDef, result.ArtifactsProduced, change, unchanged))
 
 	if exec.StartedAt != nil {
 		observe.GlobalMetrics.StepDuration.ObserveDuration(time.Since(*exec.StartedAt))
@@ -532,8 +547,9 @@ func checkSubmitter(exec *domain.StepExecution, submitter string) error {
 // Each refusal is ErrConflict and changes nothing.
 //
 // It makes no step write and routes the STORED outcome. It emits
-// step_completed again under the step's event id; an event log that
-// already has the original keeps it (ON CONFLICT DO NOTHING). Two replicas recovering the
+// step_completed again under the execution's own event id with
+// branch_change unknown/recovered; an event log that already has the
+// original keeps it (ON CONFLICT DO NOTHING). Two replicas recovering the
 // same execution at once both pass the checks, then compute the same
 // deterministic next execution id, so the second CreateStepExecution fails
 // on the primary key.
@@ -592,8 +608,13 @@ func (o *Orchestrator) RecoverCompletedStep(ctx context.Context, executionID str
 		"run_id", run.RunID, "execution_id", executionID, "step_id", exec.StepID, "outcome_id", exec.OutcomeID)
 
 	o.CompleteAssignment(ctx, executionID)
-	o.emitEvent(ctx, domain.EventStepCompleted, exec.RunID, run.TraceID,
-		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID), nil)
+	completedAt := time.Now()
+	if exec.CompletedAt != nil {
+		completedAt = *exec.CompletedAt
+	}
+	recovered := BranchChange{RepositoryID: domain.PrimaryRepositoryID, Status: BranchChangeUnknown, Reason: EvidenceReasonRecovered}
+	o.emitStepCompleted(ctx, run, exec,
+		baseStepCompletedPayload(stepDef, outcome, exec, completedAt).withEvidence(stepDef, nil, recovered, false))
 
 	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, time.Now(), nil, false)
 }

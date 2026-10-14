@@ -215,8 +215,9 @@ func (o *Orchestrator) advancePublishStepIfAny(ctx context.Context, run *domain.
 		return fmt.Errorf("update publish step execution: %w", err)
 	}
 
-	o.emitEvent(ctx, domain.EventStepCompleted, run.RunID, run.TraceID,
-		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], stepExec.StepID), nil)
+	// The documented base payload under the per-execution event id
+	// (INIT-023 TASK-008); the engine-owned step has no branch evidence.
+	o.emitStepCompleted(ctx, run, stepExec, baseStepCompletedPayload(stepDef, outcome, stepExec, now))
 
 	if outcomeID == "merge_failed" {
 		routeResult, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
