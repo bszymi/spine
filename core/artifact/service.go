@@ -259,7 +259,16 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 	if err != nil {
 		return nil, err
 	}
+	// The deferred Cleanup covers the error paths; the success path
+	// releases the scope explicitly before any event (below).
 	defer scope.Cleanup()
+	// Every git call inside the scope uses sctx (INIT-023 TASK-012): for
+	// an in-place write it carries the shared tree's ticket, so a locked
+	// git call re-enters the scope instead of waiting for it, and in
+	// standalone's shared tree it is detached from the request (bounded),
+	// so a client disconnect cannot leave a write half-staged. Events keep
+	// ctx.
+	sctx := scope.Context(ctx)
 
 	// All file I/O below goes through worktreefs (INIT-023 TASK-004, audit
 	// F5): every component is Lstat-checked from a directory handle, so a
@@ -319,7 +328,7 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 		// audit record.
 		trailers["Branch-Protection-Override"] = "true"
 	}
-	commitResult, err := git.StageAndCommit(ctx, scope, repoPath, git.CommitOpts{
+	commitResult, err := git.StageAndCommit(sctx, scope, repoPath, git.CommitOpts{
 		Message:  fmt.Sprintf("%s %s: %s", op.messageVerb, artifact.Type, artifact.Title),
 		Trailers: trailers,
 		Author: git.Author{
@@ -341,13 +350,18 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 			if rbErr := tree.WriteFile(repoPath, originalContent, originalMode); rbErr != nil {
 				log.Warn("artifact rollback: restore failed", "path", path, "error", rbErr)
 			}
-		} else if rbErr := undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, repoPath, path)); rbErr != nil {
+		} else if rbErr := undo.RollbackClaiming(claimUntracked(sctx, scope.RepoDir, repoPath, path)); rbErr != nil {
 			log.Warn("artifact rollback: remove failed", "path", path, "error", rbErr)
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 
-	s.autoPush(ctx, scope.RepoDir)
+	s.autoPush(sctx, scope.RepoDir)
+	// Release the working tree before emitting (INIT-023 TASK-012): an
+	// event published while the shared tree is held could deadlock with a
+	// queue consumer that needs it. Cleanup is idempotent; the deferred
+	// call is then a no-op.
+	scope.Cleanup()
 
 	log.Info(op.logAction,
 		"path", path,

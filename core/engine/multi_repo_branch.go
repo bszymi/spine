@@ -82,22 +82,36 @@ func (o *Orchestrator) createRunBranches(ctx context.Context, run *domain.Run) (
 	log := observe.Logger(ctx)
 	pushOn := autoPushEnabled()
 
+	// The baseline read and the branch cut are one git-only block on the
+	// shared working tree (INIT-023 TASK-012, worktree.go): the block takes
+	// the tree fresh, so its entry restore puts HEAD back on main first,
+	// and no other sequence can move HEAD between the two calls. A run
+	// branch is therefore never cut from another run's branch a
+	// concurrent cascade had checked out. The push runs after the block.
+	//
 	// Capture the primary repo's HEAD SHA *before* CreateBranch advances
 	// it, so the recorded baseline is the cut-from tip rather than the
 	// post-create tip. Best-effort: a Head() error is logged and the
 	// baseline is left unset for spine.
-	if sha, err := o.git.Head(ctx); err == nil && sha != "" {
-		captureRepoBaseline(run, repository.PrimaryRepositoryID, sha)
-	} else if err != nil {
-		log.Warn("baseline capture: failed to read primary HEAD",
-			"phase", "create",
-			"run_id", run.RunID,
-			"repository_id", repository.PrimaryRepositoryID,
-			"error", err)
+	var cutErr error
+	blockErr := o.withTree(ctx, func(ctx context.Context) error {
+		if sha, err := o.git.Head(ctx); err == nil && sha != "" {
+			captureRepoBaseline(run, repository.PrimaryRepositoryID, sha)
+		} else if err != nil {
+			log.Warn("baseline capture: failed to read primary HEAD",
+				"phase", "create",
+				"run_id", run.RunID,
+				"repository_id", repository.PrimaryRepositoryID,
+				"error", err)
+		}
+		cutErr = o.git.CreateBranch(ctx, run.BranchName, "HEAD")
+		return nil
+	})
+	if blockErr != nil {
+		cutErr = blockErr
 	}
-
-	if err := o.git.CreateBranch(ctx, run.BranchName, "HEAD"); err != nil {
-		return result, fmt.Errorf("create run branch on %q: %w", repository.PrimaryRepositoryID, err)
+	if cutErr != nil {
+		return result, fmt.Errorf("create run branch on %q: %w", repository.PrimaryRepositoryID, cutErr)
 	}
 	result.local = append(result.local, repository.PrimaryRepositoryID)
 	if pushOn {

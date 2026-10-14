@@ -187,8 +187,6 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 // errors translate into a failed outcome and a nil error so the
 // caller can persist the row and move on.
 func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *domain.Run, repoID string) (domain.RepositoryMergeOutcome, error) {
-	log := observe.Logger(ctx)
-
 	repo, err := o.repositories.Lookup(ctx, repoID)
 	if err != nil {
 		return domain.RepositoryMergeOutcome{}, err
@@ -232,9 +230,33 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 		"Run-ID":   run.RunID,
 		"Trace-ID": run.TraceID,
 	}
-	if o.bindingOn {
-		return o.attemptCodeRepositoryMergeBound(ctx, run, repoID, repo, client, outcome, trailers), nil
+	// The merge, its abort (or the bound check and take-back) and the push
+	// are one sequence on the repository's working tree (INIT-023
+	// TASK-012, design-check note 4): under its lock when the client is a
+	// git.WorkingTreeGuard. Code-repository clients register no home
+	// branch, so nothing is restored. A lock wait cut short by ctx is
+	// returned as an error: no outcome is recorded and the run stays in
+	// committing. Dormant until a code-repository catalog is wired (P3-37).
+	var result domain.RepositoryMergeOutcome
+	err = withClientTree(ctx, client, func(ctx context.Context) error {
+		if o.bindingOn {
+			result = o.attemptCodeRepositoryMergeBound(ctx, run, repoID, repo, client, outcome, trailers)
+		} else {
+			result = o.attemptCodeRepositoryMergeUnbound(ctx, repoID, repo, client, outcome, run, trailers)
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.RepositoryMergeOutcome{}, err
 	}
+	return result, nil
+}
+
+// attemptCodeRepositoryMergeUnbound is the binding-off code-repository
+// merge: merge the run branch into the default branch, abort on failure,
+// push. Git only; it runs inside attemptCodeRepositoryMerge's sequence.
+func (o *Orchestrator) attemptCodeRepositoryMergeUnbound(ctx context.Context, repoID string, repo *repository.Repository, client git.GitClient, outcome domain.RepositoryMergeOutcome, run *domain.Run, trailers map[string]string) domain.RepositoryMergeOutcome {
+	log := observe.Logger(ctx)
 	mergeResult, mergeErr := client.Merge(ctx, git.MergeOpts{
 		Source:   run.BranchName,
 		Target:   repo.DefaultBranch,
@@ -258,7 +280,7 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 		outcome.FailureClass = class
 		outcome.FailureDetail = detail
 		log.Warn("code repo merge failed", "repository_id", repoID, "error", mergeErr)
-		return outcome, nil
+		return outcome
 	}
 
 	// Push the merged ref to origin so the remote sees what we just
@@ -278,7 +300,7 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 				"repository_id", repoID,
 				"merge_sha", mergeResult.SHA,
 				"error", pushErr)
-			return outcome, nil
+			return outcome
 		}
 	}
 
@@ -286,7 +308,7 @@ func (o *Orchestrator) attemptCodeRepositoryMerge(ctx context.Context, run *doma
 	outcome.Status = domain.RepositoryMergeStatusMerged
 	outcome.MergeCommitSHA = mergeResult.SHA
 	outcome.MergedAt = &mergedAt
-	return outcome, nil
+	return outcome
 }
 
 // nextAttemptNumber returns 1 for a brand new (run, repo) pair or one

@@ -202,6 +202,9 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		return nil, err
 	}
 	defer scope.Cleanup()
+	// Every git call inside the scope uses sctx (INIT-023 TASK-012; see
+	// artifact.Service.writeAndCommit). workflow.Service emits no events.
+	sctx := scope.Context(ctx)
 
 	// All file I/O below goes through worktreefs (INIT-023 TASK-004, audit
 	// F5). On 61994fe this joined scope.RepoDir + path and called os.* with
@@ -259,7 +262,7 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		defer undo.Release()
 	}
 
-	commit, err := git.StageAndCommit(ctx, scope, rel, git.CommitOpts{
+	commit, err := git.StageAndCommit(sctx, scope, rel, git.CommitOpts{
 		Message:  op.messageFn(wf, prior),
 		Trailers: workflowTrailers(ctx, op.operation),
 		Author:   workflowAuthor(ctx),
@@ -274,7 +277,7 @@ func (s *Service) writeAndCommit(ctx context.Context, id, body string, op wfWrit
 		if op.requireExists {
 			_ = tree.WriteFile(rel, originalBody, originalMode)
 		} else {
-			_ = undo.RollbackClaiming(claimUntracked(ctx, scope.RepoDir, rel))
+			_ = undo.RollbackClaiming(claimUntracked(sctx, scope.RepoDir, rel))
 		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}

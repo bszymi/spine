@@ -165,7 +165,11 @@ type WorkflowWriter interface {
 }
 
 // CollisionHandler detects and resolves artifact ID collisions during merge.
-// Used by planning runs when a merge fails due to a path conflict.
+// Used by planning runs when a merge fails due to a path conflict. It runs
+// after the primary merge block has released the working tree, so an
+// implementation that changes the shared tree must run its git sequence
+// through git.WorkingTreeGuard (INIT-023 TASK-012). Neither product wires
+// one today.
 type CollisionHandler interface {
 	// DetectAndRenumber checks if a merge conflict is an ID collision and,
 	// if so, renumbers the artifact on the branch. Returns the new artifact path
