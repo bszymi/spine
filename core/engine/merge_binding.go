@@ -415,6 +415,9 @@ type mergeSource struct {
 	// as for excluded commits: it may be the only ref to them (codex
 	// review, round 2; the code-repository check already kept it).
 	tipUnknown bool
+	// gov is the governance-path guard's decision for this attempt
+	// (INIT-023 TASK-006); nil when the guard is off.
+	gov *governancePass
 }
 
 // resolveMergeSource is the binding-on entry of every merge attempt. It
@@ -765,6 +768,12 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 			"run_id", run.RunID, "bound_sha", src.bound, "merge_sha", mergeResult.SHA,
 			"base_sha", mergeResult.BaseSHA, "error", err)
 		return true, o.handlePermanentMergeFailure(ctx, run, violation)
+	}
+	// Governance-path guard (INIT-023 TASK-006): the post-merge assertion
+	// and, for an approved merge, the consumption marker — both before
+	// anything is pushed.
+	if done, err := o.assertGovernedMerge(ctx, run, src, mergeResult); err != nil || done {
+		return done, err
 	}
 	if src.excludedTip != "" {
 		log.Warn("merge_binding: commits after the bound head were not merged",

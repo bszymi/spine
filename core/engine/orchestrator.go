@@ -36,6 +36,9 @@ type Orchestrator struct {
 	binder    CommitBinder
 	movedHead MovedHeadPolicy
 	bindingOn bool
+	// governance is the governance-path guard (INIT-023 TASK-006), set
+	// only by WithGovernanceGuard; nil merges governance changes as before.
+	governance *governanceGuard
 	// cloneURLBuilder constructs the runner-facing clone URL for a
 	// resolved repository ID per ADR-015 *Assignment payload shape*.
 	// Production wires this to the workspace's git HTTP endpoint

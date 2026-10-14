@@ -46,6 +46,12 @@ const AuthoritativeBranch = authoritativeBranch
 // binding (failing closed without one), applies the status cascade AT
 // the bound commit, and every later phase merges exactly that commit.
 // With binding off it returns the zero value and nothing changes.
+//
+// With the governance-path guard on (WithGovernanceGuard, INIT-023
+// TASK-006) governanceGate runs next: a merge that changes governance
+// paths without an operator approval of the bound commit is held (the
+// error wraps ErrGovernanceApprovalRequired), and mergePrimaryBound
+// asserts after the merge that it changed nothing else.
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	run, done, err := o.preflightCheck(ctx, runID)
 	if err != nil || done {
@@ -53,6 +59,13 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	}
 	src, done, err := o.resolveMergeSource(ctx, run)
 	if err != nil || done {
+		return err
+	}
+	// Governance-path guard (ADR-016; INIT-023 TASK-006): after the
+	// binding is validated and the merge source built, before any code
+	// repository or the primary merges. A held merge returns here with
+	// the run still committing.
+	if done, err := o.governanceGate(ctx, run, &src); err != nil || done {
 		return err
 	}
 	if retried, err := o.mergeCodeRepos(ctx, run); err != nil || retried {
