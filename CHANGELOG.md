@@ -503,7 +503,10 @@ previous build). Externally visible:
   accepts both forms of `ResetBranch` the contract allows — the local branch moved back, or dropped
   by a remote-backed operator so the next `MergeBound` re-creates it from the remote (a clean working
   tree either way) — and every commit it hands the binder is on a branch of `Source`, so a harness
-  whose `Sync` fetches sees it.
+  whose `Sync` fetches sees it. `*git.CLIClient`'s `CommitBinder` commands run under TASK-003's
+  read bounds (wave 3 integration): the C locale, so a lock race stays a retryable error on a
+  translated host, the per-command output limit (`git.ErrOutputTooLarge`) and the bounded stderr;
+  not `GIT_ALLOC_LIMIT` (KNOWN-LIMITATIONS "Git Read Bounds").
 - Additive fields: `git.MergeOpts.SourceSHA` (merge exactly that commit; `CLIClient.Merge` honours
   it), `git.MergeResult.BaseSHA`, `engine.StepResult.ExpectedHeadSHA`,
   `engine.SubmitRequest.ExpectedHeadSHA`. New: `Orchestrator.RetryRepositoryMergeAt`,

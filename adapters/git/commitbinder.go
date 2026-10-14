@@ -72,24 +72,55 @@ type runOpts struct {
 // returns stdout, stderr and the classified error (its Err is the
 // *exec.ExitError, so callers can read the exit status). It never applies
 // push credentials: none of its callers talk to a remote.
+//
+// It keeps TASK-003's read bounds for every command it runs (INIT-023
+// wave 3 integration; before it, these commands were buffered whole and
+// ran in the host's locale):
+//
+//   - the C locale (LC_ALL=C, LANGUAGE=), as for read commands and the
+//     exact branch lookup: classifyGitError's patterns are English, and the
+//     engine decides on the kind — VerifyCommit's transient failure is
+//     retried, any other refuses the binding — so a translated
+//     "Unable to create '….lock'" would turn a lock race into a failed run.
+//     None of the parsed stdout depends on the locale (object ids, raw
+//     dates, -z listings, a ref name), and commit-tree writes the message
+//     bytes as given, so CommitFilesOnto's commit ids are unchanged;
+//   - stdout fails past the per-command limit (c.outputLimit(), never
+//     below 4 KiB) instead of growing without bound. Every command here
+//     prints at most a few object ids or one ls-tree record per argument,
+//     so the limit is never reached by a working git;
+//   - stderr keeps its head and tail (stderrSink, 64 KiB).
+//
+// Not applied: GIT_ALLOC_LIMIT and the pinned delta-base cache. ResetBranch's
+// `read-tree -m -u` materialises the working tree like checkout (opMutate),
+// and the read-only commands here parse the commit being merged, which the
+// merge itself then reads without an allocation limit (KNOWN-LIMITATIONS,
+// "Git read bounds").
 func (c *CLIClient) runWith(ctx context.Context, op string, o runOpts, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.repoPath
-	if len(o.env) > 0 {
-		cmd.Env = append(os.Environ(), o.env...)
-	}
+	env := append(os.Environ(), "LC_ALL=C", "LANGUAGE=")
+	cmd.Env = append(env, o.env...)
 	if o.stdin != nil {
 		cmd.Stdin = o.stdin
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		gitErr := classifyGitError(op, strings.TrimSpace(stderr.String()))
-		gitErr.Err = err
-		return stdout.String(), stderr.String(), gitErr
+	limit := c.outputLimit()
+	stdout := newStdoutSink(limit, 0, true, true)
+	stderr := &stderrSink{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	errText := stderr.String()
+	if stdout.overflow {
+		return "", errText, &GitError{Kind: ErrKindPermanent, Op: op, Message: "output exceeds read limit",
+			Err: &OutputTooLargeError{Op: op, Limit: limit}}
 	}
-	return stdout.String(), stderr.String(), nil
+	if err != nil {
+		gitErr := classifyGitError(op, strings.TrimSpace(errText))
+		gitErr.Err = err
+		return stdout.String(), errText, gitErr
+	}
+	return stdout.String(), errText, nil
 }
 
 // verifyCommitOID returns nil only when sha is a canonical object id that

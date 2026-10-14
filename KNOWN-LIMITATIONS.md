@@ -675,8 +675,9 @@ The following limitations have been resolved:
 - **Named-ref window.** The size probe and the read are two git processes. A ref given by *name*
   can move between them; Spine's buffer stays capped (the read overruns into the same refusal, with
   size -1) and git's memory stays within the per-read bound above. Projection reads use commit ids; the
-  window applies to reads by name (`?ref=<branch>`, and the merge-time status cascade, which reads
-  the run branch by name until INIT-023 TASK-005 pins it to the reviewed commit).
+  window applies to reads by name (`?ref=<branch>`, and the merge-time status cascade with merge
+  binding off, which reads the run branch by name; with binding on — always in `spine serve` —
+  INIT-023 TASK-005 reads it at the bound commit).
 - **Deltas on a large base are refused.** A legitimate artifact stored as a delta on a base larger
   than `GIT_ALLOC_LIMIT` (16 MiB by default) cannot be read and is refused as oversized. The
   refusal says so (`git.BlobTooLargeError.GitAllocLimit`, `git_alloc_limit_bytes` on
@@ -684,6 +685,14 @@ The following limitations have been resolved:
   file itself may be well under the per-blob limit.
 - **What `git show` renders counts.** The limit applies to what is read for a path: a tree path's
   listing, or a gitlink rendered as a commit with its patch, is refused like a large blob.
+- **The merge-binding plumbing** (INIT-023 TASK-005's `CommitBinder` methods: `rev-parse
+  --verify`, `rev-list --parents`, `merge-base --is-ancestor`, `ls-tree`, the private-index
+  `read-tree` / `hash-object` / `update-index` / `write-tree` / `commit-tree`, `update-ref`,
+  `read-tree -m -u`, `symbolic-ref`) runs in the C locale with the per-command output limit and the
+  bounded stderr (wave 3 integration), but without `GIT_ALLOC_LIMIT` or the pinned delta-base
+  cache: the take-back's `read-tree -m -u` materialises the working tree like checkout, and the
+  read-only commands parse the commit being merged, which the merge itself then reads without an
+  allocation limit.
 - **Not covered:** receive-time inflation (`index-pack` reconstructs a pushed delta to hash it;
   `receive.maxInputSize` bounds the pack, not the object), checkout-time inflation (`git worktree
   add` / `checkout` of a branch holding an oversized blob, including the standalone branch-write
