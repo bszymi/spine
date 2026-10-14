@@ -229,11 +229,12 @@ func TestVerifyBoundMergeRefusesOtherShapes(t *testing.T) {
 			g.parents[m] = []string{x, bound}
 			g.notAncestor[base+">"+x] = true
 		}, "main " + base + " " + m},
-		// The target moved between the base read and the merge (another
-		// writer; no worktree lock until TASK-012): the take-back keeps
-		// that write — it goes back to the merge's first parent, which
-		// descends from the base — instead of dropping it with the merge.
-		{"first parent is a newer target (a concurrent write)", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{w, bound} }, "main " + w + " " + m},
+		// A newer first parent with anything but the merged commit as the
+		// second parent is no target move: refused, but the take-back
+		// still keeps the newer write (it descends from the base). The
+		// [newer, bound] shape is TestTargetMovedDuringMergeRetries.
+		{"newer first parent, second parent the tip", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{w, tip} }, "main " + w + " " + m},
+		{"newer first parent and a third parent", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) { g.parents[m] = []string{w, bound, tip} }, "main " + w + " " + m},
 		{"parents swapped", git.MergeResult{SHA: m, BaseSHA: base}, func(g *fakeBinderGit) {
 			g.parents[m] = []string{bound, base}
 			g.notAncestor[base+">"+bound] = true
@@ -334,6 +335,108 @@ func TestTransientVerificationFailureRetries(t *testing.T) {
 		if p := f.latestExec("publish"); p.OutcomeID != "" {
 			t.Fatalf("publish outcome = %q, want none yet", p.OutcomeID)
 		}
+	}
+}
+
+// TestTargetMovedDuringMergeRetries (review round 2): a merge whose
+// parents are [W, S] — W a newer descendant of the reported base, S the
+// merged commit — is the shape of a write landing on the target between
+// MergeBound's base read and its merge (no worktree lock until TASK-012).
+// It is refused and taken back to W, and then retried (the run stays in
+// committing) instead of failing a legacy run or sending a publish run
+// back to execute; the retry merges on W and completes. It stays a
+// permanent refusal when the take-back did not restore the target to W.
+func TestTargetMovedDuringMergeRetries(t *testing.T) {
+	bound, base, m, w, m2, x := sha40('a'), sha40('b'), sha40('c'), sha40('8'), sha40('7'), sha40('9')
+	for _, legacy := range []bool{false, true} {
+		name := "publish workflow"
+		if legacy {
+			name = "legacy terminal-commit workflow"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := committingFix(t, legacy, true)
+			f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+			f.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+			f.git.parents[m] = []string{w, bound}
+			if err := f.merge(); err != nil {
+				t.Fatalf("MergeRunBranch: %v", err)
+			}
+			if len(f.git.pushes) != 0 {
+				t.Fatalf("pushed a merge on an unverified base: %v", f.git.pushes)
+			}
+			if len(f.git.resets) != 1 || f.git.resets[0] != "main "+w+" "+m {
+				t.Fatalf("ResetBranch calls = %v, want exactly [main %s %s] (the write kept)", f.git.resets, w, m)
+			}
+			if n := f.git.callCount("binder:CommitParents " + m); n != 1 {
+				t.Fatalf("CommitParents(M) called %d times, want once (the take-back reuses the verdict's parents)", n)
+			}
+			if f.run.Status != domain.RunStatusCommitting {
+				t.Fatalf("run status = %s, want committing (the scheduler retries)", f.run.Status)
+			}
+			if !legacy {
+				if p := f.latestExec("publish"); p.OutcomeID != "" {
+					t.Fatalf("publish outcome = %q, want none (no merge_failed route)", p.OutcomeID)
+				}
+			}
+			po := f.primaryOutcome()
+			if po == nil || po.Status != domain.RepositoryMergeStatusFailed || po.FailureClass != domain.MergeFailureRemoteUnavailable ||
+				!po.FailureClass.IsTransient() || !strings.Contains(po.FailureDetail, "target moved during the merge") ||
+				!strings.Contains(po.FailureDetail, "was restored to "+w) {
+				t.Fatalf("primary outcome = %+v, want failed, transient class remote_unavailable, naming the move and the restore", po)
+			}
+
+			// The scheduler's retry computes on the write and merges.
+			f.git.mergeRes = git.MergeResult{SHA: m2, BaseSHA: w}
+			f.git.parents[m2] = []string{w, bound}
+			if err := f.merge(); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if f.run.Status != domain.RunStatusCompleted {
+				t.Fatalf("run status after the retry = %s, want completed", f.run.Status)
+			}
+			if len(f.git.pushes) != 1 || f.git.pushes[0] != "origin main "+m2 {
+				t.Fatalf("pushes = %v, want exactly the retry's merge %s", f.git.pushes, m2)
+			}
+			if len(f.git.resets) != 1 {
+				t.Fatalf("the accepted retry was taken back: %v", f.git.resets)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(g *fakeBinderGit)
+		reset string
+		want  string // in the failure detail
+	}{
+		{"take-back failed", func(g *fakeBinderGit) {
+			g.resetErr = &git.GitError{Kind: git.ErrKindPermanent, Op: "reset_branch", Message: "cannot lock ref"}
+		}, "main " + w + " " + m, "still holds the refused merge"},
+		{"first parent does not descend from the base", func(g *fakeBinderGit) {
+			g.parents[m] = []string{x, bound}
+			g.notAncestor[base+">"+x] = true
+		}, "main " + base + " " + m, "was restored to " + base},
+	} {
+		t.Run("permanent: "+tc.name, func(t *testing.T) {
+			f := committingFix(t, false, true)
+			f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: bound, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+			f.git.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+			f.git.parents[m] = []string{w, bound}
+			tc.setup(f.git)
+			if err := f.merge(); err != nil {
+				t.Fatalf("MergeRunBranch: %v", err)
+			}
+			if len(f.git.pushes) != 0 {
+				t.Fatalf("pushed: %v", f.git.pushes)
+			}
+			if len(f.git.resets) != 1 || f.git.resets[0] != tc.reset {
+				t.Fatalf("ResetBranch calls = %v, want exactly [%s]", f.git.resets, tc.reset)
+			}
+			po := f.primaryOutcome()
+			if po == nil || po.Status != domain.RepositoryMergeStatusFailed || po.FailureClass.IsTransient() || !strings.Contains(po.FailureDetail, tc.want) {
+				t.Fatalf("primary outcome = %+v, want a permanent failure naming %q", po, tc.want)
+			}
+			requireMergeFailedRoute(t, f, false)
+		})
 	}
 }
 
@@ -654,6 +757,29 @@ func TestCodeRepoMergeBoundRefusesOtherShapes(t *testing.T) {
 			}
 		})
 	}
+	// Review round 2: [W, bound] with W a newer descendant of the base is
+	// the target moving during the merge — refused, taken back to W, and
+	// a transient outcome, so the run stays in committing and retries.
+	t.Run("target moved: transient, the write kept", func(t *testing.T) {
+		f, code := newCodeFix(t)
+		w := sha40('8')
+		code.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}
+		code.parents[m] = []string{w, repoBound}
+		out, err := f.orch.attemptCodeRepositoryMerge(context.Background(), f.run, "code-a")
+		if err != nil {
+			t.Fatalf("attemptCodeRepositoryMerge: %v", err)
+		}
+		if out.Status != domain.RepositoryMergeStatusFailed || !out.FailureClass.IsTransient() ||
+			!strings.Contains(out.FailureDetail, "target moved during the merge") {
+			t.Fatalf("outcome = %+v, want failed with a transient class naming the move", out)
+		}
+		if len(code.pushes) != 0 || len(code.plainPushes) != 0 {
+			t.Fatalf("pushed: %v %v", code.pushes, code.plainPushes)
+		}
+		if len(code.resets) != 1 || code.resets[0] != "main "+w+" "+m {
+			t.Fatalf("ResetBranch calls = %v, want exactly [main %s %s]", code.resets, w, m)
+		}
+	})
 	t.Run("accepted: pushes exactly the merge commit", func(t *testing.T) {
 		f, code := newCodeFix(t)
 		code.mergeRes = git.MergeResult{SHA: m, BaseSHA: base}

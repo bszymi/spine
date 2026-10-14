@@ -527,6 +527,9 @@ func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder
 		if err != nil {
 			return fmt.Errorf("read the merge commit's parents: %w", err)
 		}
+		if len(parents) == 2 && parents[0] != base && parents[1] == src.sha && isBoundObjectID(parents[0]) {
+			return &targetMovedError{merge: m, firstParent: parents[0], base: base, source: src.sha}
+		}
 		if len(parents) != 2 || parents[0] != base || parents[1] != src.sha {
 			return fmt.Errorf("merge commit %s has parents %v, want exactly [%s %s]", m, parents, base, src.sha)
 		}
@@ -549,6 +552,36 @@ func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder
 	return nil
 }
 
+// targetMovedError is verifyBoundMerge's verdict on a merge commit whose
+// parents are exactly [P, S] with P not the reported base: the shape a
+// write to the local target makes when it lands between MergeBound's base
+// read and its merge (another writer; the worktree is not serialized
+// until TASK-012). It is still a refusal — P was never verified as the
+// merge's base, so the merge is neither pushed nor kept — but when the
+// take-back restored the target to P (P descends from the base and the
+// compare-and-swap held) the caller retries instead of taking the
+// permanent route (review round 2): the retry computes on P and verifies
+// against it, which is what binding off does in the same race.
+type targetMovedError struct {
+	merge, firstParent, base, source string
+}
+
+func (e *targetMovedError) Error() string {
+	return fmt.Sprintf("merge commit %s has parents [%s %s], want exactly [%s %s]",
+		e.merge, e.firstParent, e.source, e.base, e.source)
+}
+
+// takeBack is what takeBackRefusedMerge did.
+type takeBack struct {
+	detail string // for the outcome's failure detail
+	// clean: the local target is known not to hold the refused merge (it
+	// did not move, or it was restored).
+	clean bool
+	// restoredTo is the commit the target was moved back to; "" when it
+	// was not moved or the take-back failed.
+	restoredTo string
+}
+
 // takeBackRefusedMerge restores the local target after verifyBoundMerge
 // refused a MergeBound result (review round 1). MergeBound has already
 // moved the local target to the refused merge M, and "nothing is pushed"
@@ -565,47 +598,92 @@ func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder
 // the worktree is not serialized until TASK-012), and dropping that commit
 // would lose a write that may already be published. A first parent that
 // does not descend from the base, an unreadable parent list, or any other
-// shape goes back to the base. Nothing is done when the target did not
-// move (M == base). It reports what happened for the outcome detail, and
-// clean = the local target is known not to hold the refused merge (it
-// did not move, or it was restored). A failure is logged at Error — the
-// local target then still holds the refused merge and must be reset
-// before the next governed merge.
-func (o *Orchestrator) takeBackRefusedMerge(ctx context.Context, binder CommitBinder, repoID, target string, res git.MergeResult) (detail string, clean bool) {
+// shape goes back to the base. When the verdict already read M's parents
+// as [P, S] (a *targetMovedError) that P is the candidate, so a second
+// parents read that fails cannot turn a kept write into a dropped one.
+// Nothing is done when the target did not move (M == base). A failure is
+// logged at Error — the local target then still holds the refused merge
+// and must be reset before the next governed merge.
+func (o *Orchestrator) takeBackRefusedMerge(ctx context.Context, binder CommitBinder, repoID, target string, res git.MergeResult, verdict error) takeBack {
 	log := observe.Logger(ctx)
 	m, base := res.SHA, res.BaseSHA
 	if m == base && isBoundObjectID(m) {
-		return "the local " + target + " was not moved", true
+		return takeBack{detail: "the local " + target + " was not moved", clean: true}
 	}
 	if !isBoundObjectID(m) || !isBoundObjectID(base) {
 		log.Error("merge binding: refused merge NOT taken back (merge result incomplete); reset the local branch before the next governed merge",
 			"repository_id", repoIDForLog(repoID), "branch", target, "merge_sha", m, "base_sha", base)
-		return "the local " + target + " may still hold the refused merge (merge result incomplete)", false
+		return takeBack{detail: "the local " + target + " may still hold the refused merge (merge result incomplete)"}
 	}
-	restoreTo := base
-	if parents, err := binder.CommitParents(ctx, m); err == nil && len(parents) >= 2 && parents[0] != base && isBoundObjectID(parents[0]) {
-		if in, err := binder.IsAncestor(ctx, base, parents[0]); err == nil && in {
-			restoreTo = parents[0]
+	restoreTo, first := base, ""
+	var moved *targetMovedError
+	if errors.As(verdict, &moved) && moved.merge == m {
+		first = moved.firstParent
+	} else if parents, err := binder.CommitParents(ctx, m); err == nil && len(parents) >= 2 {
+		first = parents[0]
+	}
+	if first != "" && first != base && isBoundObjectID(first) {
+		if in, err := binder.IsAncestor(ctx, base, first); err == nil && in {
+			restoreTo = first
 		}
 	}
 	if err := binder.ResetBranch(ctx, target, restoreTo, m); err != nil {
 		log.Error("merge binding: refused merge NOT taken back; reset the local branch before the next governed merge",
 			"repository_id", repoIDForLog(repoID), "branch", target, "merge_sha", m, "restore_to", restoreTo, "error", err)
-		return "the local " + target + " still holds the refused merge (take-back failed)", false
+		return takeBack{detail: "the local " + target + " still holds the refused merge (take-back failed)"}
 	}
 	log.Warn("merge binding: refused merge taken back",
 		"repository_id", repoIDForLog(repoID), "branch", target, "merge_sha", m, "restored_to", restoreTo)
-	return "the local " + target + " was restored to " + restoreTo, true
+	return takeBack{detail: "the local " + target + " was restored to " + restoreTo, clean: true, restoredTo: restoreTo}
 }
 
-// verificationRetryable reports whether a verifyBoundMerge error is a
-// transient failure of one of its reads (not a structural verdict) after
-// which the merge may simply run again: only when the take-back left the
-// local target clean, so the retry starts from the state before this
-// attempt instead of meeting an unverified merge already on the target.
-func verificationRetryable(err error, clean bool) bool {
+// refusalRetryable reports whether a merge verifyBoundMerge refused may
+// simply run again — the run stays in committing for the scheduler's
+// retry — instead of taking the permanent route (merge_failed back to
+// execute, or a failed legacy run). It returns the outcome message for
+// the retry. Both cases need a clean take-back: otherwise the retry would
+// meet the unverified merge on the target and accept it as "already up to
+// date".
+//
+//   - A read the check needed failed transiently (review round 1): not a
+//     verdict on the merge.
+//   - The target moved during the merge (review round 2): the merge's
+//     parents are exactly [P, S] with S the merged commit, and the
+//     take-back restored the target to P — which it does only when P
+//     descends from the reported base and the target was still at the
+//     refused merge. The target then holds what it held before the merge,
+//     the concurrent write included, and the retry computes on P and
+//     verifies against it. Treating it as permanent failed a correctly
+//     reviewed legacy run, or sent a publish run back to execute for
+//     rework nobody asked for, over a race binding off merges through. A
+//     MergeBound that persistently reports a stale base would retry
+//     without end (nothing is pushed on that path; each attempt logs at
+//     Warn); the conformance suite pins BaseSHA (MergeBound and
+//     ResetBranch cases, with the local target ahead of the remote).
+//
+// Not retried: a write that lands during a replay. The bound commit is
+// then already in the base, git reports "already up to date" and the
+// write itself as the result, and nothing tells that write from a commit
+// the binder made — trusting "any descendant of the base" there would let
+// a binder that merged the wrong commit in a replay through on the retry.
+// It stays a refusal taken back to the base (KNOWN-LIMITATIONS 7).
+//
+// The retry message names contention on the unlocked target, so the
+// outcome's class is remote_unavailable — the class classifyMergeFailure
+// gives lock contention — not network.
+func refusalRetryable(err error, tb takeBack) (string, bool) {
+	if !tb.clean {
+		return "", false
+	}
+	var moved *targetMovedError
+	if errors.As(err, &moved) && tb.restoredTo != "" && tb.restoredTo == moved.firstParent && moved.firstParent != moved.base {
+		return "merge binding: the target moved during the merge (contention on the unlocked target; will retry): " + err.Error() + "; " + tb.detail, true
+	}
 	var gitErr *git.GitError
-	return clean && errors.As(err, &gitErr) && gitErr.IsRetryable()
+	if errors.As(err, &gitErr) && gitErr.IsRetryable() {
+		return "merge binding: the merge result could not be verified (will retry): " + err.Error() + "; " + tb.detail, true
+	}
+	return "", false
 }
 
 // mergePrimaryBound is mergePrimary with binding on: MergeBound of the
@@ -647,22 +725,23 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		// The take-back runs before anything else can build on the
 		// refused merge (TASK-012 moves this whole sequence under its
 		// worktree lock).
-		undo, clean := o.takeBackRefusedMerge(ctx, o.binder, domain.PrimaryRepositoryID, authoritativeBranch, mergeResult)
-		if verificationRetryable(err, clean) {
-			// A read the check needed failed transiently and the target is
-			// back where it was: not a verdict on the merge. Stay in
-			// committing and merge again, as for a transient merge failure.
-			retry := &git.GitError{Kind: git.ErrKindTransient, Op: "merge_binding",
-				Message: "merge binding: the merge result could not be verified (will retry): " + err.Error() + "; " + undo}
+		tb := o.takeBackRefusedMerge(ctx, o.binder, domain.PrimaryRepositoryID, authoritativeBranch, mergeResult, err)
+		if msg, ok := refusalRetryable(err, tb); ok {
+			// The target is back where it was (or at the write that moved
+			// it) and nothing of the attempt survives: not a verdict on
+			// the reviewed commit. Stay in committing and merge again, as
+			// for a transient merge failure.
+			retry := &git.GitError{Kind: git.ErrKindTransient, Op: "merge_binding", Message: msg}
 			if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", retry, ""); recErr != nil {
 				return false, recErr
 			}
-			log.Warn("merge binding: transient failure verifying the merge result, will retry",
-				"run_id", run.RunID, "bound_sha", src.bound, "merge_sha", mergeResult.SHA, "error", err)
+			log.Warn("merge binding: merge result not accepted, will retry",
+				"run_id", run.RunID, "bound_sha", src.bound, "merge_sha", mergeResult.SHA,
+				"base_sha", mergeResult.BaseSHA, "restored_to", tb.restoredTo, "error", err)
 			return true, o.retryMerge(ctx, run)
 		}
 		violation := &git.GitError{Kind: git.ErrKindPermanent, Op: "merge_binding",
-			Message: "merge binding violation: " + err.Error() + "; " + undo}
+			Message: "merge binding violation: " + err.Error() + "; " + tb.detail}
 		if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, violation, ""); recErr != nil {
 			return false, recErr
 		}
@@ -1097,17 +1176,17 @@ func (o *Orchestrator) attemptCodeRepositoryMergeBound(ctx context.Context, run 
 	}
 	src := mergeSource{bound: repoBound, sha: repoBound}
 	if err := o.verifyBoundMerge(ctx, binder, runBranchIn(run, repoID), &src, mergeResult); err != nil {
-		undo, clean := o.takeBackRefusedMerge(ctx, binder, repoID, repo.DefaultBranch, mergeResult)
-		if verificationRetryable(err, clean) {
-			log.Warn("merge binding: transient failure verifying the code repository merge, will retry",
-				"repository_id", repoID, "bound_sha", repoBound, "merge_sha", mergeResult.SHA, "error", err)
-			return fail(&git.GitError{Kind: git.ErrKindTransient, Op: "merge_binding",
-				Message: "merge binding: the merge result could not be verified (will retry): " + err.Error() + "; " + undo})
+		tb := o.takeBackRefusedMerge(ctx, binder, repoID, repo.DefaultBranch, mergeResult, err)
+		if msg, ok := refusalRetryable(err, tb); ok {
+			log.Warn("merge binding: code repository merge result not accepted, will retry",
+				"repository_id", repoID, "bound_sha", repoBound, "merge_sha", mergeResult.SHA,
+				"base_sha", mergeResult.BaseSHA, "restored_to", tb.restoredTo, "error", err)
+			return fail(&git.GitError{Kind: git.ErrKindTransient, Op: "merge_binding", Message: msg})
 		}
 		log.Error("merge binding: code repository merge failed verification; nothing pushed",
 			"repository_id", repoID, "bound_sha", repoBound, "merge_sha", mergeResult.SHA, "error", err)
 		return fail(&git.GitError{Kind: git.ErrKindPermanent, Op: "merge_binding",
-			Message: "merge binding violation: " + err.Error() + "; " + undo})
+			Message: "merge binding violation: " + err.Error() + "; " + tb.detail})
 	}
 	if src.excludedTip != "" {
 		log.Warn("merge_binding: commits after the bound head were not merged",

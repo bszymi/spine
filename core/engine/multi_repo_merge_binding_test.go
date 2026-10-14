@@ -51,7 +51,10 @@ func crIsAncestor(dir, a, d string) bool {
 // failingCLI wraps a CLIClient: the next failBound MergeBound calls (and,
 // for binding off, failMerge plain non-abort Merge calls) fail with err.
 // While misMerge is set, the next MergeBound merges it in place of
-// opts.SourceSHA (a faulty binder). It records every push.
+// opts.SourceSHA (a faulty binder). While race is set, the next
+// MergeBound runs it before merging — a write landing on the target
+// between the base read and the merge — and reports the tip race returns
+// (the one before that write) as BaseSHA. It records every push.
 type failingCLI struct {
 	*git.CLIClient
 	mu          sync.Mutex
@@ -59,6 +62,7 @@ type failingCLI struct {
 	failMerge   int
 	err         error
 	misMerge    string
+	race        func() string
 	pushCommits []string // "remote branch sha"
 	plainPushes []string // "remote ref"
 }
@@ -95,7 +99,15 @@ func (f *failingCLI) MergeBound(ctx context.Context, o git.MergeOpts) (git.Merge
 	if f.misMerge != "" {
 		o.SourceSHA, f.misMerge = f.misMerge, ""
 	}
+	race := f.race
+	f.race = nil
 	f.mu.Unlock()
+	if race != nil {
+		base := race()
+		res, err := f.CLIClient.MergeBound(ctx, o)
+		res.BaseSHA = base
+		return res, err
+	}
 	return f.CLIClient.MergeBound(ctx, o)
 }
 
@@ -445,6 +457,71 @@ func TestCodeRepoBinding_RefusedMergeTakenBack(t *testing.T) {
 	e.resume()
 	if !e.originHas(r1) || e.originHas(sneak) {
 		t.Fatalf("code origin main has R1=%v sneak=%v; want R1 only", e.originHas(r1), e.originHas(sneak))
+	}
+}
+
+// TestCodeRepoBinding_ConcurrentWriteRetried (review round 2): a write
+// that lands on the code repository's default branch between MergeBound's
+// base read and its merge makes a [write, bound] merge the check refuses.
+// It is taken back to the write (kept), nothing is pushed, the outcome is
+// transient so the run stays in committing, and the retry merges the
+// bound commit on top of the write.
+func TestCodeRepoBinding_ConcurrentWriteRetried(t *testing.T) {
+	e := mustCREnv(t, true)
+	r1 := e.commitCode("feature.go", "package x\n")
+	if err := e.submit("execute", "completed"); err != nil {
+		t.Fatal(err)
+	}
+	var write string
+	e.code.race = func() string {
+		base := crGit(t, e.codeWork, "rev-parse", "refs/heads/main")
+		crGit(t, e.codeWork, "checkout", "-q", "main")
+		if err := os.WriteFile(filepath.Join(e.codeWork, "concurrent.go"), []byte("package x // a concurrent write\n"), 0o644); err != nil { //nolint:gosec // G306: test fixture
+			t.Fatal(err)
+		}
+		crGit(t, e.codeWork, "add", "concurrent.go")
+		crGit(t, e.codeWork, "commit", "-q", "-m", "write during the merge")
+		write = crGit(t, e.codeWork, "rev-parse", "HEAD")
+		return base
+	}
+	if err := e.submit("review", "accepted"); err != nil {
+		t.Fatal(err)
+	}
+	if write == "" {
+		t.Fatal("the concurrent write did not happen")
+	}
+	o := e.codeOutcome()
+	if o.Status != domain.RepositoryMergeStatusFailed || !o.FailureClass.IsTransient() || !strings.Contains(o.FailureDetail, "was restored to "+write) {
+		t.Fatalf("code outcome = %s %s %q, want failed, transient, restored to the write %s", o.Status, o.FailureClass, o.FailureDetail, write)
+	}
+	if r := e.runNow(); r.Status != domain.RunStatusCommitting {
+		t.Fatalf("run status = %s, want committing (the scheduler retries)", r.Status)
+	}
+	if len(e.code.pushCommits) != 0 || len(e.code.plainPushes) != 0 {
+		t.Fatalf("a refused code-repository merge was pushed: %q %q", e.code.pushCommits, e.code.plainPushes)
+	}
+	if got := crGit(t, e.codeWork, "rev-parse", "refs/heads/main"); got != write {
+		t.Fatalf("code repository local main = %s, want the write %s kept", got, write)
+	}
+	if st := crGit(t, e.codeWork, "status", "--porcelain"); st != "" {
+		t.Fatalf("the take-back left the code working tree dirty:\n%s", st)
+	}
+
+	if err := e.orch.MergeRunBranch(e.ctx, e.run.RunID); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if r := e.runNow(); r.Status != domain.RunStatusCompleted {
+		t.Fatalf("run status after the retry = %s, want completed", r.Status)
+	}
+	if o := e.codeOutcome(); o.Status != domain.RepositoryMergeStatusMerged {
+		t.Fatalf("code outcome after the retry = %s", o.Status)
+	}
+	if !e.originHas(r1) || !e.originHas(write) {
+		t.Fatalf("code origin main has R1=%v write=%v; want both", e.originHas(r1), e.originHas(write))
+	}
+	tip := crGit(t, e.codeOrigin, "rev-parse", "refs/heads/main")
+	if got := crGit(t, e.codeOrigin, "rev-list", "--parents", "-n", "1", tip); got != tip+" "+write+" "+r1 {
+		t.Fatalf("code origin tip parents = %q, want [%s %s]", got, write, r1)
 	}
 }
 

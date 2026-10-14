@@ -844,18 +844,61 @@ func TestMergeBindingRegression_RefusedMergeTakenBack(t *testing.T) {
 // refusal comes from main moving between the base read and the merge
 // (another writer — the worktree is not serialized until TASK-012), the
 // take-back restores main to that write, not to the older base: the
-// write is kept and only the refused merge goes.
+// write is kept and only the refused merge goes. Review round 2: the run
+// then stays in committing — a legacy run is not failed and a publish
+// run is not sent back to execute — and the scheduler's retry merges the
+// reviewed commit on top of the write, in both push modes.
 func TestMergeBindingRegression_RefusedMergeKeepsAConcurrentWrite(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, autoPush := range []bool{false, true} {
+			name := "publish workflow"
+			if legacy {
+				name = "legacy terminal-commit workflow"
+			}
+			if autoPush {
+				name += ", auto-push on"
+			}
+			t.Run(name, func(t *testing.T) {
+				testConcurrentWriteRetried(t, legacy, autoPush)
+			})
+		}
+	}
+}
+
+func testConcurrentWriteRetried(t *testing.T, legacy, autoPush bool) {
+	wf := taskDefaultWorkflow()
+	if legacy {
+		wf = reviewWorkflow()
+	}
 	var mm *misMergingCLI
-	e := newRegEnv(t, taskDefaultWorkflow(), regOpts{op: func(c *git.CLIClient) engine.GitOperator {
+	e := newRegEnv(t, wf, regOpts{autoPush: autoPush, op: func(c *git.CLIClient) engine.GitOperator {
 		mm = &misMergingCLI{CLIClient: c, t: t, concurrentWrite: true}
 		return mm
 	}})
 	mm.dir = e.dir
 	mm.armed = true
-	e.driveTaskDefaultWith(map[string]string{"src/feature.go": "package src\n// legit\n"})
-	if p := e.execOf("publish"); p.OutcomeID != "merge_failed" {
-		t.Fatalf("publish outcome = %q, want merge_failed (first parent is not the reported base)", p.OutcomeID)
+	deliverable := map[string]string{"src/feature.go": "package src\n// legit\n"}
+	if legacy {
+		e.commitOnRun("legit deliverable", deliverable)
+		if err := e.submit(0, "completed", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.submit(1, "accepted", ""); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		e.driveTaskDefaultWith(deliverable)
+	}
+	if r := e.runNow(); r.Status != domain.RunStatusCommitting {
+		t.Fatalf("run status after the race = %s, want committing (the scheduler retries)", r.Status)
+	}
+	if !legacy {
+		if p := e.execOf("publish"); p.OutcomeID != "" {
+			t.Fatalf("publish outcome = %q, want none (no merge_failed route)", p.OutcomeID)
+		}
+	}
+	if mm.write == "" || mm.refused.SHA == "" {
+		t.Fatalf("the concurrent write did not happen: %+v", mm.refused)
 	}
 	if got := e.git("rev-parse", "refs/heads/main"); got != mm.write {
 		t.Fatalf("local main = %s, want the concurrent write %s kept", got, mm.write)
@@ -865,6 +908,54 @@ func TestMergeBindingRegression_RefusedMergeKeepsAConcurrentWrite(t *testing.T) 
 	}
 	if st := e.git("status", "--porcelain"); st != "" {
 		t.Fatalf("working tree dirty after the take-back:\n%s", st)
+	}
+	if autoPush && exec.Command("git", "-C", e.origin, "cat-file", "-e", mm.refused.SHA).Run() == nil {
+		t.Fatalf("the refused merge %s reached origin", mm.refused.SHA)
+	}
+
+	// The scheduler's retry: computes on the write, verifies, merges.
+	if err := e.orch.MergeRunBranch(context.Background(), e.run.RunID); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if r := e.runNow(); r.Status != domain.RunStatusCompleted {
+		t.Fatalf("run status after the retry = %s, want completed", r.Status)
+	}
+	if !legacy {
+		if p := e.execOf("publish"); p.OutcomeID != "published" {
+			t.Fatalf("publish outcome = %q, want published", p.OutcomeID)
+		}
+		if e.execOf("execute").Attempt != 1 {
+			t.Fatal("the race routed the run back to execute")
+		}
+	}
+	repo := e.dir
+	if autoPush {
+		repo = e.origin
+	}
+	// The retry's merge is [write, cascade commit], the cascade a child
+	// of the bound commit. (It can be the very commit the check refused:
+	// a refused [write, S] merge differs from a valid one only in the
+	// base it was reported against, and git dates have one-second
+	// resolution — so the test pins the structure, not "M is absent".)
+	bound := e.runNow().CommitMeta[engine.CommitMetaBoundSHA]
+	tip := regGit(t, repo, "rev-parse", "refs/heads/main")
+	parents := strings.Fields(regGit(t, repo, "rev-list", "--parents", "-n", "1", tip))
+	if len(parents) != 3 || parents[1] != mm.write {
+		t.Fatalf("the published main tip %s has parents %v, want [%s <cascade>]", tip, parents[1:], mm.write)
+	}
+	if got := regGit(t, repo, "rev-list", "--parents", "-n", "1", parents[2]); got != parents[2]+" "+bound {
+		t.Fatalf("the merged commit %s is not a child of exactly the bound commit %s (rev-list: %s)", parents[2], bound, got)
+	}
+	for _, p := range []string{"concurrent.md", "src/feature.go"} {
+		if exec.Command("git", "-C", repo, "cat-file", "-e", "refs/heads/main:"+p).Run() != nil {
+			t.Fatalf("the published main lacks %s", p)
+		}
+	}
+	if got := regGit(t, repo, "show", "refs/heads/main:tasks/t.md"); !strings.Contains(got, "status: Completed") {
+		t.Fatalf("published main:tasks/t.md = %q, want the cascade's status Completed", got)
+	}
+	if st := e.git("status", "--porcelain"); st != "" {
+		t.Fatalf("working tree dirty after the retry:\n%s", st)
 	}
 }
 
