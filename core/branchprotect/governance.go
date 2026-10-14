@@ -190,16 +190,16 @@ func foldPath(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		min := r
+		least := r
 		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-			if f < min {
-				min = f
+			if f < least {
+				least = f
 			}
 		}
 		// The orbit's smallest rune is the same for every member; its
 		// lower case keeps the keys readable ("workflows", not
 		// "WORKFLOWS").
-		b.WriteRune(unicode.ToLower(min))
+		b.WriteRune(unicode.ToLower(least))
 	}
 	return b.String()
 }

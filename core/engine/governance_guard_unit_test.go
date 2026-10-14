@@ -129,9 +129,9 @@ func (f *govFake) decide(d GovernanceDecision, sha string, a domain.Actor, reaso
 
 func (f *govFake) eventsOf(t domain.EventType) []domain.Event {
 	var out []domain.Event
-	for _, e := range f.events.events {
-		if e.Type == t {
-			out = append(out, e)
+	for i := range f.events.events {
+		if f.events.events[i].Type == t {
+			out = append(out, f.events.events[i])
 		}
 	}
 	return out
@@ -179,6 +179,13 @@ func TestWithGovernanceGuard_Prerequisites(t *testing.T) {
 	}
 	if err := o.WithGovernanceGuard(GovernanceGuard{Enabled: true}); err == nil || o.GovernanceGuardEnabled() {
 		t.Fatalf("no MergeBases: err %v, enabled %v; want an error and the guard off", err, o.GovernanceGuardEnabled())
+	}
+	// Binding off with an operator that can list merge bases: still refused
+	// (I2 needs the bound commit).
+	gNoBind := &govGit{fakeBinderGit: newFakeBinderGit()}
+	oNoBind := &Orchestrator{git: gNoBind}
+	if err := oNoBind.WithGovernanceGuard(GovernanceGuard{Enabled: true}); err == nil || oNoBind.GovernanceGuardEnabled() {
+		t.Fatalf("binding off with MergeBases: err %v, enabled %v; want an error and the guard off", err, oNoBind.GovernanceGuardEnabled())
 	}
 	g := &govGit{fakeBinderGit: newFakeBinderGit()}
 	o2 := &Orchestrator{git: g}
@@ -236,13 +243,12 @@ func TestGovernanceDecision_WhoMayApprove(t *testing.T) {
 // TestGovernanceDecision_StateChecks is AC 8 (and AC 7's direct SHA case).
 func TestGovernanceDecision_StateChecks(t *testing.T) {
 	type tc struct {
-		name   string
-		setup  func(*govFake)
-		req    GovernanceDecisionRequest
-		code   domain.ErrorCode
-		paths  []string
-		guard  *GovernanceGuard
-		runned string
+		name  string
+		setup func(*govFake)
+		req   GovernanceDecisionRequest
+		code  domain.ErrorCode
+		paths []string
+		guard *GovernanceGuard
 	}
 	approve := func(sha string) GovernanceDecisionRequest {
 		return GovernanceDecisionRequest{CommitSHA: sha, Decision: GovernanceApprove, Actor: govOperator}

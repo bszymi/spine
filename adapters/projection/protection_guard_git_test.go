@@ -85,7 +85,7 @@ func (f *pgFix) requireProtected(why string) {
 	contributorDenied(f.t, rows)
 }
 
-func (f *pgFix) requireInstalledRelaxed(why string, source string) {
+func (f *pgFix) requireInstalledRelaxed(why, source string) {
 	f.t.Helper()
 	if len(f.st.bpRules) != 0 || f.st.bpCommit != source {
 		f.t.Fatalf("%s: rows %d from %q, want the empty ruleset from %s", why, len(f.st.bpRules), f.st.bpCommit, source)

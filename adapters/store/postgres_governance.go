@@ -149,10 +149,10 @@ func (s *PostgresStore) ListGovernanceAuthorizations(ctx context.Context, branch
 	if err != nil {
 		return nil, fmt.Errorf("list approval authorizations: %w", err)
 	}
-	for _, a := range approvals {
-		rec := a.GovernanceAuthorization
+	for i := range approvals {
+		rec := approvals[i].GovernanceAuthorization
 		rec.Source = GovernanceSourceApprovedMerge
-		if t, err := time.Parse(time.RFC3339, a.approvedAt); err == nil {
+		if t, err := time.Parse(time.RFC3339, approvals[i].approvedAt); err == nil {
 			rec.RecordedAt = t
 		}
 		out = append(out, rec)

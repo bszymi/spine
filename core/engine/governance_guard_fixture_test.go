@@ -356,9 +356,9 @@ func (g *govRepo) toMerge() {
 
 func (g *govRepo) eventsOf(t domain.EventType) []domain.Event {
 	var out []domain.Event
-	for _, e := range g.events.events {
-		if e.Type == t {
-			out = append(out, e)
+	for i := range g.events.events {
+		if g.events.events[i].Type == t {
+			out = append(out, g.events.events[i])
 		}
 	}
 	return out

@@ -126,7 +126,8 @@ func TestGovernanceGuard_CrissCrossRevertIsCaught(t *testing.T) {
 		{".spine/branch-protection.yaml", bpWeak, bpStrong},
 		{"workflows/task-default.yaml", wfWithReview, wfMore},
 	} {
-		t.Run(file.path+"/every merge base", func(t *testing.T) {
+		name := strings.ReplaceAll(file.path, "/", "_")
+		t.Run(name+"/every_merge_base", func(t *testing.T) {
 			g := newGovRepo(t, govRepoOpts{mainFiles: map[string]string{"README.md": "r\n"}, guard: defaultGuard()})
 			crissCross(t, g, file.path, file.weak, file.strong)
 			g.toMerge()
@@ -138,7 +139,7 @@ func TestGovernanceGuard_CrissCrossRevertIsCaught(t *testing.T) {
 				t.Fatalf("main %s = %q, want the tightened file", file.path, got)
 			}
 		})
-		t.Run(file.path+"/single base: post-merge assertion", func(t *testing.T) {
+		t.Run(name+"/single_base_post-merge_assertion", func(t *testing.T) {
 			g := newGovRepo(t, govRepoOpts{mainFiles: map[string]string{"README.md": "r\n"}, guard: defaultGuard(),
 				wrap: func(c *git.CLIClient) GitOperator { return singleBaseCLI{c} }})
 			crissCross(t, g, file.path, file.weak, file.strong)
