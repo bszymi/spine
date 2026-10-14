@@ -73,7 +73,9 @@ through reserved `commit_meta` keys (5).
   emitted, and `spine_timeouts_detected_total` is not incremented, when the submit won instead).
   A run that moved to `committing` between the run-timeout re-read and its cancel is not cancelled.
 - Crash recovery of a completed step that did not advance re-routes the stored outcome and
-  re-emits its `step_completed` (same id; `branch_change` `unknown`/`recovered`).
+  re-emits its `step_completed` (same id; `branch_change` `unknown`/`recovered`). When routing had
+  already created the successor but not moved the run's cursor, recovery moves the cursor and
+  activates that successor instead of creating a second attempt of it.
 
 ### Changed (embedders)
 

@@ -482,10 +482,20 @@ func TestRecoverCompletedStep(t *testing.T) {
 			f.st.runs[f.runID].CurrentStepID = "review"
 			f.st.mu.Unlock()
 		}},
-		{"a later execution exists", func(f *casFix, _ *domain.StepExecution) {
-			f.addExec("review", domain.StepStatusWaiting, "")
+		{"a later execution of the same step exists", func(f *casFix, _ *domain.StepExecution) {
+			f.addExec("execute", domain.StepStatusWaiting, "") // a retry / rework attempt
+		}},
+		{"the successor is no longer waiting", func(f *casFix, _ *domain.StepExecution) {
+			f.addExec("review", domain.StepStatusAssigned, "actor-r")
 			f.st.mu.Lock()
-			f.st.runs[f.runID].CurrentStepID = "execute" // cursor not moved yet (mid-route)
+			f.st.runs[f.runID].CurrentStepID = "execute"
+			f.st.mu.Unlock()
+		}},
+		{"more than the successor exists", func(f *casFix, _ *domain.StepExecution) {
+			f.addExec("review", domain.StepStatusWaiting, "")
+			f.addExec("execute", domain.StepStatusWaiting, "")
+			f.st.mu.Lock()
+			f.st.runs[f.runID].CurrentStepID = "execute"
 			f.st.mu.Unlock()
 		}},
 		{"execution not completed", func(f *casFix, e *domain.StepExecution) {
@@ -503,6 +513,61 @@ func TestRecoverCompletedStep(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Codex review, round 1: routing that stopped between creating the
+// successor and moving the run's cursor (a crash) is resumed — the cursor
+// moves and the successor is activated — instead of being refused for
+// ever. An internal publish successor runs its merge handler. Mutation:
+// returning the refusal for every later execution fails both cases.
+func TestRecoverCompletedStep_ResumesStrandedSuccessor(t *testing.T) {
+	t.Setenv("SPINE_GIT_PUSH_ENABLED", "false")
+	t.Run("manual successor", func(t *testing.T) {
+		f := newCasFix(t, casWorkflow(), true)
+		e := f.addExec("execute", domain.StepStatusCompleted, "actor-a")
+		f.st.mutateExec(e.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "completed" })
+		succ := f.addExec("review", domain.StepStatusWaiting, "")
+		f.st.mu.Lock()
+		f.st.runs[f.runID].CurrentStepID = "execute" // the crash: the cursor never moved
+		f.st.mu.Unlock()
+		before := len(f.st.steps)
+		if err := f.orch.RecoverCompletedStep(context.Background(), e.ExecutionID); err != nil {
+			t.Fatalf("RecoverCompletedStep: %v", err)
+		}
+		if got := f.st.run(f.runID).CurrentStepID; got != "review" {
+			t.Fatalf("cursor = %q, want review", got)
+		}
+		if len(f.st.steps) != before {
+			t.Fatalf("recovery created executions (%d -> %d): the successor must be resumed, not duplicated", before, len(f.st.steps))
+		}
+		if got := f.st.exec(succ.ExecutionID).Status; got != domain.StepStatusWaiting {
+			t.Fatalf("successor = %s, want waiting (activated, no actor)", got)
+		}
+		for _, c := range f.st.transitions {
+			if c.executionID == e.ExecutionID {
+				t.Fatalf("recovery wrote the completed execution: %+v", c)
+			}
+		}
+	})
+	t.Run("internal publish successor runs its handler", func(t *testing.T) {
+		f := newCasFix(t, publishWorkflow(), true)
+		f.st.runs[f.runID].BranchName = "" // the merge completes without git
+		r := f.addExec("review", domain.StepStatusCompleted, "actor-r")
+		f.st.mutateExec(r.ExecutionID, func(x *domain.StepExecution) { x.OutcomeID = "accepted" })
+		pub := f.addExec("publish", domain.StepStatusWaiting, "")
+		f.st.mu.Lock()
+		f.st.runs[f.runID].CurrentStepID = "review"
+		f.st.mu.Unlock()
+		if err := f.orch.RecoverCompletedStep(context.Background(), r.ExecutionID); err != nil {
+			t.Fatalf("RecoverCompletedStep: %v", err)
+		}
+		if got := f.st.exec(pub.ExecutionID).Status; got == domain.StepStatusWaiting {
+			t.Fatal("the publish step was never activated: the run is stranded")
+		}
+		if got := f.st.run(f.runID).Status; got != domain.RunStatusCompleted {
+			t.Fatalf("run = %s, want completed after the merge handler ran", got)
+		}
+	})
 }
 
 // AC 10. Every engine step writer, with the capability, stops without side

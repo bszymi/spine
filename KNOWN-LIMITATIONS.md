@@ -291,7 +291,11 @@ terminal execution from being routed twice and lets the engine verify the submit
 7. **Two replicas recovering the same completed execution** both pass `RecoverCompletedStep`'s
    checks and compute the same next execution id; the second `CreateStepExecution` fails on the
    primary key, and `step_completed` is re-emitted under the execution's own id (the event log
-   keeps the first copy).
+   keeps the first copy). A crash between creating the next execution and moving the run's
+   cursor is finished by recovery (cursor moved, the `waiting` successor activated; before, the
+   re-route created a duplicate successor attempt). A crash after the cursor moved but before the
+   successor was activated is not: recovery leaves a `waiting` current step alone, so a
+   machine-selected or internal successor is not activated until an operator acts (pre-existing).
 8. **`ProcessResult` (`core/actor`) has no production caller.** It now refuses failed and skipped
    executions and a foreign actor and writes conditionally when it can; deleting the dead path is a
    follow-up.

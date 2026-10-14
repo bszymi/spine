@@ -517,6 +517,38 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, now, hb, metaRecorded)
 }
 
+// resumeRoutedSuccessor is RecoverCompletedStep's tail when routing
+// already created the successor but did not move the run's cursor (see
+// there). Anything other than exactly that successor — more than one later
+// execution, another step, a divergence branch, a successor that is no
+// longer waiting, an id advanceToNextStep would not build, an outcome that
+// starts a divergence or ends the run — is refused: the execution was
+// routed, and nothing is changed.
+func (o *Orchestrator) resumeRoutedSuccessor(ctx context.Context, run *domain.Run, exec *domain.StepExecution, stepDef *domain.StepDefinition, outcome *domain.OutcomeDefinition, later []*domain.StepExecution) error {
+	next := outcome.NextStep
+	succ := later[0]
+	routable := next != "" && next != "end" && (stepDef.Diverge == "" || o.divergence == nil)
+	if !routable || len(later) != 1 || succ.StepID != next || succ.BranchID != "" ||
+		succ.Status != domain.StepStatusWaiting ||
+		succ.ExecutionID != fmt.Sprintf("%s-%s-%d", run.RunID, next, succ.Attempt) {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s already has a later execution (%s); step %s was routed", run.RunID, succ.ExecutionID, exec.ExecutionID))
+	}
+	log := observe.Logger(ctx)
+	log.Info("recovery: routing stopped before the run's cursor moved; resuming the successor",
+		"run_id", run.RunID, "execution_id", exec.ExecutionID, "next_step", next, "successor", succ.ExecutionID)
+	if err := o.store.UpdateCurrentStep(ctx, run.RunID, next); err != nil {
+		return fmt.Errorf("update current step: %w", err)
+	}
+	if err := o.ActivateStep(ctx, run.RunID, next); err != nil {
+		// As in advanceToNextStep: the cursor moved; an activation that
+		// fails (or loses its compare-and-swap to a live activation) is
+		// logged, not returned.
+		log.Warn("recovery: successor activation failed", "step_id", next, "error", err)
+	}
+	return nil
+}
+
 // checkSubmitter is the engine's own submit-ownership check (INIT-023
 // TASK-008, audit P3-17): a non-empty submitter must be the actor the
 // execution is bound to. An empty submitter means the caller enforces
@@ -542,9 +574,22 @@ func checkSubmitter(exec *domain.StepExecution, submitter string) error {
 // Preconditions, re-checked here rather than trusted from the scheduler:
 // the execution is completed; the run is active and its current step is
 // the execution's step; and no execution of the run was created after
-// this one — otherwise a live submit has already routed it (it may still
-// be between creating the next execution and moving the run's cursor).
-// Each refusal is ErrConflict and changes nothing.
+// this one — otherwise a submit has already routed it. Each refusal is
+// ErrConflict and changes nothing.
+//
+// One later execution is the exception (codex review, round 1): exactly
+// the successor this execution's routing creates — the outcome's next
+// step on the main path, `waiting`, under the deterministic id
+// advanceToNextStep builds. Then routing stopped between creating it and
+// moving the run's cursor (a crash; or a live submit that is about to do
+// the same two writes), and recovery finishes it instead of refusing:
+// the cursor moves to that step and the step is activated, exactly
+// advanceToNextStep's tail. Refusing left the run stranded — nothing else
+// activates the successor, and an internal publish step is never claimed
+// or assigned, so its merge never ran. A live submit racing it writes the
+// same cursor, and the second activation of the step is a lost
+// compare-and-swap (the store capability `spine serve` always has), so the
+// handler and the assignment delivery run once.
 //
 // It makes no step write and routes the STORED outcome. It emits
 // step_completed again under the execution's own event id with
@@ -578,14 +623,14 @@ func (o *Orchestrator) RecoverCompletedStep(ctx context.Context, executionID str
 	if err != nil {
 		return fmt.Errorf("list step executions: %w", err)
 	}
+	var later []*domain.StepExecution
 	for i := range execs {
 		e := &execs[i]
 		if e.ExecutionID == exec.ExecutionID {
 			continue
 		}
 		if e.CreatedAt.After(exec.CreatedAt) || (e.StepID == exec.StepID && e.Attempt > exec.Attempt) {
-			return domain.NewError(domain.ErrConflict,
-				fmt.Sprintf("run %s already has a later execution (%s); step %s was routed", run.RunID, e.ExecutionID, executionID))
+			later = append(later, e)
 		}
 	}
 
@@ -602,6 +647,9 @@ func (o *Orchestrator) RecoverCompletedStep(ctx context.Context, executionID str
 	if outcome == nil {
 		return domain.NewError(domain.ErrInvalidParams,
 			fmt.Sprintf("stored outcome %q not defined for step %s", exec.OutcomeID, exec.StepID))
+	}
+	if len(later) > 0 {
+		return o.resumeRoutedSuccessor(ctx, run, exec, stepDef, outcome, later)
 	}
 
 	observe.Logger(ctx).Info("re-routing a completed step after recovery",
