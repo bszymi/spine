@@ -47,6 +47,11 @@ type runtimeConfig struct {
 	withValidation      bool
 	withOrchestrator    bool
 	withoutMergeBinding bool
+	// governanceGuard turns on both governance-path guards (INIT-023
+	// TASK-006); governanceArtifactsDir is the artifacts_dir whose
+	// workflows/ directory the engine guard also covers.
+	governanceGuard        bool
+	governanceArtifactsDir string
 }
 
 // WithEvents enables the event system (MemoryQueue + QueueRouter).
@@ -83,6 +88,20 @@ func WithOrchestrator() RuntimeOption {
 func WithoutMergeBinding() RuntimeOption {
 	return func(c *runtimeConfig) {
 		c.withoutMergeBinding = true
+	}
+}
+
+// WithGovernanceGuard turns on both governance-path guards (ADR-016;
+// INIT-023 TASK-006), as `spine serve` does: the orchestrator holds a
+// governed merge that changes governance paths until an operator decides,
+// and the projection refuses an unprovenanced branch-protection removal.
+// artifactsDir is the environment's artifacts_dir ("" for the root), so
+// <artifacts_dir>/workflows/ is guarded too. Off by default, so existing
+// scenarios are unchanged. Requires merge binding (the default).
+func WithGovernanceGuard(artifactsDir string) RuntimeOption {
+	return func(c *runtimeConfig) {
+		c.governanceGuard = true
+		c.governanceArtifactsDir = artifactsDir
 	}
 }
 
@@ -131,6 +150,9 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 	// are created on main, so scenarios run with the same option.
 	if err := rt.Projections.WithAuthoritativeBranch(engine.AuthoritativeBranch); err != nil {
 		t.Fatalf("projection authoritative branch: %v", err)
+	}
+	if cfg.governanceGuard {
+		rt.Projections.WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{Enabled: true, Provenance: db.Store})
 	}
 
 	if cfg.withValidation {
@@ -190,6 +212,16 @@ func NewTestRuntime(t *testing.T, repo *TestRepo, db *TestDB, opts ...RuntimeOpt
 		if !cfg.withoutMergeBinding {
 			if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
 				t.Fatalf("enable merge binding: %v", err)
+			}
+		}
+		if cfg.governanceGuard {
+			if err := orch.WithGovernanceGuard(engine.GovernanceGuard{
+				Enabled:                         true,
+				WorkflowDirs:                    projection.WorkflowDirs(cfg.governanceArtifactsDir),
+				ExemptWorkflowLifecycleTaskPath: true,
+				ExemptOwnRunEvidence:            true,
+			}); err != nil {
+				t.Fatalf("enable governance guard: %v", err)
 			}
 		}
 		rt.Orchestrator = orch
