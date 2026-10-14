@@ -63,6 +63,17 @@ func (s *Service) WithArtifactsDir(dir string) {
 	s.artifactsDir = dir
 }
 
+// ArtifactsDir returns the configured artifacts directory ("/" for the
+// repository root). Wiring passes it to Orchestrator.WithArtifactsDir so
+// the governed merge resolves a run's TaskPath exactly as this service
+// read it at run start (INIT-023 TASK-017). A nil service has none.
+func (s *Service) ArtifactsDir() string {
+	if s == nil {
+		return ""
+	}
+	return s.artifactsDir
+}
+
 // WithPolicy installs the branch-protection policy consulted by every
 // ref-advancing helper (ADR-009 §3). Callers in production wire the
 // projection-backed policy built in cmd/spine; tests inject a mock or a

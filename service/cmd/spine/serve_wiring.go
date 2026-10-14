@@ -380,7 +380,12 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 			// (EPIC-006). The Noop resolver makes the seam visible
 			// without changing today's LC-004 behavior — every
 			// non-projection link target is still dangling.
-			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()))
+			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()),
+			// A Completed epic with open tasks (SC-002) or initiative
+			// with open epics (SC-003) is an error, not a warning
+			// (INIT-023 TASK-017 owner question 4); the governed merge
+			// checks an owned status change against it.
+			validation.WithBlockingStatusConflicts(validation.DefaultBlockingStatusConflicts...))
 	}
 
 	wfResolver, wfProvider := buildWorkflowResolver(deps.Store, primaryClient)
