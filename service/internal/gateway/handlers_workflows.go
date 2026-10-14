@@ -55,8 +55,22 @@ var workflowIdentifierPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 const workflowIdentifierCheckPath = workflow.WorkflowsDir + "/identifier-check.yaml"
 
 // maxIdentifierEcho bounds how much of a refused identifier an error
-// message repeats.
+// message (or a log line, warnUnsafeSSEFields) repeats.
 const maxIdentifierEcho = 80
+
+// boundedEcho returns v, or its first maxIdentifierEcho bytes cut back to
+// a rune boundary plus "...", so an attacker-sized identifier cannot grow
+// an error message or a log line. Callers quote the result (%q, slog).
+func boundedEcho(v string) string {
+	if len(v) <= maxIdentifierEcho {
+		return v
+	}
+	cut := maxIdentifierEcho
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return v[:cut] + "..."
+}
 
 // workflowIdentifierErrors returns one schema error per identifier in
 // body that does not match workflowIdentifierPattern. The body is decoded
@@ -77,19 +91,11 @@ func workflowIdentifierErrors(body string) []domain.ValidationError {
 		if v == "" || workflowIdentifierPattern.MatchString(v) {
 			return
 		}
-		echo := v
-		if len(echo) > maxIdentifierEcho {
-			cut := maxIdentifierEcho
-			for cut > 0 && !utf8.RuneStart(echo[cut]) {
-				cut--
-			}
-			echo = echo[:cut] + "..."
-		}
 		bad = append(bad, domain.ValidationError{
 			RuleID:   "schema",
 			Field:    field,
 			Severity: "error",
-			Message:  fmt.Sprintf("identifier %q must match %s", echo, workflowIdentifierPattern.String()),
+			Message:  fmt.Sprintf("identifier %q must match %s", boundedEcho(v), workflowIdentifierPattern.String()),
 		})
 	}
 	for i := range wf.Steps {

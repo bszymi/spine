@@ -207,6 +207,8 @@ type Server struct {
 	trustedProxyCIDRs          []*net.IPNet               // reverse-proxy networks: their XFF picks the rate-limit bucket; a request from them never gets token-less git access
 	rebuilds                   sync.Map                   // (workspace, rebuild_id) -> *rebuildState; see rebuildRegistryKey
 	gitProxyWarnAt             atomic.Int64               // unix nanos of the last "proxied trusted-CIDR git peer" Warn; rate-limits it
+	sseUnsafeWarnAt            atomic.Int64               // unix nanos of the last "omitting unsafe event fields" Warn; rate-limits it
+	sseUnsafeSuppressed        atomic.Int64               // unsafe-field omissions not logged since that Warn
 }
 
 // CandidateFinder discovers tasks ready for execution.

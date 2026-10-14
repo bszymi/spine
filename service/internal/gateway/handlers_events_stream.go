@@ -97,7 +97,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			log.Error("failed to replay missed events", "error", err)
 		} else {
 			for _, entry := range missed {
-				warnUnsafeSSEFields(log, entry.EventID, entry.EventType)
+				s.warnUnsafeSSEFields(log, entry.EventID, entry.EventType)
 				if werr := writeSSEEvent(rc, w, flusher, entry.EventID, entry.EventType, entry.Payload); werr != nil {
 					log.Warn("sse replay write failed, dropping connection", "error", werr)
 					return
@@ -160,7 +160,7 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			warnUnsafeSSEFields(log, evt.EventID, string(evt.Type))
+			s.warnUnsafeSSEFields(log, evt.EventID, string(evt.Type))
 			if err := writeSSEEvent(rc, w, flusher, evt.EventID, string(evt.Type), payload); err != nil {
 				log.Warn("sse write failed, dropping connection", "error", err)
 				return
@@ -293,15 +293,45 @@ func formatSSEEvent(id, eventType string, data []byte) []byte {
 	return b.Bytes()
 }
 
-// warnUnsafeSSEFields logs one Warn per field formatSSEEvent is about to
-// omit. slog quotes the value, so the log line cannot be split either.
-func warnUnsafeSSEFields(log *slog.Logger, id, eventType string) {
-	if id != "" && !sseFieldSafe(id) {
-		log.Warn("sse: omitting unsafe event id", "event_id", id, "event_type", eventType)
+// sseUnsafeWarnInterval bounds how often warnUnsafeSSEFields logs.
+const sseUnsafeWarnInterval = time.Minute
+
+// warnUnsafeSSEFields logs that formatSSEEvent is about to omit an
+// event's id: or event: line — at most once per sseUnsafeWarnInterval for
+// the whole process, like warnProxiedTrustedGitPeer, with the number of
+// omissions it did not log since its previous Warn.
+//
+// Rate-limited (INIT-023 TASK-015 review round 1) because the input is
+// attacker-shaped and repeats: an event with an unsafe ID is written to
+// every live subscriber, and once a workflow has produced more than
+// sseReplayCap of them in a row a client's cursor no longer advances
+// (KNOWN-LIMITATIONS), so every reconnect replays the same window. A
+// Warn per event let any reader-role client that reconnects in a loop
+// drive log volume without bound. The counter is process-wide, so one
+// workspace's flood can hide another's Warn for an interval; the
+// suppressed count still records it.
+//
+// The values are cut to maxIdentifierEcho bytes (boundedEcho) and slog
+// quotes them, so the log line can neither be split nor grow with the
+// identifier.
+func (s *Server) warnUnsafeSSEFields(log *slog.Logger, id, eventType string) {
+	unsafeID := id != "" && !sseFieldSafe(id)
+	unsafeType := eventType != "" && !sseFieldSafe(eventType)
+	if !unsafeID && !unsafeType {
+		return
 	}
-	if eventType != "" && !sseFieldSafe(eventType) {
-		log.Warn("sse: omitting unsafe event type", "event_id", id, "event_type", eventType)
+	now := time.Now().UnixNano()
+	last := s.sseUnsafeWarnAt.Load()
+	if (last != 0 && now-last < int64(sseUnsafeWarnInterval)) || !s.sseUnsafeWarnAt.CompareAndSwap(last, now) {
+		s.sseUnsafeSuppressed.Add(1)
+		return
 	}
+	log.Warn("sse: omitting unsafe event fields (rate-limited)",
+		"event_id", boundedEcho(id),
+		"event_type", boundedEcho(eventType),
+		"id_omitted", unsafeID,
+		"type_omitted", unsafeType,
+		"suppressed_since_last_warn", s.sseUnsafeSuppressed.Swap(0))
 }
 
 // writeSSEEvent writes a single SSE event record (formatSSEEvent) with one
