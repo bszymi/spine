@@ -1627,3 +1627,78 @@ nothing written to the tree):
 - The SMP `gitread` / `projectionwriter` contract-test failures against Spine waves 1–2 (above).
 - Align the value sets of `SPINE_DEV_MODE` and `SPINE_GIT_HTTP_DEV_NO_AUTH` (design-check
   follow-up, recorded in KNOWN-LIMITATIONS).
+
+### Review round 1
+
+*(2026-10-14. Three reviewers — correctness and compatibility, adversarial security,
+completeness and tests — on `ea8fbf5`. Each finding was checked against the code first. Fixes on
+top of `ea8fbf5`: `76bd161`, `3428fee`, `f8e3f6e`, `c4f01fe`, `a24bf89`.)*
+
+#### Findings
+
+| # | Finding (severity) | Disposition |
+|---|---|---|
+| R1 | The unsafe-SSE-field Warn has no rate limit: one Warn per field per event, per live subscriber and per replayed event, so past `sseReplayCap` unsafe IDs a reader-role client that reconnects in a loop drives log volume without bound (P3) | **Fixed** (`3428fee`). Real (code-traced at `ea8fbf5`: one Warn per unsafe field per written event, so 3 reconnects over a 100-event window whose IDs and types are both unsafe log 600 Warns). `warnUnsafeSSEFields` is now a `Server` method that logs one combined Warn (`sse: omitting unsafe event fields (rate-limited)`) at most once a minute for the process (an atomic timestamp, the `warnProxiedTrustedGitPeer` pattern), carries `suppressed_since_last_warn`, and cuts the ID and type to `maxIdentifierEcho` bytes (`boundedEcho`, now shared with the workflow identifier error). Frames are unchanged. Test `TestP328_UnsafeSSEFieldWarnIsRateLimited` drives the real replay path: 3×100 unsafe events log 1 Warn; after the interval a second Warn reports 299 suppressed; no log line is split or longer than 1 KiB; a safe event neither logs nor counts. Mutations (no rate limit, unbounded value, no count) killed |
+| R2 | `WithoutAmbientCredentials` drops `safe.directory` (and global CA / proxy) for the push while the same client's commit and merge still read host config, so a foreign-owned clone commits but cannot push, and no config fixes it (P3, dormant) | **Fixed as documentation + a pinning test; the code change is deferred (follow-up), with the reason.** Real (git reads `safe.directory` only from protected config). KNOWN-LIMITATIONS now states the consequence and the remedy (every clone under `SPINE_CODE_REPO_BASE` owned by the `spine serve` uid), next to the `.netrc` residual; so do the option's doc comment, CHANGELOG and `multi-repository-integration.md` §6.2 (`f8e3f6e`). Not changed in code because neither cheap fix is clearly right: forcing `-c safe.directory=<clone>` on the push would skip git's ownership check — which stops a foreign-owned clone's hooks and config running as the Spine user — without the operator opting in; mirroring the operator's protected `safe.directory` means re-reading the host config this option exists to ignore. Code repos are not wired in `spine serve`, so the choice belongs with wiring them (follow-up below) |
+| R3 | `IsReceivePack` / `isReadOnly` read the first `service` value, git-http-backend the last: `info/refs?service=git-upload-pack&service=git-receive-pack` is a read for the trusted-CIDR and `SPINE_GIT_HTTP_DEV_NO_AUTH` paths and returns the receive-pack advertisement (P3) | **Fixed** (`76bd161`). Reproduced at `ea8fbf5` with a real git-http-backend: `200 application/x-git-receive-pack-advertisement` under the dev flag, from a direct trusted runner, and for an authenticated caller. `IsReceivePack` now counts any receive-pack value (a repeated service fails closed to "push", so it needs a bearer), `isReadOnly` never treats a repeated service as a read, and `ServeHTTP` refuses a repeated service with `400` before the push gate, the read gate and CGI (the comment on `serviceParams` records why a single value is unambiguous: both parsers split on `&`/`=` and decode alike, and a pair `url.ParseQuery` drops keeps a literal value git-http-backend refuses). Tests: `TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement` (dev flag, trusted runner with push on and off, authenticated pusher, both value orders, a repeated upload-pack; never the receive-pack content type), the duplicate case added to `TestP330_GitDevNoAuth_ReadsOnly` and `TestP330_DirectRunnerStillTrusted` as suggested, `TestIsReadOnly` / `TestIsReceivePack` rows, `TestServeHTTP_RepeatedServiceParameterRefused`. Mutations (first value in `IsReceivePack`, first value in `isReadOnly`, refusal dropped) killed. SMP's own gateway has the same first-value classifier — reported, not changed (Follow-ups) |
+| R4 | `PoolConfig.SecretClient` and `TestPool_NoResolverPassesEmptyCredentialThrough` still say a binding without `credentials_ref` works through `SPINE_GIT_PUSH_TOKEN` (P3) | **Fixed** (`c4f01fe`): both now say such a binding clones and pushes with no credential (OQ2 "never") and a declared ref fails closed. The test file's imports were gofmt'd because it is now touched (pre-existing ordering) |
+| R5 | `multi-repository-integration.md` §6.2 promises "the same credential methods as the primary repo (SSH key, PAT, OAuth)" (P3) | **Fixed** (`f8e3f6e`): HTTPS token through `credentials_ref` only, no per-binding SSH key (follow-up), nothing inherited from the process or the host on any host, the host-config consequence, and a link to KNOWN-LIMITATIONS |
+| R6 | Integration guide §7 shows a token-less runner clone that now gets `401`; the startup Warn still recommends "a narrow runner subnet" (P3) | **Fixed** (`c4f01fe`): the example presents a bearer (`git -c http.extraHeader=…`, not persisted) and says the token-less form needs the runner's own address in `SPINE_GIT_HTTP_TRUSTED_CIDRS` and a direct connection; the push note says "runner", not "subnet"; the Warn now says "the runners' own addresses only (never a range containing a Docker bridge gateway or a reverse proxy)". No test pins the Warn text |
+| R7 | `observability.md` A.1 still says `/system/metrics` is unauthenticated and full, and omits `/platform/metrics` (P3) | **Fixed** (`c4f01fe`): an endpoint table (`system.metrics` operator bearer; full in single mode, the caller's `spine_workspace_pool_*` only in shared mode, `400` without a workspace; `/platform/metrics` behind `SPINE_OPERATOR_TOKEN`, `401`/`503`) and the pool series names |
+| R8 | The loss of non-credential host config (CA bundle, proxy, `insteadOf`, `safe.directory`, `http.version`) for credential-less code repos is not documented (P3) | **Fixed** (`f8e3f6e`): KNOWN-LIMITATIONS, the CHANGELOG `Breaking (dev setups)` and `For embedders` entries, the `WithoutAmbientCredentials` comment and §6.2 list it and name the environment forms that still apply (`GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `GIT_SSL_NO_VERIFY`, `HTTPS_PROXY` / `https_proxy` / `ALL_PROXY`). New `TestLatentGitpool_CredentialLessCodeRepoReadsNoHostConfig` pins both halves: a global `http.sslVerify=false` and a global `url.<base>.insteadOf` apply to a plain client (positive controls) and not to the credential-less cloner or factory push; `GIT_SSL_NO_VERIFY` in the environment still applies. Dropping `GIT_CONFIG_GLOBAL=/dev/null` fails three of its subtests. The suggested alternative — keep the host config and reset only the credential keys — is rejected: a URL-scoped `http.<url>.extraHeader` outranks a generic command-line reset (codex round 3), so it would reopen that credential path |
+
+#### Acceptance-criteria gaps
+
+| Gap | Disposition |
+|---|---|
+| OQ2 "never" (orchestrator ruling) leaves AC 12's first half, AC 13 and AC 22's `InheritProcessAuth=true` half unbuilt and AC 21 trivially true | **Not closable here — needs the owner.** The ruling stands as recorded; the task should not be closed until the owner confirms OQ2. If the owner chooses "yes, exact host and port", §5.1–5.3 become mandatory (`RemoteURL` with the push-URL read, the origin re-check for a reused clone, `Credential.InheritProcessAuth`, `WithProcessAuthHosts`, `hostKey`, `codeRepoProcessAuthHosts`, AC 21 as a real test) |
+| AC 16 names `make lint` and `make test-integration`; only narrower commands were recorded | **Closed** by running the literal commands (table below): `make lint` (boundary lint + repo-wide `golangci-lint run`): 270 issues on the branch vs 275 on a `main` export, all pre-existing (5 fewer `gofmt`), 0 new by `--new-from-rev main`. (The earlier "179 vs 185" counted only the 10 touched packages.) `make test-integration` (`go test -tags integration ./...`, run with `-p 4 -count=1` on the shared machine) across every package, including `adapters/projection`, `adapters/delivery`, `adapters/store` and `adapters/secrets`: only the two known pre-existing failures. `make test-scenario`'s package set ran with `-p 1` |
+| AC 4 / AC 15 ask for the PoCs against the merge base and the merge commit | **Closed for the current `main`.** The merge-base runs are the "fails at the merge base" overlays above. `main` (`d23b897`) is an ancestor of the head (`git merge-base --is-ancestor`), so the merge commit's tree is the head's tree, and the PoCs re-run at `a24bf89` give the AC 15 outcomes. If `main` moves before the merge (for example TASK-014 landing first), the re-run on the actual merge commit is the orchestrator's merge-time step |
+| AC 10 / I4 held only for a single `service` value | **Closed** by R3 |
+| The reviewers could not re-run the DB gates (shared PostgreSQL down) | **Closed**: every DB gate below ran on a private throwaway PostgreSQL 17.10 cluster in this session's scratchpad (`localhost:55716`, TCP only, `s015_*` databases), removed afterwards. The shared server on `localhost:55630` was still down |
+
+#### Gates (code at `a24bf89`)
+
+| Command | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`; `-tags integration`; `-tags scenario` | clean |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 2 without tests |
+| `go test -race -p 4 -count=1` on the 9 touched packages; the new gateway tests `-race -count=10`; `TestLatentGitpool_*` `-race -count=3` | all ok, no races |
+| `make test-integration` command: `go test -p 4 -tags integration -count=1 ./...` (fresh database) | 5025 PASS, 2 FAIL — exactly the known pre-existing `adapters/store` `TestRunModeDatabaseDefault` and `adapters/secrets` `TestAWSClient_Contract_LocalStack` — 7 SKIP (the `DBProvider` tests, which need `SPINE_REGISTRY_TEST_DATABASE_URL`). With a registry database migrated from `migrations/registry`: `service/internal/workspace` 223 PASS and `service/cmd/spine` 178 PASS, 0 SKIP |
+| CI `scenario-git-http`: `-run '^TestGitHTTP_'` and `-run '^TestBootstrapInternalAdmin_'` (fresh database) | 20 PASS (8 `TestGitHTTP_Push*`), 0 SKIP; 2 PASS, 0 SKIP |
+| `make test-scenario` packages: `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...`, branch vs a fresh `git archive main` export, own databases | 30 FAIL on both, the identical set (and the same as the set recorded above); 1488 vs 1479 PASS lines; 6 SKIP on both |
+| `make lint` (branch / `main` export) | 270 / 275 issues, all pre-existing; `golangci-lint run --new-from-rev main` on the touched packages: 0 issues with `--build-tags scenario`, `integration` (`cmd/spine`, `workspace`) and plain; `--enable-only=gosec`: 0 issues. One gocritic finding on the first draft of the new githttp test was fixed in `a24bf89` |
+| `git diff --name-only main...HEAD \| grep '\.go$' \| xargs gofmt -l` | empty |
+| Mutations of the round-1 fixes (overlay) | 7 of 7 killed (listed under R1, R3, R8) |
+| Audit PoCs overlaid at `a24bf89` | as AC 4 / AC 15 require: the four leak PoCs fail with their expected messages; `TestPOC_ProductionCatalogNeverReachesCloner`, `TestPoC_ProductionWiring_CodeRepoNeverResolvedSoNoClone` and both gateway `503` PoCs pass; `poc_stepid` passes |
+
+SMP compatibility gate (SMP `f5c6fd6d`, `../spine` = this worktree at `a24bf89`, `GOFLAGS=-mod=readonly`,
+`git status` clean after every step):
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...` | OK, clean |
+| `go test -race -p 4 -count=1` on the 43 SMP packages whose test dependencies include a changed Spine package | 39 ok, 2 without tests, the same 2 pre-existing failures as above (`gitread` `TestBounded_ErrorContractEqualsCLIClient`; `projectionwriter` `TestBoundedProjection_IncrementalAddAndModifyOversized` / `…_OversizedWorkflowStalls`), re-confirmed identical with `../spine` pointed at the fresh `main` export through a scratch `-modfile` |
+| Platform and Spine-runtime migrations (`go run ./dev/apply-migrations -set platform -dir migrations`; `-set spine-runtime`; roles as in SMP CI, `smp_prov` posture `f`) | 115 and 26 versions recorded |
+| Spine-runtime integration suites through `dev/testgate` (`spinecore`, `spineembedded`, `runner`, `executionreadiness`; `TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN`) | 1835 passed, 0 failed, 2 allowed Linux-only `ru_maxrss` skips; `testgate: PASS` |
+| `go run ./dev/testgate … -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed Linux-only skip; `testgate: PASS` |
+| `./dev/lint-spine-internals.sh` | OK |
+| Leak check after the suites (as SMP CI's) | no `ws_*` database or role left; the private cluster was then stopped and deleted |
+
+#### Codex review (`codex review --base main`)
+
+| Code | Findings | Disposition |
+|---|---|---|
+| `a24bf89` | The configured model (`gpt-6.1-sol`) is still refused for this account ("not supported when using Codex with a ChatGPT account"), so the review ran with `-c model="gpt-5.6-sol"` as in the earlier rounds; no config file was changed. Verdict: "The changes consistently implement the intended credential isolation, tenant scoping, SSE sanitization, and Git endpoint authentication behavior. The full Go test suite passes, and no actionable correctness regressions were identified." | No P1/P2; nothing to fix or reject |
+
+#### Follow-ups (added by review round 1)
+
+- **SMP gateway, same classifier divergence (reported, not changed — SMP is out of scope here).**
+  `internal/customer/githttp/handler.go` `IsReceivePack` / `isReadOnly` read the first `service`
+  value too. SMP authenticates every git request, but `gateway.go` refuses a push to a viewer
+  (below member) only through `IsReceivePack`, so with receive-pack enabled a viewer gets the
+  receive-pack advertisement through a repeated `service` (advertisement only: the pack upload is
+  matched by path). The same fix applies there.
+- When code repositories are wired: pass Spine-controlled values for `safe.directory`, the CA
+  bundle and the proxy on the command line of a credential-less clone and push (R2, R8).
