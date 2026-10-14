@@ -75,7 +75,10 @@ previous build). Externally visible:
   `update-ref`, the working tree following with a two-tree `read-tree -m -u`), so the next governed
   merge or in-place write cannot publish it — also with `SPINE_GIT_PUSH_ENABLED=false`, where the
   local `main` is the published branch. A write that landed on `main` between the merge's base read
-  and the merge is kept. A take-back that cannot run is an `ERROR merge binding: refused merge NOT
+  and the merge is kept, and the run stays in `committing` (outcome class `remote_unavailable`) so
+  the next attempt merges on top of it instead of failing the run or routing it back to `execute`
+  (a write that lands during a replay of a landed merge is not kept: KNOWN-LIMITATIONS "Governed
+  Merge Binding" 7). A take-back that cannot run is an `ERROR merge binding: refused merge NOT
   taken back` and is named in the merge outcome's failure detail.
 - **Merge retries add nothing.** A retry or resume after the merge landed on the local `main`
   recomputes the same status-cascade commit — also when the run added child artifacts — so it finds
@@ -96,7 +99,11 @@ previous build). Externally visible:
   implements the new optional `engine.CommitBinder` interface (`ResolveBranchHead`, `VerifyCommit`,
   `IsAncestor`, `CommitParents`, `CommitFilesOnto`, `MergeBound`, `PushCommit`, `ResetBranch`). No method was added
   to any interface an embedder implements. `*git.CLIClient` implements it; embedders run the shared
-  suite `core/engine/enginetest.RunCommitBinderConformance` against their own operator.
+  suite `core/engine/enginetest.RunCommitBinderConformance` against their own operator. The suite
+  accepts both forms of `ResetBranch` the contract allows — the local branch moved back, or dropped
+  by a remote-backed operator so the next `MergeBound` re-creates it from the remote (a clean working
+  tree either way) — and every commit it hands the binder is on a branch of `Source`, so a harness
+  whose `Sync` fetches sees it.
 - Additive fields: `git.MergeOpts.SourceSHA` (merge exactly that commit; `CLIClient.Merge` honours
   it), `git.MergeResult.BaseSHA`, `engine.StepResult.ExpectedHeadSHA`,
   `engine.SubmitRequest.ExpectedHeadSHA`. New: `Orchestrator.RetryRepositoryMergeAt`,

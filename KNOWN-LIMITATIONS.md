@@ -206,12 +206,27 @@ merge publishes the commit the run's steps validated and reviewed, never the run
    in-place write's auto-push publishes it. Until then — and for good when the take-back cannot run
    (the target moved on, or a local change in the shared working tree would be overwritten; logged
    at `ERROR` and named in the outcome's failure detail) — it is on the local `main`, which with
-   `SPINE_GIT_PUSH_ENABLED=false` is the published branch. The take-back keeps a write that landed
-   between the merge's base read and the merge (it restores the merge's first parent when that is a
-   newer descendant of the reported base), so a `CommitBinder` that itself committed onto the
-   target before merging is not fully undone. TASK-012 runs the merge, the check and the take-back
-   under one worktree lock. `git.CLIClient`'s `MergeBound` produces only accepted shapes unless the
-   target moves concurrently; the check guards the push and other `CommitBinder` implementations.
+   `SPINE_GIT_PUSH_ENABLED=false` is the published branch. `git.CLIClient`'s `MergeBound` produces
+   only accepted shapes unless the target moves concurrently (until TASK-012 nothing serializes the
+   worktree); the check guards the push and other `CommitBinder` implementations. When a write lands
+   on the target between the merge's base read and the merge, the merge commit's parents are
+   `[write, merged commit]`: it is refused and taken back to the write (the merge's first parent,
+   when that is a newer descendant of the reported base), and the run stays in `committing` —
+   outcome class `remote_unavailable` — so the scheduler's next attempt merges on top of the write.
+   Only a take-back that could not restore the write sends the run down the permanent route (a
+   legacy terminal-commit workflow fails the run, a publish workflow routes `merge_failed` back to
+   `execute`). Two residuals of the race: a `CommitBinder` that itself committed onto the target
+   before merging is not fully undone (its commit is kept as the "write", and a binder that does so
+   on every attempt, or that persistently reports a stale `BaseSHA`, keeps the run retrying in
+   `committing`; nothing is pushed on that path, and the conformance suite pins `BaseSHA`); and a
+   write that lands during a *replay* (the bound commit already on the local `main`, after a failed
+   push or a partially-merged resume) is not kept: `git merge` is then "already up to date" and
+   reports the write itself as its result, which the check cannot tell from a commit the binder
+   made, so it is refused and taken back to the base. The write is then dropped from the local
+   `main` (with auto-push off, from the published branch; with auto-push on, a write its writer
+   already pushed stays on origin and the local `main` must be re-synced before the next governed
+   push succeeds), and the run takes the permanent route. TASK-012 runs the merge, the check and the
+   take-back under one worktree lock, which closes both.
 8. **A garbage-collected bound commit fails closed.** If the run branch is force-pushed away from
    the bound commit and `git gc` prunes it, the merge refuses (`precondition`) and a publish workflow
    routes back to `execute`. Pinning the bound commit with a ref is a follow-up.

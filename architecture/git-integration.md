@@ -405,7 +405,9 @@ whatever the run branch points at when the merge runs:
   two parents, a fast-forward, or "already up to date"; a status-cascade or recovery-ledger commit
   must be a child of exactly the bound commit. A refused merge is taken back off the local target
   (compare-and-swap) before anything else can build on it, so neither the next governed merge nor
-  an in-place write publishes it. The push publishes exactly the verified commit, without force, so
+  an in-place write publishes it. A merge refused only because the target moved during it (its
+  first parent a newer write, its second the merged commit) is taken back to that write and
+  retried, not failed. The push publishes exactly the verified commit, without force, so
   the remote accepts only a fast-forward. Commits on the run branch after the binding are left out;
   the branch is then kept for inspection and a warning names the bound and tip commits.
 

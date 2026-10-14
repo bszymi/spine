@@ -816,15 +816,20 @@ embedder opts in.
    - `VerifyCommit` accepts an id only when `rev-parse --verify <id>^{commit}` prints it back;
    - `CommitFilesOnto` is plumbing on a private index and deterministic (dates pinned to the base
      commit's committer date);
-   - `MergeBound` merges exactly `SourceSHA` and reports `BaseSHA`;
+   - `MergeBound` merges exactly `SourceSHA` and reports `BaseSHA`, the tip the merge was actually
+     computed on — for a remote-backed operator its local branch, not the remote's value (a stale
+     `BaseSHA` looks like a target that moved during every merge, and the run retries without end);
    - `PushCommit` pushes `<sha>^{commit}:refs/heads/<branch>` with no force and no lease;
    - `ResetBranch` takes back a merge the engine refused: it moves the local branch only while it
      is still at the refused merge (compare-and-swap) and leaves a checked-out working tree clean;
      a remote-backed operator may drop its local branch instead, so the next `MergeBound`
-     re-creates it from the remote. The next `MergeBound` must not compute on the refused merge.
+     re-creates it from the remote. Either way the working tree is left clean, and the next
+     `MergeBound` must not compute on the refused merge.
 2. **Run the conformance suite** against it:
    `enginetest.RunCommitBinderConformance(t, enginetest.Harness{New: ...})`
-   (`core/engine/enginetest`). `adapters/git/commitbinder_test.go` shows the `CLIClient` harness.
+   (`core/engine/enginetest`). `adapters/git/commitbinder_test.go` shows the `CLIClient` harness
+   and a remote-backed one (`dropLocalBinderEnv`: a bare upstream as `Source`, a clone as `Local`,
+   a fetching `Sync`, and a `ResetBranch` that drops the local branch).
 3. **Enable it:** `orch.EnableMergeBinding(engine.MergeBindingConfig{})` (policy `reject`;
    `engine.MovedHeadRebind` accepts a moved head at the gate instead). It returns an error, and
    leaves binding off, when the operator lacks the capability. Code-repository clients returned by
