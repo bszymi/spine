@@ -2068,3 +2068,15 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
 `spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+
+### Cross-task review (wave 3) (2026-10-14)
+
+The wave 3 cross-task review raised no finding against this task's code. One P3 (filed against
+TASK-005's integration docs, `94017aa`) concerned this task's documented time-of-check gap
+(`service/internal/gateway/run_branch_write.go`: the run is read once, before the write): the
+CHANGELOG UX bullet and `api-operations.md` §3.3 said a commit landing during a review "can only be
+an operator's push or a push started before the review". An `/artifacts/add` or `write_context`
+write authorized during the producer step can land after that step's submit; together with an
+`automated` producer step that re-binds (Governed Merge Binding 2) it is then merged. The docs now
+say so (`3aa24b9`, on `init/INIT-023-wave3-integration`; dispositions and gates in TASK-005's
+"Cross-task review (wave 3)"). No code change here.

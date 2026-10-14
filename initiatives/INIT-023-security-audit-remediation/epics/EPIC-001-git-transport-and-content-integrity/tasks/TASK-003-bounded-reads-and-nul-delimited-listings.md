@@ -1866,3 +1866,54 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
 `spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+
+### Cross-task review (wave 3) (2026-10-14)
+
+The wave 3 cross-task review ran on the integration branch at `63e2318` (each P1/P2 put to two
+skeptics, whose votes are summarised below; P3s had none). Every fix is on `init/INIT-023-wave3-integration`
+(worktree `i23/s-int3/spine`), not on the task branches, which are unchanged: `f346c9e` (cascade
+replay), `dcdfff5` (recovery serialisation) with `475e342` (its lint), `a6dbd67` (projection
+refusal order), `7aedeca` (info/refs oracle), `3aa24b9` (docs), `cdd33ee` (codex round 1) with
+`a02580e` (its lint). Each fix's test was checked to fail against the previous code with
+`go test -overlay` (the old file swapped in), and to pass on the fix. Nothing was pushed.
+
+| # | Finding (as raised) | Skeptic votes | Disposition |
+|---|---|---|---|
+| 1 | P2, `adapters/projection/service.go` `FullRebuild`: with `artifacts_dir` a subdirectory, `workflowPathsAt` lists the tree again for the root `workflows/`; a failure there returned `discover workflows` before any refusal `DiscoverAll` had already decided was reported (no Warn, no `projection_file_skipped`, no metric) | P3 ("only a transient fault fits the window"), not a bug (the second listing repeats the first over an immutable commit, so every lasting cause fails `DiscoverAll` first; the failed rebuild is itself recorded and the retry reports; SMP never sets `artifacts_dir`) | **Fixed** as cheap and clearly right (`a6dbd67`); the severity is the skeptics' (at most one sync interval's delay). `DiscoverAll`'s kept refusals are reported right after it, the root workflows' own refusals right after their listing; the retry reports both under the same ids. Test: `TestFullRebuild_RefusalsReportedBeforeTheRootWorkflowListing` (the second `ListFiles` fails once: the oversized `spine/docs/notes.md` is reported once and the metric rises by one; the retry reports it again and the unsafe root workflow once), failing on the previous code. CHANGELOG |
+| 2 | Codex round 1, P2 (this task with TASK-005): the status cascade (`appendAddedMarkdown`, both binding modes) took every added `.md` path from the diff. With this task's raw `-z` `Diff`, a path with a control character was no longer C-quoted (whose read failed, so it was skipped) but read and rewritten; under merge binding `CommitFilesOnto` refuses a control byte in a path, so the whole cascade commit failed and the run merged with its task's status never updated | — (codex reproduced it; reproduced here on the real CLIClient) | **Fixed** (`cdd33ee`, lint `a02580e`): a path `domain.UnsafeRepositoryPath` refuses is never a cascade path. Binding on gets its task status back; binding off (SMP today) is back to `main`'s behaviour for such a file — skipped, not rewritten — so SMP sees no change; such a file is never a projected artifact either. Tests: `TestCascade_SkipsAnAddedFileAtAnUnsafePath` (real CLIClient, binding on and off: task and safe child Completed, the tab-named file merged as reviewed) and `TestAppendAddedMarkdownSkipsUnsafePaths` (control, tab, bidi, U+2028, invalid UTF-8 skipped; safe non-ASCII kept), both failing on the previous `merge.go`. CHANGELOG |
+
+**Gates** (code at `a02580e`; `final-basic`, `final-gotest` and `final-race` ran on `cdd33ee`,
+whose only difference is two `\u` escapes in one test's string literals):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 17 packages the four tasks touched (`adapters/{delivery,git,gitpool,projection,repository}`, `core/{artifact,domain,engine/...,observe,refadmit,workflow,worktreefs}`, `service/cmd/spine`, `service/internal/{gateway,githttp,workspace}`) | all ok |
+| `-tags integration -race -p 1` on `adapters/delivery`, `adapters/projection`, `service/cmd/spine`, `service/internal/workspace` (`SPINE_TEST_DATABASE_URL` = fresh `s3f_it`, `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3f_reg`, migrated from `migrations/registry`) | 905 PASS (subtests counted), 0 FAIL, 0 SKIP |
+| CI `scenario-git-http` job, its four steps verbatim (`bash -eo pipefail`) on a fresh `s3f_ci` (code `cdd33ee`) | `TestGitHTTP_*` 20 PASS (incl. `TestGitHTTP_Push*`), `TestBootstrapInternalAdmin_*` 2 PASS, `TestWorkflowLifecycle_*` 4 PASS, `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
+| `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (`s3f_scen`, registry `s3f_reg2` migrated; code `cdd33ee`) | the same 31 top-level `--- FAIL` (59 lines with subtests) as the integration run's `scen-branch-3` (identical sorted lists): the 30 known pre-existing failures plus `TestWorkspace_ScopedServices`. `TestPartialMergeRetry_HappyPath`, `TestPartialMergeExternalResolution_HappyPath`, `TestCancelFromPartiallyMerged_AsymmetricCleanup` and `TestPlanningRun_StatusCascadesToChildren` pass |
+| `golangci-lint` v2.11.4 `run --new-from-rev main` on `core/engine/...`, `adapters/projection/...`, `service/internal/{gateway,githttp}/...`, `service/scenariotest/...`: plain, `--build-tags=integration`, `--build-tags=scenario` | 0 issues each (a gocritic `builtinShadow` was fixed in `475e342`, a gosec G116 / staticcheck ST1018 in `a02580e`) |
+| `--enable-only=gosec` on the touched packages (`integration,scenario`) and on `./...` | 0 issues |
+| `gofmt -l` (the Go 1.26.5 toolchain's) on every `.go` file changed since `63e2318` | empty |
+| `codex review --base main` (codex-cli 0.162.1, the configured default model, no `-c model=` override) | round 1 (`475e342`; session `rollout-2026-10-14T15-20-33-01a13ac9-4f2b-…`, `source: {"subagent":"review"}`, `"model":"gpt-6.1-sol"`): one P2, fixed in `cdd33ee`. Round 2 (`cdd33ee`; `rollout-2026-10-14T15-30-35-01a13ad2-7e47-…`, review source, `gpt-6.1-sol`): "No actionable regressions were identified relative to the merge base." `a02580e` changes only test escapes, so no third round |
+
+**SMP compatibility** (`i23/s-int3/smp` = SMP `main` `f5c6fd6d`, detached, `../spine` = this
+worktree, `GOFLAGS=-mod=readonly`; never modified, `git status` clean after every step):
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` (on `a02580e`) | OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on the 13 SMP packages importing a changed Spine package (test imports included) plus `internal/customer/workflow` (on `a02580e`) | 11 ok, `projectionsvc` has no tests; `gitread` and `projectionwriter` fail with the **identical** `--- FAIL` list as the integration run (and Spine `main` `d23b897`): pre-existing SMP TASK-004 tests that SMP TASK-006's branch adapts (the integration run checked that TASK-006's tip passes them) |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s3f_smp_it` with `vector`, `s3f_spine_runtime_it`) | 115 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites" via `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 25m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`; code `cdd33ee`) | 1835 passed, 0 failed, 2 allowed Linux-only skips; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -p 4 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed skip; `testgate: PASS` |
+
+Not run: the CI `git-floor` job (git 2.39.5 in `golang:1.26-bookworm`) — not in this gate list, and
+the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git has
+(`update-ref`, a tab in a file name). Environment: the shared PostgreSQL 18.6 container on
+`localhost:55630`; only `s3f_*` databases were created and all were dropped afterwards; the SMP
+suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
+was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
+`spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.

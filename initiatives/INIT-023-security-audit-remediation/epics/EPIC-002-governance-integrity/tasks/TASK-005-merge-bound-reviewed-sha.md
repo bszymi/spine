@@ -1961,3 +1961,67 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
 `spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+
+### Cross-task review (wave 3) (2026-10-14)
+
+The wave 3 cross-task review ran on the integration branch at `63e2318` (each P1/P2 put to two
+skeptics, whose votes are summarised below; P3s had none). Every fix is on `init/INIT-023-wave3-integration`
+(worktree `i23/s-int3/spine`), not on the task branches, which are unchanged: `f346c9e` (cascade
+replay), `dcdfff5` (recovery serialisation) with `475e342` (its lint), `a6dbd67` (projection
+refusal order), `7aedeca` (info/refs oracle), `3aa24b9` (docs), `cdd33ee` (codex round 1) with
+`a02580e` (its lint). Each fix's test was checked to fail against the previous code with
+`go test -overlay` (the old file swapped in), and to pass on the fix. Nothing was pushed.
+
+| # | Finding (as raised) | Skeptic votes | Disposition |
+|---|---|---|---|
+| 1 | P2, `merge_binding.go` `cascadeBaseAt`: the binding-on cascade's replay check took any merge on `main`'s first-parent chain whose second parent was the bound commit, or a child of it, for this run's own. A run whose branch was reset onto an earlier run's merged bound commit `B0` (the bound actor may force-push, TASK-016) took that run's merge `[x, B0]`, diffed `MergeBase(x, B0)..B0` and rewrote the `status:` of every artifact that run added, with an empty reviewed diff; binding off cascaded `run.TaskPath` only | P2, P2 (both reproduced the reviewer's PoC on the real CLIClient; one noted the "realistic, non-adversarial" example in the report is wrong — a status-only run never force-pushed stops at its own bound commit) | **Fixed** (`f346c9e`). A merge `[P, C]` counts as this run's only when `C` is exactly the cascade commit this run builds against `MergeBase(P, bound)` (`cascadeCommitFrom`: deterministic, carries the run's `Run-ID` and `Trace-ID` trailers, so another run's cascade never equals it). A merge of `bound` itself is never taken: it can be this run's only if the cascade needed no commit against its base, and then the plain merge-base, whose paths are a subset, needs none either, so the replay still finds `main` up to date. Non-matching candidates are walked past; anything else keeps the plain merge-base. The recompute replaced the graph-only `isMergeOfBound`; the suggested `Run-ID` trailer match would have needed a new `CommitBinder` method to read messages, and a baseline bound does not stop concurrent runs (the earlier run may merge after this one started). Tests: `merge_binding_cascade_replay_test.go` (real CLIClient: the first run merged its bound commit, or a cascade commit; R's own replay adds nothing; binding-off control) fails on the previous code (`docs/c.md` rewritten to Completed; a cascade conflict failing the run). `TestCascadeBaseAtReplay` gains the bound-itself, other-run-cascade, behind-another-run and failed-recompute cases; `TestMergeBindingRegression_TransientPushRecovers` (DC-2, replay with a child artifact) passes unchanged. CHANGELOG (Security, "Merge retries add nothing"), KNOWN-LIMITATIONS 14, `git-integration.md` §6.3 |
+| 2 | P2, `merge_resolution.go` `writeBoundLedgerCommit`: two recovery requests for one partially-merged run each built the ledger on the binding in their own snapshot and replaced the whole `commit_meta`; the later write restored the other repository's old bound head (an operator's `head_sha` rebind lost, the old commit merged) and dropped the other ledger from the published ancestry | P3, P3 (both reproduced it; dormant — both `spine serve` registries load a primary-only catalog and SMP enables no binding — and it fails safe: what merges is still a reviewed binding) | **Fixed** (`dcdfff5`, lint `475e342`). The ledger is built and recorded under a per-run in-process stripe (`recoveryBindingStripes`, package level like TASK-007's `sodBindStripes`, one-slot semaphores honouring the context) from a fresh `GetRun` taken under it; the caller's run is used only for its identity. The fresh read must still pass `guardPartialMergeRecovery` (409, nothing written, if the run resumed meanwhile); a waiter whose context ends gets `ErrUnavailable` (503). Binding off unchanged. The suggested compare-and-swap on `commit_meta` would add a `RunStore` method SMP's `spinecore.RunStore` wrapper does not implement (SMP must build unchanged), so cross-process serialisation is recorded as a residual: KNOWN-LIMITATIONS "Governed Merge Binding" 15. Tests (`merge_recovery_binding_race_test.go`, all failing on the previous code): the public-API sequence on real CLIClients with request 2 reading the run before request 1's write; two goroutines from one stale snapshot with the first held inside its ledger commit (`-race`); the context waiter; the resumed run. `TestBoundLedgerMustBeAChildOfTheBinding` now uses a partially-merged run. Note: the round-1 design note "needs two concurrent main-path completions on one run, which no flow produces" did not consider the operator recovery API |
+| 3 | P3, docs (integration commit `94017aa`): `security-model.md` §7.3 and KNOWN-LIMITATIONS "Run-Branch Admission Is a Push-Start Check" said a push landing after the step's submit bound the head is not merged — false when the next step is a producer (an `automated` validate or summarize re-binds to whatever head it completes at, Governed Merge Binding 2; `artifact-creation`, `adr-creation`, `document-creation`, `task-spike` have that shape and no Spine client sends `expected_head_sha`). The CHANGELOG UX bullet and `api-operations.md` left out the API-write time-of-check gap (`run_branch_write.go`) | — | **Fixed** (`3aa24b9`, docs only): all four now name the later producer step and the pre-submit API write |
+| 4 | Codex round 1, P2 (with TASK-003): `appendAddedMarkdown` took every added `.md` path from the now raw `-z` diff, so a file at a control-character path was read and rewritten, and `CommitFilesOnto` (which refuses a control byte) failed the whole cascade: the run merged with its task's status unchanged | — | **Fixed** (`cdd33ee`, lint `a02580e`); recorded under TASK-003 |
+
+**Gates** (code at `a02580e`; `final-basic`, `final-gotest` and `final-race` ran on `cdd33ee`,
+whose only difference is two `\u` escapes in one test's string literals):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 17 packages the four tasks touched (`adapters/{delivery,git,gitpool,projection,repository}`, `core/{artifact,domain,engine/...,observe,refadmit,workflow,worktreefs}`, `service/cmd/spine`, `service/internal/{gateway,githttp,workspace}`) | all ok |
+| `-tags integration -race -p 1` on `adapters/delivery`, `adapters/projection`, `service/cmd/spine`, `service/internal/workspace` (`SPINE_TEST_DATABASE_URL` = fresh `s3f_it`, `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3f_reg`, migrated from `migrations/registry`) | 905 PASS (subtests counted), 0 FAIL, 0 SKIP |
+| CI `scenario-git-http` job, its four steps verbatim (`bash -eo pipefail`) on a fresh `s3f_ci` (code `cdd33ee`) | `TestGitHTTP_*` 20 PASS (incl. `TestGitHTTP_Push*`), `TestBootstrapInternalAdmin_*` 2 PASS, `TestWorkflowLifecycle_*` 4 PASS, `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
+| `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (`s3f_scen`, registry `s3f_reg2` migrated; code `cdd33ee`) | the same 31 top-level `--- FAIL` (59 lines with subtests) as the integration run's `scen-branch-3` (identical sorted lists): the 30 known pre-existing failures plus `TestWorkspace_ScopedServices`. `TestPartialMergeRetry_HappyPath`, `TestPartialMergeExternalResolution_HappyPath`, `TestCancelFromPartiallyMerged_AsymmetricCleanup` and `TestPlanningRun_StatusCascadesToChildren` pass |
+| `golangci-lint` v2.11.4 `run --new-from-rev main` on `core/engine/...`, `adapters/projection/...`, `service/internal/{gateway,githttp}/...`, `service/scenariotest/...`: plain, `--build-tags=integration`, `--build-tags=scenario` | 0 issues each (a gocritic `builtinShadow` was fixed in `475e342`, a gosec G116 / staticcheck ST1018 in `a02580e`) |
+| `--enable-only=gosec` on the touched packages (`integration,scenario`) and on `./...` | 0 issues |
+| `gofmt -l` (the Go 1.26.5 toolchain's) on every `.go` file changed since `63e2318` | empty |
+| `codex review --base main` (codex-cli 0.162.1, the configured default model, no `-c model=` override) | round 1 (`475e342`; session `rollout-2026-10-14T15-20-33-01a13ac9-4f2b-…`, `source: {"subagent":"review"}`, `"model":"gpt-6.1-sol"`): one P2, fixed in `cdd33ee`. Round 2 (`cdd33ee`; `rollout-2026-10-14T15-30-35-01a13ad2-7e47-…`, review source, `gpt-6.1-sol`): "No actionable regressions were identified relative to the merge base." `a02580e` changes only test escapes, so no third round |
+
+**SMP compatibility** (`i23/s-int3/smp` = SMP `main` `f5c6fd6d`, detached, `../spine` = this
+worktree, `GOFLAGS=-mod=readonly`; never modified, `git status` clean after every step):
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` (on `a02580e`) | OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on the 13 SMP packages importing a changed Spine package (test imports included) plus `internal/customer/workflow` (on `a02580e`) | 11 ok, `projectionsvc` has no tests; `gitread` and `projectionwriter` fail with the **identical** `--- FAIL` list as the integration run (and Spine `main` `d23b897`): pre-existing SMP TASK-004 tests that SMP TASK-006's branch adapts (the integration run checked that TASK-006's tip passes them) |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s3f_smp_it` with `vector`, `s3f_spine_runtime_it`) | 115 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites" via `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 25m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`; code `cdd33ee`) | 1835 passed, 0 failed, 2 allowed Linux-only skips; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -p 4 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed skip; `testgate: PASS` |
+
+Not run: the CI `git-floor` job (git 2.39.5 in `golang:1.26-bookworm`) — not in this gate list, and
+the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git has
+(`update-ref`, a tab in a file name). Environment: the shared PostgreSQL 18.6 container on
+`localhost:55630`; only `s3f_*` databases were created and all were dropped afterwards; the SMP
+suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
+was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
+`spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.
+
+**Follow-ups** (recorded, not done here):
+
+- Serialise recovery across processes sharing a runtime database: a compare-and-swap on
+  `commit_meta` (or a per-run database lock) behind an optional store interface, rebuilding the
+  ledger after contention (KNOWN-LIMITATIONS "Governed Merge Binding" 15).
+- The replay check recomputes the cascade once per candidate merge whose second parent is a child
+  of the bound commit (normally one); a run whose branch sits on another run's merged commit walks
+  the full 64 commits on its first attempt. Persisting the first attempt's cascade base in a
+  reserved `commit_meta` key would make replays independent of `main`'s history (and of item 14's
+  walk limit).

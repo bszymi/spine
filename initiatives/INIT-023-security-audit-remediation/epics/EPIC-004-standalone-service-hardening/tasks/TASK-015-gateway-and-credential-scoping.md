@@ -1856,3 +1856,53 @@ Environment: the shared PostgreSQL 18.6 container on `localhost:55630`. Only `s3
 databases and roles were cleaned up by the suites (none left, checked). The only containers
 started (the `git-floor` runs, `--rm`) were removed; the Docker VM kept at least 6.1 GB free. Logs:
 `spine-management-platform/tmp/init027-orchestration/wave3-int/`.
+
+### Cross-task review (wave 3) (2026-10-14)
+
+The wave 3 cross-task review ran on the integration branch at `63e2318` (each P1/P2 put to two
+skeptics, whose votes are summarised below; P3s had none). Every fix is on `init/INIT-023-wave3-integration`
+(worktree `i23/s-int3/spine`), not on the task branches, which are unchanged: `f346c9e` (cascade
+replay), `dcdfff5` (recovery serialisation) with `475e342` (its lint), `a6dbd67` (projection
+refusal order), `7aedeca` (info/refs oracle), `3aa24b9` (docs), `cdd33ee` (codex round 1) with
+`a02580e` (its lint). Each fix's test was checked to fail against the previous code with
+`go test -overlay` (the old file swapped in), and to pass on the fix. Nothing was pushed.
+
+| # | Finding (as raised) | Disposition |
+|---|---|---|
+| 1 | P3, `service/internal/gateway/handlers_git.go`: a non-canonical `GET /info/refs?<query>` counts as a push (`githttp.IsReceivePack`), so with receive-pack off (the default) and a workspace that resolved it took `pushDisabledShortCircuit` and reached `ServeHTTP`'s `400 unsupported info/refs query`, while a missing workspace failed the short-circuit and got the gate's uniform `401`: the workspace-existence oracle EPIC-004 TASK-031 closed, reopened for this sub-case (no new capability: the `git-receive-pack` POST 403-vs-401 already says as much) | **Fixed** (`7aedeca`): the short-circuit excludes a non-canonical info/refs (`githttp.IsNonCanonicalInfoRefs`), so it meets the auth gate like a read. Without a bearer it is `401` with the same body whether or not the workspace exists — a trusted-CIDR runner's included, since a push never takes the trusted bypass — and with one it is still `400`. The canonical receive-pack request keeps its `403` naming the flag. Test: `TestWave3_NonCanonicalInfoRefsIsNoWorkspaceOracle` (four queries; identical 401 bodies; 400 with a bearer; the canonical 403/401 guard) fails on the previous gateway. The four `TestP330` cases that pinned the token-less push-off `400` now expect `401` (round 2's "`400` push off" for the direct trusted runner is superseded). CHANGELOG, integration guide. SMP: its gateway's push-disabled short-circuit runs before workspace resolution, so porting round 2's byte-exact match (the follow-up above) cannot reopen this oracle there; keep it that way |
+
+**Gates** (code at `a02580e`; `final-basic`, `final-gotest` and `final-race` ran on `cdd33ee`,
+whose only difference is two `\u` escapes in one test's string literals):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 17 packages the four tasks touched (`adapters/{delivery,git,gitpool,projection,repository}`, `core/{artifact,domain,engine/...,observe,refadmit,workflow,worktreefs}`, `service/cmd/spine`, `service/internal/{gateway,githttp,workspace}`) | all ok |
+| `-tags integration -race -p 1` on `adapters/delivery`, `adapters/projection`, `service/cmd/spine`, `service/internal/workspace` (`SPINE_TEST_DATABASE_URL` = fresh `s3f_it`, `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3f_reg`, migrated from `migrations/registry`) | 905 PASS (subtests counted), 0 FAIL, 0 SKIP |
+| CI `scenario-git-http` job, its four steps verbatim (`bash -eo pipefail`) on a fresh `s3f_ci` (code `cdd33ee`) | `TestGitHTTP_*` 20 PASS (incl. `TestGitHTTP_Push*`), `TestBootstrapInternalAdmin_*` 2 PASS, `TestWorkflowLifecycle_*` 4 PASS, `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS; 0 SKIP |
+| `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (`s3f_scen`, registry `s3f_reg2` migrated; code `cdd33ee`) | the same 31 top-level `--- FAIL` (59 lines with subtests) as the integration run's `scen-branch-3` (identical sorted lists): the 30 known pre-existing failures plus `TestWorkspace_ScopedServices`. `TestPartialMergeRetry_HappyPath`, `TestPartialMergeExternalResolution_HappyPath`, `TestCancelFromPartiallyMerged_AsymmetricCleanup` and `TestPlanningRun_StatusCascadesToChildren` pass |
+| `golangci-lint` v2.11.4 `run --new-from-rev main` on `core/engine/...`, `adapters/projection/...`, `service/internal/{gateway,githttp}/...`, `service/scenariotest/...`: plain, `--build-tags=integration`, `--build-tags=scenario` | 0 issues each (a gocritic `builtinShadow` was fixed in `475e342`, a gosec G116 / staticcheck ST1018 in `a02580e`) |
+| `--enable-only=gosec` on the touched packages (`integration,scenario`) and on `./...` | 0 issues |
+| `gofmt -l` (the Go 1.26.5 toolchain's) on every `.go` file changed since `63e2318` | empty |
+| `codex review --base main` (codex-cli 0.162.1, the configured default model, no `-c model=` override) | round 1 (`475e342`; session `rollout-2026-10-14T15-20-33-01a13ac9-4f2b-…`, `source: {"subagent":"review"}`, `"model":"gpt-6.1-sol"`): one P2, fixed in `cdd33ee`. Round 2 (`cdd33ee`; `rollout-2026-10-14T15-30-35-01a13ad2-7e47-…`, review source, `gpt-6.1-sol`): "No actionable regressions were identified relative to the merge base." `a02580e` changes only test escapes, so no third round |
+
+**SMP compatibility** (`i23/s-int3/smp` = SMP `main` `f5c6fd6d`, detached, `../spine` = this
+worktree, `GOFLAGS=-mod=readonly`; never modified, `git status` clean after every step):
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` (on `a02580e`) | OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on the 13 SMP packages importing a changed Spine package (test imports included) plus `internal/customer/workflow` (on `a02580e`) | 11 ok, `projectionsvc` has no tests; `gitread` and `projectionwriter` fail with the **identical** `--- FAIL` list as the integration run (and Spine `main` `d23b897`): pre-existing SMP TASK-004 tests that SMP TASK-006's branch adapts (the integration run checked that TASK-006's tip passes them) |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s3f_smp_it` with `vector`, `s3f_spine_runtime_it`) | 115 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites" via `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 25m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`; code `cdd33ee`) | 1835 passed, 0 failed, 2 allowed Linux-only skips; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -p 4 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed skip; `testgate: PASS` |
+
+Not run: the CI `git-floor` job (git 2.39.5 in `golang:1.26-bookworm`) — not in this gate list, and
+the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git has
+(`update-ref`, a tab in a file name). Environment: the shared PostgreSQL 18.6 container on
+`localhost:55630`; only `s3f_*` databases were created and all were dropped afterwards; the SMP
+suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
+was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
+`spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.
