@@ -262,7 +262,7 @@ func TestServeHTTP_RepeatedServiceParameterRefused(t *testing.T) {
 			"service=git-upload-pack&service=git-upload-pack",
 			"service=git-upload-pack&service=",
 		} {
-			req := httptest.NewRequest("GET", "/info/refs?"+q, nil)
+			req := httptest.NewRequest("GET", "/info/refs?"+q, http.NoBody)
 			// A path that is not a repository: reaching
 			// ensureReceivePackConfig or CGI would answer 500.
 			req = req.WithContext(WithRepoPath(req.Context(), "/nonexistent/definitely/not/a/repo"))
