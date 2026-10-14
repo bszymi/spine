@@ -80,6 +80,11 @@ const (
 	// t015SmuggledPushInfoRefs repeats `service`: url.Values.Get returns
 	// the first value, git-http-backend keeps the last (review round 1).
 	t015SmuggledPushInfoRefs = "info/refs?service=git-upload-pack&service=git-receive-pack"
+	// t015ValuelessPushInfoRefs names `service` without '=':
+	// git-http-backend takes the next segment as its value
+	// (service=git-receive-pack), url.ParseQuery reads service="" and an
+	// unrelated key (review round 2).
+	t015ValuelessPushInfoRefs = "info/refs?service&git-receive-pack"
 )
 
 // t015ReceivePackAdvertisement is the content type git-http-backend
@@ -145,18 +150,27 @@ func TestP330_DirectRunnerStillTrusted(t *testing.T) {
 	if w := t015GitResponse(sp, http.MethodGet, t015SmuggledPushInfoRefs, "172.28.0.5:40000"); w.Code != http.StatusUnauthorized {
 		t.Fatalf("direct trusted runner, repeated service parameter: status %d (%s), want 401", w.Code, w.Header().Get("Content-Type"))
 	}
+	// Review round 2: nor to one smuggled in a name without '='.
+	if w := t015GitResponse(sp, http.MethodGet, t015ValuelessPushInfoRefs, "172.28.0.5:40000"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("direct trusted runner, valueless service parameter: status %d (%s), want 401", w.Code, w.Header().Get("Content-Type"))
+	}
+	// With push off, it is refused by Spine (400) before git-http-backend.
+	if w := t015GitResponse(s, http.MethodGet, t015ValuelessPushInfoRefs, "172.28.0.5:40000"); w.Code != http.StatusBadRequest {
+		t.Fatalf("direct trusted runner, valueless service parameter, push off: status %d (%s), want 400", w.Code, w.Header().Get("Content-Type"))
+	}
 }
 
-// Review round 1 (P3): git-http-backend keeps the LAST value of a
-// repeated query parameter, url.Values.Get returns the FIRST. When the
-// push/read classifier read one value,
-// `info/refs?service=git-upload-pack&service=git-receive-pack` was a read
-// for the token-less paths (trusted CIDR, SPINE_GIT_HTTP_DEV_NO_AUTH) and
-// git-http-backend answered it with the receive-pack advertisement. A
-// repeated `service` now counts as a push when any value names
-// receive-pack (so it needs a bearer), and the handler refuses it (400)
-// once past the auth gate, so git-http-backend never sees an ambiguous
-// request.
+// Review rounds 1 and 2 (P3): git-http-backend parses the query itself,
+// and differently from url.ParseQuery. It keeps the LAST value of a
+// repeated parameter (url.Values.Get the FIRST), and a name without '='
+// takes the NEXT segment as its value. When the push/read classifier used
+// url.ParseQuery, `info/refs?service=git-upload-pack&service=git-receive-pack`
+// (round 1) and then `info/refs?service&git-receive-pack` (round 2) were
+// reads for the token-less paths (trusted CIDR, SPINE_GIT_HTTP_DEV_NO_AUTH)
+// and git-http-backend answered them with the receive-pack advertisement.
+// Any info/refs query other than the three a git client sends now counts
+// as a push (so it needs a bearer), and the handler refuses it (400) once
+// past the auth gate, so git-http-backend never sees an ambiguous request.
 func TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement(t *testing.T) {
 	devNoAuth := t015GitServer(t, nil, "", true)
 	devNoAuth.gitDevNoAuth = true
@@ -170,6 +184,9 @@ func TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement(t *testing.T) 
 		uploadThenReceive = t015SmuggledPushInfoRefs
 		receiveThenUpload = "info/refs?service=git-receive-pack&service=git-upload-pack"
 		uploadTwice       = "info/refs?service=git-upload-pack&service=git-upload-pack"
+		valueless         = t015ValuelessPushInfoRefs
+		valuelessTrailing = "info/refs?service&git-receive-pack&x=1"
+		emptyValue        = "info/refs?service="
 	)
 	for _, tc := range []struct {
 		name    string
@@ -181,11 +198,22 @@ func TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement(t *testing.T) 
 	}{
 		{"dev no-auth, upload then receive", devNoAuth, uploadThenReceive, "198.51.100.7:40000", nil, http.StatusUnauthorized},
 		{"dev no-auth, receive then upload", devNoAuth, receiveThenUpload, "198.51.100.7:40000", nil, http.StatusUnauthorized},
-		{"dev no-auth, upload twice", devNoAuth, uploadTwice, "198.51.100.7:40000", nil, http.StatusBadRequest},
+		// Round 2: a non-canonical query is a possible push, so even a
+		// repeated upload-pack needs a bearer now (it was a 400 read).
+		{"dev no-auth, upload twice", devNoAuth, uploadTwice, "198.51.100.7:40000", nil, http.StatusUnauthorized},
+		{"dev no-auth, valueless service", devNoAuth, valueless, "198.51.100.7:40000", nil, http.StatusUnauthorized},
+		{"dev no-auth, valueless service, trailing pair", devNoAuth, valuelessTrailing, "198.51.100.7:40000", nil, http.StatusUnauthorized},
+		{"dev no-auth, empty service value", devNoAuth, emptyValue, "198.51.100.7:40000", nil, http.StatusUnauthorized},
 		{"trusted runner, push on", trustedPushOn, uploadThenReceive, "172.28.0.5:40000", nil, http.StatusUnauthorized},
-		{"trusted runner, upload twice", trustedPushOn, uploadTwice, "172.28.0.5:40000", nil, http.StatusBadRequest},
+		{"trusted runner, upload twice", trustedPushOn, uploadTwice, "172.28.0.5:40000", nil, http.StatusUnauthorized},
+		{"trusted runner, push on, valueless service", trustedPushOn, valueless, "172.28.0.5:40000", nil, http.StatusUnauthorized},
+		{"trusted runner, push on, valueless service, trailing pair", trustedPushOn, valuelessTrailing, "172.28.0.5:40000", nil, http.StatusUnauthorized},
 		{"trusted runner, push off", trustedPushOff, uploadThenReceive, "172.28.0.5:40000", nil, http.StatusBadRequest},
+		{"trusted runner, push off, valueless service", trustedPushOff, valueless, "172.28.0.5:40000", nil, http.StatusBadRequest},
+		{"trusted runner, push off, upload twice", trustedPushOff, uploadTwice, "172.28.0.5:40000", nil, http.StatusBadRequest},
 		{"authenticated pusher", authed, uploadThenReceive, "198.51.100.7:40000", []string{"Authorization", "Bearer " + bearer}, http.StatusBadRequest},
+		{"authenticated pusher, valueless service", authed, valueless, "198.51.100.7:40000", []string{"Authorization", "Bearer " + bearer}, http.StatusBadRequest},
+		{"authenticated pusher, valueless service, trailing pair", authed, valuelessTrailing, "198.51.100.7:40000", []string{"Authorization", "Bearer " + bearer}, http.StatusBadRequest},
 	} {
 		w := t015GitResponse(tc.s, http.MethodGet, tc.query, tc.peer, tc.headers...)
 		if ct := w.Header().Get("Content-Type"); ct == t015ReceivePackAdvertisement {
@@ -195,7 +223,7 @@ func TestP330_RepeatedServiceParameterNeverOpensPushAdvertisement(t *testing.T) 
 			t.Errorf("%s: status %d, want %d", tc.name, w.Code, tc.want)
 		}
 	}
-	// Guard: a single service value is unchanged.
+	// Guard: the queries a git client sends are unchanged.
 	if w := t015GitResponse(authed, http.MethodGet, t015PushInfoRefs, "198.51.100.7:40000", "Authorization", "Bearer "+bearer); w.Code != http.StatusOK ||
 		w.Header().Get("Content-Type") != t015ReceivePackAdvertisement {
 		t.Fatalf("authenticated push advertisement: status %d (%s), want 200 %s", w.Code, w.Header().Get("Content-Type"), t015ReceivePackAdvertisement)
@@ -295,6 +323,14 @@ func TestP330_GitDevNoAuth_ReadsOnly(t *testing.T) {
 	// Review round 1: nor through a repeated `service` parameter.
 	if code := t015GitRequest(s, http.MethodGet, t015SmuggledPushInfoRefs, "198.51.100.7:40000"); code != http.StatusUnauthorized {
 		t.Errorf("push advertisement (repeated service) with SPINE_GIT_HTTP_DEV_NO_AUTH: status %d, want 401", code)
+	}
+	// Review round 2: nor through a `service` name without '='.
+	if code := t015GitRequest(s, http.MethodGet, t015ValuelessPushInfoRefs, "198.51.100.7:40000"); code != http.StatusUnauthorized {
+		t.Errorf("push advertisement (valueless service) with SPINE_GIT_HTTP_DEV_NO_AUTH: status %d, want 401", code)
+	}
+	// The dumb-protocol ref list (no query) is still a read.
+	if code := t015GitRequest(s, http.MethodGet, "info/refs", "198.51.100.7:40000"); code != http.StatusOK {
+		t.Errorf("dumb info/refs with SPINE_GIT_HTTP_DEV_NO_AUTH: status %d, want 200", code)
 	}
 	if code := t015GitRequest(s, http.MethodPost, "git-receive-pack", "198.51.100.7:40000"); code != http.StatusUnauthorized {
 		t.Errorf("push with SPINE_GIT_HTTP_DEV_NO_AUTH: status %d, want 401", code)

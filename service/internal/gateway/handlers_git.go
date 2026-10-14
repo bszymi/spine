@@ -114,6 +114,13 @@ func (s *Server) handleGit(w http.ResponseWriter, r *http.Request) {
 	//    dedicated SPINE_GIT_HTTP_DEV_NO_AUTH flag, which cmd/spine
 	//    refuses unless SPINE_ENV=development, skips the bearer — and
 	//    only for reads.
+	//
+	// "Push" is githttp.IsReceivePack, which also counts an info/refs
+	// query other than the three a git client sends as a push: git-http-
+	// backend parses the query itself and may read receive-pack where
+	// url.ParseQuery does not (`service&git-receive-pack`), so such a
+	// request never takes a token-less read path, and the handler then
+	// refuses it with 400 (INIT-023 TASK-015 review round 2).
 	push := githttp.IsReceivePack(r)
 	// pushDisabledShortCircuit only bypasses auth when the workspace
 	// actually resolved. Otherwise an untrusted unauthenticated client

@@ -229,15 +229,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	gitPath := r.URL.Path
 	log := observe.Logger(r.Context())
 
-	// A repeated `service` parameter is ambiguous: this handler and
-	// git-http-backend would read different values (serviceParams).
-	// No git client sends one; refuse it before any gate or CGI.
-	if repeatedService(r) {
-		log.Warn("git request rejected — repeated service parameter",
+	// An info/refs query other than the three a git client sends is
+	// ambiguous: git-http-backend parses it with its own parser and
+	// may read a service this handler did not (infoRefsServiceOf).
+	// Refuse it before the push gate, the read gate and CGI. The raw
+	// query is not logged: it is client-chosen and unbounded.
+	if isInfoRefs(r) && infoRefsServiceOf(r.URL.RawQuery) == infoRefsNonCanonical {
+		log.Warn("git request rejected — non-canonical info/refs query",
 			"remote_addr", r.RemoteAddr,
 			"path", gitPath,
+			"query_bytes", len(r.URL.RawQuery),
 		)
-		http.Error(w, "repeated service parameter", http.StatusBadRequest)
+		http.Error(w, "unsupported info/refs query", http.StatusBadRequest)
 		return
 	}
 
@@ -810,15 +813,14 @@ func (h *Handler) ensureReceivePackConfig(ctx context.Context, repoPath string) 
 func isReadOnly(r *http.Request) bool {
 	path := r.URL.Path
 
-	// GET /info/refs?service=git-upload-pack — ref advertisement for clone/fetch.
-	// A repeated service is never a read (serviceParams).
-	if r.Method == http.MethodGet && strings.HasSuffix(path, "/info/refs") {
-		services := serviceParams(r)
-		switch len(services) {
-		case 0:
+	// GET /info/refs?service=git-upload-pack — ref advertisement for
+	// clone/fetch — and the bare GET /info/refs of the dumb protocol.
+	// Any other query is never a read (infoRefsServiceOf), including
+	// `service=` with an empty value, which git-http-backend refuses.
+	if isInfoRefs(r) {
+		switch infoRefsServiceOf(r.URL.RawQuery) {
+		case infoRefsDumb, infoRefsUploadPack:
 			return true
-		case 1:
-			return services[0] == "" || services[0] == "git-upload-pack"
 		default:
 			return false
 		}
@@ -851,15 +853,16 @@ func isReadOnly(r *http.Request) bool {
 func IsReceivePack(r *http.Request) bool {
 	path := r.URL.Path
 
-	if r.Method == http.MethodGet && strings.HasSuffix(path, "/info/refs") {
-		// Any receive-pack value counts, whichever position it holds
-		// (serviceParams): a repeated service fails closed to "push".
-		for _, v := range serviceParams(r) {
-			if v == "git-receive-pack" {
-				return true
-			}
+	if isInfoRefs(r) {
+		// A non-canonical query fails closed to "push": git-http-backend
+		// may read it as receive-pack (infoRefsServiceOf), so it needs a
+		// bearer at the gateway, and ServeHTTP then refuses it.
+		switch infoRefsServiceOf(r.URL.RawQuery) {
+		case infoRefsReceivePack, infoRefsNonCanonical:
+			return true
+		default:
+			return false
 		}
-		return false
 	}
 	if r.Method == http.MethodPost && strings.HasSuffix(path, "/git-receive-pack") {
 		return true
@@ -867,34 +870,75 @@ func IsReceivePack(r *http.Request) bool {
 	return false
 }
 
-// serviceParams returns every `service` query value of r. A real git
-// client sends at most one.
-//
-// The classifiers must not read just one of several: git-http-backend's
-// get_parameters keeps the LAST value of a repeated query parameter,
-// while url.Values.Get returns the FIRST. When IsReceivePack and
-// isReadOnly read only the first,
-// `info/refs?service=git-upload-pack&service=git-receive-pack` was a read
-// to the gateway's token-less paths (the trusted-CIDR runner bypass and
-// SPINE_GIT_HTTP_DEV_NO_AUTH) while git-http-backend answered it with the
-// receive-pack advertisement (INIT-023 TASK-015 review round 1). So
-// IsReceivePack treats a request as a push when any value names
-// receive-pack, isReadOnly never treats a repeated service as a read,
-// and ServeHTTP refuses a repeated service outright (repeatedService),
-// so git-http-backend never sees one.
-//
-// Both parsers split on '&' and '=' and decode %XX and '+' alike, so
-// with a single value they agree: url.ParseQuery drops a pair with a
-// ';' or an invalid escape, which git-http-backend keeps as a literal
-// value that names no service and that it refuses.
-func serviceParams(r *http.Request) []string {
-	return r.URL.Query()["service"]
+// isInfoRefs reports whether r is the ref advertisement request, the
+// only git-http-backend route that reads the query string (its
+// get_info_refs reads `service`; every other route ignores the query).
+// HEAD, which git-http-backend serves as GET, is neither a read nor a
+// push here, so ServeHTTP refuses it before CGI.
+func isInfoRefs(r *http.Request) bool {
+	return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs")
 }
 
-// repeatedService reports whether r carries more than one `service`
-// query value (serviceParams).
-func repeatedService(r *http.Request) bool {
-	return len(serviceParams(r)) > 1
+// infoRefsService is the advertisement a GET .../info/refs query asks
+// git-http-backend for (infoRefsServiceOf).
+type infoRefsService int
+
+const (
+	// infoRefsDumb: the empty query — the dumb-protocol ref list, a read.
+	infoRefsDumb infoRefsService = iota
+	// infoRefsUploadPack: exactly `service=git-upload-pack` (clone, fetch).
+	infoRefsUploadPack
+	// infoRefsReceivePack: exactly `service=git-receive-pack` (push).
+	infoRefsReceivePack
+	// infoRefsNonCanonical: any other query. Never a read, always a
+	// possible push, and refused by ServeHTTP.
+	infoRefsNonCanonical
+)
+
+// infoRefsServiceOf classifies the raw query of a GET .../info/refs
+// request by its exact bytes. Only the three queries a git client sends
+// are recognised: the empty query (the dumb protocol), and
+// `service=git-upload-pack` / `service=git-receive-pack` (remote-curl
+// appends exactly `service=<name>` to the info/refs URL; protocol v2
+// travels in the Git-Protocol header, not the query). Everything else is
+// infoRefsNonCanonical.
+//
+// The classification has to be the one git-http-backend acts on, and
+// git-http-backend parses QUERY_STRING — r.URL.RawQuery verbatim
+// (net/http/cgi) — with its own parser (http-backend.c get_parameters,
+// url.c url_decode_parameter_name / _value), not url.ParseQuery. The two
+// disagree on inputs no client sends, in both directions:
+//
+//   - git keeps the LAST value of a repeated parameter, url.Values.Get
+//     the FIRST: `service=git-upload-pack&service=git-receive-pack`;
+//   - git ends a name at '&' or '=', consumes that byte, and then reads
+//     the value up to the next '&', so a name without '=' takes the NEXT
+//     segment as its value: `service&git-receive-pack` is
+//     service=git-receive-pack to git, but service="" plus an unrelated
+//     key to url.ParseQuery (and `x&service=git-receive-pack` is x=… to
+//     git, with no service at all);
+//   - git keeps ';', "%00" and an invalid escape literally where
+//     url.ParseQuery drops the pair or decodes it.
+//
+// Each of the first two made a request that this package classified as
+// a read reach git-http-backend as the receive-pack advertisement, on the
+// gateway's token-less read paths (the trusted-CIDR runner bypass and
+// SPINE_GIT_HTTP_DEV_NO_AUTH): INIT-023 TASK-015 review rounds 1 and 2.
+// Comparing the exact bytes needs no model of either parser: each
+// recognised query is one name, one '=' and one value, with no byte
+// either parser treats specially, so both read it the same way, and
+// anything else never reaches git-http-backend.
+func infoRefsServiceOf(rawQuery string) infoRefsService {
+	switch rawQuery {
+	case "":
+		return infoRefsDumb
+	case "service=git-upload-pack":
+		return infoRefsUploadPack
+	case "service=git-receive-pack":
+		return infoRefsReceivePack
+	default:
+		return infoRefsNonCanonical
+	}
 }
 
 // findGitHTTPBackend locates the git-http-backend binary.
