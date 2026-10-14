@@ -52,6 +52,13 @@ func (a *runAdapter) StartRun(ctx context.Context, taskPath string) (*gateway.Ru
 	}, nil
 }
 
+// The standalone store must keep the engine's optional compare-and-swap
+// port (INIT-023 TASK-008): adapters/store cannot import core/engine, so
+// the assertion lives where the two meet, and the build fails if the store
+// ever stops satisfying it — every engine step write would silently fall
+// back to the blind UpdateStepExecution.
+var _ engine.StepExecutionTransitioner = (*store.PostgresStore)(nil)
+
 // resultAdapter adapts engine.Orchestrator to gateway.ResultHandler.
 type resultAdapter struct {
 	orch *engine.Orchestrator
@@ -63,6 +70,10 @@ func (a *resultAdapter) IngestResult(ctx context.Context, req gateway.ResultSubm
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: req.ArtifactsProduced,
 		ExpectedHeadSHA:   req.ExpectedHeadSHA,
+		// The authenticated submitter: the engine refuses a foreign one
+		// even where the gateway's own pre-check was skipped (INIT-023
+		// TASK-008, audit P3-17).
+		ActorID: req.ActorID,
 	})
 	if err != nil {
 		return nil, err

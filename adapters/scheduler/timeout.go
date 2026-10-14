@@ -60,8 +60,29 @@ func (s *Scheduler) ScanTimeouts(ctx context.Context) error {
 	return nil
 }
 
+// stepTransitioner is the store's optional conditional step write — the
+// same method engine.StepExecutionTransitioner names (INIT-023 TASK-008);
+// a local interface because this package does not import core/engine.
+// *store.PostgresStore implements it.
+type stepTransitioner interface {
+	TransitionStepExecution(ctx context.Context, exec *domain.StepExecution, fromStatus domain.StepExecutionStatus, fromActorID string) (bool, error)
+}
+
+// transitionStep persists a scheduler step write (the timeout transition,
+// startup recovery's assigned→waiting). With a conditional store the write
+// applies only while the execution still holds the (status, actor) the
+// scan listed; (false, nil) means a submit (or any other writer) moved it
+// first. Without one it is the blind UpdateStepExecution, as before.
+func (s *Scheduler) transitionStep(ctx context.Context, exec *domain.StepExecution, fromStatus domain.StepExecutionStatus, fromActorID string) (bool, error) {
+	if t, ok := s.store.(stepTransitioner); ok {
+		return t.TransitionStepExecution(ctx, exec, fromStatus, fromActorID)
+	}
+	return true, s.store.UpdateStepExecution(ctx, exec)
+}
+
 func (s *Scheduler) handleStepTimeout(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition) error {
 	log := observe.Logger(ctx)
+	fromStatus, fromActorID := exec.Status, exec.ActorID
 
 	hasTimeoutOutcome := stepDef.TimeoutOutcome != ""
 	result, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
@@ -85,8 +106,17 @@ func (s *Scheduler) handleStepTimeout(ctx context.Context, exec *domain.StepExec
 		exec.OutcomeID = stepDef.TimeoutOutcome
 	}
 
-	if err := s.store.UpdateStepExecution(ctx, exec); err != nil {
+	applied, err := s.transitionStep(ctx, exec, fromStatus, fromActorID)
+	if err != nil {
 		return fmt.Errorf("update step execution: %w", err)
+	}
+	if !applied {
+		// A submit (or a release, a cancel) won the race between the scan
+		// and this write: the step is not timed out, so no step_timeout
+		// event and no metric (INIT-023 TASK-008, audit P3-24).
+		log.Info("step changed before its timeout was recorded; skipped",
+			"execution_id", exec.ExecutionID, "step_id", exec.StepID, "run_id", exec.RunID)
+		return nil
 	}
 
 	observe.GlobalMetrics.TimeoutsDetected.Inc()

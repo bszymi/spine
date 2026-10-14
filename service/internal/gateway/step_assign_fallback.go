@@ -75,6 +75,7 @@ func (a *storeStepAssigner) AssignStep(ctx context.Context, req engine.AssignReq
 	if exec == nil {
 		return nil, domain.NewError(domain.ErrNotFound, "step execution not found")
 	}
+	fromStatus, fromActorID := exec.Status, exec.ActorID
 
 	// Mirrors engine.AssignStep open-slot recovery for pre-Option-B
 	// phantom rows (status=assigned/in_progress with empty actor_id):
@@ -96,6 +97,21 @@ func (a *storeStepAssigner) AssignStep(ctx context.Context, req engine.AssignReq
 	exec.ActorID = req.ActorID
 	if len(req.EligibleActorIDs) > 0 {
 		exec.EligibleActorIDs = req.EligibleActorIDs
+	}
+	// Conditional on the (status, actor) listed when the store can
+	// (INIT-023 TASK-008; the standalone PostgresStore does): a claim or
+	// assign that bound the step meanwhile is not overwritten — 409.
+	if t, ok := a.st.(engine.StepExecutionTransitioner); ok {
+		applied, err := t.TransitionStepExecution(ctx, exec, fromStatus, fromActorID)
+		if err != nil {
+			return nil, fmt.Errorf("update step execution: %w", err)
+		}
+		if !applied {
+			return nil, domain.NewErrorWithCause(domain.ErrConflict,
+				fmt.Sprintf("step execution %s changed state concurrently; assign not applied", exec.ExecutionID),
+				engine.ErrStepStateChanged)
+		}
+		return &engine.AssignResult{Exec: exec}, nil
 	}
 	if err := a.st.UpdateStepExecution(ctx, exec); err != nil {
 		return nil, fmt.Errorf("update step execution: %w", err)

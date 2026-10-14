@@ -116,6 +116,15 @@ type RunCanceller interface {
 	CancelRun(ctx context.Context, runID string) error
 }
 
+// StepOutputEvidenceReader returns a run's persisted step-output evidence
+// (INIT-023 TASK-008, audit P3-19) for run detail. Optional: the gateway
+// type-asserts the workspace RunCanceller — the orchestrator in both file
+// and shared mode — so ServiceSet needs no new field; without it the
+// run.status response has no step_output_evidence key.
+type StepOutputEvidenceReader interface {
+	StepOutputEvidence(ctx context.Context, runID string) ([]engine.StepOutputEvidence, error)
+}
+
 // EvidenceQuerier returns a deterministic evidence summary for a Run.
 // The gateway calls SummarizeForRun while building the run.status
 // response so the operator (CLI / external API) sees per-repository
@@ -288,6 +297,11 @@ type ResultSubmission struct {
 	// ExpectedHeadSHA is the optional run-branch head assertion
 	// (expected_head_sha, INIT-023 TASK-005).
 	ExpectedHeadSHA string
+	// ActorID is the authenticated submitter, forwarded into
+	// engine.SubmitRequest.ActorID so the engine re-checks ownership
+	// (INIT-023 TASK-008, audit P3-17). Empty only in dev mode, which has
+	// no authentication.
+	ActorID string
 }
 
 // ResultResponse is returned after result ingestion.

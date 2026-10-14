@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -230,6 +231,25 @@ func (s *Server) handleRunStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// INIT-023 TASK-008 (audit P3-19): step-output evidence — per completed
+	// step, whether the run branch moved since the previous recorded head
+	// and whether a step that declared required_outputs changed nothing.
+	// Read from the run's reserved commit_meta keys (no git call beyond the
+	// pinned workflow load), so it survives event-log retention. Like the
+	// evidence block above it is non-fatal: an error is logged and the key
+	// omitted.
+	if rc, ok := s.runCancellerFrom(r.Context()).(StepOutputEvidenceReader); ok {
+		entries, eErr := rc.StepOutputEvidence(r.Context(), run.RunID)
+		if eErr != nil {
+			observe.Logger(r.Context()).Warn("step output evidence failed",
+				"run_id", run.RunID,
+				"error", eErr,
+			)
+		} else if len(entries) > 0 {
+			resp["step_output_evidence"] = entries
+		}
+	}
+
 	WriteJSON(w, http.StatusOK, resp)
 }
 
@@ -274,8 +294,18 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.storeFrom(r.Context()).UpdateRunStatus(r.Context(), runID, result.ToStatus); err != nil {
+	// Compare-and-swap from the status the evaluation used (INIT-023
+	// TASK-008, audit P3-24): a run that moved in between (a merge started,
+	// it completed) is not overwritten; the caller gets 409 and may retry
+	// against the new state.
+	applied, err := s.storeFrom(r.Context()).TransitionRunStatus(r.Context(), runID, run.Status, result.ToStatus)
+	if err != nil {
 		WriteError(w, err)
+		return
+	}
+	if !applied {
+		WriteError(w, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s changed state concurrently; cancel not applied", runID)))
 		return
 	}
 
@@ -428,10 +458,12 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Gateway-level ownership check: the authenticated actor must be
 	// the one the step was claimed by. The downstream IngestResult
-	// check remains as defense-in-depth. If the store isn't available
-	// we fall through to IngestResult rather than failing closed, so
-	// deployments without a fully wired store (e.g., some tests) still
-	// exercise the existing code path; actor == nil only in dev mode.
+	// check remains as defense-in-depth: the authenticated actor is
+	// forwarded as ResultSubmission.ActorID below, whether or not a store
+	// is wired, so the engine refuses a foreign submitter (403) even when
+	// this pre-check is skipped (INIT-023 TASK-008). If the store isn't
+	// available we fall through to IngestResult; actor == nil only in dev
+	// mode, which has no authentication and forwards no actor.
 	//
 	// An empty exec.ActorID means the step was never claimed/assigned —
 	// per Option B (INIT-020/EPIC-001/TASK-004), submitting from that
@@ -475,12 +507,16 @@ func (s *Server) handleStepSubmit(w http.ResponseWriter, r *http.Request) {
 			artifactPaths = append(artifactPaths, a.Path)
 		}
 	}
-	resp, err := resultHandler.IngestResult(r.Context(), ResultSubmission{
+	submission := ResultSubmission{
 		ExecutionID:       executionID,
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: artifactPaths,
 		ExpectedHeadSHA:   req.ExpectedHeadSHA,
-	})
+	}
+	if actor := actorFromContext(r.Context()); actor != nil {
+		submission.ActorID = actor.ActorID
+	}
+	resp, err := resultHandler.IngestResult(r.Context(), submission)
 	if err != nil {
 		WriteError(w, err)
 		return
