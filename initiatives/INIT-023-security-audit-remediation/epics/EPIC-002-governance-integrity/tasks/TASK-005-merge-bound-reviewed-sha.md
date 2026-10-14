@@ -1724,3 +1724,127 @@ present; tmpfs data, SMP CI's role and database provisioning), removed after the
 - **TASK-006 / TASK-017:** their post-merge refusals (§3.4a; `merge_result_mismatch`) take the same
   take-back: call `takeBackRefusedMerge` before recording the outcome.
 
+
+### Review round 2
+
+A second-round reviewer examined `396c0b6` and raised two P3 findings and two acceptance-criteria
+gaps. I checked each finding against the code before deciding on it. This round's commits are
+`7e33bbd` (the target-move retry), `668cdba` (the conformance suite), `3b2e0fe` (documentation),
+`72e0750` (the two codex P2s below) and the notes commit.
+
+| Finding | Sev | Disposition |
+|---|---|---|
+| 1 — a concurrent write that moves `main` between `MergeBound`'s base read and its `git merge` (`[X, S]`, X a newer descendant of the base) is still a permanent `merge_binding` violation after a clean take-back. A legacy run is failed and a publish run is sent back to `execute`. | P3 | **Fixed** (`7e33bbd`, docs `3b2e0fe`). Real: the legacy variant of the regression test (the reviewer's `TestR2_ConcurrentWriteFailsLegacyRun` shape) fails without the fix (mutation N). `verifyBoundMerge` now reports exactly `[P, S]` with `P != BaseSHA` as a `*targetMovedError`. `takeBackRefusedMerge` takes P from that verdict instead of reading the parents a second time, so a failed second read can no longer turn a kept write into a dropped one. It returns a `takeBack{detail, clean, restoredTo}`. `refusalRetryable` keeps the run in `committing` when the take-back restored the target to exactly P (round 1's transient-read case is the other branch). The primary path uses `retryMerge`. The code-repository path uses a transient outcome. The message names contention on the unlocked target, so the class is `remote_unavailable`, not `network`. A take-back that failed or went back to the base stays permanent. KNOWN-LIMITATIONS 7 states the consequences, as the reviewer asked. |
+| 1a — found while verifying 1: a write that lands during a **replay** (the bound commit already on local `main` after a failed push or a resume) | — | **Not fixed; documented** (`3b2e0fe`). Real: reproduced with an overlay probe (push fails once; the retry's `MergeBound` races a write). `git merge --no-ff` says "already up to date" and reports the write itself as the result. The check refuses it, the take-back drops the write from local `main`, and the run takes `merge_failed`. KNOWN-LIMITATIONS 7 used to say the write was kept, which overclaimed. I did not make it retryable. In that shape any descendant of the base would have to be trusted, and a binder that merged the wrong commit during a replay (`[base, sneak]`) would then be kept and pushed by the retry. That defeats the structural check exactly where it guards non-CLIClient binders. It needs both a replay and a millisecond race, and TASK-012's lock closes it. KNOWN-LIMITATIONS 7, CHANGELOG. |
+| 2 — `testResetBranch` requires the local branch at `to` whenever `Env.Local` is set, so a remote-backed operator that drops its branch (allowed by `interfaces.go`, the integration guide and the SMP TASK-009 handoff) fails the suite | P3 | **Fixed** (`668cdba`), option 1: the contract stays and the suite accepts the branch at `to` or absent. One deviation from the suggestion: the `status --porcelain` check stays for both forms instead of being skipped when the branch is absent. A drop that leaves HEAD on the deleted (unborn) branch keeps the refused tree in the index, where the next commit would record it. The reviewer's wrapper detaches HEAD to `to` before the drop, so it should pass too; the in-tree drop harness, which does the same, passes. A self-test harness (`TestCommitBinder_DropLocalBranchConformance`, `dropLocalBinderEnv`: a bare upstream as `Source`, a clone as `Local`, a fetching `Sync`, a dropping `ResetBranch`) then found a **second suite defect**: the case's refused and next-run commits were on no branch of `Source`, so no fetch-based harness, such as SMP TASK-009's, could ever see them. They are now on `rb-refused` and `rb-next`. The new harness passes every case and fails without either fix (mutations Q, R). |
+
+**Acceptance-criteria gaps raised.**
+- *AC 19 / AC 23 (scenario suite green):* re-run on the final HEAD `72e0750` side by side with an
+  export of `main` `d23b897`. Each has 30 top-level failures, and the sorted `--- FAIL` lists
+  (57 lines with subtests) are identical. They are the known pre-existing set, which the
+  orchestrator's rule says not to fix, so AC 19/23 stay "as on `main`", not green. The shared
+  server at `localhost:55630` was down again, so I used a private cluster (below).
+- *AC 16 / AC 28 (convergence rebind and guard):* acknowledged, unchanged. The fake-handler
+  coverage is what the AC text allows. A real-path test needs TASK-012's explicit convergence
+  target (F8, KNOWN-LIMITATIONS 13). Until then the real `CommitConvergence` bypasses the bound
+  merge and the §5 guard never sees a moved run branch.
+
+**`codex review --base main`, round 2.** The plain command is refused by the service
+(`'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account`, as in round 1),
+so it ran as `codex review -c model="gpt-5.5" --base main`. The first pass, on `3b2e0fe`, raised two
+P2s. I checked both against the code; both are real and were fixed in `72e0750`:
+- *An excluded-commits check that cannot judge the tip lets cleanup delete the run branch.*
+  `verifyBoundMerge` treated an unreadable primary tip, a malformed one, or a failed
+  `IsAncestor` as "nothing excluded". `verifyAndComplete` could then delete a branch that is the
+  only ref to commits the bound merge left out. The code-repository check already kept the branch
+  in this case. Now `mergeSource.tipUnknown` keeps the branches, and only `NotFound` (no branch
+  left) counts as nothing to keep. Test: `TestUnknownTipKeepsBranch` (mutations S, T).
+- *A stale assertion with a missing required output fails the step.* DC-8 moved only rule 1
+  (syntax, applicability, capability) ahead of `validateRequiredOutputs`. A well-formed
+  `expected_head_sha` that no longer matches therefore failed the step for the missing output
+  instead of returning the 409 that changes nothing. The same happened for a gate approval of a
+  moved branch and for an unresolvable head. On that failure path `IngestResult` now runs
+  `captureHead` first, which only reads. With binding off and no assertion it reads nothing, so
+  SMP today is unchanged, and the happy path still resolves the head once, in
+  `SubmitStepResult`. Test: `TestRecoveryResubmitAndAssertionOrdering` "head refusals before
+  required outputs" (stale assertion with binding on and off, moved since the gate, head
+  unavailable, plus two controls that still fail the step; mutation U). `api/spec.yaml` and the
+  CHANGELOG now say so.
+
+The second pass, on `72e0750`: "I did not identify any discrete, introduced correctness issue that
+should block the patch."
+
+**Mutations, round 2** (`go test -overlay`; the worktree was untouched; every mutation was caught):
+
+| Mutation | Caught by |
+|---|---|
+| N: no target-move retry (`refusalRetryable`'s moved case disabled) | `TestTargetMovedDuringMergeRetries` (publish, legacy); `TestCodeRepoMergeBoundRefusesOtherShapes/target_moved`; `TestCodeRepoBinding_ConcurrentWriteRetried`; all four `…KeepsAConcurrentWrite` variants |
+| O: the moved case retries whatever the take-back did | `TestTargetMovedDuringMergeRetries/permanent:_first_parent_does_not_descend_from_the_base`; `TestVerifyBoundMergeRefusesOtherShapes/…(a_rewind)` |
+| P: the take-back re-reads the parents instead of using the verdict's | `TestTargetMovedDuringMergeRetries` (one `CommitParents(M)`) |
+| Q: the suite demands the local branch at `to` | `TestCommitBinder_DropLocalBranchConformance/ResetBranch` |
+| R: the case's fixtures off branches again | `TestCommitBinder_DropLocalBranchConformance/ResetBranch` |
+| S: `verifyAndComplete` ignores `tipUnknown` | `TestUnknownTipKeepsBranch` (three keep cases) |
+| T: a missing run branch counts as unknown | `TestUnknownTipKeepsBranch/no_run_branch_left` |
+| U: `IngestResult` ignores the head refusal on the missing-output path | `TestRecoveryResubmitAndAssertionOrdering/head_refusals_before_required_outputs` (four cases) |
+
+**Design choices in this round (the closest safe alternative, with the reason).**
+1. *Only `[P, S]` with the target restored to P is retried, not the replay shape* (row 1a): in
+   the replay shape the check has no merge commit to anchor S, so it cannot tell a concurrent
+   write from binder output.
+2. *The retry's class is `remote_unavailable`, reached through the message* ("contention on the
+   unlocked target"), the same way `classifyMergeFailure` classifies lock contention. A new class
+   would widen the fixed `ValidMergeFailureClasses` set that stored outcomes use. `network` would
+   send operators looking for a transport fault. The test pins the class.
+3. *Target-move retries are not bounded:* every other transient merge failure retries without a
+   bound too. A binder that always reports a stale `BaseSHA` would loop, but nothing is pushed on
+   that path, every attempt logs at Warn, and such a binder already fails the conformance suite:
+   the `MergeBound` replay and the `ResetBranch` stale-expected cases both pin `BaseSHA` with the
+   local target ahead of the remote. KNOWN-LIMITATIONS 7 names the residual. The integration
+   guide now says `BaseSHA` is the tip the merge was actually computed on.
+4. *The conformance status check stays for the drop form* (row 2).
+5. *Codex P2-2: `captureHead` runs only when the outputs check fails,* so a valid submission
+   costs no extra head read, and binding off without an assertion stays I/O-free.
+
+**Gates, round 2** (final HEAD `72e0750`, re-run after the codex fixes; the first run on `3b2e0fe`
+gave the same results):
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | pass ("engine constructed and exercised; library surface is sound") |
+| `go test -p 4 ./...` | pass |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | pass |
+| `go test -race -p 4` on `./adapters/git/... ./core/engine/... ./core/workflow/... ./core/worktreefs/... ./service/cmd/spine/... ./service/internal/gateway/...` | pass |
+| `SPINE_TEST_DATABASE_URL=…/s005_it go test -tags integration -race -p 1` on the same packages | pass |
+| `go test -tags scenario -p 1 ./service/scenariotest/...` (branch `s005_scen`; export of `main` `s005_scen_main`) | 30 top-level failures each; the sorted 57-line `--- FAIL` lists are identical (the known pre-existing set) |
+| scenario-git-http job: `-run '^TestGitHTTP_'`, `-run '^TestBootstrapInternalAdmin_'` | 20 and 2 pass |
+| `golangci-lint run --new-from-rev main` on the touched packages, plain / `--build-tags=integration` / `--build-tags=scenario` (with `./service/scenariotest/...`) | 0 issues each |
+| `golangci-lint run --enable-only=gosec --new-from-rev main` (plain and scenario) | 0 issues |
+| `gofmt -l` on every changed Go file | empty (the other files it flags in `core/engine` are flagged identically on `main`) |
+
+Databases: the shared server at `localhost:55630` was down, so the Spine suites ran on a private
+PostgreSQL 17.10 cluster (`/opt/homebrew/opt/postgresql@17`, data in this session's scratchpad, TCP
+on localhost only, port 55708, databases `s005_it`, `s005_scen`, `s005_scen_main`). The databases
+were dropped, and the cluster stopped and deleted, after the gates.
+
+**SMP compatibility gate, round 2** (SMP `f5c6fd6d`, detached, `../spine` → this worktree, no SMP
+edit; the SMP tree is clean afterwards; run on `72e0750`):
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...`; `bash dev/lint-spine-internals.sh` | pass; `lint-spine-internals: OK` |
+| `go test -p 4` on the SMP packages importing `core/engine`, `core/engine/enginetest` or `adapters/git` (`internal/customer/{executionreadiness,gitread,projectionsvc,projectionwriter,spinecore,spineembedded}`) | `spinecore`, `spineembedded`, `executionreadiness` pass (`projectionsvc` has no tests). `gitread` (`TestBounded_ErrorContractEqualsCLIClient`) and `projectionwriter` (`TestBoundedProjection_IncrementalAddAndModifyOversized`, `…OversizedWorkflowStalls`) fail with the identical `--- FAIL` list against an export of Spine `main` (scratch `-modfile`): pre-existing, as in round 1 |
+| `go run ./dev/apply-migrations -set platform -dir migrations`; `-set spine-runtime` | 115 and 26 versions recorded |
+| `go run ./dev/testgate -- -race -count=1 -timeout 20m ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (TEST_SPINE_DB, TEST_PLATFORM_DB, TEST_PROVISIONING_DSN provisioned as in SMP CI) | 1835 passed, 0 failed; testgate reports FAIL only for the 2 Linux-only `ru_maxrss` skips (macOS host), as in round 1 |
+
+The SMP databases ran in a private `pgvector/pgvector:pg18` container (PostgreSQL 18.4). The image
+was already present; the data was on tmpfs, and the roles, databases and `vector` extension were
+provisioned as in SMP CI. The container was removed after the gate.
+
+**Handoffs added by this round.**
+- **SMP TASK-009:** both `ResetBranch` forms pass the suite, and `dropLocalBinderEnv` in
+  `adapters/git/commitbinder_test.go` is a minimal remote-backed harness to copy. `MergeBound`'s
+  `BaseSHA` must be the local tip the merge was computed on, not the origin's value. Otherwise
+  every merge looks like a target move and the run retries in `committing` without end.
+- **TASK-012:** under the worktree lock a `[P, S]` merge with `P != BaseSHA` can only be a binder
+  fault, so the lock can make `refusalRetryable`'s target-move case permanent again. The lock also
+  closes the replay-drop residual (KNOWN-LIMITATIONS 7).
