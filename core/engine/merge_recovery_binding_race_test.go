@@ -70,10 +70,10 @@ func TestCodeRepoBinding_RecoveryRequestsDoNotLoseEachOthersBinding(t *testing.T
 	if err != nil {
 		t.Fatalf("request 1: %v", err)
 	}
-	real := e.orch.store
+	liveStore := e.orch.store
 	e.orch.store = &snapshotRunStore{mockRunStore: e.store, stale: snap}
 	res2, err := e.orch.RetryRepositoryMerge(e.ctx, e.run.RunID, "code-a", "try again")
-	e.orch.store = real
+	e.orch.store = liveStore
 	if err != nil {
 		t.Fatalf("request 2: %v", err)
 	}
