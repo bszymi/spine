@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -121,10 +122,23 @@ func (c *Consumer) executeAndSubmit(ctx context.Context, log *slog.Logger, req a
 		return fmt.Errorf("provider execution: %w", err)
 	}
 
+	// ActorID is the actor the assignment was delivered to (INIT-023
+	// TASK-008): a step rebound to another actor while the provider ran is
+	// refused (ErrForbidden) instead of completed on the new owner's
+	// behalf.
 	if err := c.orchestrator.SubmitStepResult(ctx, req.AssignmentID, StepResult{
 		OutcomeID:         result.OutcomeID,
 		ArtifactsProduced: result.ArtifactsProduced,
+		ActorID:           req.ActorID,
 	}); err != nil {
+		if errors.Is(err, ErrStepStateChanged) {
+			// The execution was resolved by someone else first (already
+			// terminal, or moved under it): nothing was written and there
+			// is nothing to retry. The memory queue does not redeliver on
+			// error, so this only keeps the log honest.
+			log.Info("step result not applied; the execution was resolved concurrently", "error", err)
+			return nil
+		}
 		log.Error("failed to submit step result", "error", err)
 		return fmt.Errorf("submit step result: %w", err)
 	}

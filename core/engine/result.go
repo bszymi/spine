@@ -16,6 +16,15 @@ type SubmitRequest struct {
 	// ExpectedHeadSHA is the optional run-branch head assertion
 	// (StepResult.ExpectedHeadSHA, INIT-023 TASK-005).
 	ExpectedHeadSHA string
+	// ActorID is the authenticated submitter (INIT-023 TASK-008, audit
+	// P3-17). When non-empty, IngestResult refuses (domain.ErrForbidden) a
+	// submission for an execution bound to a different actor, before any
+	// other check — on a terminal execution too — and writes nothing, so a
+	// non-owner can neither complete nor fail another actor's step. Empty
+	// means the caller enforces ownership itself (pre-TASK-008); an
+	// execution rebound between this method's read and the write is still
+	// refused then (the snapshot handoff, see StepResult).
+	ActorID string
 }
 
 // IngestResult validates an actor's result against step requirements
@@ -34,6 +43,16 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 	// Load the step execution.
 	exec, err := o.store.GetStepExecution(ctx, req.ExecutionID)
 	if err != nil {
+		return nil, err
+	}
+
+	// Ownership (INIT-023 TASK-008, P3-17) comes first: before the
+	// terminal answers below (a non-owner learns nothing about the
+	// execution, and the gateway refuses a foreign terminal step the same
+	// way), before the head resolution (a non-owner costs no git call) and
+	// before validateRequiredOutputs (a non-owner cannot fail the owner's
+	// step with a submission that omits an output).
+	if err := checkSubmitter(exec, req.ActorID); err != nil {
 		return nil, err
 	}
 
@@ -158,12 +177,20 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 		return nil, err
 	}
 
-	// Result is valid — submit to orchestrator.
+	// Result is valid — submit to orchestrator. The snapshot this method
+	// validated against is handed over (expect): SubmitStepResult re-reads
+	// the execution and refuses to write if it moved in between.
+	validated := stateOf(exec)
 	if err := o.SubmitStepResult(ctx, req.ExecutionID, StepResult{
 		OutcomeID:         req.OutcomeID,
 		ArtifactsProduced: req.ArtifactsProduced,
 		ExpectedHeadSHA:   req.ExpectedHeadSHA,
+		ActorID:           req.ActorID,
+		expect:            &validated,
 	}); err != nil {
+		if isStepStateChanged(err) {
+			return o.lostSubmitRace(ctx, req, err)
+		}
 		return nil, err
 	}
 
@@ -173,6 +200,38 @@ func (o *Orchestrator) IngestResult(ctx context.Context, req SubmitRequest) (*In
 		return nil, fmt.Errorf("re-read step execution: %w", err)
 	}
 
+	return &IngestResponse{
+		ExecutionID: req.ExecutionID,
+		StepID:      exec.StepID,
+		Status:      exec.Status,
+		OutcomeID:   exec.OutcomeID,
+	}, nil
+}
+
+// lostSubmitRace answers a submission whose execution moved between this
+// call's read and its write (INIT-023 TASK-008, Decision D9): another
+// submit, the timeout scanner, a cancel or a rebind won. It re-reads the
+// execution and answers exactly as a sequential duplicate would — the
+// ownership refusal, TASK-007's run-terminated conflict, or the persisted
+// terminal state with a nil error — so a client never sees a
+// timing-dependent status. A row that moved but is still live (a rebind)
+// keeps the conflict.
+func (o *Orchestrator) lostSubmitRace(ctx context.Context, req SubmitRequest, raceErr error) (*IngestResponse, error) {
+	exec, err := o.store.GetStepExecution(ctx, req.ExecutionID)
+	if err != nil {
+		return nil, fmt.Errorf("re-read step execution: %w", err)
+	}
+	if err := checkSubmitter(exec, req.ActorID); err != nil {
+		return nil, err
+	}
+	if o.entryPolicy.EnforceRunStatus && isRunTerminated(exec) {
+		return nil, o.runTerminatedConflict(ctx, exec)
+	}
+	if !exec.Status.IsTerminal() {
+		return nil, raceErr
+	}
+	observe.Logger(ctx).Info("submission lost a race; answering with the persisted state",
+		"execution_id", req.ExecutionID, "status", exec.Status, "outcome_id", exec.OutcomeID)
 	return &IngestResponse{
 		ExecutionID: req.ExecutionID,
 		StepID:      exec.StepID,
@@ -232,16 +291,30 @@ func (o *Orchestrator) FailStep(ctx context.Context, executionID string, classif
 // failStepWithClassification transitions a step to failed with error detail,
 // then evaluates retry eligibility. If retryable, a new execution is scheduled
 // with backoff delay. If not, the run is failed.
+//
+// The write is conditional on the (status, actor) exec was read with
+// (INIT-023 TASK-008). A miss means someone else resolved the step first
+// (a submit completed it, the timeout scanner failed it, a cancel closed
+// it): it is logged and nothing else happens — no RetryStep, so no retry
+// execution and no FailRun for a step this call did not fail. FailStep's
+// callers (actor-less system paths) still get nil, the same contract as
+// "already terminal, nothing to do".
 func (o *Orchestrator) failStepWithClassification(ctx context.Context, exec *domain.StepExecution, classification domain.FailureClassification, message string) {
 	log := observe.Logger(ctx)
 
+	prior := stateOf(exec)
 	exec.Status = domain.StepStatusFailed
 	exec.ErrorDetail = &domain.ErrorDetail{
 		Classification: classification,
 		Message:        message,
 		StepID:         exec.StepID,
 	}
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
+		if isStepStateChanged(err) {
+			log.Info("step resolved concurrently; not failing it",
+				"execution_id", exec.ExecutionID, "classification", classification)
+			return
+		}
 		log.Error("failed to update step execution", "error", err)
 		return
 	}

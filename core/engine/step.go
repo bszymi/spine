@@ -24,6 +24,17 @@ type StepResult struct {
 	// (INIT-023 TASK-005). Optional; it is checked even with merge
 	// binding off.
 	ExpectedHeadSHA string
+	// ActorID is the authenticated submitter (INIT-023 TASK-008, audit
+	// P3-17). When non-empty, the submit is refused with ErrForbidden for
+	// an execution bound to a different actor — on a terminal execution
+	// too — and nothing is written. Empty means the caller enforces
+	// ownership itself (the behaviour before TASK-008).
+	ActorID string
+
+	// expect is IngestResult's snapshot handoff (§3a): the (status, actor)
+	// it validated the submission against. Unexported, so only
+	// IngestResult sets it and external keyed literals keep compiling.
+	expect *stepState
 }
 
 // ActivateStep evaluates preconditions for a step and, if they pass, requests
@@ -72,9 +83,14 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	if err != nil {
 		return err
 	}
+	// Every write below is conditional on the execution still holding the
+	// status and actor read here (INIT-023 TASK-008): an activation that
+	// lost a race to a concurrent one (or to a claim) writes nothing, binds
+	// nobody, delivers no assignment and runs no handler.
+	prior := stateOf(exec)
 
 	if passed, valResult := o.evaluatePreconditions(ctx, stepDef, run); !passed {
-		return o.preparePreconditionFailure(ctx, exec, valResult, runID, stepID)
+		return o.preparePreconditionFailure(ctx, exec, prior, valResult, runID, stepID)
 	}
 
 	// Internal steps are advanced by the Spine engine itself via a
@@ -82,7 +98,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	// no actor selection, no assignment record. Route them here before
 	// the actor-dispatch code below takes over.
 	if stepDef.Type == domain.StepTypeInternal {
-		return o.activateInternalStep(ctx, exec, stepDef, run)
+		return o.activateInternalStep(ctx, exec, prior, stepDef, run)
 	}
 
 	exec.ErrorDetail = nil
@@ -121,7 +137,7 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 		// Stay in waiting. Pull-based actors discover via
 		// ListStepExecutions and call /claim; operators bind via
 		// /assign. Either path moves the step out of waiting.
-		if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+		if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 			return fmt.Errorf("update step execution: %w", err)
 		}
 		log.Info("step ready for assignment",
@@ -138,7 +154,10 @@ func (o *Orchestrator) ActivateStep(ctx context.Context, runID, stepID string) e
 	}
 	exec.Status = stepResult.ToStatus
 
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	// A miss (a concurrent activation or claim bound the step first)
+	// returns here: no assignment record, no DeliverAssignment, no
+	// step_assigned.
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
 	// Bound: release the stripe before the assignment record, the runner
@@ -183,7 +202,7 @@ func executionModeForLog(stepDef *domain.StepDefinition) string {
 // step execution and returns the appropriate domain error. Callers return the
 // result directly; the step stays in waiting because waiting→blocked is not
 // a valid transition.
-func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *domain.StepExecution, valResult *domain.ValidationResult, runID, stepID string) error {
+func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *domain.StepExecution, prior stepState, valResult *domain.ValidationResult, runID, stepID string) error {
 	log := observe.Logger(ctx)
 	if valResult != nil && len(valResult.Errors) > 0 {
 		exec.ErrorDetail = &domain.ErrorDetail{
@@ -192,7 +211,7 @@ func (o *Orchestrator) preparePreconditionFailure(ctx context.Context, exec *dom
 			StepID:         stepID,
 			Violations:     valResult.Errors,
 		}
-		if updateErr := o.store.UpdateStepExecution(ctx, exec); updateErr != nil {
+		if updateErr := o.writeStepExecution(ctx, exec, prior); updateErr != nil {
 			log.Warn("failed to persist validation errors", "error", updateErr)
 		}
 	}
@@ -329,10 +348,45 @@ func (o *Orchestrator) trackStepTimeout(ctx context.Context, exec *domain.StepEx
 
 // SubmitStepResult processes an actor's result for a step, validates the outcome,
 // routes to the next step, and advances the run.
+//
+// It is "submit", never "re-route" (INIT-023 TASK-008 §3a). Right after
+// its read it checks, in order:
+//
+//  1. ownership: a non-empty result.ActorID must be the execution's actor
+//     (ErrForbidden, even on a terminal execution — the gateway's rule);
+//  2. the snapshot handoff: when IngestResult validated the submission
+//     against an earlier read (result.expect), the row must still hold
+//     that (status, actor); otherwise it moved in between — a rebind, a
+//     concurrent submit, the timeout scanner — and nothing is written
+//     (ErrConflict wrapping ErrStepStateChanged). This also closes the
+//     rebind window for callers that send no ActorID;
+//  3. an execution that is already terminal is never written, emitted or
+//     routed again (ErrConflict wrapping ErrStepStateChanged): the step
+//     state machine accepts step.submit on completed as a no-op, so a
+//     compare-and-swap could not see a second submit that re-read the row
+//     after the first one completed it. Crash recovery re-routes a
+//     completed execution through RecoverCompletedStep instead;
+//  4. an execution with no actor bound is a 409, as before.
+//
+// Every write is conditional on the (status, actor) read (writeStepExecution;
+// the terminal write expects the post-acknowledge state), so with a store
+// that implements StepExecutionTransitioner a submit that loses a race
+// stops before CompleteAssignment, step_completed and routing.
 func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string, result StepResult) error {
 	exec, err := o.store.GetStepExecution(ctx, executionID)
 	if err != nil {
 		return fmt.Errorf("get step execution: %w", err)
+	}
+
+	if err := checkSubmitter(exec, result.ActorID); err != nil {
+		return err
+	}
+	if result.expect != nil && stateOf(exec) != *result.expect {
+		return stepStateChanged(executionID, fmt.Sprintf(
+			"it moved from %s to %s since the submission was validated", result.expect.status, exec.Status))
+	}
+	if exec.Status.IsTerminal() {
+		return stepStateChanged(executionID, fmt.Sprintf("it is already %s", exec.Status))
 	}
 
 	// Defense-in-depth ownership check: a result can only complete a
@@ -341,7 +395,7 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	// queue consumer's executeAndSubmit) call this method directly. A
 	// pre-Option-B phantom row delivered to the runner before the fix
 	// must NOT be silently completed here (INIT-020/EPIC-001/TASK-004).
-	if exec.ActorID == "" && !exec.Status.IsTerminal() {
+	if exec.ActorID == "" {
 		return domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("cannot submit result: step %s has no actor bound; call /assign or /claim before submitting",
 				executionID))
@@ -352,8 +406,8 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return fmt.Errorf("get run: %w", err)
 	}
 	// EnforceRunStatus (INIT-023 TASK-007): the engine funnel for every
-	// submit — IngestResult, the queue consumer and the scheduler's step
-	// recovery callback — never advances a run that is not active.
+	// submit — IngestResult and the queue consumer — never advances a run
+	// that is not active.
 	if err := o.requireActiveRun(run, "submitted"); err != nil {
 		return err
 	}
@@ -384,11 +438,15 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 		return err
 	}
 
-	// If step is assigned, auto-acknowledge to in_progress first.
+	// If step is assigned, auto-acknowledge to in_progress first. The
+	// terminal write below must then expect the acknowledged state
+	// (in_progress, actor), not the (assigned, actor) read above.
+	prior := stateOf(exec)
 	if exec.Status == domain.StepStatusAssigned {
-		if err := o.autoAcknowledgeStep(ctx, exec, run); err != nil {
+		if err := o.autoAcknowledgeStep(ctx, exec, prior, run); err != nil {
 			return err
 		}
+		prior = stateOf(exec)
 	}
 
 	stepTResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
@@ -401,18 +459,18 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 
 	// A captured binding is stored BEFORE the execution completes (INIT-023
 	// wave 3 integration, codex review). The scheduler's step recovery
-	// re-submits a completed execution without capturing again
-	// (captureHead skips terminal executions: the head may have moved
-	// since), so a binding written only after the completion — lost to a
-	// failed SetCommitMeta or a crash in between — left the run with the
-	// previous step's binding, or with none, and a gate then compares
-	// against nothing and accepts whatever the branch holds. Written here,
-	// a completed execution always has its binding; a failed write leaves
-	// the execution uncompleted (auto-acknowledged at most), so it can be
+	// re-routes a completed execution without capturing again (captureHead
+	// skips terminal executions: the head may have moved since), so a
+	// binding written only after the completion — lost to a failed
+	// SetCommitMeta or a crash in between — left the run with the previous
+	// step's binding, or with none, and a gate then compares against
+	// nothing and accepts whatever the branch holds. Written here, a
+	// completed execution always has its binding; a failed write leaves the
+	// execution uncompleted (auto-acknowledged at most), so it can be
 	// submitted again. It is the same single commit_meta write
 	// routeStepOutcome made (outcome commit map and binding together),
-	// only earlier; with no capture (binding off, among others) it stays
-	// where it was.
+	// only earlier; with no capture
+	// (binding off, among others) it stays where it was.
 	metaRecorded := false
 	if hb != nil {
 		if err := o.recordStepCommitMeta(ctx, stepDef, outcome, exec, run, wfDef, hb); err != nil {
@@ -425,7 +483,10 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	exec.Status = stepTResult.ToStatus
 	exec.OutcomeID = result.OutcomeID
 	exec.CompletedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
+		// A lost race (INIT-023 TASK-008) stops here: no CompleteAssignment,
+		// no step_completed, no routing. IngestResult answers it with the
+		// winner's persisted state.
 		return fmt.Errorf("update step execution: %w", err)
 	}
 
@@ -441,10 +502,106 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, now, hb, metaRecorded)
 }
 
+// checkSubmitter is the engine's own submit-ownership check (INIT-023
+// TASK-008, audit P3-17): a non-empty submitter must be the actor the
+// execution is bound to. An empty submitter means the caller enforces
+// ownership itself (every caller before TASK-008; SMP until SMP TASK-011);
+// an execution with no actor is left to the callers' own checks (409 when
+// live, the idempotent answer when terminal). The refusal does not name
+// the owner.
+func checkSubmitter(exec *domain.StepExecution, submitter string) error {
+	if submitter == "" || exec.ActorID == "" || exec.ActorID == submitter {
+		return nil
+	}
+	return domain.NewError(domain.ErrForbidden,
+		fmt.Sprintf("step execution %s is not assigned to the submitting actor", exec.ExecutionID))
+}
+
+// RecoverCompletedStep re-routes a step execution that completed but whose
+// run did not advance — the process stopped between the completion write
+// and routing (INIT-023 TASK-008 §3a). It is the only engine path that
+// routes an already-completed execution, and the crash-recovery callbacks
+// of `spine serve` use it instead of SubmitStepResult (which refuses
+// terminal executions).
+//
+// Preconditions, re-checked here rather than trusted from the scheduler:
+// the execution is completed; the run is active and its current step is
+// the execution's step; and no execution of the run was created after
+// this one — otherwise a live submit has already routed it (it may still
+// be between creating the next execution and moving the run's cursor).
+// Each refusal is ErrConflict and changes nothing.
+//
+// It makes no step write and routes the STORED outcome. It emits
+// step_completed again under the step's event id; an event log that
+// already has the original keeps it (ON CONFLICT DO NOTHING). Two replicas recovering the
+// same execution at once both pass the checks, then compute the same
+// deterministic next execution id, so the second CreateStepExecution fails
+// on the primary key.
+func (o *Orchestrator) RecoverCompletedStep(ctx context.Context, executionID string) error {
+	exec, err := o.store.GetStepExecution(ctx, executionID)
+	if err != nil {
+		return fmt.Errorf("get step execution: %w", err)
+	}
+	if exec.Status != domain.StepStatusCompleted {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("step execution %s is %s, not completed; nothing to recover", executionID, exec.Status))
+	}
+	run, err := o.store.GetRun(ctx, exec.RunID)
+	if err != nil {
+		return fmt.Errorf("get run: %w", err)
+	}
+	if run.Status != domain.RunStatusActive {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s is %s, not active; step %s is not re-routed", run.RunID, run.Status, executionID))
+	}
+	if run.CurrentStepID != exec.StepID {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("run %s is at step %q, not %q; step %s is not re-routed", run.RunID, run.CurrentStepID, exec.StepID, executionID))
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return fmt.Errorf("list step executions: %w", err)
+	}
+	for i := range execs {
+		e := &execs[i]
+		if e.ExecutionID == exec.ExecutionID {
+			continue
+		}
+		if e.CreatedAt.After(exec.CreatedAt) || (e.StepID == exec.StepID && e.Attempt > exec.Attempt) {
+			return domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("run %s already has a later execution (%s); step %s was routed", run.RunID, e.ExecutionID, executionID))
+		}
+	}
+
+	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+	if err != nil {
+		return fmt.Errorf("load workflow: %w", err)
+	}
+	stepDef := findStepDef(wfDef, exec.StepID)
+	if stepDef == nil {
+		return domain.NewError(domain.ErrNotFound,
+			fmt.Sprintf("step %q not found in workflow", exec.StepID))
+	}
+	outcome := findOutcome(stepDef, exec.OutcomeID)
+	if outcome == nil {
+		return domain.NewError(domain.ErrInvalidParams,
+			fmt.Sprintf("stored outcome %q not defined for step %s", exec.OutcomeID, exec.StepID))
+	}
+
+	observe.Logger(ctx).Info("re-routing a completed step after recovery",
+		"run_id", run.RunID, "execution_id", executionID, "step_id", exec.StepID, "outcome_id", exec.OutcomeID)
+
+	o.CompleteAssignment(ctx, executionID)
+	o.emitEvent(ctx, domain.EventStepCompleted, exec.RunID, run.TraceID,
+		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], exec.StepID), nil)
+
+	return o.routeStepOutcome(ctx, stepDef, outcome, exec, run, wfDef, time.Now(), nil, false)
+}
+
 // autoAcknowledgeStep transitions an assigned step to in_progress before the
 // submit transition. Extracted so SubmitStepResult's main body stays on the
 // happy path; an error here aborts submission.
-func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.StepExecution, run *domain.Run) error {
+func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.StepExecution, prior stepState, run *domain.Run) error {
 	ackResult, err := workflow.EvaluateStepTransition(exec.Status, workflow.StepTransitionRequest{
 		Trigger: workflow.StepTriggerAcknowledged,
 	})
@@ -454,7 +611,7 @@ func (o *Orchestrator) autoAcknowledgeStep(ctx context.Context, exec *domain.Ste
 	now := time.Now()
 	exec.Status = ackResult.ToStatus
 	exec.StartedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
 	o.emitEvent(ctx, domain.EventStepStarted, exec.RunID, run.TraceID,

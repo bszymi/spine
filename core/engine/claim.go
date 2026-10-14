@@ -49,6 +49,7 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	if err != nil {
 		return nil, fmt.Errorf("get step execution: %w", err)
 	}
+	prior := stateOf(exec) // the bind below is conditional on it (INIT-023 TASK-008)
 
 	// Validate claimable state.
 	// Also allow claiming an "assigned" step with no actor: this covers the
@@ -195,7 +196,19 @@ func (o *Orchestrator) ClaimStep(ctx context.Context, req ClaimRequest) (*ClaimR
 	exec.Status = domain.StepStatusAssigned
 	exec.ActorID = req.ActorID
 	exec.StartedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
+		if isStepStateChanged(err) && o.assignments != nil {
+			// The execution moved between the read above and this write
+			// (an assign, an activation or a cancel won; INIT-023
+			// TASK-008). The assignment row created above must not stay
+			// active: the active-assignment unique index would block
+			// every later claim of this execution.
+			cancelledAt := time.Now()
+			if cerr := o.assignments.UpdateAssignmentStatus(ctx, assignment.AssignmentID, domain.AssignmentStatusCancelled, &cancelledAt); cerr != nil {
+				log.Warn("claim lost a race; could not cancel its assignment row",
+					"execution_id", req.ExecutionID, "assignment_id", assignment.AssignmentID, "error", cerr)
+			}
+		}
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
 	// Bound: release the stripe before emitting (a synchronous event

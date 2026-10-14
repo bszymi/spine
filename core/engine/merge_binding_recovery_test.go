@@ -62,12 +62,18 @@ func TestBindingSurvivesAFailureAfterCompletion(t *testing.T) {
 			f.run.CommitMeta, execute.ExecutionID)
 	}
 
-	// A commit lands after the submit; the scheduler's recovery re-submits
-	// the completed execution (it never captures again).
+	// A commit lands after the submit; a re-submit of the completed
+	// execution (the scheduler's recovery before INIT-023 TASK-008) never
+	// captures again. Since TASK-008 §3a SubmitStepResult refuses it, and
+	// RecoverCompletedStep refuses too because the execution was routed
+	// (the review execution exists): neither moves the binding.
 	f.git.setHead(f.run.BranchName, sha40('2'))
 	f.orch.store = f.store
-	if err := f.orch.SubmitStepResult(context.Background(), execute.ExecutionID, StepResult{OutcomeID: "completed"}); err != nil {
-		t.Fatalf("recovery re-submit: %v", err)
+	if err := f.orch.SubmitStepResult(context.Background(), execute.ExecutionID, StepResult{OutcomeID: "completed"}); !errors.Is(err, ErrStepStateChanged) {
+		t.Fatalf("re-submit of a completed execution = %v, want ErrStepStateChanged", err)
+	}
+	if err := f.orch.RecoverCompletedStep(context.Background(), execute.ExecutionID); err == nil {
+		t.Fatal("recovery re-routed an execution that was already routed")
 	}
 	if f.run.CommitMeta[CommitMetaBoundSHA] != sha40('1') {
 		t.Fatalf("binding after recovery = %v, want head 1 (the head the producer submitted)", f.run.CommitMeta)

@@ -38,6 +38,7 @@ func (o *Orchestrator) AcknowledgeStep(ctx context.Context, req AcknowledgeReque
 	if err != nil {
 		return nil, fmt.Errorf("get step execution: %w", err)
 	}
+	prior := stateOf(exec) // the write below is conditional on it (INIT-023 TASK-008)
 
 	// Only the assigned actor may acknowledge.
 	if exec.ActorID != req.ActorID {
@@ -81,7 +82,7 @@ func (o *Orchestrator) AcknowledgeStep(ctx context.Context, req AcknowledgeReque
 	now := time.Now()
 	exec.Status = domain.StepStatusInProgress
 	exec.StartedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
 
