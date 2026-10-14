@@ -647,6 +647,25 @@ func TestStatusLifecycle_RemovalGuard(t *testing.T) {
 		})
 	}
 
+	t.Run("a field edit that makes the projection drop the row", func(t *testing.T) {
+		// A Task the projection keeps (artifact.Parse accepts it) loses its
+		// required title: type and status still read, but the projection
+		// would delete its row — a removal by edit.
+		full := func(title string) string {
+			return "---\nid: TASK-002\ntype: Task\n" + title + "status: Completed\n" +
+				"epic: /initiatives/init-001/epics/epic-001/epic.md\ninitiative: /initiatives/init-001/initiative.md\n---\n# TASK-002\n"
+		}
+		r := newLCRepo(t, map[string]string{lcTask: lcArt("TASK-001", "Task", "Pending"), lcSibling: full("title: Two\n")})
+		r.onRun("drop the title", func() { r.write(lcSibling, full("")) })
+		e := newLCEnv(t, r, lcOpts{meta: map[string]string{"status": "Completed"}})
+		e.requireRefused(LifecycleNonOwnedRemoval)
+
+		// Control: an edit that keeps it parseable merges.
+		r2 := newLCRepo(t, map[string]string{lcTask: lcArt("TASK-001", "Task", "Pending"), lcSibling: full("title: Two\n")})
+		r2.onRun("retitle", func() { r2.write(lcSibling, full("title: Renamed\n")) })
+		newLCEnv(t, r2, lcOpts{meta: map[string]string{"status": "Completed"}}).requireMerged()
+	})
+
 	t.Run("O3': a run deleting its own TaskPath", func(t *testing.T) {
 		r := newLCRepo(t, seed())
 		r.onRun("delete own", func() { r.rm(lcTask) })
