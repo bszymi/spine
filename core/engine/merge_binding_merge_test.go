@@ -957,8 +957,8 @@ func TestAppendAddedMarkdownSkipsUnsafePaths(t *testing.T) {
 		{Path: "tasks/child.md", Status: "added"},
 		{Path: "docs/bad\nname.md", Status: "added"},
 		{Path: "docs/tab\tname.md", Status: "added"},
-		{Path: "docs/bidi‮name.md", Status: "added"},
-		{Path: "docs/line sep.md", Status: "added"},
+		{Path: "docs/bidi\u202ename.md", Status: "added"},
+		{Path: "docs/line\u2028sep.md", Status: "added"},
 		{Path: "docs/r\xe9sum\xe9.md", Status: "added"}, // invalid UTF-8
 		{Path: "docs/résumé.md", Status: "added"},       // safe non-ASCII
 		{Path: "tasks/t.md", Status: "added"},
