@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -438,8 +437,11 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		}
 		cmd.Env = env
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// stderr is bounded like every other command's (INIT-023 TASK-003):
+	// the remote controls the sideband ("remote: …") lines git relays,
+	// and an unbounded buffer would let it grow the heap at will.
+	stderr := &stderrSink{}
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		gitErr := classifyGitError("clone", strings.TrimSpace(stderr.String()))
 		gitErr.Err = err

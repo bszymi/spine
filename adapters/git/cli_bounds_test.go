@@ -714,3 +714,60 @@ func TestMerge_TinyOutputLimitKeepsTheResult(t *testing.T) {
 		t.Fatalf("Merge = %+v, want SHA %s and FastForward (the result line was truncated away)", mr, tip)
 	}
 }
+
+// The stderr sink's ring against a reference: for every total length
+// around the head/tail boundaries and several chunkings, the kept text
+// is the input itself when it fits, otherwise its head, the marker and
+// its last bytes.
+func TestStderr_RingMatchesReference(t *testing.T) {
+	const head = 32 << 10
+	keepTail := git.MaxStderrBytesForTest - head - len("\n…[truncated]…\n")
+	in := make([]byte, 3*git.MaxStderrBytesForTest)
+	for i := range in {
+		in[i] = byte('a' + i%26)
+	}
+	for _, total := range []int{0, 1, head - 1, head, head + 1, head + keepTail - 1, head + keepTail,
+		head + keepTail + 1, head + 2*keepTail, head + 2*keepTail + 7, len(in)} {
+		for _, chunk := range []int{1, 7, 4096, 32 << 10, keepTail, keepTail + 1, len(in)} {
+			got := git.StderrKeptForTest(in[:total], chunk)
+			want := string(in[:total])
+			if total > head+keepTail {
+				want = string(in[:head]) + "\n…[truncated]…\n" + string(in[total-keepTail:total])
+			}
+			if got != want {
+				t.Fatalf("total %d chunk %d: kept %d bytes, want %d (prefix/suffix mismatch)", total, chunk, len(got), len(want))
+			}
+		}
+	}
+}
+
+// Codex review round 4: Clone's stderr — which relays the remote's
+// sideband — is bounded too. A git that writes 8 MiB to stderr before
+// failing costs well under a MiB, and the classification still sees the
+// final line.
+func TestClone_StderrIsBounded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell wrapper")
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"i=0; while [ $i -lt 256 ]; do printf 'remote: %032768d\\n' 0 >&2; i=$((i+1)); done\n" +
+		"echo \"fatal: repository 'x' not found\" >&2; exit 128\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test wrapper
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	c := git.NewCLIClient(t.TempDir())
+	var err error
+	alloc := allocDuring(func() { err = c.Clone(context.Background(), "https://example.invalid/r.git", filepath.Join(t.TempDir(), "r")) })
+	var ge *git.GitError
+	if !errors.As(err, &ge) || ge.Kind != git.ErrKindNotFound {
+		t.Fatalf("Clone = %v, want the final line classified not_found", err)
+	}
+	if len(ge.Message) > git.MaxStderrBytesForTest {
+		t.Fatalf("kept %d bytes of stderr, want <= %d", len(ge.Message), git.MaxStderrBytesForTest)
+	}
+	if alloc >= 1<<20 {
+		t.Fatalf("Clone allocated %d KiB for 8 MiB of stderr; want < 1 MiB", alloc>>10)
+	}
+}

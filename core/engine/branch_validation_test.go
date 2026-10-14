@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"os/exec"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -132,5 +134,41 @@ func TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore(t *testing.T) {
 	}
 	if result.TotalArtifacts != 1 || result.Passed != 1 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want 1 artifact passed (the gitlink skipped)", result)
+	}
+}
+
+// INIT-023 TASK-003 (codex review round 4): a file discovery refused —
+// over the git read limit, or at an unsafe path — fails branch
+// validation instead of merging unvalidated next to a valid artifact.
+func TestValidateBranch_RefusedFilesFail(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo, git.WithMaxBlobBytes(64<<10))
+	ctx := context.Background()
+	testutil.WriteFile(t, repo, "README.md", "# Test\n")
+	testutil.GitAdd(t, repo, ".", "initial commit")
+	testutil.GitCheckout(t, repo, "-b", "refused-branch")
+	testutil.WriteFile(t, repo, "initiatives/init-001/initiative.md",
+		"---\nid: INIT-001\ntype: Initiative\ntitle: Test\nstatus: Draft\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-001\n")
+	testutil.WriteFile(t, repo, "governance/big.md",
+		"---\ntype: Governance\ntitle: Big\nstatus: Living Document\n---\n\n"+strings.Repeat("x", 100<<10)+"\n")
+	testutil.WriteFile(t, repo, "governance/a\tb.md", "---\ntype: Governance\ntitle: T\nstatus: Living Document\n---\n")
+	testutil.GitAdd(t, repo, ".", "add artifacts on branch")
+
+	result, err := ValidateBranch(ctx, client, &domain.Run{RunID: "r1", Mode: domain.RunModePlanning, BranchName: "refused-branch"})
+	if err != nil {
+		t.Fatalf("ValidateBranch: %v", err)
+	}
+	if result.TotalArtifacts != 3 || result.Passed != 1 || result.Failed != 2 {
+		t.Fatalf("result = %+v, want 3 total, 1 passed, 2 failed", result)
+	}
+	got := map[string]string{}
+	for _, d := range result.Details {
+		got[d.Path] = strings.Join(d.Errors, "; ")
+	}
+	if !strings.Contains(got["governance/big.md"], "read limit") {
+		t.Errorf("oversized detail = %q", got["governance/big.md"])
+	}
+	if !strings.Contains(got[strconv.Quote("governance/a\tb.md")], "not validated") {
+		t.Errorf("unsafe-path detail missing or not quoted: %+v", got)
 	}
 }

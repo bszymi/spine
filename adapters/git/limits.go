@@ -332,29 +332,45 @@ func (s *stdoutSink) appendBounded(p []byte) {
 // maxStderrBytes in all, and never fails a Write. classifyGitError
 // searches the whole kept text, and the deciding line ("fatal: Unable to
 // create '…/index.lock'") is usually the last one, so a head-only buffer
-// could misclassify a transient failure as permanent.
+// could misclassify a transient failure as permanent. The tail is a
+// fixed ring, allocated only once the head is full, so arbitrarily long
+// stderr (a remote's sideband during a clone, say) costs O(1) memory.
 type stderrSink struct {
-	head    []byte
-	tail    []byte
-	dropped bool
+	head  []byte
+	ring  []byte // len stderrTailBytes once allocated
+	pos   int    // next write offset in ring
+	full  bool   // ring has wrapped at least once
+	tailN int64  // bytes written after the head
 }
 
 func (s *stderrSink) Write(p []byte) (int, error) {
 	n := len(p)
 	if room := stderrHeadBytes - len(s.head); room > 0 {
-		k := room
-		if k > len(p) {
-			k = len(p)
-		}
+		k := min(room, len(p))
 		s.head = append(s.head, p[:k]...)
 		p = p[k:]
 	}
-	if len(p) > 0 {
-		s.tail = append(s.tail, p...)
-		if len(s.tail) > 2*stderrTailBytes {
-			s.dropped = true
-			s.tail = append([]byte(nil), s.tail[len(s.tail)-stderrTailBytes:]...)
-		}
+	if len(p) == 0 {
+		return n, nil
+	}
+	if s.ring == nil {
+		s.ring = make([]byte, stderrTailBytes)
+	}
+	s.tailN += int64(len(p))
+	if len(p) >= len(s.ring) {
+		copy(s.ring, p[len(p)-len(s.ring):])
+		s.pos, s.full = 0, true
+		return n, nil
+	}
+	k := copy(s.ring[s.pos:], p)
+	if k < len(p) {
+		copy(s.ring, p[k:])
+		s.pos, s.full = len(p)-k, true
+		return n, nil
+	}
+	s.pos += k
+	if s.pos == len(s.ring) {
+		s.pos, s.full = 0, true
 	}
 	return n, nil
 }
@@ -362,18 +378,15 @@ func (s *stderrSink) Write(p []byte) (int, error) {
 // String returns the kept text: the head, then — with a marker when
 // bytes were dropped between them — the last stderrTailBytes.
 func (s *stderrSink) String() string {
-	tail := s.tail
-	dropped := s.dropped
-	if len(tail) > stderrTailBytes {
-		dropped = true
-		tail = tail[len(tail)-stderrTailBytes:]
-	}
 	var b bytes.Buffer
-	b.Grow(len(s.head) + len(stderrMarker) + len(tail))
+	b.Grow(len(s.head) + len(stderrMarker) + len(s.ring))
 	b.Write(s.head)
-	if dropped {
+	if s.tailN > int64(len(s.ring)) {
 		b.WriteString(stderrMarker)
 	}
-	b.Write(tail)
+	if s.full {
+		b.Write(s.ring[s.pos:])
+	}
+	b.Write(s.ring[:s.pos])
 	return b.String()
 }

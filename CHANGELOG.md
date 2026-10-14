@@ -17,7 +17,8 @@ release is cut — this file is a staging area.
   that touched it. `ReadFile` now probes the blob's size (`git cat-file -s`) and refuses one over
   the per-blob limit (`git.DefaultMaxBlobBytes`, 4 MiB, equal to the worktree read limit) before
   reading it; the read itself fills one buffer pre-sized to the blob. Every other read command
-  fails past 16 MiB of output, stderr keeps 64 KiB (head and tail), and read commands run with
+  fails past 16 MiB of output, stderr keeps 64 KiB (head and tail) for every command — `Clone`'s
+  included, which relays the remote's sideband — and read commands run with
   `GIT_ALLOC_LIMIT` (4 x the per-blob limit, at least 1 MiB) so git's own memory is bounded too —
   a small blob stored as a delta on a huge base, or a gitlink named `*.md` that `git show` renders
   as a commit with its patch, is refused by git instead of inflated. Mutating commands never fail
@@ -55,7 +56,9 @@ release is cut — this file is a staging area.
   copy's destination instead of `modified` at its source; a leading or trailing space in a listed
   path is kept; a malformed `git diff -z` stream is an error, never a partial list.
 - `artifact.Service.List` and `workflow.Service.List` leave refused paths out, as they were while
-  git quoted them; `artifact.IsIDCollision` counts an oversized existing file as a collision.
+  git quoted them; `artifact.IsIDCollision` counts an oversized existing file as a collision;
+  `engine.ValidateBranch` (no caller in Spine or SMP) fails each refused file ("not validated: …")
+  instead of letting it merge unvalidated.
 - **Cost:** one extra git process per `ReadFile`, two on a miss; a full rebuild of a large
   repository takes roughly twice as long.
 - **Read commands run in the C locale** (`LC_ALL=C`, `LANGUAGE=`; listings, diff, log, show,

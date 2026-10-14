@@ -3,10 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strconv"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
 )
 
@@ -62,6 +63,19 @@ func ValidateBranch(ctx context.Context, gitClient git.GitClient, run *domain.Ru
 		validateArtifactForBranch(a, result)
 	}
 
+	// A file discovery refused (INIT-023 TASK-003: over the git per-blob
+	// read limit, or at a path Spine refuses to store) was never read, so
+	// the branch cannot be vouched for. Each one fails validation instead
+	// of merging unvalidated and then never being projected.
+	for _, r := range changes.Refused {
+		result.TotalArtifacts++
+		result.Failed++
+		result.Details = append(result.Details, BranchValidationDetail{
+			Path:   refusedPathForReport(r.Path),
+			Errors: []string{refusalReport(r)},
+		})
+	}
+
 	if result.TotalArtifacts == 0 {
 		result.Failed = 1
 		result.Details = append(result.Details, BranchValidationDetail{
@@ -96,4 +110,24 @@ func validateArtifactForBranch(a *domain.Artifact, result *BranchValidationResul
 	} else {
 		result.Passed++
 	}
+}
+
+// refusedPathForReport is the path as reported: itself when safe,
+// Go-quoted when it holds characters Spine refuses to store (control,
+// line-separator or bidi characters, or invalid UTF-8).
+func refusedPathForReport(p string) string {
+	if artifact.UnsafePath(p) {
+		return strconv.Quote(p)
+	}
+	return p
+}
+
+func refusalReport(r artifact.RefusedFile) string {
+	if r.Reason == artifact.RefusedOversized {
+		if r.Size >= 0 {
+			return fmt.Sprintf("not validated: %d bytes, over the %d-byte git read limit", r.Size, r.Limit)
+		}
+		return fmt.Sprintf("not validated: over the %d-byte git read limit", r.Limit)
+	}
+	return "not validated: the path holds control, line-separator or bidi characters, or is not valid UTF-8"
 }
