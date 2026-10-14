@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +36,10 @@ import (
 const (
 	gitMemBaseBytes = 64 << 20  // far over any per-blob or alloc limit
 	gitMemTipBytes  = 3_000_000 // under the 4 MiB default; >= base/32, so pack-objects deltifies it
+
+	// gitMemDefaultAlloc is the default client's GIT_ALLOC_LIMIT: 4 x the
+	// per-blob limit.
+	gitMemDefaultAlloc = 4 * git.DefaultMaxBlobBytes
 )
 
 // gitMemResult is what the child reports.
@@ -47,6 +52,33 @@ type gitMemResult struct {
 	Size        int64  `json:"size"`
 	Permanent   bool   `json:"permanent"`
 	Match       bool   `json:"match"`
+	// GitAllocLimit is BlobTooLargeError.GitAllocLimit; GitAlloc is
+	// OutputTooLargeError.GitAlloc (review round 1).
+	GitAllocLimit int64 `json:"git_alloc_limit"`
+	GitAlloc      bool  `json:"git_alloc"`
+}
+
+// recordErr fills the error fields of a child result.
+func (res *gitMemResult) recordErr(err error) {
+	if err == nil {
+		return
+	}
+	res.Err = err.Error()
+	res.TooLarge = errors.Is(err, git.ErrBlobTooLarge)
+	res.OutputLarge = errors.Is(err, git.ErrOutputTooLarge)
+	var tl *git.BlobTooLargeError
+	if errors.As(err, &tl) {
+		res.Size = tl.Size
+		res.GitAllocLimit = tl.GitAllocLimit
+	}
+	var ot *git.OutputTooLargeError
+	if errors.As(err, &ot) {
+		res.GitAlloc = ot.GitAlloc
+	}
+	var ge *git.GitError
+	if errors.As(err, &ge) {
+		res.Permanent = ge.Kind == git.ErrKindPermanent && !ge.IsRetryable()
+	}
 }
 
 // TestT003_GitMemChild is the re-exec entry point; it is a no-op in a
@@ -64,7 +96,8 @@ func TestT003_GitMemChild(t *testing.T) {
 	ctx := context.Background()
 	c := git.NewCLIClient(repo, opts...)
 	var res gitMemResult
-	if os.Getenv("T003_GITMEM_OP") == "diff" {
+	switch os.Getenv("T003_GITMEM_OP") {
+	case "diff":
 		n, _ := strconv.ParseInt(os.Getenv("T003_GITMEM_ALLOC"), 10, 64)
 		c = git.NewCLIClient(repo, git.WithMaxGitAllocBytes(n))
 		diffs, err := c.Diff(ctx, os.Getenv("T003_GITMEM_FROM"), os.Getenv("T003_GITMEM_TO"))
@@ -74,26 +107,18 @@ func TestT003_GitMemChild(t *testing.T) {
 		} else if len(diffs) == 1 && diffs[0].Status == "renamed" && diffs[0].OldPath == "a.bin" && diffs[0].Path == "b.bin" {
 			res.Match = true
 		}
-	} else {
+	case "log":
+		commits, err := c.Log(ctx, git.LogOpts{Limit: 1})
+		res.Len = len(commits)
+		res.recordErr(err)
+	default:
 		data, err := c.ReadFile(ctx, os.Getenv("T003_GITMEM_REF"), os.Getenv("T003_GITMEM_PATH"))
 		res.Len = len(data)
 		if want := os.Getenv("T003_GITMEM_WANT"); want != "" {
 			body, rerr := os.ReadFile(want) //nolint:gosec // G703: a temp file path the parent test wrote
 			res.Match = rerr == nil && bytes.Equal(body, data)
 		}
-		if err != nil {
-			res.Err = err.Error()
-			res.TooLarge = errors.Is(err, git.ErrBlobTooLarge)
-			res.OutputLarge = errors.Is(err, git.ErrOutputTooLarge)
-			var tl *git.BlobTooLargeError
-			if errors.As(err, &tl) {
-				res.Size = tl.Size
-			}
-			var ge *git.GitError
-			if errors.As(err, &ge) {
-				res.Permanent = ge.Kind == git.ErrKindPermanent && !ge.IsRetryable()
-			}
-		}
+		res.recordErr(err)
 	}
 	res.RSS = childPeakRSS()
 	out, _ := json.Marshal(res)
@@ -175,6 +200,12 @@ func assertGitMemRefused(t *testing.T, label string, res gitMemResult) {
 	t.Logf("%s: len=%d err=%q git child peak RSS=%d MiB", label, res.Len, res.Err, res.RSS>>20)
 	if !res.TooLarge || res.Size != -1 || !res.Permanent || res.OutputLarge {
 		t.Errorf("%s: %+v, want a permanent ErrBlobTooLarge with Size -1 (and not ErrOutputTooLarge)", label, res)
+	}
+	// Review round 1 (P3): the refusal names git's allocation limit, the
+	// real cause — the file itself is under the per-blob limit.
+	if res.GitAllocLimit != gitMemDefaultAlloc || !strings.Contains(res.Err, "git allocation limit") {
+		t.Errorf("%s: GitAllocLimit = %d, error %q; want the %d-byte git allocation limit named as the cause",
+			label, res.GitAllocLimit, res.Err, gitMemDefaultAlloc)
 	}
 	if !strings.Contains(res.Err, "read limit") || strings.Contains(res.Err, "corrupt") {
 		t.Errorf("%s: error %q, want a read-limit message, never git's corruption text", label, res.Err)
@@ -266,5 +297,124 @@ func TestGitMem_DiffIsExempt(t *testing.T) {
 		"T003_GITMEM_FROM="+from, "T003_GITMEM_TO="+to, "T003_GITMEM_ALLOC="+strconv.Itoa(16<<20))
 	if res.Err != "" || !res.Match {
 		t.Fatalf("Diff under a 16 MiB alloc limit: %+v, want one renamed a.bin -> b.bin", res)
+	}
+}
+
+// chainRepo builds, with stock `git fast-import` (fastimport.unpackLimit=1
+// keeps its pack instead of exploding it into loose objects), a t.md
+// whose versions form one linear delta chain: `versions` blobs of
+// baseBytes, each a small edit of the one before, then a tipBytes tip
+// cut from the last. It checks that the tip sits at depth >= versions and
+// that `cat-file -s` sees only the tip, and returns the repo and a file
+// holding the tip's bytes.
+func chainRepo(t *testing.T, baseBytes, versions, tipBytes int) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	t3git(t, dir, nil, "init", "-q", "-b", "main")
+	cmd := exec.Command("git", "-c", "fastimport.unpackLimit=1", "fast-import", "--quiet", "--depth=50")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	emit := func(i int, data []byte) {
+		fmt.Fprintf(stdin, "commit refs/heads/main\ncommitter t <t@t> %d +0000\ndata 3\nv%02d\nM 100644 inline t.md\ndata %d\n", i, i, len(data))
+		stdin.Write(data)
+		stdin.Write([]byte("\n"))
+	}
+	body := gitMemBody(baseBytes)
+	for v := 1; v <= versions; v++ {
+		copy(body[(v*7919)%(baseBytes-16):], fmt.Sprintf("EDIT%04d", v))
+		emit(v, body)
+	}
+	tip := body[:tipBytes]
+	emit(versions+1, tip)
+	stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("fast-import: %v\n%s", err, stderr.String())
+	}
+	if probe := t3git(t, dir, nil, "cat-file", "-s", "refs/heads/main:t.md"); probe != strconv.Itoa(tipBytes) {
+		t.Fatalf("cat-file -s = %s, want %d (the probe sees only the target)", probe, tipBytes)
+	}
+	tipID := t3git(t, dir, nil, "rev-parse", "refs/heads/main:t.md")
+	idx, _ := filepath.Glob(filepath.Join(dir, ".git", "objects", "pack", "*.idx"))
+	if len(idx) != 1 {
+		t.Fatalf("packs: %v", idx)
+	}
+	depth := -1
+	for _, l := range strings.Split(t3git(t, dir, nil, "verify-pack", "-v", idx[0]), "\n") {
+		if f := strings.Fields(l); len(f) >= 7 && f[0] == tipID {
+			depth, _ = strconv.Atoi(f[5])
+		}
+	}
+	if depth < versions {
+		t.Fatalf("the tip is at delta depth %d, want >= %d; the fixture no longer builds a chain", depth, versions)
+	}
+	want := filepath.Join(t.TempDir(), "want")
+	if err := os.WriteFile(want, tip, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir, want
+}
+
+// Review round 1 (P2), a fifth AC 18 row: GIT_ALLOC_LIMIT checks one
+// allocation at a time, and rebuilding an object at the end of a delta
+// chain keeps every intermediate base in git's delta-base cache
+// (core.deltaBaseCacheLimit, 96 MiB by default). A 3 000 000-byte tip
+// on a chain of eight 15 MiB bases — each under the 16 MiB alloc limit,
+// so nothing is refused — is a legitimate read, but without a pinned
+// cache it took the git child to 127 MiB (134 MB with plain `git show`).
+// With the cache pinned, what remains is one chain step (the base being
+// patched, the result, the cache): about 3x the alloc limit, 55 MB
+// measured.
+func TestGitMem_DeltaChainOfSubLimitBasesStaysBounded(t *testing.T) {
+	const base = 15 << 20 // under the 16 MiB default alloc limit
+	if base >= gitMemDefaultAlloc {
+		t.Fatalf("each base must be under the alloc limit (%d)", gitMemDefaultAlloc)
+	}
+	dir, want := chainRepo(t, base, 8, gitMemTipBytes)
+	res := runGitMemChild(t, "T003_GITMEM_REPO="+dir, "T003_GITMEM_REF=refs/heads/main", "T003_GITMEM_PATH=t.md",
+		"T003_GITMEM_WANT="+want)
+	t.Logf("delta chain: len=%d err=%q git child peak RSS=%d MiB", res.Len, res.Err, res.RSS>>20)
+	if res.Err != "" || !res.Match || res.Len != gitMemTipBytes {
+		t.Fatalf("delta chain of sub-limit bases: %+v, want the tip, byte-identical (no false refusal)", res)
+	}
+	// One chain step is about 3 bases; 16 MiB is git's own baseline and
+	// the tip. Without the pinned cache: 127 MiB.
+	if bound := int64(3*gitMemDefaultAlloc + 16<<20); res.RSS >= 0 && res.RSS >= bound {
+		t.Errorf("git child peak RSS %d MiB, want < %d MiB (3 x the alloc limit + 16 MiB)", res.RSS>>20, bound>>20)
+	}
+}
+
+// Review round 1 (P3): the Log commit-message vector (Decision 9). A
+// commit whose message is 64 MiB of one character is a 64 KiB object on
+// disk; `git log` builds the whole commit in memory before it prints a
+// byte, so without GIT_ALLOC_LIMIT the read reached 72 MB RSS and only
+// then hit Spine's stdout ceiling. With it, git refuses the allocation:
+// ErrOutputTooLarge with GitAlloc, and the child stays small. This pins
+// "log" to the read class by behaviour, not only by the op table.
+func TestGitMem_LogCommitMessageIsRefusedInGit(t *testing.T) {
+	dir := t.TempDir()
+	t3git(t, dir, nil, "init", "-q", "-b", "main")
+	msg := filepath.Join(t.TempDir(), "msg")
+	if err := os.WriteFile(msg, bytes.Repeat([]byte("m"), gitMemBaseBytes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tree := t3git(t, dir, nil, "write-tree")
+	commit := t3git(t, dir, nil, "commit-tree", tree, "-F", msg)
+	t3git(t, dir, nil, "update-ref", "refs/heads/main", commit)
+	res := runGitMemChild(t, "T003_GITMEM_REPO="+dir, "T003_GITMEM_OP=log")
+	t.Logf("log: len=%d err=%q git child peak RSS=%d MiB", res.Len, res.Err, res.RSS>>20)
+	if !res.OutputLarge || !res.GitAlloc || !res.Permanent || res.TooLarge {
+		t.Fatalf("Log of a 64 MiB message: %+v, want a permanent ErrOutputTooLarge with GitAlloc (git refused the allocation)", res)
+	}
+	if res.RSS >= 0 && res.RSS >= 32<<20 {
+		t.Errorf("git child peak RSS %d MiB, want < 32 MiB", res.RSS>>20)
 	}
 }

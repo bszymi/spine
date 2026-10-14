@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -651,6 +652,21 @@ func TestEveryOpHasAnOutputClass(t *testing.T) {
 	if seen < 20 {
 		t.Fatalf("found only %d run calls; the pattern no longer matches the source", seen)
 	}
+	// Review round 1 (P3): the whole table, so a reclassification — "log"
+	// moved to diff would silently drop GIT_ALLOC_LIMIT and reopen the
+	// commit-message vector — is a visible test change, not only a
+	// passing build. TestCommands_RunUnderTheirClassEnvironment pins the
+	// same table by behaviour.
+	want := map[string]string{
+		"read_file": "read", "list_files": "read", "log": "read", "head": "read", "ref-sha": "read",
+		"rev-parse": "read", "merge-base": "read", "tree_entry": "read",
+		"diff":     "diff",
+		"checkout": "mutate", "merge": "mutate", "commit": "mutate", "add": "mutate", "branch": "mutate",
+		"config": "mutate", "push": "mutate",
+	}
+	if got := git.OpClassesForTest(); !reflect.DeepEqual(got, want) {
+		t.Errorf("op classes = %v\nwant %v", got, want)
+	}
 }
 
 // Codex review round 1 (P2): git translates the "fatal: " / "error: "
@@ -672,6 +688,9 @@ func TestReadCommands_RunInTheCLocale(t *testing.T) {
 		"case \"$1\" in cat-file|show)\n" +
 		"  if [ \"$LC_ALL\" = C ]; then p=fatal; else p=Schwerwiegend; fi\n" +
 		"  echo \"$p: attempting to allocate 99999999 over limit $GIT_ALLOC_LIMIT\" >&2; exit 128;;\n" +
+		"diff)\n" +
+		"  if [ \"$LC_ALL\" = C ]; then echo \"fatal: bad revision 'x'\" >&2; else echo \"Schwerwiegend: ungueltige Revision 'x'\" >&2; fi\n" +
+		"  exit 128;;\n" +
 		"esac\n" +
 		"exec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test wrapper
@@ -683,6 +702,15 @@ func TestReadCommands_RunInTheCLocale(t *testing.T) {
 
 	_, err = git.NewCLIClient(dir).ReadFile(ctx, commit, "t.md")
 	assertBlobTooLarge(t, "translated host", err, commit, "t.md", -1, git.DefaultMaxBlobBytes)
+
+	// Review round 1 (P3): diff runs in the C locale too (as the
+	// CHANGELOG says), so a miss a translated git words differently is
+	// still not-found, not a permanent error.
+	_, err = git.NewCLIClient(dir).Diff(ctx, commit, commit)
+	var ge *git.GitError
+	if !errors.As(err, &ge) || ge.Kind != git.ErrKindNotFound {
+		t.Fatalf("Diff on a translated host: %v, want ErrKindNotFound (diff must run in the C locale)", err)
+	}
 }
 
 // Codex review round 3 (P2): Merge reads its result from the head of
@@ -772,4 +800,336 @@ func TestClone_StderrIsBounded(t *testing.T) {
 	if alloc >= 1<<20 {
 		t.Fatalf("Clone allocated %d KiB for 8 MiB of stderr; want < 1 MiB", alloc>>10)
 	}
+}
+
+// writeTemp writes body to a fresh temporary file and returns its path.
+func writeTemp(t *testing.T, body []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(p, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func assertGitAllocRefusal(t *testing.T, label string, err error, op string, limit int64) {
+	t.Helper()
+	var ot *git.OutputTooLargeError
+	if !errors.As(err, &ot) || ot.Op != op || ot.Limit != limit || !ot.GitAlloc {
+		t.Errorf("%s: err = %v (%+v), want OutputTooLargeError{Op:%q Limit:%d GitAlloc:true}", label, err, ot, op, limit)
+		return
+	}
+	if ge, ok := err.(*git.GitError); !ok || ge.Kind != git.ErrKindPermanent {
+		t.Errorf("%s: want a permanent *git.GitError, got %T %v", label, err, err)
+	}
+}
+
+// Review round 1 (P3): every read op runs under GIT_ALLOC_LIMIT, pinned
+// by behaviour on real git, not only by the op table. A tree object and
+// a commit object each over a 1 MiB alloc limit — both well under the
+// stdout ceiling, so only git's allocation limit can refuse them — make
+// ls-tree (ListFiles, TreeEntryType), log (Log, HasCommitWithTrailer),
+// merge-base and ReadFile's probe refuse with GitAlloc, while the default
+// client reads all of them. Moving any of these ops out of the read
+// class makes its row succeed and fail the test.
+func TestReadCommands_GitAllocLimitBoundsEveryReadOp(t *testing.T) {
+	ctx := context.Background()
+	const alloc = 1 << 20
+	files := map[string][]byte{}
+	for i := 0; i < 40000; i++ {
+		files[fmt.Sprintf("f-%05d.md", i)] = []byte("x\n")
+	}
+	repo, commit := blobRepo(t, files) // one root tree of 40 000 entries
+	if n, _ := strconv.Atoi(t3git(t, repo, nil, "cat-file", "-s", commit+"^{tree}")); n <= alloc {
+		t.Fatalf("root tree is %d bytes, want > %d", n, alloc)
+	}
+	msg := writeTemp(t, bytes.Repeat([]byte("m"), 2<<20))
+	big := t3git(t, repo, nil, "commit-tree", "-p", commit, "-F", msg, commit+"^{tree}")
+	t3git(t, repo, nil, "update-ref", "refs/heads/main", big)
+	t3git(t, repo, nil, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	small := git.NewCLIClient(repo, git.WithMaxBlobBytes(64<<10), git.WithMaxGitAllocBytes(alloc))
+	if _, _, a := small.ReadBoundsForTest(); a != alloc {
+		t.Fatalf("alloc limit = %d, want %d", a, alloc)
+	}
+	def := git.NewCLIClient(repo)
+	for _, tc := range []struct {
+		label, op string
+		run       func(c *git.CLIClient) error
+	}{
+		{"ListFiles", "list_files", func(c *git.CLIClient) error { _, err := c.ListFiles(ctx, commit, ""); return err }},
+		{"TreeEntryType", "tree_entry", func(c *git.CLIClient) error {
+			_, err := c.TreeEntryType(ctx, commit, "f-00001.md")
+			return err
+		}},
+		{"Log", "log", func(c *git.CLIClient) error { _, err := c.Log(ctx, git.LogOpts{Limit: 1}); return err }},
+		{"HasCommitWithTrailer", "log", func(c *git.CLIClient) error {
+			_, _, err := c.HasCommitWithTrailer(ctx, "Run-ID", "r")
+			return err
+		}},
+		{"MergeBase", "merge-base", func(c *git.CLIClient) error { _, err := c.MergeBase(ctx, big, commit); return err }},
+	} {
+		assertGitAllocRefusal(t, tc.label, tc.run(small), tc.op, alloc)
+		if err := tc.run(def); err != nil {
+			t.Errorf("%s with the default bounds: %v, want no refusal", tc.label, err)
+		}
+	}
+	// ReadFile's probe resolves the path through the same tree.
+	_, err := small.ReadFile(ctx, commit, "f-00001.md")
+	var tl *git.BlobTooLargeError
+	if !errors.As(err, &tl) || tl.GitAllocLimit != alloc || tl.Size != -1 {
+		t.Errorf("ReadFile through an over-limit tree: %v (%+v), want BlobTooLargeError{Size:-1 GitAllocLimit:%d}", err, tl, alloc)
+	}
+	if body, err := def.ReadFile(ctx, commit, "f-00001.md"); err != nil || string(body) != "x\n" {
+		t.Errorf("default ReadFile = %q, %v", body, err)
+	}
+}
+
+// Review round 1 (P3): every git process the client starts runs under
+// exactly its class's environment. A wrapper records each invocation's
+// argv and environment; the inherited environment carries a non-C
+// locale, no GIT_ALLOC_LIMIT and an unrelated GIT_CONFIG_PARAMETERS
+// entry, which every class must keep.
+func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell wrapper")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	t3git(t, dir, nil, "init", "-q", "-b", "main")
+	t3git(t, dir, nil, "config", "user.email", "t@t")
+	t3git(t, dir, nil, "config", "user.name", "t")
+	t3git(t, dir, nil, "config", "maintenance.auto", "false")
+	t3git(t, dir, nil, "config", "gc.auto", "0")
+	writeFile(t, dir, "f.md", []byte("one\n"))
+	t3git(t, dir, nil, "add", "f.md")
+	t3git(t, dir, nil, "commit", "-qm", "one")
+	t3git(t, dir, nil, "checkout", "-q", "-b", "feature")
+	writeFile(t, dir, "g.md", []byte("two\n"))
+	t3git(t, dir, nil, "add", "g.md")
+	t3git(t, dir, nil, "commit", "-qm", "two")
+	t3git(t, dir, nil, "checkout", "-q", "main")
+	remote := t.TempDir()
+	t3git(t, remote, nil, "init", "-q", "--bare")
+	t3git(t, dir, nil, "remote", "add", "origin", remote)
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "env.log")
+	script := "#!/bin/sh\n" +
+		"{ for a in \"$@\"; do printf '%s\\037' \"$a\"; done\n" +
+		"  printf '\\036%s\\036%s\\036%s\\036%s\\n' \"${GIT_ALLOC_LIMIT-unset}\" \"${LC_ALL-unset}\" \"${LANGUAGE-unset}\" \"${GIT_CONFIG_PARAMETERS-unset}\"\n" +
+		"} >> \"$T003_ENVLOG\"\n" +
+		"exec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test wrapper
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("T003_ENVLOG", logPath)
+	t.Setenv("LC_ALL", "POSIX") // not C, and never translated
+	t.Setenv("LANGUAGE", "t003")
+	const inherited = "'t003.inherited=yes'"
+	t.Setenv("GIT_CONFIG_PARAMETERS", inherited)
+	t.Setenv("GIT_ALLOC_LIMIT", "")
+	os.Unsetenv("GIT_ALLOC_LIMIT")
+
+	c := git.NewCLIClient(dir)
+	blob, _, alloc := c.ReadBoundsForTest()
+	calls := []struct {
+		name string
+		run  func() error
+	}{
+		{"ReadFile", func() error { _, err := c.ReadFile(ctx, "main", "f.md"); return err }},
+		{"ListFiles", func() error { _, err := c.ListFiles(ctx, "main", ""); return err }},
+		{"Log", func() error { _, err := c.Log(ctx, git.LogOpts{Limit: 1}); return err }},
+		{"HasCommitWithTrailer", func() error { _, _, err := c.HasCommitWithTrailer(ctx, "Run-ID", "r"); return err }},
+		{"Head", func() error { _, err := c.Head(ctx); return err }},
+		{"RefSHA", func() error { _, err := c.RefSHA(ctx, "HEAD"); return err }},
+		{"MergeBase", func() error { _, err := c.MergeBase(ctx, "main", "feature"); return err }},
+		{"TreeEntryType", func() error { _, err := c.TreeEntryType(ctx, "main", "f.md"); return err }},
+		{"Diff", func() error { _, err := c.Diff(ctx, "main", "feature"); return err }},
+		{"CreateBranch", func() error { return c.CreateBranch(ctx, "n1", "main") }},
+		{"Checkout", func() error { return c.Checkout(ctx, "n1") }},
+		{"WriteAndStageFile", func() error { return c.WriteAndStageFile(ctx, "h.md", "three\n") }},
+		{"Commit", func() error { _, err := c.Commit(ctx, git.CommitOpts{Message: "three"}); return err }},
+		{"Merge", func() error { _, err := c.Merge(ctx, git.MergeOpts{Source: "feature"}); return err }},
+		{"Push", func() error { return c.Push(ctx, "origin", "n1") }},
+		{"DeleteBranch", func() error {
+			if err := c.Checkout(ctx, "main"); err != nil {
+				return err
+			}
+			return c.DeleteBranch(ctx, "n1")
+		}},
+	}
+	for _, call := range calls {
+		if err := call.run(); err != nil {
+			t.Fatalf("%s: %v", call.name, err)
+		}
+	}
+
+	cache := fmt.Sprintf("'core.deltaBaseCacheLimit=%d'", blob)
+	type env struct{ alloc, lcAll, language, params string }
+	readEnv := env{fmt.Sprint(alloc), "C", "", inherited + " " + cache}
+	want := map[string]env{
+		"cat-file": readEnv, "show": readEnv, "ls-tree": readEnv, "log": readEnv, "rev-parse": readEnv, "merge-base": readEnv,
+		"diff":     {"unset", "C", "", inherited + " " + cache},
+		"show-ref": {"unset", "C", "", inherited}, // the exact branch lookup (refgrammar.go)
+		"branch":   {"unset", "POSIX", "t003", inherited}, "switch": {"unset", "POSIX", "t003", inherited},
+		"add": {"unset", "POSIX", "t003", inherited}, "commit": {"unset", "POSIX", "t003", inherited},
+		"merge": {"unset", "POSIX", "t003", inherited}, "push": {"unset", "POSIX", "t003", inherited},
+	}
+	raw, err := os.ReadFile(logPath) //nolint:gosec // G304: the test's own temp file
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		parts := strings.Split(line, "\x1e")
+		if len(parts) != 5 {
+			t.Fatalf("unparseable record %q", line)
+		}
+		sub := ""
+		args := strings.Split(strings.TrimSuffix(parts[0], "\x1f"), "\x1f")
+		for i := 0; i < len(args); i++ {
+			if args[i] == "-c" {
+				i++
+				continue
+			}
+			if !strings.HasPrefix(args[i], "-") {
+				sub = args[i]
+				break
+			}
+		}
+		w, ok := want[sub]
+		if !ok {
+			// A git child git started itself (local transport, hooks)
+			// inherits its parent's environment; only the client's own
+			// commands are pinned here.
+			if sub == "receive-pack" || sub == "upload-pack" || sub == "pack-objects" || sub == "index-pack" ||
+				sub == "unpack-objects" || sub == "maintenance" || sub == "gc" || sub == "rev-list" {
+				continue
+			}
+			t.Errorf("git %q ran but has no expected environment (args %q)", sub, args)
+			continue
+		}
+		seen[sub] = true
+		if got := (env{parts[1], parts[2], parts[3], parts[4]}); got != w {
+			t.Errorf("git %s (args %q): env %+v, want %+v", sub, args, got, w)
+		}
+	}
+	for sub := range want {
+		if !seen[sub] {
+			t.Errorf("git %s never ran; the test no longer covers its class", sub)
+		}
+	}
+}
+
+// Review round 1 (P2): the delta-base cache pin is appended to whatever
+// GIT_CONFIG_PARAMETERS the process inherited (either quoting form), and
+// real git reads it — as the last, winning value — alongside the
+// inherited entries.
+func TestDeltaBaseCacheEnv(t *testing.T) {
+	for _, tc := range []struct{ inherited, want string }{
+		{"", "GIT_CONFIG_PARAMETERS='core.deltaBaseCacheLimit=4194304'"},
+		{"  ", "GIT_CONFIG_PARAMETERS='core.deltaBaseCacheLimit=4194304'"},
+		{"'a.b=c'", "GIT_CONFIG_PARAMETERS='a.b=c' 'core.deltaBaseCacheLimit=4194304'"},
+		{"'a.b'='c'", "GIT_CONFIG_PARAMETERS='a.b'='c' 'core.deltaBaseCacheLimit=4194304'"},
+	} {
+		if got := git.DeltaBaseCacheEnvForTest(tc.inherited, 4<<20); got != tc.want {
+			t.Errorf("inherited %q: %q, want %q", tc.inherited, got, tc.want)
+		}
+	}
+	dir := t.TempDir()
+	t3git(t, dir, nil, "init", "-q")
+	t3git(t, dir, nil, "config", "core.deltaBaseCacheLimit", "999999999") // a repository value never wins
+	for _, inherited := range []string{"'t003.x=old-style'", "'t003.x'='new-style'"} {
+		if strings.Contains(inherited, "'='") && !gitAtLeast(t, 2, 31) {
+			continue // the 'key'='value' form arrived in git 2.31
+		}
+		cmd := exec.Command("git", "config", "--get-regexp", `^(t003\.x|core\.deltabasecachelimit)$`)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), git.DeltaBaseCacheEnvForTest(inherited, 4<<20))
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git config under %q: %v", inherited, err)
+		}
+		got := strings.Fields(string(out))
+		// --get-regexp prints every value in precedence order, the
+		// command-line ones last.
+		if len(got) < 4 || got[len(got)-2] != "core.deltabasecachelimit" || got[len(got)-1] != "4194304" ||
+			!strings.Contains(string(out), "t003.x") {
+			t.Errorf("under %q git sees %q, want the inherited entry kept and the 4194304 pin last", inherited, out)
+		}
+	}
+}
+
+func gitAtLeast(t *testing.T, major, minor int) bool {
+	t.Helper()
+	m := regexp.MustCompile(`git version (\d+)\.(\d+)`).FindStringSubmatch(t3git(t, t.TempDir(), nil, "version"))
+	if m == nil {
+		return false
+	}
+	ma, _ := strconv.Atoi(m[1])
+	mi, _ := strconv.Atoi(m[2])
+	return ma > major || (ma == major && mi >= minor)
+}
+
+// Review round 1 (P3): the stdout sink keeps exactly what fits, grows in
+// powers of two (never past the limit), and a text sink hands its buffer
+// to String() without a copy — so run() holds a command's output once.
+func TestStdoutSink_GrowthAndHandOver(t *testing.T) {
+	in := repeatTo(1<<20 + 12345)
+	for _, text := range []bool{false, true} {
+		for _, chunk := range []int{1 << 10, 7919, 32 << 10, 64 << 10} {
+			for _, limit := range []int64{4 << 10, 1 << 20, 3 << 20} {
+				label := fmt.Sprintf("text=%v chunk=%d limit=%d", text, chunk, limit)
+				drain := git.StdoutSinkForTest(in, chunk, limit, false, text)
+				keep := min(int64(len(in)), limit)
+				if drain.Kept != string(in[:keep]) || drain.Overflow != (int64(len(in)) > limit) || drain.WriteErr != nil {
+					t.Fatalf("%s draining: kept %d bytes, overflow %v, err %v; want %d", label, len(drain.Kept), drain.Overflow, drain.WriteErr, keep)
+				}
+				fail := git.StdoutSinkForTest(in, chunk, limit, true, text)
+				if int64(len(in)) > limit && (fail.WriteErr == nil || !fail.Overflow) {
+					t.Fatalf("%s failing: err %v overflow %v, want the limit error", label, fail.WriteErr, fail.Overflow)
+				}
+				for i, c := range drain.Caps {
+					if int64(c) > limit || (int64(c) != limit && c&(c-1) != 0) || c < 512 {
+						t.Fatalf("%s: capacity %d after write %d, want a power of two >= 512 or exactly the limit", label, c, i)
+					}
+				}
+				if text && drain.HandOverAllocs != 0 {
+					t.Errorf("%s: String() allocated %v times, want 0 (no copy)", label, drain.HandOverAllocs)
+				}
+			}
+		}
+	}
+}
+
+// Review round 1 (P3): run() returns the output buffer itself. A Log
+// whose output is 3.5 MiB costs its buffer's growth (powers of two up
+// to 4 MiB: under 8 MiB in all) and nothing more; converting a []byte
+// buffer to a string added a full copy (3.5 MiB) on top, and held the
+// output twice at its peak.
+func TestRun_OutputIsHeldOnce(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	t3git(t, dir, nil, "init", "-q", "-b", "main")
+	const msgLen = 3<<20 + 512<<10
+	tree := t3git(t, dir, nil, "write-tree")
+	commit := t3git(t, dir, nil, "commit-tree", tree, "-F", writeTemp(t, bytes.Repeat([]byte("m"), msgLen)))
+	t3git(t, dir, nil, "update-ref", "refs/heads/main", commit)
+	c := git.NewCLIClient(dir)
+	var commits []git.CommitInfo
+	var err error
+	alloc := allocDuring(func() { commits, err = c.Log(ctx, git.LogOpts{Limit: 1}) })
+	if err != nil || len(commits) != 1 || len(commits[0].Message) != msgLen {
+		t.Fatalf("Log: %d commits, %v", len(commits), err)
+	}
+	if bound := uint64(8<<20 + msgLen/2); alloc >= bound {
+		t.Errorf("Log allocated %d KiB, want < %d KiB (buffer growth only, no copy of the output)", alloc>>10, bound>>10)
+	}
+	t.Logf("Log of %d KiB allocated %d KiB", msgLen>>10, alloc>>10)
 }

@@ -1,6 +1,9 @@
 package git
 
-import "context"
+import (
+	"context"
+	"testing"
+)
 
 // ClassifyGitErrorForTest exposes classifyGitError for testing.
 func ClassifyGitErrorForTest(stderr string) *GitError {
@@ -70,4 +73,57 @@ const MaxStderrBytesForTest = maxStderrBytes
 func OpClassDeclaredForTest(op string) bool {
 	_, ok := opClasses[op]
 	return ok
+}
+
+// OpClassesForTest returns every declared op name with its output class
+// ("read", "diff" or "mutate").
+func OpClassesForTest() map[string]string {
+	names := map[opClass]string{opRead: "read", opDiff: "diff", opMutate: "mutate"}
+	out := make(map[string]string, len(opClasses))
+	for op, c := range opClasses {
+		out[op] = names[c]
+	}
+	return out
+}
+
+// DeltaBaseCacheEnvForTest exposes the GIT_CONFIG_PARAMETERS entry read
+// and diff commands run with.
+func DeltaBaseCacheEnvForTest(inherited string, limit int64) string {
+	return deltaBaseCacheEnv(inherited, limit)
+}
+
+// SinkRun is what StdoutSinkForTest observed.
+type SinkRun struct {
+	Kept           string
+	Caps           []int // the buffer's capacity after each Write
+	Overflow       bool
+	WriteErr       error
+	HandOverAllocs float64 // allocations of String() on a text sink
+}
+
+var sinkText string
+
+// StdoutSinkForTest feeds p to a stdout sink in chunk-sized writes (as
+// os/exec's copy goroutine would) and reports what it kept and how its
+// buffer grew.
+func StdoutSinkForTest(p []byte, chunk int, limit int64, failing, text bool) SinkRun {
+	s := newStdoutSink(limit, 0, failing, text)
+	var r SinkRun
+	for len(p) > 0 {
+		n := min(chunk, len(p))
+		if _, err := s.Write(p[:n]); err != nil {
+			r.WriteErr = err
+			break
+		}
+		r.Caps = append(r.Caps, s.capacity())
+		p = p[n:]
+	}
+	r.Overflow = s.overflow
+	if text {
+		r.HandOverAllocs = testing.AllocsPerRun(10, func() { sinkText = s.String() })
+		r.Kept = s.String()
+	} else {
+		r.Kept = string(s.Bytes())
+	}
+	return r
 }

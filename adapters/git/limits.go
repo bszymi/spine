@@ -23,7 +23,19 @@ package git
 //     (wrapper.c memory_limit_check): it refuses instead of allocating,
 //     and the refusal is mapped to the same typed errors as a stdout
 //     overflow, before git's own text ("packed object … is corrupt")
-//     can be classified as corruption.
+//     can be classified as corruption. GIT_ALLOC_LIMIT bounds ONE
+//     allocation, not git's total: an object at the end of a delta
+//     chain whose bases are each under the limit is rebuilt base by
+//     base, and git keeps the intermediate bases in its delta-base
+//     cache (core.deltaBaseCacheLimit, 96 MiB by default) — a 3 MB tip
+//     on a chain of eight 15 MiB bases took the git child to 127 MiB
+//     with no allocation near the limit (review round 1). Read and diff
+//     commands therefore also pin that cache to the per-blob limit
+//     (deltaBaseCacheEnv). What remains is the chain step itself: the
+//     base being patched, the result and the cache, about three times
+//     the alloc limit per concurrent read (55 MB measured for that
+//     chain at the default 16 MiB; KNOWN-LIMITATIONS.md, "Git read
+//     bounds").
 //   - Mutating commands (checkout, merge, commit, add, branch, config,
 //     push) are never failed on output size: git performs the side
 //     effect before it prints, so a failing ceiling would report a merge
@@ -40,8 +52,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/bszymi/spine/core/worktreefs"
 )
@@ -93,6 +107,12 @@ const (
 	// the `rev-parse HEAD` after every commit and merge prints one object
 	// id. 4 KiB holds both many times over and is still a bound.
 	minOutputBytes int64 = 4 << 10
+
+	// minSinkGrowth is the smallest buffer a growing stdout sink
+	// allocates. Growth goes in powers of two from here (never past the
+	// limit), so what a command's output costs is a function of its size
+	// alone, not of how the pipe happened to chunk it.
+	minSinkGrowth = 512
 )
 
 // WithMaxBlobBytes sets the per-blob ReadFile limit. n <= 0 keeps the
@@ -154,10 +174,23 @@ type BlobTooLargeError struct {
 	// or git refused an allocation over its alloc limit).
 	Size  int64
 	Limit int64
+	// GitAllocLimit is non-zero when git itself refused an allocation
+	// over this GIT_ALLOC_LIMIT while producing the content (Size is then
+	// -1). The content may well be under Limit: what git could not
+	// allocate is something larger it needed to build it — the base of a
+	// small blob stored as a delta on a large one, or the patch of a
+	// gitlink rendered as a commit. Error() says so, so a 3 MB file is
+	// never reported as over a 4 MiB limit (review round 1).
+	GitAllocLimit int64
 }
 
 func (e *BlobTooLargeError) Error() string {
-	if e.Size < 0 {
+	switch {
+	case e.GitAllocLimit > 0:
+		return fmt.Sprintf("%q at %q cannot be read within the read limits: git needed an allocation over "+
+			"the %d-byte git allocation limit to produce it (a delta on a large base, or a gitlink rendered "+
+			"with its patch)", e.Path, e.Ref, e.GitAllocLimit)
+	case e.Size < 0:
 		return fmt.Sprintf("%q at %q exceeds the %d-byte read limit", e.Path, e.Ref, e.Limit)
 	}
 	return fmt.Sprintf("%q at %q is %d bytes, over the %d-byte read limit", e.Path, e.Ref, e.Size, e.Limit)
@@ -255,6 +288,34 @@ func deriveGitAllocLimit(explicit, blob int64) int64 {
 	return max(n, minGitAllocBytes)
 }
 
+// deltaBaseCacheEnv is the GIT_CONFIG_PARAMETERS entry read and diff
+// commands run with: whatever the parent process passes (inherited),
+// then core.deltaBaseCacheLimit = the per-blob limit (review round 1,
+// P2). GIT_ALLOC_LIMIT checks one allocation at a time, and rebuilding
+// an object at the end of a delta chain keeps each intermediate base in
+// git's delta-base cache — 96 MiB by default — so a chain of bases each
+// under the alloc limit still grew the git child far past it (127 MiB
+// for a 3 MB tip on eight 15 MiB bases; 55 MB with the cache pinned).
+// The cache only saves re-inflating a shared base, so a small one costs
+// nothing on these one-object reads and listings: trees are small, and
+// the per-blob limit holds every tree of a large repository.
+//
+// It is the environment form of `git -c`, so the argv every caller and
+// test pins is unchanged. The value uses the original 'key=value'
+// quoting, which git has read since 1.7 and still reads alongside the
+// 'key'='value' form 2.31 introduced; an inherited value of either form
+// is kept, and ours comes last, so it wins over it and over every
+// repository, global or system config file (command-line config has the
+// highest precedence). Key and value are fixed text and digits: nothing
+// here needs quoting.
+func deltaBaseCacheEnv(inherited string, limit int64) string {
+	pin := "'core.deltaBaseCacheLimit=" + strconv.FormatInt(limit, 10) + "'"
+	if strings.TrimSpace(inherited) == "" {
+		return "GIT_CONFIG_PARAMETERS=" + pin
+	}
+	return "GIT_CONFIG_PARAMETERS=" + inherited + " " + pin
+}
+
 // --- output sinks ---
 
 // stdoutSink captures a command's stdout up to limit. It deliberately
@@ -269,22 +330,61 @@ func deriveGitAllocLimit(explicit, blob int64) int64 {
 // draining (mutating commands): Write keeps up to limit, drops the rest
 // and always reports success, so git never sees EPIPE and never stops
 // half way through printing after its side effect.
+//
+// A sink keeps either bytes (ReadFile's content read, returned as
+// []byte) or text (every other command, which run() returns as a
+// string). Text goes into a strings.Builder, whose String() hands its
+// buffer over without a copy, and the parsers' paths and messages are
+// substrings of it: converting a []byte buffer instead held the output
+// twice, so a 16 MiB listing peaked at 32 MiB (review round 1).
 type stdoutSink struct {
-	buf      []byte
+	buf      []byte           // bytes mode
+	text     *strings.Builder // text mode (nil in bytes mode)
 	limit    int64
 	failing  bool
 	overflow bool
 }
 
-func newStdoutSink(limit, sizeHint int64, failing bool) *stdoutSink {
+func newStdoutSink(limit, sizeHint int64, failing, text bool) *stdoutSink {
 	s := &stdoutSink{limit: limit, failing: failing}
+	if text {
+		s.text = new(strings.Builder)
+	}
 	if sizeHint > 0 {
-		if sizeHint > limit {
-			sizeHint = limit
+		n := int(min(sizeHint, limit, int64(math.MaxInt)))
+		if s.text != nil {
+			s.text.Grow(n) // exact on an empty builder
+		} else {
+			s.buf = make([]byte, 0, n)
 		}
-		s.buf = make([]byte, 0, sizeHint)
 	}
 	return s
+}
+
+func (s *stdoutSink) size() int {
+	if s.text != nil {
+		return s.text.Len()
+	}
+	return len(s.buf)
+}
+
+func (s *stdoutSink) capacity() int {
+	if s.text != nil {
+		return s.text.Cap()
+	}
+	return cap(s.buf)
+}
+
+// Bytes returns what a bytes-mode sink kept.
+func (s *stdoutSink) Bytes() []byte { return s.buf }
+
+// String returns what a text-mode sink kept, without copying it. The
+// sink must not be written to afterwards.
+func (s *stdoutSink) String() string {
+	if s.text == nil {
+		return string(s.buf)
+	}
+	return s.text.String()
 }
 
 func (s *stdoutSink) Write(p []byte) (int, error) {
@@ -294,7 +394,7 @@ func (s *stdoutSink) Write(p []byte) (int, error) {
 		}
 		return len(p), nil
 	}
-	room := s.limit - int64(len(s.buf))
+	room := s.limit - int64(s.size())
 	if int64(len(p)) > room {
 		s.overflow = true
 		if s.failing {
@@ -307,25 +407,50 @@ func (s *stdoutSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// appendBounded appends p, growing the buffer by doubling (never past
-// limit) rather than through append's ~1.25x growth for large slices,
-// whose intermediate copies would add up to several times the final
-// size.
+// appendBounded appends p, growing the buffer to the next power of two
+// at least twice its capacity (from minSinkGrowth, never past limit)
+// rather than through append's ~1.25x growth for large slices, whose
+// intermediate copies would add up to several times the final size.
+// What growth allocates in all is under twice the final buffer.
 func (s *stdoutSink) appendBounded(p []byte) {
-	need := len(s.buf) + len(p)
-	if need > cap(s.buf) {
-		newCap := 2 * cap(s.buf)
-		if newCap < need {
-			newCap = need
-		}
-		if int64(newCap) > s.limit {
+	have := s.size()
+	if need := have + len(p); need > s.capacity() {
+		newCap := nextPowerOfTwo(max(2*s.capacity(), need, minSinkGrowth))
+		if int64(newCap) > s.limit || newCap <= 0 {
 			newCap = int(min(s.limit, int64(math.MaxInt)))
 		}
-		grown := make([]byte, len(s.buf), newCap)
-		copy(grown, s.buf)
-		s.buf = grown
+		if s.text != nil {
+			// Grow on a non-empty Builder allocates 2*cap+n, past the
+			// limit; on an empty one it allocates exactly n. So the text
+			// moves into a fresh builder of exactly newCap.
+			grown := new(strings.Builder)
+			grown.Grow(newCap)
+			grown.WriteString(s.text.String())
+			s.text = grown
+		} else {
+			grown := make([]byte, have, newCap)
+			copy(grown, s.buf)
+			s.buf = grown
+		}
+	}
+	if s.text != nil {
+		s.text.Write(p)
+		return
 	}
 	s.buf = append(s.buf, p...)
+}
+
+// nextPowerOfTwo returns the smallest power of two >= n (n > 0), or 0
+// when that does not fit in an int.
+func nextPowerOfTwo(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	shift := bits.Len(uint(n - 1))
+	if shift >= bits.UintSize-1 {
+		return 0
+	}
+	return 1 << shift
 }
 
 // stderrSink keeps the head and the tail of a command's stderr, at most
