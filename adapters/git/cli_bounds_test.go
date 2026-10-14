@@ -759,7 +759,9 @@ func TestClone_StderrIsBounded(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	c := git.NewCLIClient(t.TempDir())
 	var err error
-	alloc := allocDuring(func() { err = c.Clone(context.Background(), "https://example.invalid/r.git", filepath.Join(t.TempDir(), "r")) })
+	alloc := allocDuring(func() {
+		err = c.Clone(context.Background(), "https://example.invalid/r.git", filepath.Join(t.TempDir(), "r"))
+	})
 	var ge *git.GitError
 	if !errors.As(err, &ge) || ge.Kind != git.ErrKindNotFound {
 		t.Fatalf("Clone = %v, want the final line classified not_found", err)
