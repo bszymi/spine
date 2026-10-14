@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -15,7 +16,9 @@ import (
 
 	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
+	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/service/internal/config"
 )
@@ -49,11 +52,8 @@ func governanceGuardFromEnv() bool {
 }
 
 // logGovernanceGuard records the selection at startup. Off is a Warn
-// naming what stays open; on without event delivery is a Warn too: honoured
-// override pushes are then not persisted to runtime.event_log, so they
-// cannot vouch for a protection removal (a relaxation needs a governed run
-// with an operator approval).
-func logGovernanceGuard(log *slog.Logger, eventDelivery bool) {
+// naming what stays open.
+func logGovernanceGuard(log *slog.Logger) {
 	raw := os.Getenv(governanceGuardEnv)
 	on, warning := parseGovernanceGuard(raw)
 	if warning != "" {
@@ -66,10 +66,6 @@ func logGovernanceGuard(log *slog.Logger, eventDelivery bool) {
 	}
 	log.Info("governance-path guards: on (governance changes on governed merges need an operator approval; protection removals need an operator record)",
 		"env", governanceGuardEnv)
-	if !eventDelivery {
-		log.Warn("governance-path guards: event delivery is off (SPINE_EVENT_DELIVERY), so honoured override pushes are not recorded in runtime.event_log and cannot authorise a branch-protection relaxation; relax protection through a governed run with an operator approval, or enable event delivery",
-			"env", governanceGuardEnv)
-	}
 }
 
 // standaloneGovernanceGuard is the engine guard `spine serve` installs:
@@ -131,4 +127,61 @@ func governanceAwareCommitRetry(fn func(ctx context.Context, runID string) error
 		}
 		return err
 	}
+}
+
+// eventLogWriter is the store surface the push path's provenance write
+// needs (store.DeliveryStore has it).
+type eventLogWriter interface {
+	WriteEventLog(ctx context.Context, entry *store.EventLogEntry) error
+}
+
+// overrideProvenanceEmitter writes every honoured
+// branch_protection.override event to runtime.event_log synchronously, then
+// forwards it. The projection's protection-removal guard accepts an
+// override push as provenance only through that row, and the standalone
+// event router delivers asynchronously (and writes event_log only when
+// event delivery is on): without this, a sync that ran between the push
+// landing and the delivery subscriber's write refused the authorised
+// relaxation and advanced past it for good (codex review round 1). The
+// git pre-receive gate emits the event before handing the push to git, so
+// the row exists before the ref moves. The delivery subscriber's later
+// write of the same event id is a no-op (ON CONFLICT DO NOTHING). A failed
+// write is logged and the push proceeds: the relaxation is then refused
+// until an operator re-affirms it (fail-safe).
+type overrideProvenanceEmitter struct {
+	inner event.Emitter
+	log   eventLogWriter
+}
+
+func (e *overrideProvenanceEmitter) Emit(ctx context.Context, evt domain.Event) error {
+	if evt.Type == domain.EventBranchProtectionOverride {
+		payload, err := json.Marshal(evt)
+		if err == nil {
+			err = e.log.WriteEventLog(ctx, &store.EventLogEntry{
+				EventID: evt.EventID, EventType: string(evt.Type), Payload: payload, CreatedAt: evt.Timestamp,
+			})
+		}
+		if err != nil {
+			observe.Logger(ctx).Warn("governance-path guard: override provenance not recorded; a branch-protection relaxation this push carries will be refused until an operator re-affirms it",
+				"event_id", evt.EventID, "error", err)
+		}
+	}
+	if e.inner == nil {
+		return nil
+	}
+	return e.inner.Emit(ctx, evt)
+}
+
+// withOverrideProvenance wraps the git push path's emitter while the
+// governance-path guards are on and the workspace has a store that can
+// write the event log; otherwise it returns inner unchanged.
+func withOverrideProvenance(inner event.Emitter, st store.Store) event.Emitter {
+	if !governanceGuardFromEnv() || st == nil {
+		return inner
+	}
+	w, ok := st.(eventLogWriter)
+	if !ok {
+		return inner
+	}
+	return &overrideProvenanceEmitter{inner: inner, log: w}
 }

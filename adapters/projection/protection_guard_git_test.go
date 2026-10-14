@@ -10,6 +10,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 )
@@ -348,4 +349,60 @@ func TestProtectionRemovalGuard_DeletionOnAnotherAuthoritativeBranch(t *testing.
 	if f.st.bpCommit != "bootstrap" {
 		t.Fatalf("an operator deletion was not installed: source %q", f.st.bpCommit)
 	}
+}
+
+// flakyMergeBaseGit fails MergeBase for one commit with a retryable git
+// error, n times.
+type flakyMergeBaseGit struct {
+	*git.CLIClient
+	commit string
+	n      int
+}
+
+func (f *flakyMergeBaseGit) MergeBase(ctx context.Context, a, b string) (string, error) {
+	if (a == f.commit || b == f.commit) && f.n > 0 {
+		f.n--
+		return "", &git.GitError{Kind: git.ErrKindTransient, Op: "merge-base", Message: "repository locked"}
+	}
+	return f.CLIClient.MergeBase(ctx, a, b)
+}
+
+// TestProtectionRemovalGuard_RecordVerificationErrors (codex review round
+// 1): a transient git failure while checking a record holds the sync
+// (error, retried) instead of refusing — a refusal would advance past the
+// authorised relaxation and never look at it again — while a record whose
+// commit is not in this repository (an override recorded at pre-receive
+// for a push that never landed) is a plain mismatch.
+func TestProtectionRemovalGuard_RecordVerificationErrors(t *testing.T) {
+	t.Run("transient: held and retried", func(t *testing.T) {
+		f := newPGFix(t)
+		o := f.relax("operator override")
+		flaky := &flakyMergeBaseGit{CLIClient: f.r.git, commit: o, n: 1}
+		f.svc = NewService(flaky, f.st, f.router, 0)
+		if err := f.svc.WithAuthoritativeBranch("main"); err != nil {
+			t.Fatal(err)
+		}
+		f.svc.WithProtectionRemovalGuard(ProtectionRemovalGuard{Enabled: true, Provenance: f.prov, Events: f.router})
+		f.prov.records = []store.GovernanceAuthorization{override(o, f.c0)}
+		_ = f.svc.IncrementalSync(context.Background())
+		f.requireProtected("transient verification failure")
+		if st := f.st.syncState(); st.Status != "error" || st.LastSyncedCommit != f.c0 {
+			t.Fatalf("state = %+v, want error held at c0", st)
+		}
+		if f.refusals() != 0 {
+			t.Fatal("a transient verification failure was reported as a refusal")
+		}
+		f.sync()
+		f.requireInstalledRelaxed("after the git failure cleared", o)
+	})
+	t.Run("record commit not in the repository: mismatch", func(t *testing.T) {
+		f := newPGFix(t)
+		f.relax("no landed operator push")
+		f.prov.records = []store.GovernanceAuthorization{override("0123456789abcdef0123456789abcdef01234567", f.c0)}
+		f.sync()
+		f.requireProtected("missing record commit")
+		if st := f.st.syncState(); st.Status != "idle" || f.refusals() != 1 {
+			t.Fatalf("state %+v refusals %d, want idle and one refusal", st, f.refusals())
+		}
+	})
 }

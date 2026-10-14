@@ -89,7 +89,7 @@ Both guards are off at their zero value, and the embedded library then behaves e
 
 - While the installed rules no longer carry `no-direct-write` on the authoritative branch, the projection guard is inactive. This keeps ADR-009 §1 bullet 3 consistent: self-protection is already off, and direct pushes produce no override event to vouch for anything.
 - A database rebuilt from git refuses a relaxed config until an operator re-affirms it with an override push that **edits** the file (a comment line is enough). An override push that does not touch the file proves nothing.
-- Override provenance exists only where override events are persisted to `runtime.event_log`: always in SMP; in standalone only with event delivery on (`SPINE_EVENT_DELIVERY=true`). Without it, relaxing protection takes a governed run with an operator approval.
+- Override provenance is the honoured override's row in `runtime.event_log`. The git pre-receive gate emits the event before git moves the ref; SMP's emitter writes the row synchronously, and with the guards on `spine serve`'s push path writes it synchronously too (whatever `SPINE_EVENT_DELIVERY` says), so the projection never sees the push before its record. The event log is pruned by retention, which is why a database rebuilt later needs the re-affirmation.
 - Convergence merges that move content into `main` outside `MergeRunBranch` (audit F8) are not seen by this guard; INIT-023 TASK-012 owns that path.
 
 ---

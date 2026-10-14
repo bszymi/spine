@@ -174,8 +174,10 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 				return gateway.GitPushResources{}, noop, fmt.Errorf("git-push fallback branch-protect policy: %w", err)
 			}
 			return gateway.GitPushResources{
-				Policy:   policy,
-				Events:   fallbackEvents,
+				Policy: policy,
+				// Honoured overrides are recorded synchronously for the
+				// governance guard (INIT-023 TASK-006).
+				Events:   withOverrideProvenance(fallbackEvents, fallbackStore),
 				Runs:     runReaderOrNil(fallbackStore),
 				StepDefs: fallbackStepDefs,
 			}, noop, nil
@@ -207,7 +209,7 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 		}
 		return gateway.GitPushResources{
 			Policy:   policy,
-			Events:   events,
+			Events:   withOverrideProvenance(events, ss.Store),
 			Runs:     runReaderOrNil(ss.Store),
 			StepDefs: stepDefLookupOrNil(ss.StepAssigner),
 		}, release, nil

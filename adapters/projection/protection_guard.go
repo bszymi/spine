@@ -55,6 +55,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/branchprotect"
 	bpconfig "github.com/bszymi/spine/core/branchprotect/config"
@@ -195,13 +196,25 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 			return fmt.Errorf("protection-removal guard: read operator records: %w", err)
 		}
 	}
+	var verifyErr error
 	for _, rec := range records {
-		if s.provenanceMatches(ctx, rec, head, newest, content, present) {
+		ok, err := s.provenanceMatches(ctx, rec, head, newest, content, present)
+		if err != nil && verifyErr == nil {
+			verifyErr = err
+		}
+		if ok {
 			log.Info("projection: protection removal authorised by an operator record",
 				"branch", branch, "source", rec.Source, "record_commit", rec.CommitSHA,
 				"actor_id", rec.ActorID, "run_id", rec.RunID, "event_id", rec.EventID, "head", shortSHA(head))
 			return nil
 		}
+	}
+	if verifyErr != nil {
+		// A record could not be checked because git failed transiently
+		// (codex review round 1): an infrastructure error, not a refusal —
+		// a refusal advances the sync and would not look at this config
+		// again until the file changes, losing an authorised relaxation.
+		return fmt.Errorf("protection-removal guard: verify an operator record: %w", verifyErr)
 	}
 
 	installedNames, candidateNames := kindNames(oldKinds), kindNames(newKinds)
@@ -231,62 +244,95 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 	return fmt.Errorf("%w (branch %s, head %s, %d record(s) checked)", ErrProtectionRemovalUnauthorized, branch, shortSHA(head), len(records))
 }
 
-// provenanceMatches applies the matching rule to one record. Any git
-// error means the record does not match.
-func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAuthorization, head, newest string, content []byte, present bool) bool {
+// provenanceMatches applies the matching rule to one record. A git
+// failure that is retryable (a lock, the network, a cancelled context)
+// is returned as an error — the caller holds the sync so the record is
+// checked again — and any other failure (a commit that does not exist in
+// this repository, an unreadable entry) means the record does not match.
+func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAuthorization, head, newest string, content []byte, present bool) (bool, error) {
 	c := rec.CommitSHA
 	if !isHexSHA(c) {
-		return false
+		return false, nil
 	}
 	// Reachable: the record's commit is in the history being installed.
-	if mb, err := s.git.MergeBase(ctx, c, head); err != nil || strings.TrimSpace(mb) != c {
-		return false
+	mb, err := s.git.MergeBase(ctx, c, head)
+	if err != nil {
+		return false, transientOnly(ctx, err)
+	}
+	if strings.TrimSpace(mb) != c {
+		return false, nil
 	}
 	// New: not already behind what is installed (or synced).
 	if newest != "" {
-		if mb, err := s.git.MergeBase(ctx, c, newest); err != nil || strings.TrimSpace(mb) == c {
-			return false
+		mb, err := s.git.MergeBase(ctx, c, newest)
+		if err != nil {
+			return false, transientOnly(ctx, err)
+		}
+		if strings.TrimSpace(mb) == c {
+			return false, nil
 		}
 	}
 	// Content: the record's config is byte-for-byte the candidate (or,
 	// for a deleted file, the record deleted it too).
-	recContent, recPresent, ok := s.configAt(ctx, c)
-	if !ok || recPresent != present || (present && !bytes.Equal(recContent, content)) {
-		return false
+	recContent, recPresent, err := s.configAt(ctx, c)
+	if err != nil {
+		return false, transientOnly(ctx, err)
+	}
+	if recPresent != present || (present && !bytes.Equal(recContent, content)) {
+		return false, nil
 	}
 	// Changed: the act itself changed the config (owner question 8).
 	base := rec.BaseSHA
 	if base == "" || isZeroSHA(base) {
-		return recPresent // the config was created by the act
+		return recPresent, nil // the config was created by the act
 	}
 	if !isHexSHA(base) {
-		return false
+		return false, nil
 	}
-	baseContent, basePresent, ok := s.configAt(ctx, base)
-	if !ok {
-		return false
+	baseContent, basePresent, err := s.configAt(ctx, base)
+	if err != nil {
+		return false, transientOnly(ctx, err)
 	}
 	if basePresent != recPresent {
-		return true
+		return true, nil
 	}
-	return recPresent && !bytes.Equal(baseContent, recContent)
+	return recPresent && !bytes.Equal(baseContent, recContent), nil
 }
 
+// errUnreadableConfig marks a config entry that is not a readable file.
+var errUnreadableConfig = errors.New("branch-protection config entry is not a readable file")
+
 // configAt reads the branch-protection config at commit: its bytes and
-// whether it exists. ok is false on any read failure or a non-file entry.
-func (s *Service) configAt(ctx context.Context, commit string) ([]byte, bool, bool) {
+// whether it exists.
+func (s *Service) configAt(ctx context.Context, commit string) ([]byte, bool, error) {
 	files, err := s.git.ListFiles(ctx, commit, BranchProtectionConfigPath)
 	if err != nil {
-		return nil, false, false
+		return nil, false, err
 	}
 	if !containsPath(files, BranchProtectionConfigPath) {
-		return nil, false, true
+		return nil, false, nil
 	}
 	content, unreadable, err := s.readFileEntry(ctx, commit, BranchProtectionConfigPath)
-	if err != nil || unreadable != nil {
-		return nil, false, false
+	if err != nil {
+		return nil, false, err
 	}
-	return content, true, true
+	if unreadable != nil {
+		return nil, false, errUnreadableConfig
+	}
+	return content, true, nil
+}
+
+// transientOnly returns err when it is worth retrying (a retryable git
+// error or a cancelled context) and nil otherwise.
+func transientOnly(ctx context.Context, err error) error {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var gitErr *git.GitError
+	if errors.As(err, &gitErr) && gitErr.IsRetryable() {
+		return err
+	}
+	return nil
 }
 
 // kindsFor is the union of the protection kinds the rules apply to branch.

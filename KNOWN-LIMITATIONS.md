@@ -373,18 +373,20 @@ refuses an unprovenanced branch-protection removal. What remains:
 1. **Opt-in for embedders.** The library's zero value is v1: until an embedder calls
    `WithGovernanceGuard` and `WithProtectionRemovalGuard` (SMP: its TASK-010), F3 stays open
    there. `spine serve` turns both on; `SPINE_GOVERNANCE_GUARD=off` restores v1.
-2. **Override provenance needs the event log.** An honoured override push vouches for a
-   relaxation only through its `branch_protection.override` row in `runtime.event_log`. In
-   standalone that row is written only with event delivery on (`SPINE_EVENT_DELIVERY=true`; the
-   server warns at startup otherwise); without it, relaxing protection takes a governed run with an
-   operator approval. The event log is pruned by retention, so a database rebuilt long after a
-   relaxation — or a fresh database restored from git — refuses it until an operator re-affirms it
-   with an override push that **edits** the file (`docs/git-push-guide.md` §4).
+2. **Override provenance lives in the event log, which is pruned.** An honoured override push
+   vouches for a relaxation only through its `branch_protection.override` row in
+   `runtime.event_log` (written synchronously at pre-receive by `spine serve` with the guards on,
+   and by SMP's emitter). Retention prunes that table, so a database rebuilt long after a
+   relaxation — or a fresh database restored from git — refuses it until an operator re-affirms
+   it with an override push that **edits** the file (`docs/git-push-guide.md` §4). A failed
+   synchronous write is logged and the push proceeds; the relaxation is then refused until
+   re-affirmed. API-path override events carry no pre-receive range and never count.
 3. **A refusal is not a sync error** (owner question 7). `sync_state` does not show it; the signals
    are the Warn log, `branch_protection.removal_refused`, and installed rows whose `source_commit`
    is older than the file at head. It is re-evaluated on the next change to the file and on every
-   full rebuild. A provenance or rule-store read failure, by contrast, holds the sync in `error`
-   and is retried.
+   full rebuild. A provenance or rule-store read failure, or a retryable git failure while
+   checking a record, by contrast, holds the sync in `error` and is retried; a record whose commit
+   is not in the repository (an override recorded for a push that never landed) is a mismatch.
 4. **Scope of the projection guard** (owner question 5): the authoritative branch only. Removing
    protection from other patterns (`release/*`, `staging`) is installed without a record. While the
    installed rules carry no `no-direct-write` on the authoritative branch the guard is inactive

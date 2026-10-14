@@ -106,7 +106,7 @@ With the governance-path guards on (the `spine serve` default; ADR-016, INIT-023
     push -o spine.override=true origin main
   ```
 
-  An override push that does not change the file proves nothing about it and is ignored for this purpose. In standalone Spine the override event is the record, and it is persisted to `runtime.event_log` only with event delivery on (`SPINE_EVENT_DELIVERY=true`); without it, relax protection through a governed run that an operator approves. Tightening the rules never needs a record.
+  An override push that does not change the file proves nothing about it and is ignored for this purpose. The override event is the record: with the guards on, the push path writes it to `runtime.event_log` before git updates the ref, whether or not event delivery is enabled. Tightening the rules never needs a record.
 
 ### Deleting a protected branch
 

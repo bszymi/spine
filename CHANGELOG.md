@@ -40,7 +40,9 @@ ADR is `Proposed` until the owner signs it off). No migration.
   (`runtime.event_log`), or an approved governed merge's consumption marker
   (`spine.governance_approval.merge_sha`/`base_sha`, written before the push). Otherwise the rules
   stay, `branch_protection.removal_refused` is emitted and a Warn logged. Commit trailers are
-  never trusted. Inactive while `no-direct-write` is already off on the authoritative branch.
+  never trusted. Inactive while `no-direct-write` is already off on the authoritative branch. A
+  provenance read failure, or a retryable git failure while checking a record, holds the sync
+  (retried) instead of refusing.
 
 ### Changed (standalone)
 
@@ -59,9 +61,12 @@ ADR is `Proposed` until the owner signs it off). No migration.
   does not grow and nothing downstream stalls; the rules shown by `branch_protection_rules` keep
   their old `source_commit`. Recovery: an operator override push that **edits** the file
   (`docs/git-push-guide.md`). A database rebuilt from git refuses a relaxed config until then.
-- **Override provenance needs event delivery.** Override events reach `runtime.event_log` only
-  with `SPINE_EVENT_DELIVERY=true`; without it `spine serve` warns at startup, and relaxing
-  protection takes a governed run with an operator approval.
+- **Honoured override pushes are written to `runtime.event_log` synchronously.** With the guards
+  on, the git push path records each `branch_protection.override` event in the event log before
+  git moves the ref, whatever `SPINE_EVENT_DELIVERY` says (the delivery subscriber's later write
+  of the same id is a no-op). The projection guard accepts an override as provenance only through
+  that row; the asynchronous router alone could let a sync run before it and refuse the
+  authorised relaxation for good. A failed write is logged and the push proceeds.
 - New events (operational, in `allEventTypes()`): `governance.merge_held`,
   `governance.merge_decided`, `branch_protection.removal_refused` (`architecture/event-schemas.md`
   §4.16–§4.18). New step failure classification `governance_approval_required`.

@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/bszymi/spine/adapters/projection"
 	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/adapters/scheduler"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
@@ -56,7 +58,7 @@ func TestParseGovernanceGuard(t *testing.T) {
 	}
 	t.Setenv(governanceGuardEnv, "junk")
 	var buf bytes.Buffer
-	logGovernanceGuard(slog.New(slog.NewTextHandler(&buf, nil)), true)
+	logGovernanceGuard(slog.New(slog.NewTextHandler(&buf, nil)))
 	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "stay ON") || !governanceGuardFromEnv() {
 		t.Fatalf("junk value: on=%v log=%s", governanceGuardFromEnv(), buf.String())
 	}
@@ -178,5 +180,99 @@ func TestCommitRetry_HeldMergeLogsNoError(t *testing.T) {
 	other.RunRetryCycle(context.Background())
 	if !strings.Contains(buf.String(), "level=ERROR") {
 		t.Fatalf("a real merge failure no longer logs at Error:\n%s", buf.String())
+	}
+}
+
+// recordingEmitter records forwarded events.
+type recordingEmitter struct{ events []domain.Event }
+
+func (r *recordingEmitter) Emit(_ context.Context, e domain.Event) error {
+	r.events = append(r.events, e)
+	return nil
+}
+
+// eventLogStore records event-log writes and their order against the
+// forwarded emission.
+type eventLogStore struct {
+	stubStore
+	writes []store.EventLogEntry
+	err    error
+	seen   *recordingEmitter
+	before []int // forwarded-event count at each write
+}
+
+func (s *eventLogStore) WriteEventLog(_ context.Context, e *store.EventLogEntry) error {
+	s.writes = append(s.writes, *e)
+	if s.seen != nil {
+		s.before = append(s.before, len(s.seen.events))
+	}
+	return s.err
+}
+
+// TestOverrideProvenanceEmitter (codex review round 1): with the guards on,
+// an honoured override event reaches runtime.event_log synchronously and
+// before it is forwarded (the git gate emits it before git moves the ref,
+// so the projection can never see the push without its provenance); other
+// events are only forwarded; a failed write still forwards; with the
+// guards off the emitter is unchanged.
+func TestOverrideProvenanceEmitter(t *testing.T) {
+	t.Setenv(governanceGuardEnv, "")
+	inner := &recordingEmitter{}
+	st := &eventLogStore{seen: inner}
+	em := withOverrideProvenance(inner, st)
+	if em == event.Emitter(inner) {
+		t.Fatal("guards on: the emitter was not wrapped")
+	}
+	ctx := context.Background()
+	ts := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	ov := domain.Event{EventID: "evt-ov-1", Type: domain.EventBranchProtectionOverride, Timestamp: ts, ActorID: "op-1",
+		Payload: []byte(`{"branch":"refs/heads/main","operation":"direct_write"}`)}
+	if err := em.Emit(ctx, ov); err != nil {
+		t.Fatal(err)
+	}
+	if err := em.Emit(ctx, domain.Event{EventID: "evt-other", Type: domain.EventRunCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.writes) != 1 || st.writes[0].EventID != "evt-ov-1" || !st.writes[0].CreatedAt.Equal(ts) || st.before[0] != 0 {
+		t.Fatalf("event-log writes = %+v (forwarded before write: %v)", st.writes, st.before)
+	}
+	var stored domain.Event
+	if err := json.Unmarshal(st.writes[0].Payload, &stored); err != nil || stored.ActorID != "op-1" || stored.EventID != "evt-ov-1" {
+		t.Fatalf("stored payload = %s (%v): want the whole event, as the delivery subscriber writes it", st.writes[0].Payload, err)
+	}
+	if len(inner.events) != 2 {
+		t.Fatalf("forwarded = %d, want 2", len(inner.events))
+	}
+
+	failing := &eventLogStore{err: errors.New("database down")}
+	inner2 := &recordingEmitter{}
+	if err := withOverrideProvenance(inner2, failing).Emit(ctx, ov); err != nil || len(inner2.events) != 1 {
+		t.Fatalf("a failed provenance write must still forward: %v, %d", err, len(inner2.events))
+	}
+	if err := withOverrideProvenance(nil, &eventLogStore{}).Emit(ctx, ov); err != nil {
+		t.Fatalf("nil inner: %v", err)
+	}
+
+	t.Setenv(governanceGuardEnv, "off")
+	if got := withOverrideProvenance(inner, st); got != event.Emitter(inner) {
+		t.Fatal("guards off: the emitter must be unchanged")
+	}
+	if got := withOverrideProvenance(inner, nil); got != event.Emitter(inner) {
+		t.Fatal("no store: the emitter must be unchanged")
+	}
+}
+
+// TestGitPushResolver_RecordsOverrideProvenance: the single-mode push
+// resolver hands githttp the provenance-recording emitter.
+func TestGitPushResolver_RecordsOverrideProvenance(t *testing.T) {
+	t.Setenv(governanceGuardEnv, "")
+	st := &eventLogStore{}
+	res, release, err := buildGitPushResolver(nil, st, nil, nil)(context.Background(), "ws-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, ok := res.Events.(*overrideProvenanceEmitter); !ok {
+		t.Fatalf("push resolver events = %T, want the provenance-recording emitter", res.Events)
 	}
 }
