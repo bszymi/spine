@@ -1906,3 +1906,89 @@ the Docker VM had 6.2 GB free; the new real-git tests use only porcelain any git
 suites' `ws_*` databases and roles were cleaned up by the suites (none left, checked). No container
 was started apart from `docker run --rm alpine:3 df` disk checks. Logs:
 `spine-management-platform/tmp/init027-orchestration/wave3-fix-spine-s3f/`.
+
+### Acceptance (wave 3) (2026-10-14)
+
+The final gate on `init/INIT-023-wave3-integration` (worktree `i23/s-int3/spine`). It ran after the
+codex 6.1 catch-up of waves 1 and 2 was merged in (`41c70dd8`: the worktreefs FIFO `O_NONBLOCK`
+open, exact integers in stored workflow definitions, the sweep's `SetSyncBaseline`). The code gates
+ran at `41c70dd8`. The two commits after it change documentation only: `c6938efd` (CHANGELOG) and
+the commit that adds this note. Nothing was pushed. Main, the task branches and the SMP checkout
+are unchanged.
+
+**This task.** `TestGitHTTP_*` gives 20 PASS, 8 of them push scenarios.
+`service/internal/{gateway,githttp}` and `adapters/{gitpool,repository}` pass under `-race`, and
+SMP's githttp testgate passes against this Spine. The catch-up changes none of this task's files.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go test -p 4 -count=1 ./...` | 40 packages ok |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 21 packages changed since `d23b897` | 19 ok. `core/engine/enginetest` has no tests. `service/scenariotest/scenarios` builds only with `-tags scenario`; the scenario rows below cover it |
+| `-tags integration -p 1 -count=1 -v` on the changed packages that have integration suites: `adapters/{delivery,projection,store}`, `service/cmd/spine`, `service/internal/workspace`. `SPINE_TEST_DATABASE_URL` = fresh `s3g_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s3g_reg`, migrated from `migrations/registry` | 1086 PASS, subtests counted (315 / 191 / 171 / 184 / 225); 0 SKIP; 1 FAIL. The failure is `adapters/store` `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`, column `workflow_version_label`), and it was there before: a `git archive` export of `main` `d23b897` fails it the same way. `adapters/store` is in scope only because of the catch-up's `SetSyncBaseline`; its `TestSetSyncBaseline_*` tests pass |
+| CI `scenario-git-http` job: its four `run:` steps, read from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`, repo root as cwd, `SPINE_TEST_DATABASE_URL` = fresh `s3g_ci`) | All four steps exit 0. `TestGitHTTP_*`: 20 PASS, 8 of them `TestGitHTTP_Push*`. `TestBootstrapInternalAdmin_*`: 2 PASS. `TestWorkflowLifecycle_*`: 4 PASS, including both required ones. `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy`: PASS. 0 SKIP |
+| Full scenario suite, `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...`, run side by side on this branch and on a `git archive` export of `main` `d23b897` (fresh `s3g_scen_{b,m}`, registry `s3g_reg_{b,m}` migrated) | The failure sets are identical: 31 top-level `--- FAIL` on each (59 lines with subtests). They are the 30 known failures plus `TestWorkspace_ScopedServices`, the same sorted list as the wave 3 review's run. Top-level PASS: 198 on the branch, 196 on main; the two extra are TASK-014's `TestWorkflowLifecycle_UpdateExisting*`. 0 SKIP |
+| CI `git-floor` job: its three `run:` steps, verbatim, in `golang:1.26-bookworm` (`--pull=never --rm`; worktree, host module cache and step scripts mounted read-only; `GOPROXY=off`, `GOTOOLCHAIN=local`) | git 2.39.5. All three steps ok: `adapters/git`, `adapters/git/refname`, `core/engine`, then `adapters/git/...`, `core/artifact`, `core/workflow`. The container was removed |
+| `golangci-lint` v2.11.4 `run --new-from-rev d23b897` on the changed packages, plain, `--build-tags integration` and `--build-tags scenario` | 0 issues each |
+| `golangci-lint --enable-only=gosec` on the changed packages (`scenario`; `integration`) and on `./...` (plain; `integration,scenario`) | 0 issues, apart from one finding with `integration`: G602 at `adapters/store/postgres_integration_test.go:1563`. It was there before: the file is unchanged since `main`, and the `main` export reports the same finding |
+| `gofmt -l` (Go 1.26.8) on the 150 `.go` files changed since `d23b897` | empty |
+| `codex review --base main` (codex-cli 0.162.1, the configured default model, no `-c model=` override) | Round 1 at `41c70dd8`: session `rollout-2026-10-14T16-10-25-01a13af6-f3bb-…`, `source: {"subagent":"review"}`, `"model":"gpt-6.1-sol"`. Round 2 at `c6938efd`: session `rollout-2026-10-14T16-26-49-01a13b05-f6d9-…`, same source and model. Both rounds returned "No actionable regressions were identified." Nothing to fix, so no third round |
+
+**Merge `41c70dd8`: semantic check.** In every auto-merged file (`adapters/projection/service.go`,
+`adapters/projection/sweep.go`, `core/worktreefs/tree.go`, `KNOWN-LIMITATIONS.md`), the merge's
+change against each parent matches the other side's change against `d23b897` hunk for hunk.
+Neither side lost or altered a line.
+
+- **Baseline reset and the sweep.** On the up-to-date path, `resetSyncBaseline` now replaces the
+  `idle@head` write. The wave 3 projection changes do not get in its way:
+  - the TASK-003 refusals are reported on the diff path (`recordRefused`), which the up-to-date
+    return never reaches;
+  - the sweep's `unsafe_path` retirement is a row write, so it sets the `changed` flag that drives
+    the reset;
+  - so after a retirement only the baseline moves, as the catch-up intends.
+- **Stored-definition comparisons.** The exact-integer `sameJSON` and `VerifyProjectionDefinition`
+  are the only places that compare stored definitions, and wave 3 adds none. The keep-or-remove
+  decision for an unsafe-path row (`retireUnsafeWorkflowRow` → `applyRejection`, and the sweep's
+  `unsafe_path` branch) goes through `VerifyProjectionDefinition`, so it reads integers exactly
+  too.
+- **`core/worktreefs` and TASK-003.**
+  - `git.DefaultMaxBlobBytes` is still defined as `worktreefs.DefaultMaxReadBytes`, which is
+    unchanged.
+  - `ReadFileLimit` still refuses on the Lstat size and still reads through
+    `LimitReader(limit+1)`.
+  - The non-blocking open and the `IsRegular` check only add a refusal before the read, and
+    `clearNoBlock` makes the descriptor blocking again before `readCapped`.
+  - TASK-005's `commitbinder.go` entry in the `scan_test.go` allowlist and the new
+    `nonblock_*.go` files coexist; `core/worktreefs` passes, including under `-race`.
+- **SMP.** `projectionsvc.New` passes a `*store.PostgresStore` (`NewPostgresStoreWithQuerier`), so
+  SMP gets `SetSyncBaseline` without any change.
+- **Defect found.** The only one: the CHANGELOG conflict resolution dropped the `---` rule before
+  the catch-up section. `c6938efd` restores it (docs only).
+
+**SMP compatibility.** `i23/s-int3/smp` is SMP `main` `f5c6fd6d`, detached, with `../spine` =
+this worktree and `GOFLAGS=-mod=readonly`. The checkout was never modified, and `git status` is
+clean.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` with no DSNs, on the 13 SMP packages that import a changed Spine package (test imports included) plus `internal/customer/workflow` | 11 ok; `projectionsvc` has no tests. Two packages fail with the same list as the wave 3 integration and review runs: `gitread` (`TestBounded_ErrorContractEqualsCLIClient`: `bad_ref`, `bad_sha`, `missing_path`, `path_beyond_a_symlinked_dir`) and `projectionwriter` (`TestBoundedProjection_IncrementalAddAndModifyOversized`, `TestBoundedProjection_OversizedWorkflowStalls`). These are the known SMP TASK-004 contract tests: they also fail against waves 1 and 2 on SMP `main`, and SMP's wave 3 branch fixes them. Reported here, not fixed |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s3g_smp_it` with `vector`, `s3g_spine_runtime_it`) | 115 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 10m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, and `TEST_PROVISIONING_DSN` = `smp_prov` as in CI) | 1835 passed, 0 failed, 2 allowed Linux-only skips; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | 246 passed, 0 failed, 1 allowed Linux-only skip; `testgate: PASS` |
+
+**Not run.**
+- The other steps of SMP's integration job: the platform-DB shared suites, fenced migrate,
+  workspace-schema, faultinject and verify-children. They are not in this gate list.
+- Image-based gates (images, RDS emulation, an isolated `make dev-up` smoke). They need images
+  built from these branches.
+- GitHub CI. It cannot run this branch until Spine is pushed.
+
+**Environment.**
+- PostgreSQL: the shared PostgreSQL container on `localhost:55630`. Only `s3g_*` databases were
+  created, and all of them were dropped. There were no `ws_*` databases or roles before the SMP
+  suites ran and none after.
+- Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
+  disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
+- Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
