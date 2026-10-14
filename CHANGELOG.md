@@ -569,6 +569,9 @@ previous build). Externally visible:
   `ExpectedHeadSHA` gets it checked (old clients never send it); `git.CommitOpts` trailers outside
   the standard four are now written in sorted order instead of map order. Everything else — every
   code path and git argv — is unchanged without `EnableMergeBinding`.
+
+---
+
 ## INIT-023 — Codex 6.1 catch-up review of waves 1 and 2
 
 ### Changed
