@@ -41,7 +41,12 @@ release is cut — this file is a staging area.
   `needs_rework` loop, or a restart-recovered row that still names its actor — can be claimed only
   by that prior holder; an operator can still assign it to anyone. Without it a contributor could
   claim a colleague's reworked draft and then write the branch as its bound actor. A step its
-  holder released stays claimable by others; a retry after a failed attempt is not re-offered.
+  holder released stays claimable by others; a retry after a failed attempt is not re-offered;
+  nor is an attempt whose prior holder no longer resolves or is not `active` (it could never claim
+  it back). With `EnforceExecutionMode` on (strict), `automated_only` and `ai_only` steps are not
+  re-offered at all: only operator-provisioned machine actors can bind them, and auto-selection
+  already hands their rework to any eligible pool member, so pinning the claim to one runner or
+  agent identity would only strand the attempt when it has gone.
 - **Workflow definitions have one producer (design-check V3, V4).** The artifact endpoints'
   workflow-path guard was a raw prefix test, so `./workflows/x`, `governance/../workflows/x` and
   `workflows//x` reached `workflows/` on a run branch (and `PUT /artifacts/./workflows/<id>.yaml`
@@ -49,6 +54,13 @@ release is cut — this file is a staging area.
   slashes, case folding). `POST /runs` with `mode: planning` and a `workflows/` task path, which
   minted a non-lifecycle run that could lock that workflow against governed edits, is refused, and
   so is the same path in the engine's `StartPlanningRun`.
+- **Not closed here: workflow edits by push.** "Workflow edits ride only their own run" (V2) is
+  enforced on the API path. A git push is admitted by the binding alone (INIT-023 TASK-016) and the
+  pre-receive gate checks no paths, so the actor bound to a task run's (or a lifecycle run's) current
+  step can still push changes under `workflows/` — or any other governed path — onto that run
+  branch, and the governed merge then publishes them under that run's review rather than
+  `workflow_review`. Closing that is the governance path guard (INIT-023 TASK-006); see
+  `KNOWN-LIMITATIONS.md`.
 
 ### Changed
 
@@ -73,7 +85,10 @@ release is cut — this file is a staging area.
   never named); `409` (`detail.step_type`) during a `review` or `internal` step for every role;
   `409` operator-only when the run has no run-level cursor (legacy or diverged) or its branch is
   not an engine run branch; `409` when the step definition cannot be resolved; `503` when no step
-  assigner is configured. After `POST /artifacts/entry` or a workflow planning run starts, the
+  assigner is configured. API writes land on the run's branch in the primary repository, so while
+  the current step is routed to a code repository (ADR-015 `repository: <id>`) only operators may
+  write it: the step's holder gets `409` with `detail.repository_id` (the same rule as a push of
+  that branch to the primary repository; before, any contributor could write it). After `POST /artifacts/entry` or a workflow planning run starts, the
   author claims the draft step before stacking edits (the same claim was already required to submit
   it); after `needs_rework`, the reworked step is claimed again.
 - **A run that governs a workflow definition accepts no artifact writes** (`400`).
@@ -86,6 +101,28 @@ release is cut — this file is a staging area.
 - **Wiring:** single-workspace `spine serve` now wires the workflow planning starter (pooled
   workspaces already had one) and installs the branch-protection policy on every
   `workflow.Service`. No event type, schema, migration or environment variable is added.
+
+### Upgrade note: workflow runs left behind by failed starts
+
+Before this change a failed workflow-lifecycle start — a reviewer `POST /workflows` for an id that
+already exists, or a git error on the branch write — left its planning run `pending` with the run
+branch deleted, and scheduler recovery promotes such runs to `active` with a waiting `draft` step.
+They never finish. After the upgrade the one-open-run rule counts them, so every reviewer `POST` /
+`PUT` of that workflow answers `409` naming the run (`write_context` on it fails, its branch being
+gone). Operators should look for them once and cancel them:
+
+```sql
+SELECT run_id, task_path, status, branch_name, current_step_id
+  FROM runtime.runs
+ WHERE mode = 'planning' AND task_path LIKE 'workflows/%'
+   AND status NOT IN ('completed', 'failed', 'cancelled');
+```
+
+For each row whose `branch_name` no longer exists in the served repository (`git -C <repo>
+rev-parse --verify --quiet refs/heads/<branch_name>` prints nothing), run `spine run cancel
+<run_id>` (or `POST /api/v1/runs/{run_id}/cancel`) as an operator. Without database access, `GET
+/api/v1/query/runs?task_path=workflows/<id>.yaml` lists the runs of one workflow. The `409` message
+now names the operator cancel as the recovery for a stale run.
 
 ### For embedders
 

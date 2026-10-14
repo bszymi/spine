@@ -48,8 +48,43 @@ paths:
                 $ref: '#/components/schemas/ArtifactCreateResponse'
         '400':
           $ref: '#/components/responses/InvalidParams'
+        '403':
+          description: |
+            Branch protection refused the write, or — with a `write_context`
+            naming a run — the caller is neither the actor bound to the
+            run's current step nor an operator (the response never names
+            the holder; see `WriteContext`)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
         '409':
-          $ref: '#/components/responses/AlreadyExists'
+          description: |
+            The artifact already exists (`already_exists`), or (`conflict`)
+            With a `write_context` naming a run, the run's branch accepts no
+            write from this caller now (see `WriteContext`): its current
+            step is waiting or unassigned (claim it first;
+            `detail.execution_id`), has no open execution, is a `review` or
+            `internal` step (`detail.step_type`; every role), is routed to a
+            code repository (`detail.repository_id`), or cannot be resolved;
+            or the run has no run-level current step or no engine run
+            branch (operators only)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
         '422':
           $ref: '#/components/responses/ValidationFailed'
 
@@ -152,8 +187,10 @@ paths:
         '409':
           description: |
             Run is past the draft step, its draft step is waiting or
-            unassigned, it has no open execution for the draft step, or the
-            step definition cannot be resolved
+            unassigned, it has no open execution for the draft step, the
+            draft step is routed to a code repository
+            (`detail.repository_id`; the branch written is the primary
+            repository's), or the step definition cannot be resolved
 
   /artifacts/{path}:
     get:
@@ -210,8 +247,44 @@ paths:
                 $ref: '#/components/schemas/ArtifactUpdateResponse'
         '400':
           $ref: '#/components/responses/InvalidParams'
+        '403':
+          description: |
+            Branch protection refused the write, or — with a `write_context`
+            naming a run — the caller is neither the actor bound to the
+            run's current step nor an operator (the response never names
+            the holder; see `WriteContext`)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            With a `write_context` naming a run, the run's branch accepts no
+            write from this caller now (see `WriteContext`): its current
+            step is waiting or unassigned (claim it first;
+            `detail.execution_id`), has no open execution, is a `review` or
+            `internal` step (`detail.step_type`; every role), is routed to a
+            code repository (`detail.repository_id`), or cannot be resolved;
+            or the run has no run-level current step or no engine run
+            branch (operators only)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  errors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Error'
         '422':
           $ref: '#/components/responses/ValidationFailed'
 
@@ -1168,7 +1241,12 @@ components:
         has no open execution, 403 for any other caller (the response never
         names the holder). While the current step is a `review` or
         `internal` step the branch is frozen for every role, operators
-        included (409, `detail.step_type`). A run with no run-level current
+        included (409, `detail.step_type`). API writes land on the run's
+        branch in the primary repository, so while the current step is
+        routed to a code repository (ADR-015 `repository: <id>`; a step
+        writes only its own repository) the branch accepts them only from
+        operators: its holder gets 409 with `detail.repository_id` (the
+        same rule as a push of that branch). A run with no run-level current
         step (legacy, or diverged) accepts API writes only from operators.
         A run that governs a workflow definition accepts no artifact writes
         (400).
