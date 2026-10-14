@@ -350,7 +350,9 @@ State transitions within a single entity are atomic:
 - **A terminal execution is never routed twice.** `step.submit` on `completed` is a
   no-op transition, which a (status, actor) comparison cannot see, so the submit path
   refuses an execution that is terminal when read, and one that moved since the
-  submission was validated; a lost submit race answers with the persisted state.
+  submission was validated (the step's own actor acknowledging it, `assigned →
+  in_progress`, is the one move that is not a conflict); a lost submit race answers
+  with the persisted state.
 - **Not transactional:** a step's terminal write and the creation of the next
   execution are separate writes. A cancel between them leaves a `waiting` execution
   on the cancelled run, which the run-status entry checks keep inert.

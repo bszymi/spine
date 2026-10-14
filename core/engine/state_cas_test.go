@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/core/actor"
 	"github.com/bszymi/spine/core/domain"
 )
 
@@ -624,6 +625,88 @@ func TestRecoverCompletedStep_DoesNotRewindAMovedCursor(t *testing.T) {
 	if got := f.st.run(f.runID).CurrentStepID; got != "later-step" {
 		t.Fatalf("cursor rewound to %q", got)
 	}
+}
+
+// Codex review, round 3: the step's own actor acknowledging concurrently
+// (assigned → in_progress) is not a conflict — not between IngestResult's
+// read and SubmitStepResult's, and not between SubmitStepResult's read and
+// its auto-acknowledge — so the result is applied, also through the queue
+// consumer. A rebind in the same window still is. Mutation: requiring an
+// exact snapshot match (or failing on the auto-ack miss) fails it.
+func TestSubmit_ConcurrentAcknowledgeIsNotAConflict(t *testing.T) {
+	ack := func(f *casFix, id string) {
+		f.st.mutateExec(id, func(x *domain.StepExecution) {
+			now := time.Now()
+			x.Status, x.StartedAt = domain.StepStatusInProgress, &now
+		})
+	}
+	for _, capability := range []bool{false, true} {
+		t.Run(fmt.Sprintf("IngestResult, capability=%v", capability), func(t *testing.T) {
+			f := newCasFix(t, casWorkflow(), capability)
+			e := f.addExec("execute", domain.StepStatusAssigned, "actor-a")
+			f.st.afterGetExec = func(id string, n int) {
+				if n == 1 {
+					ack(f, id)
+				}
+			}
+			resp, err := f.orch.IngestResult(context.Background(), SubmitRequest{ExecutionID: e.ExecutionID,
+				OutcomeID: "completed", ArtifactsProduced: []string{"deliverable"}, ActorID: "actor-a"})
+			if err != nil || resp.Status != domain.StepStatusCompleted {
+				t.Fatalf("IngestResult = %+v, %v; want completed", resp, err)
+			}
+		})
+	}
+	t.Run("auto-acknowledge lost to the owner's acknowledge (capability)", func(t *testing.T) {
+		f := newCasFix(t, casWorkflow(), true)
+		e := f.addExec("execute", domain.StepStatusAssigned, "actor-a")
+		f.st.afterGetExec = func(id string, n int) {
+			if n == 1 { // SubmitStepResult has its snapshot
+				ack(f, id)
+			}
+		}
+		if err := f.orch.SubmitStepResult(context.Background(), e.ExecutionID,
+			StepResult{OutcomeID: "completed", ArtifactsProduced: []string{"deliverable"}}); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		if got := f.st.exec(e.ExecutionID).Status; got != domain.StepStatusCompleted {
+			t.Fatalf("execute = %s, want completed", got)
+		}
+		if f.st.exec(f.runID+"-review-1") == nil {
+			t.Fatal("not routed")
+		}
+	})
+	t.Run("consumer applies its result", func(t *testing.T) {
+		f := newCasFix(t, casWorkflow(), true)
+		e := f.addExec("execute", domain.StepStatusAssigned, "actor-a")
+		f.st.afterGetExec = func(id string, n int) {
+			if n == 1 {
+				ack(f, id)
+			}
+		}
+		req := actor.AssignmentRequest{AssignmentID: e.ExecutionID, RunID: f.runID, StepID: "execute", ActorID: "actor-a"}
+		if err := NewConsumer(nil, f.orch).executeAndSubmit(context.Background(), discardLogger(), req, staticProvider{outcome: "completed"}); err != nil {
+			t.Fatalf("consumer: %v", err)
+		}
+		if got := f.st.exec(e.ExecutionID).Status; got != domain.StepStatusCompleted {
+			t.Fatalf("execute = %s, want completed (the result was dropped)", got)
+		}
+	})
+	t.Run("consumer keeps the error for a rebind", func(t *testing.T) {
+		f := newCasFix(t, casWorkflow(), true)
+		e := f.addExec("execute", domain.StepStatusAssigned, "actor-a")
+		f.st.afterGetExec = func(id string, n int) {
+			if n == 1 {
+				f.st.mutateExec(id, func(x *domain.StepExecution) { x.ActorID = "actor-b" })
+			}
+		}
+		req := actor.AssignmentRequest{AssignmentID: e.ExecutionID, RunID: f.runID, StepID: "execute", ActorID: "actor-a"}
+		if err := NewConsumer(nil, f.orch).executeAndSubmit(context.Background(), discardLogger(), req, staticProvider{outcome: "completed"}); err == nil {
+			t.Fatal("a result for a rebound execution was reported as applied")
+		}
+		if got := f.st.exec(e.ExecutionID); got.Status != domain.StepStatusAssigned || got.ActorID != "actor-b" {
+			t.Fatalf("execution = %s/%q, want the rebind's", got.Status, got.ActorID)
+		}
+	})
 }
 
 // failingCancelAssignments fails every UpdateAssignmentStatus.

@@ -162,7 +162,19 @@ func (o *Orchestrator) branchChangeAtSubmit(ctx context.Context, run *domain.Run
 	}
 	bc.HeadSHA = hb.head
 
-	if prev, by, ok, _ := trustedBinding(run.CommitMeta, run.RunID); ok {
+	if prev, by, ok, _ := trustedBinding(run.CommitMeta, run.RunID); ok && by == boundByStep(exec.StepID, exec.ExecutionID) {
+		// The run's binding is this execution's own capture: an earlier
+		// attempt of this submit recorded it (and this evidence) but its
+		// terminal write failed, so the execution is still open (codex
+		// review, round 3). Comparing with it would call every change
+		// "unchanged"; keep the comparison point that attempt recorded.
+		rec, found := storedEvidence(run, exec.ExecutionID)
+		if !found || rec.BranchChange.PreviousSHA == "" {
+			bc.Status, bc.Reason = BranchChangeUnknown, EvidenceReasonNoPreviousSHA
+			return bc
+		}
+		bc.PreviousSHA, bc.PreviousSource = rec.BranchChange.PreviousSHA, rec.BranchChange.PreviousSource
+	} else if ok {
 		bc.PreviousSHA, bc.PreviousSource = prev, by
 	} else if base := run.RepositoryBaselines[domain.PrimaryRepositoryID]; isBoundObjectID(base) {
 		// A binding this run did not record is never a comparison point
@@ -191,6 +203,19 @@ func (o *Orchestrator) branchChangeAtSubmit(ctx context.Context, run *domain.Run
 	}
 	bc.Status, bc.ChangedPaths = BranchChangeChanged, intPtr(len(diffs))
 	return bc
+}
+
+// storedEvidence decodes the run's persisted evidence for executionID.
+func storedEvidence(run *domain.Run, executionID string) (stepEvidenceRecord, bool) {
+	raw, ok := run.CommitMeta[CommitMetaEvidencePrefix+executionID]
+	if !ok {
+		return stepEvidenceRecord{}, false
+	}
+	var rec stepEvidenceRecord
+	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		return stepEvidenceRecord{}, false
+	}
+	return rec, true
 }
 
 // diffFailureKind classifies a failed evidence diff without its text.

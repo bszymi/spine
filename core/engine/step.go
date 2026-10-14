@@ -381,7 +381,7 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	if err := checkSubmitter(exec, result.ActorID); err != nil {
 		return err
 	}
-	if result.expect != nil && stateOf(exec) != *result.expect {
+	if result.expect != nil && !acknowledgedOrSame(*result.expect, stateOf(exec)) {
 		return stepStateChanged(executionID, fmt.Sprintf(
 			"it moved from %s to %s since the submission was validated", result.expect.status, exec.Status))
 	}
@@ -459,7 +459,18 @@ func (o *Orchestrator) SubmitStepResult(ctx context.Context, executionID string,
 	prior := stateOf(exec)
 	if exec.Status == domain.StepStatusAssigned {
 		if err := o.autoAcknowledgeStep(ctx, exec, prior, run); err != nil {
-			return err
+			// The same actor acknowledging concurrently (its runner's
+			// /acknowledge racing the submit) is not a conflict (codex
+			// review, round 3): continue from the acknowledged row. Any
+			// other move — a rebind, a release, a terminal write — stands.
+			if !isStepStateChanged(err) {
+				return err
+			}
+			cur, rerr := o.store.GetStepExecution(ctx, executionID)
+			if rerr != nil || !acknowledgedOrSame(prior, stateOf(cur)) || cur.Status != domain.StepStatusInProgress {
+				return err
+			}
+			exec = cur
 		}
 		prior = stateOf(exec)
 	}
@@ -561,6 +572,19 @@ func (o *Orchestrator) resumeRoutedSuccessor(ctx context.Context, run *domain.Ru
 		log.Warn("recovery: successor activation failed", "step_id", next, "error", err)
 	}
 	return nil
+}
+
+// acknowledgedOrSame reports whether cur is the state `was` described, or
+// that state acknowledged by the same actor (assigned → in_progress). An
+// acknowledgment is the one benign move between a submission's reads and
+// its write: the step's owner (or its runner) started it. Any other change
+// of status or actor means the execution moved under the submission.
+func acknowledgedOrSame(was, cur stepState) bool {
+	if cur == was {
+		return true
+	}
+	return was.status == domain.StepStatusAssigned && cur.status == domain.StepStatusInProgress &&
+		cur.actorID == was.actorID && was.actorID != ""
 }
 
 // checkSubmitter is the engine's own submit-ownership check (INIT-023

@@ -12,6 +12,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -330,6 +331,53 @@ func TestStepCompleted_FlagsRequiredOutputsWithoutBranchChange(t *testing.T) {
 			t.Fatalf("non-reserved outcome key lost: %q", got)
 		}
 	})
+}
+
+// failTerminalOnce fails the first conditional write that completes an
+// execution, after the binding and evidence were stored (b911c04's order).
+type failTerminalOnce struct {
+	condStore
+	failed bool
+}
+
+func (s *failTerminalOnce) TransitionStepExecution(ctx context.Context, e *domain.StepExecution, from domain.StepExecutionStatus, actorID string) (bool, error) {
+	if e.Status == domain.StepStatusCompleted && !s.failed {
+		s.failed = true
+		return false, errors.New("store: connection reset")
+	}
+	return s.condStore.TransitionStepExecution(ctx, e, from, actorID)
+}
+
+// Codex review, round 3: a submit whose terminal write failed after its
+// binding and evidence were stored is retried against the comparison point
+// that attempt recorded, not against its own capture — otherwise every
+// change reads "unchanged" and the step is falsely flagged. Mutation:
+// dropping the own-binding branch in branchChangeAtSubmit fails it.
+func TestStepCompleted_RetryKeepsTheComparisonPoint(t *testing.T) {
+	f := newEvidenceFix(t, casWorkflow(), true)
+	fs := &failTerminalOnce{condStore: condStore{f.st}}
+	f.orch.store = fs
+	f.eg.diffN = 2
+	f.git.setHead("spine/run/run-1", sha40('1'))
+	e := f.addExec("execute", domain.StepStatusInProgress, "actor-a")
+	if err := f.orch.SubmitStepResult(context.Background(), e.ExecutionID, StepResult{OutcomeID: "completed", ArtifactsProduced: []string{"deliverable"}}); err == nil {
+		t.Fatal("first attempt: want the terminal write's error")
+	}
+	if got := f.st.exec(e.ExecutionID).Status; got != domain.StepStatusInProgress {
+		t.Fatalf("after the failed write the execution is %s, want in_progress", got)
+	}
+	if err := f.orch.SubmitStepResult(context.Background(), e.ExecutionID, StepResult{OutcomeID: "completed", ArtifactsProduced: []string{"deliverable"}}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	_, p, _ := f.completedPayload(t, e.ExecutionID)
+	want := BranchChange{RepositoryID: "spine", Status: BranchChangeChanged, HeadSHA: sha40('1'),
+		PreviousSHA: sha40('b'), PreviousSource: EvidencePreviousSourceBaseline, ChangedPaths: intPtr(2)}
+	if !reflect.DeepEqual(p.BranchChange, &want) || *p.RequiredOutputsUnchanged {
+		t.Fatalf("retry branch_change = %+v (flag %v), want %+v and no flag", p.BranchChange, *p.RequiredOutputsUnchanged, want)
+	}
+	if rec, ok := f.storedEvidence(t, e.ExecutionID); !ok || !reflect.DeepEqual(rec.BranchChange, want) {
+		t.Fatalf("stored evidence = %+v, want %+v", rec.BranchChange, want)
+	}
 }
 
 // The documented base payload, the per-execution event id and the

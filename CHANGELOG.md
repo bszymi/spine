@@ -68,7 +68,8 @@ through reserved `commit_meta` keys (5).
   another writer on the no-orchestrator fallback). `POST /runs/{run_id}/steps/{step_id}/assign` on
   the engine-less fallback answers 409 when the step was bound meanwhile.
 - **A lost submit race answers 200 with the winner's persisted state** — what a sequential
-  duplicate submit already got — or 409 when the execution is still live but moved (rebound).
+  duplicate submit already got — or 409 when the execution is still live but moved (rebound,
+  released). The step's own actor acknowledging it concurrently is not a conflict.
 - **A submit that loses to the timeout scanner** leaves the step failed (no `step_timeout` is
   emitted, and `spine_timeouts_detected_total` is not incremented, when the submit won instead).
   A run that moved to `committing` between the run-timeout re-read and its cancel is not cancelled.

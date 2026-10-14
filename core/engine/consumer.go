@@ -132,12 +132,17 @@ func (c *Consumer) executeAndSubmit(ctx context.Context, log *slog.Logger, req a
 		ActorID:           req.ActorID,
 	}); err != nil {
 		if errors.Is(err, ErrStepStateChanged) {
-			// The execution was resolved by someone else first (already
-			// terminal, or moved under it): nothing was written and there
-			// is nothing to retry. The memory queue does not redeliver on
-			// error, so this only keeps the log honest.
-			log.Info("step result not applied; the execution was resolved concurrently", "error", err)
-			return nil
+			// Only an execution someone else already resolved (terminal)
+			// means there is nothing left to do (codex review, round 3: a
+			// concurrent acknowledgment by the same actor is absorbed by
+			// SubmitStepResult itself and never lands here). A live
+			// execution that moved — released, rebound — keeps the error:
+			// the result was not applied.
+			if cur, rerr := c.orchestrator.store.GetStepExecution(ctx, req.AssignmentID); rerr == nil && cur.Status.IsTerminal() {
+				log.Info("step result not applied; the execution was resolved concurrently",
+					"status", cur.Status, "error", err)
+				return nil
+			}
 		}
 		log.Error("failed to submit step result", "error", err)
 		return fmt.Errorf("submit step result: %w", err)
