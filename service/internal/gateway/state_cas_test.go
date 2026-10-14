@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -115,15 +116,33 @@ type (
 )
 
 // casNoGit fails the test on any call: run detail and a refused
-// submit must not touch git.
+// submit must not touch git. Diff (the one call either path could make)
+// is reported with t.Errorf — it runs on the server's goroutine — and
+// counted so the tests assert zero calls; every other method panics on the
+// nil embedded interface (review round 1: the guarantee was documented
+// but never asserted).
 type casNoGit struct {
 	engine.GitOperator
+	t     *testing.T
+	mu    sync.Mutex
 	calls int
 }
 
-func (g *casNoGit) Diff(context.Context, string, string) ([]git.FileDiff, error) {
+func (g *casNoGit) Diff(_ context.Context, a, b string) ([]git.FileDiff, error) {
+	g.mu.Lock()
 	g.calls++
+	g.mu.Unlock()
+	g.t.Errorf("unexpected git Diff(%s, %s)", a, b)
 	return nil, errors.New("no git expected")
+}
+
+func (g *casNoGit) requireNoCall() {
+	g.t.Helper()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.calls != 0 {
+		g.t.Fatalf("%d git calls, want none", g.calls)
+	}
 }
 
 type casFixedLoader struct{ wf *domain.WorkflowDefinition }
@@ -132,13 +151,14 @@ func (l casFixedLoader) LoadWorkflow(context.Context, string, string) (*domain.W
 	return l.wf, nil
 }
 
-func casNewTestOrch(t *testing.T, rs engine.RunStore, wf *domain.WorkflowDefinition) *engine.Orchestrator {
+func casNewTestOrch(t *testing.T, rs engine.RunStore, wf *domain.WorkflowDefinition) (*engine.Orchestrator, *casNoGit) {
 	t.Helper()
-	orch, err := engine.New(casNilResolver{}, rs, casNilActors{}, casNilArtifacts{}, casNilEvents{}, &casNoGit{}, casFixedLoader{wf: wf})
+	g := &casNoGit{t: t}
+	orch, err := engine.New(casNilResolver{}, rs, casNilActors{}, casNilArtifacts{}, casNilEvents{}, g, casFixedLoader{wf: wf})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return orch
+	return orch, g
 }
 
 // AC 4 (b): with no store wired (the gateway pre-check's fall-through
@@ -148,7 +168,7 @@ func TestStepSubmit_EngineRefusesForeignSubmitterWithoutStore(t *testing.T) {
 	authSvc, token := casTokenFor(t, fs, "alice", domain.RoleContributor)
 	rs := &casEngineRunStore{exec: &domain.StepExecution{ExecutionID: "exec-1", RunID: "run-1", StepID: "execute",
 		Status: domain.StepStatusInProgress, Attempt: 1, ActorID: "bob"}}
-	orch := casNewTestOrch(t, rs, &domain.WorkflowDefinition{})
+	orch, noGit := casNewTestOrch(t, rs, &domain.WorkflowDefinition{})
 	ts := httptest.NewServer(gateway.NewServer(":0", gateway.ServerConfig{
 		Auth: authSvc, ResultHandler: casEngineResultHandler{orch: orch}, // no Store
 	}).Handler())
@@ -158,6 +178,7 @@ func TestStepSubmit_EngineRefusesForeignSubmitterWithoutStore(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-owner submit without a store: %d %s, want 403", resp.StatusCode, body)
 	}
+	noGit.requireNoCall() // a non-owner costs no git call (AC 5)
 }
 
 // casLostRaceStore makes every conditional write miss.
@@ -271,7 +292,7 @@ func TestRunStatus_StepOutputEvidenceFromOrchestrator(t *testing.T) {
 		},
 	}
 	wf := &domain.WorkflowDefinition{Steps: []domain.StepDefinition{{ID: "execute", RequiredOutputs: []string{"deliverable"}}, {ID: "review"}}}
-	orch := casNewTestOrch(t, rs, wf)
+	orch, noGit := casNewTestOrch(t, rs, wf)
 	fs := newFakeStore()
 	authSvc, token := casTokenFor(t, fs, "admin-1", domain.RoleAdmin)
 	ts := httptest.NewServer(gateway.NewServer(":0", gateway.ServerConfig{Store: fs, Auth: authSvc, RunCanceller: orch}).Handler())
@@ -290,6 +311,7 @@ func TestRunStatus_StepOutputEvidenceFromOrchestrator(t *testing.T) {
 		len(got.Evidence[0].RequiredOutputs) != 1 {
 		t.Fatalf("step_output_evidence = %+v", got.Evidence)
 	}
+	noGit.requireNoCall() // run detail is read from commit_meta, never from git
 }
 
 // Compile-time: the orchestrator is a StepOutputEvidenceReader.

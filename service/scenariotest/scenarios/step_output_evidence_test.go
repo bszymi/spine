@@ -3,10 +3,16 @@
 package scenarios_test
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	spineEngine "github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/service/scenariotest/engine"
@@ -27,7 +33,8 @@ import (
 //	Then the review's evidence is changed (one path)
 //	When execute attempt 2 completes with nothing new pushed
 //	Then it is unchanged against the review's binding and flagged
-//	And run detail returns the three entries without the event log
+//	And the event log holds the three step_completed events with the same evidence
+//	And run detail returns the same three entries after the run's event log rows are deleted
 func TestStepOutputEvidence_RecordedAndReadBack(t *testing.T) {
 	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
 	taskPath := "initiatives/init-081/epics/epic-081/tasks/task-081.md"
@@ -42,6 +49,17 @@ func TestStepOutputEvidence_RecordedAndReadBack(t *testing.T) {
 			engine.WriteAndCommit("workflows/task-default.yaml", standardRunMergeWorkflowYAML, "seed task-default workflow"),
 			engine.SeedHierarchy("INIT-081", "EPIC-081", "TASK-081"),
 			engine.SyncProjections(),
+			{
+				// spine serve's wiring: the delivery subscriber writes every
+				// routed event to runtime.event_log (review round 1: without
+				// it the log stayed empty and the deletion below proved
+				// nothing).
+				Name: "event-log-subscriber",
+				Action: func(sc *engine.ScenarioContext) error {
+					sub := delivery.NewDeliverySubscriber(sc.Runtime.Store, delivery.NewStoreSubscriptionLister(sc.Runtime.Store))
+					return sub.Subscribe(sc.Ctx, sc.Runtime.Events)
+				},
+			},
 			engine.StartRun(taskPath),
 			engine.AssertRunStatus(domain.RunStatusActive),
 
@@ -59,16 +77,43 @@ func TestStepOutputEvidence_RecordedAndReadBack(t *testing.T) {
 				Name: "run-detail-evidence",
 				Action: func(sc *engine.ScenarioContext) error {
 					runID := sc.MustGet("run_id").(string)
+					before, err := sc.Runtime.Orchestrator.StepOutputEvidence(sc.Ctx, runID)
+					if err != nil {
+						return err
+					}
+					// The audit-trail copy: the run's three step_completed
+					// events reach the event log (asynchronously, through
+					// the queue) and carry the same evidence run detail
+					// returns.
+					logged, err := waitStepCompletedLogged(sc.Ctx, sc.Runtime.Store, runID, 3)
+					if err != nil {
+						return err
+					}
+					for _, ev := range before {
+						p, ok := logged[ev.ExecutionID]
+						if !ok {
+							return fmt.Errorf("no step_completed in the event log for %s", ev.ExecutionID)
+						}
+						if p.BranchChange == nil || !reflect.DeepEqual(*p.BranchChange, ev.BranchChange) ||
+							p.RequiredOutputsUnchanged == nil || *p.RequiredOutputsUnchanged != ev.RequiredOutputsUnchanged {
+							return fmt.Errorf("event log evidence for %s = %+v, run detail %+v", ev.ExecutionID, p, ev)
+						}
+					}
 					// Run detail must not depend on the retention-pruned
-					// event log.
-					// runtime.event_log has no run_id column; its payload
-					// is the event JSON, which names the run.
+					// event log. runtime.event_log has no run_id column;
+					// its payload is the event JSON, which names the run.
 					if err := sc.Runtime.Store.ExecRaw(sc.Ctx, `DELETE FROM runtime.event_log WHERE payload::text LIKE '%' || $1 || '%'`, runID); err != nil {
 						return fmt.Errorf("clear event log: %w", err)
+					}
+					if left, err := stepCompletedLogged(sc.Ctx, sc.Runtime.Store, runID); err != nil || len(left) != 0 {
+						return fmt.Errorf("after the delete the event log still holds %d step_completed rows of the run (%v)", len(left), err)
 					}
 					got, err := sc.Runtime.Orchestrator.StepOutputEvidence(sc.Ctx, runID)
 					if err != nil {
 						return err
+					}
+					if !reflect.DeepEqual(got, before) {
+						return fmt.Errorf("run detail changed when the event log was deleted:\nbefore %+v\nafter  %+v", before, got)
 					}
 					if len(got) != 3 {
 						return fmt.Errorf("%d evidence entries, want 3: %+v", len(got), got)
@@ -97,6 +142,57 @@ func TestStepOutputEvidence_RecordedAndReadBack(t *testing.T) {
 			},
 		},
 	})
+}
+
+// loggedStepCompleted is the evidence part of a logged step_completed.
+type loggedStepCompleted struct {
+	ExecutionID              string                    `json:"execution_id"`
+	BranchChange             *spineEngine.BranchChange `json:"branch_change"`
+	RequiredOutputsUnchanged *bool                     `json:"required_outputs_unchanged"`
+}
+
+// stepCompletedLogged returns the run's step_completed payloads in
+// runtime.event_log, by execution id.
+func stepCompletedLogged(ctx context.Context, st *store.PostgresStore, runID string) (map[string]loggedStepCompleted, error) {
+	rows, err := st.ListEventsAfter(ctx, "", []string{string(domain.EventStepCompleted)}, 1000)
+	if err != nil {
+		return nil, fmt.Errorf("list event log: %w", err)
+	}
+	out := map[string]loggedStepCompleted{}
+	for i := range rows {
+		var ev domain.Event
+		if err := json.Unmarshal(rows[i].Payload, &ev); err != nil {
+			return nil, fmt.Errorf("event %s: %w", rows[i].EventID, err)
+		}
+		if ev.RunID != runID {
+			continue
+		}
+		var p loggedStepCompleted
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return nil, fmt.Errorf("event %s payload: %w", rows[i].EventID, err)
+		}
+		out[p.ExecutionID] = p
+	}
+	return out, nil
+}
+
+// waitStepCompletedLogged waits (bounded) until the event log holds at
+// least n step_completed events of the run.
+func waitStepCompletedLogged(ctx context.Context, st *store.PostgresStore, runID string, n int) (map[string]loggedStepCompleted, error) {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		got, err := stepCompletedLogged(ctx, st, runID)
+		if err != nil {
+			return nil, err
+		}
+		if len(got) >= n {
+			return got, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("event log holds %d step_completed events of the run, want %d", len(got), n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // INIT-023 TASK-008 (audit P3-24), on PostgreSQL: a completed execution is
