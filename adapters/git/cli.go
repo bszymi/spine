@@ -1,12 +1,13 @@
 package git
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,10 +65,10 @@ import (
 //	Merge (abort)       merge --abort                     (Strategy "abort" or Source "--abort", nothing else)
 //	CreateBranch        branch [eoo] <n> <HEAD | oid>^{commit}   (git branch re-DWIMs a bare start point)
 //	DeleteBranch        branch -D [eoo] <n>
-//	Diff                diff --name-status [eoo] <from'> <to'> --
+//	Diff                diff --name-status -z [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
-//	ReadFile            show [eoo] <ref'>:<path> --
-//	ListFiles           ls-tree -r --name-only [eoo] <ref'>
+//	ReadFile            cat-file -s [eoo] <ref'>:<path>, then show [eoo] <ref'>:<path> --
+//	ListFiles           ls-tree -r --name-only -z [eoo] <ref'>
 //	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
 //	RefSHA              rev-parse --verify [eoo] <ref'>   (no call at all for an existing branch)
 //	MergeBase           merge-base [eoo] <a'> <b'>
@@ -91,6 +92,19 @@ import (
 //
 // The client requires git >= MinGitVersion (2.30); hosts call
 // CheckGitVersion at startup.
+//
+// # Read bounds (INIT-023 TASK-003)
+//
+// No method buffers more than its limit (limits.go): ReadFile refuses a
+// blob over the per-blob limit before reading it (BlobTooLargeError,
+// ErrBlobTooLarge), every other read command fails past the per-command
+// stdout limit (OutputTooLargeError, ErrOutputTooLarge), and mutating
+// commands drain their stdout instead of failing on its size. git's own
+// memory on read commands is bounded per allocation (GIT_ALLOC_LIMIT)
+// and its delta-base cache is pinned, which leaves about three times the
+// alloc limit per read (a delta-chain step: base, result, cache), not
+// one. Diff and ListFiles read NUL-delimited output, so every path is
+// returned raw — never C-quoted, never whitespace-trimmed.
 type CLIClient struct {
 	repoPath         string
 	credentialHelper string   // path to external credential helper script
@@ -98,6 +112,16 @@ type CLIClient struct {
 	pushToken        string   // token for HTTPS push auth (SPINE_GIT_PUSH_TOKEN)
 	pushUsername     string   // username for token auth (default: x-access-token)
 	askpassPath      string   // path to temporary GIT_ASKPASS script (created from pushToken)
+
+	// Read bounds (limits.go). Zero means the default, so even a
+	// CLIClient not built by NewCLIClient is bounded.
+	maxBlobBytes     int64 // one ReadFile (WithMaxBlobBytes)
+	maxOutputBytes   int64 // stdout of every other command (WithMaxOutputBytes)
+	maxGitAllocBytes int64 // GIT_ALLOC_LIMIT on read commands (WithMaxGitAllocBytes)
+	// blobSize is ReadFile's size probe; nil means catFileSize. It is a
+	// field only so a test can make the probe lie and exercise the read's
+	// own cap (the second line of defence).
+	blobSize func(ctx context.Context, spec string) (int64, error)
 }
 
 // CLIOption configures a CLIClient.
@@ -145,11 +169,23 @@ func WithoutCredentialHelper() CLIOption {
 }
 
 // NewCLIClient creates a new Git client for the repository at the given path.
+//
+// Every client gets the read bounds (DefaultMaxBlobBytes,
+// DefaultMaxOutputBytes, GIT_ALLOC_LIMIT = 4 x the per-blob limit) unless
+// WithMaxBlobBytes / WithMaxOutputBytes / WithMaxGitAllocBytes say
+// otherwise.
 func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
-	c := &CLIClient{repoPath: repoPath}
+	c := &CLIClient{
+		repoPath:       repoPath,
+		maxBlobBytes:   DefaultMaxBlobBytes,
+		maxOutputBytes: DefaultMaxOutputBytes,
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
+	// Derived after every option, so WithMaxBlobBytes moves the default
+	// alloc limit with it and a too-small explicit value is raised.
+	c.maxGitAllocBytes = deriveGitAllocLimit(c.maxGitAllocBytes, c.blobLimit())
 	// When a push token is configured (and no credential helper takes priority),
 	// create a GIT_ASKPASS script that reads credentials from environment variables.
 	// This keeps the token out of argv and off disk in the script itself.
@@ -404,8 +440,11 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 		}
 		cmd.Env = env
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// stderr is bounded like every other command's (INIT-023 TASK-003):
+	// the remote controls the sideband ("remote: …") lines git relays,
+	// and an unbounded buffer would let it grow the heap at will.
+	stderr := &stderrSink{}
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		gitErr := classifyGitError("clone", strings.TrimSpace(stderr.String()))
 		gitErr.Err = err
@@ -615,6 +654,16 @@ func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
 // TASK-009), and a trailing `--` stops a "rev" that is really a path
 // from being silently read as a pathspec (`diff <sha> f` used to return
 // an empty diff; now it is "bad revision", ErrKindNotFound).
+//
+// The output is NUL-delimited (`-z`, INIT-023 TASK-003, audit P3-9), so
+// every path is returned raw. Without it git C-quoted any path holding a
+// byte >= 0x80, a control character, `"` or `\` ("r\303\251sum\303\251"),
+// and the quoted string no longer ended in ".md": a governed artifact in a
+// non-ASCII directory (artifact.Slugify keeps every Unicode letter) was
+// never projected, never status-cascaded, and NextID allocated its ID a
+// second time. Rename detection still follows diff.renames (porcelain
+// `git diff`). The parser is strict (parseNameStatusZ): a malformed or
+// truncated stream is an error, never a partial list.
 func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, error) {
 	if err := checkRev("diff", "from", from); err != nil {
 		return nil, err
@@ -630,47 +679,109 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 	if err != nil {
 		return nil, err
 	}
-	output, err := c.run(ctx, "diff", "diff", "--name-status", "--end-of-options", fromRev, toRev, "--")
+	output, err := c.run(ctx, "diff", "diff", "--name-status", "-z", "--end-of-options", fromRev, toRev, "--")
 	if err != nil {
 		return nil, err
 	}
+	diffs, err := parseNameStatusZ(output)
+	if err != nil {
+		return nil, &GitError{Kind: ErrKindPermanent, Op: "diff", Message: "unparseable diff output", Err: err}
+	}
+	return diffs, nil
+}
 
+// errMalformedDiff is parseNameStatusZ's error. It never echoes a path:
+// paths are committed, attacker-chosen text.
+var errMalformedDiff = errors.New("malformed `git diff --name-status -z` output")
+
+// parseNameStatusZ parses `git diff --name-status -z` output: records of
+// "<status>\0<path>\0", or "<status>\0<src>\0<dst>\0" for a status
+// starting with R (rename) or C (copy). Mapping:
+//
+//	A        added
+//	D        deleted
+//	M, T     modified (T: type change)
+//	R<score> renamed, OldPath = src, Path = dst
+//	C<score> added at dst (the copy source is unchanged; before -z this
+//	         fell into the default case and reported the SOURCE as
+//	         modified — only reachable with diff.renames=copies)
+//	other    modified at the single path, as before
+//
+// A truncated or malformed stream (no terminating NUL, an empty status
+// or path, a missing second path) returns an error and no records: one
+// mis-split would shift every later record onto the wrong path. Empty
+// output is (nil, nil).
+func parseNameStatusZ(out string) ([]FileDiff, error) {
+	if out == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(out, "\x00") {
+		return nil, fmt.Errorf("%w: unterminated record", errMalformedDiff)
+	}
+	// Scanned field by field, not split: the paths are substrings of the
+	// one output buffer, and no intermediate slice of every field is
+	// built. out ends in NUL, so every field is NUL-terminated and rest is
+	// empty exactly when the stream is exhausted.
+	rest := out
+	field := func() (string, bool) {
+		if rest == "" {
+			return "", false
+		}
+		f, tail, _ := strings.Cut(rest, "\x00")
+		rest = tail
+		return f, true
+	}
 	var diffs []FileDiff
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		if line == "" {
-			continue
+	for rest != "" {
+		status, _ := field()
+		if !validDiffStatus(status) {
+			return nil, fmt.Errorf("%w: unexpected status field at record %d", errMalformedDiff, len(diffs)+1)
 		}
-		parts := strings.Split(line, "\t")
-		if len(parts) < 2 {
-			continue
+		paths := 1
+		if status[0] == 'R' || status[0] == 'C' {
+			paths = 2
 		}
-
-		statusCode := parts[0]
+		p1, ok := field()
+		p2 := ""
+		if ok && paths == 2 {
+			p2, ok = field()
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: record %d is missing a path", errMalformedDiff, len(diffs)+1)
+		}
+		if p1 == "" || (paths == 2 && p2 == "") {
+			return nil, fmt.Errorf("%w: record %d has an empty path", errMalformedDiff, len(diffs)+1)
+		}
 		var fd FileDiff
-
-		switch {
-		case statusCode == "A":
-			fd = FileDiff{Path: parts[1], Status: "added"}
-		case statusCode == "M":
-			fd = FileDiff{Path: parts[1], Status: "modified"}
-		case statusCode == "D":
-			fd = FileDiff{Path: parts[1], Status: "deleted"}
-		case strings.HasPrefix(statusCode, "R"):
-			// Rename: R<score>\t<old>\t<new>
-			fd = FileDiff{Status: "renamed"}
-			if len(parts) >= 3 {
-				fd.OldPath = parts[1]
-				fd.Path = parts[2]
-			} else {
-				fd.Path = parts[1]
-			}
-		default:
-			fd = FileDiff{Path: parts[1], Status: "modified"}
+		switch status[0] {
+		case 'A':
+			fd = FileDiff{Path: p1, Status: "added"}
+		case 'D':
+			fd = FileDiff{Path: p1, Status: "deleted"}
+		case 'R':
+			fd = FileDiff{OldPath: p1, Path: p2, Status: "renamed"}
+		case 'C':
+			fd = FileDiff{Path: p2, Status: "added"}
+		default: // M, T and anything else git may print for one path
+			fd = FileDiff{Path: p1, Status: "modified"}
 		}
-
 		diffs = append(diffs, fd)
 	}
 	return diffs, nil
+}
+
+// validDiffStatus accepts git's name-status field: one upper-case letter
+// optionally followed by a decimal score ("R100", "C075").
+func validDiffStatus(s string) bool {
+	if s == "" || s[0] < 'A' || s[0] > 'Z' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Log returns commit history. A non-empty Since is Rev class; Path
@@ -710,6 +821,39 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 // ReadFile reads a file at a specific Git ref (Rev class). An empty ref
 // is refused: `git show :<path>` would read the index, which no caller
 // means.
+//
+// The read is bounded (INIT-023 TASK-003, audit F4):
+//
+//  1. `git cat-file -s [eoo] <rev>:<path>` probes the size. It reads only
+//     the object header (a delta's header for a deltified object), so
+//     git never inflates an oversized blob. A size over the per-blob
+//     limit is refused before any content is read: a *GitError
+//     {Permanent, "read_file", "blob exceeds read limit"} wrapping a
+//     *BlobTooLargeError with the probed size, matching ErrBlobTooLarge.
+//  2. `git show [eoo] <rev>:<path> --` (unchanged argv, so blobs are
+//     byte-identical: no textconv or filter runs without --textconv, and
+//     a tree path keeps its listing) reads into one buffer pre-sized to
+//     the probed size and capped at the limit — no doubling, no string
+//     round trip. Overrunning the cap is the same refusal with Size -1:
+//     the object behind a named ref moved after the probe, or `git show`
+//     rendered more than the probed object (a gitlink to a commit in the
+//     repository prints that commit with its patch).
+//
+// Both commands run with GIT_ALLOC_LIMIT, so a small blob stored as a
+// delta on a huge base, or the patch of a gitlink, is refused by git
+// before it allocates the large object; that is also Size -1, with
+// GitAllocLimit set so the message names the real cause (the file itself
+// may be small).
+//
+// Errors are those of the unbounded read (I2). When the probe fails for
+// any reason other than a size bound, the `git show` runs anyway and its
+// result is returned: cat-file words some misses differently ("invalid
+// object name" where `git show … --` says "bad revision"), and every miss
+// must keep the kind and text it has today (ErrKindNotFound since
+// INIT-023 TASK-002). That costs one extra git process on a miss; the
+// show is bounded exactly like a probed one.
+//
+// A 0-byte blob returns a non-nil, empty slice.
 func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
 	if err := checkRev("read_file", "ref", ref); err != nil {
 		return nil, err
@@ -718,11 +862,81 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	output, err := c.run(ctx, "read_file", "show", "--end-of-options", fmt.Sprintf("%s:%s", rev, path), "--")
+	spec := rev + ":" + path
+	limit := c.blobLimit()
+
+	probe := c.blobSize
+	if probe == nil {
+		probe = c.catFileSize
+	}
+	var sizeHint int64
+	size, err := probe(ctx, spec)
+	switch {
+	case errors.Is(err, ErrOutputTooLarge):
+		return nil, readOverrun(ref, path, limit, err)
+	case err != nil:
+		// Not a size refusal: let `git show` produce today's error.
+	case size > limit:
+		return nil, blobTooLarge(ref, path, size, limit)
+	default:
+		sizeHint = size
+	}
+
+	out, err := c.runBounded(ctx, "read_file", limit, sizeHint, "show", "--end-of-options", spec, "--")
 	if err != nil {
+		if errors.Is(err, ErrOutputTooLarge) {
+			return nil, readOverrun(ref, path, limit, err)
+		}
 		return nil, err
 	}
-	return []byte(output), nil
+	if out == nil {
+		out = []byte{}
+	}
+	return out, nil
+}
+
+// catFileSize is ReadFile's default size probe: `git cat-file -s
+// [eoo] <spec>` (no trailing "--": cat-file takes exactly one object name,
+// which it never reads as a pathspec). It runs as a read command, so its
+// stdout is capped and it gets GIT_ALLOC_LIMIT.
+func (c *CLIClient) catFileSize(ctx context.Context, spec string) (int64, error) {
+	out, err := c.runBounded(ctx, "read_file", maxProbeBytes, 0, "cat-file", "-s", "--end-of-options", spec)
+	if err != nil {
+		return 0, err
+	}
+	size, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if perr != nil || size < 0 {
+		return 0, &GitError{Kind: ErrKindPermanent, Op: "read_file",
+			Message: "unexpected git cat-file -s output", Err: perr}
+	}
+	return size, nil
+}
+
+// blobTooLarge builds ReadFile's size refusal.
+func blobTooLarge(ref, path string, size, limit int64) *GitError {
+	return &GitError{
+		Kind:    ErrKindPermanent,
+		Op:      "read_file",
+		Message: "blob exceeds read limit",
+		Err:     &BlobTooLargeError{Ref: ref, Path: path, Size: size, Limit: limit},
+	}
+}
+
+// readOverrun maps an output refusal of the probe or the read (cause
+// matches ErrOutputTooLarge) to ReadFile's size refusal, Size -1. When
+// git refused an allocation over GIT_ALLOC_LIMIT, the refusal carries
+// that limit and says so: the content may be well under the per-blob
+// limit (a small blob stored as a delta on a large base), and calling it
+// "over the read limit" would point the operator at the wrong cause.
+func readOverrun(ref, path string, limit int64, cause error) *GitError {
+	tl := &BlobTooLargeError{Ref: ref, Path: path, Size: -1, Limit: limit}
+	msg := "blob exceeds read limit"
+	var ot *OutputTooLargeError
+	if errors.As(cause, &ot) && ot.GitAlloc {
+		tl.GitAllocLimit = ot.Limit
+		msg = "blob read exceeds git allocation limit"
+	}
+	return &GitError{Kind: ErrKindPermanent, Op: "read_file", Message: msg, Err: tl}
 }
 
 // WriteAndStageFile writes content to a file in the working tree and stages it.
@@ -760,6 +974,13 @@ func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string)
 
 // ListFiles lists files matching a pattern at a specific Git ref (Rev
 // class).
+//
+// The listing is NUL-delimited (`ls-tree -z`, INIT-023 TASK-003, audit
+// P3-9): every path is returned raw. Before, git C-quoted non-ASCII and
+// control-character paths (so discovery and NextID could not see them)
+// and strings.TrimSpace mangled a leading or trailing space in the first
+// or last path. Only the empty element after the final NUL is dropped;
+// output that does not end in NUL is a truncated listing and an error.
 func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]string, error) {
 	if err := checkRev("list_files", "ref", ref); err != nil {
 		return nil, err
@@ -768,18 +989,28 @@ func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]strin
 	if err != nil {
 		return nil, err
 	}
-	output, err := c.run(ctx, "list_files", "ls-tree", "-r", "--name-only", "--end-of-options", rev)
+	output, err := c.run(ctx, "list_files", "ls-tree", "-r", "--name-only", "-z", "--end-of-options", rev)
 	if err != nil {
 		return nil, err
 	}
+	if output == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(output, "\x00") {
+		return nil, &GitError{Kind: ErrKindPermanent, Op: "list_files", Message: "unterminated `git ls-tree -z` output"}
+	}
 
+	// Scanned, not split: the paths are substrings of the one output
+	// buffer, and no intermediate slice of every field is built.
 	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		if line == "" {
-			continue
+	for rest := output; rest != ""; {
+		var p string
+		p, rest, _ = strings.Cut(rest, "\x00")
+		if p == "" {
+			return nil, &GitError{Kind: ErrKindPermanent, Op: "list_files", Message: "empty path in `git ls-tree -z` output"}
 		}
-		if pattern == "" || matchSimpleGlob(pattern, line) {
-			files = append(files, line)
+		if pattern == "" || matchSimpleGlob(pattern, p) {
+			files = append(files, p)
 		}
 	}
 	return files, nil
@@ -935,8 +1166,91 @@ func (c *CLIClient) DeleteRemoteBranch(ctx context.Context, remote, branch strin
 	return err
 }
 
-// run executes a git command and returns stdout. On error, classifies the failure.
+// opClass decides how a command's output is bounded (INIT-023 TASK-003).
+type opClass int
+
+const (
+	// opRead: stdout fails past its limit, and git runs with
+	// GIT_ALLOC_LIMIT, a pinned delta-base cache and the C locale. Every
+	// command that only reads the repository.
+	opRead opClass = iota
+	// opDiff: stdout fails past its limit, and git runs with the pinned
+	// delta-base cache and the C locale but no GIT_ALLOC_LIMIT — rename
+	// detection loads both blobs of a candidate pair, and a legitimate
+	// large rename already on main must not fail Diff (which would wedge
+	// IncrementalSync). Also the class of any op name not listed below:
+	// output is never silently truncated.
+	opDiff
+	// opMutate: stdout is drained (head kept, rest discarded, never an
+	// error) and no GIT_ALLOC_LIMIT. git performs the side effect before
+	// it prints — `git merge --ff-only` killed by SIGPIPE after 4 KiB of
+	// diffstat had already moved main — and checkout/merge materialise
+	// legitimate large files.
+	opMutate
+)
+
+// opClasses maps every op name the client passes to run/runBounded.
+var opClasses = map[string]opClass{
+	"read_file":  opRead,
+	"list_files": opRead,
+	"log":        opRead,
+	"head":       opRead,
+	"ref-sha":    opRead,
+	"rev-parse":  opRead,
+	"merge-base": opRead,
+	"tree_entry": opRead,
+	"diff":       opDiff,
+	"checkout":   opMutate,
+	"merge":      opMutate,
+	"commit":     opMutate,
+	"add":        opMutate,
+	"branch":     opMutate,
+	"config":     opMutate,
+	"push":       opMutate,
+}
+
+func classOf(op string) opClass {
+	if c, ok := opClasses[op]; ok {
+		return c
+	}
+	return opDiff
+}
+
+// run executes a git command and returns stdout. On error, classifies
+// the failure. stdout is bounded by the client's per-command limit
+// (runSink) and held once: the returned string is the sink's own buffer,
+// not a copy of it, so a parser's substrings share it too.
 func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string, error) {
+	sink, err := c.runSink(ctx, op, c.outputLimit(), 0, true, args...)
+	if err != nil {
+		return "", err
+	}
+	return sink.String(), nil
+}
+
+// runBounded is run for a caller that needs the stdout bytes (ReadFile):
+// sizeHint pre-sizes the buffer when the caller knows the expected size.
+func (c *CLIClient) runBounded(ctx context.Context, op string, limit, sizeHint int64, args ...string) ([]byte, error) {
+	sink, err := c.runSink(ctx, op, limit, sizeHint, false, args...)
+	if err != nil {
+		return nil, err
+	}
+	return sink.Bytes(), nil
+}
+
+// runSink executes a git command in the repository and returns the sink
+// holding its stdout, never more than limit bytes of it (text: kept as a
+// string, see stdoutSink). See opClass for what each command class gets.
+//
+// A read command whose stdout overruns limit, or that git aborts on
+// GIT_ALLOC_LIMIT, returns
+// *GitError{Permanent, op, "output exceeds read limit", *OutputTooLargeError}
+// BEFORE stderr is classified: git's own text for an alloc refusal
+// ("packed object … is corrupt") would otherwise be reported as
+// repository corruption. Stderr keeps its head and tail (stderrSink).
+func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int64, text bool, args ...string) (*stdoutSink, error) {
+	class := classOf(op)
+
 	// For push operations, prepend a command-scoped credential.helper
 	// override via `git -c` so authentication is wired the same way
 	// it was for the lazy clone (Clone applies the symmetric logic).
@@ -985,18 +1299,57 @@ func (c *CLIClient) run(ctx context.Context, op string, args ...string) (string,
 		}
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		gitErr := classifyGitError(op, strings.TrimSpace(stderr.String()))
-		gitErr.Err = err
-		return "", gitErr
+	// Read and diff commands inherit the parent environment, as before,
+	// plus (a later duplicate wins in os/exec, so an inherited value
+	// cannot loosen any of these):
+	//
+	//   - the C locale. git translates the "fatal: " / "error: " prefix of
+	//     its alloc refusal, which isGitAllocRefusal must recognise, and
+	//     the English stderr is also what classifyGitError's patterns
+	//     expect (lookupBranch forces it for the same reason): a
+	//     translated "bad revision" would be a permanent error instead of
+	//     not-found. Their stdout does not depend on the locale: paths are
+	//     raw (-z), blobs are bytes, dates are ISO, status letters fixed.
+	//   - a pinned delta-base cache (deltaBaseCacheEnv), which bounds what
+	//     GIT_ALLOC_LIMIT cannot: the bases git caches while it rebuilds
+	//     a delta chain. It refuses nothing, so diff gets it too.
+	//   - read commands only: GIT_ALLOC_LIMIT. diff is exempt (opDiff).
+	allocLimit := c.gitAllocLimit()
+	if class == opRead || class == opDiff {
+		env := append(os.Environ(),
+			deltaBaseCacheEnv(os.Getenv("GIT_CONFIG_PARAMETERS"), c.blobLimit()),
+			"LC_ALL=C", "LANGUAGE=")
+		if class == opRead {
+			env = append(env, "GIT_ALLOC_LIMIT="+strconv.FormatInt(allocLimit, 10))
+		}
+		cmd.Env = env
 	}
 
-	return stdout.String(), nil
+	stdout := newStdoutSink(limit, sizeHint, class != opMutate, text)
+	stderr := &stderrSink{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	err := cmd.Run()
+	errText := stderr.String()
+
+	// Size refusals first. The alloc refusal is honoured even when git
+	// exited 0: after a gentle allocation failure its output may be
+	// incomplete.
+	if class == opRead && isGitAllocRefusal(errText, allocLimit) {
+		return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "output exceeds read limit",
+			Err: &OutputTooLargeError{Op: op, Limit: allocLimit, GitAlloc: true}}
+	}
+	if stdout.overflow && stdout.failing {
+		return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "output exceeds read limit",
+			Err: &OutputTooLargeError{Op: op, Limit: limit}}
+	}
+	if err != nil {
+		gitErr := classifyGitError(op, strings.TrimSpace(errText))
+		gitErr.Err = err
+		return nil, gitErr
+	}
+	return stdout, nil
 }
 
 // buildCommitMessage constructs a commit message with trailers.

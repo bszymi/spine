@@ -85,6 +85,7 @@ func ExportPrometheus() string {
 	writeCounter(&b, "spine_git_commit_retries_total", m.GitCommitRetries.Value())
 	writeCounter(&b, "spine_events_emitted_total", m.EventsEmitted.Value())
 	writeCounter(&b, "spine_projection_syncs_total", m.ProjectionSyncs.Value())
+	writeCounter(&b, "spine_projection_files_skipped_total", m.ProjectionFilesSkipped.Value())
 	writeCounter(&b, "spine_scheduler_scans_total", m.SchedulerScans.Value())
 	writeCounter(&b, "spine_timeouts_detected_total", m.TimeoutsDetected.Value())
 	writeCounter(&b, "spine_orphans_detected_total", m.OrphansDetected.Value())

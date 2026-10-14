@@ -159,6 +159,7 @@ func allEventTypes() []domain.EventType {
 		domain.EventEngineRecovered,
 		domain.EventProjectionSynced,
 		domain.EventProjectionWorkflowRejected,
+		domain.EventProjectionFileSkipped,
 		domain.EventThreadCreated,
 		domain.EventCommentAdded,
 		domain.EventThreadResolved,

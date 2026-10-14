@@ -38,9 +38,10 @@ func taskDoc(n int) string {
 }
 
 // TestList_ResolvesTheRefOnce is AC 18: List(ctx, <branch>) runs exactly
-// one exact branch lookup and N `show` reads, all against that one
-// object id, and returns the same artifacts as listing the branch
-// checked out (the pre-change behaviour).
+// one exact branch lookup and N `show` reads — each after its size probe
+// (`cat-file -s`, INIT-023 TASK-003) — all against that one object id,
+// and returns the same artifacts as listing the branch checked out (the
+// pre-change behaviour).
 func TestList_ResolvesTheRefOnce(t *testing.T) {
 	testutil.HermeticGit(t)
 	repo := testutil.NewTempRepo(t)
@@ -69,9 +70,14 @@ func TestList_ResolvesTheRefOnce(t *testing.T) {
 	}
 	calls := rec.Calls(t)
 
-	lookups, shows, other := 0, 0, 0
+	lookups, shows, probes, other := 0, 0, 0, 0
 	for _, c := range calls {
 		switch c[0] {
+		case "cat-file":
+			probes++
+			if len(c) != 4 || c[1] != "-s" || c[2] != "--end-of-options" || !strings.HasPrefix(c[3], tip+":") {
+				t.Errorf("probe argv %q, want cat-file -s --end-of-options %s:<path>", c, tip)
+			}
 		case "show-ref":
 			lookups++
 			if want := []string{"show-ref", "--verify", "--hash", "refs/heads/" + branch}; strings.Join(c, " ") != strings.Join(want, " ") {
@@ -91,8 +97,8 @@ func TestList_ResolvesTheRefOnce(t *testing.T) {
 			t.Errorf("unexpected git call %q", c)
 		}
 	}
-	if lookups != 1 || shows != n {
-		t.Fatalf("List ran %d lookups and %d shows (calls %q), want 1 and %d", lookups, shows, calls, n)
+	if lookups != 1 || shows != n || probes != n {
+		t.Fatalf("List ran %d lookups, %d probes and %d shows (calls %q), want 1, %d and %d", lookups, probes, shows, calls, n, n)
 	}
 
 	// Same answer as listing the checked-out branch through HEAD.

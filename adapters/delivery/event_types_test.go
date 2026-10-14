@@ -26,3 +26,23 @@ func TestAllEventTypes_IncludesProjectionWorkflowRejected(t *testing.T) {
 		}
 	}
 }
+
+// INIT-023 TASK-003 AC 12: the projection's skipped-file event is
+// subscribable, operational, and keeps its wire name.
+func TestAllEventTypes_IncludesProjectionFileSkipped(t *testing.T) {
+	n := 0
+	for _, et := range allEventTypes() {
+		if et == domain.EventProjectionFileSkipped {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("allEventTypes() lists %q %d times, want once", domain.EventProjectionFileSkipped, n)
+	}
+	if domain.EventProjectionFileSkipped != "projection_file_skipped" {
+		t.Fatalf("wire name drifted: %q", domain.EventProjectionFileSkipped)
+	}
+	if isDomainEvent(string(domain.EventProjectionFileSkipped)) {
+		t.Fatal("projection_file_skipped is operational, not a domain event")
+	}
+}
