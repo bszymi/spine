@@ -49,6 +49,10 @@ type Service struct {
 	// concurrently; sweepMu makes the sweep single-flight.
 	workflowsVerified atomic.Bool
 	sweepMu           sync.Mutex
+	// removalGuard, when set, refuses to install a branch-protection
+	// config that removes protection from the authoritative branch
+	// without an operator record (INIT-023 TASK-006, protection_guard.go).
+	removalGuard *ProtectionRemovalGuard
 }
 
 // NewService creates a new Projection Service.
@@ -202,7 +206,9 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 
 	// Project branch-protection config (ADR-009 §1). Always runs on
 	// rebuild so bootstrap defaults land even when the file is absent.
-	if err := s.projectBranchProtection(ctx, head); err != nil {
+	// A refused protection removal keeps the previous rules and is not a
+	// projection error (INIT-023 TASK-006; the guard logged it).
+	if err := s.projectBranchProtectionAt(ctx, head, prevCommit); err != nil && !errors.Is(err, ErrProtectionRemovalUnauthorized) {
 		log.Warn("failed to project branch-protection config",
 			"path", BranchProtectionConfigPath,
 			"error", err,
@@ -604,7 +610,11 @@ func (s *Service) IncrementalSync(ctx context.Context) error {
 		}
 	}
 	if bpDirty {
-		if err := s.projectBranchProtection(ctx, head); err != nil {
+		// A refused protection removal keeps the previous rules and is not
+		// a sync error (INIT-023 TASK-006, TASK-011 D2): the window
+		// advances, and the next change to the file (or a rebuild)
+		// re-evaluates it. The guard logged it and emitted the event.
+		if err := s.projectBranchProtectionAt(ctx, head, state.LastSyncedCommit); err != nil && !errors.Is(err, ErrProtectionRemovalUnauthorized) {
 			log.Warn("failed to project branch-protection config",
 				"path", BranchProtectionConfigPath,
 				"error", err,
@@ -892,6 +902,15 @@ func isTerminalProjectionStatus(status string) bool {
 //     with source_commit="bootstrap" so operators can tell the table
 //     reflects defaults rather than an explicit config.
 func (s *Service) projectBranchProtection(ctx context.Context, commitSHA string) error {
+	return s.projectBranchProtectionAt(ctx, commitSHA, "")
+}
+
+// projectBranchProtectionAt is projectBranchProtection with the commit the
+// calling sync started from (anchor), which the protection-removal guard
+// uses for newness while bootstrap rows are installed. With the guard on,
+// every candidate passes guardProtectionRemoval before it replaces the
+// rules — the bootstrap seed and the parsed file alike.
+func (s *Service) projectBranchProtectionAt(ctx context.Context, commitSHA, anchor string) error {
 	// Determine existence by listing, not by ReadFile's error string —
 	// git CLIs surface "file missing" with various messages, and
 	// conflating every read error with "missing" would let a transient
@@ -904,6 +923,9 @@ func (s *Service) projectBranchProtection(ctx context.Context, commitSHA string)
 	}
 	if !containsPath(files, BranchProtectionConfigPath) {
 		// Config truly absent — seed bootstrap defaults.
+		if err := s.guardProtectionRemoval(ctx, commitSHA, anchor, bootstrapCandidate(), nil, false); err != nil {
+			return err
+		}
 		return s.store.UpsertBranchProtectionRules(ctx, bootstrapRows(), "bootstrap")
 	}
 
@@ -938,6 +960,10 @@ func (s *Service) projectBranchProtection(ctx context.Context, commitSHA string)
 		// The caller counts this as a sync error so the commit is not
 		// advanced past the bad file.
 		return fmt.Errorf("parse branch-protection config at %s: %w", shortSHA(commitSHA), err)
+	}
+
+	if err := s.guardProtectionRemoval(ctx, commitSHA, anchor, cfg.Rules, content, true); err != nil {
+		return err
 	}
 
 	rows := make([]store.BranchProtectionRuleProjection, 0, len(cfg.Rules))
