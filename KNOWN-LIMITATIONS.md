@@ -200,11 +200,18 @@ merge publishes the commit the run's steps validated and reviewed, never the run
    already-merged repository is skipped after a `merge_failed` loop-back, dropping the next round's
    reviewed work. Under binding both are fixed. Both paths are dormant until a code-repository
    catalog is wired.
-7. **Auto-push off:** with `SPINE_GIT_PUSH_ENABLED=false` the local `main` the merge moves is the
-   published branch, so the structural check of the merge result (DC-3) runs after the result is
-   already visible: a failed check refuses the run (`merge_failed`) but cannot take the merge back.
-   `git.CLIClient`'s `MergeBound` only produces accepted shapes; the check guards the push and other
-   `CommitBinder` implementations.
+7. **A refused merge is on the local `main` until it is taken back.** `MergeBound` moves the local
+   target before the structural check (DC-3) runs. A refused result is then taken back,
+   compare-and-swap, to the state before the merge, so neither the next governed merge nor an
+   in-place write's auto-push publishes it. Until then — and for good when the take-back cannot run
+   (the target moved on, or a local change in the shared working tree would be overwritten; logged
+   at `ERROR` and named in the outcome's failure detail) — it is on the local `main`, which with
+   `SPINE_GIT_PUSH_ENABLED=false` is the published branch. The take-back keeps a write that landed
+   between the merge's base read and the merge (it restores the merge's first parent when that is a
+   newer descendant of the reported base), so a `CommitBinder` that itself committed onto the
+   target before merging is not fully undone. TASK-012 runs the merge, the check and the take-back
+   under one worktree lock. `git.CLIClient`'s `MergeBound` produces only accepted shapes unless the
+   target moves concurrently; the check guards the push and other `CommitBinder` implementations.
 8. **A garbage-collected bound commit fails closed.** If the run branch is force-pushed away from
    the bound commit and `git gc` prunes it, the merge refuses (`precondition`) and a publish workflow
    routes back to `execute`. Pinning the bound commit with a ref is a follow-up.
@@ -215,10 +222,35 @@ merge publishes the commit the run's steps validated and reviewed, never the run
 10. **Excluded commits are logged, not evented.** When the primary's or any code repository's run
     branch holds commits the merge left out, every run branch of the run is kept (not only the one
     with excluded commits) and a `merge_binding: commits after the bound head were not merged`
-    warning names `run_id`, `bound_sha` and `tip_sha`; a dedicated event type is a follow-up.
+    warning names `run_id`, `bound_sha` and `tip_sha`; a dedicated event type is a follow-up. Only
+    code repositories this run merged are judged: one resolved externally or skipped is cleaned up
+    as with binding off.
 11. **Collision renumber is skipped under binding** (planning runs whose artifact id collided at
     merge fail instead of renumbering): the renumber commits on the branch tip. Neither product
     wires a collision handler today.
+12. **Without `expected_head_sha` an approval binds the head at submit time, not the head the
+    reviewer read.** The moved-head check compares the head at submit with the previous binding. If
+    the run branch is moved while the reviewer reads the diff (say, a commit that hides a hunk) and
+    moved back to exactly the bound commit before the submit, the check passes and the bound commit
+    — hunk included — merges, although the diff the reviewer read never showed it. Window (b) is
+    therefore closed only for clients that send `expected_head_sha`, which no Spine client does
+    yet (no CLI flag; the bound head is not returned to reviewers) and SMP TASK-009 will. In
+    standalone, TASK-016's review freeze limits who can push the run branch during a review to
+    operators. Making the assertion mandatory on advancing gate submits is owner question 1;
+    returning the bound head in the submit response is a follow-up.
+13. **Convergence merges into the checked-out branch (audit F8, owned by TASK-012).**
+    `CommitConvergence` merges the selected divergence branches with no target, so in standalone
+    (where the shared worktree has `main` checked out) the converged content reaches `main`
+    directly, without the bound merge or its structural check, and the post-convergence rebind
+    (§5, DC-6) sees an unmoved run branch. The rebind guard is exercised only against a fake
+    convergence. Dormant: no shipped workflow in Spine or SMP diverges. TASK-012 gives the
+    convergence an explicit run-branch target.
+14. **A replay finds the run's earlier merge within 64 first-parent commits.** A retry or resume
+    after the merge landed diffs the status cascade against `main` as it was just before that merge,
+    found on `main`'s first-parent chain, so it recomputes the same cascade commit. If more than 64
+    first-parent commits landed on `main` between the attempts, or `main`'s history cannot be read,
+    the cascade falls back to the current merge-base: a run that added child artifacts then gets a
+    second cascade commit and merge commit (no content beyond the reviewed one).
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are

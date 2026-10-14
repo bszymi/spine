@@ -23,9 +23,16 @@ release is cut — this file is a staging area.
     moved since the previous binding (policy `reject`, the default; `rebind` accepts the new head);
   - every merge attempt merges exactly the bound commit, applies the status cascade at that commit
     with plumbing (never on the run branch), checks that the result is built from only the previous
-    target tip and that commit, and pushes it without force;
+    target tip and that commit, and pushes it without force; the cascade and recovery-ledger
+    commits must be children of exactly the bound commit, and a merge result that fails the check
+    is taken back off the local target before anything else can build on it or publish it;
   - a run with no binding the run itself recorded fails closed (`precondition`): a publish workflow
     routes `merge_failed` back to `execute`, a legacy terminal-commit workflow fails the run.
+
+  The window after the reviewer read the diff is closed for clients that send `expected_head_sha`
+  (below). An approval without it binds the head at submit time: the moved-head check compares that
+  head with the previous binding, so a branch moved during the review and moved back to the bound
+  commit before the submit is not detected (KNOWN-LIMITATIONS "Governed Merge Binding").
 - **Workflow outcomes can no longer write `spine.*` commit metadata.** Reserved keys are stripped
   from every outcome `commit:` map before storage, with binding on or off, and `workflow.Validate`
   reports them (`steps[i].outcomes[j].commit`).
@@ -64,6 +71,15 @@ previous build). Externally visible:
   `WARN merge_binding: commits after the bound head were not merged` names `run_id`, `bound_sha`
   and `tip_sha`.
 - **Planning-run collision renumber is skipped** under binding (it committed on the branch tip).
+- **A merge the structural check refuses is taken back** off the local `main` (compare-and-swap
+  `update-ref`, the working tree following with a two-tree `read-tree -m -u`), so the next governed
+  merge or in-place write cannot publish it — also with `SPINE_GIT_PUSH_ENABLED=false`, where the
+  local `main` is the published branch. A write that landed on `main` between the merge's base read
+  and the merge is kept. A take-back that cannot run is an `ERROR merge binding: refused merge NOT
+  taken back` and is named in the merge outcome's failure detail.
+- **Merge retries add nothing.** A retry or resume after the merge landed on the local `main`
+  recomputes the same status-cascade commit — also when the run added child artifacts — so it finds
+  `main` already up to date instead of adding a second cascade commit and merge commit.
 - **`POST /runs/{run_id}/repositories/{repository_id}/retry` accepts `head_sha`** (and `spine run
   merge retry --head-sha`): the code repository's current run-branch head to rebind to. Without it
   the retry merges the bound commit again; a stale `head_sha` is `409 run_branch_moved`. The ledger
@@ -78,7 +94,7 @@ previous build). Externally visible:
 - New opt-in `Orchestrator.EnableMergeBinding(engine.MergeBindingConfig{MovedHead: ...})` and
   `MergeBindingEnabled()`. It returns an error, leaving binding off, unless the `GitOperator`
   implements the new optional `engine.CommitBinder` interface (`ResolveBranchHead`, `VerifyCommit`,
-  `IsAncestor`, `CommitParents`, `CommitFilesOnto`, `MergeBound`, `PushCommit`). No method was added
+  `IsAncestor`, `CommitParents`, `CommitFilesOnto`, `MergeBound`, `PushCommit`, `ResetBranch`). No method was added
   to any interface an embedder implements. `*git.CLIClient` implements it; embedders run the shared
   suite `core/engine/enginetest.RunCommitBinderConformance` against their own operator.
 - Additive fields: `git.MergeOpts.SourceSHA` (merge exactly that commit; `CLIClient.Merge` honours
@@ -87,7 +103,10 @@ previous build). Externally visible:
   `engine.HeadBindingDetail` (the `Detail` of every binding refusal) and the `Reason*` constants,
   the `CommitMeta*` key constants, `git.IsCanonicalObjectName`.
 - **Shared behaviour at the next bump, binding off:** reserved `spine.*` keys are stripped from
-  outcome `commit:` maps (no shipped workflow in Spine or SMP uses them); a client that sends
+  outcome `commit:` maps (no shipped workflow in Spine or SMP uses them); `workflow.Validate` now
+  rejects an outcome `commit:` key starting with `spine.` in any letter case, at
+  `steps[i].outcomes[j].commit` — not opt-in, so every workflow an embedder validates (SMP's workflow
+  writer and seeding included) is refused with such a key; a client that sends
   `ExpectedHeadSHA` gets it checked (old clients never send it); `git.CommitOpts` trailers outside
   the standard four are now written in sorted order instead of map order. Everything else — every
   code path and git argv — is unchanged without `EnableMergeBinding`.

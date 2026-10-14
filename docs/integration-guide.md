@@ -809,7 +809,7 @@ embedder opts in.
 
 1. **Implement `engine.CommitBinder` on the `GitOperator`** passed to `engine.New`
    (`ResolveBranchHead`, `VerifyCommit`, `IsAncestor`, `CommitParents`, `CommitFilesOnto`,
-   `MergeBound`, `PushCommit`; contract in `core/engine/interfaces.go`). It is an optional
+   `MergeBound`, `PushCommit`, `ResetBranch`; contract in `core/engine/interfaces.go`). It is an optional
    interface, found by type assertion. The rules that matter:
    - `ResolveBranchHead` reads `refs/heads/<branch>` exactly, in the repository merges read from
      (origin, for a remote-backed operator), never by DWIM;
@@ -817,7 +817,11 @@ embedder opts in.
    - `CommitFilesOnto` is plumbing on a private index and deterministic (dates pinned to the base
      commit's committer date);
    - `MergeBound` merges exactly `SourceSHA` and reports `BaseSHA`;
-   - `PushCommit` pushes `<sha>^{commit}:refs/heads/<branch>` with no force and no lease.
+   - `PushCommit` pushes `<sha>^{commit}:refs/heads/<branch>` with no force and no lease;
+   - `ResetBranch` takes back a merge the engine refused: it moves the local branch only while it
+     is still at the refused merge (compare-and-swap) and leaves a checked-out working tree clean;
+     a remote-backed operator may drop its local branch instead, so the next `MergeBound`
+     re-creates it from the remote. The next `MergeBound` must not compute on the refused merge.
 2. **Run the conformance suite** against it:
    `enginetest.RunCommitBinderConformance(t, enginetest.Harness{New: ...})`
    (`core/engine/enginetest`). `adapters/git/commitbinder_test.go` shows the `CLIClient` harness.
@@ -826,7 +830,10 @@ embedder opts in.
    leaves binding off, when the operator lacks the capability. Code-repository clients returned by
    `RepositoryGitClients` must implement it too, or `StartRun` refuses multi-repo runs.
 4. **Send assertions:** carry the head a runner tested or pushed, or the head a reviewer read the
-   diff at, as `engine.SubmitRequest.ExpectedHeadSHA`. Binding refusals are `*domain.SpineError`
+   diff at, as `engine.SubmitRequest.ExpectedHeadSHA`. Without an assertion an approval binds the
+   head at submit time, and the moved-head check only compares it with the previous binding, so
+   the window between reading the diff and submitting is closed only for clients that send it
+   (KNOWN-LIMITATIONS "Governed Merge Binding"). Binding refusals are `*domain.SpineError`
    whose `Detail` is an `engine.HeadBindingDetail`; map `Reason` (`engine.ReasonRunBranchMoved`,
    `engine.ReasonRunBranchMovedSinceGate`, …) to your own error codes.
 5. **Read the binding for display** from `runs.commit_meta` (`engine.CommitMetaBoundSHA`,

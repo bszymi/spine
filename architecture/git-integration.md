@@ -386,7 +386,10 @@ whatever the run branch points at when the merge runs:
   merge compares the current head with the previous binding. If the branch moved, the approval is
   refused with `409 run_branch_moved_since_gate` (policy `reject`, the default): the commits after
   the binding were not validated, so only a rework outcome may follow. Policy `rebind` accepts the
-  current head instead.
+  current head instead. The check compares the head *at submit* with the previous binding; what a
+  reviewer actually read is pinned only by the reviewer's `expected_head_sha`. Without it, a branch
+  moved while the reviewer read the diff and moved back to the bound commit before the submit is
+  not detected (KNOWN-LIMITATIONS "Governed Merge Binding").
 - *The committing window.* From the approving completion onwards the binding is frozen: only the
   engine moves it again (a convergence that ran from the bound head, a recovery ledger commit).
   Every merge attempt — the immediate one, the publish handler, every scheduler retry, every
@@ -399,10 +402,12 @@ whatever the run branch points at when the merge runs:
   the merge.
 - *Structural check and push.* Before anything is pushed, the merge result must be built from
   exactly the target's previous tip and the bound (or cascade) commit — a merge commit with those
-  two parents, a fast-forward, or "already up to date". The push publishes exactly that commit,
-  without force, so the remote accepts only a fast-forward. Commits on the run branch after the
-  binding are left out; the branch is then kept for inspection and a warning names the bound and
-  tip commits.
+  two parents, a fast-forward, or "already up to date"; a status-cascade or recovery-ledger commit
+  must be a child of exactly the bound commit. A refused merge is taken back off the local target
+  (compare-and-swap) before anything else can build on it, so neither the next governed merge nor
+  an in-place write publishes it. The push publishes exactly the verified commit, without force, so
+  the remote accepts only a fast-forward. Commits on the run branch after the binding are left out;
+  the branch is then kept for inspection and a warning names the bound and tip commits.
 
 Spine uses **fast-forward merges** when possible to preserve linear history.
 
