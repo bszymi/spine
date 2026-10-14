@@ -26,7 +26,9 @@ func clearNoBlock(f *os.File) error {
 		return err
 	}
 	var serr error
-	if err := rc.Control(func(fd uintptr) { serr = syscall.SetNonblock(int(fd), false) }); err != nil {
+	if err := rc.Control(func(fd uintptr) {
+		serr = syscall.SetNonblock(int(fd), false) //nolint:gosec // G115: a file descriptor the kernel handed out fits an int
+	}); err != nil {
 		return err
 	}
 	return serr

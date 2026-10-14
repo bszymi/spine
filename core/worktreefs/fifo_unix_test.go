@@ -3,6 +3,7 @@
 package worktreefs
 
 import (
+	"bytes"
 	"os"
 	"syscall"
 	"testing"
@@ -128,7 +129,7 @@ func TestTree_ReadFileThroughNonBlockingOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != string(big) {
+	if !bytes.Equal(b, big) {
 		t.Fatalf("read %d bytes, want %d, or content differs", len(b), len(big))
 	}
 }
