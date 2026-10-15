@@ -2,10 +2,10 @@
 id: TASK-006
 type: Task
 title: "Governance-path guard on governed merges and protection-removal guard in projection"
-status: Pending
+status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-15
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -1769,3 +1769,245 @@ Criteria).
 
 ## Implementation Notes
 
+Implemented on branch `init/INIT-023-TASK-006-governance-path-guard`, from Spine local `main`
+`ae513dca` (origin `61994fe` + the INIT-023 scaffold + waves 1–3 + the codex 6.1 catch-up). Diff
+base: `git diff main...HEAD`. Status stays In Progress; the orchestrator closes it after merge.
+No runtime schema change (`git diff --name-only main...HEAD -- migrations go.mod go.sum` is empty).
+
+### Orchestrator rulings recorded (owner questions take their defaults, pending the owner)
+
+- **Scope:** audit F3 (governance files ride governed merges) and its projection half.
+- **OQ1** (default **(a)**): operator-or-above approval of the exact bound commit; the merge is held
+  until approve or reject. Recorded in a **new ADR**: `ADR-016` was the next free number in
+  `architecture/adr/` (ADR-001…015 exist; no sibling wave-4 worktree had taken it). The ADR is
+  `Proposed` until the owner signs off OQ1.
+- **OQ2:** guarded paths `.spine/`, `.spine.yaml`, `workflows/` and `<artifacts_dir>/workflows/`;
+  AI-agent configuration not guarded.
+- **OQ3:** the ADR-008 lifecycle exemption is on in `spine serve`, off in the embedded zero value.
+- **OQ4:** both guards on in `spine serve`; `SPINE_GOVERNANCE_GUARD=off` restores v1; the embedded
+  zero value is today's behaviour.
+- **OQ5:** the projection guard covers the authoritative branch only.
+- **OQ6:** a post-merge mismatch is a permanent refusal.
+- **OQ7:** a refused protection removal is not a sync error (TASK-011 D2: the sync goes idle,
+  the rules are kept, event + Warn).
+- **OQ8:** provenance must have changed the config.
+- **OQ9:** the own-run evidence carve-out (`.spine/runs/<own run id>/evidence/`) is on (in
+  `spine serve`; the engine option's zero value is off, see Deviations 3).
+- **OQ10:** exemption hardening — local reviewer≠author, and the edited workflow (bound and
+  merge-base versions) never declares `applies_to: [Workflow]`.
+- **Placement:** the guard plugs in after TASK-005's `resolveMergeSource` and binds to TASK-005's
+  bound SHA; it reads through TASK-003's bounded `Diff`/`ReadFile` and feeds TASK-011's
+  projection. SMP TASK-010 adopts it; the embedded API is in `docs/integration-guide.md` §10.
+
+### What was built
+
+| Commit | Change |
+|---|---|
+| `09ea2afe` | `architecture/adr/ADR-016-governance-path-guard.md` (Proposed); "Amended by ADR-016" notes in ADR-009 §1, §5, §6, Consequences and ADR-008 §2 |
+| `346994a9` | `core/branchprotect/governance.go`: `GovernancePaths` (validated, case-folded prefixes — Unicode simple folding, so U+212A and U+017F fold too; every entry covers what lies beneath it; unsafe, control-byte and undecodable C-quoted paths are governed), `GovernanceApproval`, `GovernanceCheck.Touched()` (byte-exact exemptions), `EvaluateGovernance`. `Request.Governance` (consulted only for `OpGovernedMerge`), reason codes `governance_approved`, `governance_approval_required`, `governance_unevaluable`; `Policy.Evaluate` defers to it and still loads no rules |
+| `34d1314e` | `core/domain/governance.go` (the six `spine.governance_approval.*` keys), `FailureGovernanceApprovalRequired`, events `governance.merge_held`, `governance.merge_decided`, `branch_protection.removal_refused` registered in `allEventTypes()` |
+| `3b313528` | `(*git.CLIClient).MergeBases` (`git merge-base --all`, TASK-002 argument handling, fail closed) — the optional `engine.MergeBaseLister` |
+| `b4c06b07` | `core/engine/governance_guard.go` (`GovernanceGuard`, `WithGovernanceGuard`, `MergeBaseLister`, `ErrGovernanceApprovalRequired`, `governanceGate`, `buildGovernanceCheck` — union over every merge base of the merged commit — the lifecycle exemption, the evidence carve-out, the hold record, the post-merge assertion `assertGovernedMerge`, the consumption marker, the governance take-back), `core/engine/governance_decision.go` (`DecideGovernanceMerge`, `GovernanceMergeStatus`); `MergeRunBranch` calls the gate after `resolveMergeSource`; `mergeSource.gov`; the assertion runs in `mergePrimaryBound` after `verifyBoundMerge`, before the push |
+| `f913f952` | `(*store.PostgresStore).MergeCommitMeta` (`commit_meta \|\| patch`), `ListGovernanceAuthorizations` (override events with `pre_receive_ref.old_sha`; consumed approvals with `merge_sha` and `base_sha`, tombstoned sha excluded); neither joins `store.Store` |
+| `d5d577c7` | `adapters/projection/protection_guard.go`: `ProtectionRemovalGuard`, `WithProtectionRemovalGuard`, `ErrProtectionRemovalUnauthorized`, `GovernanceProvenanceReader`, `Service.WorkflowDirs()`; both upserts in `projectBranchProtectionAt` pass the guard; `FullRebuild` and `IncrementalSync` treat a refusal as a Warn, not an error |
+| `0a8a06a6` | `service/cmd/spine/serve_governance_guard.go`: the switch, both orchestrator builders, both projection wirings (process level; per workspace in the pooled builder), the commit-retry wrappers (`governanceAwareCommitRetry`), permission `run.governance.decide` |
+| `338f9869` | `POST /runs/{run_id}/governance-decision`, `GET /runs/{run_id}/governance` (`handlers_run_governance.go`), `api/spec.yaml` |
+| `2ab5a0cb` | `harness.WithGovernanceGuard` / `WithRuntimeGovernanceGuard`; scenario `TestGovernancePathGuard_HeldUntilOperatorApproves` |
+| `b5980615` | Docs: security-model §7.3, event-schemas §4.16–§4.18 + emission map, engine-state-machine (held `committing`), git-push-guide §4 (re-affirm by an editing override push), execution-evidence §6.1, api-operations, integration-guide §10, CHANGELOG, KNOWN-LIMITATIONS "Governance-Path Guard" |
+| `48c99c6d` | Mutation-driven test fix (binding-off prerequisite) and lint hygiene |
+| `be372095`, `0972f1b7`, `54f51f28`, `c3b9cdd3` | Codex rounds 1–4 fixes (below) |
+
+### Per-AC evidence
+
+| AC | Status | Evidence |
+|---|---|---|
+| 1 | partial | ADR-016 exists and records OQ1 (default (a)); amendment notes in ADR-009 §1/§5/§6/Consequences and ADR-008 §2; security-model, event-schemas, engine-state-machine, git-push-guide (and execution-evidence, api-operations, integration-guide) updated. The ADR is **`Proposed`**: "Accepted before the code merges" needs the owner's sign-off on OQ1 |
+| 2 | done | `TestGovernanceGuard_ZeroValueKeepsV1Behaviour` (binding off and on, no `WithGovernanceGuard`: merges, no governance event, no governance keys). No existing `core/engine`, `core/branchprotect` or `adapters/projection` test was edited (`fakeStore` is wrapped by the new `guardFakeStore`, not edited) |
+| 3 | done | `TestGovernanceGuard_SelfReviewedRunCannotSlipGovernanceFiles` (real `CLIClient`, real `branchprotect.New`, `mockRunStore`, binding on): committing, `main` keeps the main rule and `id: review`, publish `ErrorDetail` `governance_approval_required` (rule `governance-path-guard`), one `governance.merge_held` naming both paths, no outcome row. Mutation M1 caught |
+| 4 | done | `TestGovernanceGuard_ApproveMerges`: merged, completed, publish `published` with the hold cleared, the **six** keys (`merge_sha` = the primary outcome's `merge_commit_sha`, `base_sha` = pre-merge main), one `governance.merge_decided` (`approved`) — through the read-modify-write fallback store; the atomic path in `TestGovernanceGuard_ConsumptionMarker` |
+| 5 | done | `TestGovernanceGuard_RejectRoutesBack` (task-default: active at execute, publish `merge_failed`; no publish step: failed, branch kept, one `run_failed`; main unchanged) |
+| 6 | done | `TestGovernanceDecision_WhoMayApprove` (contributor, reviewer, empty role, empty id → `ErrForbidden`, no write, no event; operator and admin merge). Mutation M2 caught |
+| 7 | done | `TestGovernanceDecision_StateChecks/another_sha` (`ErrConflict`) and `TestGovernanceGuard_StaleApprovalIsNotHonoured` (approval X, conflict → `merge_failed`, new commit Y, accepted again → held, `stale_approval_sha` X, detail names it, a decision on X is `ErrConflict`). Mutations M3, M4 caught |
+| 8 | done | `TestGovernanceDecision_StateChecks` (not committing `ErrConflict`; no governed paths `ErrPrecondition`; malformed SHA and a ref `ErrInvalidParams`; reject without reason, reason too long, unknown decision `ErrInvalidParams`; guard off `ErrUnavailable`; unknown run `ErrNotFound`; unevaluable `ErrUnavailable`) — none writes or emits |
+| 9 | done | `TestGovernanceGuard_ForgedApprovalIsStripped` (outcome commit with `status: Done` and planted `spine.governance_approval.*` for the bound commit, role admin → held; stored `commit_meta` has `status`, no governance keys). `workflow.Validate` reports it at `steps[1].outcomes[0].commit` naming the key (TASK-005's rule; Deviations 9). Mutation M5 (TASK-005 strip removed) caught |
+| 10 | done | `core/branchprotect/governance_test.go` `TestGovernancePaths_Match` (every listed match/non-match, C-quoted, control byte, Kelvin sign, long s), `TestNewGovernancePaths_RejectsInvalidEntries` (`""`, `../x`, `work*`, `a\x00`, …), `TestGovernanceCheck_Touched` (rename via `OldPath`, deletion); engine side `TestGovernanceGuard_RenameAndDeletion`. Mutations M6 (`OldPath`), M7 (quoted branch) caught |
+| 11 | done | `TestGovernanceGuard_FailsClosed`: `MergeBases` error, no merge base, malformed base, pre-merge `Diff` error → `ErrUnavailable` (not a hold), no `MergeBound`, committing, no hold record; post-merge `Diff` error (permanent and transient) → no push, `ResetBranch main <Base> <M>`, no marker. Missing/invalid `bound_sha` → TASK-005's route: `TestGovernanceGuard_MissingBindingIsNotAHold`. Real-git local `main == BaseSHA`: AC 28(b) |
+| 12 | done | `TestGovernanceGuard_IdempotentHold` (three attempts, one event id `evt-<trace12>-governance-held-<bound12>-<publish execution>`, the hold written once; terminal-commit path on the last completed step). Mutation M23 caught |
+| 13 | done | `TestGovernanceGuard_LifecycleExemption` (8 cases incl. the three design-check ones; held cases merge after approval). Mutations M8 (`TaskPath != WorkflowPath`), M9 (local SoD) caught |
+| 14 | done | `TestGovernanceGuard_CascadeFootprintIsEvaluated` (`.spine/tasks/TASK-9.md` with a status outcome, diff touches only `src/x.go` → held on the cascaded file; run branch unmoved; merges after approval). Mutation M10 (diff `src.bound`) caught |
+| 15 | done | `TestGovernanceGuard_NoSideEffectsWhileHeld` (code repository: `RepositoryGitClients.Client` called 0 times; no `Commit`/`Checkout`/`WriteAndStageFile`/`MergeBound`/`PushCommit`); real git: AC 14's unmoved run branch |
+| 16 | done | `TestGovernanceGuard_ConsumptionMarker` (marker written before the push; an ungoverned merge writes no governance key; a failed `MergeCommitMeta` → error, committing, no push, taken back). Mutation M24 caught. ("no `spine.` keys" read as no `spine.governance_approval.*` keys: binding keys exist by design) |
+| 17 | done | `TestProtectionRemovalGuard_RefusesUnprovenancedEmptyRuleset` (no upsert, `ErrProtectionRemovalUnauthorized`, the policy over the installed rows still denies, one event; nil reader refuses; guard off installs). Mutation M11 caught |
+| 18 | done | `TestProtectionRemovalGuard_IncrementalSyncKeepsRulesOnSlippedPolicy` (real git: idle at the merge commit, rules kept, contributor `direct_write`/`delete` denied, one event over three ticks, no re-query on an unrelated commit, `FullRebuild` refuses too and ends **idle** — Deviations 12 — and an editing override push installs on the next tick). Mutations M11, M25 caught |
+| 19 | done | `TestProtectionRemovalGuard_AcceptedCases` (override record; consumed approval; both still installed after an unrelated commit with no re-query) |
+| 20 | done | `TestProtectionRemovalGuard_RefusedCases` (replay, unreachable, bytes differ, empty list, nil reader, both laundering cases, bootstrap replay; a reader error holds the sync — Deviations 11). Mutations M12–M16 caught |
+| 21 | done | `TestProtectionRemovalGuard_NoLookupCases` (tightening, reordering, deleting the file, `no-delete` removable without `no-direct-write`, empty table) with a reader that fails the test when called |
+| 22 | done | `adapters/store/governance_integration_test.go` `TestGovernanceStore_Integration` (both branch spellings, the whole-event shape; excludes delete, other branch, API shape, other type, unconsumed, tombstoned, no base; no outcome row needed; per-source limit; `MergeCommitMeta` keeps keys, NULL column, not-found); `git diff --name-only main...HEAD -- migrations/` empty |
+| 23 | done | `TestRunGovernanceDecision_Authorization` (403 contributor/reviewer, 200 operator/admin with the actor forwarded), `TestRunGovernanceDecision_StatusMapping` (400, 404, 409 ×2, 412, 503 ×3), `TestRunGovernanceStatus`; spec documents both routes; `TestParseGovernanceGuard` (unset, off, false, 0, no, on, true, 1, yes, junk → on + Warn) |
+| 24 | done | `service/scenariotest/scenarios/governance_path_guard_test.go` `TestGovernancePathGuard_HeldUntilOperatorApproves` (held; contributor 403; operator approves through the API; main advances; projection installs version 1.1) |
+| 25 | done | `adapters/delivery/event_types_test.go` `TestAllEventTypes_IncludesGovernanceGuardEvents`; event-schemas §4.16–§4.18 + emission map |
+| 26 | done | SMP gate below (no SMP edit) |
+| 27 | done | Gates below. The original PoCs, compiled into this tree with `go test -overlay`: `TestPOC_R12_SelfReviewedRunSlipsGovernanceFilesIntoMain` and `TestPOC_ProjectedEmptyRulesetUnprotectsMain` PASS (they enable no guard — I1), the design-check probe `TestDesignCheck_TASK006_CrissCrossHidesGovernanceRevert` PASSes (raw git behaviour); `TestPOC_R12_ProjectionInstallsSlippedPolicy` panics in TASK-011's sweep (its fake store has no `ListActiveWorkflowProjections`) **identically on a `git archive main` export** — pre-existing fixture rot, not this task. The inverted tests (AC 3, 17, 18, 28) fail with their guard mutated back (M1, M11, M17, M18) |
+| 28 | done | `TestGovernanceGuard_CrissCrossRevertIsCaught` for `.spine/branch-protection.yaml` and `workflows/task-default.yaml`: (a) every merge base → held, the path named; (b) single-base lister → post-merge refusal, `post_merge: true` event, local main = base, tightened bytes on main, clean tree, routed back, outcome failed (push off). Mutations M17 (one base), M18 (assertion removed) caught |
+| 29 | done | `TestWithGovernanceGuard_Prerequisites` (binding off — also with a `MergeBaseLister` — no `MergeBases`, invalid path → error, guard off); `TestGovernanceGuard_MissingBindingIsNotAHold`; `TestGovernanceGuard_EveryHoldIsDecidable` (6 hold shapes × approve/reject). Mutation M21 caught |
+| 30 | done | `TestGovernanceGuard_ArtifactsDirWorkflows`; `TestServeWiring_EnablesGovernanceGuards` (both builders pass `workflows/,spine/workflows/` for `artifacts_dir: spine`); `TestService_WorkflowDirsFollowsArtifactsDir` |
+| 31 | done | `TestGovernanceGuard_RejectRevokesTheApproval` (approve X with a transient merge failure → committing; reject; `sha == ""`; resubmit X → held under a new event id). Mutation M19 caught |
+| 32 | done | `TestGovernanceGuard_OwnRunEvidenceCarveOut` (own evidence merges; another run's evidence, own run outside `evidence/`, carve-out off → held). Mutation M22 caught |
+| 33 | done | `Match` rows `.spine.yaml/x` and `workflows` (a file) |
+| 34 | done | `TestGovernanceDecision_RejectLosesTheRace` (no publish step; an approve completes the merge inside the reject's revocation write; reject → `ErrConflict`, run completed, no `run_failed`, no rejected decision event). Mutation M20 (`UpdateRunStatus`) caught |
+| 35 | done | `TestCommitRetry_HeldMergeLogsNoError` (the scheduler's real sweep with `governanceAwareCommitRetry`: no Error line, a Debug line; a real failure still logs Error). Mutation M27 caught |
+
+**Mutations** (`go test -overlay`, worktree untouched; scripts in this session's scratchpad): M1–M36, every one caught by the test named above. M17/M18 first showed "not caught" because the criss-cross subtests' names carried `/` from file paths (go test splits `-run` on `/`); renamed, they are caught. M21 found a real gap (the binding-off check was only exercised with an operator that also lacked `MergeBases`), fixed in `48c99c6d`. M28–M36 cover the codex-round fixes.
+
+### Deviations and design choices (with reasons)
+
+1. **C-quoted paths are decoded, not always governed** (the design-check's alternative). TASK-003
+   made Spine's `Diff` NUL-delimited, but an embedder's operator may still C-quote; a decodable
+   path is matched decoded, an undecodable one is governed. No guarded entry can start with `"`,
+   so decoding only adds governance. `domain.UnsafeRepositoryPath` paths (invalid UTF-8, control,
+   U+2028/9, bidi) are governed too.
+2. **Case folding uses Unicode simple folding** (smallest rune of each `SimpleFold` orbit, lower-cased),
+   not `strings.ToLower`, which misses U+017F LONG S.
+3. **`ExemptOwnRunEvidence` zero value is false**: the library's zero value must be today's
+   behaviour, and a true zero value cannot be expressed on a bool; `spine serve` and the harness set
+   it (OQ9 default "on").
+4. **Only the guard's own decision creates a hold.** A custom `Policy` that denies with
+   `governance_approval_required` while the guard sees nothing to approve gets a plain `403`
+   refusal — otherwise it would create a hold `DecideGovernanceMerge` must refuse (`412`), breaking
+   AC 29. `EvaluateGovernance` also treats a malformed (not only empty) bound SHA as unevaluable.
+5. **The governance take-back restores exactly `BaseSHA`** (`takeBackGovernedMerge`), not
+   TASK-005's `takeBackRefusedMerge`: the latter moves to a newer first parent of a refused merge,
+   which for a fast-forward result is run-branch content.
+6. **A post-merge `Diff` failure** is retried when it is a retryable git error and the take-back
+   was clean (TASK-005's own rule for its checks); otherwise it is the permanent refusal.
+7. **The marker is not written on an "already up to date" replay**: the attempt that made the
+   merge wrote it before its push; a replay keeps it. Approve does not reset `merge_sha`/`base_sha`
+   (a concurrent attempt's marker must not be lost); a stale marker for an unlanded merge is ignored
+   by the projection's reachability check.
+8. **The lifecycle exemption reads the edited file at `src.sha`** (what merges), not `src.bound`;
+   they are equal for lifecycle runs (no status cascade on a `.yaml` task path).
+9. **AC 9's validator path:** TASK-005's rule reports reserved keys at `steps[i].outcomes[j].commit`
+   with the key in the message; the design-check note says this task adds no second rule.
+10. **Store Source 2** has no `repository_merge_outcomes` join and excludes an empty/tombstoned
+    `sha` (design-check note and AC 22 correction). Source 2 is not branch-scoped
+    (KNOWN-LIMITATIONS 11).
+11. **A provenance read failure is an infrastructure error, not a refusal**: the sync is held and
+    retried with the rules kept (AC 20 lists it among the "refused with the rules kept" cases; this
+    keeps the rules too and does not lose an authorised relaxation to a database blip, consistent
+    with TASK-011 D2). Codex round 1 extended this to retryable git failures while checking a record.
+12. **`FullRebuild` refusals end `idle`** (§5 note 3, D17), not `error` as AC 18's original sentence
+    says; the design-check correction replaced only the IncrementalSync assertions.
+13. **Projection wiring per workspace** is done in `cmd/spine`'s pooled builder
+    (`workspaceOrchestratorBuilder`, which runs inside `buildServiceSet` before the ServiceSet is
+    returned and before any sync), not in `service/internal/workspace/pool.go:955`: the switch then
+    lives in one package. The engine guard's workflow directories come from the workspace
+    projection (`ProjSync.WorkflowDirs()`); `buildOrchestrator` gained a `workflowDirs` parameter.
+14. **The gateway finds the decider on the `RunMergeResolver`** (the orchestrator) by type
+    assertion: no new `ServiceSet` or `ServerConfig` field.
+15. **Override provenance is written synchronously in `spine serve`'s push path** (codex round 1):
+    the design assumed the delivery subscriber's asynchronous, delivery-gated `event_log` write.
+16. **Reject decides its route before writing**, and fails a no-publish run with its own
+    compare-and-swap (TASK-008 converts `failRunOnMergeError` later); a publish-path reject that
+    finds the run completed (or still committing) answers 409 without an event.
+17. **A refused merge that cannot be taken back blocks every governed merge** (codex round 2, P1;
+    also a failed marker write, round 3): in process for all runs and in reserved key
+    `spine.governance.blocked_target` on the run, which stays committing. Restart residual in
+    KNOWN-LIMITATIONS 6.
+18. **With the guard on, a `FullRebuild` whose branch-protection step failed on infrastructure keeps
+    the previous `last_synced_commit`** (codex round 3), preserving the newness anchor.
+19. **Re-approving a commit whose approval is recorded retries the merge even when nothing is left
+    to evaluate** (codex round 4): after an approved merge landed locally and its push failed.
+20. **`GovernanceMergeStatus`** answers `ErrUnavailable` with the guard off and reports an
+    `EvaluationError` (no git output) instead of failing when the facts cannot be computed.
+
+### Codex review (`codex review --base main`, codex-cli 0.162.1, no `-c model=` override)
+
+Every round's review sub-session (`session_meta.source = {"subagent":"review"}`) has
+`"model":"gpt-6.1-sol"`.
+
+| Round | Session | Findings | Disposition |
+|---|---|---|---|
+| 1 (`48c99c6d`) | `01a13bf1-f617-77e2-9692-53631b7d15da` | P2 override provenance arrives asynchronously, a refusal advances past it; P2 transient git errors in record verification become a refusal | Both real; fixed in `be372095` with tests |
+| 2 (`be372095`) | `01a13bfa-1d71-7e82-b3e6-0a84ef2f620b` | P1 a failed take-back leaves the refused merge for the next merge to publish; P2 reject falls to the no-publish route on lookup failure; P2 decision event ids collide within a second | All real; fixed in `0972f1b7` with tests |
+| 3 (`0972f1b7`) | `01a13c04-05ea-7611-a002-9be95a78c252` | P2 a failed marker write with a failed take-back leaves no block; P2 a `FullRebuild` infra failure moves the bootstrap anchor to head (reproduced) | Both real; fixed in `54f51f28` with tests |
+| 4 (`54f51f28`) | `01a13ec2-27d6-7190-95bd-86f0b3c20ad3` | P2 re-approval after a locally landed merge whose push failed answers 412 | Real; fixed in `c3b9cdd3` with a test |
+| 5 (`c3b9cdd3`, the final code) | `01a13ecb-d024-7d43-b0ca-e5502baa2719` | "No actionable defects were identified" | — |
+
+No finding was rejected.
+
+### Gates (final code `c3b9cdd3`; only this notes commit follows)
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `lint-boundaries: OK`; OK; "engine constructed and exercised; library surface is sound." |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 FAIL |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean |
+| `go test -race -p 4 -count=1` on the 11 touched non-scenario packages (`adapters/{delivery,git,projection,store}`, `core/{auth,branchprotect,domain,engine}`, `service/cmd/spine`, `service/internal/gateway`, `service/scenariotest/harness`) | all ok |
+| `-tags integration -race -p 1 -count=1 -v` on `adapters/{delivery,projection,store}` and `service/cmd/spine` (fresh `s006_it2`; registry `s006_reg3` migrated from `migrations/registry`) | 898 PASS (subtests counted), 0 SKIP, 1 FAIL: `adapters/store` `TestRunModeDatabaseDefault` — the known pre-existing failure (identical on `main`, per the wave-3 notes) |
+| CI `scenario-git-http` job, its `run:` steps verbatim (`w3final/ci_job.py`, fresh `s006_ci2`) | job rc 0: step 2 (`TestGitHTTP_*`) 87 PASS, step 3 (`TestBootstrapInternalAdmin_*`) 26, step 4 (`TestWorkflowLifecycle_*`) 57, step 5 (pooled workflow-service policy) 1; 0 FAIL, 0 SKIP |
+| Full scenario suite `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (fresh `s006_scen2`, registry `s006_reg4` migrated) | 31 top-level FAIL — the **identical** sorted set of the known pre-existing failures (wave-3 final run's `scen-b.topfails`: the 30 + `TestWorkspace_ScopedServices`); 199 top-level PASS (wave-3 baseline 198 + the new `TestGovernancePathGuard_HeldUntilOperatorApproves`); 0 SKIP. An earlier run on `0972f1b7` gave the same result |
+| CI `git-floor` steps in `golang:1.26-bookworm` (git 2.39.5; `--pull=never --rm --init`, non-root, worktree and module cache read-only at `/work/spine`, `GOPROXY=off`, `GOTOOLCHAIN=local`) plus this task's git-heavy tests | step 2: 73 PASS; step 3: 891 PASS (both `TestMergeBases` tests); `Governance\|WithGovernanceGuard` in `core/engine`: 98 PASS (criss-cross included); `ProtectionRemovalGuard` in `adapters/projection`: 27 PASS; 0 FAIL. (A first run with the worktree mounted at its host path is **not** counted: that Docker Desktop mount came up empty on this VM, which a `-v` re-check exposed.) Container removed |
+| `golangci-lint` v2.11.4 `run --new-from-rev main` on every touched package, plain, `--build-tags=integration`, `--build-tags=scenario` (with `service/scenariotest/...`) | 0 issues each |
+| `golangci-lint --enable-only=gosec`: `./...` plain; `./...` with `integration,scenario`; `--new-from-rev main` on `./core/... ./adapters/... ./service/...` | 0; 1 (G602 at `adapters/store/postgres_integration_test.go:1563`, an untouched file — pre-existing, same as the wave-3 notes); 0 |
+| `gofmt -l` on every changed `.go` file | empty |
+| Mutation runs M1–M36 (`go test -overlay`) | all caught (see Per-AC evidence) |
+| Original PoCs by overlay (AC 27) | see AC 27 |
+
+### SMP compatibility gate
+
+`i23/s-T006/smp` = SMP `main` `1ae9b0e3` (detached, `.spine-revision` d23b897), `../spine` = this
+worktree, `GOFLAGS=-mod=readonly`, no `vendor/`; never modified (`git status` clean after every
+step).
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `bash dev/lint-spine-internals.sh` | all OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on the 14 SMP packages importing a changed Spine package, test imports included (`go list`): `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`, `internal/recovery` (on `54f51f28`) | 13 ok, `projectionsvc` has no tests. The wave-1/2 `gitread`/`projectionwriter` failures of earlier gates are gone on this SMP main |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s006_smp_it` with `vector`, `s006_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`), on `c3b9cdd3` | 1914 passed, 0 failed, 2 allowed skips; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -p 4 -tags integration ./internal/customer/githttp/`, on `c3b9cdd3` | 301 passed, 0 failed, 1 allowed skip; `testgate: PASS` |
+| The three Linux-only skips, in `golang:1.26-bookworm` (git 2.39.5, read-only mounts at `/work/s-T006/{smp,spine}` so `../spine` resolves) | `TestDiffChildMemory_MillionPaths` PASS, `TestReceiveTimeMemory_RealGitReaderFetch` PASS (maxrss 11352 KiB vs 265952 without the threshold), `TestIntegration_ReceiveTimeMemoryBounded` PASS (4 subtests) |
+
+The round-4 change (`c3b9cdd3`) touched only `core/engine/governance_decision.go`; the SMP packages
+that import `core/engine` (`spinecore`, `spineembedded`) ran on `c3b9cdd3` through the testgate
+row; the other packages of the race row do not import `core/engine`. `ws_*` databases and roles:
+0 before and 0 after.
+
+### Environment
+
+Shared PostgreSQL 18.6 (`i23-pg`, `localhost:55630`): only `s006_*` databases were created, and
+all were dropped (checked: none left). Docker: only `golang:1.26-bookworm` (git-floor, SMP
+Linux-only tests) and `alpine:3` (disk/mount checks) from present images, `--pull=never --rm`; no
+container left; the VM kept about 5 GB free. Logs and mutation/overlay scripts are in this
+session's scratchpad.
+
+### Not run
+
+- GitHub CI (needs a push).
+- Image-based SMP gates (images, RDS emulation, `make dev-up` smoke) and the other SMP integration
+  steps (platform-DB shared suites, fenced migrate, workspace-schema, faultinject, verify-children)
+  — not in this task's gate list.
+- A side-by-side scenario run on a `main` export: the branch's failure set was compared with the
+  wave-3 final run's `main`-identical set (same 31 names) instead.
+
+### Handoffs
+
+- **SMP TASK-010** (adopts this task; `docs/integration-guide.md` §10): implement
+  `engine.MergeBaseLister` on `RealGitOperator` (`git merge-base --all`, same pre-fetch as
+  `MergeBase`) and make `Diff` accept two local object ids; call `WithGovernanceGuard` after
+  `EnableMergeBinding` (exemption off, carve-out per SMP's evidence producer); add
+  `MergeCommitMeta` to `spinecore.RunStore`; call `DecideGovernanceMerge` with the caller's Spine
+  actor and `RoleAdmin` inside the git-session/write-gate wrapper; expose
+  `GovernanceMergeStatus`; enable `WithProtectionRemovalGuard` in the projection writer and the
+  provisioning rebuild with the runtime store as provenance (the pools need `SELECT` on
+  `runtime.event_log` and `runtime.runs`); pin that the engine's own pushes never emit
+  `branch_protection.override`. SMP has no commit-retry sweep: re-approval is its merge retry (now
+  also after a push failure, codex round 4).
+- **TASK-012:** its bounded merge-retry counter must not count `ErrGovernanceApprovalRequired`
+  (nor `errGovernanceTargetBlocked`, which is an unavailable refusal); its worktree lock makes the
+  governance take-back reliable (KNOWN-LIMITATIONS "Governance-Path Guard" 6).
+- **TASK-008:** `rejectGovernanceMerge` already fails a no-publish run with a compare-and-swap; when
+  `failRunOnMergeError` becomes one, the two can share it.
+- **TASK-017:** the guard diffs the merged commit (`src.sha`), so any change to the bound cascade
+  is evaluated automatically.
+- **Owner:** sign off ADR-016 (OQ1) to move it to `Accepted`.
