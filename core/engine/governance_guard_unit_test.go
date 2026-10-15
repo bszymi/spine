@@ -778,3 +778,40 @@ func TestGovernanceDecision_UniqueEventIDs(t *testing.T) {
 		t.Fatalf("decision events = %+v, want two distinct ids", ev)
 	}
 }
+
+// TestGovernanceGuard_MarkerFailureWithFailedTakeBackBlocks (codex review
+// round 3): the consumption-marker write and the take-back both fail, so
+// the approved merge is on the local main without its marker. The run
+// stays committing and the target is blocked; once both recover, the retry
+// takes the merge back, merges again, records the marker and only then
+// pushes — instead of finding main up to date and pushing without
+// provenance.
+func TestGovernanceGuard_MarkerFailureWithFailedTakeBackBlocks(t *testing.T) {
+	f := newGovFake(t, publishWorkflow(), defaultGuard(), true, govPaths...)
+	f.run.CommitMeta[domain.CommitMetaGovernanceApprovalSHA] = gBound
+	f.run.CommitMeta[domain.CommitMetaGovernanceApprovalActorID] = "op-1"
+	f.run.CommitMeta[domain.CommitMetaGovernanceApprovalActorRole] = "operator"
+	f.run.CommitMeta[domain.CommitMetaGovernanceApprovalApprovedAt] = "2026-10-14T00:00:00Z"
+	f.merger.mergeErr = errors.New("database down")
+	f.g.resetErr = &git.GitError{Kind: git.ErrKindTransient, Op: "reset_branch", Message: "repository locked"}
+	f.g.setHead("main", gMerge)
+	if err := f.merge(); err == nil || f.run.Status != domain.RunStatusCommitting || len(f.g.pushes) != 0 {
+		t.Fatalf("err %v, run %s, pushes %v; want an error, committing, nothing pushed", err, f.run.Status, f.g.pushes)
+	}
+	// Still blocked while the take-back keeps failing.
+	f.merger.mergeErr = nil
+	err := f.merge()
+	requireSpineCode(t, err, domain.ErrUnavailable)
+	if f.g.callCount("binder:MergeBound") != 1 || len(f.g.pushes) != 0 {
+		t.Fatalf("merged %d times, pushed %v while blocked", f.g.callCount("binder:MergeBound"), f.g.pushes)
+	}
+	f.g.resetErr = nil
+	if err := f.merge(); err != nil {
+		t.Fatalf("recovered merge: %v", err)
+	}
+	if f.run.Status != domain.RunStatusCompleted || len(f.g.pushes) != 1 ||
+		f.run.CommitMeta[domain.CommitMetaGovernanceApprovalMergeSHA] != gMerge {
+		t.Fatalf("run %s, pushes %v, marker %q; want completed, one push, the marker", f.run.Status, f.g.pushes,
+			f.run.CommitMeta[domain.CommitMetaGovernanceApprovalMergeSHA])
+	}
+}

@@ -44,7 +44,9 @@ ADR is `Proposed` until the owner signs it off). No migration.
   stay, `branch_protection.removal_refused` is emitted and a Warn logged. Commit trailers are
   never trusted. Inactive while `no-direct-write` is already off on the authoritative branch. A
   provenance read failure, or a retryable git failure while checking a record, holds the sync
-  (retried) instead of refusing.
+  (retried) instead of refusing; with the guard on, a full rebuild whose branch-protection step
+  failed that way keeps the previous `last_synced_commit` (the guard's newness anchor) instead of
+  the head.
 
 ### Changed (standalone)
 

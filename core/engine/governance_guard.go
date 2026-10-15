@@ -787,6 +787,14 @@ func (o *Orchestrator) assertGovernedMerge(ctx context.Context, run *domain.Run,
 			}
 			if err := o.mergeRunCommitMeta(ctx, run.RunID, marker); err != nil {
 				tb := o.takeBackGovernedMerge(ctx, res)
+				if !tb.clean {
+					// The merge is still on the local target without its
+					// marker (codex review round 3): a retry would find it
+					// up to date, skip the marker and push it, and the
+					// approved change would have no provenance. Block until
+					// the target is restored, like a refused merge.
+					o.recordGovernanceBlock(ctx, run, res.SHA, res.BaseSHA)
+				}
 				log.Error("governance guard: consumption marker not recorded; merge taken back, nothing pushed, the run stays committing",
 					"run_id", run.RunID, "merge_sha", res.SHA, "take_back", tb.detail, "error", err)
 				return false, fmt.Errorf("record governance consumption marker: %w", err)

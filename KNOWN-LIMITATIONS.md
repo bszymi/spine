@@ -387,6 +387,8 @@ refuses an unprovenanced branch-protection removal. What remains:
    full rebuild. A provenance or rule-store read failure, or a retryable git failure while
    checking a record, by contrast, holds the sync in `error` and is retried; a record whose commit
    is not in the repository (an override recorded for a push that never landed) is a mismatch.
+   With the guard on, a full rebuild whose branch-protection step failed on infrastructure keeps
+   the previous `last_synced_commit` (not the head), so the retry keeps the newness anchor.
 4. **Scope of the projection guard** (owner question 5): the authoritative branch only. Removing
    protection from other patterns (`release/*`, `staging`) is installed without a record. While the
    installed rules carry no `no-direct-write` on the authoritative branch the guard is inactive

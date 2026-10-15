@@ -208,18 +208,31 @@ func (s *Service) FullRebuild(ctx context.Context) error {
 	// rebuild so bootstrap defaults land even when the file is absent.
 	// A refused protection removal keeps the previous rules and is not a
 	// projection error (INIT-023 TASK-006; the guard logged it).
+	bpFailed := false
 	if err := s.projectBranchProtectionAt(ctx, head, prevCommit); err != nil && !errors.Is(err, ErrProtectionRemovalUnauthorized) {
 		log.Warn("failed to project branch-protection config",
 			"path", BranchProtectionConfigPath,
 			"error", err,
 		)
 		projErrors++
+		bpFailed = true
 	}
 
 	// Update sync state — only mark idle if no errors
 	if projErrors > 0 {
+		synced := head // for rebuild, keep HEAD to allow retry at same commit
+		if bpFailed && s.removalGuard != nil {
+			// With the protection-removal guard on, a failed
+			// branch-protection step keeps the previous commit instead
+			// (INIT-023 TASK-006, codex review round 3): while bootstrap
+			// rows are installed it is the guard's newness anchor, and a
+			// retry anchored at head would take the operator record that
+			// authorised this very head for a replay. The next sync then
+			// re-diffs from it.
+			synced = prevCommit
+		}
 		if err := s.store.UpdateSyncState(ctx, &store.SyncState{
-			LastSyncedCommit: head, // for rebuild, keep HEAD to allow retry at same commit
+			LastSyncedCommit: synced,
 			Status:           "error",
 			ErrorDetail:      fmt.Sprintf("%d projection errors during rebuild", projErrors),
 		}); err != nil {

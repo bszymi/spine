@@ -406,3 +406,33 @@ func TestProtectionRemovalGuard_RecordVerificationErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestProtectionRemovalGuard_RebuildFailureKeepsTheNewnessAnchor (codex
+// review round 3): with the bootstrap rows installed, the newness anchor is
+// the commit the sync started from. A FullRebuild whose branch-protection
+// step failed on infrastructure (here the provenance read) used to record
+// the head as last_synced_commit, so the retry anchored at the head itself
+// and refused the operator's authorisation as a replay. The rebuild now
+// keeps the previous commit when that step fails, and the retry installs
+// it.
+func TestProtectionRemovalGuard_RebuildFailureKeepsTheNewnessAnchor(t *testing.T) {
+	f := newPGFix(t)
+	f.r.remove(BranchProtectionConfigPath)
+	s := f.r.commit("config deleted")
+	f.st.bpRules = bootstrapRows()
+	f.st.bpCommit = "bootstrap"
+	f.st.setState(s, "idle")
+	o := f.relax("operator override re-adds a relaxed config")
+	f.prov.records = []store.GovernanceAuthorization{override(o, s)}
+	f.prov.err = errors.New("database down")
+	if err := f.svc.FullRebuild(context.Background()); err != nil {
+		t.Fatalf("FullRebuild: %v", err)
+	}
+	if st := f.st.syncState(); st.Status != "error" || st.LastSyncedCommit != s {
+		t.Fatalf("after a failed rebuild state = %+v, want error held at the previous commit %s", st, s)
+	}
+	f.requireProtected("rebuild with a provenance outage")
+	f.prov.err = nil
+	f.sync()
+	f.requireInstalledRelaxed("retry after the outage", o)
+}
