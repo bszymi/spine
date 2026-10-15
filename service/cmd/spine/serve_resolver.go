@@ -181,6 +181,10 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 	ss.CommitRetryFn = func(ctx context.Context, runID string) error {
 		return orch.MergeRunBranch(ctx, runID)
 	}
+	// The merge retry budget's exhaustion handler (INIT-023 TASK-012,
+	// P3-27), so a future wiring of the multi-workspace scheduler gets the
+	// bound (owner question 3: wiring it is a follow-up).
+	ss.CommitExhaustedFn = orch.AbandonExhaustedMerge
 	ss.StepRecoveryFn = func(ctx context.Context, execID string) error {
 		exec, err := ss.Store.GetStepExecution(ctx, execID)
 		if err != nil {
