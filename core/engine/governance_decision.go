@@ -81,7 +81,9 @@ var commitSHAPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 //  4. CommitSHA is a full hex object id (ErrInvalidParams);
 //  5. the run exists (ErrNotFound) and is committing (ErrConflict);
 //  6. the merge's governance facts can be computed (ErrUnavailable);
-//  7. the merge changes a governance path (ErrPrecondition);
+//  7. the merge changes a governance path (ErrPrecondition) — except for
+//     an approve of a commit whose approval is already recorded, the merge
+//     retry after an approved merge landed locally and its push failed;
 //  8. CommitSHA is the bound commit (ErrConflict).
 //
 // Approve records the approval (reserved commit_meta keys), re-reads the
@@ -147,7 +149,15 @@ func (o *Orchestrator) DecideGovernanceMerge(ctx context.Context, req Governance
 			"the merge's changed paths could not be computed; try again", err)
 	}
 	touched := gc.Touched()
-	if len(touched) == 0 {
+	// A re-approval of a commit whose approval is already recorded is the
+	// manual merge retry, also once nothing is left to evaluate (codex
+	// review round 4): after an approved merge landed on the local main and
+	// its push failed, main contains the bound commit, the remaining diff is
+	// empty, and refusing here would leave an embedder without a commit-retry
+	// sweep (SMP) no way to finish the run.
+	retry := req.Decision == GovernanceApprove && len(touched) == 0 &&
+		governanceApprovalMatches(run.CommitMeta, gc.BoundSHA)
+	if len(touched) == 0 && !retry {
 		return nil, domain.NewError(domain.ErrPrecondition, "run does not require governance approval: its merge changes no governance path")
 	}
 	if sha != gc.BoundSHA {
@@ -457,4 +467,11 @@ func (o *Orchestrator) GovernanceMergeStatus(ctx context.Context, runID string) 
 	decision, _ := branchprotect.EvaluateGovernance(gc)
 	st.Held = run.Status == domain.RunStatusCommitting && decision == branchprotect.DecisionDeny
 	return st, nil
+}
+
+// governanceApprovalMatches reports whether meta records an operator-or-above
+// approval of exactly sha.
+func governanceApprovalMatches(meta map[string]string, sha string) bool {
+	a := governanceApprovalFrom(meta)
+	return a != nil && a.SHA == sha && a.Actor.ActorID != "" && a.Actor.Role.HasAtLeast(domain.RoleOperator)
 }

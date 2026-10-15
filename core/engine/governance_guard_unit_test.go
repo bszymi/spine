@@ -815,3 +815,37 @@ func TestGovernanceGuard_MarkerFailureWithFailedTakeBackBlocks(t *testing.T) {
 			f.run.CommitMeta[domain.CommitMetaGovernanceApprovalMergeSHA])
 	}
 }
+
+// TestGovernanceDecision_ReapproveRetriesALandedMerge (codex review round
+// 4): the approved merge reached the local main but its push failed, so
+// main now contains the bound commit and nothing is left to evaluate.
+// Approving the same commit again is the manual merge retry (an embedder
+// without a commit-retry sweep has no other): it pushes and completes the
+// run instead of answering 412. A reject there, and an approve without a
+// recorded approval, still get 412.
+func TestGovernanceDecision_ReapproveRetriesALandedMerge(t *testing.T) {
+	f := newGovFake(t, publishWorkflow(), defaultGuard(), true, govPaths...)
+	f.g.pushErr = &git.GitError{Kind: git.ErrKindTransient, Op: "push", Message: "network error"}
+	res, err := f.decide(GovernanceApprove, gBound, govOperator, "")
+	if err != nil || res.RunStatus != domain.RunStatusCommitting {
+		t.Fatalf("first approve: %v %+v; want committing after a transient push failure", err, res)
+	}
+	// Local main now holds the merge: the bound commit is a merge base of
+	// itself and the replay is "already up to date".
+	f.g.bases["main "+gBound] = []string{gBound}
+	f.g.mergeRes = git.MergeResult{SHA: gMerge, BaseSHA: gMerge}
+	f.g.pushErr = nil
+	_, err = f.decide(GovernanceReject, gBound, govOperator, "no")
+	requireSpineCode(t, err, domain.ErrPrecondition)
+	res, err = f.decide(GovernanceApprove, gBound, govOperator, "")
+	if err != nil || res.RunStatus != domain.RunStatusCompleted || res.MergeError != "" {
+		t.Fatalf("retry approve: %v %+v; want the merge pushed and the run completed", err, res)
+	}
+	if len(f.g.pushes) != 2 || f.run.CommitMeta[domain.CommitMetaGovernanceApprovalMergeSHA] != gMerge {
+		t.Fatalf("pushes %v marker %q", f.g.pushes, f.run.CommitMeta[domain.CommitMetaGovernanceApprovalMergeSHA])
+	}
+
+	g := newGovFake(t, publishWorkflow(), defaultGuard(), true, "src/a.go")
+	_, err = g.decide(GovernanceApprove, gBound, govOperator, "")
+	requireSpineCode(t, err, domain.ErrPrecondition)
+}

@@ -901,8 +901,10 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    authenticated caller as `Actor` with its Spine role; the engine refuses below
    `domain.RoleOperator` (`ErrForbidden`), a SHA other than the bound one (`ErrConflict`), a run
    that is not committing (`ErrConflict`) and a merge with no governance change
-   (`ErrPrecondition`). Approve merges at once (a merge failure is in `MergeError`; approving again
-   retries); reject needs a reason, revokes the approval and takes `merge_failed`. Run decisions
+   (`ErrPrecondition`). Approve merges at once (a merge failure is in `MergeError`; approving the
+   same commit again retries — also after the merge landed locally and only its push failed, when
+   nothing is left to evaluate); reject needs a reason, revokes the approval and takes
+   `merge_failed`. Run decisions
    inside whatever serialises your other merge-cascading calls.
 5. **Atomic writes (recommended).** If your `RunStore` can implement
    `MergeCommitMeta(ctx, runID string, patch map[string]string) error` (`commit_meta || patch`),
