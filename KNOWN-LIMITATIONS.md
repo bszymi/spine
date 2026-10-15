@@ -909,7 +909,12 @@ What that implies, and what it leaves open:
     `blocked-notes.md` in the way of a checkout reads as "repository locked", transient). The retry
     budget caps the loop; matching `index.lock': File exists` precisely is a follow-up. Likewise
     curl's "Couldn't connect to server" is classified permanent.
-11. **Embedders.** A tree no client registered a home branch for (SMP's per-request worktrees, code
+11. **Ignored files and the engine's own sequences.** The restore never overwrites an ignored file
+    (its switch home uses `--no-overwrite-ignore`, and an ignored file in the reset's way refuses
+    it), but the engine's own checkouts and merges inside a sequence (the cascade's checkout of a run
+    branch, a merge into `main`) keep git's default and overwrite an ignored file at a path the
+    target branch tracks, as before TASK-012. Keep ignored local state out of `SPINE_REPO_PATH`.
+12. **Embedders.** A tree no client registered a home branch for (SMP's per-request worktrees, code
     repository clones) is never restored or detached and keeps the real `HEAD`. Every git child is
     stopped with `SIGTERM` on cancel for every client, and the engine's merge blocks re-check the run
     status for every operator — neither changes a successful result.

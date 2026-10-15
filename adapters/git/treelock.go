@@ -518,7 +518,9 @@ func (c *CLIClient) RestoreWorkingTree(ctx context.Context) (TreeRestoreReport, 
 // not save untracked files and `reset --hard` would delete them (codex
 // review round 2).
 //  4. HEAD is switched to the home branch with the Checkout argv (`switch
-//     --no-guess`), which never detaches onto a same-named tag.
+//     --no-guess`, which never detaches onto a same-named tag) plus
+//     `--no-overwrite-ignore`, so an ignored file in the way fails the
+//     switch instead of being overwritten.
 //  5. HEAD must now be refs/heads/<home> and the tracked status clean.
 //
 // Untracked files are never removed. One that blocks step 4 fails the
@@ -636,7 +638,11 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 	}
 
 	if rep.PreviousRef != full {
-		if _, _, err := c.runWith(ctx, op, runOpts{}, "switch", "--no-guess", "--end-of-options", short); err != nil {
+		// --no-overwrite-ignore (codex review round 3): git's default
+		// overwrites an ignored file at a path the home branch tracks;
+		// the restore never touches untracked or ignored files, so such a
+		// file fails the switch instead.
+		if _, _, err := c.runWith(ctx, op, runOpts{}, "switch", "--no-guess", "--no-overwrite-ignore", "--end-of-options", short); err != nil {
 			return fail(err)
 		}
 		rep.SwitchedHEAD = true

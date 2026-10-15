@@ -525,3 +525,29 @@ func TestF9_RestoreFailureAfterQuarantineCarriesTheSHA(t *testing.T) {
 		t.Fatalf("the quarantine commit does not hold the edit: %q", got)
 	}
 }
+
+// Codex review round 3 [P1]: the switch home never overwrites an ignored
+// file at a path the home branch tracks (git's default is
+// --overwrite-ignore).
+func TestF9_RestoreNeverOverwritesIgnoredFiles(t *testing.T) {
+	ctx := context.Background()
+	repo := swFeatureRepo(t)
+	testutil.WriteFile(t, repo, "data.bin", "tracked on main\n")
+	swGit(t, repo, "add", "data.bin")
+	swGit(t, repo, "commit", "-q", "-m", "data on main")
+	c := git.NewCLIClient(repo, git.WithHomeBranch("main"))
+	swGit(t, repo, "checkout", "-q", "feature") // feature has no data.bin
+	testutil.WriteFile(t, repo, ".git/info/exclude", "data.bin\n")
+	testutil.WriteFile(t, repo, "data.bin", "precious ignored content\n")
+	_, err := c.RestoreWorkingTree(ctx)
+	var re *git.TreeRestoreError
+	if !errors.As(err, &re) {
+		t.Fatalf("RestoreWorkingTree = %v, want a *TreeRestoreError (an ignored file is in the way of the switch)", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, "data.bin")); string(b) != "precious ignored content\n" {
+		t.Fatalf("the restore overwrote the ignored file: %q", b)
+	}
+	if got := swHead(t, repo); got != "refs/heads/feature" {
+		t.Fatalf("HEAD = %s, want the switch refused", got)
+	}
+}
