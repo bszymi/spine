@@ -34,6 +34,9 @@ func (s *Scheduler) ScanRunTimeouts(ctx context.Context) error {
 	}
 
 	for i := range runs {
+		if i > 0 && softBudgetSpent(ctx, "run-timeouts", i, len(runs)) {
+			return nil
+		}
 		run := &runs[i]
 		if err := s.handleRunTimeout(ctx, run, now); err != nil {
 			log.Error("handle run timeout failed", "run_id", run.RunID, "error", err)

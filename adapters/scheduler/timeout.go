@@ -24,6 +24,9 @@ func (s *Scheduler) ScanTimeouts(ctx context.Context) error {
 	}
 
 	for i := range execs {
+		if i > 0 && softBudgetSpent(ctx, "step-timeouts", i, len(execs)) {
+			return nil
+		}
 		exec := &execs[i]
 
 		// Use StartedAt if available, otherwise CreatedAt.

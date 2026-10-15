@@ -21,6 +21,9 @@ func (s *Scheduler) ScanOrphans(ctx context.Context) error {
 	}
 
 	for i := range runs {
+		if i > 0 && softBudgetSpent(ctx, "orphans", i, len(runs)) {
+			return nil
+		}
 		observe.GlobalMetrics.OrphansDetected.Inc()
 		log.Warn("potential orphan run detected",
 			"run_id", runs[i].RunID,

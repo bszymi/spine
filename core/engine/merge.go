@@ -572,10 +572,14 @@ func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.
 	}
 
 	// Classify based on error type: merge conflicts get git_conflict,
-	// other permanent merge errors get permanent_error.
+	// spent retry budgets get merge_retries_exhausted (INIT-023 TASK-012,
+	// P3-27), other permanent merge errors get permanent_error.
 	classification := domain.FailurePermanent
 	var gitErr *git.GitError
-	if errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict") {
+	switch {
+	case isRetriesExhausted(mergeErr):
+		classification = domain.FailureMergeRetriesExhausted
+	case errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict"):
 		classification = domain.FailureGitConflict
 	}
 

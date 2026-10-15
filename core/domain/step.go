@@ -50,6 +50,11 @@ const (
 	// (as `skipped`) because its run was cancelled or failed
 	// (INIT-023 TASK-007). Not retryable.
 	FailureRunTerminated FailureClassification = "run_terminated"
+	// FailureMergeRetriesExhausted marks the step whose outcome led to a
+	// governed merge whose automatic retries were spent on transient
+	// failures (INIT-023 TASK-012, audit P3-27). Not retryable: the run
+	// took the permanent-failure route.
+	FailureMergeRetriesExhausted FailureClassification = "merge_retries_exhausted"
 )
 
 // IsRetryable returns true if this failure classification allows retry.

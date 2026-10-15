@@ -204,6 +204,34 @@ func (o RepositoryMergeOutcome) IsTerminal() bool {
 	return false
 }
 
+// RetriesExhausted reports whether this outcome has spent a retry budget
+// of maxRetries automatic retries (INIT-023 TASK-012, audit P3-27): the
+// latest attempt failed with a transient class and more than maxRetries
+// attempts are recorded. Attempts counts every recorded attempt for (run,
+// repository), the first one included, so within one committing episode
+// "> maxRetries" means the first attempt and maxRetries retries have run.
+// The count is per (run, repository) lifetime and carries over a
+// merge_failed loop-back (owner question 4: no per-episode counter, no
+// migration). maxRetries <= 0 is "unbounded" and never exhausts.
+func (o RepositoryMergeOutcome) RetriesExhausted(maxRetries int) bool {
+	return maxRetries > 0 &&
+		o.Status == RepositoryMergeStatusFailed &&
+		o.FailureClass.IsTransient() &&
+		o.Attempts > maxRetries
+}
+
+// FirstExhaustedOutcome returns a copy of the first outcome, in slice
+// order, whose retry budget is spent (RetriesExhausted), or nil.
+func FirstExhaustedOutcome(outcomes []RepositoryMergeOutcome, maxRetries int) *RepositoryMergeOutcome {
+	for i := range outcomes {
+		if outcomes[i].RetriesExhausted(maxRetries) {
+			cp := outcomes[i]
+			return &cp
+		}
+	}
+	return nil
+}
+
 // IsPrimaryRepository reports whether this outcome is for the workspace
 // primary repository — the only repository allowed to record a
 // LedgerCommitSHA.
