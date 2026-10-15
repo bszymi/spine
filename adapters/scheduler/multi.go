@@ -37,6 +37,10 @@ type MultiScheduler struct {
 	workspaceBudget  time.Duration
 	maxConcurrent    int
 	done             chan struct{}
+
+	// resumes holds, per workspace, where each budgeted scan stopped.
+	resumeMu sync.Mutex
+	resumes  map[string]*scanResume
 }
 
 // MultiSchedulerConfig holds configuration for the multi-workspace scheduler.
@@ -230,6 +234,21 @@ func (ms *MultiScheduler) forEachWorkspace(ctx context.Context, scanName string,
 	wg.Wait()
 }
 
+// resumeFor returns the workspace's scan resume positions.
+func (ms *MultiScheduler) resumeFor(wsID string) *scanResume {
+	ms.resumeMu.Lock()
+	defer ms.resumeMu.Unlock()
+	if ms.resumes == nil {
+		ms.resumes = map[string]*scanResume{}
+	}
+	r := ms.resumes[wsID]
+	if r == nil {
+		r = &scanResume{}
+		ms.resumes[wsID] = r
+	}
+	return r
+}
+
 // runWorkspace is one workspace's share of a tick.
 func (ms *MultiScheduler) runWorkspace(ctx context.Context, scanName, wsID string, fn func(ctx context.Context, sched *Scheduler)) {
 	log := observe.Logger(ctx)
@@ -269,31 +288,105 @@ func (ms *MultiScheduler) runWorkspace(ctx context.Context, scanName, wsID strin
 
 	wsCtx := observe.WithWorkspaceID(ctx, wsID)
 	if ms.workspaceBudget > 0 {
-		wsCtx = withSoftBudget(wsCtx, time.Now().Add(ms.workspaceBudget))
+		wsCtx = withSoftBudget(wsCtx, time.Now().Add(ms.workspaceBudget), ms.resumeFor(wsID))
 	}
 	fn(wsCtx, sched)
 }
 
-// softBudgetKey carries a workspace scan's soft deadline.
+// softBudgetKey carries a workspace scan's softBudget.
 type softBudgetKey struct{}
 
-// withSoftBudget attaches a soft deadline to ctx. It is a value, not a
-// context deadline: nothing is cancelled when it passes.
-func withSoftBudget(ctx context.Context, deadline time.Time) context.Context {
-	return context.WithValue(ctx, softBudgetKey{}, deadline)
+// softBudget is one workspace's soft time budget for one tick, and the
+// positions its budgeted scans resume from (kept across ticks).
+type softBudget struct {
+	deadline time.Time
+	resume   *scanResume
 }
 
-// softBudgetSpent reports whether ctx's soft budget has passed; the
-// caller's loop then stops before item processed of total. It logs the
-// stop at Warn. A context without a budget (single-workspace mode) never
-// stops.
-func softBudgetSpent(ctx context.Context, scan string, processed, total int) bool {
-	deadline, ok := ctx.Value(softBudgetKey{}).(time.Time)
-	if !ok || time.Now().Before(deadline) {
+// scanResume is where each budgeted scan of one workspace stopped (codex
+// review round 1): a scan cut short resumes there on the next tick
+// instead of at the start of the list again, so a prefix that keeps using
+// the whole budget cannot starve the items behind it.
+type scanResume struct {
+	mu   sync.Mutex
+	next map[string]int
+}
+
+func (r *scanResume) get(scan string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.next[scan]
+}
+
+func (r *scanResume) set(scan string, i int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.next == nil {
+		r.next = map[string]int{}
+	}
+	r.next[scan] = i
+}
+
+// withSoftBudget attaches a soft deadline (and the workspace's resume
+// positions) to ctx. It is a value, not a context deadline: nothing is
+// cancelled when it passes.
+func withSoftBudget(ctx context.Context, deadline time.Time, resume *scanResume) context.Context {
+	if resume == nil {
+		resume = &scanResume{}
+	}
+	return context.WithValue(ctx, softBudgetKey{}, &softBudget{deadline: deadline, resume: resume})
+}
+
+// budgetIter walks the n items of one scan. Without a budget in ctx
+// (single-workspace mode) it visits 0..n-1 in order, exactly the loop it
+// replaces. With one it starts where the scan's previous pass stopped,
+// wraps around, and stops between items once the deadline has passed —
+// always after at least one item, so every scan makes progress each tick —
+// recording where to resume and logging the stop at Warn (scan,
+// workspace_id, processed, remaining).
+type budgetIter struct {
+	ctx      context.Context
+	scan     string
+	n        int
+	k        int // items visited so far
+	start    int
+	i        int // the current item's index
+	b        *softBudget
+	finished bool
+}
+
+func newBudgetIter(ctx context.Context, scan string, n int) *budgetIter {
+	it := &budgetIter{ctx: ctx, scan: scan, n: n}
+	if b, ok := ctx.Value(softBudgetKey{}).(*softBudget); ok && b != nil {
+		it.b = b
+		if n > 0 {
+			it.start = b.resume.get(scan) % n
+		}
+	}
+	return it
+}
+
+// next advances to the next item and reports whether there is one.
+func (it *budgetIter) next() bool {
+	if it.finished {
 		return false
 	}
-	observe.Logger(ctx).Warn("workspace scan budget spent; the rest waits for the next tick",
-		"scan", scan, "workspace_id", observe.WorkspaceID(ctx),
-		"processed", processed, "remaining", total-processed)
+	if it.k >= it.n {
+		it.finished = true
+		if it.b != nil {
+			it.b.resume.set(it.scan, 0)
+		}
+		return false
+	}
+	if it.k > 0 && it.b != nil && !time.Now().Before(it.b.deadline) {
+		it.finished = true
+		it.b.resume.set(it.scan, (it.start+it.k)%it.n)
+		observe.Logger(it.ctx).Warn("workspace scan budget spent; the rest waits for the next tick",
+			"scan", it.scan, "workspace_id", observe.WorkspaceID(it.ctx),
+			"processed", it.k, "remaining", it.n-it.k)
+		return false
+	}
+	it.i = (it.start + it.k) % it.n
+	it.k++
 	return true
 }

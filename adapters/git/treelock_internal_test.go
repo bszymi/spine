@@ -289,3 +289,23 @@ func TestTreeLock_SequenceIsDetachedAndBounded(t *testing.T) {
 		t.Fatalf("exit restore did not return the tree home: HEAD=%s", got)
 	}
 }
+
+// (i, codex review round 1) On a tree without a home branch the sequence
+// only holds the lock: fn's ctx keeps the caller's cancellation.
+func TestTreeLock_NoHomeSequenceKeepsCancellation(t *testing.T) {
+	dir := tlRepo(t)
+	c := NewCLIClient(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	var errAfter error
+	err := c.WithWorkingTree(ctx, func(fctx context.Context) error {
+		cancel()
+		errAfter = fctx.Err()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithWorkingTree: %v", err)
+	}
+	if !errors.Is(errAfter, context.Canceled) {
+		t.Fatalf("fn's ctx after the caller cancelled: %v, want context.Canceled on a tree without a home branch", errAfter)
+	}
+}

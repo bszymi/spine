@@ -42,10 +42,11 @@ package git
 //     .git/index.lock is reported, never deleted (owner question 5). A
 //     poisoned tree therefore heals itself at the next governed operation
 //     instead of failing it.
-//  3. A taken sequence is never abandoned half-way: WithWorkingTree runs
-//     the entry restore, fn and the exit restore on a context detached
-//     from the caller's cancellation and bounded by treeSequenceTimeout
-//     (owner question 6). Only the lock wait honours the caller's context.
+//  3. A taken sequence on a home-branch tree is never abandoned half-way:
+//     WithWorkingTree runs the entry restore, fn and the exit restore on a
+//     context detached from the caller's cancellation and bounded by
+//     treeSequenceTimeout (owner question 6). Only the lock wait honours
+//     the caller's context.
 //     Together with SIGTERM-on-cancel (gitcmd.go) a client disconnect can
 //     no longer leave the tree half checked out or locked.
 //  4. On a home-branch tree, a read method's "HEAD" means
@@ -412,7 +413,8 @@ func (c *CLIClient) lockTree(ctx context.Context) (treeHold, error) {
 // (WorkingTreeGuard). A ctx that already carries this tree's live ticket
 // re-enters: fn runs at once with that ctx, nothing else happens.
 //
-// When this call TAKES the tree:
+// When this call TAKES a tree with a home branch (standalone's shared
+// workspace tree):
 //
 //   - fn, and the restores around it, run on a context detached from the
 //     caller's cancellation and bounded by treeSequenceTimeout (it keeps
@@ -421,9 +423,14 @@ func (c *CLIClient) lockTree(ctx context.Context) (treeHold, error) {
 //     server has started is therefore finished, never left half-way by a
 //     client disconnect; one that hits the bound is stopped with SIGTERM
 //     and healed by the next restore;
-//   - on a tree with a home branch, the tree is restored before fn (a
-//     failure returns the *TreeRestoreError and fn does not run) and after
-//     fn (a failure is logged at Error; fn's result is returned).
+//   - the tree is restored before fn (a failure returns the
+//     *TreeRestoreError and fn does not run) and after fn (a failure is
+//     logged at Error; fn's result is returned).
+//
+// On a tree with no home branch (code-repository clones, embedders'
+// per-request worktrees) it only holds the lock: fn gets the caller's ctx,
+// cancellation included, with the ticket added, and nothing is restored
+// (codex review round 1: such trees keep today's cancellation semantics).
 func (c *CLIClient) WithWorkingTree(ctx context.Context, fn func(ctx context.Context) error) error {
 	if c.homeErr != nil {
 		return &TreeRestoreError{Branch: c.homeBranch, Err: c.homeErr}
@@ -436,21 +443,20 @@ func (c *CLIClient) WithWorkingTree(ctx context.Context, fn func(ctx context.Con
 		return fn(h.ctx)
 	}
 	defer h.release()
+	home := c.treeHome()
+	if home == "" {
+		return fn(h.ctx)
+	}
 	seq, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), treeSequenceTimeout)
 	defer cancel()
-	home := c.treeHome()
-	if home != "" {
-		if _, err := c.restoreHeld(seq, home); err != nil {
-			return err
-		}
+	if _, err := c.restoreHeld(seq, home); err != nil {
+		return err
 	}
 	fnErr := fn(seq)
-	if home != "" {
-		// A fresh bound: fn may have spent the sequence's.
-		if _, err := c.restoreHeld(h.ctx, home); err != nil {
-			observe.Logger(ctx).Error("shared working tree not restored after a sequence; the next sequence retries the restore",
-				"home_branch", home, "error", err)
-		}
+	// A fresh bound: fn may have spent the sequence's.
+	if _, err := c.restoreHeld(h.ctx, home); err != nil {
+		observe.Logger(ctx).Error("shared working tree not restored after a sequence; the next sequence retries the restore",
+			"home_branch", home, "error", err)
 	}
 	return fnErr
 }

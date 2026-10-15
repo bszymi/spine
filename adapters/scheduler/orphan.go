@@ -20,10 +20,8 @@ func (s *Scheduler) ScanOrphans(ctx context.Context) error {
 		return fmt.Errorf("list stale active runs: %w", err)
 	}
 
-	for i := range runs {
-		if i > 0 && softBudgetSpent(ctx, "orphans", i, len(runs)) {
-			return nil
-		}
+	for it := newBudgetIter(ctx, "orphans", len(runs)); it.next(); {
+		i := it.i
 		observe.GlobalMetrics.OrphansDetected.Inc()
 		log.Warn("potential orphan run detected",
 			"run_id", runs[i].RunID,

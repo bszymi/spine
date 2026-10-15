@@ -358,11 +358,8 @@ func (s *Scheduler) retryRunsByStatus(ctx context.Context, status domain.RunStat
 		return
 	}
 
-	for i := range runs {
-		if i > 0 && softBudgetSpent(ctx, "commit-retry:"+string(status), i, len(runs)) {
-			return
-		}
-		runID := runs[i].RunID
+	for it := newBudgetIter(ctx, "commit-retry:"+string(status), len(runs)); it.next(); {
+		runID := runs[it.i].RunID
 		if resumeTrigger == "" && s.commitBudgetSpent(ctx, runID) {
 			continue
 		}

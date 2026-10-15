@@ -210,3 +210,75 @@ func TestMultiScheduler_PerWorkspaceSchedulerGetsTheRetryBudget(t *testing.T) {
 		t.Fatalf("DefaultCommitMaxRetries = %d, want 3 (the standalone value)", DefaultCommitMaxRetries)
 	}
 }
+
+// Codex review round 1: a scan cut short by the budget resumes where it
+// stopped on the next tick, so the tail of a long list is not starved by
+// a prefix that keeps using the whole budget.
+func TestMultiScheduler_BudgetedScanResumesWhereItStopped(t *testing.T) {
+	st := &msStore{}
+	const n = 30
+	for i := 0; i < n; i++ {
+		st.runs = append(st.runs, domain.Run{RunID: fmt.Sprintf("r-%03d", i), Status: domain.RunStatusCommitting})
+	}
+	var mu sync.Mutex
+	var order []string
+	retry := func(_ context.Context, runID string) error {
+		mu.Lock()
+		order = append(order, runID)
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}
+	pool := &msPool{sets: map[string]ServiceSet{"ws": {Store: st, CommitRetryFn: retry}}}
+	ms := NewMultiScheduler(pool, msResolver{ids: []string{"ws"}}, MultiSchedulerConfig{WorkspaceBudget: 35 * time.Millisecond})
+	tick := func() []string {
+		mu.Lock()
+		before := len(order)
+		mu.Unlock()
+		ms.forEachWorkspace(context.Background(), "commit-retry", func(ctx context.Context, sched *Scheduler) {
+			sched.RunCommitRetry(ctx)
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), order[before:]...)
+	}
+	first := tick()
+	if len(first) == 0 || len(first) >= n {
+		t.Fatalf("first tick processed %d of %d, want a budgeted part", len(first), n)
+	}
+	second := tick()
+	if len(second) == 0 {
+		t.Fatal("second tick processed nothing")
+	}
+	wantStart := fmt.Sprintf("r-%03d", len(first))
+	if second[0] != wantStart {
+		t.Fatalf("second tick started at %s, want %s (where the first stopped)", second[0], wantStart)
+	}
+	seen := map[string]bool{}
+	for _, id := range append(first, second...) {
+		seen[id] = true
+	}
+	for k := 0; k < 20 && len(seen) < n; k++ {
+		for _, id := range tick() {
+			seen[id] = true
+		}
+	}
+	if len(seen) != n {
+		t.Fatalf("after repeated budgeted ticks %d of %d runs were ever retried", len(seen), n)
+	}
+}
+
+// Without a budget (single-workspace mode) the scan visits every item in
+// order, as before.
+func TestBudgetIter_NoBudgetIsThePlainLoop(t *testing.T) {
+	var got []int
+	for it := newBudgetIter(context.Background(), "x", 5); it.next(); {
+		got = append(got, it.i)
+	}
+	if fmt.Sprint(got) != "[0 1 2 3 4]" {
+		t.Fatalf("visited %v, want [0 1 2 3 4]", got)
+	}
+	for it := newBudgetIter(context.Background(), "x", 0); it.next(); {
+		t.Fatal("visited an item of an empty list")
+	}
+}
