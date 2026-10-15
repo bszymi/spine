@@ -47,6 +47,16 @@ const AuthoritativeBranch = authoritativeBranch
 // the bound commit, and every later phase merges exactly that commit.
 // With binding off it returns the zero value and nothing changes.
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
+	// An exhaustion abandonment of this run in progress (AbandonExhaustedMerge,
+	// INIT-023 TASK-012) is routing it: this attempt stands down, nothing
+	// is recorded. Never the case for an embedder that does not wire the
+	// scheduler's exhaustion handler.
+	end, ok := mergeAttemptGate.beginAttempt(runID)
+	if !ok {
+		observe.Logger(ctx).Info("merge retries of this run are being abandoned; this merge attempt stands down", "run_id", runID)
+		return nil
+	}
+	defer end()
 	run, done, err := o.preflightCheck(ctx, runID)
 	if err != nil || done {
 		return err

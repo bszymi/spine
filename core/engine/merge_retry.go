@@ -28,6 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
@@ -69,10 +71,30 @@ const retriesExhaustedMarker = "retries exhausted ("
 // No tree lock: this does no git work, and it routes steps (worktree.go).
 // The scheduler calls it (scheduler.CommitExhaustedFunc) before each
 // commit retry.
+//
+// Coordination (codex review round 4). Within the process it never
+// overlaps a merge attempt of the same run: while one is in flight it
+// returns false and the next tick decides on the attempt's own outcome,
+// and a MergeRunBranch that starts while an abandonment runs stands down
+// (mergeAttemptGate). So the abandonment can neither route a run whose
+// attempt is publishing, nor re-record a stale outcome over a merged one.
+// And an outcome counts only when it was attempted in the run's current
+// committing episode — at or after the latest step activity of the run:
+// after a merge_failed loop-back and rework, the previous episode's
+// exhausted outcome no longer abandons the new episode before its first
+// attempt; its first transient failure does (owner question 4). Across
+// processes sharing one database the residual race remains until
+// TASK-008's compare-and-swap writes (KNOWN-LIMITATIONS).
 func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, maxRetries int) (bool, error) {
 	if maxRetries <= 0 {
 		return false, nil
 	}
+	end, ok := mergeAttemptGate.beginAbandon(runID)
+	if !ok {
+		observe.Logger(ctx).Info("merge attempt in flight; the retry budget is checked on the next tick", "run_id", runID)
+		return false, nil
+	}
+	defer end()
 	run, err := o.store.GetRun(ctx, runID)
 	if err != nil {
 		return false, fmt.Errorf("get run: %w", err)
@@ -86,6 +108,15 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 	}
 	ex := domain.FirstExhaustedOutcome(outcomes, maxRetries)
 	if ex == nil {
+		return false, nil
+	}
+	current, err := o.attemptedThisEpisode(ctx, runID, ex)
+	if err != nil {
+		return false, err
+	}
+	if !current {
+		observe.Logger(ctx).Info("exhausted merge outcome predates the run's current committing episode; waiting for this episode's attempt",
+			"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts)
 		return false, nil
 	}
 	cause := &MergeRetriesExhaustedError{
@@ -123,4 +154,89 @@ func exhaustedPrefix(attempts, maxRetries int) string {
 func isRetriesExhausted(err error) bool {
 	var e *MergeRetriesExhaustedError
 	return errors.As(err, &e)
+}
+
+// attemptedThisEpisode reports whether outcome was attempted in the run's
+// current committing episode: its last attempt is at or after the latest
+// step activity (creation, start or completion of any of the run's step
+// executions). An episode begins with step activity — the commit outcome's
+// step completing, a publish step starting — and merge attempts move no
+// step timestamp, so an outcome attempted before the latest activity
+// belongs to an earlier episode. No timestamp, or an unreadable step list,
+// is "not this episode" with the error returned: the abandonment waits.
+func (o *Orchestrator) attemptedThisEpisode(ctx context.Context, runID string, outcome *domain.RepositoryMergeOutcome) (bool, error) {
+	if outcome.LastAttemptedAt == nil {
+		return false, nil
+	}
+	execs, err := o.store.ListStepExecutionsByRun(ctx, runID)
+	if err != nil {
+		return false, fmt.Errorf("list step executions: %w", err)
+	}
+	var latest time.Time
+	for i := range execs {
+		for _, ts := range []*time.Time{&execs[i].CreatedAt, execs[i].StartedAt, execs[i].CompletedAt} {
+			if ts != nil && ts.After(latest) {
+				latest = *ts
+			}
+		}
+	}
+	return !outcome.LastAttemptedAt.Before(latest), nil
+}
+
+// mergeAttemptGate coordinates, within one process, AbandonExhaustedMerge
+// with MergeRunBranch for the same run (codex review round 4). Neither
+// side ever waits: an abandonment while an attempt is in flight is
+// skipped, and an attempt that starts during an abandonment stands down.
+// Package level, like recoveryBindingStripes, because `spine serve` builds
+// an orchestrator per workspace and the pool rebuilds them. An embedder
+// that never calls AbandonExhaustedMerge (SMP) only ever increments and
+// decrements the in-flight count: its merges behave exactly as before.
+var mergeAttemptGate = &attemptGate{inFlight: map[string]int{}, abandoning: map[string]bool{}}
+
+type attemptGate struct {
+	mu         sync.Mutex
+	inFlight   map[string]int
+	abandoning map[string]bool
+}
+
+// beginAttempt registers a merge attempt of runID; ok is false (and
+// nothing is registered) while an abandonment of the run is in progress.
+// Nested attempts in one goroutine count up.
+func (g *attemptGate) beginAttempt(runID string) (end func(), ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.abandoning[runID] {
+		return func() {}, false
+	}
+	g.inFlight[runID]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if g.inFlight[runID]--; g.inFlight[runID] <= 0 {
+				delete(g.inFlight, runID)
+			}
+		})
+	}, true
+}
+
+// beginAbandon marks an abandonment of runID; ok is false (and nothing is
+// marked) while a merge attempt of the run is in flight or another
+// abandonment runs.
+func (g *attemptGate) beginAbandon(runID string) (end func(), ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.inFlight[runID] > 0 || g.abandoning[runID] {
+		return func() {}, false
+	}
+	g.abandoning[runID] = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			delete(g.abandoning, runID)
+		})
+	}, true
 }

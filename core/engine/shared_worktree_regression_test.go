@@ -1082,3 +1082,115 @@ func TestMergeRetry_TransientVerifyCommitIsACountedAttempt(t *testing.T) {
 		}
 	}
 }
+
+// swtExhausted seeds st with run-<id>'s primary outcome failed with a
+// transient class after 4 attempts at attemptedAt, and a completed step at
+// stepAt.
+func swtExhausted(t *testing.T, st *mockRunStore, id string, attemptedAt, stepAt time.Time) {
+	t.Helper()
+	runID := "run-" + id
+	if err := st.UpsertRepositoryMergeOutcome(context.Background(), &domain.RepositoryMergeOutcome{
+		RunID: runID, RepositoryID: domain.PrimaryRepositoryID, Status: domain.RepositoryMergeStatusFailed,
+		FailureClass: domain.MergeFailureNetwork, FailureDetail: "git push: network error",
+		SourceBranch: "spine/run/" + runID, TargetBranch: "main", Attempts: 4, LastAttemptedAt: &attemptedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st.createdSteps = append(st.createdSteps, &domain.StepExecution{ExecutionID: runID + "-start-1", RunID: runID,
+		StepID: "start", Status: domain.StepStatusCompleted, CreatedAt: stepAt, CompletedAt: &stepAt})
+}
+
+// Codex review round 4: an abandonment never overlaps an in-flight merge
+// attempt of the same run, so it can neither route a run whose attempt is
+// publishing nor re-record a stale outcome over the merged one.
+func TestMergeRetry_AbandonSkipsWhileAMergeIsInFlight(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	ctx := context.Background()
+	repo := swtRepo(t, "a")
+	shared := git.NewCLIClient(repo, git.WithHomeBranch("main"))
+	var abandoned bool
+	var abandonErr error
+	var once sync.Once
+	var o *Orchestrator
+	hook := &swtHookGit{CLIClient: shared, afterCheckout: func(_ context.Context, b string) {
+		if b == "spine/run/run-a" {
+			once.Do(func() { abandoned, abandonErr = o.AbandonExhaustedMerge(context.Background(), "run-a", 3) })
+		}
+	}}
+	o, st := swtOrch(hook, "a")
+	now := time.Now()
+	swtExhausted(t, st, "a", now, now.Add(-time.Minute))
+	if err := o.MergeRunBranch(ctx, "run-a"); err != nil {
+		t.Fatalf("MergeRunBranch: %v", err)
+	}
+	if abandoned || abandonErr != nil {
+		t.Fatalf("AbandonExhaustedMerge during the attempt = %v, %v; want false (an attempt is in flight)", abandoned, abandonErr)
+	}
+	if s := st.runs["run-a"].Status; s != domain.RunStatusCompleted {
+		t.Fatalf("run %s, want completed", s)
+	}
+	o2, _ := st.GetRepositoryMergeOutcome(ctx, "run-a", domain.PrimaryRepositoryID)
+	if o2.Status != domain.RepositoryMergeStatusMerged || strings.Contains(o2.FailureDetail, "retries exhausted") {
+		t.Fatalf("outcome %+v, want merged", o2)
+	}
+	if ok, err := o.AbandonExhaustedMerge(ctx, "run-a", 3); ok || err != nil {
+		t.Fatalf("AbandonExhaustedMerge after the merge = %v, %v; want false", ok, err)
+	}
+}
+
+// A merge attempt that starts while an abandonment of the run is in
+// progress stands down: nothing is merged or recorded.
+func TestMergeRetry_MergeStandsDownDuringAbandon(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "false")
+	ctx := context.Background()
+	repo := swtRepo(t, "a")
+	o, st := swtOrch(git.NewCLIClient(repo, git.WithHomeBranch("main")), "a")
+	mainBefore := swtGit(t, repo, "rev-parse", "main")
+	end, ok := mergeAttemptGate.beginAbandon("run-a")
+	if !ok {
+		t.Fatal("could not mark the abandonment")
+	}
+	err := o.MergeRunBranch(ctx, "run-a")
+	end()
+	if err != nil {
+		t.Fatalf("MergeRunBranch during an abandonment = %v, want nil", err)
+	}
+	if got := swtGit(t, repo, "rev-parse", "main"); got != mainBefore {
+		t.Fatal("a merge ran during the abandonment")
+	}
+	if outcomes, _ := st.ListRepositoryMergeOutcomes(ctx, "run-a"); len(outcomes) != 0 {
+		t.Fatalf("outcomes recorded: %+v", outcomes)
+	}
+	if err := o.MergeRunBranch(ctx, "run-a"); err != nil || st.runs["run-a"].Status != domain.RunStatusCompleted {
+		t.Fatalf("after the abandonment: %v, run %s", err, st.runs["run-a"].Status)
+	}
+}
+
+// Codex review round 4: the previous committing episode's exhausted
+// outcome does not abandon a new episode (after a merge_failed loop-back
+// and rework) before that episode's own attempt; its first transient
+// failure does (owner question 4).
+func TestMergeRetry_PreviousEpisodeOutcomeDoesNotAbandon(t *testing.T) {
+	ctx := context.Background()
+	st := &mockRunStore{runs: map[string]*domain.Run{"run-a": swtRun("a")}}
+	o := &Orchestrator{store: st, git: &stubGitOperator{}, events: &mockEventEmitter{}, wfLoader: &stubWorkflowLoader{},
+		policy: branchprotect.NewPermissive()}
+	now := time.Now()
+	swtExhausted(t, st, "a", now.Add(-time.Hour), now.Add(-time.Minute))
+	if ok, err := o.AbandonExhaustedMerge(ctx, "run-a", 3); ok || err != nil {
+		t.Fatalf("an exhausted outcome from an earlier episode = %v, %v; want false", ok, err)
+	}
+	if s := st.runs["run-a"].Status; s != domain.RunStatusCommitting {
+		t.Fatalf("run %s, want committing", s)
+	}
+	// This episode's first attempt fails transiently: now it counts.
+	later := now
+	out, _ := st.GetRepositoryMergeOutcome(ctx, "run-a", domain.PrimaryRepositoryID)
+	out.Attempts, out.LastAttemptedAt = 5, &later
+	if err := st.UpsertRepositoryMergeOutcome(ctx, out); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := o.AbandonExhaustedMerge(ctx, "run-a", 3); !ok || err != nil {
+		t.Fatalf("this episode's exhausted outcome = %v, %v; want true", ok, err)
+	}
+}

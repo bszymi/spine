@@ -896,8 +896,12 @@ What that implies, and what it leaves open:
    ref while a sequence may be moving it. TASK-011 pins the projection explicitly.
 7. **Merge retries are counted per (run, repository), not per committing episode** (owner question
    4). After a run's first exhaustion its attempts are already above the bound, so every later
-   committing episode of that run is abandoned at its first transient failure: one network blip in a
-   reworked run costs a full rework cycle. A per-episode counter needs a migration.
+   committing episode of that run is abandoned at its first transient failure (an outcome counts
+   only when it was attempted in the current episode, i.e. after the run's latest step activity):
+   one network blip in a reworked run costs a full rework cycle. A per-episode counter needs a
+   migration. In one process an abandonment never overlaps a merge attempt of the same run (it skips
+   the tick while one is in flight; an attempt that starts during it stands down); across processes
+   sharing one database it can, until TASK-008's compare-and-swap status writes.
 8. **Uncounted transient exits stay unbounded:** a lock wait cut short by the caller (by design),
    outcome-persistence errors (a store outage), and any later transient exit that records no
    outcome (TASK-017's retryable read failures must record one). TASK-005's transient
