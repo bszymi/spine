@@ -903,6 +903,13 @@ func TestF9_CancelledRequestNeverPoisonsTree(t *testing.T) {
 	swtGit(t, repo, "commit", "-q", "-m", "attributes")
 	swtGit(t, repo, "checkout", "-q", "-b", "spine/run/run-a", "main")
 	swtWrite(t, repo, "tasks/task-a.md", fmt.Sprintf(swtTask, "a"))
+	// git checks entries out in index order: the a/ files are written
+	// before b.slow's filter blocks, so a checkout stopped there leaves
+	// them behind as untracked files no restore removes (the design
+	// check's residue case) — unless the sequence runs to completion.
+	for i := 0; i < 40; i++ {
+		swtWrite(t, repo, fmt.Sprintf("a/f%02d.txt", i), fmt.Sprintf("%d\n", i))
+	}
 	swtWrite(t, repo, "b.slow", "slow content\n")
 	swtGit(t, repo, "add", "-A")
 	swtGit(t, repo, "commit", "-q", "-m", "work a")

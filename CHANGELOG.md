@@ -32,7 +32,8 @@ bounded at 5 minutes (a constant).
   longer land on `main` outside the governed merge, and a run branch is never cut from another run's
   branch. The tree's home branch (`main`) is restored by whoever takes it: a merge in progress is
   aborted, tracked changes are quarantined into an unreferenced commit (logged with its SHA), `HEAD`
-  goes back to `main`; untracked files are never touched and a stale `.git/index.lock` is reported.
+  goes back to `main`; untracked and ignored files are never touched (one in the way fails the
+  restore before anything changes) and a stale `.git/index.lock` is reported.
   A tree left dirty or off `main` therefore no longer fails every later governed merge in the
   workspace.
 - **A client disconnect can no longer poison the tree (F9 via request cancellation).** Git children
@@ -57,8 +58,9 @@ bounded at 5 minutes (a constant).
 
 - One governed merge, run start, convergence or in-place write at a time per workspace tree; an
   HTTP submit that triggers a merge may wait for another merge's push.
-- New log and audit records: `shared working tree restored` (Warn) and `working_tree_restored`
-  (audit, with `quarantine_sha`), `merge_retries_exhausted` (audit) with an Error log,
+- New log and audit records: `shared working tree restored` and `shared working tree: tracked
+  changes quarantined` (Warn), `working_tree_restored` and `working_tree_restore_failed` (audit,
+  with `quarantine_sha`), `merge_retries_exhausted` (audit) with an Error log,
   `run is no longer committing; this merge attempt stands down` (Info), the scheduler's
   `merge retries exhausted; …` and `workspace scan budget spent; …` (Warn) records.
 - New values: step `error_detail.classification` `merge_retries_exhausted`; the

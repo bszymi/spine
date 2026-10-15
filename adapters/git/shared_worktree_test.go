@@ -455,3 +455,73 @@ func TestF9_HeadReadsResolveToHomeBranch(t *testing.T) {
 		t.Fatalf("no-home Head() = %s, %v", h, err)
 	}
 }
+
+// Codex review round 2 [P1]: an untracked file standing where `reset
+// --hard` would write a tracked path is never deleted; the restore
+// refuses and changes nothing.
+func TestF9_RestoreNeverDeletesObstructingUntrackedFiles(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, repo string) (path, content string)
+	}{
+		{"untracked file replaces a tracked directory", func(t *testing.T, repo string) (string, string) {
+			testutil.WriteFile(t, repo, "dir/file.md", "tracked\n")
+			swGit(t, repo, "add", "dir/file.md")
+			swGit(t, repo, "commit", "-q", "-m", "dir")
+			swGit(t, repo, "rm", "-r", "-q", "dir")
+			testutil.WriteFile(t, repo, "dir", "precious untracked content\n")
+			return "dir", "precious untracked content\n"
+		}},
+		{"tracked file untracked and rewritten", func(t *testing.T, repo string) (string, string) {
+			swGit(t, repo, "rm", "--cached", "-q", "f.md")
+			testutil.WriteFile(t, repo, "f.md", "precious rewrite\n")
+			return "f.md", "precious rewrite\n"
+		}},
+		{"tracked file replaced by a directory", func(t *testing.T, repo string) (string, string) {
+			swGit(t, repo, "rm", "-q", "f.md")
+			testutil.WriteFile(t, repo, "f.md/inner.txt", "precious nested\n")
+			return "f.md/inner.txt", "precious nested\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := swFeatureRepo(t)
+			c := git.NewCLIClient(repo, git.WithHomeBranch("main"))
+			path, content := tc.setup(t, repo)
+			statusBefore := swGit(t, repo, "status", "--porcelain")
+			_, err := c.RestoreWorkingTree(ctx)
+			var re *git.TreeRestoreError
+			if !errors.As(err, &re) || re.QuarantineSHA != "" || !strings.Contains(err.Error(), "untracked file is in the way") {
+				t.Fatalf("RestoreWorkingTree = %v, want a *TreeRestoreError refusing the obstruction before any quarantine", err)
+			}
+			if b, rerr := os.ReadFile(filepath.Join(repo, path)); rerr != nil || string(b) != content {
+				t.Fatalf("%s after the refused restore: %q, %v", path, b, rerr)
+			}
+			if got := swGit(t, repo, "status", "--porcelain"); got != statusBefore {
+				t.Fatalf("a refused restore changed the tree:\n%s\nwas:\n%s", got, statusBefore)
+			}
+		})
+	}
+}
+
+// Codex review round 2 [P2]: when a later step fails after tracked changes
+// were quarantined, the quarantine SHA is logged and carried in the error.
+func TestF9_RestoreFailureAfterQuarantineCarriesTheSHA(t *testing.T) {
+	ctx := context.Background()
+	repo := swFeatureRepo(t)
+	testutil.WriteFile(t, repo, "notes.md", "tracked on main\n")
+	swGit(t, repo, "add", "notes.md")
+	swGit(t, repo, "commit", "-q", "-m", "notes")
+	c := git.NewCLIClient(repo, git.WithHomeBranch("main"))
+	swGit(t, repo, "checkout", "-q", "feature") // feature has no notes.md
+	testutil.WriteFile(t, repo, "f.md", "edit to quarantine\n")
+	testutil.WriteFile(t, repo, "notes.md", "an untracked file blocking the switch\n")
+	_, err := c.RestoreWorkingTree(ctx)
+	var re *git.TreeRestoreError
+	if !errors.As(err, &re) || re.QuarantineSHA == "" || !strings.Contains(err.Error(), re.QuarantineSHA) {
+		t.Fatalf("RestoreWorkingTree = %v, want a *TreeRestoreError carrying the quarantine SHA", err)
+	}
+	if got := swGit(t, repo, "show", re.QuarantineSHA+":f.md"); got != "edit to quarantine" {
+		t.Fatalf("the quarantine commit does not hold the edit: %q", got)
+	}
+}

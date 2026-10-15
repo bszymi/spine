@@ -873,8 +873,12 @@ What that implies, and what it leaves open:
    `git stash apply <sha>` recovers it until `gc` prunes it, two weeks by default) and switches to
    `main`. That matters when an operator points standalone at a checkout they also edit (the default
    `SPINE_REPO_PATH` is `.`): uncommitted tracked edits there are moved out of the way at the next
-   governed operation. Untracked files are never touched; one that blocks the switch to `main` fails
-   every governed operation until an operator moves it. The `reset --hard` fallback after a failed
+   governed operation. Untracked (and ignored) files are never touched: one that blocks the switch to
+   `main`, or that stands where the reset would rewrite a tracked path (a tracked directory replaced
+   by a file, a tracked file un-tracked and rewritten, a tracked file replaced by a directory), fails
+   the restore — before anything is reset — and so every governed operation until an operator moves
+   it. A restore that fails after quarantining names the quarantine SHA in its error, its Error log
+   and a `working_tree_restore_failed` audit record. The `reset --hard` fallback after a failed
    `git merge --abort` discards the conflicted state of that merge without quarantine — the only
    unquarantined discard. Quarantine objects are not pruned beyond git's own `gc`.
 3. **One process per repository path.** The lock is in-process. A second `spine serve`, or an

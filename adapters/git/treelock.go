@@ -120,13 +120,21 @@ func (e *TreeWaitError) Unwrap() error { return e.Err }
 // TreeRestoreError is returned when a shared tree could not be brought
 // back to a clean checkout of its home branch. Err is the *GitError (or
 // grammar refusal) that stopped the restore, so the transient/permanent
-// classification survives errors.As.
+// classification survives errors.As. QuarantineSHA is set when the
+// restore had already quarantined tracked changes before a later step
+// failed (codex review round 2): the edits are off the disk and only that
+// commit holds them.
 type TreeRestoreError struct {
-	Branch string
-	Err    error
+	Branch        string
+	Err           error
+	QuarantineSHA string
 }
 
 func (e *TreeRestoreError) Error() string {
+	if e.QuarantineSHA != "" {
+		return fmt.Sprintf("restore working tree to %s: %v (tracked changes were quarantined in %s; recover them with `git stash apply %s`)",
+			e.Branch, e.Err, e.QuarantineSHA, e.QuarantineSHA)
+	}
 	return fmt.Sprintf("restore working tree to %s: %v", e.Branch, e.Err)
 }
 
@@ -499,7 +507,16 @@ func (c *CLIClient) RestoreWorkingTree(ctx context.Context) (TreeRestoreReport, 
 //  3. Tracked changes (`status --porcelain=v1 -z --untracked-files=no`)
 //     are quarantined: `git stash create` writes a commit holding them but
 //     no ref, then `reset --hard`. If stash create fails, or prints no
-//     commit, the restore fails and nothing is reset.
+//     commit, the restore fails and nothing is reset. The SHA is logged at
+//     Warn as soon as it exists, and a later failure carries it in the
+//     *TreeRestoreError.
+//
+// Before either `reset --hard` the restore refuses (and changes nothing)
+// when an untracked or ignored file stands where the reset would write a
+// tracked path — the path itself, a parent directory it would recreate,
+// or content under the path (untrackedObstruction): `stash create` does
+// not save untracked files and `reset --hard` would delete them (codex
+// review round 2).
 //  4. HEAD is switched to the home branch with the Checkout argv (`switch
 //     --no-guess`), which never detaches onto a same-named tag.
 //  5. HEAD must now be refs/heads/<home> and the tracked status clean.
@@ -512,7 +529,24 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 	defer cancel()
 	var rep TreeRestoreReport
 	fail := func(err error) (TreeRestoreReport, error) {
-		return rep, &TreeRestoreError{Branch: home, Err: err}
+		if rep.QuarantineSHA != "" {
+			observe.Logger(ctx).Error("shared working tree restore failed after tracked changes were quarantined",
+				"home_branch", home, "previous_ref", rep.PreviousRef, "quarantine_sha", rep.QuarantineSHA, "error", err)
+			observe.AuditLog(ctx, "working_tree_restore_failed",
+				"home_branch", home, "previous_ref", rep.PreviousRef, "quarantine_sha", rep.QuarantineSHA)
+		}
+		return rep, &TreeRestoreError{Branch: home, Err: err, QuarantineSHA: rep.QuarantineSHA}
+	}
+	resetHard := func() error {
+		if p, err := c.untrackedObstruction(ctx, op); err != nil {
+			return err
+		} else if p != "" {
+			return &GitError{Kind: ErrKindPermanent, Op: op,
+				Message: fmt.Sprintf("an untracked file is in the way of a tracked path the restore would rewrite (%q); "+
+					"nothing was reset — move it out of the working tree", p)}
+		}
+		_, _, err := c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q")
+		return err
 	}
 	short, full, err := checkBranch(op, "home branch", home)
 	if err != nil {
@@ -554,7 +588,7 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 	if _, _, err := c.runWith(ctx, op, runOpts{}, "rev-parse", "-q", "--verify", "MERGE_HEAD"); err == nil {
 		rep.AbortedMerge = true
 		if _, _, abortErr := c.runWith(ctx, op, runOpts{}, "merge", "--abort"); abortErr != nil {
-			if _, _, err := c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q"); err != nil {
+			if err := resetHard(); err != nil {
 				return fail(err)
 			}
 		}
@@ -570,6 +604,13 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		return fail(err)
 	}
 	if status != "" {
+		if p, err := c.untrackedObstruction(ctx, op); err != nil {
+			return fail(err)
+		} else if p != "" {
+			return fail(&GitError{Kind: ErrKindPermanent, Op: op,
+				Message: fmt.Sprintf("an untracked file is in the way of a tracked path the restore would rewrite (%q); "+
+					"nothing was reset — move it out of the working tree", p)})
+		}
 		// A fixed identity: the quarantine commit is the server's, and
 		// stash create must work on a host with no user.name configured.
 		env := []string{
@@ -587,7 +628,9 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 				Message: "tracked changes found but git stash create produced no commit; nothing was reset"})
 		}
 		rep.QuarantineSHA = sha
-		if _, _, err := c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q"); err != nil {
+		observe.Logger(ctx).Warn("shared working tree: tracked changes quarantined",
+			"home_branch", short, "previous_ref", rep.PreviousRef, "quarantine_sha", sha)
+		if err := resetHard(); err != nil {
 			return fail(err)
 		}
 	}
@@ -625,4 +668,66 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 			"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA)
 	}
 	return rep, nil
+}
+
+// untrackedObstruction returns a path where an untracked or ignored file
+// stands in the way of `git reset --hard`, or "". The reset rewrites every
+// tracked path that differs from HEAD (`git diff --no-renames --name-only
+// HEAD`); it deletes an untracked file at that path, an untracked file
+// standing where one of its parent directories must be (a tracked
+// directory removed and replaced by a file), and untracked content under
+// the path (a tracked file replaced by a directory). Untracked entries
+// come from `ls-files --others --directory` (ignored files included, an
+// untracked directory as one "dir/" entry). An untracked directory that
+// contains a path the reset would recreate is reported too, conservatively.
+func (c *CLIClient) untrackedObstruction(ctx context.Context, op string) (string, error) {
+	changed, _, err := c.runWith(ctx, op, runOpts{}, "diff", "--no-renames", "--name-only", "-z", "HEAD", "--")
+	if err != nil {
+		return "", err
+	}
+	if changed == "" {
+		return "", nil
+	}
+	others, _, err := c.runWith(ctx, op, runOpts{}, "ls-files", "-z", "--others", "--directory")
+	if err != nil {
+		return "", err
+	}
+	if others == "" {
+		return "", nil
+	}
+	untracked := map[string]bool{}      // untracked entry path (no trailing slash)
+	underUntracked := map[string]bool{} // every proper parent of an untracked entry
+	for _, u := range strings.Split(others, "\x00") {
+		u = strings.TrimSuffix(u, "/")
+		if u == "" {
+			continue
+		}
+		untracked[u] = true
+		for i := strings.IndexByte(u, '/'); i >= 0; i = nextSlash(u, i) {
+			underUntracked[u[:i]] = true
+		}
+	}
+	for _, p := range strings.Split(changed, "\x00") {
+		if p == "" {
+			continue
+		}
+		if untracked[p] || underUntracked[p] {
+			return p, nil
+		}
+		for i := strings.IndexByte(p, '/'); i >= 0; i = nextSlash(p, i) {
+			if untracked[p[:i]] {
+				return p[:i], nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// nextSlash returns the index of the next '/' in s after i, or -1.
+func nextSlash(s string, i int) int {
+	j := strings.IndexByte(s[i+1:], '/')
+	if j < 0 {
+		return -1
+	}
+	return i + 1 + j
 }
