@@ -402,6 +402,8 @@ The evaluation step receives a structured summary of all branch outcomes:
 
 ### 4.5 Committing Convergence Results to Git
 
+**Where the selected branches go (INIT-023 TASK-012, audit F8).** When the last divergence branch completes, the engine merges the selected branch (or branches) into the **run branch** — the run passed to `EvaluateAndCommit` names the merge target explicitly — *before* the evaluation step, so the evaluator reviews the converged content and it reaches the authoritative branch only through the run's governed merge after that step. A run that is not the divergence's own, or has no `spine/` run branch, is refused before the divergence context or any ref changes. Divergence branches fork from the run branch, so the branch work builds on the run's own pre-divergence work and convergence does not conflict with it. In standalone the merges run as one sequence on the shared working tree (git-integration.md §6.6), and a failed merge is aborted there.
+
 After the evaluation step completes, durable outcomes are committed to Git per ADR-001:
 
 1. **Selected artifacts** — the chosen result (selected branch, subset, merged artifact, or experiment package) is committed to the main artifact path

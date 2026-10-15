@@ -341,9 +341,9 @@ Push admission (§6.5 step 3) resolves a divergence ref through exactly this sha
 
 **Divergence branch lifecycle:**
 
-1. Created when the divergence point is triggered
+1. Created when the divergence point is triggered, **forked from the run (task) branch** — the run's own work before the divergence point is the branch's base, so the branch work and that work never conflict at convergence (INIT-023 TASK-012; a branch added to an exploratory divergence forks from it too)
 2. Branch-specific work commits are isolated to each divergence branch
-3. After convergence, the selected branch is merged to the task branch (or authoritative branch)
+3. After convergence, the selected branch is merged into the **run (task) branch**, never into the authoritative branch. It reaches the authoritative branch only through the governed merge after the run's evaluation step (§6.3). Convergence names the run branch as the merge target explicitly and refuses a run that is not the divergence's own or has no `spine/` run branch, before anything changes (INIT-023 TASK-012, audit F8: an implicit target merged divergence content into the checked-out `main` before review)
 4. Non-selected branches are preserved (never deleted, per Constitution §6)
 
 ### 6.3 Merge Strategy
@@ -473,6 +473,19 @@ Push is a first-class, enforced surface in v1. It is off by default — `SPINE_G
 **Operator override.** The Git-path equivalent of `write_context.override` is `git push -o spine.override=true`. Operators (role `operator+`) bypass a matching rule for that single push; contributors setting the same option are rejected with a distinct "override not authorised" reason, not silently accepted. Every honored override emits exactly one `branch_protection.override` governance event per overridden ref update — not per push — with the ADR-009 §4 payload plus a `pre_receive_ref: {old_sha, new_sha, ref}` block. No commit trailer is added on this path; the event is the sole audit record for a Git push override. Unused overrides (flag set on a push that did not need it) emit nothing.
 
 **`receive.advertisePushOptions=true`** is set on every workspace repo alongside `http.receivepack=true` so `git push -o` actually reaches the gate — without it the client silently drops the option.
+
+### 6.6 Shared Working Tree (standalone)
+
+Standalone `spine serve` keeps **one** non-bare working tree per workspace (`SPINE_REPO_PATH`), and one `git.CLIClient` serves the engine, the divergence service, the artifact and workflow services and the projection from it. INIT-023 TASK-012 (audit F9) makes that tree safe to share:
+
+- **One sequence at a time.** Every stateful client call (checkout, commit, merge and its abort, branch create and delete, staged write, the bound merge and its take-back) holds a process-wide lock keyed by the tree's canonical path. A multi-step engine sequence holds it once, as a *git-only block*: the status cascade (checkout run branch → write → commit → checkout main), the governed merge (merge → abort on failure / structural check and take-back of a refused bound merge → push — the tree is held across the push), a run start (read `HEAD` → cut the run branch), the binding-off recovery ledger, a convergence's merges, and a code repository's merge. An in-place artifact or workflow write holds it from the start of the write to its commit and push. No block emits an event, routes a step or writes the store: outcomes are recorded, and the run routed, after the tree is released.
+- **The tree rests on its home branch.** The workspace's primary client registers `main` (the governed-merge target) as the tree's *home branch*. Whoever takes the tree first restores it to a clean checkout of `main`: a merge in progress is aborted, tracked changes are **quarantined** into an unreferenced commit (`git stash create` — no ref, so the git endpoint never advertises it; recoverable with `git stash apply <sha>` until `gc` prunes it, the SHA is logged at Warn and in a `working_tree_restored` audit record), `HEAD` is switched back to `main`. Untracked files are never touched; one that blocks the switch fails the restore. A `.git/index.lock` left by a crash fails the restore and is reported, never deleted. A tree a crash or an operator left dirty or off `main` therefore heals at the next governed operation instead of failing it.
+- **A started sequence is finished.** Only the wait for the tree honours the caller's context (a client that gives up while waiting gets an error, and nothing is recorded: the run stays `committing` for the scheduler). Once taken, the sequence and its restores run detached from the request, bounded at 5 minutes, which also bounds a hung push. Every git child is stopped with `SIGTERM`, never `SIGKILL`, when its context ends: git's own handlers then remove the lock files it holds.
+- **Same run, entered twice.** The cascade and governed-merge blocks re-read the run first and stand down when it is no longer `committing`, so the HTTP submit's merge and the scheduler's retry can no longer fail a run the other one completed.
+- **`HEAD` means `main`.** On the home-branch tree, read methods resolve `HEAD` to `refs/heads/main` (exactly, no DWIM): artifact and workflow reads with no ref, `StartRun`'s task read (which binds the workflow by the task's type), preconditions, the workflow pin fallback, ID allocation, the projection. Inside a block `HEAD` is a run branch; reads are not serialised.
+- **Bounded retries.** A governed merge that keeps failing transiently is retried by the scheduler at most 3 times (`spine serve`), then routed like a permanent failure (`merge_retries_exhausted`; see [Engine State Machine](/architecture/engine-state-machine.md)).
+
+Trees no client registered a home branch for — code-repository clones, embedders' per-request worktrees — are never restored and keep the real `HEAD`; their calls take an uncontended lock. The lock is in-process: one `spine serve` per repository path (KNOWN-LIMITATIONS "Shared working tree").
 
 ---
 
