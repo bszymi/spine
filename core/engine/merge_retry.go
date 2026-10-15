@@ -214,7 +214,8 @@ func (g *attemptGate) beginAttempt(runID string) (end func(), ok bool) {
 		once.Do(func() {
 			g.mu.Lock()
 			defer g.mu.Unlock()
-			if g.inFlight[runID]--; g.inFlight[runID] <= 0 {
+			g.inFlight[runID]--
+			if g.inFlight[runID] <= 0 {
 				delete(g.inFlight, runID)
 			}
 		})
