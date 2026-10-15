@@ -75,7 +75,7 @@ type ServiceSet struct {
 	// spent (INIT-023 TASK-012); mirrors scheduler.ServiceSet.CommitExhaustedFn.
 	CommitExhaustedFn func(ctx context.Context, runID string, maxRetries int) (bool, error)
 	StepRecoveryFn    func(ctx context.Context, executionID string) error
-	RunFailFn      func(ctx context.Context, runID, reason string) error
+	RunFailFn         func(ctx context.Context, runID, reason string) error
 	// RunTerminatedFn closes a timed-out run's live step executions
 	// (INIT-023 TASK-007); mirrors scheduler.ServiceSet.RunTerminatedFn.
 	RunTerminatedFn func(ctx context.Context, runID, message string)

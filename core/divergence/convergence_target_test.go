@@ -113,7 +113,7 @@ func (s *cvStore) status(id string) domain.DivergenceStatus {
 
 type cvEvents struct{}
 
-func (cvEvents) Emit(context.Context, domain.Event) error                               { return nil }
+func (cvEvents) Emit(context.Context, domain.Event) error                              { return nil }
 func (cvEvents) Subscribe(context.Context, domain.EventType, event.EventHandler) error { return nil }
 
 func cvGit(t *testing.T, dir string, args ...string) string {

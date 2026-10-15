@@ -62,7 +62,7 @@ func (s *WriteScope) Context(ctx context.Context) context.Context {
 	if !s.detached {
 		return withTicket(ctx, s.ticket)
 	}
-	c, cancel := context.WithDeadline(context.WithoutCancel(ctx), s.deadline)
+	c, cancel := context.WithDeadline(context.WithoutCancel(ctx), s.deadline) //nolint:gosec // G118: cancel is kept in s.cancels and called by Cleanup (endContexts)
 	s.mu.Lock()
 	s.cancels = append(s.cancels, cancel)
 	s.mu.Unlock()

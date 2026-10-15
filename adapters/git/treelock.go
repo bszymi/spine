@@ -210,11 +210,11 @@ func treeAbs(dir string) string {
 // treeReal is abs resolved through symlinks, or "" when it cannot be
 // (the directory does not exist yet).
 func treeReal(abs string) string {
-	real, err := filepath.EvalSymlinks(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return ""
 	}
-	return real
+	return resolved
 }
 
 // canonicalTreeKey is the lock key: the symlink-free path when it
@@ -222,8 +222,8 @@ func treeReal(abs string) string {
 // repo/. and repo share one lock.
 func canonicalTreeKey(dir string) string {
 	abs := treeAbs(dir)
-	if real := treeReal(abs); real != "" {
-		return real
+	if resolved := treeReal(abs); resolved != "" {
+		return resolved
 	}
 	return abs
 }
@@ -232,12 +232,12 @@ func canonicalTreeKey(dir string) string {
 // its absolute path and, when it resolves, its symlink-free path.
 func registerHomeBranch(dir, branch string) {
 	abs := treeAbs(dir)
-	real := treeReal(abs)
+	resolved := treeReal(abs)
 	treeMu.Lock()
 	defer treeMu.Unlock()
 	treeHomes[abs] = branch
-	if real != "" {
-		treeHomes[real] = branch
+	if resolved != "" {
+		treeHomes[resolved] = branch
 	}
 }
 
@@ -257,13 +257,13 @@ func homeBranchOf(dir string) string {
 	if ok {
 		return b
 	}
-	real := treeReal(abs)
-	if real == "" || real == abs {
+	resolved := treeReal(abs)
+	if resolved == "" || resolved == abs {
 		return ""
 	}
 	treeMu.Lock()
 	defer treeMu.Unlock()
-	return treeHomes[real]
+	return treeHomes[resolved]
 }
 
 // treeHold is one acquisition of a tree, or a reentrant pass-through.
