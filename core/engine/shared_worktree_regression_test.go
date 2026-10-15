@@ -1050,3 +1050,28 @@ func TestF9_HeadReadDuringSequenceSeesMain(t *testing.T) {
 		t.Fatalf("StartRun bound the workflow for %v, want [Task]", resolver.types)
 	}
 }
+
+// P3-27 (design-check note on what the bound counts): TASK-005's
+// transient VerifyCommit exit records a failed, transient primary outcome
+// before retrying, so the retry budget applies to it.
+func TestMergeRetry_TransientVerifyCommitIsACountedAttempt(t *testing.T) {
+	f := committingFix(t, false, true)
+	valid := sha40('b')
+	f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: valid, CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+	f.git.verifyErr = &git.GitError{Kind: git.ErrKindTransient, Op: "verify_commit", Message: "repository locked"}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := f.merge(); err != nil {
+			t.Fatalf("MergeRunBranch: %v", err)
+		}
+		o, err := f.store.GetRepositoryMergeOutcome(context.Background(), f.run.RunID, domain.PrimaryRepositoryID)
+		if err != nil {
+			t.Fatalf("attempt %d: no primary outcome: %v", attempt, err)
+		}
+		if o.Attempts != attempt || o.Status != domain.RepositoryMergeStatusFailed || !o.FailureClass.IsTransient() {
+			t.Fatalf("attempt %d: outcome %d/%s/%s, want %d/failed/transient", attempt, o.Attempts, o.Status, o.FailureClass, attempt)
+		}
+		if f.run.Status != domain.RunStatusCommitting {
+			t.Fatalf("run %s, want committing", f.run.Status)
+		}
+	}
+}

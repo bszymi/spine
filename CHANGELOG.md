@@ -50,7 +50,8 @@ bounded at 5 minutes (a constant).
   retried at most 3 times by the scheduler (the value `spine serve` already configured, now
   enforced), then routed like a permanent failure: a publish-step workflow loops back through
   `merge_failed`, a legacy terminal-commit workflow fails the run (branch kept). The step carries the
-  new classification `merge_retries_exhausted`.
+  new classification `merge_retries_exhausted`. A transient failure verifying the bound commit
+  (merge binding) is now a recorded, counted attempt too.
 
 ### Changed
 

@@ -440,6 +440,13 @@ func (o *Orchestrator) resolveMergeSource(ctx context.Context, run *domain.Run) 
 		if errors.As(err, &gitErr) && gitErr.IsRetryable() {
 			observe.Logger(ctx).Warn("merge binding: transient failure verifying the bound commit, will retry",
 				"run_id", run.RunID, "bound_sha", bound, "error", err)
+			// A counted attempt (INIT-023 TASK-012, P3-27 design-check
+			// note): recorded as a failed primary outcome with the
+			// transient class, so the scheduler's retry budget bounds this
+			// exit too instead of retrying it forever.
+			if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", err, ""); recErr != nil {
+				return mergeSource{}, true, recErr
+			}
 			return mergeSource{}, true, o.retryMerge(ctx, run)
 		}
 		return o.bindingFailure(ctx, run, fmt.Sprintf("bound commit %s is not available: %v", bound, err))

@@ -895,8 +895,9 @@ What that implies, and what it leaves open:
    committing episode of that run is abandoned at its first transient failure: one network blip in a
    reworked run costs a full rework cycle. A per-episode counter needs a migration.
 8. **Uncounted transient exits stay unbounded:** a lock wait cut short by the caller (by design),
-   outcome-persistence errors (a store outage), and the transient exits of sibling tasks that record
-   no outcome.
+   outcome-persistence errors (a store outage), and any later transient exit that records no
+   outcome (TASK-017's retryable read failures must record one). TASK-005's transient
+   `VerifyCommit` exit records a failed, transient primary outcome and is counted.
 9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
    `platform-binding` resolver modes no scheduler retries committing runs at all. Wiring
    `MultiScheduler` into `spine serve` is a follow-up.
