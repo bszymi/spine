@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // ── Fakes ──

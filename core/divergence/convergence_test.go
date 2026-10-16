@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
+	gitpkg "github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
-	gitpkg "github.com/bszymi/spine/adapters/git"
 )
 
 // ── Fake Git Client with Merge ──

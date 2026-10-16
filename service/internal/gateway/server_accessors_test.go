@@ -5,13 +5,13 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/gitpool"
+	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/gitpool"
-	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
