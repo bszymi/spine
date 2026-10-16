@@ -567,3 +567,74 @@ func TestGovernanceGuard_RenameFollowingIsRefusedWithARemedy(t *testing.T) {
 		t.Fatalf("main workflows/task-x.yaml = %q after the approved merge", got)
 	}
 }
+
+// mainMovesCLI commits on main at the start of the next MergeBound — a
+// concurrent writer landing between the gate and the merge.
+type mainMovesCLI struct {
+	*git.CLIClient
+	before func()
+}
+
+func (c *mainMovesCLI) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if b := c.before; b != nil {
+		c.before = nil
+		b()
+	}
+	return c.CLIClient.MergeBound(ctx, opts)
+}
+
+// TestGovernanceGuard_LifecycleExemptionFollowsTheTarget (codex review,
+// review round 1): a lifecycle run edits workflows/foo.yaml's steps while
+// main — after the fork — makes foo govern workflows. Git merges both
+// cleanly, so an exemption judged only on the run's and the merge base's
+// versions let an edit of a workflow-governing workflow land with no
+// operator. Before the gate saw it: no exemption, held (an approval still
+// merges it). Between the gate and the merge: the post-merge assertion
+// re-checks the merged result and refuses (nothing lands; the run, which
+// has no publish step, fails). Mutations: dropping the target-tip read
+// merges the first case, dropping lifecycleResultStillExempt the second.
+func TestGovernanceGuard_LifecycleExemptionFollowsTheTarget(t *testing.T) {
+	const (
+		base     = "id: foo\nname: Foo\nversion: \"1.0\"\nstatus: Active\napplies_to: [Task]\nentry_step: a\nsteps:\n  - id: a\n"
+		runEdit  = base + "  - id: b\n"
+		governor = "id: foo\nname: Foo\nversion: \"1.0\"\nstatus: Active\napplies_to: [Workflow]\nentry_step: a\nsteps:\n  - id: a\n"
+	)
+	main := map[string]string{lifecyclePath: lifecycleBody, ".spine/branch-protection.yaml": govProtected, "workflows/foo.yaml": base}
+	guard := &GovernanceGuard{Enabled: true, ExemptWorkflowLifecycleTaskPath: true, ExemptOwnRunEvidence: true}
+
+	t.Run("main changed before the gate: held", func(t *testing.T) {
+		g := newGovRepo(t, govRepoOpts{wf: govLifecycleWF(), mainFiles: main, guard: guard,
+			runFiles: map[string]string{"workflows/foo.yaml": runEdit}, tweak: lifecycleRun("workflows/foo.yaml")})
+		g.writeCommit(map[string]string{"workflows/foo.yaml": governor}, "an operator makes foo govern workflows")
+		g.complete("draft", "author", "submitted")
+		g.complete("review", "reviewer", "approved")
+		g.requireHeld("target governs workflows")
+		res, err := g.decide(GovernanceApprove, g.runHead(), govOperator, "")
+		if err != nil || res.RunStatus != domain.RunStatusCompleted {
+			t.Fatalf("approve: %v %+v", err, res)
+		}
+	})
+	t.Run("main changed between the gate and the merge: refused", func(t *testing.T) {
+		var g *govRepo
+		mover := &mainMovesCLI{}
+		g = newGovRepo(t, govRepoOpts{wf: govLifecycleWF(), mainFiles: main, guard: guard,
+			runFiles: map[string]string{"workflows/foo.yaml": runEdit}, tweak: lifecycleRun("workflows/foo.yaml"),
+			wrap: func(c *git.CLIClient) GitOperator { mover.CLIClient = c; return mover }})
+		mover.before = func() {
+			g.writeCommit(map[string]string{"workflows/foo.yaml": governor}, "an operator makes foo govern workflows")
+		}
+		g.complete("draft", "author", "submitted")
+		g.complete("review", "reviewer", "approved")
+		if got := g.mainFile("workflows/foo.yaml"); got != governor {
+			t.Fatalf("main workflows/foo.yaml = %q, want the governor without the run's edit", got)
+		}
+		held := g.eventsOf(domain.EventGovernanceMergeHeld)
+		if len(held) != 1 || !strings.Contains(string(held[0].Payload), `"post_merge":true`) ||
+			!strings.Contains(string(held[0].Payload), "workflows/foo.yaml") {
+			t.Fatalf("post-merge refusal events = %v", held)
+		}
+		if r := g.store.runs[govRunID]; r.Status != domain.RunStatusFailed {
+			t.Fatalf("run = %s, want failed (no publish step; nothing merged)", r.Status)
+		}
+	})
+}

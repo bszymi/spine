@@ -38,6 +38,11 @@ package projection
 // that relaxation. Why newness: re-pushing an old authorised blob after
 // it was superseded must not replay its authorisation.
 //
+// While an approved governed merge is in flight — its run still
+// committing, its approved commit on the head, its consumption marker not
+// yet written — an unmatched removal holds the sync for a retry instead
+// (approvedMergeInFlight; review round 1).
+//
 // A refusal keeps the previous rules, emits
 // branch_protection.removal_refused and logs a Warn, and is NOT a sync
 // error (owner question 7, INIT-023 TASK-011 D2): counting it would freeze
@@ -219,6 +224,22 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 		// again until the file changes, losing an authorised relaxation.
 		return fmt.Errorf("protection-removal guard: verify an operator record: %w", verifyErr)
 	}
+	// An approved governed merge in flight (review round 1, finding F4 and
+	// codex): the engine moves the local main to the merge commit before
+	// it records the consumption marker, and a projection following the
+	// local main can sync in between. Refusing there advanced the sync
+	// past the approved merge for good — and with bootstrap rows installed
+	// even a full rebuild then took the late record for a replay. The sync
+	// is held instead (an infrastructure retry, the rules untouched) and
+	// the next tick decides with the marker in place.
+	if rec, err := s.approvedMergeInFlight(ctx, records, head); err != nil {
+		return fmt.Errorf("protection-removal guard: check for an approved merge in flight: %w", err)
+	} else if rec != nil {
+		log.Info("projection: an approved governed merge is on the head without its consumption marker yet; protection change deferred to the next sync",
+			"branch", branch, "run_id", rec.RunID, "approved_commit", rec.CommitSHA, "head", shortSHA(head))
+		return fmt.Errorf("protection-removal guard: an approved governed merge (run %s, commit %s) is on the head without its consumption marker yet; retrying",
+			rec.RunID, shortSHA(rec.CommitSHA))
+	}
 
 	installedNames, candidateNames := kindNames(oldKinds), kindNames(newKinds)
 	log.Warn("projection: refused to install a branch-protection config that removes protection from the authoritative branch without an operator record; the previous rules stay installed",
@@ -264,6 +285,11 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 // file): the operator wrote the bytes being installed, and that is the
 // documented re-affirmation (docs/git-push-guide.md §4).
 func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAuthorization, head, newest string, content []byte, present bool, branch string, removed map[bpconfig.RuleKind]bool) (bool, error) {
+	switch rec.Source {
+	case store.GovernanceSourceOverrideEvent, store.GovernanceSourceApprovedMerge:
+	default:
+		return false, nil // a pending approval, or a source this guard does not know, vouches for nothing
+	}
 	c := rec.CommitSHA
 	if !isHexSHA(c) {
 		return false, nil
@@ -338,6 +364,53 @@ func protectsAll(content []byte, present bool, branch string, kinds map[bpconfig
 		}
 	}
 	return true
+}
+
+// approvedMergeInFlight returns the pending approval
+// (store.GovernanceSourcePendingApproval: a run still committing with an
+// approval recorded) whose approved commit is reachable from head while
+// no consumption marker of it is — the approved merge has moved the
+// branch but not yet recorded its marker — or nil. A retryable git
+// failure is returned (the caller holds the sync); any other failure on a
+// record skips it.
+//
+// Residual (KNOWN-LIMITATIONS "Governance-Path Guard" 13): while such a
+// run stays committing in that state — its marker write failed and the
+// take-back too (the engine then blocks governed merges), or its approved
+// commit reached the head through another merge — a pending protection
+// removal holds the sync instead of being decided.
+func (s *Service) approvedMergeInFlight(ctx context.Context, records []store.GovernanceAuthorization, head string) (*store.GovernanceAuthorization, error) {
+	reachable := func(c string) (bool, error) {
+		mb, err := s.git.MergeBase(ctx, c, head)
+		if err != nil {
+			return false, transientOnly(ctx, err)
+		}
+		return strings.TrimSpace(mb) == c, nil
+	}
+	for i := range records {
+		rec := &records[i]
+		if rec.Source != store.GovernanceSourcePendingApproval || !isHexSHA(rec.CommitSHA) {
+			continue
+		}
+		on, err := reachable(rec.CommitSHA)
+		if err != nil {
+			return nil, err
+		}
+		if !on {
+			continue
+		}
+		if isHexSHA(rec.MergeSHA) {
+			marked, err := reachable(rec.MergeSHA)
+			if err != nil {
+				return nil, err
+			}
+			if marked {
+				continue // the marker is in place: the approved-merge record decides
+			}
+		}
+		return rec, nil
+	}
+	return nil, nil
 }
 
 // errUnreadableConfig marks a config entry that is not a readable file.

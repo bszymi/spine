@@ -938,6 +938,9 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    `runs.commit_meta` — the approved merge must also have removed the protection itself (its
    base config applied every kind being removed). The provenance reader needs `SELECT` on `runtime.event_log` and
    `runtime.runs`; a read error holds the sync (retried), a missing reader refuses every removal.
+   It also lists runs still `committing` with an approval (pending, never authorisations): an
+   unmatched removal while such a run's approved commit is on the head without a reachable
+   consumption marker holds the sync for a retry instead of being refused.
    Your engine's own pushes of `main` must never emit `branch_protection.override` — every merge
    would become provenance and the guard would be void.
 7. **Reserved keys** `domain.CommitMetaGovernanceApproval*`, `engine.CommitMetaGovernanceBlockedTarget`

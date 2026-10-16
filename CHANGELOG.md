@@ -48,7 +48,9 @@ ADR is `Proposed` until the owner signs it off). No migration.
   (`runtime.event_log`), or an approved governed merge's consumption marker
   (`spine.governance_approval.merge_sha`/`base_sha`, written before the push) whose own diff
   removed the protection (its base config applied every kind being removed). Otherwise the rules
-  stay, `branch_protection.removal_refused` is emitted and a Warn logged. Commit trailers are
+  stay, `branch_protection.removal_refused` is emitted and a Warn logged — except while an approved
+  merge is in flight (its run still `committing`, its approved commit on the head, no reachable
+  marker yet): the sync then holds and retries instead of refusing. Commit trailers are
   never trusted. Inactive while `no-direct-write` is already off on the authoritative branch. A
   provenance read failure, or a retryable git failure while checking a record, holds the sync
   (retried) instead of refusing; with the guard on, a full rebuild whose branch-protection step
@@ -60,7 +62,8 @@ ADR is `Proposed` until the owner signs it off). No migration.
 - **`spine serve` turns both guards on.** `SPINE_GOVERNANCE_GUARD=off` (`false`, `0`, `no`)
   restores v1; any unrecognised value keeps them on with a startup Warn. The lifecycle exemption
   (a workflow-lifecycle planning run may merge its own `workflows/<id>.yaml` — never the governing
-  workflow, never a file that declares `applies_to: [Workflow]` now or before, and only when the
+  workflow, never a file that declares `applies_to: [Workflow]` now, at a merge base, on `main` or
+  in the merged result, and only when the
   reviewer neither started the run — the starter is recorded at start; a run without one gets no
   exemption — nor is a run author: bound to any author step of it or holding an assignment of one)
   and the own-run evidence carve-out

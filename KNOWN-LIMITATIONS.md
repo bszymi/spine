@@ -451,13 +451,17 @@ refuses an unprovenanced branch-protection removal. What remains:
     inherits that definition's residual: an assign-bound execution reset by restart recovery and
     rebound to someone else leaves no record of the first actor (no append-only binding ledger
     without a schema change).
-13. **The consumption-marker window.** The marker is written after the merge moves the local
-    `main` and before the push. In single-workspace `spine serve` the projection follows the local
-    `main`, and the sync loop is not serialised with the merge (TASK-012's worktree lock covers git
-    writers, not the projection): a tick inside that window sees an approved relaxation with no
-    record yet, refuses it (event + Warn) and advances. The stricter rules stay (fail-safe); the
-    approved change is installed by the next change to the file, a full rebuild
-    (`POST /system/rebuild`), or an editing override push.
+13. **The consumption-marker window holds the sync.** The marker is written after the merge moves
+    the local `main` and before the push, and in single-workspace `spine serve` the projection
+    follows the local `main` without being serialised with the merge (TASK-012's worktree lock
+    covers git writers, not the projection). A sync that finds a protection removal at the head
+    with no matching record, while a run is still `committing` with an approval whose commit is
+    on the head and no reachable marker, therefore holds (`error`, the rules untouched, retried)
+    instead of refusing — a refusal would advance past the approved merge, and with bootstrap rows
+    installed even a full rebuild would then take the late record for a replay. Residual: while
+    such a run stays in that state (its marker write and its take-back both failed, so governed
+    merges are blocked; or its approved commit reached `main` through another merge), a pending
+    protection removal keeps the sync held.
 14. **An editing override push vouches for the whole file it leaves.** Owner question 8 counts an
     override push that changed `.spine/branch-protection.yaml` — the documented re-affirmation —
     so if `main` already carries an unauthorised relaxation (refused, rules kept), an operator's

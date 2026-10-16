@@ -7,8 +7,9 @@ package store_test
 // MergeCommitMetaIfStatus only in the given run status; and
 // ListGovernanceAuthorizations returns honoured override pushes (in the
 // shape both Spine's delivery subscriber and SMP's emitter write: the
-// whole domain.Event JSON, branch "main" or "refs/heads/main") and
-// consumed approvals, and nothing else.
+// whole domain.Event JSON, branch "main" or "refs/heads/main"),
+// consumed approvals and (as pending, never as authorisations) approvals
+// of runs still committing, and nothing else.
 
 import (
 	"context"
@@ -207,6 +208,50 @@ func TestGovernanceStore_Integration(t *testing.T) {
 	}
 	if ok, err := s.MergeCommitMetaIfStatus(ctx, "run-gov-missing", domain.RunStatusCompleted, map[string]string{"k": "v"}); err != nil || ok {
 		t.Fatalf("unknown run: applied=%v err=%v; want not applied, no error", ok, err)
+	}
+
+	// Pending approvals (review round 1): runs still committing with an
+	// approval recorded, with or without a marker — never a tombstoned
+	// approval, never a run that left committing (run-gov-consumed and
+	// run-gov-unconsumed above are completed).
+	mkCommitting := func(id string, meta map[string]string) {
+		t.Helper()
+		if err := s.CreateRun(ctx, &domain.Run{RunID: id, TaskPath: "tasks/t.md", WorkflowPath: "workflows/w.yaml",
+			WorkflowID: "w", WorkflowVersion: "v", Status: domain.RunStatusCommitting, TraceID: "trace-" + id, CreatedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetCommitMeta(ctx, id, meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkCommitting("run-gov-pending", approval(govSHA('5'), "", "", "2026-10-14T12:00:00Z"))
+	mkCommitting("run-gov-pending-marked", approval(govSHA('6'), govSHA('7'), govSHA('8'), "2026-10-14T12:01:00Z"))
+	mkCommitting("run-gov-pending-tombstone", approval("", "", "", ""))
+	all, err := s.ListGovernanceAuthorizations(ctx, "main", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pend := map[string]store.GovernanceAuthorization{}
+	marked := false
+	for _, r := range all {
+		switch {
+		case r.Source == store.GovernanceSourcePendingApproval:
+			pend[r.RunID] = r
+		case r.Source == store.GovernanceSourceApprovedMerge && r.RunID == "run-gov-pending-marked":
+			marked = true
+		}
+	}
+	if len(pend) != 2 {
+		t.Fatalf("pending approvals = %+v, want run-gov-pending and run-gov-pending-marked", pend)
+	}
+	if r := pend["run-gov-pending"]; r.CommitSHA != govSHA('5') || r.MergeSHA != "" || r.ActorID != "op-9" {
+		t.Fatalf("pending approval = %+v", r)
+	}
+	if r := pend["run-gov-pending-marked"]; r.CommitSHA != govSHA('6') || r.MergeSHA != govSHA('7') {
+		t.Fatalf("pending approval with a marker = %+v", r)
+	}
+	if !marked {
+		t.Fatal("a committing run's complete marker is not listed as an approved-merge record")
 	}
 }
 

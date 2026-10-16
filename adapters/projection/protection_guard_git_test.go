@@ -8,6 +8,7 @@ package projection
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -459,4 +460,96 @@ func TestProtectionRemovalGuard_RebuildFailureKeepsTheNewnessAnchor(t *testing.T
 	f.prov.err = nil
 	f.sync()
 	f.requireInstalledRelaxed("retry after the outage", o)
+}
+
+func pendingApproval(approved, mergeSHA string) store.GovernanceAuthorization {
+	return store.GovernanceAuthorization{Source: store.GovernanceSourcePendingApproval, CommitSHA: approved,
+		MergeSHA: mergeSHA, ActorID: "op-1", RunID: "run-x"}
+}
+
+// TestProtectionRemovalGuard_ApprovedMergeInFlightHoldsTheSync (review
+// round 1, finding F4 and codex): the engine moves the local main to an
+// approved merge before it records the consumption marker. A sync inside
+// that window used to refuse the approved relaxation and advance past it;
+// with bootstrap rows installed even a full rebuild then took the late
+// record for a replay. The sync now holds (error, the rules untouched, no
+// refusal event) while the run is committing with its approved commit on
+// the head and no reachable marker, and installs once the marker exists.
+// A pending approval never vouches for anything itself. Mutation:
+// dropping the in-flight check refuses and advances.
+func TestProtectionRemovalGuard_ApprovedMergeInFlightHoldsTheSync(t *testing.T) {
+	approvedMerge := func(f *pgFix) (bound, pre, m string) {
+		f.r.run("checkout", "-q", "-b", "spine/run/approved")
+		f.r.write(BranchProtectionConfigPath, pgRelaxed)
+		bound = f.r.commit("approved run work")
+		f.r.run("checkout", "-q", "main")
+		pre = f.r.run("rev-parse", "HEAD")
+		f.r.run("merge", "-q", "--no-ff", "-m", "Merge run approved", "spine/run/approved")
+		return bound, pre, f.r.run("rev-parse", "HEAD")
+	}
+	for _, bootstrap := range []bool{false, true} {
+		name := "protected rows installed"
+		if bootstrap {
+			name = "bootstrap rows installed"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newPGFix(t)
+			anchor := f.c0
+			if bootstrap {
+				f.r.remove(BranchProtectionConfigPath)
+				anchor = f.r.commit("config deleted")
+				f.st.bpRules = bootstrapRows()
+				f.st.bpCommit = "bootstrap"
+				f.st.setState(anchor, "idle")
+			}
+			bound, pre, m := approvedMerge(f)
+
+			// Inside the window: approval recorded, marker not yet.
+			f.prov.records = []store.GovernanceAuthorization{pendingApproval(bound, "")}
+			_ = f.svc.IncrementalSync(context.Background())
+			if st := f.st.syncState(); st.Status != "error" || st.LastSyncedCommit != anchor {
+				t.Fatalf("in the window: state %+v, want the sync held at %s", st, anchor)
+			}
+			f.requireProtected("approved merge in flight")
+			if f.refusals() != 0 {
+				t.Fatal("an approved merge in flight was refused")
+			}
+			// A stale marker from an earlier attempt does not end the window.
+			f.prov.records = []store.GovernanceAuthorization{pendingApproval(bound, strings.Repeat("e", 40))}
+			_ = f.svc.IncrementalSync(context.Background())
+			if st := f.st.syncState(); st.Status != "error" || st.LastSyncedCommit != anchor {
+				t.Fatalf("stale marker: state %+v, want the sync still held", st)
+			}
+
+			// The marker lands: the next sync installs the approved change.
+			f.prov.records = []store.GovernanceAuthorization{approved(m, pre), pendingApproval(bound, m)}
+			f.sync()
+			f.requireInstalledRelaxed("after the marker", m)
+		})
+	}
+	t.Run("a pending approval vouches for nothing", func(t *testing.T) {
+		f := newPGFix(t)
+		bound, _, _ := approvedMerge(f)
+		// The marker is in place (reachable) but no approved-merge record
+		// matches: the pending entry must not authorise the removal.
+		f.prov.records = []store.GovernanceAuthorization{pendingApproval(bound, f.r.run("rev-parse", "HEAD"))}
+		f.sync()
+		f.requireProtected("pending approval alone")
+		if f.refusals() != 1 {
+			t.Fatalf("refusals = %d, want 1", f.refusals())
+		}
+	})
+	t.Run("an approval whose commit is not on the head does not hold", func(t *testing.T) {
+		f := newPGFix(t)
+		f.r.run("checkout", "-q", "-b", "spine/run/other")
+		other := f.r.commit("another run's approved commit")
+		f.r.run("checkout", "-q", "main")
+		f.relax("unprovenanced relaxation")
+		f.prov.records = []store.GovernanceAuthorization{pendingApproval(other, "")}
+		f.sync()
+		f.requireProtected("unrelated pending approval")
+		if f.refusals() != 1 {
+			t.Fatalf("refusals = %d, want the unprovenanced relaxation refused", f.refusals())
+		}
+	})
 }

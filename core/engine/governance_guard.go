@@ -354,6 +354,9 @@ type governancePass struct {
 	// governance_approved), so a successful merge records the consumption
 	// marker.
 	consumes bool
+	// lifecycle is the task path the ADR-008 lifecycle exemption excused,
+	// or ""; the post-merge assertion re-checks it against the result.
+	lifecycle string
 }
 
 // governanceGate runs between resolveMergeSource and the first merge
@@ -433,6 +436,9 @@ func (o *Orchestrator) governanceGate(ctx context.Context, run *domain.Run, src 
 		check:    gc,
 		touched:  touched,
 		consumes: hasReason(ownReasons, branchprotect.ReasonGovernanceApproved),
+	}
+	if artifact.IsWorkflowPath(run.TaskPath) && hasPath(gc.ExemptPaths, run.TaskPath) {
+		src.gov.lifecycle = run.TaskPath
 	}
 	if src.gov.consumes {
 		log.Info("governance guard: approved governance change proceeds to merge",
@@ -586,8 +592,10 @@ func cleanRelative(p string) bool {
 //     parsed from the file being merged, byte-exact (StartPlanningRun
 //     takes a caller-supplied path, so a front-matter-wrapped
 //     workflows/x.yaml can produce this run shape too);
-//   - neither the merged file nor its version at any merge base declares
-//     applies_to: [Workflow], in any letter case (an exempt edit could
+//   - neither the merged file nor its version at any merge base or at the
+//     target's current tip declares applies_to: [Workflow], in any letter
+//     case — and the post-merge assertion re-checks the merged result
+//     (lifecycleResultStillExempt) — (an exempt edit could
 //     otherwise add a second workflow-governing binding — every lifecycle
 //     run would then fail to resolve — or shadow
 //     <artifacts_dir>/workflows/workflow-lifecycle.yaml from the root);
@@ -637,27 +645,76 @@ func (o *Orchestrator) lifecycleExemption(ctx context.Context, run *domain.Run, 
 	if declaresWorkflowGovernance(def.AppliesTo) {
 		return deny("the edited workflow governs workflows", nil)
 	}
-	for _, b := range bases {
-		prev, err := o.git.ReadFile(ctx, b, run.TaskPath)
+	// Every version the merge combines with the run's: each merge base's,
+	// and the target's current one (codex review, review round 1) — main
+	// may have made the file govern workflows after the run forked, and a
+	// clean merge would carry the run's edit into that version.
+	tip, err := o.binder.ResolveBranchHead(ctx, authoritativeBranch)
+	if err != nil {
+		return deny("the target's current version unreadable", err)
+	}
+	for _, ref := range append(append([]string(nil), bases...), tip) {
+		governs, err := o.workflowVersionGoverns(ctx, ref, run.TaskPath)
 		if err != nil {
-			var gitErr *git.GitError
-			if errors.As(err, &gitErr) && gitErr.Kind == git.ErrKindNotFound {
-				continue // the file is new since this base
-			}
-			return deny("previous workflow version unreadable", err)
+			return deny("previous workflow version unreadable or does not parse", err)
 		}
-		prevDef, err := workflow.Parse(run.TaskPath, prev)
-		if err != nil {
-			return deny("previous workflow version does not parse", err)
-		}
-		if declaresWorkflowGovernance(prevDef.AppliesTo) {
-			return deny("the previous version governs workflows", nil)
+		if governs {
+			return deny("a previous version (a merge base's or the target's) governs workflows", nil)
 		}
 	}
 	if ok, why := o.reviewerIsNotAuthor(ctx, run, gov); !ok {
 		return deny(why, nil)
 	}
 	return []string{run.TaskPath}
+}
+
+// workflowVersionGoverns reports whether the version of path at ref
+// declares applies_to: [Workflow]. A file missing at ref does not (it is
+// new since then); one that cannot be read or parsed is an error, and the
+// caller grants nothing.
+func (o *Orchestrator) workflowVersionGoverns(ctx context.Context, ref, path string) (bool, error) {
+	prev, err := o.git.ReadFile(ctx, ref, path)
+	if err != nil {
+		var gitErr *git.GitError
+		if errors.As(err, &gitErr) && gitErr.Kind == git.ErrKindNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	def, err := workflow.Parse(path, prev)
+	if err != nil {
+		return false, err
+	}
+	return declaresWorkflowGovernance(def.AppliesTo), nil
+}
+
+// lifecycleResultStillExempt re-checks the lifecycle exemption against the
+// merge that was actually made (codex review, review round 1): the merged
+// file must still be workflows/<parsed id>.yaml and govern no workflows,
+// and the target before the merge must not have made it govern workflows.
+// The gate read the target's version, but the target can move between the
+// gate and the merge (other runs' merges, operator pushes), and a clean
+// merge then combines the run's edit with a workflow-governing version the
+// gate never saw. Any read or parse failure fails the check.
+func (o *Orchestrator) lifecycleResultStillExempt(ctx context.Context, run *domain.Run, res git.MergeResult) (bool, string) {
+	content, err := o.git.ReadFile(ctx, res.SHA, run.TaskPath)
+	if err != nil {
+		return false, "merged workflow file unreadable"
+	}
+	def, err := workflow.Parse(run.TaskPath, content)
+	if err != nil {
+		return false, "merged workflow file does not parse"
+	}
+	if run.TaskPath != workflow.FilePath(def.ID) {
+		return false, "task path is not workflows/<parsed id>.yaml in the merged result"
+	}
+	if declaresWorkflowGovernance(def.AppliesTo) {
+		return false, "the merged workflow governs workflows"
+	}
+	if governs, err := o.workflowVersionGoverns(ctx, res.BaseSHA, run.TaskPath); err != nil || governs {
+		return false, "the target's version before the merge governs workflows (or is unreadable)"
+	}
+	return true, ""
 }
 
 func declaresWorkflowGovernance(appliesTo []string) bool {
@@ -667,6 +724,17 @@ func declaresWorkflowGovernance(appliesTo []string) bool {
 		}
 	}
 	return false
+}
+
+// withoutPath returns a copy of xs without s.
+func withoutPath(xs []string, s string) []string {
+	out := make([]string, 0, len(xs))
+	for _, x := range xs {
+		if x != s {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 func hasPath(xs []string, s string) bool {
@@ -983,10 +1051,18 @@ func (o *Orchestrator) assertGovernedMerge(ctx context.Context, run *domain.Run,
 				actual = append(actual, d.OldPath)
 			}
 		}
+		exempt := gc.ExemptPaths
+		if pass.lifecycle != "" {
+			if ok, why := o.lifecycleResultStillExempt(ctx, run, res); !ok {
+				log.Warn("governance guard: the lifecycle exemption does not hold for the merged result; the workflow edit is not covered",
+					"run_id", run.RunID, "task_path", pass.lifecycle, "merge_sha", res.SHA, "reason", why)
+				exempt = withoutPath(exempt, pass.lifecycle)
+			}
+		}
 		post := &branchprotect.GovernanceCheck{
 			Paths:        gc.Paths,
 			ChangedPaths: actual,
-			ExemptPaths:  append(append([]string(nil), gc.ExemptPaths...), o.ownEvidenceExemptions(run, actual)...),
+			ExemptPaths:  append(append([]string(nil), exempt...), o.ownEvidenceExemptions(run, actual)...),
 		}
 		covered := make(map[string]struct{}, len(pass.touched))
 		for _, p := range pass.touched {

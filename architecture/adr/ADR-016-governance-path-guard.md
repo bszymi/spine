@@ -66,7 +66,7 @@ A workflow-lifecycle planning run may merge its **own** workflow file without op
 
 - the run is a planning run whose task path is exactly `workflows/<id>.yaml`, `<id>` being the parsed workflow's id (byte-exact);
 - the task path is not the governing workflow's own path, and the governing workflow declares `applies_to: [Workflow]`;
-- neither the edited file nor its merge-base version declares `applies_to: [Workflow]` (an exempt edit can never create or shadow a workflow-governing binding);
+- neither the edited file nor its version at any merge base or at the target's current tip declares `applies_to: [Workflow]`, and after the merge the result is checked again (an exempt edit can never create, edit or shadow a workflow-governing binding, even when the target changes between the check and the merge);
 - the last completed review step was completed by someone who neither started the run (the starter wrote the body onto the branch; the engine records them at start, and a run with no recorded starter gets no exemption) nor is a run author — bound to any author step execution of the run, in any status, or holding an assignment row of one — a local separation-of-duties check that holds whatever the deployment's step-entry policy says.
 
 Every other governance path in that run still needs approval. ADR-008 §2 carries an "Amended by ADR-016" note.
@@ -92,7 +92,7 @@ Both guards are off at their zero value, and the embedded library then behaves e
 - A database rebuilt from git refuses a relaxed config until an operator re-affirms it with an override push that **edits** the file (a comment line is enough). An override push that does not touch the file proves nothing.
 - Override provenance is the honoured override's row in `runtime.event_log`. The git pre-receive gate emits the event before git moves the ref; SMP's emitter writes the row synchronously, and with the guards on `spine serve`'s push path writes it synchronously too (whatever `SPINE_EVENT_DELIVERY` says), so the projection never sees the push before its record. The event log is pruned by retention, which is why a database rebuilt later needs the re-affirmation.
 - Convergence merges that move content into `main` outside `MergeRunBranch` (audit F8) are not seen by this guard; INIT-023 TASK-012 owns that path.
-- The consumption marker is written after the merge moves the local `main` and before the push. A projection that follows the local `main` (single-workspace `spine serve`) can sync inside that window, see an approved relaxation with no record yet, refuse it and advance; the stricter rules stay (fail-safe) until the file changes again, an operator triggers a full rebuild (`POST /system/rebuild`), or an editing override push re-affirms it.
+- The consumption marker is written after the merge moves the local `main` and before the push, so a projection that follows the local `main` (single-workspace `spine serve`) can sync in between. A removal it cannot match while a run is still `committing` with an approval whose commit is on the head and no reachable marker holds the sync (retried) instead of being refused; it is decided on the next tick, once the marker exists.
 - Decisions are serialised with merge attempts within one process only (§4).
 
 ---

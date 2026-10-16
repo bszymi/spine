@@ -61,8 +61,15 @@ func (s *PostgresStore) MergeCommitMetaIfStatus(ctx context.Context, runID strin
 
 // Sources of a GovernanceAuthorization.
 const (
-	GovernanceSourceOverrideEvent    = "override_event"
-	GovernanceSourceApprovedMerge    = "governance_approval"
+	GovernanceSourceOverrideEvent = "override_event"
+	GovernanceSourceApprovedMerge = "governance_approval"
+	// GovernanceSourcePendingApproval is not an authorisation: a run still
+	// committing with an approval recorded. CommitSHA is the approved
+	// (bound) commit and MergeSHA its consumption marker's merge commit,
+	// if any (possibly from an earlier attempt). The projection uses it to
+	// tell an approved merge in flight — on the head before its marker is
+	// written — from an unprovenanced removal (review round 1).
+	GovernanceSourcePendingApproval  = "governance_approval_pending"
 	governanceOverrideEventType      = "branch_protection.override"
 	governanceOverrideOperationWrite = "direct_write"
 )
@@ -82,7 +89,10 @@ type GovernanceAuthorization struct {
 	// all-zero id means the ref (and so the config) did not exist before.
 	// The projection counts a record only if the config differs between
 	// BaseSHA and CommitSHA — the act changed the config (owner question 8).
-	BaseSHA    string
+	BaseSHA string
+	// MergeSHA is set on pending approvals only (see
+	// GovernanceSourcePendingApproval).
+	MergeSHA   string
 	ActorID    string
 	RunID      string // approvals
 	EventID    string // overrides
@@ -103,7 +113,9 @@ type GovernanceAuthorization struct {
 //     that consumed the approval before it pushed). A revoked approval
 //     (the reject tombstone: an empty sha) is excluded. Whether the merge
 //     commit reached the branch is the caller's reachability check, not
-//     this query's.
+//     this query's;
+//   - runs still committing with an approval recorded, as
+//     GovernanceSourcePendingApproval (not authorisations: see there).
 //
 // The event_log rows are the whole domain.Event JSON, as both Spine's
 // delivery subscriber and SMP's emitter write them. event_log is pruned
@@ -175,6 +187,40 @@ func (s *PostgresStore) ListGovernanceAuthorizations(ctx context.Context, branch
 		rec := approvals[i].GovernanceAuthorization
 		rec.Source = GovernanceSourceApprovedMerge
 		if t, err := time.Parse(time.RFC3339, approvals[i].approvedAt); err == nil {
+			rec.RecordedAt = t
+		}
+		out = append(out, rec)
+	}
+
+	pending, err := queryAll(ctx, s.pool, `
+		SELECT run_id,
+		       COALESCE(commit_meta->>$1, ''),
+		       commit_meta->>$2,
+		       COALESCE(commit_meta->>$3, ''),
+		       COALESCE(commit_meta->>$4, '')
+		FROM runtime.runs
+		WHERE status = $5
+		  AND COALESCE(commit_meta->>$2, '') <> ''
+		ORDER BY COALESCE(commit_meta->>$4, '') DESC, run_id
+		LIMIT $6`,
+		[]any{
+			domain.CommitMetaGovernanceApprovalActorID,
+			domain.CommitMetaGovernanceApprovalSHA,
+			domain.CommitMetaGovernanceApprovalMergeSHA,
+			domain.CommitMetaGovernanceApprovalApprovedAt,
+			string(domain.RunStatusCommitting),
+			limit,
+		},
+		func(row pgx.Rows, a *approvalRow) error {
+			return row.Scan(&a.RunID, &a.ActorID, &a.CommitSHA, &a.MergeSHA, &a.approvedAt)
+		})
+	if err != nil {
+		return nil, fmt.Errorf("list pending approvals: %w", err)
+	}
+	for i := range pending {
+		rec := pending[i].GovernanceAuthorization
+		rec.Source = GovernanceSourcePendingApproval
+		if t, err := time.Parse(time.RFC3339, pending[i].approvedAt); err == nil {
 			rec.RecordedAt = t
 		}
 		out = append(out, rec)
