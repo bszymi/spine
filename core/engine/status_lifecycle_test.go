@@ -595,6 +595,17 @@ func TestStatusLifecycle_RemovalGuard(t *testing.T) {
 		}},
 		{"retyped", "", func(r *lcRepo) { r.write(lcSibling, lcArt("TASK-002", "Taskx", "Completed")) }},
 		{"symlink", "", func(r *lcRepo) { r.symlink(lcSibling, "task-001.md") }},
+		// Renamed out of scope (review round 1): git reports R100, and
+		// the projection drops the row as for a deletion.
+		{"renamed to a non-.md path", "", func(r *lcRepo) {
+			r.git("mv", lcSibling, strings.TrimSuffix(lcSibling, ".md")+".txt")
+		}},
+		{"renamed under templates/", "", func(r *lcRepo) {
+			if err := os.MkdirAll(filepath.Join(r.dir, "templates"), 0o755); err != nil {
+				r.t.Fatal(err)
+			}
+			r.git("mv", lcSibling, "templates/task-002.md")
+		}},
 		{"recreated (standard)", "", func(r *lcRepo) { r.rm(lcSibling); r.write(recreatedPath, recreated) }},
 		{"recreated (planning)", domain.RunModePlanning, func(r *lcRepo) { r.rm(lcSibling); r.write(recreatedPath, recreated) }},
 	}
@@ -744,6 +755,23 @@ func TestStatusLifecycle_ArtifactsDir(t *testing.T) {
 		r.onRun("edit", func() { r.write("spine/"+sibRel, lcArt("TASK-002", "Task", "Pending")) })
 		e := newLCEnv(t, r, lcOpts{taskPath: taskRel, meta: map[string]string{"status": "Completed"}, dir: "spine"})
 		e.requireRefused(LifecycleNonOwnedStatusChange)
+	})
+	t.Run("a non-owned artifact renamed out of spine/ is refused", func(t *testing.T) {
+		r := newLCRepo(t, seed())
+		r.onRun("move out", func() {
+			if err := os.MkdirAll(filepath.Join(r.dir, "docs"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			r.git("mv", "spine/"+sibRel, "docs/u.md")
+		})
+		if ds := r.git("diff", "--name-status", "-M", "main", lcBranch); !strings.Contains(ds, "R100\tspine/"+sibRel+"\tdocs/u.md") {
+			t.Fatalf("git does not report the rename out of spine/:\n%s", ds)
+		}
+		e := newLCEnv(t, r, lcOpts{taskPath: taskRel, meta: map[string]string{"status": "Completed"}, dir: "spine"})
+		e.requireRefused(LifecycleNonOwnedRemoval)
+		if got := r.statusAt("main", "spine/"+sibRel); got != "Completed" {
+			t.Fatalf("main spine/%s = %s", sibRel, got)
+		}
 	})
 	t.Run("edits outside the scope are ignored", func(t *testing.T) {
 		r := newLCRepo(t, seed())
