@@ -31,9 +31,12 @@ package projection
 // Why "changed the config" (owner question 8): otherwise any later
 // operator act — a hotfix override push, an approved workflow edit — would
 // produce a commit whose tree still carries an unauthorised relaxation
-// already sitting on main, and vouch for it (laundering). Why newness:
-// re-pushing an old authorised blob after it was superseded must not
-// replay its authorisation.
+// already sitting on main, and vouch for it (laundering). An approved
+// merge must moreover have removed the protection itself — its base
+// config applied every kind being removed (review round 1) — because the
+// operator approved the run's diff, which may only add a rule on top of
+// that relaxation. Why newness: re-pushing an old authorised blob after
+// it was superseded must not replay its authorisation.
 //
 // A refusal keeps the previous rules, emits
 // branch_protection.removal_refused and logs a Warn, and is NOT a sync
@@ -167,13 +170,13 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 		return nil // self-protection already off (ADR-009 §1 bullet 3)
 	}
 	newKinds := kindsFor(candidate, branch)
-	removed := false
+	removed := map[bpconfig.RuleKind]bool{}
 	for k := range oldKinds {
 		if !newKinds[k] {
-			removed = true
+			removed[k] = true
 		}
 	}
-	if !removed {
+	if len(removed) == 0 {
 		return nil // tightening, reordering, other branches: no provenance needed
 	}
 
@@ -198,7 +201,7 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 	}
 	var verifyErr error
 	for _, rec := range records {
-		ok, err := s.provenanceMatches(ctx, rec, head, newest, content, present)
+		ok, err := s.provenanceMatches(ctx, rec, head, newest, content, present, branch, removed)
 		if err != nil && verifyErr == nil {
 			verifyErr = err
 		}
@@ -249,7 +252,18 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 // is returned as an error — the caller holds the sync so the record is
 // checked again — and any other failure (a commit that does not exist in
 // this repository, an unreadable entry) means the record does not match.
-func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAuthorization, head, newest string, content []byte, present bool) (bool, error) {
+//
+// An approved governed merge must also have performed the removal itself
+// (review round 1): the config at its BaseSHA — the target before the
+// merge — must apply every kind being removed (removed) to branch.
+// Otherwise an unauthorised relaxation already sitting on main (refused,
+// the rules kept) was installed by the next approved merge that touched
+// the file at all, even one whose own diff only adds a rule — the
+// operator approved that diff, not the relaxation it was laid over. An
+// override push keeps owner question 8's rule (the push changed the
+// file): the operator wrote the bytes being installed, and that is the
+// documented re-affirmation (docs/git-push-guide.md §4).
+func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAuthorization, head, newest string, content []byte, present bool, branch string, removed map[bpconfig.RuleKind]bool) (bool, error) {
 	c := rec.CommitSHA
 	if !isHexSHA(c) {
 		return false, nil
@@ -284,7 +298,9 @@ func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAut
 	// Changed: the act itself changed the config (owner question 8).
 	base := rec.BaseSHA
 	if base == "" || isZeroSHA(base) {
-		return recPresent, nil // the config was created by the act
+		// The config was created by the act (its base is the bootstrap
+		// defaults).
+		return recPresent && (rec.Source != store.GovernanceSourceApprovedMerge || protectsAll(nil, false, branch, removed)), nil
 	}
 	if !isHexSHA(base) {
 		return false, nil
@@ -293,10 +309,35 @@ func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAut
 	if err != nil {
 		return false, transientOnly(ctx, err)
 	}
-	if basePresent != recPresent {
-		return true, nil
+	if basePresent == recPresent && (!recPresent || bytes.Equal(baseContent, recContent)) {
+		return false, nil // the act did not change the config
 	}
-	return recPresent && !bytes.Equal(baseContent, recContent), nil
+	if rec.Source == store.GovernanceSourceApprovedMerge && !protectsAll(baseContent, basePresent, branch, removed) {
+		return false, nil // the approved diff did not remove the protection
+	}
+	return true, nil
+}
+
+// protectsAll reports whether a config (absent: the bootstrap defaults)
+// applies every kind in kinds to branch. A config that does not parse
+// protects nothing here: a record whose base cannot be read as rules
+// cannot be shown to have removed anything.
+func protectsAll(content []byte, present bool, branch string, kinds map[bpconfig.RuleKind]bool) bool {
+	rules := bootstrapCandidate()
+	if present {
+		cfg, err := bpconfig.Parse(bytes.NewReader(content))
+		if err != nil {
+			return false
+		}
+		rules = cfg.Rules
+	}
+	have := kindsFor(rules, branch)
+	for k := range kinds {
+		if !have[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // errUnreadableConfig marks a config entry that is not a readable file.

@@ -287,6 +287,30 @@ func TestProtectionRemovalGuard_RefusedCases(t *testing.T) {
 		}
 		f.requireProtected("laundered by an unrelated approved merge")
 	})
+	t.Run("laundering: an approved merge whose own diff only adds a rule", func(t *testing.T) {
+		// Review round 1: the relaxation is already on main (refused); a
+		// run's diff against it adds a release/* rule, which reads as
+		// tightening. Its approval changed the bytes, but the approved
+		// diff removed nothing from main: it must not vouch for the
+		// relaxation underneath. Mutation: dropping protectsAll installs
+		// the release rule alone and leaves main unprotected.
+		f := newPGFix(t)
+		r := f.relax("relaxation slips in")
+		f.sync() // refused
+		f.r.run("checkout", "-q", "-b", "spine/run/tighten")
+		f.r.write(BranchProtectionConfigPath, "version: 1\nrules:\n  - branch: release/*\n    protections: [no-delete]\n")
+		f.r.commit("add a release rule")
+		f.r.run("checkout", "-q", "main")
+		f.r.run("merge", "-q", "--no-ff", "-m", "Merge run tighten", "spine/run/tighten")
+		m := f.r.run("rev-parse", "HEAD")
+		f.prov.records = []store.GovernanceAuthorization{approved(m, r)}
+		f.sync()
+		f.requireProtected("laundered by an approved merge that only adds a rule")
+		if err := f.svc.FullRebuild(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.requireProtected("rebuild after the laundering attempt")
+	})
 	t.Run("bootstrap replay: a record older than the sync's start", func(t *testing.T) {
 		f := newPGFix(t)
 		a := f.relax("authorised relaxation (long ago)")
