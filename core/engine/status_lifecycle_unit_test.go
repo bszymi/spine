@@ -333,6 +333,10 @@ type scValidator struct {
 	res   domain.ValidationResult
 	err   error
 	calls []string
+	// perPath, when set, answers per projection key instead of res; a key
+	// it does not list passes, as validation.Engine passes a path the
+	// projection does not know.
+	perPath map[string]domain.ValidationResult
 }
 
 func (v *scValidator) Validate(context.Context, string) domain.ValidationResult {
@@ -341,6 +345,12 @@ func (v *scValidator) Validate(context.Context, string) domain.ValidationResult 
 
 func (v *scValidator) ValidateStatusChange(_ context.Context, p string, s domain.ArtifactStatus) (domain.ValidationResult, error) {
 	v.calls = append(v.calls, p+"="+string(s))
+	if v.perPath != nil {
+		if r, ok := v.perPath[p]; ok {
+			return r, v.err
+		}
+		return domain.ValidationResult{Status: "passed"}, v.err
+	}
 	return v.res, v.err
 }
 
@@ -678,6 +688,42 @@ func TestStatusLifecycle_MergeResultRules(t *testing.T) {
 	})
 }
 
+// TestStatusLifecycle_NonCanonicalTaskPath (codex review, round 1
+// follow-up): StartRun accepts a TaskPath spelled "./tasks/t.md" at the
+// repository root (artifact.Service.Read trims only a leading "/"), while
+// git diffs name the canonical "tasks/t.md". The run must still own it, and
+// the cascade must rewrite it under the canonical name (CommitFilesOnto
+// refuses a "." component, which would keep the run in committing).
+func TestStatusLifecycle_NonCanonicalTaskPath(t *testing.T) {
+	for _, spelled := range []string{"./" + ulTask, "/" + ulTask, "tasks//t.md"} {
+		t.Run(spelled, func(t *testing.T) {
+			f, _ := lcFix(t, true)
+			f.run.TaskPath = spelled
+			f.git.files[ulBase+":"+ulTask] = ulDoc("Task", "Pending")
+			plan, le := planFor(t, f, "Completed")
+			if le != nil {
+				t.Fatalf("refused: %v", le)
+			}
+			if _, ok := plan.updates[ulTask]; !ok || len(plan.updates) != 1 {
+				t.Fatalf("rewrites = %v, want exactly %s", plan.updates, ulTask)
+			}
+			if err := f.merge(); err != nil || f.run.Status != domain.RunStatusCompleted {
+				t.Fatalf("MergeRunBranch = %v, run %s (outcome %+v)", err, f.run.Status, f.primaryOutcome())
+			}
+		})
+	}
+	t.Run("the branch completes its own TaskPath spelled ./", func(t *testing.T) {
+		f, _ := lcFix(t, true)
+		f.run.TaskPath = "./" + ulTask
+		f.git.files[ulBase+":"+ulTask] = ulDoc("Task", "Pending")
+		f.git.files[ulBound+":"+ulTask] = ulDoc("Task", "Completed")
+		f.diff(git.FileDiff{Path: ulTask, Status: "modified"})
+		if _, le := planFor(t, f, "Completed"); le != nil {
+			t.Fatalf("refused: %v", le)
+		}
+	})
+}
+
 // TestStatusLifecycle_SCGateMainHolds: the status-conflict gate (O4) is not
 // asked about a change main already holds (review round 1, P3): the merge
 // lands no status change there.
@@ -718,6 +764,44 @@ func TestStatusLifecycle_SCGateMainHolds(t *testing.T) {
 		g.readErr[ulMain+":epics/e.md"] = &git.GitError{Kind: git.ErrKindTransient, Op: "x", Message: "repository locked"}
 		if err := f.merge(); err == nil || f.run.Status != domain.RunStatusCommitting || len(f.git.merges) != 0 {
 			t.Fatalf("MergeRunBranch = %v, run %s, merges %d", err, f.run.Status, len(f.git.merges))
+		}
+	})
+	// Codex review (round 1 follow-up): main renamed the epic after the
+	// fork, so the projection keys it under the new name; asking under the
+	// old one passes (an unknown path), while V1 follows the rename and
+	// lands Completed. The gate must ask under main's name.
+	renamed := func(t *testing.T) (*bindFix, *scValidator) {
+		f, _, v := epicFix(t, "Pending")
+		delete(f.git.files, ulMain+":epics/e.md")
+		f.git.files[ulMain+":epics/e2.md"] = ulDoc("Epic", "Pending")
+		f.git.diffs[ulBase+" "+ulMain] = []git.FileDiff{{OldPath: "epics/e.md", Path: "epics/e2.md", Status: "renamed"}}
+		v.perPath = map[string]domain.ValidationResult{"epics/e2.md": v.res}
+		return f, v
+	}
+	t.Run("main renamed the artifact: asked under main's name", func(t *testing.T) {
+		f, v := renamed(t)
+		_, le := planFor(t, f, "Completed")
+		if le == nil || len(le.Violations) != 1 || le.Violations[0].Reason != LifecycleStatusConflict ||
+			!reflect.DeepEqual(v.calls, []string{"epics/e2.md=Completed"}) {
+			t.Fatalf("violations %+v, calls %v; want status_conflict asked for epics/e2.md", le, v.calls)
+		}
+	})
+	t.Run("main renamed it again before the merge: retried", func(t *testing.T) {
+		f, v := renamed(t)
+		v.perPath = map[string]domain.ValidationResult{} // the check passes
+		const later = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1"
+		f.git.mergeRes = git.MergeResult{SHA: ulMerge, BaseSHA: later}
+		f.git.parents[ulMerge] = []string{later, ulCasc}
+		f.git.diffs[ulBase+" "+later] = []git.FileDiff{{OldPath: "epics/e.md", Path: "epics/e3.md", Status: "renamed"}}
+		f.git.files[later+":epics/e3.md"] = ulDoc("Epic", "Pending")
+		f.git.diffs[later+" "+ulMerge] = []git.FileDiff{{Path: "epics/e3.md", Status: "modified"}}
+		f.git.files[ulMerge+":epics/e3.md"] = ulDoc("Epic", "Completed")
+		if err := f.merge(); err != nil {
+			t.Fatalf("MergeRunBranch: %v", err)
+		}
+		if f.run.Status != domain.RunStatusCommitting || len(f.git.resets) != 1 || len(f.git.pushes) != 0 {
+			t.Fatalf("run %s, resets %v, pushes %v (outcome %+v); want committing, one take-back, no push",
+				f.run.Status, f.git.resets, f.git.pushes, f.primaryOutcome())
 		}
 	})
 	t.Run("main's head unknown: asked", func(t *testing.T) {

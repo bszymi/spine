@@ -271,6 +271,24 @@ func TestStatusLifecycle_MergeResultMainSideRename(t *testing.T) {
 			t.Fatalf("main %s = %s, want absent", lcTask, got)
 		}
 	})
+	t.Run("the owned epic moved: the status-conflict gate asks under main's name", func(t *testing.T) {
+		// Codex review (round 1 follow-up): the projection keys the moved
+		// epic under its new name, where SC-002 trips; under the old name
+		// it has no row and would pass, and V1 lets the rename land.
+		const epic = "initiatives/init-001/epics/epic-001/epic.md"
+		const epicMoved = "initiatives/init-001/epics/epic-001/epic-renamed.md"
+		r := newLCRepo(t, map[string]string{epic: lcArt("EPIC-001", "Epic", "Pending")})
+		r.onRun("work", func() { r.write("src/run.txt", "work\n") })
+		r.onMain("move the epic", func() { r.git("mv", epic, epicMoved) })
+		e := newLCEnv(t, r, lcOpts{taskPath: epic, meta: map[string]string{"status": "Completed"}})
+		v := &scValidator{perPath: map[string]domain.ValidationResult{epicMoved: {Status: "failed",
+			Errors: []domain.ValidationError{{RuleID: "SC-002", Severity: "error"}}}}}
+		e.orch.WithValidator(v)
+		e.requireRefused(LifecycleStatusConflict)
+		if got := r.statusAt("main", epicMoved); got != "Pending" {
+			t.Fatalf("main %s = %s, want Pending", epicMoved, got)
+		}
+	})
 	t.Run("the owned TaskPath moved and cancelled on main", func(t *testing.T) {
 		// git merges the rename and the status lines conflict-free only
 		// under merge=union; whatever git does, a status main changed
@@ -287,4 +305,17 @@ func TestStatusLifecycle_MergeResultMainSideRename(t *testing.T) {
 			t.Fatalf("main %s = %s, want Cancelled", taskMoved, got)
 		}
 	})
+}
+
+// TestStatusLifecycle_NonCanonicalTaskPathOnGit (codex review, round 1
+// follow-up): a run started with "./<path>" at the repository root (StartRun
+// accepts it) owns its artifact and the cascade lands its status.
+func TestStatusLifecycle_NonCanonicalTaskPathOnGit(t *testing.T) {
+	r := newLCRepo(t, map[string]string{lcTask: lcArt("TASK-001", "Task", "Pending")})
+	r.onRun("work", func() { r.write("src/run.txt", "work\n") })
+	e := newLCEnv(t, r, lcOpts{taskPath: "./" + lcTask, meta: map[string]string{"status": "Completed"}})
+	e.requireMerged()
+	if got := r.statusAt("main", lcTask); got != "Completed" {
+		t.Fatalf("main %s = %s, want Completed", lcTask, got)
+	}
 }

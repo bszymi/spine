@@ -253,6 +253,11 @@ type ownedChange struct {
 	from  domain.ArtifactStatus
 	final domain.ArtifactStatus
 	isNew bool
+	// scAt is the name on main the status-conflict gate (O4) judged the
+	// change under — main renames the artifact after the fork, the
+	// projection follows — or "" when the gate did not run. V1 retries a
+	// merge that lands it under another name.
+	scAt string
 }
 
 // diffItem is one diff entry as the lifecycle sees it: the path at the
@@ -681,6 +686,11 @@ func (p *planner) own(c ownedChange) { p.plan.owned = append(p.plan.owned, c) }
 // validator without StatusChangeValidator skips the gate; a validator
 // error is transient.
 //
+// The check is made under main's current name for the artifact (codex
+// review, round 1 follow-up): when main renamed it after the fork, the
+// projection keys it there, and asking under the old name passes (no row),
+// while V1 lets the merge land the change under main's name.
+//
 // A change main already holds is not asked about (review round 1): the
 // merge then lands no status change there, so it cannot be the one that
 // trips a status-conflict rule, while the projection the rules read may
@@ -699,14 +709,27 @@ func (p *planner) runSCChecks(ctx context.Context) error {
 		return nil
 	}
 	for _, c := range p.scChecks {
-		held, err := p.mainHolds(ctx, c)
+		at, held, err := p.onMain(ctx, c)
 		if err != nil {
 			return err
+		}
+		for i := range p.plan.owned {
+			if p.plan.owned[i].path == c.path {
+				p.plan.owned[i].scAt = at
+			}
 		}
 		if held {
 			continue
 		}
-		res, err := scv.ValidateStatusChange(ctx, c.key, c.to)
+		key := c.key
+		if at != c.path {
+			// The projection keys the artifact under main's name; under the
+			// old one the rules would find no row and pass.
+			if k, ok := p.scope.ArtifactKey(at); ok {
+				key = k
+			}
+		}
+		res, err := scv.ValidateStatusChange(ctx, key, c.to)
 		if err != nil {
 			return fmt.Errorf("status lifecycle: status-conflict check for %s: %w", c.path, err)
 		}
@@ -725,36 +748,57 @@ func (p *planner) runSCChecks(ctx context.Context) error {
 	return nil
 }
 
-// mainHolds reports whether main's tip already holds c's artifact at its
-// target type and status. A transient failure is returned; anything else
-// that keeps it from telling (no binder, no branch, the file renamed or
-// unreadable on main) is "no": the gate is asked, as before.
-func (p *planner) mainHolds(ctx context.Context, c scCheck) (bool, error) {
+// onMain returns the name main's tip gives c's artifact — c.path, or the
+// name main renamed it to since the merge-base — and whether main already
+// holds it at c's target type and status there. A transient failure is
+// returned; anything else that keeps it from telling (no binder, no
+// branch, the file unreadable on main) is (c.path, false): the gate is
+// asked under the bound commit's name, as before.
+func (p *planner) onMain(ctx context.Context, c scCheck) (string, bool, error) {
 	if p.o.binder == nil {
-		return false, nil
+		return c.path, false, nil
 	}
 	if p.mainTip == "" {
 		x, err := p.o.binder.ResolveBranchHead(ctx, authoritativeBranch)
 		if err != nil {
 			if lifecycleTransient(ctx, err) {
-				return false, fmt.Errorf("status lifecycle: resolve %s for the status-conflict check: %w", authoritativeBranch, err)
+				return "", false, fmt.Errorf("status lifecycle: resolve %s for the status-conflict check: %w", authoritativeBranch, err)
 			}
-			return false, nil
+			return c.path, false, nil
 		}
 		if !isBoundObjectID(x) {
-			return false, nil
+			return c.path, false, nil
 		}
 		p.mainTip = x
 	}
-	content, err := p.o.git.ReadFile(ctx, p.mainTip, c.path)
+	at := c.path
+	content, err := p.o.git.ReadFile(ctx, p.mainTip, at)
+	var gitErr *git.GitError
+	if err != nil && !lifecycleTransient(ctx, err) && errors.As(err, &gitErr) && gitErr.Kind == git.ErrKindNotFound {
+		// Gone under this name on main: renamed since the merge-base?
+		diffs, derr := p.o.git.Diff(ctx, p.base, p.mainTip)
+		if derr != nil {
+			if lifecycleTransient(ctx, derr) {
+				return "", false, fmt.Errorf("status lifecycle: main's renames for the status-conflict check: %w", derr)
+			}
+			return c.path, false, nil
+		}
+		for _, d := range diffs {
+			if d.Status == "renamed" && d.OldPath == c.path && d.Path != "" {
+				at = d.Path
+				content, err = p.o.git.ReadFile(ctx, p.mainTip, at)
+				break
+			}
+		}
+	}
 	if err != nil {
 		if lifecycleTransient(ctx, err) {
-			return false, fmt.Errorf("status lifecycle: read %s on %s for the status-conflict check: %w", c.path, authoritativeBranch, err)
+			return "", false, fmt.Errorf("status lifecycle: read %s on %s for the status-conflict check: %w", at, authoritativeBranch, err)
 		}
-		return false, nil
+		return at, false, nil
 	}
 	t, s, ok := artifact.LifecycleFields(content)
-	return ok && t == c.typ && s == c.to, nil
+	return at, ok && t == c.typ && s == c.to, nil
 }
 
 // applyStatusLifecycleAt is the lifecycle-on replacement of
@@ -1010,6 +1054,13 @@ func (v *mergeVerifier) verify(ctx context.Context, merged string) error {
 					at = n
 				}
 			}
+		}
+		if c.scAt != "" && at != c.scAt {
+			// main renamed the artifact again since the status-conflict gate
+			// judged the change under c.scAt: judge it again under the name
+			// it would land at.
+			return lifecycleRetry(fmt.Sprintf("main renamed %s since the status-conflict check (judged under %s, now %s); judging again",
+				lifecycleText(c.path, 256), lifecycleText(c.scAt, 256), lifecycleText(at, 256)), nil)
 		}
 		landing[at] = c
 		landingAt[i] = at

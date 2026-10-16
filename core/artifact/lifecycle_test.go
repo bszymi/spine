@@ -120,4 +120,16 @@ func TestPathScope(t *testing.T) {
 	if got := root.RepoPath("/initiatives/x.md"); got != "initiatives/x.md" {
 		t.Errorf("root RepoPath = %q", got)
 	}
+	// Cleaned to the form git names it in a diff (codex review, TASK-017
+	// round 1): artifact.Service.Read accepts these spellings at the root.
+	for in, want := range map[string]string{"./initiatives/x.md": "initiatives/x.md", "initiatives//x.md": "initiatives/x.md", "": ""} {
+		if got := root.RepoPath(in); got != want {
+			t.Errorf("root RepoPath(%q) = %q, want %q", in, got, want)
+		}
+		if in != "" {
+			if got := sub.RepoPath(in); got != "spine/"+want {
+				t.Errorf("RepoPath(%q) = %q, want spine/%s", in, got, want)
+			}
+		}
+	}
 }

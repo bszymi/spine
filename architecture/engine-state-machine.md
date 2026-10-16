@@ -333,8 +333,10 @@ merge outcome as failed (class `precondition`), classifies the last completed st
 `status_lifecycle_violation` (§3.3.1) and takes the permanent route: a publish-step workflow sends
 the run back to its producer (`merge_failed`), any other workflow fails the run. The blocking
 status-conflict check reads the projection, so it can lag `main` by one sync (KNOWN-LIMITATIONS);
-it is not asked about a change `main` already holds (the merge then lands no status change there),
-which covers a resumed run whose merge already landed.
+it is asked under the name `main` gives the artifact (when `main` renamed it after the fork, the
+projection keys it there; a merge that would land it under yet another name is retried), and it is
+not asked about a change `main` already holds (the merge then lands no status change there), which
+covers a resumed run whose merge already landed.
 
 ### 5A.3 The merge result
 

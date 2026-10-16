@@ -42,8 +42,9 @@ whatever the branch added. Owner questions answered by their defaults, pending t
   (`architecture/workflow-validation.md` §5.5 rule 1). A workflow planning run with such a body is
   refused before its branch exists.
 - **A Completed epic with open tasks (SC-002) or initiative with open epics (SC-003) blocks**: an
-  owned transition to `Completed` that trips one is refused `status_conflict`. A status `main`
-  already holds is not re-asked (a resumed run whose merge already landed completes).
+  owned transition to `Completed` that trips one is refused `status_conflict`. The check is made
+  under the name `main` gives the artifact (a rename `main` made after the fork is followed), and a
+  status `main` already holds is not re-asked (a resumed run whose merge already landed completes).
 
 ### Changed (standalone)
 

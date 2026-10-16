@@ -79,11 +79,20 @@ func (p PathScope) GovernedArtifactKey(repoPath string) (string, bool) {
 
 // RepoPath maps an artifact-relative path (a run's TaskPath, a projection
 // key) to its repository path the way artifact.Service.Read resolves it:
-// one leading "/" is dropped and the path is joined under dir.
+// one leading "/" is dropped and the path is joined under dir — and,
+// lexically cleaned, in the form git names it in a diff. Read joins under
+// a subdirectory with filepath.Join, which cleans, but at the repository
+// root it passes "./tasks/t.md" or "tasks//t.md" to git as given, and git
+// reads them as "tasks/t.md"; the governed-merge lifecycle compares this
+// path with diff paths and writes it with CommitFilesOnto, which refuses a
+// "." component (codex review, TASK-017 round 1). "" stays "".
 func (p PathScope) RepoPath(artifactPath string) string {
 	artifactPath = strings.TrimPrefix(artifactPath, "/")
+	if artifactPath == "" {
+		return ""
+	}
 	if p.dir == "" {
-		return artifactPath
+		return path.Clean(artifactPath)
 	}
 	return path.Join(p.dir, artifactPath)
 }
