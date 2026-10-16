@@ -223,8 +223,8 @@ TaskPath and every Markdown artifact the run branch added. With the lifecycle on
 **owns** — its TaskPath, plus the artifacts a planning run adds — and only after the whole bound
 diff has been judged: a status change on any other artifact, an undeclared transition, or a
 rewrite that does not re-parse to the judged status refuses the merge before any commit is made
-and before any ref advances, and the merge result is re-checked before it is pushed
-([Engine State Machine](/architecture/engine-state-machine.md) §5A).
+and before any ref advances, and what the merge result changes relative to `main` is judged again
+before it is pushed ([Engine State Machine](/architecture/engine-state-machine.md) §5A.3).
 
 ### 5.5 Operational vs Governed Commits
 

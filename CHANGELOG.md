@@ -27,16 +27,23 @@ whatever the branch added. Owner questions answered by their defaults, pending t
   `Completed` work, or an ADR "Completed"). Every rewrite is re-parsed: an owned artifact whose
   status line the byte-preserving writer cannot rewrite (a quoted key, a continuation line, …) is
   refused instead of landing the author's own value.
-- **The merge result is re-checked before any push**: a `*.md merge=union` attribute that keeps two
-  status lines without a conflict is refused (`merge_result_mismatch`) and taken back off the local
-  `main`.
+- **What the merge result changes is judged against `main` before any push**
+  (`architecture/engine-state-machine.md` §5A.3): only the run's own artifacts may change status,
+  to the planned status and from the judged one; every other artifact keeps its type, status and
+  existence, and an added one carries an initial status. Anything else is refused
+  (`merge_result_mismatch`) and taken back off the local `main` — a `*.md merge=union` attribute
+  that keeps two status lines, a criss-cross history `git merge` resolves against a base the
+  judgement never saw, or a concurrent merge of commits the bound commit builds on (when `main`
+  gained such commits between the judgement and the merge, the attempt is retried and judged
+  again). A rename `main` made after the fork merges as it did before the lifecycle.
 - **`workflow.Service` refuses an impossible `commit.status`** at create and update, and
   `POST /api/v1/workflows/{id}/validate` reports it (`rule_id: commit_status`): every outcome's
   `commit.status` must be a declared status of every `applies_to` type
   (`architecture/workflow-validation.md` §5.5 rule 1). A workflow planning run with such a body is
   refused before its branch exists.
 - **A Completed epic with open tasks (SC-002) or initiative with open epics (SC-003) blocks**: an
-  owned transition to `Completed` that trips one is refused `status_conflict`.
+  owned transition to `Completed` that trips one is refused `status_conflict`. A status `main`
+  already holds is not re-asked (a resumed run whose merge already landed completes).
 
 ### Changed (standalone)
 

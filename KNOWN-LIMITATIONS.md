@@ -478,6 +478,22 @@ The governed merge judges artifact-status changes against the declared lifecycle
 - **A gitlink whose recorded id names a blob in the repository is read as that blob**, exactly as
   the projection reads it (see "Projection Sync" above); replacing an artifact with such a gitlink
   of the same content is therefore not a removal to either.
+- **A run branch with more than one merge-base with `main`** (a criss-cross history: the branch
+  merged a commit of another run's branch that `main` merged separately) is judged against git's
+  newest merge-base. A status change the other merge-base carries is then attributed to the run and
+  refused (`non_owned_status_change` on an artifact the run did not touch) — fail closed; merging
+  `main` into the run branch gives it one merge-base again. Whatever the plan accepts, the merge
+  result is judged against `main` before any push (§5A.3), so nothing unjudged lands.
+- **The merge-result check pairs renames with git's rename detection** between `main` before the
+  merge and the merge result. A non-owned artifact the branch renamed and that `main` (or the
+  branch) edited so heavily that git no longer pairs the two (under 50 % similar) reads as a
+  deletion plus an addition and is refused; the author re-does the rename on a branch from current
+  `main`.
+- **A rename `main` made of the run's TaskPath after the fork** merges with the status change
+  landing under `main`'s name; `run.TaskPath` keeps the name the run started with.
+- **A merge whose merge-base moved is retried, not refused**: when `main` gains commits of the
+  bound history between the judgement and the merge, the merge is taken back and the attempt
+  retried; it retries for as long as that keeps happening (TASK-012 bounds retries).
 - **The merge-result check runs after the code repositories merged** (code-repository-first
   ordering) and after the local merge, like TASK-005's structural check: a refused merge is taken
   back off the local `main` and never pushed, but with auto-push off the local `main` briefly held

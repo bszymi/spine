@@ -324,7 +324,7 @@ status.
 | A diff-listed path that cannot be read for a reason a retry cannot change (too large, not a blob, not found) | — | `unreadable_artifact` |
 | No merge-base with `main`, or a permanent merge-base / diff failure | — | `unreadable_diff` |
 | The cascade's rewrite of an owned path does not re-parse to exactly `final` with nothing else changed | — | `status_rewrite_failed` |
-| The merge result (before any push) does not hold the judged type and status | — | `merge_result_mismatch` |
+| The merge result (before any push) changes, relative to `main` before the merge, something the rules above did not allow (§5A.3) | — | `merge_result_mismatch` |
 
 The cascade rewrites only owned paths whose status differs from `final`, in one commit onto the
 bound commit. A retryable git error (or a non-git store or transport error) keeps the run in
@@ -332,7 +332,35 @@ bound commit. A retryable git error (or a non-git store or transport error) keep
 merge outcome as failed (class `precondition`), classifies the last completed step
 `status_lifecycle_violation` (§3.3.1) and takes the permanent route: a publish-step workflow sends
 the run back to its producer (`merge_failed`), any other workflow fails the run. The blocking
-status-conflict check reads the projection, so it can lag `main` by one sync (KNOWN-LIMITATIONS).
+status-conflict check reads the projection, so it can lag `main` by one sync (KNOWN-LIMITATIONS);
+it is not asked about a change `main` already holds (the merge then lands no status change there),
+which covers a resumed run whose merge already landed.
+
+### 5A.3 The merge result
+
+The rules above judge the bound diff against one merge-base (`git merge-base main <bound>`), but
+`git merge` merges against the virtual base of every best common ancestor, and against `main` as it
+is when the merge runs. So after the local merge and before any push, the engine judges what the
+merge actually changes, `Diff(<main before the merge>, <merge result>)` with renames detected,
+relative to `main`:
+
+- The merge-base of `main` before the merge and the merged commit must still be the one the plan
+  judged against. When `main` gained commits of the bound history between the judgement and the
+  merge, it is not: the merge is taken back off the local `main` and the attempt retried (the run
+  stays `committing`), so the next attempt judges against the base git now merges with.
+- The run's own artifact whose status the plan sets must land at the planned type and status, from
+  the judged status on `main` (or `main` already holding the planned one); one the plan creates must
+  not overwrite an artifact `main` holds. A rename `main` made after the merge-base is followed for
+  the TaskPath (git merges the rename and the status change cleanly).
+- Every other artifact `main` holds keeps its type, its status and its existence (and, when it
+  parses for the projection on `main`, keeps parsing); an artifact the merge adds must carry an
+  initial status of its type. A rename `main` made after the fork is `main`'s state, not a change of
+  the merge.
+
+Anything else is refused `merge_result_mismatch` (a side that cannot be read, `unreadable_artifact`)
+and the refused merge is taken back off the local `main`; nothing is pushed. This covers a
+`*.md merge=union` attribute that keeps two status lines without a conflict, a criss-cross history
+whose virtual base the plan never saw, and a concurrent merge of commits the bound commit builds on.
 
 ---
 
