@@ -756,7 +756,7 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 	if verr == nil && src.lifecycle != nil {
 		// V1 (INIT-023 TASK-017): what the merge lands is what the status
 		// lifecycle judged.
-		verr = o.verifyLifecycleMerge(ctx, src.lifecycle, mergeResult)
+		verr = o.verifyLifecycleMerge(ctx, src.lifecycle, src.sha, mergeResult)
 	}
 	if err := verr; err != nil {
 		// The take-back runs before anything else can build on the

@@ -27,26 +27,35 @@ var (
 
 const ulTask = "tasks/t.md"
 
-// lcGit is fakeBinderGit with injectable Diff / MergeBase / ReadFile errors.
+// lcGit is fakeBinderGit with injectable Diff / MergeBase / ReadFile errors:
+// for every call (diffErr, mbErr) or for one pair "a b" (diffErrs, mbErrs).
 type lcGit struct {
 	*fakeBinderGit
-	diffErr error
-	mbErr   error
-	readErr map[string]error // "ref:path"
+	diffErr  error
+	mbErr    error
+	diffErrs map[string]error
+	mbErrs   map[string]error
+	readErr  map[string]error // "ref:path"
 }
 
 func (g *lcGit) Diff(ctx context.Context, a, b string) ([]git.FileDiff, error) {
-	if g.diffErr != nil {
+	if err := g.diffErrs[a+" "+b]; err != nil || g.diffErr != nil {
 		g.record("Diff " + a + " " + b)
-		return nil, g.diffErr
+		if err == nil {
+			err = g.diffErr
+		}
+		return nil, err
 	}
 	return g.fakeBinderGit.Diff(ctx, a, b)
 }
 
 func (g *lcGit) MergeBase(ctx context.Context, a, b string) (string, error) {
-	if g.mbErr != nil {
+	if err := g.mbErrs[a+" "+b]; err != nil || g.mbErr != nil {
 		g.record("MergeBase " + a + " " + b)
-		return "", g.mbErr
+		if err == nil {
+			err = g.mbErr
+		}
+		return "", err
 	}
 	return g.fakeBinderGit.MergeBase(ctx, a, b)
 }
@@ -70,7 +79,7 @@ func ulDoc(typ, status string) string {
 func lcFix(t *testing.T, legacy bool) (*bindFix, *lcGit) {
 	t.Helper()
 	f := committingFix(t, legacy, false)
-	g := &lcGit{fakeBinderGit: f.git, readErr: map[string]error{}}
+	g := &lcGit{fakeBinderGit: f.git, readErr: map[string]error{}, diffErrs: map[string]error{}, mbErrs: map[string]error{}}
 	f.orch.git = g
 	if err := f.orch.EnableMergeBinding(MergeBindingConfig{}); err != nil {
 		t.Fatal(err)
@@ -79,6 +88,7 @@ func lcFix(t *testing.T, legacy bool) (*bindFix, *lcGit) {
 	f.run.CommitMeta = map[string]string{"status": "Completed", CommitMetaBoundSHA: ulBound,
 		CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
 	f.git.files[ulBound+":"+ulTask] = ulDoc("Task", "Pending")
+	f.git.files[ulMain+":"+ulTask] = ulDoc("Task", "Pending")
 	f.git.ontoSHA = ulCasc
 	f.git.parents[ulCasc] = []string{ulBound}
 	f.git.mergeRes = git.MergeResult{SHA: ulMerge, BaseSHA: ulMain}
@@ -472,6 +482,7 @@ func TestStatusLifecycle_MergeResultMismatchUnit(t *testing.T) {
 		f.diff(git.FileDiff{Path: "tasks/u.md", Status: "modified"})
 		f.git.files[ulBase+":tasks/u.md"] = ulDoc("Task", "Pending")
 		f.git.files[ulBound+":tasks/u.md"] = ulDoc("Task", "Pending") + "body edit\n"
+		f.git.diffs[ulMain+" "+ulMerge] = []git.FileDiff{{Path: "tasks/u.md", Status: "modified"}}
 		f.git.files[ulMain+":tasks/u.md"] = ulDoc("Task", "Cancelled")
 		f.git.files[ulMerge+":tasks/u.md"] = ulDoc("Task", "Cancelled") + "body edit\n"
 		if err := f.merge(); err != nil || f.run.Status != domain.RunStatusCompleted {
@@ -494,6 +505,226 @@ func TestStatusLifecycle_MergeResultMismatchUnit(t *testing.T) {
 		delete(f.git.files, ulMerge+":"+ulTask)
 		if err := f.merge(); err != nil || f.run.Status != domain.RunStatusCompleted {
 			t.Fatalf("MergeRunBranch = %v, run %s (outcome %+v)", err, f.run.Status, f.primaryOutcome())
+		}
+	})
+}
+
+// TestStatusLifecycle_MergeResultRules pins V1's rules on the fake (review
+// round 1): it judges Diff(main before the merge, merge result) relative to
+// main — not the paths the plan listed — after checking that the merge was
+// made against the merge-base the plan judged.
+func TestStatusLifecycle_MergeResultRules(t *testing.T) {
+	const retry = "retry"
+	mainM := ulMain + " " + ulMerge
+	transient := &git.GitError{Kind: git.ErrKindTransient, Op: "x", Message: "repository locked"}
+	permanent := &git.GitError{Kind: git.ErrKindPermanent, Op: "x", Message: "fatal: bad object"}
+	inMerge := func(f *bindFix, d ...git.FileDiff) { f.git.diffs[mainM] = d }
+	sib := func(f *bindFix, onMain, inResult string) {
+		inMerge(f, git.FileDiff{Path: "tasks/u.md", Status: "modified"})
+		f.git.files[ulMain+":tasks/u.md"] = onMain
+		f.git.files[ulMerge+":tasks/u.md"] = inResult
+	}
+	for _, c := range []struct {
+		name string
+		set  func(f *bindFix, g *lcGit)
+		want string // "" merges, retry stays in committing, else a substring of the refusal
+	}{
+		{"a non-owned body edit keeps main's status", func(f *bindFix, _ *lcGit) {
+			sib(f, ulDoc("Task", "Cancelled"), ulDoc("Task", "Cancelled")+"edit\n")
+		}, ""},
+		{"a non-owned status change the plan never saw", func(f *bindFix, _ *lcGit) {
+			sib(f, ulDoc("Task", "Completed"), ulDoc("Task", "Pending"))
+		}, "tasks/u.md: merge_result_mismatch (Task Completed -> Pending)"},
+		{"a non-owned retype", func(f *bindFix, _ *lcGit) {
+			sib(f, ulDoc("Task", "Completed"), ulDoc("Epic", "Completed"))
+		}, "tasks/u.md: merge_result_mismatch (Task Completed -> Completed)"},
+		{"a non-owned artifact that stops parsing", func(f *bindFix, _ *lcGit) {
+			sib(f, ulDoc("Task", "Completed"), "---\nid: X-1\ntype: Task\nstatus: Completed\nstatus: Pending\n---\n")
+		}, `tasks/u.md: merge_result_mismatch (Task Completed -> "")`},
+		{"a non-owned artifact the projection would drop", func(f *bindFix, _ *lcGit) {
+			// Type and status still read, but artifact.Parse refuses it (the
+			// required title is gone): DiscoverChanges would delete its row.
+			full := func(title string) string {
+				return "---\nid: TASK-002\ntype: Task\n" + title + "status: Completed\n" +
+					"epic: /initiatives/i/epics/e/epic.md\ninitiative: /initiatives/i/initiative.md\n---\n# TASK-002\n"
+			}
+			sib(f, full("title: Two\n"), full(""))
+		}, "tasks/u.md: merge_result_mismatch (Task Completed -> Completed)"},
+		{"a non-owned artifact deleted", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: "tasks/u.md", Status: "deleted"})
+			f.git.files[ulMain+":tasks/u.md"] = ulDoc("Task", "Completed")
+		}, `tasks/u.md: merge_result_mismatch (Task Completed -> "")`},
+		{"a non-owned artifact renamed out of scope", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{OldPath: "tasks/u.md", Path: "tasks/u.txt", Status: "renamed"})
+			f.git.files[ulMain+":tasks/u.md"] = ulDoc("Task", "Completed")
+		}, `tasks/u.md: merge_result_mismatch (Task Completed -> "")`},
+		{"a non-owned rename with the status kept", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{OldPath: "tasks/u.md", Path: "tasks/v.md", Status: "renamed"})
+			f.git.files[ulMain+":tasks/u.md"] = ulDoc("Task", "Completed")
+			f.git.files[ulMerge+":tasks/v.md"] = ulDoc("Task", "Completed")
+		}, ""},
+		{"an addition without an initial status", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: "tasks/n.md", Status: "added"})
+			f.git.files[ulMerge+":tasks/n.md"] = ulDoc("Task", "Completed")
+		}, `tasks/n.md: merge_result_mismatch (Task "" -> Completed)`},
+		{"an addition with an initial status", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: "tasks/n.md", Status: "added"})
+			f.git.files[ulMerge+":tasks/n.md"] = ulDoc("Task", "Draft")
+		}, ""},
+		{"a template is out of scope", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: "templates/x.md", Status: "modified"})
+			f.git.files[ulMain+":templates/x.md"] = ulDoc("Task", "Completed")
+			f.git.files[ulMerge+":templates/x.md"] = ulDoc("Task", "Pending")
+		}, ""},
+		{"the owned artifact over a status main changed", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: ulTask, Status: "modified"})
+			f.git.files[ulMain+":"+ulTask] = ulDoc("Task", "Cancelled")
+		}, ulTask + ": merge_result_mismatch (Task Pending -> Cancelled)"},
+		{"main already holds the planned status", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: ulTask, Status: "modified"})
+			f.git.files[ulMain+":"+ulTask] = ulDoc("Task", "Completed")
+			f.git.files[ulMerge+":"+ulTask] = ulDoc("Task", "Completed") + "edit\n"
+		}, ""},
+		{"the owned artifact removed by the merge", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: ulTask, Status: "deleted"})
+		}, ulTask + `: merge_result_mismatch (Task Completed -> "")`},
+		{"another artifact renamed onto the owned path", func(f *bindFix, _ *lcGit) {
+			delete(f.git.files, ulMain+":"+ulTask)
+			inMerge(f, git.FileDiff{OldPath: "tasks/u.md", Path: ulTask, Status: "renamed"})
+			f.git.files[ulMain+":tasks/u.md"] = ulDoc("Task", "Pending")
+		}, `tasks/u.md: merge_result_mismatch (Task Pending -> ""); ` + ulTask + `: merge_result_mismatch (Task Pending -> "")`},
+		{"main renamed the owned TaskPath after the merge-base", func(f *bindFix, _ *lcGit) {
+			const moved = "tasks/t-moved.md"
+			delete(f.git.files, ulMain+":"+ulTask)
+			delete(f.git.files, ulMerge+":"+ulTask)
+			f.git.diffs[ulBase+" "+ulMain] = []git.FileDiff{{OldPath: ulTask, Path: moved, Status: "renamed"}}
+			f.git.files[ulMain+":"+moved] = ulDoc("Task", "Pending")
+			inMerge(f, git.FileDiff{Path: moved, Status: "modified"})
+			f.git.files[ulMerge+":"+moved] = ulDoc("Task", "Completed")
+		}, ""},
+		{"main's renames unreadable transiently", func(f *bindFix, g *lcGit) {
+			delete(f.git.files, ulMain+":"+ulTask)
+			g.diffErrs[ulBase+" "+ulMain] = transient
+		}, retry},
+		{"a quoted path in the merge diff", func(f *bindFix, _ *lcGit) {
+			inMerge(f, git.FileDiff{Path: `"tasks/\303\251.md"`, Status: "added"})
+		}, LifecycleUnparseablePath},
+		{"a permanent read of the merge result", func(f *bindFix, g *lcGit) {
+			sib(f, ulDoc("Task", "Pending"), "")
+			g.readErr[ulMerge+":tasks/u.md"] = permanent
+		}, "tasks/u.md: " + LifecycleUnreadableArtifact},
+		{"main gained commits of the bound history", func(f *bindFix, _ *lcGit) {
+			f.git.mergeBases[ulMain+" "+ulCasc] = sha40('9')
+		}, retry},
+		{"the merge's merge-base unreadable transiently", func(_ *bindFix, g *lcGit) {
+			g.mbErrs[ulMain+" "+ulCasc] = transient
+		}, retry},
+		{"the merge's merge-base unreadable permanently", func(_ *bindFix, g *lcGit) {
+			g.mbErrs[ulMain+" "+ulCasc] = permanent
+		}, LifecycleUnreadableDiff},
+		{"the merge diff unreadable transiently", func(_ *bindFix, g *lcGit) { g.diffErrs[mainM] = transient }, retry},
+		{"the merge diff unreadable permanently", func(_ *bindFix, g *lcGit) { g.diffErrs[mainM] = permanent }, LifecycleUnreadableDiff},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f, g := lcFix(t, true)
+			c.set(f, g)
+			if err := f.merge(); err != nil {
+				t.Fatalf("MergeRunBranch: %v", err)
+			}
+			po := f.primaryOutcome()
+			switch c.want {
+			case "":
+				if f.run.Status != domain.RunStatusCompleted || len(f.git.resets) != 0 {
+					t.Fatalf("run %s, resets %v (outcome %+v); want completed", f.run.Status, f.git.resets, po)
+				}
+			case retry:
+				if f.run.Status != domain.RunStatusCommitting || len(f.git.resets) != 1 || len(f.git.pushes) != 0 {
+					t.Fatalf("run %s, resets %v, pushes %v (outcome %+v); want committing, one take-back, no push",
+						f.run.Status, f.git.resets, f.git.pushes, po)
+				}
+			default:
+				if f.run.Status != domain.RunStatusFailed || len(f.git.resets) != 1 || len(f.git.pushes) != 0 {
+					t.Fatalf("run %s, resets %v, pushes %v (outcome %+v); want failed, one take-back, no push",
+						f.run.Status, f.git.resets, f.git.pushes, po)
+				}
+				if po == nil || po.FailureClass != domain.MergeFailurePrecondition || !strings.Contains(po.FailureDetail, c.want) {
+					t.Fatalf("outcome = %+v, want a precondition refusal containing %q", po, c.want)
+				}
+			}
+		})
+	}
+
+	t.Run("a planned creation onto main's artifact", func(t *testing.T) {
+		f, _ := lcFix(t, true)
+		f.diff(git.FileDiff{Path: ulTask, Status: "added"}) // created by the run: O2
+		inMerge(f, git.FileDiff{Path: ulTask, Status: "modified"})
+		f.git.files[ulMain+":"+ulTask] = ulDoc("Task", "Cancelled")
+		if err := f.merge(); err != nil {
+			t.Fatalf("MergeRunBranch: %v", err)
+		}
+		if po := f.primaryOutcome(); f.run.Status != domain.RunStatusFailed || po == nil ||
+			!strings.Contains(po.FailureDetail, ulTask+`: merge_result_mismatch (Task "" -> Cancelled)`) {
+			t.Fatalf("run %s, outcome %+v; want refused", f.run.Status, po)
+		}
+	})
+	t.Run("control: a planned creation main does not hold", func(t *testing.T) {
+		f, _ := lcFix(t, true)
+		f.diff(git.FileDiff{Path: ulTask, Status: "added"})
+		delete(f.git.files, ulMain+":"+ulTask)
+		inMerge(f, git.FileDiff{Path: ulTask, Status: "added"})
+		if err := f.merge(); err != nil || f.run.Status != domain.RunStatusCompleted {
+			t.Fatalf("MergeRunBranch = %v, run %s (outcome %+v)", err, f.run.Status, f.primaryOutcome())
+		}
+	})
+}
+
+// TestStatusLifecycle_SCGateMainHolds: the status-conflict gate (O4) is not
+// asked about a change main already holds (review round 1, P3): the merge
+// lands no status change there.
+func TestStatusLifecycle_SCGateMainHolds(t *testing.T) {
+	epicFix := func(t *testing.T, onMain string) (*bindFix, *lcGit, *scValidator) {
+		f, g := lcFix(t, true)
+		f.run.TaskPath = "epics/e.md"
+		f.git.files[ulBase+":epics/e.md"] = ulDoc("Epic", "Pending")
+		f.git.files[ulBound+":epics/e.md"] = ulDoc("Epic", "Pending")
+		f.git.files[ulMerge+":epics/e.md"] = ulDoc("Epic", "Completed")
+		f.git.setHead("main", ulMain)
+		f.git.files[ulMain+":epics/e.md"] = ulDoc("Epic", onMain)
+		v := &scValidator{res: domain.ValidationResult{Status: "failed", Errors: []domain.ValidationError{{RuleID: "SC-002", Severity: "error"}}}}
+		f.orch.WithValidator(v)
+		return f, g, v
+	}
+	t.Run("main holds the target: not asked", func(t *testing.T) {
+		f, _, v := epicFix(t, "Completed")
+		if _, le := planFor(t, f, "Completed"); le != nil || len(v.calls) != 0 {
+			t.Fatalf("refused %v / calls %v", le, v.calls)
+		}
+	})
+	t.Run("main holds another status: asked", func(t *testing.T) {
+		f, _, v := epicFix(t, "Pending")
+		if _, le := planFor(t, f, "Completed"); le == nil || len(v.calls) != 1 {
+			t.Fatalf("refused %v / calls %v; want status_conflict", le, v.calls)
+		}
+	})
+	t.Run("main's head unreadable transiently: committing", func(t *testing.T) {
+		f, _, _ := epicFix(t, "Completed")
+		f.git.headErrs["main"] = &git.GitError{Kind: git.ErrKindTransient, Op: "x", Message: "repository locked"}
+		if err := f.merge(); err == nil || f.run.Status != domain.RunStatusCommitting || len(f.git.merges) != 0 {
+			t.Fatalf("MergeRunBranch = %v, run %s, merges %d", err, f.run.Status, len(f.git.merges))
+		}
+	})
+	t.Run("main's file unreadable transiently: committing", func(t *testing.T) {
+		f, g, _ := epicFix(t, "Completed")
+		g.readErr[ulMain+":epics/e.md"] = &git.GitError{Kind: git.ErrKindTransient, Op: "x", Message: "repository locked"}
+		if err := f.merge(); err == nil || f.run.Status != domain.RunStatusCommitting || len(f.git.merges) != 0 {
+			t.Fatalf("MergeRunBranch = %v, run %s, merges %d", err, f.run.Status, len(f.git.merges))
+		}
+	})
+	t.Run("main's head unknown: asked", func(t *testing.T) {
+		f, _, v := epicFix(t, "Completed")
+		delete(f.git.heads, "main")
+		if _, le := planFor(t, f, "Completed"); le == nil || len(v.calls) != 1 {
+			t.Fatalf("refused %v / calls %v; want status_conflict", le, v.calls)
 		}
 	})
 }

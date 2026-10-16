@@ -30,9 +30,13 @@ package engine
 //     (R1) — the regex writer must produce exactly the status that was
 //     judged, with nothing else changed;
 //   - after the local merge and before any push, the merge result itself is
-//     re-read (V1): what lands is what was judged, whatever git's merge did
-//     (a `*.md merge=union` attribute keeps two status lines without a
-//     conflict).
+//     judged against main as it was before the merge (V1): whatever git's
+//     merge did — a `*.md merge=union` attribute keeps two status lines
+//     without a conflict; a criss-cross history merges against a virtual
+//     base the plan never saw; main may gain commits of the bound history
+//     between the judgement and the merge — the merge may change only the
+//     status of the run's own artifacts, to the planned status, from the
+//     judged one.
 //
 // Errors fail closed: a retryable git error (or a non-git store/transport
 // error) keeps the run in committing for a retry; a read the author's
@@ -110,8 +114,9 @@ const (
 	// writer cannot handle).
 	LifecycleStatusRewriteFailed = "status_rewrite_failed"
 	// LifecycleUnreadableArtifact: a path the diff lists cannot be read at
-	// the merge-base or the bound commit for a reason a retry cannot
-	// change (too large, not a blob, not found).
+	// the merge-base or the bound commit — or, for the merge-result check,
+	// on main before the merge or in the merge result — for a reason a
+	// retry cannot change (too large, not a blob, not found).
 	LifecycleUnreadableArtifact = "unreadable_artifact"
 	// LifecycleUnreadableDiff: the bound diff itself cannot be computed
 	// for a reason a retry cannot change (no merge-base with main — an
@@ -119,9 +124,16 @@ const (
 	// Added by the implementation (not in the design's table): without it
 	// such a run would sit in committing forever.
 	LifecycleUnreadableDiff = "unreadable_diff"
-	// LifecycleMergeResultMismatch: the merge result does not hold what
-	// was judged (V1). From is the expected status, To the status the
-	// merge result holds ("" when the file does not parse there).
+	// LifecycleMergeResultMismatch: the merge changes, relative to main
+	// before the merge, something the lifecycle did not judge (V1): a
+	// status, type or existence of an artifact the run does not own, the
+	// run's own artifact to other than the planned status or from other
+	// than the judged one, or a new artifact without an initial status.
+	// From is the status V1 expected and To the status it found — in the
+	// merge result, or on main for the judged from-status of the run's own
+	// artifact; "" stands for "no lifecycle artifact" (removed, never
+	// there, or no longer parsing) and, as the expectation for an artifact
+	// the merge adds, for "an initial status of its type".
 	LifecycleMergeResultMismatch = "merge_result_mismatch"
 )
 
@@ -217,24 +229,30 @@ func lifecycleText(s string, limit int) string {
 
 // lifecyclePlan is what planStatusLifecycle decided for one bound diff.
 type lifecyclePlan struct {
+	// base is the merge-base the bound diff was judged against; V1
+	// requires the merge to have been made against it.
 	base string
 	// updates are the owned rewrites (repository path → content), each
 	// verified by R1.
 	updates map[string]string
-	// judged lists every artifact the bound commit holds that the plan
-	// judged, with the status the merge result must hold (V1).
-	judged []judgedArtifact
+	// owned lists the status changes the plan allows the merge to land:
+	// the run's own artifacts whose status the merge sets (V1). Every
+	// other artifact's status, type and existence must reach the merge
+	// result as main holds them, and an artifact the merge adds must carry
+	// an initial status.
+	owned []ownedChange
 }
 
-// judgedArtifact is one V1 expectation: path must be a lifecycle artifact
-// of type typ in the merge result, with status — or, when fromMain, with
-// the status mainPath has on main before the merge.
-type judgedArtifact struct {
-	path     string
-	typ      domain.ArtifactType
-	status   domain.ArtifactStatus
-	fromMain bool
-	mainPath string
+// ownedChange is one status change the merge result may land (V1): the
+// run's own artifact at path (repository path at the bound commit), of
+// type typ, set to final — from the merge-base status from, or, when
+// isNew, created (no lifecycle artifact at the merge-base).
+type ownedChange struct {
+	path  string
+	typ   domain.ArtifactType
+	from  domain.ArtifactStatus
+	final domain.ArtifactStatus
+	isNew bool
 }
 
 // diffItem is one diff entry as the lifecycle sees it: the path at the
@@ -323,6 +341,7 @@ type planner struct {
 	viol      []StatusLifecycleViolation
 	plan      *lifecyclePlan
 	scChecks  []scCheck
+	mainTip   string // main's tip for O4's "already holds" check, resolved on first use
 }
 
 // scCheck is one O4 candidate, evaluated once nothing else was refused.
@@ -502,8 +521,6 @@ func (p *planner) judgeNonOwned(it diffItem, base, tip side) {
 			// The projection drops the row of an artifact that stops
 			// parsing (core/artifact DiscoverChanges): a removal by edit.
 			p.refuse(StatusLifecycleViolation{Path: it.tip, Type: base.typ, From: base.status, To: tip.status, Reason: LifecycleNonOwnedRemoval})
-		default:
-			p.expectMain(it.tip, tip.typ, it.base)
 		}
 		return
 	}
@@ -515,9 +532,7 @@ func (p *planner) judgeNonOwned(it diffItem, base, tip side) {
 	}
 	if !p.l.IsInitial(tip.typ, tip.status) {
 		p.refuse(StatusLifecycleViolation{Path: it.tip, Type: tip.typ, To: tip.status, Reason: LifecycleIllegalInitialStatus})
-		return
 	}
-	p.expect(it.tip, tip.typ, tip.status)
 }
 
 // judgeOwned is rows O1 (with O1′ and O4), O2 (with O2′), O3 and O3′ for
@@ -543,9 +558,7 @@ func (p *planner) judgeOwned(it diffItem, isTask bool, base, tip side) {
 			// artifact either.
 			if tip.status != base.status {
 				p.refuse(StatusLifecycleViolation{Path: it.tip, Type: base.typ, From: base.status, To: tip.status, Reason: LifecycleStatusChangeWithoutEffect})
-				return
 			}
-			p.expectMain(it.tip, tip.typ, it.base)
 			return
 		}
 		final := p.newStatus
@@ -566,9 +579,7 @@ func (p *planner) judgeOwned(it diffItem, isTask bool, base, tip side) {
 			return
 		}
 		if final != base.status {
-			p.expect(it.tip, tip.typ, final)
-		} else {
-			p.expectMain(it.tip, tip.typ, it.base)
+			p.own(ownedChange{path: it.tip, typ: tip.typ, from: base.status, final: final})
 		}
 		return
 	}
@@ -577,9 +588,7 @@ func (p *planner) judgeOwned(it diffItem, isTask bool, base, tip side) {
 	if p.newStatus == "" {
 		if !p.l.IsInitial(tip.typ, tip.status) {
 			p.refuse(StatusLifecycleViolation{Path: it.tip, Type: tip.typ, To: tip.status, Reason: LifecycleIllegalInitialStatus})
-			return
 		}
-		p.expect(it.tip, tip.typ, tip.status)
 		return
 	}
 	final := p.newStatus
@@ -590,7 +599,7 @@ func (p *planner) judgeOwned(it diffItem, isTask bool, base, tip side) {
 	if !p.rewrite(it.tip, tip, final) {
 		return
 	}
-	p.expect(it.tip, tip.typ, final)
+	p.own(ownedChange{path: it.tip, typ: tip.typ, final: final, isNew: true})
 }
 
 // judgeTaskPath covers the TaskPath when no diff entry lands on it: it is
@@ -661,18 +670,26 @@ func (p *planner) rewrite(path string, tip side, final domain.ArtifactStatus) bo
 	return true
 }
 
-func (p *planner) expect(path string, t domain.ArtifactType, s domain.ArtifactStatus) {
-	p.plan.judged = append(p.plan.judged, judgedArtifact{path: path, typ: t, status: s})
-}
-
-func (p *planner) expectMain(path string, t domain.ArtifactType, mainPath string) {
-	p.plan.judged = append(p.plan.judged, judgedArtifact{path: path, typ: t, fromMain: true, mainPath: mainPath})
-}
+// own records a status change V1 lets the merge land. An owned artifact
+// whose status the plan leaves as it was at the merge-base, and an
+// artifact the run adds with its authored initial status, need no entry:
+// V1 holds them to main's state, or to an initial status, like any other.
+func (p *planner) own(c ownedChange) { p.plan.owned = append(p.plan.owned, c) }
 
 // runSCChecks is O4: an owned transition the orchestrator's validator
 // refuses with a blocking (error-severity) status-conflict finding. A
 // validator without StatusChangeValidator skips the gate; a validator
 // error is transient.
+//
+// A change main already holds is not asked about (review round 1): the
+// merge then lands no status change there, so it cannot be the one that
+// trips a status-conflict rule, while the projection the rules read may
+// have moved since main took it. That is the resume of a run whose primary
+// merge already landed when the replay is not recognised as one — the
+// binding moved to a recovery-ledger commit (a child of the merged bound
+// commit, so the merge-base is not the bound commit), or this run's merge
+// lies beyond priorMergeWalkLimit — as well as a status another run set
+// on main meanwhile.
 func (p *planner) runSCChecks(ctx context.Context) error {
 	if len(p.scChecks) == 0 || p.o.validator == nil {
 		return nil
@@ -682,6 +699,13 @@ func (p *planner) runSCChecks(ctx context.Context) error {
 		return nil
 	}
 	for _, c := range p.scChecks {
+		held, err := p.mainHolds(ctx, c)
+		if err != nil {
+			return err
+		}
+		if held {
+			continue
+		}
 		res, err := scv.ValidateStatusChange(ctx, c.key, c.to)
 		if err != nil {
 			return fmt.Errorf("status lifecycle: status-conflict check for %s: %w", c.path, err)
@@ -699,6 +723,38 @@ func (p *planner) runSCChecks(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// mainHolds reports whether main's tip already holds c's artifact at its
+// target type and status. A transient failure is returned; anything else
+// that keeps it from telling (no binder, no branch, the file renamed or
+// unreadable on main) is "no": the gate is asked, as before.
+func (p *planner) mainHolds(ctx context.Context, c scCheck) (bool, error) {
+	if p.o.binder == nil {
+		return false, nil
+	}
+	if p.mainTip == "" {
+		x, err := p.o.binder.ResolveBranchHead(ctx, authoritativeBranch)
+		if err != nil {
+			if lifecycleTransient(ctx, err) {
+				return false, fmt.Errorf("status lifecycle: resolve %s for the status-conflict check: %w", authoritativeBranch, err)
+			}
+			return false, nil
+		}
+		if !isBoundObjectID(x) {
+			return false, nil
+		}
+		p.mainTip = x
+	}
+	content, err := p.o.git.ReadFile(ctx, p.mainTip, c.path)
+	if err != nil {
+		if lifecycleTransient(ctx, err) {
+			return false, fmt.Errorf("status lifecycle: read %s on %s for the status-conflict check: %w", c.path, authoritativeBranch, err)
+		}
+		return false, nil
+	}
+	t, s, ok := artifact.LifecycleFields(content)
+	return ok && t == c.typ && s == c.to, nil
 }
 
 // applyStatusLifecycleAt is the lifecycle-on replacement of
@@ -785,61 +841,302 @@ func (o *Orchestrator) refuseStatusLifecycle(ctx context.Context, run *domain.Ru
 	return o.handlePermanentMergeFailure(ctx, run, le)
 }
 
-// verifyLifecycleMerge is V1 (DC-8): before any push, every artifact the
-// plan judged must be, in the merge result M, a lifecycle artifact of the
-// judged type with the expected status — the planned status, or, for an
-// artifact whose status the plan leaves alone, the status it has on main
-// before the merge (BaseSHA). A merge that adds nothing (M == BaseSHA, a
-// replay of a merge that already landed) has nothing to verify. A
-// transient read error is returned as a retryable *git.GitError (the
-// take-back runs, then the attempt is retried); a mismatch, or a permanent
-// read failure, is a *StatusLifecycleError (merge_result_mismatch).
-func (o *Orchestrator) verifyLifecycleMerge(ctx context.Context, plan *lifecyclePlan, res git.MergeResult) error {
-	m, base := res.SHA, res.BaseSHA
-	if plan == nil || m == base {
+// verifyLifecycleMerge is V1 (DC-8; review round 1): before any push, the
+// merge result M must change, relative to main as it was before the merge
+// (BaseSHA), nothing the lifecycle did not allow.
+//
+// It judges what the merge changes, not the paths the plan listed: the
+// plan judged Diff(merge-base, bound) for ONE `git merge-base`, while
+// `git merge` (ort) merges against the virtual base of every best common
+// ancestor, against main as it is when the merge runs. In a criss-cross
+// history, or after main gained commits of the bound history between the
+// judgement and the merge, a status change or a deletion the plan never
+// saw would otherwise land with the branch's content; and a rename main
+// made after the fork, which git merges cleanly, would be refused because
+// the old name reads nowhere (review finding P2).
+//
+//  1. The merge-base of BaseSHA and the merged commit must still be the
+//     plan's. If main gained commits of the bound history since the
+//     judgement it is not, and the attempt is retried (a transient error:
+//     the caller takes the merge back and stays in committing) so the next
+//     attempt judges against the base git now merges with.
+//  2. Every in-scope path Diff(BaseSHA, M) lists (renames detected) is
+//     judged: the run's own artifact whose status the plan sets (owned)
+//     must land at the planned status and type, from the judged status on
+//     main (or main's already holding the planned one) — or, when the plan
+//     created it, onto no lifecycle artifact on main; any other artifact
+//     main holds keeps its type, its status, its existence and, if it
+//     parses for the projection on main, that too; an artifact the merge
+//     adds must carry an initial status of its type.
+//  3. An owned change the diff does not list was not landed by this merge:
+//     main must already hold the planned status there.
+//
+// The owned TaskPath is looked up under the name main gave it when main
+// renamed it after the merge-base (Diff(merge-base, BaseSHA)). A merge
+// that adds nothing (M == BaseSHA, a replay of a merge that already
+// landed) has nothing to verify. A transient read error is returned as a
+// retryable *git.GitError; a mismatch, or a read or diff a retry cannot
+// change, is a *StatusLifecycleError.
+func (o *Orchestrator) verifyLifecycleMerge(ctx context.Context, plan *lifecyclePlan, merged string, res git.MergeResult) error {
+	if plan == nil || res.SHA == res.BaseSHA {
 		return nil
 	}
-	transient := func(err error) error {
-		return &git.GitError{Kind: git.ErrKindTransient, Op: "status_lifecycle",
-			Message: "the merge result could not be read for the status lifecycle check", Err: err}
+	v := &mergeVerifier{o: o, plan: plan, m: res.SHA, main: res.BaseSHA, renamed: map[string]string{}}
+	if err := v.verify(ctx, merged); err != nil {
+		return err
 	}
-	var viol []StatusLifecycleViolation
-	mismatch := func(j judgedArtifact, want, got domain.ArtifactStatus) {
-		viol = append(viol, StatusLifecycleViolation{Path: j.path, Type: j.typ, From: want, To: got, Reason: LifecycleMergeResultMismatch})
-	}
-	for _, j := range plan.judged {
-		want := j.status
-		if j.fromMain {
-			c, err := o.git.ReadFile(ctx, base, j.mainPath)
-			if err != nil {
-				if lifecycleTransient(ctx, err) {
-					return transient(err)
-				}
-				mismatch(j, "", "")
-				continue
-			}
-			t, s, ok := artifact.LifecycleFields(c)
-			if !ok || t != j.typ {
-				mismatch(j, "", "")
-				continue
-			}
-			want = s
-		}
-		c, err := o.git.ReadFile(ctx, m, j.path)
-		if err != nil {
-			if lifecycleTransient(ctx, err) {
-				return transient(err)
-			}
-			mismatch(j, want, "")
-			continue
-		}
-		t, s, ok := artifact.LifecycleFields(c)
-		if !ok || t != j.typ || s != want {
-			mismatch(j, want, s)
-		}
-	}
-	if len(viol) > 0 {
-		return &StatusLifecycleError{Violations: viol}
+	if len(v.viol) > 0 {
+		return &StatusLifecycleError{Violations: v.viol}
 	}
 	return nil
+}
+
+// mergeVerifier carries one V1 evaluation.
+type mergeVerifier struct {
+	o       *Orchestrator
+	plan    *lifecyclePlan
+	m, main string // the merge result and main before the merge
+	viol    []StatusLifecycleViolation
+	// renamed maps a path at the plan's merge-base to its name on main
+	// (main-side renames since the merge-base), loaded on first use.
+	renamed       map[string]string
+	renamedLoaded bool
+}
+
+// lifecycleRetry is V1's "not a verdict, merge again" error: retryable,
+// so takeBackRefusedMerge's caller keeps the run in committing.
+func lifecycleRetry(msg string, err error) error {
+	return &git.GitError{Kind: git.ErrKindTransient, Op: "status_lifecycle", Message: msg, Err: err}
+}
+
+func (v *mergeVerifier) mismatch(path string, t domain.ArtifactType, want, got domain.ArtifactStatus) {
+	v.viol = append(v.viol, StatusLifecycleViolation{Path: path, Type: t, From: want, To: got, Reason: LifecycleMergeResultMismatch})
+}
+
+func (v *mergeVerifier) unreadable(path string) {
+	v.viol = append(v.viol, StatusLifecycleViolation{Path: path, Reason: LifecycleUnreadableArtifact})
+}
+
+// read reads path at ref. A transient failure is returned; a not-found is
+// an absent side when absentOK; any other failure reports bad (what cannot
+// be read cannot be verified: the caller refuses unreadable_artifact).
+func (v *mergeVerifier) read(ctx context.Context, ref, path string, absentOK bool) (sd side, bad bool, err error) {
+	content, err := v.o.git.ReadFile(ctx, ref, path)
+	if err == nil {
+		return readSide(content, path), false, nil
+	}
+	if lifecycleTransient(ctx, err) {
+		return side{}, false, lifecycleRetry("the merge result could not be read for the status lifecycle check", err)
+	}
+	var gitErr *git.GitError
+	if absentOK && errors.As(err, &gitErr) && gitErr.Kind == git.ErrKindNotFound {
+		return side{}, false, nil
+	}
+	return side{}, true, nil
+}
+
+// mainName returns the name main gives a path of the plan's merge-base:
+// the path itself, or its new name when main renamed it since. ok is false
+// when main holds neither.
+func (v *mergeVerifier) mainName(ctx context.Context, path string) (string, bool, error) {
+	if !v.renamedLoaded {
+		diffs, err := v.o.git.Diff(ctx, v.plan.base, v.main)
+		if err != nil {
+			if lifecycleTransient(ctx, err) {
+				return "", false, lifecycleRetry("main's renames since the merge-base could not be read for the status lifecycle check", err)
+			}
+			return "", false, nil
+		}
+		for _, d := range diffs {
+			if d.Status == "renamed" && d.OldPath != "" {
+				v.renamed[d.OldPath] = d.Path
+			}
+		}
+		v.renamedLoaded = true
+	}
+	n, ok := v.renamed[path]
+	return n, ok, nil
+}
+
+// diffSides maps a diff entry to its path on main before the merge and in
+// the merge result ("" for the side that does not exist).
+func diffSides(d git.FileDiff) (mainPath, mPath string) {
+	switch d.Status {
+	case "added":
+		return "", d.Path
+	case "deleted":
+		return d.Path, ""
+	case "renamed":
+		return d.OldPath, d.Path
+	default:
+		return d.Path, d.Path
+	}
+}
+
+func (v *mergeVerifier) verify(ctx context.Context, merged string) error {
+	// 1. The merge was made against the base the plan judged.
+	mb, err := v.o.git.MergeBase(ctx, v.main, merged)
+	if err != nil {
+		if lifecycleTransient(ctx, err) {
+			return lifecycleRetry("the merge-base of the merge could not be read for the status lifecycle check", err)
+		}
+		return &StatusLifecycleError{Violations: []StatusLifecycleViolation{{Reason: LifecycleUnreadableDiff}}}
+	}
+	if !isBoundObjectID(mb) {
+		return &StatusLifecycleError{Violations: []StatusLifecycleViolation{{Reason: LifecycleUnreadableDiff}}}
+	}
+	if mb != v.plan.base {
+		return lifecycleRetry(fmt.Sprintf("main gained commits of the bound history since the status lifecycle judged it "+
+			"(the merge-base is now %s, the judgement was against %s); judging again", mb, v.plan.base), nil)
+	}
+
+	// Where each owned change lands: its path, or main's new name for it.
+	landing := map[string]*ownedChange{}
+	landingAt := make([]string, len(v.plan.owned))
+	for i := range v.plan.owned {
+		c := &v.plan.owned[i]
+		at := c.path
+		if !c.isNew {
+			sd, bad, err := v.read(ctx, v.main, c.path, true)
+			if err != nil {
+				return err
+			}
+			if !bad && !sd.read {
+				n, ok, err := v.mainName(ctx, c.path)
+				if err != nil {
+					return err
+				}
+				if ok {
+					at = n
+				}
+			}
+		}
+		landing[at] = c
+		landingAt[i] = at
+	}
+
+	// 2. Everything the merge changes relative to main.
+	diffs, err := v.o.git.Diff(ctx, v.main, v.m)
+	if err != nil {
+		if lifecycleTransient(ctx, err) {
+			return lifecycleRetry("the merge result's diff could not be read for the status lifecycle check", err)
+		}
+		return &StatusLifecycleError{Violations: []StatusLifecycleViolation{{Reason: LifecycleUnreadableDiff}}}
+	}
+	seen := map[string]bool{}
+	for _, d := range diffs {
+		if cQuotedMarkdown(d.Path) || (d.Status == "renamed" && cQuotedMarkdown(d.OldPath)) {
+			v.viol = append(v.viol, StatusLifecycleViolation{Path: d.Path, Reason: LifecycleUnparseablePath})
+			continue
+		}
+		mainPath, mPath := diffSides(d)
+		if c := landing[mainPath]; mainPath != "" && c != nil && mPath != mainPath {
+			// The run's own artifact moved away or removed by the merge.
+			seen[mainPath] = true
+			v.mismatch(mainPath, c.typ, c.final, "")
+			continue
+		}
+		c := landing[mPath]
+		if mPath == "" {
+			c = nil
+		}
+		_, mainIn := v.o.artifactScope.GovernedArtifactKey(mainPath)
+		_, mIn := v.o.artifactScope.GovernedArtifactKey(mPath)
+		mainIn = mainIn && mainPath != ""
+		mIn = mIn && mPath != ""
+		if c == nil && !mainIn && !mIn {
+			continue // out of scope on both sides: the projection never reads it
+		}
+		var before, after side
+		if mainPath != "" && (mainIn || c != nil) {
+			sd, bad, err := v.read(ctx, v.main, mainPath, false)
+			if err != nil {
+				return err
+			}
+			if bad {
+				v.unreadable(mainPath)
+				continue
+			}
+			before = sd
+		}
+		if mPath != "" && (mIn || c != nil) {
+			sd, bad, err := v.read(ctx, v.m, mPath, false)
+			if err != nil {
+				return err
+			}
+			if bad {
+				v.unreadable(mPath)
+				continue
+			}
+			after = sd
+		}
+		if c != nil {
+			seen[mPath] = true
+			if mainPath != mPath {
+				// Another path renamed onto the run's own artifact (DC-7 at
+				// the merge): its identity on main is gone — a removal —
+				// and it is not the owned artifact's judged from-status.
+				v.judgeFrozen(mainPath, "", before, side{})
+				before = side{}
+			}
+			v.judgeOwned(mPath, c, before, after)
+			continue
+		}
+		v.judgeFrozen(mainPath, mPath, before, after)
+	}
+
+	// 3. An owned change this merge did not land: main must hold it.
+	for i := range v.plan.owned {
+		c, at := &v.plan.owned[i], landingAt[i]
+		if seen[at] {
+			continue
+		}
+		sd, bad, err := v.read(ctx, v.m, at, true)
+		switch {
+		case err != nil:
+			return err
+		case bad:
+			v.unreadable(at)
+		case !sd.ok || sd.typ != c.typ || sd.status != c.final:
+			v.mismatch(at, c.typ, c.final, sd.status)
+		}
+	}
+	return nil
+}
+
+// judgeOwned: the run's own artifact lands at the planned type and status,
+// from the judged status on main (or main's holding the planned one
+// already) — or, for an artifact the plan created, onto no lifecycle
+// artifact on main.
+func (v *mergeVerifier) judgeOwned(path string, c *ownedChange, before, after side) {
+	switch {
+	case !after.ok || after.typ != c.typ || after.status != c.final:
+		v.mismatch(path, c.typ, c.final, after.status)
+	case c.isNew && before.ok:
+		v.mismatch(path, before.typ, "", before.status)
+	case !c.isNew && (!before.ok || before.typ != c.typ):
+		v.mismatch(path, c.typ, c.from, before.status)
+	case !c.isNew && before.status != c.from && before.status != c.final:
+		v.mismatch(path, c.typ, c.from, before.status)
+	}
+}
+
+// judgeFrozen: an artifact main holds keeps its type, status and existence
+// (and, when it parses for the projection on main, keeps parsing); an
+// artifact the merge adds carries an initial status.
+func (v *mergeVerifier) judgeFrozen(mainPath, mPath string, before, after side) {
+	if before.ok {
+		path := mPath
+		if path == "" || !after.ok {
+			path = mainPath
+		}
+		switch {
+		case !after.ok, after.typ != before.typ, after.status != before.status, before.parses && !after.parses:
+			v.mismatch(path, before.typ, before.status, after.status)
+		}
+		return
+	}
+	if after.ok && !v.o.lifecycle.IsInitial(after.typ, after.status) {
+		v.mismatch(mPath, after.typ, "", after.status)
+	}
 }

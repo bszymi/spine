@@ -135,6 +135,10 @@ type countingCLI struct {
 	mu         sync.Mutex
 	merges     int
 	failPushes int // PushCommit fails transiently this many times
+	// beforeMergeBound, when set, runs once before the next MergeBound:
+	// another writer landing on main between the lifecycle's judgement
+	// and the merge.
+	beforeMergeBound func()
 }
 
 func (c *countingCLI) PushCommit(ctx context.Context, remote, branch, sha string) error {
@@ -162,7 +166,12 @@ func (c *countingCLI) Merge(ctx context.Context, opts git.MergeOpts) (git.MergeR
 func (c *countingCLI) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
 	c.mu.Lock()
 	c.merges++
+	hook := c.beforeMergeBound
+	c.beforeMergeBound = nil
 	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return c.CLIClient.MergeBound(ctx, opts)
 }
 
@@ -946,4 +955,78 @@ func TestStatusLifecycle_ReplayAfterTransientPush(t *testing.T) {
 	e2 := newLCEnv(t, r2, lcOpts{taskPath: epic, meta: map[string]string{"status": "Completed"}})
 	e2.orch.WithValidator(&scValidator{res: v.res})
 	e2.requireRefused(LifecycleStatusConflict)
+}
+
+// TestStatusLifecycle_ResumeAfterLanding (review round 1, P3): the primary
+// merge landed and passed the status-conflict gate; the run is resumed in a
+// shape the replay check does not recognise — the binding moved to a
+// recovery-ledger commit L (a child of the bound B, so MergeBase(main, L) is
+// B, not L), or this run's merge lies beyond priorMergeWalkLimit. The plan
+// then judges the TaskPath from the pre-cascade content again (Pending ->
+// Completed), but main already holds Completed: the gate, whose projection
+// now reports an open child, is not asked, and the resume completes.
+func TestStatusLifecycle_ResumeAfterLanding(t *testing.T) {
+	const epic = "initiatives/init-001/epics/epic-001/epic.md"
+	sc002 := domain.ValidationResult{Status: "failed", Errors: []domain.ValidationError{{RuleID: "SC-002", Severity: "error"}}}
+	land := func(t *testing.T) (*lcRepo, *lcEnv, *scValidator) {
+		r := newLCRepo(t, map[string]string{epic: lcArt("EPIC-001", "Epic", "Pending")})
+		r.onRun("work", func() { r.write("notes.txt", "done\n") })
+		e := newLCEnv(t, r, lcOpts{taskPath: epic, meta: map[string]string{"status": "Completed"}})
+		v := &scValidator{res: domain.ValidationResult{Status: "passed"}}
+		e.orch.WithValidator(v)
+		e.merge()
+		if e.run.Status != domain.RunStatusCompleted || len(v.calls) != 1 || r.statusAt("main", epic) != "Completed" {
+			t.Fatalf("first merge: run %s, SC calls %v, main epic %s", e.run.Status, v.calls, r.statusAt("main", epic))
+		}
+		v.res = sc002
+		e.run.Status = domain.RunStatusCommitting
+		return r, e, v
+	}
+
+	t.Run("binding moved to a recovery-ledger commit", func(t *testing.T) {
+		r, e, v := land(t)
+		ledger, err := r.cli.CommitFilesOnto(context.Background(), e.bound, nil, git.CommitOpts{Message: "merge recovery ledger", AllowEmpty: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.run.CommitMeta[CommitMetaBoundSHA] = ledger.SHA
+		e.run.CommitMeta[CommitMetaBoundBy] = boundByRecovery(lcRunID, "merge_recovery_retry")
+		if base, replay, err := e.orch.cascadeBase(context.Background(), e.run, "Completed", ledger.SHA); err != nil || replay || base != e.bound {
+			t.Fatalf("cascadeBase = %s, replay %v, %v; want the bound commit, not a replay", base, replay, err)
+		}
+		e.merge()
+		if e.run.Status != domain.RunStatusCompleted {
+			t.Fatalf("resume: run %s (outcome %+v), want completed", e.run.Status, e.outcome())
+		}
+		if len(v.calls) != 1 {
+			t.Fatalf("the resume consulted the SC gate again: %v", v.calls)
+		}
+		if got := r.statusAt("main", epic); got != "Completed" {
+			t.Fatalf("main epic = %s", got)
+		}
+	})
+	t.Run("this run's merge beyond the replay walk limit", func(t *testing.T) {
+		r, e, v := land(t)
+		for i := 0; i <= priorMergeWalkLimit; i++ {
+			r.git("commit", "-q", "--allow-empty", "-m", "later work on main")
+		}
+		e.merge()
+		if e.run.Status != domain.RunStatusCompleted {
+			t.Fatalf("resume: run %s (outcome %+v), want completed", e.run.Status, e.outcome())
+		}
+		if len(v.calls) != 1 {
+			t.Fatalf("the resume consulted the SC gate again: %v", v.calls)
+		}
+	})
+	t.Run("control: main does not hold the status, the gate is asked", func(t *testing.T) {
+		r := newLCRepo(t, map[string]string{epic: lcArt("EPIC-001", "Epic", "Pending")})
+		r.onRun("work", func() { r.write("notes.txt", "done\n") })
+		e := newLCEnv(t, r, lcOpts{taskPath: epic, meta: map[string]string{"status": "Completed"}})
+		v := &scValidator{res: sc002}
+		e.orch.WithValidator(v)
+		e.requireRefused(LifecycleStatusConflict) // plans once, then merges: two asks
+		if len(v.calls) != 2 {
+			t.Fatalf("SC calls %v, want two", v.calls)
+		}
+	})
 }
