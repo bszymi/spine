@@ -127,6 +127,62 @@ func TestServeWiring_EnablesGovernanceGuards(t *testing.T) {
 	}
 }
 
+// TestBuildServerConfig_EnablesGovernanceGuards (review round 1) drives
+// the process-level wiring of the default single-workspace `spine serve`
+// (buildServerConfig) rather than the helpers: the projection's removal
+// guard (enableProtectionRemovalGuard on the process projection) and the
+// workflow directories buildServerConfig passes to buildOrchestrator
+// (artifacts_dir "spine" → workflows/ and spine/workflows/). Mutation
+// check: deleting either call site, or passing nil directories, fails it;
+// SPINE_GOVERNANCE_GUARD=off leaves both off.
+func TestBuildServerConfig_EnablesGovernanceGuards(t *testing.T) {
+	for _, c := range []struct {
+		env string
+		on  bool
+	}{{"", true}, {"off", false}} {
+		t.Run("env="+c.env, func(t *testing.T) {
+			t.Setenv(governanceGuardEnv, c.env)
+			repoPath := testutil.NewTempRepo(t)
+			q := queue.NewMemoryQueue(16)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			go q.Start(ctx)
+			rt, err := buildServerConfig(ctx, serveDeps{
+				Store:      stubStore{},
+				RepoPath:   repoPath,
+				SpineCfg:   &config.SpineConfig{ArtifactsDir: "spine"},
+				GitClient:  git.NewCLIClient(repoPath),
+				Queue:      q,
+				Events:     event.NewQueueRouter(q),
+				DevMode:    true,
+				RuntimeEnv: "development",
+			})
+			if err != nil {
+				t.Fatalf("buildServerConfig: %v", err)
+			}
+			if rt.ProjSync == nil {
+				t.Fatal("no process projection built")
+			}
+			if got := rt.ProjSync.ProtectionRemovalGuardEnabled(); got != c.on {
+				t.Fatalf("process projection removal guard enabled = %v, want %v", got, c.on)
+			}
+			orch, ok := rt.Config.StepAssigner.(*engine.Orchestrator)
+			if !ok {
+				t.Fatalf("StepAssigner = %T, want the process orchestrator", rt.Config.StepAssigner)
+			}
+			checkGuard(t, "buildServerConfig", orch, c.on, "workflows/,spine/workflows/")
+		})
+	}
+}
+
+// The engine finds the guard's store capabilities by type assertion, so a
+// signature drift would silently fall back to read-modify-write; pin them
+// on the store `spine serve` uses.
+var _ interface {
+	MergeCommitMeta(ctx context.Context, runID string, patch map[string]string) error
+	MergeCommitMetaIfStatus(ctx context.Context, runID string, status domain.RunStatus, patch map[string]string) (bool, error)
+} = (*store.PostgresStore)(nil)
+
 func checkGuard(t *testing.T, where string, orch *engine.Orchestrator, on bool, dirs string) {
 	t.Helper()
 	cfg, enabled := orch.GovernanceGuardConfig()
