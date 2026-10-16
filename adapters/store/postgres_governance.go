@@ -37,6 +37,28 @@ func (s *PostgresStore) MergeCommitMeta(ctx context.Context, runID string, patch
 	return mustAffect(tag, "run not found")
 }
 
+// MergeCommitMetaIfStatus is MergeCommitMeta applied only while the run
+// is in status, in one statement; applied reports whether it was (false
+// also for an unknown run). It is the engine's optional conditional write
+// (core/engine commitMetaStatusMerger) for the governance approval
+// (INIT-023 TASK-006 review round 1): an approval written after a
+// concurrent reject had already routed the run out of committing would
+// otherwise survive the loop-back and merge the same commit on resubmit.
+// The row lock the UPDATE takes orders it against the reject's status
+// transition (READ COMMITTED re-checks the WHERE on the newest row).
+func (s *PostgresStore) MergeCommitMetaIfStatus(ctx context.Context, runID string, status domain.RunStatus, patch map[string]string) (bool, error) {
+	if patch == nil {
+		patch = map[string]string{}
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE runtime.runs SET commit_meta = COALESCE(commit_meta, '{}'::jsonb) || $1::jsonb WHERE run_id = $2 AND status = $3`,
+		patch, runID, string(status))
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // Sources of a GovernanceAuthorization.
 const (
 	GovernanceSourceOverrideEvent    = "override_event"

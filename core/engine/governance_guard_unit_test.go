@@ -19,12 +19,22 @@ import (
 	"github.com/bszymi/spine/core/domain"
 )
 
-// govGit is fakeBinderGit with MergeBases and programmable Diff errors.
+// govGit is fakeBinderGit with MergeBases, programmable Diff errors and
+// a one-shot hook inside MergeBound (an approved attempt in flight).
 type govGit struct {
 	*fakeBinderGit
-	bases    map[string][]string // "a b" → bases; default [sha40('0')]
-	basesErr error
-	diffErr  map[string]error // "a b" → Diff error
+	bases     map[string][]string // "a b" → bases; default [sha40('0')]
+	basesErr  error
+	diffErr   map[string]error // "a b" → Diff error
+	mergeHook func()           // runs once, inside the next MergeBound
+}
+
+func (g *govGit) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if h := g.mergeHook; h != nil {
+		g.mergeHook = nil
+		h()
+	}
+	return g.fakeBinderGit.MergeBound(ctx, opts)
 }
 
 func (g *govGit) MergeBases(_ context.Context, a, b string) ([]string, error) {
@@ -291,7 +301,9 @@ func TestGovernanceDecision_StateChecks(t *testing.T) {
 // TestGovernanceGuard_FailsClosed is AC 11 with the design check's
 // post-merge cases: a MergeBases or Diff error refuses (unavailable, not a
 // hold) without merging; after the merge, a Diff error refuses without a
-// push and takes the local target back to the base.
+// push and takes the local target back to the base. A merge that can never
+// be evaluated (no merge base, an oversized diff) is refused permanently
+// instead: TestGovernanceGuard_UnevaluableMergeIsRefusedNotStuck.
 func TestGovernanceGuard_FailsClosed(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -300,7 +312,6 @@ func TestGovernanceGuard_FailsClosed(t *testing.T) {
 		{"merge bases error", func(f *govFake) {
 			f.g.basesErr = &git.GitError{Kind: git.ErrKindPermanent, Op: "merge-base", Message: "boom"}
 		}},
-		{"no merge base", func(f *govFake) { f.g.bases["main "+gBound] = []string{} }},
 		{"diff error", func(f *govFake) { f.g.diffErr[sha40('0')+" "+gBound] = errors.New("diff failed") }},
 		{"malformed merge base", func(f *govFake) { f.g.bases["main "+gBound] = []string{"HEAD"} }},
 	} {
@@ -566,6 +577,11 @@ func TestGovernanceGuard_EveryHoldIsDecidable(t *testing.T) {
 // reject's checks and its transition; the reject returns ErrConflict, the
 // run stays completed and no run_failed event is emitted. Mutation:
 // reverting the compare-and-swap to UpdateRunStatus fails the run.
+//
+// Within one process the governance stripe now orders the two decisions
+// (TestGovernanceDecision_RejectWaitsForAnInFlightApprovedMerge), so the
+// approve is another process's (review round 1): it completes the run in
+// the store between the reject's revocation and its transition.
 func TestGovernanceDecision_RejectLosesTheRace(t *testing.T) {
 	f := newGovFake(t, legacyWorkflow(), defaultGuard(), true, govPaths...)
 	requireHoldErr(t, f.merge())
@@ -573,8 +589,9 @@ func TestGovernanceDecision_RejectLosesTheRace(t *testing.T) {
 	f.store.beforeWrite = func(string) {
 		once.Do(func() {
 			f.store.beforeWrite = nil
-			if _, err := f.decide(GovernanceApprove, gBound, govAdmin, ""); err != nil {
-				t.Errorf("concurrent approve: %v", err)
+			if ok, err := f.store.mockRunStore.TransitionRunStatus(context.Background(), f.run.RunID,
+				domain.RunStatusCommitting, domain.RunStatusCompleted); !ok || err != nil {
+				t.Errorf("another process's completion: %v %v", ok, err)
 			}
 		})
 	}
@@ -821,8 +838,9 @@ func TestGovernanceGuard_MarkerFailureWithFailedTakeBackBlocks(t *testing.T) {
 // main now contains the bound commit and nothing is left to evaluate.
 // Approving the same commit again is the manual merge retry (an embedder
 // without a commit-retry sweep has no other): it pushes and completes the
-// run instead of answering 412. A reject there, and an approve without a
-// recorded approval, still get 412.
+// run instead of answering 412. A reject there gets 409 (the merge won;
+// review round 1), and an approve without a recorded approval still gets
+// 412.
 func TestGovernanceDecision_ReapproveRetriesALandedMerge(t *testing.T) {
 	f := newGovFake(t, publishWorkflow(), defaultGuard(), true, govPaths...)
 	f.g.pushErr = &git.GitError{Kind: git.ErrKindTransient, Op: "push", Message: "network error"}
@@ -835,8 +853,10 @@ func TestGovernanceDecision_ReapproveRetriesALandedMerge(t *testing.T) {
 	f.g.bases["main "+gBound] = []string{gBound}
 	f.g.mergeRes = git.MergeResult{SHA: gMerge, BaseSHA: gMerge}
 	f.g.pushErr = nil
+	// A reject is too late: the approved merge already reached the local
+	// main (the merge won; review round 1 answers 409, not 412).
 	_, err = f.decide(GovernanceReject, gBound, govOperator, "no")
-	requireSpineCode(t, err, domain.ErrPrecondition)
+	requireSpineCode(t, err, domain.ErrConflict)
 	res, err = f.decide(GovernanceApprove, gBound, govOperator, "")
 	if err != nil || res.RunStatus != domain.RunStatusCompleted || res.MergeError != "" {
 		t.Fatalf("retry approve: %v %+v; want the merge pushed and the run completed", err, res)

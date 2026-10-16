@@ -449,6 +449,9 @@ func (o *Orchestrator) startWorkflowPlanningRun(ctx context.Context, workflowID,
 				o.failOrphanWorkflowRun(ctx, runID)
 				return fmt.Errorf("%s workflow on branch: %w", verb, err)
 			}
+			// The caller wrote the body: the lifecycle exemption's
+			// separation of duties needs them (INIT-023 TASK-006).
+			o.recordLifecycleStarter(ctx, runID)
 			return nil
 		},
 	})

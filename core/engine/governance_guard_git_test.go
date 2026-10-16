@@ -181,15 +181,28 @@ func fooWorkflow(id, appliesTo string) string {
 	return "id: " + id + "\nname: Foo\nversion: \"1.0\"\nstatus: Active\napplies_to: [" + appliesTo + "]\nentry_step: a\nsteps:\n  - id: a\n"
 }
 
-func lifecycleRun(taskPath string) func(*domain.Run) {
+// lifecycleRun shapes the run as startWorkflowPlanningRun does, the
+// starter ("starter") recorded; starter "" records none.
+func lifecycleRun(taskPath string, starter ...string) func(*domain.Run) {
+	who := "starter"
+	if len(starter) > 0 {
+		who = starter[0]
+	}
 	return func(r *domain.Run) {
 		r.Mode = domain.RunModePlanning
 		r.TaskPath = taskPath
+		if who != "" {
+			r.CommitMeta = map[string]string{CommitMetaGovernanceStartedBy: who}
+		}
 	}
 }
 
 // TestGovernanceGuard_LifecycleExemption is AC 13 with the design check's
-// three extra cases (owner questions 3 and 10).
+// three extra cases (owner questions 3 and 10) and review round 1's: the
+// reviewer started the run (its body is theirs) while another actor
+// submitted the draft; no starter recorded; the reviewer was bound to an
+// earlier, failed draft attempt. Mutation: the old check (completed
+// non-review steps only) grants all three.
 func TestGovernanceGuard_LifecycleExemption(t *testing.T) {
 	main := map[string]string{lifecyclePath: lifecycleBody, ".spine/branch-protection.yaml": govProtected}
 	guard := func(exempt bool) *GovernanceGuard {
@@ -203,6 +216,8 @@ func TestGovernanceGuard_LifecycleExemption(t *testing.T) {
 		exempt   bool
 		reviewer string
 		wfPath   string
+		starter  []string
+		priorBy  string // a failed earlier draft attempt bound to this actor
 		held     bool
 	}
 	for _, c := range []tc{
@@ -223,6 +238,15 @@ func TestGovernanceGuard_LifecycleExemption(t *testing.T) {
 			files:    map[string]string{"workflows/foo.yaml": fooWorkflow("foo", "Task")}, exempt: true, held: true},
 		{name: "task path case differs from the parsed id: held", taskPath: "workflows/Foo.yaml",
 			files: map[string]string{"workflows/Foo.yaml": fooWorkflow("foo", "Task")}, exempt: true, held: true},
+		{name: "reviewer started the run, another actor drafted: held", taskPath: "workflows/foo.yaml",
+			files: map[string]string{"workflows/foo.yaml": fooWorkflow("foo", "Task")}, exempt: true,
+			starter: []string{"reviewer"}, held: true},
+		{name: "no starter recorded: held", taskPath: "workflows/foo.yaml",
+			files: map[string]string{"workflows/foo.yaml": fooWorkflow("foo", "Task")}, exempt: true,
+			starter: []string{""}, held: true},
+		{name: "reviewer held an earlier draft attempt: held", taskPath: "workflows/foo.yaml",
+			files: map[string]string{"workflows/foo.yaml": fooWorkflow("foo", "Task")}, exempt: true,
+			priorBy: "reviewer", held: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			wf := govLifecycleWF()
@@ -237,7 +261,11 @@ func TestGovernanceGuard_LifecycleExemption(t *testing.T) {
 				seed[k] = v
 			}
 			g := newGovRepo(t, govRepoOpts{wf: wf, mainFiles: seed, runFiles: c.files,
-				guard: guard(c.exempt), tweak: lifecycleRun(c.taskPath)})
+				guard: guard(c.exempt), tweak: lifecycleRun(c.taskPath, c.starter...)})
+			if c.priorBy != "" {
+				g.store.createdSteps = append([]*domain.StepExecution{{ExecutionID: govRunID + "-draft-0", RunID: govRunID,
+					StepID: "draft", Status: domain.StepStatusFailed, ActorID: c.priorBy}}, g.store.createdSteps...)
+			}
 			reviewer := c.reviewer
 			if reviewer == "" {
 				reviewer = "reviewer"
@@ -478,4 +506,64 @@ func TestGovernanceGuard_StaleApprovalIsNotHonoured(t *testing.T) {
 	}
 	_, err = g.decide(GovernanceApprove, x, govOperator, "")
 	requireSpineCode(t, err, domain.ErrConflict)
+}
+
+// TestGovernanceGuard_RenameFollowingIsRefusedWithARemedy (review round
+// 1): under git's DEFAULT configuration a merge follows renames. After the
+// run forked, main renamed drafts/wf.yaml into workflows/task-x.yaml; the
+// run edits only drafts/wf.yaml (dropping the review step), so the
+// pre-merge diff from the merge base names no governed path, and git
+// carries the edit onto workflows/task-x.yaml. The post-merge assertion
+// refuses it (not a bypass: the local main is restored, nothing lands),
+// and the refusal tells the author what to do. Following that remedy —
+// updating the run branch from main — turns the same change into a
+// decidable hold, and an operator approval merges it.
+func TestGovernanceGuard_RenameFollowingIsRefusedWithARemedy(t *testing.T) {
+	g := newGovRepo(t, govRepoOpts{
+		mainFiles: map[string]string{"drafts/wf.yaml": govTaskDefault, "workflows/task-default.yaml": govTaskDefault, "README.md": "r\n"},
+		runFiles:  map[string]string{"drafts/wf.yaml": govReviewLess},
+		guard:     defaultGuard(),
+	})
+	g.git("mv", "drafts/wf.yaml", "workflows/task-x.yaml")
+	g.git("commit", "-q", "-m", "main moves the draft into workflows/")
+	base := g.mainHead()
+
+	g.toMerge()
+	if got := g.mainHead(); got != base {
+		t.Fatalf("local main = %s, want the base %s (taken back)", got, base)
+	}
+	if got := g.mainFile("workflows/task-x.yaml"); got != govTaskDefault {
+		t.Fatalf("main workflows/task-x.yaml = %q, want it unchanged", got)
+	}
+	held := g.eventsOf(domain.EventGovernanceMergeHeld)
+	if len(held) != 1 || !strings.Contains(string(held[0].Payload), `"post_merge":true`) ||
+		!strings.Contains(string(held[0].Payload), "workflows/task-x.yaml") {
+		t.Fatalf("post-merge refusal events = %d %v", len(held), held)
+	}
+	r := g.store.runs[govRunID]
+	if r.Status != domain.RunStatusActive || r.CurrentStepID != "execute" {
+		t.Fatalf("run = %s at %s, want routed back to execute", r.Status, r.CurrentStepID)
+	}
+	out := g.primaryOutcome()
+	if out == nil || out.Status != domain.RepositoryMergeStatusFailed ||
+		!strings.Contains(out.FailureDetail, "update the run branch from main") {
+		t.Fatalf("primary outcome = %+v, want a failure naming the remedy", out)
+	}
+
+	// The remedy: bring main into the run branch and resubmit.
+	g.git("checkout", "-q", g.branch)
+	g.git("merge", "-q", "--no-edit", "main")
+	g.git("checkout", "-q", "main")
+	g.toMerge()
+	g.requireHeld("after updating the run branch from main")
+	if paths := g.heldPaths(); !hasPath(paths, "workflows/task-x.yaml") {
+		t.Fatalf("held paths %v do not name workflows/task-x.yaml", paths)
+	}
+	res, err := g.decide(GovernanceApprove, g.runHead(), govOperator, "")
+	if err != nil || res.MergeError != "" || res.RunStatus != domain.RunStatusCompleted {
+		t.Fatalf("approve: %v %+v", err, res)
+	}
+	if got := g.mainFile("workflows/task-x.yaml"); got != govReviewLess {
+		t.Fatalf("main workflows/task-x.yaml = %q after the approved merge", got)
+	}
 }

@@ -83,9 +83,10 @@ func TestMergeBases_CrissCross(t *testing.T) {
 }
 
 // TestMergeBases_RefusesAndFailsClosed: malformed revisions are refused
-// before any git process; a missing revision and unrelated histories are
-// errors, never an empty answer; a tag named like the branch does not
-// answer for it.
+// before any git process; a missing revision is an error, never an empty
+// answer; unrelated histories are an empty answer with no error (review
+// round 1: the guard refuses them permanently instead of retrying for
+// good); a tag named like the branch does not answer for it.
 func TestMergeBases_RefusesAndFailsClosed(t *testing.T) {
 	testutil.HermeticGit(t)
 	ctx := context.Background()
@@ -111,8 +112,8 @@ func TestMergeBases_RefusesAndFailsClosed(t *testing.T) {
 	testutil.WriteFile(t, repo, "o.txt", "o\n")
 	mbGit(t, repo, "2026-02-02T00:00:00Z", "add", "-A")
 	mbGit(t, repo, "2026-02-02T00:00:00Z", "commit", "-qm", "orphan")
-	if bases, err := gc.MergeBases(ctx, "main", "orphan"); err == nil {
-		t.Errorf("MergeBases of unrelated histories = %v, nil; want an error", bases)
+	if bases, err := gc.MergeBases(ctx, "main", "orphan"); err != nil || bases == nil || len(bases) != 0 {
+		t.Errorf("MergeBases of unrelated histories = %#v, %v; want an empty list and no error", bases, err)
 	}
 
 	// refs/tags/main pointing at the orphan commit must not answer for main.

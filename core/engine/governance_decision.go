@@ -80,27 +80,34 @@ var commitSHAPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 //     one (ErrInvalidParams);
 //  4. CommitSHA is a full hex object id (ErrInvalidParams);
 //  5. the run exists (ErrNotFound) and is committing (ErrConflict);
-//  6. the merge's governance facts can be computed (ErrUnavailable);
-//  7. the merge changes a governance path (ErrPrecondition) — except for
-//     an approve of a commit whose approval is already recorded, the merge
-//     retry after an approved merge landed locally and its push failed;
+//  6. the merge's governance facts can be computed (ErrUnavailable; a
+//     merge that can never be evaluated — no merge base, a diff over the
+//     git output limit — is ErrPrecondition: the gate refuses it);
+//  7. the merge changes a governance path (ErrPrecondition) — except when
+//     the bound commit's approval is already recorded and nothing is left
+//     to evaluate (the approved merge reached the local main): an approve
+//     is then the merge retry, a reject is ErrConflict (the merge won);
 //  8. CommitSHA is the bound commit (ErrConflict).
 //
-// Approve records the approval (reserved commit_meta keys), re-reads the
-// run (ErrConflict if it left committing meanwhile, without merging),
-// emits governance.merge_decided, clears the hold and runs the merge; a
-// merge error is reported in MergeError and the call still succeeds,
-// because the approval stands. Approving the same commit again is a
-// manual merge retry.
+// Checks 5-8 and everything after run under the run's governance stripe,
+// which every merge attempt of the run also holds (governanceRunStripes):
+// a decision waits for an attempt in flight and then sees its result.
+//
+// Approve records the approval (reserved commit_meta keys) only while the
+// run is still committing (ErrConflict otherwise, with nothing recorded or
+// merged), emits governance.merge_decided, clears the hold and runs the
+// merge; a merge error is reported in MergeError and the call still
+// succeeds, because the approval stands. Approving the same commit again
+// is a manual merge retry.
 //
 // Reject first revokes any approval (the keys are emptied: a JSONB merge
 // cannot delete a key, and an empty commit parses as no approval), so a
 // resubmit of the same commit after the loop-back is held again. Then it
 // takes the publish step's merge_failed route (back to execute in
 // task-default) or, on a workflow with no publish step, fails the run
-// with a compare-and-swap from committing (the branch is preserved). A
-// run that completed meanwhile is ErrConflict, and no run_failed or
-// decision event is emitted.
+// with a compare-and-swap from committing (the branch is preserved), and
+// revokes once more after the route. A run that completed meanwhile is
+// ErrConflict, and no run_failed or decision event is emitted.
 //
 // There is no separation-of-duties rule on the approver (TASK-006 D11):
 // an operator can already land the same change with an override push.
@@ -129,6 +136,16 @@ func (o *Orchestrator) DecideGovernanceMerge(ctx context.Context, req Governance
 		return nil, domain.NewError(domain.ErrInvalidParams, "commit_sha must be a full hex commit id (40 or 64 characters)")
 	}
 
+	// One merge attempt or decision per run at a time (review round 1,
+	// governanceRunStripes): everything below reads the run fresh under
+	// the stripe, so a reject cannot interleave with an approved attempt
+	// in flight, nor an approve with a reject.
+	ctx, unlock, err := lockGovernanceRun(ctx, req.RunID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
 	run, err := o.store.GetRun(ctx, req.RunID)
 	if err != nil {
 		var se *domain.SpineError
@@ -145,19 +162,29 @@ func (o *Orchestrator) DecideGovernanceMerge(ctx context.Context, req Governance
 	if err != nil {
 		observe.Logger(ctx).Warn("governance decision: the merge's governance facts are unavailable",
 			"run_id", run.RunID, "error", err)
+		if unevaluableForever(err) {
+			// Nothing to decide (review round 1): the gate refuses this merge
+			// permanently on its next attempt and routes the run back.
+			return nil, domain.NewErrorWithCause(domain.ErrPrecondition,
+				"the merge cannot be evaluated ("+unevaluableReason(err)+"); the guard refuses it and routes the run back, so there is nothing to decide", err)
+		}
 		return nil, domain.NewErrorWithCause(domain.ErrUnavailable,
 			"the merge's changed paths could not be computed; try again", err)
 	}
 	touched := gc.Touched()
-	// A re-approval of a commit whose approval is already recorded is the
-	// manual merge retry, also once nothing is left to evaluate (codex
-	// review round 4): after an approved merge landed on the local main and
-	// its push failed, main contains the bound commit, the remaining diff is
-	// empty, and refusing here would leave an embedder without a commit-retry
-	// sweep (SMP) no way to finish the run.
-	retry := req.Decision == GovernanceApprove && len(touched) == 0 &&
-		governanceApprovalMatches(run.CommitMeta, gc.BoundSHA)
-	if len(touched) == 0 && !retry {
+	// Nothing left to evaluate while the bound commit's approval is
+	// recorded: the approved merge already reached the local main (its push
+	// failed, or its completion did). A re-approval is the manual merge
+	// retry (codex review round 4): refusing it would leave an embedder
+	// without a commit-retry sweep (SMP) no way to finish the run. A reject
+	// is too late — the merge won (review round 1; 409, not "nothing to
+	// approve").
+	landed := len(touched) == 0 && governanceApprovalMatches(run.CommitMeta, gc.BoundSHA)
+	if landed && req.Decision == GovernanceReject {
+		return nil, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("the approved merge of %s already reached the local %s; it can no longer be rejected (approve again to retry its publication)", gc.BoundSHA, authoritativeBranch))
+	}
+	if len(touched) == 0 && !landed {
 		return nil, domain.NewError(domain.ErrPrecondition, "run does not require governance approval: its merge changes no governance path")
 	}
 	if sha != gc.BoundSHA {
@@ -178,26 +205,27 @@ func (o *Orchestrator) DecideGovernanceMerge(ctx context.Context, req Governance
 func (o *Orchestrator) approveGovernanceMerge(ctx context.Context, run *domain.Run, gc *branchprotect.GovernanceCheck, touched []string, req GovernanceDecisionRequest, result *GovernanceDecisionResult) (*GovernanceDecisionResult, error) {
 	log := observe.Logger(ctx)
 	now := time.Now().UTC().Truncate(time.Second)
-	if err := o.mergeRunCommitMeta(ctx, run.RunID, map[string]string{
+	recorded, err := o.recordGovernanceApproval(ctx, run.RunID, map[string]string{
 		domain.CommitMetaGovernanceApprovalSHA:        gc.BoundSHA,
 		domain.CommitMetaGovernanceApprovalActorID:    req.Actor.ActorID,
 		domain.CommitMetaGovernanceApprovalActorRole:  string(req.Actor.Role),
 		domain.CommitMetaGovernanceApprovalApprovedAt: now.Format(time.RFC3339),
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, domain.NewErrorWithCause(domain.ErrInternal, "record the governance approval", err)
 	}
-	fresh, err := o.store.GetRun(ctx, run.RunID)
-	if err != nil {
-		return nil, domain.NewErrorWithCause(domain.ErrInternal, "reload run", err)
-	}
-	if fresh.Status != domain.RunStatusCommitting {
+	if !recorded {
 		return nil, domain.NewError(domain.ErrConflict,
-			fmt.Sprintf("run %s left committing (%s) while the approval was recorded; nothing was merged", run.RunID, fresh.Status))
+			fmt.Sprintf("run %s left committing before the approval was recorded; nothing was recorded or merged", run.RunID))
 	}
+	// The approval is recorded: audit it now, whatever the merge does.
 	o.emitGovernanceDecided(ctx, run, gc, touched, "approved", req, decisionEventSuffix("approve", gc.BoundSHA))
 	log.Info("governance guard: governance change approved",
 		"run_id", run.RunID, "bound_sha", gc.BoundSHA, "actor_id", req.Actor.ActorID, "actor_role", string(req.Actor.Role))
-	o.clearGovernanceHold(ctx, fresh)
+	if fresh, err := o.store.GetRun(ctx, run.RunID); err == nil {
+		run = fresh
+	}
+	o.clearGovernanceHold(ctx, run)
 
 	result.MergeAttempted = true
 	if err := o.MergeRunBranch(ctx, run.RunID); err != nil {
@@ -227,12 +255,7 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 	// Revoke first: TASK-005 keeps reserved keys across later outcome
 	// writes, so an approval that survived the reject would merge the same
 	// commit when the author resubmits it unchanged after the loop-back.
-	if err := o.mergeRunCommitMeta(ctx, run.RunID, map[string]string{
-		domain.CommitMetaGovernanceApprovalSHA:        "",
-		domain.CommitMetaGovernanceApprovalActorID:    "",
-		domain.CommitMetaGovernanceApprovalActorRole:  "",
-		domain.CommitMetaGovernanceApprovalApprovedAt: "",
-	}); err != nil {
+	if err := o.mergeRunCommitMeta(ctx, run.RunID, governanceApprovalTombstone()); err != nil {
 		return nil, domain.NewErrorWithCause(domain.ErrInternal, "revoke the governance approval", err)
 	}
 	if fresh, err := o.store.GetRun(ctx, run.RunID); err == nil {
@@ -254,6 +277,7 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 			return nil, domain.NewError(domain.ErrConflict,
 				fmt.Sprintf("run %s is %s: the reject did not take effect", run.RunID, after.Status))
 		}
+		o.revokeAgainAfterRoute(ctx, run.RunID)
 		o.emitGovernanceDecided(ctx, run, gc, touched, "rejected", req, decisionEventSuffix("reject", gc.BoundSHA))
 		log.Info("governance guard: governance change rejected; run routed back",
 			"run_id", run.RunID, "bound_sha", gc.BoundSHA, "actor_id", req.Actor.ActorID)
@@ -274,6 +298,7 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 		return nil, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("run %s left committing before the reject took effect", run.RunID))
 	}
+	o.revokeAgainAfterRoute(ctx, run.RunID)
 	o.recordGitConflictOnStep(ctx, run, rejectErr)
 	o.terminateLiveSteps(ctx, run.RunID, "run failed: governance change rejected")
 	o.emitEvent(ctx, domain.EventRunFailed, run.RunID, run.TraceID,
@@ -283,6 +308,74 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 		"run_id", run.RunID, "bound_sha", gc.BoundSHA, "actor_id", req.Actor.ActorID)
 	result.RunStatus = domain.RunStatusFailed
 	return result, nil
+}
+
+// commitMetaStatusMerger is the optional RunStore capability for a
+// conditional partial commit_meta write: patch is merged over the run's
+// commit_meta only while the run is in status, and applied reports
+// whether it was. *store.PostgresStore implements it (one UPDATE … WHERE
+// status = $status). RunStore does not change.
+type commitMetaStatusMerger interface {
+	MergeCommitMetaIfStatus(ctx context.Context, runID string, status domain.RunStatus, patch map[string]string) (applied bool, err error)
+}
+
+// governanceApprovalTombstone is the reject's revocation: the approval
+// keys emptied (a JSONB merge cannot delete a key, and an empty sha parses
+// as no approval). The consumption marker keys are left alone.
+func governanceApprovalTombstone() map[string]string {
+	return map[string]string{
+		domain.CommitMetaGovernanceApprovalSHA:        "",
+		domain.CommitMetaGovernanceApprovalActorID:    "",
+		domain.CommitMetaGovernanceApprovalActorRole:  "",
+		domain.CommitMetaGovernanceApprovalApprovedAt: "",
+	}
+}
+
+// recordGovernanceApproval writes the approval only while the run is
+// still committing (review round 1): an approval written after a reject
+// had revoked and routed the run back would survive the loop-back
+// (TASK-005 keeps reserved keys) and merge the same commit on resubmit.
+// With commitMetaStatusMerger the write is conditional in one statement.
+// Without it the approval is written, the run re-read, and a run that left
+// committing gets the revocation written back before recorded=false is
+// returned; a failed re-read is revoked the same way and reported as an
+// error. Within one process the governance stripe already orders the
+// approve against every reject; this keeps the order across processes.
+func (o *Orchestrator) recordGovernanceApproval(ctx context.Context, runID string, patch map[string]string) (bool, error) {
+	if m, ok := o.store.(commitMetaStatusMerger); ok {
+		return m.MergeCommitMetaIfStatus(ctx, runID, domain.RunStatusCommitting, patch)
+	}
+	if err := o.mergeRunCommitMeta(ctx, runID, patch); err != nil {
+		return false, err
+	}
+	fresh, err := o.store.GetRun(ctx, runID)
+	if err == nil && fresh.Status == domain.RunStatusCommitting {
+		return true, nil
+	}
+	if rerr := o.mergeRunCommitMeta(ctx, runID, governanceApprovalTombstone()); rerr != nil {
+		observe.Logger(ctx).Error("governance guard: an approval recorded for a run that left committing could not be revoked; reject the run's next hold explicitly",
+			"run_id", runID, "error", rerr)
+		return false, errors.Join(err, rerr)
+	}
+	if err != nil {
+		return false, fmt.Errorf("re-read run after recording the approval (revoked again): %w", err)
+	}
+	return false, nil
+}
+
+// revokeAgainAfterRoute writes the revocation a second time once the
+// reject's route has moved the run out of committing (review round 1): an
+// approve in another process that passed its checks before the route can
+// have written its approval between the first revocation and the route.
+// After the route no approval can be recorded (the write is conditional
+// on committing), so this one is final. A failure is logged at Error: the
+// reject has taken effect, and within one process the governance stripe
+// already excludes the interleaving.
+func (o *Orchestrator) revokeAgainAfterRoute(ctx context.Context, runID string) {
+	if err := o.mergeRunCommitMeta(ctx, runID, governanceApprovalTombstone()); err != nil {
+		observe.Logger(ctx).Error("governance guard: the reject's second revocation failed; an approval written concurrently by another process could survive the loop-back",
+			"run_id", runID, "error", err)
+	}
 }
 
 // activePublishExecution reports whether the run's workflow has a publish
@@ -455,6 +548,9 @@ func (o *Orchestrator) GovernanceMergeStatus(ctx context.Context, runID string) 
 		observe.Logger(ctx).Warn("governance status: the merge's governance facts are unavailable",
 			"run_id", run.RunID, "error", err)
 		st.EvaluationError = "the merge's changed paths could not be computed"
+		if unevaluableForever(err) {
+			st.EvaluationError = "the merge cannot be evaluated: " + unevaluableReason(err)
+		}
 		return st, nil
 	}
 	touched := gc.Touched()

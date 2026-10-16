@@ -35,9 +35,16 @@ package engine
 //     step and announced once per episode (recordGovernanceHold).
 //  3. Post-merge assertion (assertGovernedMerge). Before the push, the
 //     governed paths the merge actually changed (Diff(BaseSHA, M)) must be
-//     covered by the evaluation; anything else (non-default merge
-//     configuration: merge.directoryRenames, merge drivers) is a permanent
-//     refusal, taken back to BaseSHA and never pushed (owner question 6).
+//     covered by the evaluation; anything else is a permanent refusal,
+//     taken back to BaseSHA and never pushed (owner question 6). It fires
+//     under git's DEFAULT configuration too (review round 1): rename
+//     following carries a run's edit of a path that main has since renamed
+//     into a governed tree onto the governed name, which the pre-merge
+//     diff from the merge base cannot see. Non-default configuration
+//     (merge.directoryRenames, merge drivers) is the other source. The
+//     author's remedy is to update the run branch from main: the merge
+//     base moves, the governed path is evaluated and the merge is held
+//     for an operator decision.
 //  4. Consumption marker. A merge that consumed an approval records the
 //     merge commit and its base under reserved commit_meta keys BEFORE the
 //     push, so the projection's protection-removal guard can tell an
@@ -52,6 +59,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"reflect"
 	"strings"
 	"sync"
@@ -98,9 +106,12 @@ type GovernanceGuard struct {
 
 // MergeBaseLister is the optional capability the guard needs: every merge
 // base of two commits (`git merge-base --all`), each a full lowercase hex
-// object id. It is not part of GitOperator, so embedders whose operator
-// lacks it keep compiling; WithGovernanceGuard type-asserts it and
-// refuses to turn the guard on without it. *git.CLIClient implements it.
+// object id. Histories with no common ancestor are an empty list and a nil
+// error — the guard refuses such a merge permanently — while an error is
+// treated as possibly transient (the run stays committing and is retried).
+// It is not part of GitOperator, so embedders whose operator lacks it keep
+// compiling; WithGovernanceGuard type-asserts it and refuses to turn the
+// guard on without it. *git.CLIClient implements it.
 type MergeBaseLister interface {
 	MergeBases(ctx context.Context, a, b string) ([]string, error)
 }
@@ -116,6 +127,37 @@ var ErrGovernanceApprovalRequired = errors.New("engine: governed merge requires 
 // errGovernanceUnevaluable is the cause of the error for a merge whose
 // changed paths could not be computed: refused, never held.
 var errGovernanceUnevaluable = errors.New("engine: governance guard could not evaluate the merge")
+
+// errGovernanceNoMergeBase: the merged commit shares no history with the
+// target, so there is no base to diff from.
+var errGovernanceNoMergeBase = errors.New("the run branch shares no history with " + authoritativeBranch)
+
+// unevaluableForever reports whether an evaluation failure is a property
+// of the merge itself, the same on every attempt (review round 1): no
+// merge base (an orphan history pushed to the run branch), or a diff
+// larger than the git output limit (git.ErrOutputTooLarge — the same trees
+// and limit always give the same size). Retrying those would leave the run
+// in committing for good, with neither approve nor reject able to act and
+// cancel not allowed from committing; the gate refuses them permanently
+// instead (refuseUnevaluableMerge). Every other failure — a git process,
+// lock or store error, a malformed MergeBaseLister answer — may be
+// transient and keeps the run committing for a retry (fail closed).
+func unevaluableForever(err error) bool {
+	return errors.Is(err, errGovernanceNoMergeBase) || errors.Is(err, git.ErrOutputTooLarge)
+}
+
+// unevaluableReason names an unevaluableForever failure for messages,
+// without git output.
+func unevaluableReason(err error) string {
+	switch {
+	case errors.Is(err, errGovernanceNoMergeBase):
+		return "the run branch shares no history with " + authoritativeBranch
+	case errors.Is(err, git.ErrOutputTooLarge):
+		return "its diff exceeds the git output limit"
+	default:
+		return "its changed paths cannot be computed"
+	}
+}
 
 // GovernanceHoldRuleID is the ErrorDetail.RuleID of a held merge.
 const GovernanceHoldRuleID = "governance-path-guard"
@@ -144,9 +186,108 @@ type governanceGuard struct {
 // else (codex review round 2).
 const CommitMetaGovernanceBlockedTarget = "spine.governance.blocked_target"
 
+// CommitMetaGovernanceStartedBy is the reserved commit_meta key naming the
+// actor who started a workflow-lifecycle planning run (review round 1).
+// startWorkflowPlanningRun writes the body the caller sent onto the run
+// branch, so that actor authored the run's content, yet no step execution
+// or assignment records them; the lifecycle exemption's separation-of-
+// duties check needs them (reviewerIsNotAuthor). Written once, at start,
+// only while the guard and the exemption are on; reserved, so workflow
+// outcomes can never set it and TASK-005 keeps it across bindings.
+const CommitMetaGovernanceStartedBy = "spine.governance.started_by"
+
 // errGovernanceTargetBlocked is the cause of the error for a merge refused
 // because a refused merge is still on the local target.
 var errGovernanceTargetBlocked = errors.New("engine: a merge the governance guard refused is still on the local target")
+
+// governanceRunStripes serialises, within one process, every merge
+// attempt of a run while the guard is on (MergeRunBranch) with every
+// operator decision on that run (DecideGovernanceMerge) — review round 1.
+// Without it:
+//
+//   - a reject that arrived while an approved attempt was between the
+//     gate and the push routed the run back and answered success, and the
+//     attempt then merged and published the rejected change anyway (and
+//     could not complete the run it found active);
+//   - an approve whose write landed after a concurrent reject recreated
+//     the approval the reject had revoked, so a resubmit of the same
+//     commit after the loop-back merged with no hold.
+//
+// The stripe is held for the whole attempt or decision. An approve
+// records the approval and runs its merge under one hold, so no scheduler
+// tick consumes the approval in between and the decision event is always
+// emitted for an approval that was recorded. A reject waits for an
+// in-flight attempt, then reads the run again: a completed run (the merge
+// won) or one whose approved merge already reached the local target is
+// answered 409 before anything is written.
+//
+// Re-entrant through the context (governanceStripesHeld): a call chain
+// that holds the stripe and reaches MergeRunBranch again — approve's own
+// merge; a workflow whose merge_failed route activates another internal
+// merge step — does not wait for itself. Package level and striped by run
+// ID like sodBindStripes and recoveryBindingStripes, for the same reasons
+// (`spine serve` builds an orchestrator per workspace and the pool
+// rebuilds them); two runs on one stripe only serialise needlessly. Each
+// stripe is a one-slot semaphore so a waiter honours its context. With
+// the guard off nothing is taken (the embedded zero value is unchanged).
+//
+// Residual (KNOWN-LIMITATIONS "Governance-Path Guard" 9): processes
+// sharing one database are not serialised. The approval write and the
+// reject's revocation are safe across processes on their own (the
+// conditional approval write, the reject's second revocation after its
+// route); an approved attempt in flight in another process is not.
+var governanceRunStripes = func() (s [64]chan struct{}) {
+	for i := range s {
+		s[i] = make(chan struct{}, 1)
+	}
+	return s
+}()
+
+// governanceStripesHeld is the context key under which the bitmask of the
+// governance stripes the call chain holds is carried (64 stripes, one bit
+// each).
+type governanceStripesHeld struct{}
+
+func governanceStripe(runID string) uint {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(runID))
+	return uint(h.Sum32() % uint32(len(governanceRunStripes)))
+}
+
+// lockGovernanceRun takes runID's governance stripe, unless ctx already
+// holds it, and returns the context that records it held plus an
+// idempotent release (never nil). A free stripe is taken even when ctx is
+// already done; a contended one is waited for only until ctx ends, and
+// then the error is ErrUnavailable wrapping ctx.Err(), with nothing held.
+func lockGovernanceRun(ctx context.Context, runID string) (context.Context, func(), error) {
+	idx := governanceStripe(runID)
+	held, _ := ctx.Value(governanceStripesHeld{}).(uint64)
+	if held&(1<<idx) != 0 {
+		return ctx, func() {}, nil
+	}
+	sem := governanceRunStripes[idx]
+	select {
+	case sem <- struct{}{}:
+	default:
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx, func() {}, domain.NewErrorWithCause(domain.ErrUnavailable,
+				fmt.Sprintf("governance guard: gave up waiting for another merge attempt or decision on run %s", runID), ctx.Err())
+		}
+	}
+	var once sync.Once
+	return context.WithValue(ctx, governanceStripesHeld{}, held|1<<idx), func() { once.Do(func() { <-sem }) }, nil
+}
+
+// lockGovernanceRunIfGuarded is MergeRunBranch's entry: lockGovernanceRun
+// while the guard is on, nothing otherwise.
+func (o *Orchestrator) lockGovernanceRunIfGuarded(ctx context.Context, runID string) (context.Context, func(), error) {
+	if o.governance == nil || !o.bindingOn {
+		return ctx, func() {}, nil
+	}
+	return lockGovernanceRun(ctx, runID)
+}
 
 // WithGovernanceGuard configures the governance-path guard. With Enabled
 // false it turns the guard off. With Enabled true it returns an error, and
@@ -218,8 +359,10 @@ type governancePass struct {
 // governanceGate runs between resolveMergeSource and the first merge
 // (MergeRunBranch). It returns done=true with the error the caller
 // returns when the merge must not proceed: a hold (precondition_failed
-// wrapping ErrGovernanceApprovalRequired), an unevaluable merge
-// (service_unavailable; nothing recorded), a policy failure (internal) or
+// wrapping ErrGovernanceApprovalRequired), a merge whose changed paths
+// could not be computed this time (service_unavailable; nothing recorded,
+// retried), one that can never be evaluated (refuseUnevaluableMerge: the
+// permanent-failure route, nil error), a policy failure (internal) or
 // another deny (forbidden). On allow it records the pass on src. A nil
 // guard, or binding off, is a no-op.
 func (o *Orchestrator) governanceGate(ctx context.Context, run *domain.Run, src *mergeSource) (bool, error) {
@@ -231,6 +374,9 @@ func (o *Orchestrator) governanceGate(ctx context.Context, run *domain.Run, src 
 		return true, err
 	}
 	gc, err := o.buildGovernanceCheck(ctx, run, *src)
+	if err != nil && unevaluableForever(err) {
+		return true, o.refuseUnevaluableMerge(ctx, run, src, err)
+	}
 	if err != nil {
 		log.Error("governance guard: cannot compute the merge's changed paths; merge refused",
 			"run_id", run.RunID, "bound_sha", src.bound, "error", err)
@@ -295,6 +441,31 @@ func (o *Orchestrator) governanceGate(ctx context.Context, run *domain.Run, src 
 	return false, nil
 }
 
+// refuseUnevaluableMerge is the permanent refusal of a merge the guard can
+// never evaluate (unevaluableForever; review round 1). Nothing has been
+// merged — the gate runs before any repository merges — so it takes
+// TASK-005's permanent-failure route: the primary outcome is recorded as
+// failed, then the publish step's merge_failed (back to execute in
+// task-default) or, on a workflow with no publish step, a failed run. The
+// author gets a message they can act on. With the guard off git refuses
+// the same unrelated-history merge as a permanent failure too.
+func (o *Orchestrator) refuseUnevaluableMerge(ctx context.Context, run *domain.Run, src *mergeSource, cause error) error {
+	msg := "governance guard: the merge cannot be evaluated: " + unevaluableReason(cause) + "; nothing was merged"
+	switch {
+	case errors.Is(cause, errGovernanceNoMergeBase):
+		msg += " (build the run branch on " + authoritativeBranch + " and resubmit)"
+	case errors.Is(cause, git.ErrOutputTooLarge):
+		msg += " (split the change, or have an operator land it directly)"
+	}
+	violation := &git.GitError{Kind: git.ErrKindPermanent, Op: "governance_guard", Message: msg}
+	if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", violation, ""); recErr != nil {
+		return recErr
+	}
+	observe.Logger(ctx).Error("governance guard: the merge can never be evaluated; refused permanently, nothing merged",
+		"run_id", run.RunID, "bound_sha", src.bound, "merged_sha", src.sha, "error", cause)
+	return o.handlePermanentMergeFailure(ctx, run, violation)
+}
+
 func hasReason(reasons []branchprotect.Reason, code branchprotect.ReasonCode) bool {
 	for _, r := range reasons {
 		if r.Code == code {
@@ -320,7 +491,7 @@ func (o *Orchestrator) buildGovernanceCheck(ctx context.Context, run *domain.Run
 		return nil, fmt.Errorf("merge bases of %s and %s: %w", authoritativeBranch, src.sha, err)
 	}
 	if len(bases) == 0 {
-		return nil, fmt.Errorf("%s and %s have no merge base", authoritativeBranch, src.sha)
+		return nil, fmt.Errorf("%w (%s and %s have no merge base)", errGovernanceNoMergeBase, authoritativeBranch, src.sha)
 	}
 	changed, err := o.changedPathsFrom(ctx, bases, src.sha)
 	if err != nil {
@@ -421,11 +592,14 @@ func cleanRelative(p string) bool {
 //     run would then fail to resolve — or shadow
 //     <artifacts_dir>/workflows/workflow-lifecycle.yaml from the root);
 //   - local separation of duties: the last completed main-path review step
-//     was completed by a named actor who completed no non-review step of
-//     the run, whatever the deployment's step-entry policy says (in
-//     standalone one reviewer could otherwise self-grant workflow_review,
-//     draft, self-review and land a review-less task-default with no
-//     operator).
+//     was completed by a named actor who neither started the run (the
+//     recorded CommitMetaGovernanceStartedBy; none recorded grants
+//     nothing) nor authored it in the engine's sense (runAuthor: bound to
+//     any author step execution of the run, in any status, or holding an
+//     assignment row of one), whatever the deployment's step-entry policy
+//     says (in standalone one reviewer could otherwise self-grant
+//     workflow_review, draft or start the run with a review-less
+//     task-default body, self-review and land it with no operator).
 func (o *Orchestrator) lifecycleExemption(ctx context.Context, run *domain.Run, src mergeSource, bases, changed []string) []string {
 	if !o.governance.cfg.ExemptWorkflowLifecycleTaskPath {
 		return nil
@@ -506,7 +680,20 @@ func hasPath(xs []string, s string) bool {
 
 // reviewerIsNotAuthor is the exemption's local separation-of-duties
 // check: the actor of the last completed main-path review step execution
-// is named and completed no non-review step execution of the run.
+// is named, is not the actor who started the run, and is not a run author
+// (runAuthor, the definition TASK-007's separation of duties uses).
+//
+// Review round 1: the check used to compare the reviewer only with actors
+// who COMPLETED a non-review step. The body of a lifecycle run is written
+// onto the branch by whoever starts it (PUT/POST /workflows below
+// operator), and the draft step is assigned to someone else, so a
+// reviewer could start the run with a review-less body, let another actor
+// submit the draft unchanged and approve it alone. The starter is now
+// recorded at start (CommitMetaGovernanceStartedBy); a run without that
+// record — started before the upgrade, or by a caller with no actor —
+// gets no exemption. runAuthor also counts an author execution the
+// reviewer was bound to and released or abandoned (its ledger rows), and
+// so a write_context write, which TASK-014 limits to the assignee.
 func (o *Orchestrator) reviewerIsNotAuthor(ctx context.Context, run *domain.Run, wf *domain.WorkflowDefinition) (bool, string) {
 	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
 	if err != nil {
@@ -529,13 +716,42 @@ func (o *Orchestrator) reviewerIsNotAuthor(ctx context.Context, run *domain.Run,
 	if last == nil || last.ActorID == "" {
 		return false, "no completed review step with a named actor"
 	}
-	for i := range execs {
-		e := &execs[i]
-		if e.Status == domain.StepStatusCompleted && !isReview(e.StepID) && e.ActorID == last.ActorID {
-			return false, "the reviewer also completed a non-review step of the run"
-		}
+	starter := run.CommitMeta[CommitMetaGovernanceStartedBy]
+	if starter == "" {
+		return false, "the run's starter is not recorded"
+	}
+	if starter == last.ActorID {
+		return false, "the reviewer started the run (and wrote its body)"
+	}
+	stepID, err := o.runAuthor(ctx, run, wf, last, last.ActorID, execs)
+	if err != nil {
+		return false, "the run's authors could not be determined"
+	}
+	if stepID != "" {
+		return false, "the reviewer is an author of the run (step " + stepID + ")"
 	}
 	return true, ""
+}
+
+// recordLifecycleStarter records who started a workflow-lifecycle planning
+// run (CommitMetaGovernanceStartedBy), for the lifecycle exemption's
+// separation-of-duties check. Only while the guard and the exemption are
+// on (the zero value writes nothing). No actor on ctx, or a failed write,
+// records nothing — the run then gets no exemption, and its workflow edit
+// needs an operator approval (fail toward approval); the run itself starts
+// as before.
+func (o *Orchestrator) recordLifecycleStarter(ctx context.Context, runID string) {
+	if o.governance == nil || !o.governance.cfg.ExemptWorkflowLifecycleTaskPath {
+		return
+	}
+	a := domain.ActorFromContext(ctx)
+	if a == nil || a.ActorID == "" {
+		return
+	}
+	if err := o.mergeRunCommitMeta(ctx, runID, map[string]string{CommitMetaGovernanceStartedBy: a.ActorID}); err != nil {
+		observe.Logger(ctx).Warn("governance guard: the lifecycle run's starter was not recorded; its workflow edit will need an operator approval",
+			"run_id", runID, "error", err)
+	}
 }
 
 // completedAfter orders completed executions by completion time, then by
@@ -740,8 +956,11 @@ func shortSHA12(sha string) string {
 // OldPath, the own-run evidence carve-out and the evaluation's exemptions
 // applied — must be covered by the paths the gate evaluated. With no
 // approval that set is empty, so any governed path is a violation. A
-// violation (non-default merge behaviour the pre-merge evaluation cannot
-// see) is a permanent refusal (owner question 6); a Diff failure is too,
+// violation (merge behaviour the pre-merge evaluation cannot see: rename
+// following into a governed path main renamed, under default
+// configuration, or non-default merge configuration) is a permanent
+// refusal (owner question 6) whose message tells the author to update
+// the run branch from main; a Diff failure is too,
 // unless it is a retryable git error and the take-back was clean (the
 // attempt then simply runs again, as TASK-005 treats a transient read in
 // its own check). Either way the local target is restored to BaseSHA
@@ -835,7 +1054,10 @@ func (o *Orchestrator) assertGovernedMerge(ctx context.Context, run *domain.Run,
 			return true, o.retryMerge(ctx, run)
 		}
 	}
-	msg := "merge changed governed paths not covered by the evaluation: " + strings.Join(quotePaths(extra, governanceMessageLimit), ", ")
+	msg := "merge changed governed paths not covered by the evaluation: " + strings.Join(quotePaths(extra, governanceMessageLimit), ", ") +
+		" (git carried the run's changes onto them, e.g. following a rename on " + authoritativeBranch +
+		" since the run branch forked; update the run branch from " + authoritativeBranch +
+		" and resubmit: the change is then evaluated and held for an operator decision)"
 	if derr != nil {
 		msg = "the merge's changed paths could not be read: " + derr.Error()
 	}

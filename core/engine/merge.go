@@ -51,8 +51,15 @@ const AuthoritativeBranch = authoritativeBranch
 // TASK-006) governanceGate runs next: a merge that changes governance
 // paths without an operator approval of the bound commit is held (the
 // error wraps ErrGovernanceApprovalRequired), and mergePrimaryBound
-// asserts after the merge that it changed nothing else.
+// asserts after the merge that it changed nothing else. The whole attempt
+// then runs under the run's governance stripe, so an operator decision on
+// the run waits for it (governanceRunStripes).
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
+	ctx, unlock, err := o.lockGovernanceRunIfGuarded(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	run, done, err := o.preflightCheck(ctx, runID)
 	if err != nil || done {
 		return err

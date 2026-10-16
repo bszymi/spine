@@ -3,7 +3,8 @@
 package store_test
 
 // INIT-023 TASK-006 AC 22: the governance-path guard's storage, on
-// PostgreSQL. MergeCommitMeta merges keys atomically; and
+// PostgreSQL. MergeCommitMeta merges keys atomically, and
+// MergeCommitMetaIfStatus only in the given run status; and
 // ListGovernanceAuthorizations returns honoured override pushes (in the
 // shape both Spine's delivery subscriber and SMP's emitter write: the
 // whole domain.Event JSON, branch "main" or "refs/heads/main") and
@@ -184,6 +185,28 @@ func TestGovernanceStore_Integration(t *testing.T) {
 	var se *domain.SpineError
 	if !errors.As(err, &se) || se.Code != domain.ErrNotFound {
 		t.Fatalf("unknown run: %v, want not_found", err)
+	}
+
+	// MergeCommitMetaIfStatus (review round 1): applied only in the given
+	// status, keeping every other key; a wrong status or an unknown run
+	// writes nothing and reports false.
+	if ok, err := s.MergeCommitMetaIfStatus(ctx, "run-gov-consumed", domain.RunStatusCommitting,
+		map[string]string{domain.CommitMetaGovernanceApprovalSHA: govSHA('d')}); err != nil || ok {
+		t.Fatalf("wrong status: applied=%v err=%v; want not applied", ok, err)
+	}
+	if r, err := s.GetRun(ctx, "run-gov-consumed"); err != nil || r.CommitMeta[domain.CommitMetaGovernanceApprovalSHA] != "" {
+		t.Fatalf("a refused conditional write changed commit_meta: %v %v", r.CommitMeta, err)
+	}
+	if ok, err := s.MergeCommitMetaIfStatus(ctx, "run-gov-consumed", domain.RunStatusCompleted,
+		map[string]string{domain.CommitMetaGovernanceApprovalSHA: govSHA('d')}); err != nil || !ok {
+		t.Fatalf("matching status: applied=%v err=%v; want applied", ok, err)
+	}
+	if r, err := s.GetRun(ctx, "run-gov-consumed"); err != nil || r.CommitMeta[domain.CommitMetaGovernanceApprovalSHA] != govSHA('d') ||
+		r.CommitMeta["status"] != "Completed" || r.CommitMeta[domain.CommitMetaGovernanceApprovalMergeSHA] != govSHA('c') {
+		t.Fatalf("after the conditional write commit_meta = %v, %v", r.CommitMeta, err)
+	}
+	if ok, err := s.MergeCommitMetaIfStatus(ctx, "run-gov-missing", domain.RunStatusCompleted, map[string]string{"k": "v"}); err != nil || ok {
+		t.Fatalf("unknown run: applied=%v err=%v; want not applied, no error", ok, err)
 	}
 }
 

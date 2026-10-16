@@ -102,6 +102,16 @@ type govStore struct {
 	setMetaErr  error
 	listErr     error
 	beforeWrite func(kind string) // called once per commit_meta write, before it applies
+	// beforeTransition is called once per TransitionRunStatus, before it
+	// applies (another process acting between a decision's writes).
+	beforeTransition func(from, to domain.RunStatus)
+}
+
+func (s *govStore) TransitionRunStatus(ctx context.Context, runID string, from, to domain.RunStatus) (bool, error) {
+	if s.beforeTransition != nil {
+		s.beforeTransition(from, to)
+	}
+	return s.mockRunStore.TransitionRunStatus(ctx, runID, from, to)
 }
 
 func (s *govStore) ListStepExecutionsByRun(ctx context.Context, runID string) ([]domain.StepExecution, error) {
@@ -139,11 +149,39 @@ func (s *govStore) SetCommitMeta(ctx context.Context, runID string, meta map[str
 	return s.mockRunStore.SetCommitMeta(ctx, runID, cp)
 }
 
-// govMergerStore adds the atomic MergeCommitMeta capability.
+// govMergerStore adds the atomic MergeCommitMeta capability and its
+// conditional variant (MergeCommitMetaIfStatus, the approval write).
 type govMergerStore struct {
 	*govStore
 	mergeErr   error
 	mergeCalls []map[string]string
+	condCalls  []map[string]string
+}
+
+func (s *govMergerStore) MergeCommitMetaIfStatus(_ context.Context, runID string, status domain.RunStatus, patch map[string]string) (bool, error) {
+	if s.beforeWrite != nil {
+		s.beforeWrite("merge-if")
+	}
+	s.condCalls = append(s.condCalls, patch)
+	if s.mergeErr != nil {
+		return false, s.mergeErr
+	}
+	r, ok := s.runs[runID]
+	if !ok {
+		return false, domain.NewError(domain.ErrNotFound, "run not found")
+	}
+	if r.Status != status {
+		return false, nil
+	}
+	meta := make(map[string]string, len(r.CommitMeta)+len(patch))
+	for k, v := range r.CommitMeta {
+		meta[k] = v
+	}
+	for k, v := range patch {
+		meta[k] = v
+	}
+	r.CommitMeta = meta
+	return true, nil
 }
 
 func (s *govMergerStore) MergeCommitMeta(_ context.Context, runID string, patch map[string]string) error {

@@ -2,7 +2,9 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 )
 
@@ -23,10 +25,13 @@ import (
 // any git process and follow --end-of-options, so a poisoned revision
 // cannot become a flag, and a short branch name resolves exactly to
 // refs/heads/<name> (TASK-002's lookup, never a tag or other shadow).
-// Histories with no common ancestor make git exit non-zero with no
-// output; that is returned as the command's error. A line that is not a
-// full object id is an error, never skipped: the caller fails closed on
-// it.
+// Histories with no common ancestor make git exit 1 with no output and no
+// diagnostic; that is an empty list and a nil error (INIT-023 TASK-006
+// review round 1): the guard refuses such a merge permanently, whereas an
+// error means "try again" and would leave the run committing for good.
+// Any other failure is returned as the command's error. A line that is
+// not a full object id is an error, never skipped: the caller fails
+// closed on it.
 func (c *CLIClient) MergeBases(ctx context.Context, a, b string) ([]string, error) {
 	if err := checkRev("merge-base", "a", a); err != nil {
 		return nil, err
@@ -44,6 +49,9 @@ func (c *CLIClient) MergeBases(ctx context.Context, a, b string) ([]string, erro
 	}
 	output, err := c.run(ctx, "merge-base", "merge-base", "--all", "--end-of-options", revA, revB)
 	if err != nil {
+		if noMergeBase(err) {
+			return []string{}, nil
+		}
 		return nil, err
 	}
 	var out []string
@@ -64,6 +72,17 @@ func (c *CLIClient) MergeBases(ctx context.Context, a, b string) ([]string, erro
 		out = append(out, line)
 	}
 	return out, nil
+}
+
+// noMergeBase reports git merge-base's "no common ancestor" answer: exit
+// status 1 with nothing on stderr (both revisions were resolved before, so
+// a missing revision cannot produce it; git's fatal errors exit 128 and
+// say why).
+func noMergeBase(err error) bool {
+	var gitErr *GitError
+	var exitErr *exec.ExitError
+	return errors.As(err, &gitErr) && gitErr.Message == "" &&
+		errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
 // truncateOutput bounds a line of git output quoted in an error.
