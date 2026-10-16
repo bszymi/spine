@@ -1618,3 +1618,62 @@ inside the lifecycle (off in SMP) and `artifact.PathScope.RepoPath` (no SMP call
 
 **Databases.** `s017_it`, `s017_scen`, `s017_reg`, `s017_scen_main`, `s017_reg_main`,
 `s017_smp_it`, `s017_spine_runtime_it` on the shared `i23-pg`, dropped after the gates.
+
+### Review round 2 (2026-10-16)
+
+A second-round reviewer examined the branch after round 1 (`3e2a1af7`). It confirmed R1-1 to R1-8
+as fixed. It re-ran their evidence: mutants of `judgeFrozen` and the merge-base check, a git PoC of
+equal-dated criss-cross bases, and the AC 13/14 Postgres steps (0 SKIP). It reported one finding.
+Commit: `220d817a`.
+
+| ID | Finding | Disposition |
+|---|---|---|
+| R2-1 | P3: plain golangci-lint reports one issue that is new compared with `main`: gocritic `typeDefFirst` at `core/validation/engine.go` (`type Engine struct`). The branch had declared `BlockingStatusConflicts()` and `promote()` above the type. The reported line is unchanged since March, so `--new-from-rev main` filtered it out, and the round-1 gate rows recorded 0 | **Fixed** |
+
+**R2-1 (P3).** Reproduced on `3e2a1af7`: `golangci-lint run ./core/validation/...` reports
+`engine.go:242:1: typeDefFirst` (gocritic), and `main` does not. Fix: both methods now sit below
+`NewEngine`. `DefaultBlockingStatusConflicts` and `WithBlockingStatusConflicts` stay where they
+were because they are not methods. No behaviour change. This is a pure move, so there is no test
+that fails without it. The evidence is the lint comparison below. **Method change:** this round's
+lint gate compares plain output with `main` and does not rely on `--new-from-rev`. Both trees are
+linted with `--max-issues-per-linter=0 --max-same-issues=0`. Each issue is normalised to
+`file: message` (line and column dropped), and the multisets are compared with `comm`. `main` is
+a `git archive main`.
+
+**Gaps.** The reviewer reported no gap besides R2-1. It found the R1-3 sub-case where a rename
+falls under 50 % similarity once `main` edits the same file. That case fails closed and is already
+in KNOWN-LIMITATIONS ("pairs renames with git's rename detection"), so nothing changed.
+
+**Gates (review round 2, on `220d817a`).**
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `embed-smoketest` | OK; built; "engine constructed and exercised; library surface is sound" |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | pass |
+| `go test -p 4 -count=1 ./...` | pass (40 packages ok, none failed) |
+| `go test -race -p 4 -count=1` on `./core/{engine,workflow,validation,artifact,domain}/... ./adapters/projection/... ./service/cmd/spine/... ./service/internal/workspace/... ./service/scenariotest/harness/...` | pass (9 packages ok) |
+| `SPINE_TEST_DATABASE_URL=…/s017_it go test -tags integration -race -count=1 -p 1` on `./core/{domain,artifact,workflow,validation,engine}/... ./adapters/projection/... ./service/cmd/spine/... ./service/internal/workspace/...` (PostgreSQL 18.6) | pass (8 packages ok; `TestBuildServiceSet_ValidatorBlocksStatusConflicts` PASS, not skipped) |
+| scenario-git-http job on a fresh `s017_job`: `^TestGitHTTP_`, `^TestBootstrapInternalAdmin_`, `^TestWorkflowLifecycle_`, `StatusLifecycle`, `^TestBuildServiceSet_WorkflowServiceHasProjectionPolicy$`, `^TestBuildServiceSet_ValidatorBlocksStatusConflicts$` (`-v`) | 20 / 2 / 4 / 3 pass, 0 fail, 0 skip; the three AC 14 scenarios and both integration tests PASS |
+| Full scenario suite (`-tags scenario -count=1 -p 1 -v ./service/scenariotest/...`; `s017_scen` + `s017_reg` migrated with `migrations/registry/*.sql`) vs the same on `git archive main` (`s017_scen_main`, `s017_reg_main`) | 31 top-level failures on both (the known set, incl. `TestWorkspace_ScopedServices`); the sorted `--- FAIL` lists are identical; the `--- PASS` lists differ only by the three TASK-017 scenarios |
+| git-floor job in `golang:1.26-bookworm` (git 2.39.5): the ref-grammar filter; `./adapters/git/... ./core/artifact/ ./core/workflow/`; extra `-v -run TestStatusLifecycle_ ./core/engine/`, `./adapters/projection/ ./core/validation/` | pass; all 31 `TestStatusLifecycle_*` pass |
+| Plain `golangci-lint run` on the touched packages (`./adapters/projection/... ./core/{artifact,domain,engine,validation,workflow}/... ./service/cmd/spine/... ./service/internal/workspace/...` plus `./service/scenariotest/harness/...`, or `./service/scenariotest/...` with build tags), branch vs `main`, normalised | plain: 103 vs 104, `--build-tags=integration`: 103 vs 104, `--build-tags=scenario`: 161 vs 162. 0 new on the branch in each run. The one fewer is `engine.go`'s gofmt import order, which the branch fixed |
+| `golangci-lint run --enable-only=gosec`, same comparison (plain and `--build-tags=scenario`) | 0 vs 0 |
+| `golangci-lint run --new-from-rev main ./...` | 0 issues |
+| `gofmt -l` on every Go file changed vs `main` (37 files) | empty |
+| No pre-existing test file modified (`git diff --diff-filter=MDR main...HEAD -- '*_test.go'`) | empty |
+| `codex review --base main` (plain, no model override) | on `220d817a`: review sub-session `01a144c9-75e8-7eb1-9894-4ca87cff048a`, model `gpt-6.1-sol` (every `model` field in the session): "No actionable regressions were identified. The lifecycle enforcement, merge-result verification, and production wiring are consistent with the documented scope and limitations." No finding to fix or reject |
+
+**SMP compatibility gate (review round 2, on `220d817a`).** `/Users/bartoszszymichowski/42sid/i23/s-T017/smp`
+at SMP `main` `1ae9b0e3` (`.spine-revision` `d23b897`), `../spine` → this worktree,
+`GOFLAGS=-mod=readonly`, no SMP edit:
+- `go build ./...` and `go vet ./...` (plain, `-tags integration`, `-tags scenario`, `-tags faultinject`) pass.
+- `go test -race -count=1 -p 4` passes on the 12 SMP packages importing a changed Spine package (11 ok; `projectionsvc` has no tests).
+- Platform / spine-runtime migrations record 116 / 26 versions (`s017_smp_it`, `s017_spine_runtime_it`).
+- The `dev/testgate` runtime step reports "4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)", PASS.
+- The `dev/testgate` githttp suite reports "301 tests passed, 0 failed, 1 skipped (1 allowed)", PASS.
+- The three Linux-only tests pass in `golang:1.26-bookworm`.
+- `ws_` databases and roles: 0 before, 0 after.
+
+**Databases.** `s017_it`, `s017_job`, `s017_scen`, `s017_reg`, `s017_scen_main`, `s017_reg_main`,
+`s017_smp_it` and `s017_spine_runtime_it` were created on the shared `i23-pg` and dropped after
+the gates; none remain. The containers ran with `--rm`; none remain.
