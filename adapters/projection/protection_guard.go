@@ -205,7 +205,8 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 		}
 	}
 	var verifyErr error
-	for _, rec := range records {
+	for i := range records {
+		rec := &records[i]
 		ok, err := s.provenanceMatches(ctx, rec, head, newest, content, present, branch, removed)
 		if err != nil && verifyErr == nil {
 			verifyErr = err
@@ -284,7 +285,7 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 // override push keeps owner question 8's rule (the push changed the
 // file): the operator wrote the bytes being installed, and that is the
 // documented re-affirmation (docs/git-push-guide.md §4).
-func (s *Service) provenanceMatches(ctx context.Context, rec store.GovernanceAuthorization, head, newest string, content []byte, present bool, branch string, removed map[bpconfig.RuleKind]bool) (bool, error) {
+func (s *Service) provenanceMatches(ctx context.Context, rec *store.GovernanceAuthorization, head, newest string, content []byte, present bool, branch string, removed map[bpconfig.RuleKind]bool) (bool, error) {
 	switch rec.Source {
 	case store.GovernanceSourceOverrideEvent, store.GovernanceSourceApprovedMerge:
 	default:
