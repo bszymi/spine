@@ -279,7 +279,10 @@ func TestLockGovernanceRun(t *testing.T) {
 // TestStartWorkflowPlanningRun_RecordsTheStarter: with the guard and the
 // lifecycle exemption on, a workflow-lifecycle run records the actor who
 // started it (and wrote its body) under CommitMetaGovernanceStartedBy;
-// with either off, or without an actor, nothing is written.
+// with either off, or without an actor, nothing is written. Both starters
+// are covered: create (POST /workflows) and update (PUT /workflows/{id},
+// review round 1 finding 2's attack shape; review round 2 gap — the update
+// rows used to be declared but ran the create path).
 func TestStartWorkflowPlanningRun_RecordsTheStarter(t *testing.T) {
 	on := &governanceGuard{cfg: GovernanceGuard{Enabled: true, ExemptWorkflowLifecycleTaskPath: true}}
 	actor := &domain.Actor{ActorID: "rev-1", Role: domain.RoleReviewer}
@@ -294,18 +297,40 @@ func TestStartWorkflowPlanningRun_RecordsTheStarter(t *testing.T) {
 		{"exemption off", &governanceGuard{cfg: GovernanceGuard{Enabled: true}}, actor, false, ""},
 		{"guard off", nil, actor, false, ""},
 		{"no actor", on, nil, false, ""},
+		{"update, guard and exemption on", on, actor, true, "rev-1"},
+		{"update, exemption off", &governanceGuard{cfg: GovernanceGuard{Enabled: true}}, actor, true, ""},
+		{"update, guard off", nil, actor, true, ""},
+		{"update, no actor", on, nil, true, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			st := &mockRunStore{}
-			orch := workflowPlanningOrchestrator(&mockWorkflowWriter{}, workflowPlanningResolver(), st, &mockEventEmitter{}, &stubGitOperator{})
+			w := &mockWorkflowWriter{}
+			var g GitOperator = &stubGitOperator{}
+			if c.update {
+				g = &workflowReadGit{files: map[string]string{"workflows/new-workflow.yaml": validWorkflowBody}}
+			}
+			orch := workflowPlanningOrchestrator(w, workflowPlanningResolver(), st, &mockEventEmitter{}, g)
 			orch.governance = c.guard
 			ctx := context.Background()
 			if c.actor != nil {
 				ctx = domain.WithActor(ctx, c.actor)
 			}
-			res, err := orch.StartWorkflowPlanningRun(ctx, "new-workflow", validWorkflowBody)
+			var res *StartRunResult
+			var err error
+			if c.update {
+				res, err = orch.StartWorkflowUpdatePlanningRun(ctx, "new-workflow", bumpedWorkflowBody)
+			} else {
+				res, err = orch.StartWorkflowPlanningRun(ctx, "new-workflow", validWorkflowBody)
+			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			wantCreate, wantUpdate := 1, 0
+			if c.update {
+				wantCreate, wantUpdate = 0, 1
+			}
+			if w.createCalls != wantCreate || w.updateCalls != wantUpdate {
+				t.Fatalf("writer: create=%d update=%d, want %d/%d", w.createCalls, w.updateCalls, wantCreate, wantUpdate)
 			}
 			got := st.runs[res.Run.RunID].CommitMeta[CommitMetaGovernanceStartedBy]
 			if got != c.want {
