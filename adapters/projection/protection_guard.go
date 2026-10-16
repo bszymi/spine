@@ -32,11 +32,15 @@ package projection
 // operator act — a hotfix override push, an approved workflow edit — would
 // produce a commit whose tree still carries an unauthorised relaxation
 // already sitting on main, and vouch for it (laundering). An approved
-// merge must moreover have removed the protection itself — its base
-// config applied every kind being removed (review round 1) — because the
-// operator approved the run's diff, which may only add a rule on top of
-// that relaxation. Why newness: re-pushing an old authorised blob after
-// it was superseded must not replay its authorisation.
+// merge must moreover account for every kind being removed (review
+// rounds 1 and 2): its own diff removed it — its base config applied it —
+// or its base config is, byte for byte, the result of an earlier valid
+// record that accounts for it in turn (a chain of custody; see
+// provenanceCheck). The operator approved the run's diff, which may only
+// add a rule on top of an unauthorised relaxation; and two authorised
+// relaxations may land before one projection tick. Why newness:
+// re-pushing an old authorised blob after it was superseded must not
+// replay its authorisation.
 //
 // While an approved governed merge is in flight — its run still
 // committing, its approved commit on the head, its consumption marker not
@@ -204,21 +208,20 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 			return fmt.Errorf("protection-removal guard: read operator records: %w", err)
 		}
 	}
-	var verifyErr error
+	pc := &provenanceCheck{s: s, records: records, head: head, newest: newest, branch: branch,
+		facts: make([]*recordFacts, len(records)), failed: map[custodyKey]bool{}}
 	for i := range records {
+		if !pc.authorises(ctx, i, content, present, removed) {
+			continue
+		}
 		rec := &records[i]
-		ok, err := s.provenanceMatches(ctx, rec, head, newest, content, present, branch, removed)
-		if err != nil && verifyErr == nil {
-			verifyErr = err
-		}
-		if ok {
-			log.Info("projection: protection removal authorised by an operator record",
-				"branch", branch, "source", rec.Source, "record_commit", rec.CommitSHA,
-				"actor_id", rec.ActorID, "run_id", rec.RunID, "event_id", rec.EventID, "head", shortSHA(head))
-			return nil
-		}
+		log.Info("projection: protection removal authorised by an operator record",
+			"branch", branch, "source", rec.Source, "record_commit", rec.CommitSHA,
+			"actor_id", rec.ActorID, "run_id", rec.RunID, "event_id", rec.EventID,
+			"custody_commits", pc.custodyCommits(), "head", shortSHA(head))
+		return nil
 	}
-	if verifyErr != nil {
+	if verifyErr := pc.verifyErr; verifyErr != nil {
 		// A record could not be checked because git failed transiently
 		// (codex review round 1): an infrastructure error, not a refusal —
 		// a refusal advances the sync and would not look at this config
@@ -269,96 +272,278 @@ func (s *Service) guardProtectionRemoval(ctx context.Context, head, anchor strin
 	return fmt.Errorf("%w (branch %s, head %s, %d record(s) checked)", ErrProtectionRemovalUnauthorized, branch, shortSHA(head), len(records))
 }
 
-// provenanceMatches applies the matching rule to one record. A git
-// failure that is retryable (a lock, the network, a cancelled context)
-// is returned as an error — the caller holds the sync so the record is
-// checked again — and any other failure (a commit that does not exist in
-// this repository, an unreadable entry) means the record does not match.
+// provenanceCheck applies the matching rule to the operator records for
+// one guard decision. Each record's own checks (recordFacts) cost git
+// reads, so they are established once and shared by the record's turn as
+// the candidate's match and by every chain that passes through it.
 //
-// An approved governed merge must also have performed the removal itself
-// (review round 1): the config at its BaseSHA — the target before the
-// merge — must apply every kind being removed (removed) to branch.
-// Otherwise an unauthorised relaxation already sitting on main (refused,
-// the rules kept) was installed by the next approved merge that touched
-// the file at all, even one whose own diff only adds a rule — the
-// operator approved that diff, not the relaxation it was laid over. An
-// override push keeps owner question 8's rule (the push changed the
-// file): the operator wrote the bytes being installed, and that is the
-// documented re-affirmation (docs/git-push-guide.md §4).
-func (s *Service) provenanceMatches(ctx context.Context, rec *store.GovernanceAuthorization, head, newest string, content []byte, present bool, branch string, removed map[bpconfig.RuleKind]bool) (bool, error) {
+// The rule. A record matches when it is valid (validWith) and its config is
+// byte-for-byte the candidate. The removal it vouches for must then be
+// accounted for kind by kind along a chain of custody (custody):
+//
+//   - an override push accounts for every kind its bytes lack: the
+//     operator wrote those bytes (owner question 8's changed-the-file
+//     rule; the documented re-affirmation, docs/git-push-guide.md §4);
+//   - an approved governed merge accounts for the kinds its base config
+//     applied to the branch — its own diff removed them (review round 1:
+//     the operator approved that diff, not a relaxation it was laid over);
+//   - the kinds already missing at an approved merge's base are accounted
+//     for only when that base config is itself an authorised state: the
+//     result, byte for byte, of another valid record whose commit the base
+//     descends from, which is then judged the same way (review round 2:
+//     two authorised relaxations landing before one projection tick, each
+//     newer than the installed rows, were refused for good because the
+//     newest record's base no longer applied the kind the earlier act had
+//     removed).
+//
+// Bytes, not kinds, link the chain, and every link must descend in
+// history: an unauthorised write anywhere between two authorised acts
+// breaks it, even when it only re-drops a kind an earlier act had dropped
+// and a later one restored. A looser rule — "some valid record in the
+// window removed this kind" — would launder exactly that write.
+//
+// A retryable git failure on any record is kept in verifyErr: when nothing
+// matched, the caller holds the sync rather than refuse (a refusal is not
+// looked at again until the file changes), and any other failure means
+// the record does not match.
+type provenanceCheck struct {
+	s       *Service
+	records []store.GovernanceAuthorization
+	head    string
+	newest  string // the installed rows' source commit or the anchor; "" for none
+	branch  string
+	facts   []*recordFacts
+	// failed memoises custody walks that failed, keyed by record and the
+	// kinds still to account for. Along a chain every link's commit is an
+	// ancestor of the previous approved link's base, itself a proper
+	// ancestor of that link's merge commit, so a record already on the
+	// path can never be a later link and excluding it changes nothing: the
+	// memo is exact. With inconsistent records it can only refuse more,
+	// the safe direction. The path set itself only stops cycles on such
+	// records.
+	failed    map[custodyKey]bool
+	chain     []int // the record indexes of the last successful custody walk, oldest first
+	verifyErr error
+}
+
+// recordFacts is what one record's own checks established.
+type recordFacts struct {
+	// eligible: an authorisation source, a full commit id, reachable from
+	// the head and newer than what is installed.
+	eligible bool
+	content  []byte // the config at the record's commit
+	present  bool
+	// The base is read only for a record whose content is wanted (as the
+	// candidate, or as a link of a chain), as before review round 2.
+	baseRead bool
+	// changed: the act changed the config (owner question 8).
+	changed bool
+	// created: the record has no base (BaseSHA empty or all zeros) — the
+	// act created the branch, so the state before it is the bootstrap
+	// defaults and nothing older can be chained to.
+	created     bool
+	baseContent []byte
+	basePresent bool
+}
+
+type custodyKey struct {
+	record int
+	kinds  string
+}
+
+// noteErr keeps the first retryable failure.
+func (p *provenanceCheck) noteErr(ctx context.Context, err error) {
+	if err = transientOnly(ctx, err); err != nil && p.verifyErr == nil {
+		p.verifyErr = err
+	}
+}
+
+// validWith reports whether record i is valid and its config is exactly
+// (content, present), establishing each check once. A record whose checks
+// failed is invalid (a retryable failure is noted).
+func (p *provenanceCheck) validWith(ctx context.Context, i int, content []byte, present bool) bool {
+	f := p.facts[i]
+	if f == nil {
+		var err error
+		if f, err = p.eligibility(ctx, &p.records[i]); err != nil {
+			p.noteErr(ctx, err)
+			f = &recordFacts{}
+		}
+		p.facts[i] = f
+	}
+	if !f.eligible || f.present != present || (present && !bytes.Equal(f.content, content)) {
+		return false
+	}
+	if !f.baseRead {
+		if err := p.readBase(ctx, &p.records[i], f); err != nil {
+			p.noteErr(ctx, err)
+			f.eligible = false
+			return false
+		}
+	}
+	return f.changed
+}
+
+func (p *provenanceCheck) eligibility(ctx context.Context, rec *store.GovernanceAuthorization) (*recordFacts, error) {
+	invalid := &recordFacts{}
 	switch rec.Source {
 	case store.GovernanceSourceOverrideEvent, store.GovernanceSourceApprovedMerge:
 	default:
-		return false, nil // a pending approval, or a source this guard does not know, vouches for nothing
+		return invalid, nil // a pending approval, or a source this guard does not know, vouches for nothing
 	}
 	c := rec.CommitSHA
 	if !isHexSHA(c) {
-		return false, nil
+		return invalid, nil
 	}
 	// Reachable: the record's commit is in the history being installed.
-	mb, err := s.git.MergeBase(ctx, c, head)
-	if err != nil {
-		return false, transientOnly(ctx, err)
-	}
-	if strings.TrimSpace(mb) != c {
-		return false, nil
+	if ok, err := p.ancestor(ctx, c, p.head); err != nil || !ok {
+		return invalid, err
 	}
 	// New: not already behind what is installed (or synced).
-	if newest != "" {
-		mb, err := s.git.MergeBase(ctx, c, newest)
-		if err != nil {
-			return false, transientOnly(ctx, err)
-		}
-		if strings.TrimSpace(mb) == c {
-			return false, nil
+	if p.newest != "" {
+		if old, err := p.ancestor(ctx, c, p.newest); err != nil || old {
+			return invalid, err
 		}
 	}
-	// Content: the record's config is byte-for-byte the candidate (or,
-	// for a deleted file, the record deleted it too).
-	recContent, recPresent, err := s.configAt(ctx, c)
+	content, present, err := p.s.configAt(ctx, c)
 	if err != nil {
-		return false, transientOnly(ctx, err)
+		return invalid, err
 	}
-	if recPresent != present || (present && !bytes.Equal(recContent, content)) {
-		return false, nil
-	}
-	// Changed: the act itself changed the config (owner question 8).
-	base := rec.BaseSHA
-	if base == "" || isZeroSHA(base) {
-		// The config was created by the act (its base is the bootstrap
-		// defaults).
-		return recPresent && (rec.Source != store.GovernanceSourceApprovedMerge || protectsAll(nil, false, branch, removed)), nil
-	}
-	if !isHexSHA(base) {
-		return false, nil
-	}
-	baseContent, basePresent, err := s.configAt(ctx, base)
-	if err != nil {
-		return false, transientOnly(ctx, err)
-	}
-	if basePresent == recPresent && (!recPresent || bytes.Equal(baseContent, recContent)) {
-		return false, nil // the act did not change the config
-	}
-	if rec.Source == store.GovernanceSourceApprovedMerge && !protectsAll(baseContent, basePresent, branch, removed) {
-		return false, nil // the approved diff did not remove the protection
-	}
-	return true, nil
+	return &recordFacts{eligible: true, content: content, present: present}, nil
 }
 
-// protectsAll reports whether a config (absent: the bootstrap defaults)
-// applies every kind in kinds to branch. A config that does not parse
-// protects nothing here: a record whose base cannot be read as rules
-// cannot be shown to have removed anything.
-func protectsAll(content []byte, present bool, branch string, kinds map[bpconfig.RuleKind]bool) bool {
+// readBase reads the record's base config and decides "changed".
+func (p *provenanceCheck) readBase(ctx context.Context, rec *store.GovernanceAuthorization, f *recordFacts) error {
+	f.baseRead = true
+	if base := rec.BaseSHA; base == "" || isZeroSHA(base) {
+		// The config was created by the act (its base is the bootstrap
+		// defaults).
+		f.created = true
+		f.changed = f.present
+		return nil
+	} else if !isHexSHA(base) {
+		return nil // changed stays false: the record does not match
+	}
+	var err error
+	f.baseContent, f.basePresent, err = p.s.configAt(ctx, rec.BaseSHA)
+	if err != nil {
+		return err
+	}
+	f.changed = f.basePresent != f.present || (f.present && !bytes.Equal(f.baseContent, f.content))
+	return nil
+}
+
+// ancestor reports whether a is b or an ancestor of b.
+func (p *provenanceCheck) ancestor(ctx context.Context, a, b string) (bool, error) {
+	mb, err := p.s.git.MergeBase(ctx, a, b)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(mb) == a, nil
+}
+
+// authorises reports whether record i vouches for installing the candidate
+// (content, present), which removes the kinds in removed from the branch.
+func (p *provenanceCheck) authorises(ctx context.Context, i int, content []byte, present bool, removed map[bpconfig.RuleKind]bool) bool {
+	if !p.validWith(ctx, i, content, present) {
+		return false
+	}
+	p.chain = nil
+	return p.custody(ctx, i, removed, map[int]bool{i: true})
+}
+
+// custody reports whether the kinds in missing — absent from record i's
+// resulting config, present in the installed rules — are accounted for by
+// record i and the authorised states before it (the rule on
+// provenanceCheck). Record i is valid.
+func (p *provenanceCheck) custody(ctx context.Context, i int, missing map[bpconfig.RuleKind]bool, onPath map[int]bool) bool {
+	rec, f := &p.records[i], p.facts[i]
+	if rec.Source == store.GovernanceSourceOverrideEvent {
+		p.chain = append(p.chain, i)
+		return true
+	}
+	if f.created {
+		if !protectsAll(nil, false, p.branch, missing) {
+			return false
+		}
+		p.chain = append(p.chain, i)
+		return true
+	}
+	// The kinds this approved diff removed itself are accounted for.
+	baseKinds := configKinds(f.baseContent, f.basePresent, p.branch)
+	left := map[bpconfig.RuleKind]bool{}
+	for k := range missing {
+		if !baseKinds[k] {
+			left[k] = true
+		}
+	}
+	if len(left) == 0 {
+		p.chain = append(p.chain, i)
+		return true
+	}
+	key := custodyKey{record: i, kinds: strings.Join(kindNames(left), ",")}
+	if p.failed[key] {
+		return false
+	}
+	// The rest were already missing at the base: that state must be the
+	// result of an earlier authorised act the base descends from.
+	for j := range p.records {
+		if onPath[j] {
+			continue
+		}
+		if !p.validWith(ctx, j, f.baseContent, f.basePresent) {
+			continue
+		}
+		earlier, err := p.ancestor(ctx, p.records[j].CommitSHA, rec.BaseSHA)
+		if err != nil {
+			p.noteErr(ctx, err)
+			continue
+		}
+		if !earlier {
+			continue
+		}
+		onPath[j] = true
+		ok := p.custody(ctx, j, left, onPath)
+		delete(onPath, j)
+		if ok {
+			p.chain = append(p.chain, i)
+			return true
+		}
+	}
+	p.failed[key] = true
+	return false
+}
+
+// custodyCommits lists the commits of the last successful custody walk,
+// newest first, for the log.
+func (p *provenanceCheck) custodyCommits() []string {
+	out := make([]string, 0, len(p.chain))
+	for n := len(p.chain) - 1; n >= 0; n-- {
+		out = append(out, shortSHA(p.records[p.chain[n]].CommitSHA))
+	}
+	return out
+}
+
+// configKinds is the union of the protection kinds a config (absent: the
+// bootstrap defaults) applies to branch. A config that does not parse
+// applies nothing here: a record whose base cannot be read as rules cannot
+// be shown to have removed anything.
+func configKinds(content []byte, present bool, branch string) map[bpconfig.RuleKind]bool {
 	rules := bootstrapCandidate()
 	if present {
 		cfg, err := bpconfig.Parse(bytes.NewReader(content))
 		if err != nil {
-			return false
+			return map[bpconfig.RuleKind]bool{}
 		}
 		rules = cfg.Rules
 	}
-	have := kindsFor(rules, branch)
+	return kindsFor(rules, branch)
+}
+
+// protectsAll reports whether a config (absent: the bootstrap defaults)
+// applies every kind in kinds to branch.
+func protectsAll(content []byte, present bool, branch string, kinds map[bpconfig.RuleKind]bool) bool {
+	have := configKinds(content, present, branch)
 	for k := range kinds {
 		if !have[k] {
 			return false

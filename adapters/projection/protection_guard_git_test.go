@@ -19,6 +19,9 @@ import (
 const (
 	pgProtected = "version: 1\nrules:\n  - branch: main\n    protections: [no-delete, no-direct-write]\n"
 	pgRelaxed   = "version: 1\nrules: []\n"
+	// pgNoDirectWriteOnly drops no-delete from main and keeps
+	// no-direct-write: the first of two relaxations (review round 2).
+	pgNoDirectWriteOnly = "version: 1\nrules:\n  - branch: main\n    protections: [no-direct-write]\n"
 )
 
 // guardMapStore is mapStore with the installed rows readable.
@@ -96,6 +99,29 @@ func (f *pgFix) requireInstalledRelaxed(why, source string) {
 
 func (f *pgFix) refusals() int {
 	return len(f.router.ofType(domain.EventBranchProtectionRemovalRefused))
+}
+
+// mergeRun commits config on a fresh run branch cut from main and merges
+// it into main with --no-ff, as a governed merge does. It returns main
+// before the merge (the record's BaseSHA) and the merge commit.
+func (f *pgFix) mergeRun(run, config string) (pre, merge string) {
+	f.t.Helper()
+	f.r.run("checkout", "-q", "-b", "spine/run/"+run)
+	f.r.write(BranchProtectionConfigPath, config)
+	f.r.commit("run " + run + " work")
+	f.r.run("checkout", "-q", "main")
+	pre = f.r.run("rev-parse", "HEAD")
+	f.r.run("merge", "-q", "--no-ff", "-m", "Merge run "+run, "spine/run/"+run)
+	return pre, f.r.run("rev-parse", "HEAD")
+}
+
+// commitConfig writes config on the current branch and commits it (an
+// override push when a record names it, an unauthorised write otherwise).
+func (f *pgFix) commitConfig(config, msg string) (pre, commit string) {
+	f.t.Helper()
+	pre = f.r.run("rev-parse", "HEAD")
+	f.r.write(BranchProtectionConfigPath, config)
+	return pre, f.r.commit(msg)
 }
 
 func override(commit, base string) store.GovernanceAuthorization {
@@ -202,6 +228,49 @@ func TestProtectionRemovalGuard_AcceptedCases(t *testing.T) {
 		if f.prov.calls != calls {
 			t.Fatal("provenance re-queried for an unrelated commit")
 		}
+	})
+
+	// Review round 2: two authorised relaxations reach main before one
+	// projection tick (two approvals inside one poll, a second merge
+	// landing during the in-flight hold, a sync held for infrastructure).
+	// The newest record removed no-direct-write; no-delete was removed by
+	// the earlier authorised act, whose result is exactly the newest
+	// record's base. Round 1 judged the newest base alone against
+	// installed−candidate and refused both, for good: a FullRebuild could
+	// not recover. Mutation: dropping the chain step (custody) refuses.
+	t.Run("two approved relaxations in one sync window", func(t *testing.T) {
+		f := newPGFix(t)
+		pre1, m1 := f.mergeRun("r1", pgNoDirectWriteOnly)
+		pre2, m2 := f.mergeRun("r2", pgRelaxed) // built on r1: cut from main after m1
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2), approved(m1, pre1)}
+		f.sync()
+		f.requireInstalledRelaxed("two approvals in one window", m2)
+		if f.refusals() != 0 {
+			t.Fatalf("refusals = %d, want 0", f.refusals())
+		}
+	})
+	t.Run("an override push then an approved merge in one sync window", func(t *testing.T) {
+		f := newPGFix(t)
+		preO, o := f.commitConfig(pgNoDirectWriteOnly, "operator override push drops no-delete")
+		pre2, m2 := f.mergeRun("r2", pgRelaxed)
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2), override(o, preO)}
+		f.sync()
+		f.requireInstalledRelaxed("override then approval in one window", m2)
+	})
+	t.Run("the earlier record arriving late is installed by a FullRebuild", func(t *testing.T) {
+		// A refusal is re-evaluated on every FullRebuild: once the earlier
+		// act's record is readable, the rebuild installs both acts' result.
+		f := newPGFix(t)
+		pre1, m1 := f.mergeRun("r1", pgNoDirectWriteOnly)
+		pre2, m2 := f.mergeRun("r2", pgRelaxed)
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2)}
+		f.sync()
+		f.requireProtected("the earlier act's record not readable yet")
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2), approved(m1, pre1)}
+		if err := f.svc.FullRebuild(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.requireInstalledRelaxed("rebuild with both records", m2)
 	})
 }
 
@@ -312,6 +381,52 @@ func TestProtectionRemovalGuard_RefusedCases(t *testing.T) {
 		}
 		f.requireProtected("rebuild after the laundering attempt")
 	})
+	t.Run("laundering: an unauthorised relaxation between authorised acts", func(t *testing.T) {
+		// Review round 2. One window: r1 (approved) drops no-delete, r2
+		// (approved) restores it, an unauthorised write drops it again
+		// with other bytes, and r3 (approved) only adds a release rule on
+		// top. no-delete was removed by an authorised act once in this
+		// window, but the state r3 was approved over is not one any
+		// operator authorised. A rule that accepted "some valid record
+		// removed this kind" (the reviewer's per-kind union), or that
+		// matched intermediate states by kinds instead of bytes, installs
+		// it. Mutations: either relaxation is caught here.
+		f := newPGFix(t)
+		pre1, m1 := f.mergeRun("r1", pgNoDirectWriteOnly)
+		pre2, m2 := f.mergeRun("r2", pgProtected)
+		f.commitConfig(pgNoDirectWriteOnly+"# unauthorised\n", "relaxation slips in again")
+		pre3, m3 := f.mergeRun("r3", pgNoDirectWriteOnly+"# unauthorised\n  - branch: release/*\n    protections: [no-delete]\n")
+		f.prov.records = []store.GovernanceAuthorization{approved(m3, pre3), approved(m2, pre2), approved(m1, pre1)}
+		f.sync()
+		f.requireProtected("relaxation laundered through an earlier authorised act")
+		if f.refusals() != 1 {
+			t.Fatalf("refusals = %d, want 1", f.refusals())
+		}
+		if err := f.svc.FullRebuild(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.requireProtected("rebuild after the laundering attempt")
+	})
+	t.Run("laundering: authorised bytes from a line the approved base does not descend from", func(t *testing.T) {
+		// Review round 2. An operator authorised dropping no-delete on a
+		// side line; the same bytes were written to main without one; an
+		// approved run then dropped no-direct-write; the side line is
+		// joined later with `merge -s ours` (tree unchanged), making the
+		// side record reachable. The approved run's base was produced by
+		// the unauthorised write, not by the side record, which is not an
+		// ancestor of that base. Mutation: dropping the ancestry check
+		// installs the empty ruleset.
+		f := newPGFix(t)
+		f.r.run("checkout", "-q", "-b", "side")
+		preO, o := f.commitConfig(pgNoDirectWriteOnly, "operator override on a side line")
+		f.r.run("checkout", "-q", "main")
+		f.commitConfig(pgNoDirectWriteOnly, "the same bytes on main, no operator")
+		pre2, m2 := f.mergeRun("r2", pgRelaxed)
+		f.r.run("merge", "-q", "-s", "ours", "-m", "join the side line", "side")
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2), override(o, preO)}
+		f.sync()
+		f.requireProtected("authorised bytes replayed from a parallel line")
+	})
 	t.Run("bootstrap replay: a record older than the sync's start", func(t *testing.T) {
 		f := newPGFix(t)
 		a := f.relax("authorised relaxation (long ago)")
@@ -376,6 +491,27 @@ func TestProtectionRemovalGuard_DeletionOnAnotherAuthoritativeBranch(t *testing.
 	}
 }
 
+// TestProtectionRemovalGuard_ApprovedMergeWithoutABase: an approved-merge
+// record with no base (the store never returns one; this is the defensive
+// branch) is judged against the bootstrap defaults as the state before
+// it, which protect main only — so on another authoritative branch it
+// accounts for nothing. Mutation: accepting a created base outright
+// installs the empty ruleset for trunk.
+func TestProtectionRemovalGuard_ApprovedMergeWithoutABase(t *testing.T) {
+	f := newPGFix(t)
+	f.st.bpRules = []store.BranchProtectionRuleProjection{{BranchPattern: "*", RuleOrder: 0,
+		Protections: []byte(`["no-delete","no-direct-write"]`)}}
+	f.svc.WithProtectionRemovalGuard(ProtectionRemovalGuard{Enabled: true, AuthoritativeBranch: "trunk",
+		Provenance: f.prov, Events: f.router})
+	_, m := f.mergeRun("r1", pgRelaxed)
+	f.prov.records = []store.GovernanceAuthorization{approved(m, "")}
+	f.sync()
+	if len(f.st.bpRules) == 0 || f.refusals() != 1 {
+		t.Fatalf("an approved merge without a base installed %d rows (refusals %d), want the rules kept",
+			len(f.st.bpRules), f.refusals())
+	}
+}
+
 // flakyMergeBaseGit fails MergeBase for one commit with a retryable git
 // error, n times.
 type flakyMergeBaseGit struct {
@@ -419,6 +555,31 @@ func TestProtectionRemovalGuard_RecordVerificationErrors(t *testing.T) {
 		}
 		f.sync()
 		f.requireInstalledRelaxed("after the git failure cleared", o)
+	})
+	t.Run("transient on an earlier link of the chain: held and retried", func(t *testing.T) {
+		// Review round 2: the newest record matches the candidate, but the
+		// earlier authorised act it chains to cannot be checked this tick.
+		// A refusal would advance past both acts for good.
+		f := newPGFix(t)
+		pre1, m1 := f.mergeRun("r1", pgNoDirectWriteOnly)
+		pre2, m2 := f.mergeRun("r2", pgRelaxed)
+		flaky := &flakyMergeBaseGit{CLIClient: f.r.git, commit: m1, n: 1}
+		f.svc = NewService(flaky, f.st, f.router, 0)
+		if err := f.svc.WithAuthoritativeBranch("main"); err != nil {
+			t.Fatal(err)
+		}
+		f.svc.WithProtectionRemovalGuard(ProtectionRemovalGuard{Enabled: true, Provenance: f.prov, Events: f.router})
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2), approved(m1, pre1)}
+		_ = f.svc.IncrementalSync(context.Background())
+		f.requireProtected("transient failure on the earlier link")
+		if st := f.st.syncState(); st.Status != "error" || st.LastSyncedCommit != f.c0 {
+			t.Fatalf("state = %+v, want error held at c0", st)
+		}
+		if f.refusals() != 0 {
+			t.Fatal("a transient failure on a chain link was reported as a refusal")
+		}
+		f.sync()
+		f.requireInstalledRelaxed("after the git failure cleared", m2)
 	})
 	t.Run("record commit not in the repository: mismatch", func(t *testing.T) {
 		f := newPGFix(t)
