@@ -2011,3 +2011,124 @@ session's scratchpad.
 - **TASK-017:** the guard diffs the merged commit (`src.sha`), so any change to the bound cascade
   is evaluated automatically.
 - **Owner:** sign off ADR-016 (OQ1) to move it to `Accepted`.
+
+### Review round 1 (2026-10-16)
+
+Three reviewers looked at `569ec83e`: correctness and compatibility, adversarial security, and
+completeness and tests. Each finding was checked against the code before anything changed: the
+races by reading the decision and merge paths and then reproducing them with fake stores and
+hooks, rename following with real git at the default configuration, and the rest by reading the
+code. Commits: `1148a742` (engine, store, git), `9e808929` (projection), `283e7f9f` (wiring
+test), `0c842103` (docs, CI), `556fca14` (the codex round below), `b038cb3b` (lint). Still no
+runtime schema change: `git diff --name-only main...HEAD -- migrations go.mod go.sum` is empty.
+
+#### Findings and what was done
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | P2 | An approve whose write lands after a concurrent reject keeps the approval it wrote | **FIXED.** `DecideGovernanceMerge` now holds a per-run governance stripe (see 5). The approval is written only while the run is still `committing`: `(*PostgresStore).MergeCommitMetaIfStatus`, an `UPDATE … WHERE status = $3` behind the new optional `commitMetaStatusMerger`. The fallback writes, re-reads, and writes the tombstone back if the run left `committing`. A reject now revokes a second time after its route (`revokeAgainAfterRoute`). The `governance.merge_decided` event is emitted as soon as the approval is recorded. Tests: `TestGovernanceDecision_LateApproveCannotOutliveAReject` (conditional write and fallback: 409, no approval, no approved event, the resubmit is held), `TestGovernanceDecision_RejectRevokesAgainAfterItsRoute` (an approval written between the revocation and the route does not survive; publish and no-publish), and the store integration case for `MergeCommitMetaIfStatus` |
+| 2 | P2 | The lifecycle exemption's SoD check misses the run's starter, who wrote the body | **FIXED.** `startWorkflowPlanningRun` now records the context's actor in the reserved key `spine.governance.started_by` (`engine.CommitMetaGovernanceStartedBy`), only while the guard and the exemption are on. `reviewerIsNotAuthor` refuses in three cases: the reviewer started the run; no starter is recorded (runs from before the upgrade); or the reviewer is a run author by `runAuthor`, TASK-007's definition (any author execution in any status, plus assignment-ledger rows, which also covers the assignee-only `write_context` writes). Tests: `TestGovernanceGuard_LifecycleExemption` gains three cases (the reviewer started the run while another actor drafted; no starter; the reviewer held an earlier failed draft attempt), and `TestStartWorkflowPlanningRun_RecordsTheStarter` |
+| 3 | P3 | Docs say the post-merge assertion fires only under non-default merge configuration, but rename following triggers it at the default configuration | **FIXED.** Corrected in ADR-016 §3 and the Alternatives, KNOWN-LIMITATIONS 7, the `governance_guard.go` comments, the CHANGELOG and engine-state-machine. The refusal message now names the remedy: update the run branch from `main` and resubmit. Test `TestGovernanceGuard_RenameFollowingIsRefusedWithARemedy` uses real git at the default configuration: the run is refused, `main` is restored, the outcome names the remedy, and after `git merge main` on the run branch the same change is **held** and an approval merges it |
+| 4 | P3 | The consumption marker is written after `MergeBound` moves the local `main`, so a projection tick in that window refuses the approved relaxation | **FIXED** (done properly once codex round R1-1 showed that with bootstrap rows even a rebuild cannot recover). `ListGovernanceAuthorizations` also returns runs still `committing` with an approval (`GovernanceSourcePendingApproval`, never an authorisation). When a removal has no matching record, the approved commit is on the head and no reachable marker exists, the sync is **held** for a retry instead of refused (`approvedMergeInFlight`). Test: `TestProtectionRemovalGuard_ApprovedMergeInFlightHoldsTheSync` (protected and bootstrap rows; a stale marker keeps the hold; a pending entry vouches for nothing; an unrelated pending approval does not hold). The store integration test covers the pending rows. Residual: KNOWN-LIMITATIONS 13 |
+| 5 | P2 | A reject that arrives during an approved attempt in flight returns success, and the change merges anyway | **FIXED.** `governanceRunStripes` is a package-level, run-striped, context-honouring semaphore, re-entrant through the context. `MergeRunBranch` holds it for the whole attempt while the guard is on (`lockGovernanceRunIfGuarded`; nothing is taken with the guard off), and so does `DecideGovernanceMerge`. A reject therefore waits for the attempt and then answers 409. A reject after the approved merge reached the local `main` is now 409 ("the merge won"), not 412. Tests: `TestGovernanceDecision_RejectWaitsForAnInFlightApprovedMerge` (the approve's own merge, and a scheduler retry carrying the approval) and `TestLockGovernanceRun` (re-entrant; exclusive; the waiter gives up with its context; idempotent release; a guard-off `MergeRunBranch` never waits). KNOWN-LIMITATIONS 9 is rewritten, including the cross-process residual |
+| 6 | P2 | Same as 1 (`approveGovernanceMerge` at `:181`) | **FIXED** with 1 |
+| 7 | P2 | A merge that can never be evaluated (no merge base, or a diff over the output limit) stays `committing` for good | **FIXED.** `unevaluableForever` covers `errGovernanceNoMergeBase` and `git.ErrOutputTooLarge`. `refuseUnevaluableMerge` takes the permanent route: the outcome is failed, then `merge_failed` or a failed run. A decision on such a run is 412 and the status reads "cannot be evaluated: …". `(*git.CLIClient).MergeBases` maps `git merge-base`'s exit 1 with no output to an empty list, and the `MergeBaseLister` doc gives the contract. Errors that may be transient still keep the run `committing`. Tests: `TestGovernanceGuard_UnevaluableMergeIsRefusedNotStuck` (both causes × publish and no publish) and `TestMergeBases_RefusesAndFailsClosed` (unrelated histories give an empty list) |
+| 8 | P3 | Laundering: a record whose own diff only tightens still vouches for a relaxation already on `main` | **FIXED for approved merges**, recorded as a residual for override pushes. An approved-merge record now counts only if the config at its `BaseSHA` applied every kind being removed (`protectsAll`). Test: `TestProtectionRemovalGuard_RefusedCases/laundering:_an_approved_merge_whose_own_diff_only_adds_a_rule` (IncrementalSync and FullRebuild). Override pushes keep OQ8's changed-the-file rule, for two reasons. The operator authored the bytes being installed. And the documented re-affirmation, a comment-line edit in an override push (OQ8's stated cost), depends on that rule; the stricter rule would turn every re-affirmation into a two-push restore-then-relax. The residual is KNOWN-LIMITATIONS 14 and a git-push-guide warning |
+| 9 | P3 | Same as 3 | **FIXED** with 3 |
+| 10 | P2 | No test covers the process-level wiring of `spine serve` | **FIXED.** `TestBuildServerConfig_EnablesGovernanceGuards` drives `buildServerConfig` (`artifacts_dir: spine`, env unset and `off`). Overlay mutations were caught: dropping `enableProtectionRemovalGuard(projSync, …)` fails it, and so does passing `nil` for `workflowDirsFor(…)`. A compile-time assertion pins the two `PostgresStore` capabilities the engine type-asserts |
+| 11 | P3 | event-schemas §4.17 decision id is stale | **FIXED.** The id is now `evt-<trace12>-governance-<approve\|reject>-<sha12>-<unixmilli>-<rand12>`, with "do not parse; correlate on run_id/bound_sha/decision" |
+| 12 | P3 | The two DB-backed tests never run in CI | **FIXED.** `scenario-git-http` gains a must-pass, never-skip step for `^TestGovernancePathGuard_` (scenario) and `^TestGovernanceStore_Integration$` (integration). It was run verbatim (gates below) |
+| 13 | P3 | AC 26 evidence omits `internal/customer/docindex/...` and `internal/docmemory/...` | **FIXED.** Run this round, both with and without the platform DB (SMP gate below) |
+
+**Acceptance-criteria gaps.**
+
+- **AC 1** stays partial: ADR-016 is `Proposed` until the owner signs off OQ1. This is owner-gated and cannot be fixed in code.
+- **AC 9**, **AC 18** and **AC 16**: the deviations already recorded (9, 12, and the AC 16 reading) still stand.
+- **AC 13, 29, 30 and 31**: done (findings 2, 7, 10 and 1/5).
+- **AC 26**: evidence completed (finding 13).
+- **ADR number**: still free, no gap.
+- **AC 11**: the AC's literal "no merge base → ErrUnavailable" is now the permanent route (Deviation 22).
+
+#### Codex (`codex review --base main`, codex-cli 0.162.1, no model override)
+
+| Round | Code | Review sub-session (`source: {"subagent":"review"}`, `model: gpt-6.1-sol`) | Findings | Disposition |
+|---|---|---|---|---|
+| R1-1 | `0c842103` | `01a14403-3f1b-77a2-b4d3-abd94dc16498` | P2: the lifecycle exemption ignores the target's version, so a clean merge with a `main` that has since made the file govern workflows lands unapproved. P2: with bootstrap rows, a refusal inside the marker window moves the newness anchor past the approved merge, so even a rebuild cannot install it | Both real, fixed in `556fca14`. 1: the gate also reads the target tip, and the post-merge assertion re-checks the merged result (`lifecycleResultStillExempt`); test `TestGovernanceGuard_LifecycleExemptionFollowsTheTarget` covers main moving before the gate (held) and between the gate and the merge (refused). 2: the in-flight hold (finding 4) |
+| R1-2 | `556fca14` | `01a1440e-8196-7c30-a84f-02c57bac30c7` | "No actionable regressions were identified" | — |
+| R1-3 | `b038cb3b` (the final code) | `01a14432-7e7d-74e2-9523-e5504b24e4b6` | "No actionable regressions were identified" | — |
+
+No codex finding was rejected.
+
+Every new behaviour was mutation-checked by `go test -overlay` (worktree untouched), and every mutant was caught. The mutants:
+
+- **Stripe and approval write:** no stripe in `MergeRunBranch`; no stripe in `DecideGovernanceMerge`; an unconditional approval write; no second revocation.
+- **Unevaluable merges:** no unevaluable branch; no `MergeBases` exit-1 mapping.
+- **Lifecycle exemption:** no starter check; no `runAuthor`; no starter recording; no target-tip read; no post-merge lifecycle re-check.
+- **Decisions:** reject-after-landed back to 412.
+- **Projection:** no `protectsAll`; no in-flight hold; pending entries counted as provenance.
+- **Wiring:** both call sites in `serve_wiring.go`.
+
+#### Deviations added this round
+
+21. **Decisions are serialised with merges in process only**, following the engine's existing stripe pattern (`sodBindStripes`, `recoveryBindingStripes`). Across processes, the conditional approval write plus the second revocation still stop a late approval. But a reject served by another process while an approved merge is in flight is not ordered with it; that would need a database lock per run. This is KNOWN-LIMITATIONS 9, and the integration guide tells embedders with replicas to serialise the two themselves.
+22. **No merge base and an oversized diff are permanent refusals**, not `ErrUnavailable` as AC 11 lists. Retrying cannot change them, and a retry left the run undecidable, which breaks AC 29. The `MergeBaseLister` contract now says unrelated histories are an empty list.
+23. **A reject after the approved merge reached the local `main` is 409, not 412.** Nothing is left to evaluate there because the merge won, which is what KNOWN-LIMITATIONS 9 says.
+24. **Only approved-merge records must have removed the protection themselves** (finding 8). Override pushes keep OQ8's rule because of the documented re-affirmation.
+25. **An unmatched removal while an approved merge is in flight holds the sync** (infrastructure retry) instead of being refused (finding 4, refining OQ7). Otherwise the approved change would be lost for good, which matters most with bootstrap rows. Residual: KNOWN-LIMITATIONS 13.
+26. **The starter is recorded only while the guard and the exemption are on**, so the zero value writes nothing. A lifecycle run started before the upgrade, or with no actor on the context, gets no exemption and needs an operator approval.
+27. **When the lifecycle exemption fails its post-merge re-check, the merge is refused permanently.** This happens only if the target moved between the gate and the merge. It is not a hold, because the post-merge path never holds (OQ6). The resubmit is then held, since the gate reads the moved target.
+
+#### Gates (final code `b038cb3b`; only this notes commit follows)
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | `lint-boundaries: OK`; OK; "engine constructed and exercised; library surface is sound." (on `b038cb3b`) |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 FAIL (on `b038cb3b`) |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean (on `b038cb3b`) |
+| `go test -race -p 4 -count=1` on the 11 touched non-scenario packages | all ok (on `556fca14`); `adapters/projection` re-run with `-race` on `b038cb3b`: ok |
+| `-tags integration -race -p 1 -count=1 -v` on `adapters/{delivery,projection,store}`, `service/cmd/spine`, `service/internal/gateway` (fresh `s006_r1it2`, registry `s006_r1reg2` migrated from `migrations/registry`), on `556fca14` | 1944 PASS, 0 SKIP, 1 FAIL: `TestRunModeDatabaseDefault`, the known pre-existing failure. An earlier run that also included `adapters/git` had one more failure, `adapters/delivery` `TestQueuePG_CircuitOpenDoesNotStarve` (TASK-010's breaker test, timing under load); standalone it passed `-count=3` |
+| CI `scenario-git-http`, its `run:` steps verbatim (`w3final/ci_job.py` on this worktree's `ci.yml`, fresh `s006_r1ci`), on `b038cb3b` | job rc 0. Step 2 (`TestGitHTTP_*`) 87 PASS, step 3 26, step 4 57, step 5 1, **new step 6** 19 (scenario) + 1 (store integration); 0 FAIL, 0 SKIP |
+| Full scenario suite `go test -tags scenario -p 1 -count=1 -v ./service/scenariotest/...` (fresh `s006_r1scen`, registry `s006_r1sreg`), on `556fca14` | 31 top-level FAIL, `diff`-**identical** to the wave-3 baseline `scen-b.topfails`; 199 top-level PASS, including `TestGovernancePathGuard_HeldUntilOperatorApproves`; 0 SKIP |
+| CI `git-floor` in `golang:1.26-bookworm` (git 2.39.5; `--pull=never --rm --init`, non-root, worktree read-only at `/work/spine`, `GOPROXY=off`) plus this task's git tests, on `b038cb3b` | step 2: 73 PASS; step 3: 891 PASS (both `TestMergeBases` tests); `Governance\|WithGovernanceGuard\|LockGovernanceRun\|RecordsTheStarter` in `core/engine`: 124 PASS (a `-v` re-check lists `RenameFollowing…`, `LifecycleExemptionFollowsTheTarget`, `CrissCross…` and `LifecycleExemption` as PASS); `ProtectionRemovalGuard` in `adapters/projection`: 33 PASS; 0 FAIL; containers removed |
+| `golangci-lint` v2.11.4 `run --new-from-rev main` on the 11 touched packages, plain and `--build-tags=integration`, and with `service/scenariotest/...` under `--build-tags=scenario` | 0 issues each, after `b038cb3b` (one `gocritic rangeValCopy` the new `MergeSHA` field caused) |
+| `golangci-lint --enable-only=gosec`: `./...` plain; `./...` with `integration,scenario`; `--new-from-rev main` on `./core/... ./adapters/... ./service/...` | 0; 1, the pre-existing G602 at `adapters/store/postgres_integration_test.go:1563` (untouched); 0 |
+| `gofmt -l` (toolchain gofmt) on every changed `.go` file | empty |
+
+#### SMP compatibility gate (this round, on `b038cb3b`)
+
+`i23/s-T006/smp` = SMP `main` `1ae9b0e3` (detached, `.spine-revision` d23b897), `../spine` = this
+worktree, `GOFLAGS=-mod=readonly`. It was never modified: `git status` was clean afterwards.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `bash dev/lint-spine-internals.sh` | all OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1` on the 14 SMP packages whose imports or test imports reach a changed Spine package (computed again with `go list`; the same 14) | 13 ok; `projectionsvc` has no tests |
+| `go test -race -count=1 -v ./internal/customer/docindex/... ./internal/docmemory/...` (finding 13), without a database, then with `TEST_PLATFORM_DB` | ok, ok: 81 PASS, 14 SKIP (the docmemory repository tests skip without a database); with the database, 95 PASS, 0 SKIP |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s006_r1smp_it` with `vector`, `s006_r1spine_rt`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites", `go run ./dev/testgate … ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` | 1914 passed, 0 failed, 2 allowed skips; `testgate: PASS` |
+| SMP CI "Git gateway integration tests", `go run ./dev/testgate … -tags integration ./internal/customer/githttp/` | 301 passed, 0 failed, 1 allowed skip; `testgate: PASS` |
+| The three Linux-only skips in `golang:1.26-bookworm` (read-only mounts at `/work/s-T006/{smp,spine}`) | `TestDiffChildMemory_MillionPaths` PASS (peak 4408 KiB), `TestReceiveTimeMemory_RealGitReaderFetch` PASS (11352 KiB vs 265956 without the threshold), `TestIntegration_ReceiveTimeMemoryBounded` PASS (4 subtests) |
+
+`ws_*` databases and roles: 0 before and 0 after. The SMP zero value is unchanged:
+
+- The stripe is taken only with the guard on.
+- `recordLifecycleStarter` writes only with the guard and the exemption on.
+- `MergeCommitMetaIfStatus` is an optional store capability.
+- The `MergeBases` change is reachable only through the guard.
+- The projection changes run only inside `guardProtectionRemoval`, which is nil at the zero value.
+
+#### Environment
+
+The shared PostgreSQL holds only the `s006_r1*` databases listed above, and all of them were
+dropped (`s006%` count: 0). Docker ran only `golang:1.26-bookworm` from the present image
+(`--pull=never --rm`), and no container is left. Logs, overlay mutants and job scripts are in
+this session's scratchpad (`t006r1/`).
+
+#### Handoff changes
+
+- **SMP TASK-010.** Four additions to the earlier handoff:
+  - `RealGitOperator.MergeBases` must return an empty list, not an error, for unrelated histories.
+  - Add `MergeCommitMetaIfStatus` to `spinecore.RunStore` next to `MergeCommitMeta`.
+  - If customer-app runs replicas against one workspace database, serialise `DecideGovernanceMerge` with `MergeRunBranch` per run across them (for example with an advisory lock). The engine's stripe is in-process only.
+  - The provenance reader now also reads committing runs (no new grant: the same `SELECT` on `runtime.runs`).
+- **TASK-012.** Its worktree lock and bounded retry counter must also treat the governance stripe's `ErrUnavailable` (a waiter that gave up) as "try again".
