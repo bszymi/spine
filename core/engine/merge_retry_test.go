@@ -365,6 +365,81 @@ func TestMergeRetry_TransientPushIsRetriedUntilItLands(t *testing.T) {
 	}
 }
 
+// phaseCLI fails pushes while pushDown is set and merges (not their
+// aborts) while mergeDown is set, each with a transient error.
+type phaseCLI struct {
+	flakyPushCLI
+	mergeDown *atomic.Bool
+}
+
+func (p phaseCLI) Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if p.mergeDown.Load() && opts.Strategy != "abort" && opts.Source != "--abort" {
+		return git.MergeResult{}, errLocked
+	}
+	return p.CLIClient.Merge(ctx, opts)
+}
+
+func (p phaseCLI) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if p.mergeDown.Load() {
+		return git.MergeResult{}, errLocked
+	}
+	return p.CLIClient.MergeBound(ctx, opts)
+}
+
+// Codex review round 6: the merge lands and its push fails (attempt 1),
+// then later attempts fail before reaching the push (the merge itself, or
+// the working-tree restore, fails transiently). Their outcomes keep the
+// pending publication, so the budget still never abandons the run while
+// its merge sits on the local main; once both recover, it completes.
+func TestMergeRetry_LaterMergeFailureKeepsThePendingPublication(t *testing.T) {
+	for _, tc := range retryCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pushDown, mergeDown := &atomic.Bool{}, &atomic.Bool{}
+			pushDown.Store(true)
+			e := newRetryEnv(t, retryWorkflow(tc.publish), tc.binding, func(c *git.CLIClient) engine.GitOperator {
+				return phaseCLI{flakyPushCLI{c, pushDown}, mergeDown}
+			}, nil)
+			seed := regGit(t, e.origin, "rev-parse", "main")
+			e.driveToCommitting(tc.publish) // attempt 1: merged locally, push failed
+			first := e.primary()
+			if !first.MergedLocally() || first.LocalMergeSHA() == "" {
+				t.Fatalf("attempt 1 = %q, want a local merge with a failed push", first.FailureDetail)
+			}
+			mergeDown.Store(true)
+			for attempt := 2; attempt <= 6; attempt++ {
+				if err := e.orch.MergeRunBranch(ctx, e.run.RunID); err != nil {
+					t.Fatalf("retry %d: %v", attempt, err)
+				}
+				o := e.primary()
+				if o.Attempts != attempt || !o.FailureClass.IsTransient() || !o.MergedLocally() || o.LocalMergeSHA() != first.LocalMergeSHA() {
+					t.Fatalf("attempt %d = %d/%s %q; want the earlier local merge %s kept pending", attempt, o.Attempts, o.FailureClass, o.FailureDetail, first.LocalMergeSHA())
+				}
+				if ok, err := e.orch.AbandonExhaustedMerge(ctx, e.run.RunID, 3); ok || err != nil {
+					t.Fatalf("attempt %d: AbandonExhaustedMerge = %v, %v; want false (its merge is on the local main)", attempt, ok, err)
+				}
+				if r := e.runNow(); r.Status != domain.RunStatusCommitting {
+					t.Fatalf("attempt %d: run %s, want committing", attempt, r.Status)
+				}
+			}
+			if got := regGit(t, e.origin, "rev-parse", "main"); got != seed {
+				t.Fatalf("origin main moved to %s while pushes failed", got)
+			}
+			mergeDown.Store(false)
+			pushDown.Store(false)
+			if err := e.orch.MergeRunBranch(ctx, e.run.RunID); err != nil {
+				t.Fatalf("the retry after recovery: %v", err)
+			}
+			if r := e.runNow(); r.Status != domain.RunStatusCompleted {
+				t.Fatalf("run %s after recovery, want completed", r.Status)
+			}
+			if _, err := regTry(e.origin, "cat-file", "-e", "main:deliverable.md"); err != nil {
+				t.Fatal("the run's work is not on origin main after recovery")
+			}
+		})
+	}
+}
+
 // refuseCLI is the shared client with a verifyBoundMerge refusal injected
 // after MergeBound: CommitParents lies about the merge commit's second
 // parent. While the merge block still holds the tree it starts an in-place

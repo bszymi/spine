@@ -4,6 +4,7 @@ package domain_test
 // predicate.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/core/domain"
@@ -90,5 +91,47 @@ func TestRetriesExhausted_MergedLocallyNeverExhausts(t *testing.T) {
 	}
 	if got := domain.FirstExhaustedOutcome([]domain.RepositoryMergeOutcome{pushed}, 3); got != nil {
 		t.Fatalf("FirstExhaustedOutcome over a push-phase outcome = %+v, want nil", got)
+	}
+}
+
+// Codex review round 6: an attempt that fails before its own push keeps
+// naming an earlier merge that landed locally, so the outcome stays
+// publication pending and is never abandoned by the retry budget.
+func TestKeepPendingPublication(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	pushed := &domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureNetwork,
+		Attempts: 1, FailureDetail: domain.PushFailureDetail(sha, "git push: network error")}
+	if got := pushed.LocalMergeSHA(); got != sha {
+		t.Fatalf("LocalMergeSHA = %q, want %s", got, sha)
+	}
+	later := domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureRemoteUnavailable,
+		Attempts: 9, FailureDetail: "prepare the shared working tree: repository locked"}
+	later.KeepPendingPublication(pushed)
+	if !later.MergedLocally() || later.LocalMergeSHA() != sha || later.RetriesExhausted(3) ||
+		!strings.Contains(later.FailureDetail, "repository locked") {
+		t.Fatalf("a later merge-phase failure = %q (MergedLocally %v, exhausted %v); want the pending merge kept",
+			later.FailureDetail, later.MergedLocally(), later.RetriesExhausted(3))
+	}
+	// Carried again by the next failure, with the same SHA.
+	next := domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureNetwork,
+		Attempts: 10, FailureDetail: "git merge: network error"}
+	next.KeepPendingPublication(&later)
+	if next.LocalMergeSHA() != sha || strings.Count(next.FailureDetail, "local merge succeeded") != 1 {
+		t.Fatalf("carried twice = %q", next.FailureDetail)
+	}
+	for name, tc := range map[string]struct {
+		prior *domain.RepositoryMergeOutcome
+		out   domain.RepositoryMergeOutcome
+	}{
+		"no prior":                 {nil, later},
+		"prior not merged locally": {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "git merge: x"}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
+		"this attempt merged":      {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusMerged}},
+		"this attempt pushed anew": {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: domain.PushFailureDetail(strings.Repeat("f", 40), "e")}},
+	} {
+		before := tc.out
+		tc.out.KeepPendingPublication(tc.prior)
+		if tc.out.FailureDetail != before.FailureDetail {
+			t.Errorf("%s: detail changed to %q", name, tc.out.FailureDetail)
+		}
 	}
 }

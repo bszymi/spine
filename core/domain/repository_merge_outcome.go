@@ -217,10 +217,51 @@ func PushFailureDetail(mergeSHA, detail string) string {
 	return fmt.Sprintf("%s%s) but push failed: %s", localMergePushFailedPrefix, mergeSHA, detail)
 }
 
-// MergedLocally reports a failed outcome recorded by PushFailureDetail:
-// the merge is on the local target, and only its publication failed.
+// PendingPublicationDetail is the failure detail of a later attempt for a
+// run whose merge already landed on the local target as mergeSHA (and
+// whose push of it failed), when this attempt failed with detail before
+// reaching its own push. MergedLocally recognises it.
+func PendingPublicationDetail(mergeSHA, detail string) string {
+	return fmt.Sprintf("%s%s) earlier and its push is still pending; this attempt failed: %s",
+		localMergePushFailedPrefix, mergeSHA, detail)
+}
+
+// MergedLocally reports a failed outcome recorded by PushFailureDetail
+// or PendingPublicationDetail: the merge is on the local target, and only
+// its publication failed.
 func (o RepositoryMergeOutcome) MergedLocally() bool {
 	return o.Status == RepositoryMergeStatusFailed && strings.HasPrefix(o.FailureDetail, localMergePushFailedPrefix)
+}
+
+// LocalMergeSHA is the merge commit a MergedLocally outcome names, or "".
+func (o RepositoryMergeOutcome) LocalMergeSHA() string {
+	if !o.MergedLocally() {
+		return ""
+	}
+	sha, _, ok := strings.Cut(strings.TrimPrefix(o.FailureDetail, localMergePushFailedPrefix), ")")
+	if !ok {
+		return ""
+	}
+	return sha
+}
+
+// KeepPendingPublication is applied to a failed attempt's outcome before
+// it is recorded over prior (codex review round 6 of INIT-023 TASK-012).
+// When prior's merge landed on the local target and only its push failed
+// (MergedLocally), and this attempt failed before its own push — the
+// working-tree restore, the merge, a check — that merge is still on the
+// target: no attempt removes an earlier merge. The new failure detail
+// keeps naming it (PendingPublicationDetail), so the outcome stays
+// MergedLocally and the retry budget never abandons a run whose merge is
+// waiting to be published. A nil prior, a successful attempt, or one
+// that is MergedLocally itself is left as it is.
+func (o *RepositoryMergeOutcome) KeepPendingPublication(prior *RepositoryMergeOutcome) {
+	if prior == nil || o.Status != RepositoryMergeStatusFailed || o.MergedLocally() {
+		return
+	}
+	if sha := prior.LocalMergeSHA(); sha != "" {
+		o.FailureDetail = PendingPublicationDetail(sha, o.FailureDetail)
+	}
 }
 
 // RetriesExhausted reports whether this outcome has spent a retry budget

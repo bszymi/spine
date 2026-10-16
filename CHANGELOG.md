@@ -64,7 +64,8 @@ bounded at 5 minutes (a constant).
   (merge binding) is now a recorded, counted attempt too (recorded only while the run is still
   `committing`). A push that fails after the merge landed on the local `main` is not abandoned —
   the run is not reported failed while its merge sits on the branch for the next push to publish;
-  it stays `committing` and the push is retried until it lands (review round 1).
+  it stays `committing` and the push is retried until it lands, also when a later attempt fails
+  before reaching its push (review round 1, codex round 6).
 
 ### Changed
 
@@ -96,7 +97,9 @@ bounded at 5 minutes (a constant).
   `git.TreeRestoreError`, `git.TreeWaitError`, `(*git.WriteScope).Context`,
   `engine.Orchestrator.AbandonExhaustedMerge`, `engine.MergeRetriesExhaustedError`,
   `domain.RepositoryMergeOutcome.RetriesExhausted`, `domain.RepositoryMergeOutcome.MergedLocally`,
-  `domain.PushFailureDetail`, `domain.FirstExhaustedOutcome`, `git.TreeRestoreReport.TookBack` /
+  `domain.PushFailureDetail`, `domain.PendingPublicationDetail`,
+  `domain.RepositoryMergeOutcome.LocalMergeSHA` / `.KeepPendingPublication`,
+  `domain.FirstExhaustedOutcome`, `git.TreeRestoreReport.TookBack` /
   `.Phantoms`,
   `domain.FailureMergeRetriesExhausted`, `scheduler.WithCommitExhausted`,
   `scheduler.CommitExhaustedFunc`, `(*scheduler.Scheduler).CommitRetryBudget`, the

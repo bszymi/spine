@@ -149,6 +149,11 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 				"bound_sha", run.CommitMeta[RepoBoundSHAKey(repoID)])
 		}
 		outcome, err := o.attemptCodeRepositoryMerge(ctx, run, repoID)
+		if err == nil {
+			// A merge that landed earlier stays publication pending
+			// across this attempt's failure (KeepPendingPublication).
+			outcome.KeepPendingPublication(existing)
+		}
 		if err != nil {
 			// Non-recoverable per-repo error (e.g. registry no longer
 			// knows the repo). Bubble up so the run stays in committing
@@ -422,7 +427,17 @@ func classifyMergeFailure(err error) (domain.MergeFailureClass, string) {
 func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domain.Run, mergeSHA string, phaseErr error, phase string) error {
 	log := observe.Logger(ctx)
 	now := time.Now()
-	attempts := o.nextAttemptNumber(ctx, run.RunID, repository.PrimaryRepositoryID)
+	// The prior outcome numbers the attempt (as nextAttemptNumber does)
+	// and carries a pending publication across a later failure
+	// (KeepPendingPublication).
+	prior, priorErr := o.store.GetRepositoryMergeOutcome(ctx, run.RunID, repository.PrimaryRepositoryID)
+	if priorErr != nil {
+		prior = nil
+	}
+	attempts := 1
+	if prior != nil {
+		attempts = prior.Attempts + 1
+	}
 	outcome := domain.RepositoryMergeOutcome{
 		RunID:           run.RunID,
 		RepositoryID:    repository.PrimaryRepositoryID,
@@ -439,6 +454,7 @@ func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domai
 			outcome.FailureDetail = domain.PushFailureDetail(mergeSHA, detail)
 		} else {
 			outcome.FailureDetail = detail
+			outcome.KeepPendingPublication(prior)
 		}
 	} else {
 		mergedAt := now
