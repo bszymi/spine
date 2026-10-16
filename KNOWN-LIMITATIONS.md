@@ -881,6 +881,16 @@ What that implies, and what it leaves open:
    and a `working_tree_restore_failed` audit record. The `reset --hard` fallback after a failed
    `git merge --abort` discards the conflicted state of that merge without quarantine — the only
    unquarantined discard. Quarantine objects are not pruned beyond git's own `gc`.
+   **Phantoms** (review round 1): a tracked difference `git reset --hard` cannot remove — a
+   `*.md text eol=lf` attribute over a file committed with CRLF, two paths that differ only in case
+   on a case-insensitive filesystem — is content, not damage. The restore leaves it in place (Warn
+   once, listing the paths), holds only the index to `HEAD`, switches home with `--discard-changes`
+   when such a difference would make the plain switch refuse (after the same untracked/ignored
+   obstruction check over every path the switch writes), and does not quarantine the same phantom
+   again while its blobs are unchanged. git itself still refuses a checkout or merge that would
+   rewrite a phantom path ("your local changes would be overwritten"), so a governed merge or a
+   cascade checkout that touches it fails like any other permanent merge failure until the content
+   is fixed (renormalize the file, or remove one of the colliding paths).
 3. **One process per repository path.** The lock is in-process. A second `spine serve`, or an
    operator's git, on the same tree is not serialized, and a restore can quarantine its in-flight
    work.
@@ -890,10 +900,21 @@ What that implies, and what it leaves open:
    the workspace then fails transiently ("repository locked", naming the file) — bounded by the retry
    budget below — until an operator deletes the file.
 5. **git's own detached auto-gc can still contend for ref locks.** That failure is transient and
-   bounded by the retry budget.
+   bounded by the retry budget. When it hits the take-back of a refused bound merge (the merge
+   `MergeBound` already put on the local `main`), the client keeps the take-back pending: the
+   merge block's own exit restore retries it, and until it succeeds every later take of the tree
+   (governed merge, run start, in-place write) retries it first and refuses the tree while `main`
+   still contains the refused merge — permanently, naming the merge, when something outside the
+   server moved `main` on top of it. The pending record is in-process: a restart between a failed
+   take-back and the next take of the tree forgets it (the failed outcome and its Error log name
+   the merge; reset `main` by hand). Reads (the projection, `HEAD` reads, git HTTP fetches) are
+   not held back while it is pending.
 6. **`HEAD` means `main` for reads, but reads are not serialized.** On the home-branch tree every read
    of `HEAD` resolves to `refs/heads/main`; a read that names a run branch, or a full rev, reads that
-   ref while a sequence may be moving it. TASK-011 pins the projection explicitly.
+   ref while a sequence may be moving it. TASK-011 pins the projection explicitly. A read of the
+   working tree's *files* would see whatever a sequence has checked out, so the one write path that
+   reads files before writing — task acceptance/rejection and the follow-up link — reads under the
+   tree's lock and commits only over the bytes it read (a change in between is a 409 conflict).
 7. **Merge retries are counted per (run, repository), not per committing episode** (owner question
    4). After a run's first exhaustion its attempts are already above the bound, so every later
    committing episode of that run is abandoned at its first transient failure (an outcome counts
@@ -905,7 +926,16 @@ What that implies, and what it leaves open:
 8. **Uncounted transient exits stay unbounded:** a lock wait cut short by the caller (by design),
    outcome-persistence errors (a store outage), and any later transient exit that records no
    outcome (TASK-017's retryable read failures must record one). TASK-005's transient
-   `VerifyCommit` exit records a failed, transient primary outcome and is counted.
+   `VerifyCommit` exit records a failed, transient primary outcome and is counted (after re-reading
+   the run, so a second entry never overwrites a completed run's merged outcome).
+   **A push that fails after the merge landed is never abandoned** (review round 1): the merge is on
+   the local target, where the next writer's push publishes it, so routing the run as failed (or
+   back to `execute`) would contradict the branch, and taking the merge back is unsafe (another
+   writer's push may already have published it, and runs started since may have been cut from it).
+   Such a run stays in `committing` and its push is retried every tick until it lands, with an Error
+   log once the budget is passed ("publication pending"); each retry is an "already up to date"
+   merge plus the push, holding the tree for the push. Only attempts that left nothing on the target
+   are bounded and abandoned.
 9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
    `platform-binding` resolver modes no scheduler retries committing runs at all. Wiring
    `MultiScheduler` into `spine serve` is a follow-up.

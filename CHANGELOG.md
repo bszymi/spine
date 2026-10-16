@@ -35,7 +35,10 @@ bounded at 5 minutes (a constant).
   goes back to `main`; untracked and ignored files are never touched (one in the way fails the
   restore before anything changes) and a stale `.git/index.lock` is reported.
   A tree left dirty or off `main` therefore no longer fails every later governed merge in the
-  workspace.
+  workspace. A tracked difference no hard reset removes (a `text eol=lf` attribute over a file
+  committed with CRLF, case-only path collisions on a case-insensitive filesystem) is left in place
+  instead of failing every later restore — content, including a divergence branch's, could
+  otherwise wedge the workspace (review round 1).
 - **A client disconnect can no longer poison the tree (F9 via request cancellation).** Git children
   are stopped with `SIGTERM` (git removes its lock files) instead of `SIGKILL`, and a sequence that
   has taken the tree runs to completion detached from the request (bounded at 5 minutes); only the
@@ -44,15 +47,24 @@ bounded at 5 minutes (a constant).
   completed run to failed: the merge blocks re-read the run and stand down unless it is still
   `committing`.
 - **A refused bound merge is taken back before the tree is released**, so an in-place write's
-  auto-push or the next run start never builds on or publishes it.
+  auto-push or the next run start never builds on or publishes it. When the take-back itself fails
+  (a ref lock), it stays pending: the block's exit restore and every later take of the tree retry
+  it first and refuse the tree while `main` still holds the refused merge.
+- **Task acceptance and the follow-up link read the task under the tree's lock** and commit only
+  over the bytes they read: an accept issued while a sequence had a run branch checked out used to
+  commit that branch's unreviewed file to `main`; a change that lands between the read and the
+  write is now a conflict (409).
 - **`HEAD` reads mean `main` on the shared tree:** a run started while another run's cascade had its
   branch checked out bound the workflow an unreviewed branch's task type chose.
-- **Governed-merge retries are bounded (P3-27).** A merge or push that keeps failing transiently is
+- **Governed-merge retries are bounded (P3-27).** A merge that keeps failing transiently is
   retried at most 3 times by the scheduler (the value `spine serve` already configured, now
   enforced), then routed like a permanent failure: a publish-step workflow loops back through
   `merge_failed`, a legacy terminal-commit workflow fails the run (branch kept). The step carries the
   new classification `merge_retries_exhausted`. A transient failure verifying the bound commit
-  (merge binding) is now a recorded, counted attempt too.
+  (merge binding) is now a recorded, counted attempt too (recorded only while the run is still
+  `committing`). A push that fails after the merge landed on the local `main` is not abandoned —
+  the run is not reported failed while its merge sits on the branch for the next push to publish;
+  it stays `committing` and the push is retried until it lands (review round 1).
 
 ### Changed
 
@@ -83,7 +95,9 @@ bounded at 5 minutes (a constant).
   `(*CLIClient).RestoreWorkingTree`, `(*CLIClient).HomeBranch`, `git.TreeRestoreReport`,
   `git.TreeRestoreError`, `git.TreeWaitError`, `(*git.WriteScope).Context`,
   `engine.Orchestrator.AbandonExhaustedMerge`, `engine.MergeRetriesExhaustedError`,
-  `domain.RepositoryMergeOutcome.RetriesExhausted`, `domain.FirstExhaustedOutcome`,
+  `domain.RepositoryMergeOutcome.RetriesExhausted`, `domain.RepositoryMergeOutcome.MergedLocally`,
+  `domain.PushFailureDetail`, `domain.FirstExhaustedOutcome`, `git.TreeRestoreReport.TookBack` /
+  `.Phantoms`,
   `domain.FailureMergeRetriesExhausted`, `scheduler.WithCommitExhausted`,
   `scheduler.CommitExhaustedFunc`, `(*scheduler.Scheduler).CommitRetryBudget`, the
   `MultiSchedulerConfig` fields `CommitMaxRetries` / `WorkspaceBudget` /
@@ -100,6 +114,14 @@ bounded at 5 minutes (a constant).
   branch (`WithHomeBranch` is never set by SMP) is never restored or detached and keeps the real
   `HEAD`. Use `scope.Context(ctx)` for git calls made inside an in-place scope; a locked call made
   with a context that does not carry the scope's ticket waits for the scope itself.
+- **`artifact.Service` acceptance/rejection** (`AcceptTask`, `RejectTask`, the follow-up link)
+  reads the task file inside an uncontended in-place scope on an embedder's worktree (the same
+  bytes as before) and commits only if the file is unchanged when it writes — always true on an
+  embedder's per-request worktree, where nothing else writes.
+- **`git.CLIClient.ResetBranch`** remembers a take-back it could not complete, and the next
+  `WithWorkingTree`, in-place `EnterBranch` scope or restore on that tree retries it first (and
+  fails while the branch still holds the refused merge). Embedders that never call `ResetBranch` on
+  a `CLIClient` (SMP) never have one.
 
 ---
 
