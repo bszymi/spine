@@ -83,6 +83,7 @@ import (
 	"time"
 
 	"github.com/bszymi/spine/core/observe"
+	"github.com/bszymi/spine/core/worktreefs"
 )
 
 const (
@@ -200,15 +201,15 @@ var (
 	treeHomes = map[string]string{} // abs and symlink-free path -> home branch
 	// treePhantoms: canonical tree key -> phantom path -> its blobs, as
 	// the last restore that found phantoms saw them (restoreHeld).
-	treePhantoms = map[string]map[string]phantomBlobs{}
+	treePhantoms = map[string]map[string]phantomState{}
 	// treeTakeBacks: canonical tree key -> branch -> the take-back a
 	// failed ResetBranch left undone (pendingTakeBack).
 	treeTakeBacks = map[string]map[string]pendingTakeBack{}
 )
 
-// phantomBlobs identifies a phantom's state: the index entry's blob and
-// the working-tree file's blob after git's clean filters (`hash-object`).
-type phantomBlobs struct{ index, worktree string }
+// phantomState identifies a phantom's state: the index entry's blob and
+// a fingerprint of the working-tree entry at its path (phantomStatesOf).
+type phantomState struct{ index, worktree string }
 
 // pendingTakeBack is a take-back ResetBranch was asked for and did not
 // complete (review round 1 of INIT-023 TASK-012): the engine refused a
@@ -645,9 +646,13 @@ func (c *CLIClient) RestoreWorkingTree(ctx context.Context) (TreeRestoreReport, 
 // divergence branch's content could trigger. Phantoms are now accepted: a
 // path whose difference survived the reset is reported (Warn, once per
 // state; TreeRestoreReport.Phantoms), and as long as its index blob and its
-// filtered working-tree blob stay the same, later restores neither
-// quarantine nor reset it again (treePhantoms). Only the index is held to
-// HEAD; a staged change left after the reset still fails the restore.
+// working-tree entry stay the same, later restores neither quarantine nor
+// reset it again (treePhantoms). The entry is identified without reading
+// through it (phantomStatesOf, review round 2): its type, and a regular
+// file's filtered blob or a symbolic link's own target — a collision of a
+// file and a link is a type change, and the link is never followed. Only
+// the index is held to HEAD; a staged change left after the reset still
+// fails the restore.
 //
 // Untracked files are never removed. One that blocks step 4 fails the
 // restore, and an operator resolves it.
@@ -888,6 +893,15 @@ type trackedChange struct {
 // staged: the index differs from HEAD for the path (or it is unmerged).
 func (ch trackedChange) staged() bool { return ch.x != ' ' }
 
+// worktreeOnly: the index matches HEAD and the working-tree entry differs
+// from it — modified, its type changed (a file where the index has a
+// link, or the reverse) or missing. These are the differences a phantom
+// can be (review round 2: a case collision of a file and a symbolic link
+// is a type change, of a file and a directory a missing path).
+func (ch trackedChange) worktreeOnly() bool {
+	return ch.x == ' ' && (ch.y == 'M' || ch.y == 'T' || ch.y == 'D')
+}
+
 // parseTrackedStatus parses porcelain v1 -z output. A rename or copy
 // entry ("R  to\0from\0") is followed by its source path, which is
 // skipped.
@@ -908,14 +922,36 @@ func parseTrackedStatus(out string) []trackedChange {
 }
 
 // maxPhantoms bounds the phantom bookkeeping: a tree with more working-tree
-// differences than this is quarantined as usual at every restore.
+// differences than this is quarantined as usual at every restore (and
+// logged and audited each time; it never wedges).
 const maxPhantoms = 64
 
-// phantomBlobsOf reads, for each path, the index entry's blob
-// (`ls-files -s`) and the working-tree file's blob after git's clean
-// filters (`hash-object`, which writes nothing). A path that has no index
-// entry, or no file, is left out.
-func (c *CLIClient) phantomBlobsOf(ctx context.Context, op string, paths []string) (map[string]phantomBlobs, error) {
+// phantomStatesOf reads, for each path, the index entry's blob (`ls-files
+// -s`) and a fingerprint of the working-tree entry at the path. A path
+// with no stage-0 index entry is left out.
+//
+// The working-tree entry is identified without reading through it
+// (review round 2). Every path is first looked at with
+// worktreefs.LstatEntry, which follows nothing — no symbolic link at the
+// leaf, no symlinked or non-directory component above it — and opens
+// nothing at the leaf:
+//
+//   - a regular file: "blob <id>", its blob after git's clean filters
+//     (`hash-object`, which writes nothing). Only these paths are passed
+//     to hash-object, which opens and follows what it is given: before,
+//     a symbolic link was hashed through to its target outside the tree,
+//     and a link to a FIFO or to /dev/zero blocked the restore, or read
+//     without bound, until treeRestoreTimeout;
+//   - a symbolic link: "symlink <target>", the link's own text;
+//   - any other type (a directory, a FIFO, a device): "type <mode>";
+//   - nothing at the path: "absent";
+//   - a component above the leaf that is a symbolic link or not a
+//     directory (git itself then sees the path as missing): "unreachable
+//     <reason> <component>".
+//
+// Any other refusal or failure is returned, and the caller treats the
+// paths as unknown (quarantined).
+func (c *CLIClient) phantomStatesOf(ctx context.Context, op string, paths []string) (map[string]phantomState, error) {
 	idx, _, err := c.runWith(ctx, op, runOpts{env: []string{"GIT_LITERAL_PATHSPECS=1"}},
 		append([]string{"ls-files", "-s", "-z", "--"}, paths...)...)
 	if err != nil {
@@ -931,28 +967,59 @@ func (c *CLIClient) phantomBlobsOf(ctx context.Context, op string, paths []strin
 			index[path] = f[1]
 		}
 	}
-	wt, _, err := c.runWith(ctx, op, runOpts{}, append([]string{"hash-object", "--"}, paths...)...)
+	tree, err := worktreefs.Open(c.repoPath)
 	if err != nil {
 		return nil, err
 	}
-	sums := strings.Fields(wt)
-	if len(sums) != len(paths) {
-		return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "hash-object printed an unexpected number of ids"}
-	}
-	out := make(map[string]phantomBlobs, len(paths))
-	for i, p := range paths {
-		if index[p] != "" {
-			out[p] = phantomBlobs{index: index[p], worktree: sums[i]}
+	defer tree.Close()
+	wt := make(map[string]string, len(paths))
+	var regular []string
+	for _, p := range paths {
+		fi, target, err := tree.LstatEntry(p)
+		var pe *worktreefs.PathError
+		switch {
+		case err == nil && fi.Mode().IsRegular():
+			regular = append(regular, p)
+		case err == nil && fi.Mode()&fs.ModeSymlink != 0:
+			wt[p] = "symlink " + target
+		case err == nil:
+			wt[p] = "type " + fi.Mode().Type().String()
+		case errors.Is(err, fs.ErrNotExist):
+			wt[p] = "absent"
+		case errors.As(err, &pe) && (pe.Reason == worktreefs.ReasonSymlink || pe.Reason == worktreefs.ReasonNotDir):
+			wt[p] = "unreachable " + string(pe.Reason) + " " + pe.Component
+		default:
+			return nil, err
 		}
 	}
-	return out, nil
+	if len(regular) > 0 {
+		out, _, err := c.runWith(ctx, op, runOpts{}, append([]string{"hash-object", "--"}, regular...)...)
+		if err != nil {
+			return nil, err
+		}
+		sums := strings.Fields(out)
+		if len(sums) != len(regular) {
+			return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "hash-object printed an unexpected number of ids"}
+		}
+		for i, p := range regular {
+			wt[p] = "blob " + sums[i]
+		}
+	}
+	states := make(map[string]phantomState, len(paths))
+	for _, p := range paths {
+		if index[p] != "" {
+			states[p] = phantomState{index: index[p], worktree: wt[p]}
+		}
+	}
+	return states, nil
 }
 
 // knownPhantoms reports whether changes are exactly phantoms an earlier
 // restore of this tree already found: every entry a working-tree-only
-// modification of a remembered path whose index blob and filtered
-// working-tree blob are unchanged. Anything else — a staged change, a new
-// path, an edit to a phantom path, any error — is not, and is quarantined.
+// difference (worktreeOnly) of a remembered path whose index blob and
+// working-tree fingerprint (phantomStatesOf) are unchanged. Anything else
+// — a staged change, a new path, an edit to a phantom path, any error —
+// is not, and is quarantined.
 func (c *CLIClient) knownPhantoms(ctx context.Context, op string, changes []trackedChange) bool {
 	if len(changes) > maxPhantoms {
 		return false
@@ -966,7 +1033,7 @@ func (c *CLIClient) knownPhantoms(ctx context.Context, op string, changes []trac
 	}
 	paths := make([]string, 0, len(changes))
 	for _, ch := range changes {
-		if ch.staged() || ch.y != 'M' {
+		if !ch.worktreeOnly() {
 			return false
 		}
 		if _, ok := known[ch.path]; !ok {
@@ -974,7 +1041,7 @@ func (c *CLIClient) knownPhantoms(ctx context.Context, op string, changes []trac
 		}
 		paths = append(paths, ch.path)
 	}
-	cur, err := c.phantomBlobsOf(ctx, op, paths)
+	cur, err := c.phantomStatesOf(ctx, op, paths)
 	if err != nil {
 		return false
 	}
@@ -988,8 +1055,8 @@ func (c *CLIClient) knownPhantoms(ctx context.Context, op string, changes []trac
 
 // rememberPhantoms records the working-tree-only differences left after a
 // restore (the phantoms), logs them at Warn when they differ from what was
-// remembered, and returns their paths. More than maxPhantoms are reported
-// but not remembered.
+// remembered, and returns their paths. More than maxPhantoms, or any entry
+// knownPhantoms would not accept, are reported but not remembered.
 func (c *CLIClient) rememberPhantoms(ctx context.Context, op, home string, left []trackedChange) []string {
 	key := canonicalTreeKey(c.repoPath)
 	if len(left) == 0 {
@@ -999,13 +1066,16 @@ func (c *CLIClient) rememberPhantoms(ctx context.Context, op, home string, left 
 		return nil
 	}
 	paths := make([]string, 0, len(left))
+	trackable := len(left) <= maxPhantoms
 	for _, ch := range left {
 		paths = append(paths, ch.path)
+		// Remembered only as knownPhantoms can recognise them again.
+		trackable = trackable && ch.worktreeOnly()
 	}
-	var cur map[string]phantomBlobs
-	if len(paths) <= maxPhantoms {
+	var cur map[string]phantomState
+	if trackable {
 		var err error
-		if cur, err = c.phantomBlobsOf(ctx, op, paths); err != nil {
+		if cur, err = c.phantomStatesOf(ctx, op, paths); err != nil {
 			cur = nil
 		}
 	}

@@ -450,6 +450,40 @@ func (t *Tree) Lstat(rel string) (fs.FileInfo, error) {
 	return w.regularLeaf()
 }
 
+// LstatEntry checks rel like every other operation — no component above
+// the leaf may be a symbolic link or anything but a directory (I2, I3) —
+// and returns the leaf's file info whatever its type (a regular file, a
+// directory, a symbolic link, a FIFO, a device), without following or
+// opening it. For a symbolic link it also returns the link's target, read
+// with readlinkat on the leaf's parent and never followed; "" for any
+// other type. A missing leaf, or a missing directory above it, wraps
+// fs.ErrNotExist.
+//
+// It is for callers that must identify a working-tree entry without
+// reading through it (INIT-023 TASK-012 review round 2: the shared
+// working tree's phantom bookkeeping hashed every residual path with
+// `git hash-object`, which follows a symbolic link out of the tree and
+// blocks on a FIFO).
+func (t *Tree) LstatEntry(rel string) (fs.FileInfo, string, error) {
+	w, err := t.walkToLeaf("lstat", rel, false)
+	if err != nil {
+		return nil, "", err
+	}
+	defer w.close()
+	fi, err := w.parent().Lstat(w.leaf)
+	if err != nil {
+		return nil, "", relErr(err, w.rel)
+	}
+	if !isSymlink(fi) {
+		return fi, "", nil
+	}
+	target, err := w.parent().Readlink(w.leaf)
+	if err != nil {
+		return nil, "", relErr(err, w.rel)
+	}
+	return fi, target, nil
+}
+
 // ReadFile reads a regular file, capped at DefaultMaxReadBytes.
 func (t *Tree) ReadFile(rel string) ([]byte, error) {
 	return t.ReadFileLimit(rel, DefaultMaxReadBytes)
