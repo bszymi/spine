@@ -22,6 +22,14 @@ const workflowsSubdir = "workflows/"
 // paths restores the data-model guarantee that a full rebuild equals an
 // incrementally maintained store (architecture/data-model.md §4.1).
 type pathScope struct {
+	// scope is the artifact classifier, artifact.PathScope (INIT-023
+	// TASK-017 moved the predicate to core/artifact so the governed-merge
+	// status lifecycle shares it). It is built once, here: the
+	// normalisation trims one leading "./" and one trailing "/", so it is
+	// not idempotent, and re-normalising dir on every call keyed
+	// artifacts under another prefix than isWorkflow's for spellings such
+	// as "foo//" (review round 1). Its prefix is exactly prefix below.
+	scope  artifact.PathScope
 	dir    string // "" for the repository root
 	prefix string // dir + "/", or "" for the root
 }
@@ -31,11 +39,12 @@ type pathScope struct {
 // whitespace is trimmed; "", ".", "./" and "/" mean the root; otherwise
 // one leading "./" and one trailing "/" are trimmed).
 func newPathScope(artifactsDir string) pathScope {
-	d := artifact.NewPathScope(artifactsDir).Dir()
+	sc := artifact.NewPathScope(artifactsDir)
+	d := sc.Dir()
 	if d == "" {
 		return pathScope{}
 	}
-	return pathScope{dir: d, prefix: d + "/"}
+	return pathScope{scope: sc, dir: d, prefix: d + "/"}
 }
 
 // artifactKey maps a repository path to its projection key, mirroring
@@ -46,7 +55,7 @@ func newPathScope(artifactsDir string) pathScope {
 // TASK-017), which the governed-merge status lifecycle shares, so the
 // merge judges exactly the paths the projection reads.
 func (p pathScope) artifactKey(repoPath string) (string, bool) {
-	return artifact.NewPathScope(p.dir).ArtifactKey(repoPath)
+	return p.scope.ArtifactKey(repoPath)
 }
 
 // isWorkflow reports whether a repository path is a workflow definition
