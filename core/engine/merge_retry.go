@@ -22,6 +22,15 @@ package engine
 // nothing, so it is never counted; a lock wait cut short by the caller's
 // context records nothing either (§2.7); outcome-persistence failures are
 // a store outage and are not counted.
+//
+// What it never abandons (review round 1): an attempt whose merge landed
+// on the local target and whose push failed (domain.MergedLocally). The
+// merge is there — the next push of the branch by any writer publishes
+// it — so routing the run as failed would contradict the branch, and
+// taking the merge back is unsafe (another writer's push may already have
+// published it; runs started since may have been cut from it). Such a run
+// stays in committing and its push is retried every tick until it lands,
+// with an Error log once the budget is passed (publication pending).
 
 import (
 	"context"
@@ -60,7 +69,8 @@ const retriesExhaustedMarker = "retries exhausted ("
 // to execute, per task-default), a legacy terminal-commit workflow fails
 // the run (branch kept). It returns false, and changes nothing, when the
 // run is not committing, maxRetries is not positive, or no outcome is
-// exhausted.
+// exhausted — an outcome whose merge landed locally and only its push
+// failed never is (domain.RepositoryMergeOutcome.RetriesExhausted).
 //
 // The exhausted outcome is re-recorded with its attempts, timestamps and
 // transient class unchanged (the outcomes CHECK admits no new class, and
@@ -108,6 +118,14 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 	}
 	ex := domain.FirstExhaustedOutcome(outcomes, maxRetries)
 	if ex == nil {
+		for i := range outcomes {
+			if out := outcomes[i]; out.MergedLocally() && out.Attempts > maxRetries {
+				observe.Logger(ctx).Error("governed merge landed locally but its push keeps failing; the run stays in committing "+
+					"and the push is retried until it lands (publication pending; never abandoned)",
+					"run_id", runID, "repository_id", out.RepositoryID, "attempts", out.Attempts,
+					"max_retries", maxRetries, "failure_class", string(out.FailureClass))
+			}
+		}
 		return false, nil
 	}
 	current, err := o.attemptedThisEpisode(ctx, runID, ex)

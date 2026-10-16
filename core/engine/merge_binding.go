@@ -444,6 +444,15 @@ func (o *Orchestrator) resolveMergeSource(ctx context.Context, run *domain.Run) 
 			// note): recorded as a failed primary outcome with the
 			// transient class, so the scheduler's retry budget bounds this
 			// exit too instead of retrying it forever.
+			//
+			// The run status is re-read first (review round 1, DC-2): with
+			// binding on no cascade block runs before this point, so a
+			// second entry for a run the first entry has just completed
+			// would otherwise overwrite the merged outcome with this failure
+			// (the upsert replaces status and merge SHA).
+			if done, ret := blockExit(o.requireStillCommitting(ctx, run.RunID)); done {
+				return mergeSource{}, true, ret
+			}
 			if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", err, ""); recErr != nil {
 				return mergeSource{}, true, recErr
 			}
@@ -628,8 +637,13 @@ type takeBack struct {
 // as [P, S] (a *targetMovedError) that P is the candidate, so a second
 // parents read that fails cannot turn a kept write into a dropped one.
 // Nothing is done when the target did not move (M == base). A failure is
-// logged at Error — the local target then still holds the refused merge
-// and must be reset before the next governed merge.
+// logged at Error. The local target then still holds the refused merge,
+// so the shared-tree client keeps the take-back pending (INIT-023 TASK-012
+// review round 1, git.CLIClient.ResetBranch): the block's own exit restore
+// retries it before the tree is released, and until it succeeds no later
+// sequence or in-place write gets the tree — nothing builds on, or
+// publishes, the refused merge. A binder that is not a CLIClient (an
+// embedder's operator) keeps today's behaviour.
 func (o *Orchestrator) takeBackRefusedMerge(ctx context.Context, binder CommitBinder, repoID, target string, res git.MergeResult, verdict error) takeBack {
 	log := observe.Logger(ctx)
 	m, base := res.SHA, res.BaseSHA
@@ -1311,8 +1325,7 @@ func (o *Orchestrator) attemptCodeRepositoryMergeBound(ctx context.Context, run 
 	if autoPushEnabled() {
 		if pushErr := binder.PushCommit(ctx, "origin", repo.DefaultBranch, mergeResult.SHA); pushErr != nil {
 			out := fail(pushErr)
-			out.FailureDetail = fmt.Sprintf("local merge succeeded (sha=%s) but push failed: %s",
-				mergeResult.SHA, out.FailureDetail)
+			out.FailureDetail = domain.PushFailureDetail(mergeResult.SHA, out.FailureDetail)
 			log.Warn("code repo push after merge failed",
 				"repository_id", repoID, "merge_sha", mergeResult.SHA, "error", pushErr)
 			return out

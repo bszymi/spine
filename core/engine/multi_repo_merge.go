@@ -294,8 +294,7 @@ func (o *Orchestrator) attemptCodeRepositoryMergeUnbound(ctx context.Context, re
 			class, detail := classifyMergeFailure(pushErr)
 			outcome.Status = domain.RepositoryMergeStatusFailed
 			outcome.FailureClass = class
-			outcome.FailureDetail = fmt.Sprintf("local merge succeeded (sha=%s) but push failed: %s",
-				mergeResult.SHA, detail)
+			outcome.FailureDetail = domain.PushFailureDetail(mergeResult.SHA, detail)
 			log.Warn("code repo push after merge failed",
 				"repository_id", repoID,
 				"merge_sha", mergeResult.SHA,
@@ -437,8 +436,7 @@ func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domai
 		outcome.Status = domain.RepositoryMergeStatusFailed
 		outcome.FailureClass = class
 		if phase == "push" && mergeSHA != "" {
-			outcome.FailureDetail = fmt.Sprintf("local merge succeeded (sha=%s) but push failed: %s",
-				mergeSHA, detail)
+			outcome.FailureDetail = domain.PushFailureDetail(mergeSHA, detail)
 		} else {
 			outcome.FailureDetail = detail
 		}

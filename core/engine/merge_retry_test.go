@@ -13,10 +13,12 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,14 +30,47 @@ import (
 	"github.com/bszymi/spine/testutil"
 )
 
-// pushFailCLI is the shared client whose pushes of main always fail with
-// a transient network error.
-type pushFailCLI struct{ *git.CLIClient }
+// mergeFailCLI is the shared client whose merges (not their aborts)
+// always fail with a transient error: a merge-phase failure, so nothing
+// lands on the local main.
+type mergeFailCLI struct{ *git.CLIClient }
+
+var errLocked = &git.GitError{Kind: git.ErrKindTransient, Op: "merge", Message: "repository locked"}
+
+func (m mergeFailCLI) Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if opts.Strategy == "abort" || opts.Source == "--abort" {
+		return m.CLIClient.Merge(ctx, opts)
+	}
+	return git.MergeResult{}, errLocked
+}
+
+func (mergeFailCLI) MergeBound(context.Context, git.MergeOpts) (git.MergeResult, error) {
+	return git.MergeResult{}, errLocked
+}
+
+// flakyPushCLI is the shared client whose pushes of main fail with a
+// transient network error while down is set: the merge lands on the local
+// main and only its publication fails.
+type flakyPushCLI struct {
+	*git.CLIClient
+	down *atomic.Bool
+}
 
 var errNetwork = &git.GitError{Kind: git.ErrKindTransient, Op: "push", Message: "network error"}
 
-func (pushFailCLI) Push(context.Context, string, string) error               { return errNetwork }
-func (pushFailCLI) PushCommit(context.Context, string, string, string) error { return errNetwork }
+func (f flakyPushCLI) Push(ctx context.Context, remote, ref string) error {
+	if f.down.Load() {
+		return errNetwork
+	}
+	return f.CLIClient.Push(ctx, remote, ref)
+}
+
+func (f flakyPushCLI) PushCommit(ctx context.Context, remote, branch, sha string) error {
+	if f.down.Load() {
+		return errNetwork
+	}
+	return f.CLIClient.PushCommit(ctx, remote, branch, sha)
+}
 
 type retryEnv struct {
 	t      *testing.T
@@ -161,33 +196,47 @@ func (e *retryEnv) driveToCommitting(publish bool) {
 	}
 }
 
-func TestMergeRetry_TransientPushIsBoundedThenAbandoned(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		binding bool
-		publish bool
-	}{
-		{"binding off, legacy workflow", false, false},
-		{"binding off, publish-step workflow", false, true},
-		{"binding on, legacy workflow", true, false},
-		{"binding on, publish-step workflow", true, true},
-	} {
+// retryCases are AC 15's four combinations.
+var retryCases = []struct {
+	name    string
+	binding bool
+	publish bool
+}{
+	{"binding off, legacy workflow", false, false},
+	{"binding off, publish-step workflow", false, true},
+	{"binding on, legacy workflow", true, false},
+	{"binding on, publish-step workflow", true, true},
+}
+
+func retryWorkflow(publish bool) *domain.WorkflowDefinition {
+	if publish {
+		return taskDefaultWorkflow()
+	}
+	return reviewWorkflow()
+}
+
+// AC 15: a merge that keeps failing transiently — nothing lands on the
+// local main — is retried a bounded number of times, then abandoned like
+// a permanent failure. Neither the local nor the origin main ever holds
+// the run's work.
+func TestMergeRetry_TransientMergeIsBoundedThenAbandoned(t *testing.T) {
+	for _, tc := range retryCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			wf := reviewWorkflow()
-			if tc.publish {
-				wf = taskDefaultWorkflow()
-			}
-			e := newRetryEnv(t, wf, tc.binding, func(c *git.CLIClient) engine.GitOperator { return pushFailCLI{c} }, nil)
+			e := newRetryEnv(t, retryWorkflow(tc.publish), tc.binding, func(c *git.CLIClient) engine.GitOperator { return mergeFailCLI{c} }, nil)
+			seed := regGit(t, e.origin, "rev-parse", "main")
 			e.driveToCommitting(tc.publish)
+			var class domain.MergeFailureClass
 			for attempt := 1; ; attempt++ {
 				if r := e.runNow(); r.Status != domain.RunStatusCommitting {
 					t.Fatalf("attempt %d: run %s, want committing", attempt, r.Status)
 				}
 				o := e.primary()
-				if o.Attempts != attempt || o.Status != domain.RepositoryMergeStatusFailed || o.FailureClass != domain.MergeFailureNetwork {
-					t.Fatalf("attempt %d: outcome = %d/%s/%s, want %d/failed/network", attempt, o.Attempts, o.Status, o.FailureClass, attempt)
+				if o.Attempts != attempt || o.Status != domain.RepositoryMergeStatusFailed || !o.FailureClass.IsTransient() || o.MergedLocally() {
+					t.Fatalf("attempt %d: outcome = %d/%s/%s (%q), want %d/failed/transient, not merged locally",
+						attempt, o.Attempts, o.Status, o.FailureClass, o.FailureDetail, attempt)
 				}
+				class = o.FailureClass
 				if attempt == 4 {
 					break
 				}
@@ -233,12 +282,84 @@ func TestMergeRetry_TransientPushIsBoundedThenAbandoned(t *testing.T) {
 			}
 			o := e.primary()
 			const prefix = "retries exhausted (attempts=4, max_retries=3): "
-			if o.Attempts != 4 || o.FailureClass != domain.MergeFailureNetwork || !strings.HasPrefix(o.FailureDetail, prefix) ||
+			if o.Attempts != 4 || o.FailureClass != class || !strings.HasPrefix(o.FailureDetail, prefix) ||
 				strings.Count(o.FailureDetail, "retries exhausted (") != 1 {
 				t.Fatalf("outcome after abandon = %d/%s/%q", o.Attempts, o.FailureClass, o.FailureDetail)
 			}
 			if ok, err := e.orch.AbandonExhaustedMerge(ctx, e.run.RunID, 3); ok || err != nil {
 				t.Fatalf("a second AbandonExhaustedMerge = %v, %v; want false", ok, err)
+			}
+			// Review round 1: the state of main after the abandonment.
+			if got := regGit(t, e.dir, "rev-parse", "main"); got != seed {
+				t.Fatalf("local main = %s after the abandonment, want the seed %s", got, seed)
+			}
+			if got := regGit(t, e.origin, "rev-parse", "main"); got != seed {
+				t.Fatalf("origin main = %s after the abandonment, want the seed %s", got, seed)
+			}
+		})
+	}
+}
+
+// AC 15, review round 1: a push that keeps failing after the merge landed
+// on the local main is never abandoned. Routing the run as failed would
+// leave its merge on the local main for the next writer's push to
+// publish, and taking it back would rewrite a branch that may already be
+// published; the run stays in committing (publication pending) and its
+// push is retried until it lands, past the budget.
+func TestMergeRetry_TransientPushIsRetriedUntilItLands(t *testing.T) {
+	for _, tc := range retryCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			down := &atomic.Bool{}
+			down.Store(true)
+			e := newRetryEnv(t, retryWorkflow(tc.publish), tc.binding, func(c *git.CLIClient) engine.GitOperator { return flakyPushCLI{c, down} }, nil)
+			seed := regGit(t, e.origin, "rev-parse", "main")
+			e.driveToCommitting(tc.publish)
+			for attempt := 1; attempt <= 6; attempt++ {
+				if r := e.runNow(); r.Status != domain.RunStatusCommitting {
+					t.Fatalf("attempt %d: run %s, want committing", attempt, r.Status)
+				}
+				o := e.primary()
+				if o.Attempts != attempt || o.Status != domain.RepositoryMergeStatusFailed ||
+					o.FailureClass != domain.MergeFailureNetwork || !o.MergedLocally() {
+					t.Fatalf("attempt %d: outcome = %d/%s/%s (%q), want %d/failed/network, merged locally",
+						attempt, o.Attempts, o.Status, o.FailureClass, o.FailureDetail, attempt)
+				}
+				if ok, err := e.orch.AbandonExhaustedMerge(ctx, e.run.RunID, 3); ok || err != nil {
+					t.Fatalf("attempt %d: AbandonExhaustedMerge = %v, %v; want false (merged locally, publication pending)", attempt, ok, err)
+				}
+				if attempt < 6 {
+					if err := e.orch.MergeRunBranch(ctx, e.run.RunID); err != nil { // the scheduler's retry
+						t.Fatalf("retry %d: %v", attempt, err)
+					}
+				}
+			}
+			if _, err := regTry(e.dir, "cat-file", "-e", "main:deliverable.md"); err != nil {
+				t.Fatal("the run's merge is not on the local main")
+			}
+			if got := regGit(t, e.origin, "rev-parse", "main"); got != seed {
+				t.Fatalf("origin main = %s while the push fails, want the seed %s", got, seed)
+			}
+			if o := e.primary(); strings.Contains(o.FailureDetail, "retries exhausted") {
+				t.Fatalf("a locally merged outcome was marked exhausted: %q", o.FailureDetail)
+			}
+
+			down.Store(false)
+			if err := e.orch.MergeRunBranch(ctx, e.run.RunID); err != nil {
+				t.Fatalf("the retry after the remote came back: %v", err)
+			}
+			if r := e.runNow(); r.Status != domain.RunStatusCompleted {
+				t.Fatalf("run %s after the push landed, want completed", r.Status)
+			}
+			if o := e.primary(); o.Status != domain.RepositoryMergeStatusMerged {
+				t.Fatalf("outcome %s after the push landed, want merged", o.Status)
+			}
+			local, remote := regGit(t, e.dir, "rev-parse", "main"), regGit(t, e.origin, "rev-parse", "main")
+			if local != remote {
+				t.Fatalf("local main %s, origin main %s; want the published merge on both", local, remote)
+			}
+			if _, err := regTry(e.origin, "cat-file", "-e", "main:deliverable.md"); err != nil {
+				t.Fatal("the run's work is not on origin main")
 			}
 		})
 	}
@@ -254,6 +375,28 @@ type refuseCLI struct {
 	merge     git.MergeResult
 	onMerged  func(git.MergeResult)
 	triggered bool
+	// failTakeBack makes the engine's take-back fail the way a detached
+	// `git gc --auto` running pack-refs makes it fail: refs/heads/<n>.lock
+	// exists while the real ResetBranch runs (dir is the repository).
+	failTakeBack bool
+	dir          string
+	takeBackErr  error
+}
+
+func (r *refuseCLI) ResetBranch(ctx context.Context, branch, to, expected string) error {
+	if !r.failTakeBack {
+		return r.CLIClient.ResetBranch(ctx, branch, to, expected)
+	}
+	lock := filepath.Join(r.dir, ".git", "refs", "heads", branch+".lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		return err
+	}
+	err := r.CLIClient.ResetBranch(ctx, branch, to, expected)
+	_ = os.Remove(lock)
+	r.mu.Lock()
+	r.takeBackErr = err
+	r.mu.Unlock()
+	return err
 }
 
 func (r *refuseCLI) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
@@ -378,5 +521,61 @@ func TestF9_RefusedBoundMergeNeverVisibleToNextHolder(t *testing.T) {
 			t.Fatalf("local main was %s when the refusal was recorded, want the base %s (or the write %s on it; the refused merge is %s)",
 				at, base, write, m.SHA)
 		}
+	}
+}
+
+func regTry(dir string, args ...string) (string, error) {
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// Review round 1 (DC-8 when the take-back itself fails): the refused
+// merge's take-back fails inside the block (a ref lock held by git's
+// auto-gc). The block's own exit restore retries it before the tree is
+// released, so the in-place write waiting for the tree still lands on the
+// base and origin main never receives the refused merge. Before the fix
+// the block released a tree that looked healthy with main at the refused
+// merge, and the write built on it and pushed it.
+func TestF9_FailedTakeBackIsFinishedBeforeTheTreeIsReleased(t *testing.T) {
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "") // artifact auto-push follows SPINE_GIT_AUTO_PUSH (on)
+	rc := &refuseCLI{failTakeBack: true}
+	e := newRetryEnv(t, reviewWorkflow(), true, func(c *git.CLIClient) engine.GitOperator {
+		rc.CLIClient = c
+		return rc
+	}, nil)
+	rc.dir = e.dir
+	svc := artifact.NewService(git.NewCLIClient(e.dir), nil, e.dir)
+	svc.WithPolicy(branchprotect.NewPermissive())
+	const doc = "---\ntype: Governance\ntitle: Concurrent\nstatus: Living Document\nversion: \"0.1\"\n---\n# Concurrent\n"
+	writeDone := make(chan error, 1)
+	rc.onMerged = func(git.MergeResult) {
+		go func() {
+			_, err := svc.Create(context.Background(), "governance/concurrent.md", doc)
+			writeDone <- err
+		}()
+	}
+	e.commitOnRun(map[string]string{"deliverable.md": "work\n"})
+	e.submit(0, "completed")
+	base := regGit(t, e.dir, "rev-parse", "refs/heads/main")
+	e.submit(1, "accepted") // the bound merge runs here, is refused, and its take-back fails
+
+	rc.mu.Lock()
+	m, takeBackErr := rc.merge, rc.takeBackErr
+	rc.mu.Unlock()
+	if takeBackErr == nil {
+		t.Fatal("the injected take-back failure did not happen")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("in-place write: %v", err)
+	}
+	write := regGit(t, e.dir, "log", "-1", "--format=%H", "refs/heads/main", "--", "governance/concurrent.md")
+	if parent := regGit(t, e.dir, "rev-parse", write+"^"); parent != base {
+		t.Fatalf("the in-place write's parent is %s, want the base %s (the refused merge is %s)", parent, base, m.SHA)
+	}
+	if err := exec.Command("git", "-C", e.origin, "merge-base", "--is-ancestor", m.SHA, "refs/heads/main").Run(); err == nil {
+		t.Fatal("origin main contains the refused merge")
+	}
+	if o := e.primary(); o.Status != domain.RepositoryMergeStatusFailed || !strings.Contains(o.FailureDetail, "take-back failed") {
+		t.Fatalf("primary outcome = %+v, want the refusal with the failed take-back recorded", o)
 	}
 }

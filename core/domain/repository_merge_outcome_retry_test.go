@@ -64,3 +64,31 @@ func TestFirstExhaustedOutcome(t *testing.T) {
 		t.Fatalf("no outcomes = %+v, want nil", got)
 	}
 }
+
+// Review round 1: an attempt whose merge landed locally and whose push
+// failed never exhausts the budget — the run's merge is on the local
+// target, so the run is not routed as failed; its push is retried.
+func TestRetriesExhausted_MergedLocallyNeverExhausts(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	pushed := domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureNetwork,
+		Attempts: 9, FailureDetail: domain.PushFailureDetail(sha, "git push: network error")}
+	if !pushed.MergedLocally() || pushed.RetriesExhausted(3) {
+		t.Fatalf("push-phase outcome: MergedLocally=%v RetriesExhausted=%v, want true/false", pushed.MergedLocally(), pushed.RetriesExhausted(3))
+	}
+	if want := "local merge succeeded (sha=" + sha + ") but push failed: git push: network error"; pushed.FailureDetail != want {
+		t.Fatalf("PushFailureDetail = %q, want the recorded format %q", pushed.FailureDetail, want)
+	}
+	merging := pushed
+	merging.FailureDetail = "git merge: repository locked"
+	if merging.MergedLocally() || !merging.RetriesExhausted(3) {
+		t.Fatal("a merge-phase transient failure must stay bounded")
+	}
+	merged := pushed
+	merged.Status = domain.RepositoryMergeStatusMerged
+	if merged.MergedLocally() {
+		t.Fatal("a merged outcome is not a failed push")
+	}
+	if got := domain.FirstExhaustedOutcome([]domain.RepositoryMergeOutcome{pushed}, 3); got != nil {
+		t.Fatalf("FirstExhaustedOutcome over a push-phase outcome = %+v, want nil", got)
+	}
+}

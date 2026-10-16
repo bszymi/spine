@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -204,6 +205,24 @@ func (o RepositoryMergeOutcome) IsTerminal() bool {
 	return false
 }
 
+// localMergePushFailedPrefix opens the failure detail of an attempt whose
+// merge landed on the local target and whose push of it failed
+// (PushFailureDetail).
+const localMergePushFailedPrefix = "local merge succeeded (sha="
+
+// PushFailureDetail is the failure detail recorded for an attempt whose
+// merge landed on the local target branch as mergeSHA and whose push of
+// it failed with detail. MergedLocally recognises it.
+func PushFailureDetail(mergeSHA, detail string) string {
+	return fmt.Sprintf("%s%s) but push failed: %s", localMergePushFailedPrefix, mergeSHA, detail)
+}
+
+// MergedLocally reports a failed outcome recorded by PushFailureDetail:
+// the merge is on the local target, and only its publication failed.
+func (o RepositoryMergeOutcome) MergedLocally() bool {
+	return o.Status == RepositoryMergeStatusFailed && strings.HasPrefix(o.FailureDetail, localMergePushFailedPrefix)
+}
+
 // RetriesExhausted reports whether this outcome has spent a retry budget
 // of maxRetries automatic retries (INIT-023 TASK-012, audit P3-27): the
 // latest attempt failed with a transient class and more than maxRetries
@@ -213,11 +232,23 @@ func (o RepositoryMergeOutcome) IsTerminal() bool {
 // The count is per (run, repository) lifetime and carries over a
 // merge_failed loop-back (owner question 4: no per-episode counter, no
 // migration). maxRetries <= 0 is "unbounded" and never exhausts.
+//
+// An outcome whose merge landed locally and whose push failed
+// (MergedLocally) never exhausts (review round 1 of INIT-023 TASK-012).
+// Abandoning it would route the run like a permanent failure — fail a
+// legacy run, send a publish run back to execute — while its merge stays
+// on the local target, where the next writer's push publishes it, and
+// taking the merge back is unsafe: another writer's push may already have
+// published it, and runs started since may have been cut from it. The
+// run stays in committing and its push is retried until it lands
+// (publication pending); only attempts that left nothing on the target
+// are bounded.
 func (o RepositoryMergeOutcome) RetriesExhausted(maxRetries int) bool {
 	return maxRetries > 0 &&
 		o.Status == RepositoryMergeStatusFailed &&
 		o.FailureClass.IsTransient() &&
-		o.Attempts > maxRetries
+		o.Attempts > maxRetries &&
+		!o.MergedLocally()
 }
 
 // FirstExhaustedOutcome returns a copy of the first outcome, in slice

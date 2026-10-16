@@ -36,6 +36,7 @@ import (
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/workflow"
+	"github.com/bszymi/spine/testutil"
 )
 
 // ---- helpers ----
@@ -97,8 +98,13 @@ const swtTask = "---\nid: TASK-%s\ntype: Task\ntitle: T\nstatus: Pending\n---\n#
 
 // swtRepo: main plus run branches spine/run/run-<id>, each adding
 // tasks/task-<id>.md and code-<id>.txt; HEAD on main.
+//
+// Like every real-git engine test, it makes git hermetic (testutil.HermeticGit):
+// the CLIClient's own merges and cascade commits need a committer identity,
+// which a CI runner's empty GECOS name does not provide (review round 1).
 func swtRepo(t *testing.T, ids ...string) string {
 	t.Helper()
+	testutil.HermeticGit(t)
 	dir := t.TempDir()
 	swtGit(t, dir, "init", "-q", "-b", "main")
 	swtWrite(t, dir, "README.md", "hi\n")
@@ -227,6 +233,7 @@ func swtDivergenceWorkflow() *domain.WorkflowDefinition {
 // the branch step is submitted, which converges.
 func swtDivergenceRun(t *testing.T, routerFor func(repo string) event.EventRouter) (repo, runBranch, mainBefore string, st *mockRunStore) {
 	t.Helper()
+	testutil.HermeticGit(t)
 	ctx := context.Background()
 	repo = t.TempDir()
 	swtGit(t, repo, "init", "-q", "-b", "main")
@@ -363,8 +370,19 @@ func TestF9_SameRunDoubleEntryNeverFailsACompletedRun(t *testing.T) {
 	entryB := &Orchestrator{store: st, git: client, events: eventsB, wfLoader: &stubWorkflowLoader{}, policy: pp}
 
 	errB := make(chan error, 1)
-	go func() { errB <- entryB.MergeRunBranch(ctx, "run-a") }()
-	<-pp.paused // B has passed the committing check
+	bDone := make(chan struct{})
+	go func() { errB <- entryB.MergeRunBranch(ctx, "run-a"); close(bDone) }()
+	// Never leak entry B (review round 1): a failure before the resume
+	// would leave it paused, holding the package-level attempt gate for
+	// "run-a" and failing later tests that reuse the run ID.
+	var resumeOnce sync.Once
+	resume := func() { resumeOnce.Do(func() { close(pp.resume) }) }
+	t.Cleanup(func() { resume(); <-bDone })
+	select {
+	case <-pp.paused: // B has passed the committing check
+	case err := <-errB:
+		t.Fatalf("entry B ended before reaching the pause: %v", err)
+	}
 	if err := entryA.MergeRunBranch(ctx, "run-a"); err != nil {
 		t.Fatalf("entry A: %v", err)
 	}
@@ -374,7 +392,7 @@ func TestF9_SameRunDoubleEntryNeverFailsACompletedRun(t *testing.T) {
 	if _, err := swtTry(repo, "rev-parse", "--verify", "refs/heads/spine/run/run-a"); err == nil {
 		t.Fatal("entry A did not delete the run branch (the race needs it gone)")
 	}
-	close(pp.resume)
+	resume()
 	if err := <-errB; err != nil {
 		t.Fatalf("entry B returned %v, want nil (it stands down)", err)
 	}
@@ -1080,6 +1098,55 @@ func TestMergeRetry_TransientVerifyCommitIsACountedAttempt(t *testing.T) {
 		if f.run.Status != domain.RunStatusCommitting {
 			t.Fatalf("run %s, want committing", f.run.Status)
 		}
+	}
+}
+
+// completingVerify is the binder whose VerifyCommit lets another entry of
+// the same run complete it first (the HTTP submit's merge finishing while
+// the scheduler's retry is in VerifyCommit), then fails transiently.
+type completingVerify struct {
+	*fakeBinderGit
+	complete func()
+}
+
+func (c *completingVerify) VerifyCommit(ctx context.Context, sha string) error {
+	_ = c.fakeBinderGit.VerifyCommit(ctx, sha)
+	c.complete()
+	return &git.GitError{Kind: git.ErrKindTransient, Op: "verify_commit", Message: "repository locked"}
+}
+
+// Review round 1 (DC-2 under binding): the transient VerifyCommit exit
+// re-reads the run before it records its failure, so a second entry never
+// overwrites the merged outcome of a run the first entry completed.
+func TestMergeRetry_TransientVerifyCommitNeverOverwritesACompletedRun(t *testing.T) {
+	f := committingFix(t, false, true)
+	ctx := context.Background()
+	f.run.CommitMeta = map[string]string{CommitMetaBoundSHA: sha40('b'), CommitMetaBoundBy: boundByStep("review", bindRunID+"-review-1")}
+	merged := sha40('m')
+	cv := &completingVerify{fakeBinderGit: f.git, complete: func() {
+		f.run.Status = domain.RunStatusCompleted
+		now := time.Now()
+		if err := f.store.UpsertRepositoryMergeOutcome(ctx, &domain.RepositoryMergeOutcome{
+			RunID: f.run.RunID, RepositoryID: domain.PrimaryRepositoryID, Status: domain.RepositoryMergeStatusMerged,
+			SourceBranch: f.run.BranchName, TargetBranch: "main",
+			MergeCommitSHA: merged, MergedAt: &now, Attempts: 1, LastAttemptedAt: &now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	f.orch.git = cv
+	if err := f.orch.EnableMergeBinding(MergeBindingConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.merge(); err != nil {
+		t.Fatalf("the second entry = %v, want nil (it stands down)", err)
+	}
+	o, err := f.store.GetRepositoryMergeOutcome(ctx, f.run.RunID, domain.PrimaryRepositoryID)
+	if err != nil || o.Status != domain.RepositoryMergeStatusMerged || o.MergeCommitSHA != merged || o.Attempts != 1 {
+		t.Fatalf("primary outcome after the second entry = %+v, %v; want the first entry's merged row", o, err)
+	}
+	if f.run.Status != domain.RunStatusCompleted {
+		t.Fatalf("run %s, want completed", f.run.Status)
 	}
 }
 
