@@ -688,6 +688,36 @@ func TestProtectionRemovalGuard_ApprovedMergeInFlightHoldsTheSync(t *testing.T) 
 			f.requireInstalledRelaxed("after the marker", m)
 		})
 	}
+	t.Run("a second approved merge lands while the first is in flight", func(t *testing.T) {
+		// Review round 2: r1's merge moved main but its marker is not
+		// written yet; r2, cut from main after it, merges and records its
+		// marker. The first tick holds (r1 in flight). The next tick sees
+		// both markers and must install r2's result through r1's record —
+		// round 1 refused it there, for good.
+		f := newPGFix(t)
+		f.r.run("checkout", "-q", "-b", "spine/run/r1")
+		f.r.write(BranchProtectionConfigPath, pgNoDirectWriteOnly)
+		bound1 := f.r.commit("run r1 work")
+		f.r.run("checkout", "-q", "main")
+		pre1 := f.r.run("rev-parse", "HEAD")
+		f.r.run("merge", "-q", "--no-ff", "-m", "Merge run r1", "spine/run/r1")
+		m1 := f.r.run("rev-parse", "HEAD")
+		pre2, m2 := f.mergeRun("r2", pgRelaxed)
+
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2), pendingApproval(bound1, "")}
+		_ = f.svc.IncrementalSync(context.Background())
+		if st := f.st.syncState(); st.Status != "error" || st.LastSyncedCommit != f.c0 {
+			t.Fatalf("r1 in flight: state %+v, want the sync held at c0", st)
+		}
+		f.requireProtected("r1 in flight")
+
+		f.prov.records = []store.GovernanceAuthorization{approved(m2, pre2), approved(m1, pre1), pendingApproval(bound1, m1)}
+		f.sync()
+		f.requireInstalledRelaxed("both markers in place", m2)
+		if f.refusals() != 0 {
+			t.Fatalf("refusals = %d, want 0", f.refusals())
+		}
+	})
 	t.Run("a pending approval vouches for nothing", func(t *testing.T) {
 		f := newPGFix(t)
 		bound, _, _ := approvedMerge(f)
