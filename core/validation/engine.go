@@ -194,27 +194,6 @@ func WithBlockingStatusConflicts(ids ...string) Option {
 	}
 }
 
-// BlockingStatusConflicts returns the promoted rule IDs, sorted (for
-// wiring tests). A nil engine has none.
-func (e *Engine) BlockingStatusConflicts() []string {
-	if e == nil || len(e.blocking) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(e.blocking))
-	for id := range e.blocking {
-		out = append(out, id)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// promote turns a warning of a blocking rule into an error.
-func (e *Engine) promote(r *domain.ValidationError) {
-	if r.Severity == "warning" && e.blocking[r.RuleID] {
-		r.Severity = "error"
-	}
-}
-
 // NoopGovernedFileResolver returns the default GovernedFileResolver:
 // it never resolves any path, so LC-004 falls through to its
 // projection-only behavior. Use this as the explicit production
@@ -268,6 +247,27 @@ func NewEngine(st store.Store, opts ...Option) *Engine {
 	e.rules = append(e.rules, repositoryRules(e.catalogSnapshot)...)
 	e.rules = append(e.rules, evidenceRules(e.runResolver, e.evidenceResolver, e.policyResolver, e.branchTipResolver)...)
 	return e
+}
+
+// BlockingStatusConflicts returns the promoted rule IDs, sorted (for
+// wiring tests). A nil engine has none.
+func (e *Engine) BlockingStatusConflicts() []string {
+	if e == nil || len(e.blocking) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(e.blocking))
+	for id := range e.blocking {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// promote turns a warning of a blocking rule into an error.
+func (e *Engine) promote(r *domain.ValidationError) {
+	if r.Severity == "warning" && e.blocking[r.RuleID] {
+		r.Severity = "error"
+	}
 }
 
 // Validate runs all applicable rules against a single artifact.
