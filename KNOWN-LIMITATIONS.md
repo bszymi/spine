@@ -922,7 +922,14 @@ What that implies, and what it leaves open:
    one network blip in a reworked run costs a full rework cycle. A per-episode counter needs a
    migration. In one process an abandonment never overlaps a merge attempt of the same run (it skips
    the tick while one is in flight; an attempt that starts during it stands down); across processes
-   sharing one database it can, until TASK-008's compare-and-swap status writes.
+   sharing one database it can, until TASK-008's compare-and-swap status writes. A *code
+   repository* whose retries are exhausted is not routed like the primary (codex review round 8):
+   its outcome is marked `retries exhausted (…)`, which the per-repository loop treats as a terminal
+   failure, the primary then merges and the run waits in `partially-merged` for an operator
+   (`RetryRepositoryMerge` / `ResolveRepositoryMergeExternally`); after a retry its next transient
+   failure is exhausted at once (the same lifetime count). A failed attempt whose prior primary
+   outcome cannot be read records nothing and the run stays in `committing` (a store outage, not
+   counted), so a landed merge is never dropped from the outcome.
 8. **Uncounted transient exits stay unbounded:** a lock wait cut short by the caller (by design),
    outcome-persistence errors (a store outage), and any later transient exit that records no
    outcome (TASK-017's retryable read failures must record one). TASK-005's transient

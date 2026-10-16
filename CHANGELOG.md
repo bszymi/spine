@@ -59,7 +59,9 @@ bounded at 5 minutes (a constant).
 - **Governed-merge retries are bounded (P3-27).** A merge that keeps failing transiently is
   retried at most 3 times by the scheduler (the value `spine serve` already configured, now
   enforced), then routed like a permanent failure: a publish-step workflow loops back through
-  `merge_failed`, a legacy terminal-commit workflow fails the run (branch kept). The step carries the
+  `merge_failed`, a legacy terminal-commit workflow fails the run (branch kept); an exhausted code
+  repository is a terminal failure of that repository instead (the primary merges and the run waits
+  in `partially-merged` for operator recovery, codex round 8). The step carries the
   new classification `merge_retries_exhausted`. A transient failure verifying the bound commit
   (merge binding) is now a recorded, counted attempt too (recorded only while the run is still
   `committing`). A push that fails after the merge landed on the local `main` is not abandoned —

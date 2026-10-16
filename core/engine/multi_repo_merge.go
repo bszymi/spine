@@ -121,7 +121,11 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 		if lookupErr != nil && !isNotFoundError(lookupErr) {
 			return fmt.Errorf("lookup existing outcome for %q: %w", repoID, lookupErr)
 		}
-		if existing != nil && existing.IsTerminal() {
+		// A failure whose retries were abandoned (AbandonExhaustedMerge,
+		// INIT-023 TASK-012 codex review round 8) is terminal here like a
+		// permanent one: the primary merges and the run waits in
+		// partially-merged for an operator.
+		if existing != nil && (existing.IsTerminal() || retriesAbandoned(*existing)) {
 			// Merge binding (INIT-023 TASK-005 §8, P3-37): a `merged`
 			// repository is skipped only while its bound commit is on its
 			// default branch. After a merge_failed loop-back the run binds
@@ -432,6 +436,19 @@ func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domai
 	// (KeepPendingPublication).
 	prior, priorErr := o.store.GetRepositoryMergeOutcome(ctx, run.RunID, repository.PrimaryRepositoryID)
 	if priorErr != nil {
+		// A failure recorded without its prior could drop the prior's
+		// landed merge (KeepPendingPublication), and the retry budget
+		// could then abandon a run whose merge is on main (codex review
+		// round 8). So a failed read other than "no outcome yet" records
+		// nothing when the carry matters — a failure that is not this
+		// attempt's own push failure — and the run stays in committing
+		// for the next retry (a store outage, not counted), as the code
+		// repository loop already does for its lookup. A success, or a
+		// push failure naming its own merge, needs no carry and is
+		// recorded as before.
+		if phaseErr != nil && (phase != "push" || mergeSHA == "") && !isNotFoundError(priorErr) {
+			return fmt.Errorf("read the prior primary merge outcome: %w", priorErr)
+		}
 		prior = nil
 	}
 	attempts := 1

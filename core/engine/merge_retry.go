@@ -76,6 +76,18 @@ const retriesExhaustedMarker = "retries exhausted ("
 // exhausted — an outcome whose merge landed locally and only its push
 // failed never is (domain.RepositoryMergeOutcome.RetriesExhausted).
 //
+// A code repository's exhausted outcome takes a code repository's
+// permanent-failure route instead (codex review round 8): it is marked
+// (below), which makes it terminal for the per-repository loop
+// (retriesAbandoned), and AbandonExhaustedMerge returns false, so the
+// scheduler's retry that follows merges the primary and parks the run in
+// partially-merged — the lifecycle in which an operator retries or
+// resolves the repository (merge_resolution.go), with any other code
+// repository's landed merge kept. Routing it like a primary failure used
+// to fail the run (or send it back to execute) while another code
+// repository's merge stayed landed, and partial-merge recovery then
+// refused the run because it was not partially merged.
+//
 // The exhausted outcome is re-recorded with its attempts, timestamps and
 // transient class unchanged (the outcomes CHECK admits no new class, and
 // the last failure was transient) and its failure detail prefixed once
@@ -120,7 +132,17 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 	if err != nil {
 		return false, fmt.Errorf("list merge outcomes: %w", err)
 	}
-	ex := domain.FirstExhaustedOutcome(outcomes, maxRetries)
+	// A code repository already handed to the partial-merge lifecycle
+	// (marked by an earlier call) is not exhausted again; a marked primary
+	// outcome is, so a routing that failed after the mark is retried.
+	pending := make([]domain.RepositoryMergeOutcome, 0, len(outcomes))
+	for i := range outcomes {
+		if !outcomes[i].IsPrimaryRepository() && retriesAbandoned(outcomes[i]) {
+			continue
+		}
+		pending = append(pending, outcomes[i])
+	}
+	ex := domain.FirstExhaustedOutcome(pending, maxRetries)
 	if ex == nil {
 		for i := range outcomes {
 			if out := outcomes[i]; out.MergedLocally() && out.Attempts > maxRetries {
@@ -162,10 +184,27 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 		"max_retries", maxRetries,
 		"failure_class", string(ex.FailureClass),
 	)
+	if !ex.IsPrimaryRepository() {
+		observe.Logger(ctx).Error("code repository merge retries exhausted; it is now a terminal failure — the primary merges "+
+			"and the run waits in partially-merged for an operator to retry or resolve the repository",
+			"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts,
+			"max_retries", maxRetries, "failure_class", string(ex.FailureClass))
+		return false, nil
+	}
 	observe.Logger(ctx).Error("governed merge retries exhausted; taking the permanent-failure route",
 		"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts,
 		"max_retries", maxRetries, "failure_class", string(ex.FailureClass))
 	return true, o.handlePermanentMergeFailure(ctx, run, cause)
+}
+
+// retriesAbandoned reports an outcome AbandonExhaustedMerge marked: a
+// failure whose failure detail opens with the exhausted marker. For a
+// code repository it is terminal (mergeAffectedCodeRepositories skips it
+// like a permanent failure) until an operator's retry resets the outcome
+// to pending or a resolution replaces it. Only AbandonExhaustedMerge
+// writes the marker, so an embedder that never calls it (SMP) has none.
+func retriesAbandoned(o domain.RepositoryMergeOutcome) bool {
+	return o.Status == domain.RepositoryMergeStatusFailed && strings.HasPrefix(o.FailureDetail, retriesExhaustedMarker)
 }
 
 func exhaustedPrefix(attempts, maxRetries int) string {

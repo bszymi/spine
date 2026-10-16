@@ -510,6 +510,69 @@ func TestMergeRetry_FailureAfterAMergedOutcomeNeverAbandons(t *testing.T) {
 	}
 }
 
+// primaryReadDownStore fails reads of the primary outcome while down is
+// set: a store read failure while the write still succeeds.
+type primaryReadDownStore struct {
+	*outcomeStore
+	down *atomic.Bool
+}
+
+func (s primaryReadDownStore) GetRepositoryMergeOutcome(ctx context.Context, runID, repoID string) (*domain.RepositoryMergeOutcome, error) {
+	if s.down.Load() && repoID == domain.PrimaryRepositoryID {
+		return nil, errStoreDown
+	}
+	return s.outcomeStore.GetRepositoryMergeOutcome(ctx, runID, repoID)
+}
+
+// Codex review round 8: attempt 1 merges locally and its push fails.
+// While the prior outcome cannot be read, a later attempt that fails
+// before its push records nothing — the failure would otherwise replace
+// the row without the earlier merge, and the budget could then abandon
+// the run while its merge sits on main. The attempt ends with the read
+// error, the run stays committing, and once the read recovers the next
+// failure is recorded with the merge kept.
+func TestMergeRetry_UnreadablePriorOutcomeRecordsNothing(t *testing.T) {
+	for _, tc := range retryCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pushDown, mergeDown, readDown := &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}
+			pushDown.Store(true)
+			e := newRetryEnv(t, retryWorkflow(tc.publish), tc.binding, func(c *git.CLIClient) engine.GitOperator {
+				return phaseCLI{flakyPushCLI{c, pushDown}, mergeDown}
+			}, func(s *outcomeStore, _ string) engine.RunStore { return primaryReadDownStore{s, readDown} })
+			e.driveToCommitting(tc.publish) // attempt 1: merged locally, push failed
+			first := e.primary()
+			if !first.MergedLocally() || first.Attempts != 1 {
+				t.Fatalf("attempt 1 = %d %q, want a local merge with a failed push", first.Attempts, first.FailureDetail)
+			}
+			mergeDown.Store(true)
+			readDown.Store(true)
+			for i := 0; i < 5; i++ {
+				err := e.orch.MergeRunBranch(ctx, e.run.RunID)
+				if err == nil || !strings.Contains(err.Error(), "read the prior primary merge outcome") {
+					t.Fatalf("retry %d with the prior unreadable: %v; want the read error", i, err)
+				}
+				if o := e.primary(); o.Attempts != first.Attempts || o.FailureDetail != first.FailureDetail {
+					t.Fatalf("retry %d recorded %d %q over the pending publication", i, o.Attempts, o.FailureDetail)
+				}
+				if ok, err := e.orch.AbandonExhaustedMerge(ctx, e.run.RunID, 3); ok || err != nil {
+					t.Fatalf("retry %d: AbandonExhaustedMerge = %v, %v; want false", i, ok, err)
+				}
+				if r := e.runNow(); r.Status != domain.RunStatusCommitting {
+					t.Fatalf("retry %d: run %s, want committing", i, r.Status)
+				}
+			}
+			readDown.Store(false)
+			if err := e.orch.MergeRunBranch(ctx, e.run.RunID); err != nil {
+				t.Fatalf("the retry with the read back: %v", err)
+			}
+			if o := e.primary(); o.Attempts != 2 || !o.MergedLocally() || o.LocalMergeSHA() != first.LocalMergeSHA() {
+				t.Fatalf("after the read recovered = %d %q; want attempt 2 keeping %s", o.Attempts, o.FailureDetail, first.LocalMergeSHA())
+			}
+		})
+	}
+}
+
 // refuseCLI is the shared client with a verifyBoundMerge refusal injected
 // after MergeBound: CommitParents lies about the merge commit's second
 // parent. While the merge block still holds the tree it starts an in-place
