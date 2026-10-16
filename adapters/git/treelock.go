@@ -41,7 +41,11 @@ package git
 //     switched back home. Untracked files are never touched, and a stale
 //     .git/index.lock is reported, never deleted (owner question 5). A
 //     poisoned tree therefore heals itself at the next governed operation
-//     instead of failing it.
+//     instead of failing it. A tracked difference no hard reset removes (a
+//     phantom: line-ending attributes over a CRLF blob, case-only path
+//     collisions) is left in place rather than failing every later take,
+//     and a take-back of a refused merge that a failed ResetBranch left
+//     undone is retried before the tree is used (review round 1).
 //  3. A taken sequence on a home-branch tree is never abandoned half-way:
 //     WithWorkingTree runs the entry restore, fn and the exit restore on a
 //     context detached from the caller's cancellation and bounded by
@@ -153,11 +157,21 @@ type TreeRestoreReport struct {
 	QuarantineSHA string
 	// SwitchedHEAD: HEAD was not on the home branch and was switched.
 	SwitchedHEAD bool
+	// TookBack is the refused merge a failed ResetBranch had left on a
+	// branch of this tree, which the restore took back (pendingTakeBack);
+	// "" when there was none.
+	TookBack string
+	// Phantoms are tracked paths whose working-tree difference survived
+	// `git reset --hard` — a line-ending conversion the attributes demand
+	// but the committed blob lacks, two paths that differ only in case on
+	// a case-insensitive filesystem. They are left in place (nothing can
+	// remove them but a content change); nil when there are none.
+	Phantoms []string
 }
 
 // Repaired reports whether the restore changed anything.
 func (r TreeRestoreReport) Repaired() bool {
-	return r.AbortedMerge || r.QuarantineSHA != "" || r.SwitchedHEAD
+	return r.AbortedMerge || r.QuarantineSHA != "" || r.SwitchedHEAD || r.TookBack != ""
 }
 
 // --- Registry: locks and home branches, keyed by the tree's path. ---
@@ -184,7 +198,75 @@ var (
 	treeMu    sync.Mutex
 	treeLocks = map[string]*treeLock{}
 	treeHomes = map[string]string{} // abs and symlink-free path -> home branch
+	// treePhantoms: canonical tree key -> phantom path -> its blobs, as
+	// the last restore that found phantoms saw them (restoreHeld).
+	treePhantoms = map[string]map[string]phantomBlobs{}
+	// treeTakeBacks: canonical tree key -> branch -> the take-back a
+	// failed ResetBranch left undone (pendingTakeBack).
+	treeTakeBacks = map[string]map[string]pendingTakeBack{}
 )
+
+// phantomBlobs identifies a phantom's state: the index entry's blob and
+// the working-tree file's blob after git's clean filters (`hash-object`).
+type phantomBlobs struct{ index, worktree string }
+
+// pendingTakeBack is a take-back ResetBranch was asked for and did not
+// complete (review round 1 of INIT-023 TASK-012): the engine refused a
+// bound merge after MergeBound moved the local branch to expected, and
+// moving it back to `to` failed — a ref lock held by git's detached
+// auto-gc, for example. Before this record existed the merge block still
+// released the tree, and the tree looked healthy (on its home branch,
+// clean) with the refused merge on the branch: the next holder — an
+// in-place artifact write whose auto-push publishes main, another run's
+// MergeBound — built on it or published it. Now every later take of the
+// tree first settles it (settlePendingTakeBack): it retries the
+// compare-and-swap, and refuses the tree while the branch still contains
+// the refused merge. In-process, like the lock (KNOWN-LIMITATIONS).
+type pendingTakeBack struct{ to, expected string }
+
+func notePendingTakeBack(dir, branch, to, expected string) {
+	key := canonicalTreeKey(dir)
+	treeMu.Lock()
+	defer treeMu.Unlock()
+	m := treeTakeBacks[key]
+	if m == nil {
+		m = map[string]pendingTakeBack{}
+		treeTakeBacks[key] = m
+	}
+	m[branch] = pendingTakeBack{to: to, expected: expected}
+}
+
+func clearPendingTakeBack(dir, branch string) {
+	key := canonicalTreeKey(dir)
+	treeMu.Lock()
+	defer treeMu.Unlock()
+	if m := treeTakeBacks[key]; m != nil {
+		delete(m, branch)
+		if len(m) == 0 {
+			delete(treeTakeBacks, key)
+		}
+	}
+}
+
+func pendingTakeBacksOf(dir string) map[string]pendingTakeBack {
+	treeMu.Lock()
+	empty := len(treeTakeBacks) == 0
+	treeMu.Unlock()
+	if empty {
+		return nil
+	}
+	key := canonicalTreeKey(dir)
+	treeMu.Lock()
+	defer treeMu.Unlock()
+	if len(treeTakeBacks[key]) == 0 {
+		return nil
+	}
+	out := make(map[string]pendingTakeBack, len(treeTakeBacks[key]))
+	for b, p := range treeTakeBacks[key] {
+		out[b] = p
+	}
+	return out
+}
 
 func ticketsIn(ctx context.Context) *heldTickets {
 	h, _ := ctx.Value(heldTicketsKey{}).(*heldTickets)
@@ -439,6 +521,9 @@ func (c *CLIClient) lockTree(ctx context.Context) (treeHold, error) {
 // per-request worktrees) it only holds the lock: fn gets the caller's ctx,
 // cancellation included, with the ticket added, and nothing is restored
 // (codex review round 1: such trees keep today's cancellation semantics).
+// The one exception is a take-back a failed ResetBranch on this tree left
+// undone (pendingTakeBack), settled before fn; embedders that never call
+// ResetBranch never have one.
 func (c *CLIClient) WithWorkingTree(ctx context.Context, fn func(ctx context.Context) error) error {
 	if c.homeErr != nil {
 		return &TreeRestoreError{Branch: c.homeBranch, Err: c.homeErr}
@@ -453,6 +538,12 @@ func (c *CLIClient) WithWorkingTree(ctx context.Context, fn func(ctx context.Con
 	defer h.release()
 	home := c.treeHome()
 	if home == "" {
+		// Never restored, but a take-back a failed ResetBranch left undone
+		// (a code repository's bound merge) is settled first, so the
+		// sequence never builds on a refused merge (pendingTakeBack).
+		if _, branch, err := c.settlePendingTakeBacks(h.ctx, "restore_tree"); err != nil {
+			return &TreeRestoreError{Branch: branch, Err: err}
+		}
 		return fn(h.ctx)
 	}
 	seq, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), treeSequenceTimeout)
@@ -509,7 +600,7 @@ func (c *CLIClient) RestoreWorkingTree(ctx context.Context) (TreeRestoreReport, 
 //     no ref, then `reset --hard`. If stash create fails, or prints no
 //     commit, the restore fails and nothing is reset. The SHA is logged at
 //     Warn as soon as it exists, and a later failure carries it in the
-//     *TreeRestoreError.
+//     *TreeRestoreError. Known phantoms (below) are not quarantined again.
 //
 // Before either `reset --hard` the restore refuses (and changes nothing)
 // when an untracked or ignored file stands where the reset would write a
@@ -520,8 +611,29 @@ func (c *CLIClient) RestoreWorkingTree(ctx context.Context) (TreeRestoreReport, 
 //  4. HEAD is switched to the home branch with the Checkout argv (`switch
 //     --no-guess`, which never detaches onto a same-named tag) plus
 //     `--no-overwrite-ignore`, so an ignored file in the way fails the
-//     switch instead of being overwritten.
-//  5. HEAD must now be refs/heads/<home> and the tracked status clean.
+//     switch instead of being overwritten. When phantoms remain (below)
+//     the plain switch would refuse ("your local changes would be
+//     overwritten"), so the switch discards them (`--discard-changes`),
+//     after the same untracked-obstruction check over every path the
+//     switch writes (`diff HEAD refs/heads/<home>`): a forced switch
+//     overwrites untracked and ignored files.
+//  5. A take-back a failed ResetBranch left undone is settled
+//     (settlePendingTakeBacks): retried, or the restore fails while the
+//     branch still holds the refused merge.
+//  6. HEAD must now be refs/heads/<home> and the index must equal HEAD.
+//
+// Phantoms (review round 1). A working-tree difference `reset --hard`
+// cannot remove — a `text eol=lf` attribute over a blob committed with
+// CRLF, two tracked paths that differ only in case on a case-insensitive
+// filesystem — is content, not damage: git rewrites the file and still
+// reports it modified. Such a difference used to fail step 6 ("tracked
+// changes remain") on every later take, a workspace-wide outage that a
+// divergence branch's content could trigger. Phantoms are now accepted: a
+// path whose difference survived the reset is reported (Warn, once per
+// state; TreeRestoreReport.Phantoms), and as long as its index blob and its
+// filtered working-tree blob stay the same, later restores neither
+// quarantine nor reset it again (treePhantoms). Only the index is held to
+// HEAD; a staged change left after the reset still fails the restore.
 //
 // Untracked files are never removed. One that blocks step 4 fails the
 // restore, and an operator resolves it.
@@ -539,13 +651,16 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		}
 		return rep, &TreeRestoreError{Branch: home, Err: err, QuarantineSHA: rep.QuarantineSHA}
 	}
+	obstructed := func(p string) error {
+		return &GitError{Kind: ErrKindPermanent, Op: op,
+			Message: fmt.Sprintf("an untracked file is in the way of a tracked path the restore would rewrite (%q); "+
+				"nothing was reset — move it out of the working tree", p)}
+	}
 	resetHard := func() error {
-		if p, err := c.untrackedObstruction(ctx, op); err != nil {
+		if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
 			return err
 		} else if p != "" {
-			return &GitError{Kind: ErrKindPermanent, Op: op,
-				Message: fmt.Sprintf("an untracked file is in the way of a tracked path the restore would rewrite (%q); "+
-					"nothing was reset — move it out of the working tree", p)}
+			return obstructed(p)
 		}
 		_, _, err := c.runWith(ctx, op, runOpts{}, "reset", "--hard", "-q")
 		return err
@@ -579,9 +694,12 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		}
 		return strings.TrimSpace(out), nil
 	}
-	tracked := func() (string, error) {
+	tracked := func() ([]trackedChange, error) {
 		out, _, err := c.runWith(ctx, op, runOpts{}, "status", "--porcelain=v1", "-z", "--untracked-files=no")
-		return out, err
+		if err != nil {
+			return nil, err
+		}
+		return parseTrackedStatus(out), nil
 	}
 
 	if rep.PreviousRef, err = headRef(); err != nil {
@@ -601,17 +719,22 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		}
 	}
 
-	status, err := tracked()
+	changes, err := tracked()
 	if err != nil {
 		return fail(err)
 	}
-	if status != "" {
-		if p, err := c.untrackedObstruction(ctx, op); err != nil {
+	// residual: the working-tree-only differences left once the tree is
+	// as clean as a hard reset makes it (phantoms).
+	var residual []trackedChange
+	switch {
+	case len(changes) == 0:
+	case c.knownPhantoms(ctx, op, changes):
+		residual = changes
+	default:
+		if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
 			return fail(err)
 		} else if p != "" {
-			return fail(&GitError{Kind: ErrKindPermanent, Op: op,
-				Message: fmt.Sprintf("an untracked file is in the way of a tracked path the restore would rewrite (%q); "+
-					"nothing was reset — move it out of the working tree", p)})
+			return fail(obstructed(p))
 		}
 		// A fixed identity: the quarantine commit is the server's, and
 		// stash create must work on a host with no user.name configured.
@@ -635,20 +758,49 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		if err := resetHard(); err != nil {
 			return fail(err)
 		}
+		if residual, err = tracked(); err != nil {
+			return fail(err)
+		}
+	}
+	for _, ch := range residual {
+		if ch.staged() {
+			return fail(&GitError{Kind: ErrKindPermanent, Op: op,
+				Message: fmt.Sprintf("staged changes remain after the reset (%q)", ch.path)})
+		}
 	}
 
 	if rep.PreviousRef != full {
+		args := []string{"switch", "--no-guess", "--no-overwrite-ignore", "--end-of-options", short}
+		if len(residual) > 0 {
+			// Phantoms make the plain switch refuse. A forced switch
+			// overwrites untracked and ignored files, so check every path it
+			// writes first.
+			if p, err := c.untrackedObstruction(ctx, op, "HEAD", full); err != nil {
+				return fail(err)
+			} else if p != "" {
+				return fail(obstructed(p))
+			}
+			args = []string{"switch", "--no-guess", "--discard-changes", "--end-of-options", short}
+		}
 		// --no-overwrite-ignore (codex review round 3): git's default
 		// overwrites an ignored file at a path the home branch tracks;
 		// the restore never touches untracked or ignored files, so such a
 		// file fails the switch instead.
-		if _, _, err := c.runWith(ctx, op, runOpts{}, "switch", "--no-guess", "--no-overwrite-ignore", "--end-of-options", short); err != nil {
+		if _, _, err := c.runWith(ctx, op, runOpts{}, args...); err != nil {
 			return fail(err)
 		}
 		rep.SwitchedHEAD = true
 	}
 
-	if rep.Repaired() {
+	took, _, err := c.settlePendingTakeBacks(ctx, op)
+	if len(took) > 0 {
+		rep.TookBack = took[0]
+	}
+	if err != nil {
+		return fail(err)
+	}
+
+	if rep.Repaired() || len(residual) > 0 {
 		ref, err := headRef()
 		if err != nil {
 			return fail(err)
@@ -661,33 +813,248 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		if err != nil {
 			return fail(err)
 		}
-		if left != "" {
-			return fail(&GitError{Kind: ErrKindPermanent, Op: op,
-				Message: "tracked changes remain after the restore"})
+		for _, ch := range left {
+			if ch.staged() {
+				return fail(&GitError{Kind: ErrKindPermanent, Op: op,
+					Message: fmt.Sprintf("staged changes remain after the restore (%q)", ch.path)})
+			}
 		}
-		observe.Logger(ctx).Warn("shared working tree restored",
-			"home_branch", short, "previous_ref", rep.PreviousRef,
-			"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA,
-			"switched_head", rep.SwitchedHEAD)
-		observe.AuditLog(ctx, "working_tree_restored",
-			"home_branch", short, "previous_ref", rep.PreviousRef,
-			"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA)
+		rep.Phantoms = c.rememberPhantoms(ctx, op, short, left)
+		if rep.Repaired() {
+			observe.Logger(ctx).Warn("shared working tree restored",
+				"home_branch", short, "previous_ref", rep.PreviousRef,
+				"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA,
+				"switched_head", rep.SwitchedHEAD, "took_back", rep.TookBack)
+			observe.AuditLog(ctx, "working_tree_restored",
+				"home_branch", short, "previous_ref", rep.PreviousRef,
+				"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA,
+				"took_back", rep.TookBack)
+		}
 	}
 	return rep, nil
 }
 
+// trackedChange is one entry of `git status --porcelain=v1 -z
+// --untracked-files=no`: X is the index against HEAD, Y the working tree
+// against the index.
+type trackedChange struct {
+	x, y byte
+	path string
+}
+
+// staged: the index differs from HEAD for the path (or it is unmerged).
+func (ch trackedChange) staged() bool { return ch.x != ' ' }
+
+// parseTrackedStatus parses porcelain v1 -z output. A rename or copy
+// entry ("R  to\0from\0") is followed by its source path, which is
+// skipped.
+func parseTrackedStatus(out string) []trackedChange {
+	var changes []trackedChange
+	fields := strings.Split(out, "\x00")
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if len(f) < 4 || f[2] != ' ' {
+			continue
+		}
+		changes = append(changes, trackedChange{x: f[0], y: f[1], path: f[3:]})
+		if f[0] == 'R' || f[0] == 'C' {
+			i++
+		}
+	}
+	return changes
+}
+
+// maxPhantoms bounds the phantom bookkeeping: a tree with more working-tree
+// differences than this is quarantined as usual at every restore.
+const maxPhantoms = 64
+
+// phantomBlobsOf reads, for each path, the index entry's blob
+// (`ls-files -s`) and the working-tree file's blob after git's clean
+// filters (`hash-object`, which writes nothing). A path that has no index
+// entry, or no file, is left out.
+func (c *CLIClient) phantomBlobsOf(ctx context.Context, op string, paths []string) (map[string]phantomBlobs, error) {
+	idx, _, err := c.runWith(ctx, op, runOpts{env: []string{"GIT_LITERAL_PATHSPECS=1"}},
+		append([]string{"ls-files", "-s", "-z", "--"}, paths...)...)
+	if err != nil {
+		return nil, err
+	}
+	index := map[string]string{}
+	for _, rec := range strings.Split(idx, "\x00") {
+		meta, path, ok := strings.Cut(rec, "\t")
+		if !ok {
+			continue
+		}
+		if f := strings.Fields(meta); len(f) == 3 && f[2] == "0" {
+			index[path] = f[1]
+		}
+	}
+	wt, _, err := c.runWith(ctx, op, runOpts{}, append([]string{"hash-object", "--"}, paths...)...)
+	if err != nil {
+		return nil, err
+	}
+	sums := strings.Fields(wt)
+	if len(sums) != len(paths) {
+		return nil, &GitError{Kind: ErrKindPermanent, Op: op, Message: "hash-object printed an unexpected number of ids"}
+	}
+	out := make(map[string]phantomBlobs, len(paths))
+	for i, p := range paths {
+		if index[p] != "" {
+			out[p] = phantomBlobs{index: index[p], worktree: sums[i]}
+		}
+	}
+	return out, nil
+}
+
+// knownPhantoms reports whether changes are exactly phantoms an earlier
+// restore of this tree already found: every entry a working-tree-only
+// modification of a remembered path whose index blob and filtered
+// working-tree blob are unchanged. Anything else — a staged change, a new
+// path, an edit to a phantom path, any error — is not, and is quarantined.
+func (c *CLIClient) knownPhantoms(ctx context.Context, op string, changes []trackedChange) bool {
+	if len(changes) > maxPhantoms {
+		return false
+	}
+	key := canonicalTreeKey(c.repoPath)
+	treeMu.Lock()
+	known := treePhantoms[key]
+	treeMu.Unlock()
+	if len(known) == 0 {
+		return false
+	}
+	paths := make([]string, 0, len(changes))
+	for _, ch := range changes {
+		if ch.staged() || ch.y != 'M' {
+			return false
+		}
+		if _, ok := known[ch.path]; !ok {
+			return false
+		}
+		paths = append(paths, ch.path)
+	}
+	cur, err := c.phantomBlobsOf(ctx, op, paths)
+	if err != nil {
+		return false
+	}
+	for _, p := range paths {
+		if b, ok := cur[p]; !ok || b != known[p] {
+			return false
+		}
+	}
+	return true
+}
+
+// rememberPhantoms records the working-tree-only differences left after a
+// restore (the phantoms), logs them at Warn when they differ from what was
+// remembered, and returns their paths. More than maxPhantoms are reported
+// but not remembered.
+func (c *CLIClient) rememberPhantoms(ctx context.Context, op, home string, left []trackedChange) []string {
+	key := canonicalTreeKey(c.repoPath)
+	if len(left) == 0 {
+		treeMu.Lock()
+		delete(treePhantoms, key)
+		treeMu.Unlock()
+		return nil
+	}
+	paths := make([]string, 0, len(left))
+	for _, ch := range left {
+		paths = append(paths, ch.path)
+	}
+	var cur map[string]phantomBlobs
+	if len(paths) <= maxPhantoms {
+		var err error
+		if cur, err = c.phantomBlobsOf(ctx, op, paths); err != nil {
+			cur = nil
+		}
+	}
+	treeMu.Lock()
+	prev := treePhantoms[key]
+	same := len(cur) > 0 && len(prev) == len(cur)
+	for p, b := range cur {
+		if prev[p] != b {
+			same = false
+		}
+	}
+	if len(cur) > 0 {
+		treePhantoms[key] = cur
+	} else {
+		delete(treePhantoms, key)
+	}
+	treeMu.Unlock()
+	if !same {
+		shown := paths
+		if len(shown) > 10 {
+			shown = shown[:10]
+		}
+		observe.Logger(ctx).Warn("shared working tree: tracked differences that a hard reset cannot remove are left in place "+
+			"(line-ending conversion or case-only path collisions in the content); the index matches HEAD",
+			"home_branch", home, "paths", shown, "count", len(paths))
+	}
+	return paths
+}
+
+// settlePendingTakeBacks completes, or refuses, the take-backs a failed
+// ResetBranch left on this tree (pendingTakeBack). The caller holds the
+// tree and ctx carries its ticket (ResetBranch re-enters). Per branch:
+//
+//   - still at the refused merge: the compare-and-swap is retried; a
+//     failure keeps the record and is returned (its class survives, so a
+//     ref-lock race stays transient);
+//   - moved on but still containing the refused merge (another process,
+//     an operator's git): refused, permanently — the merge must be taken
+//     back by hand before anything builds on the branch;
+//   - no longer containing it, or gone: the record is dropped.
+//
+// It returns the refused merges it took back, and the branch it failed on.
+func (c *CLIClient) settlePendingTakeBacks(ctx context.Context, op string) (took []string, branch string, err error) {
+	for b, p := range pendingTakeBacksOf(c.repoPath) {
+		tip, ok, err := lookupBranch(ctx, c.repoPath, op, b)
+		if err != nil {
+			return took, b, err
+		}
+		if !ok {
+			clearPendingTakeBack(c.repoPath, b)
+			continue
+		}
+		if tip == p.expected {
+			if err := c.ResetBranch(ctx, b, p.to, p.expected); err != nil {
+				return took, b, fmt.Errorf("take back the refused merge %s on %s: %w", p.expected, b, err)
+			}
+			observe.Logger(ctx).Warn("shared working tree: a refused merge a failed take-back had left was taken back",
+				"branch", b, "merge_sha", p.expected, "restored_to", p.to)
+			took = append(took, p.expected)
+			continue
+		}
+		in, err := c.IsAncestor(ctx, p.expected, tip)
+		if err != nil {
+			return took, b, err
+		}
+		if in {
+			return took, b, &GitError{Kind: ErrKindPermanent, Op: op,
+				Message: fmt.Sprintf("refs/heads/%s still contains the refused merge %s (it moved on to %s outside this server); "+
+					"reset it so that it no longer contains that merge", b, p.expected, tip)}
+		}
+		clearPendingTakeBack(c.repoPath, b)
+	}
+	return took, "", nil
+}
+
 // untrackedObstruction returns a path where an untracked or ignored file
-// stands in the way of `git reset --hard`, or "". The reset rewrites every
-// tracked path that differs from HEAD (`git diff --no-renames --name-only
-// HEAD`); it deletes an untracked file at that path, an untracked file
+// stands in the way of a command that rewrites tracked paths, or "".
+// revs name the paths it rewrites: `git diff --no-renames --name-only
+// <revs>` — "HEAD" for `git reset --hard` (every tracked path whose
+// working tree or index differs from HEAD), "HEAD", "<branch>" for a
+// forced switch (every path that differs between the two trees). Such a
+// command deletes an untracked file at that path, an untracked file
 // standing where one of its parent directories must be (a tracked
 // directory removed and replaced by a file), and untracked content under
 // the path (a tracked file replaced by a directory). Untracked entries
 // come from `ls-files --others --directory` (ignored files included, an
 // untracked directory as one "dir/" entry). An untracked directory that
-// contains a path the reset would recreate is reported too, conservatively.
-func (c *CLIClient) untrackedObstruction(ctx context.Context, op string) (string, error) {
-	changed, _, err := c.runWith(ctx, op, runOpts{}, "diff", "--no-renames", "--name-only", "-z", "HEAD", "--")
+// contains a path the command would recreate is reported too,
+// conservatively.
+func (c *CLIClient) untrackedObstruction(ctx context.Context, op string, revs ...string) (string, error) {
+	args := append([]string{"diff", "--no-renames", "--name-only", "-z"}, revs...)
+	changed, _, err := c.runWith(ctx, op, runOpts{}, append(args, "--")...)
 	if err != nil {
 		return "", err
 	}

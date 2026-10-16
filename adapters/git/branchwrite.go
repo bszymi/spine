@@ -224,14 +224,20 @@ func enterInPlace(ctx context.Context, repoDir string) (*WriteScope, error) {
 		scope.cleanup = func() {}
 		return scope, nil
 	}
+	c := &CLIClient{repoPath: repoDir}
 	if home := homeBranchOf(repoDir); home != "" {
-		c := &CLIClient{repoPath: repoDir}
 		if _, err := c.restoreHeld(h.ctx, home); err != nil {
 			h.release()
 			return nil, err
 		}
 		scope.detached = true
 		scope.deadline = time.Now().Add(treeSequenceTimeout)
+	} else if _, branch, err := c.settlePendingTakeBacks(h.ctx, "restore_tree"); err != nil {
+		// Not restored, but never handed out over a take-back a failed
+		// ResetBranch left undone (pendingTakeBack; none on an embedder's
+		// tree that never calls ResetBranch).
+		h.release()
+		return nil, &TreeRestoreError{Branch: branch, Err: err}
 	}
 	var once sync.Once
 	scope.cleanup = func() {

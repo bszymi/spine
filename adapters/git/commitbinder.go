@@ -533,9 +533,16 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 // tree on a branch reset to `to` would make the next ordinary commit on
 // the branch record that tree — the refused content — as a plain commit.
 // No remote is touched.
-func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string) error {
+//
+// A failure after the arguments are verified is remembered for the tree
+// (INIT-023 TASK-012 review round 1, pendingTakeBack): every later take
+// of the tree — WithWorkingTree, an in-place write scope, the restore of
+// a home-branch tree, the merge block's own exit restore first — retries
+// the swap before anything else runs, and refuses the tree while the
+// branch still contains the refused merge.
+func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string) (retErr error) {
 	const op = "reset_branch"
-	_, full, err := checkBranch(op, "branch", branch)
+	short, full, err := checkBranch(op, "branch", branch)
 	if err != nil {
 		return err
 	}
@@ -560,6 +567,19 @@ func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string
 	if err := c.verifyCommitOID(ctx, op, "expected", expected); err != nil {
 		return err
 	}
+	// From here a failure leaves the branch at (or containing) the merge
+	// the caller refused. The take-back is remembered for the tree, and
+	// every later take of it settles it first — retries the swap, or
+	// refuses while the branch still holds the merge — so the tree is
+	// never handed on as healthy with the refused merge on it (review
+	// round 1 of INIT-023 TASK-012; pendingTakeBack). A success clears it.
+	defer func() {
+		if retErr != nil {
+			notePendingTakeBack(c.repoPath, short, to, expected)
+		} else {
+			clearPendingTakeBack(c.repoPath, short)
+		}
+	}()
 	attached, err := c.headIsBranch(ctx, op, full)
 	if err != nil {
 		return err

@@ -101,20 +101,52 @@ func TestTreeLock_NestedCallReenters(t *testing.T) {
 	}
 }
 
-// (b) A second client on the same directory, spelled differently, waits.
+// (b) A second client on the same directory, spelled differently, waits:
+// the uncleaned "repo/." (review round 1: filepath.Join cleaned the
+// spelling the test meant to pass, so the canonical key was never
+// exercised), a symlink to the repository, and — on macOS, where t.TempDir
+// is under the /var -> /private/var symlink — the resolved path.
 func TestTreeLock_SameTreeDifferentSpellingShareOneLock(t *testing.T) {
 	dir := tlRepo(t)
-	c1 := NewCLIClient(dir)
-	c2 := NewCLIClient(filepath.Join(dir, ".")) // "repo/."
-	release := tlHold(t, c1)
-	defer release()
-	blocked, res := tlBlocks(func() error { return c2.Checkout(context.Background(), "feature") }, 300*time.Millisecond)
-	if !blocked {
-		t.Fatalf("a second client on %s/. ran while the first held the tree (err=%v)", dir, <-res)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Fatal(err)
 	}
-	release()
-	if err := <-res; err != nil {
-		t.Fatalf("Checkout after release: %v", err)
+	spellings := map[string]string{"repo/.": dir + string(filepath.Separator) + ".", "symlink": alias}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
+		spellings["resolved"] = resolved
+	}
+	c1 := NewCLIClient(dir, WithHomeBranch("main"))
+	for name, spelling := range spellings {
+		t.Run(name, func(t *testing.T) {
+			c2 := NewCLIClient(spelling)
+			if c2.HomeBranch() != "main" {
+				t.Fatalf("the home branch is not found through %q", spelling)
+			}
+			release := tlHold(t, c1)
+			defer release()
+			blocked, res := tlBlocks(func() error { return c2.Checkout(context.Background(), "feature") }, 300*time.Millisecond)
+			if !blocked {
+				t.Fatalf("a second client on %q ran while the first held the tree (err=%v)", spelling, <-res)
+			}
+			treeMu.Lock()
+			l := treeLocks[canonicalTreeKey(dir)]
+			n := 0
+			if l != nil {
+				n = l.refs
+			}
+			treeMu.Unlock()
+			if n != 2 {
+				t.Fatalf("holder and waiter on %q share one lock entry with refs %d, want 2", spelling, n)
+			}
+			release()
+			if err := <-res; err != nil {
+				t.Fatalf("Checkout after release: %v", err)
+			}
+			if err := c2.Checkout(context.Background(), "main"); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -307,5 +339,35 @@ func TestTreeLock_NoHomeSequenceKeepsCancellation(t *testing.T) {
 	}
 	if !errors.Is(errAfter, context.Canceled) {
 		t.Fatalf("fn's ctx after the caller cancelled: %v, want context.Canceled on a tree without a home branch", errAfter)
+	}
+}
+
+// Every git child of this package is built by newGitCmd (SIGTERM on
+// cancel, WaitDelay): no other file may call exec.Command or
+// exec.CommandContext (review round 1 — a runner going back to
+// exec.CommandContext would be SIGKILLed again and leave index.lock).
+func TestGitChildrenAreBuiltByNewGitCmd(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "gitcmd.go" {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			code, _, _ := strings.Cut(line, "//")
+			if strings.Contains(code, "exec.Command(") || strings.Contains(code, "exec.CommandContext(") {
+				t.Errorf("%s:%d starts a process without newGitCmd: %s", f, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	cmd := newGitCmd(context.Background(), "version")
+	if cmd.Cancel == nil || cmd.WaitDelay <= 0 {
+		t.Fatal("newGitCmd must set Cancel (SIGTERM) and WaitDelay")
 	}
 }
