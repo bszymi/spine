@@ -468,7 +468,22 @@ refuses an unprovenanced branch-protection removal. What remains:
     override push that edits the file for another reason (adds a rule) installs it too. Operators
     should compare the installed rules with the file (the `branch_protection.removal_refused`
     event names both) before an override push to it. An approved governed merge, by contrast,
-    counts only if its own diff removed the protection (ADR-016 §6).
+    counts only for the kinds its own diff removed, or that a chain of earlier authorised states
+    accounts for (ADR-016 §6; item 15).
+15. **Several operator acts in one sync window are judged as a chain** (review round 2). When two
+    or more authorised changes to `.spine/branch-protection.yaml` reach `main` before one
+    projection install (two approvals inside one poll, a merge landing while the sync is held),
+    the newest record's base config must be, byte for byte, the result of an earlier valid record
+    it descends from, and so on back to an act that removed each kind itself. Two residuals:
+    - any unauthorised write to the file between two such acts — even a comment-only edit —
+      breaks the chain, and the result is refused (rules kept; recovery is an editing override
+      push, docs/git-push-guide.md §4);
+    - newness is judged against the installed rules, not against later acts in the same window:
+      an unauthorised write that restores, byte for byte, the result of an authorised relaxation
+      from earlier in the window, after something else in that window had tightened the file
+      again, is installed on that relaxation's record. Every install ends the window.
+
+    The chain only uses records the provenance reader returns (`Lookback`, 200 per source).
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are

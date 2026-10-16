@@ -46,8 +46,11 @@ ADR is `Proposed` until the owner signs it off). No migration.
   of an operator act that **changed** the config matches it byte for byte, is reachable from the
   sync head and is newer than the installed rules: an honoured override push
   (`runtime.event_log`), or an approved governed merge's consumption marker
-  (`spine.governance_approval.merge_sha`/`base_sha`, written before the push) whose own diff
-  removed the protection (its base config applied every kind being removed). Otherwise the rules
+  (`spine.governance_approval.merge_sha`/`base_sha`, written before the push) that accounts for
+  every kind being removed: its own diff removed it (its base config applied it), or its base
+  config is, byte for byte, the result of an earlier valid record its base descends from, judged
+  the same way — so two authorised relaxations landing before one projection tick both count, and
+  an unauthorised write between them breaks the chain. Otherwise the rules
   stay, `branch_protection.removal_refused` is emitted and a Warn logged — except while an approved
   merge is in flight (its run still `committing`, its approved commit on the head, no reachable
   marker yet): the sync then holds and retries instead of refusing. Commit trailers are

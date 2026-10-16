@@ -935,8 +935,11 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    Provenance is a database record of an operator act that changed the config: an honoured
    `branch_protection.override` git push in `runtime.event_log` (whole-`domain.Event` JSON with
    `payload.pre_receive_ref.old_sha`), or an approved merge's consumption marker in
-   `runs.commit_meta` — the approved merge must also have removed the protection itself (its
-   base config applied every kind being removed). The provenance reader needs `SELECT` on `runtime.event_log` and
+   `runs.commit_meta` — the approved merge must also account for every kind being removed: its
+   own diff removed it (its base config applied it), or its base config is byte for byte the
+   result of an earlier valid record its base descends from, judged the same way (a chain of
+   custody through the records the reader returns, so keep `Lookback` above the number of
+   operator acts one sync window can see). The provenance reader needs `SELECT` on `runtime.event_log` and
    `runtime.runs`; a read error holds the sync (retried), a missing reader refuses every removal.
    It also lists runs still `committing` with an approval (pending, never authorisations): an
    unmatched removal while such a run's approved commit is on the head without a reachable
