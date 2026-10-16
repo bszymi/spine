@@ -875,8 +875,10 @@ an embedder opts in. The library's zero value is the v1 behaviour.
 
 1. **Prerequisites.** Merge binding on (§9), and a `GitOperator` that implements the optional
    `engine.MergeBaseLister` — `MergeBases(ctx, a, b)` returns every merge base (`git merge-base
-   --all`), full lowercase ids, an error (never an empty list) for unrelated histories. A
-   remote-backed operator fetches like its `MergeBase` does. Its `Diff` must accept two local
+   --all`), full lowercase ids, and an **empty list with a nil error** for unrelated histories
+   (`git merge-base` exits 1 with no output): the guard refuses such a merge permanently, while
+   any error is treated as possibly transient and retried. A remote-backed operator fetches like
+   its `MergeBase` does. Its `Diff` must accept two local
    object ids (the post-merge check diffs the unpushed merge commit against its base).
 2. **Enable the merge guard** after `EnableMergeBinding`:
    ```go
@@ -901,15 +903,27 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    authenticated caller as `Actor` with its Spine role; the engine refuses below
    `domain.RoleOperator` (`ErrForbidden`), a SHA other than the bound one (`ErrConflict`), a run
    that is not committing (`ErrConflict`) and a merge with no governance change
-   (`ErrPrecondition`). Approve merges at once (a merge failure is in `MergeError`; approving the
-   same commit again retries — also after the merge landed locally and only its push failed, when
-   nothing is left to evaluate); reject needs a reason, revokes the approval and takes
-   `merge_failed`. Run decisions
-   inside whatever serialises your other merge-cascading calls.
+   (`ErrPrecondition`). Approve records the approval only while the run is still committing
+   (otherwise `ErrConflict`, nothing recorded) and merges at once (a merge failure is in
+   `MergeError`; approving the same commit again retries — also after the merge landed locally
+   and only its push failed, when nothing is left to evaluate); reject needs a reason, revokes the
+   approval, takes `merge_failed` and revokes again, and is `ErrConflict` once the approved merge
+   completed or reached the local `main`. A merge that can never be evaluated (no merge base, a
+   diff over the git output limit) is `ErrPrecondition`: `MergeRunBranch` refuses it permanently.
+   Within one process the engine serialises decisions with merge attempts per run (an in-process
+   stripe that `MergeRunBranch` also takes while the guard is on); **if you run several replicas
+   against one database**, also serialise `DecideGovernanceMerge` with `MergeRunBranch` per run
+   across them (for example a database advisory lock on the run id) — KNOWN-LIMITATIONS
+   "Governance-Path Guard" 9. Run decisions inside whatever serialises your other
+   merge-cascading calls.
 5. **Atomic writes (recommended).** If your `RunStore` can implement
-   `MergeCommitMeta(ctx, runID string, patch map[string]string) error` (`commit_meta || patch`),
-   the engine uses it; otherwise it falls back to read-modify-write (KNOWN-LIMITATIONS
-   "Governance-Path Guard" 9). `*store.PostgresStore` implements it.
+   `MergeCommitMeta(ctx, runID string, patch map[string]string) error` (`commit_meta || patch`)
+   and `MergeCommitMetaIfStatus(ctx, runID string, status domain.RunStatus, patch
+   map[string]string) (applied bool, err error)` (the same, `WHERE status = $status`; false for a
+   wrong status or an unknown run), the engine uses them — the second for the approval, so it can
+   never land after a reject routed the run away; otherwise it falls back to read-modify-write
+   plus a re-read (KNOWN-LIMITATIONS "Governance-Path Guard" 9). `*store.PostgresStore`
+   implements both.
 6. **Enable the projection guard:**
    ```go
    projectionSvc.WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{
@@ -921,9 +935,11 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    Provenance is a database record of an operator act that changed the config: an honoured
    `branch_protection.override` git push in `runtime.event_log` (whole-`domain.Event` JSON with
    `payload.pre_receive_ref.old_sha`), or an approved merge's consumption marker in
-   `runs.commit_meta`. The provenance reader needs `SELECT` on `runtime.event_log` and
+   `runs.commit_meta` — the approved merge must also have removed the protection itself (its
+   base config applied every kind being removed). The provenance reader needs `SELECT` on `runtime.event_log` and
    `runtime.runs`; a read error holds the sync (retried), a missing reader refuses every removal.
    Your engine's own pushes of `main` must never emit `branch_protection.override` — every merge
    would become provenance and the guard would be void.
-7. **Reserved keys** `domain.CommitMetaGovernanceApproval*` are written only by the engine; read
-   them for display.
+7. **Reserved keys** `domain.CommitMetaGovernanceApproval*`, `engine.CommitMetaGovernanceBlockedTarget`
+   and `engine.CommitMetaGovernanceStartedBy` (the lifecycle run's starter, written only with the
+   lifecycle exemption on) are written only by the engine; read them for display.

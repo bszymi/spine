@@ -409,27 +409,62 @@ refuses an unprovenanced branch-protection removal. What remains:
    lock makes the take-back itself reliable. Merge binding's own refusals have the same residual
    ("Governed Merge Binding" 7).
 7. **Post-merge refusals are permanent** (owner question 6). A merge whose result changes a
-   governed path the pre-merge evaluation did not cover (only under non-default git merge
-   configuration such as `merge.directoryRenames` or custom merge drivers) takes `merge_failed`
-   on every attempt; an operator must land such a change directly.
+   governed path the pre-merge evaluation did not cover takes `merge_failed` on every attempt.
+   This happens under git's **default** configuration too: rename following carries a run's edit
+   of a path that `main` has since renamed into a governed tree (`docs/x.yaml` →
+   `workflows/x.yaml`) onto the governed name, which the diff from the merge base cannot see;
+   non-default merge configuration (`merge.directoryRenames`, custom merge drivers) is the other
+   source. The remedy is the author's, and the refusal names it: update the run branch from
+   `main` and resubmit — the merge base moves, the path is evaluated, and the merge is held for an
+   operator decision. Merges that can never be evaluated (an unrelated history with no merge
+   base, a diff over the git output limit) are refused permanently on the first attempt the same
+   way; only failures that may be transient keep the run `committing`.
 8. **Held runs have no timeout.** Cancel is not allowed from `committing`; an operator approves or
    rejects. The decision API runs the approved merge inside the request. Re-evaluating a held run
    on every scheduler tick re-emits `governance.merge_held` under the same event id (the event log
    and delivery queue de-duplicate it; live SSE listeners can see the repeat).
-9. **Decision races.** A reject that lands while an approved merge is already in flight returns
-   `409` (the merge won), but its revocation still empties the approval keys, so that merge loses
-   its projection provenance: a relaxation it carried is refused until re-affirmed (fail-safe).
-   Stores without the atomic `MergeCommitMeta` capability (an embedder's `RunStore`) use a
-   read-modify-write, which can drop a concurrent engine write to the same run's reserved keys;
-   `*store.PostgresStore` has the capability. Full serialisation needs TASK-012's worktree lock.
+9. **Decision races are closed within one process only.** Every merge attempt of a run (guard
+   on) and every decision on it hold the run's in-process governance stripe: a reject that arrives
+   while an approved merge is in flight waits, then answers `409` (the merge won) if the merge
+   completed or reached the local `main`; an approve can never recreate an approval a reject
+   revoked. Across processes sharing one database (an embedder running replicas): the approval is
+   written only while the run is `committing` (`MergeCommitMetaIfStatus`) and the reject revokes
+   again after its route, so a late approval still cannot survive a reject — but a reject served
+   by another process while an approved merge is in flight is not ordered with it (the merge may
+   publish while the reject routes the run back), and a reject that lost to a merge completed in
+   another process still empties the approval keys, so that merge loses its projection
+   provenance (fail-safe: a relaxation it carried is refused until re-affirmed). Closing that
+   needs a database lock per run. Stores without the atomic `MergeCommitMeta` /
+   `MergeCommitMetaIfStatus` capabilities (an embedder's `RunStore`) use a read-modify-write,
+   which can drop a concurrent engine write to the same run's reserved keys;
+   `*store.PostgresStore` has both.
 10. **Symlinks.** A symlink that is itself a guarded path is a governed change, but edits to the
    target of a symlink already on `main` that points outside the guarded trees are not. A symlink
    inside the run's own evidence directory is exempt like any evidence file. Spine's projection
    reads by git path and does not follow links; an embedder's runner may.
 11. **Approval records are not branch-scoped.** A consumed approval names the engine's merge
     target (`main`); the projection proves landing by reachability from its own authoritative head.
-12. **The lifecycle exemption's separation-of-duties check** compares completed step executions
-    only (an actor who drafted and abandoned an execution is not counted).
+12. **The lifecycle exemption's separation-of-duties check** refuses a reviewer who started the
+    run (recorded at start in `spine.governance.started_by`; a run with no recorded starter gets
+    no exemption) or who is a run author in the engine's separation-of-duties sense (bound to any
+    author step execution of the run, in any status, or holding an assignment row of one). It
+    inherits that definition's residual: an assign-bound execution reset by restart recovery and
+    rebound to someone else leaves no record of the first actor (no append-only binding ledger
+    without a schema change).
+13. **The consumption-marker window.** The marker is written after the merge moves the local
+    `main` and before the push. In single-workspace `spine serve` the projection follows the local
+    `main`, and the sync loop is not serialised with the merge (TASK-012's worktree lock covers git
+    writers, not the projection): a tick inside that window sees an approved relaxation with no
+    record yet, refuses it (event + Warn) and advances. The stricter rules stay (fail-safe); the
+    approved change is installed by the next change to the file, a full rebuild
+    (`POST /system/rebuild`), or an editing override push.
+14. **An editing override push vouches for the whole file it leaves.** Owner question 8 counts an
+    override push that changed `.spine/branch-protection.yaml` — the documented re-affirmation —
+    so if `main` already carries an unauthorised relaxation (refused, rules kept), an operator's
+    override push that edits the file for another reason (adds a rule) installs it too. Operators
+    should compare the installed rules with the file (the `branch_protection.removal_refused`
+    event names both) before an override push to it. An approved governed merge, by contrast,
+    counts only if its own diff removed the protection (ADR-016 §6).
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are

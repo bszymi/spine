@@ -506,7 +506,7 @@ payload:
 
 ### 4.17 `governance.merge_decided`
 
-Emitted when an operator approves or rejects a held merge (`POST /runs/{run_id}/governance-decision`, engine `DecideGovernanceMerge`). A reject that loses the race to a merge that completed meanwhile returns `409` and emits nothing.
+Emitted when an operator approves or rejects a held merge (`POST /runs/{run_id}/governance-decision`, engine `DecideGovernanceMerge`). An approval is announced as soon as it is recorded, before its merge runs; an approve that finds the run no longer `committing` records nothing and emits nothing. A reject that loses to a merge that completed (or reached the local `main`) meanwhile returns `409` and emits nothing.
 
 **Source:** Orchestrator (`DecideGovernanceMerge`)
 
@@ -522,7 +522,7 @@ payload:
   path_count: <integer>
 ```
 
-**Idempotency:** `evt-<trace12>-governance-approve-<bound_sha12>-<unixmilli>` / `…-governance-reject-…`; every decision is its own event.
+**Idempotency:** `evt-<trace12>-governance-<approve|reject>-<bound_sha12>-<unixmilli>-<rand12>`, where `<rand12>` is 12 random hex characters: every decision is its own event, and two decisions on the same commit within the same millisecond (concurrent operators, a manual retry) do not collapse into one in the de-duplicating event log. Consumers must not parse the id; correlate on `run_id`, `bound_sha` and `decision`.
 
 ### 4.18 `branch_protection.removal_refused`
 

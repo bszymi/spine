@@ -43,9 +43,9 @@ A governed merge is **governance-changing** when it changes any path under a gua
 ### 3. The changed-path set is evaluated in two parts
 
 - **Before the merge**, the changed paths are the union of `Diff(B, S)` over **every** merge base `B` of `main` and `S` (`git merge-base --all`), where `S` is the commit the merge will actually merge: the bound commit, or the status-cascade commit the engine builds on it. If `S` agrees with every merge base on a path, git's virtual merge base agrees too (recursively merging identical sides is a no-op), so a standard merge keeps `main`'s version of that path.
-- **After the merge, before the push**, the governed paths the merge actually changed (`Diff(BaseSHA, M)`) must be a subset of what the first part evaluated. This covers merge behaviour the first part cannot see (`merge.directoryRenames`, merge drivers from the host's git configuration). A violation is a **permanent refusal** (TASK-006 owner question 6): the local target is restored to `BaseSHA`, nothing is pushed, and the run takes the workflow's `merge_failed` route (or fails, on a workflow with no publish step).
+- **After the merge, before the push**, the governed paths the merge actually changed (`Diff(BaseSHA, M)`) must be a subset of what the first part evaluated. This covers merge behaviour the first part cannot see: under git's **default** configuration, rename following — a run edits a path that `main` has since renamed into a governed tree, and git carries the edit onto the governed name — and, beyond it, non-default configuration (`merge.directoryRenames`, merge drivers from the host's git configuration). A violation is a **permanent refusal** (TASK-006 owner question 6): the local target is restored to `BaseSHA`, nothing is pushed, and the run takes the workflow's `merge_failed` route (or fails, on a workflow with no publish step). The refusal tells the author the remedy: update the run branch from `main` and resubmit; the merge base then moves, the governed path is evaluated by the first part, and the merge is held for an operator decision.
 
-If the set cannot be computed — a git error, no merge base, no bound commit — the merge is refused, never allowed.
+If the set cannot be computed the merge is refused, never allowed. A failure that may be transient (a git or store error) keeps the run in `committing` and is retried; a merge that can never be evaluated — no merge base (an unrelated history), a diff over the git output limit — is refused permanently on its first attempt and takes the same `merge_failed` route, so no run is left in `committing` with nothing an operator could decide.
 
 ### 4. Authorization: an operator approves the exact bound commit
 
@@ -54,7 +54,8 @@ This is TASK-006 owner question 1, default **(a)**:
 - A governance-changing merge is **held**. The run stays in `committing`, nothing is merged (no code repository either), and the hold is recorded on the run's publish step (or, on a workflow with no publish step, its last completed step) as `error_detail.classification = governance_approval_required`, with a `governance.merge_held` event.
 - An actor with role **operator or higher** approves or rejects through an engine API (`DecideGovernanceMerge`; standalone `POST /runs/{run_id}/governance-decision`). The approval names the bound commit and is recorded server-side under reserved `runs.commit_meta` keys (`spine.governance_approval.*`) and audited by a `governance.merge_decided` event. It is never read from commit text, branch content or workflow-authored data: workflow outcomes cannot write reserved keys (TASK-005 strips them).
 - An approval binds to the bound commit, not to a branch: a run that loops back and binds a new commit needs a new approval, and an approval for another commit is reported as stale.
-- **Approve** records the approval and runs the merge at once; approving again is a manual merge retry. **Reject** clears any approval (the keys are emptied; JSONB merge cannot delete a key) and takes the workflow's `merge_failed` route — back to `execute` in `task-default` — or fails the run on a workflow with no publish step, with the branch preserved. Cancel is not allowed from `committing`, so reject is the way out.
+- **Approve** records the approval — only while the run is still `committing` — and runs the merge at once; approving again is a manual merge retry. **Reject** clears any approval (the keys are emptied; JSONB merge cannot delete a key), takes the workflow's `merge_failed` route — back to `execute` in `task-default` — or fails the run on a workflow with no publish step, with the branch preserved, and clears the approval once more after the route. Cancel is not allowed from `committing`, so reject is the way out.
+- **Decisions are ordered with merges.** Within one process every merge attempt of a run (while the guard is on) and every decision on it hold the run's governance stripe: a reject that arrives while an approved merge is in flight waits for it, and is answered `409` (the merge won) when that merge completed or reached the local `main`; an approve can never recreate an approval a reject revoked. Across processes sharing one database the approval write and the double revocation keep the second guarantee; serialising a reject with an approved merge in flight in another process is left to the embedder (KNOWN-LIMITATIONS).
 - There is no separation-of-duties rule on the approver: an operator can already land any change with an override push (ADR-009 §4/§5), so a self-approval grants nothing new, and requiring a second operator would deadlock single-operator workspaces.
 
 The decision is one pure function (`branchprotect.EvaluateGovernance`), consulted through `Policy.Evaluate` (the facts travel on `branchprotect.Request.Governance`) **and** by the engine itself, so a permissive or custom policy cannot turn the guard off.
@@ -66,7 +67,7 @@ A workflow-lifecycle planning run may merge its **own** workflow file without op
 - the run is a planning run whose task path is exactly `workflows/<id>.yaml`, `<id>` being the parsed workflow's id (byte-exact);
 - the task path is not the governing workflow's own path, and the governing workflow declares `applies_to: [Workflow]`;
 - neither the edited file nor its merge-base version declares `applies_to: [Workflow]` (an exempt edit can never create or shadow a workflow-governing binding);
-- the last completed review step was completed by someone other than every actor that completed a non-review step of the run (a local separation-of-duties check that holds whatever the deployment's step-entry policy says).
+- the last completed review step was completed by someone who neither started the run (the starter wrote the body onto the branch; the engine records them at start, and a run with no recorded starter gets no exemption) nor is a run author — bound to any author step execution of the run, in any status, or holding an assignment row of one — a local separation-of-duties check that holds whatever the deployment's step-entry policy says.
 
 Every other governance path in that run still needs approval. ADR-008 §2 carries an "Amended by ADR-016" note.
 
@@ -75,9 +76,9 @@ Every other governance path in that run still needs approval. ADR-008 §2 carrie
 The projection never installs a branch-protection config that removes protection from the authoritative branch (the kinds the installed rules apply to `main` are not a subset of the candidate's) unless a **database record of an operator act that changed the config** matches the content being installed (owner question 8):
 
 - an honoured `branch_protection.override` git push whose old→new range changed `.spine/branch-protection.yaml` (`runtime.event_log`), or
-- an approved governed merge whose recorded `BaseSHA`→`M` changed it (`runtime.runs.commit_meta`, the consumption marker the engine writes before the push).
+- an approved governed merge whose recorded `BaseSHA`→`M` changed it **and removed the protection itself**: the config at `BaseSHA` applied every kind being removed (`runtime.runs.commit_meta`, the consumption marker the engine writes before the push). The operator approved the run's diff; if `main` already carried an unauthorised relaxation (refused, the rules kept), a diff on top of it that only adds a rule must not vouch for the relaxation underneath.
 
-A record matches when it is a full commit id, reachable from the sync head, newer than the installed rules (the installed rows' `source_commit`, or — while the bootstrap rows are installed — the sync's starting commit), and its config bytes equal the candidate's. Commit trailers are never used: any run-branch author can forge them.
+A record matches when it is a full commit id, reachable from the sync head, newer than the installed rules (the installed rows' `source_commit`, or — while the bootstrap rows are installed — the sync's starting commit), and its config bytes equal the candidate's. Commit trailers are never used: any run-branch author can forge them. An override push is held to the changed-the-file rule only: the operator wrote the bytes being installed, which is what the documented re-affirmation relies on — so an editing override push vouches for the whole file it leaves, a relaxation already on `main` included (§8).
 
 When no record matches, the previous rules stay installed, a `branch_protection.removal_refused` event is emitted and a Warn is logged. This is **not a sync error** (owner question 7; INIT-023 TASK-011 D2): the sync advances, so the diff window does not grow without bound and SMP's governed document index (which reconciles only at `idle`) does not stall. The refusal is re-evaluated on the next change to the file and on every full rebuild. The guard covers the authoritative branch only (owner question 5).
 
@@ -91,6 +92,8 @@ Both guards are off at their zero value, and the embedded library then behaves e
 - A database rebuilt from git refuses a relaxed config until an operator re-affirms it with an override push that **edits** the file (a comment line is enough). An override push that does not touch the file proves nothing.
 - Override provenance is the honoured override's row in `runtime.event_log`. The git pre-receive gate emits the event before git moves the ref; SMP's emitter writes the row synchronously, and with the guards on `spine serve`'s push path writes it synchronously too (whatever `SPINE_EVENT_DELIVERY` says), so the projection never sees the push before its record. The event log is pruned by retention, which is why a database rebuilt later needs the re-affirmation.
 - Convergence merges that move content into `main` outside `MergeRunBranch` (audit F8) are not seen by this guard; INIT-023 TASK-012 owns that path.
+- The consumption marker is written after the merge moves the local `main` and before the push. A projection that follows the local `main` (single-workspace `spine serve`) can sync inside that window, see an approved relaxation with no record yet, refuse it and advance; the stricter rules stay (fail-safe) until the file changes again, an operator triggers a full rebuild (`POST /system/rebuild`), or an editing override push re-affirms it.
+- Decisions are serialised with merge attempts within one process only (§4).
 
 ---
 
@@ -127,7 +130,7 @@ Depends on separation of duties (TASK-007) and is weaker than ADR-009 §5's oper
 
 ### A single `merge-base` diff
 
-Provably bypassable by a criss-cross history (Context). The union over every merge base plus the post-merge assertion is exact under default git configuration and independent of merge semantics otherwise.
+Provably bypassable by a criss-cross history (Context). The union over every merge base makes the pre-merge evaluation exact for content git merges path by path; the post-merge assertion covers everything else — rename following under default configuration as well as non-default merge configuration — so the guard is independent of merge semantics.
 
 ### `git merge-tree --write-tree` to precompute the result
 

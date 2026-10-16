@@ -675,13 +675,18 @@ paths:
         binds to that commit only.
 
         - `approve` records the approval (reserved `commit_meta` keys,
-          `governance.merge_decided` event) and runs the merge at once. A
-          merge that then fails is reported in `merge_error`; the approval
-          stands, and approving the same commit again retries the merge.
+          `governance.merge_decided` event) — only while the run is still
+          `committing` — and runs the merge at once. A merge that then
+          fails is reported in `merge_error`; the approval stands, and
+          approving the same commit again retries the merge.
         - `reject` (a `reason` is required) revokes any approval and takes
           the workflow's `merge_failed` route (back to `execute` in
           task-default), or fails a run whose workflow has no publish step
           (the branch is kept).
+
+        A decision waits for a merge attempt of the run already in flight
+        and then sees its result: a reject after the approved merge
+        completed or reached the local `main` is `409` (the merge won).
 
         Operator or admin only; the engine checks the role again.
       tags: [Workflow]
@@ -735,11 +740,11 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: The run is not committing, or commit_sha is not the run's bound commit (the message names the bound commit)
+          description: The run is not committing (an approve that finds it left committing records nothing), commit_sha is not the run's bound commit (the message names the bound commit), or a reject after the approved merge already reached the local main
         '412':
-          description: The run's merge changes no governance path; there is nothing to decide
+          description: The run's merge changes no governance path, or can never be evaluated (no merge base, a diff over the git output limit — the guard refuses it on its next attempt); there is nothing to decide
         '503':
-          description: The governance-path guard is off, the engine is not wired, or the merge's changed paths could not be computed (retry)
+          description: The governance-path guard is off, the engine is not wired, the merge's changed paths could not be computed this time, or another decision or merge attempt on the run did not finish in time (retry)
 
   /runs/{run_id}/governance:
     get:

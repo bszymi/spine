@@ -24,15 +24,21 @@ ADR is `Proposed` until the owner signs it off). No migration.
   `governance.merge_held` is emitted once per bound commit and hold episode. An `operator`/`admin`
   approves or rejects exactly the bound commit (`POST /api/v1/runs/{run_id}/governance-decision`);
   approve merges at once, reject revokes the approval and takes `merge_failed` (or fails a
-  no-publish run, branch kept). The approval lives in reserved `runs.commit_meta` keys
+  no-publish run, branch kept). Decisions are serialised with the run's merge attempts in process:
+  a reject during an approved merge in flight waits and is answered `409` if the merge won, and an
+  approval is recorded only while the run is still `committing`, so a late approve can never
+  outlive a reject. The approval lives in reserved `runs.commit_meta` keys
   (`spine.governance_approval.*`) that workflow outcomes cannot write. Closes the self-reviewed
   `rules: []` / review-less `task-default` PoC.
 - **Every merge base, and a post-merge check.** The changed paths are the union of the diffs from
   every merge base of `main` and the merged commit (`git merge-base --all`): with one merge base a
   criss-cross history let a run revert another run's tightened `.spine/branch-protection.yaml` or
   workflow unseen. After the merge, before the push, a merge that changed a governed path the
-  evaluation did not cover (non-default merge configuration) is refused permanently, taken back to
-  the base and never pushed. If that take-back fails, the run stays `committing` and every
+  evaluation did not cover (rename following under git's default configuration, or non-default
+  merge configuration) is refused permanently, taken back to the base and never pushed; the
+  refusal tells the author to update the run branch from `main`, after which the change is held
+  for an operator decision. A merge that can never be evaluated (no merge base, a diff over the
+  git output limit) is refused permanently the same way instead of staying `committing`. If that take-back fails, the run stays `committing` and every
   governed merge is refused as unavailable until the local `main` no longer contains the refused
   merge (each attempt retries the take-back).
 - **The projection refuses an unprovenanced protection removal.** A branch-protection config that
@@ -40,7 +46,8 @@ ADR is `Proposed` until the owner signs it off). No migration.
   of an operator act that **changed** the config matches it byte for byte, is reachable from the
   sync head and is newer than the installed rules: an honoured override push
   (`runtime.event_log`), or an approved governed merge's consumption marker
-  (`spine.governance_approval.merge_sha`/`base_sha`, written before the push). Otherwise the rules
+  (`spine.governance_approval.merge_sha`/`base_sha`, written before the push) whose own diff
+  removed the protection (its base config applied every kind being removed). Otherwise the rules
   stay, `branch_protection.removal_refused` is emitted and a Warn logged. Commit trailers are
   never trusted. Inactive while `no-direct-write` is already off on the authoritative branch. A
   provenance read failure, or a retryable git failure while checking a record, holds the sync
@@ -54,7 +61,9 @@ ADR is `Proposed` until the owner signs it off). No migration.
   restores v1; any unrecognised value keeps them on with a startup Warn. The lifecycle exemption
   (a workflow-lifecycle planning run may merge its own `workflows/<id>.yaml` — never the governing
   workflow, never a file that declares `applies_to: [Workflow]` now or before, and only when the
-  reviewer completed no other step of the run) and the own-run evidence carve-out
+  reviewer neither started the run — the starter is recorded at start; a run without one gets no
+  exemption — nor is a run author: bound to any author step of it or holding an assignment of one)
+  and the own-run evidence carve-out
   (`.spine/runs/<run id>/evidence/`) are on.
 - **Runs whose agents edit `workflows/**` or `.spine/**` now wait for an operator** (for example
   step profiles or agent definitions). Operators decide through the new routes
@@ -91,9 +100,21 @@ All opt-in; the zero value is today's behaviour, and no interface an embedder im
   loops should treat it as waiting, not failed, and not count it against a retry budget.
 - `DecideGovernanceMerge(ctx, engine.GovernanceDecisionRequest)` and
   `GovernanceMergeStatus(ctx, runID)` are the decision and read APIs (the engine checks the
-  operator role itself). Optional store capability `MergeCommitMeta(ctx, runID, patch)` (atomic
-  `commit_meta || patch`; `*store.PostgresStore` has it; without it the engine falls back to
-  read-modify-write).
+  operator role itself). With the guard on, `MergeRunBranch` and `DecideGovernanceMerge` take a
+  per-run in-process stripe (re-entrant through the context; nothing with the guard off);
+  embedders running replicas must serialise the two across processes themselves. Optional store
+  capabilities `MergeCommitMeta(ctx, runID, patch)` (atomic `commit_meta || patch`) and
+  `MergeCommitMetaIfStatus(ctx, runID, status, patch) (bool, error)` (the same, only in `status`;
+  used for the approval) — `*store.PostgresStore` has both; without them the engine falls back to
+  read-modify-write and a re-read. A reject after the approved merge reached the local `main` is
+  `ErrConflict`; a merge that can never be evaluated is `ErrPrecondition` for a decision and a
+  permanent refusal for `MergeRunBranch`.
+- `engine.MergeBaseLister` contract: unrelated histories are an empty list with a nil error
+  (`(*git.CLIClient).MergeBases` maps `git merge-base`'s exit 1 to that); an error means "retry".
+- Reserved key `engine.CommitMetaGovernanceStartedBy` (`spine.governance.started_by`): the
+  workflow-lifecycle run's starter, written by `StartWorkflowPlanningRun` /
+  `StartWorkflowUpdatePlanningRun` from the context's actor only while the guard and the lifecycle
+  exemption are on.
 - `projection.(*Service).WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{...})`
   with a `projection.GovernanceProvenanceReader` (`*store.PostgresStore.ListGovernanceAuthorizations`);
   a nil reader refuses every removal. `projection.ErrProtectionRemovalUnauthorized`.
