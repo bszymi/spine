@@ -38,7 +38,11 @@ bounded at 5 minutes (a constant).
   workspace. A tracked difference no hard reset removes (a `text eol=lf` attribute over a file
   committed with CRLF, case-only path collisions on a case-insensitive filesystem) is left in place
   instead of failing every later restore — content, including a divergence branch's, could
-  otherwise wedge the workspace (review round 1).
+  otherwise wedge the workspace (review round 1). Such a difference is identified without reading
+  through it: a symbolic link is never followed and a FIFO never opened (a file/link case collision
+  used to make every restore hash the link's target outside the tree, or block on a FIFO for 30 s),
+  and a type change is remembered like a modification, so it is quarantined once, not at every
+  take (review round 2).
 - **A client disconnect can no longer poison the tree (F9 via request cancellation).** Git children
   are stopped with `SIGTERM` (git removes its lock files) instead of `SIGKILL`, and a sequence that
   has taken the tree runs to completion detached from the request (bounded at 5 minutes); only the
@@ -49,7 +53,12 @@ bounded at 5 minutes (a constant).
 - **A refused bound merge is taken back before the tree is released**, so an in-place write's
   auto-push or the next run start never builds on or publishes it. When the take-back itself fails
   (a ref lock), it stays pending: the block's exit restore and every later take of the tree retry
-  it first and refuse the tree while `main` still holds the refused merge.
+  it first and refuse the tree while `main` still holds the refused merge. A take-back is remembered
+  from its first fallible step (a failure in its commit checks, or a sequence whose deadline was
+  spent, used to be forgotten and the tree released with the refused merge on `main`), runs on its
+  own 30 s bound detached from the caller, and on the shared tree a refused merge whose content no
+  checkout makes clean is quarantined and reset instead of keeping the whole tree refused (review
+  round 2).
 - **Task acceptance and the follow-up link read the task under the tree's lock** and commit only
   over the bytes they read: an accept issued while a sequence had a run branch checked out used to
   commit that branch's unreviewed file to `main`; a change that lands between the read and the
@@ -68,7 +77,9 @@ bounded at 5 minutes (a constant).
   the run is not reported failed while its merge sits on the branch for the next push to publish;
   it stays `committing` and the push is retried until it lands, also when a later attempt fails
   before reaching its push, and a run whose merge was recorded but whose completion failed is
-  never abandoned either (review round 1, codex rounds 6–7).
+  never abandoned either (review round 1, codex rounds 6–7). That exemption holds within one
+  committing episode: after a permanent push rejection sends the run back to `execute`, the
+  reworked run's next episode is bounded like any other (review round 2).
 
 ### Changed
 
@@ -101,7 +112,8 @@ bounded at 5 minutes (a constant).
   `engine.Orchestrator.AbandonExhaustedMerge`, `engine.MergeRetriesExhaustedError`,
   `domain.RepositoryMergeOutcome.RetriesExhausted`, `domain.RepositoryMergeOutcome.MergedLocally`,
   `domain.PushFailureDetail`, `domain.PendingPublicationDetail`,
-  `domain.RepositoryMergeOutcome.LocalMergeSHA` / `.KeepPendingPublication`,
+  `domain.RepositoryMergeOutcome.LocalMergeSHA` / `.KeepPendingPublication` /
+  `.KeepsPendingPublicationOf`, `worktreefs.Tree.LstatEntry`,
   `domain.FirstExhaustedOutcome`, `git.TreeRestoreReport.TookBack` /
   `.Phantoms`,
   `domain.FailureMergeRetriesExhausted`, `scheduler.WithCommitExhausted`,
@@ -124,10 +136,20 @@ bounded at 5 minutes (a constant).
   reads the task file inside an uncontended in-place scope on an embedder's worktree (the same
   bytes as before) and commits only if the file is unchanged when it writes — always true on an
   embedder's per-request worktree, where nothing else writes.
-- **`git.CLIClient.ResetBranch`** remembers a take-back it could not complete, and the next
-  `WithWorkingTree`, in-place `EnterBranch` scope or restore on that tree retries it first (and
-  fails while the branch still holds the refused merge). Embedders that never call `ResetBranch` on
-  a `CLIClient` (SMP) never have one.
+- **`git.CLIClient.ResetBranch`** remembers a take-back it could not complete — from the first
+  call that can fail, the lock wait included; only proof that `expected` names no commit arms
+  nothing — and the next `WithWorkingTree`, in-place `EnterBranch` scope or restore on that tree
+  retries it first (and fails while the branch still holds the refused merge). Its git now runs on
+  its own context, detached from the caller's cancellation and bounded at 30 s (review round 2: a
+  take-back is a compensating action). On a tree with a home branch a refused two-tree switch is
+  quarantined (`git stash create`) and reset (`read-tree --reset -u`) after the untracked-file
+  check; on any other tree it is refused as before. Embedders that never call `ResetBranch` on a
+  `CLIClient` (SMP) never have one and see none of this.
+- **`domain.RepositoryMergeOutcome.KeepPendingPublication`** no longer carries a permanent-class
+  prior, and the engine applies it only to a prior attempted in the run's current committing
+  episode (one `ListStepExecutionsByRun` read, only when a carry would apply; a failed read records
+  nothing and the run stays `committing`). This narrows a failure-detail prefix this task added;
+  successful merges are unchanged.
 
 ---
 

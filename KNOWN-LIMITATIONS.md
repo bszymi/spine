@@ -887,10 +887,22 @@ What that implies, and what it leaves open:
    once, listing the paths), holds only the index to `HEAD`, switches home with `--discard-changes`
    when such a difference would make the plain switch refuse (after the same untracked/ignored
    obstruction check over every path the switch writes), and does not quarantine the same phantom
-   again while its blobs are unchanged. git itself still refuses a checkout or merge that would
+   again while its index blob and working-tree entry are unchanged. The entry is identified without
+   reading through it (review round 2): its type, and a regular file's filtered blob or a symbolic
+   link's own target — a link is never followed and nothing is opened at the leaf (a FIFO, a device)
+   — so a case collision of a file and a link costs one quarantine, not one per take. More than 64
+   residual paths are not remembered: while they show, every take quarantines them again (a stash
+   commit, a Warn and a `working_tree_restored` audit record per take) but the tree still never
+   wedges. git itself still refuses a checkout or merge that would
    rewrite a phantom path ("your local changes would be overwritten"), so a governed merge or a
    cascade checkout that touches it fails like any other permanent merge failure until the content
-   is fixed (renormalize the file, or remove one of the colliding paths).
+   is fixed (renormalize the file, or remove one of the colliding paths). A refused bound merge that
+   carries a phantom is still taken back on the shared tree (review round 2): when `read-tree -m`
+   refuses, the take-back quarantines the tracked state and resets the index and tree to the base,
+   after the untracked-file check. On a tree with no home branch (a code-repository clone, an
+   embedder's worktree) a local change is never discarded, so such a take-back stays refused and
+   pending, and that tree refuses every later sequence until the content or the branch is fixed by
+   hand (fail closed; dormant in standalone, and SMP never calls `ResetBranch`).
 3. **One process per repository path.** The lock is in-process. A second `spine serve`, or an
    operator's git, on the same tree is not serialized, and a restore can quarantine its in-flight
    work.
@@ -905,7 +917,10 @@ What that implies, and what it leaves open:
    merge block's own exit restore retries it, and until it succeeds every later take of the tree
    (governed merge, run start, in-place write) retries it first and refuses the tree while `main`
    still contains the refused merge — permanently, naming the merge, when something outside the
-   server moved `main` on top of it. The pending record is in-process: a restart between a failed
+   server moved `main` on top of it. The record is armed before the take-back's first fallible step,
+   and the take-back's git runs on its own 30 s bound detached from the caller (review round 2), so
+   a sequence whose deadline is spent, or a git that cannot start, no longer releases the tree with
+   the refused merge on `main`. The pending record is in-process: a restart between a failed
    take-back and the next take of the tree forgets it (the failed outcome and its Error log name
    the merge; reset `main` by hand). Reads (the projection, `HEAD` reads, git HTTP fetches) are
    not held back while it is pending.
@@ -945,7 +960,13 @@ What that implies, and what it leaves open:
    push (the restore, the merge or a check, transiently) keeps naming the earlier local merge in its
    failure detail, so it stays pending too (codex review round 6), and so does one after an attempt
    recorded `merged` whose run did not complete (a store failure after the record; codex review
-   round 7). Only attempts that left nothing on the target are bounded and abandoned. A *permanent* failure after a local merge (a rejected or
+   round 7). Only attempts that left nothing on the target are bounded and abandoned. The exemption
+   holds within one committing episode (review round 2): an earlier merge is carried only from an
+   outcome attempted after the run's latest step activity and never from a permanent-class one, so
+   a run sent back to `execute` by a permanent push rejection is bounded again in its next episode
+   (a failed read of the run's steps records nothing, like an unreadable prior). A code
+   repository's re-merge under binding (its bound commit no longer on the default branch) carries
+   nothing either. A *permanent* failure after a local merge (a rejected or
    unauthenticated push, a refusal) still routes the run while its merge stays on the local `main`,
    as before TASK-012; re-syncing local `main` is a follow-up.
 9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
