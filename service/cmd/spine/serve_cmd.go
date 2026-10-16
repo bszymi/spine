@@ -12,7 +12,6 @@ import (
 	"github.com/bszymi/spine/core/queue"
 	"github.com/bszymi/spine/service/internal/config"
 	"github.com/bszymi/spine/service/internal/gateway"
-	"github.com/bszymi/spine/service/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -134,12 +133,7 @@ func serveCmd() *cobra.Command {
 			if smpID := os.Getenv("SMP_WORKSPACE_ID"); smpID != "" {
 				gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+smpID))
 			}
-			// The workspace's primary client is standalone's shared working
-			// tree (INIT-023 TASK-012): its home branch is the governed-merge
-			// target, engine.AuthoritativeBranch ("main"), which every
-			// sequence on the tree restores and every "HEAD" read means
-			// (workspace.PrimaryClientOptions; gitOpts is not modified).
-			gitClient := git.NewCLIClient(repoPath, workspace.PrimaryClientOptions(gitOpts)...)
+			gitClient := buildPrimaryGitClient(repoPath, gitOpts)
 			if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
 				log.Warn("failed to configure credential helper", "error", err)
 			}

@@ -9,20 +9,24 @@ package divergence_test
 // git.CLIClient with WithHomeBranch("main"), as `spine serve` builds it.
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
+	"github.com/bszymi/spine/testutil"
 )
 
 // cvStore is a BranchStore that counts divergence-context writes.
@@ -166,6 +170,9 @@ type cvEnv struct {
 
 func newCVEnv(t *testing.T) *cvEnv {
 	t.Helper()
+	// The CLIClient's own convergence merges need a committer identity
+	// (review round 1: a CI runner has none to guess).
+	testutil.HermeticGit(t)
 	dir := t.TempDir()
 	cvGit(t, dir, "init", "-q", "-b", "main")
 	cvWrite(t, dir, "README.md", "seed\n")
@@ -303,7 +310,14 @@ func TestF8_ConvergenceAbortScope(t *testing.T) {
 		e := newCVEnv(t)
 		divCtx, _ := e.diverge(t, map[string]string{"README.md": "branch edit\n"})
 		cvCommitOn(t, e.dir, e.run.BranchName, map[string]string{"README.md": "run edit after the fork\n"}, "run work")
-		err := e.svc.EvaluateAndCommit(ctx, e.run, divCtx, cvConv)
+		// The shared client, still a git.WorkingTreeGuard, recording its
+		// merges (review round 1: the exit restore aborts a left-over merge
+		// too, so the end state alone cannot show the in-block abort).
+		rec := &mergeRecorder{CLIClient: e.client, dir: e.dir}
+		svc := divergence.NewService(e.st, rec, cvEvents{})
+		svc.WithBranchProtectPolicy(branchprotect.New(branchprotect.StaticRules(branchprotect.BootstrapDefaults())))
+		logs := cvCaptureLogs(t)
+		err := svc.EvaluateAndCommit(ctx, e.run, divCtx, cvConv)
 		if err == nil {
 			t.Fatal("a conflicting convergence reported success")
 		}
@@ -313,6 +327,18 @@ func TestF8_ConvergenceAbortScope(t *testing.T) {
 		e.assertTreeHome(t)
 		if got := e.st.status(divCtx.DivergenceID); got == domain.DivergenceStatusResolved {
 			t.Fatal("a failed convergence was resolved")
+		}
+		rec.mu.Lock()
+		calls := append([]recordedMerge(nil), rec.calls...)
+		rec.mu.Unlock()
+		if len(calls) != 2 || calls[0].opts.Target != e.run.BranchName ||
+			calls[1].opts.Source != "--abort" || calls[1].opts.Strategy != "abort" || !calls[1].held {
+			t.Fatalf("merges = %+v, want the merge into %s, then its abort while the tree is still held", calls, e.run.BranchName)
+		}
+		// The exit restore only switches HEAD back home; it never finds a
+		// merge left in progress.
+		if strings.Contains(logs.String(), "aborted_merge=true") {
+			t.Fatalf("the exit restore had to abort the failed convergence's merge:\n%s", logs.String())
 		}
 	})
 	t.Run("non-guard client: one merge with the run branch as target, no abort", func(t *testing.T) {
@@ -370,4 +396,38 @@ func TestF8_DivergenceForksFromRunBranch(t *testing.T) {
 	if _, err := e.svc.CreateExploratoryBranch(ctx, &domain.Run{RunID: "run-2", BranchName: "spine/run/x-run-2"}, exp, "y", "draft"); !errors.As(err, &se) || se.Code != domain.ErrPrecondition {
 		t.Fatalf("CreateExploratoryBranch for another run = %v, want ErrPrecondition", err)
 	}
+}
+
+type recordedMerge struct {
+	opts git.MergeOpts
+	held bool // a second client on the tree could not take it at the time
+}
+
+// mergeRecorder is the shared CLIClient recording Merge calls and whether
+// the tree was held when each was made.
+type mergeRecorder struct {
+	*git.CLIClient
+	dir   string
+	mu    sync.Mutex
+	calls []recordedMerge
+}
+
+func (r *mergeRecorder) Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	probe, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	err := git.NewCLIClient(r.dir).WithWorkingTree(probe, func(context.Context) error { return nil })
+	cancel()
+	var we *git.TreeWaitError
+	r.mu.Lock()
+	r.calls = append(r.calls, recordedMerge{opts: opts, held: errors.As(err, &we)})
+	r.mu.Unlock()
+	return r.CLIClient.Merge(ctx, opts)
+}
+
+func cvCaptureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }

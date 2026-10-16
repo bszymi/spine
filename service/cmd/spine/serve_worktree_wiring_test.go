@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/bszymi/spine/adapters/git"
@@ -25,12 +27,22 @@ func TestServeWiring_PrimaryClientHomeBranchAndRetryBudget(t *testing.T) {
 	repoPath := testutil.NewTempRepo(t)
 	base := git.PushAuthOpts()
 	baseLen := len(base)
-	gitClient := git.NewCLIClient(repoPath, workspace.PrimaryClientOptions(base)...)
+	// serveCmd's own construction (review round 1: the test used to
+	// rebuild the expression instead of exercising it).
+	gitClient := buildPrimaryGitClient(repoPath, base)
 	if got := gitClient.HomeBranch(); got != engine.AuthoritativeBranch {
 		t.Fatalf("primary client home branch = %q, want %q", got, engine.AuthoritativeBranch)
 	}
 	if len(base) != baseLen {
 		t.Fatal("PrimaryClientOptions modified the base options")
+	}
+	// ... and serveCmd builds its primary client only through it.
+	src, err := os.ReadFile("serve_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "buildPrimaryGitClient(repoPath, gitOpts)") || strings.Contains(string(src), "git.NewCLIClient(") {
+		t.Fatal("serve_cmd.go must build the workspace's primary client with buildPrimaryGitClient (home branch), not git.NewCLIClient")
 	}
 	codeRepo := gitpool.NewCLIClientFactory(base...)(testutil.NewTempRepo(t), gitpool.Credential{})
 	if cc, ok := codeRepo.(*git.CLIClient); !ok || cc.HomeBranch() != "" {

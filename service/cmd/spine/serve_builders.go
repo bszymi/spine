@@ -714,3 +714,13 @@ func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *
 	}
 	return pgStore, nil
 }
+
+// buildPrimaryGitClient builds the single-workspace primary client of
+// `spine serve`. It is standalone's shared working tree (INIT-023
+// TASK-012): its home branch is the governed-merge target,
+// engine.AuthoritativeBranch ("main"), which every sequence on the tree
+// restores and every "HEAD" read means (workspace.PrimaryClientOptions;
+// gitOpts is not modified, it still feeds code-repository clients).
+func buildPrimaryGitClient(repoPath string, gitOpts []git.CLIOption) *git.CLIClient {
+	return git.NewCLIClient(repoPath, workspace.PrimaryClientOptions(gitOpts)...)
+}
