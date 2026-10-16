@@ -1558,6 +1558,31 @@ base: `git diff main...HEAD`. Status stays In Progress; the orchestrator closes 
   `divergence-and-convergence.md` §4.5, `engine-state-machine.md` (committing rows),
   `KNOWN-LIMITATIONS.md` ("Shared Working Tree" under Architecture Deviations; binding items 7 and 13
   updated), `CHANGELOG.md` (Security / Changed / Changed (embedders)).
+- **Review round 1 and codex rounds 6–9** (`6e068dfd`, `14009226`, `617e46ef`, `8b0a80ec`,
+  `ca632f13`, `ee90c672`, `e3db4ef7`, `cb996b00`, `541cff95`; dispositions under "Review round 1"):
+  - `adapters/git`: phantoms (tracked differences no `reset --hard` removes: a `text eol=lf`
+    attribute over a CRLF blob, case-only path collisions) are left in place and remembered per
+    tree (`treePhantoms`, index blob + filtered work-tree blob), never quarantined again while
+    unchanged; the restore holds only the index to `HEAD`; the switch home over phantoms is
+    `--discard-changes` after an untracked/ignored obstruction check over `diff HEAD
+    refs/heads/<home>`; `TreeRestoreReport.Phantoms`. `ResetBranch` remembers a take-back it could
+    not complete (`pendingTakeBack`); the restore, `WithWorkingTree` on a no-home tree and an
+    in-place scope settle it first (retry the CAS, or refuse while the branch still contains the
+    refused merge); `TreeRestoreReport.TookBack`.
+  - `core/domain` / `core/engine`: `MergedLocally` (`PushFailureDetail`, `PendingPublicationDetail`,
+    `LocalMergeSHA`, `KeepPendingPublication`): a run whose merge landed on the target — push
+    failed, or recorded `merged` with the completion not following — is never abandoned by the
+    budget; a later failure carries the merge forward. The transient `VerifyCommit` exit re-reads
+    the run before recording. An exhausted *code repository* is marked terminal and parks the run
+    in `partially-merged` (codex round 8). A failed read of the prior primary outcome records
+    nothing when the carry matters (codex round 8).
+  - `core/artifact`: `readRepoFile` reads under an in-place scope (the tree lock and its entry
+    restore); `updateFrom` commits only if the file still holds the bytes read (409 otherwise);
+    acceptance, rejection and the follow-up link use it.
+  - `service/cmd/spine`: `buildPrimaryGitClient` (the serve wiring under test).
+  - Tests: `adapters/git/shared_worktree_review_test.go`, `core/artifact/acceptance_shared_tree_test.go`,
+    `core/engine/merge_retry_coderepo_test.go`, new cases in the files above; the real-git engine
+    and divergence fixtures call `testutil.HermeticGit`.
 
 ### Acceptance criteria — evidence
 
@@ -1573,31 +1598,32 @@ Test files: `adapters/git/treelock_internal_test.go`, `adapters/git/shared_workt
 | 2 | `TestF8_StandaloneConvergenceTargetsRunBranch`. |
 | 3 | `TestF8_ConvergenceRefusesMissingOrForeignTarget`: subtests in the stated order (other run's `spine/` branch, `main`, empty, nil); `ErrPrecondition`; no ref moves; context stays `active` and `UpdateDivergenceContext` is never called; the exported `CommitConvergence` refuses the same runs. |
 | 4 | `TestF8_MergeRefusesEmptyTarget` (branch and `SourceSHA` forms, permanent, no git process), `TestF8_MergeAbortStillWorksWithoutTarget` (`{Source:"--abort", Strategy:"abort"}`, `{Source:"--abort"}`, `{Strategy:"abort"}` each run exactly `merge --abort`), `TestF8_MergeAbortShapesRefusedBeforeGit` (`{Strategy:"abort", Target:"x"}`, `{Source:"--abort", Target:"x"}`, `{Strategy:"abort", Source:"feature"}`). |
-| 5 | `TestF8_ConvergenceAbortScope`: shared tree — no `MERGE_HEAD`, HEAD on `main`, error, not resolved; non-guard recording fake — exactly one `Merge` with `Target == run.BranchName`, no abort, with and without a merge failure. |
+| 5 | `TestF8_ConvergenceAbortScope`: shared tree — no `MERGE_HEAD`, HEAD on `main`, error, not resolved, and (review round 1) a guard-preserving recorder shows the `{Source:"--abort"}` call made inside the block, with no exit-restore abort after it; non-guard recording fake — exactly one `Merge` with `Target == run.BranchName`, no abort, with and without a merge failure. |
 | 6 | `TestF9_ConcurrentGovernedMergesSerialize` (25 iterations). |
 | 6b | `TestF9_SameRunDoubleEntryNeverFailsACompletedRun` (copy-returning store; entry B paused in branch protection; entry A completes and deletes the branch; B returns nil, run `completed`, outcome `merged`, no `run_failed`). |
 | 7 | `TestF9_StatusCascadeIsAtomicAgainstConcurrentMerge`. |
 | 8 | `TestF9_RunBranchNeverCutFromForeignRunBranch`. |
 | 9 | `TestF9_PoisonedTreeSelfHealsAtNextMerge` (exactly one Warn with a non-empty `quarantine_sha`). |
 | 9b | `TestF9_PartiallyStagedCascadeIsQuarantined`: nine artifacts plus `docs/b.md`; at the cascade's checkout the branch tip replaces `docs/` with a committed symlink, so worktreefs refuses `docs/b.md` after earlier paths were staged. The cascade write order is a map iteration, so the test repeats the scenario (up to 8 times) until a write was staged before the refusal, asserting the properties on every run. |
-| 10 | (a) `TestTreeLock_NestedCallReenters`, (b) `…SameTreeDifferentSpellingShareOneLock`, (c) `…WaitHonoursContext`, (d) `…RegistryEmptyAfterRelease`, (e) `…StaleTicketDoesNotBypass`, (f) `…InPlaceScopeHoldsTree`, (g) `…InPlaceScopeContextReenters`, (h) `…DoneContextNeverAcquires` (0/200), (i) `…SequenceIsDetachedAndBounded`, plus `…NoHomeSequenceKeepsCancellation` (codex round 1); `TestF9_StatefulCallsWaitForTheTree` covers every locked call and `EnterBranch(dir, "")`. All under `-race`. |
+| 10 | (a) `TestTreeLock_NestedCallReenters`, (b) `…SameTreeDifferentSpellingShareOneLock` (review round 1: subtests `repo/.` built uncleaned, a symlink alias and the resolved path, each blocking while the first client holds the tree, one registry key, `homeBranchOf` through the alias), (c) `…WaitHonoursContext`, (d) `…RegistryEmptyAfterRelease`, (e) `…StaleTicketDoesNotBypass`, (f) `…InPlaceScopeHoldsTree`, (g) `…InPlaceScopeContextReenters`, (h) `…DoneContextNeverAcquires` (0/200), (i) `…SequenceIsDetachedAndBounded`, plus `…NoHomeSequenceKeepsCancellation` (codex round 1); `TestF9_StatefulCallsWaitForTheTree` covers every locked call and `EnterBranch(dir, "")`. All under `-race`. |
 | 11 | `TestF9_RestoreQuarantinesAndReturnsToMain` (quarantine, untracked kept, no new ref, no-op, merge in progress aborted), `TestF9_HomeBranchSelfHealsOnlyWhenConfigured` (CreateBranch/EnterBranch from a poisoned shared tree start from main; no home branch never moves HEAD; restore failure → `*TreeRestoreError`, fn not run; invalid home fails closed), `TestF9_RestoreReportsStaleIndexLock` (message names `index.lock`, inner `*GitError` retryable, fn not run, file kept). Codex rounds 2–3: `TestF9_RestoreNeverDeletesObstructingUntrackedFiles`, `TestF9_RestoreFailureAfterQuarantineCarriesTheSHA`, `TestF9_RestoreNeverOverwritesIgnoredFiles`. |
 | 12 | `TestF9_NoEventsOrRoutingUnderTheTreeLock`: merge success, transient (push), permanent (conflict, routes `run_failed`), `StartRun`, convergence, in-place `artifact.Service.Create`; a second client tries `WithWorkingTree` (1 s) on every emit; no violation. |
 | 13 | `TestF9_LockWaitCancellationIsNotAMergeFailure`: `*git.TreeWaitError` wrapping `DeadlineExceeded`, no outcome row, run `committing`. |
 | 14 | `TestF9_EntryRestoreFailureIsARecordedAttempt`: an untracked `notes.md` blocks `switch main`; one failed, permanent outcome (`attempts` 1); legacy run `failed`; publish workflow routes `merge_failed` → `execute`. |
-| 15 | `TestMergeRetry_TransientPushIsBoundedThenAbandoned` (binding off failing `Push` and binding on failing `PushCommit`, each with the legacy and the publish-step workflow): attempts 1–4 class `network`; `false` (no change) at 3, `true` at 4; legacy → `failed` with `merge_retries_exhausted` on the step; publish → `active` at `execute`; outcome keeps 4 attempts and `network`, prefix exactly once; second call `false`; `maxRetries` 0 `false`. Also `TestMergeRetry_TransientVerifyCommitIsACountedAttempt` and the codex round 4 tests. |
+| 15 | **Changed in review round 1 (Deviation 16).** `TestMergeRetry_TransientMergeIsBoundedThenAbandoned` (binding off failing `Merge`, binding on failing `MergeBound`, each with the legacy and the publish-step workflow): attempts 1–4 class transient; `false` (no change) at 3, `true` at 4; legacy → `failed` with `merge_retries_exhausted` on the step; publish → `active` at `execute`; outcome keeps 4 attempts and the class, prefix exactly once; second call `false`; `maxRetries` 0 `false`; local and origin `main` never hold the run's work. Push-phase failures (the AC's wrapper: `Push` / `PushCommit` failing): `TestMergeRetry_TransientPushIsRetriedUntilItLands` — never abandoned past the budget, origin `main` unchanged while pushes fail, completed with the work on origin once the push lands; `TestMergeRetry_LaterMergeFailureKeepsThePendingPublication`, `TestMergeRetry_FailureAfterAMergedOutcomeNeverAbandons`, `TestMergeRetry_UnreadablePriorOutcomeRecordsNothing` (codex rounds 6–8); `TestAbandonExhaustedMerge_CodeRepositoryParksPartiallyMerged` (codex round 8). Also `TestMergeRetry_TransientVerifyCommitIsACountedAttempt`, `TestMergeRetry_TransientVerifyCommitNeverOverwritesACompletedRun` (review round 1) and the codex round 4 tests. |
 | 16 | `TestCommitBudget_ExhaustedRunIsHandedOverNotRetried`, `…HandlerErrorSkipsTheRun`, `…ZeroMaxRetriesNeverAsks`, `…NoHandlerLeavesExhaustedRunCommitting`, `…RecoverOnStartupAppliesTheGate`, `…HeldRunWithoutOutcomeIsNeverAbandoned` (10 ticks); `TestRetriesExhausted` and `TestFirstExhaustedOutcome` (domain table). `recovery_partial_test.go` and `scenarios/partial_merge_retry_test.go` are unedited and pass. |
 | 17 | `TestMultiScheduler_BoundedConcurrency` (10 workspaces, observed maximum 4, returns after all, each released once), `…SoftBudgetStopsBetweenItemsWithoutCancelling` (fewer than 100 calls, `remaining > 0` logged, ctx never cancelled), `…PerWorkspaceSchedulerGetsTheRetryBudget` (default 3, configured, unbounded; the ServiceSet's handler), `…BudgetedScanResumesWhereItStopped` and `TestBudgetIter_NoBudgetIsThePlainLoop` (codex round 1). |
 | 18 | Mutation table below; the original PoCs re-run on `main` below. |
-| 19 | `TestServeWiring_PrimaryClientHomeBranchAndRetryBudget` (primary client home branch, code-repository client none, base options untouched, `buildScheduler` budget 3 with handler, `workspaceOrchestratorBuilder` sets `CommitExhaustedFn`), `TestBuildServiceSet_PrimaryClientHasHomeBranch` (through the ServiceSet and `GitPool.PrimaryClient`). Harness: `NewTestRepo` uses `WithHomeBranch("main")`; **no** scenario uses `WithoutHomeBranch()` (the scenario suite's failures are identical to `main`'s, see Gates). |
+| 19 | `TestServeWiring_PrimaryClientHomeBranchAndRetryBudget` (review round 1: through `buildPrimaryGitClient`, the helper `serve_cmd.go` builds its primary client with; primary client home branch, code-repository client none, base options untouched, `buildScheduler` budget 3 with handler, `workspaceOrchestratorBuilder` sets `CommitExhaustedFn`), `TestBuildServiceSet_PrimaryClientHasHomeBranch` (through the ServiceSet and `GitPool.PrimaryClient`). Harness: `NewTestRepo` uses `WithHomeBranch("main")`; **no** scenario uses `WithoutHomeBranch()` (the scenario suite's failures are identical to `main`'s, see Gates). |
 | 20 | Existing-test edits — see Deviations (more than §6 listed, because TASK-002/003 added merge tests without a `Target` after the design). |
 | 21 | Docs as listed under What was built. |
 | 22 | SMP gate below. |
 | 23 | Gates below. |
-| 24 | (a) `TestF9_CancelledGitLeavesNoLockFile` (slow smudge filter, cancelled at 300 ms, no `index.lock`); (b) `TestF9_CancelledRequestNeverPoisonsTree` (run A's branch adds 40 files written before a slow-filter file; cancelled at 300 ms: no `index.lock`, clean `main` with no untracked files, run A `completed` or `committing`, no `unknown` outcome, retry of A and run B complete). Both also pass in `golang:1.26-bookworm` (git 2.39.5). |
+| 24 | (a) `TestF9_CancelledGitLeavesNoLockFile` (slow smudge filter, cancelled at 300 ms, no `index.lock`); (b) `TestF9_CancelledRequestNeverPoisonsTree` (run A's branch adds 40 files written before a slow-filter file; cancelled at 300 ms: no `index.lock`, clean `main` with no untracked files, run A `completed` or `committing`, no `unknown` outcome, retry of A and run B complete). Both also pass in `golang:1.26-bookworm` (git 2.39.5). Review round 1: `TestF9_CancelledCommitBinderGitLeavesNoLockFile` (a `ResetBranch` whose `read-tree -m -u` hits the slow filter, through `runWith`) and `TestGitChildrenAreBuiltByNewGitCmd` (every git child in the package from `newGitCmd`). |
 | 25 | `TestF9_HeadReadsResolveToHomeBranch` (every read method; a second client on the tree; a tree with no home keeps the real HEAD) and `TestF9_HeadReadDuringSequenceSeesMain` (during run A's cascade: `ReadFile(HEAD)` = main's `type: Task`, `Head()` = `refs/heads/main`, `StartRun` binds `Task`). |
-| 26 | `TestF9_RefusedBoundMergeNeverVisibleToNextHolder` (binding on, auto-push to a bare origin, a refusal injected after `MergeBound` through `CommitParents`; an in-place `artifact.Service.Create` started inside the block waits; its commit's parent is the base; origin `main` never contains `M`). See Deviations for the "local main at record" assertion. |
-| 27 | `TestF8_DivergenceForksFromRunBranch` (merge-base = run tip at divergence start; convergence succeeds, `resolved`, main unchanged; exploratory branch at the run tip; another run refused). The SMP-side unit test is SMP TASK-012's. |
+| 26 | `TestF9_RefusedBoundMergeNeverVisibleToNextHolder` (binding on, auto-push to a bare origin, a refusal injected after `MergeBound` through `CommitParents`; an in-place `artifact.Service.Create` started inside the block waits; its commit's parent is the base; origin `main` never contains `M`). See Deviations for the "local main at record" assertion. Review round 1: `TestF9_FailedTakeBackIsFinishedBeforeTheTreeIsReleased` (the take-back fails inside the block on a held `refs/heads/main.lock`; the exit restore finishes it, the waiting write lands on the base, origin `main` never contains `M`) and `adapters/git` `TestF9_FailedTakeBackIsSettledBeforeReuse` (home and no-home trees; moved on outside the server → refused until reset by hand). |
+| 27 | `TestF8_DivergenceForksFromRunBranch` (merge-base = run tip at divergence start; convergence succeeds, `resolved`, main unchanged; exploratory branch at the run tip; another run refused); gateway (review round 1): `TestHandleCreateBranch_PassesTheDivergencesRun` (the fake records the run: the divergence's own `RunID` and `BranchName`, never the URL's; a run that cannot be loaded creates nothing). The SMP-side unit test is SMP TASK-012's. |
+| §0 / review | Phantoms: `TestF9_RestoreLeavesLineEndingPhantomsInPlace`, `TestF9_PhantomOnRunBranchNeverWedgesTheTree` (the review's convergence-shaped reproduction), `TestF9_CaseCollisionPhantomNeverWedgesTheTree` (macOS/APFS; skips on a case-sensitive filesystem). Locked acceptance read: `TestAcceptTask_DuringAHeldSequenceRecordsMainsOwnTask`, `TestUpdateFrom_ConflictWhenTheFileChangedSinceTheRead`. |
 
 ### Deviations (with reasons)
 
@@ -1660,6 +1686,43 @@ Test files: `adapters/git/treelock_internal_test.go`, `adapters/git/shared_workt
 14. **AC 9b** retries its scenario until a write was staged before the refusal (map-ordered
     cascade writes).
 15. **Scenario harness:** no scenario needed `WithoutHomeBranch()`.
+16. **AC 15: a push that fails after the merge landed is no longer abandoned** (review round 1,
+    findings 2 and 5; codex rounds 6–8). AC 15 asks for transient *push* failures to be abandoned at
+    attempt 4. Abandoning them routed the run as failed (or back to `execute`) while its merge stayed
+    on the local `main`, where the next writer's push published it; taking the merge back instead is
+    unsafe (another writer's push may already have published it, runs started since may be cut from
+    it). The run now stays `committing` and is retried until it completes (Error log once past the
+    budget); the bound — and AC 15's assertions — apply to transient failures that left nothing on
+    the target (`TestMergeRetry_TransientMergeIsBoundedThenAbandoned`), and the AC's push wrapper
+    pins the new behaviour (`TestMergeRetry_TransientPushIsRetriedUntilItLands`). A later attempt
+    that fails before its push keeps naming the landed merge (`KeepPendingPublication`), including
+    after a `merged` record whose completion failed. This contradicts AC 15's push half as written;
+    it needs the orchestrator's acceptance.
+17. **Phantoms are accepted, not quarantined forever** (review round 1, finding 1): the restore holds
+    the index to `HEAD` and lets working-tree-only differences a hard reset cannot remove stay (one
+    Warn per state), instead of §2.5 step 5's "tracked status clean". The quarantine still runs for
+    any other tracked change, and a known phantom is never quarantined again while its blobs are
+    unchanged.
+18. **A failed take-back stays pending in-process** (review round 1, finding 4): the tree is refused
+    by every later take until the take-back completes (or, when `main` moved on outside the server
+    and still contains the refused merge, until an operator resets it). The record is in-process,
+    like the lock (KNOWN-LIMITATIONS).
+19. **Acceptance reads under the lock and commits only over what it read** (review round 1,
+    finding 3): a file that changed between the read and the write is now a 409 conflict instead of
+    being overwritten. On an embedder's private tree (SMP) the lock is uncontended and the bytes are
+    unchanged, so the result is the same.
+20. **An exhausted code repository parks the run in `partially-merged`** (codex round 8) instead of
+    the primary's route: its outcome is marked `retries exhausted (…)` (class and attempts kept —
+    the outcomes CHECK admits no new class), the merge loop treats the mark as terminal, and
+    `AbandonExhaustedMerge` returns `false` so the following retry merges the primary.
+21. **A failed read of the prior primary outcome records nothing** (codex round 8) when the attempt
+    failed before its own push: the run stays `committing`, the attempt is not counted. A success,
+    or a push failure naming its own merge, is recorded as before.
+22. **gofmt:** four edited files outside AC 23's exemption list (`core/divergence/service.go`,
+    `convergence_test.go`, `service_test.go`, `service/internal/gateway/server_accessors_test.go`)
+    had main's import-order diff; reformatted in a separate commit (`cb996b00`, import order only),
+    as the design check offers. `gofmt -l` now lists only `core/divergence/convergence.go` and
+    `adapters/scheduler/recovery.go`, both in the exemption.
 
 ### Fails before the fix (AC 18)
 
@@ -1699,7 +1762,7 @@ M21–M27 guard the codex fixes. Every mutant is killed, at least by the predict
 | M7: any ticket for the key is honoured | AC 10e | `TestTreeLock_StaleTicketDoesNotBypass` |
 | M8: handlePermanentMergeFailure inside the primary block | AC 12 | `TestF9_NoEventsOrRoutingUnderTheTreeLock`, `TestF9_HeadReadDuringSequenceSeesMain` |
 | M9: commitBudgetSpent always false | AC 16 | `TestCommitBudget_ExhaustedRunIsHandedOverNotRetried`, `TestCommitBudget_HandlerErrorSkipsTheRun`, `TestCommitBudget_NoHandlerLeavesExhaustedRunCommitting`, `TestCommitBudget_RecoverOnStartupAppliesTheGate`, `TestCommitBudget_HeldRunWithoutOutcomeIsNeverAbandoned` |
-| M10: RetriesExhausted uses >= | AC 15, 16 | `TestMergeRetry_TransientPushIsBoundedThenAbandoned`, `TestCommitBudget_ExhaustedRunIsHandedOverNotRetried`, `TestCommitBudget_NoHandlerLeavesExhaustedRunCommitting`, `TestCommitBudget_RecoverOnStartupAppliesTheGate`, `TestRetriesExhausted` |
+| M10: RetriesExhausted uses >= (re-run at `541cff95`) | AC 15, 16 | `TestMergeRetry_TransientMergeIsBoundedThenAbandoned`, `TestAbandonExhaustedMerge_CodeRepositoryParksPartiallyMerged`, `TestCommitBudget_ExhaustedRunIsHandedOverNotRetried`, `TestCommitBudget_NoHandlerLeavesExhaustedRunCommitting`, `TestCommitBudget_RecoverOnStartupAppliesTheGate`, `TestRetriesExhausted` |
 | M11: MultiScheduler ctx deadline instead of soft budget | AC 17 | `TestMultiScheduler_SoftBudgetStopsBetweenItemsWithoutCancelling`, `TestMultiScheduler_BudgetedScanResumesWhereItStopped` |
 | M12: git children keep the default SIGKILL cancel | AC 24a | `TestF9_CancelledGitLeavesNoLockFile` |
 | M13: WithWorkingTree passes the caller's ctx to fn | AC 10i, 24b | `TestTreeLock_SequenceIsDetachedAndBounded`, `TestF9_CancelledRequestNeverPoisonsTree` |
@@ -1718,11 +1781,37 @@ M21–M27 guard the codex fixes. Every mutant is killed, at least by the predict
 | M26: abandonment does not wait out an in-flight attempt (codex r4 P2) | codex follow-up | `TestMergeRetry_AbandonSkipsWhileAMergeIsInFlight` |
 | M27: an earlier episode's outcome counts (codex r4 P2) | codex follow-up | `TestMergeRetry_PreviousEpisodeOutcomeDoesNotAbandon` |
 
-### Gates (final code `b95361b8`; the artifact commit after it changes only this file)
+**Review round 1 and codex rounds 6–8 mutants** (`scratchpad/t012r1/mutate.py` + `mutate_extra.py`,
+`go test -overlay` with the mutated file, worktree untouched; all at `541cff95`). Every one is killed:
 
-All on macOS (git 2.54, Go 1.26.5) unless stated; databases `s012_spine` (scenario-harness
-migrated), `s012_reg` (`migrations/registry/*.sql`), `s012_smp_it`, `s012_spine_runtime_it` on
-`i23-pg`, dropped at the end.
+| Mutation | Guards | Failing tests (observed) |
+|---|---|---|
+| R1a: the verify step fails on any phantom | finding 1 | `TestF9_RestoreLeavesLineEndingPhantomsInPlace`, `TestF9_CaseCollisionPhantomNeverWedgesTheTree` |
+| R1b: no forced switch over phantoms | finding 1 | `TestF9_PhantomOnRunBranchNeverWedgesTheTree`, `TestF9_CaseCollisionPhantomNeverWedgesTheTree` |
+| R1c: phantoms are never remembered | finding 1 | `TestF9_RestoreLeavesLineEndingPhantomsInPlace`, `TestF9_CaseCollisionPhantomNeverWedgesTheTree` |
+| R2: a failed take-back is not remembered | finding 4 | `TestF9_FailedTakeBackIsSettledBeforeReuse` (home, no-home, moved-on), `TestF9_FailedTakeBackIsFinishedBeforeTheTreeIsReleased` |
+| R3: `runWith` keeps the default SIGKILL | finding 10 | `TestF9_CancelledCommitBinderGitLeavesNoLockFile`, `TestGitChildrenAreBuiltByNewGitCmd` |
+| R4: the lock is keyed by the raw path | finding 8 | `TestTreeLock_SameTreeDifferentSpellingShareOneLock` (`repo/.`, symlink, resolved) |
+| R5: no run re-check before the `VerifyCommit` record | finding 6 | `TestMergeRetry_TransientVerifyCommitNeverOverwritesACompletedRun` |
+| R6: push-phase outcomes exhaust | findings 2, 5 | `TestMergeRetry_TransientPushIsRetriedUntilItLands` (4 cases), `TestRetriesExhausted_MergedLocallyNeverExhausts` |
+| R7a: acceptance reads unlocked, no compare | finding 3 | `TestAcceptTask_DuringAHeldSequenceRecordsMainsOwnTask`, `TestUpdateFrom_ConflictWhenTheFileChangedSinceTheRead` |
+| R7b: acceptance reads unlocked, compare kept | finding 3 | `TestAcceptTask_DuringAHeldSequenceRecordsMainsOwnTask` |
+| R8: convergence never aborts inside the block | finding 9 | `TestF8_ConvergenceAbortScope` (shared tree) |
+| R9: `spine serve` primary client without a home branch | finding 12 | `TestServeWiring_PrimaryClientHomeBranchAndRetryBudget` |
+| R10: the gateway passes the URL's run | finding 13 | `TestHandleCreateBranch_PassesTheDivergencesRun` |
+| R11: `swtRepo`, `swtDivergenceRun` and `newCVEnv` drop `HermeticGit`, run with no git identity (`HOME` empty, `user.useConfigOnly=true`) | findings 7, 11 | 12 tests ("Committer identity unknown"): `TestF8_ConvergenceMergesIntoRunBranchNotMain`, `TestF9_ConcurrentGovernedMergesSerialize`, `TestF9_SameRunDoubleEntryNeverFailsACompletedRun`, `TestF9_StatusCascadeIsAtomicAgainstConcurrentMerge`, `TestF9_PoisonedTreeSelfHealsAtNextMerge`, `TestF9_PartiallyStagedCascadeIsQuarantined`, `TestF9_NoEventsOrRoutingUnderTheTreeLock`, `TestF9_CancelledRequestNeverPoisonsTree`, `TestMergeRetry_AbandonSkipsWhileAMergeIsInFlight`, `TestMergeRetry_MergeStandsDownDuringAbandon`, `TestF8_StandaloneConvergenceTargetsRunBranch`, `TestF8_DivergenceForksFromRunBranch` — the review's 13 less `TestMergeRetry_PreviousEpisodeOutcomeDoesNotAbandon`, its cascade casualty, which no longer fails (finding 11's cleanup) |
+| R12: a later failure drops the pending publication | codex r6 | `TestMergeRetry_LaterMergeFailureKeepsThePendingPublication` (4 cases) |
+| R13: `KeepPendingPublication` is a no-op | codex r6–7 | `TestKeepPendingPublication`, `TestMergeRetry_LaterMergeFailureKeepsThePendingPublication`, `TestMergeRetry_FailureAfterAMergedOutcomeNeverAbandons` |
+| R14: a `merged` prior is not carried | codex r7 | `TestKeepPendingPublication`, `TestMergeRetry_FailureAfterAMergedOutcomeNeverAbandons` (4 cases) |
+| R15: an unreadable prior is treated as absent | codex r8 | `TestMergeRetry_UnreadablePriorOutcomeRecordsNothing` (4 cases) |
+| R16: an exhausted code repository is routed like the primary | codex r8 | `TestAbandonExhaustedMerge_CodeRepositoryParksPartiallyMerged` |
+| R17: a marked code repository is not terminal in the merge loop | codex r8 | `TestAbandonExhaustedMerge_CodeRepositoryParksPartiallyMerged` |
+
+### Gates (final code `541cff95`; the artifact commit after it changes only this file)
+
+All on macOS (git 2.54, Go 1.26.5) unless stated; databases `s012_spine`, `s012_reg`
+(`migrations/registry/*.sql`), `s012_smp_it`, `s012_spine_runtime_it` on `i23-pg`, all dropped at
+the end. The first gate run (at `b95361b8`, before review round 1) is superseded by this one.
 
 | Gate | Command | Result |
 |---|---|---|
@@ -1731,42 +1820,48 @@ migrated), `s012_reg` (`migrations/registry/*.sql`), `s012_smp_it`, `s012_spine_
 | Embed smoke test | `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "library surface is sound" |
 | Vet | `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags scenario ./...` | clean (all three) |
 | Unit | `go test -count=1 -p 4 ./...` | 40 packages ok, 0 failures |
-| Race | `go test -race -count=1 -p 4` on `adapters/git/...`, `adapters/scheduler/...`, `core/engine/...`, `core/divergence/...`, `core/domain/...`, `core/artifact/...`, `core/workflow/...`, `core/worktreefs/...`, `service/cmd/spine/...`, `service/internal/workspace/...`, `service/internal/gateway/...` | 12 ok, 0 races (at `a56df4ce`; the gocritic-only change in `b95361b8` re-ran `-race -run 'TestMergeRetry_\|TestF9_' ./core/engine/`: ok) |
-| Integration (touched packages) | `SPINE_TEST_DATABASE_URL=…/s012_spine go test -tags integration -count=1 -p 2 -v ./service/cmd/spine/ ./service/internal/workspace/` | 235 PASS, 0 skips (incl. `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy`) |
+| Race | `go test -race -count=1 -p 4` on `adapters/git/...`, `adapters/scheduler/...`, `core/artifact/...`, `core/divergence/...`, `core/domain/...`, `core/engine/...`, `core/workflow/...`, `core/worktreefs/...`, `service/cmd/spine/...`, `service/internal/gateway/...`, `service/internal/workspace/...` | 12 ok, 0 races |
+| No git identity (finding 7) | `HOME`=empty dir, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_*` `user.useConfigOnly=true`, no `GIT_AUTHOR_*`/`GIT_COMMITTER_*`: `go test -count=1 -p 4 ./core/engine/ ./core/divergence/ ./core/artifact/ ./adapters/git/ ./service/internal/workspace/ ./service/cmd/spine/ ./core/workflow/` (the environment refuses a plain `git commit`: "Author identity unknown") | 7 ok |
+| Integration (touched packages) | `SPINE_TEST_DATABASE_URL=…/s012_spine SPINE_REGISTRY_TEST_DATABASE_URL=…/s012_reg go test -tags integration -count=1 -p 2 -v ./service/cmd/spine/ ./service/internal/workspace/` | 235 top-level PASS (411 with subtests), 0 failures, 0 skips |
 | CI scenario-git-http | `go test -tags scenario -count=1 -run '^TestGitHTTP_' -v ./service/scenariotest/scenarios/` (and `^TestBootstrapInternalAdmin_`, `^TestWorkflowLifecycle_`) | 20 / 2 / 4 PASS, 0 failures, 0 skips |
-| `make test-scenario` | `go test -tags scenario -count=1 -p 4 ./service/scenariotest/...` with both DSNs | 34 top-level failures, **identical** to an archive of `main` run against the same databases (empty diff). The two first-run differences (`TestNewTestDB`/`TestCleanup` on the branch, `TestActorAPI_AIAgentGoldenPath` on main) were `-p 4` races on the shared database; serially they pass on the branch, and `TestSchemaMatchesProduction` fails on both. |
-| golangci-lint | `golangci-lint run --new-from-rev main <pkg>` per touched package (harness with `--build-tags scenario`) | 0 new issues (fixed on the way: 4 gocritic builtinShadow, 1 gofmt, 1 gosec G118 documented with a `//nolint` reason, 1 gocritic initClause) |
-| gosec | the same with `--enable-only=gosec` | 0 new issues |
-| gofmt | `gofmt -l` on every changed file vs `main`'s version | only the pre-existing import-order diffs, byte-identical to `main`'s, in `adapters/scheduler/recovery.go`, `core/divergence/convergence.go`, `core/divergence/service.go`, `core/divergence/convergence_test.go`, `core/divergence/service_test.go`, `service/internal/gateway/server_accessors_test.go` (AC 23's exemption; not reformatted, to keep the diff minimal) |
-| git floor | `golang:1.26-bookworm` (git 2.39.5), worktree read-only: the CI job's two steps, plus the task's tests `-run 'TestF8_\|TestF9_\|TestMergeRetry_\|TestCommitBudget_\|TestMultiScheduler_' ./core/engine/ ./core/divergence/ ./adapters/scheduler/` | all ok at `b95361b8`: step 1 (`adapters/git`, `core/engine` ref-grammar filter), step 2 (`adapters/git/...`, `core/artifact`, `core/workflow`), and the task filter (`core/engine`, `core/divergence`, `adapters/scheduler`) |
-
-The engine's real-git tests need a git identity for the engine's own commits (as the other real-git
-engine tests do); the container passes `GIT_AUTHOR_*`/`GIT_COMMITTER_*`.
+| `make test-scenario` | `go test -tags scenario -count=1 -p 1 -timeout 60m -v ./service/scenariotest/...` with both DSNs, serially (`-p 1`: no runs racing on the shared database), on the branch and on a `git archive main` | **31 top-level failures on both, identical sets** (198 PASS, 0 skips each): the known pre-existing set (30 + `TestWorkspace_ScopedServices`; `TestSchemaMatchesProduction` among them). Not a pass as AC 23 words it; see Review round 1, G1. The first run's 34 at `-p 4` included shared-database races. |
+| `make lint` | `lint-boundaries` + full `golangci-lint run` (the orchestration binary first on `PATH`), branch and `git archive main` | fails on both with pre-existing issues: branch 258 (errcheck 10, gocritic 119, gofmt 99, staticcheck 30), main 262; the normalised issue sets differ only by the four gofmt entries `cb996b00` removed — 0 new |
+| golangci-lint, new | `golangci-lint run --new-from-rev main` on every touched package (harness with `--build-tags scenario`) | 0 issues |
+| gosec | `make lint-security` (branch and main) and `--new-from-rev main --enable-only=gosec ./...` | 0 issues |
+| gofmt | `gofmt -l` on every changed file | `adapters/scheduler/recovery.go`, `core/divergence/convergence.go` only — both in AC 23's exemption (main's import order, unchanged) |
+| git floor | `golang:1.26-bookworm` (git 2.39.5), non-root, `--init`, worktree read-only, **no git identity** (`user.useConfigOnly=true`): the CI job's two steps, plus `-run 'TestF8_\|TestF9_\|TestMergeRetry_\|TestCommitBudget_\|TestMultiScheduler_\|TestAbandonExhaustedMerge_\|TestAcceptTask_\|TestUpdateFrom_\|TestTreeLock_\|TestGitChildren' ./core/engine/ ./core/divergence/ ./adapters/scheduler/ ./core/artifact/ ./adapters/git/` | all ok; the CRLF phantom tests run there, the case-collision test skips (case-sensitive filesystem; it runs on macOS) |
+| Mutations | review-round mutants R1–R17 and M10 re-run | all killed (tables above) |
 
 ### SMP compatibility gate (Rule 3)
 
 SMP `1ae9b0e3` (detached checkout `i23/s-T012/smp`, `../spine` = this worktree), no SMP edits,
-`GOFLAGS=-mod=readonly`:
+`GOFLAGS=-mod=readonly`, at Spine `541cff95`:
 
-| Step | Command | Result at Spine `b95361b8` |
+| Step | Command | Result |
 |---|---|---|
 | Build + vet | `go build ./... && go vet ./...`, plain and `-tags integration`, `-tags scenario`, `-tags faultinject` | clean (all four) |
-| Race, every SMP package importing a changed Spine package | `go test -race -count=1 -p 4 -timeout 20m` on `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}` (the importers of `adapters/git`, `adapters/scheduler`, `core/engine`, `core/divergence`, `core/domain`, `core/artifact`, `core/workflow`, under every tag set), with `TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` | 11 ok, `projectionsvc` has no test files |
+| Race, every SMP package importing a changed Spine package | `go test -race -count=1 -p 4 -timeout 20m` on `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}` (the direct importers, under every tag set, of `adapters/git`, `adapters/scheduler`, `core/artifact`, `core/divergence`, `core/domain`, `core/engine`, `core/workflow`, `core/worktreefs`), with `TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` | 11 ok, `projectionsvc` has no test files |
 | Integration job, Spine-runtime step | `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 10m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` | PASS: 1914 passed, 0 failed, 2 allowed skips |
 | githttp suite | `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | PASS: 301 passed, 0 failed, 1 allowed skip |
 | Leak check | `ws_%` databases and roles before/after | 0 / 0 |
 
 Platform migrations via `go run ./dev/apply-migrations -set platform -dir migrations` (116
-versions), Spine runtime via `-set spine-runtime` (26). The same gate also passed at `7dfdb597`
-(before codex rounds 3–4). Rule 4: SIGTERM-on-cancel and the run-status re-check reach SMP's
-`CLIClient` users and engine; no successful result changed in any SMP suite. SMP never sets
-`WithHomeBranch`, never calls `AbandonExhaustedMerge`, `WithWorkingTree` or `CLIClient.Merge`, and
-receives an explicit convergence `Target` plus `run.BranchName` as the divergence base.
+versions), Spine runtime via `-set spine-runtime` (26). Rule 4: SIGTERM-on-cancel and the
+run-status re-check reach SMP's `CLIClient` users and engine; no successful result changed in any
+SMP suite. Review round 1 adds, on SMP's paths: `readRepoFile` takes an uncontended in-process lock
+on SMP's per-request tree and reads the same bytes, and the acceptance write compares them with the
+file it replaces (equal on a private tree); the code-repository loop's extra terminal check and the
+pending-take-back settle read only records that `AbandonExhaustedMerge` / `ResetBranch` write, and
+SMP calls neither; a failed read of the prior primary outcome now ends the attempt (nothing
+recorded) instead of recording it as attempt 1 — only under a store read failure. SMP never sets
+`WithHomeBranch`, never calls `AbandonExhaustedMerge`, `WithWorkingTree`, `CLIClient.Merge` or
+`ResetBranch`, and receives an explicit convergence `Target` plus `run.BranchName` as the
+divergence base.
 
 ### Codex
 
-`codex review --base main`, plain (no model override); every review sub-session
-(`session_meta.source = {"subagent":"review"}`) ran `gpt-6.1-sol`:
+`codex review --base main`, plain (no model override, codex-cli 0.162.1); every review
+sub-session (`session_meta.source = {"subagent":"review"}`) ran `gpt-6.1-sol`:
 
 | Round | Review session | Findings | Resolution |
 |---|---|---|---|
@@ -1775,13 +1870,160 @@ receives an explicit convergence `Target` plus `run.BranchName` as the divergenc
 | 3 | `01a13fb4-b96b-7671-9abc-82d32d964f79` | [P1] the restore's switch overwrote ignored files (`--overwrite-ignore` default) | fixed in `7bd6663b` (`--no-overwrite-ignore`) |
 | 4 | `01a13fc1-451e-73b3-aae4-88b114d23090` | [P2] exhaustion abandonment could race an in-flight merge attempt / use the previous episode's outcome | fixed in `a56df4ce` |
 | 5 | `01a13fcc-af3a-7d23-bd2a-0544aef73864` | none ("No actionable regressions were identified") | — |
+| 6 (review round 1 fixes) | `01a1440a-0025-7733-b186-e4e7a5aaa8dd` | [P2] a later failure before the push overwrote the publication-pending marker, so the budget could abandon a run whose merge was on main | fixed in `ee90c672` (`KeepPendingPublication`) |
+| 7 | `01a14411-4724-7c80-8573-55c7dd37a249` | cut off before a verdict (the agent session ended mid-review); its last probe showed a `merged` prior outcome was not carried by `KeepPendingPublication` | verified and fixed in `e3db4ef7` |
+| 8 | `01a1442b-bb35-7fc3-9881-42f6ae7967b4` | [P2] a failed read of the prior primary outcome dropped the publication marker; [P2] an exhausted code repository was routed like the primary (bypassing partial-merge recovery) | fixed in `541cff95` |
+| 9 | `01a1443f-17f1-7922-8a73-7ea327ae5acb` | none ("No actionable regressions were identified … locking, convergence-target, and retry-budget changes are consistent with their callers and regression tests") | — |
 
-No finding was rejected.
+No codex finding was rejected.
+
+### Review round 1
+
+Three reviewers (correctness and compatibility, adversarial security, completeness and tests)
+reported 14 findings and a list of acceptance-criteria gaps. Each was checked against the code
+before it was fixed. Commits: `6e068dfd`, `14009226`, `617e46ef`, `8b0a80ec`, `ca632f13` (docs),
+then `e3db4ef7`, `cb996b00`, and codex follow-ups `ee90c672`, `541cff95`.
+
+**Findings.**
+
+1. **P2, `adapters/git/treelock.go` — phantoms wedge the shared tree. FIXED** (`6e068dfd`).
+   Real: a `text eol=lf` attribute over a CRLF blob reproduces on any OS (and a case-only path
+   collision on APFS). On `main`, the verify step failed every later take with "tracked changes
+   remain". On a run branch, the plain switch refused. Either way the whole workspace was down.
+   Fix, as suggested: the restore holds only the index to `HEAD`. Working-tree-only differences
+   left after the reset are phantoms: reported at Warn once per state, remembered by index blob and
+   filtered work-tree blob, and never quarantined again (so no new stash commit) while unchanged.
+   Over phantoms the switch home is `--discard-changes`, after an untracked/ignored obstruction
+   check over `diff HEAD refs/heads/<home>`. Tests: `TestF9_RestoreLeavesLineEndingPhantomsInPlace`
+   (on `main`), `TestF9_PhantomOnRunBranchNeverWedgesTheTree` (the review's convergence-shaped
+   reproduction), `TestF9_CaseCollisionPhantomNeverWedgesTheTree`. Mutants R1a–R1c.
+2. **P3, `core/engine/merge_retry.go:146` — abandonment after a push-phase failure leaves the
+   merge on local `main`. FIXED** (`14009226`, completed by `ee90c672`, `e3db4ef7`, `541cff95`),
+   together with finding 5. Real: abandoning recorded the run failed while the next writer's push
+   published its merge.
+3. **P2, `core/artifact/acceptance.go:82` — the acceptance read is unlocked. FIXED** (`617e46ef`).
+   Real: `readRepoFile` read the shared tree's files outside any scope, so it could read a run
+   branch a sequence had checked out. `readRepoFile` now reads inside an in-place scope (the lock
+   plus the entry restore). `updateFrom` commits only if the file still holds the bytes read
+   (otherwise 409). Accept, reject and the follow-up link use it. Chosen over `git.ReadFile("HEAD")`
+   because the write must also not overwrite a change made in between. Tests:
+   `TestAcceptTask_DuringAHeldSequenceRecordsMainsOwnTask`,
+   `TestUpdateFrom_ConflictWhenTheFileChangedSinceTheRead`. Mutants R7a/R7b.
+4. **P2, `core/engine/merge_binding.go:760` — a failed take-back fails open. FIXED** (`6e068dfd`).
+   Real: on a held `refs/heads/main.lock` the block released a tree that looked healthy with `main`
+   at `M`. `ResetBranch` now records a take-back it could not complete (`pendingTakeBack`). The
+   block's exit restore and every later take of the tree (sequence, in-place scope, restore, and a
+   no-home tree's `WithWorkingTree`) settle it first: they retry the compare-and-swap, or refuse
+   permanently while the branch still contains `M` after moving on outside the server. The marker
+   is in-process, like the lock, rather than a durable `refs/spine/…` ref; a restart forgets it
+   (KNOWN-LIMITATIONS; the failed outcome and its Error log name the merge). Tests:
+   `TestF9_FailedTakeBackIsSettledBeforeReuse` and
+   `TestF9_FailedTakeBackIsFinishedBeforeTheTreeIsReleased` (the review's PoC: the next in-place
+   write lands on the base, and origin `main` never contains `M`). Mutant R2.
+5. **P2, `core/engine/merge_retry.go:146` — the same as finding 2, from the security review.
+   FIXED** by behaviour (b), "merged locally, publication pending". `RetriesExhausted` is false for
+   a `MergedLocally` outcome, so the run stays `committing` and is retried until it completes, with
+   an Error log past the budget. Option (a), taking the merge back, was rejected: another writer's
+   push may already have published it, and runs started since may be cut from it. The codex rounds
+   closed the gaps around this. A later pre-push failure keeps naming the merge (round 6). So does a
+   failure after a `merged` record whose completion failed (round 7). An unreadable prior outcome
+   records nothing (round 8). Tests: `TestMergeRetry_TransientPushIsRetriedUntilItLands`,
+   `TestMergeRetry_LaterMergeFailureKeepsThePendingPublication`,
+   `TestMergeRetry_FailureAfterAMergedOutcomeNeverAbandons`,
+   `TestMergeRetry_UnreadablePriorOutcomeRecordsNothing`, and
+   `TestMergeRetry_TransientMergeIsBoundedThenAbandoned`, whose abandonment leaves local and origin
+   `main` at the seed. AC 15's push half changes: see Deviation 16. Mutants R6, R12–R15.
+6. **P3, `core/engine/merge_binding.go:447` — the `VerifyCommit` record runs before the re-check.
+   FIXED** (`14009226`). Real under binding, where no cascade block runs first.
+   `requireStillCommitting` now runs before `recordPrimaryMergeOutcome` on that exit. Test:
+   `TestMergeRetry_TransientVerifyCommitNeverOverwritesACompletedRun` (DC-2 under binding with a
+   transient `VerifyCommit` on entry B). Mutant R5.
+7. **P2, test fixtures — they depend on the host's git identity. FIXED** (`14009226`,
+   `8b0a80ec`). `swtRepo`, `swtDivergenceRun` and `newCVEnv` call `testutil.HermeticGit`. Verified
+   with no identity at all: the 7 task packages on macOS, and the `golang:1.26-bookworm` git floor
+   with `user.useConfigOnly=true`. Mutant R11 reproduces the review's failures.
+8. **P2, `adapters/git/treelock_internal_test.go:108` — AC 10(b) is tautological. FIXED**
+   (`6e068dfd`). Confirmed: `filepath.Join` cleaned `repo/.`. The test now uses `dir + "/."`
+   uncleaned, a symlink alias and the resolved path. Each blocks while the first client holds the
+   tree, the registry has one key, and `homeBranchOf` resolves through the alias. Mutant R4 (the
+   raw-path key) is now killed.
+9. **P3, `core/divergence/convergence.go:271` — the in-block abort is untested. FIXED**
+   (`8b0a80ec`). A guard-preserving recorder sees the `{Source:"--abort"}` call while the block
+   holds the tree. The log has no `aborted_merge=true` exit-restore repair. Mutant R8.
+10. **P3, `adapters/git/commitbinder.go:100` — no test covers `runWith` cancellation. FIXED**
+    (`6e068dfd`). `TestF9_CancelledCommitBinderGitLeavesNoLockFile` cancels a `ResetBranch` whose
+    `read-tree -m -u` hits a slow smudge filter, and no `index.lock` is left.
+    `TestGitChildrenAreBuiltByNewGitCmd` checks that every git child in the package comes from
+    `newGitCmd`. Mutant R3.
+11. **P3, `core/engine/shared_worktree_regression_test.go:366` — the goroutine leak cascades.
+    FIXED** (`14009226`). An idempotent close plus a drain run in `t.Cleanup`. Evidence: under R11
+    the cascade casualty `TestMergeRetry_PreviousEpisodeOutcomeDoesNotAbandon` no longer fails.
+12. **P3, `service/cmd/spine/serve_cmd.go:142` — the serve wiring is untested. FIXED**
+    (`8b0a80ec`). `serve_cmd.go` builds its primary client through `buildPrimaryGitClient`, which
+    `TestServeWiring_PrimaryClientHomeBranchAndRetryBudget` calls. Mutant R9.
+13. **P3, `service/internal/gateway/handlers_divergence.go:94` — the run hand-over is untested.
+    FIXED** (`8b0a80ec`). The fake records the run.
+    `TestHandleCreateBranch_PassesTheDivergencesRun` asserts the divergence's own `RunID` and a
+    non-empty `BranchName`, and that a `GetRun` failure creates nothing. Mutant R10.
+14. **P3, this artifact's gofmt gate row (the finding text was truncated). FIXED** (`cb996b00`).
+    The row presented six files as AC 23's exemption, but four of them are not on the AC's list
+    (`core/divergence/service.go`, `convergence_test.go`, `service_test.go`,
+    `service/internal/gateway/server_accessors_test.go`). Those four were reformatted, import order
+    only, in a separate commit, as the design check offers. `gofmt -l` now lists only the two exempt
+    files.
+
+**Acceptance-criteria gaps.**
+
+- **G1, AC 23: `make test-scenario` does not pass. NOT MET as worded; needs the orchestrator's
+  waiver.** A serial run with both DSNs fails 31 top-level scenarios on the branch and on
+  `git archive main`, and the sets are identical. That is the pre-existing set the orchestrator
+  lists (30 + `TestWorkspace_ScopedServices`). The four end-to-end divergence scenarios
+  (`TestDivergence_SelectOneEndToEnd`, `…MinimumCompletedBranches`, `…RequireAllWithFailedBranch`,
+  `…SequentialDivergence`) and the failing `TestArtifactMutation_*` and `TestRunLifecycle_*`
+  scenarios abort at fixture seeding (`validation_failed`) in both builds. The `TestDivergence_*`
+  scenarios that pass only evaluate convergence strategies, with no merge. So, as the reviewer
+  says, no scenario exercises the convergence merge or the governed merge, and parity says nothing
+  about F8/F9 at scenario level. Those are covered by the real-git engine, divergence and
+  adapter tests. The earlier summary's "the gates … are green" overstated this gate; corrected
+  here.
+- **G2, AC 23: `make lint` was not run in full. Run now:** it fails on both trees with
+  pre-existing issues and adds 0 new ones (the normalised sets differ only by the four gofmt fixes).
+  `make lint-security` reports 0 issues on both.
+- **G3, AC 26: "local main equals `BaseSHA` at record" is weakened (Deviation 12).** The deviation
+  is kept, for the reason given there. The property that matters, "origin `main` never contains
+  `M`", is now also tested with a failed take-back (finding 4).
+- **G4, AC 27: the SMP-side unit test. DEFERRED** to SMP TASK-012, as the AC allows. SMP
+  `1ae9b0e3`'s `spinecore` suite passes with `run.BranchName` as the base and an explicit
+  convergence `Target`.
+- **G5, §0: phantoms break self-heal. FIXED** (finding 1).
+- **G6, AC 20: existing-test edits beyond the list. Recorded** (Deviation 1). Review round 1 edits
+  `service/internal/gateway/handlers_divergence_test.go` (the fake records the run) and makes
+  gofmt-only import changes in `core/divergence/convergence_test.go`, `service_test.go` and
+  `service/internal/gateway/server_accessors_test.go`. Every other test change is in this task's
+  own test files.
+- **G7, §0 / §2.9: working-tree file reads outside the lock. FIXED** (finding 3). No other
+  production path reads the shared tree's files outside a scope: `RenumberArtifact` and
+  `UpdateLinksToRenamedArtifact` have no caller, and `safePathIn` validates inside write scopes.
+- **G8, AC 15: the state of `main` after a push-phase exhaustion. FIXED** by specification: such a
+  run is never abandoned (Deviation 16). The merge-phase abandonment asserts that local and origin
+  `main` are unchanged.
+- **G9, AC 10(b). FIXED** (finding 8). **G10, AC 5. FIXED** (finding 9). **G11, AC 19. FIXED**
+  (finding 12). **G13, CI identity. FIXED** (finding 7).
+- **G12, AC 12: the probe is vacuous on the transient path (Deviation 13). NOT A DEFECT.**
+  `retryMerge` emits no event by design, so there is nothing to probe. The assertion stays as a
+  guard against a future emit under the lock.
+- **G14: the reviewer's own re-verification (build, vet, tests, lint, gosec, the SMP set, codex
+  sessions, docs, mutants M12/M14).** Informational. It is consistent with the gates above.
 
 ### Not run / notes for the orchestrator
 
+- **Needs a ruling:** AC 23's `make test-scenario` (G1: 31 pre-existing failures, identical to
+  `main`) and AC 15's push half (Deviation 16: push-phase transient failures are retried until the
+  push lands, never abandoned).
 - The SMP-side unit test of AC 27 (`divergenceGitClient.CreateBranch` receives and forwards
-  `run.BranchName`) belongs to SMP TASK-012 (no SMP edits here); the SMP gate's `spinecore` suite
+  `run.BranchName`) belongs to SMP TASK-012 (no SMP edits here). The SMP gate's `spinecore` suite
   passes with the new base.
-- `MultiScheduler` remains unwired (OQ3); its bounds are covered by unit tests only.
+- `MultiScheduler` remains unwired (OQ3). Its bounds are covered by unit tests only.
+- Code-repository merges remain dormant in standalone (no code-repo catalog). The round 8 routing
+  is covered by an engine unit test with fake repository clients.
 - Runtime schema: unchanged.
