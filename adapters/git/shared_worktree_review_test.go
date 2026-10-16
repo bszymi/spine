@@ -341,35 +341,3 @@ func TestF9_FailedTakeBackIsSettledBeforeReuse(t *testing.T) {
 		}
 	})
 }
-
-// AC 24a on the CommitBinder runner (review round 1): runWith — MergeBound,
-// ResetBranch, VerifyCommit and the restore run git through it — stops a
-// cancelled git with SIGTERM too. A ResetBranch whose `read-tree -m -u`
-// checks out a file through a slow smudge filter is cancelled at 300 ms;
-// git's own handler removes .git/index.lock. (A tree with no home branch
-// keeps the caller's cancellation, so the cancel reaches git.)
-func TestF9_CancelledCommitBinderGitLeavesNoLockFile(t *testing.T) {
-	repo := testutil.NewTempRepo(t)
-	swGit(t, repo, "config", "filter.slow.smudge", "sleep 2; cat")
-	swGit(t, repo, "config", "filter.slow.clean", "cat")
-	testutil.WriteFile(t, repo, ".gitattributes", "*.slow filter=slow\n")
-	swGit(t, repo, "add", ".gitattributes")
-	swGit(t, repo, "commit", "-q", "-m", "attributes")
-	expected := swGit(t, repo, "rev-parse", "main")
-	swGit(t, repo, "checkout", "-q", "-b", "slow")
-	testutil.WriteFile(t, repo, "b.slow", "slow content\n")
-	swGit(t, repo, "add", "b.slow")
-	swGit(t, repo, "commit", "-q", "-m", "slow file")
-	to := swGit(t, repo, "rev-parse", "slow")
-	swGit(t, repo, "checkout", "-q", "main")
-
-	c := git.NewCLIClient(repo)
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	if err := c.ResetBranch(ctx, "main", to, expected); err == nil {
-		t.Fatal("a ResetBranch cancelled during its smudge filter reported success")
-	}
-	if _, err := os.Stat(filepath.Join(repo, ".git", "index.lock")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf(".git/index.lock after a cancelled ResetBranch: %v (git was killed, not terminated)", err)
-	}
-}

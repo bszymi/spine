@@ -534,12 +534,37 @@ func (c *CLIClient) mergeSHA(ctx context.Context, opts MergeOpts) (MergeResult, 
 // the branch record that tree — the refused content — as a plain commit.
 // No remote is touched.
 //
-// A failure after the arguments are verified is remembered for the tree
-// (INIT-023 TASK-012 review round 1, pendingTakeBack): every later take
-// of the tree — WithWorkingTree, an in-place write scope, the restore of
-// a home-branch tree, the merge block's own exit restore first — retries
-// the swap before anything else runs, and refuses the tree while the
-// branch still contains the refused merge.
+// A failure is remembered for the tree (INIT-023 TASK-012 review round
+// 1, pendingTakeBack): every later take of the tree — WithWorkingTree,
+// an in-place write scope, the restore of a home-branch tree, the merge
+// block's own exit restore first — retries the swap before anything else
+// runs, and refuses the tree while the branch still contains the refused
+// merge.
+//
+// Review round 2 of INIT-023 TASK-012:
+//
+//   - the record is armed once the arguments pass the grammar, before the
+//     first call that can fail — the lock wait, the commit checks — not
+//     after them: a take-back that failed at a commit check used to be
+//     forgotten, and the merge block then released a tree that looked
+//     healthy with the refused merge on its branch. The one failure that
+//     arms nothing is proof that expected names no commit: a branch
+//     cannot contain it;
+//   - the git work runs on its own context, detached from the caller's
+//     cancellation and bounded by treeRestoreTimeout, like the restore: a
+//     take-back is a compensating action, and the governed merge calls it
+//     at the end of a sequence whose own deadline may already be spent;
+//   - on a tree with a home branch (standalone's shared tree, whose policy
+//     is quarantine and continue) a refused two-tree switch no longer
+//     fails the take-back: content no checkout makes clean — a CRLF blob
+//     under a `text eol=lf` attribute, two paths that differ only in case
+//     — refuses `read-tree -m` for good, so a take-back of a merge that
+//     carries it could never succeed and every later take of the tree
+//     failed on it. The tracked state is quarantined instead (`git stash
+//     create`, as the restore does) and the index and tree are reset to
+//     `to`, after the restore's untracked-obstruction check. A tree with
+//     no home branch keeps the refusal: a local change there is never
+//     discarded (TASK-005).
 func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string) (retErr error) {
 	const op = "reset_branch"
 	short, full, err := checkBranch(op, "branch", branch)
@@ -552,34 +577,38 @@ func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string
 	if err := checkObjectName(op, "expected", expected); err != nil {
 		return err
 	}
+	// From here a failure may leave the branch at (or containing) the
+	// merge the caller refused. The take-back is remembered for the tree,
+	// and every later take of it settles it first — retries the swap, or
+	// refuses while the branch still holds the merge — so the tree is
+	// never handed on as healthy with the refused merge on it
+	// (pendingTakeBack). A success clears the record of this take-back.
+	remember := true
+	defer func() {
+		switch {
+		case retErr == nil:
+			clearPendingTakeBack(c.repoPath, short, expected)
+		case remember:
+			notePendingTakeBack(c.repoPath, short, to, expected)
+		}
+	}()
 	// The ref move and the index/tree follow-up hold the working tree
 	// (INIT-023 TASK-012); inside the governed merge's sequence this
-	// re-enters.
+	// re-enters. Only the wait honours the caller's ctx.
 	h, err := c.lockTree(ctx)
 	if err != nil {
 		return err
 	}
 	defer h.release()
-	ctx = h.ctx
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(h.ctx), treeRestoreTimeout)
+	defer cancel()
 	if err := c.verifyCommitOID(ctx, op, "target", to); err != nil {
 		return err
 	}
 	if err := c.verifyCommitOID(ctx, op, "expected", expected); err != nil {
+		remember = !errors.Is(err, errNotCommit)
 		return err
 	}
-	// From here a failure leaves the branch at (or containing) the merge
-	// the caller refused. The take-back is remembered for the tree, and
-	// every later take of it settles it first — retries the swap, or
-	// refuses while the branch still holds the merge — so the tree is
-	// never handed on as healthy with the refused merge on it (review
-	// round 1 of INIT-023 TASK-012; pendingTakeBack). A success clears it.
-	defer func() {
-		if retErr != nil {
-			notePendingTakeBack(c.repoPath, short, to, expected)
-		} else {
-			clearPendingTakeBack(c.repoPath, short)
-		}
-	}()
 	attached, err := c.headIsBranch(ctx, op, full)
 	if err != nil {
 		return err
@@ -591,8 +620,15 @@ func (c *CLIClient) ResetBranch(ctx context.Context, branch, to, expected string
 	if !attached || to == expected {
 		return nil
 	}
-	if _, _, err := c.runWith(ctx, op, runOpts{}, "read-tree", "-m", "-u", "--end-of-options", expected, to); err != nil {
-		if _, _, fwdErr := c.runWith(ctx, op, runOpts{},
+	_, _, err = c.runWith(ctx, op, runOpts{}, "read-tree", "-m", "-u", "--end-of-options", expected, to)
+	if err != nil && c.treeHome() != "" {
+		err = c.resetTreeOverRefusedSwitch(ctx, op, short, to, err)
+	}
+	if err != nil {
+		// Its own short bound: the switch may have spent ctx's.
+		fwdCtx, fwdCancel := context.WithTimeout(context.WithoutCancel(ctx), treeRestoreTimeout)
+		defer fwdCancel()
+		if _, _, fwdErr := c.runWith(fwdCtx, op, runOpts{},
 			"update-ref", "-m", "spine: keep the merge (working tree not restorable)", "--end-of-options", full, expected, to); fwdErr != nil {
 			return &GitError{Kind: ErrKindPermanent, Op: op,
 				Message: fmt.Sprintf("%s was reset to %s but its working tree could not follow (%v), and moving it back to %s failed (%v): the branch, index and working tree disagree",

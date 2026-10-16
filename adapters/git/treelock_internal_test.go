@@ -371,3 +371,40 @@ func TestGitChildrenAreBuiltByNewGitCmd(t *testing.T) {
 		t.Fatal("newGitCmd must set Cancel (SIGTERM) and WaitDelay")
 	}
 }
+
+// AC 24a on the CommitBinder runner (review round 1): runWith — MergeBound,
+// VerifyCommit, the restore and ResetBranch run git through it — stops a
+// cancelled git with SIGTERM too. A `read-tree -m -u` that checks out a
+// file through a slow smudge filter is cancelled at 300 ms; git's own
+// handler removes .git/index.lock. (Review round 2 moved this from
+// ResetBranch, which now runs its git on a detached context, to runWith
+// itself.)
+func TestF9_CancelledCommitBinderGitLeavesNoLockFile(t *testing.T) {
+	dir := tlRepo(t)
+	tlRun(t, dir, "config", "filter.slow.smudge", "sleep 2; cat")
+	tlRun(t, dir, "config", "filter.slow.clean", "cat")
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("*.slow filter=slow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tlRun(t, dir, "add", ".gitattributes")
+	tlRun(t, dir, "commit", "-q", "-m", "attributes")
+	from := tlRun(t, dir, "rev-parse", "main")
+	tlRun(t, dir, "checkout", "-q", "-b", "slow")
+	if err := os.WriteFile(filepath.Join(dir, "b.slow"), []byte("slow content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tlRun(t, dir, "add", "b.slow")
+	tlRun(t, dir, "commit", "-q", "-m", "slow file")
+	to := tlRun(t, dir, "rev-parse", "slow")
+	tlRun(t, dir, "checkout", "-q", "main")
+
+	c := NewCLIClient(dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if _, _, err := c.runWith(ctx, "reset_branch", runOpts{}, "read-tree", "-m", "-u", "--end-of-options", from, to); err == nil {
+		t.Fatal("a read-tree cancelled during its smudge filter reported success")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git", "index.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(".git/index.lock after a cancelled runWith: %v (git was killed, not terminated)", err)
+	}
+}

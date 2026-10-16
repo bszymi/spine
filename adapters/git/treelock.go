@@ -236,12 +236,19 @@ func notePendingTakeBack(dir, branch, to, expected string) {
 	m[branch] = pendingTakeBack{to: to, expected: expected}
 }
 
-func clearPendingTakeBack(dir, branch string) {
+// clearPendingTakeBack drops the record of branch's take-back of the
+// refused merge expected. A record of another refused merge on the branch
+// is kept (review round 2): a take-back that succeeded says nothing about
+// whether the branch still contains that one, and the next settle decides
+// it.
+func clearPendingTakeBack(dir, branch, expected string) {
 	key := canonicalTreeKey(dir)
 	treeMu.Lock()
 	defer treeMu.Unlock()
 	if m := treeTakeBacks[key]; m != nil {
-		delete(m, branch)
+		if p, ok := m[branch]; ok && p.expected == expected {
+			delete(m, branch)
+		}
 		if len(m) == 0 {
 			delete(treeTakeBacks, key)
 		}
@@ -617,16 +624,23 @@ func (c *CLIClient) RestoreWorkingTree(ctx context.Context) (TreeRestoreReport, 
 //     after the same untracked-obstruction check over every path the
 //     switch writes (`diff HEAD refs/heads/<home>`): a forced switch
 //     overwrites untracked and ignored files.
-//  5. A take-back a failed ResetBranch left undone is settled
+//  5. HEAD must now be refs/heads/<home> and the index must equal HEAD;
+//     the working-tree-only differences left are remembered as phantoms
+//     (below). This runs before step 6, so a take-back that stays pending
+//     does not make every later take quarantine the phantoms again
+//     (review round 2), and again after a step 6 that moved the tree.
+//  6. A take-back a failed ResetBranch left undone is settled
 //     (settlePendingTakeBacks): retried, or the restore fails while the
-//     branch still holds the refused merge.
-//  6. HEAD must now be refs/heads/<home> and the index must equal HEAD.
+//     branch still holds the refused merge. On this tree a take-back
+//     whose two-tree switch is refused quarantines and resets instead
+//     (ResetBranch, review round 2), so content no checkout makes clean
+//     cannot keep it pending.
 //
 // Phantoms (review round 1). A working-tree difference `reset --hard`
 // cannot remove — a `text eol=lf` attribute over a blob committed with
 // CRLF, two tracked paths that differ only in case on a case-insensitive
 // filesystem — is content, not damage: git rewrites the file and still
-// reports it modified. Such a difference used to fail step 6 ("tracked
+// reports it modified. Such a difference used to fail step 5 ("tracked
 // changes remain") on every later take, a workspace-wide outage that a
 // divergence branch's content could trigger. Phantoms are now accepted: a
 // path whose difference survived the reset is reported (Warn, once per
@@ -736,19 +750,11 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		} else if p != "" {
 			return fail(obstructed(p))
 		}
-		// A fixed identity: the quarantine commit is the server's, and
-		// stash create must work on a host with no user.name configured.
-		env := []string{
-			"GIT_AUTHOR_NAME=Spine", "GIT_AUTHOR_EMAIL=spine@spine.local",
-			"GIT_COMMITTER_NAME=Spine", "GIT_COMMITTER_EMAIL=spine@spine.local",
-		}
-		out, _, err := c.runWith(ctx, op, runOpts{env: env},
-			"stash", "create", "spine: quarantined working-tree state")
+		sha, err := c.quarantineTracked(ctx, op)
 		if err != nil {
 			return fail(err)
 		}
-		sha := strings.TrimSpace(out)
-		if !IsCanonicalObjectName(sha) {
+		if sha == "" {
 			return fail(&GitError{Kind: ErrKindPermanent, Op: op,
 				Message: "tracked changes found but git stash create produced no commit; nothing was reset"})
 		}
@@ -792,46 +798,83 @@ func (c *CLIClient) restoreHeld(ctx context.Context, home string) (TreeRestoreRe
 		rep.SwitchedHEAD = true
 	}
 
+	// Step 5, and the phantoms. It runs before the take-backs are settled
+	// as well as after a settle that changed the tree (review round 2): a
+	// settle that fails leaves the phantoms remembered, so the next take
+	// does not quarantine them again while the take-back stays pending.
+	verify := func() error {
+		ref, err := headRef()
+		if err != nil {
+			return err
+		}
+		if ref != full {
+			return &GitError{Kind: ErrKindPermanent, Op: op,
+				Message: fmt.Sprintf("HEAD is %q after the restore, not %s", ref, full)}
+		}
+		left, err := tracked()
+		if err != nil {
+			return err
+		}
+		for _, ch := range left {
+			if ch.staged() {
+				return &GitError{Kind: ErrKindPermanent, Op: op,
+					Message: fmt.Sprintf("staged changes remain after the restore (%q)", ch.path)}
+			}
+		}
+		rep.Phantoms = c.rememberPhantoms(ctx, op, short, left)
+		return nil
+	}
+	if rep.Repaired() || len(residual) > 0 {
+		if err := verify(); err != nil {
+			return fail(err)
+		}
+	}
+
 	took, _, err := c.settlePendingTakeBacks(ctx, op)
 	if len(took) > 0 {
 		rep.TookBack = took[0]
+		if verr := verify(); verr != nil && err == nil {
+			err = verr
+		}
 	}
 	if err != nil {
 		return fail(err)
 	}
 
-	if rep.Repaired() || len(residual) > 0 {
-		ref, err := headRef()
-		if err != nil {
-			return fail(err)
-		}
-		if ref != full {
-			return fail(&GitError{Kind: ErrKindPermanent, Op: op,
-				Message: fmt.Sprintf("HEAD is %q after the restore, not %s", ref, full)})
-		}
-		left, err := tracked()
-		if err != nil {
-			return fail(err)
-		}
-		for _, ch := range left {
-			if ch.staged() {
-				return fail(&GitError{Kind: ErrKindPermanent, Op: op,
-					Message: fmt.Sprintf("staged changes remain after the restore (%q)", ch.path)})
-			}
-		}
-		rep.Phantoms = c.rememberPhantoms(ctx, op, short, left)
-		if rep.Repaired() {
-			observe.Logger(ctx).Warn("shared working tree restored",
-				"home_branch", short, "previous_ref", rep.PreviousRef,
-				"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA,
-				"switched_head", rep.SwitchedHEAD, "took_back", rep.TookBack)
-			observe.AuditLog(ctx, "working_tree_restored",
-				"home_branch", short, "previous_ref", rep.PreviousRef,
-				"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA,
-				"took_back", rep.TookBack)
-		}
+	if rep.Repaired() {
+		observe.Logger(ctx).Warn("shared working tree restored",
+			"home_branch", short, "previous_ref", rep.PreviousRef,
+			"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA,
+			"switched_head", rep.SwitchedHEAD, "took_back", rep.TookBack)
+		observe.AuditLog(ctx, "working_tree_restored",
+			"home_branch", short, "previous_ref", rep.PreviousRef,
+			"aborted_merge", rep.AbortedMerge, "quarantine_sha", rep.QuarantineSHA,
+			"took_back", rep.TookBack)
 	}
 	return rep, nil
+}
+
+// quarantineTracked writes the tracked changes of the index and working
+// tree against HEAD into an unreferenced commit (`git stash create`: no
+// ref, so the git HTTP endpoint never advertises it) and returns its id,
+// or "" when git found nothing to save. A fixed identity: the quarantine
+// commit is the server's, and stash create must work on a host with no
+// user.name configured. Nothing in the tree or the index is changed.
+func (c *CLIClient) quarantineTracked(ctx context.Context, op string) (string, error) {
+	env := []string{
+		"GIT_AUTHOR_NAME=Spine", "GIT_AUTHOR_EMAIL=spine@spine.local",
+		"GIT_COMMITTER_NAME=Spine", "GIT_COMMITTER_EMAIL=spine@spine.local",
+	}
+	out, _, err := c.runWith(ctx, op, runOpts{env: env},
+		"stash", "create", "spine: quarantined working-tree state")
+	if err != nil {
+		return "", err
+	}
+	sha := strings.TrimSpace(out)
+	if sha != "" && !IsCanonicalObjectName(sha) {
+		return "", &GitError{Kind: ErrKindPermanent, Op: op, Message: "git stash create printed no commit id"}
+	}
+	return sha, nil
 }
 
 // trackedChange is one entry of `git status --porcelain=v1 -z
@@ -1012,7 +1055,7 @@ func (c *CLIClient) settlePendingTakeBacks(ctx context.Context, op string) (took
 			return took, b, err
 		}
 		if !ok {
-			clearPendingTakeBack(c.repoPath, b)
+			clearPendingTakeBack(c.repoPath, b, p.expected)
 			continue
 		}
 		if tip == p.expected {
@@ -1033,9 +1076,43 @@ func (c *CLIClient) settlePendingTakeBacks(ctx context.Context, op string) (took
 				Message: fmt.Sprintf("refs/heads/%s still contains the refused merge %s (it moved on to %s outside this server); "+
 					"reset it so that it no longer contains that merge", b, p.expected, tip)}
 		}
-		clearPendingTakeBack(c.repoPath, b)
+		clearPendingTakeBack(c.repoPath, b, p.expected)
 	}
 	return took, "", nil
+}
+
+// resetTreeOverRefusedSwitch brings the index and working tree of a
+// home-branch tree to `to` after `read-tree -m -u <expected> <to>`
+// refused (switchErr), on a branch ResetBranch already moved to `to` with
+// HEAD attached to it (review round 2 of INIT-023 TASK-012). It is the
+// restore's own repair, applied to the take-back: an untracked or ignored
+// file standing where the reset writes refuses it and nothing changes
+// (untrackedObstruction over `HEAD`, now `to`); the tracked state — the
+// refused merge's content in the index, and whatever the working tree
+// holds over it — is quarantined (`git stash create`, an unreferenced
+// commit, logged at Warn); then `read-tree --reset -u <to>`. A failure is
+// returned with switchErr, and ResetBranch moves the branch forward again.
+func (c *CLIClient) resetTreeOverRefusedSwitch(ctx context.Context, op, branch, to string, switchErr error) error {
+	if p, err := c.untrackedObstruction(ctx, op, "HEAD"); err != nil {
+		return fmt.Errorf("%w (and the obstruction check failed: %v)", switchErr, err)
+	} else if p != "" {
+		return &GitError{Kind: ErrKindPermanent, Op: op,
+			Message: fmt.Sprintf("the working tree cannot follow the take-back: an untracked file is in the way of a tracked path it would rewrite (%q); "+
+				"move it out of the working tree", p),
+			Err: switchErr}
+	}
+	sha, err := c.quarantineTracked(ctx, op)
+	if err != nil {
+		return fmt.Errorf("%w (and the quarantine failed: %v)", switchErr, err)
+	}
+	if sha != "" {
+		observe.Logger(ctx).Warn("shared working tree: tracked changes quarantined before a refused merge was taken back",
+			"branch", branch, "restore_to", to, "quarantine_sha", sha)
+	}
+	if _, _, err := c.runWith(ctx, op, runOpts{}, "read-tree", "--reset", "-u", "--end-of-options", to); err != nil {
+		return fmt.Errorf("%w (and the reset to %s failed: %v)", switchErr, to, err)
+	}
+	return nil
 }
 
 // untrackedObstruction returns a path where an untracked or ignored file
