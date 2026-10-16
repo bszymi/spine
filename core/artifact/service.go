@@ -1,6 +1,7 @@
 package artifact
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -183,7 +184,28 @@ func worktreeError(ctx context.Context, path, action string, err error) error {
 
 // readRepoFile reads an artifact's bytes from the main working tree
 // through worktreefs (symlinks refused, read capped).
+//
+// The read holds the working tree (an in-place scope, INIT-023 TASK-012
+// review round 1). In standalone's shared tree a governed sequence — a
+// convergence merging a divergence branch, the status cascade, the
+// recovery ledger — checks a run branch out while it holds the tree, and
+// an unlocked read then returned that branch's unreviewed file, which
+// the acceptance and follow-up paths wrote back onto main. Under the lock
+// the read waits for the sequence and its scope's entry restore, so it
+// sees the home branch's file. A tree with no home branch (an embedder's
+// per-request worktree) takes an uncontended lock and reads exactly what
+// it read before. The bytes are also the expected original of the update
+// that follows (updateFrom), so a change that lands between the two is a
+// conflict, never overwritten.
 func (s *Service) readRepoFile(ctx context.Context, path string) ([]byte, error) {
+	if _, err := s.cleanPath(path); err != nil {
+		return nil, err
+	}
+	scope, err := git.EnterBranch(ctx, s.repo, "", nil)
+	if err != nil {
+		return nil, domain.NewError(domain.ErrGit, err.Error())
+	}
+	defer scope.Cleanup()
 	rel, err := s.safePath(path)
 	if err != nil {
 		return nil, err
@@ -224,6 +246,11 @@ type writeOp struct {
 	operation     string
 	eventType     domain.EventType
 	logAction     string
+	// checkOriginal (Update only): the file read inside the write scope
+	// must still be original, the bytes the new content was derived from
+	// (updateFrom); otherwise the write is a conflict and nothing changes.
+	checkOriginal bool
+	original      []byte
 }
 
 func (s *Service) writeAndCommit(ctx context.Context, path, content string, op writeOp) (*WriteResult, error) {
@@ -300,6 +327,10 @@ func (s *Service) writeAndCommit(ctx context.Context, path, content string, op w
 		originalContent, err = tree.ReadFile(repoPath)
 		if err != nil {
 			return nil, worktreeError(ctx, path, "read original", err)
+		}
+		if op.checkOriginal && !bytes.Equal(originalContent, op.original) {
+			return nil, domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("artifact %s changed while the update was being prepared; retry", path))
 		}
 		// Replace never opens the existing file for writing: a fresh
 		// O_EXCL temp file is renamed over it, keeping its mode.
@@ -444,6 +475,24 @@ func (s *Service) Update(ctx context.Context, path, content string) (*WriteResul
 		operation:     "artifact.update",
 		eventType:     domain.EventArtifactUpdated,
 		logAction:     "artifact updated",
+	})
+}
+
+// updateFrom is Update for a read-modify-write: content was derived from
+// original, the file's bytes as readRepoFile read them, and the write
+// commits only if the file is still original when the write scope holds
+// the tree (INIT-023 TASK-012 review round 1). The acceptance and
+// follow-up-link paths use it, so a governed merge that changes the task
+// between their read and their write is never reverted by it.
+func (s *Service) updateFrom(ctx context.Context, path string, original []byte, content string) (*WriteResult, error) {
+	return s.writeAndCommit(ctx, path, content, writeOp{
+		requireExists: true,
+		messageVerb:   "Update",
+		operation:     "artifact.update",
+		eventType:     domain.EventArtifactUpdated,
+		logAction:     "artifact updated",
+		checkOriginal: true,
+		original:      original,
 	})
 }
 

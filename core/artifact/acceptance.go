@@ -78,7 +78,10 @@ func (s *Service) setAcceptance(ctx context.Context, path string, acceptance dom
 
 	// Read the raw file to modify front matter. readRepoFile goes through
 	// worktreefs: a symlink anywhere in the path is refused (400), a file
-	// over the worktree read cap is refused (413) — INIT-023 TASK-004.
+	// over the worktree read cap is refused (413) — INIT-023 TASK-004. It
+	// holds the working tree, so a run branch a governed sequence has
+	// checked out is never read, and updateFrom commits only over these
+	// bytes (INIT-023 TASK-012 review round 1).
 	raw, err := s.readRepoFile(ctx, path)
 	if err != nil {
 		return nil, err
@@ -101,8 +104,8 @@ func (s *Service) setAcceptance(ctx context.Context, path string, acceptance dom
 		"acceptance", acceptance,
 	)
 
-	// Write and commit via Update.
-	return s.Update(ctx, path, updated)
+	// Write and commit via Update, over exactly the bytes read above.
+	return s.updateFrom(ctx, path, raw, updated)
 }
 
 // insertAcceptanceFields adds acceptance, acceptance_rationale, and updates
