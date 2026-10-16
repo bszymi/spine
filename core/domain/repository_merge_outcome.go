@@ -218,17 +218,19 @@ func PushFailureDetail(mergeSHA, detail string) string {
 }
 
 // PendingPublicationDetail is the failure detail of a later attempt for a
-// run whose merge already landed on the local target as mergeSHA (and
-// whose push of it failed), when this attempt failed with detail before
-// reaching its own push. MergedLocally recognises it.
+// run whose merge already landed on the target as mergeSHA in an earlier
+// attempt — its push failed, or the attempt was recorded merged and the
+// run's completion did not follow — when this attempt failed with detail
+// before reaching its own push. MergedLocally recognises it.
 func PendingPublicationDetail(mergeSHA, detail string) string {
-	return fmt.Sprintf("%s%s) earlier and its push is still pending; this attempt failed: %s",
+	return fmt.Sprintf("%s%s) in an earlier attempt; this attempt failed: %s",
 		localMergePushFailedPrefix, mergeSHA, detail)
 }
 
 // MergedLocally reports a failed outcome recorded by PushFailureDetail
-// or PendingPublicationDetail: the merge is on the local target, and only
-// its publication failed.
+// or PendingPublicationDetail: a merge of the run landed on the local
+// target, and what failed came after it (its publication, or a later
+// attempt).
 func (o RepositoryMergeOutcome) MergedLocally() bool {
 	return o.Status == RepositoryMergeStatusFailed && strings.HasPrefix(o.FailureDetail, localMergePushFailedPrefix)
 }
@@ -247,20 +249,28 @@ func (o RepositoryMergeOutcome) LocalMergeSHA() string {
 
 // KeepPendingPublication is applied to a failed attempt's outcome before
 // it is recorded over prior (codex review round 6 of INIT-023 TASK-012).
-// When prior's merge landed on the local target and only its push failed
-// (MergedLocally), and this attempt failed before its own push — the
-// working-tree restore, the merge, a check — that merge is still on the
-// target: no attempt removes an earlier merge. The new failure detail
-// keeps naming it (PendingPublicationDetail), so the outcome stays
-// MergedLocally and the retry budget never abandons a run whose merge is
-// waiting to be published. A nil prior, a successful attempt, or one
-// that is MergedLocally itself is left as it is.
+// When an earlier attempt's merge landed on the target — prior is
+// MergedLocally (its push failed), or prior is merged (codex review round
+// 7: the run's completion did not follow the record, a store failure
+// after it, and the run is still committing) — and this attempt failed
+// before its own push (the working-tree restore, the merge, a check),
+// that merge is still on the target: no attempt removes an earlier merge.
+// The new failure detail keeps naming it (PendingPublicationDetail), so
+// the outcome stays MergedLocally and the retry budget never abandons a
+// run whose merge is on the target. A nil prior, a prior with nothing on
+// the target, a successful attempt, or one that is MergedLocally itself
+// is left as it is.
 func (o *RepositoryMergeOutcome) KeepPendingPublication(prior *RepositoryMergeOutcome) {
 	if prior == nil || o.Status != RepositoryMergeStatusFailed || o.MergedLocally() {
 		return
 	}
-	if sha := prior.LocalMergeSHA(); sha != "" {
-		o.FailureDetail = PendingPublicationDetail(sha, o.FailureDetail)
+	switch {
+	case prior.Status == RepositoryMergeStatusMerged:
+		o.FailureDetail = PendingPublicationDetail(prior.MergeCommitSHA, o.FailureDetail)
+	case prior.MergedLocally():
+		// Carried even when the SHA could not be parsed back: the prefix,
+		// not the SHA, is what keeps the outcome from exhausting.
+		o.FailureDetail = PendingPublicationDetail(prior.LocalMergeSHA(), o.FailureDetail)
 	}
 }
 

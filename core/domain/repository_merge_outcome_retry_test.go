@@ -119,14 +119,46 @@ func TestKeepPendingPublication(t *testing.T) {
 	if next.LocalMergeSHA() != sha || strings.Count(next.FailureDetail, "local merge succeeded") != 1 {
 		t.Fatalf("carried twice = %q", next.FailureDetail)
 	}
+	// Codex review round 7: a prior recorded merged (the run's completion
+	// did not follow the record) is a merge on the target too; a later
+	// failure carries its merge commit, and so does the one after it.
+	merged := &domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusMerged, MergeCommitSHA: sha, Attempts: 4}
+	afterMerged := domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureNetwork,
+		Attempts: 5, FailureDetail: "prepare the shared working tree: repository locked"}
+	afterMerged.KeepPendingPublication(merged)
+	if !afterMerged.MergedLocally() || afterMerged.LocalMergeSHA() != sha || afterMerged.RetriesExhausted(3) {
+		t.Fatalf("a failure after a merged outcome = %q (MergedLocally %v, exhausted %v); want the merge kept",
+			afterMerged.FailureDetail, afterMerged.MergedLocally(), afterMerged.RetriesExhausted(3))
+	}
+	again := domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureNetwork,
+		Attempts: 6, FailureDetail: "git merge: network error"}
+	again.KeepPendingPublication(&afterMerged)
+	if again.LocalMergeSHA() != sha || again.RetriesExhausted(3) {
+		t.Fatalf("carried after a merged outcome twice = %q", again.FailureDetail)
+	}
+	// The prefix, not the SHA, keeps the outcome from exhausting: a merged
+	// row without a SHA, and a detail whose SHA cannot be parsed back, are
+	// carried all the same.
+	noSHA := domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureNetwork,
+		Attempts: 7, FailureDetail: "x"}
+	noSHA.KeepPendingPublication(&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusMerged})
+	chained := domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureNetwork,
+		Attempts: 8, FailureDetail: "y"}
+	chained.KeepPendingPublication(&noSHA)
+	if !noSHA.MergedLocally() || noSHA.RetriesExhausted(3) || !chained.MergedLocally() || chained.RetriesExhausted(3) {
+		t.Fatalf("SHA-less carry = %q / %q; want both kept merged locally", noSHA.FailureDetail, chained.FailureDetail)
+	}
 	for name, tc := range map[string]struct {
 		prior *domain.RepositoryMergeOutcome
 		out   domain.RepositoryMergeOutcome
 	}{
-		"no prior":                 {nil, later},
-		"prior not merged locally": {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "git merge: x"}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
-		"this attempt merged":      {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusMerged}},
-		"this attempt pushed anew": {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: domain.PushFailureDetail(strings.Repeat("f", 40), "e")}},
+		"prior pending":                {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusPending}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
+		"prior resolved externally":    {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusResolvedExternally, MergeCommitSHA: sha}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
+		"merged prior, attempt merged": {merged, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusMerged, MergeCommitSHA: sha}},
+		"no prior":                     {nil, later},
+		"prior not merged locally":     {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "git merge: x"}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
+		"this attempt merged":          {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusMerged}},
+		"this attempt pushed anew":     {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: domain.PushFailureDetail(strings.Repeat("f", 40), "e")}},
 	} {
 		before := tc.out
 		tc.out.KeepPendingPublication(tc.prior)

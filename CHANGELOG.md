@@ -65,7 +65,8 @@ bounded at 5 minutes (a constant).
   `committing`). A push that fails after the merge landed on the local `main` is not abandoned —
   the run is not reported failed while its merge sits on the branch for the next push to publish;
   it stays `committing` and the push is retried until it lands, also when a later attempt fails
-  before reaching its push (review round 1, codex round 6).
+  before reaching its push, and a run whose merge was recorded but whose completion failed is
+  never abandoned either (review round 1, codex rounds 6–7).
 
 ### Changed
 

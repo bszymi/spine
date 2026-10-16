@@ -24,13 +24,17 @@ package engine
 // a store outage and are not counted.
 //
 // What it never abandons (review round 1): an attempt whose merge landed
-// on the local target and whose push failed (domain.MergedLocally). The
-// merge is there — the next push of the branch by any writer publishes
-// it — so routing the run as failed would contradict the branch, and
-// taking the merge back is unsafe (another writer's push may already have
-// published it; runs started since may have been cut from it). Such a run
-// stays in committing and its push is retried every tick until it lands,
-// with an Error log once the budget is passed (publication pending).
+// on the local target and whose push failed (domain.MergedLocally), and a
+// later attempt of such a run, or of a run whose merge was recorded
+// merged but whose completion did not follow, that failed before its own
+// push (domain.KeepPendingPublication; codex rounds 6–7). The merge is
+// there — the next push of the branch by any writer publishes it, or it
+// is already published — so routing the run as failed would contradict
+// the branch, and taking the merge back is unsafe (another writer's push
+// may already have published it; runs started since may have been cut
+// from it). Such a run stays in committing and is retried every tick
+// until it completes, with an Error log once the budget is passed
+// (publication pending).
 
 import (
 	"context"
@@ -120,8 +124,8 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 	if ex == nil {
 		for i := range outcomes {
 			if out := outcomes[i]; out.MergedLocally() && out.Attempts > maxRetries {
-				observe.Logger(ctx).Error("governed merge landed locally but its push keeps failing; the run stays in committing "+
-					"and the push is retried until it lands (publication pending; never abandoned)",
+				observe.Logger(ctx).Error("governed merge landed on the local target but the run's later steps keep failing; "+
+					"the run stays in committing and is retried until it completes (publication pending; never abandoned)",
 					"run_id", runID, "repository_id", out.RepositoryID, "attempts", out.Attempts,
 					"max_retries", maxRetries, "failure_class", string(out.FailureClass))
 			}

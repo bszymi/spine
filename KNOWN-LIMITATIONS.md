@@ -936,8 +936,9 @@ What that implies, and what it leaves open:
    log once the budget is passed ("publication pending"); each retry is an "already up to date"
    merge plus the push, holding the tree for the push. A later attempt that fails before its own
    push (the restore, the merge or a check, transiently) keeps naming the earlier local merge in its
-   failure detail, so it stays pending too (codex review round 6). Only attempts that left nothing
-   on the target are bounded and abandoned. A *permanent* failure after a local merge (a rejected or
+   failure detail, so it stays pending too (codex review round 6), and so does one after an attempt
+   recorded `merged` whose run did not complete (a store failure after the record; codex review
+   round 7). Only attempts that left nothing on the target are bounded and abandoned. A *permanent* failure after a local merge (a rejected or
    unauthenticated push, a refusal) still routes the run while its merge stays on the local `main`,
    as before TASK-012; re-syncing local `main` is a follow-up.
 9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
