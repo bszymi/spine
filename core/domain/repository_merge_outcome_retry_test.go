@@ -159,8 +159,18 @@ func TestKeepPendingPublication(t *testing.T) {
 		"prior not merged locally":     {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "git merge: x"}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
 		"this attempt merged":          {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusMerged}},
 		"this attempt pushed anew":     {pushed, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: domain.PushFailureDetail(strings.Repeat("f", 40), "e")}},
+		// Review round 2 (finding 4): a permanent push rejection after the
+		// merge landed was routed when it was recorded; what follows is a
+		// new committing episode, bounded like any other.
+		"prior rejected permanently": {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureBranchProtection,
+			FailureDetail: domain.PushFailureDetail(sha, "git push: rejected: non-fast-forward")}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
+		"prior auth failure, carried before": {&domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureClass: domain.MergeFailureAuth,
+			FailureDetail: domain.PendingPublicationDetail(sha, "git merge: x")}, domain.RepositoryMergeOutcome{Status: domain.RepositoryMergeStatusFailed, FailureDetail: "y"}},
 	} {
 		before := tc.out
+		if tc.out.KeepsPendingPublicationOf(tc.prior) {
+			t.Errorf("%s: KeepsPendingPublicationOf = true", name)
+		}
 		tc.out.KeepPendingPublication(tc.prior)
 		if tc.out.FailureDetail != before.FailureDetail {
 			t.Errorf("%s: detail changed to %q", name, tc.out.FailureDetail)

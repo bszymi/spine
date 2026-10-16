@@ -257,21 +257,48 @@ func (o RepositoryMergeOutcome) LocalMergeSHA() string {
 // that merge is still on the target: no attempt removes an earlier merge.
 // The new failure detail keeps naming it (PendingPublicationDetail), so
 // the outcome stays MergedLocally and the retry budget never abandons a
-// run whose merge is on the target. A nil prior, a prior with nothing on
-// the target, a successful attempt, or one that is MergedLocally itself
-// is left as it is.
+// run whose merge is on the target. Nothing is carried when
+// KeepsPendingPublicationOf is false.
+//
+// The carry holds within one committing episode only. Whether prior
+// belongs to the current one is a question for the run's step history,
+// which the caller answers before calling (the engine's
+// keepPendingPublication; review round 2 of INIT-023 TASK-012).
 func (o *RepositoryMergeOutcome) KeepPendingPublication(prior *RepositoryMergeOutcome) {
-	if prior == nil || o.Status != RepositoryMergeStatusFailed || o.MergedLocally() {
+	if !o.KeepsPendingPublicationOf(prior) {
 		return
+	}
+	if prior.Status == RepositoryMergeStatusMerged {
+		o.FailureDetail = PendingPublicationDetail(prior.MergeCommitSHA, o.FailureDetail)
+		return
+	}
+	// Carried even when the SHA could not be parsed back: the prefix, not
+	// the SHA, is what keeps the outcome from exhausting.
+	o.FailureDetail = PendingPublicationDetail(prior.LocalMergeSHA(), o.FailureDetail)
+}
+
+// KeepsPendingPublicationOf reports whether KeepPendingPublication would
+// carry prior's landed merge into o: o failed and is not MergedLocally
+// itself, and prior is merged or a transient MergedLocally failure.
+//
+// A permanent-class prior is not carried (review round 2 of INIT-023
+// TASK-012, finding 4), even when its merge landed locally: the engine
+// handed it to the permanent-failure route when it was recorded — the
+// publish step's merge_failed back to execute, or a failed legacy run —
+// which is exactly where the retry budget's abandonment sends a run. The
+// carry protected nothing there, and kept every later transient failure
+// of the reworked run from ever exhausting its budget.
+func (o RepositoryMergeOutcome) KeepsPendingPublicationOf(prior *RepositoryMergeOutcome) bool {
+	if prior == nil || o.Status != RepositoryMergeStatusFailed || o.MergedLocally() {
+		return false
 	}
 	switch {
 	case prior.Status == RepositoryMergeStatusMerged:
-		o.FailureDetail = PendingPublicationDetail(prior.MergeCommitSHA, o.FailureDetail)
+		return true
 	case prior.MergedLocally():
-		// Carried even when the SHA could not be parsed back: the prefix,
-		// not the SHA, is what keeps the outcome from exhausting.
-		o.FailureDetail = PendingPublicationDetail(prior.LocalMergeSHA(), o.FailureDetail)
+		return prior.FailureClass.IsTransient()
 	}
+	return false
 }
 
 // RetriesExhausted reports whether this outcome has spent a retry budget

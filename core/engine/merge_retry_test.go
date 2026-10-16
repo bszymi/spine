@@ -787,3 +787,128 @@ func TestF9_FailedTakeBackIsFinishedBeforeTheTreeIsReleased(t *testing.T) {
 		t.Fatalf("primary outcome = %+v, want the refusal with the failed take-back recorded", o)
 	}
 }
+
+// pushModeCLI fails pushes of main by mode — 0 succeeds, 1 fails
+// transiently (network), 2 is rejected permanently (non-fast-forward) —
+// and merges (not their aborts) transiently while mergeDown is set.
+type pushModeCLI struct {
+	*git.CLIClient
+	mode      *atomic.Int32
+	mergeDown *atomic.Bool
+}
+
+var errRejected = &git.GitError{Kind: git.ErrKindPermanent, Op: "push", Message: "rejected: non-fast-forward"}
+
+func (p pushModeCLI) pushErr() error {
+	switch p.mode.Load() {
+	case 1:
+		return errNetwork
+	case 2:
+		return errRejected
+	}
+	return nil
+}
+
+func (p pushModeCLI) Push(ctx context.Context, remote, ref string) error {
+	if err := p.pushErr(); err != nil {
+		return err
+	}
+	return p.CLIClient.Push(ctx, remote, ref)
+}
+
+func (p pushModeCLI) PushCommit(ctx context.Context, remote, branch, sha string) error {
+	if err := p.pushErr(); err != nil {
+		return err
+	}
+	return p.CLIClient.PushCommit(ctx, remote, branch, sha)
+}
+
+func (p pushModeCLI) Merge(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if p.mergeDown.Load() && opts.Strategy != "abort" && opts.Source != "--abort" {
+		return git.MergeResult{}, errLocked
+	}
+	return p.CLIClient.Merge(ctx, opts)
+}
+
+func (p pushModeCLI) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	if p.mergeDown.Load() {
+		return git.MergeResult{}, errLocked
+	}
+	return p.CLIClient.MergeBound(ctx, opts)
+}
+
+// Review round 2 (finding 4): the run's merge lands and its push fails
+// transiently (attempt 1), then the push is rejected permanently (attempt
+// 2): the run takes merge_failed back to execute with its outcome still
+// naming the landed merge. After the rework its next committing episode
+// fails transiently before any push. Those attempts used to inherit the
+// earlier episode's "local merge succeeded" marker, so the budget never
+// abandoned them and the run was retried every tick forever. The new
+// episode is bounded: with per-run-lifetime counting (owner question 4)
+// it is abandoned at attempt 4, the first of its failures past the
+// budget, and takes merge_failed again.
+func TestMergeRetry_EpisodeAfterAPermanentPushFailureIsBounded(t *testing.T) {
+	for _, binding := range []bool{false, true} {
+		t.Run(map[bool]string{false: "binding off", true: "binding on"}[binding], func(t *testing.T) {
+			ctx := context.Background()
+			mode, mergeDown := &atomic.Int32{}, &atomic.Bool{}
+			mode.Store(1)
+			e := newRetryEnv(t, taskDefaultWorkflow(), binding, func(c *git.CLIClient) engine.GitOperator {
+				return pushModeCLI{c, mode, mergeDown}
+			}, nil)
+			e.driveToCommitting(true) // attempt 1: merged locally, push failed transiently
+			if o := e.primary(); o.Attempts != 1 || !o.MergedLocally() || !o.FailureClass.IsTransient() {
+				t.Fatalf("attempt 1 = %d/%s %q, want a local merge whose push failed transiently", o.Attempts, o.FailureClass, o.FailureDetail)
+			}
+			mode.Store(2)
+			if err := e.orch.MergeRunBranch(ctx, e.run.RunID); err != nil { // attempt 2: rejected
+				t.Fatalf("attempt 2: %v", err)
+			}
+			if o := e.primary(); o.Attempts != 2 || o.FailureClass.IsTransient() || !o.MergedLocally() {
+				t.Fatalf("attempt 2 = %d/%s %q, want a permanent push rejection naming the local merge", o.Attempts, o.FailureClass, o.FailureDetail)
+			}
+			if r := e.runNow(); r.Status != domain.RunStatusActive || r.CurrentStepID != "execute" {
+				t.Fatalf("after the rejection: run %s at %s, want active at execute (merge_failed)", r.Status, r.CurrentStepID)
+			}
+
+			// The rework: the next episode's merges fail before any push.
+			mode.Store(0)
+			mergeDown.Store(true)
+			e.commitOnRun(map[string]string{"deliverable.md": "reworked\n"})
+			n := len(e.actors.assignments)
+			e.submit(n-1, "completed")
+			e.submit(n, "passed")
+			e.submit(n+1, "accepted") // attempt 3
+			for attempt := 3; ; attempt++ {
+				if r := e.runNow(); r.Status != domain.RunStatusCommitting {
+					t.Fatalf("attempt %d: run %s, want committing", attempt, r.Status)
+				}
+				o := e.primary()
+				if o.Attempts != attempt || !o.FailureClass.IsTransient() || o.MergedLocally() {
+					t.Fatalf("attempt %d = %d/%s %q; want a transient failure that does not inherit the earlier episode's merge",
+						attempt, o.Attempts, o.FailureClass, o.FailureDetail)
+				}
+				ok, err := e.orch.AbandonExhaustedMerge(ctx, e.run.RunID, 3)
+				if err != nil {
+					t.Fatalf("attempt %d: AbandonExhaustedMerge: %v", attempt, err)
+				}
+				if attempt < 4 {
+					if ok {
+						t.Fatalf("attempt %d: abandoned before the budget was spent", attempt)
+					}
+					if err := e.orch.MergeRunBranch(ctx, e.run.RunID); err != nil {
+						t.Fatalf("retry %d: %v", attempt, err)
+					}
+					continue
+				}
+				if !ok {
+					t.Fatalf("attempt %d: the new episode was not abandoned once its budget was spent", attempt)
+				}
+				break
+			}
+			if r := e.runNow(); r.Status != domain.RunStatusActive || r.CurrentStepID != "execute" {
+				t.Fatalf("after the abandonment: run %s at %s, want active at execute (merge_failed)", r.Status, r.CurrentStepID)
+			}
+		})
+	}
+}

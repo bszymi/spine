@@ -125,6 +125,9 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 		// INIT-023 TASK-012 codex review round 8) is terminal here like a
 		// permanent one: the primary merges and the run waits in
 		// partially-merged for an operator.
+		// The outcome a failure of this attempt carries a landed merge from
+		// (keepPendingPublication).
+		carryFrom := existing
 		if existing != nil && (existing.IsTerminal() || retriesAbandoned(*existing)) {
 			// Merge binding (INIT-023 TASK-005 §8, P3-37): a `merged`
 			// repository is skipped only while its bound commit is on its
@@ -151,12 +154,21 @@ func (o *Orchestrator) mergeAffectedCodeRepositories(ctx context.Context, run *d
 				"run_id", run.RunID,
 				"repository_id", repoID,
 				"bound_sha", run.CommitMeta[RepoBoundSHAKey(repoID)])
+			// The earlier merge's bound commit is not on the default
+			// branch, so nothing of it is pending publication there: a
+			// failure of the re-merge is bounded like any other (review
+			// round 2 of INIT-023 TASK-012, finding 4).
+			carryFrom = nil
 		}
 		outcome, err := o.attemptCodeRepositoryMerge(ctx, run, repoID)
 		if err == nil {
-			// A merge that landed earlier stays publication pending
-			// across this attempt's failure (KeepPendingPublication).
-			outcome.KeepPendingPublication(existing)
+			// A merge that landed earlier in this committing episode stays
+			// publication pending across this attempt's failure. A failed
+			// read of the run's steps records nothing; the run stays in
+			// committing.
+			if carryErr := o.keepPendingPublication(ctx, run, &outcome, carryFrom); carryErr != nil {
+				return fmt.Errorf("decide whether the earlier merge of %q is pending publication: %w", repoID, carryErr)
+			}
 		}
 		if err != nil {
 			// Non-recoverable per-repo error (e.g. registry no longer
@@ -432,8 +444,8 @@ func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domai
 	log := observe.Logger(ctx)
 	now := time.Now()
 	// The prior outcome numbers the attempt (as nextAttemptNumber does)
-	// and carries a pending publication across a later failure
-	// (KeepPendingPublication).
+	// and carries a pending publication across a later failure of the
+	// same committing episode (keepPendingPublication).
 	prior, priorErr := o.store.GetRepositoryMergeOutcome(ctx, run.RunID, repository.PrimaryRepositoryID)
 	if priorErr != nil {
 		// A failure recorded without its prior could drop the prior's
@@ -471,7 +483,12 @@ func (o *Orchestrator) recordPrimaryMergeOutcome(ctx context.Context, run *domai
 			outcome.FailureDetail = domain.PushFailureDetail(mergeSHA, detail)
 		} else {
 			outcome.FailureDetail = detail
-			outcome.KeepPendingPublication(prior)
+			// Within the current committing episode only (review round 2
+			// of INIT-023 TASK-012); a failed read of the run's steps
+			// records nothing, as a failed read of prior does above.
+			if err := o.keepPendingPublication(ctx, run, &outcome, prior); err != nil {
+				return fmt.Errorf("decide whether the earlier primary merge is pending publication: %w", err)
+			}
 		}
 	} else {
 		mergedAt := now

@@ -34,7 +34,10 @@ package engine
 // may already have published it; runs started since may have been cut
 // from it). Such a run stays in committing and is retried every tick
 // until it completes, with an Error log once the budget is passed
-// (publication pending).
+// (publication pending). The carry holds within one committing episode
+// (review round 2, keepPendingPublication): a merge an earlier episode
+// routed — a permanent push rejection sends the run back to execute —
+// does not exempt the reworked run's next episode from the bound.
 
 import (
 	"context"
@@ -242,6 +245,46 @@ func (o *Orchestrator) attemptedThisEpisode(ctx context.Context, runID string, o
 		}
 	}
 	return !outcome.LastAttemptedAt.Before(latest), nil
+}
+
+// keepPendingPublication carries an earlier attempt's landed merge across
+// this attempt's failure (domain.KeepPendingPublication) — only when prior
+// was attempted in the run's current committing episode (review round 2
+// of INIT-023 TASK-012, finding 4).
+//
+// A merge that landed in an earlier episode was routed with that episode:
+// a permanent push rejection (non-fast-forward, auth) after an earlier
+// transient one sends a publish run back to execute with its outcome
+// still MergedLocally, and the reworked run's next committing episode
+// must be bounded like any other. Carried across the boundary, the marker
+// made every later pre-push transient failure (lock contention, a stale
+// index.lock, VerifyCommit) MergedLocally, so the budget never abandoned
+// the new episode and the run was retried every tick forever. Within an
+// episode the carry stays: no attempt removes an earlier merge from the
+// target.
+//
+// It reads the run's step executions only when the carry would apply
+// (domain.RepositoryMergeOutcome.KeepsPendingPublicationOf). A failed
+// read is returned, and the caller records nothing — carried by mistake,
+// the marker would carry itself into every later record, since each one
+// is attempted in the current episode — so the run stays in committing
+// for the next retry (a store outage, not counted), as for an unreadable
+// prior outcome.
+func (o *Orchestrator) keepPendingPublication(ctx context.Context, run *domain.Run, outcome, prior *domain.RepositoryMergeOutcome) error {
+	if !outcome.KeepsPendingPublicationOf(prior) {
+		return nil
+	}
+	current, err := o.attemptedThisEpisode(ctx, run.RunID, prior)
+	if err != nil {
+		return err
+	}
+	if !current {
+		observe.Logger(ctx).Info("the earlier merge outcome belongs to a previous committing episode; not carried as pending publication",
+			"run_id", run.RunID, "repository_id", prior.RepositoryID, "prior_attempts", prior.Attempts)
+		return nil
+	}
+	outcome.KeepPendingPublication(prior)
+	return nil
 }
 
 // mergeAttemptGate coordinates, within one process, AbandonExhaustedMerge
