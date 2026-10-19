@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/branchprotect"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
-	"github.com/bszymi/spine/adapters/git"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 )
