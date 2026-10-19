@@ -1796,3 +1796,28 @@ No SMP failure, so no compatibility break.
   after, and the shared roles were untouched.
 - Docker: the only containers were the `git-floor` runs, the Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm`. Nothing was pulled or pruned.
+
+### Cross-task review (wave 4) (2026-10-19)
+
+The integrated wave 4 (`db0b727b`) was reviewed as a whole; the fixes are `0ab10a57` … `f47131f4`
+on `init/INIT-023-wave4-integration` (final code `f47131f4`, nothing pushed). TASK-006's note of the
+same name has the full disposition table, the mutation check and the gates. The owner questions
+stay recorded as defaults. What concerns this task:
+
+- **P2-1, V1 skipped on a replay (real, fixed in `0ab10a57`).** `verifyLifecycleMerge` returns nil
+  for "already up to date" (a merge that adds nothing). That assumed a replay's merge had been
+  judged by an earlier attempt, which a `MergeBound` error after git moved `main`, or a process
+  death inside the merge block, broke: on the criss-cross of
+  `TestStatusLifecycle_MergeResultCrissCross`, the second attempt completed the run with `main`'s
+  Completed `TASK-002` reopened to `Pending`. With the status lifecycle on (as with the guard),
+  every attempt that can move `main` now records `spine.merge.unverified` before `MergeBound` and
+  clears it when the merge is accepted. A late error's merge is taken back at once (a `main` that cannot be checked after it keeps the
+  run `committing`, `f47131f4`), and a leftover
+  record is settled at the start of the next attempt, which merges again and runs V1 on the new
+  merge. `TestWave4Review_LateMergeErrorV1` pins it on real git; `TestWave4Review_RetryBudgetSparesAnUnverifiedMerge`
+  pins that the budget keeps such a run with the lifecycle on and the guard off. Integration guide
+  §11 item 4 documents it for embedders.
+- **Merge-attempt cost.** With the lifecycle on, a merge attempt that is not a replay writes one
+  more `commit_meta` row before `MergeBound`; a local `main` that cannot be read before the merge
+  is a transient (counted) failure.
+- No other finding of the review concerns this task.

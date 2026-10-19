@@ -2348,3 +2348,42 @@ No SMP failure, so no compatibility break.
   after, and the shared roles were untouched.
 - Docker: the only containers were the `git-floor` runs, the Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm`. Nothing was pulled or pruned.
+
+### Cross-task review (wave 4) (2026-10-19)
+
+The integrated wave 4 (`db0b727b`) was reviewed as a whole; the fixes are `0ab10a57` … `f47131f4`
+on `init/INIT-023-wave4-integration` (final code `f47131f4`, nothing pushed). TASK-006's note of the
+same name has the full disposition table, the mutation check and the gates. The owner questions
+stay recorded as defaults. What concerns this task:
+
+- **P2-1, the merge block (real, fixed in `0ab10a57`).** The merge block assumed a `MergeBound`
+  error meant `main` was unchanged, and a refusal's take-back assumed the block always reached its
+  checks. A late `MergeBound` error after git moved `main`, or the process dying inside the block,
+  left an unverified merge that the next attempt accepted as a replay and pushed past V1
+  (TASK-017) and the governance post-merge assertion (TASK-006). With either check on, the block
+  now records `spine.merge.unverified` before `MergeBound`, clears it in the write that accepts
+  the merge (before the push), takes a late error's merge back at once (on the shared tree through
+  `CLIClient`'s armed `ResetBranch`, so a failure keeps the take-back pending), and every next
+  attempt settles a leftover record first (`settleUnverifiedMerge`). When the block cannot check
+  `main` after the error (unreadable, or moved by another writer), the attempt is transient
+  whatever the error's class, so the run stays `committing` for its next attempt to settle
+  (`f47131f4`; a killed git child is classed permanent). It extends "Shared Working
+  Tree" 5's restart residual to a take-back that never ran, for the run's own next attempt;
+  KNOWN-LIMITATIONS "Governance-Path Guard" 16 has what remains.
+- **The retry budget (P3s, fixed in `4ae5032b`).**
+  - `AbandonExhaustedMerge` decides its route (workflow, live publish step) before it marks or
+    routes anything, and a read error returns `(false, err)`. Before, one failed workflow load
+    failed a publish-workflow run instead of routing it back.
+  - It never abandons a run carrying the merge-in-flight record (`mergeKeepsCommitting`), nor
+    decides "not held" on a failed read (TASK-006 P2-2).
+  - A stale hold or a stale `blocked_target` no longer keeps a run off the budget.
+  - A governance decision counts as a merge attempt in flight (`mergeAttemptGate.beginAttempt`
+    before it records anything), so an abandonment can no longer route an approved run back
+    between the approval and its merge.
+  - **Not done:** restarting the count at an approval. That is retry counting, this task's owner
+    question 4 (Decision 10), still recorded as the default; a follow-up for the owner.
+- **Serve wiring (P3, fixed in `757d90b8`).** The scheduler's commit retry and step recovery are
+  `engineSchedulerOptions`, `commitRetryFor` and `stepRecoveryFor`, over a `schedulerEngine`
+  interface shared by both builders, with tests that drive the built scheduler.
+- **gofmt (`19de65e5`).** `core/divergence/convergence.go`'s import order, which `main` `ae513dca`
+  has too, is reformatted in a separate commit, as AC 23 allows.

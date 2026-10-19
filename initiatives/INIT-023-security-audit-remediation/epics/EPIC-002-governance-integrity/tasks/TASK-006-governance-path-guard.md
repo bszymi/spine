@@ -2431,3 +2431,107 @@ No SMP failure, so no compatibility break.
   after, and the shared roles were untouched.
 - Docker: the only containers were the `git-floor` runs, the Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm`. Nothing was pulled or pruned.
+
+### Cross-task review (wave 4) (2026-10-19)
+
+The wave 4 integration (`db0b727b`) was reviewed as a whole: three lenses (merge path, state
+writes, completeness and compatibility), each finding checked by two skeptics. The fixes are on
+`init/INIT-023-wave4-integration` in the worktree `i23/s-int4/spine`: `0ab10a57`, `4ae5032b`,
+`6c835669`, `757d90b8`, `09986e8a`, `e0c85d2a`, `19de65e5`, `8d5edbfe` and `f47131f4`. The final
+code is `f47131f4`; the commit that adds these notes changes only the task artifacts. Every code fix has a test that fails
+without it (the mutation check below). Nothing was pushed. Spine `main`, the task branches and the
+SMP checkout are unchanged. The owner questions of all four tasks stay recorded as defaults,
+pending the owner; none was re-decided. This note carries the full table and the gates; TASK-012,
+TASK-017 and TASK-008 have short notes for their findings.
+
+**Dispositions.** Severity is the reviewer's; the two skeptics' votes are in brackets.
+
+| # | Finding | Disposition |
+|---|---|---|
+| P2-1 [P2, P3] | `merge_binding.go:792`: V1 (TASK-017) and this task's post-merge assertion could be skipped for good. A `MergeBound` error after git had moved the local `main` (the trailing `rev-parse` fails, the git child is killed after its ref update), or the process dying inside the merge block (on `SIGTERM` neither the scheduler nor the HTTP server waits for one), left the merge on `main`; the block only ran `git merge --abort`. The next attempt saw "already up to date", both checks returned nil for the replay, and the merge was pushed: a review-less workflow carried into `workflows/` by a rename on `main`, or a criss-cross resolution that reopens a Completed task. An approved merge killed before its consumption marker completed without one. | **Real, fixed** (`0ab10a57`, `merge_inflight.go`). With V1 or the guard on, an attempt that can move `main` records the reserved `spine.merge.unverified` (`"<base> <source>"`) on the run in the merge block before `MergeBound`. The write that records the accepted merge clears it before the push, together with the consumption marker (`checkGovernedMerge` now returns the marker; `acceptedMergePatch`). A `MergeBound` error after `main` moved is taken back in the block (`takeBackFailedMerge`, compare-and-swap through `ResetBranch`); if that fails, the run stays `committing` (transient, never the permanent route) and governed merges are blocked on the merge. Every attempt of a run that still carries the record settles it first, before anything reads `main` (`settleUnverifiedMerge`): `main` at the base is cleared; `main` at this run's merge is taken back and the attempt merges and checks again; a merge buried under later commits refuses the attempt as unavailable, keeps the record and blocks governed merges (guard on) until an operator resets `main`. The retry budget never abandons a run that carries the record. A replay without a record (bound already on `main`) is unchanged. Both checks off: nothing is written. Follow-up `f47131f4`, from the second skeptic's note that a killed git child is classed permanent (empty stderr): when `main` cannot be checked after the error (unreadable, or moved to something other than this attempt's merge), the attempt is transient whatever the error's class, so the run stays `committing` and its next attempt settles the record instead of being routed away with an unverified merge possibly on `main`. Residual: KNOWN-LIMITATIONS "Governance-Path Guard" 16. Tests: `wave4_review_merge_test.go`, real git: a late error, a crash then a restart, a buried merge, a failed late take-back, V1 on the criss-cross, an approved merge crashing before its marker, a legitimate replay, the budget's exemption, and a permanent late error with `main` unreadable (`TestWave4Review_UncheckedLateMergeStaysCommitting`) |
+| P2-2 [P3, P2] | `governance_guard.go:899`: `governanceHoldTarget` took a failed `LoadWorkflow` (or a failed step listing, swallowed by `findActiveMergeStep`) for "no publish step" and answered with the last completed step. The hold record, its clearing on approval and the retry budget's held test could each pick a different step: one transient `git show` abandoned a held, undecided run (or failed it, with a second failure), or left an approved run's hold on the publish step so its failures were retried forever. | **Real, fixed** (`4ae5032b`). `governanceHoldTarget` returns `(target, error)`; it falls back to the last completed step only when the loaded workflow has no live publish step. A hold whose target cannot be read records nothing that attempt (no step write, no event; the merge is still held). `clearGovernanceHold` clears every execution of the run that carries the hold, reading no workflow, and returns its error. `governanceKeepsCommitting` returns the error, so `AbandonExhaustedMerge` returns `(false, err)` and the scheduler skips the tick. Tests: `TestWave4Review_HoldReadFailureNeverAbandons` (one and two failures), `…ApprovalClearsTheHoldWhateverTheWorkflowRead`, `…HoldNotRecordedOnAGuessedStep` |
+| P3 | `governance_guard.go:1282`: a stale hold (the run's commits reached `main` another way, with no decision) kept the retry budget off the run forever, and the step kept showing a hold. | **Fixed** (`4ae5032b`): an attempt the gate allows clears any hold left on the run (`TestWave4Review_StaleHoldIsClearedWhenTheGateAllows`, the reviewer's PoC). Residual while every attempt fails before the gate: KNOWN-LIMITATIONS "Governance-Path Guard" 17 |
+| P3 | `governance_decision.go:189`: after an approved merge was refused post-merge and its take-back failed, `GET /governance` said `required=false, held=false`, the approve returned an empty `merge_error`, and a reject answered 409 "the approved merge already reached the local main". | **Fixed** (`6c835669`), differently from the suggestion for the reject: while the run's `blocked_target` merge is still in the local `main`'s history, `GovernanceMergeStatus` sets `Blocked` / `BlockedMergeSHA` (never `Held`; served as `blocked`, `blocked_merge_sha`), the approve reports it in `merge_error`, and a reject is a 409 that says the merge could not be taken back and that the run's next attempt takes it back first. The reject is not let through: KNOWN-LIMITATIONS 6 keeps a blocked run `committing` so its own retries restore `main` after a restart, and its post-merge refusal routes it back on its own once the take-back works. Test: `TestWave4Review_BlockedRefusedMergeIsReportedTruthfully` (the reviewer's PoC, inverted) |
+| P3 | `merge_retry.go:215` (TASK-012): `AbandonExhaustedMerge` routed through `handlePermanentMergeFailure`, which turns a failed workflow load (or step listing) into "no publish step" and fails a publish-workflow run. | **Fixed** (`4ae5032b`, test strengthened in `09986e8a`): the route (workflow, live publish step) is decided before anything is marked or routed, and a read error returns `(false, err)`; `routePermanentMergeFailure` takes the decision. A read failing after the decision leaves the run `committing` for the next tick (`TestWave4Review_AbandonmentDecidesItsRouteFirst`) |
+| P3 | `governance_decision.go:235` (TASK-012): an abandonment could interleave with an approve, route the approved run back, and leave the approval's `MergeRunBranch` standing down while the response said a merge was attempted; the hold-period count also stayed in place after the approval. | **Fixed in part** (`4ae5032b`). `DecideGovernanceMerge` registers with `mergeAttemptGate` before it records anything: during an abandonment it is `ErrUnavailable` with nothing written (try again), and no abandonment starts until the decision and its merge finish, so the approval's attempt can no longer stand down because of one (`TestWave4Review_DecisionIsAnAttemptInFlight`). **Not done**: restarting the count at the approval. That is retry counting (TASK-012 owner question 4 / Decision 10, recorded as a default); a follow-up for the owner |
+| P3 | `serve_builders.go:416` (TASK-008): no test pinned that `spine serve`'s startup step recovery calls `RecoverCompletedStep`. | **Fixed** (`757d90b8`): the callbacks move into `engineSchedulerOptions` / `stepRecoveryFor` over a `schedulerEngine` interface, shared by both builders; `TestServeScheduler_StepRecoveryUsesRecoverCompletedStep` drives startup recovery through them. The `SubmitStepResult` mutant no longer compiles (not in the interface); a `RetryStep` mutant fails |
+| P3 | `serve_builders.go:436`: no test pinned that the production scheduler retries through `governanceAwareCommitRetry` (AC 35). | **Fixed** (`757d90b8`): `commitRetryFor`, used by both builders; `TestServeScheduler_HeldMergeLogsNoError` drives the built commit-retry sweep. The bare-`MergeRunBranch` mutant fails |
+| P3 | `serve_builders.go:217`: no test of the shared-mode push resolver's `withOverrideProvenance`. | **Fixed** (`757d90b8`): `TestGitPushResolver_RecordsOverrideProvenanceInSharedMode` asserts the emitter writes an honoured override to the workspace's own event log. The mutant fails |
+| P3 | `governance_guard.go:1273`: a well-formed `blocked_target` kept the run off the budget even after another run's gate had taken the merge back. | **Fixed** (`4ae5032b`): `governanceKeepsCommitting` checks the merge against the local `main` (`mergeOnLocalTarget`; a missing commit is not on it), clears a stale key and lets the budget apply; a read error skips the tick (`TestWave4Review_StaleBlockedTargetDoesNotStopTheBudget`) |
+| P3 | `engine-state-machine.md:147`: §3.3.1 lacked `merge_retries_exhausted` and `governance_approval_required`. | **Fixed** (`e0c85d2a`) |
+| P3 | `integration-guide.md:819`: `SPINE_GOVERNANCE_GUARD` missing from the §8 environment reference. | **Fixed** (`e0c85d2a`): default on, the off spellings, the Warn on an unrecognised value, ADR-016 and §12 |
+| P3 | The tenth P3 (of the completeness lens, by its position): its text was cut off in the task handed to this fix pass (only `"severity": "P3"` and `"repo": "spine` survived), and no copy of the finding is in the reviewers' scratch directories. | **Not addressed: unknown.** Recorded as an open question for the orchestrator. That lens's scratch also has a scenario run with `spine serve`'s defaults (the guard on) in which `TestWorkflowLifecycle_*` waits in `committing` ("the run's starter is not recorded"); if that was the finding, it is TASK-006's lifecycle exemption, an owner question kept at its default, not re-decided here |
+
+Also fixed: `gofmt -l` over the changed files listed `core/divergence/convergence.go` (the
+`adapters/git` import out of order, as on `main` `ae513dca`); reformatted in its own commit
+(`19de65e5`), as TASK-012's AC 23 allows. `golangci-lint --new-from-rev ae513dca` found four
+issues in the review's own code (gocritic `builtinShadow` in `settleUnverifiedMerge`, staticcheck
+QF1008 in a test helper), fixed in `8d5edbfe` with no behaviour change.
+
+**Mutation check.** `w4/agents/fix-spine/mut/mut.py` applies the engine mutants one at a time, each
+undoing one fix, and runs the test that pins it. First round (13 mutants): 11 killed; E5 (the
+abandonment back on `handlePermanentMergeFailure`) did not build and E13 (the budget ignoring the
+merge-in-flight record) survived. Their tests were strengthened in `09986e8a`. Final round, in a
+throwaway detached worktree at `f47131f4` (`mut2.py`, `mut3.py`; logs `mut2.log`, `mut3.log`):
+all 14 engine mutants are killed (E1–E13, and E14: the new unchecked-`main` reclassification
+removed, killed by `TestWave4Review_UncheckedLateMergeStaysCommitting`), and so are the four serve
+mutants: the bare `MergeRunBranch` as the commit retry, `RetryStep` for a completed execution, and
+the shared-mode and single-mode push resolvers without the provenance wrapper. The worktree was
+removed.
+
+**Follow-ups.**
+- KNOWN-LIMITATIONS "Governance-Path Guard" 16: the merge-in-flight record is on its run only, so
+  after a restart another writer can build on, and publish, an unverified merge before that run's
+  next attempt. Closing it needs a record every writer checks (for example in the repository,
+  like TASK-012's pending take-back but durable).
+- "Governance-Path Guard" 17: a stale hold on a run whose attempts all fail before the gate.
+- Restarting the retry count at an approval (above): for the owner, with TASK-012's Decision 10.
+
+**Codex.** `codex review --base main` (codex-cli 0.162.1, the configured default, no `-c model=`;
+findings read from the review sub-session JSONL under `~/.codex/sessions/2026/10/19/` with
+`source: {"subagent":"review"}`, `cwd` = this worktree, `model` = `gpt-6.1-sol`). Round 1 at
+`e0c85d2a`: session `01a1547b-0773-71d1-9911-72cbaa105d4b`, no findings. Round 2 at `f47131f4`:
+session `01a154ce-eb74-7e82-90e2-2575bf420173`, no findings. Two clean rounds; no third was run.
+
+**Gates** (final code `f47131f4`; logs in
+`spine-management-platform/tmp/init027-orchestration/w4/agents/fix-spine/`, `chainD.out`,
+`chainS.out` and the directories they name).
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean, all three |
+| `gofmt -l` on the 172 `.go` files changed since `ae513dca` | none |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 failures |
+| `go test -race -p 4 -count=1` on the 19 packages changed since `ae513dca` (`service/scenariotest/scenarios` builds only with `-tags scenario`) | 19 ok, 0 data races |
+| `-tags integration -p 1 -count=1 -v` on `adapters/{delivery,projection,store}`, `service/cmd/spine`, `service/internal/workspace` (fresh `s4f_it`; `s4f_reg` migrated from `migrations/registry`) | 587 top-level PASS (1164 with subtests), 0 SKIP, 1 FAIL: `adapters/store` `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`, `workflow_version_label`), the known pre-existing failure |
+| Full scenario suite (`-tags scenario -p 1 -count=1 -v ./service/scenariotest/...`, fresh databases, registry migrated) | 31 top-level `--- FAIL`, the sorted list identical to the `main` `ae513dca` baseline of the integration pass (`int-spine/scen-m.topfails`): the known 30 plus `TestWorkspace_ScopedServices`. 204 PASS, 0 SKIP |
+| CI `scenario-git-http`: every `run:` step read from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`, fresh `s4f_ci`), including the steps TASK-008, TASK-017 and TASK-006 added | all 7 steps exit 0: `TestGitHTTP_*` 20, `TestBootstrapInternalAdmin_*` 2, `TestWorkflowLifecycle_*` 4, pooled branch protection 1, TASK-008's store compare-and-swap and evidence 10, TASK-017's scenarios and pooled validator 4, TASK-006's scenario and store 2 (top-level PASS); 0 FAIL, 0 SKIP |
+| CI `git-floor`: its 3 `run:` steps in `golang:1.26-bookworm` (`--pull=never --rm --init`, non-root, read-only mounts, `GOPROXY=off`) | git 2.39.5; all 3 steps ok |
+| `golangci-lint` v2.11.4 `run --new-from-rev ae513dca` on the changed packages, plain, `--build-tags integration`, `--build-tags scenario` | 0 issues each (the four the review's code had were fixed in `8d5edbfe`) |
+| `golangci-lint --enable-only=gosec`: `--new-from-rev ae513dca ./...`; full `./...`; full `--build-tags integration,scenario` | 0; 0; 1: G602 at `adapters/store/postgres_integration_test.go:1563`, a file unchanged since `main` (recorded by wave 3 and the integration pass) |
+
+**SMP compatibility.** `i23/s-int4/smp` is SMP `main` `1ae9b0e3`, detached, `../spine` = this
+worktree at `f47131f4`, `GOFLAGS=-mod=readonly`; never modified (`git status` clean before and
+after).
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | all OK |
+| `go test -race -p 4 -count=1`, no DSNs, on the 14 SMP packages importing a changed Spine package (test imports included; recomputed with `go list`, the same list as the integration pass): `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`, `internal/recovery` | 13 ok (`projectionsvc` has no tests), 0 failures |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s4f_smp_it` with `vector`, `s4f_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites" via `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`) | `4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)`; `testgate: PASS` |
+| SMP CI "Git gateway integration tests" via `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `1 packages, 301 tests passed, 0 failed, 1 skipped (1 allowed)`; `testgate: PASS` |
+| The three Linux-only tests those allowances skip on macOS, in `golang:1.26-bookworm` (git 2.39.5): `TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch`, `TestIntegration_ReceiveTimeMemoryBounded` | all 3 PASS |
+
+No SMP failure, so no compatibility break.
+
+**Not run.** GitHub CI (nothing is pushed). SMP's integration-job steps outside this gate list
+(platform-DB shared suites, fenced migrate, workspace-schema, faultinject, verify-children) and the
+image-based gates.
+
+**Environment.** PostgreSQL: the shared `i23-pg` on `localhost:55630`; only `s4f_*` databases were
+created and all were dropped; no `ws_*` databases or roles before the SMP suites or after; the shared
+roles were untouched. Docker: only the `git-floor` run, the two Linux-only SMP runs and `alpine:3 df`
+checks, all `--rm` and `--pull=never`; nothing pulled or pruned. The mutation check used a
+throwaway detached worktree under the scratch directory, removed afterwards.

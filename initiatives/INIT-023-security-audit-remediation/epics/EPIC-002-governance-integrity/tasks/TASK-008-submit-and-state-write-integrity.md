@@ -1882,3 +1882,23 @@ No SMP failure, so no compatibility break.
   after, and the shared roles were untouched.
 - Docker: the only containers were the `git-floor` runs, the Linux-only SMP runs and the
   `alpine:3 df` checks, all `--rm`. Nothing was pulled or pruned.
+
+### Cross-task review (wave 4) (2026-10-19)
+
+The integrated wave 4 (`db0b727b`) was reviewed as a whole; the fixes are `0ab10a57` … `f47131f4`
+on `init/INIT-023-wave4-integration` (final code `f47131f4`, nothing pushed). TASK-006's note of the
+same name has the full disposition table and the gates. The owner questions stay recorded as
+defaults. What concerns this task:
+
+- **P3, AC 21 had no test (fixed in `757d90b8`).** Nothing pinned that `spine serve`'s startup step
+  recovery hands a completed execution to `RecoverCompletedStep`: putting the `ae513dca` form back
+  (`SubmitStepResult(…, StepResult{OutcomeID: exec.OutcomeID})`) passed all of
+  `go test ./service/cmd/spine/`. The callback is now `stepRecoveryFor`, shared by `buildScheduler`
+  and the workspace builder, over a `schedulerEngine` interface that has no `SubmitStepResult`.
+  `TestServeScheduler_StepRecoveryUsesRecoverCompletedStep` drives startup recovery through the
+  built scheduler and asserts the completed execution reaches `RecoverCompletedStep` and is not
+  retried; a `RetryStep` mutant fails it.
+- **Compare-and-swap writes.** The review's changes keep the step writes on this task's
+  compare-and-swap: `clearGovernanceHold` now clears every execution of the run that carries a
+  governance hold, each through `writeStepExecution` with the row's prior state, as the hold's own
+  write does.
