@@ -21,7 +21,8 @@ import (
 // merges against a virtual base built from all of them — changes on the
 // target. The guard therefore diffs from every base.
 //
-// Same argument handling as MergeBase: both revisions are validated before
+// Same argument handling as MergeBase, the home branch's "HEAD" included:
+// both revisions are validated before
 // any git process and follow --end-of-options, so a poisoned revision
 // cannot become a flag, and a short branch name resolves exactly to
 // refs/heads/<name> (TASK-002's lookup, never a tag or other shadow).
@@ -39,11 +40,15 @@ func (c *CLIClient) MergeBases(ctx context.Context, a, b string) ([]string, erro
 	if err := checkRev("merge-base", "b", b); err != nil {
 		return nil, err
 	}
-	revA, err := c.resolveRev(ctx, "merge-base", "a", a)
+	// On a home-branch tree "HEAD" means the home branch, as for every
+	// other read method (INIT-023 TASK-012 §2.9; wave 4 integration, codex
+	// round 2): otherwise the merge bases would depend on what a concurrent
+	// sequence has checked out, and disagree with MergeBase.
+	revA, err := c.resolveRev(ctx, "merge-base", "a", c.homeRev(a))
 	if err != nil {
 		return nil, err
 	}
-	revB, err := c.resolveRev(ctx, "merge-base", "b", b)
+	revB, err := c.resolveRev(ctx, "merge-base", "b", c.homeRev(b))
 	if err != nil {
 		return nil, err
 	}

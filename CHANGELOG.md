@@ -50,6 +50,9 @@ in a step write whose result is the same for every input SMP produces.
   `DecideGovernanceMerge` and `GovernanceMergeStatus` compute the merge's governance facts from
   the lifecycle's merge source, as the gate does — a merge the lifecycle refuses is
   `ErrPrecondition` ("nothing to decide") for a decision and an `EvaluationError` for the status.
+- `git.CLIClient.MergeBases` (TASK-006) resolves a `HEAD` argument to the home branch on a
+  home-branch tree, as `MergeBase` and every other read method do (TASK-012); a client with no
+  home branch is unchanged.
 - `docs/integration-guide.md`: the three wave 4 embedding sections are numbered §10 (TASK-008),
   §11 (TASK-017) and §12 (TASK-006).
 

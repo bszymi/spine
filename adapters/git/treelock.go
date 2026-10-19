@@ -55,7 +55,7 @@ package git
 //     no longer leave the tree half checked out or locked.
 //  4. On a home-branch tree, a read method's "HEAD" means
 //     refs/heads/<home> (ReadFile, ListFiles, TreeEntryType, Head, Diff,
-//     Log, MergeBase, RefSHA). Reads are not serialised (that would make
+//     Log, MergeBase, MergeBases, RefSHA). Reads are not serialised (that would make
 //     every API read wait behind merges and pushes), and inside a sequence
 //     HEAD is a run branch: without the rewrite a concurrent StartRun read
 //     the task at HEAD and bound the workflow an unreviewed branch chose.
