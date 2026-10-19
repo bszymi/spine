@@ -199,6 +199,12 @@ func TestRead_NotAFileIsNotFound(t *testing.T) {
 		assert404("artifact.Service.Read "+tc.label, err, tc.want)
 	}
 
+	// A "./"-relative path reads the file, as `git show` resolved it
+	// (codex review, wave 4 follow-up).
+	if a, err := artSvc.Read(ctx, "./governance/g.md", c2); err != nil || a == nil {
+		t.Fatalf("Read(./governance/g.md) = %v, %v; want the artifact", a, err)
+	}
+
 	wfSvc := workflow.NewService(client, r.dir)
 	_, err := wfSvc.Read(ctx, "wl", c2)
 	assert404("workflow.Service.Read gitlink", err, "gitlink")

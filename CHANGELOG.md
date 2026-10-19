@@ -37,12 +37,15 @@ at ae513dca, and two guards no test pinned). No runtime schema change.
   gitlink records, or — for a gitlink whose commit is absent — `fatal: bad object …` with the same
   Kind. Size refusals (`ErrBlobTooLarge`, `BlobTooLargeError`) and misses are unchanged: a miss is
   still `ErrKindNotFound` with git's `fatal: bad revision '<rev>:<path>'` text, now built by the
-  client (Err is nil instead of the exit status). A path no tree entry can have — `""`, a leading or
-  trailing `/`, an empty, `.` or `..` component, a NUL — is a miss without a lookup (git read
-  `./x` relative to its working directory and `dir/` as the listing). A revision that names no
-  tree is a miss only when `git rev-parse --verify --quiet <rev>^{tree}` proves it by exit status;
-  any other ls-tree failure keeps git's classified error. Every ordinary file read costs the same
-  two git processes as before (plus the branch lookup), with different argv.
+  client (Err is nil instead of the exit status). The path is the one `git show` looked up: a
+  `./` or `../` prefix is relative to the repository root (`./task.md` still reads `task.md`;
+  climbing out is still git's Permanent "outside repository" error) and a trailing `/` names only
+  a directory (`dir/` is the not-a-file refusal instead of the listing). A path no tree entry can
+  have — `""`, a leading `/`, an empty, `.` or `..` component inside it, a NUL — is a miss
+  without a lookup, as git's literal lookup was. A revision that names no tree is a miss only when
+  `git rev-parse --verify --quiet <rev>^{tree}` proves it by exit status; any other ls-tree
+  failure keeps git's classified error. Every ordinary file read costs the same two git processes
+  as before (plus the branch lookup), with different argv.
 - Callers treat the refusal like TASK-003's size refusal: discovery records it as
   `artifact.RefusedNotAFile` (`"not_a_file"`, a new `RefusalReason`; `projection_file_skipped`
   with `reason: not_a_file`, sizes null) and removes a governed row a gitlink replaces — a gitlink
@@ -58,7 +61,10 @@ at ae513dca, and two guards no test pinned). No runtime schema change.
   fails on the next `.spine-revision` bump that includes this change — expected: Spine's ReadFile no
   longer runs `show` on a gitlink, so SMP TASK-010 can delegate `gitread.Client.ReadFile` to it
   (`git.NotBlobError` / `git.ErrNotBlob` / `git.NotBlobMessage` mirror SMP's `gitread` names and
-  envelope, so `gitread` can alias them).
+  envelope, so `gitread` can alias them). So do the "dangling gitlink" rows of SMP's tests that
+  compare `gitread`'s errors with `CLIClient.ReadFile`'s (`TestBounded_ErrorContractEqualsCLIClient`
+  on SMP `main`, its `gitread.Client` successor on the wave 4 line): the Kind is still Permanent,
+  but the Message is now `NotBlobMessage`, not git's `bad object` text.
 
 ---
 

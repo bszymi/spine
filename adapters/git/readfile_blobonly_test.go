@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,19 +139,79 @@ func TestReadFile_RevisionSyntaxInThePathIsLiteral(t *testing.T) {
 	}
 }
 
-// A path no tree entry can have is a miss without any lookup. git would
-// have read "./x" relative to its working directory and "d/" as the
-// directory's listing — neither is the file at that exact path.
+// A path no tree entry can have is a miss without any lookup — git took
+// these literally and found nothing ("bad revision"), as it did for a
+// file named with a trailing "/".
 func TestReadFile_PathsNoEntryCanHaveAreMisses(t *testing.T) {
 	ctx := context.Background()
 	dir, head, _ := blobOnlyRepo(t)
 	c := git.NewCLIClient(dir)
-	for _, p := range []string{"", "./d/x.md", "d/./x.md", "d/", "/d/x.md", "d//x.md", "s/../d/x.md", "..", ".", "d/x.md\x00"} {
+	for _, p := range []string{"", "/", "d/./x.md", "/d/x.md", "d//x.md", "s/../d/x.md", "..", ".", "d/x.md/", "./d/x.md/", "d/x.md\x00"} {
+		// ("..": git show read `<rev>:` .. `` as a range and printed a log.)
+		if p != "" && p != ".." && p != "d/x.md\x00" {
+			if out, ok := gitShow(t, dir, head+":"+p); ok {
+				t.Fatalf("fixture: git show %q found %q", p, truncateForTest([]byte(out)))
+			}
+		}
 		got, err := c.ReadFile(ctx, head, p)
 		var ge *git.GitError
 		if !errors.As(err, &ge) || ge.Kind != git.ErrKindNotFound || got != nil {
 			t.Errorf("ReadFile(%q) = %q, %v; want an ErrKindNotFound miss", p, truncateForTest(got), err)
 		}
+	}
+}
+
+// gitShow runs TASK-003's read, `git show [eoo] <spec> --`, and reports
+// its stdout and whether it succeeded.
+func gitShow(t *testing.T, dir, spec string) (string, bool) {
+	t.Helper()
+	cmd := exec.Command("git", "show", "--end-of-options", spec, "--")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return string(out), err == nil
+}
+
+// Codex review (wave 4 follow-up): the path is the one `git show` looked
+// up. A "./" or "../" prefix is relative to the repository root, so
+// "./d/x.md" still reads d/x.md — byte for byte what show printed — and
+// artifact reads and run starts given such a path keep working; a path
+// that climbs out of the repository is still git's Permanent "outside
+// repository" error; a trailing "/" names only a directory, which is now
+// the not-a-file refusal instead of a listing.
+func TestReadFile_PathsResolveLikeGitShow(t *testing.T) {
+	ctx := context.Background()
+	dir, head, _ := blobOnlyRepo(t)
+	c := git.NewCLIClient(dir)
+	for _, p := range []string{"./d/x.md", "././d/x.md", "./d/../d/x.md", "./d//x.md", "./s/../d/x.md", "./a^b", "./x@{1}"} {
+		want, ok := gitShow(t, dir, head+":"+p)
+		if !ok {
+			t.Fatalf("fixture: git show %q failed", p)
+		}
+		got, err := c.ReadFile(ctx, head, p)
+		if err != nil || string(got) != want {
+			t.Errorf("ReadFile(%q) = %q, %v; want git show's %q", p, truncateForTest(got), err, want)
+		}
+	}
+	for _, tc := range []struct{ path, typ string }{
+		{"d/", git.TreeEntryTree}, {"s/d/", git.TreeEntryTree}, {"./d/", git.TreeEntryTree},
+		{"./", git.TreeEntryTree}, {"./g.md", git.TreeEntryCommit},
+	} {
+		got, err := c.ReadFile(ctx, head, tc.path)
+		assertNotBlob(t, tc.path, got, err, head, tc.path, tc.typ)
+	}
+	for _, p := range []string{"../d/x.md", ".././d/x.md", "./d/../../x", "./.."} {
+		got, err := c.ReadFile(ctx, head, p)
+		var ge *git.GitError
+		if !errors.As(err, &ge) || ge.Kind != git.ErrKindPermanent || errors.Is(err, git.ErrNotBlob) || got != nil ||
+			!strings.Contains(ge.Message, "outside repository") {
+			t.Errorf("ReadFile(%q) = %q, %v; want git's Permanent \"outside repository\" refusal", p, truncateForTest(got), err)
+		}
+	}
+	// "./" at a revision that names no tree is a miss.
+	if _, err := c.ReadFile(ctx, strings.Repeat("cd", 20), "./"); err == nil {
+		t.Fatal("ReadFile(<absent commit>, \"./\") succeeded")
+	} else if ge, ok := err.(*git.GitError); !ok || ge.Kind != git.ErrKindNotFound {
+		t.Fatalf("ReadFile(<absent commit>, \"./\") = %v, want ErrKindNotFound", err)
 	}
 }
 

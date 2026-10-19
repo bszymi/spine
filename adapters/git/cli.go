@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"sort"
 	"strconv"
 	"strings"
@@ -1088,19 +1089,24 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 // object; that is also Size -1, with GitAllocLimit set so the message
 // names the real cause (the file itself may be small).
 //
+// The path is the one `git show` looked up (entryLookupPath): a "./" or
+// "../" prefix is relative to the repository root ("./task.md" reads
+// task.md, "./" is the root tree; climbing out of the repository is git's
+// Permanent "outside repository" error), and a trailing "/" names only a
+// directory.
+//
 // A miss keeps the error it has had since INIT-023 TASK-002 — git's
 // "bad revision '<rev>:<path>'", ErrKindNotFound, Op "read_file" — now
 // built here instead of read from a `git show` that would first try the
 // spec as a range. It is the answer when the revision's tree has no
-// entry at exactly path; when the path can name no tree entry at all
-// ("", a leading or trailing "/", an empty, "." or ".." component, a NUL
-// byte — git would read "./x" relative to its working directory and
-// "dir/" as the directory: neither names a file at that path); and when
-// the revision names no tree, which `git rev-parse --verify --quiet
-// <rev>^{tree}` proves by its exit status (1, nothing on stderr) after
-// ls-tree failed — never git's stderr. Any other ls-tree or cat-file
-// failure is classified from git's stderr as before (a missing blob in
-// a corrupt repository is an error, not a miss).
+// entry at exactly that path; when the path can name no tree entry at
+// all ("", a leading "/", an empty, "." or ".." component inside it, a
+// NUL byte — git took those literally and found nothing); and when the
+// revision names no tree, which `git rev-parse --verify --quiet
+// <rev>^{tree}` proves by its exit status (1) after ls-tree failed —
+// never git's stderr. Any other ls-tree or cat-file failure is classified
+// from git's stderr as before (a missing blob in a corrupt repository is
+// an error, not a miss).
 //
 // A 0-byte blob returns a non-nil, empty slice.
 func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
@@ -1163,26 +1169,75 @@ type blobEntry struct {
 	size int64  // the blob's size; -1 when ls-tree reported none
 }
 
-// readEntry types the entry at exactly path in rev's tree (ReadFile step
-// 1). A path no tree entry can have, and a revision that names no tree,
-// are "no entry" (typ ""). The ls-tree output is one record for any path
-// readEntryPath accepts; its cap leaves room for a second and fails the
-// read past it (errors.Is ErrOutputTooLarge — a tree carrying duplicate
-// entries is refused, not guessed at).
+// readEntry types the entry path names in rev's tree (ReadFile step 1).
+// The path is first resolved the way `git show <rev>:<path>` resolved it
+// (entryLookupPath): a "./" or "../" prefix is relative to the
+// repository root, and a trailing "/" names only a directory. A path no
+// tree entry can have, and a revision that names no tree, are "no entry"
+// (typ ""). The ls-tree output is one record for any path readEntryPath
+// accepts; its cap leaves room for a second and fails the read past it
+// (errors.Is ErrOutputTooLarge — a tree carrying duplicate entries is
+// refused, not guessed at).
 func (c *CLIClient) readEntry(ctx context.Context, rev, path string) (blobEntry, error) {
-	if !readEntryPath(path) {
+	lookup, dirOnly, root, err := c.entryLookupPath(path)
+	if err != nil {
+		return blobEntry{}, err
+	}
+	if root { // "./": the revision's root tree
+		ok, err := c.revNamesTree(ctx, rev)
+		if err != nil || !ok {
+			return blobEntry{}, err
+		}
+		return blobEntry{typ: TreeEntryTree}, nil
+	}
+	if !readEntryPath(lookup) {
 		return blobEntry{}, nil
 	}
-	limit := 2 * (int64(len(path)) + readEntryRecordBytes)
+	limit := 2 * (int64(len(lookup)) + readEntryRecordBytes)
 	out, err := c.runBounded(ctx, "read_file", limit, 0,
-		"--literal-pathspecs", "ls-tree", "-l", "-z", "--full-tree", "--end-of-options", rev, path)
+		"--literal-pathspecs", "ls-tree", "-l", "-z", "--full-tree", "--end-of-options", rev, lookup)
 	if err != nil {
-		if !errors.Is(err, ErrOutputTooLarge) && ctx.Err() == nil && c.revNamesNoTree(ctx, rev) {
-			return blobEntry{}, nil
+		if !errors.Is(err, ErrOutputTooLarge) && ctx.Err() == nil {
+			if ok, rerr := c.revNamesTree(ctx, rev); rerr == nil && !ok {
+				return blobEntry{}, nil
+			}
 		}
 		return blobEntry{}, err
 	}
-	return parseBlobEntry(string(out), path)
+	ent, err := parseBlobEntry(string(out), lookup)
+	if err != nil || (dirOnly && ent.typ != TreeEntryTree) {
+		return blobEntry{}, err
+	}
+	return ent, nil
+}
+
+// entryLookupPath is the tree path `git show <rev>:<path>` looked up for
+// path, and whether only a directory matches it (a trailing "/": git
+// listed "d/" as the directory d and found no "d/x.md/").
+//
+// A path that starts with "./" or "../" is relative to git's working
+// directory, the repository root (git's resolve_relative_path): "."
+// components and repeated slashes are dropped and ".." pops a component,
+// so "./task.md" still reads task.md (codex review, wave 4 follow-up); a
+// path that climbs out of the repository is git's own refusal, a
+// Permanent "outside repository" error, as before. "./" alone is the root
+// tree (lookup ""). Any other path was taken literally, so it is returned
+// unchanged apart from its trailing slashes; readEntryPath then refuses
+// the shapes no entry can have ("" and "/" among them).
+func (c *CLIClient) entryLookupPath(path string) (lookup string, dirOnly, root bool, err error) {
+	dirOnly = len(path) > 1 && strings.HasSuffix(path, "/")
+	if !strings.HasPrefix(path, "./") && !strings.HasPrefix(path, "../") {
+		return strings.TrimRight(path, "/"), dirOnly, false, nil
+	}
+	clean := pathpkg.Clean(path)
+	switch {
+	case clean == ".." || strings.HasPrefix(clean, "../"):
+		return "", false, false, &GitError{Kind: ErrKindPermanent, Op: "read_file",
+			Message: fmt.Sprintf("fatal: '%s' is outside repository at '%s'", path, c.repoPath)}
+	case clean == ".":
+		return "", true, true, nil
+	}
+	return clean, dirOnly, false, nil
 }
 
 // readEntryRecordBytes bounds an `ls-tree -l -z` record apart from its
@@ -1191,9 +1246,9 @@ const readEntryRecordBytes = 128
 
 // readEntryPath reports whether path can name a tree entry: non-empty, no
 // NUL, and every "/"-separated component non-empty and neither "." nor
-// "..". A tree entry's name can be none of those, and git reads such a
-// spec relative to its working directory ("./x") or as a directory's
-// listing ("dir/") rather than as the entry the caller named.
+// "..". A tree entry's name can be none of those, and git took such a
+// path literally (`<rev>:d/./x.md` and `<rev>:d//x.md` were misses), so
+// it names no file.
 func readEntryPath(path string) bool {
 	if path == "" || strings.IndexByte(path, 0) >= 0 {
 		return false
@@ -1206,18 +1261,23 @@ func readEntryPath(path string) bool {
 	return true
 }
 
-// revNamesNoTree reports whether rev positively names no tree:
-// `git rev-parse --verify --quiet [eoo] <rev>^{tree}` exits with status 1,
-// its "not a valid object name" answer (a name that resolves to a blob
-// also prints why on stderr; the status is what decides, never the text).
-// rev passed checkRev, so it holds no "^" or ":" of its own. Any other
-// outcome — it resolves, git died (128), could not run or was signalled —
-// is false, and the caller keeps ls-tree's error.
-func (c *CLIClient) revNamesNoTree(ctx context.Context, rev string) bool {
+// revNamesTree reports whether rev names a tree-ish:
+// `git rev-parse --verify --quiet [eoo] <rev>^{tree}` exits 0 (yes) or 1,
+// its "not a valid object name" answer (no; a name that resolves to a blob
+// also prints why on stderr — the status decides, never the text). rev
+// passed checkRev, so it holds no "^" or ":" of its own. Any other outcome
+// — git died (128), could not run or was signalled — is an error.
+func (c *CLIClient) revNamesTree(ctx context.Context, rev string) (bool, error) {
 	_, err := c.runBounded(ctx, "read_file", maxProbeBytes+64, 0,
 		"rev-parse", "--verify", "--quiet", "--end-of-options", rev+"^{tree}")
+	if err == nil {
+		return true, nil
+	}
 	var ee *exec.ExitError
-	return err != nil && errors.As(err, &ee) && ee.ExitCode() == 1
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 // parseBlobEntry reads `ls-tree -l -z` records ("<mode> SP <type> SP
