@@ -53,8 +53,14 @@ func TestCompleteRun_DoesNotResurrectCancelledRun(t *testing.T) {
 	}
 }
 
-// mergeFailGit fails every non-abort merge permanently.
-type mergeFailGit struct{ *fakeBinderGit }
+// mergeFailGit fails every non-abort merge permanently — the plain Merge
+// and, with merge binding on, MergeBound. race, when set, runs inside the
+// merge call, after the merge block's status re-check (INIT-023 TASK-012)
+// and before the failure is returned.
+type mergeFailGit struct {
+	*fakeBinderGit
+	race func()
+}
 
 func (g mergeFailGit) Merge(_ context.Context, opts git.MergeOpts) (git.MergeResult, error) {
 	g.record("Merge " + opts.Source)
@@ -62,12 +68,48 @@ func (g mergeFailGit) Merge(_ context.Context, opts git.MergeOpts) (git.MergeRes
 		return git.MergeResult{}, nil
 	}
 	g.plainMerges = append(g.plainMerges, opts)
+	if g.race != nil {
+		g.race()
+	}
 	return git.MergeResult{}, &git.GitError{Kind: git.ErrKindPermanent, Op: "merge", Message: "conflict"}
+}
+
+func (g mergeFailGit) MergeBound(_ context.Context, opts git.MergeOpts) (git.MergeResult, error) {
+	g.record("binder:MergeBound " + opts.SourceSHA)
+	g.merges = append(g.merges, opts)
+	if g.race != nil {
+		g.race()
+	}
+	return git.MergeResult{}, &git.GitError{Kind: git.ErrKindPermanent, Op: "merge", Message: "conflict"}
+}
+
+// bindCasFix turns merge binding on for f's run (bound at its review
+// step) and puts the run in committing with that review completed.
+func bindCasFix(t *testing.T, f *casFix) *domain.StepExecution {
+	t.Helper()
+	if err := f.orch.EnableMergeBinding(MergeBindingConfig{}); err != nil {
+		t.Fatalf("EnableMergeBinding: %v", err)
+	}
+	review := f.addExec("review", domain.StepStatusCompleted, "actor-r")
+	run := f.st.runs[f.runID]
+	run.Status = domain.RunStatusCommitting
+	run.CommitMeta = map[string]string{CommitMetaBoundSHA: sha40('a'), CommitMetaBoundBy: boundByStep("review", review.ExecutionID)}
+	return review
 }
 
 // AC 7. A hook moves the run to cancelled between each mutator's read and
 // its write. No mutator overwrites it, emits its event or cleans up the
 // branch. Mutation: restoring UpdateRunStatus in any mutator fails its row.
+//
+// The permanent-merge-failure rows race INSIDE the merge call (INIT-023
+// wave 4 follow-up): a move right after MergeRunBranch's read is now
+// stopped by TASK-012's status re-check at the top of the merge block,
+// before any merge, so it no longer reaches failRunOnMergeError's
+// compare-and-swap. Mutation: dropping that CAS's `if !applied` (treating
+// the lost transition as applied) fails both rows — run_failed emitted,
+// the review's git_conflict detail written.
+// TestMergeRunBranch_RunLeftCommittingBeforeTheMergeBlock pins the
+// re-check.
 func TestRunMutators_LostRaceNeverOverwrites(t *testing.T) {
 	t.Setenv("SPINE_GIT_PUSH_ENABLED", "false")
 	type row struct {
@@ -76,42 +118,60 @@ func TestRunMutators_LostRaceNeverOverwrites(t *testing.T) {
 		call   func(o *Orchestrator, f *casFix) error
 		event  domain.EventType
 		errNil bool // failRunOnMergeError logs a lost race and returns nil
+		// inMerge: the race runs inside the merge call (mergeFailGit.race),
+		// not after the mutator's first read; bound: merge binding on.
+		inMerge, bound bool
 	}
 	rows := []row{
 		{"CompleteRun with commit", domain.RunStatusActive, func(o *Orchestrator, f *casFix) error {
 			return o.CompleteRun(context.Background(), f.runID, true)
-		}, domain.EventRunCompleted, false},
+		}, domain.EventRunCompleted, false, false, false},
 		{"CompleteRun without commit", domain.RunStatusActive, func(o *Orchestrator, f *casFix) error {
 			return o.CompleteRun(context.Background(), f.runID, false)
-		}, domain.EventRunCompleted, false},
+		}, domain.EventRunCompleted, false, false, false},
 		{"FailRun", domain.RunStatusActive, func(o *Orchestrator, f *casFix) error {
 			return o.FailRun(context.Background(), f.runID, "boom")
-		}, domain.EventRunFailed, false},
+		}, domain.EventRunFailed, false, false, false},
 		{"CancelRun", domain.RunStatusActive, func(o *Orchestrator, f *casFix) error {
 			return o.CancelRun(context.Background(), f.runID)
-		}, domain.EventRunCancelled, false},
+		}, domain.EventRunCancelled, false, false, false},
 		{"PauseRun", domain.RunStatusActive, func(o *Orchestrator, f *casFix) error {
 			return o.PauseRun(context.Background(), f.runID, "blocked")
-		}, domain.EventRunPaused, false},
+		}, domain.EventRunPaused, false, false, false},
 		{"ResumeRun", domain.RunStatusPaused, func(o *Orchestrator, f *casFix) error {
 			return o.ResumeRun(context.Background(), f.runID)
-		}, domain.EventRunResumed, false},
+		}, domain.EventRunResumed, false, false, false},
 		{"failRunOnMergeError (permanent merge failure)", domain.RunStatusCommitting, func(o *Orchestrator, f *casFix) error {
 			return o.MergeRunBranch(context.Background(), f.runID)
-		}, domain.EventRunFailed, true},
+		}, domain.EventRunFailed, true, true, false},
+		{"failRunOnMergeError (permanent bound merge failure)", domain.RunStatusCommitting, func(o *Orchestrator, f *casFix) error {
+			return o.MergeRunBranch(context.Background(), f.runID)
+		}, domain.EventRunFailed, true, true, true},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			wf := casWorkflow()
 			f := newCasFix(t, wf, false)
-			f.orch.git = mergeFailGit{f.git}
-			f.st.runs[f.runID].Status = r.start
+			cancel := func() { f.st.setRunStatus(f.runID, domain.RunStatusCancelled) }
+			mg := mergeFailGit{fakeBinderGit: f.git}
+			if r.inMerge {
+				mg.race = cancel
+			}
+			f.orch.git = mg
 			// A completed step whose git_conflict detail a lost merge
 			// failure must not write.
-			review := f.addExec("review", domain.StepStatusCompleted, "actor-r")
-			f.st.afterGetRun = func(runID string, n int) {
-				if n == 1 {
-					f.st.setRunStatus(runID, domain.RunStatusCancelled)
+			var review *domain.StepExecution
+			if r.bound {
+				review = bindCasFix(t, f)
+			} else {
+				review = f.addExec("review", domain.StepStatusCompleted, "actor-r")
+			}
+			f.st.runs[f.runID].Status = r.start
+			if !r.inMerge {
+				f.st.afterGetRun = func(runID string, n int) {
+					if n == 1 {
+						cancel()
+					}
 				}
 			}
 			err := r.call(f.orch, f)
@@ -136,6 +196,70 @@ func TestRunMutators_LostRaceNeverOverwrites(t *testing.T) {
 			}
 			if got := f.st.exec(review.ExecutionID); got.ErrorDetail != nil {
 				t.Fatalf("lost merge-failure race wrote git_conflict detail: %+v", got.ErrorDetail)
+			}
+			if r.inMerge {
+				// The race really ran inside the merge: one merge call.
+				merges := f.git.callCount("binder:MergeBound")
+				if !r.bound {
+					merges = len(f.git.plainMerges)
+				}
+				if merges != 1 {
+					t.Fatalf("%d merge calls, want 1 (the race must run inside it): %v", merges, f.git.calls)
+				}
+			}
+		})
+	}
+}
+
+// INIT-023 wave 4 follow-up: TASK-012's status re-check at the top of the
+// merge block (merge.go mergePrimary, merge_binding.go mergePrimaryBound)
+// is the only guard between an attempt that read the run as committing
+// and a merge of a run that has since left committing. A hook cancels the
+// run right after MergeRunBranch's read; the attempt stands down — nil, no
+// merge, no push, no run write, no event. Mutation: deleting either
+// requireStillCommitting call fails its row with a merge (and, for a
+// successful merge, a push) of the cancelled run; the compare-and-swap
+// writes after it keep the status, so only the git calls show it.
+func TestMergeRunBranch_RunLeftCommittingBeforeTheMergeBlock(t *testing.T) {
+	t.Setenv("SPINE_GIT_PUSH_ENABLED", "true")
+	t.Setenv("SPINE_GIT_AUTO_PUSH", "true")
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("binding=%v", bound), func(t *testing.T) {
+			f := newCasFix(t, casWorkflow(), false)
+			if bound {
+				bindCasFix(t, f)
+				f.git.mergeRes = git.MergeResult{SHA: sha40('a'), BaseSHA: sha40('b')} // a fast-forward
+			} else {
+				f.addExec("review", domain.StepStatusCompleted, "actor-r")
+				f.st.runs[f.runID].Status = domain.RunStatusCommitting
+			}
+			f.st.afterGetRun = func(runID string, n int) {
+				if n == 1 { // MergeRunBranch has read the run as committing
+					f.st.setRunStatus(runID, domain.RunStatusCancelled)
+				}
+			}
+			if err := f.orch.MergeRunBranch(context.Background(), f.runID); err != nil {
+				t.Fatalf("MergeRunBranch of a run that left committing = %v, want nil (it stands down)", err)
+			}
+			f.st.mu.Lock()
+			reads := f.st.runReads[f.runID]
+			f.st.mu.Unlock()
+			if reads < 2 {
+				t.Fatalf("MergeRunBranch read the run %d time(s); nothing re-read it after the hook", reads)
+			}
+			if n := f.git.callCount("binder:MergeBound") + len(f.git.plainMerges); n != 0 {
+				t.Fatalf("merged a run that is no longer committing (%d merge calls): %v", n, f.git.calls)
+			}
+			if n := len(f.git.pushes) + len(f.git.plainPushes); n != 0 {
+				t.Fatalf("pushed for a run that is no longer committing: %v %v", f.git.pushes, f.git.plainPushes)
+			}
+			if got := f.st.run(f.runID).Status; got != domain.RunStatusCancelled || len(f.st.runWrites) != 0 {
+				t.Fatalf("status = %s, writes = %v; want cancelled and none", got, f.st.runWrites)
+			}
+			for _, ev := range []domain.EventType{domain.EventRunCompleted, domain.EventRunFailed} {
+				if len(f.events(ev)) != 0 {
+					t.Fatalf("%s emitted for a run that left committing", ev)
+				}
 			}
 		})
 	}
