@@ -298,3 +298,85 @@ func TestF9_PhantomRefusedMergeIsTakenBack(t *testing.T) {
 		}
 	})
 }
+
+// Finding 1, the clear: a take-back that succeeds clears only the record
+// of its own refused merge. Inside one sequence the take-back of a refused
+// merge X fails (main.lock held) and stays pending; a second refused merge
+// Y, made on top of X, is then taken back to X. That success says nothing
+// about X, which is still on main: X's record is kept, and the block's exit
+// restore finishes it. Clearing the branch's record whatever merge it named
+// handed the tree on as healthy with X on main.
+func TestF9_TakeBackSuccessClearsOnlyItsOwnRecord(t *testing.T) {
+	ctx := context.Background()
+	repo := swFeatureRepo(t)
+	swGit(t, repo, "checkout", "-q", "-b", "feature2", "main")
+	testutil.WriteFile(t, repo, "g.md", "feature2\n")
+	swGit(t, repo, "add", "g.md")
+	swGit(t, repo, "commit", "-q", "-m", "feature2 g")
+	swGit(t, repo, "checkout", "-q", "main")
+	c := git.NewCLIClient(repo, git.WithHomeBranch("main"))
+	var base string
+	if err := c.WithWorkingTree(ctx, func(seq context.Context) error {
+		var x git.MergeResult
+		x, base = swRefused(t, seq, c, repo)
+		release := swRefLock(t, repo, "main")
+		if err := c.ResetBranch(seq, "main", base, x.SHA); err == nil {
+			t.Fatal("ResetBranch with main.lock held reported success")
+		}
+		release()
+		y, err := c.MergeBound(seq, git.MergeOpts{Source: "feature2", SourceSHA: swGit(t, repo, "rev-parse", "feature2"),
+			Target: "main", Strategy: "merge-commit", Message: "refused too"})
+		if err != nil {
+			t.Fatalf("MergeBound of the second merge: %v", err)
+		}
+		if err := c.ResetBranch(seq, "main", x.SHA, y.SHA); err != nil {
+			t.Fatalf("take-back of the second refused merge: %v", err)
+		}
+		if got := swGit(t, repo, "rev-parse", "main"); got != x.SHA {
+			t.Fatalf("main = %s after the second take-back, want the first refused merge %s", got, x.SHA)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("sequence: %v", err)
+	}
+	if got := swGit(t, repo, "rev-parse", "main"); got != base {
+		t.Fatalf("main = %s after the block, want the base %s: the first take-back was forgotten", got, base)
+	}
+	swTreeHealthy(t, ctx, c, repo, base, "after the block")
+}
+
+// Finding 2, the order: a take-back that stays pending does not make every
+// take of the tree quarantine its phantoms again. The restore remembers the
+// phantoms before it settles take-backs, so while the take-back cannot be
+// done — here main moved on outside the server and still contains the
+// refused merge, a refusal that waits for an operator — every take refuses
+// the tree and only the first one writes a quarantine commit. Settled
+// first, a failing settle left the phantoms unremembered, and each take
+// quarantined them anew.
+func TestF9_PendingTakeBackDoesNotRequarantinePhantoms(t *testing.T) {
+	ctx := context.Background()
+	repo := swPhantomFeature(t)
+	c := git.NewCLIClient(repo, git.WithHomeBranch("main"))
+	res, base := swRefused(t, ctx, c, repo)
+	release := swRefLock(t, repo, "main")
+	if err := c.ResetBranch(ctx, "main", base, res.SHA); err == nil {
+		t.Fatal("ResetBranch with main.lock held reported success")
+	}
+	release()
+	swGit(t, repo, "commit", "-q", "--allow-empty", "--no-verify", "-m", "moved on outside the server")
+	swStale(t, repo, "notes.md")
+	if st, _ := swTry(repo, "status", "--porcelain", "--untracked-files=no"); st != "M notes.md" {
+		t.Fatalf("precondition: status = %q, want the phantom", st)
+	}
+	for i := 0; i < 3; i++ {
+		_, err := c.RestoreWorkingTree(ctx)
+		var tre *git.TreeRestoreError
+		if !errors.As(err, &tre) || !strings.Contains(err.Error(), "still contains the refused merge") {
+			t.Fatalf("take %d while main still contains the refused merge = %v; want the settle's refusal", i, err)
+		}
+		if i > 0 && tre.QuarantineSHA != "" {
+			t.Fatalf("take %d quarantined the phantom again (%s) while the take-back stayed pending", i, tre.QuarantineSHA)
+		}
+	}
+	swTreeRefused(t, ctx, c, repo, "while main still contains the refused merge")
+}
