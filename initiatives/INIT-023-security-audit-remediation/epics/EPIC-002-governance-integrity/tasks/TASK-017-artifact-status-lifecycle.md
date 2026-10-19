@@ -1821,3 +1821,72 @@ stay recorded as defaults. What concerns this task:
   more `commit_meta` row before `MergeBound`; a local `main` that cannot be read before the merge
   is a transient (counted) failure.
 - No other finding of the review concerns this task.
+
+### Acceptance (wave 4) (2026-10-19)
+
+The final gate on `init/INIT-023-wave4-integration` (worktree `i23/s-int4/spine`). Every gate ran at
+`02d65f4c`. Its last code commit is `f47131f4`, the last fix of the cross-task review; `02d65f4c`
+and the commit that adds this note change only the four task artifacts. Nothing was pushed. Spine
+`main` (`ae513dca`), the task branches and the SMP checkout are unchanged. The owner questions of
+all four tasks stay recorded as defaults, pending the owner; none was re-decided. No gate found a
+defect, so this gate added no code commit.
+
+**This task.**
+- Its CI step, "Status-lifecycle scenarios and pooled validator", passes in the
+  `scenario-git-http` run below. The 3 `StatusLifecycle` scenarios and
+  `TestBuildServiceSet_ValidatorBlocksStatusConflicts` pass, with 0 SKIP and 0 FAIL.
+- In the full scenario run, the three lifecycle scenarios pass:
+  `TestPlanningRun_StatusCascadesToChildren_StatusLifecycle`,
+  `TestStandardRun_StatusLifecycleArtifactsDir` and
+  `TestStandardRun_StatusLifecycleRefusesNonOwnedStatusEdit`.
+- The `git-floor` job's step 3 passes on git 2.39.5. It runs `core/workflow`
+  (`ValidateCommitStatuses`) and `core/artifact`.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean, all three |
+| `gofmt -l` (Go 1.26.5) on the 172 `.go` files changed since `ae513dca` (88 added, 84 modified) | empty |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 failures (3 more packages have no tests) |
+| `go test -race -p 4 -count=1` on the 19 packages changed since `ae513dca`: `adapters/{delivery,git,projection,scheduler,store}`, `core/{actor,artifact,auth,branchprotect,divergence,domain,engine,validation,workflow,worktreefs}`, `service/cmd/spine`, `service/internal/{gateway,workspace}`, `service/scenariotest/harness`. `service/scenariotest/scenarios` builds only with `-tags scenario`; the scenario rows cover it | 19 ok, 0 data races |
+| `-tags integration -p 1 -count=1 -v` on the changed packages that have integration suites: `adapters/{delivery,projection,store}`, `service/cmd/spine`, `service/internal/workspace`. `SPINE_TEST_DATABASE_URL` = fresh `s4g_it`; `SPINE_REGISTRY_TEST_DATABASE_URL` = `s4g_reg`, migrated from `migrations/registry` | 587 top-level PASS (1164 with subtests), 0 SKIP, 1 FAIL. The failure is `adapters/store` `TestRunModeDatabaseDefault` (`postgres_integration_test.go:702: GetRun: can't scan into dest[5] (col: workflow_version_label): cannot scan NULL into *string`), the known pre-existing failure. This run checked it again: a `git archive` export of `main` `ae513dca` fails it with the same message |
+| CI `scenario-git-http`: its 7 `run:` steps, read from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`, repo root as cwd, `SPINE_TEST_DATABASE_URL` = fresh `s4g_ci`) | All 7 steps exit 0. `TestGitHTTP_*`: 20 PASS. `TestBootstrapInternalAdmin_*`: 2. `TestWorkflowLifecycle_*`: 4. Pooled workflow-service branch protection: 1. TASK-008's store compare-and-swap: 8, and its scenarios: 2. TASK-017's `StatusLifecycle` scenarios: 3, and its pooled validator: 1. TASK-006's governance scenario: 1, and its store test: 1. 0 SKIP and 0 FAIL in every log |
+| Full scenario suite (what `make test-scenario` runs, with `-p 1 -count=1 -v -timeout 60m`), on this branch and on a fresh `git archive` export of `main` `ae513dca`; fresh `s4g_scen_{b,m}` each, registry `s4g_sreg_{b,m}` migrated | 31 top-level `--- FAIL` on each, and the sorted lists are identical at every level (59 lines with subtests on each). They are the known pre-existing set: the 30 plus `TestWorkspace_ScopedServices`. Top-level PASS is 204 on the branch and 198 on `main`. The extra 6 are `TestCompletedStep_IsNotReRouted`, `TestStepOutputEvidence_RecordedAndReadBack`, `TestGovernancePathGuard_HeldUntilOperatorApproves`, `TestPlanningRun_StatusCascadesToChildren_StatusLifecycle`, `TestStandardRun_StatusLifecycleArtifactsDir` and `TestStandardRun_StatusLifecycleRefusesNonOwnedStatusEdit`. 0 SKIP |
+| CI `git-floor`: its 3 `run:` steps, verbatim (`bash -e`), in `golang:1.26-bookworm` (`--pull=never --rm --init`; non-root `501:20`, where GitHub runs root; the worktree, the main repository's `.git`, the host module cache and the step scripts mounted read-only; `GOPROXY=off`, `GOTOOLCHAIN=local`) | git 2.39.5. All 3 steps ok: the version check; `adapters/git`, `adapters/git/refname` and `core/engine` with the ref-grammar filter; then `adapters/git/...`, `core/artifact` and `core/workflow`. The container was removed |
+| `golangci-lint` v2.11.4 `run --new-from-rev ae513dca` on the changed packages, plain, `--build-tags integration` and `--build-tags scenario` (with `./service/scenariotest/...`) | 0 issues each |
+| `golangci-lint --enable-only=gosec` on the changed packages (plain; `integration,scenario`) and on `./...` (plain; `integration,scenario`) | 0; 1; 0; 1. The one finding is G602 at `adapters/store/postgres_integration_test.go:1563`. It was there before: the file is unchanged since `ae513dca`, and the `main` export reports the same finding in this run |
+| `codex review --base main` (codex-cli 0.162.1, the configured default, no `-c model=`). The session was read from `~/.codex/sessions/2026/10/19/` (`source: {"subagent":"review"}`, `cwd` = this worktree, `model` = `gpt-6.1-sol`) | This round ran because `02d65f4c` (notes only) was added after the cross-task review's last clean round, which was at `f47131f4` (`01a154ce-eb74-7e82-90e2-2575bf420173`, no findings). Round at `02d65f4c`: `01a154e6-f52f-70d3-a575-8d753013f8b2`, `"findings": []`, "patch is correct". Codex's own `go test ./core/engine -timeout 90s` side run timed out inside its sandbox; `core/engine` needs about 360 s on this machine, and it passes in the gate rows above. Nothing to fix, so no second round |
+
+**SMP compatibility.** `i23/s-int4/smp` is SMP `main` `1ae9b0e3`, detached, with `../spine` =
+this worktree (`02d65f4c`) and `GOFLAGS=-mod=readonly`. The checkout was never modified, and
+`git status` is clean before and after.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | all OK; `lint-spine-internals: OK` |
+| `go test -race -p 4 -count=1`, no DSNs, on the 14 SMP packages that import a changed Spine package under any of the four tag sets (test imports included): `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`, `internal/recovery` | 13 ok; `projectionsvc` has no tests. 0 failures |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s4g_smp_it` with `vector`, `s4g_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, and `TEST_PROVISIONING_DSN` = `smp_prov`, as in CI; CI's timeout is 10m, raised for the loaded machine) | `4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)`; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `1 packages, 301 tests passed, 0 failed, 1 skipped (1 allowed)`; `testgate: PASS` |
+| The three Linux-only tests those allowances skip on macOS, in `golang:1.26-bookworm` (git 2.39.5, non-root, `--init`, read-only mounts): `TestDiffChildMemory_MillionPaths` and `TestReceiveTimeMemory_RealGitReaderFetch` (`spinecore`, `-race`), and `TestIntegration_ReceiveTimeMemoryBounded` (`githttp`, `-race -tags integration`) | all 3 PASS. The containers were removed |
+
+No SMP command failed, so there is no compatibility break, and no run against `../spine` at
+`ae513dca` was needed.
+
+**Not run.**
+- GitHub CI. It cannot run this branch until Spine is pushed.
+- The other steps of SMP's integration job: the platform-DB shared suites, fenced migrate,
+  workspace-schema, faultinject and verify-children. They are not in this gate list. The image-based
+  gates were not run either.
+- `-race` on `service/scenariotest/scenarios`, which builds only with `-tags scenario`. The CI job
+  and the full scenario run cover it without `-race`.
+
+**Environment.**
+- PostgreSQL: the shared `i23-pg` on `localhost:55630`. Only `s4g_*` databases were created, and
+  all of them were dropped. There were no `ws_*` databases or roles before the SMP suites and none
+  after. The shared roles `platform`, `platform_audit_retention` and `smp_prov` were already there
+  and were untouched.
+- Docker: the only containers were the `git-floor` run, the two Linux-only SMP runs and the
+  `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
+  VM had 5.8 GB free at the lowest check.
+- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
