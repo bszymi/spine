@@ -110,18 +110,20 @@ func (s *Server) handleRunGovernanceStatus(w http.ResponseWriter, r *http.Reques
 		return ps
 	}
 	resp := map[string]any{
-		"run_id":           st.RunID,
-		"run_status":       string(st.RunStatus),
-		"evaluated":        st.Evaluated,
-		"evaluation_error": st.EvaluationError,
-		"bound_sha":        st.BoundSHA,
-		"required":         st.Required,
-		"held":             st.Held,
-		"paths":            nonNil(st.Paths),
-		"path_count":       st.PathCount,
-		"truncated":        st.Truncated,
-		"exempt_paths":     nonNil(st.ExemptPaths),
-		"approval":         nil,
+		"run_id":            st.RunID,
+		"run_status":        string(st.RunStatus),
+		"evaluated":         st.Evaluated,
+		"evaluation_error":  st.EvaluationError,
+		"bound_sha":         st.BoundSHA,
+		"required":          st.Required,
+		"held":              st.Held,
+		"blocked":           st.Blocked,
+		"blocked_merge_sha": st.BlockedMergeSHA,
+		"paths":             nonNil(st.Paths),
+		"path_count":        st.PathCount,
+		"truncated":         st.Truncated,
+		"exempt_paths":      nonNil(st.ExemptPaths),
+		"approval":          nil,
 	}
 	if a := st.Approval; a != nil {
 		resp["approval"] = map[string]any{

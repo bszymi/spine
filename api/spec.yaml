@@ -745,7 +745,7 @@ paths:
                   merge_attempted: { type: boolean }
                   merge_error:
                     type: string
-                    description: Approve only — the merge after the approval did not complete.
+                    description: Approve only — the merge after the approval did not complete (including a merge refused after the approval whose take-back failed; the run then stays `committing`).
                   run_status: { type: string }
         '400':
           description: Malformed body, unknown decision, malformed commit_sha, a reason over 2000 bytes, or a reject without a reason
@@ -754,11 +754,11 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: The run is not committing (an approve that finds it left committing records nothing), commit_sha is not the run's bound commit (the message names the bound commit), or a reject after the approved merge already reached the local main
+          description: The run is not committing (an approve that finds it left committing records nothing), commit_sha is not the run's bound commit (the message names the bound commit), a reject after the approved merge already reached the local main, or a reject while a refused merge of the run that could not be taken back is still on the local main (`blocked` in `GET /runs/{run_id}/governance`)
         '412':
           description: The run's merge changes no governance path, or can never be evaluated (no merge base, a diff over the git output limit — the guard refuses it on its next attempt); there is nothing to decide
         '503':
-          description: The governance-path guard is off, the engine is not wired, the merge's changed paths could not be computed this time, or another decision or merge attempt on the run did not finish in time (retry)
+          description: The governance-path guard is off, the engine is not wired, the merge's changed paths could not be computed this time, another decision or merge attempt on the run did not finish in time, or the run's exhausted merge retries are being abandoned at that moment (retry; nothing was recorded)
 
   /runs/{run_id}/governance:
     get:
@@ -788,7 +788,20 @@ paths:
                   evaluation_error: { type: string }
                   bound_sha: { type: string }
                   required: { type: boolean }
-                  held: { type: boolean }
+                  held:
+                    type: boolean
+                    description: Held for an operator decision (never while `blocked`).
+                  blocked:
+                    type: boolean
+                    description: |
+                      A merge of the run that was refused, or whose approval
+                      could not be recorded, could not be taken back and is
+                      still on the local `main` (`blocked_merge_sha`).
+                      Governed merges are blocked on it; the run stays
+                      `committing` and its next attempt takes it back first.
+                      The paths are then computed against a `main` that
+                      holds that merge. A reject is `409` meanwhile.
+                  blocked_merge_sha: { type: string }
                   paths:
                     type: array
                     items: { type: string }

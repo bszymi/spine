@@ -173,6 +173,24 @@ func (o *Orchestrator) DecideGovernanceMerge(ctx context.Context, req Governance
 		return nil, domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("run %s is %s, not committing: only a held merge can be decided", run.RunID, run.Status))
 	}
+	// A merge of the run the guard refused, or whose approval could not be
+	// recorded, that could not be taken back is still on the local main
+	// (INIT-023 wave 4 review): the facts below are then computed against
+	// a main that already contains the bound commit, and a reject used to
+	// be told the approved merge "already reached the local main". The
+	// run stays committing so its retries take that merge back first, and
+	// it cannot be rejected meanwhile; an approve is the manual retry.
+	blockedMerge, err := o.governanceBlockOnMain(ctx, run)
+	if err != nil {
+		return nil, domain.NewErrorWithCause(domain.ErrUnavailable,
+			"the run's blocked merge could not be checked against the local "+authoritativeBranch+"; try again", err)
+	}
+	if blockedMerge != "" && req.Decision == GovernanceReject {
+		return nil, domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("merge %s of run %s was refused (or its approval could not be recorded) and could not be taken back: it is still on the local %s, "+
+				"and governed merges are blocked on it; the run stays committing and its next attempt takes the merge back first, so there is nothing to reject now",
+				blockedMerge, run.RunID, authoritativeBranch))
+	}
 	gc, err := o.governanceCheckForRun(ctx, run)
 	if err != nil {
 		observe.Logger(ctx).Warn("governance decision: the merge's governance facts are unavailable",
@@ -260,8 +278,37 @@ func (o *Orchestrator) approveGovernanceMerge(ctx context.Context, run *domain.R
 	}
 	if after, err := o.store.GetRun(ctx, run.RunID); err == nil {
 		result.RunStatus = after.Status
+		// A refusal whose take-back failed returns no error from the
+		// attempt (the run stays committing for its retries): the response
+		// must not read as a merge that went through (INIT-023 wave 4
+		// review).
+		if m, _, ok := governanceBlockOf(after.CommitMeta); ok && result.MergeError == "" && after.Status == domain.RunStatusCommitting {
+			result.MergeError = fmt.Sprintf("the merge was refused or could not be recorded, and merge %s could not be taken back: "+
+				"governed merges are blocked until the local %s no longer contains it; the run stays committing and its retries take it back",
+				m, authoritativeBranch)
+		}
 	}
 	return result, nil
+}
+
+// governanceBlockOf parses the run's CommitMetaGovernanceBlockedTarget.
+func governanceBlockOf(meta map[string]string) (merge, base string, ok bool) {
+	merge, base, ok = strings.Cut(meta[CommitMetaGovernanceBlockedTarget], " ")
+	return merge, base, ok && isBoundObjectID(merge) && isBoundObjectID(base)
+}
+
+// governanceBlockOnMain returns the run's recorded blocked merge when it is
+// still in the local main's history, or "" (no block, or a stale one).
+func (o *Orchestrator) governanceBlockOnMain(ctx context.Context, run *domain.Run) (string, error) {
+	m, _, ok := governanceBlockOf(run.CommitMeta)
+	if !ok {
+		return "", nil
+	}
+	on, err := o.mergeOnLocalTarget(ctx, m)
+	if err != nil || !on {
+		return "", err
+	}
+	return m, nil
 }
 
 func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Run, gc *branchprotect.GovernanceCheck, touched []string, req GovernanceDecisionRequest, result *GovernanceDecisionResult) (*GovernanceDecisionResult, error) {
@@ -565,12 +612,19 @@ type GovernanceMergeStatus struct {
 	// Required: the merge changes a governance path.
 	Required bool
 	// Held: the run is committing, Required, and no approval of the bound
-	// commit is recorded.
-	Held        bool
-	Paths       []string // capped
-	PathCount   int
-	Truncated   bool
-	ExemptPaths []string
+	// commit is recorded. Never while Blocked.
+	Held bool
+	// Blocked: a merge of the run that was refused (or whose approval
+	// could not be recorded) could not be taken back and is still on the
+	// local main (BlockedMergeSHA); governed merges are blocked on it and
+	// the run's retries take it back first (INIT-023 wave 4 review). The
+	// paths are then computed against a main that holds it.
+	Blocked         bool
+	BlockedMergeSHA string
+	Paths           []string // capped
+	PathCount       int
+	Truncated       bool
+	ExemptPaths     []string
 	// Approval is the recorded approval, or nil (also after a reject).
 	Approval *GovernanceApprovalRecord
 }
@@ -601,6 +655,13 @@ func (o *Orchestrator) GovernanceMergeStatus(ctx context.Context, runID string) 
 			BaseSHA:    run.CommitMeta[domain.CommitMetaGovernanceApprovalBaseSHA],
 		}
 	}
+	if run.Status == domain.RunStatusCommitting {
+		m, err := o.governanceBlockOnMain(ctx, run)
+		if err != nil {
+			observe.Logger(ctx).Warn("governance status: the run's blocked merge could not be checked", "run_id", run.RunID, "error", err)
+		}
+		st.Blocked, st.BlockedMergeSHA = m != "", m
+	}
 	if _, _, ok, _ := trustedBinding(run.CommitMeta, run.RunID); !ok {
 		st.EvaluationError = "the run has no bound commit yet"
 		return st, nil
@@ -626,7 +687,7 @@ func (o *Orchestrator) GovernanceMergeStatus(ctx context.Context, runID string) 
 	st.PathCount = len(touched)
 	st.ExemptPaths = nonNil(gc.ExemptPaths)
 	decision, _ := branchprotect.EvaluateGovernance(gc)
-	st.Held = run.Status == domain.RunStatusCommitting && decision == branchprotect.DecisionDeny
+	st.Held = run.Status == domain.RunStatusCommitting && decision == branchprotect.DecisionDeny && !st.Blocked
 	return st, nil
 }
 
