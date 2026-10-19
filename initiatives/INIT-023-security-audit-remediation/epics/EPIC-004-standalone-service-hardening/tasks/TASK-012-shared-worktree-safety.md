@@ -2234,3 +2234,117 @@ sub-session (`session_meta.source = {"subagent":"review"}`, cwd this worktree) r
 - Code-repository merges remain dormant in standalone (no code-repo catalog). The round 8 routing
   is covered by an engine unit test with fake repository clients.
 - Runtime schema: unchanged.
+
+### Integration (wave 4 merge) (2026-10-19)
+
+The four wave 4 branches were merged with `git merge --no-ff` onto `init/INIT-023-wave4-integration`
+(worktree `i23/s-int4/spine`, from Spine local `main` `ae513dca`), in this order: TASK-012
+(`3872f4d6`), TASK-008 (`1fef1444`), TASK-017 (`2cbfe037`), TASK-006 (`0b9a4f22`). The semantic
+conflicts between them were then fixed in coordination commits, each code fix with a test that
+fails without it: `3ea7d88f` (engine), `4dbf0486` (serve wiring test and docs), `96cf8e40` (docs),
+`044c2103` (lint, test code) and `a6acc720` (codex round 2). The final code is `a6acc720`; the
+commit that adds this note changes only the four task artifacts. Nothing was pushed. Spine
+`main`, the task branches and the SMP checkout are unchanged. The owner questions of all four
+tasks stay recorded as defaults, pending the owner; none was re-decided.
+
+**This task.** It merged first and cleanly. The later merges then put the other tasks'
+post-merge checks into this task's primary merge block. The coordination commits made the
+retry budget and the take-backs agree with them:
+
+- **One merge block.** TASK-017's merge-result check (V1) and TASK-006's post-merge assertion and
+  consumption marker now run inside `mergePrimaryBound`'s git-only block. They run after
+  `verifyBoundMerge` and before the push, and each refusal is taken back before the tree is
+  released.
+  - git's auto-merge had placed TASK-006's assertion after the block, that is after the push.
+    Four TASK-006 tests failed on that state. The merge `0b9a4f22` split the assertion into
+    `checkGovernedMerge` (in the block) and `settleGovernedRefusal` (after it).
+  - The block's "no store write" rule now has one exception: the consumption marker, which must
+    name the merge commit before the push. The `worktree.go` header and
+    `architecture/git-integration.md` §6.6 say so.
+- **Every take-back goes through the armed, tree-locked `ResetBranch`, inside the block.** This
+  covers TASK-005's structural refusal, V1 and the governance assertion.
+  `TestWave4_LateRefusalsAreTakenBackUnderTheTreeLock` (real git, home-branch tree, bare
+  origin) checks four cases: the governance and the lifecycle refusal, each with and without a
+  failing first take-back (a held `refs/heads/main.lock`). In each, an in-place write waits for
+  the tree and lands on the base, and local and origin `main` never contain the refused merge.
+  Mutants that move V1 or the governance check out of the block are killed.
+- **The retry budget and TASK-006.**
+  - `AbandonExhaustedMerge` never abandons a run held for an operator decision, or a run whose
+    refused merge is still blocked on the local `main` (`governanceKeepsCommitting`). See
+    `TestWave4_RetryBudgetNeverAbandonsAHeldOrBlockedRun`.
+  - A hold still records no attempt. Pre-gate transient failures on a held run's ticks are
+    counted, and once an approval clears the hold the budget applies again.
+  - `MergeRunBranch` registers its attempt (`mergeAttemptGate`) before it takes TASK-006's
+    governance stripe. An attempt that waits for a decision therefore counts as in flight, and
+    no abandonment routes the run while it waits.
+- **The §3 cross-task requirement for TASK-017 is met.** Its retryable failure judging the bound
+  commit is now a counted attempt (`TestWave4_TransientLifecycleFailureIsACountedAttempt`).
+- **§2.9 covers TASK-006's `MergeBases` too** (codex round 2, `a6acc720`).
+- **TASK-008's compare-and-swap run and step writes now make the abandonment's route
+  conditional.** The `AbandonExhaustedMerge` doc and KNOWN-LIMITATIONS "Shared Working Tree" 7
+  say so. What is left across processes is the re-record of the exhausted outcome.
+- **Docs.** KNOWN-LIMITATIONS "Shared Working Tree" 5/7/8 drop the stale TASK-008/TASK-017
+  forward references, and 5 links the governance block.
+- **Unchanged.** Deviation 16 (AC 15's push half) and AC 23's `make test-scenario` ruling are
+  still open for the orchestrator.
+
+**Coordination commits.**
+
+| Commit | What it fixes | Tests |
+|---|---|---|
+| `3ea7d88f` | V1 is taken back to exactly `BaseSHA`; a failed take-back of a TASK-005 or V1 refusal records the governance block (guard on); the retry budget spares held and blocked runs; the lifecycle's transient exit is a counted attempt; the governance hold and its clearing are compare-and-swap; the decision API mirrors the lifecycle | `core/engine/wave4_integration_test.go` (9 tests), `wave4_integration_git_test.go` (4 real-git cases). Every fix has a mutant killed under `go test -overlay`: M1–M7, M3b, and M8/M9 (governance check, V1 moved out of the block). The overlays and logs are in `w4/agents/int-spine/mut/` |
+| `4dbf0486` | Serve wiring composition; docs: the order of checks (`engine-state-machine.md`), the merge block (`git-integration.md` §6.6), KNOWN-LIMITATIONS, integration guide §11/§12, CHANGELOG "wave 4 integration" | `service/cmd/spine/serve_wave4_wiring_test.go`: both builders have binding, lifecycle, guard, home-branch primary client (a `MergeBaseLister`), retry budget and handler, governance-aware retry, projection guard |
+| `96cf8e40` | ADR-016 and KNOWN-LIMITATIONS: convergence is no longer a path around the guard | docs only |
+| `044c2103` | gocritic and staticcheck on the new test | test code only |
+| `a6acc720` | Codex round 2 P2: `MergeBases` resolves `HEAD` to the home branch | `adapters/git/wave4_mergebases_test.go` (mutant M10 killed) |
+
+**Gates.** The code gates ran on `a6acc720` unless the row names `96cf8e40`. The only code
+change after `96cf8e40` is `a6acc720`'s `HEAD` rewrite in `MergeBases`, which no engine or
+scenario caller reaches (they pass `main` or object ids). Logs are in
+`spine-management-platform/tmp/init027-orchestration/w4/agents/int-spine/`.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound" |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean, all three |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 failures |
+| `go test -race -p 4 -count=1` on the 19 packages changed since `ae513dca` (`service/scenariotest/scenarios` builds only with `-tags scenario`; the scenario rows cover it) | 19 ok, 0 data races (`adapters/{delivery,git,projection,scheduler,store}`, `core/{actor,artifact,auth,branchprotect,divergence,domain,engine,validation,workflow,worktreefs}`, `service/cmd/spine`, `service/internal/{gateway,workspace}`, `service/scenariotest/harness`) |
+| `-tags integration -p 1 -count=1 -v` on the changed packages with integration suites: `adapters/{delivery,projection,store}`, `service/cmd/spine`, `service/internal/workspace`. `SPINE_TEST_DATABASE_URL` = fresh `s4i_it`, `SPINE_REGISTRY_TEST_DATABASE_URL` = `s4i_reg`, migrated from `migrations/registry` | 584 top-level PASS (1161 with subtests), 0 SKIP, 1 FAIL. The failure is `adapters/store` `TestRunModeDatabaseDefault` (`cannot scan NULL into *string`, column `workflow_version_label`), the known pre-existing failure: a `git archive` export of `main` `ae513dca` fails it the same way. Run at `96cf8e40` and again at `a6acc720`, with the same result |
+| Full scenario suite (`-tags scenario -p 1 -count=1 -v ./service/scenariotest/...`), branch at `96cf8e40` against a `git archive` export of `main` `ae513dca`; fresh databases each, registry migrated | 31 top-level `--- FAIL` on both, and the sorted lists are identical, at every level. They are the known pre-existing set: the 30 plus `TestWorkspace_ScopedServices`, the same list as wave 3. Top-level PASS is 204 on the branch and 198 on `main`. The extra 6 are the wave's scenarios: `TestCompletedStep_IsNotReRouted`, `TestStepOutputEvidence_RecordedAndReadBack`, `TestGovernancePathGuard_HeldUntilOperatorApproves` and the three `StatusLifecycle` scenarios. 0 SKIP |
+| CI `scenario-git-http`: its 7 `run:` steps, read from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`, `SPINE_TEST_DATABASE_URL` = fresh `s4i_ci`) | All 7 steps exit 0. `TestGitHTTP_*`: 20 PASS. `TestBootstrapInternalAdmin_*`: 2. `TestWorkflowLifecycle_*`: 4. Pooled workflow-service branch protection: 1. TASK-008's store compare-and-swap: 8, and its scenarios: 2. TASK-017's `StatusLifecycle` scenarios: 3, and its pooled validator: 1. TASK-006's `TestGovernancePathGuard_HeldUntilOperatorApproves`: 1, and `TestGovernanceStore_Integration`: 1. 0 SKIP and 0 FAIL in every step |
+| CI `git-floor`: its 3 `run:` steps in `golang:1.26-bookworm` (`--pull=never --rm --init`, non-root, read-only mounts, `GOPROXY=off`, no git identity); plus an extra run of `core/engine` `-run 'TestWave4_\|TestStatusLifecycle_\|TestGovernanceGuard_\|TestF9_\|TestMergeRetry_'` | git 2.39.5. All 3 steps ok: `adapters/git/...` and `core/engine` (ref-grammar filter), then `adapters/git/...`, `core/artifact` and `core/workflow`. The extra `core/engine` run is ok on git 2.39.5 too, both at `a6acc720` |
+| `golangci-lint` v2.11.4 `run --new-from-rev ae513dca` on the changed packages, plain, `--build-tags integration` and `--build-tags scenario` | 0 issues each. The two issues in the new test at `96cf8e40` were fixed in `044c2103` |
+| `golangci-lint --enable-only=gosec`: `--new-from-rev ae513dca ./...`, full `./...`, and full `--build-tags integration,scenario` | 0; 0; 1. The one is G602 at `adapters/store/postgres_integration_test.go:1563`, a file unchanged since `main` (wave 3 recorded the same finding) |
+| `gofmt -l` on the 167 `.go` files changed since `ae513dca` | only `core/divergence/convergence.go`: the import-order problem it has on `main` `ae513dca`, covered by TASK-012's AC 23 exemption |
+| `ci.yml` | one step per task: TASK-008's, TASK-017's and TASK-006's in `scenario-git-http`; none duplicated; the YAML parses |
+| `codex review --base main` (codex-cli 0.162.1, the configured default, no `-c model=`; sessions read from `~/.codex/sessions/2026/10/19/`, `source: {"subagent":"review"}`, `cwd` = this worktree, `model` = `gpt-6.1-sol`) | Round 1 at `96cf8e40`: `01a153e5-817e-7f33-9a6b-680376b6f857`, no findings. Round 2 at `044c2103`: `01a153fc-abf2-7a72-9d81-03a7e51ef284`, one P2 (the `MergeBases` `HEAD` rewrite): real, reproduced, fixed in `a6acc720`. Round 3 at `a6acc720`: `01a15409-966a-7da1-a64f-248cfbd7f2b4`, no findings |
+
+**SMP compatibility.** `i23/s-int4/smp` is SMP `main` `1ae9b0e3`, detached, with `../spine` =
+this worktree and `GOFLAGS=-mod=readonly`. The checkout was never modified, and `git status` is
+clean.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | all OK; `lint-spine-internals: OK`; `git status` clean |
+| `go test -race -p 4 -count=1`, no DSNs, on the 14 SMP packages importing a changed Spine package (test imports included): `cmd/customer-app`, `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`, `internal/recovery` | 13 ok; `projectionsvc` has no tests. No failures: the wave 3 `gitread` / `projectionwriter` contract failures are gone on SMP `main` `1ae9b0e3` |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s4i_smp_it` with `vector`, `s4i_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`, as in CI) | `4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)`; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `1 packages, 301 tests passed, 0 failed, 1 skipped (1 allowed)`; `testgate: PASS` |
+| The three Linux-only tests those allowances skip on macOS, in `golang:1.26-bookworm` (git 2.39.5): `TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch` (`spinecore`) and `TestIntegration_ReceiveTimeMemoryBounded` (`-tags integration`, `githttp`) | all 3 PASS on git 2.39.5; the containers were removed |
+
+No SMP failure, so no compatibility break.
+
+**Not run.**
+- GitHub CI: it cannot run this branch until Spine is pushed.
+- The other steps of SMP's integration job (platform-DB shared suites, fenced migrate,
+  workspace-schema, faultinject, verify-children) and the image-based gates. They are not in this
+  gate list.
+- The full scenario suite was not repeated after `a6acc720`, for the reason in the Gates
+  preamble.
+
+**Environment.**
+- PostgreSQL: the shared `i23-pg` on `localhost:55630`. Only `s4i_*` databases were created, and
+  all were dropped. There were no `ws_*` databases or roles before the SMP suites and none
+  after, and the shared roles were untouched.
+- Docker: the only containers were the `git-floor` runs, the Linux-only SMP runs and the
+  `alpine:3 df` checks, all `--rm`. Nothing was pulled or pruned.
