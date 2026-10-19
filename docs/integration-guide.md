@@ -925,7 +925,9 @@ off for embedders until they opt in; `spine serve` turns it on. Three independen
    same value (TaskPaths are artifact-relative; diffs are repository-relative). A refusal is a
    failed primary merge outcome of class `precondition` whose detail starts
    `status_lifecycle_violation:`, and the last completed step's `error_detail.classification` is
-   `status_lifecycle_violation`.
+   `status_lifecycle_violation`. A retryable failure judging the bound commit returns an error
+   and records a failed primary outcome with a transient class, so a retry budget
+   (`AbandonExhaustedMerge`, §12 and TASK-012) counts it.
 2. **Workflow writes:** `workflowSvc.WithStatusLifecycle(domain.DefaultStatusLifecycle())`. Create
    and Update then refuse a body whose `commit.status` is not a declared status of its
    `applies_to` types, and `ValidateBody` reports it (`rule_id: commit_status`). An embedder with
@@ -975,7 +977,11 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    wrapping `engine.ErrGovernanceApprovalRequired` and leaves the run `committing`; the publish
    step (or the last completed step) carries `error_detail.classification =
    governance_approval_required`, and `governance.merge_held` is emitted. A retry loop should
-   treat the hold as waiting, not failed. `orch.GovernanceMergeStatus(ctx, runID)` reports the
+   treat the hold as waiting, not failed: a hold records no merge attempt, and
+   `AbandonExhaustedMerge` never abandons a held run, nor one whose refused merge could not be
+   taken back (that run carries `spine.governance.blocked_target`, and every governed merge is
+   refused as unavailable until the local `main` no longer contains the refused merge, whichever
+   check refused it). `orch.GovernanceMergeStatus(ctx, runID)` reports the
    bound commit, the governed paths (capped) and any recorded approval.
 4. **Decide.** `orch.DecideGovernanceMerge(ctx, engine.GovernanceDecisionRequest{RunID, CommitSHA,
    Decision: engine.GovernanceApprove|engine.GovernanceReject, Actor, Reason})`. Pass the
@@ -989,6 +995,8 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    approval, takes `merge_failed` and revokes again, and is `ErrConflict` once the approved merge
    completed or reached the local `main`. A merge that can never be evaluated (no merge base, a
    diff over the git output limit) is `ErrPrecondition`: `MergeRunBranch` refuses it permanently.
+   With the status lifecycle on (§11) the decision evaluates the lifecycle's merge source, as the
+   gate does, and a merge the lifecycle now refuses is `ErrPrecondition` too.
    Within one process the engine serialises decisions with merge attempts per run (an in-process
    stripe that `MergeRunBranch` also takes while the guard is on); **if you run several replicas
    against one database**, also serialise `DecideGovernanceMerge` with `MergeRunBranch` per run

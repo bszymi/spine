@@ -495,17 +495,29 @@ refuses an unprovenanced branch-protection removal. What remains:
    (audit F8, INIT-023 TASK-012), operator override pushes and ADR-008 operator bypass writes are
    not held by the merge guard (operators may land changes directly by design). Workflow
    definitions get no projection provenance check.
-6. **A refused merge that cannot be taken back blocks every governed merge.** If the post-merge
-   assertion refuses a merge and `ResetBranch` fails, the refused commit is still on the local
-   `main`, and the next governed merge — of any run — would build on it and publish it. The
-   refusing run therefore stays `committing` with the block on its `commit_meta`
-   (`spine.governance.blocked_target`), and every governed merge is refused as unavailable until
-   the local `main` no longer contains the refused merge (each attempt retries the take-back; an
-   operator can reset `main` by hand, after which the block clears by itself). The block of other
-   runs is held in process: after a restart only the refusing run's own retries see it, so
-   another run merging first could still publish the refused commit. INIT-023 TASK-012's worktree
-   lock makes the take-back itself reliable. Merge binding's own refusals have the same residual
-   ("Governed Merge Binding" 7).
+6. **A refused merge that cannot be taken back blocks every governed merge** — whichever check
+   refused it (INIT-023 wave 4 integration): TASK-005's structural check, TASK-017's merge-result
+   check (V1) or this guard's post-merge assertion or failed marker write. Every one of them takes
+   the merge back inside TASK-012's merge block, before the shared tree is released, with
+   `ResetBranch` (a compare-and-swap to the base `main` held). If that fails, the refused commit is
+   still on the local `main`, and two records keep anything from building on it:
+   - **the shared tree** (`git.CLIClient`, standalone): the take-back stays pending in process,
+     the block's own exit restore retries it, and every later take of the tree — another merge,
+     an in-place write, a run start — retries it first and is refused while `main` still contains
+     the refused merge;
+   - **the guard** (any operator, with the guard on): the merge is recorded as a block, in
+     process and on the refusing run's `commit_meta` (`spine.governance.blocked_target`), and every
+     governed merge is refused as unavailable before it merges a code repository (not a counted
+     attempt), retrying the take-back itself.
+
+   Whichever completes the take-back clears both: a successful `ResetBranch` drops the tree's
+   record, and the guard drops its block once `main` no longer contains the merge. An operator
+   can also reset `main` by hand. A refusal of the guard keeps its run `committing` (its retries
+   keep trying, and the retry budget never abandons it); a refusal of TASK-005 or V1 takes its
+   permanent route, because it is a verdict on the reviewed commit. Both records are in process:
+   after a restart only a refusing run of the guard sees its own block on its next attempt, so
+   another run merging first could still publish the refused commit ("Governed Merge Binding" 7,
+   "Shared Working Tree" 5).
 7. **Post-merge refusals are permanent** (owner question 6). A merge whose result changes a
    governed path the pre-merge evaluation did not cover takes `merge_failed` on every attempt.
    This happens under git's **default** configuration too: rename following carries a run's edit
@@ -520,7 +532,11 @@ refuses an unprovenanced branch-protection removal. What remains:
 8. **Held runs have no timeout.** Cancel is not allowed from `committing`; an operator approves or
    rejects. The decision API runs the approved merge inside the request. Re-evaluating a held run
    on every scheduler tick re-emits `governance.merge_held` under the same event id (the event log
-   and delivery queue de-duplicate it; live SSE listeners can see the repeat).
+   and delivery queue de-duplicate it; live SSE listeners can see the repeat). A hold is not a
+   merge attempt and never counts against TASK-012's retry budget, and the budget never abandons a
+   held run (INIT-023 wave 4 integration). A transient failure *before* the gate on a held run's
+   tick (the bound commit's check, the status lifecycle's reads) is a counted attempt, so after an
+   approval the approved merge's first transient failure can exhaust the budget.
 9. **Decision races are closed within one process only.** Every merge attempt of a run (guard
    on) and every decision on it hold the run's in-process governance stripe: a reject that arrives
    while an approved merge is in flight waits, then answers `409` (the merge won) if the merge
@@ -702,7 +718,13 @@ The governed merge judges artifact-status changes against the declared lifecycle
   newest merge-base. A status change the other merge-base carries is then attributed to the run and
   refused (`non_owned_status_change` on an artifact the run did not touch) — fail closed; merging
   `main` into the run branch gives it one merge-base again. Whatever the plan accepts, the merge
-  result is judged against `main` before any push (§5A.3), so nothing unjudged lands.
+  result is judged against `main` before any push (§5A.3), so nothing unjudged lands. The
+  governance guard (TASK-006) lists *every* merge base (`engine.MergeBaseLister`, `git merge-base
+  --all`) because it decides on the pre-merge diff alone; the lifecycle deliberately keeps the
+  single base, also where the operator offers the list (INIT-023 wave 4 integration): its
+  base-independent check is the merge-result judgement, judging against several bases would only
+  add refusals that check already makes or that `main` does not support, and the verdict would
+  then depend on the embedder's operator (SMP's has no lister yet). Both fail closed.
 - **The merge-result check pairs renames with git's rename detection** between `main` before the
   merge and the merge result. A non-owned artifact the branch renamed and that `main` (or the
   branch) edited so heavily that git no longer pairs the two (under 50 % similar) reads as a
@@ -712,11 +734,15 @@ The governed merge judges artifact-status changes against the declared lifecycle
   landing under `main`'s name; `run.TaskPath` keeps the name the run started with.
 - **A merge whose merge-base moved is retried, not refused**: when `main` gains commits of the
   bound history between the judgement and the merge, the merge is taken back and the attempt
-  retried; it retries for as long as that keeps happening (TASK-012 bounds retries).
+  retried. Each such retry, and each retryable failure judging the bound commit, is a counted
+  attempt, so TASK-012's retry budget bounds them (INIT-023 wave 4 integration).
 - **The merge-result check runs after the code repositories merged** (code-repository-first
   ordering) and after the local merge, like TASK-005's structural check: a refused merge is taken
-  back off the local `main` and never pushed, but with auto-push off the local `main` briefly held
-  it (TASK-005 / TASK-012).
+  back off the local `main` (to exactly the base `main` held) and never pushed. With auto-push off
+  the local `main` briefly held it; on the standalone shared tree that is inside TASK-012's merge
+  block, so no later holder of the tree builds on it, and a take-back that fails keeps the tree
+  refused until it completes (and, with the governance guard on, blocks every governed merge;
+  "Governance-Path Guard" 6).
 - **Runs in flight at the upgrade** whose branch carries status edits on artifacts they do not own
   are refused at the merge; a publish-step workflow routes them back to `execute`.
 
@@ -1253,7 +1279,8 @@ What that implies, and what it leaves open:
    the refused merge on `main`. The pending record is in-process: a restart between a failed
    take-back and the next take of the tree forgets it (the failed outcome and its Error log name
    the merge; reset `main` by hand). Reads (the projection, `HEAD` reads, git HTTP fetches) are
-   not held back while it is pending.
+   not held back while it is pending. With the governance guard on, the same failed take-back is
+   also a governance block, whichever check refused the merge ("Governance-Path Guard" 6).
 6. **`HEAD` means `main` for reads, but reads are not serialized.** On the home-branch tree every read
    of `HEAD` resolves to `refs/heads/main`; a read that names a run branch, or a full rev, reads that
    ref while a sequence may be moving it. TASK-011 pins the projection explicitly. A read of the
@@ -1267,7 +1294,10 @@ What that implies, and what it leaves open:
    one network blip in a reworked run costs a full rework cycle. A per-episode counter needs a
    migration. In one process an abandonment never overlaps a merge attempt of the same run (it skips
    the tick while one is in flight; an attempt that starts during it stands down); across processes
-   sharing one database it can, until TASK-008's compare-and-swap status writes. A *code
+   sharing one database the routing itself is conditional since TASK-008 (a route that loses to a
+   concurrent completion writes nothing), but the re-record of the exhausted outcome is not. With
+   the governance guard on, a run held for an operator decision and a run whose refused merge is
+   still blocked on the local `main` are never abandoned (INIT-023 wave 4 integration). A *code
    repository* whose retries are exhausted is not routed like the primary (codex review round 8):
    its outcome is marked `retries exhausted (…)`, which the per-repository loop treats as a terminal
    failure, the primary then merges and the run waits in `partially-merged` for an operator
@@ -1276,10 +1306,13 @@ What that implies, and what it leaves open:
    outcome cannot be read records nothing and the run stays in `committing` (a store outage, not
    counted), so a landed merge is never dropped from the outcome.
 8. **Uncounted transient exits stay unbounded:** a lock wait cut short by the caller (by design),
-   outcome-persistence errors (a store outage), and any later transient exit that records no
-   outcome (TASK-017's retryable read failures must record one). TASK-005's transient
-   `VerifyCommit` exit records a failed, transient primary outcome and is counted (after re-reading
-   the run, so a second entry never overwrites a completed run's merged outcome).
+   outcome-persistence errors (a store outage), the governance guard's "unavailable" refusals (its
+   changed paths could not be computed, a refused merge still blocked on `main`, a waiter on the
+   run's governance stripe that gave up — TASK-006 asked for them not to count), and any later
+   transient exit that records no outcome. TASK-005's transient `VerifyCommit` exit and TASK-017's
+   retryable failures judging the bound commit (INIT-023 wave 4 integration) record a failed,
+   transient primary outcome and are counted (after re-reading the run, so a second entry never
+   overwrites a completed run's merged outcome).
    **A push that fails after the merge landed is never abandoned** (review round 1): the merge is on
    the local target, where the next writer's push publishes it, so routing the run as failed (or
    back to `execute`) would contradict the branch, and taking the merge back is unsafe (another

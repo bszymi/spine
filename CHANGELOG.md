@@ -6,6 +6,55 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation: wave 4 integration (TASK-012, TASK-008, TASK-017, TASK-006)
+
+The four wave 4 tasks merged onto one branch, plus the coordination their combination needs. No
+runtime schema change; every new behaviour below is inside an option the embedded zero value
+leaves off (the status lifecycle, the governance guard, the retry budget's exhaustion handler) or
+in a step write whose result is the same for every input SMP produces.
+
+### Changed (standalone)
+
+- **One order of checks in a governed merge**: binding → status lifecycle → governance gate (hold)
+  → code repositories → the merge block on the shared working tree (re-check, `MergeBound`,
+  structural check, merge-result check V1, governance post-merge assertion and consumption marker,
+  push). A merge that violates the lifecycle and touches governance paths is refused, never held
+  (`architecture/engine-state-machine.md`, "Order of the checks in a governed merge").
+- **The governance guard's post-merge assertion and consumption marker run inside the merge
+  block, before the push**, and its refusal is taken back before the shared tree is released. The
+  marker is the one store write a merge block makes.
+- **A failed take-back blocks every governed merge whichever check refused the merge**: with the
+  guard on, a refusal of TASK-005's structural check or of V1 whose take-back failed records the
+  same governance block (`spine.governance.blocked_target` on the refusing run) as the guard's own
+  refusals, on top of the shared tree's pending take-back (KNOWN-LIMITATIONS "Governance-Path
+  Guard" 6).
+- **The retry budget never abandons a run held for an operator governance decision, or one whose
+  refused merge is still blocked on the local `main`.** A transient failure before the gate on a
+  held run's tick still counts.
+- **A retryable failure judging the bound commit under the status lifecycle is a counted merge
+  attempt** (a failed, transient primary outcome), so the retry budget bounds it.
+
+### Changed (embedders)
+
+- `Orchestrator.MergeRunBranch` with `WithStatusLifecycle`: a retryable failure judging the bound
+  commit now records a failed primary merge outcome with a transient class (after re-reading the
+  run) and still returns the error; it records nothing while the run is no longer `committing`.
+- The status lifecycle's merge-result refusal (V1) takes the local target back to exactly the
+  merge's `BaseSHA`, never to the merged commit's first parent.
+- With `WithGovernanceGuard` on: `Orchestrator.AbandonExhaustedMerge` returns `false` for a run
+  whose merge is held for a decision or whose refused merge is still blocked; a structural or V1
+  refusal whose take-back failed writes `spine.governance.blocked_target` on the run and blocks
+  governed merges like the guard's own; the hold record on a step and its clearing on approval go
+  through the optional `engine.StepExecutionTransitioner` when the store has it (a stale copy of
+  a step that moved is no longer written back); and with the status lifecycle on too,
+  `DecideGovernanceMerge` and `GovernanceMergeStatus` compute the merge's governance facts from
+  the lifecycle's merge source, as the gate does — a merge the lifecycle refuses is
+  `ErrPrecondition` ("nothing to decide") for a decision and an `EvaluationError` for the status.
+- `docs/integration-guide.md`: the three wave 4 embedding sections are numbered §10 (TASK-008),
+  §11 (TASK-017) and §12 (TASK-006).
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-002 TASK-006: governance-path guard)
 
 Audit F3 (P2, both surfaces), "run-branch slippage": a run branch could carry governance files
