@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -202,6 +203,142 @@ func (o RepositoryMergeOutcome) IsTerminal() bool {
 		return true
 	}
 	return false
+}
+
+// localMergePushFailedPrefix opens the failure detail of an attempt whose
+// merge landed on the local target and whose push of it failed
+// (PushFailureDetail).
+const localMergePushFailedPrefix = "local merge succeeded (sha="
+
+// PushFailureDetail is the failure detail recorded for an attempt whose
+// merge landed on the local target branch as mergeSHA and whose push of
+// it failed with detail. MergedLocally recognises it.
+func PushFailureDetail(mergeSHA, detail string) string {
+	return fmt.Sprintf("%s%s) but push failed: %s", localMergePushFailedPrefix, mergeSHA, detail)
+}
+
+// PendingPublicationDetail is the failure detail of a later attempt for a
+// run whose merge already landed on the target as mergeSHA in an earlier
+// attempt — its push failed, or the attempt was recorded merged and the
+// run's completion did not follow — when this attempt failed with detail
+// before reaching its own push. MergedLocally recognises it.
+func PendingPublicationDetail(mergeSHA, detail string) string {
+	return fmt.Sprintf("%s%s) in an earlier attempt; this attempt failed: %s",
+		localMergePushFailedPrefix, mergeSHA, detail)
+}
+
+// MergedLocally reports a failed outcome recorded by PushFailureDetail
+// or PendingPublicationDetail: a merge of the run landed on the local
+// target, and what failed came after it (its publication, or a later
+// attempt).
+func (o RepositoryMergeOutcome) MergedLocally() bool {
+	return o.Status == RepositoryMergeStatusFailed && strings.HasPrefix(o.FailureDetail, localMergePushFailedPrefix)
+}
+
+// LocalMergeSHA is the merge commit a MergedLocally outcome names, or "".
+func (o RepositoryMergeOutcome) LocalMergeSHA() string {
+	if !o.MergedLocally() {
+		return ""
+	}
+	sha, _, ok := strings.Cut(strings.TrimPrefix(o.FailureDetail, localMergePushFailedPrefix), ")")
+	if !ok {
+		return ""
+	}
+	return sha
+}
+
+// KeepPendingPublication is applied to a failed attempt's outcome before
+// it is recorded over prior (codex review round 6 of INIT-023 TASK-012).
+// When an earlier attempt's merge landed on the target — prior is
+// MergedLocally (its push failed), or prior is merged (codex review round
+// 7: the run's completion did not follow the record, a store failure
+// after it, and the run is still committing) — and this attempt failed
+// before its own push (the working-tree restore, the merge, a check),
+// that merge is still on the target: no attempt removes an earlier merge.
+// The new failure detail keeps naming it (PendingPublicationDetail), so
+// the outcome stays MergedLocally and the retry budget never abandons a
+// run whose merge is on the target. Nothing is carried when
+// KeepsPendingPublicationOf is false.
+//
+// The carry holds within one committing episode only. Whether prior
+// belongs to the current one is a question for the run's step history,
+// which the caller answers before calling (the engine's
+// keepPendingPublication; review round 2 of INIT-023 TASK-012).
+func (o *RepositoryMergeOutcome) KeepPendingPublication(prior *RepositoryMergeOutcome) {
+	if !o.KeepsPendingPublicationOf(prior) {
+		return
+	}
+	if prior.Status == RepositoryMergeStatusMerged {
+		o.FailureDetail = PendingPublicationDetail(prior.MergeCommitSHA, o.FailureDetail)
+		return
+	}
+	// Carried even when the SHA could not be parsed back: the prefix, not
+	// the SHA, is what keeps the outcome from exhausting.
+	o.FailureDetail = PendingPublicationDetail(prior.LocalMergeSHA(), o.FailureDetail)
+}
+
+// KeepsPendingPublicationOf reports whether KeepPendingPublication would
+// carry prior's landed merge into o: o failed and is not MergedLocally
+// itself, and prior is merged or a transient MergedLocally failure.
+//
+// A permanent-class prior is not carried (review round 2 of INIT-023
+// TASK-012, finding 4), even when its merge landed locally: the engine
+// handed it to the permanent-failure route when it was recorded — the
+// publish step's merge_failed back to execute, or a failed legacy run —
+// which is exactly where the retry budget's abandonment sends a run. The
+// carry protected nothing there, and kept every later transient failure
+// of the reworked run from ever exhausting its budget.
+func (o RepositoryMergeOutcome) KeepsPendingPublicationOf(prior *RepositoryMergeOutcome) bool {
+	if prior == nil || o.Status != RepositoryMergeStatusFailed || o.MergedLocally() {
+		return false
+	}
+	switch {
+	case prior.Status == RepositoryMergeStatusMerged:
+		return true
+	case prior.MergedLocally():
+		return prior.FailureClass.IsTransient()
+	}
+	return false
+}
+
+// RetriesExhausted reports whether this outcome has spent a retry budget
+// of maxRetries automatic retries (INIT-023 TASK-012, audit P3-27): the
+// latest attempt failed with a transient class and more than maxRetries
+// attempts are recorded. Attempts counts every recorded attempt for (run,
+// repository), the first one included, so within one committing episode
+// "> maxRetries" means the first attempt and maxRetries retries have run.
+// The count is per (run, repository) lifetime and carries over a
+// merge_failed loop-back (owner question 4: no per-episode counter, no
+// migration). maxRetries <= 0 is "unbounded" and never exhausts.
+//
+// An outcome whose merge landed locally and whose push failed
+// (MergedLocally) never exhausts (review round 1 of INIT-023 TASK-012).
+// Abandoning it would route the run like a permanent failure — fail a
+// legacy run, send a publish run back to execute — while its merge stays
+// on the local target, where the next writer's push publishes it, and
+// taking the merge back is unsafe: another writer's push may already have
+// published it, and runs started since may have been cut from it. The
+// run stays in committing and its push is retried until it lands
+// (publication pending); only attempts that left nothing on the target
+// are bounded.
+func (o RepositoryMergeOutcome) RetriesExhausted(maxRetries int) bool {
+	return maxRetries > 0 &&
+		o.Status == RepositoryMergeStatusFailed &&
+		o.FailureClass.IsTransient() &&
+		o.Attempts > maxRetries &&
+		!o.MergedLocally()
+}
+
+// FirstExhaustedOutcome returns a copy of the first outcome, in slice
+// order, whose retry budget is spent (RetriesExhausted), or nil.
+func FirstExhaustedOutcome(outcomes []RepositoryMergeOutcome, maxRetries int) *RepositoryMergeOutcome {
+	for i := range outcomes {
+		if outcomes[i].RetriesExhausted(maxRetries) {
+			cp := outcomes[i]
+			return &cp
+		}
+	}
+	return nil
 }
 
 // IsPrimaryRepository reports whether this outcome is for the workspace

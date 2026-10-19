@@ -70,9 +70,12 @@ type ServiceSet struct {
 
 	// Engine-dependent callback functions for the multi-workspace scheduler.
 	// Set by the PoolConfig.Builder when the engine orchestrator is available.
-	CommitRetryFn  func(ctx context.Context, runID string) error
-	StepRecoveryFn func(ctx context.Context, executionID string) error
-	RunFailFn      func(ctx context.Context, runID, reason string) error
+	CommitRetryFn func(ctx context.Context, runID string) error
+	// CommitExhaustedFn ends a committing run whose merge retry budget is
+	// spent (INIT-023 TASK-012); mirrors scheduler.ServiceSet.CommitExhaustedFn.
+	CommitExhaustedFn func(ctx context.Context, runID string, maxRetries int) (bool, error)
+	StepRecoveryFn    func(ctx context.Context, executionID string) error
+	RunFailFn         func(ctx context.Context, runID, reason string) error
 	// RunTerminatedFn closes a timed-out run's live step executions
 	// (INIT-023 TASK-007); mirrors scheduler.ServiceSet.RunTerminatedFn.
 	RunTerminatedFn func(ctx context.Context, runID, message string)
@@ -822,6 +825,19 @@ func perWorkspaceCodeRepoBase(base, workspaceID string) (string, error) {
 	return narrowed, nil
 }
 
+// PrimaryClientOptions returns the options of a workspace's primary git
+// client — standalone's shared working tree (INIT-023 TASK-012): a copy of
+// base plus git.WithHomeBranch(engine.AuthoritativeBranch), so every
+// sequence on the tree restores a clean checkout of the governed-merge
+// target and every "HEAD" read means it. base is never modified: the same
+// options also build code-repository clients and the cloner, which keep
+// their repositories' own default branches.
+func PrimaryClientOptions(base []git.CLIOption) []git.CLIOption {
+	opts := make([]git.CLIOption, 0, len(base)+1)
+	opts = append(opts, base...)
+	return append(opts, git.WithHomeBranch(engine.AuthoritativeBranch))
+}
+
 func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder, cipher *spinecrypto.SecretCipher, secretEnvelopeMode store.SecretEnvelopeMode, secretClient secrets.SecretClient, dbPolicy PoolPolicy, codeRepoBase string) (*ServiceSet, error) {
 	// Each closer accepts the reason the service set is being torn
 	// down so the workspace pool can record the per-reason
@@ -883,7 +899,11 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	if cfg.SMPWorkspaceID != "" {
 		gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+cfg.SMPWorkspaceID))
 	}
-	gitClient := git.NewCLIClient(repoPath, gitOpts...)
+	// The workspace's primary client is the shared working tree (INIT-023
+	// TASK-012, PrimaryClientOptions). gitOpts also feeds the gitpool's
+	// code-repository clients and cloner below, which keep their own
+	// default branches and never get a home branch.
+	gitClient := git.NewCLIClient(repoPath, PrimaryClientOptions(gitOpts)...)
 
 	// Configure credential helper in repo-local git config if set.
 	if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {

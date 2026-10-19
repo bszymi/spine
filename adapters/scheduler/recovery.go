@@ -283,6 +283,9 @@ func (s *Scheduler) recoverCommittingRuns(ctx context.Context, result *RecoveryR
 		if s.commitThreshold > 0 && time.Since(runs[i].CreatedAt) < s.commitThreshold {
 			continue
 		}
+		if s.commitBudgetSpent(ctx, runs[i].RunID) {
+			continue
+		}
 
 		log.Info("retrying commit for stuck run", "run_id", runs[i].RunID)
 		if err := s.commitRetryFn(ctx, runs[i].RunID); err != nil {
@@ -355,8 +358,11 @@ func (s *Scheduler) retryRunsByStatus(ctx context.Context, status domain.RunStat
 		return
 	}
 
-	for i := range runs {
-		runID := runs[i].RunID
+	for it := newBudgetIter(ctx, "commit-retry:"+string(status), len(runs)); it.next(); {
+		runID := runs[it.i].RunID
+		if resumeTrigger == "" && s.commitBudgetSpent(ctx, runID) {
+			continue
+		}
 		if resumeTrigger != "" {
 			if status == domain.RunStatusPartiallyMerged {
 				eligible, err := codeRepoOutcomesAllowResume(ctx, s.store, runID)
@@ -406,6 +412,55 @@ func (s *Scheduler) retryRunsByStatus(ctx context.Context, status domain.RunStat
 			log.Error("commit retry failed", "run_id", runID, "error", err)
 		}
 	}
+}
+
+// commitBudgetSpent is the retry-budget gate in front of every automatic
+// commit retry of a committing run (INIT-023 TASK-012, audit P3-27). It
+// reports true when the run must not be retried this tick:
+//
+//   - commitMaxRetries <= 0: never (unbounded, the pre-TASK-012 behaviour).
+//   - an exhaustion handler is wired: whatever it reports — it ends the run
+//     when the budget is spent. Its error is logged and the run is
+//     skipped; the next tick asks again.
+//   - none is wired: the run is skipped, with an Error log, while one of
+//     its outcomes is exhausted (domain.FirstExhaustedOutcome), so a
+//     misconfiguration stops the loop instead of retrying forever. A store
+//     error is logged and the run skipped.
+//
+// The partially-merged resume pass is not gated: an operator resolution
+// resets that path, and codeRepoOutcomesAllowResume already stops it
+// flapping.
+func (s *Scheduler) commitBudgetSpent(ctx context.Context, runID string) bool {
+	if s.commitMaxRetries <= 0 {
+		return false
+	}
+	log := observe.Logger(ctx)
+	if s.commitExhaustedFn != nil {
+		abandoned, err := s.commitExhaustedFn(ctx, runID, s.commitMaxRetries)
+		if err != nil {
+			log.Error("merge retry budget check failed; run skipped this tick",
+				"run_id", runID, "max_retries", s.commitMaxRetries, "error", err)
+			return true
+		}
+		if abandoned {
+			log.Warn("merge retries exhausted; run taken off the retry loop",
+				"run_id", runID, "max_retries", s.commitMaxRetries)
+		}
+		return abandoned
+	}
+	outcomes, err := s.store.ListRepositoryMergeOutcomes(ctx, runID)
+	if err != nil {
+		log.Error("merge retry budget check failed; run skipped this tick",
+			"run_id", runID, "max_retries", s.commitMaxRetries, "error", err)
+		return true
+	}
+	if ex := domain.FirstExhaustedOutcome(outcomes, s.commitMaxRetries); ex != nil {
+		log.Error("merge retries exhausted; no exhaustion handler wired; run left in committing",
+			"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts,
+			"max_retries", s.commitMaxRetries)
+		return true
+	}
+	return false
 }
 
 // codeRepoOutcomesAllowResume reports whether a partially-merged run

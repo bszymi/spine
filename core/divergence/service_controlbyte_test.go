@@ -28,13 +28,14 @@ import (
 // stays valid after that change.
 func TestCreateExploratoryBranch_ControlByteBranchIDFailsClosed(t *testing.T) {
 	ctx := context.Background()
+	run := &domain.Run{RunID: "run-1", BranchName: "spine/run/task-1-run-1"}
 	newSvc := func(t *testing.T) (*divergence.Service, *fakeStore, *fakeGitClient, *domain.DivergenceContext) {
 		t.Helper()
 		fs := newFakeStore()
 		gitClient := &fakeGitClient{}
 		svc := divergence.NewService(fs, gitClient, &fakeEventRouter{})
 		svc.WithBranchProtectPolicy(branchprotect.New(nil))
-		divCtx, err := svc.StartDivergence(ctx, &domain.Run{RunID: "run-1"}, domain.DivergenceDefinition{
+		divCtx, err := svc.StartDivergence(ctx, run, domain.DivergenceDefinition{
 			ID:   "div-1",
 			Mode: domain.DivergenceModeExploratory,
 		}, "")
@@ -46,7 +47,7 @@ func TestCreateExploratoryBranch_ControlByteBranchIDFailsClosed(t *testing.T) {
 
 	for _, id := range []string{"a\x00", "a\x01", "a\nb", "a\x1f", "a\x7f"} {
 		svc, fs, gitClient, divCtx := newSvc(t)
-		branch, err := svc.CreateExploratoryBranch(ctx, divCtx, id, "step-1")
+		branch, err := svc.CreateExploratoryBranch(ctx, run, divCtx, id, "step-1")
 		if err == nil {
 			t.Errorf("branch_id %q: created %+v, want a refusal", id, branch)
 		}
@@ -62,7 +63,7 @@ func TestCreateExploratoryBranch_ControlByteBranchIDFailsClosed(t *testing.T) {
 	// refusals above come from the bytes, not from the policy refusing
 	// everything.
 	svc, _, gitClient, divCtx := newSvc(t)
-	if _, err := svc.CreateExploratoryBranch(ctx, divCtx, "variant-1", "step-1"); err != nil {
+	if _, err := svc.CreateExploratoryBranch(ctx, run, divCtx, "variant-1", "step-1"); err != nil {
 		t.Fatalf("well-formed branch_id refused: %v", err)
 	}
 	if len(gitClient.branches) != 1 {

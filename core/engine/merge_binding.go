@@ -440,6 +440,22 @@ func (o *Orchestrator) resolveMergeSource(ctx context.Context, run *domain.Run) 
 		if errors.As(err, &gitErr) && gitErr.IsRetryable() {
 			observe.Logger(ctx).Warn("merge binding: transient failure verifying the bound commit, will retry",
 				"run_id", run.RunID, "bound_sha", bound, "error", err)
+			// A counted attempt (INIT-023 TASK-012, P3-27 design-check
+			// note): recorded as a failed primary outcome with the
+			// transient class, so the scheduler's retry budget bounds this
+			// exit too instead of retrying it forever.
+			//
+			// The run status is re-read first (review round 1, DC-2): with
+			// binding on no cascade block runs before this point, so a
+			// second entry for a run the first entry has just completed
+			// would otherwise overwrite the merged outcome with this failure
+			// (the upsert replaces status and merge SHA).
+			if done, ret := blockExit(o.requireStillCommitting(ctx, run.RunID)); done {
+				return mergeSource{}, true, ret
+			}
+			if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", err, ""); recErr != nil {
+				return mergeSource{}, true, recErr
+			}
 			return mergeSource{}, true, o.retryMerge(ctx, run)
 		}
 		return o.bindingFailure(ctx, run, fmt.Sprintf("bound commit %s is not available: %v", bound, err))
@@ -571,8 +587,9 @@ func (o *Orchestrator) verifyBoundMerge(ctx context.Context, binder CommitBinder
 // targetMovedError is verifyBoundMerge's verdict on a merge commit whose
 // parents are exactly [P, S] with P not the reported base: the shape a
 // write to the local target makes when it lands between MergeBound's base
-// read and its merge (another writer; the worktree is not serialized
-// until TASK-012). It is still a refusal — P was never verified as the
+// read and its merge (another writer: in-process writers are serialized
+// by the shared-tree lock since INIT-023 TASK-012, so another process or a
+// CommitBinder that is not a git.WorkingTreeGuard). It is still a refusal — P was never verified as the
 // merge's base, so the merge is neither pushed nor kept — but when the
 // take-back restored the target to P (P descends from the base and the
 // compare-and-swap held) the caller retries instead of taking the
@@ -611,15 +628,22 @@ type takeBack struct {
 // It goes back to the state before this merge: the reported base, unless
 // M is a merge whose first parent is a different descendant of the base —
 // the target moved between the base read and the merge (another writer;
-// the worktree is not serialized until TASK-012), and dropping that commit
-// would lose a write that may already be published. A first parent that
+// in-process writers are serialized since INIT-023 TASK-012), and
+// dropping that commit would lose a write that may already be published.
+// It runs inside the primary merge block, before the tree is released. A
+// first parent that
 // does not descend from the base, an unreadable parent list, or any other
 // shape goes back to the base. When the verdict already read M's parents
 // as [P, S] (a *targetMovedError) that P is the candidate, so a second
 // parents read that fails cannot turn a kept write into a dropped one.
 // Nothing is done when the target did not move (M == base). A failure is
-// logged at Error — the local target then still holds the refused merge
-// and must be reset before the next governed merge.
+// logged at Error. The local target then still holds the refused merge,
+// so the shared-tree client keeps the take-back pending (INIT-023 TASK-012
+// review round 1, git.CLIClient.ResetBranch): the block's own exit restore
+// retries it before the tree is released, and until it succeeds no later
+// sequence or in-place write gets the tree — nothing builds on, or
+// publishes, the refused merge. A binder that is not a CLIClient (an
+// embedder's operator) keeps today's behaviour.
 func (o *Orchestrator) takeBackRefusedMerge(ctx context.Context, binder CommitBinder, repoID, target string, res git.MergeResult, verdict error) takeBack {
 	log := observe.Logger(ctx)
 	m, base := res.SHA, res.BaseSHA
@@ -705,22 +729,64 @@ func refusalRetryable(err error, tb takeBack) (string, bool) {
 // mergePrimaryBound is mergePrimary with binding on: MergeBound of the
 // resolved source, the structural check, then a non-forced push of
 // exactly the merge commit.
+//
+// MergeBound, the abort of a failed merge, verifyBoundMerge, the take-back
+// of a refused merge and the push are one git-only block on the shared
+// working tree (INIT-023 TASK-012, worktree.go; design-check DC-8). The
+// take-back in particular runs before the tree is released: MergeBound has
+// already moved the local main to the refused merge M, and the next holder
+// — an in-place artifact write whose auto-push publishes main, a run start
+// cutting its branch from main, another run's MergeBound computing on main
+// — would otherwise build on, or publish, M. The block also re-checks the
+// run status first (DC-2). Outcome recording and routing run after it.
 func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, src *mergeSource) (bool, error) {
 	log := observe.Logger(ctx)
 	trailers := map[string]string{
 		"Run-ID":   run.RunID,
 		"Trace-ID": run.TraceID,
 	}
-	mergeResult, mergeErr := o.binder.MergeBound(ctx, git.MergeOpts{
-		Source:    run.BranchName,
-		SourceSHA: src.sha,
-		Target:    authoritativeBranch,
-		Strategy:  "merge-commit",
-		Message:   fmt.Sprintf("Merge run %s: %s", run.RunID, run.TaskPath),
-		Trailers:  trailers,
+	pushOn := autoPushEnabled()
+	var (
+		mergeResult git.MergeResult
+		mergeErr    error
+		verdict     error // verifyBoundMerge's refusal
+		tb          takeBack
+		pushErr     error
+	)
+	blockErr := o.withTree(ctx, func(ctx context.Context) error {
+		if err := o.requireStillCommitting(ctx, run.RunID); err != nil {
+			return err
+		}
+		mergeResult, mergeErr = o.binder.MergeBound(ctx, git.MergeOpts{
+			Source:    run.BranchName,
+			SourceSHA: src.sha,
+			Target:    authoritativeBranch,
+			Strategy:  "merge-commit",
+			Message:   fmt.Sprintf("Merge run %s: %s", run.RunID, run.TaskPath),
+			Trailers:  trailers,
+		})
+		if mergeErr != nil {
+			o.abortMerge(ctx)
+			return nil
+		}
+		if err := o.verifyBoundMerge(ctx, o.binder, run.BranchName, src, mergeResult); err != nil {
+			verdict = err
+			tb = o.takeBackRefusedMerge(ctx, o.binder, domain.PrimaryRepositoryID, authoritativeBranch, mergeResult, err)
+			return nil
+		}
+		if pushOn {
+			pushErr = o.binder.PushCommit(ctx, "origin", authoritativeBranch, mergeResult.SHA)
+		}
+		return nil
 	})
+	if done, ret := blockExit(blockErr); done {
+		return true, ret
+	}
+	if blockErr != nil {
+		mergeErr = blockMergeError(blockErr)
+	}
+
 	if mergeErr != nil {
-		o.abortMerge(ctx)
 		if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", mergeErr, ""); recErr != nil {
 			return false, recErr
 		}
@@ -737,12 +803,9 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		return true, o.handlePermanentMergeFailure(ctx, run, mergeErr)
 	}
 
-	if err := o.verifyBoundMerge(ctx, o.binder, run.BranchName, src, mergeResult); err != nil {
-		// The take-back runs before anything else can build on the
-		// refused merge (TASK-012 moves this whole sequence under its
-		// worktree lock).
-		tb := o.takeBackRefusedMerge(ctx, o.binder, domain.PrimaryRepositoryID, authoritativeBranch, mergeResult, err)
-		if msg, ok := refusalRetryable(err, tb); ok {
+	if verdict != nil {
+		// The take-back already ran, in the block.
+		if msg, ok := refusalRetryable(verdict, tb); ok {
 			// The target is back where it was (or at the write that moved
 			// it) and nothing of the attempt survives: not a verdict on
 			// the reviewed commit. Stay in committing and merge again, as
@@ -753,17 +816,17 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 			}
 			log.Warn("merge binding: merge result not accepted, will retry",
 				"run_id", run.RunID, "bound_sha", src.bound, "merge_sha", mergeResult.SHA,
-				"base_sha", mergeResult.BaseSHA, "restored_to", tb.restoredTo, "error", err)
+				"base_sha", mergeResult.BaseSHA, "restored_to", tb.restoredTo, "error", verdict)
 			return true, o.retryMerge(ctx, run)
 		}
 		violation := &git.GitError{Kind: git.ErrKindPermanent, Op: "merge_binding",
-			Message: "merge binding violation: " + err.Error() + "; " + tb.detail}
+			Message: "merge binding violation: " + verdict.Error() + "; " + tb.detail}
 		if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, violation, ""); recErr != nil {
 			return false, recErr
 		}
 		log.Error("merge binding: merge result failed verification; nothing pushed",
 			"run_id", run.RunID, "bound_sha", src.bound, "merge_sha", mergeResult.SHA,
-			"base_sha", mergeResult.BaseSHA, "error", err)
+			"base_sha", mergeResult.BaseSHA, "error", verdict)
 		return true, o.handlePermanentMergeFailure(ctx, run, violation)
 	}
 	if src.excludedTip != "" {
@@ -779,21 +842,19 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		"fast_forward", mergeResult.FastForward,
 	)
 
-	if autoPushEnabled() {
-		if pushErr := o.binder.PushCommit(ctx, "origin", authoritativeBranch, mergeResult.SHA); pushErr != nil {
-			if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, pushErr, "push"); recErr != nil {
-				return false, recErr
-			}
-			var gitErr *git.GitError
-			if errors.As(pushErr, &gitErr) && !gitErr.IsRetryable() {
-				log.Error("auto-push: permanent push failure (auth or rejected), failing run",
-					"run_id", run.RunID, "error", pushErr)
-				return true, o.handlePermanentMergeFailure(ctx, run, pushErr)
-			}
-			log.Warn("auto-push: transient push failure, staying in committing for retry",
-				"run_id", run.RunID, "error", pushErr)
-			return true, o.retryMerge(ctx, run)
+	if pushOn && pushErr != nil {
+		if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, pushErr, "push"); recErr != nil {
+			return false, recErr
 		}
+		var gitErr *git.GitError
+		if errors.As(pushErr, &gitErr) && !gitErr.IsRetryable() {
+			log.Error("auto-push: permanent push failure (auth or rejected), failing run",
+				"run_id", run.RunID, "error", pushErr)
+			return true, o.handlePermanentMergeFailure(ctx, run, pushErr)
+		}
+		log.Warn("auto-push: transient push failure, staying in committing for retry",
+			"run_id", run.RunID, "error", pushErr)
+		return true, o.retryMerge(ctx, run)
 	}
 
 	if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, nil, ""); recErr != nil {
@@ -1264,8 +1325,7 @@ func (o *Orchestrator) attemptCodeRepositoryMergeBound(ctx context.Context, run 
 	if autoPushEnabled() {
 		if pushErr := binder.PushCommit(ctx, "origin", repo.DefaultBranch, mergeResult.SHA); pushErr != nil {
 			out := fail(pushErr)
-			out.FailureDetail = fmt.Sprintf("local merge succeeded (sha=%s) but push failed: %s",
-				mergeResult.SHA, out.FailureDetail)
+			out.FailureDetail = domain.PushFailureDetail(mergeResult.SHA, out.FailureDetail)
 			log.Warn("code repo push after merge failed",
 				"repository_id", repoID, "merge_sha", mergeResult.SHA, "error", pushErr)
 			return out

@@ -20,13 +20,27 @@ type TestRepo struct {
 
 // NewTestRepo creates a temporary Git repository initialized with a main
 // branch and an empty initial commit. Cleanup is automatic via t.TempDir().
-func NewTestRepo(t *testing.T) *TestRepo {
+//
+// The repository's client is built as `spine serve` builds a workspace's
+// primary client (INIT-023 TASK-012): with git.WithHomeBranch("main"), so
+// every engine sequence restores the tree to a clean main first and
+// "HEAD" reads mean main. WithoutHomeBranch() opts out, for a scenario
+// that must observe a non-restored tree; each use states why.
+func NewTestRepo(t *testing.T, opts ...EnvOption) *TestRepo {
 	t.Helper()
 
+	cfg := &envConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
 	dir := testutil.NewTempRepo(t)
+	var gitOpts []git.CLIOption
+	if !cfg.noHomeBranch {
+		gitOpts = append(gitOpts, git.WithHomeBranch("main"))
+	}
 	return &TestRepo{
 		Dir: dir,
-		Git: git.NewCLIClient(dir),
+		Git: git.NewCLIClient(dir, gitOpts...),
 	}
 }
 

@@ -23,8 +23,8 @@ func (s *Scheduler) ScanTimeouts(ctx context.Context) error {
 		return fmt.Errorf("list active step executions: %w", err)
 	}
 
-	for i := range execs {
-		exec := &execs[i]
+	for it := newBudgetIter(ctx, "step-timeouts", len(execs)); it.next(); {
+		exec := &execs[it.i]
 
 		// Use StartedAt if available, otherwise CreatedAt.
 		// Waiting/assigned steps don't have StartedAt but can still time out per §3.2.

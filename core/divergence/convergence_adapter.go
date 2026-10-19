@@ -10,7 +10,15 @@ import (
 
 // EvaluateAndCommit runs convergence evaluation and commits the result.
 // This is the single entry point used by the engine orchestrator.
-func (s *Service) EvaluateAndCommit(ctx context.Context, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error {
+//
+// run is the run the divergence belongs to (INIT-023 TASK-012, audit F8):
+// its branch is the convergence target. The target guard runs first,
+// before any store or git call, so a refused convergence leaves the
+// divergence context exactly as it was (still active, never converging).
+func (s *Service) EvaluateAndCommit(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, convDef domain.ConvergenceDefinition) error {
+	if err := convergenceTargetGuard(run, divCtx); err != nil {
+		return err
+	}
 	// Transition from active → converging before evaluation.
 	if divCtx.Status == domain.DivergenceStatusActive {
 		result, err := workflow.EvaluateDivergenceTransition(divCtx.Status, workflow.DivergenceTransitionRequest{
@@ -46,7 +54,7 @@ func (s *Service) EvaluateAndCommit(ctx context.Context, divCtx *domain.Divergen
 		return fmt.Errorf("evaluate convergence: %w", err)
 	}
 
-	if err := s.CommitConvergence(ctx, divCtx, output); err != nil {
+	if err := s.CommitConvergence(ctx, run, divCtx, output); err != nil {
 		return fmt.Errorf("commit convergence: %w", err)
 	}
 

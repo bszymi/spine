@@ -401,11 +401,12 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		}, [][]string{lookup("feat"), {"switch", "--no-guess", "--end-of-options", "main"},
 			{"merge", "--no-ff", "-m", "m", "--end-of-options", featOID}, {"rev-parse", "HEAD"}}},
 		{"Merge oid fast-forward", func() error {
-			_, err := c.Merge(ctx, git.MergeOpts{Source: mainOID, Strategy: "fast-forward"})
+			_, err := c.Merge(ctx, git.MergeOpts{Source: mainOID, Target: "main", Strategy: "fast-forward"})
 			return err
-		}, [][]string{{"merge", "--ff-only", "--end-of-options", mainOID}, {"rev-parse", "HEAD"}}},
+		}, [][]string{{"switch", "--no-guess", "--end-of-options", "main"},
+			{"merge", "--ff-only", "--end-of-options", mainOID}, {"rev-parse", "HEAD"}}},
 		{"Merge abort (strategy)", func() error {
-			_, err := c.Merge(ctx, git.MergeOpts{Strategy: "abort", Source: "--abort", Target: "main"})
+			_, err := c.Merge(ctx, git.MergeOpts{Strategy: "abort", Source: "--abort"})
 			_ = err // no merge in progress: git refuses, the argv is what matters
 			return nil
 		}, [][]string{{"merge", "--abort"}}},
@@ -478,7 +479,7 @@ func TestRefGrammar_AbbreviatedIDIsNeverAnObject(t *testing.T) {
 	ctx := context.Background()
 	abbrev := featOID[:8]
 	rec.Reset(t)
-	_, err := c.Merge(ctx, git.MergeOpts{Source: abbrev, Strategy: "fast-forward"})
+	_, err := c.Merge(ctx, git.MergeOpts{Source: abbrev, Target: "main", Strategy: "fast-forward"})
 	var ge *git.GitError
 	if !errors.As(err, &ge) || ge.Kind != git.ErrKindNotFound {
 		t.Fatalf("Merge(Source: abbreviated id) = %v, want ErrKindNotFound", err)

@@ -114,7 +114,9 @@ func buildSuccessorContent(original *domain.Artifact, successorID, rejectedPath,
 
 // addLinkToArtifact reads an artifact, adds a link, and commits the update.
 func (s *Service) addLinkToArtifact(ctx context.Context, path, linkType, target string) error {
-	// Confined, capped read (worktreefs; INIT-023 TASK-004).
+	// Confined, capped read (worktreefs; INIT-023 TASK-004) under the
+	// working tree's lock, and an update over exactly these bytes
+	// (INIT-023 TASK-012 review round 1; see readRepoFile).
 	raw, err := s.readRepoFile(ctx, path)
 	if err != nil {
 		return err
@@ -122,7 +124,7 @@ func (s *Service) addLinkToArtifact(ctx context.Context, path, linkType, target 
 
 	// Insert the link before the closing --- of front matter.
 	updated := insertLink(string(raw), linkType, target)
-	_, updateErr := s.Update(ctx, path, updated)
+	_, updateErr := s.updateFrom(ctx, path, raw, updated)
 	return updateErr
 }
 

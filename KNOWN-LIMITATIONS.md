@@ -281,8 +281,9 @@ merge publishes the commit the run's steps validated and reviewed, never the run
    (the target moved on, or a local change in the shared working tree would be overwritten; logged
    at `ERROR` and named in the outcome's failure detail) — it is on the local `main`, which with
    `SPINE_GIT_PUSH_ENABLED=false` is the published branch. `git.CLIClient`'s `MergeBound` produces
-   only accepted shapes unless the target moves concurrently (until TASK-012 nothing serializes the
-   worktree); the check guards the push and other `CommitBinder` implementations. When a write lands
+   only accepted shapes unless the target moves concurrently (since TASK-012 in-process writers are
+   serialized by the shared working-tree lock, so only another process on the same tree can); the
+   check guards the push and other `CommitBinder` implementations. When a write lands
    on the target between the merge's base read and the merge, the merge commit's parents are
    `[write, merged commit]`: it is refused and taken back to the write (the merge's first parent,
    when that is a newer descendant of the reported base), and the run stays in `committing` —
@@ -299,8 +300,9 @@ merge publishes the commit the run's steps validated and reviewed, never the run
    made, so it is refused and taken back to the base. The write is then dropped from the local
    `main` (with auto-push off, from the published branch; with auto-push on, a write its writer
    already pushed stays on origin and the local `main` must be re-synced before the next governed
-   push succeeds), and the run takes the permanent route. TASK-012 runs the merge, the check and the
-   take-back under one worktree lock, which closes both.
+   push succeeds), and the run takes the permanent route. Since TASK-012 the merge, the check and the
+   take-back run as one block under the working-tree lock, which closes both for in-process writers
+   (see "Shared Working Tree" under Architecture Deviations).
 8. **A garbage-collected bound commit fails closed.** If the run branch is force-pushed away from
    the bound commit and `git gc` prunes it, the merge refuses (`precondition`) and a publish workflow
    routes back to `execute`. Pinning the bound commit with a ref is a follow-up.
@@ -336,13 +338,12 @@ merge publishes the commit the run's steps validated and reviewed, never the run
     standalone, TASK-016's review freeze limits who can push the run branch during a review to
     operators. Making the assertion mandatory on advancing gate submits is owner question 1;
     returning the bound head in the submit response is a follow-up.
-13. **Convergence merges into the checked-out branch (audit F8, owned by TASK-012).**
-    `CommitConvergence` merges the selected divergence branches with no target, so in standalone
-    (where the shared worktree has `main` checked out) the converged content reaches `main`
-    directly, without the bound merge or its structural check, and the post-convergence rebind
-    (§5, DC-6) sees an unmoved run branch. The rebind guard is exercised only against a fake
-    convergence. Dormant: no shipped workflow in Spine or SMP diverges. TASK-012 gives the
-    convergence an explicit run-branch target.
+13. **Convergence merged into the checked-out branch (audit F8) — closed by TASK-012.**
+    `CommitConvergence` now merges the selected divergence branches into `run.BranchName`
+    explicitly (and divergence branches fork from it), so converged content reaches `main` only
+    through the bound merge, and the post-convergence rebind (§5, DC-6) sees the moved run branch.
+    The rebind guard is still exercised only against a fake convergence. Dormant: no shipped
+    workflow in Spine or SMP diverges.
 14. **A replay finds the run's earlier merge within 64 first-parent commits.** A retry or resume
     after the merge landed diffs the status cascade against `main` as it was just before that merge,
     found on `main`'s first-parent chain, so it recomputes the same cascade commit. A merge there
@@ -856,3 +857,131 @@ The following limitations have been resolved:
 - Git branches are created for isolation
 - No runtime enforcement prevents cross-branch artifact reads via API
 - Isolation is convention-based, not enforced at the store level
+
+### Shared Working Tree (standalone; INIT-023 TASK-012)
+Standalone `spine serve` runs every governed git operation of a workspace in one non-bare working
+tree (`SPINE_REPO_PATH`), serialized and self-healing (`architecture/git-integration.md` §6.6).
+What that implies, and what it leaves open:
+1. **One sequence at a time per workspace tree.** Governed merges, run starts, convergences, the
+   status cascade and in-place artifact/workflow writes are serialized; a governed merge holds the
+   tree across its push (bounded at 5 minutes), so an HTTP submit that triggers a merge may wait for
+   another merge's push. A client disconnect no longer cancels a merge that has taken the tree: it
+   completes (bounded), and only the wait for the tree is cancelled.
+2. **A restore quarantines tracked changes in `SPINE_REPO_PATH`.** Whoever takes a tree that is not
+   on a clean `main` aborts a merge in progress, stashes tracked changes into an unreferenced commit
+   (`git stash create`; the SHA is logged at Warn and in the `working_tree_restored` audit record;
+   `git stash apply <sha>` recovers it until `gc` prunes it, two weeks by default) and switches to
+   `main`. That matters when an operator points standalone at a checkout they also edit (the default
+   `SPINE_REPO_PATH` is `.`): uncommitted tracked edits there are moved out of the way at the next
+   governed operation. Untracked (and ignored) files are never touched: one that blocks the switch to
+   `main`, or that stands where the reset would rewrite a tracked path (a tracked directory replaced
+   by a file, a tracked file un-tracked and rewritten, a tracked file replaced by a directory), fails
+   the restore — before anything is reset — and so every governed operation until an operator moves
+   it. A restore that fails after quarantining names the quarantine SHA in its error, its Error log
+   and a `working_tree_restore_failed` audit record. The `reset --hard` fallback after a failed
+   `git merge --abort` discards the conflicted state of that merge without quarantine — the only
+   unquarantined discard. Quarantine objects are not pruned beyond git's own `gc`.
+   **Phantoms** (review round 1): a tracked difference `git reset --hard` cannot remove — a
+   `*.md text eol=lf` attribute over a file committed with CRLF, two paths that differ only in case
+   on a case-insensitive filesystem — is content, not damage. The restore leaves it in place (Warn
+   once, listing the paths), holds only the index to `HEAD`, switches home with `--discard-changes`
+   when such a difference would make the plain switch refuse (after the same untracked/ignored
+   obstruction check over every path the switch writes), and does not quarantine the same phantom
+   again while its index blob and working-tree entry are unchanged. The entry is identified without
+   reading through it (review round 2): its type, and a regular file's filtered blob or a symbolic
+   link's own target — a link is never followed and nothing is opened at the leaf (a FIFO, a device)
+   — so a case collision of a file and a link costs one quarantine, not one per take. More than 64
+   residual paths are not remembered: while they show, every take quarantines them again (a stash
+   commit, a Warn and a `working_tree_restored` audit record per take) but the tree still never
+   wedges. git itself still refuses a checkout or merge that would
+   rewrite a phantom path ("your local changes would be overwritten"), so a governed merge or a
+   cascade checkout that touches it fails like any other permanent merge failure until the content
+   is fixed (renormalize the file, or remove one of the colliding paths). A refused bound merge that
+   carries a phantom is still taken back on the shared tree (review round 2): when `read-tree -m`
+   refuses, the take-back quarantines the tracked state and resets the index and tree to the base,
+   after the untracked-file check. On a tree with no home branch (a code-repository clone, an
+   embedder's worktree) a local change is never discarded, so such a take-back stays refused and
+   pending, and that tree refuses every later sequence until the content or the branch is fixed by
+   hand (fail closed; dormant in standalone, and SMP never calls `ResetBranch`).
+3. **One process per repository path.** The lock is in-process. A second `spine serve`, or an
+   operator's git, on the same tree is not serialized, and a restore can quarantine its in-flight
+   work.
+4. **A stale `.git/index.lock` is reported, not removed** (owner question 5). Spine itself no longer
+   leaves one behind (git children get `SIGTERM`, whose handlers remove lock files, and a taken
+   sequence is never cancelled half-way); a process or host crash still can. Every governed merge in
+   the workspace then fails transiently ("repository locked", naming the file) — bounded by the retry
+   budget below — until an operator deletes the file.
+5. **git's own detached auto-gc can still contend for ref locks.** That failure is transient and
+   bounded by the retry budget. When it hits the take-back of a refused bound merge (the merge
+   `MergeBound` already put on the local `main`), the client keeps the take-back pending: the
+   merge block's own exit restore retries it, and until it succeeds every later take of the tree
+   (governed merge, run start, in-place write) retries it first and refuses the tree while `main`
+   still contains the refused merge — permanently, naming the merge, when something outside the
+   server moved `main` on top of it. The record is armed before the take-back's first fallible step,
+   and the take-back's git runs on its own 30 s bound detached from the caller (review round 2), so
+   a sequence whose deadline is spent, or a git that cannot start, no longer releases the tree with
+   the refused merge on `main`. The pending record is in-process: a restart between a failed
+   take-back and the next take of the tree forgets it (the failed outcome and its Error log name
+   the merge; reset `main` by hand). Reads (the projection, `HEAD` reads, git HTTP fetches) are
+   not held back while it is pending.
+6. **`HEAD` means `main` for reads, but reads are not serialized.** On the home-branch tree every read
+   of `HEAD` resolves to `refs/heads/main`; a read that names a run branch, or a full rev, reads that
+   ref while a sequence may be moving it. TASK-011 pins the projection explicitly. A read of the
+   working tree's *files* would see whatever a sequence has checked out, so the one write path that
+   reads files before writing — task acceptance/rejection and the follow-up link — reads under the
+   tree's lock and commits only over the bytes it read (a change in between is a 409 conflict).
+7. **Merge retries are counted per (run, repository), not per committing episode** (owner question
+   4). After a run's first exhaustion its attempts are already above the bound, so every later
+   committing episode of that run is abandoned at its first transient failure (an outcome counts
+   only when it was attempted in the current episode, i.e. after the run's latest step activity):
+   one network blip in a reworked run costs a full rework cycle. A per-episode counter needs a
+   migration. In one process an abandonment never overlaps a merge attempt of the same run (it skips
+   the tick while one is in flight; an attempt that starts during it stands down); across processes
+   sharing one database it can, until TASK-008's compare-and-swap status writes. A *code
+   repository* whose retries are exhausted is not routed like the primary (codex review round 8):
+   its outcome is marked `retries exhausted (…)`, which the per-repository loop treats as a terminal
+   failure, the primary then merges and the run waits in `partially-merged` for an operator
+   (`RetryRepositoryMerge` / `ResolveRepositoryMergeExternally`); after a retry its next transient
+   failure is exhausted at once (the same lifetime count). A failed attempt whose prior primary
+   outcome cannot be read records nothing and the run stays in `committing` (a store outage, not
+   counted), so a landed merge is never dropped from the outcome.
+8. **Uncounted transient exits stay unbounded:** a lock wait cut short by the caller (by design),
+   outcome-persistence errors (a store outage), and any later transient exit that records no
+   outcome (TASK-017's retryable read failures must record one). TASK-005's transient
+   `VerifyCommit` exit records a failed, transient primary outcome and is counted (after re-reading
+   the run, so a second entry never overwrites a completed run's merged outcome).
+   **A push that fails after the merge landed is never abandoned** (review round 1): the merge is on
+   the local target, where the next writer's push publishes it, so routing the run as failed (or
+   back to `execute`) would contradict the branch, and taking the merge back is unsafe (another
+   writer's push may already have published it, and runs started since may have been cut from it).
+   Such a run stays in `committing` and its push is retried every tick until it lands, with an Error
+   log once the budget is passed ("publication pending"); each retry is an "already up to date"
+   merge plus the push, holding the tree for the push. A later attempt that fails before its own
+   push (the restore, the merge or a check, transiently) keeps naming the earlier local merge in its
+   failure detail, so it stays pending too (codex review round 6), and so does one after an attempt
+   recorded `merged` whose run did not complete (a store failure after the record; codex review
+   round 7). Only attempts that left nothing on the target are bounded and abandoned. The exemption
+   holds within one committing episode (review round 2): an earlier merge is carried only from an
+   outcome attempted after the run's latest step activity and never from a permanent-class one, so
+   a run sent back to `execute` by a permanent push rejection is bounded again in its next episode
+   (a failed read of the run's steps records nothing, like an unreadable prior). A code
+   repository's re-merge under binding (its bound commit no longer on the default branch) carries
+   nothing either. A *permanent* failure after a local merge (a rejected or
+   unauthenticated push, a refusal) still routes the run while its merge stays on the local `main`,
+   as before TASK-012; re-syncing local `main` is a follow-up.
+9. **The multi-workspace scheduler is bounded but not wired** (owner question 3): in the `db` and
+   `platform-binding` resolver modes no scheduler retries committing runs at all. Wiring
+   `MultiScheduler` into `spine serve` is a follow-up.
+10. **`classifyGitError`'s bare `"lock"` substring** also matches paths in git's stderr (an untracked
+    `blocked-notes.md` in the way of a checkout reads as "repository locked", transient). The retry
+    budget caps the loop; matching `index.lock': File exists` precisely is a follow-up. Likewise
+    curl's "Couldn't connect to server" is classified permanent.
+11. **Ignored files and the engine's own sequences.** The restore never overwrites an ignored file
+    (its switch home uses `--no-overwrite-ignore`, and an ignored file in the reset's way refuses
+    it), but the engine's own checkouts and merges inside a sequence (the cascade's checkout of a run
+    branch, a merge into `main`) keep git's default and overwrite an ignored file at a path the
+    target branch tracks, as before TASK-012. Keep ignored local state out of `SPINE_REPO_PATH`.
+12. **Embedders.** A tree no client registered a home branch for (SMP's per-request worktrees, code
+    repository clones) is never restored or detached and keeps the real `HEAD`. Every git child is
+    stopped with `SIGTERM` on cancel for every client, and the engine's merge blocks re-check the run
+    status for every operator — neither changes a successful result.

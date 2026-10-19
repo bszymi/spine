@@ -5,13 +5,13 @@ import (
 	"testing"
 
 	"github.com/bszymi/spine/adapters/delivery"
+	"github.com/bszymi/spine/adapters/git"
+	"github.com/bszymi/spine/adapters/gitpool"
+	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/divergence"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/evidence"
-	"github.com/bszymi/spine/adapters/git"
-	"github.com/bszymi/spine/adapters/gitpool"
-	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/core/validation"
 	"github.com/bszymi/spine/service/internal/workspace"
 )
@@ -19,7 +19,7 @@ import (
 // stubBranchCreator implements BranchCreator for testing.
 type stubBranchCreator struct{}
 
-func (s *stubBranchCreator) CreateExploratoryBranch(_ context.Context, _ *domain.DivergenceContext, _, _ string) (*domain.Branch, error) {
+func (s *stubBranchCreator) CreateExploratoryBranch(_ context.Context, _ *domain.Run, _ *domain.DivergenceContext, _, _ string) (*domain.Branch, error) {
 	return nil, nil
 }
 func (s *stubBranchCreator) CloseWindow(_ context.Context, _ *domain.DivergenceContext) error {

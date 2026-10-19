@@ -589,7 +589,7 @@ func TestMutatingCommands_DrainOutput(t *testing.T) {
 	}
 
 	t3git(t, dir, nil, "checkout", "-q", "main")
-	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Strategy: "fast-forward"})
+	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "main", Strategy: "fast-forward"})
 	mainNow := t3git(t, dir, nil, "rev-parse", "refs/heads/main")
 	if mainNow != tip {
 		t.Fatalf("refs/heads/main = %s, want the fast-forwarded tip %s", mainNow, tip)
@@ -734,7 +734,7 @@ func TestMerge_TinyOutputLimitKeepsTheResult(t *testing.T) {
 	t3git(t, dir, nil, "checkout", "-q", "main")
 
 	c := git.NewCLIClient(dir, git.WithMaxOutputBytes(1))
-	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature"})
+	mr, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "main"})
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
@@ -955,7 +955,7 @@ func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
 		{"Checkout", func() error { return c.Checkout(ctx, "n1") }},
 		{"WriteAndStageFile", func() error { return c.WriteAndStageFile(ctx, "h.md", "three\n") }},
 		{"Commit", func() error { _, err := c.Commit(ctx, git.CommitOpts{Message: "three"}); return err }},
-		{"Merge", func() error { _, err := c.Merge(ctx, git.MergeOpts{Source: "feature"}); return err }},
+		{"Merge", func() error { _, err := c.Merge(ctx, git.MergeOpts{Source: "feature", Target: "n1"}); return err }},
 		{"Push", func() error { return c.Push(ctx, "origin", "n1") }},
 		{"DeleteBranch", func() error {
 			if err := c.Checkout(ctx, "main"); err != nil {

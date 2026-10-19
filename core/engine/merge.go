@@ -47,6 +47,16 @@ const AuthoritativeBranch = authoritativeBranch
 // the bound commit, and every later phase merges exactly that commit.
 // With binding off it returns the zero value and nothing changes.
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
+	// An exhaustion abandonment of this run in progress (AbandonExhaustedMerge,
+	// INIT-023 TASK-012) is routing it: this attempt stands down, nothing
+	// is recorded. Never the case for an embedder that does not wire the
+	// scheduler's exhaustion handler.
+	end, ok := mergeAttemptGate.beginAttempt(runID)
+	if !ok {
+		observe.Logger(ctx).Info("merge retries of this run are being abandoned; this merge attempt stands down", "run_id", runID)
+		return nil
+	}
+	defer end()
 	run, done, err := o.preflightCheck(ctx, runID)
 	if err != nil || done {
 		return err
@@ -118,8 +128,24 @@ func (o *Orchestrator) preflightCheck(ctx context.Context, runID string) (*domai
 	// binding the cascade runs at the bound commit instead
 	// (resolveMergeSource → applyCommitStatusAt) and never touches the
 	// run branch.
+	//
+	// The cascade is one git-only block on the shared working tree
+	// (INIT-023 TASK-012, worktree.go): checkout run → write → commit →
+	// checkout main can no longer interleave with another run's merge, so
+	// its status commit never lands on main outside the governed merge.
+	// The block re-checks the run status first: a second entry for a run
+	// another entry already completed stands down here.
 	if newStatus := run.CommitMeta["status"]; newStatus != "" && !o.bindingOn {
-		if err := o.applyCommitStatus(ctx, run, newStatus); err != nil {
+		err := o.withTree(ctx, func(ctx context.Context) error {
+			if err := o.requireStillCommitting(ctx, run.RunID); err != nil {
+				return err
+			}
+			return o.applyCommitStatus(ctx, run, newStatus)
+		})
+		if done, ret := blockExit(err); done {
+			return nil, true, ret
+		}
+		if err != nil {
 			log.Warn("failed to apply commit status, proceeding with merge",
 				"run_id", runID, "error", err)
 		}
@@ -189,19 +215,46 @@ func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run, src *m
 		"Trace-ID": run.TraceID,
 	}
 
-	mergeResult, mergeErr := o.git.Merge(ctx, git.MergeOpts{
-		Source:   run.BranchName,
-		Target:   authoritativeBranch,
-		Strategy: "merge-commit",
-		Message:  fmt.Sprintf("Merge run %s: %s", run.RunID, run.TaskPath),
-		Trailers: trailers,
+	// The merge, its abort and the push are one git-only block on the
+	// shared working tree (INIT-023 TASK-012, worktree.go). It takes the
+	// tree fresh, so its entry restore puts a clean main under the merge;
+	// it re-checks the run status first; and it holds the tree across the
+	// push, so no other writer moves main between the merge and the push.
+	// Outcome recording, classification and routing run after it.
+	pushOn := autoPushEnabled()
+	var mergeResult git.MergeResult
+	var mergeErr, pushErr error
+	blockErr := o.withTree(ctx, func(ctx context.Context) error {
+		if err := o.requireStillCommitting(ctx, run.RunID); err != nil {
+			return err
+		}
+		mergeResult, mergeErr = o.git.Merge(ctx, git.MergeOpts{
+			Source:   run.BranchName,
+			Target:   authoritativeBranch,
+			Strategy: "merge-commit",
+			Message:  fmt.Sprintf("Merge run %s: %s", run.RunID, run.TaskPath),
+			Trailers: trailers,
+		})
+		if mergeErr != nil {
+			// Abort early, inside the block, so the tree is clean for
+			// whatever holds it next.
+			o.abortMerge(ctx)
+			return nil
+		}
+		if pushOn {
+			pushErr = o.git.Push(ctx, "origin", "main")
+		}
+		return nil
 	})
+	if done, ret := blockExit(blockErr); done {
+		return true, ret
+	}
+	if blockErr != nil {
+		mergeErr = blockMergeError(blockErr)
+	}
 
-	// On merge failure abort early — the only retry-relevant signal
-	// is mergeErr, and aborting in advance leaves the working copy
-	// clean for whatever path follows.
+	// On merge failure: the only retry-relevant signal is mergeErr.
 	if mergeErr != nil {
-		o.abortMerge(ctx)
 		// Record the failed outcome before any state transition so the
 		// audit row is in place. A persistence failure here is fatal:
 		// returning the error keeps the run in committing for retry,
@@ -242,15 +295,15 @@ func (o *Orchestrator) mergePrimary(ctx context.Context, run *domain.Run, src *m
 		"fast_forward", mergeResult.FastForward,
 	)
 
-	// Push the authoritative branch to origin after a successful merge.
-	// On failure record the primary outcome as failed before the run
-	// state transition: the local merge happened (mergeResult.SHA is
-	// known) but origin/main has not advanced, so dashboards must see
-	// the same "failed" status they would for a code repo whose push
-	// did not land. The local SHA is captured in failure_detail so the
-	// recovery path can confirm what was applied locally.
-	if autoPushEnabled() {
-		if pushErr := o.git.Push(ctx, "origin", "main"); pushErr != nil {
+	// The push of the authoritative branch ran in the block. On failure
+	// record the primary outcome as failed before the run state
+	// transition: the local merge happened (mergeResult.SHA is known) but
+	// origin/main has not advanced, so dashboards must see the same
+	// "failed" status they would for a code repo whose push did not land.
+	// The local SHA is captured in failure_detail so the recovery path can
+	// confirm what was applied locally.
+	if pushOn {
+		if pushErr != nil {
 			if recErr := o.recordPrimaryMergeOutcome(ctx, run, mergeResult.SHA, pushErr, "push"); recErr != nil {
 				return false, recErr
 			}
@@ -356,7 +409,9 @@ func (o *Orchestrator) handlePermanentMergeFailure(ctx context.Context, run *dom
 	return o.advancePublishStepIfAny(ctx, run, "merge_failed")
 }
 
-// abortMerge cleans up a failed merge so the repo is not left dirty.
+// abortMerge cleans up a failed merge so the repo is not left dirty. It
+// runs inside the merge block (INIT-023 TASK-012): the abort re-enters the
+// tree the merge holds.
 func (o *Orchestrator) abortMerge(ctx context.Context) {
 	// git merge --abort to clean up conflicted state.
 	// This is best-effort — if it fails, the repo may need manual cleanup.
@@ -527,10 +582,14 @@ func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.
 	}
 
 	// Classify based on error type: merge conflicts get git_conflict,
-	// other permanent merge errors get permanent_error.
+	// spent retry budgets get merge_retries_exhausted (INIT-023 TASK-012,
+	// P3-27), other permanent merge errors get permanent_error.
 	classification := domain.FailurePermanent
 	var gitErr *git.GitError
-	if errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict") {
+	switch {
+	case isRetriesExhausted(mergeErr):
+		classification = domain.FailureMergeRetriesExhausted
+	case errors.As(mergeErr, &gitErr) && strings.Contains(gitErr.Message, "conflict"):
 		classification = domain.FailureGitConflict
 	}
 
@@ -635,6 +694,10 @@ var statusFieldRegexp = regexp.MustCompile(`(?m)^status:\s*.*$`)
 // Enumeration is best-effort: if Diff fails, the cascade degrades to the
 // original single-artifact behaviour on run.TaskPath so the primary contract
 // is preserved.
+//
+// It must run inside the cascade block (preflightCheck, INIT-023
+// TASK-012): its checkout → write → commit → checkout is a working-tree
+// sequence, and ctx must be the block's.
 func (o *Orchestrator) applyCommitStatus(ctx context.Context, run *domain.Run, newStatus string) error {
 	log := observe.Logger(ctx)
 

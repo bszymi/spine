@@ -33,8 +33,8 @@ func (s *Scheduler) ScanRunTimeouts(ctx context.Context) error {
 		return fmt.Errorf("list timed out runs: %w", err)
 	}
 
-	for i := range runs {
-		run := &runs[i]
+	for it := newBudgetIter(ctx, "run-timeouts", len(runs)); it.next(); {
+		run := &runs[it.i]
 		if err := s.handleRunTimeout(ctx, run, now); err != nil {
 			log.Error("handle run timeout failed", "run_id", run.RunID, "error", err)
 		}

@@ -363,6 +363,12 @@ func buildOrchestrator(
 	return orch
 }
 
+// defaultCommitMaxRetries is the automatic retry budget of a committing
+// run's governed merge in `spine serve` (INIT-023 TASK-012, owner question
+// 1: the value standalone already configured, now enforced). With the
+// 60 s commit tick, about four minutes of transient failure.
+const defaultCommitMaxRetries = 3
+
 // buildScheduler wires the background scheduler with recovery callbacks.
 func buildScheduler(
 	st store.Store,
@@ -394,9 +400,14 @@ func buildScheduler(
 			// TASK-007). A no-op unless the step-entry policy sets
 			// TerminateStepsOnCancel.
 			scheduler.WithRunTerminated(orch.TerminateLiveSteps),
+			// The retry budget is enforced (INIT-023 TASK-012, P3-27): after
+			// defaultCommitMaxRetries automatic retries of a transiently
+			// failing merge the run is handed to AbandonExhaustedMerge,
+			// which routes it like a permanent merge failure.
 			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
 				return orch.MergeRunBranch(ctx, runID)
-			}, 3, 2*time.Minute),
+			}, defaultCommitMaxRetries, 2*time.Minute),
+			scheduler.WithCommitExhausted(orch.AbandonExhaustedMerge),
 		)
 	}
 	return scheduler.New(st, events, opts...)
@@ -702,4 +713,14 @@ func buildStore(ctx context.Context, resolver workspace.Resolver, secretCipher *
 		return nil, err
 	}
 	return pgStore, nil
+}
+
+// buildPrimaryGitClient builds the single-workspace primary client of
+// `spine serve`. It is standalone's shared working tree (INIT-023
+// TASK-012): its home branch is the governed-merge target,
+// engine.AuthoritativeBranch ("main"), which every sequence on the tree
+// restores and every "HEAD" read means (workspace.PrimaryClientOptions;
+// gitOpts is not modified, it still feeds code-repository clients).
+func buildPrimaryGitClient(repoPath string, gitOpts []git.CLIOption) *git.CLIClient {
+	return git.NewCLIClient(repoPath, workspace.PrimaryClientOptions(gitOpts)...)
 }

@@ -48,6 +48,12 @@ var allowed = map[string]bool{
 	// MkdirTemp/RemoveAll of the private GIT_INDEX_FILE directory in
 	// os.TempDir (INIT-023 TASK-005): plumbing only, no working tree.
 	"adapters/git/commitbinder.go:CLIClient.CommitFilesOnto": true,
+	// INIT-023 TASK-012: EvalSymlinks of the tree ROOT to key the shared
+	// working-tree lock (never a path inside the tree, nothing opened),
+	// and an Lstat existence check of <git-dir>/index.lock before a
+	// restore (read-only, never followed, never removed).
+	"adapters/git/treelock.go:treeReal":              true,
+	"adapters/git/treelock.go:CLIClient.restoreHeld": true,
 }
 
 func set(names ...string) map[string]bool {

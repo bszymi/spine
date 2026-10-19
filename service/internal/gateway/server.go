@@ -175,8 +175,10 @@ type PlanningRunResult struct {
 }
 
 // BranchCreator creates exploratory branches and manages divergence windows.
+// CreateExploratoryBranch takes the divergence's run (INIT-023 TASK-012):
+// the branch forks from its run branch.
 type BranchCreator interface {
-	CreateExploratoryBranch(ctx context.Context, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
+	CreateExploratoryBranch(ctx context.Context, run *domain.Run, divCtx *domain.DivergenceContext, branchID, startStep string) (*domain.Branch, error)
 	CloseWindow(ctx context.Context, divCtx *domain.DivergenceContext) error
 }
 

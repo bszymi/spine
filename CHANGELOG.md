@@ -6,6 +6,153 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-004 TASK-012: standalone git-state safety — convergence target, serialized working tree, bounded merge retries)
+
+Audit F8 (P2), F9 (P2) and P3-27, all in standalone `spine serve`. Owner questions take their
+defaults, pending the owner: 3 automatic merge retries; a poisoned tree is quarantined and the
+operation continues; `MultiScheduler` is bounded but not wired; retries counted per run lifetime (no
+migration); a stale `.git/index.lock` is reported, never deleted; a taken working-tree sequence is
+bounded at 5 minutes (a constant).
+
+### Security
+
+- **Convergence merges into the run branch, never into `main` (F8).** The selected divergence
+  branches used to be merged with no target, which the git client read as "into whatever is checked
+  out" — `main` in standalone's shared tree — so divergence-branch content reached the governed
+  branch while the run was still active and its review step waiting. Convergence now names the run
+  branch as the target, refuses a run that is not the divergence's own or has no `spine/` run branch
+  before anything changes, and consults branch protection about the branch that moves. Divergence
+  branches fork from the run branch (also for exploratory branches). `git.CLIClient.Merge` refuses
+  an empty `Target`.
+- **The shared working tree is serialized and self-healing (F9).** Every stateful git call holds a
+  process-wide lock on the tree, and the engine's multi-step sequences (status cascade, governed
+  merge with its push, run start, recovery ledger, convergence, code-repository merge) and in-place
+  artifact/workflow writes each hold it once, as git-only blocks: no event is emitted and no step is
+  routed while it is held. Concurrent approvals no longer fail each other, a status commit can no
+  longer land on `main` outside the governed merge, and a run branch is never cut from another run's
+  branch. The tree's home branch (`main`) is restored by whoever takes it: a merge in progress is
+  aborted, tracked changes are quarantined into an unreferenced commit (logged with its SHA), `HEAD`
+  goes back to `main`; untracked and ignored files are never touched (one in the way fails the
+  restore before anything changes) and a stale `.git/index.lock` is reported.
+  A tree left dirty or off `main` therefore no longer fails every later governed merge in the
+  workspace. A tracked difference no hard reset removes (a `text eol=lf` attribute over a file
+  committed with CRLF, case-only path collisions on a case-insensitive filesystem) is left in place
+  instead of failing every later restore — content, including a divergence branch's, could
+  otherwise wedge the workspace (review round 1). Such a difference is identified without reading
+  through it: a symbolic link is never followed and a FIFO never opened (a file/link case collision
+  used to make every restore hash the link's target outside the tree, or block on a FIFO for 30 s),
+  and a type change is remembered like a modification, so it is quarantined once, not at every
+  take (review round 2).
+- **A client disconnect can no longer poison the tree (F9 via request cancellation).** Git children
+  are stopped with `SIGTERM` (git removes its lock files) instead of `SIGKILL`, and a sequence that
+  has taken the tree runs to completion detached from the request (bounded at 5 minutes); only the
+  wait for the tree is cancelled, and that is not recorded as a merge failure.
+- **The same run entered twice (HTTP submit plus the scheduler's retry)** no longer flips a
+  completed run to failed: the merge blocks re-read the run and stand down unless it is still
+  `committing`.
+- **A refused bound merge is taken back before the tree is released**, so an in-place write's
+  auto-push or the next run start never builds on or publishes it. When the take-back itself fails
+  (a ref lock), it stays pending: the block's exit restore and every later take of the tree retry
+  it first and refuse the tree while `main` still holds the refused merge. A take-back is remembered
+  from its first fallible step (a failure in its commit checks, or a sequence whose deadline was
+  spent, used to be forgotten and the tree released with the refused merge on `main`), runs on its
+  own 30 s bound detached from the caller, and on the shared tree a refused merge whose content no
+  checkout makes clean is quarantined and reset instead of keeping the whole tree refused (review
+  round 2).
+- **Task acceptance and the follow-up link read the task under the tree's lock** and commit only
+  over the bytes they read: an accept issued while a sequence had a run branch checked out used to
+  commit that branch's unreviewed file to `main`; a change that lands between the read and the
+  write is now a conflict (409).
+- **`HEAD` reads mean `main` on the shared tree:** a run started while another run's cascade had its
+  branch checked out bound the workflow an unreviewed branch's task type chose.
+- **Governed-merge retries are bounded (P3-27).** A merge that keeps failing transiently is
+  retried at most 3 times by the scheduler (the value `spine serve` already configured, now
+  enforced), then routed like a permanent failure: a publish-step workflow loops back through
+  `merge_failed`, a legacy terminal-commit workflow fails the run (branch kept); an exhausted code
+  repository is a terminal failure of that repository instead (the primary merges and the run waits
+  in `partially-merged` for operator recovery, codex round 8). The step carries the
+  new classification `merge_retries_exhausted`. A transient failure verifying the bound commit
+  (merge binding) is now a recorded, counted attempt too (recorded only while the run is still
+  `committing`). A push that fails after the merge landed on the local `main` is not abandoned —
+  the run is not reported failed while its merge sits on the branch for the next push to publish;
+  it stays `committing` and the push is retried until it lands, also when a later attempt fails
+  before reaching its push, and a run whose merge was recorded but whose completion failed is
+  never abandoned either (review round 1, codex rounds 6–7). That exemption holds within one
+  committing episode: after a permanent push rejection sends the run back to `execute`, the
+  reworked run's next episode is bounded like any other (review round 2).
+
+### Changed
+
+- One governed merge, run start, convergence or in-place write at a time per workspace tree; an
+  HTTP submit that triggers a merge may wait for another merge's push.
+- New log and audit records: `shared working tree restored` and `shared working tree: tracked
+  changes quarantined` (Warn), `working_tree_restored` and `working_tree_restore_failed` (audit,
+  with `quarantine_sha`), `merge_retries_exhausted` (audit) with an Error log,
+  `run is no longer committing; this merge attempt stands down` (Info), the scheduler's
+  `merge retries exhausted; …` and `workspace scan budget spent; …` (Warn) records.
+- New values: step `error_detail.classification` `merge_retries_exhausted`; the
+  `retries exhausted (attempts=N, max_retries=M): ` prefix in
+  `repository_merge_outcomes.failure_detail`. No migration, table, column or event type.
+- Divergence branches fork from the run branch instead of `HEAD`.
+
+### Changed (embedders)
+
+- **API changes (Spine library):** `divergence.Service.EvaluateAndCommit`, `CommitConvergence`
+  and `CreateExploratoryBranch`, `engine.ConvergenceHandler.EvaluateAndCommit`,
+  `engine.DivergenceHandler.CreateExploratoryBranch` and the gateway's `BranchCreator` take the
+  run (`*domain.Run`). `git.CLIClient.Merge` refuses an empty `Target` (`"merge target
+  required"`), and an abort (`Strategy: "abort"` or `Source: "--abort"`) that names a `Target`.
+  SMP passes `*divergence.Service` to `WithDivergence`/`WithConvergence`, implements none of these
+  interfaces and never calls `CLIClient.Merge`, so it compiles unchanged; its divergence adapter
+  receives an explicit `Target` (the run branch it resolved itself before) and `run.BranchName` as
+  the divergence base (passed through unchanged).
+- **Additive:** `git.WorkingTreeGuard`, `(*CLIClient).WithWorkingTree`, `git.WithHomeBranch`,
+  `(*CLIClient).RestoreWorkingTree`, `(*CLIClient).HomeBranch`, `git.TreeRestoreReport`,
+  `git.TreeRestoreError`, `git.TreeWaitError`, `(*git.WriteScope).Context`,
+  `engine.Orchestrator.AbandonExhaustedMerge`, `engine.MergeRetriesExhaustedError`,
+  `domain.RepositoryMergeOutcome.RetriesExhausted`, `domain.RepositoryMergeOutcome.MergedLocally`,
+  `domain.PushFailureDetail`, `domain.PendingPublicationDetail`,
+  `domain.RepositoryMergeOutcome.LocalMergeSHA` / `.KeepPendingPublication` /
+  `.KeepsPendingPublicationOf`, `worktreefs.Tree.LstatEntry`,
+  `domain.FirstExhaustedOutcome`, `git.TreeRestoreReport.TookBack` /
+  `.Phantoms`,
+  `domain.FailureMergeRetriesExhausted`, `scheduler.WithCommitExhausted`,
+  `scheduler.CommitExhaustedFunc`, `(*scheduler.Scheduler).CommitRetryBudget`, the
+  `MultiSchedulerConfig` fields `CommitMaxRetries` / `WorkspaceBudget` /
+  `MaxConcurrentWorkspaces` and `ServiceSet.CommitExhaustedFn`.
+- **Behaviour every embedder sees (Rule 4):** every git child the git client starts is stopped
+  with `SIGTERM` when its context ends (`Kill` 10 s later, or at once where the signal is
+  unsupported) — a cancelled git now exits through its own handler instead of being killed; and
+  the engine's cascade and primary-merge steps re-read the run first (one extra `GetRun` each) and
+  skip a run that is no longer `committing` instead of merging against a deleted branch. Neither
+  changes a successful result.
+- **Lock scope for embedders:** every `CLIClient` stateful call, and an in-place
+  `git.EnterBranch(ctx, dir, "")` scope until its `Cleanup`, takes an uncontended lock on its tree's
+  path; the registry entry is removed when the last holder leaves. A tree with no registered home
+  branch (`WithHomeBranch` is never set by SMP) is never restored or detached and keeps the real
+  `HEAD`. Use `scope.Context(ctx)` for git calls made inside an in-place scope; a locked call made
+  with a context that does not carry the scope's ticket waits for the scope itself.
+- **`artifact.Service` acceptance/rejection** (`AcceptTask`, `RejectTask`, the follow-up link)
+  reads the task file inside an uncontended in-place scope on an embedder's worktree (the same
+  bytes as before) and commits only if the file is unchanged when it writes — always true on an
+  embedder's per-request worktree, where nothing else writes.
+- **`git.CLIClient.ResetBranch`** remembers a take-back it could not complete — from the first
+  call that can fail, the lock wait included; only proof that `expected` names no commit arms
+  nothing — and the next `WithWorkingTree`, in-place `EnterBranch` scope or restore on that tree
+  retries it first (and fails while the branch still holds the refused merge). Its git now runs on
+  its own context, detached from the caller's cancellation and bounded at 30 s (review round 2: a
+  take-back is a compensating action). On a tree with a home branch a refused two-tree switch is
+  quarantined (`git stash create`) and reset (`read-tree --reset -u`) after the untracked-file
+  check; on any other tree it is refused as before. Embedders that never call `ResetBranch` on a
+  `CLIClient` (SMP) never have one and see none of this.
+- **`domain.RepositoryMergeOutcome.KeepPendingPublication`** no longer carries a permanent-class
+  prior, and the engine applies it only to a prior attempted in the run's current committing
+  episode (one `ListStepExecutionsByRun` read, only when a carry would apply; a failed read records
+  nothing and the run stays `committing`). This narrows a failure-detail prefix this task added;
+  successful merges are unchanged.
+
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-004 TASK-015: SSE field safety, shared-mode scoping, git-endpoint auth, gitpool credential scoping)
 
 Standalone `spine serve` hardening (audit P3-28, P3-29, P3-30) plus the latent gitpool

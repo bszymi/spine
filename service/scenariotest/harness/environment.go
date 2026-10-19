@@ -22,6 +22,18 @@ type envConfig struct {
 	seedWorkflows  bool
 	artifactsDir   string // empty means default "/"
 	runtimeOpts    []RuntimeOption
+	noHomeBranch   bool
+}
+
+// WithoutHomeBranch builds the repository's client without
+// git.WithHomeBranch("main") (INIT-023 TASK-012), so its working tree is
+// never restored and "HEAD" reads follow the checked-out branch. For a
+// scenario that must observe a non-restored tree; every use must say why
+// in a comment. Also accepted by NewTestRepo.
+func WithoutHomeBranch() EnvOption {
+	return func(c *envConfig) {
+		c.noHomeBranch = true
+	}
 }
 
 // WithGovernance seeds the repository with governance documents.
@@ -105,7 +117,11 @@ func NewTestEnvironment(t *testing.T, opts ...EnvOption) *TestEnvironment {
 		opt(cfg)
 	}
 
-	repo := NewTestRepo(t)
+	var repoOpts []EnvOption
+	if cfg.noHomeBranch {
+		repoOpts = append(repoOpts, WithoutHomeBranch())
+	}
+	repo := NewTestRepo(t, repoOpts...)
 
 	if cfg.seedGovernance {
 		repo.SeedGovernance(t)

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,6 +104,18 @@ import (
 // alloc limit per read (a delta-chain step: base, result, cache), not
 // one. Diff and ListFiles read NUL-delimited output, so every path is
 // returned raw — never C-quoted, never whitespace-trimmed.
+//
+// # Shared working tree (INIT-023 TASK-012)
+//
+// Every stateful method (Checkout, Commit, Merge, CreateBranch,
+// DeleteBranch, WriteAndStageFile, MergeBound, ResetBranch) holds the
+// tree's process-wide lock for its duration; a multi-step sequence holds it
+// once through WithWorkingTree (WorkingTreeGuard), and an in-place
+// EnterBranch scope until its Cleanup. Merge refuses an empty Target. On a
+// tree registered with WithHomeBranch, a taken sequence first restores a
+// clean checkout of the home branch, and the read methods resolve "HEAD"
+// to refs/heads/<home>. Every git child is stopped with SIGTERM, not
+// SIGKILL, when its context ends (gitcmd.go). See treelock.go.
 type CLIClient struct {
 	repoPath         string
 	credentialHelper string   // path to external credential helper script
@@ -123,6 +134,12 @@ type CLIClient struct {
 	// field only so a test can make the probe lie and exercise the read's
 	// own cap (the second line of defence).
 	blobSize func(ctx context.Context, spec string) (int64, error)
+
+	// Shared working tree (INIT-023 TASK-012, treelock.go): the
+	// WithHomeBranch value (validated and registered for the tree by
+	// NewCLIClient), and the refusal when it was not a valid branch name.
+	homeBranch string
+	homeErr    error
 }
 
 // CLIOption configures a CLIClient.
@@ -290,6 +307,7 @@ func NewCLIClient(repoPath string, opts ...CLIOption) *CLIClient {
 	// Derived after every option, so WithMaxBlobBytes moves the default
 	// alloc limit with it and a too-small explicit value is raised.
 	c.maxGitAllocBytes = deriveGitAllocLimit(c.maxGitAllocBytes, c.blobLimit())
+	c.setupHomeBranch()
 	// When a push token is configured (and no credential helper takes priority),
 	// create a GIT_ASKPASS script that reads credentials from environment variables.
 	// This keeps the token out of argv and off disk in the script itself.
@@ -522,7 +540,7 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 	// Branch arguments never resolve through tags anyway (exact lookup);
 	// this keeps upstream-controlled names out of rev resolution too.
 	args = append(args, "clone", "--no-tags", "--", url, path)
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmd(ctx, args...)
 	// Build the clone environment when the client carries any auth
 	// state — askpass token, credential-helper env (e.g.
 	// SMP_WORKSPACE_ID for per-workspace helpers), or both. Skipping
@@ -573,12 +591,21 @@ func (c *CLIClient) Clone(ctx context.Context, url, path string) error {
 // remote-tracking ref. switch only ever attaches to an existing local
 // branch ("a branch is expected, got tag ..."), carries staged changes
 // like checkout, and refuses to run during an in-progress merge.
+//
+// It takes the client's working tree for its duration (INIT-023 TASK-012,
+// treelock.go): re-entrant inside WithWorkingTree, it never restores the
+// tree — a sequence owns HEAD.
 func (c *CLIClient) Checkout(ctx context.Context, branch string) error {
 	short, _, err := checkBranch("checkout", "branch", branch)
 	if err != nil {
 		return err
 	}
-	return c.switchTo(ctx, short)
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	return c.switchTo(h.ctx, short)
 }
 
 // switchTo runs the Checkout argv for an already-validated short name.
@@ -589,7 +616,15 @@ func (c *CLIClient) switchTo(ctx context.Context, short string) error {
 
 // Commit creates a new commit with the staged changes.
 // Commit messages include structured trailers per Git Integration §5.1.
+// It takes the working tree like Checkout; the commit's own `rev-parse
+// HEAD` reads the real HEAD (the commit just made), never the home branch.
 func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, error) {
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return CommitResult{}, err
+	}
+	defer h.release()
+	ctx = h.ctx
 	msg := buildCommitMessage(opts)
 
 	args := []string{"commit", "-m", msg}
@@ -612,16 +647,26 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 	return CommitResult{SHA: strings.TrimSpace(sha)}, nil
 }
 
-// Merge merges a source branch into the current branch (or target branch).
+// Merge merges a source branch into opts.Target.
 //
 // Strategy "abort" or Source "--abort" is the in-band abort sentinel the
 // engine (and SMP's operator) rely on: it runs exactly `git merge
-// --abort` — no checkout, no grammar check, no other argv.
+// --abort` — no checkout, no grammar check, no other argv. An abort that
+// also names a Target, or a Strategy "abort" whose Source is neither empty
+// nor "--abort", is refused before git runs (INIT-023 TASK-012).
 //
-// Otherwise Source is Commit class (a full object id or a branch) and a
-// non-empty Target is Branch class; both are checked before any git
-// process. A branch source is looked up exactly and merged BY OBJECT ID,
-// so a same-named tag or ref, or a refs/tags/refs/heads/<n> planted for a
+// Every other call needs a non-empty Target (INIT-023 TASK-012, audit F8):
+// an empty Target used to mean "merge into whatever is checked out", and
+// in standalone's shared tree that is main between sequences, so
+// convergence (which sent no Target) merged unreviewed divergence-branch
+// content straight into main before the run's review. It is refused with a
+// permanent *GitError ("merge target required") before any git process
+// starts, after Source's grammar check.
+//
+// Otherwise Source is Commit class (a full object id or a branch) and
+// Target is Branch class; both are checked before any git process. A
+// branch source is looked up exactly and merged BY OBJECT ID, so a
+// same-named tag or ref, or a refs/tags/refs/heads/<n> planted for a
 // deleted branch, can never be merged in its place: a missing source
 // branch is ErrKindNotFound and no `git merge` runs. The lookup happens
 // before the switch to Target, so a missing source changes nothing.
@@ -629,16 +674,33 @@ func (c *CLIClient) Commit(ctx context.Context, opts CommitOpts) (CommitResult, 
 // A non-empty SourceSHA (INIT-023 TASK-005) replaces Source: the commit
 // is verified (VerifyCommit's check) before any switch, exactly that
 // object id is merged, Source is never resolved, and BaseSHA reports the
-// target tip the merge was computed on. With an empty SourceSHA the argv
-// is unchanged.
+// target tip the merge was computed on.
+//
+// The whole call (lookup, switch, merge) holds the working tree.
 func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, error) {
 	if opts.Strategy == "abort" || opts.Source == "--abort" {
-		if _, err := c.run(ctx, "merge", "merge", "--abort"); err != nil {
+		if opts.Target != "" {
+			return MergeResult{}, &GitError{Kind: ErrKindPermanent, Op: "merge",
+				Message: "merge abort takes no target"}
+		}
+		if opts.Strategy == "abort" && opts.Source != "" && opts.Source != "--abort" {
+			return MergeResult{}, &GitError{Kind: ErrKindPermanent, Op: "merge",
+				Message: "merge abort takes no source"}
+		}
+		h, err := c.lockTree(ctx)
+		if err != nil {
+			return MergeResult{}, err
+		}
+		defer h.release()
+		if _, err := c.run(h.ctx, "merge", "merge", "--abort"); err != nil {
 			return MergeResult{}, err
 		}
 		return MergeResult{}, nil
 	}
 	if opts.SourceSHA != "" {
+		if opts.Target == "" {
+			return MergeResult{}, errMergeTargetRequired()
+		}
 		return c.mergeSHA(ctx, opts)
 	}
 
@@ -646,26 +708,34 @@ func (c *CLIClient) Merge(ctx context.Context, opts MergeOpts) (MergeResult, err
 	if err := checkCommit("merge", "source", opts.Source, false); err != nil {
 		return MergeResult{}, err
 	}
-	var target string
-	if opts.Target != "" {
-		short, _, err := checkBranch("merge", "target", opts.Target)
-		if err != nil {
-			return MergeResult{}, err
-		}
-		target = short
+	if opts.Target == "" {
+		return MergeResult{}, errMergeTargetRequired()
+	}
+	target, _, err := checkBranch("merge", "target", opts.Target)
+	if err != nil {
+		return MergeResult{}, err
 	}
 
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	defer h.release()
+	ctx = h.ctx
 	// Phase 2: resolve the source to an object id, then switch.
 	source, err := c.resolveCommit(ctx, "merge", "source", opts.Source)
 	if err != nil {
 		return MergeResult{}, err
 	}
-	if target != "" {
-		if err := c.switchTo(ctx, target); err != nil {
-			return MergeResult{}, err
-		}
+	if err := c.switchTo(ctx, target); err != nil {
+		return MergeResult{}, err
 	}
 	return c.runMerge(ctx, opts, source)
+}
+
+// errMergeTargetRequired is Merge's refusal of an implicit target.
+func errMergeTargetRequired() *GitError {
+	return &GitError{Kind: ErrKindPermanent, Op: "merge", Message: "merge target required"}
 }
 
 // runMerge runs `git merge` of the already-resolved source object id
@@ -730,6 +800,13 @@ func (c *CLIClient) runMerge(ctx context.Context, opts MergeOpts, source string)
 // it: autoSetupMerge's default tracks remote-tracking bases only). An
 // unborn HEAD still fails with "not a valid object name", Permanent, as
 // before.
+//
+// It holds the working tree (INIT-023 TASK-012). When base is "HEAD" and
+// this call TAKES a tree that has a home branch, the tree is restored
+// first, so a run or divergence branch is never cut from a foreign run
+// branch a poisoned tree was left on; a failed restore is the
+// *TreeRestoreError and no branch is created. Inside a sequence (re-entry)
+// nothing is restored: the sequence's entry restore already did.
 func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 	short, _, err := checkBranch("branch", "name", name)
 	if err != nil {
@@ -737,6 +814,19 @@ func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 	}
 	if err := checkCommit("branch", "base", base, true); err != nil {
 		return err
+	}
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	ctx = h.ctx
+	if h.fresh && base == "HEAD" {
+		if home := c.treeHome(); home != "" {
+			if _, err := c.restoreHeld(ctx, home); err != nil {
+				return err
+			}
+		}
 	}
 	from, err := c.resolveCommit(ctx, "branch", "base", base)
 	if err != nil {
@@ -747,12 +837,18 @@ func (c *CLIClient) CreateBranch(ctx context.Context, name, base string) error {
 }
 
 // DeleteBranch deletes a local branch (Branch class).
+// It holds the working tree like Checkout.
 func (c *CLIClient) DeleteBranch(ctx context.Context, name string) error {
 	short, _, err := checkBranch("branch", "name", name)
 	if err != nil {
 		return err
 	}
-	_, err = c.run(ctx, "branch", "branch", "-D", "--end-of-options", short)
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	_, err = c.run(h.ctx, "branch", "branch", "-D", "--end-of-options", short)
 	return err
 }
 
@@ -782,11 +878,11 @@ func (c *CLIClient) Diff(ctx context.Context, from, to string) ([]FileDiff, erro
 	if err := checkRev("diff", "to", to); err != nil {
 		return nil, err
 	}
-	fromRev, err := c.resolveRev(ctx, "diff", "from", from)
+	fromRev, err := c.resolveRev(ctx, "diff", "from", c.homeRev(from))
 	if err != nil {
 		return nil, err
 	}
-	toRev, err := c.resolveRev(ctx, "diff", "to", to)
+	toRev, err := c.resolveRev(ctx, "diff", "to", c.homeRev(to))
 	if err != nil {
 		return nil, err
 	}
@@ -897,6 +993,12 @@ func validDiffStatus(s string) bool {
 
 // Log returns commit history. A non-empty Since is Rev class; Path
 // always follows the `--`.
+//
+// The history ends at HEAD — on a tree with a home branch (INIT-023
+// TASK-012 §2.9) at refs/heads/<home>, looked up exactly: both the
+// implicit default revision and the `<since>..HEAD` range name the home
+// branch's object id, so a history query issued while a sequence has a
+// run branch checked out still reads the home branch.
 func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error) {
 	if opts.Since != "" {
 		if err := checkRev("log", "since", opts.Since); err != nil {
@@ -909,12 +1011,22 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 		args = append(args, fmt.Sprintf("-n%d", opts.Limit))
 	}
 	args = append(args, "--end-of-options")
-	if opts.Since != "" {
-		since, err := c.resolveRev(ctx, "log", "since", opts.Since)
+	tip := "HEAD"
+	if home := c.treeHome(); home != "" {
+		oid, err := c.resolveBranchOID(ctx, "log", "HEAD", headsPrefix+home, home)
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, fmt.Sprintf("%s..HEAD", since))
+		tip = oid
+	}
+	if opts.Since != "" {
+		since, err := c.resolveRev(ctx, "log", "since", c.homeRev(opts.Since))
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, fmt.Sprintf("%s..%s", since, tip))
+	} else if tip != "HEAD" {
+		args = append(args, tip)
 	}
 	args = append(args, "--")
 	if opts.Path != "" {
@@ -969,7 +1081,7 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 	if err := checkRev("read_file", "ref", ref); err != nil {
 		return nil, err
 	}
-	rev, err := c.resolveRev(ctx, "read_file", "ref", ref)
+	rev, err := c.resolveRev(ctx, "read_file", "ref", c.homeRev(ref))
 	if err != nil {
 		return nil, err
 	}
@@ -1062,11 +1174,20 @@ func readOverrun(ref, path string, limit int64, cause error) *GitError {
 // followed out of the repository. Refusals unwrap to worktreefs.ErrUnsafePath.
 // An existing file is replaced by rename (its mode is kept); a new one is
 // created O_EXCL with mode 0644.
+//
+// The write and the stage hold the working tree (INIT-023 TASK-012), taken
+// before the confined write.
 func (c *CLIClient) WriteAndStageFile(ctx context.Context, path, content string) error {
 	rel, err := worktreefs.Clean(path)
 	if err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	h, err := c.lockTree(ctx)
+	if err != nil {
+		return err
+	}
+	defer h.release()
+	ctx = h.ctx
 	tree, err := worktreefs.Open(c.repoPath)
 	if err != nil {
 		return fmt.Errorf("open worktree: %w", err)
@@ -1096,7 +1217,7 @@ func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]strin
 	if err := checkRev("list_files", "ref", ref); err != nil {
 		return nil, err
 	}
-	rev, err := c.resolveRev(ctx, "list_files", "ref", ref)
+	rev, err := c.resolveRev(ctx, "list_files", "ref", c.homeRev(ref))
 	if err != nil {
 		return nil, err
 	}
@@ -1127,8 +1248,14 @@ func (c *CLIClient) ListFiles(ctx context.Context, ref, pattern string) ([]strin
 	return files, nil
 }
 
-// Head returns the current HEAD commit SHA.
+// Head returns the current HEAD commit SHA. On a tree with a home branch
+// (INIT-023 TASK-012 §2.9) it is the object id of refs/heads/<home>,
+// looked up exactly (a missing home branch is ErrKindNotFound), whatever a
+// sequence has checked out at the moment.
 func (c *CLIClient) Head(ctx context.Context) (string, error) {
+	if home := c.treeHome(); home != "" {
+		return c.resolveBranchOID(ctx, "head", "HEAD", headsPrefix+home, home)
+	}
 	output, err := c.run(ctx, "head", "rev-parse", "HEAD")
 	if err != nil {
 		return "", err
@@ -1146,7 +1273,7 @@ func (c *CLIClient) RefSHA(ctx context.Context, ref string) (string, error) {
 	if err := checkRev("ref-sha", "ref", ref); err != nil {
 		return "", err
 	}
-	rev, err := c.resolveRev(ctx, "ref-sha", "ref", ref)
+	rev, err := c.resolveRev(ctx, "ref-sha", "ref", c.homeRev(ref))
 	if err != nil {
 		return "", err
 	}
@@ -1176,11 +1303,11 @@ func (c *CLIClient) MergeBase(ctx context.Context, a, b string) (string, error) 
 	if err := checkRev("merge-base", "b", b); err != nil {
 		return "", err
 	}
-	revA, err := c.resolveRev(ctx, "merge-base", "a", a)
+	revA, err := c.resolveRev(ctx, "merge-base", "a", c.homeRev(a))
 	if err != nil {
 		return "", err
 	}
-	revB, err := c.resolveRev(ctx, "merge-base", "b", b)
+	revB, err := c.resolveRev(ctx, "merge-base", "b", c.homeRev(b))
 	if err != nil {
 		return "", err
 	}
@@ -1385,7 +1512,7 @@ func (c *CLIClient) runSink(ctx context.Context, op string, limit, sizeHint int6
 		// Clone).
 		args = append(append([]string{}, noAmbientAuthArgs...), args...)
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = c.repoPath
 
 	// For push operations, inject extra environment variables for credential

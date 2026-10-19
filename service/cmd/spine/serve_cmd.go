@@ -133,7 +133,7 @@ func serveCmd() *cobra.Command {
 			if smpID := os.Getenv("SMP_WORKSPACE_ID"); smpID != "" {
 				gitOpts = append(gitOpts, git.WithPushEnv("SMP_WORKSPACE_ID="+smpID))
 			}
-			gitClient := git.NewCLIClient(repoPath, gitOpts...)
+			gitClient := buildPrimaryGitClient(repoPath, gitOpts)
 			if err := gitClient.ConfigureCredentialHelper(ctx); err != nil {
 				log.Warn("failed to configure credential helper", "error", err)
 			}

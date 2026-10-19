@@ -18,7 +18,7 @@ func (m *mockDivergenceHandler) StartDivergence(_ context.Context, _ *domain.Run
 	return m.divCtx, m.err
 }
 
-func (m *mockDivergenceHandler) CreateExploratoryBranch(_ context.Context, _ *domain.DivergenceContext, _, _ string) (*domain.Branch, error) {
+func (m *mockDivergenceHandler) CreateExploratoryBranch(_ context.Context, _ *domain.Run, _ *domain.DivergenceContext, _, _ string) (*domain.Branch, error) {
 	return nil, nil
 }
 
@@ -158,7 +158,7 @@ func (m *mockConvergenceHandler) CheckEntryPolicy(_ context.Context, _ *domain.D
 	return m.policyReady, m.policyErr
 }
 
-func (m *mockConvergenceHandler) EvaluateAndCommit(_ context.Context, _ *domain.DivergenceContext, _ domain.ConvergenceDefinition) error {
+func (m *mockConvergenceHandler) EvaluateAndCommit(_ context.Context, _ *domain.Run, _ *domain.DivergenceContext, _ domain.ConvergenceDefinition) error {
 	m.called = true
 	return m.commitErr
 }

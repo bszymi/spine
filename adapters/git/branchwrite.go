@@ -9,25 +9,73 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 // WriteScope is the working directory for a single branch-scoped write.
 // When the scope was created with a non-empty branch, RepoDir points at a
 // private worktree and Cleanup must be called to remove it. When the scope
-// is "unbranched" (empty branch), RepoDir is the main repo and Cleanup is
-// a no-op.
+// is "unbranched" (empty branch), RepoDir is the main repo and the scope
+// holds that repository's working tree (INIT-023 TASK-012) until Cleanup,
+// which must be called as well.
 type WriteScope struct {
 	RepoDir string
 	Branch  string
 	cleanup func()
+
+	// In-place scopes only (empty branch): the tree's ticket when this
+	// scope took the tree (nil when it re-entered a sequence the caller
+	// already holds), whether the tree has a home branch (then the scope's
+	// contexts are detached and bounded), and the bound.
+	ticket   *treeTicket
+	detached bool
+	deadline time.Time
+	mu       sync.Mutex
+	cancels  []context.CancelFunc
 }
 
-// Cleanup releases the worktree (no-op when using the main repo).
-// Safe to call multiple times.
+// Cleanup releases the worktree, or for an in-place scope the working
+// tree. Safe to call multiple times; call it before emitting events about
+// the write, so no event is published while the tree is held.
 func (s *WriteScope) Cleanup() {
 	if s != nil && s.cleanup != nil {
 		s.cleanup()
+	}
+}
+
+// Context returns the context every git call made inside the scope must
+// use (INIT-023 TASK-012, design-check DC-5). For an in-place scope that
+// took the working tree it carries the tree's ticket, so a locked
+// CLIClient call made inside the scope re-enters instead of waiting for
+// the scope itself until ctx ends; on a tree with a home branch it is
+// also detached from ctx's cancellation and bounded by the scope's
+// deadline (treeSequenceTimeout from EnterBranch), so a client disconnect
+// cannot stop a staged write half-way. On any other tree ctx's
+// cancellation is kept (embedders' per-request worktrees behave as
+// before). For a worktree scope, or an in-place scope that re-entered a
+// sequence, it is ctx itself. The derived contexts end at Cleanup.
+func (s *WriteScope) Context(ctx context.Context) context.Context {
+	if s == nil || s.ticket == nil {
+		return ctx
+	}
+	if !s.detached {
+		return withTicket(ctx, s.ticket)
+	}
+	c, cancel := context.WithDeadline(context.WithoutCancel(ctx), s.deadline) //nolint:gosec // G118: cancel is kept in s.cancels and called by Cleanup (endContexts)
+	s.mu.Lock()
+	s.cancels = append(s.cancels, cancel)
+	s.mu.Unlock()
+	return withTicket(c, s.ticket)
+}
+
+func (s *WriteScope) endContexts() {
+	s.mu.Lock()
+	cancels := s.cancels
+	s.cancels = nil
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
 	}
 }
 
@@ -45,8 +93,16 @@ var TrailerOrder = []string{
 
 // EnterBranch prepares a WriteScope for a write operation.
 //
-// When branch is empty, the scope points at repoDir with a no-op Cleanup.
-// Otherwise a private parent dir is allocated and a worktree for the
+// When branch is empty, the scope points at repoDir and holds repoDir's
+// working tree (INIT-023 TASK-012, treelock.go) until Cleanup: the lock
+// is taken (re-entrant when ctx carries it, waiting only until ctx ends,
+// *TreeWaitError), and when this call took a tree with a home branch the
+// tree is first restored to a clean checkout of it (a failure is the
+// *TreeRestoreError and no scope is returned). An in-place write in
+// standalone's shared tree therefore never commits onto a run branch a
+// sequence has checked out, and its staged file is never swept into the
+// engine's cascade commit. Use scope.Context(ctx) for the git calls made
+// inside the scope. Otherwise a private parent dir is allocated and a worktree for the
 // branch is added inside it; the scope's Cleanup removes both the
 // worktree and its parent.
 //
@@ -74,7 +130,7 @@ var TrailerOrder = []string{
 // returned; a missing branch is a *GitError{Kind: ErrKindNotFound}.
 func EnterBranch(ctx context.Context, repoDir, branch string, validator func(string) error) (*WriteScope, error) {
 	if branch == "" {
-		return &WriteScope{RepoDir: repoDir, cleanup: func() {}}, nil
+		return enterInPlace(ctx, repoDir)
 	}
 	if validator != nil {
 		if err := validator(branch); err != nil {
@@ -105,7 +161,7 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 	}
 	worktreeDir := filepath.Join(parent, "wt")
 
-	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "--detach", "--end-of-options", worktreeDir, oid)
+	cmd := newGitCmd(ctx, "worktree", "add", "--detach", "--end-of-options", worktreeDir, oid)
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(parent)
@@ -118,13 +174,13 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 	removeWorktree := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		rmCmd := exec.CommandContext(cleanupCtx, "git", "worktree", "remove", "--force", worktreeDir)
+		rmCmd := newGitCmd(cleanupCtx, "worktree", "remove", "--force", worktreeDir)
 		rmCmd.Dir = repoDir
 		_, _ = rmCmd.CombinedOutput()
 		_ = os.RemoveAll(parent)
 	}
 
-	sw := exec.CommandContext(ctx, "git", "switch", "--no-guess", "--end-of-options", short)
+	sw := newGitCmd(ctx, "switch", "--no-guess", "--end-of-options", short)
 	sw.Dir = worktreeDir
 	if out, err := sw.CombinedOutput(); err != nil {
 		removeWorktree()
@@ -133,7 +189,7 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 
 	// Post-condition: the worktree must be ON refs/heads/<short>, never
 	// detached and never on another ref.
-	sym := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
+	sym := newGitCmd(ctx, "symbolic-ref", "-q", "HEAD")
 	sym.Dir = worktreeDir
 	if out, err := sym.Output(); err != nil || strings.TrimSpace(string(out)) != headsPrefix+short {
 		removeWorktree()
@@ -149,12 +205,48 @@ func EnterBranch(ctx context.Context, repoDir, branch string, validator func(str
 			// the worktree must still be removed or we leak it on disk.
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			rmCmd := exec.CommandContext(cleanupCtx, "git", "worktree", "remove", "--force", worktreeDir)
+			rmCmd := newGitCmd(cleanupCtx, "worktree", "remove", "--force", worktreeDir)
 			rmCmd.Dir = repoDir
 			_, _ = rmCmd.CombinedOutput()
 			os.RemoveAll(parent)
 		},
 	}, nil
+}
+
+// enterInPlace is EnterBranch with an empty branch.
+func enterInPlace(ctx context.Context, repoDir string) (*WriteScope, error) {
+	h, err := acquireTree(ctx, repoDir)
+	if err != nil {
+		return nil, err
+	}
+	scope := &WriteScope{RepoDir: repoDir, ticket: h.ticket}
+	if !h.fresh {
+		scope.cleanup = func() {}
+		return scope, nil
+	}
+	c := &CLIClient{repoPath: repoDir}
+	if home := homeBranchOf(repoDir); home != "" {
+		if _, err := c.restoreHeld(h.ctx, home); err != nil {
+			h.release()
+			return nil, err
+		}
+		scope.detached = true
+		scope.deadline = time.Now().Add(treeSequenceTimeout)
+	} else if _, branch, err := c.settlePendingTakeBacks(h.ctx, "restore_tree"); err != nil {
+		// Not restored, but never handed out over a take-back a failed
+		// ResetBranch left undone (pendingTakeBack; none on an embedder's
+		// tree that never calls ResetBranch).
+		h.release()
+		return nil, &TreeRestoreError{Branch: branch, Err: err}
+	}
+	var once sync.Once
+	scope.cleanup = func() {
+		once.Do(func() {
+			scope.endContexts()
+			h.release()
+		})
+	}
+	return scope, nil
 }
 
 // StageAndCommit stages path under scope.RepoDir and creates a scoped commit
@@ -188,7 +280,7 @@ func StageAndCommit(ctx context.Context, scope *WriteScope, path string, opts Co
 // Used directly by service rollback paths when the file write succeeds but a
 // later validation step fails before StageAndCommit is called.
 func UnstageFile(ctx context.Context, repoDir, path string) error {
-	cmd := exec.CommandContext(ctx, "git", "reset", "HEAD", "--", path)
+	cmd := newGitCmd(ctx, "reset", "HEAD", "--", path)
 	cmd.Dir = repoDir
 	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -207,7 +299,7 @@ func UnstageFile(ctx context.Context, repoDir, path string) error {
 // 2), so every doubt is an error: an unborn HEAD or any other git failure
 // returns a non-nil error, never "untracked", and the caller keeps the file.
 func TrackedInHEAD(ctx context.Context, repoDir, path string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "ls-tree", "-z", "--name-only", "HEAD", "--", path)
+	cmd := newGitCmd(ctx, "ls-tree", "-z", "--name-only", "HEAD", "--", path)
 	cmd.Dir = repoDir
 	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 	var stderr strings.Builder
@@ -228,7 +320,7 @@ func TrackedInHEAD(ctx context.Context, repoDir, path string) (bool, error) {
 // detached HEAD (exit status 1) returns "HEAD", the value rev-parse
 // returned; an unborn branch now returns its name instead of an error.
 func CurrentBranch(ctx context.Context, repoDir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
+	cmd := newGitCmd(ctx, "symbolic-ref", "-q", "HEAD")
 	cmd.Dir = repoDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -244,7 +336,7 @@ func CurrentBranch(ctx context.Context, repoDir string) (string, error) {
 }
 
 func stageFile(ctx context.Context, repoDir, path string) error {
-	cmd := exec.CommandContext(ctx, "git", "add", "--", path)
+	cmd := newGitCmd(ctx, "add", "--", path)
 	cmd.Dir = repoDir
 	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -260,14 +352,14 @@ func commitFile(ctx context.Context, repoDir, path, message string, author Autho
 	}
 	args = append(args, "--", path)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmd(ctx, args...)
 	cmd.Dir = repoDir
 	cmd.Env = append(os.Environ(), "GIT_LITERAL_PATHSPECS=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git commit %s: %s", path, strings.TrimSpace(string(out)))
 	}
 
-	shaCmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	shaCmd := newGitCmd(ctx, "rev-parse", "HEAD")
 	shaCmd.Dir = repoDir
 	shaOut, err := shaCmd.CombinedOutput()
 	if err != nil {

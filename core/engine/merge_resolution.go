@@ -717,17 +717,34 @@ func (o *Orchestrator) writeMergeRecoveryLedgerCommit(
 	if o.bindingOn {
 		return o.writeBoundLedgerCommit(ctx, run, repositoryID, action)
 	}
+	// Checkout run → commit → push → checkout main is one git-only block
+	// on the shared working tree (INIT-023 TASK-012, worktree.go); the
+	// callers' outcome writes and events run after it.
+	var sha string
+	err := o.withTree(ctx, func(ctx context.Context) error {
+		var err error
+		sha, err = o.writeLedgerOnRunBranch(ctx, run, repositoryID, action)
+		return err
+	})
+	return sha, err
+}
+
+// writeLedgerOnRunBranch is writeMergeRecoveryLedgerCommit's git sequence
+// (binding off). ctx is the block's.
+func (o *Orchestrator) writeLedgerOnRunBranch(ctx context.Context, run *domain.Run, repositoryID string, action mergeRecoveryAction) (string, error) {
 	// The checkout restore at the end runs on a separate, bounded
 	// context so it survives the request being cancelled mid-flight.
 	// Without this, an HTTP client disconnect after the run-branch
 	// checkout would leave the shared primary clone on the run
 	// branch, confusing every subsequent scheduler tick and operator
-	// action that assumes the working tree is on `main`.
+	// action that assumes the working tree is on `main`. It keeps ctx's
+	// values (WithoutCancel): inside the block that is the tree's ticket,
+	// so the restore re-enters the sequence instead of waiting for it.
 	if err := o.git.Checkout(ctx, run.BranchName); err != nil {
 		return "", fmt.Errorf("checkout %s: %w", run.BranchName, err)
 	}
 	defer func() {
-		restoreCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		if err := o.git.Checkout(restoreCtx, authoritativeBranch); err != nil {
 			observe.Logger(ctx).Warn("failed to restore main checkout after ledger commit",
