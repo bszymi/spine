@@ -403,43 +403,79 @@ func buildScheduler(
 		opts = append(opts, scheduler.WithOrphanThreshold(orphanThreshold))
 	}
 	if orch != nil {
-		opts = append(opts,
-			scheduler.WithStepRecovery(func(ctx context.Context, execID string) error {
-				exec, err := st.GetStepExecution(ctx, execID)
-				if err != nil {
-					return err
-				}
-				if exec.Status == domain.StepStatusCompleted {
-					// The only engine path that re-routes a completed
-					// execution (INIT-023 TASK-008): it re-checks the run
-					// is active, at this step and without a successor.
-					return orch.RecoverCompletedStep(ctx, execID)
-				}
-				return orch.RetryStep(ctx, exec)
-			}),
-			scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
-				return orch.FailRun(ctx, runID, reason)
-			}),
-			// The run-timeout cancel writes the run row directly; this
-			// hook closes the run's live executions afterwards (INIT-023
-			// TASK-007). A no-op unless the step-entry policy sets
-			// TerminateStepsOnCancel.
-			scheduler.WithRunTerminated(orch.TerminateLiveSteps),
-			// The retry budget is enforced (INIT-023 TASK-012, P3-27): after
-			// defaultCommitMaxRetries automatic retries of a transiently
-			// failing merge the run is handed to AbandonExhaustedMerge,
-			// which routes it like a permanent merge failure. A merge held
-			// for an operator governance decision is not a failed retry
-			// (INIT-023 TASK-006): it records no outcome, so it never
-			// counts against the budget, and the wrapper keeps it out of
-			// the Error log.
-			scheduler.WithCommitRetry(governanceAwareCommitRetry(func(ctx context.Context, runID string) error {
-				return orch.MergeRunBranch(ctx, runID)
-			}), defaultCommitMaxRetries, 2*time.Minute),
-			scheduler.WithCommitExhausted(orch.AbandonExhaustedMerge),
-		)
+		opts = append(opts, engineSchedulerOptions(st, orch)...)
 	}
 	return scheduler.New(st, events, opts...)
+}
+
+// schedulerEngine is the engine surface the scheduler callbacks of both
+// builders call (*engine.Orchestrator). The wiring tests drive exactly
+// these callbacks over a fake (INIT-023 wave 4 review: a regression of the
+// step-recovery callback, or of the governance-aware retry wrapper, used
+// to pass every serve test).
+type schedulerEngine interface {
+	RecoverCompletedStep(ctx context.Context, executionID string) error
+	RetryStep(ctx context.Context, exec *domain.StepExecution) error
+	FailRun(ctx context.Context, runID, reason string) error
+	TerminateLiveSteps(ctx context.Context, runID, message string)
+	MergeRunBranch(ctx context.Context, runID string) error
+	AbandonExhaustedMerge(ctx context.Context, runID string, maxRetries int) (bool, error)
+}
+
+// engineSchedulerOptions are buildScheduler's engine callbacks.
+func engineSchedulerOptions(st store.Store, eng schedulerEngine) []scheduler.Option {
+	return []scheduler.Option{
+		scheduler.WithStepRecovery(stepRecoveryFor(st, eng)),
+		scheduler.WithRunFail(func(ctx context.Context, runID, reason string) error {
+			return eng.FailRun(ctx, runID, reason)
+		}),
+		// The run-timeout cancel writes the run row directly; this
+		// hook closes the run's live executions afterwards (INIT-023
+		// TASK-007). A no-op unless the step-entry policy sets
+		// TerminateStepsOnCancel.
+		scheduler.WithRunTerminated(eng.TerminateLiveSteps),
+		// The retry budget is enforced (INIT-023 TASK-012, P3-27): after
+		// defaultCommitMaxRetries automatic retries of a transiently
+		// failing merge the run is handed to AbandonExhaustedMerge,
+		// which routes it like a permanent merge failure. A merge held
+		// for an operator governance decision is not a failed retry
+		// (INIT-023 TASK-006): it records no outcome, so it never
+		// counts against the budget, and the wrapper keeps it out of
+		// the Error log.
+		scheduler.WithCommitRetry(commitRetryFor(eng), defaultCommitMaxRetries, 2*time.Minute),
+		scheduler.WithCommitExhausted(eng.AbandonExhaustedMerge),
+	}
+}
+
+// stepExecutionGetter is the store read stepRecoveryFor needs.
+type stepExecutionGetter interface {
+	GetStepExecution(ctx context.Context, executionID string) (*domain.StepExecution, error)
+}
+
+// stepRecoveryFor is the startup step-recovery callback of both builders.
+// A completed execution is re-routed through RecoverCompletedStep, the
+// only engine path that re-routes one (INIT-023 TASK-008): it re-checks
+// the run is active, at this step and without a successor. SubmitStepResult
+// refuses an execution that is already terminal, so the run would stay on
+// its completed step. Anything else is retried.
+func stepRecoveryFor(st stepExecutionGetter, eng schedulerEngine) func(ctx context.Context, execID string) error {
+	return func(ctx context.Context, execID string) error {
+		exec, err := st.GetStepExecution(ctx, execID)
+		if err != nil {
+			return err
+		}
+		if exec.Status == domain.StepStatusCompleted {
+			return eng.RecoverCompletedStep(ctx, execID)
+		}
+		return eng.RetryStep(ctx, exec)
+	}
+}
+
+// commitRetryFor is the commit-retry callback of both builders: the
+// governed merge behind the governance-aware wrapper (a hold is not a
+// failed retry and logs no Error line; INIT-023 TASK-006 AC 35).
+func commitRetryFor(eng schedulerEngine) func(ctx context.Context, runID string) error {
+	return governanceAwareCommitRetry(eng.MergeRunBranch)
 }
 
 // buildGitHTTPHandler assembles the git HTTP handler. Returns nil when

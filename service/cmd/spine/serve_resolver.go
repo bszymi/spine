@@ -192,25 +192,14 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 		ss.EvidenceQuerier = evidence.NewQuerier(ss.GitClient)
 	}
 
-	ss.CommitRetryFn = governanceAwareCommitRetry(func(ctx context.Context, runID string) error {
-		return orch.MergeRunBranch(ctx, runID)
-	})
+	ss.CommitRetryFn = commitRetryFor(orch)
 	// The merge retry budget's exhaustion handler (INIT-023 TASK-012,
 	// P3-27), so a future wiring of the multi-workspace scheduler gets the
 	// bound (owner question 3: wiring it is a follow-up).
 	ss.CommitExhaustedFn = orch.AbandonExhaustedMerge
-	ss.StepRecoveryFn = func(ctx context.Context, execID string) error {
-		exec, err := ss.Store.GetStepExecution(ctx, execID)
-		if err != nil {
-			return err
-		}
-		if exec.Status == domain.StepStatusCompleted {
-			// See buildScheduler: recovery re-routes through
-			// RecoverCompletedStep, never SubmitStepResult (INIT-023 TASK-008).
-			return orch.RecoverCompletedStep(ctx, execID)
-		}
-		return orch.RetryStep(ctx, exec)
-	}
+	// Recovery re-routes a completed execution through RecoverCompletedStep,
+	// never SubmitStepResult (INIT-023 TASK-008; stepRecoveryFor).
+	ss.StepRecoveryFn = stepRecoveryFor(ss.Store, orch)
 	ss.RunFailFn = func(ctx context.Context, runID, reason string) error {
 		return orch.FailRun(ctx, runID, reason)
 	}
