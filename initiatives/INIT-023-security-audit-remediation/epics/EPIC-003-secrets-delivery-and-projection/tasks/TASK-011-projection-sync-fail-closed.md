@@ -2185,3 +2185,26 @@ unless noted.
 
 All `cxp_*` databases were dropped afterwards. The only containers started were the `--rm` test
 runs above.
+
+### Adversarial review of the wave 4 follow-up (2026-10-20)
+
+Recorded in full on TASK-003 ("Adversarial review of the follow-up"); fixed in `6fa432e4` on
+`init/INIT-023-wave4-integration`, not pushed. Two findings touched this task's design:
+
+- **The classifier's "a blob there means git failed" rule (P2).** `TreeEntryType` types an entry
+  from its mode, and a regular-file entry can record the id of a tree, a commit or a tag. After
+  the follow-up's `cat-file blob <oid>` read, such an entry failed with a plain `bad file`, and
+  `classifyReadFailure` / `readFileEntry` took the mode's "blob" as proof that git had failed: the
+  sync was held on every tick, a plantable wedge. The rule still holds, because the git client
+  now proves the object's own type before it reads (`cat-file -t`) and refuses anything but a blob
+  as `git.ErrNotBlob` with `NotBlobError.FileEntry`. The classifier consults that refusal before
+  the tree (`notBlobEntry` → the new description `non_blob_object`), so the case is deterministic:
+  a `not_a_file` rejection for a workflow, a held sync with the rules kept for branch protection,
+  and a `not_a_file` skip for an artifact.
+- **Review round 2's typing before the read (P1).** It typed the entry, not the object, so a
+  file entry recording an annotated tag whose target is a review-less body read as that body (the
+  tag was peeled), while diffs show the tag object's text. The same client check closes it.
+  `TestProjection_FileEntryRecordingATagAt{WorkflowPathIsRejection,BranchProtectionIsHeld}` and
+  `TestIncrementalSync_FileEntryRecordingATreeOrCommitAdvances` pin both; each fails without the
+  fix. AC 28 (branch validation ignores `ReadErrors`) is unchanged: such a file is a refusal now,
+  not a read error, so `TestValidateBranch_FileEntryRecordingANonBlobObjectFails` fails it.
