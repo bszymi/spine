@@ -631,6 +631,11 @@ type takeBack struct {
 	// restoredTo is the commit the target was moved back to; "" when it
 	// was not moved or the take-back failed.
 	restoredTo string
+	// target is the commit the take-back was to restore the target to,
+	// also when it failed; "" when the target did not move or the merge
+	// result was incomplete. A failed take-back's block names it
+	// (recordGovernanceBlock, INIT-023 wave 4 integration).
+	target string
 }
 
 // takeBackRefusedMerge restores the local target after verifyBoundMerge
@@ -688,11 +693,11 @@ func (o *Orchestrator) takeBackRefusedMerge(ctx context.Context, binder CommitBi
 	if err := binder.ResetBranch(ctx, target, restoreTo, m); err != nil {
 		log.Error("merge binding: refused merge NOT taken back; reset the local branch before the next governed merge",
 			"repository_id", repoIDForLog(repoID), "branch", target, "merge_sha", m, "restore_to", restoreTo, "error", err)
-		return takeBack{detail: "the local " + target + " still holds the refused merge (take-back failed)"}
+		return takeBack{detail: "the local " + target + " still holds the refused merge (take-back failed)", target: restoreTo}
 	}
 	log.Warn("merge binding: refused merge taken back",
 		"repository_id", repoIDForLog(repoID), "branch", target, "merge_sha", m, "restored_to", restoreTo)
-	return takeBack{detail: "the local " + target + " was restored to " + restoreTo, clean: true, restoredTo: restoreTo}
+	return takeBack{detail: "the local " + target + " was restored to " + restoreTo, clean: true, restoredTo: restoreTo, target: restoreTo}
 }
 
 // refusalRetryable reports whether a merge verifyBoundMerge refused may
@@ -788,18 +793,25 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 			o.abortMerge(ctx)
 			return nil
 		}
-		verr := o.verifyBoundMerge(ctx, o.binder, run.BranchName, src, mergeResult)
-		if verr == nil && src.lifecycle != nil {
-			// V1 (INIT-023 TASK-017): what the merge lands is what the
-			// status lifecycle judged. Its git reads run in the block, and
-			// its refusal is taken back here like verifyBoundMerge's, so no
-			// later holder of the tree builds on the refused merge.
-			verr = o.verifyLifecycleMerge(ctx, src.lifecycle, src.sha, mergeResult)
-		}
-		if verr != nil {
+		if verr := o.verifyBoundMerge(ctx, o.binder, run.BranchName, src, mergeResult); verr != nil {
 			verdict = verr
 			tb = o.takeBackRefusedMerge(ctx, o.binder, domain.PrimaryRepositoryID, authoritativeBranch, mergeResult, verr)
 			return nil
+		}
+		if src.lifecycle != nil {
+			// V1 (INIT-023 TASK-017): what the merge lands is what the
+			// status lifecycle judged. Its git reads run in the block, and
+			// its refusal is taken back here, so no later holder of the
+			// tree builds on the refused merge. verifyBoundMerge has
+			// accepted the merge, so the target held exactly BaseSHA
+			// before it: the take-back restores that, never a first parent
+			// (for a fast-forward to a merge commit that would be run-branch
+			// content; INIT-023 wave 4 integration, as TASK-006's).
+			if verr := o.verifyLifecycleMerge(ctx, src.lifecycle, src.sha, mergeResult); verr != nil {
+				verdict = verr
+				tb = o.takeBackToBase(ctx, mergeResult, "status lifecycle")
+				return nil
+			}
 		}
 		// Governance-path guard (INIT-023 TASK-006): the post-merge
 		// assertion and, for an approved merge, the consumption marker —
@@ -839,7 +851,16 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 
 	if verdict != nil {
 		// verifyBoundMerge's or V1's refusal; the take-back already ran,
-		// in the block.
+		// in the block. One that failed leaves the refused merge on the
+		// local main: the shared tree refuses every later holder until the
+		// take-back completes (git.CLIClient's pending take-back, INIT-023
+		// TASK-012), and with the governance guard on the merge is also
+		// blocked for every governed merge, as for a refusal of the guard
+		// itself (INIT-023 wave 4 integration; KNOWN-LIMITATIONS
+		// "Governance-Path Guard" 6).
+		if !tb.clean {
+			o.blockGovernedMergesOn(ctx, run, mergeResult.SHA, tb.target)
+		}
 		if msg, ok := refusalRetryable(verdict, tb); ok {
 			// The target is back where it was (or at the write that moved
 			// it) and nothing of the attempt survives: not a verdict on

@@ -251,8 +251,12 @@ func TestStatusLifecycle_FailsClosed(t *testing.T) {
 			if f.run.Status != domain.RunStatusCommitting || len(f.git.merges) != 0 || f.git.callCount("Merge ") != 0 {
 				t.Fatalf("run %s, MergeBound %d; want committing and no merge", f.run.Status, len(f.git.merges))
 			}
-			if len(f.store.mergeOutcomes) != 0 {
-				t.Fatalf("a transient failure recorded an outcome: %+v", f.store.mergeOutcomes)
+			// A counted attempt (INIT-023 wave 4 integration, TASK-012's
+			// retry budget): one failed, transient primary outcome, no
+			// merge commit.
+			if po := f.primaryOutcome(); len(f.store.mergeOutcomes) != 1 || po == nil || po.Attempts != 1 ||
+				po.Status != domain.RepositoryMergeStatusFailed || !po.FailureClass.IsTransient() || po.MergeCommitSHA != "" {
+				t.Fatalf("a transient failure must record one failed, transient attempt: %+v", f.store.mergeOutcomes)
 			}
 		})
 	}

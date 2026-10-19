@@ -936,8 +936,14 @@ func (o *Orchestrator) recordGovernanceHold(ctx context.Context, run *domain.Run
 			RuleID:         GovernanceHoldRuleID,
 		}
 		if !reflect.DeepEqual(target.ErrorDetail, detail) {
+			// Conditional on the row the hold target read (INIT-023
+			// TASK-008's step compare-and-swap, when the store has it;
+			// INIT-023 wave 4 integration): a stale copy of a step another
+			// attempt or decision moved meanwhile is never written back
+			// over it.
+			prior := stateOf(target)
 			target.ErrorDetail = detail
-			if err := o.store.UpdateStepExecution(ctx, target); err != nil {
+			if err := o.writeStepExecution(ctx, target, prior); err != nil {
 				log.Warn("governance guard: failed to record the hold on the step",
 					"run_id", run.RunID, "step_id", target.StepID, "error", err)
 			}
@@ -1203,28 +1209,81 @@ func quotePaths(ps []string, limit int) []string {
 
 // takeBackGovernedMerge restores the local target to exactly BaseSHA after
 // the guard refused a merge that verifyBoundMerge had accepted (or after a
-// failed marker write). Unlike takeBackRefusedMerge it never moves the
-// target to a first parent: an accepted merge is [BaseSHA, S], a
+// failed marker write): takeBackToBase.
+func (o *Orchestrator) takeBackGovernedMerge(ctx context.Context, res git.MergeResult) takeBack {
+	return o.takeBackToBase(ctx, res, "governance guard")
+}
+
+// takeBackToBase restores the local target to exactly BaseSHA after a
+// check that runs once verifyBoundMerge has accepted the merge refused it
+// — TASK-006's post-merge assertion or failed marker write, TASK-017's V1
+// (who names it in the log). Unlike takeBackRefusedMerge it never moves
+// the target to a first parent: an accepted merge is [BaseSHA, S], a
 // fast-forward to S, or nothing, so the target held BaseSHA before it —
 // and for a fast-forward, S's own first parent is run-branch content,
 // which must not stay on the target. Compare-and-swap through
-// ResetBranch; a failure is logged at Error (the local target then still
-// holds the refused merge and must be reset before the next merge).
-func (o *Orchestrator) takeBackGovernedMerge(ctx context.Context, res git.MergeResult) takeBack {
+// ResetBranch, inside the primary merge block (git.CLIClient's armed,
+// tree-locked take-back on the shared tree); a failure is logged at Error
+// (the local target then still holds the refused merge and must be reset
+// before the next merge).
+func (o *Orchestrator) takeBackToBase(ctx context.Context, res git.MergeResult, who string) takeBack {
 	if res.SHA == res.BaseSHA {
 		return takeBack{detail: "the local " + authoritativeBranch + " was not moved", clean: true}
 	}
 	if !isBoundObjectID(res.SHA) || !isBoundObjectID(res.BaseSHA) {
-		observe.Logger(ctx).Error("governance guard: refused merge NOT taken back (merge result incomplete); reset the local branch before the next governed merge",
+		observe.Logger(ctx).Error(who+": refused merge NOT taken back (merge result incomplete); reset the local branch before the next governed merge",
 			"branch", authoritativeBranch, "merge_sha", res.SHA, "base_sha", res.BaseSHA)
 		return takeBack{detail: "the local " + authoritativeBranch + " may still hold the refused merge (merge result incomplete)"}
 	}
 	if err := o.binder.ResetBranch(ctx, authoritativeBranch, res.BaseSHA, res.SHA); err != nil {
-		observe.Logger(ctx).Error("governance guard: refused merge NOT taken back; reset the local branch before the next governed merge",
+		observe.Logger(ctx).Error(who+": refused merge NOT taken back; reset the local branch before the next governed merge",
 			"branch", authoritativeBranch, "merge_sha", res.SHA, "restore_to", res.BaseSHA, "error", err)
-		return takeBack{detail: "the local " + authoritativeBranch + " still holds the refused merge (take-back failed)"}
+		return takeBack{detail: "the local " + authoritativeBranch + " still holds the refused merge (take-back failed)", target: res.BaseSHA}
 	}
-	return takeBack{detail: "the local " + authoritativeBranch + " was restored to " + res.BaseSHA, clean: true, restoredTo: res.BaseSHA}
+	return takeBack{detail: "the local " + authoritativeBranch + " was restored to " + res.BaseSHA, clean: true, restoredTo: res.BaseSHA, target: res.BaseSHA}
+}
+
+// blockGovernedMergesOn records a refused merge whose take-back failed as
+// a governance block (recordGovernanceBlock) while the guard is on,
+// whichever check refused it (INIT-023 wave 4 integration). With the
+// guard off, or without the commits to name, it does nothing: the shared
+// tree's pending take-back still refuses every later holder (INIT-023
+// TASK-012), and an embedder's operator keeps TASK-005's behaviour.
+func (o *Orchestrator) blockGovernedMergesOn(ctx context.Context, run *domain.Run, merge, restoreTo string) {
+	if o.governance == nil || !o.bindingOn || !isBoundObjectID(merge) || !isBoundObjectID(restoreTo) {
+		return
+	}
+	o.recordGovernanceBlock(ctx, run, merge, restoreTo)
+}
+
+// governanceKeepsCommitting reports why the merge retry budget
+// (AbandonExhaustedMerge, INIT-023 TASK-012) must not abandon a committing
+// run while the guard is on (INIT-023 wave 4 integration), or "":
+//
+//   - a refused merge of the run is still blocked on the local target
+//     (CommitMetaGovernanceBlockedTarget): like a merge that landed
+//     locally, routing the run away would contradict the branch, and its
+//     retries are what keep trying the take-back after a restart;
+//   - the merge is held for an operator decision (the hold target carries
+//     the hold): a hold records no attempt, but the transient failures
+//     before the gate on the held run's ticks do, and a long hold must not
+//     turn them into an abandonment the operator never decided. The
+//     approval clears the hold; the approved merge's own transient
+//     failures are bounded again.
+func (o *Orchestrator) governanceKeepsCommitting(ctx context.Context, run *domain.Run) string {
+	if o.governance == nil || !o.bindingOn {
+		return ""
+	}
+	if v := run.CommitMeta[CommitMetaGovernanceBlockedTarget]; v != "" {
+		if m, b, ok := strings.Cut(v, " "); ok && isBoundObjectID(m) && isBoundObjectID(b) {
+			return "a merge the guard refused for this run is still blocked on the local " + authoritativeBranch
+		}
+	}
+	if t := o.governanceHoldTarget(ctx, run); t != nil && t.ErrorDetail != nil &&
+		t.ErrorDetail.Classification == domain.FailureGovernanceApprovalRequired && t.ErrorDetail.RuleID == GovernanceHoldRuleID {
+		return "the merge is held for an operator governance decision"
+	}
+	return ""
 }
 
 // recordGovernanceBlock remembers a refused merge that is still on the

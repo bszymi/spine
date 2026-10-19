@@ -112,8 +112,14 @@ const retriesExhaustedMarker = "retries exhausted ("
 // after a merge_failed loop-back and rework, the previous episode's
 // exhausted outcome no longer abandons the new episode before its first
 // attempt; its first transient failure does (owner question 4). Across
-// processes sharing one database the residual race remains until
-// TASK-008's compare-and-swap writes (KNOWN-LIMITATIONS).
+// processes sharing one database the routing itself is conditional
+// (INIT-023 TASK-008's compare-and-swap run and step writes: a route that
+// loses to a concurrent completion writes nothing); the re-record of the
+// exhausted outcome is not (KNOWN-LIMITATIONS).
+//
+// With the governance-path guard on, a run held for an operator decision
+// and a run whose refused merge is still blocked on the local target are
+// never abandoned (governanceKeepsCommitting).
 func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, maxRetries int) (bool, error) {
 	if maxRetries <= 0 {
 		return false, nil
@@ -164,6 +170,15 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 	if !current {
 		observe.Logger(ctx).Info("exhausted merge outcome predates the run's current committing episode; waiting for this episode's attempt",
 			"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts)
+		return false, nil
+	}
+	// The governance-path guard keeps a held run, and a run whose refused
+	// merge is still blocked on the local target, in committing (INIT-023
+	// wave 4 integration; governanceKeepsCommitting): neither is abandoned
+	// by the budget. Never the case with the guard off.
+	if why := o.governanceKeepsCommitting(ctx, run); why != "" {
+		observe.Logger(ctx).Info("merge retries spent, but the run stays in committing: "+why,
+			"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts, "max_retries", maxRetries)
 		return false, nil
 	}
 	cause := &MergeRetriesExhaustedError{

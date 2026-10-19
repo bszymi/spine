@@ -860,6 +860,22 @@ func (o *Orchestrator) resolveLifecycleSource(ctx context.Context, run *domain.R
 	case err != nil:
 		observe.Logger(ctx).Warn("status lifecycle: transient failure judging the bound commit; the run stays in committing",
 			"run_id", run.RunID, "bound_sha", src.bound, "error", err)
+		// A counted attempt (INIT-023 wave 4 integration; TASK-012's §3
+		// cross-task requirement): recorded as a failed primary outcome
+		// with a transient class, so the merge retry budget bounds this
+		// exit like TASK-005's transient VerifyCommit instead of retrying
+		// it every tick forever. The run status is re-read first, so a
+		// second entry for a run another entry has just completed never
+		// overwrites its merged outcome. MergeRunBranch still returns the
+		// error (AC 9).
+		if done, ret := blockExit(o.requireStillCommitting(ctx, run.RunID)); done {
+			return mergeSource{}, true, ret
+		}
+		counted := &git.GitError{Kind: git.ErrKindTransient, Op: "status_lifecycle",
+			Message: "status lifecycle: the bound commit could not be judged (will retry): " + err.Error(), Err: err}
+		if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", counted, ""); recErr != nil {
+			return mergeSource{}, true, recErr
+		}
 		return mergeSource{}, true, err
 	}
 	src.sha = c

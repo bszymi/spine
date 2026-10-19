@@ -168,6 +168,13 @@ func (o *Orchestrator) DecideGovernanceMerge(ctx context.Context, req Governance
 			return nil, domain.NewErrorWithCause(domain.ErrPrecondition,
 				"the merge cannot be evaluated ("+unevaluableReason(err)+"); the guard refuses it and routes the run back, so there is nothing to decide", err)
 		}
+		if errors.Is(err, errLifecycleRefusesMerge) {
+			// Nothing to decide either (INIT-023 wave 4 integration): the
+			// status lifecycle refuses the merge before the gate on its
+			// next attempt and routes the run back.
+			return nil, domain.NewErrorWithCause(domain.ErrPrecondition,
+				"the status lifecycle refuses this merge; its next attempt routes the run back, so there is nothing to decide", err)
+		}
 		return nil, domain.NewErrorWithCause(domain.ErrUnavailable,
 			"the merge's changed paths could not be computed; try again", err)
 	}
@@ -287,9 +294,11 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 		return result, nil
 	}
 
-	// No publish step: fail the run, compare-and-swap from committing
-	// (failRunOnMergeError's write is blind until INIT-023 TASK-008, and
-	// an approve on another request may have completed the merge).
+	// No publish step: fail the run, compare-and-swap from committing (an
+	// approve on another request may have completed the merge). Not
+	// failRunOnMergeError, although its write is a compare-and-swap too
+	// since INIT-023 TASK-008: a reject that lost must answer 409, which
+	// needs to know whether the write applied.
 	applied, err := o.store.TransitionRunStatus(ctx, run.RunID, domain.RunStatusCommitting, domain.RunStatusFailed)
 	if err != nil {
 		return nil, domain.NewErrorWithCause(domain.ErrInternal, "fail the rejected run", err)
@@ -443,8 +452,12 @@ func (o *Orchestrator) clearGovernanceHold(ctx context.Context, run *domain.Run)
 		target.ErrorDetail.Classification != domain.FailureGovernanceApprovalRequired {
 		return
 	}
+	// Conditional on the row read (INIT-023 TASK-008's step
+	// compare-and-swap, when the store has it; INIT-023 wave 4
+	// integration), like the hold's own write.
+	prior := stateOf(target)
 	target.ErrorDetail = nil
-	if err := o.store.UpdateStepExecution(ctx, target); err != nil {
+	if err := o.writeStepExecution(ctx, target, prior); err != nil {
 		observe.Logger(ctx).Warn("governance guard: failed to clear the hold on the step",
 			"run_id", run.RunID, "step_id", target.StepID, "error", err)
 	}
@@ -453,7 +466,8 @@ func (o *Orchestrator) clearGovernanceHold(ctx context.Context, run *domain.Run)
 // governanceCheckForRun computes the governance facts of the run's merge
 // exactly as the gate does, without the gate's side effects (no outcome
 // row, no routing): the trusted binding, the commit check, and the
-// bound status cascade. It mirrors resolveMergeSource (merge_binding.go);
+// bound status cascade — the status lifecycle's when it is on. It mirrors
+// resolveMergeSource (merge_binding.go and resolveLifecycleSource);
 // the two must agree, or a held run could not be decided (pinned by
 // TestGovernanceGuard_EveryHoldIsDecidable).
 func (o *Orchestrator) governanceCheckForRun(ctx context.Context, run *domain.Run) (*branchprotect.GovernanceCheck, error) {
@@ -465,6 +479,24 @@ func (o *Orchestrator) governanceCheckForRun(ctx context.Context, run *domain.Ru
 		return nil, fmt.Errorf("bound commit %s: %w", bound, err)
 	}
 	src := mergeSource{bound: bound, sha: bound}
+	if o.lifecycle != nil {
+		// resolveMergeSource's lifecycle step (INIT-023 TASK-017): with the
+		// status lifecycle on, the merge source is the lifecycle's cascade
+		// (owned paths only), judged even with no commit.status, and it
+		// never degrades to the bound commit (INIT-023 wave 4
+		// integration). A refusal leaves nothing to decide: the next merge
+		// attempt refuses the merge and routes the run back.
+		c, _, err := o.applyStatusLifecycleAt(ctx, run, run.CommitMeta["status"], bound)
+		var le *StatusLifecycleError
+		switch {
+		case errors.As(err, &le):
+			return nil, fmt.Errorf("%w: %v", errLifecycleRefusesMerge, le)
+		case err != nil:
+			return nil, err
+		}
+		src.sha = c
+		return o.buildGovernanceCheck(ctx, run, src)
+	}
 	if newStatus := run.CommitMeta["status"]; newStatus != "" {
 		c, err := o.applyCommitStatusAt(ctx, run, newStatus, bound)
 		switch {
@@ -479,6 +511,11 @@ func (o *Orchestrator) governanceCheckForRun(ctx context.Context, run *domain.Ru
 	}
 	return o.buildGovernanceCheck(ctx, run, src)
 }
+
+// errLifecycleRefusesMerge marks governance facts that cannot be computed
+// because the status lifecycle (INIT-023 TASK-017) refuses the merge
+// before the gate would run (governanceCheckForRun).
+var errLifecycleRefusesMerge = errors.New("the status lifecycle refuses the merge")
 
 // GovernanceApprovalRecord is the approval recorded on a run, as stored.
 type GovernanceApprovalRecord struct {
@@ -550,6 +587,9 @@ func (o *Orchestrator) GovernanceMergeStatus(ctx context.Context, runID string) 
 		st.EvaluationError = "the merge's changed paths could not be computed"
 		if unevaluableForever(err) {
 			st.EvaluationError = "the merge cannot be evaluated: " + unevaluableReason(err)
+		}
+		if errors.Is(err, errLifecycleRefusesMerge) {
+			st.EvaluationError = "the status lifecycle refuses the merge"
 		}
 		return st, nil
 	}
