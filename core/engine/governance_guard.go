@@ -433,6 +433,14 @@ func (o *Orchestrator) governanceGate(ctx context.Context, run *domain.Run, src 
 			"run_id", run.RunID, "branch", authoritativeBranch, "reasons", denyReasonCodes(reasons))
 		return true, domain.NewError(domain.ErrForbidden, firstMergeDenyMessage(reasons, run.RunID))
 	}
+	// Allowed: a hold still recorded on the run's steps is stale — the
+	// approval's own clear failed, or the run's commits reached main
+	// another way and nothing is left to approve — and would keep the
+	// retry budget from ever applying (INIT-023 wave 4 review).
+	if err := o.clearGovernanceHold(ctx, run); err != nil {
+		log.Warn("governance guard: a stale hold could not be cleared; the next allowed attempt retries",
+			"run_id", run.RunID, "error", err)
+	}
 	src.gov = &governancePass{
 		check:    gc,
 		touched:  touched,
@@ -892,20 +900,30 @@ func (o *Orchestrator) mergeRunCommitMeta(ctx context.Context, runID string, pat
 
 // governanceHoldTarget is the step a hold is recorded on, and whose
 // execution id names the hold episode: the run's active publish step, or
-// — on a workflow with no publish step — its last completed step (the
-// step whose outcome triggered the merge, as recordGitConflictOnStep
-// uses). nil when there is none.
-func (o *Orchestrator) governanceHoldTarget(ctx context.Context, run *domain.Run) *domain.StepExecution {
-	if wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion); err == nil && wfDef != nil {
-		if exec, _ := o.findActiveMergeStep(ctx, run, wfDef); exec != nil {
-			return exec
-		}
+// — on a workflow with no publish step, or none live — its last completed
+// step (the step whose outcome triggered the merge, as
+// recordGitConflictOnStep uses). nil when there is none. A workflow or
+// step-execution read that fails is an error, never "no publish step"
+// (INIT-023 wave 4 review): the hold record, its clearing and the retry
+// budget's held test would otherwise each pick a different step.
+func (o *Orchestrator) governanceHoldTarget(ctx context.Context, run *domain.Run) (*domain.StepExecution, error) {
+	wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+	if err == nil && wfDef == nil {
+		err = errors.New("no workflow definition")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load the run's workflow: %w", err)
 	}
 	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
 	if err != nil {
-		observe.Logger(ctx).Warn("governance guard: step executions unavailable for the hold record",
-			"run_id", run.RunID, "error", err)
-		return nil
+		return nil, fmt.Errorf("list the run's step executions: %w", err)
+	}
+	if id := publishStepID(wfDef); id != "" {
+		for i := range execs {
+			if execs[i].StepID == id && !execs[i].Status.IsTerminal() {
+				return &execs[i], nil
+			}
+		}
 	}
 	var last *domain.StepExecution
 	for i := range execs {
@@ -913,7 +931,24 @@ func (o *Orchestrator) governanceHoldTarget(ctx context.Context, run *domain.Run
 			last = &execs[i]
 		}
 	}
-	return last
+	return last, nil
+}
+
+// publishStepID is the workflow's publish step (type internal, handler
+// merge), or "".
+func publishStepID(wfDef *domain.WorkflowDefinition) string {
+	for i := range wfDef.Steps {
+		s := &wfDef.Steps[i]
+		if s.Type == domain.StepTypeInternal && s.Execution != nil && s.Execution.Handler == "merge" {
+			return s.ID
+		}
+	}
+	return ""
+}
+
+// isGovernanceHold reports a hold ErrorDetail (recordGovernanceHold).
+func isGovernanceHold(d *domain.ErrorDetail) bool {
+	return d != nil && d.Classification == domain.FailureGovernanceApprovalRequired && d.RuleID == GovernanceHoldRuleID
 }
 
 // recordGovernanceHold records a held merge: the hold ErrorDetail on the
@@ -925,7 +960,15 @@ func (o *Orchestrator) governanceHoldTarget(ctx context.Context, run *domain.Run
 // reject and resubmit gets a new event even for the same commit.
 func (o *Orchestrator) recordGovernanceHold(ctx context.Context, run *domain.Run, gc *branchprotect.GovernanceCheck, touched []string) {
 	log := observe.Logger(ctx)
-	target := o.governanceHoldTarget(ctx, run)
+	target, err := o.governanceHoldTarget(ctx, run)
+	if err != nil {
+		// Neither the hold nor its event is recorded on a guessed step
+		// (INIT-023 wave 4 review); the merge is still held, and the next
+		// attempt records both.
+		log.Warn("governance guard: the hold could not be recorded this time; the merge is held all the same",
+			"run_id", run.RunID, "error", err)
+		return
+	}
 	episode := "none"
 	if target != nil {
 		episode = target.ExecutionID
@@ -1296,29 +1339,68 @@ func (o *Orchestrator) blockGovernedMergesOn(ctx context.Context, run *domain.Ru
 // run while the guard is on (INIT-023 wave 4 integration), or "":
 //
 //   - a refused merge of the run is still blocked on the local target
-//     (CommitMetaGovernanceBlockedTarget): like a merge that landed
-//     locally, routing the run away would contradict the branch, and its
-//     retries are what keep trying the take-back after a restart;
+//     (CommitMetaGovernanceBlockedTarget) and still in its history: like a
+//     merge that landed locally, routing the run away would contradict the
+//     branch, and its retries are what keep trying the take-back after a
+//     restart. A recorded block whose merge is no longer in the local
+//     target's history (another run's gate took it back, an operator reset
+//     the branch) is stale: the key is cleared and the budget applies
+//     (INIT-023 wave 4 review);
 //   - the merge is held for an operator decision (the hold target carries
 //     the hold): a hold records no attempt, but the transient failures
 //     before the gate on the held run's ticks do, and a long hold must not
 //     turn them into an abandonment the operator never decided. The
-//     approval clears the hold; the approved merge's own transient
-//     failures are bounded again.
-func (o *Orchestrator) governanceKeepsCommitting(ctx context.Context, run *domain.Run) string {
+//     approval clears the hold (as does any attempt the gate allows); the
+//     approved merge's own transient failures are bounded again.
+//
+// A read it needs that fails is returned (INIT-023 wave 4 review): the
+// abandonment then skips the tick instead of deciding "not held".
+func (o *Orchestrator) governanceKeepsCommitting(ctx context.Context, run *domain.Run) (string, error) {
 	if o.governance == nil || !o.bindingOn {
-		return ""
+		return "", nil
 	}
 	if v := run.CommitMeta[CommitMetaGovernanceBlockedTarget]; v != "" {
 		if m, b, ok := strings.Cut(v, " "); ok && isBoundObjectID(m) && isBoundObjectID(b) {
-			return "a merge the guard refused for this run is still blocked on the local " + authoritativeBranch
+			on, err := o.mergeOnLocalTarget(ctx, m)
+			if err != nil {
+				return "", fmt.Errorf("check the run's blocked merge %s: %w", m, err)
+			}
+			if on {
+				return "a merge the guard refused for this run is still blocked on the local " + authoritativeBranch, nil
+			}
+			if err := o.mergeRunCommitMeta(ctx, run.RunID, map[string]string{CommitMetaGovernanceBlockedTarget: ""}); err != nil {
+				observe.Logger(ctx).Warn("governance guard: failed to clear a stale blocked target on the run",
+					"run_id", run.RunID, "merge_sha", m, "error", err)
+			}
 		}
 	}
-	if t := o.governanceHoldTarget(ctx, run); t != nil && t.ErrorDetail != nil &&
-		t.ErrorDetail.Classification == domain.FailureGovernanceApprovalRequired && t.ErrorDetail.RuleID == GovernanceHoldRuleID {
-		return "the merge is held for an operator governance decision"
+	t, err := o.governanceHoldTarget(ctx, run)
+	if err != nil {
+		return "", fmt.Errorf("read the run's governance hold: %w", err)
 	}
-	return ""
+	if t != nil && isGovernanceHold(t.ErrorDetail) {
+		return "the merge is held for an operator governance decision", nil
+	}
+	return "", nil
+}
+
+// mergeOnLocalTarget reports whether merge is in the local target's
+// history. A merge commit that no longer exists (taken back and pruned)
+// is not.
+func (o *Orchestrator) mergeOnLocalTarget(ctx context.Context, merge string) (bool, error) {
+	tip, err := o.binder.ResolveBranchHead(ctx, authoritativeBranch)
+	if err != nil {
+		return false, err
+	}
+	in, err := o.binder.IsAncestor(ctx, merge, tip)
+	if err != nil {
+		var gitErr *git.GitError
+		if errors.As(err, &gitErr) && gitErr.Kind == git.ErrKindNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return in, nil
 }
 
 // recordGovernanceBlock remembers a refused merge that is still on the

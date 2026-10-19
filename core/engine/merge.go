@@ -450,7 +450,14 @@ func (o *Orchestrator) handlePermanentMergeFailure(ctx context.Context, run *dom
 		return o.failRunOnMergeError(ctx, run, mergeErr)
 	}
 	stepExec, _ := o.findActiveMergeStep(ctx, run, wfDef)
-	if stepExec == nil {
+	return o.routePermanentMergeFailure(ctx, run, mergeErr, stepExec != nil)
+}
+
+// routePermanentMergeFailure is handlePermanentMergeFailure's route once
+// the caller has decided whether the run has a live publish step:
+// merge_failed through it, or a failed run.
+func (o *Orchestrator) routePermanentMergeFailure(ctx context.Context, run *domain.Run, mergeErr error, publish bool) error {
+	if !publish {
 		return o.failRunOnMergeError(ctx, run, mergeErr)
 	}
 	o.recordGitConflictOnStep(ctx, run, mergeErr)

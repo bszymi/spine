@@ -97,7 +97,9 @@ const retriesExhaustedMarker = "retries exhausted ("
 // with "retries exhausted (attempts=N, max_retries=M): ". The step the run
 // routes from carries domain.FailureMergeRetriesExhausted.
 //
-// No tree lock: this does no git work, and it routes steps (worktree.go).
+// No tree lock: it routes steps (worktree.go), and its only git work is
+// two reads with the guard on (governanceKeepsCommitting's check of a
+// recorded block).
 // The scheduler calls it (scheduler.CommitExhaustedFunc) before each
 // commit retry.
 //
@@ -119,7 +121,11 @@ const retriesExhaustedMarker = "retries exhausted ("
 //
 // With the governance-path guard on, a run held for an operator decision
 // and a run whose refused merge is still blocked on the local target are
-// never abandoned (governanceKeepsCommitting).
+// never abandoned (governanceKeepsCommitting); with V1 or the guard on,
+// nor is a run whose merge may be on the local main unverified
+// (mergeKeepsCommitting). A read those checks, or the route decision,
+// need that fails is returned with nothing written: the scheduler skips
+// the run this tick (INIT-023 wave 4 review).
 func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, maxRetries int) (bool, error) {
 	if maxRetries <= 0 {
 		return false, nil
@@ -175,11 +181,36 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 	// The governance-path guard keeps a held run, and a run whose refused
 	// merge is still blocked on the local target, in committing (INIT-023
 	// wave 4 integration; governanceKeepsCommitting): neither is abandoned
-	// by the budget. Never the case with the guard off.
-	if why := o.governanceKeepsCommitting(ctx, run); why != "" {
+	// by the budget. Never the case with the guard off. Nor is a run whose
+	// merge may be on the local main unverified (INIT-023 wave 4 review):
+	// its next attempt takes that merge back first (settleUnverifiedMerge),
+	// and routing it away would leave the merge there.
+	why, err := o.mergeKeepsCommitting(ctx, run)
+	if err != nil {
+		return false, err
+	}
+	if why != "" {
 		observe.Logger(ctx).Info("merge retries spent, but the run stays in committing: "+why,
 			"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts, "max_retries", maxRetries)
 		return false, nil
+	}
+	// The route is decided before anything is written (INIT-023 wave 4
+	// review, as rejectGovernanceMerge does): a workflow or step-execution
+	// read that fails must not be taken for "no publish step" and fail a
+	// run that should go back to execute. Unlike a merge attempt this
+	// decision can simply wait for the next tick.
+	publish := false
+	if ex.IsPrimaryRepository() {
+		wfDef, err := o.wfLoader.LoadWorkflow(ctx, run.WorkflowPath, run.WorkflowVersion)
+		if err == nil && wfDef == nil {
+			err = errors.New("no workflow definition")
+		}
+		if err != nil {
+			return false, fmt.Errorf("load the run's workflow: %w", err)
+		}
+		if publish, err = o.activePublishExecution(ctx, run, wfDef); err != nil {
+			return false, fmt.Errorf("list step executions: %w", err)
+		}
 	}
 	cause := &MergeRetriesExhaustedError{
 		RepositoryID: ex.RepositoryID,
@@ -212,7 +243,18 @@ func (o *Orchestrator) AbandonExhaustedMerge(ctx context.Context, runID string, 
 	observe.Logger(ctx).Error("governed merge retries exhausted; taking the permanent-failure route",
 		"run_id", runID, "repository_id", ex.RepositoryID, "attempts", ex.Attempts,
 		"max_retries", maxRetries, "failure_class", string(ex.FailureClass))
-	return true, o.handlePermanentMergeFailure(ctx, run, cause)
+	return true, o.routePermanentMergeFailure(ctx, run, cause, publish)
+}
+
+// mergeKeepsCommitting reports why the retry budget must not abandon a
+// committing run, or "": a merge-in-flight record (CommitMetaMergeUnverified,
+// written only with V1 or the guard on) or governanceKeepsCommitting.
+func (o *Orchestrator) mergeKeepsCommitting(ctx context.Context, run *domain.Run) (string, error) {
+	if o.verifiesMergeResult() && run.CommitMeta[CommitMetaMergeUnverified] != "" {
+		return "a merge of this run may be on the local " + authoritativeBranch +
+			" without its checks; the next attempt takes it back first", nil
+	}
+	return o.governanceKeepsCommitting(ctx, run)
 }
 
 // retriesAbandoned reports an outcome AbandonExhaustedMerge marked: a

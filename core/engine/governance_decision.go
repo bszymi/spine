@@ -136,6 +136,21 @@ func (o *Orchestrator) DecideGovernanceMerge(ctx context.Context, req Governance
 		return nil, domain.NewError(domain.ErrInvalidParams, "commit_sha must be a full hex commit id (40 or 64 characters)")
 	}
 
+	// A decision counts as a merge attempt in flight for the retry budget
+	// (mergeAttemptGate; INIT-023 wave 4 review): registered before the
+	// approval is recorded and the hold cleared, an abandonment that has
+	// started meanwhile is refused here (try again: nothing was recorded),
+	// and none can start until the decision — and the approved attempt —
+	// has finished. Before, an abandonment that read the hold after the
+	// approval cleared it routed the approved run back, and the approval's
+	// own MergeRunBranch then stood down without merging while the
+	// response said a merge was attempted.
+	end, ok := mergeAttemptGate.beginAttempt(req.RunID)
+	if !ok {
+		return nil, domain.NewError(domain.ErrUnavailable,
+			fmt.Sprintf("run %s: its exhausted merge retries are being abandoned right now; nothing was recorded (try again)", req.RunID))
+	}
+	defer end()
 	// One merge attempt or decision per run at a time (review round 1,
 	// governanceRunStripes): everything below reads the run fresh under
 	// the stripe, so a reject cannot interleave with an approved attempt
@@ -232,7 +247,10 @@ func (o *Orchestrator) approveGovernanceMerge(ctx context.Context, run *domain.R
 	if fresh, err := o.store.GetRun(ctx, run.RunID); err == nil {
 		run = fresh
 	}
-	o.clearGovernanceHold(ctx, run)
+	if err := o.clearGovernanceHold(ctx, run); err != nil {
+		log.Warn("governance guard: the hold could not be cleared after the approval; the approved attempt clears it",
+			"run_id", run.RunID, "error", err)
+	}
 
 	result.MergeAttempted = true
 	if err := o.MergeRunBranch(ctx, run.RunID); err != nil {
@@ -268,7 +286,10 @@ func (o *Orchestrator) rejectGovernanceMerge(ctx context.Context, run *domain.Ru
 	if fresh, err := o.store.GetRun(ctx, run.RunID); err == nil {
 		run = fresh
 	}
-	o.clearGovernanceHold(ctx, run)
+	if err := o.clearGovernanceHold(ctx, run); err != nil {
+		log.Warn("governance guard: the hold could not be cleared after the reject",
+			"run_id", run.RunID, "error", err)
+	}
 	rejectErr := &git.GitError{Kind: git.ErrKindPermanent, Op: "governance_guard",
 		Message: fmt.Sprintf("governance change rejected by %s: %s", req.Actor.ActorID, req.Reason)}
 
@@ -391,14 +412,7 @@ func (o *Orchestrator) revokeAgainAfterRoute(ctx context.Context, runID string) 
 // (merge-handler) step with a live execution — the reject's route-back.
 // Unlike findActiveMergeStep, a store failure is an error, not "none".
 func (o *Orchestrator) activePublishExecution(ctx context.Context, run *domain.Run, wfDef *domain.WorkflowDefinition) (bool, error) {
-	var publishID string
-	for i := range wfDef.Steps {
-		s := &wfDef.Steps[i]
-		if s.Type == domain.StepTypeInternal && s.Execution != nil && s.Execution.Handler == "merge" {
-			publishID = s.ID
-			break
-		}
-	}
+	publishID := publishStepID(wfDef)
 	if publishID == "" {
 		return false, nil
 	}
@@ -445,22 +459,33 @@ func (o *Orchestrator) emitGovernanceDecided(ctx context.Context, run *domain.Ru
 		fmt.Sprintf("evt-%s-governance-%s", shortTraceID(run.TraceID), suffix), raw)
 }
 
-// clearGovernanceHold removes a hold ErrorDetail from the hold target.
-func (o *Orchestrator) clearGovernanceHold(ctx context.Context, run *domain.Run) {
-	target := o.governanceHoldTarget(ctx, run)
-	if target == nil || target.ErrorDetail == nil ||
-		target.ErrorDetail.Classification != domain.FailureGovernanceApprovalRequired {
-		return
+// clearGovernanceHold removes the hold ErrorDetail from every step
+// execution of the run that carries one (INIT-023 wave 4 review): not from
+// one target it would have to work out again — a read that fails then
+// picked another step and left the hold in place, and the retry budget
+// kept treating an approved run as held. Each write is conditional on the
+// row read (INIT-023 TASK-008's step compare-and-swap, when the store has
+// it; INIT-023 wave 4 integration), like the hold's own write. It returns
+// the first failure; every caller logs it, and the next attempt the gate
+// allows clears what is left (governanceGate).
+func (o *Orchestrator) clearGovernanceHold(ctx context.Context, run *domain.Run) error {
+	execs, err := o.store.ListStepExecutionsByRun(ctx, run.RunID)
+	if err != nil {
+		return fmt.Errorf("list the run's step executions: %w", err)
 	}
-	// Conditional on the row read (INIT-023 TASK-008's step
-	// compare-and-swap, when the store has it; INIT-023 wave 4
-	// integration), like the hold's own write.
-	prior := stateOf(target)
-	target.ErrorDetail = nil
-	if err := o.writeStepExecution(ctx, target, prior); err != nil {
-		observe.Logger(ctx).Warn("governance guard: failed to clear the hold on the step",
-			"run_id", run.RunID, "step_id", target.StepID, "error", err)
+	var first error
+	for i := range execs {
+		e := &execs[i]
+		if !isGovernanceHold(e.ErrorDetail) {
+			continue
+		}
+		prior := stateOf(e)
+		e.ErrorDetail = nil
+		if err := o.writeStepExecution(ctx, e, prior); err != nil && first == nil {
+			first = fmt.Errorf("clear the hold on step %s: %w", e.StepID, err)
+		}
 	}
+	return first
 }
 
 // governanceCheckForRun computes the governance facts of the run's merge
