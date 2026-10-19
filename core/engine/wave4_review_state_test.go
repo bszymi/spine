@@ -22,10 +22,15 @@ type flakyLoader struct {
 	wf    *domain.WorkflowDefinition
 	fails int
 	calls int
+	// okFirst > 0: the first okFirst calls succeed, every later one fails.
+	okFirst int
 }
 
 func (l *flakyLoader) LoadWorkflow(_ context.Context, _, _ string) (*domain.WorkflowDefinition, error) {
 	l.calls++
+	if l.okFirst > 0 && l.calls > l.okFirst {
+		return nil, &git.GitError{Kind: git.ErrKindTransient, Op: "show", Message: "repository locked"}
+	}
 	if l.fails > 0 {
 		l.fails--
 		return nil, &git.GitError{Kind: git.ErrKindTransient, Op: "show", Message: "repository locked"}
@@ -125,6 +130,20 @@ func TestWave4Review_AbandonmentDecidesItsRouteFirst(t *testing.T) {
 	abandoned, err = f.orch.AbandonExhaustedMerge(ctx, f.run.RunID, 3)
 	if err != nil || !abandoned || f.run.Status != domain.RunStatusActive || f.step("publish").OutcomeID != "merge_failed" {
 		t.Fatalf("next tick: %v, %v, run %s, publish %q; want the merge_failed route", abandoned, err, f.run.Status, f.step("publish").OutcomeID)
+	}
+
+	// A read that fails after the decision (the route's own workflow load)
+	// leaves the run committing for the next tick; it never fails it.
+	g := newW4Fake(t, nil, false, w4Modified("src/a.go")...)
+	w4Exhausted(t, g)
+	g.orch.wfLoader = &flakyLoader{wf: g.wf, okFirst: 1}
+	if _, err := g.orch.AbandonExhaustedMerge(ctx, g.run.RunID, 3); err == nil || g.run.Status != domain.RunStatusCommitting {
+		t.Fatalf("route read failed: err %v, run %s; want an error and the run still committing", err, g.run.Status)
+	}
+	g.orch.wfLoader = &flakyLoader{wf: g.wf}
+	abandoned, err = g.orch.AbandonExhaustedMerge(ctx, g.run.RunID, 3)
+	if err != nil || !abandoned || g.run.Status != domain.RunStatusActive || g.step("publish").OutcomeID != "merge_failed" {
+		t.Fatalf("after the read recovered: %v, %v, run %s, publish %q; want the merge_failed route", abandoned, err, g.run.Status, g.step("publish").OutcomeID)
 	}
 }
 

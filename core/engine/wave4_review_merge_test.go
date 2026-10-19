@@ -352,3 +352,24 @@ func w4ExhaustedOn(t *testing.T, s *mockRunStore, r *domain.Run) {
 	f := &govFake{t: t, run: r, store: &govStore{mockRunStore: s}}
 	w4Exhausted(t, f)
 }
+
+// TestWave4Review_RetryBudgetSparesAnUnverifiedMerge: with the status
+// lifecycle on and the guard off (no governance block to fall back on), a
+// run whose merge-in-flight record is set is not abandoned — its next
+// attempt takes the merge back first — and once the record is cleared the
+// budget applies.
+func TestWave4Review_RetryBudgetSparesAnUnverifiedMerge(t *testing.T) {
+	ctx := context.Background()
+	f := newW4Fake(t, nil, true, w4Modified(w4Task)...)
+	f.run.CommitMeta[CommitMetaMergeUnverified] = gBase + " " + gBound
+	w4Exhausted(t, f)
+	abandoned, err := f.orch.AbandonExhaustedMerge(ctx, f.run.RunID, 3)
+	if err != nil || abandoned || f.run.Status != domain.RunStatusCommitting {
+		t.Fatalf("AbandonExhaustedMerge = %v, %v, run %s; want the run kept committing", abandoned, err, f.run.Status)
+	}
+	f.run.CommitMeta[CommitMetaMergeUnverified] = ""
+	abandoned, err = f.orch.AbandonExhaustedMerge(ctx, f.run.RunID, 3)
+	if err != nil || !abandoned {
+		t.Fatalf("after the record cleared: AbandonExhaustedMerge = %v, %v; want abandoned", abandoned, err)
+	}
+}
