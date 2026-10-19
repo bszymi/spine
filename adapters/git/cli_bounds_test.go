@@ -139,8 +139,15 @@ func TestReadFile_AtLimitIsOnePreSizedBuffer(t *testing.T) {
 	ctx := context.Background()
 	const limit = 1 << 20
 	body := repeatTo(limit)
-	dir, commit := blobRepo(t, map[string][]byte{"at.md": body, "empty.md": {}})
+	dir, commit := blobRepo(t, map[string][]byte{"at.md": body, "empty.md": {}, "one.md": []byte("1")})
 	c := git.NewCLIClient(dir, git.WithMaxBlobBytes(limit))
+
+	// A read's fixed cost — one git child per step (the entry probe, the
+	// object-type check of the adversarial review of the wave 4 follow-up,
+	// the read), each with os/exec's environment copy and io.Copy's 32 KiB
+	// buffers for stdout and stderr — is not the buffer under test: it is
+	// measured on a 1-byte file and left out of the bound.
+	overhead := allocDuring(func() { _, _ = c.ReadFile(ctx, commit, "one.md") })
 
 	var got []byte
 	var err error
@@ -151,8 +158,9 @@ func TestReadFile_AtLimitIsOnePreSizedBuffer(t *testing.T) {
 	if !bytes.Equal(got, body) {
 		t.Fatalf("ReadFile returned %d bytes, not the %d-byte blob", len(got), len(body))
 	}
-	if alloc > limit+limit/4 {
-		t.Errorf("ReadFile of a %d-byte blob allocated %d KiB; want <= 1.25 MiB (one pre-sized buffer)", limit, alloc>>10)
+	if alloc > overhead+limit+limit/4 {
+		t.Errorf("ReadFile of a %d-byte blob allocated %d KiB beyond a 1-byte read's %d KiB; want <= 1.25 MiB (one pre-sized buffer)",
+			limit, (alloc-min(alloc, overhead))>>10, overhead>>10)
 	}
 
 	empty, err := c.ReadFile(ctx, commit, "empty.md")
@@ -281,11 +289,21 @@ func TestReadFile_ErrorKindParity(t *testing.T) {
 	}
 }
 
-// assertNotBlob checks ReadFile's not-a-file refusal (wave 4 follow-up):
-// no content, the direct *git.GitError{Permanent, "read_file",
-// NotBlobMessage} wrapping a *git.NotBlobError of the entry's type, and
-// never a size refusal or a miss.
+// assertNotBlob checks ReadFile's not-a-file refusal (wave 4 follow-up)
+// of a directory or a gitlink entry: no content, the direct
+// *git.GitError{Permanent, "read_file", NotBlobMessage} wrapping a
+// *git.NotBlobError of the entry's type with FileEntry false, and never a
+// size refusal or a miss.
 func assertNotBlob(t *testing.T, label string, got []byte, err error, ref, path, typ string) {
+	t.Helper()
+	assertNotBlobObject(t, label, got, err, ref, path, typ, false)
+}
+
+// assertNotBlobObject is assertNotBlob for either shape of the refusal:
+// fileEntry is true for a file entry that records an object that is not a
+// blob (typ is then that object's own type; adversarial review of the
+// wave 4 follow-up), false for a directory or a gitlink entry.
+func assertNotBlobObject(t *testing.T, label string, got []byte, err error, ref, path, typ string, fileEntry bool) {
 	t.Helper()
 	if got != nil {
 		t.Errorf("%s: ReadFile returned %d bytes (%q), want none", label, len(got), truncateForTest(got))
@@ -301,8 +319,11 @@ func assertNotBlob(t *testing.T, label string, got []byte, err error, ref, path,
 	if !errors.Is(err, git.ErrNotBlob) || !errors.As(err, &nb) {
 		t.Fatalf("%s: %v does not match ErrNotBlob / *NotBlobError", label, err)
 	}
-	if nb.Ref != ref || nb.Path != path || nb.Type != typ {
-		t.Errorf("%s: NotBlobError = %+v, want {%q %q %q}", label, nb, ref, path, typ)
+	if nb.Ref != ref || nb.Path != path || nb.Type != typ || nb.FileEntry != fileEntry {
+		t.Errorf("%s: NotBlobError = %+v, want {%q %q %q FileEntry:%v}", label, nb, ref, path, typ, fileEntry)
+	}
+	if fileEntry && !strings.Contains(nb.Error(), typ) {
+		t.Errorf("%s: NotBlobError text %q does not name the recorded object's type %q", label, nb.Error(), typ)
 	}
 	if errors.Is(err, git.ErrBlobTooLarge) || errors.Is(err, git.ErrOutputTooLarge) {
 		t.Errorf("%s: %v also matches a size refusal", label, err)

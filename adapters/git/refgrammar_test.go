@@ -312,13 +312,17 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 	lookup := func(n string) []string { return []string{"show-ref", "--verify", "--hash", "refs/heads/" + n} }
 	// entry is ReadFile's entry probe (wave 4 follow-up; it replaced
 	// TASK-003's `cat-file -s` and the `git show` read): it types and
-	// sizes the entry at exactly f.txt, then blob reads that object by
-	// id. The revision never reaches git joined to the path. A failed
+	// sizes the entry at exactly f.txt, types the object it records and
+	// then blob reads that object by id. The revision never reaches git joined to the path. A failed
 	// probe is followed by noTree, which proves a miss by exit status.
 	entry := func(rev string) []string {
 		return []string{"--literal-pathspecs", "ls-tree", "-l", "-z", "--full-tree", "--end-of-options", rev, "f.txt"}
 	}
 	blob := func(oid string) []string { return []string{"cat-file", "blob", oid} }
+	// objType is the object-type check between them (adversarial review
+	// of the follow-up): a file entry's mode does not make its object a
+	// blob, so the recorded id is typed from its header before the read.
+	objType := func(oid string) []string { return []string{"cat-file", "-t", oid} }
 	noTree := func(rev string) []string {
 		return []string{"rev-parse", "--verify", "--quiet", "--end-of-options", rev + "^{tree}"}
 	}
@@ -368,11 +372,11 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		{"Log plain", func() error { _, err := c.Log(ctx, git.LogOpts{}); return err },
 			[][]string{{"log", logFormat, "--end-of-options", "--"}}},
 		{"ReadFile branch", func() error { _, err := c.ReadFile(ctx, "feat", "f.txt"); return err },
-			[][]string{lookup("feat"), entry(featOID), blob(featBlob)}},
+			[][]string{lookup("feat"), entry(featOID), objType(featBlob), blob(featBlob)}},
 		{"ReadFile tag-only name", func() error { _, err := c.ReadFile(ctx, "t1", "f.txt"); return err },
-			[][]string{lookup("t1"), entry("t1"), blob(featBlob)}},
+			[][]string{lookup("t1"), entry("t1"), objType(featBlob), blob(featBlob)}},
 		{"ReadFile HEAD", func() error { _, err := c.ReadFile(ctx, "HEAD", "f.txt"); return err },
-			[][]string{entry("HEAD"), blob(mainBlob)}},
+			[][]string{entry("HEAD"), objType(mainBlob), blob(mainBlob)}},
 		// The read-cost classes CHANGELOG and KNOWN-LIMITATIONS document
 		// (review round 2): every bare name that is a valid branch name
 		// pays one lookup whether or not the branch exists (tag, abbreviated
@@ -380,21 +384,21 @@ func TestRefGrammar_ArgvShape(t *testing.T) {
 		// the lookup, then NotFound); a full object id, HEAD (above) and
 		// any other refs/* pay none.
 		{"ReadFile abbreviated id", func() error { _, err := c.ReadFile(ctx, abbrev, "f.txt"); return err },
-			[][]string{lookup(abbrev), entry(abbrev), blob(featBlob)}},
+			[][]string{lookup(abbrev), entry(abbrev), objType(featBlob), blob(featBlob)}},
 		{"ReadFile remote-tracking short name", func() error { _, err := c.ReadFile(ctx, "origin/tracked", "f.txt"); return err },
-			[][]string{lookup("origin/tracked"), entry("origin/tracked"), blob(featBlob)}},
+			[][]string{lookup("origin/tracked"), entry("origin/tracked"), objType(featBlob), blob(featBlob)}},
 		{"ReadFile missing bare name", func() error { _, err := c.ReadFile(ctx, "nope", "f.txt"); return notFound(err) },
 			[][]string{lookup("nope"), entry("nope"), noTree("nope")}},
 		{"ReadFile refs/heads/ branch", func() error { _, err := c.ReadFile(ctx, "refs/heads/feat", "f.txt"); return err },
-			[][]string{lookup("feat"), entry(featOID), blob(featBlob)}},
+			[][]string{lookup("feat"), entry(featOID), objType(featBlob), blob(featBlob)}},
 		{"ReadFile missing refs/heads/ branch", func() error { _, err := c.ReadFile(ctx, "refs/heads/nope", "f.txt"); return notFound(err) },
 			[][]string{lookup("nope")}},
 		{"ReadFile object id", func() error { _, err := c.ReadFile(ctx, featOID, "f.txt"); return err },
-			[][]string{entry(featOID), blob(featBlob)}},
+			[][]string{entry(featOID), objType(featBlob), blob(featBlob)}},
 		{"ReadFile refs/tags/", func() error { _, err := c.ReadFile(ctx, "refs/tags/t1", "f.txt"); return err },
-			[][]string{entry("refs/tags/t1"), blob(featBlob)}},
+			[][]string{entry("refs/tags/t1"), objType(featBlob), blob(featBlob)}},
 		{"ReadFile refs/remotes/", func() error { _, err := c.ReadFile(ctx, "refs/remotes/origin/tracked", "f.txt"); return err },
-			[][]string{entry("refs/remotes/origin/tracked"), blob(featBlob)}},
+			[][]string{entry("refs/remotes/origin/tracked"), objType(featBlob), blob(featBlob)}},
 		{"ListFiles branch", func() error { _, err := c.ListFiles(ctx, "feat", ""); return err },
 			[][]string{lookup("feat"), {"ls-tree", "-r", "--name-only", "-z", "--end-of-options", featOID}}},
 		{"RefSHA branch", func() error { _, err := c.RefSHA(ctx, "feat"); return err },

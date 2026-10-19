@@ -31,10 +31,11 @@ func IsIDCollision(ctx context.Context, gitClient git.GitClient, branchRef, targ
 	_, err := gitClient.ReadFile(ctx, targetRef, artifactPath)
 	if err != nil {
 		// A blob refused for its size exists (INIT-023 TASK-003): that
-		// is a collision, not a free path. So is a gitlink or a directory
-		// the git client refuses to read as a file (git.ErrNotBlob, wave
-		// 4 follow-up): the path is taken (a directory read as its
-		// listing, and so as a collision, before).
+		// is a collision, not a free path. So is a gitlink, a directory or
+		// a file entry recording a tag, a tree or a commit, which the git
+		// client refuses to read as a file (git.ErrNotBlob, wave 4
+		// follow-up and its review): the path is taken (a directory read
+		// as its listing, and so as a collision, before).
 		if errors.Is(err, git.ErrBlobTooLarge) || errors.Is(err, git.ErrNotBlob) {
 			return true, nil
 		}

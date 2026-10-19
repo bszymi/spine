@@ -217,3 +217,107 @@ func TestRead_NotAFileIsNotFound(t *testing.T) {
 		}
 	}
 }
+
+// Adversarial review of the wave 4 follow-up (P1, P2): a regular-file
+// entry (mode 100644) can record the id of an object that is not a blob.
+// The git client's `cat-file blob <oid>` peeled a tag to its target — so
+// a tag pointing at the hiddenTask blob projected TASK-9 while the diff
+// showed only the tag object's text — and failed a tree or a commit with
+// a plain "bad file", a ReadError that ValidateBranch ignores. ReadFile
+// now types the recorded object and refuses anything but a blob as not a
+// file, so discovery records each one as RefusedNotAFile, the reads
+// answer 404 naming the object's type, and the path is still taken.
+func TestDiscovery_FileEntriesRecordingNonBlobObjectsAreNotAFileRefusals(t *testing.T) {
+	ctx := context.Background()
+	r := notAFileRepo{t: t, dir: t.TempDir()}
+	r.git(nil, "init", "-q", "-b", "main")
+	r.write("initiatives/INIT-001/initiative.md", refusedInitiative)
+	r.write("governance/g.md", refusedGovernance)
+	r.git(nil, "add", "-A")
+	r.git(nil, "commit", "-q", "-m", "c1")
+	c1 := r.git(nil, "rev-parse", "HEAD")
+	hidden := r.git([]byte(hiddenTask), "hash-object", "-w", "--stdin")
+	tag := r.git([]byte("object "+hidden+"\ntype blob\ntag v1\ntagger t <t@t> 0 +0000\n\nm\n"), "mktag")
+	tree := r.git(nil, "rev-parse", c1+"^{tree}")
+	wfTag := r.git([]byte("object "+r.git([]byte("id: wt\n"), "hash-object", "-w", "--stdin")+
+		"\ntype blob\ntag v2\ntagger t <t@t> 0 +0000\n\nm\n"), "mktag")
+	r.git(nil, "rm", "-q", "--cached", "initiatives/INIT-001/initiative.md")
+	entries := map[string]string{ // path -> recorded object id
+		"initiatives/INIT-001/initiative.md": tag,
+		"docs/tree.md":                       tree,
+		"docs/commit.md":                     c1,
+		"workflows/wt.yaml":                  wfTag,
+	}
+	for p, id := range entries {
+		r.git(nil, "update-index", "--add", "--cacheinfo", "100644,"+id+","+p)
+	}
+	r.git(nil, "commit", "-q", "-m", "c2: file entries recording non-blob objects")
+	c2 := r.git(nil, "rev-parse", "HEAD")
+	// Precondition: the follow-up's read peeled the tag to the hidden task.
+	if got := r.git(nil, "cat-file", "blob", tag); got != strings.TrimSpace(hiddenTask) {
+		t.Fatalf("fixture: cat-file blob of the tag must print the hidden task, got %q", got)
+	}
+	client := git.NewCLIClient(r.dir)
+	mdPaths := []string{"initiatives/INIT-001/initiative.md", "docs/tree.md", "docs/commit.md"}
+
+	cs, err := artifact.DiscoverChanges(ctx, client, c1, c2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs.Created) != 0 || len(cs.Modified) != 0 || len(cs.ReadErrors) != 0 {
+		t.Fatalf("created %v, modified %v, read errors %v; want none (the hidden task must never be projected)",
+			cs.Created, cs.Modified, cs.ReadErrors)
+	}
+	got := refusalsByPath(cs.Refused)
+	for _, p := range mdPaths {
+		if want := (artifact.RefusedFile{Path: p, Reason: artifact.RefusedNotAFile}); got[p] != want {
+			t.Errorf("refusal for %s = %+v, want %+v", p, got[p], want)
+		}
+	}
+	if len(got) != len(mdPaths) {
+		t.Errorf("refused = %+v, want the three .md entries", cs.Refused)
+	}
+	if strings.Join(cs.Deleted, ",") != "initiatives/INIT-001/initiative.md" {
+		t.Errorf("deleted = %v, want the initiative whose entry now records a tag", cs.Deleted)
+	}
+
+	res, err := artifact.DiscoverAll(ctx, client, c2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = refusalsByPath(res.Refused)
+	for _, p := range mdPaths {
+		if got[p].Reason != artifact.RefusedNotAFile {
+			t.Errorf("DiscoverAll refusal for %s = %+v, want not_a_file", p, got[p])
+		}
+	}
+	for _, a := range res.Artifacts {
+		if a.Path != "governance/g.md" {
+			t.Errorf("DiscoverAll projected %s (%s) from a non-blob object", a.Path, a.ID)
+		}
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("DiscoverAll errors = %+v, want none", res.Errors)
+	}
+
+	artSvc := artifact.NewService(client, nil, r.dir)
+	for p, want := range map[string]string{
+		"initiatives/INIT-001/initiative.md": "tag", "docs/tree.md": "tree", "docs/commit.md": "commit",
+	} {
+		a, err := artSvc.Read(ctx, p, c2)
+		var se *domain.SpineError
+		if a != nil || !errors.As(err, &se) || se.Code != domain.ErrNotFound || !errors.Is(err, git.ErrNotBlob) ||
+			!strings.Contains(se.Message, "records a "+want+" object") {
+			t.Errorf("Read(%s) = %+v, %v; want a 404 naming the recorded %s", p, a, err, want)
+		}
+		if collision, err := artifact.IsIDCollision(ctx, client, c2, c2, p); err != nil || !collision {
+			t.Errorf("IsIDCollision(%s) = %v, %v; want true", p, collision, err)
+		}
+	}
+	wfSvc := workflow.NewService(client, r.dir)
+	if _, err := wfSvc.Read(ctx, "wt", c2); err == nil {
+		t.Fatal("workflow Read of a file entry recording a tag succeeded")
+	} else if var404 := new(domain.SpineError); !errors.As(err, &var404) || var404.Code != domain.ErrNotFound || !errors.Is(err, git.ErrNotBlob) {
+		t.Fatalf("workflow Read = %v, want a 404 caused by the not-a-file refusal", err)
+	}
+}

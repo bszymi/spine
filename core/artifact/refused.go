@@ -23,12 +23,14 @@ const (
 	// (UnsafePath). The file is never read.
 	RefusedUnsafePath RefusalReason = "unsafe_path"
 	// RefusedNotAFile: the commit's tree records a gitlink (or a
-	// directory) at the path, not a file — the git client refused the
-	// read as not a blob (git.ErrNotBlob; INIT-023 wave 4 follow-up). Like
-	// an oversized blob it can never become readable at that commit, so
-	// discovery skips it, records it and moves on; no object behind the
-	// entry is read, so a gitlink recording the id of a blob in the
-	// repository is never projected as that blob.
+	// directory) at the path, not a file, or a file entry whose recorded
+	// object is a tag, a tree or a commit — the git client refused the
+	// read as not a blob (git.ErrNotBlob; INIT-023 wave 4 follow-up and
+	// its review). Like an oversized blob it can never become readable at
+	// that commit, so discovery skips it, records it and moves on; no
+	// object's content behind the entry is read, so a gitlink recording
+	// the id of a blob in the repository is never projected as that blob,
+	// nor a file entry recording a tag as the tag's target.
 	RefusedNotAFile RefusalReason = "not_a_file"
 )
 
@@ -83,7 +85,8 @@ func StoredUnsafePath(p string) bool { return UnsafePath(p) && utf8.ValidString(
 // blob for its size (git.ErrBlobTooLarge — any GitClient whose refusal
 // matches the sentinel, not only *git.CLIClient); a RefusedNotAFile record
 // when it refused the path as not naming a file (git.ErrNotBlob: a
-// gitlink or a directory); or the read error.
+// gitlink, a directory, or a file entry recording a tag, a tree or a
+// commit); or the read error.
 func readForDiscovery(ctx context.Context, gitClient git.GitClient, ref, path string) ([]byte, *RefusedFile, error) {
 	content, err := gitClient.ReadFile(ctx, ref, path)
 	if err == nil {
@@ -130,8 +133,9 @@ func ReadLimitPhrase(err error) string {
 
 // NotAFilePhrase renders the git client's not-a-file refusal
 // (git.ErrNotBlob) for an API message: "the path names a gitlink (commit),
-// not a file", or the directory form. It never repeats the path, which
-// the caller already names.
+// not a file", the directory form, or "the path's file entry records a tag
+// object, not file content". It never repeats the path, which the caller
+// already names.
 func NotAFilePhrase(err error) string {
 	var nb *git.NotBlobError
 	if errors.As(err, &nb) {

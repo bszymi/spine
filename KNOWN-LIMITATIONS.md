@@ -679,18 +679,26 @@ refuses an unprovenanced branch-protection removal. What remains:
   changed-artifact read. A `GitClient` decorator passed to `projection.NewService` that does not
   forward it gets the historical read: a successful read is trusted, and every read failure other
   than the client's own refusals is infrastructure. Since the INIT-023 wave 4 follow-up
-  `*git.CLIClient.ReadFile` itself refuses a gitlink or a directory (`git.ErrNotBlob`), and the
-  projection describes that refusal as the entry it is, so a decorator over it no longer reads a
-  gitlink's recorded blob; the gap remains only for a `GitClient` whose `ReadFile` is not backed by
-  `*git.CLIClient`.
+  `*git.CLIClient.ReadFile` itself refuses a gitlink or a directory (`git.ErrNotBlob`) — and,
+  since the review of that follow-up, a file entry whose recorded object is a tag, a tree or a
+  commit, which the tree types as a blob from its mode — and the projection describes that refusal
+  as the entry it is, so a decorator over it no longer reads a gitlink's recorded blob or a tag's
+  target; the gap remains only for a `GitClient` whose `ReadFile` is not backed by
+  `*git.CLIClient` (SMP's `gitread` read at SMP `main` 1ae9b0e3 still peels a tag; CHANGELOG).
 - **A gitlink at an artifact path is refused as not a file** (INIT-023 wave 4 follow-up; closed
   for every reader built on `*git.CLIClient`). Until then a gitlink whose recorded id names a blob
   in the repository was read as that blob — by artifact discovery, `artifact.Service` reads and
   branch validation — while diffs and repository viewers showed a submodule pointer. `ReadFile`
   now types the entry from its mode before reading anything: discovery records a `not_a_file`
   refusal (and removes a governed row the gitlink replaces), branch validation fails the file, and
-  reads answer 404. Refusing gitlink entries in a governed repository at the push and merge
-  boundary would also keep them out of `main` (follow-up).
+  reads answer 404. The same holds for a regular-file entry that records the id of an annotated
+  tag (`git cat-file blob` peeled it to its target blob, while diffs show the tag object's text), a
+  tree or a commit (review of the follow-up): `ReadFile` reads the recorded object's own type and
+  refuses anything but a blob. Refusing gitlink entries, and file entries whose object is not a
+  blob, in a governed repository at the push and merge boundary would also keep them out of `main`
+  (follow-up). The default receive config accepts such a push (it checks only that the objects
+  exist); `receive.fsckObjects` refused one carrying a file entry that records a tag in a check
+  with git 2.54, but neither Spine nor SMP sets it.
 - **A first full rebuild that was interrupted** (the process stopped while `sync_state` was
   `rebuilding` with no synced commit) is not retried automatically, because it cannot be told apart
   from a first rebuild still running on another instance; run `POST /api/v1/system/rebuild`. A first
@@ -1068,7 +1076,9 @@ The following limitations have been resolved:
   <rev>:<path>` rendered: a tree path's listing, a gitlink as a commit with its patch (a diff queue
   of millions of small allocations, which `GIT_ALLOC_LIMIT` does not bound: 272 MiB measured by
   SMP), and a path holding `..` or a `^` suffix as a range or a revision. A gitlink or a directory
-  is now refused unread (`git.ErrNotBlob`), and the path never reaches a revision expression.
+  is now refused unread (`git.ErrNotBlob`), and the path never reaches a revision expression. A
+  file entry is read only when the object it records is a blob (`git cat-file -t <oid>` before
+  the read): one recording a tag, a tree or a commit is the same refusal (review of the follow-up).
 - **The merge-binding plumbing** (INIT-023 TASK-005's `CommitBinder` methods: `rev-parse
   --verify`, `rev-list --parents`, `merge-base --is-ancestor`, `ls-tree`, the private-index
   `read-tree` / `hash-object` / `update-index` / `write-tree` / `commit-tree`, `update-ref`,
@@ -1081,9 +1091,11 @@ The following limitations have been resolved:
   `receive.maxInputSize` bounds the pack, not the object), checkout-time inflation (`git worktree
   add` / `checkout` of a branch holding an oversized blob, including the standalone branch-write
   worktree), and wall-clock timeouts on git commands.
-- **Cost:** one extra git process per `ReadFile` (two on a miss: the probe, then the `git show`
-  that produces today's error), so a full rebuild of a large repository takes roughly twice as
-  long. A batched probe is a follow-up.
+- **Cost:** a `ReadFile` of a file runs three git processes — the entry probe (`ls-tree -l`), the
+  object-type check (`cat-file -t`) and the read (`cat-file blob`) — where it ran one before
+  TASK-003 (`show`) and two after it; a miss runs one (two when the revision names no tree). So a
+  full rebuild of a large repository takes roughly three times as long in git processes as before
+  TASK-003. A batched probe (one `cat-file --batch` for the type, size and content) is a follow-up.
 - **Refused paths** (P3-9, owner question 2): `Diff` and `ListFiles` return raw NUL-delimited
   paths, so non-ASCII artifacts are now projected. A path that is not valid UTF-8 or holds a
   control character (C0, DEL, C1), U+2028/U+2029 or a bidi control (U+202A–U+202E,

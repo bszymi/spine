@@ -34,7 +34,12 @@ const (
 // recorded id names, so a gitlink recording the id of a blob in this
 // repository reads successfully — content no diff shows. A successful
 // read therefore does not prove the path holds a file; the entry type
-// does.
+// does — the entry's, not the object's: a file entry (a blob mode) can
+// record the id of a tag, a tree or a commit, and TreeEntryType still
+// answers TreeEntryBlob for it, because it reads only the mode. CLIClient's
+// ReadFile types that object itself and refuses anything but a blob
+// (NotBlobError with FileEntry; adversarial review of the wave 4
+// follow-up).
 type TreeEntryTyper interface {
 	// TreeEntryType returns TreeEntryBlob, TreeEntryTree or
 	// TreeEntryCommit for the entry at exactly path in ref's tree, or ""

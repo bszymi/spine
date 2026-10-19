@@ -465,8 +465,9 @@ func (s *Service) Read(ctx context.Context, path, ref string) (*domain.Artifact,
 			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
 				fmt.Sprintf("artifact %s at ref %s %s", path, ref, ReadLimitPhrase(err)), err)
 		}
-		// A gitlink or a directory at the path (INIT-023 wave 4
-		// follow-up: the git client refuses it unread) holds no artifact:
+		// A gitlink, a directory or a file entry recording a tag, a tree
+		// or a commit at the path (INIT-023 wave 4 follow-up and its
+		// review: the git client refuses it unread) holds no artifact:
 		// 404, as for a missing path — not the 500 a rendered listing or
 		// commit failing to parse used to be.
 		if errors.Is(err, git.ErrNotBlob) {

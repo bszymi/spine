@@ -41,7 +41,8 @@ func taskDoc(n int) string {
 // one exact branch lookup and N blob reads — each after its entry probe
 // (`ls-tree -l` of the path at that one object id; INIT-023 wave 4
 // follow-up, which replaced TASK-003's `cat-file -s` probe and the `git
-// show` read) — and returns the same artifacts as listing the branch
+// show` read) and its object-type check (`cat-file -t <oid>`, review of
+// that follow-up) — and returns the same artifacts as listing the branch
 // checked out (the pre-change behaviour).
 func TestList_ResolvesTheRefOnce(t *testing.T) {
 	testutil.HermeticGit(t)
@@ -71,7 +72,7 @@ func TestList_ResolvesTheRefOnce(t *testing.T) {
 	}
 	calls := rec.Calls(t)
 
-	lookups, shows, probes, other := 0, 0, 0, 0
+	lookups, shows, probes, types, other := 0, 0, 0, 0, 0
 	for _, c := range calls {
 		switch c[0] {
 		case "--literal-pathspecs":
@@ -81,6 +82,10 @@ func TestList_ResolvesTheRefOnce(t *testing.T) {
 				t.Errorf("probe argv %q, want %q <path>", c, want)
 			}
 		case "cat-file":
+			if len(c) == 3 && c[1] == "-t" && git.IsFullObjectName(c[2]) {
+				types++
+				continue
+			}
 			shows++
 			if len(c) != 3 || c[1] != "blob" || !git.IsFullObjectName(c[2]) {
 				t.Errorf("blob read argv %q, want cat-file blob <oid>", c)
@@ -99,8 +104,9 @@ func TestList_ResolvesTheRefOnce(t *testing.T) {
 			t.Errorf("unexpected git call %q", c)
 		}
 	}
-	if lookups != 1 || shows != n || probes != n {
-		t.Fatalf("List ran %d lookups, %d probes and %d blob reads (calls %q), want 1, %d and %d", lookups, probes, shows, calls, n, n)
+	if lookups != 1 || shows != n || probes != n || types != n {
+		t.Fatalf("List ran %d lookups, %d probes, %d object-type checks and %d blob reads (calls %q), want 1, %d, %d and %d",
+			lookups, probes, types, shows, calls, n, n, n)
 	}
 
 	// Same answer as listing the checked-out branch through HEAD.

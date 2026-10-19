@@ -68,7 +68,7 @@ import (
 //	DeleteBranch        branch -D [eoo] <n>
 //	Diff                diff --name-status -z [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
-//	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file blob <oid>
+//	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file -t <oid>, cat-file blob <oid>
 //	                    (rev-parse --verify --quiet [eoo] <ref'>^{tree} only after a failed ls-tree)
 //	ListFiles           ls-tree -r --name-only -z [eoo] <ref'>
 //	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
@@ -100,7 +100,8 @@ import (
 // No method buffers more than its limit (limits.go): ReadFile refuses a
 // blob over the per-blob limit before reading it (BlobTooLargeError,
 // ErrBlobTooLarge) and reads blobs only, refusing a directory or a
-// gitlink unread (NotBlobError, ErrNotBlob; wave 4 follow-up); every
+// gitlink unread, and a file entry that records a tag, a tree or a commit
+// (NotBlobError, ErrNotBlob; wave 4 follow-up); every
 // other read command fails past the per-command stdout limit
 // (OutputTooLargeError, ErrOutputTooLarge), and mutating
 // commands drain their stdout instead of failing on its size. git's own
@@ -1066,23 +1067,35 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 //  1. `git --literal-pathspecs ls-tree -l -z --full-tree [eoo] <rev> <path>`
 //     types the entry at exactly that path (the record whose path is
 //     byte-equal to it; git normalises the pathspec) and reports its
-//     object id and, for a blob, its size. ls-tree reads only tree
-//     objects and the blob's header, so a gitlink whose commit is
-//     absent is still typed and an oversized blob is never inflated.
-//     The type comes from the entry's MODE, so a gitlink recording the
-//     id of a blob in this repository is still a gitlink.
+//     object id and, for a file entry, the recorded object's size.
+//     ls-tree reads only tree objects and the object's header, so a
+//     gitlink whose commit is absent is still typed and an oversized
+//     blob is never inflated. The type comes from the entry's MODE, so a
+//     gitlink recording the id of a blob in this repository is still a
+//     gitlink.
 //  2. No entry: a miss (below). A directory or a gitlink: a
 //     *GitError{Permanent, "read_file", NotBlobMessage} wrapping a
 //     *NotBlobError, matching ErrNotBlob — refused before any object is
-//     read. A blob over the per-blob limit: a *GitError{Permanent,
+//     read.
+//  3. A file entry (a blob mode) records an id, and nothing makes that
+//     id a blob's: `git cat-file -t <oid>` reads the object's own type
+//     from its header (adversarial review of the wave 4 follow-up). A
+//     tag, a tree or a commit is the same not-a-file refusal, its
+//     NotBlobError carrying that type and FileEntry. Without this check
+//     the read below peeled a tag to its target blob — content no diff
+//     shows, since git diff shows the tag object's own text — and failed
+//     on a tree or a commit with a plain Permanent "bad file" that a
+//     caller could not tell from a git failure.
+//  4. A blob over the per-blob limit: a *GitError{Permanent,
 //     "read_file", "blob exceeds read limit"} wrapping a
 //     *BlobTooLargeError with the probed size, matching ErrBlobTooLarge.
-//  3. `git cat-file blob <oid>` reads the probed object — by id, so a
-//     ref that moves after the probe cannot change what is read — into
-//     one buffer pre-sized to the probed size and capped at the limit.
-//     It is byte-identical to `git show` of a blob (no textconv or
-//     filter runs) and refuses an object that is not a blob at its
-//     header. Overrunning the cap is the size refusal with Size -1.
+//  5. `git cat-file blob <oid>` reads the probed object — by id, so a
+//     ref that moves after the probe cannot change what is read (an
+//     object id names one object, so the type step 3 read is the type
+//     of what is read here) — into one buffer pre-sized to the probed
+//     size and capped at the limit. It is byte-identical to `git show`
+//     of a blob (no textconv or filter runs). Overrunning the cap is the
+//     size refusal with Size -1.
 //
 // Every command runs with GIT_ALLOC_LIMIT, so a small blob stored as a
 // delta on a huge base is refused by git before it allocates the large
@@ -1106,7 +1119,7 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 // <rev>^{tree}` proves by its exit status (1) after ls-tree failed —
 // never git's stderr. Any other ls-tree or cat-file failure is classified
 // from git's stderr as before (a missing blob in a corrupt repository is
-// an error, not a miss).
+// an error, not a miss; its stderr names only the object id).
 //
 // A 0-byte blob returns a non-nil, empty slice.
 func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
@@ -1134,6 +1147,20 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 			Err: &NotBlobError{Ref: ref, Path: path, Type: ent.typ}}
 	}
 
+	// A file entry: its mode says blob, which does not make the object it
+	// records one (step 3).
+	objType, err := c.objectType(ctx, ent.oid)
+	if err != nil {
+		if errors.Is(err, ErrOutputTooLarge) {
+			return nil, readOverrun(ref, path, limit, err)
+		}
+		return nil, err
+	}
+	if objType != TreeEntryBlob {
+		return nil, &GitError{Kind: ErrKindPermanent, Op: "read_file", Message: NotBlobMessage,
+			Err: &NotBlobError{Ref: ref, Path: path, Type: objType, FileEntry: true}}
+	}
+
 	size := ent.size
 	if c.blobSize != nil {
 		if size, err = c.blobSize(ctx, ent.oid); err != nil {
@@ -1159,6 +1186,29 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 		out = []byte{}
 	}
 	return out, nil
+}
+
+// maxObjectTypeBytes bounds `git cat-file -t` output: one type word.
+const maxObjectTypeBytes = 64
+
+// objectType is ReadFile's step 3: the type of the object oid names, as
+// `git cat-file -t <oid>` prints it — read from the object's header, never
+// its content, and never dereferenced (a tag is "tag", not its target's
+// type). oid is a full object name from ls-tree, so it cannot be an option
+// or a revision expression. Anything but one of the four object types is
+// an error.
+func (c *CLIClient) objectType(ctx context.Context, oid string) (string, error) {
+	out, err := c.runBounded(ctx, "read_file", maxObjectTypeBytes, 0, "cat-file", "-t", oid)
+	if err != nil {
+		return "", err
+	}
+	switch typ := strings.TrimSuffix(string(out), "\n"); typ {
+	case TreeEntryBlob, TreeEntryTree, TreeEntryCommit, ObjectTag:
+		return typ, nil
+	default:
+		return "", &GitError{Kind: ErrKindPermanent, Op: "read_file",
+			Message: fmt.Sprintf("unexpected object type %q", truncateRecord(typ))}
+	}
 }
 
 // blobEntry is ReadFile's probe result: the tree entry at exactly the

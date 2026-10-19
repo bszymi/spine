@@ -22,7 +22,8 @@ package git
 //     as a commit with its patch was the other bypass, and one that
 //     GIT_ALLOC_LIMIT did not stop — a diff queue is millions of small
 //     allocations. Since the wave 4 follow-up ReadFile reads blobs only,
-//     with `git cat-file blob`, and refuses a gitlink unread.) Read
+//     with `git cat-file blob` after `git cat-file -t` has proved the
+//     object is one, and refuses a gitlink unread.) Read
 //     commands therefore run with GIT_ALLOC_LIMIT, which git checks on
 //     every heap allocation
 //     (wrapper.c memory_limit_check): it refuses instead of allocating,
@@ -210,13 +211,21 @@ func (e *BlobTooLargeError) Is(target error) bool { return target == ErrBlobTooL
 // ErrNotBlob is what ReadFile's other content refusal matches with
 // errors.Is (INIT-023 wave 4 follow-up): the commit's tree records a
 // directory (a tree) or a gitlink (mode 160000, a commit) at the path, not
-// a file. ReadFile reads blobs only: `git show <rev>:<path>` used to
-// render a directory as a listing and a gitlink whose commit is in the
-// repository as that commit with its whole patch — content no file holds,
-// and a diff queue no GIT_ALLOC_LIMIT bounds (272 MiB in the git child,
-// measured by SMP at ae513dca). Like a size refusal it is a property of
-// the commit: no retry can make the path a file.
+// a file — or a file entry whose recorded object is not a blob (a tag, a
+// tree or a commit; NotBlobError.FileEntry). ReadFile reads blobs only:
+// `git show <rev>:<path>` used to render a directory as a listing and a
+// gitlink whose commit is in the repository as that commit with its whole
+// patch — content no file holds, and a diff queue no GIT_ALLOC_LIMIT
+// bounds (272 MiB in the git child, measured by SMP at ae513dca). Like a
+// size refusal it is a property of the commit: no retry can make the path
+// a file.
 var ErrNotBlob = errors.New("git: the path names no file")
+
+// ObjectTag is the type `git cat-file -t` prints for an annotated tag
+// object. A tree entry never has it as its own type (ls-tree types an
+// entry from its mode); it is the type a NotBlobError with FileEntry
+// reports when a file entry records a tag's id.
+const ObjectTag = "tag"
 
 // NotBlobMessage is the GitError.Message of every ErrNotBlob refusal.
 const NotBlobMessage = "object is not a file"
@@ -228,14 +237,36 @@ const NotBlobMessage = "object is not a file"
 // caller that keys on ErrKindNotFound never takes it for "absent" (a
 // directory or a gitlink at a governed path is not a missing file).
 //
-// Type is the tree entry's type as `git ls-tree` prints it: TreeEntryTree
-// or TreeEntryCommit. Ref and Path are caller- and branch-controlled text,
+// Type is the type of the object the path names. For a directory or a
+// gitlink it is the tree entry's type as `git ls-tree` prints it
+// (TreeEntryTree or TreeEntryCommit, from the entry's mode — the object is
+// never read). For a file entry (FileEntry) it is the recorded object's own
+// type as `git cat-file -t` prints it: ObjectTag, TreeEntryTree or
+// TreeEntryCommit. Ref and Path are caller- and branch-controlled text,
 // kept for callers that sanitise them; Error never prints them.
 type NotBlobError struct {
 	Ref, Path, Type string
+	// FileEntry is true when the tree entry at the path is a file — a blob
+	// mode: 100644, 100755 or the symlink mode 120000, all of which ls-tree
+	// prints as "blob" — that records the id of an object that is not a
+	// blob (adversarial review of the wave 4 follow-up). Nothing makes the
+	// recorded id match the mode: `update-index --cacheinfo`, mktree or any
+	// tree writer records whatever id it is given, and a push with the
+	// default receive config checks only that the object exists. git diff
+	// shows such an entry as the object's own text; `git cat-file blob`
+	// would peel a tag to its target blob — content no diff shows — so
+	// ReadFile refuses it unread instead.
+	FileEntry bool
 }
 
 func (e *NotBlobError) Error() string {
+	if e.FileEntry {
+		switch e.Type {
+		case ObjectTag, TreeEntryTree, TreeEntryCommit:
+			return "the path's file entry records a " + e.Type + " object, not file content"
+		}
+		return "the path's file entry records an object that is not file content"
+	}
 	switch e.Type {
 	case TreeEntryTree:
 		return "the path names a directory (tree), not a file"

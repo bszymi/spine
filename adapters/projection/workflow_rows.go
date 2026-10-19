@@ -89,8 +89,9 @@ func (s *Service) WithStrictWorkflowValidation(strict bool) {
 // git refusing an allocation over GIT_ALLOC_LIMIT while producing it)
 // can never become readable at that commit. So does its not-a-file
 // refusal (git.ErrNotBlob, INIT-023 wave 4 follow-up): the commit's tree
-// records a gitlink or a directory at the path, and ReadFile refuses it
-// without reading any object behind it. Artifact discovery handles both
+// records a gitlink or a directory at the path, or a file entry recording
+// a tag, a tree or a commit, and ReadFile refuses it without reading the
+// object's content. Artifact discovery handles both
 // for changed files itself (ChangeSet.Refused), so in practice this
 // matters for workflow files and the branch-protection config; and there
 // readFileEntry and classifyReadFailure ask notBlobEntry first, so a

@@ -148,6 +148,57 @@ func TestValidateBranch_GitlinkFailsAsNotAFile(t *testing.T) {
 	}
 }
 
+// Adversarial review of the wave 4 follow-up (P2): a regular-file entry
+// recording the id of a tree, or of a tag (here one whose target is a
+// valid artifact's blob, which `git cat-file blob` peeled to and so
+// validated content no diff shows), is not a file either. Before the fix
+// the tree was a plain read error — skipped, so the branch validated and,
+// once merged, held main's projection — and the tag validated as the
+// hidden artifact. Both fail validation as not_a_file refusals now.
+func TestValidateBranch_FileEntryRecordingANonBlobObjectFails(t *testing.T) {
+	repo := testutil.NewTempRepo(t)
+	client := git.NewCLIClient(repo)
+	ctx := context.Background()
+
+	testutil.WriteFile(t, repo, "README.md", "# Test\n")
+	testutil.GitAdd(t, repo, ".", "initial commit")
+	testutil.GitCheckout(t, repo, "-b", "test-branch")
+	testutil.WriteFile(t, repo, "initiatives/init-001/initiative.md",
+		"---\nid: INIT-001\ntype: Initiative\ntitle: Test\nstatus: Draft\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-001\n")
+	gitIn := func(stdin string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Stdin = strings.NewReader(stdin)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	hidden := gitIn("---\nid: INIT-002\ntype: Initiative\ntitle: Hidden\nstatus: Draft\ncreated: 2026-01-01\nlast_updated: 2026-01-01\n---\n# INIT-002\n",
+		"hash-object", "-w", "--stdin")
+	tag := gitIn("object "+hidden+"\ntype blob\ntag v1\ntagger t <t@t> 0 +0000\n\nm\n", "mktag")
+	tree := gitIn("", "rev-parse", "HEAD^{tree}")
+	gitIn("", "update-index", "--add", "--cacheinfo", "100644,"+tree+",x.md")
+	gitIn("", "update-index", "--add", "--cacheinfo", "100644,"+tag+",initiatives/init-002/initiative.md")
+	testutil.GitAdd(t, repo, "initiatives/init-001", "add an artifact and two non-blob file entries")
+
+	result, err := ValidateBranch(ctx, client, &domain.Run{RunID: "r1", Mode: domain.RunModePlanning, BranchName: "test-branch"})
+	if err != nil {
+		t.Fatalf("ValidateBranch: %v", err)
+	}
+	if result.TotalArtifacts != 3 || result.Passed != 1 || result.Failed != 2 || len(result.Details) != 2 {
+		t.Fatalf("result = %+v, want the artifact passed and both non-blob entries failed", result)
+	}
+	for _, d := range result.Details {
+		if (d.Path != "x.md" && d.Path != "initiatives/init-002/initiative.md") || len(d.Errors) != 1 ||
+			!strings.Contains(d.Errors[0], "not validated") || !strings.Contains(d.Errors[0], "a tag, a tree or a commit") {
+			t.Fatalf("detail = %+v, want a not_a_file refusal naming the non-blob entry", d)
+		}
+	}
+}
+
 // readFailingGit fails every ReadFile of one path with a plain git error
 // (a read error, not a refusal) and otherwise is the real client.
 type readFailingGit struct {

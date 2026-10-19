@@ -65,7 +65,8 @@ func ValidateBranch(ctx context.Context, gitClient git.GitClient, run *domain.Ru
 
 	// A file discovery refused (INIT-023 TASK-003: over the git per-blob
 	// read limit, or at a path Spine refuses to store; wave 4 follow-up: a
-	// gitlink, not a file) was never read, so the branch cannot be
+	// gitlink, a directory or a file entry recording a tag, a tree or a
+	// commit, not a file) was never read, so the branch cannot be
 	// vouched for. Each one fails validation instead of merging
 	// unvalidated and then never being projected.
 	for _, r := range changes.Refused {
@@ -134,7 +135,7 @@ func refusalReport(r artifact.RefusedFile) string {
 		return fmt.Sprintf("not validated: over the %d-byte git read limit", r.Limit)
 	}
 	if r.Reason == artifact.RefusedNotAFile {
-		return "not validated: the path holds a gitlink or a directory, not a file"
+		return "not validated: the path holds no file content (a gitlink, a directory, or an entry recording a tag, a tree or a commit)"
 	}
 	return "not validated: the path holds control, line-separator or bidi characters, or is not valid UTF-8"
 }

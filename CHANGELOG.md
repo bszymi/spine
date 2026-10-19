@@ -26,6 +26,22 @@ at ae513dca, and two guards no test pinned). No runtime schema change.
   objects and the blob header only and takes the type from the entry's mode) and reads the probed
   blob by object id (`git cat-file blob <oid>`, byte-identical to `show` for a blob). The path
   never reaches a revision expression.
+- **A file entry that records a tag, a tree or a commit is not read as a file** (adversarial review
+  of the follow-up above). A regular-file entry's mode does not make its recorded id a blob's:
+  `update-index --cacheinfo`, `mktree` or any tree writer records whatever id it is given, and a
+  push with the default receive config checks only that the object exists. `git cat-file blob
+  <oid>` dereferences, so an entry recording an annotated tag whose target is a blob read as that
+  blob — content no diff shows (git diff shows the tag object's own text): a reviewed workflow
+  replaced by a review-less one projected Active, `.spine/branch-protection.yaml` relaxed to
+  `rules: []`, and discovery and branch validation saw the hidden front matter. An entry recording
+  a tree or a commit made `cat-file` fail with a plain "bad file", which the projection classified
+  as infrastructure (the tree, which records only the mode, said "blob"): the sync was held in
+  `error` at every tick until someone rewrote the file — a wedge any push could plant, and branch
+  validation skipped the file (ReadErrors are ignored, TASK-011 AC 28) so a planning branch could
+  carry it onto `main`. (At 07825efb `git show` printed the tag header or the object, a
+  deterministic parse rejection.) ReadFile now reads the recorded object's own type (`git cat-file
+  -t <oid>`, from its header, never dereferenced) before it sizes or reads anything, and refuses
+  every type but blob as the not-a-file refusal.
 
 ### Changed (embedders)
 
@@ -44,14 +60,28 @@ at ae513dca, and two guards no test pinned). No runtime schema change.
   have — `""`, a leading `/`, an empty, `.` or `..` component inside it, a NUL — is a miss
   without a lookup, as git's literal lookup was. A revision that names no tree is a miss only when
   `git rev-parse --verify --quiet <rev>^{tree}` proves it by exit status; any other ls-tree
-  failure keeps git's classified error. Every ordinary file read costs the same two git processes
-  as before (plus the branch lookup), with different argv.
+  failure keeps git's classified error. Every ordinary file read costs three git processes (plus
+  the branch lookup): the entry probe (`ls-tree -l`), the object-type check (`cat-file -t <oid>`)
+  and the read (`cat-file blob <oid>`) — one more than the two (`cat-file -s`, `show`) before.
+- `CLIClient.ReadFile` of a **file entry recording an object that is not a blob** (an annotated
+  tag, a tree or a commit, at a 100644, 100755 or 120000 entry) is the same refusal, its
+  `NotBlobError` carrying the new field `FileEntry: true` and `Type` set to the object's own type
+  (`git.ObjectTag` — a new constant, `"tag"` —, `git.TreeEntryTree` or `git.TreeEntryCommit`);
+  `Error()` says "the path's file entry records a <type> object, not file content". A tag whose
+  target is a blob used to return that blob's bytes; a tree, a commit or a tag of one used to
+  return a Permanent `*GitError` with git's `bad file` text. `TreeEntryType` is unchanged: it reads
+  only trees, so it still answers `TreeEntryBlob` for such an entry. The projection describes the
+  refusal as the tree entry `non_blob_object` (in the `not_a_file` rejection's cause and the
+  branch-protection sync error), discovery records it as `RefusedNotAFile`, branch validation
+  fails it ("not validated: the path holds no file content (a gitlink, a directory, or an entry
+  recording a tag, a tree or a commit)"), and the artifact and workflow reads answer it 404 — the
+  callers below need no change of their own.
 - Callers treat the refusal like TASK-003's size refusal: discovery records it as
   `artifact.RefusedNotAFile` (`"not_a_file"`, a new `RefusalReason`; `projection_file_skipped`
   with `reason: not_a_file`, sizes null) and removes a governed row a gitlink replaces — a gitlink
   `.md` was a `ChangeSet.ReadErrors` entry (`read_skipped`) when its commit was absent and was read
-  as rendered content otherwise; branch validation fails such a file ("not validated: the path
-  holds a gitlink or a directory, not a file") instead of skipping it; the projection's
+  as rendered content otherwise; branch validation fails such a file (the message above) instead
+  of skipping it; the projection's
   `isContentReadError` includes it, and a not-a-file refusal is a `not_a_file` workflow rejection
   (never `read_bounds`) even through a `GitClient` decorator that does not forward
   `TreeEntryTyper`; `artifact.Service.Read` and `workflow.Service.Read` answer it `ErrNotFound`
@@ -65,6 +95,14 @@ at ae513dca, and two guards no test pinned). No runtime schema change.
   compare `gitread`'s errors with `CLIClient.ReadFile`'s (`TestBounded_ErrorContractEqualsCLIClient`
   on SMP `main`, its `gitread.Client` successor on the wave 4 line): the Kind is still Permanent,
   but the Message is now `NotBlobMessage`, not git's `bad object` text.
+- **SMP (not changed here; SMP owns it):** SMP's own `gitread.ReadFile` / `ReadBlob` at SMP `main`
+  1ae9b0e3 read with `cat-file blob --end-of-options <rev>:<path>`, which peels a tag the same way,
+  and SMP's `gitread.Wrap` puts that read in front of every `CLIClient` it hands to the projection,
+  artifact and workflow services — so the tag-to-blob read is SMP's to close by the same
+  object-type check, before or at the bump that delegates to this ReadFile. (A file entry recording
+  a tree or a commit is already SMP's `gitread.NotBlobError`: `readSizedBlob` types the object with
+  `cat-file -t` after the failed read.) SMP tests that pin Spine's ReadFile argv or count its git
+  processes see the extra `cat-file -t <oid>`.
 
 ---
 
