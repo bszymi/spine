@@ -1811,7 +1811,8 @@ M21–M27 guard the codex fixes. Every mutant is killed, at least by the predict
 
 All on macOS (git 2.54, Go 1.26.5) unless stated; databases `s012_spine`, `s012_reg`
 (`migrations/registry/*.sql`), `s012_smp_it`, `s012_spine_runtime_it` on `i23-pg`, all dropped at
-the end. The first gate run (at `b95361b8`, before review round 1) is superseded by this one.
+the end. The first gate run (at `b95361b8`, before review round 1) is superseded by this one, and
+this one by the gates in Review round 2 below (final code `fef299a2`).
 
 | Gate | Command | Result |
 |---|---|---|
@@ -1835,7 +1836,7 @@ the end. The first gate run (at `b95361b8`, before review round 1) is superseded
 ### SMP compatibility gate (Rule 3)
 
 SMP `1ae9b0e3` (detached checkout `i23/s-T012/smp`, `../spine` = this worktree), no SMP edits,
-`GOFLAGS=-mod=readonly`, at Spine `541cff95`:
+`GOFLAGS=-mod=readonly`, at Spine `541cff95` (re-run at `fef299a2` in Review round 2 below):
 
 | Step | Command | Result |
 |---|---|---|
@@ -1861,7 +1862,8 @@ divergence base.
 ### Codex
 
 `codex review --base main`, plain (no model override, codex-cli 0.162.1); every review
-sub-session (`session_meta.source = {"subagent":"review"}`) ran `gpt-6.1-sol`:
+sub-session (`session_meta.source = {"subagent":"review"}`) ran `gpt-6.1-sol`. Rounds 10 and 11
+(review round 2) are listed in Review round 2 below.
 
 | Round | Review session | Findings | Resolution |
 |---|---|---|---|
@@ -2015,11 +2017,216 @@ then `e3db4ef7`, `cb996b00`, and codex follow-ups `ee90c672`, `541cff95`.
 - **G14: the reviewer's own re-verification (build, vet, tests, lint, gosec, the SMP set, codex
   sessions, docs, mutants M12/M14).** Informational. It is consistent with the gates above.
 
+### Review round 2
+
+Review round 2, of the branch as of `08555766`, reported four findings. Each was checked against
+the code before it was fixed. Commits: `75419bf5` (findings 1 and 2), `0041edd5` (finding 3),
+`29962a8c` (finding 4), `f684a77f` (docs). After the fix commits were re-verified by mutation:
+`bba878b4` (tests for five guards no test covered) and `fef299a2` (one new errcheck issue). No
+runtime schema change; no new configuration.
+
+**Findings.**
+
+1. **`adapters/git/commitbinder.go` — `ResetBranch` armed its pending take-back only after
+   `verifyCommitOID`, so an expired context failed open. FIXED** (`75419bf5`). Real: the governed
+   merge calls the take-back at the end of a sequence whose own deadline may be spent. The first
+   commit check then failed, nothing was remembered, and the block released a tree that looked
+   healthy with `main` at the refused merge. Now:
+   - the record is armed once the arguments pass the grammar, before the lock wait and the commit
+     checks;
+   - the one failure that arms nothing is proof that `expected` names no commit (`errNotCommit`),
+     because a branch cannot contain it;
+   - the take-back's git runs on a context detached from the caller and bounded by
+     `treeRestoreTimeout` (30 s), like the restore. Only the wait for the tree honours the
+     caller's context;
+   - the forward move after a refused switch gets its own bound;
+   - a success clears only the record of the same refused merge.
+
+   `TestF9_CancelledCommitBinderGitLeavesNoLockFile` moved from `ResetBranch` to an internal test
+   of `runWith`, because `ResetBranch` no longer follows the caller's cancellation. Tests:
+   `TestF9_TakeBackSurvivesASpentContext` (cancelled; deadline spent: the take-back completes and
+   the tree follows it), `TestF9_EarlyTakeBackFailureIsRemembered` (a commit check fails, through
+   a git wrapper; the wait for the tree is cut short; `expected` is a blob: nothing to take back),
+   and `TestF9_TakeBackSuccessClearsOnlyItsOwnRecord` (`bba878b4`, below).
+2. **`adapters/git/commitbinder.go` — `read-tree -m -u` refuses over a line-ending phantom, so a
+   refused merge carrying a phantom could never be taken back. FIXED** (`75419bf5`). Real: a
+   CRLF blob under `text eol=lf`, or a case collision, refuses the two-tree switch for good. Every
+   later take of the tree then refused it, and each one wrote a new quarantine commit. On a tree
+   with a home branch, the take-back now runs the restore's own repair
+   (`resetTreeOverRefusedSwitch`):
+   - the untracked-obstruction check over `HEAD` (an untracked or ignored file where the reset
+     writes refuses it, and nothing changes);
+   - a quarantine of the tracked state (`git stash create`, logged at Warn);
+   - `read-tree --reset -u <to>`.
+
+   A tree without a home branch keeps TASK-005's refusal: a local change is never discarded
+   there, so the take-back stays pending and fails closed (KNOWN-LIMITATIONS "Shared Working Tree"
+   2). The restore also remembers phantoms before it settles take-backs (step 5 before step 6), so
+   a take-back that stays pending does not make every take quarantine the phantoms again. Tests:
+   `TestF9_PhantomRefusedMergeIsTakenBack` (in the block; settled by a later take, with no new
+   quarantine afterwards; an untracked file in the way refuses it and is kept; a tree without a
+   home branch keeps the refusal), and `TestF9_PendingTakeBackDoesNotRequarantinePhantoms`
+   (`bba878b4`, below).
+3. **`adapters/git/treelock.go` — `rememberPhantoms` hashed symbolic links and FIFOs with
+   `git hash-object`, and `T` phantoms were quarantined again at every take. FIXED**
+   (`0041edd5`). Real: `hash-object` opens and follows what it is given. A file/link case
+   collision on a case-insensitive filesystem left a type-change phantom. When the disk kept the
+   link, the restore hashed its target outside the tree, blocked on a FIFO until the 30 s bound,
+   or could read `/dev/zero` without bound. And `knownPhantoms` accepted only `M`. Now:
+   - each residual path is looked at with the new, read-only `worktreefs.LstatEntry`. It follows
+     no component and opens nothing at the leaf; a link's own target is read with `readlinkat`;
+   - only regular files go to `hash-object`. A link is fingerprinted by its target, any other
+     type by its mode, and a missing or unreachable path by that fact;
+   - `knownPhantoms` and `rememberPhantoms` both accept working-tree-only `M`, `T` and `D` entries
+     (`trackedChange.worktreeOnly`).
+
+   Tests: `TestF9_PhantomFingerprintNeverReadsThroughALink` (internal: links to a FIFO and to a
+   file outside the tree, fingerprinted in bounded time without being read), and
+   `TestF9_FileLinkCaseCollisionPhantomIsBounded` (both name orders; at most one quarantine in
+   four restores; macOS, skips on a case-sensitive filesystem). Also
+   `TestF9_PhantomsBeyondTheBoundAreQuarantinedAndNeverWedge` (more than `maxPhantoms`: a
+   quarantine at every take, never a wedge; the AC 11 gap), `TestTree_LstatEntry` and
+   `TestTree_LstatEntryNeverOpensAFIFO`.
+4. **`core/domain/repository_merge_outcome.go`, `core/engine` — `KeepPendingPublication`
+   carried a landed merge across committing episodes, so the retry bound never applied. FIXED**
+   (`29962a8c`). Real, and reproduced end to end:
+   - a push fails transiently, then is rejected permanently. The publish run goes back to
+     `execute` with its outcome still naming the merge;
+   - every pre-push transient failure of the reworked run's next episode inherited the marker;
+   - so the budget never abandoned it, and it was retried every tick forever. The code-repository
+     loop did the same on the binding re-merge path.
+
+   Now:
+   - (domain) a permanent-class prior is never carried; `KeepsPendingPublicationOf` exposes the
+     decision;
+   - (engine) `keepPendingPublication` carries only a prior attempted in the run's current
+     committing episode (`attemptedThisEpisode`, the abandonment's own rule). It reads the run's
+     steps only when a carry would apply;
+   - a failed read of the steps records nothing, and the run stays `committing`, as for an
+     unreadable prior;
+   - the binding re-merge path carries nothing.
+
+   Tests: `TestMergeRetry_EpisodeAfterAPermanentPushFailureIsBounded` (the finding's sequence,
+   binding off and on: the new episode is abandoned at attempt 4 and takes `merge_failed` again),
+   `TestKeepPendingPublication` (domain), `TestKeepPendingPublication_OnlyWithinTheEpisode`,
+   `TestKeepPendingPublication_CodeRepositoryEpisodes` and
+   `TestKeepPendingPublication_CodeRepositoryReMergeIsNotCarried`. Also, from `bba878b4`:
+   `TestKeepPendingPublication_PrimaryRecord` and
+   `TestKeepPendingPublication_CodeRepositoryUnreadableStepsRecordNothing`.
+
+Docs (`f684a77f`): CHANGELOG (Security; Changed (embedders)), KNOWN-LIMITATIONS "Shared Working
+Tree" items 2, 5 and 8, `architecture/git-integration.md` §6.6, and the `committing` row of
+`architecture/engine-state-machine.md`.
+
+**Mutation check of the round-2 fixes.** Each guard the fix commits added was mutated in a
+throwaway detached worktree (`i23/s-T012/mut`, removed afterwards; script
+`w4/agents/fin012/mutants.py`). Its package's tests were then run: `TestF9_` in `adapters/git`;
+`TestKeepPendingPublication|TestMergeRetry_|TestAbandonExhaustedMerge_|TestF9_|TestF8_` in
+`core/engine`; `TestKeepPendingPublication` in `core/domain`; `TestTree_LstatEntry` in
+`core/worktreefs`. On the round-2 fix commits, five mutants survived (2.1e, 2.2d, 2.4f, 2.4g and
+2.4h). The fixes themselves were present. `bba878b4` adds a test for each of the five, and each
+test fails with its mutant.
+
+| Mutant | Guard removed | Killed by |
+|---|---|---|
+| 2.1a | a failed commit check forgets the take-back | `TestF9_EarlyTakeBackFailureIsRemembered/a_commit_check_fails` |
+| 2.1b | a lock wait cut short forgets it | `…/the_wait_for_the_tree_is_cut_short` |
+| 2.1c | the take-back runs on the caller's context | `TestF9_TakeBackSurvivesASpentContext` (both) |
+| 2.1d | `errNotCommit` arms a record | `…/expected_names_no_commit:_nothing_to_take_back` |
+| 2.1e | a success clears the branch's record whatever merge it named | `TestF9_TakeBackSuccessClearsOnlyItsOwnRecord` (`bba878b4`; survived before) |
+| 2.1f | the forward move shares the switch's context | **survives**: it acts only after the switch spent the 30 s `treeRestoreTimeout` (a constant), so a test would have to block for 30 s. Covered by review only; it is the fail-safe of a fail-safe (the restore heals a branch/index mismatch at the next take) |
+| 2.2a | no reset over a refused switch | `TestF9_PhantomRefusedMergeIsTakenBack` (3 of 4 subtests) |
+| 2.2b | no untracked-obstruction check | `…/an_untracked_file_in_the_way_refuses_it_and_is_kept` |
+| 2.2c | the reset also on a tree without a home branch | `…/a_tree_without_a_home_branch_keeps_the_refusal` |
+| 2.2d | phantoms remembered only after a successful settle | `TestF9_PendingTakeBackDoesNotRequarantinePhantoms` (`bba878b4`; survived before) |
+| 2.3a | links hashed through `hash-object` | `TestF9_PhantomFingerprintNeverReadsThroughALink`, `TestF9_FileLinkCaseCollisionPhantomIsBounded` (blocked 30 s) |
+| 2.3b | `knownPhantoms` accepts only `M` | `TestF9_PhantomFingerprintNeverReadsThroughALink`, `TestF9_FileLinkCaseCollisionPhantomIsBounded` |
+| 2.3c | `rememberPhantoms` ignores `worktreeOnly` | **equivalent**: `verify` has already refused every staged entry, and after `reset --hard` every residual entry is working-tree-only |
+| 2.3d | `LstatEntry` follows the leaf (`Stat`) | `TestTree_LstatEntry`, `TestTree_LstatEntryNeverOpensAFIFO`, `TestF9_PhantomFingerprintNeverReadsThroughALink` |
+| 2.3e | `T` is not a phantom | `TestF9_PhantomFingerprintNeverReadsThroughALink`, `TestF9_FileLinkCaseCollisionPhantomIsBounded` |
+| 2.4a | a permanent-class prior is carried | `TestKeepPendingPublication` (domain), `TestKeepPendingPublication_OnlyWithinTheEpisode` |
+| 2.4b | no episode check | `TestKeepPendingPublication_OnlyWithinTheEpisode`, `TestKeepPendingPublication_CodeRepositoryEpisodes` |
+| 2.4c | the re-merge path carries | `TestKeepPendingPublication_CodeRepositoryReMergeIsNotCarried` |
+| 2.4d | a failed step read carries on | `TestKeepPendingPublication_OnlyWithinTheEpisode/unreadable_steps…` |
+| 2.4e | the code-repository call site carries directly | `TestKeepPendingPublication_CodeRepositoryEpisodes` |
+| 2.4f | the primary call site carries directly | `TestKeepPendingPublication_PrimaryRecord` (`bba878b4`; survived before: `TestMergeRetry_EpisodeAfterAPermanentPushFailureIsBounded`'s prior is permanent-class, so the domain guard alone decides it) |
+| 2.4g | the primary call site ignores the step-read error | `TestKeepPendingPublication_PrimaryRecord/unreadable_steps_record_nothing` (`bba878b4`; survived before) |
+| 2.4h | the code-repository call site ignores it | `TestKeepPendingPublication_CodeRepositoryUnreadableStepsRecordNothing` (`bba878b4`; survived before) |
+
+`TestF9_PendingTakeBackDoesNotRequarantinePhantoms` keeps the take-back pending in a way that
+waits for an operator: `main` moved on outside the server and still contains the merge. A held
+`refs/heads/main.lock` does not test the order. There the restore's own `reset --hard` fails on
+the ref lock before any phantom can be remembered, so each take quarantines again while the lock
+is held. That behaviour is the same on `main` (transient, unreferenced commits only), and the
+round leaves it unchanged.
+
+**Gates** (final code `fef299a2`; the artifact commit after it changes only this file). The
+round-2 code was first gated at `bba878b4`; that run's only new issue was the errcheck fixed in
+`fef299a2`, and every gate below was re-run at `fef299a2`. macOS (git 2.54, Go 1.26.5) unless
+stated. Databases on `i23-pg`: `s012f_spine`, `s012f_reg` (`migrations/registry/*.sql`),
+`s012f_ci` (fresh, for the CI job), `s012f_smp_it` and `s012f_spine_runtime_it`. All were dropped
+at the end.
+
+| Gate | Command | Result |
+|---|---|---|
+| Boundary lint | `./dev/lint-boundaries.sh` | OK |
+| Build | `make build` | OK |
+| Embed smoke test | `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | "library surface is sound" |
+| Vet | `go vet ./...`; `-tags integration`; `-tags scenario` | clean (all three) |
+| Unit | `go test -count=1 -p 4 ./...` | 40 packages ok, 0 failures |
+| Race, every package changed since `ae513dca` | `go test -race -count=1 -p 4` on `adapters/git/...`, `adapters/scheduler/...`, `core/artifact/...`, `core/divergence/...`, `core/domain/...`, `core/engine/...`, `core/workflow/...`, `core/worktreefs/...`, `service/cmd/spine/...`, `service/internal/gateway/...`, `service/internal/workspace/...` | 12 ok, 0 races |
+| Race, `service/scenariotest/harness` | `go test -race -count=1 -tags scenario` with both DSNs | 0 races; 26 PASS, 3 FAIL: `TestSchemaMatchesProduction` (a NOT NULL `metadata` column refuses the projection upsert), and `TestNewTestEnvironment_EndToEnd` and `TestNewTestRuntime_CreateArtifact` (`validation_failed` at fixture seeding). The same 3 fail at `ae513dca`, also with 26 PASS: pre-existing, part of G1's set |
+| Integration (changed packages with integration tests) | `SPINE_TEST_DATABASE_URL=…/s012f_spine SPINE_REGISTRY_TEST_DATABASE_URL=…/s012f_reg go test -tags integration -count=1 -p 2 -v ./service/cmd/spine/ ./service/internal/workspace/` | 235 top-level PASS (411 with subtests), 0 failures, 0 skips |
+| CI `scenario-git-http`, all four steps verbatim (TASK-001, TASK-013, TASK-014) | the job's `run:` scripts with its env (`SPINE_TEST_DATABASE_URL` only) on a fresh database | all four pass, none skips: `TestGitHTTP_*` 20 PASS (a `TestGitHTTP_Push*` among them), `TestBootstrapInternalAdmin_*` 2 PASS (both named tests), `TestWorkflowLifecycle_*` 4 PASS (both named tests), `TestBuildServiceSet_WorkflowServiceHasProjectionPolicy` PASS |
+| CI `git-floor` | `golang:1.26-bookworm` (git 2.39.5, Go 1.26.8), non-root (`501:20`), `--init`, worktree and `.git` read-only, **no git identity** (`user.useConfigOnly=true`; a plain `git commit` fails "Author identity unknown"): the job's three steps, plus `-run 'TestF8_\|TestF9_\|TestMergeRetry_\|TestCommitBudget_\|TestMultiScheduler_\|TestAbandonExhaustedMerge_\|TestAcceptTask_\|TestUpdateFrom_\|TestTreeLock_\|TestGitChildren\|TestKeepPendingPublication\|TestTree_LstatEntry'` on `core/engine`, `core/divergence`, `adapters/scheduler`, `core/artifact`, `adapters/git`, `core/worktreefs` | all ok: "git version 2.39.5"; the ref-grammar step and the adapter/services step pass; the task filter has 85 PASS, 0 FAIL. Skipped there: `TestF9_CaseCollisionPhantomNeverWedgesTheTree` and both subtests of `TestF9_FileLinkCaseCollisionPhantomIsBounded`, because the filesystem is case-sensitive (they run on macOS). The line-ending phantom tests run there, round 2's included |
+| golangci-lint, new | `golangci-lint run --new-from-rev ae513dca` on every changed package (harness with `--build-tags scenario`) | 0 issues (at `bba878b4`: 1, the errcheck fixed in `fef299a2`) |
+| gosec | `--new-from-rev ae513dca --enable-only=gosec ./...` and `--enable-only=gosec ./...` | 0 issues (both) |
+| gofmt | `gofmt -l` on every changed file | `adapters/scheduler/recovery.go`, `core/divergence/convergence.go` only. Both are unformatted on `ae513dca` too, by the same misplaced `adapters/…` import (import order only), which this task does not reorder. `convergence.go` is on AC 23's list, and `recovery.go` on the design check's addition to it (Deviation 22) |
+
+Not re-run in this round: `make test-scenario` in full (G1: 31 pre-existing failures, identical to
+`main`), full `make lint` (G2), and the macOS no-identity run (the git floor above runs with no
+identity).
+
+**SMP compatibility gate** (Rule 3). SMP `1ae9b0e3` (detached checkout `i23/s-T012/smp`; its
+`../spine` is this worktree at `fef299a2`), no SMP edits, `GOFLAGS=-mod=readonly`:
+
+| Step | Command | Result |
+|---|---|---|
+| Build + vet | `go build ./... && go vet ./...`, plain and `-tags integration`, `-tags scenario`, `-tags faultinject` | clean (all four) |
+| Race, every SMP package importing a changed Spine package | `go test -race -count=1 -p 4 -timeout 20m` on `internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`. These are the direct importers, under every tag set, of `adapters/git`, `adapters/scheduler`, `core/artifact`, `core/divergence`, `core/domain`, `core/engine`, `core/workflow` and `core/worktreefs` (`go list -test`). Run with `TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` | 11 ok, 0 races; `projectionsvc` has no test files |
+| Integration job, Spine-runtime step | `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 10m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` | PASS: 1914 passed, 0 failed, 2 allowed skips |
+| githttp suite | `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | PASS: 301 passed, 0 failed, 1 allowed skip |
+| Leak check | `ws_%` databases and roles, before and after | none of these suites left one. One `ws_` database and its two roles appeared during the run. They belong to another agent's live `-tags faultinject` testgate run in `i23/pin-ae513dc/smp-int4` (its `failureboundary.test` held their connections), and were left alone. SMP checkout clean before and after |
+
+Platform migrations via `go run ./dev/apply-migrations -set platform -dir migrations`, Spine runtime
+via `-set spine-runtime`. Round 2 adds nothing on SMP's paths beyond round 1:
+- SMP never calls `ResetBranch` or `RestoreWorkingTree` and never sets `WithHomeBranch`;
+- `phantomStatesOf` runs only in a home-branch restore;
+- `keepPendingPublication` reads the run's steps only when a carry would apply. Its failed read
+  ends the attempt the way an unreadable prior already did, and the carry matters only to
+  `AbandonExhaustedMerge`, which SMP does not call.
+
+**Codex.** `codex review --base main`, plain (no model override; codex-cli 0.162.1). Each review
+sub-session (`session_meta.source = {"subagent":"review"}`, cwd this worktree) ran
+`gpt-6.1-sol`:
+
+| Round | Code | Review session | Findings |
+|---|---|---|---|
+| 10 | `bba878b4` | `01a1539a-13d3-7e20-8a45-b17fb20668f0` | none ("No actionable regressions were identified … shared-worktree locking, explicit convergence targets, and retry-budget handling are supported by extensive regression coverage") |
+| 11 | `fef299a2` | `01a153a3-355e-7022-9c2b-db19f9111098` | none ("No actionable regressions were identified in the changes") |
+
 ### Not run / notes for the orchestrator
 
 - **Needs a ruling:** AC 23's `make test-scenario` (G1: 31 pre-existing failures, identical to
   `main`) and AC 15's push half (Deviation 16: push-phase transient failures are retried until the
-  push lands, never abandoned).
+  push lands, never abandoned). Review round 2 narrows that exemption to one committing episode:
+  after a permanent push rejection sends the run back to `execute`, its next episode is bounded
+  again (finding 4).
+- Review round 2 residuals, not defects: mutant 2.1f survives (the forward move's own bound acts
+  only after a 30 s switch, and a test would block for 30 s). A held `refs/heads/main.lock` makes
+  every take quarantine again until the lock goes, as on `main`. On a tree without a home branch, a
+  take-back over a phantom stays pending and fails closed (KNOWN-LIMITATIONS "Shared Working Tree"
+  2; dormant in standalone, and SMP never calls `ResetBranch`).
 - The SMP-side unit test of AC 27 (`divergenceGitClient.CreateBranch` receives and forwards
   `run.BranchName`) belongs to SMP TASK-012 (no SMP edits here). The SMP gate's `spinecore` suite
   passes with the new base.
