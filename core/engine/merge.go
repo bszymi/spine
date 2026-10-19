@@ -531,12 +531,16 @@ func (o *Orchestrator) transitionToPartiallyMerged(ctx context.Context, run *dom
 
 // failRunOnMergeError transitions a run to failed due to a permanent merge error.
 // Persists git_conflict classification on the last completed step for visibility.
+//
+// The run write is a compare-and-swap from the status the merge read
+// (INIT-023 TASK-008): when another path already moved the run (a
+// concurrent merge attempt completed it, an operator acted), the miss is
+// logged and nil returned, exactly like completeAfterMerge — no run_failed,
+// no executions closed, and no merge-failure detail written onto a run
+// that another path finished (the git_conflict detail is recorded only
+// after the transition applied).
 func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run, mergeErr error) error {
 	log := observe.Logger(ctx)
-
-	// Persist git_conflict detail on the last completed step so actors
-	// can see why the run failed via the step execution record.
-	o.recordGitConflictOnStep(ctx, run, mergeErr)
 
 	result, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{
 		Trigger: workflow.TriggerGitCommitFailedPerm,
@@ -545,9 +549,19 @@ func (o *Orchestrator) failRunOnMergeError(ctx context.Context, run *domain.Run,
 		return err
 	}
 
-	if err := o.store.UpdateRunStatus(ctx, run.RunID, result.ToStatus); err != nil {
+	applied, err := o.store.TransitionRunStatus(ctx, run.RunID, run.Status, result.ToStatus)
+	if err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
+	if !applied {
+		log.Info("run already transitioned, skipping permanent merge failure",
+			"run_id", run.RunID, "error", mergeErr)
+		return nil
+	}
+
+	// Persist git_conflict detail on the last completed step so actors
+	// can see why the run failed via the step execution record.
+	o.recordGitConflictOnStep(ctx, run, mergeErr)
 	// TerminateStepsOnCancel (INIT-023 TASK-007): the publish step (and any
 	// other live execution) closes with the run.
 	o.terminateLiveSteps(ctx, run.RunID, "run failed: merge failed permanently")
@@ -593,12 +607,13 @@ func (o *Orchestrator) recordGitConflictOnStep(ctx context.Context, run *domain.
 		classification = domain.FailureGitConflict
 	}
 
+	prior := stateOf(lastCompleted)
 	lastCompleted.ErrorDetail = &domain.ErrorDetail{
 		Classification: classification,
 		Message:        fmt.Sprintf("merge failed: %s", mergeErr.Error()),
 		StepID:         lastCompleted.StepID,
 	}
-	if updateErr := o.store.UpdateStepExecution(ctx, lastCompleted); updateErr != nil {
+	if updateErr := o.writeStepExecution(ctx, lastCompleted, prior); updateErr != nil {
 		observe.Logger(ctx).Warn("failed to record git conflict on step", "error", updateErr)
 	}
 }

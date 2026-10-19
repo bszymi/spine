@@ -3,14 +3,15 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/repository"
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/repository"
-	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/workflow"
 )
 
@@ -114,8 +115,16 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 
 		now := time.Now()
 		if err := s.store.WithTx(ctx, func(tx store.Tx) error {
-			if err := tx.UpdateRunStatus(ctx, runs[i].RunID, tr.ToStatus); err != nil {
+			// Compare-and-swap from pending (INIT-023 TASK-008): a run that
+			// left pending since the listing (StartRun activated it, an
+			// operator cancelled it) is not written over; the transaction
+			// rolls back and the run is skipped.
+			applied, err := tx.TransitionRunStatus(ctx, runs[i].RunID, runs[i].Status, tr.ToStatus)
+			if err != nil {
 				return err
+			}
+			if !applied {
+				return errRecoveryRunMoved
 			}
 			if hasEntryStep {
 				return nil // entry step already exists, skip creation
@@ -130,6 +139,10 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 				CreatedAt:    now,
 			})
 		}); err != nil {
+			if errors.Is(err, errRecoveryRunMoved) {
+				log.Info("pending run changed before recovery activated it; skipped", "run_id", runs[i].RunID)
+				continue
+			}
 			log.Error("activate pending run failed", "run_id", runs[i].RunID, "error", err)
 			continue
 		}
@@ -139,6 +152,10 @@ func (s *Scheduler) recoverPendingRuns(ctx context.Context, result *RecoveryResu
 	}
 	return nil
 }
+
+// errRecoveryRunMoved rolls back a pending-run activation whose
+// compare-and-swap missed.
+var errRecoveryRunMoved = errors.New("run left pending before recovery activated it")
 
 // recoverActiveRuns inspects each active run's current step and applies recovery.
 func (s *Scheduler) recoverActiveRuns(ctx context.Context, result *RecoveryResult) error {
@@ -195,8 +212,16 @@ func (s *Scheduler) recoverStep(ctx context.Context, run *domain.Run, exec *doma
 				return fmt.Errorf("reset assigned to waiting: %w", err)
 			}
 			exec.Status = result.ToStatus
-			if err := s.store.UpdateStepExecution(ctx, exec); err != nil {
+			applied, err := s.transitionStep(ctx, exec, domain.StepStatusAssigned, exec.ActorID)
+			if err != nil {
 				return fmt.Errorf("update step execution: %w", err)
+			}
+			if !applied {
+				// The step moved since the listing (INIT-023 TASK-008): a
+				// live replica acknowledged or completed it. Leave it.
+				log.Info("assigned step changed before recovery reset it; skipped",
+					"run_id", run.RunID, "step_id", exec.StepID)
+				return nil
 			}
 		}
 		log.Info("step ready for reassignment", "run_id", run.RunID, "step_id", exec.StepID, "status", exec.Status)

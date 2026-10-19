@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/observe"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // ReleaseRequest represents a request to release a step assignment.
@@ -58,23 +58,59 @@ func (o *Orchestrator) ReleaseStep(ctx context.Context, req ReleaseRequest) erro
 	if err != nil {
 		return fmt.Errorf("get step execution: %w", err)
 	}
+	// The execution itself must still be bound to the releasing actor
+	// (INIT-023 TASK-008), not only the assignment row: startup recovery
+	// resets assigned→waiting without clearing actor_id or the assignment
+	// row, and AssignStep then binds another actor without creating a row,
+	// so A's stale active claim would otherwise release B's step. An
+	// unbound execution (empty actor) keeps today's behaviour.
+	if exec.ActorID != "" && exec.ActorID != req.ActorID {
+		return domain.NewError(domain.ErrForbidden,
+			fmt.Sprintf("step execution %s is not assigned to actor %q", assignment.ExecutionID, req.ActorID))
+	}
 	if exec.Status.IsTerminal() {
 		return domain.NewError(domain.ErrConflict,
 			fmt.Sprintf("step execution %s is in terminal state %q, cannot release", assignment.ExecutionID, exec.Status))
 	}
+	prior := stateOf(exec)
+	original := *exec
 
-	// Cancel the assignment.
 	now := time.Now()
-	if err := o.assignments.UpdateAssignmentStatus(ctx, req.AssignmentID, domain.AssignmentStatusCancelled, &now); err != nil {
-		return fmt.Errorf("cancel assignment: %w", err)
+	if o.stepTransitioner() == nil {
+		// Blind store (no compare-and-swap capability): today's order —
+		// the assignment row is cancelled first, then the step is written.
+		if err := o.assignments.UpdateAssignmentStatus(ctx, req.AssignmentID, domain.AssignmentStatusCancelled, &now); err != nil {
+			return fmt.Errorf("cancel assignment: %w", err)
+		}
 	}
 
 	// Transition step execution back to waiting.
 	exec.Status = domain.StepStatusWaiting
 	exec.ActorID = ""
 	exec.StartedAt = nil
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
+	}
+	if o.stepTransitioner() != nil {
+		// Conditional store: the step write comes first, so a lost race
+		// (a submit or bind won) leaves both the execution and the
+		// assignment row untouched; the row is cancelled only after the
+		// write applied.
+		if err := o.assignments.UpdateAssignmentStatus(ctx, req.AssignmentID, domain.AssignmentStatusCancelled, &now); err != nil {
+			// Compensate (codex review, round 2): an unbound waiting
+			// execution next to a still-active assignment row would block
+			// every later claim (the active-assignment unique index), and
+			// once another actor is bound the owner guard above stops this
+			// actor's retry from cancelling the row. Put the execution back
+			// as it was read — conditionally, so a writer that took the
+			// released step meanwhile is not overwritten — and report the
+			// failure; the caller can retry the release.
+			if cerr := o.writeStepExecution(ctx, &original, stateOf(exec)); cerr != nil {
+				log.Error("release: assignment not cancelled and the step could not be restored",
+					"assignment_id", req.AssignmentID, "execution_id", exec.ExecutionID, "error", err, "restore_error", cerr)
+			}
+			return fmt.Errorf("cancel assignment: %w", err)
+		}
 	}
 
 	// Emit release event.

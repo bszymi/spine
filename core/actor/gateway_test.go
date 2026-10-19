@@ -355,3 +355,96 @@ func TestBuildPromptMinimal(t *testing.T) {
 // suppress unused import
 var _ = time.Now
 var _ json.RawMessage
+
+// ── INIT-023 TASK-008 AC 12: ProcessResult's cheap guards ──
+
+type casGatewayStore struct {
+	*gatewayFakeStore
+	cas int
+}
+
+func (c *casGatewayStore) TransitionStepExecution(_ context.Context, e *domain.StepExecution, from domain.StepExecutionStatus, fromActor string) (bool, error) {
+	c.cas++
+	cur := c.stepExecs[e.ExecutionID]
+	if cur.Status != from || cur.ActorID != fromActor {
+		return false, nil
+	}
+	cp := *e
+	c.stepExecs[e.ExecutionID] = &cp
+	return true, nil
+}
+
+func TestProcessResult_Guards(t *testing.T) {
+	result := actor.AssignmentResult{AssignmentID: "assign-1", RunID: "run-1", ActorID: "actor-1", OutcomeID: "approved"}
+	for _, tc := range []struct {
+		name   string
+		exec   domain.StepExecution
+		code   domain.ErrorCode
+		status domain.StepExecutionStatus
+	}{
+		{"a failed execution is not overwritten", domain.StepExecution{ExecutionID: "assign-1", Status: domain.StepStatusFailed, ActorID: "actor-1"},
+			domain.ErrConflict, domain.StepStatusFailed},
+		{"a skipped execution is not overwritten", domain.StepExecution{ExecutionID: "assign-1", Status: domain.StepStatusSkipped, ActorID: "actor-1"},
+			domain.ErrConflict, domain.StepStatusSkipped},
+		{"a waiting execution is not completed", domain.StepExecution{ExecutionID: "assign-1", Status: domain.StepStatusWaiting},
+			domain.ErrConflict, domain.StepStatusWaiting},
+		{"a foreign actor is refused", domain.StepExecution{ExecutionID: "assign-1", Status: domain.StepStatusInProgress, ActorID: "actor-2"},
+			domain.ErrForbidden, domain.StepStatusInProgress},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newGatewayFakeStore()
+			e := tc.exec
+			fs.stepExecs["assign-1"] = &e
+			events := &fakeEventRouter{}
+			gw := actor.NewGateway(fs, events, &fakeQueue{}, actor.NewService(fs))
+			err := gw.ProcessResult(context.Background(), sampleRequest(), result)
+			se, ok := err.(*domain.SpineError)
+			if !ok || se.Code != tc.code {
+				t.Fatalf("err = %v, want %s", err, tc.code)
+			}
+			if got := fs.stepExecs["assign-1"].Status; got != tc.status {
+				t.Fatalf("status = %s, want %s", got, tc.status)
+			}
+			if len(events.events) != 0 {
+				t.Fatal("a refused result emitted step_completed")
+			}
+		})
+	}
+	t.Run("a lost race changes nothing", func(t *testing.T) {
+		base := newGatewayFakeStore()
+		fs := &casGatewayStore{gatewayFakeStore: base}
+		base.stepExecs["assign-1"] = &domain.StepExecution{ExecutionID: "assign-1", Status: domain.StepStatusInProgress, ActorID: "actor-1"}
+		// The row the gateway reads is a copy; the stored one is failed by
+		// the timeout scanner before the write.
+		read := *base.stepExecs["assign-1"]
+		base.stepExecs["assign-1"].Status = domain.StepStatusFailed
+		events := &fakeEventRouter{}
+		gw := actor.NewGateway(&readOnceStore{casGatewayStore: fs, first: &read}, events, &fakeQueue{}, actor.NewService(base))
+		err := gw.ProcessResult(context.Background(), sampleRequest(), result)
+		se, ok := err.(*domain.SpineError)
+		if !ok || se.Code != domain.ErrConflict || fs.cas != 1 {
+			t.Fatalf("err = %v (cas %d), want a conflict after one conditional write", err, fs.cas)
+		}
+		if got := base.stepExecs["assign-1"].Status; got != domain.StepStatusFailed {
+			t.Fatalf("status = %s, want failed", got)
+		}
+		if len(events.events) != 0 {
+			t.Fatal("a lost race emitted step_completed")
+		}
+	})
+}
+
+// readOnceStore answers the first GetStepExecution with a stale snapshot.
+type readOnceStore struct {
+	*casGatewayStore
+	first *domain.StepExecution
+}
+
+func (r *readOnceStore) GetStepExecution(ctx context.Context, id string) (*domain.StepExecution, error) {
+	if r.first != nil {
+		cp := *r.first
+		r.first = nil
+		return &cp, nil
+	}
+	return r.casGatewayStore.GetStepExecution(ctx, id)
+}

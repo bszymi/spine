@@ -38,37 +38,10 @@ func (o *Orchestrator) AcknowledgeStep(ctx context.Context, req AcknowledgeReque
 	if err != nil {
 		return nil, fmt.Errorf("get step execution: %w", err)
 	}
+	prior := stateOf(exec) // the write below is conditional on it (INIT-023 TASK-008)
 
-	// Only the assigned actor may acknowledge.
-	if exec.ActorID != req.ActorID {
-		return nil, domain.NewError(domain.ErrForbidden,
-			fmt.Sprintf("actor %q is not assigned to step execution %s", req.ActorID, req.ExecutionID))
-	}
-
-	// EnforceRunStatus (INIT-023 TASK-007): no work starts on a run that is
-	// not active. Checked ahead of the idempotent in_progress answer too, so
-	// a runner re-acknowledging on a dead run is told to stop rather than
-	// that it may carry on. The run is loaded only when the flag is on.
-	if o.entryPolicy.EnforceRunStatus {
-		run, err := o.store.GetRun(ctx, exec.RunID)
-		if err != nil {
-			return nil, fmt.Errorf("get run: %w", err)
-		}
-		if err := o.requireActiveRun(run, "acknowledged"); err != nil {
-			return nil, err
-		}
-	}
-
-	// Idempotency: acknowledging an already-in_progress step is a no-op.
-	// The same actor calling acknowledge twice (e.g., after a network retry)
-	// should receive the current state rather than an error.
-	if exec.Status == domain.StepStatusInProgress {
-		return &AcknowledgeResult{
-			ExecutionID: exec.ExecutionID,
-			StepID:      exec.StepID,
-			Status:      string(exec.Status),
-			StartedAt:   exec.StartedAt,
-		}, nil
+	if res, done, err := o.acknowledgeAnswer(ctx, req, exec); done {
+		return res, err
 	}
 
 	// Validate state transition (returns 409 if not in assigned state).
@@ -81,7 +54,10 @@ func (o *Orchestrator) AcknowledgeStep(ctx context.Context, req AcknowledgeReque
 	now := time.Now()
 	exec.Status = domain.StepStatusInProgress
 	exec.StartedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
+		if isStepStateChanged(err) {
+			return o.lostAcknowledgeRace(ctx, req, fmt.Errorf("update step execution: %w", err))
+		}
 		return nil, fmt.Errorf("update step execution: %w", err)
 	}
 
@@ -92,10 +68,72 @@ func (o *Orchestrator) AcknowledgeStep(ctx context.Context, req AcknowledgeReque
 	o.emitEvent(ctx, domain.EventStepStarted, exec.RunID, run.TraceID,
 		fmt.Sprintf("evt-%s-started", exec.ExecutionID), nil)
 
+	return acknowledged(exec), nil
+}
+
+// acknowledgeAnswer is AcknowledgeStep's answer that needs no write, for
+// the execution as read: done is true when (res, err) is the answer — the
+// ownership refusal, TASK-007's run-status refusal, or the idempotent
+// in_progress result — and false when the step must be transitioned.
+func (o *Orchestrator) acknowledgeAnswer(ctx context.Context, req AcknowledgeRequest, exec *domain.StepExecution) (*AcknowledgeResult, bool, error) {
+	// Only the assigned actor may acknowledge.
+	if exec.ActorID != req.ActorID {
+		return nil, true, domain.NewError(domain.ErrForbidden,
+			fmt.Sprintf("actor %q is not assigned to step execution %s", req.ActorID, req.ExecutionID))
+	}
+
+	// EnforceRunStatus (INIT-023 TASK-007): no work starts on a run that is
+	// not active. Checked ahead of the idempotent in_progress answer too, so
+	// a runner re-acknowledging on a dead run is told to stop rather than
+	// that it may carry on. The run is loaded only when the flag is on.
+	if o.entryPolicy.EnforceRunStatus {
+		run, err := o.store.GetRun(ctx, exec.RunID)
+		if err != nil {
+			return nil, true, fmt.Errorf("get run: %w", err)
+		}
+		if err := o.requireActiveRun(run, "acknowledged"); err != nil {
+			return nil, true, err
+		}
+	}
+
+	// Idempotency: acknowledging an already-in_progress step is a no-op.
+	// The same actor calling acknowledge twice (e.g., after a network retry)
+	// should receive the current state rather than an error.
+	if exec.Status == domain.StepStatusInProgress {
+		return acknowledged(exec), true, nil
+	}
+	return nil, false, nil
+}
+
+// lostAcknowledgeRace answers an acknowledgment whose conditional write
+// missed (INIT-023 TASK-008 review round 1; only with the step capability —
+// a blind store never misses). Decision D9's parity rule, as for a submit
+// (acknowledgedOrSame, lostSubmitRace): losing to the same actor's
+// identical transition — a concurrent retry of this acknowledge, or the
+// actor's own submit auto-acknowledging — is not a conflict, because the
+// sequential retry of it gets the idempotent in_progress answer; so this
+// one gets it too, judged on the re-read row exactly as a fresh call
+// would be (TASK-007's run-status refusal included), and emits no second
+// step_started (the winner did). Any other move — released, rebound,
+// completed, failed, terminated — keeps the conflict: the acknowledgment
+// was not applied and the step is not the caller's to start.
+func (o *Orchestrator) lostAcknowledgeRace(ctx context.Context, req AcknowledgeRequest, raceErr error) (*AcknowledgeResult, error) {
+	cur, err := o.store.GetStepExecution(ctx, req.ExecutionID)
+	if err != nil {
+		return nil, fmt.Errorf("re-read step execution: %w", err)
+	}
+	if cur.Status != domain.StepStatusInProgress || cur.ActorID != req.ActorID {
+		return nil, raceErr
+	}
+	res, _, err := o.acknowledgeAnswer(ctx, req, cur)
+	return res, err
+}
+
+func acknowledged(exec *domain.StepExecution) *AcknowledgeResult {
 	return &AcknowledgeResult{
 		ExecutionID: exec.ExecutionID,
 		StepID:      exec.StepID,
 		Status:      string(exec.Status),
 		StartedAt:   exec.StartedAt,
-	}, nil
+	}
 }

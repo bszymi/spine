@@ -242,12 +242,109 @@ This document tracks known gaps and deferred functionality.
 - **Stored data:** runs that were cancelled or failed before the upgrade keep their live
   executions. They are inert under `EnforceRunStatus` (every entry point refuses them, and the
   candidate listing hides them); a one-shot sweep is a follow-up.
-- **Not atomic:** run-end termination is a blind write that a concurrent bind can overwrite until
-  INIT-023 TASK-008's compare-and-swap; `EnforceRunStatus` is the backstop.
+- **Not atomic without the store capability:** run-end termination writes each live execution
+  through the engine's step write, which is conditional on (status, actor) only with a store that
+  implements `engine.StepExecutionTransitioner` (INIT-023 TASK-008; `spine serve`'s PostgreSQL
+  store does). An embedder whose store does not (SMP until its TASK-011) keeps a blind write that a
+  concurrent bind can overwrite; `EnforceRunStatus` is the backstop.
 - **Status preconditions on the run's own artifact** are evaluated against `main`, where commit
   status lands only at merge; a precondition requiring a status an earlier outcome commits can
   never hold mid-run (see `workflow.DeferredStatusPreconditions`). Custom workflows with such a
   precondition strand under the strict policy until it is removed.
+
+### Engine State Writes and Submit Ownership: What INIT-023 TASK-008 Leaves Open
+INIT-023 TASK-008 (audit P3-17 Spine half, P3-24) makes run-status writes compare-and-swap with
+re-evaluation, makes step writes compare-and-swap on (status, actor) with a capable store, stops a
+terminal execution from being routed twice and lets the engine verify the submitter
+(`architecture/engine-state-machine.md` "Concurrent writes"). What remains:
+1. **The engine's submitter check is opt-in.** `engine.SubmitRequest.ActorID` empty means "the
+   caller enforces ownership", as before. `spine serve` always sends the authenticated actor (also
+   when the gateway's own pre-check is skipped for want of a store); dev mode, with no
+   authentication, sends none. An embedder that sends none (SMP until its TASK-011) relies on its
+   own check; the snapshot handoff still stops an empty-`ActorID` submit from completing an
+   execution rebound between `IngestResult`'s read and the write. Failing closed on an empty
+   `ActorID` is a follow-up once every caller sends one (owner question 4: an Orchestrator option
+   plus an explicit system-submit marker for the actor-less callers).
+2. **Step compare-and-swap is opt-in for embedders.** A store without
+   `engine.StepExecutionTransitioner` keeps the blind `UpdateStepExecution`; SMP opts in in its
+   TASK-011 (owner question 3) and keeps its per-execution locks. Run-status compare-and-swap uses
+   `TransitionRunStatus`, which every store has, so it is on everywhere.
+3. **(status, actor), not a version:** an ABA by the same actor (release, then reclaim by the same
+   actor) restores `(in_progress, A)`, so a stale write from that actor's earlier attempt can still
+   match. It cannot cross actors. A version column would close it and needs a migration.
+4. **Step write and next-step creation are not one transaction.** A cancel that commits between a
+   submit's applied terminal write and `advanceToNextStep`'s `CreateStepExecution` leaves a
+   `waiting` execution on the cancelled run; the run stays cancelled (the routing's `CompleteRun`
+   or the publish handler's transition misses), and the stray execution is refused by the
+   run-status entry checks (TASK-007) — inert, not removed. Fully transactional routing is a
+   separate engine change.
+5. **A lost submit can still write `commit_meta`.** With merge binding on, a captured binding (and
+   this execution's evidence key) is written before the step's terminal write (wave 3, so a
+   completed execution always has its binding). A submit that then loses its step
+   compare-and-swap has already written them; `commit_meta` writes remain whole-map,
+   last-writer-wins replaces built from the writer's own read of the run (TASK-005). The window is
+   between the two writes of one submit; the recovery ledger's per-run lock does not cover step
+   submits. Only the persisted key is left behind: the `required outputs declared but run branch
+   unchanged` Warn and `step_completed` follow an applied terminal write only, and run detail
+   returns completed executions only.
+6. **A failed retry and the scheduler's failed-step recovery can race** to create the next
+   attempt; both build the same deterministic execution id, so the loser's `CreateStepExecution`
+   fails on the primary key. No duplicate is possible; the loser logs an error.
+7. **Two replicas recovering the same completed execution** may both pass `RecoverCompletedStep`'s
+   checks; the routing is claimed by creating the successor first under an attempt pinned from
+   the checked listing, so one wins the primary key and the other gets a conflict, and
+   `step_completed` is re-emitted under the execution's own id (the event log keeps the first
+   copy). A *live* submit routing the same execution at that moment numbers its successor from
+   its own later listing (`advanceToNextStep`), so it can create a second attempt beside the
+   recovery's — a multi-replica rolling-restart window of milliseconds; the run cursor
+   compare-and-swap keeps the cursor from being rewound. The queue consumer (dormant: no production
+   caller) recovers a completed execution its own redelivery was refused for, but not while another
+   delivery of the same assignment is still inside `SubmitStepResult` in that consumer — that one
+   may be the winner, about to route — and the last delivery out recovers instead; a winner in
+   another process, or a submit that does not go through the consumer, is not seen, so the same
+   window applies there. A crash between creating the next execution and moving the run's
+   cursor is finished by recovery (cursor moved, the `waiting` successor activated; before, the
+   re-route created a duplicate successor attempt). A crash after the cursor moved but before the
+   successor was activated is not: recovery leaves a `waiting` current step alone, so a
+   machine-selected or internal successor is not activated until an operator acts (pre-existing).
+   A divergence-branch execution is recovered on its branch's cursor (only the queue consumer
+   reaches that today; the scheduler's recovery follows the run cursor, which is
+   `divergence:<id>`); a branch marked completed whose convergence check never ran is not.
+   **Upgrade note:** recovery re-emits `step_completed` under the per-execution id
+   (`evt-<trace>-<execution_id>-completed`). An execution completed by a pre-TASK-008 binary was
+   logged under the per-step id (`evt-<trace>-<step_id>-completed`), so if a crash interrupted its
+   routing and the process restarts on this version, that one execution's `step_completed` is
+   logged and delivered twice (once per id). It is a one-off at the upgrade, standalone only (no
+   embedder calls recovery). Recovery cannot tell such an execution apart without a schema change,
+   and skipping the re-emission would lose the event of every completion a crash interrupted before
+   it was emitted.
+8. **A release whose assignment cancel fails is compensated, not atomic.** With the step
+   capability `ReleaseStep` writes the step first and cancels the assignment row after it; if the
+   cancel fails, the step is put back (conditionally) and the error returned. A writer that took
+   the released step in that instant makes the restore miss: the row stays active (an `ERROR
+   release: assignment not cancelled and the step could not be restored` names it) and blocks
+   claims until it expires or the run ends. One transaction across both stores would close it.
+9. **Resuming a successor needs the conditional cursor move.** `RecoverCompletedStep` moves the
+   cursor with `engine.RunCursorTransitioner`, and a divergence branch's cursor with
+   `engine.BranchCursorTransitioner` (the PostgreSQL store has both); a store without them
+   re-reads the run (the branch) right before a plain `UpdateCurrentStep` (`UpdateBranch`), which
+   narrows but does not close the window in which a live submit's cursor could be rewound — or,
+   for a branch, a completed branch reopened by a stale snapshot. No embedder calls recovery today.
+10. **`ProcessResult` (`core/actor`) has no production caller.** It now refuses failed and skipped
+   executions and a foreign actor and writes conditionally when it can; deleting the dead path is a
+   follow-up.
+11. **A lost claim's assignment row is removed only with `engine.AssignmentRowDeleter`.**
+   `ClaimStep` creates its `claim-<execution>-<actor>` row before the conditional step write,
+   because the active-assignment unique index is what serialises two claims. When the step write
+   loses, the claim never bound its actor, so the row is deleted. That row would otherwise be read
+   as a binding: the separation-of-duties ledger counts claim rows in every status, the
+   prior-holder re-offer reads one as "held and released", and its id would collide with the same
+   actor's next claim. The PostgreSQL store implements the port. An assignment store without it
+   (or a failing delete) cancels the row instead, so no claim is blocked, and the three effects
+   remain: the lost claimant is refused as a reviewer of that run, a prior holder's lost claim
+   opens its re-offered rework attempt to others, and that actor cannot claim the execution again.
+   It is reachable only together with `engine.StepExecutionTransitioner`, because a blind step
+   write never loses.
 
 ### Governed Merge Binding (INIT-023 TASK-005)
 SHA-bound governed merges (`Orchestrator.EnableMergeBinding`) close audit F2's merge half: the
@@ -830,6 +927,47 @@ The following limitations have been resolved:
   load) until the next rotation revokes them. Rotate once after upgrading.
 - **Unsetting `SMP_ADMIN_TOKEN`** stops seeding but does not revoke the existing bootstrap row;
   revoke it with `DELETE /api/v1/tokens/{token_id}`.
+
+### Step Outputs Are Self-Attested Labels
+- A step's `required_outputs` are logical labels (`architecture/workflow-definition-format.md`
+  §5.3). The runtime binding §5.3 describes — the engine resolving each name to a concrete
+  artifact — is **not implemented**: the engine only checks that the submitter *listed* every
+  declared name in `artifacts_produced` (`validateRequiredOutputs`, `core/engine/result.go`).
+  A step that declared outputs can be submitted with nothing pushed.
+- Every shipped value is a label, not a path:
+  - Spine `workflows/`: `artifact_content` (`adr-creation.yaml:29`, `artifact-creation.yaml:38`,
+    `document-creation.yaml:32`), `decision_document` (`adr.yaml:29`), `deliverable`
+    (`task-default.yaml:54`), `findings` (`task-spike.yaml:26`), `summary`
+    (`task-spike.yaml:52`), `task_breakdown` (`epic-lifecycle.yaml:29`), `workflow_body`
+    (`workflow-lifecycle.yaml:34`, and the `spine init-repo` seed,
+    `service/internal/cli/initrepo.go:518`).
+  - SMP `workflows/`: `artifact_content` (`adr-creation.yaml:29`, `artifact-creation.yaml:38`,
+    `document-creation.yaml:32`), `task_breakdown` (`epic-lifecycle.yaml:28`), `deliverable`
+    (`task-default.yaml:39`), `findings` (`task-spike.yaml:25`), `summary`
+    (`task-spike.yaml:50`), `workflow_body` (`workflow-lifecycle.yaml:34`).
+  - SMP's executors always attest the constant `deliverable` (`cmd/runner/operational_client.go:139`,
+    `internal/engine/runner.go:379`, `internal/engine/adapters.go:232`).
+- **What is recorded instead (INIT-023 TASK-008, audit P3-19; evidence, not enforcement — owner
+  question 1: flag only):** `step_completed` carries `branch_change` (did the run branch's content
+  change between the previous recorded head and this submit's head; `unchanged` needs no git call
+  when the heads are equal, and a head moved by commits that change no path — an empty commit, a
+  change and its revert — is `unchanged` too, `reason: head_moved_tree_unchanged`) and
+  `required_outputs_unchanged` (declared outputs, content unchanged), plus a
+  `WARN required outputs declared but run branch unchanged` once the submission applied; run
+  detail (`GET /runs/{run_id}`)
+  returns the same as `step_output_evidence`, from the reserved `spine.evidence.<execution_id>`
+  `commit_meta` keys (it survives event-log retention). **Review remains the control.**
+- **Evidence follows merge binding.** With binding off (an embedder without `EnableMergeBinding`,
+  SMP until its TASK-009) and no `expected_head_sha`, nothing is captured: every entry is
+  `unknown`/`head_sha_unrecorded` and run detail has no evidence. Only the primary repository is
+  counted; code repositories are not (v1). A planning run's seed commit counts towards the first
+  step's diff when no earlier head is recorded (`previous_source: baseline` shows it). A changed
+  count is best-effort: a diff that fails or exceeds 3 s gives `unknown`/`diff_failed:<kind>`
+  (an embedder's operator that resolves arguments by branch name first, as SMP's does, may lose
+  the count — or a moved head's `unchanged` — when a branch is named like the SHA; the
+  `unchanged` signal for equal heads needs no git call and is unaffected).
+- Enforcing outputs needs path-typed outputs in the workflow format (both corpora) behind an
+  opt-in flag; a follow-up.
 
 ### Skill Eligibility Is Matched by Name
 - Workflow `required_skills` and claim-time eligibility match skill *names*, not ids. Since

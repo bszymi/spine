@@ -101,6 +101,13 @@ type headBinding struct {
 	// trusted earlier binding (any repo key present was not written by
 	// this run).
 	replaceRepoKeys bool
+	// extra holds further reserved keys written in the same commit_meta
+	// write as the binding — today one spine.evidence.<execution_id> key
+	// per step capture (INIT-023 TASK-008, step-output evidence). Every key
+	// must be reserved (apply drops any other): they ride the binding's
+	// single write instead of a second whole-map replace, and the keys of
+	// earlier executions are kept like every reserved key.
+	extra map[string]string
 }
 
 // apply returns reserved with b written over it.
@@ -121,6 +128,11 @@ func (b *headBinding) apply(reserved map[string]string) map[string]string {
 	}
 	for id, h := range b.repoHeads {
 		out[RepoBoundSHAKey(id)] = h
+	}
+	for k, v := range b.extra {
+		if isReservedCommitMetaKey(k) {
+			out[k] = v
+		}
 	}
 	return out
 }

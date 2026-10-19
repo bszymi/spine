@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -38,6 +39,10 @@ type Consumer struct {
 	ctx          context.Context
 	stopped      bool
 	mu           sync.Mutex
+	// submitting counts, per assignment id, the deliveries of this
+	// consumer that are inside SubmitStepResult (INIT-023 TASK-008 review
+	// round 1). Guarded by mu; see executeAndSubmit.
+	submitting map[string]int
 }
 
 // NewConsumer creates a queue consumer wired to the orchestrator.
@@ -121,16 +126,114 @@ func (c *Consumer) executeAndSubmit(ctx context.Context, log *slog.Logger, req a
 		return fmt.Errorf("provider execution: %w", err)
 	}
 
-	if err := c.orchestrator.SubmitStepResult(ctx, req.AssignmentID, StepResult{
+	// ActorID is the actor the assignment was delivered to (INIT-023
+	// TASK-008): a step rebound to another actor while the provider ran is
+	// refused (ErrForbidden) instead of completed on the new owner's
+	// behalf.
+	leave := c.enterSubmit(req.AssignmentID)
+	err = c.orchestrator.SubmitStepResult(ctx, req.AssignmentID, StepResult{
 		OutcomeID:         result.OutcomeID,
 		ArtifactsProduced: result.ArtifactsProduced,
-	}); err != nil {
+		ActorID:           req.ActorID,
+	})
+	leave()
+	// Another delivery of this assignment still inside SubmitStepResult
+	// may be the winner, between its terminal write and its routing.
+	// Checked after leaving, so of several deliveries that lost at once the
+	// last one out sees none and recovers.
+	routingElsewhere := err != nil && c.submittingNow(req.AssignmentID)
+	if err != nil {
+		// A lost race, or an ownership refusal for an execution rebound
+		// while the provider ran (codex review, round 5): when the
+		// execution is already resolved there is nothing left to submit.
+		if errors.Is(err, ErrStepStateChanged) || isForbidden(err) {
+			// Only an execution someone else already resolved (terminal)
+			// means there is nothing left to do (codex review, round 3: a
+			// concurrent acknowledgment by the same actor is absorbed by
+			// SubmitStepResult itself and never lands here). A live
+			// execution that moved — released, rebound — keeps the error:
+			// the result was not applied.
+			if cur, rerr := c.orchestrator.store.GetStepExecution(ctx, req.AssignmentID); rerr == nil && cur.Status.IsTerminal() {
+				// A completed execution whose routing never finished (a
+				// redelivery after the first submit completed it and then
+				// failed to create the next execution) is routed now (codex
+				// review, round 4); RecoverCompletedStep refuses — a
+				// conflict, nothing changed — when it was routed.
+				//
+				// Not while another delivery of this assignment is still
+				// submitting in this consumer (review round 1): that one
+				// may have completed the execution and be about to route
+				// it, and recovery cannot tell it from a crash — its checks
+				// all pass, it creates the successor, and the winner's
+				// advanceToNextStep then numbers a second attempt from its
+				// own later listing. The winner routes; if its routing
+				// fails it returns the error, and the redelivery that
+				// follows recovers. Skipping is safe for a delivery that is
+				// merely racing too: it loses the same way and, last out,
+				// recovers. A winner in another process, or outside the
+				// consumer, is not seen (KNOWN-LIMITATIONS "Engine State
+				// Writes …" 7).
+				if cur.Status == domain.StepStatusCompleted && routingElsewhere {
+					log.Info("step result not applied; another delivery of this assignment is routing it",
+						"status", cur.Status, "error", err)
+					return nil
+				}
+				if cur.Status == domain.StepStatusCompleted {
+					if rerr := c.orchestrator.RecoverCompletedStep(ctx, req.AssignmentID); rerr != nil && !isConflict(rerr) {
+						log.Error("completed step could not be recovered", "error", rerr)
+						return fmt.Errorf("recover completed step: %w", rerr)
+					}
+				}
+				log.Info("step result not applied; the execution was resolved concurrently",
+					"status", cur.Status, "error", err)
+				return nil
+			}
+		}
 		log.Error("failed to submit step result", "error", err)
 		return fmt.Errorf("submit step result: %w", err)
 	}
 
 	log.Info("assignment completed", "outcome_id", result.OutcomeID)
 	return nil
+}
+
+// enterSubmit records that a delivery of assignmentID is inside
+// SubmitStepResult; the returned func records that it left.
+func (c *Consumer) enterSubmit(assignmentID string) func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.submitting == nil {
+		c.submitting = map[string]int{}
+	}
+	c.submitting[assignmentID]++
+	return func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.submitting[assignmentID]--
+		if c.submitting[assignmentID] <= 0 {
+			delete(c.submitting, assignmentID)
+		}
+	}
+}
+
+// submittingNow reports whether a delivery of assignmentID is inside
+// SubmitStepResult (the caller has already left).
+func (c *Consumer) submittingNow(assignmentID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.submitting[assignmentID] > 0
+}
+
+// isForbidden reports whether err is a domain ErrForbidden.
+func isForbidden(err error) bool {
+	var se *domain.SpineError
+	return errors.As(err, &se) && se.Code == domain.ErrForbidden
+}
+
+// isConflict reports whether err is a domain ErrConflict.
+func isConflict(err error) bool {
+	var se *domain.SpineError
+	return errors.As(err, &se) && se.Code == domain.ErrConflict
 }
 
 // findProvider returns the first provider that can handle the given step type.

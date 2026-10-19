@@ -87,23 +87,83 @@ func (s *PostgresStore) GetStepExecution(ctx context.Context, executionID string
 	return &exec, nil
 }
 
-func (s *PostgresStore) UpdateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
+// stepExecUpdateSet is the column set UpdateStepExecution and
+// TransitionStepExecution write ($1..$8, then execution_id as $9). Both
+// statements are built from it and from stepExecUpdateArgs, so a column
+// added to the blind update is written by the conditional one too
+// (INIT-023 TASK-008).
+const stepExecUpdateSet = `status = $1, actor_id = $2, outcome_id = $3, retry_after = $4, started_at = $5, completed_at = $6, error_detail = $7, eligible_actor_ids = $8`
+
+// stepExecUpdateArgs returns the arguments for stepExecUpdateSet followed
+// by the execution id ($9).
+func stepExecUpdateArgs(exec *domain.StepExecution) []any {
 	eligibleActorIDs := exec.EligibleActorIDs
 	if eligibleActorIDs == nil {
 		eligibleActorIDs = []string{}
 	}
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE runtime.step_executions
-		SET status = $1, actor_id = $2, outcome_id = $3, retry_after = $4, started_at = $5, completed_at = $6, error_detail = $7, eligible_actor_ids = $8
-		WHERE execution_id = $9`,
+	return []any{
 		exec.Status, nilIfEmpty(exec.ActorID), nilIfEmpty(exec.OutcomeID),
 		exec.RetryAfter, exec.StartedAt, exec.CompletedAt, exec.ErrorDetail,
 		eligibleActorIDs, exec.ExecutionID,
+	}
+}
+
+func (s *PostgresStore) UpdateStepExecution(ctx context.Context, exec *domain.StepExecution) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.step_executions
+		SET `+stepExecUpdateSet+`
+		WHERE execution_id = $9`,
+		stepExecUpdateArgs(exec)...,
 	)
 	if err != nil {
 		return err
 	}
 	return mustAffect(tag, "step execution not found")
+}
+
+// TransitionStepExecution is UpdateStepExecution made conditional
+// (INIT-023 TASK-008, audit P3-24): it writes exactly the same columns, but
+// only while the row still holds fromStatus and fromActorID — the status
+// and actor the caller read before deciding on the write. It implements
+// the engine's optional engine.StepExecutionTransitioner port (the
+// compile-time assertion lives in service/cmd/spine, since this package
+// cannot import core/engine).
+//
+// The actor comparison coalesces actor_id to the empty string and compares
+// it with the plain fromActorID ($11): Spine always stores NULL for "no
+// actor" (nilIfEmpty), but rows written directly (fixtures, embedders) may
+// hold an empty string — both mean "no actor" — and a plain text parameter
+// avoids a typed-NULL comparison.
+//
+// (true, nil): applied. (false, nil): the row exists but has moved on
+// (another writer won); nothing was written. ErrNotFound: no such row.
+// Status alone would let a stale write from actor A land after a release
+// and a re-assign to B restored the same status; the actor closes that
+// (an ABA by the same actor is accepted).
+func (s *PostgresStore) TransitionStepExecution(ctx context.Context, exec *domain.StepExecution, fromStatus domain.StepExecutionStatus, fromActorID string) (bool, error) {
+	args := append(stepExecUpdateArgs(exec), fromStatus, fromActorID)
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE runtime.step_executions
+		SET `+stepExecUpdateSet+`
+		WHERE execution_id = $9 AND status = $10 AND COALESCE(actor_id, '') = $11`,
+		args...,
+	)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM runtime.step_executions WHERE execution_id = $1)`,
+		exec.ExecutionID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, domain.NewError(domain.ErrNotFound, "step execution not found")
+	}
+	return false, nil
 }
 
 func (s *PostgresStore) ListStepExecutionsByRun(ctx context.Context, runID string) ([]domain.StepExecution, error) {

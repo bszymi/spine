@@ -81,7 +81,12 @@ func mergeHandler(ctx context.Context, o *Orchestrator, run *domain.Run, exec *d
 // then invokes the registered handler. The handler is responsible for
 // advancing the step to a terminal outcome; this function only
 // establishes the state and actor identity for audit.
-func (o *Orchestrator) activateInternalStep(ctx context.Context, exec *domain.StepExecution, stepDef *domain.StepDefinition, run *domain.Run) error {
+//
+// The write is conditional on prior (INIT-023 TASK-008): an activation
+// that lost the race to a concurrent one returns the conflict and never
+// invokes the handler, so the merge handler cannot run twice for one
+// execution.
+func (o *Orchestrator) activateInternalStep(ctx context.Context, exec *domain.StepExecution, prior stepState, stepDef *domain.StepDefinition, run *domain.Run) error {
 	log := observe.Logger(ctx)
 
 	if stepDef.Execution == nil || stepDef.Execution.Handler == "" {
@@ -114,7 +119,7 @@ func (o *Orchestrator) activateInternalStep(ctx context.Context, exec *domain.St
 	now := time.Now()
 	exec.Status = ackResult.ToStatus
 	exec.StartedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, exec); err != nil {
+	if err := o.writeStepExecution(ctx, exec, prior); err != nil {
 		return fmt.Errorf("update internal step execution: %w", err)
 	}
 	o.emitEvent(ctx, domain.EventStepStarted, run.RunID, run.TraceID,
@@ -192,16 +197,27 @@ func (o *Orchestrator) advancePublishStepIfAny(ctx context.Context, run *domain.
 		return err
 	}
 
+	prior := stateOf(stepExec)
 	now := time.Now()
 	stepExec.Status = submitResult.ToStatus
 	stepExec.OutcomeID = outcomeID
 	stepExec.CompletedAt = &now
-	if err := o.store.UpdateStepExecution(ctx, stepExec); err != nil {
+	if err := o.writeStepExecution(ctx, stepExec, prior); err != nil {
+		if isStepStateChanged(err) {
+			// A sibling merge attempt advanced the step between
+			// findActiveMergeStep's read and this write (INIT-023
+			// TASK-008): it owns the outcome, its event and any
+			// route-back. Same contract as the no-active-step case above.
+			log.Info("publish step already advanced by a concurrent merge attempt; skipping",
+				"run_id", run.RunID, "step_id", stepExec.StepID, "outcome", outcomeID)
+			return nil
+		}
 		return fmt.Errorf("update publish step execution: %w", err)
 	}
 
-	o.emitEvent(ctx, domain.EventStepCompleted, run.RunID, run.TraceID,
-		fmt.Sprintf("evt-%s-%s-completed", run.TraceID[:12], stepExec.StepID), nil)
+	// The documented base payload under the per-execution event id
+	// (INIT-023 TASK-008); the engine-owned step has no branch evidence.
+	o.emitStepCompleted(ctx, run, stepExec, baseStepCompletedPayload(stepDef, outcome, stepExec, now))
 
 	if outcomeID == "merge_failed" {
 		routeResult, err := workflow.EvaluateRunTransition(run.Status, workflow.TransitionRequest{

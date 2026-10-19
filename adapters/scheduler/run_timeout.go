@@ -43,6 +43,24 @@ func (s *Scheduler) ScanRunTimeouts(ctx context.Context) error {
 	return nil
 }
 
+// runTimeoutTransitioner is the store's optional conditional form of
+// UpdateRunStatusAt (INIT-023 TASK-008): the same write, applied only while
+// the run is still in fromStatus. *store.PostgresStore implements it.
+type runTimeoutTransitioner interface {
+	TransitionRunStatusAt(ctx context.Context, runID string, fromStatus, toStatus domain.RunStatus, completedAt time.Time) (bool, error)
+}
+
+// cancelTimedOutRun writes the cancel. With a conditional store it applies
+// only while the run still holds the status the re-read saw, so a run that
+// moved in between (to committing, completed, cancelled) is not
+// overwritten; a store without it keeps the blind UpdateRunStatusAt.
+func (s *Scheduler) cancelTimedOutRun(ctx context.Context, runID string, from domain.RunStatus, scanNow time.Time) (bool, error) {
+	if t, ok := s.store.(runTimeoutTransitioner); ok {
+		return t.TransitionRunStatusAt(ctx, runID, from, domain.RunStatusCancelled, scanNow)
+	}
+	return true, s.store.UpdateRunStatusAt(ctx, runID, domain.RunStatusCancelled, scanNow)
+}
+
 func (s *Scheduler) handleRunTimeout(ctx context.Context, run *domain.Run, scanNow time.Time) error {
 	log := observe.Logger(ctx)
 
@@ -58,8 +76,14 @@ func (s *Scheduler) handleRunTimeout(ctx context.Context, run *domain.Run, scanN
 		return nil
 	}
 
-	if err := s.store.UpdateRunStatusAt(ctx, run.RunID, domain.RunStatusCancelled, scanNow); err != nil {
+	applied, err := s.cancelTimedOutRun(ctx, run.RunID, current.Status, scanNow)
+	if err != nil {
 		return fmt.Errorf("cancel timed-out run: %w", err)
+	}
+	if !applied {
+		log.Info("run changed before its timeout cancel was recorded; skipped",
+			"run_id", run.RunID, "read_status", current.Status)
+		return nil
 	}
 	// INIT-023 TASK-007: this cancel writes the run row directly and never
 	// calls the engine's CancelRun (which would also delete the run branch,

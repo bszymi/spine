@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bszymi/spine/adapters/store"
 	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/queue"
-	"github.com/bszymi/spine/adapters/store"
 )
 
 // Gateway delivers step assignments to actors and processes results.
@@ -76,6 +76,13 @@ func (g *Gateway) DeliverAssignment(ctx context.Context, req AssignmentRequest) 
 	return nil
 }
 
+// stepTransitioner is the store's optional conditional step write (the
+// method engine.StepExecutionTransitioner names; core/actor cannot import
+// core/engine).
+type stepTransitioner interface {
+	TransitionStepExecution(ctx context.Context, exec *domain.StepExecution, fromStatus domain.StepExecutionStatus, fromActorID string) (bool, error)
+}
+
 // ProcessResult validates and processes a step result from an actor.
 func (g *Gateway) ProcessResult(ctx context.Context, req AssignmentRequest, result AssignmentResult) error {
 	log := observe.Logger(ctx)
@@ -98,12 +105,38 @@ func (g *Gateway) ProcessResult(ctx context.Context, req AssignmentRequest, resu
 		return nil
 	}
 
-	// Update step execution with result
+	// INIT-023 TASK-008 (cheap guards; no production caller in Spine or
+	// SMP): a failed or skipped execution is never overwritten to
+	// completed, a result is accepted only for a live (assigned or
+	// in_progress) execution, and a bound execution only from its own
+	// actor.
+	if exec.Status != domain.StepStatusAssigned && exec.Status != domain.StepStatusInProgress {
+		return domain.NewError(domain.ErrConflict,
+			fmt.Sprintf("step execution %s is %s; result not accepted", exec.ExecutionID, exec.Status))
+	}
+	if exec.ActorID != "" && exec.ActorID != result.ActorID {
+		return domain.NewError(domain.ErrForbidden,
+			fmt.Sprintf("step execution %s is not assigned to the submitting actor", exec.ExecutionID))
+	}
+	fromStatus, fromActorID := exec.Status, exec.ActorID
+
+	// Update step execution with result: conditional on the state read
+	// above when the store can (the standalone PostgresStore), so a
+	// result that lost a race to another writer changes nothing.
 	now := time.Now()
 	exec.Status = domain.StepStatusCompleted
 	exec.OutcomeID = result.OutcomeID
 	exec.CompletedAt = &now
-	if err := g.store.UpdateStepExecution(ctx, exec); err != nil {
+	if t, ok := g.store.(stepTransitioner); ok {
+		applied, err := t.TransitionStepExecution(ctx, exec, fromStatus, fromActorID)
+		if err != nil {
+			return fmt.Errorf("update step execution: %w", err)
+		}
+		if !applied {
+			return domain.NewError(domain.ErrConflict,
+				fmt.Sprintf("step execution %s changed state concurrently; result not accepted", exec.ExecutionID))
+		}
+	} else if err := g.store.UpdateStepExecution(ctx, exec); err != nil {
 		return fmt.Errorf("update step execution: %w", err)
 	}
 

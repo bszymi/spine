@@ -388,7 +388,10 @@ func buildScheduler(
 					return err
 				}
 				if exec.Status == domain.StepStatusCompleted {
-					return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
+					// The only engine path that re-routes a completed
+					// execution (INIT-023 TASK-008): it re-checks the run
+					// is active, at this step and without a successor.
+					return orch.RecoverCompletedStep(ctx, execID)
 				}
 				return orch.RetryStep(ctx, exec)
 			}),

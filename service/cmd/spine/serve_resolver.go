@@ -191,7 +191,9 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 			return err
 		}
 		if exec.Status == domain.StepStatusCompleted {
-			return orch.SubmitStepResult(ctx, execID, engine.StepResult{OutcomeID: exec.OutcomeID})
+			// See buildScheduler: recovery re-routes through
+			// RecoverCompletedStep, never SubmitStepResult (INIT-023 TASK-008).
+			return orch.RecoverCompletedStep(ctx, execID)
 		}
 		return orch.RetryStep(ctx, exec)
 	}

@@ -173,7 +173,7 @@ The classification determines whether retry is attempted and informs operator di
 | `assigned` | Check actor availability; if still reachable, wait; if not, transition to `waiting` for reassignment |
 | `in_progress` | Check for pending result; if none, apply timeout logic |
 | `blocked` | Remain blocked; check if blocking condition resolved |
-| `completed` | No action (terminal) |
+| `completed` | No action on the step (terminal). If the run did not advance past it (the process stopped between the completion write and routing), the stored outcome is routed again through `Orchestrator.RecoverCompletedStep` — only while the run is active, at that step and has no later execution. `SubmitStepResult` never routes an execution that is already terminal (INIT-023 TASK-008). |
 | `failed` | Check retry eligibility; if eligible, create new execution |
 | `skipped` | No action (terminal) |
 
@@ -328,6 +328,41 @@ State transitions within a single entity are atomic:
 - Multiple StepExecutions may be active concurrently within a Run (during divergence)
 - Multiple Branches execute concurrently within a DivergenceContext
 - The Workflow Engine must use optimistic concurrency control or row-level locking to prevent conflicting state transitions on the same entity
+
+#### Concurrent writes (INIT-023 TASK-008)
+
+- **Run status writes are compare-and-swap with re-evaluation.** Every engine run
+  mutator (complete, fail, cancel, pause, resume, start, the permanent-merge-failure
+  path) evaluates its trigger against the status it read and writes with
+  `TransitionRunStatus(from = that status)`. A lost race re-reads and re-evaluates
+  (at most three attempts), so the trigger is judged against the state that won and
+  never written over it: a cancel that raced a pause still cancels, a cancel that
+  raced a merge start answers 409 (`run.cancel` is invalid from `committing`), and a
+  completion that raced a cancel never resurrects the run. Events, branch cleanup and
+  step termination follow an applied write only. The scheduler's run-timeout cancel
+  and startup recovery, and the gateway's no-orchestrator cancel, are conditional too.
+- **Step execution writes are compare-and-swap on (status, actor) when the store
+  supports it** (the optional `engine.StepExecutionTransitioner`; the standalone
+  PostgreSQL store does, an embedder opts in). A writer that lost its race writes
+  nothing and stops without side effects: no event, no routing, no assignment
+  delivery, no handler run, no retry execution. A claim that lost removes the
+  assignment row it created first, because the claim never bound its actor
+  (`engine.AssignmentRowDeleter` on the assignment store; without it the row is
+  cancelled, and separation of duties and the prior-holder re-offer then read it as a
+  binding: KNOWN-LIMITATIONS "Engine State Writes …" 11). Without the capability step writes
+  stay blind (an embedder serialises them itself). An acknowledgment that loses to the
+  same actor's identical transition (a concurrent retry, or the actor's own submit
+  auto-acknowledging) answers like the sequential retry — the idempotent `in_progress`
+  result, subject to the run-status check — and any other lost race keeps the 409.
+- **A terminal execution is never routed twice.** `step.submit` on `completed` is a
+  no-op transition, which a (status, actor) comparison cannot see, so the submit path
+  refuses an execution that is terminal when read, and one that moved since the
+  submission was validated (the step's own actor acknowledging it, `assigned →
+  in_progress`, is the one move that is not a conflict); a lost submit race answers
+  with the persisted state.
+- **Not transactional:** a step's terminal write and the creation of the next
+  execution are separate writes. A cancel between them leaves a `waiting` execution
+  on the cancelled run, which the run-status entry checks keep inert.
 
 ---
 

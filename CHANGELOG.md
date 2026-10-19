@@ -6,6 +6,136 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-008: submit ownership, step-output evidence, compare-and-swap state writes)
+
+Audit P3-17 (Spine half), P3-19 and P3-24. Owner questions take their defaults, pending the owner:
+`required_outputs` unchanged is flagged, not refused (1); a cancel that loses the race to a merge
+start answers 409 (2); SMP opts into the step compare-and-swap in SMP TASK-011 (3); failing closed
+on an empty submitter is a follow-up after SMP TASK-011 (4); run detail carries the evidence
+through reserved `commit_meta` keys (5).
+
+### Security
+
+- **A cancelled run is no longer resurrected and merged (P3-24).** Every run-status mutator read
+  the run, judged the trigger and wrote unconditionally, so a cancel that committed inside
+  `CompleteRun`'s read was overwritten (`cancelled → committing`) and the run merged to `main`.
+  Run writes are now compare-and-swap on the status that was read, re-judged against the state
+  that won (at most three attempts): a completion after a cancel answers 409 and nothing is merged,
+  emitted or cleaned up; a cancel that raced a pause still cancels; a cancel that raced a merge
+  start answers 409 instead of cancelling a run whose merge then lands. Covers `CompleteRun`,
+  `FailRun`, `CancelRun`, `PauseRun`, `ResumeRun`, run start, the permanent-merge-failure path,
+  the scheduler's run-timeout cancel and startup recovery, and the gateway's no-orchestrator
+  cancel.
+- **Step writes cannot overwrite a writer that won (P3-24).** With the PostgreSQL store (`spine
+  serve`) every engine step write is conditional on the (status, actor) it read. A submit that
+  races the timeout scanner no longer overwrites the failed step and routes its outcome; two merge
+  attempts no longer both advance the publish step; a lost activation delivers no assignment and
+  runs no handler; a lost claim removes its own assignment row (it never bound its actor, so
+  neither the separation-of-duties author ledger nor the prior-holder re-offer may read it as a
+  binding; without the optional `engine.AssignmentRowDeleter` it is cancelled); a lost failure
+  creates no retry.
+  The timeout scanner, startup recovery and the gateway's fallback assigner are conditional too.
+- **A completed step is never routed twice (P3-24, design check).** `step.submit` on `completed`
+  is an accepted no-op transition, so a second submit that re-read the row after the first one
+  completed it flipped a `rejected` review to `approved` and merged it (two racing submits, a
+  submit racing the timeout's outcome, or a recovery re-route racing a live replica). The submit
+  path now refuses an execution that is terminal when read, or that moved since the submission was
+  validated, and the scheduler's crash recovery re-routes only through
+  `Orchestrator.RecoverCompletedStep` (active run, the current step, no later execution).
+- **The engine checks who submits (P3-17).** The authenticated actor reaches `IngestResult`, which
+  refuses a submission for an execution bound to another actor (`403`) before anything else — also
+  on a completed execution, and before the required-outputs check, so a non-owner can no longer
+  fail the owner's step by omitting an output. `spine serve` sends it even where the gateway's own
+  pre-check is skipped (no store wired). A release by a stale claim of an execution since bound to
+  someone else is `403` too.
+- **Step outputs are recorded as evidence (P3-19).** `required_outputs` are labels the submitter
+  attests (KNOWN-LIMITATIONS "Step Outputs Are Self-Attested Labels"). `step_completed` now records
+  whether the run branch changed since the previous recorded head (`branch_change`) and flags a
+  step that declared outputs but changed nothing (`required_outputs_unchanged`, plus a Warn log).
+  Review stays the control; nothing is refused.
+
+### Changed (standalone)
+
+- **`step_completed` has a payload and a per-execution event id.** The documented base fields
+  (`step_id`, `step_name`, `outcome`, `next_step`, `attempt`, `duration_ms`, `has_commit`,
+  `branch_id`) plus `execution_id`, `actor_id` (also on the envelope), `required_outputs`,
+  `artifacts_produced` (at most 32 entries of 512 bytes; `artifacts_produced_count` exact),
+  `branch_change` and `required_outputs_unchanged` (architecture/event-schemas.md §4.2). The id is
+  `evt-<trace>-<execution_id>-completed`, so every rework attempt is recorded and delivered (the
+  per-step id made the event log and the delivery queue drop attempt 2 onwards). A moved head
+  costs one `git diff` of at most 3 s at submit; an unmoved one none. `branch_change` is judged on
+  the content: a head moved by commits that change no path (an empty commit, a change and its
+  revert) is `unchanged` with `reason: head_moved_tree_unchanged`, and flagged.
+  **Upgrade note:** an execution completed by an earlier binary was logged under the per-step id;
+  if a crash interrupted its routing and the restart runs this version, crash recovery re-emits it
+  under the per-execution id, so that one execution's `step_completed` is logged and delivered
+  twice (KNOWN-LIMITATIONS "Engine State Writes …" 7).
+- **`GET /runs/{run_id}` adds `step_output_evidence`** (one entry per completed step that recorded
+  it), read from the reserved `runs.commit_meta` keys `spine.evidence.<execution_id>` — no git call
+  beyond the workflow load, and it survives event-log retention.
+- **`POST /runs/{run_id}/cancel` answers 409** when the cancel lost a race (to a merge start, or to
+  another writer on the no-orchestrator fallback). `POST /runs/{run_id}/steps/{step_id}/assign` on
+  the engine-less fallback answers 409 when the step was bound meanwhile.
+- **A lost submit race answers 200 with the winner's persisted state** — what a sequential
+  duplicate submit already got — or 409 when the execution is still live but moved (rebound,
+  released). The step's own actor acknowledging it concurrently is not a conflict. Likewise
+  `POST /steps/{execution_id}/acknowledge` that loses to the same actor's identical transition (a
+  concurrent retry, or its own submit auto-acknowledging) answers the idempotent `in_progress`
+  result a sequential retry gets, not 409; any other lost race stays 409.
+- **A submit that loses to the timeout scanner** leaves the step failed (no `step_timeout` is
+  emitted, and `spine_timeouts_detected_total` is not incremented, when the submit won instead).
+  A run that moved to `committing` between the run-timeout re-read and its cancel is not cancelled.
+- Crash recovery of a completed step that did not advance re-routes the stored outcome and
+  re-emits its `step_completed` (same id; `branch_change` `unknown`/`recovered`). When routing had
+  already created the successor but not moved the run's cursor, recovery moves the cursor and
+  activates that successor instead of creating a second attempt of it.
+
+### Changed (embedders)
+
+- **New, opt-in:** `engine.SubmitRequest.ActorID` and `engine.StepResult.ActorID` (empty keeps
+  caller-enforced ownership); the optional `engine.StepExecutionTransitioner` store port, found by
+  type assertion (no interface an embedder implements gained a method; without it every step write
+  is the blind `UpdateStepExecution`, unchanged); `(*store.PostgresStore).TransitionStepExecution`
+  and `TransitionRunStatusAt`; the optional `engine.RunCursorTransitioner` with
+  `(*store.PostgresStore).TransitionCurrentStep` (crash recovery's conditional cursor move) and
+  `engine.BranchCursorTransitioner` with `(*store.PostgresStore).TransitionBranchCursor` (the same
+  for a divergence branch's cursor: cursor only, while the branch is open);
+  `engine.AssignmentRowDeleter` with `(*store.PostgresStore).DeleteAssignment` (type-asserted on
+  the assignment store: a claim whose conditional step write lost removes the row it created,
+  only while the row names that execution and actor);
+  `Orchestrator.RecoverCompletedStep` and
+  `Orchestrator.StepOutputEvidence`; the types `engine.BranchChange` and
+  `engine.StepOutputEvidence` with their `BranchChange*` / `EvidenceReason*` constants (an
+  `unchanged` entry whose head moved carries `EvidenceReasonTreeUnchanged`),
+  `engine.CommitMetaEvidencePrefix`, `engine.ErrRunStateChanged`, `engine.ErrStepStateChanged`.
+- **Shared behaviour at the next bump (not opt-in):**
+  - Run-status writes go through `TransitionRunStatus` (every `RunStore` has it). A `CancelRun`
+    that loses the race to a merge start returns the state machine's `ErrConflict` (a sequential
+    cancel of a `committing` run already did); a `CompleteRun` after a concurrent cancel returns
+    `ErrConflict` instead of resurrecting the run; a lost `failRunOnMergeError` returns nil and
+    records no `git_conflict` detail (the detail is now written after the applied run write). A
+    `TransitionRunStatus` error is returned at once, wrapped (`errors.Is` holds); a `GetRun` error
+    stays wrapped as before.
+  - `SubmitStepResult` on an execution that is terminal when read returns `ErrConflict` wrapping
+    `ErrStepStateChanged` instead of re-routing it, and one whose (status, actor) moved since
+    `IngestResult` validated it does the same; `IngestResult` answers both with its unchanged
+    idempotent response when the row is terminal, else 409.
+  - `step_completed` has a payload and the per-execution id: a subscription that includes it
+    receives one delivery per rework attempt. With binding off its `branch_change` is
+    `unknown`/`head_sha_unrecorded` and no git call is made; nothing is persisted.
+  - With merge binding on, a step capture's single `commit_meta` write also carries
+    `spine.evidence.<execution_id>` (inside the reserved `spine.` prefix; `stripReserved` keeps
+    workflows from writing it), and evidence costs at most one 3 s diff on the submit path.
+  - `AcknowledgeStep` with the step capability: losing its compare-and-swap to the same actor's
+    identical transition returns the idempotent `in_progress` result (a store without the
+    capability never misses, so nothing changes there).
+  - `ReleaseStep` refuses (`ErrForbidden`) an execution bound to an actor other than the releasing
+    one. With the step capability it writes the step before cancelling the assignment row, and
+    puts the step back (conditionally) when that cancel fails.
+  - `core/actor.Gateway.ProcessResult` (no production caller) refuses a failed or skipped
+    execution and a foreign actor.
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-004 TASK-012: standalone git-state safety — convergence target, serialized working tree, bounded merge retries)
 
 Audit F8 (P2), F9 (P2) and P3-27, all in standalone `spine serve`. Owner questions take their
