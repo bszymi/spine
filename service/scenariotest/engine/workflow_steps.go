@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/bszymi/spine/core/artifact"
 	"github.com/bszymi/spine/core/domain"
 	spineEngine "github.com/bszymi/spine/core/engine"
+	"github.com/bszymi/spine/core/observe"
 	"github.com/bszymi/spine/core/workflow"
 	"github.com/bszymi/spine/service/scenariotest/assert"
 )
@@ -63,10 +65,43 @@ func StartPlanningRun(artifactPath, artifactContent string) Step {
 	}
 }
 
+// ScenarioLifecycleStarter is the actor the harness starts a
+// workflow-lifecycle run as when the scenario's context binds none: the
+// actor id the scenario's log context carries (RunScenario).
+const ScenarioLifecycleStarter = "scenario-actor"
+
+// lifecycleStartCtx is the context the harness starts a workflow-lifecycle
+// planning run with. In `spine serve` such a run is started only through
+// POST /workflows or PUT /workflows/{id} by an authenticated caller below
+// operator (handlers_workflows.go): the gateway's auth middleware binds the
+// actor (domain.WithActor), and the engine records it as the run's starter
+// (engine.CommitMetaGovernanceStartedBy) for the ADR-008 lifecycle
+// exemption's separation of duties. The harness calls the orchestrator
+// directly, so — when the scenario's context binds no actor of its own — it
+// binds the reviewer its log context already names. Without it every
+// lifecycle run under the governance guard was held as "the run's starter
+// is not recorded", which no `spine serve` request produces (INIT-023
+// wave 4 follow-up). The binding is local to the start: later steps keep
+// sc.Ctx unchanged.
+func lifecycleStartCtx(ctx context.Context) context.Context {
+	if domain.ActorFromContext(ctx) != nil {
+		return ctx
+	}
+	id := observe.ActorID(ctx)
+	if id == "" {
+		id = ScenarioLifecycleStarter
+	}
+	return domain.WithActor(ctx, &domain.Actor{
+		ActorID: id, Name: id, Type: domain.ActorTypeHuman, Role: domain.RoleReviewer, Status: domain.ActorStatusActive,
+	})
+}
+
 // StartWorkflowPlanningRun returns a step that starts a planning run governing
 // a workflow-definition edit (ADR-008). Mirrors StartPlanningRun but routes
 // through the workflow planning path — YAML body, workflow.Service writer,
 // governing workflow resolved as applies_to: [Workflow] / mode: creation.
+// The run is started as the scenario's actor (lifecycleStartCtx), as a
+// reviewer's POST /workflows starts it in `spine serve`.
 func StartWorkflowPlanningRun(workflowID, body string) Step {
 	return Step{
 		Name: "start-workflow-planning-run-" + workflowID,
@@ -74,7 +109,7 @@ func StartWorkflowPlanningRun(workflowID, body string) Step {
 			if sc.Runtime.Orchestrator == nil {
 				return fmt.Errorf("StartWorkflowPlanningRun requires WithOrchestrator() on the runtime")
 			}
-			result, err := sc.Runtime.Orchestrator.StartWorkflowPlanningRun(sc.Ctx, workflowID, body)
+			result, err := sc.Runtime.Orchestrator.StartWorkflowPlanningRun(lifecycleStartCtx(sc.Ctx), workflowID, body)
 			if err != nil {
 				return fmt.Errorf("start workflow planning run for %s: %w", workflowID, err)
 			}
@@ -104,7 +139,7 @@ func StartWorkflowUpdatePlanningRun(workflowID, body string) Step {
 			if sc.Runtime.Orchestrator == nil {
 				return fmt.Errorf("StartWorkflowUpdatePlanningRun requires WithOrchestrator() on the runtime")
 			}
-			result, err := sc.Runtime.Orchestrator.StartWorkflowUpdatePlanningRun(sc.Ctx, workflowID, body)
+			result, err := sc.Runtime.Orchestrator.StartWorkflowUpdatePlanningRun(lifecycleStartCtx(sc.Ctx), workflowID, body)
 			if err != nil {
 				return fmt.Errorf("start workflow update planning run for %s: %w", workflowID, err)
 			}
