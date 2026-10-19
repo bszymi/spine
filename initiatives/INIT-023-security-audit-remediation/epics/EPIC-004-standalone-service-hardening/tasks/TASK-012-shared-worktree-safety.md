@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-004-standalone
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-15
+last_updated: 2026-10-19
 # Also blocked by spine TASK-002 (CLIClient ref grammar and Merge/Checkout argv), transitively
 # through TASK-005. Add the blocked_by link once TASK-002's epic path is fixed in this initiative.
 # Design check (2026-10-06): TASK-002's path is fixed, so the link is added below. TASK-011 is
@@ -2457,3 +2457,27 @@ No SMP command failed, so there is no compatibility break, and no run against `.
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
 - Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+
+### Integration follow-up (wave 4) (2026-10-19)
+
+A mutation check found that no test pinned this task's in-block status re-check, the
+`requireStillCommitting` call at the top of the merge block in `mergePrimary`
+(`core/engine/merge.go`) and in `mergePrimaryBound` (`core/engine/merge_binding.go`). That held
+even on this task's own tip. Without the re-check, an attempt that read the run as committing
+merges, and for a successful merge pushes, a run that has since left committing. The
+compare-and-swap writes after the block keep the status, so only the git calls show the
+difference, and no test looked at them.
+
+**Fix (`9a6123de`, tests only).** `TestMergeRunBranch_RunLeftCommittingBeforeTheMergeBlock`
+(`core/engine/state_cas_test.go`) runs with binding off and with binding on:
+- A hook cancels the run right after `MergeRunBranch`'s read. The test checks that the run is
+  read again afterwards.
+- The attempt must stand down: nil error, no `Merge` or `MergeBound`, no `Push` or
+  `PushCommit` (auto-push on), no run status write, and no `run_completed` or `run_failed`.
+- Mutations: deleting the call in `mergePrimary` fails the binding-off row, and deleting it in
+  `mergePrimaryBound` fails the binding-on row (both killed).
+
+The same commit makes TASK-008's `failRunOnMergeError` row race inside the merge call, because
+this re-check had made the old row's race moot (see TASK-008's "Integration follow-up (wave 4)").
+Gates and codex for the follow-up as a whole are in TASK-003's "Post-merge fix (wave 4
+integration)" note.

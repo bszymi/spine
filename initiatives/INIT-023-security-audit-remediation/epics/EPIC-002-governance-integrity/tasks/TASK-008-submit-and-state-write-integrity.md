@@ -5,7 +5,7 @@ title: "Submit ownership, step-output evidence and compare-and-swap state writes
 status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-15
+last_updated: 2026-10-19
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -1970,3 +1970,29 @@ No SMP command failed, so there is no compatibility break, and no run against `.
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
 - Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+
+### Integration follow-up (wave 4) (2026-10-19)
+
+A mutation check of the merged tree found that no test pinned this task's compare-and-swap in
+`failRunOnMergeError` (`core/engine/merge.go`, `if !applied`). The "failRunOnMergeError (permanent
+merge failure)" row of `TestRunMutators_LostRaceNeverOverwrites` cancelled the run right after
+`MergeRunBranch`'s read. Since TASK-012, the status re-check at the top of the merge block
+(`requireStillCommitting`) stops that attempt before any merge, so the CAS never ran. With
+`if !applied` dropped, treating the lost transition as applied, the test still passed on
+`07825efb`; this was checked again here.
+
+**Fix (`9a6123de`, tests only).** The independent check's probe (`m13_probe_test.go`) is adopted
+into `core/engine/state_cas_test.go`:
+- `mergeFailGit` takes a `race` hook that runs *inside* the merge call, after the block's
+  re-check and before the permanent failure returns. It covers the plain `Merge` and, new, the
+  bound `MergeBound`.
+- The row now races inside the merge.
+- A second row does the same with merge binding on (`bindCasFix`).
+- Both rows assert what the probe did: no status write, no `run_failed`, no git_conflict detail
+  on the review, and no branch cleanup. They also check that the race really ran inside exactly
+  one merge call.
+- Mutation: `if false && !applied` fails both rows (killed). The re-check itself is pinned by
+  TASK-012's follow-up, `TestMergeRunBranch_RunLeftCommittingBeforeTheMergeBlock`.
+
+Gates and codex for the follow-up as a whole are in TASK-003's "Post-merge fix (wave 4
+integration)" note.

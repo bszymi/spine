@@ -5,7 +5,7 @@ title: "Governance-path guard on governed merges and protection-removal guard in
 status: In Progress
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-15
+last_updated: 2026-10-19
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 links:
@@ -2602,3 +2602,60 @@ No SMP command failed, so there is no compatibility break, and no run against `.
   `alpine:3 df` checks, all `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker
   VM had 5.8 GB free at the lowest check.
 - Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/gate-spine/`.
+
+### Integration follow-up (wave 4) (2026-10-19)
+
+A reviewer ran the scenario suite with `spine serve`-like settings: the guard and the lifecycle
+exemption on. Every ADR-008 workflow-lifecycle run was then held for an operator with "the run's
+starter is not recorded". `recordLifecycleStarter` (`core/engine/governance_guard.go`) reads
+`domain.ActorFromContext` and records nothing when no actor is bound. This follow-up checked
+where a lifecycle run starts and whether an actor is on the context there. The fix is
+`958e063a` on `init/INIT-023-wave4-integration`. Nothing was pushed, and owner question 3 (the
+exemption is on in `spine serve`) stays at its default.
+
+**Start paths.**
+
+| Path | Actor on ctx at the start? | Starter recorded? |
+|---|---|---|
+| `spine serve` (single-workspace and pooled): POST `/workflows` or PUT `/workflows/{id}` by a caller below operator, routed to `startWorkflowLifecycleRun` → `workflowPlanningRunAdapter` → `Orchestrator.StartWorkflow(Update)PlanningRun` | yes. The auth middleware binds `domain.WithActor` (`middleware.go`), and the adapter passes the request context unchanged | yes |
+| `spine serve` dev mode with no token (`devMode`, no actor) | no | no. The run is held for an operator, which is the intended fail-closed for a genuinely actor-less start |
+| POST `/runs` with `mode=planning` for a `workflows/` path | never starts one: `isWorkflowTarget` refuses it before any starter runs (TASK-014), and the engine's `StartPlanningRun` refuses it too | n/a |
+| `workflow.Service` | starts no run. Its writes on the lifecycle branch run inside `onBranch` with the starter's context | n/a |
+| Scenario harness `engine.StartWorkflowPlanningRun` / `StartWorkflowUpdatePlanningRun` | **no**. `sc.Ctx` carried only the log actor id (`observe.WithActorID`) | **no**, the defect |
+
+So `spine serve` was not affected. Only the harness lacked the actor, and the harness is what was
+fixed. The engine is unchanged.
+
+**Fix (`958e063a`).** The harness's two start steps now start the run with `lifecycleStartCtx`.
+When the scenario's context binds no actor, it binds the reviewer the log context already names
+(`engine.ScenarioLifecycleStarter`, `scenario-actor`), as the gateway binds the caller. The
+binding is local to the start, and later steps keep `sc.Ctx`.
+
+**Tests** (`service/scenariotest/scenarios/workflow_lifecycle_starter_test.go`, Postgres-backed,
+all `TestWorkflowLifecycle_*`, so they run in the `scenario-git-http` CI step that must never
+skip):
+- `TestWorkflowLifecycle_GatewayStartedRunReviewedByAnotherIsExempt` and
+  `TestWorkflowLifecycle_GatewayStartedRunReviewedByItsStarterIsHeld` drive the real path, with
+  the guard and the exemption on:
+  - the real gateway router, auth middleware and `handleWorkflowCreate`, over the scenario's
+    orchestrator, with a starter adapter that is `serve_wiring.go`'s passthrough;
+  - reviewer `wl-starter`'s POST `/workflows` records `wl-starter` as the starter, and `rev-a`
+    drafts under `spine serve`'s strict step-entry policy;
+  - `rev-b` reviews → the merge is exempt and the workflow is on `main`;
+  - `wl-starter` reviews (allowed to claim: they ran no step) → held for an operator, reason
+    "the reviewer started the run", and `main` does not have the file.
+- `TestWorkflowLifecycle_UpdateExisting_DraftAuthorCannotReview_GuardOn` is TASK-014 AC 19 under
+  the guard, through the harness start. On `07825efb` it was held with "the run's starter is not
+  recorded".
+
+**Mutations** (throwaway worktree, removed; all killed):
+
+| Mutant | Killed by |
+|---|---|
+| harness binds no actor | `..._DraftAuthorCannotReview_GuardOn` (starter not recorded) |
+| `startWorkflowPlanningRun` does not call `recordLifecycleStarter` | `..._GatewayStartedRunReviewedByAnotherIsExempt` |
+| `reviewerIsNotAuthor` does not compare the reviewer with the starter | `..._GatewayStartedRunReviewedByItsStarterIsHeld` |
+
+The golden-path lifecycle scenarios, run under the guard, are still held after the fix, and that
+is correct. Their synthetic actor `scenario-test-actor` drafts and reviews, so the exemption
+refuses them as "the reviewer is an author of the run". They run with the guard off, as before.

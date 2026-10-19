@@ -7,7 +7,7 @@ epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transp
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-14
+last_updated: 2026-10-19
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-001-git-transport-and-content-integrity/epic.md
@@ -2005,3 +2005,165 @@ clean.
 - Docker: the only containers started were the `git-floor` run (`--rm`) and the `alpine:3 df`
   disk checks. Nothing was pulled. The Docker VM had 6.3 GB free.
 - Logs: `spine-management-platform/tmp/init027-orchestration/w3final/`.
+
+### Post-merge fix (wave 4 integration) (2026-10-19)
+
+Two residuals of this task, found by SMP INIT-027/EPIC-004/TASK-008 at `ae513dca` and fixed on
+`init/INIT-023-wave4-integration` (worktree `i23/s-int4/spine`) after the wave 4 acceptance
+(`07825efb`): `25d57e1a` (the fix), `aadd43e5` (codex round 1). Nothing was pushed. Spine `main`,
+the task branches and the SMP checkout are unchanged. No owner question was re-decided.
+
+**1. A gitlink or a directory was rendered, not refused.** `CLIClient.ReadFile` read content
+with `git show --end-of-options <rev>:<path> --`. For a gitlink whose commit is in the
+repository, show printed that commit with its whole patch. The size probe sized the ~200-byte
+commit object, and a diff queue is millions of small allocations, so neither the output cap nor
+`GIT_ALLOC_LIMIT` stopped it. `TestGitMem_GitlinkToWideCommitIsRefusedUnread` reproduces SMP's
+measurement exactly: a gitlink to a commit that adds 10^6 paths through one shared subtree took
+the git child to **272 MiB** on `07825efb` (4 MiB now). A gitlink recording the id of a blob in
+the repository read as that blob, which is content no diff shows. A directory read as its
+listing.
+
+**2. The path reached git's revision parser.** `<rev>:<path>` went to `git show` as one
+revision argument, and show tries range and parent syntax before it reads one object name.
+- A missing `s/d..main`, with `s/d` a tree and `main` a branch, read as `git log` of the range.
+- `<gitlink>^!` read as the gitlink's commit, and `<gitlink>^@` as an empty file.
+- Even an existing file named `d..main` was rendered as the range.
+
+Missing `a^b` and `x@{1}` were already misses. They stay misses, and files with those names read
+as themselves. All of this is pinned in `TestReadFile_RevisionSyntaxInThePathIsLiteral`.
+
+**Fix (`25d57e1a`).** ReadFile reads blobs only, and the path never reaches a revision
+expression:
+- **Probe.** `git --literal-pathspecs ls-tree -l -z --full-tree --end-of-options <rev> <path>`
+  types the entry at exactly that path (byte-equal record), with its object id and blob size.
+  ls-tree reads tree objects and the blob header only. It takes the type from the entry's
+  *mode*, so a gitlink recording a blob id is still a gitlink.
+- **Read.** `git cat-file blob <oid>` reads the probed object. This is byte-identical to show
+  for a blob (no textconv or filters). It refuses a non-blob at its header, and it reads by id,
+  so a named ref that moves after the probe cannot change what is read (the named-ref window in
+  KNOWN-LIMITATIONS is closed).
+- **New refusal.** A gitlink or a directory is
+  `*GitError{Permanent, "read_file", NotBlobMessage}` wrapping the new
+  `*NotBlobError{Ref, Path, Type}`, which matches `ErrNotBlob`. The Kind is the one a dangling
+  gitlink always had. Error() never prints the path. The names and envelope mirror SMP's
+  `gitread`, so SMP can alias them.
+- **Kept.** The size refusal (`blob exceeds read limit`, `BlobTooLargeError` with the probed size,
+  Size -1 for an overrun or an alloc refusal with GitAllocLimit), `GIT_ALLOC_LIMIT`, the pinned
+  delta-base cache and the C locale.
+- **Misses.** A miss keeps its contract: ErrKindNotFound with git's
+  `fatal: bad revision '<rev>:<path>'`, now built by the client (`Err` is nil instead of the exit
+  status). `TestReadFile_ErrorKindParity` still compares every miss with show's own error.
+  A revision that names no tree is a miss only when `rev-parse --verify --quiet <rev>^{tree}`
+  proves it by exit status (1) after ls-tree failed. A git that cannot run is an error, not a
+  miss (`TestReadFile_GitThatCannotRunIsNotAMiss`).
+- **Cost.** An ordinary read is still two git processes plus the branch lookup.
+
+**Callers treat the refusal like this task's size refusal.**
+- **Discovery** (`readForDiscovery`) records it as `RefusedNotAFile` (`"not_a_file"`):
+  `projection_file_skipped` with null sizes, and a governed row a gitlink replaces is deleted.
+  Before, a dangling gitlink was a ChangeSet.ReadErrors entry (`read_skipped`, the row kept), and
+  an in-repo one was read as rendered content.
+- **Branch validation** fails such a file ("not validated: the path holds a gitlink or a
+  directory, not a file"). TASK-011 AC 28's gitlink fixture
+  (`TestValidateBranch_UnreadableGitlinkIsSkippedAsBefore`) is now
+  `TestValidateBranch_GitlinkFailsAsNotAFile`. AC 28's own claim, that ReadErrors are ignored,
+  is `TestValidateBranch_ReadErrorsAreIgnored`.
+- **Projection.** TASK-011's `isContentReadError` includes `ErrNotBlob`. `classifyReadFailure`
+  and `readFileEntry` describe a not-a-file refusal as the entry it names, so a workflow gets a
+  `not_a_file` rejection, never `read_bounds`. This also closes the KNOWN-LIMITATIONS gap for a
+  `GitClient` decorator that does not forward `TreeEntryTyper` over `*CLIClient`
+  (`TestProjection_GitlinkToBlobThroughANonTypingDecorator`).
+- **Reads.** `artifact.Service.Read` and `workflow.Service.Read` answer it ErrNotFound: 404, where
+  a rendered listing or commit that failed to parse used to be a 500.
+- **`IsIDCollision`** counts it as a collision.
+- Every other ReadFile caller already failed closed on a non-NotFound error.
+
+**Codex round 1 (`aadd43e5`, P2).** The exact lookup had made `./task.md` a miss, but git show
+resolved it relative to the repository root. ReadFile now looks up the path git show looked up:
+- a `./` or `../` prefix is resolved against the root;
+- climbing out is still git's Permanent "outside repository" error;
+- `./` is the root tree;
+- a trailing `/` names only a directory: `d/` is the not-a-file refusal, `d/x.md/` a miss.
+
+`TestReadFile_PathsResolveLikeGitShow` compares each resolved read with show's bytes.
+`TestRead_NotAFileIsNotFound` reads `./governance/g.md` through `artifact.Service`.
+
+**Tests updated on purpose.** These tests expected the old read:
+- `TestReadFile_ErrorKindParity`: the dangling gitlink and the tree path are now not-a-file
+  rows (`assertNotBlob`).
+- `TestGitMem_GitlinkToCommitIsRefusedInGit`: now `ErrNotBlob`, not an alloc refusal.
+- `TestRefGrammar_ArgvShape` and `TestList_ResolvesTheRefOnce`: the new argv.
+- `TestCommands_RunUnderTheirClassEnvironment`: no `git show` runs any more.
+- `TestTreeEntryType`'s precondition: it runs show itself.
+- The projection's `killingGit` wrapper now kills `cat-file blob <oid>` of the path's blob.
+- `TestFullRebuild_GitAllocRefusalNamesItsLimit` now uses a delta on a large base. Its gitlink
+  fixture is the new `TestFullRebuild_GitlinkIsNotAFile`.
+- The two TASK-011 gitlink sync tests now expect `refused`, not `read_skipped`.
+- The hidden-blob preconditions in `gitlink_blob_test.go` run `git show` directly.
+
+**Mutations** (throwaway worktree `i23/s-int4/fu-mut`, removed afterwards; every one killed):
+
+| Mutant | Killed by |
+|---|---|
+| `adapters/git/cli.go` back to `07825efb` (the `git show` read) | 5 `adapters/git` tests (the wide gitlink at 272 MiB, the range reads), `TestDiscovery_GitlinksAreNotAFileRefusals`, `TestRead_NotAFileIsNotFound`, `TestProjection_GitlinkToBlobThroughANonTypingDecorator`, `TestFullRebuild_GitlinkIsNotAFile`, `TestValidateBranch_GitlinkFailsAsNotAFile` |
+| typed probe kept, content read by `git show <rev>:<path>` | `TestReadFile_RevisionSyntaxInThePathIsLiteral` |
+| no lexical entry-path check | `TestReadFile_PathsNoEntryCanHaveAreMisses` |
+| any ls-tree failure taken as a miss | `TestReadFile_GitThatCannotRunIsNotAMiss` |
+| no "./" resolution / no trailing-"/" rule | `TestReadFile_PathsResolveLikeGitShow` and `TestRead_NotAFileIsNotFound` / `TestReadFile_PathsNoEntryCanHaveAreMisses` |
+| discovery without `RefusedNotAFile` | `TestDiscovery_GitlinksAreNotAFileRefusals`, `TestValidateBranch_GitlinkFailsAsNotAFile` |
+| projection without `notBlobEntry` | `TestProjection_GitlinkToBlobThroughANonTypingDecorator` |
+| artifact read without the 404 / `IsIDCollision` without `ErrNotBlob` / branch validation without its report | `TestRead_NotAFileIsNotFound` (both) / `TestValidateBranch_GitlinkFailsAsNotAFile` |
+
+**SMP.** CHANGELOG (embedders) records the change. When SMP next bumps to it, these tests fail,
+which is expected:
+- TASK-008's tripwire `TestClient_SpineReadFileRendersTheGitlinksPatch`. Spine no longer runs show
+  on a gitlink, so SMP TASK-010 can delegate `gitread.Client.ReadFile`.
+- The "dangling gitlink" rows of SMP's error-contract tests against `CLIClient.ReadFile`:
+  `TestBounded_ErrorContractEqualsCLIClient` on SMP `main`, and its `gitread.Client` successor on
+  the wave 4 line. The Kind is still Permanent, but the Message is now `NotBlobMessage`, not git's
+  `bad object`.
+
+**Gates** at `aadd43e5`, the last code commit of the follow-up (items 1 to 4 and codex round 1).
+The commit that adds these notes changes only the four task artifacts.
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | OK; OK; "engine constructed and exercised; library surface is sound." |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | clean, all three |
+| `gofmt -l` (Go 1.26.5) on the 25 `.go` files changed since `07825efb` (3 added, 22 modified) | empty |
+| `go test -p 4 -count=1 ./...` | 40 packages ok, 0 failures (3 more have no tests) |
+| `go test -race -p 4 -count=1` on the changed packages: `adapters/git/...`, `adapters/projection`, `core/{artifact,engine,workflow}`, `service/scenariotest/engine`. `service/scenariotest/scenarios` builds only with `-tags scenario`; the scenario rows cover it | 7 ok, 0 data races |
+| `-tags integration -p 1 -count=1 -v ./adapters/projection/`, the only changed package with an integration suite (fresh `s4u_it`; registry `s4u_reg` migrated) | 125 top-level PASS (236 with subtests), 0 SKIP, 0 FAIL |
+| CI `scenario-git-http`: its 7 `run:` steps, read from `ci.yml` and run verbatim (`bash --noprofile --norc -eo pipefail`, repo root as cwd, fresh `s4u_ci`) | All 7 steps exit 0. `TestGitHTTP_*`: 20 PASS. `TestBootstrapInternalAdmin_*`: 2. `TestWorkflowLifecycle_*`: 7, the 4 before plus the 3 new ones (TASK-006's follow-up). Workflow-policy integration: 1. TASK-008 store CAS: 8, and its scenarios: 2. Status-lifecycle scenarios: 3, and its pooled validator: 1. Governance scenario: 1, and its store test: 1. 0 SKIP, 0 FAIL |
+| Full scenario suite, `go test -tags scenario -p 1 -count=1 -v -timeout 60m ./service/scenariotest/...` (fresh `s4u_scen`; registry `s4u_sreg` migrated) | 31 top-level `--- FAIL`. The failing set (59 lines with subtests) is byte-identical to the wave 4 acceptance run's (`gate-spine/scen-b.fails`): the known 30 plus `TestWorkspace_ScopedServices`. 207 top-level PASS, the acceptance's 204 plus the 3 new `TestWorkflowLifecycle_*`. 0 SKIP |
+| CI `git-floor`: its 3 `run:` steps, verbatim, in `golang:1.26-bookworm` (`--pull=never --rm --init`, non-root, read-only mounts, `GOPROXY=off`) | git 2.39.5. All 3 steps ok, including the new ReadFile and gitmem tests. The container was removed |
+| `golangci-lint` v2.11.4 `run --new-from-rev ae513dca` on the changed packages, plain, `--build-tags integration` and `--build-tags scenario` (with `./service/scenariotest/...`) | 0 issues each |
+| `golangci-lint --enable-only=gosec` on the changed packages (plain; `integration,scenario`) and on `./...` (plain; `integration,scenario`) | 0; 0; 0; 1. The one is the known G602 at `adapters/store/postgres_integration_test.go:1563`, a file unchanged since `ae513dca` |
+| `codex review --base main` (codex-cli 0.162.1, the configured default, no `-c model=`). Each session was read from `~/.codex/sessions/2026/10/19/`: `source: {"subagent":"review"}`, `cwd` = this worktree, `model` = `gpt-6.1-sol` | Round 1 at `9a6123de`: `01a155fa-7ac2-7c90-8dc3-4345b46006d1`, one P2 ("Normalize artifact paths before the strict tree-entry lookup", `./task.md`), fixed in `aadd43e5` with tests. Round 2 at `aadd43e5`: `01a15602-4fe6-7ab2-a1ac-276a25d952cc`, `"findings": []`, "patch is correct" |
+
+**SMP compatibility.** `i23/s-int4/smp` is SMP `main` `1ae9b0e3`, detached, with `../spine` =
+this worktree (`aadd43e5`) and `GOFLAGS=-mod=readonly`. The checkout was never modified, and
+`git status` was clean before and after.
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject`; `dev/lint-spine-internals.sh` | All OK; `lint-spine-internals: OK`. The first plain `go vet` failed with `can't import facts … no such file or directory` for build-cache entries, in packages that import no changed Spine package. The cache was being trimmed while it ran. A rerun was clean |
+| `go test -race -p 4 -count=1`, no DSNs, on the 8 SMP packages that import a changed Spine package under any of the four tag sets (test imports included): `internal/customer/{executionreadiness,gitread,projectionsvc,projectionwriter,proposals,spinecore,spineembedded,workspace}` | 6 ok; `projectionsvc` has no tests. **1 expected failure**: `gitread` `TestBounded_ErrorContractEqualsCLIClient/dangling_gitlink` reports `message: CLIClient "object is not a file", Bounded "fatal: bad object HEAD:gl-dangling"`. The Kind matches (Permanent); the Message is this change, recorded in CHANGELOG (embedders). SMP's production read on `main` is `Bounded`'s own and never calls `CLIClient.ReadFile`. Every package passed at the wave 4 acceptance |
+| `go run ./dev/apply-migrations -set platform -dir migrations` / `-set spine-runtime` (fresh `s4u_smp_it` with `vector`, `s4u_spine_runtime_it`) | 116 / 26 versions recorded |
+| SMP CI "Spine runtime integration suites": `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/{spinecore,spineembedded,runner,executionreadiness}/` (`TEST_SPINE_DB`, `TEST_PLATFORM_DB`, `TEST_PROVISIONING_DSN` = `smp_prov`, as in CI; timeout raised from 10m for the loaded machine) | `4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)`; `testgate: PASS` |
+| SMP CI "Git gateway integration tests": `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `1 packages, 301 tests passed, 0 failed, 1 skipped (1 allowed)`; `testgate: PASS` |
+
+**Not run.**
+- GitHub CI. It cannot run this branch until Spine is pushed.
+- The Linux-only SMP tests that the testgate allowances skip on macOS. This change does not touch
+  the code they measure.
+- The other steps of SMP's integration job, and the image-based gates.
+
+**Environment.**
+- PostgreSQL: the shared `i23-pg` on `localhost:55630`. Only `s4u_*` databases were created, and
+  all of them were dropped. There were no `ws_*` databases or roles before the SMP suites and none
+  after. The shared roles were untouched.
+- Docker: the only containers were the `git-floor` run and an `alpine:3 df` check, both
+  `--rm --pull=never`. Nothing was pulled, built or pruned. The Docker VM had 6.1 GB free.
+- The throwaway mutation worktree `i23/s-int4/fu-mut` was removed with `git worktree remove`.
+- Logs: `spine-management-platform/tmp/init027-orchestration/w4/agents/fu-fix/`.
