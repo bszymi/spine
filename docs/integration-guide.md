@@ -817,6 +817,7 @@ spec:
 | `SMP_WORKSPACE_ID` | No | - | Management platform workspace ID (dedicated mode) |
 | `SPINE_ORPHAN_THRESHOLD` | No | - | Duration before recovering orphaned steps |
 | `SPINE_STEP_ENTRY_POLICY` | No | `strict` | Engine step-entry policy (INIT-023 TASK-007). `strict` (or unset): assign/claim enforce run status, actor eligibility, execution mode, preconditions, `required_skills` on assign and separation of duties; cancelled/failed runs close their live steps; the gateway's engine-less assign fallback is disabled. `legacy`: pre-INIT-023 behaviour, logged as a `WARN` at startup (migration escape hatch, to be removed). Any other value refuses to start. See [Security Model](/architecture/security-model.md) §4.4.1. |
+| `SPINE_GOVERNANCE_GUARD` | No | on | Governance-path guards (ADR-016; INIT-023 TASK-006). On (unset, `on`, `true`, `1`, `yes`): a governed merge that changes `.spine/`, `.spine.yaml`, `workflows/` or `<artifacts_dir>/workflows/` waits in `committing`, with no timeout, until an operator approves or rejects its bound commit (`POST /runs/{run_id}/governance-decision`; `GET /runs/{run_id}/governance` shows the state), and the projection installs a branch-protection relaxation only with an operator record (an approved merge or an honoured override push). `off`, `false`, `0` or `no` (any case) turn both guards off, logged as a `WARN` at startup. Any other value keeps them on, with a `WARN` naming the value. See [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) and §12. |
 | `SPINE_MIGRATIONS_DIR` | No | `migrations` | Path to schema migrations |
 | `SPINE_SSE_MAX_CONN_PER_ACTOR` | No | `5` | Per-actor cap on concurrent SSE stream connections, counted per (workspace, actor) in shared mode (≤0 disables the cap) |
 | `SPINE_EVENT_DELIVERY` | No | `false` | Feature flag — set to `true` to enable webhook / SSE / pull-log delivery. Without it, only projection polling works. |
@@ -939,6 +940,18 @@ off for embedders until they opt in; `spine serve` turns it on. Three independen
    whose validator is that engine (or embeds it) also checks an owned status transition against
    the blocking rules at the merge.
 
+4. **Merges whose checks never ran** (INIT-023 wave 4 review). With the merge option on (or the
+   governance guard, §12), a merge attempt that can move the local `main` records
+   `engine.CommitMetaMergeUnverified` (`"<base sha> <source sha>"`) on the run before
+   `MergeBound`, and clears it in the same write that records the accepted merge, before any push.
+   A `MergeBound` error after `main` moved is taken back at once. A run that still carries the
+   record (the process died in the merge block, or a take-back failed) has that merge taken back
+   at the start of its next attempt, which then merges and checks again; one that can no longer be
+   taken back (something was committed on top of it) refuses the attempt as `ErrUnavailable`
+   until an operator resets the local `main` so it no longer contains it (cancel is not allowed
+   from `committing`), and `AbandonExhaustedMerge` never abandons such a run. The `RunStore` writes one more
+   `commit_meta` row per merge attempt (`MergeCommitMeta` when it has it).
+
 Before turning the merge option on, check that every workflow's merge-time transition is in the
 table (`core/workflow/commit_status_compat_test.go` is Spine's gate; SMP's `task-default` relies on
 Task `Pending → In Progress`). A planning run's additions are stamped with the outcome's status; a
@@ -1033,6 +1046,17 @@ an embedder opts in. The library's zero value is the v1 behaviour.
    consumption marker holds the sync for a retry instead of being refused.
    Your engine's own pushes of `main` must never emit `branch_protection.override` — every merge
    would become provenance and the guard would be void.
-7. **Reserved keys** `domain.CommitMetaGovernanceApproval*`, `engine.CommitMetaGovernanceBlockedTarget`
-   and `engine.CommitMetaGovernanceStartedBy` (the lifecycle run's starter, written only with the
-   lifecycle exemption on) are written only by the engine; read them for display.
+7. **Reserved keys** `domain.CommitMetaGovernanceApproval*`, `engine.CommitMetaGovernanceBlockedTarget`,
+   `engine.CommitMetaGovernanceStartedBy` (the lifecycle run's starter, written only with the
+   lifecycle exemption on) and `engine.CommitMetaMergeUnverified` (§11, item 4) are written only by
+   the engine; read them for display.
+8. **A refused merge that could not be taken back** (INIT-023 wave 4 review) is reported, not
+   hidden: `GovernanceMergeStatus` sets `Blocked` and `BlockedMergeSHA` (and never `Held`) while
+   the run's `spine.governance.blocked_target` merge is still in the local `main`'s history; a
+   reject is `ErrConflict` meanwhile (the run stays committing and its next attempt takes the
+   merge back first), and an approve whose merge ended blocked reports it in `MergeError`. A
+   decision counts as a merge attempt in flight for the retry budget: while
+   `AbandonExhaustedMerge` is abandoning the run it is `ErrUnavailable` with nothing recorded
+   (try again). `AbandonExhaustedMerge` returns an error, and changes nothing, when a read it
+   needs to decide fails (the hold, a recorded block against the local `main`, the route), so a
+   scheduler skips the run for that tick.

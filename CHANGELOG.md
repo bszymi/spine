@@ -6,6 +6,63 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation: wave 4 cross-task review
+
+Fixes for the review of the four wave 4 tasks together. No runtime schema change; everything below
+is inside an option the embedded zero value leaves off (the status lifecycle, the governance guard,
+the retry budget's exhaustion handler).
+
+### Security
+
+- **A merge whose post-merge checks never ran is no longer published as a replay.** With the
+  status lifecycle or the governance guard on, a `MergeBound` error after git had moved the local
+  `main`, or a process death inside the merge block, left the merge on `main`; the next attempt
+  found `main` up to date, skipped V1 and the governance post-merge assertion, and pushed it (a
+  review-less workflow carried into `workflows/` by a rename on `main`; a criss-cross resolution
+  that reopened a Completed task). Each attempt that can move `main` now records the reserved
+  `spine.merge.unverified` key first and clears it in the write that records the accepted merge,
+  before the push; a late `MergeBound` error is taken back at once; and a run that still carries
+  the record has the merge taken back at the start of its next attempt, which merges and checks
+  again (KNOWN-LIMITATIONS "Governance-Path Guard" 16).
+
+### Changed (standalone)
+
+- **A failed read no longer decides a governance hold.** The hold, its clearing and the retry
+  budget's held test used to fall back to the run's last completed step when the workflow (or the
+  step list) could not be read, so one transient `git show` could abandon a held, undecided run or
+  leave an approved run's hold in place, retried forever. A failed read is now an error: the hold is
+  not recorded this time, the abandonment skips the tick, and an approval clears the hold from every
+  step that carries it.
+- **The retry budget decides its route before writing**, so a failed workflow read during an
+  abandonment no longer fails a publish-workflow run outright.
+- **A stale hold or blocked target no longer stops the retry budget**: an attempt the gate allows
+  clears a hold left on the run, and a recorded block whose merge is no longer in the local `main`'s
+  history is cleared.
+- **A decision is a merge attempt in flight for the retry budget**: an abandonment can no longer
+  route an approved run back between the approval and its merge (the decision answers `503`,
+  nothing recorded, while an abandonment runs).
+- **`GET /runs/{run_id}/governance` reports `blocked`** (and `blocked_merge_sha`) while a refused
+  merge of the run that could not be taken back is still on the local `main`; a reject is then a
+  truthful `409` instead of "the approved merge already reached the local main", and an approve
+  whose merge ended blocked reports it in `merge_error`.
+
+### Changed (embedders)
+
+- With `WithStatusLifecycle` or `WithGovernanceGuard` on, `MergeRunBranch` writes one more
+  reserved `commit_meta` key per merge attempt (`engine.CommitMetaMergeUnverified`) and refuses an
+  attempt as `ErrUnavailable` while an unverified merge of the run is buried in the local `main`'s
+  history (until an operator resets it); a local `main` that cannot be read before the merge is a
+  transient merge failure (counted). The guard's consumption marker is written in the same
+  `commit_meta` write.
+- `AbandonExhaustedMerge` returns an error, and writes nothing, when a read it needs fails (the
+  hold, a recorded block against the local `main`, the route); it never abandons a run carrying
+  `CommitMetaMergeUnverified`.
+- `DecideGovernanceMerge` answers `ErrUnavailable` while `AbandonExhaustedMerge` is abandoning the
+  run, and `ErrConflict` for a reject while the run's refused merge is still blocked on the local
+  `main`. `GovernanceMergeStatus` gains `Blocked` and `BlockedMergeSHA`.
+
+---
+
 ## INIT-023 — Security Audit Remediation: wave 4 integration (TASK-012, TASK-008, TASK-017, TASK-006)
 
 The four wave 4 tasks merged onto one branch, plus the coordination their combination needs. No

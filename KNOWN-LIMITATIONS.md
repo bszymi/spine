@@ -599,6 +599,32 @@ refuses an unprovenanced branch-protection removal. What remains:
       again, is installed on that relaxation's record. Every install ends the window.
 
     The chain only uses records the provenance reader returns (`Lookback`, 200 per source).
+16. **A merge whose post-merge checks never ran** (INIT-023 wave 4 review; with TASK-017's V1 on
+    as well as with this guard). Every merge attempt that can move the local `main` first records
+    `spine.merge.unverified` (`"<base> <source>"`) on its run, and the write that records the
+    accepted merge clears it before the push. A `MergeBound` error after git moved `main` (the
+    trailing `rev-parse` failed, the git child was killed after its ref update) is taken back in
+    the merge block; a run that still carries the record — the process died inside the block (on
+    `SIGTERM` the scheduler and the HTTP server do not wait for one), or the take-back failed — has
+    the merge taken back at the start of its next attempt, which merges and checks again. Before,
+    the next attempt found `main` up to date and published the unverified merge. What remains: the
+    record is on that run only, so between a restart and its next attempt another writer (another
+    run's governed merge, an in-place write, a run start) can build on the unverified merge, and
+    its push publishes it. The run's next attempt then finds the merge buried: it refuses as
+    unavailable (Error log), keeps the record, blocks governed merges on the merge with the guard
+    on (item 6), and the retry budget never abandons the run, until an operator resets the local
+    `main` so it no longer contains the merge (and, if another writer already pushed it, the
+    published branch too). Cancel is not allowed from `committing`, so there is no other way out:
+    the engine never accepts the unverified merge on its own. A buried merge the engine cannot
+    locate within the replay walk limit refuses the same way.
+17. **A stale hold is cleared only by an attempt the gate allows.** A run held for a decision
+    whose commits then reach `main` another way (an operator lands the run branch, another
+    approved run's branch carried them) is no longer held; the next attempt the gate allows clears
+    the hold, and the retry budget applies again. While every attempt fails before the gate (a
+    transient check of the bound commit), the hold stays and the run stays `committing`. A decision
+    on a run whose refused merge is still blocked (item 6) reports it: `GET /runs/{run_id}/governance`
+    shows `blocked`, a reject is `409` until the run's own retry has taken the merge back, and an
+    approve whose merge ended blocked says so in `merge_error`.
 
 ### Projection Sync: What INIT-023 TASK-011 Leaves Open
 - **`workflow.Validate` is advisory at projection.** Strict parsing and the projection round trip are

@@ -189,8 +189,9 @@ func (o *Orchestrator) clearMergeInFlight(ctx context.Context, run *domain.Run) 
 //     commits cannot be taken back, so the attempt is refused as
 //     unavailable, the record kept and, with the guard on, governed merges
 //     blocked on it, until an operator resets the local main so it no
-//     longer contains that merge (or cancels the run). A walk that cannot
-//     decide (a read error, the walk limit) refuses the same way.
+//     longer contains that merge (cancel is not allowed from committing).
+//     A walk that cannot decide (a read error, the walk limit) refuses the
+//     same way.
 //
 // It returns nil when the attempt may proceed.
 func (o *Orchestrator) settleUnverifiedMerge(ctx context.Context, run *domain.Run) error {
@@ -245,7 +246,7 @@ func (o *Orchestrator) settleUnverifiedMerge(ctx context.Context, run *domain.Ru
 		case found:
 			stuck, reason = m, "an unverified merge of the run ("+m+") is in the history of the local "+authoritativeBranch+
 				" (something was committed on top of it); reset the local "+authoritativeBranch+
-				" so it no longer contains it, or cancel the run"
+				" so it no longer contains it"
 		default:
 			clear = true
 		}
