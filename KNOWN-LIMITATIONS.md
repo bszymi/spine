@@ -491,9 +491,10 @@ refuses an unprovenanced branch-protection removal. What remains:
    protection from other patterns (`release/*`, `staging`) is installed without a record. While the
    installed rules carry no `no-direct-write` on the authoritative branch the guard is inactive
    (ADR-009 §1 bullet 3).
-5. **Paths outside `MergeRunBranch`.** Convergence merges that move content into `main` directly
-   (audit F8, INIT-023 TASK-012), operator override pushes and ADR-008 operator bypass writes are
-   not held by the merge guard (operators may land changes directly by design). Workflow
+5. **Paths outside `MergeRunBranch`.** Operator override pushes and ADR-008 operator bypass
+   writes are not held by the merge guard (operators may land changes directly by design).
+   Convergence is no longer one of them: since TASK-012 (audit F8) it merges divergence branches
+   into the run branch only, so their content reaches `main` through the guarded merge. Workflow
    definitions get no projection provenance check.
 6. **A refused merge that cannot be taken back blocks every governed merge** — whichever check
    refused it (INIT-023 wave 4 integration): TASK-005's structural check, TASK-017's merge-result
