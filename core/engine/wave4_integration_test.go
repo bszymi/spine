@@ -80,8 +80,9 @@ func (f *govFake) primaryOutcome() *domain.RepositoryMergeOutcome {
 
 func (f *govFake) heldEvents(postMerge bool) int {
 	n := 0
-	for _, e := range f.eventsOf(domain.EventGovernanceMergeHeld) {
-		if strings.Contains(string(e.Payload), `"post_merge":true`) == postMerge {
+	held := f.eventsOf(domain.EventGovernanceMergeHeld)
+	for i := range held {
+		if strings.Contains(string(held[i].Payload), `"post_merge":true`) == postMerge {
 			n++
 		}
 	}
@@ -145,7 +146,8 @@ func TestWave4_HoldThenApprovedMergeRunsEveryCheckBeforeThePush(t *testing.T) {
 	govDiff := f.callIndex("Diff "+gBase+" "+gMerge, v1)
 	marker := f.callIndex("store:merge", govDiff)
 	push := f.callIndex("binder:PushCommit ", 0)
-	if merge < 0 || v1 < 0 || govDiff < 0 || marker < 0 || push < 0 || !(merge < v1 && v1 < govDiff && govDiff < marker && marker < push) {
+	if merge < 0 || v1 < 0 || govDiff < 0 || marker < 0 || push < 0 ||
+		merge >= v1 || v1 >= govDiff || govDiff >= marker || marker >= push {
 		t.Fatalf("order MergeBound %d < V1 %d < governance diff %d < marker %d < push %d violated; calls %v",
 			merge, v1, govDiff, marker, push, f.g.calls)
 	}
