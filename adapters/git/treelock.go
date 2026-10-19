@@ -971,7 +971,7 @@ func (c *CLIClient) phantomStatesOf(ctx context.Context, op string, paths []stri
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	defer func() { _ = tree.Close() }()
 	wt := make(map[string]string, len(paths))
 	var regular []string
 	for _, p := range paths {
