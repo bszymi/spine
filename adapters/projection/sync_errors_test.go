@@ -231,6 +231,10 @@ func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 		})
 	}
 
+	// Since the INIT-023 wave 4 follow-up the git client refuses a
+	// gitlink as not a file without reading it (git.ErrNotBlob), and
+	// discovery records that as a not_a_file refusal: skipped, logged and
+	// counted as "refused", never a read error for the classifier.
 	t.Run("gitlink_is_skipped_logged_and_counted", func(t *testing.T) {
 		logs := captureLogs(t)
 		repo := newScratchRepo(t)
@@ -243,8 +247,8 @@ func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 			t.Fatal(err)
 		}
 		// A gitlink (submodule entry) named x.md whose commit is not in
-		// this repository: `git show <c>:x.md` fails with "bad object",
-		// and the commit's tree proves there is no regular file there.
+		// this repository: `git show <c>:x.md` failed with "bad object";
+		// ReadFile now refuses the entry as not a file.
 		repo.run("update-index", "--add", "--cacheinfo", "160000,"+gitlinkTarget+",x.md")
 		repo.run("commit", "-q", "-m", "gitlink")
 		head := repo.run("rev-parse", "HEAD")
@@ -255,7 +259,7 @@ func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 		if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != head {
 			t.Fatalf("sync state: %+v", got)
 		}
-		if n := len(logs.lines("level=WARN", "skipped unreadable changed file", "x.md", "entry=gitlink")); n != 1 {
+		if n := len(logs.lines("level=WARN", "projection skipped file", "x.md", "reason=not_a_file")); n != 1 {
 			t.Fatalf("expected one Warn naming x.md, got %d:\n%s", n, logs.String())
 		}
 		synced := router.ofType(domain.EventProjectionSynced)
@@ -266,8 +270,11 @@ func TestIncrementalSync_ArtifactReadErrorsAreClassified(t *testing.T) {
 		if err := json.Unmarshal(synced[0].Payload, &p); err != nil {
 			t.Fatal(err)
 		}
-		if p["read_skipped"] != float64(1) || p["workflows_rejected"] != float64(0) {
+		if p["refused"] != float64(1) || p["read_skipped"] != float64(0) || p["workflows_rejected"] != float64(0) {
 			t.Fatalf("projection_synced payload = %+v", p)
+		}
+		if len(router.ofType(domain.EventProjectionFileSkipped)) != 1 {
+			t.Fatalf("expected one projection_file_skipped event")
 		}
 	})
 }

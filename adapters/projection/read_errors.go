@@ -51,7 +51,9 @@ const (
 //     they never get here; this classifier serves changed-artifact reads
 //     and readFileEntry's fallback for a client without it.
 //   - isContentReadError (a blob whose content is refused by a size bound,
-//     registered by the bounded-read work) is deterministic too.
+//     registered by the bounded-read work) is deterministic too, and so
+//     is the git client's own not-a-file refusal (git.ErrNotBlob, wave 4
+//     follow-up), which is described as the entry it names (notBlobEntry).
 //   - Anything that cannot be proved — a cancelled context, a git client
 //     without the TreeEntryTyper capability, a failure to read the tree —
 //     is infrastructure. Holding the sync on an unproved failure is
@@ -65,6 +67,9 @@ func (s *Service) classifyReadFailure(ctx context.Context, ref, path string, rea
 	}
 	if ctx.Err() != nil {
 		return "", readErr
+	}
+	if entry, ok := notBlobEntry(readErr); ok {
+		return entry, nil
 	}
 	if isContentReadError(readErr) {
 		return entryContentRefused, nil
@@ -106,6 +111,25 @@ func nonFileEntry(typ string) (string, error) {
 	default:
 		return "", fmt.Errorf("unexpected tree entry type %q", truncateForLog(typ, 40))
 	}
+}
+
+// notBlobEntry maps the git client's not-a-file refusal (a
+// *git.NotBlobError: ReadFile typed the entry and refused it unread) to
+// entryGitlink or entryTree. ok is false for any other error, and for a
+// refusal of a type it does not document — that one is still
+// isContentReadError, so it stays deterministic as refused content.
+func notBlobEntry(err error) (string, bool) {
+	var nb *git.NotBlobError
+	if !errors.As(err, &nb) {
+		return "", false
+	}
+	switch nb.Type {
+	case git.TreeEntryCommit:
+		return entryGitlink, true
+	case git.TreeEntryTree:
+		return entryTree, true
+	}
+	return "", false
 }
 
 // unreadableEntry is readFileEntry's deterministic outcome: the commit
@@ -184,8 +208,13 @@ func (s *Service) readFileEntry(ctx context.Context, ref, path string) ([]byte, 
 	if err == nil {
 		return content, nil, nil
 	}
-	if ctx.Err() == nil && isContentReadError(err) {
-		return nil, &unreadableEntry{entry: entryContentRefused, readErr: err}, nil
+	if ctx.Err() == nil {
+		if entry, ok := notBlobEntry(err); ok {
+			return nil, &unreadableEntry{entry: entry}, nil
+		}
+		if isContentReadError(err) {
+			return nil, &unreadableEntry{entry: entryContentRefused, readErr: err}, nil
+		}
 	}
 	return nil, nil, err
 }

@@ -677,17 +677,20 @@ refuses an unprovenanced branch-protection removal. What remains:
 - **Entries are typed from the commit's tree** (`git.TreeEntryTyper`, implemented by
   `*git.CLIClient`): before every workflow and branch-protection read, and after a failed
   changed-artifact read. A `GitClient` decorator passed to `projection.NewService` that does not
-  forward it gets the historical read: a successful read is trusted (a gitlink recording the id of
-  a blob in the repository is read as that blob), and every read failure is infrastructure (a
-  dangling gitlink holds the sync in `error`, fail closed, instead of being skipped or rejected).
-- **A gitlink at an artifact path whose recorded id names a blob in the repository is read as that
-  blob** — by artifact discovery in both projection entry points and by every other artifact
-  reader (`artifact.Service` reads, branch validation) — while diffs and repository viewers show a
-  submodule pointer. Workflow files and `.spine/branch-protection.yaml` are typed before they are
-  read, so this cannot change a run's workflow or the branch rules (TASK-011 review round 2).
-  Typing every artifact in the projection alone would not close it for the other readers and would
-  add a git process per artifact to every full rebuild; refusing gitlink entries in a governed
-  repository at the push and merge boundary closes it for every reader at once (follow-up).
+  forward it gets the historical read: a successful read is trusted, and every read failure other
+  than the client's own refusals is infrastructure. Since the INIT-023 wave 4 follow-up
+  `*git.CLIClient.ReadFile` itself refuses a gitlink or a directory (`git.ErrNotBlob`), and the
+  projection describes that refusal as the entry it is, so a decorator over it no longer reads a
+  gitlink's recorded blob; the gap remains only for a `GitClient` whose `ReadFile` is not backed by
+  `*git.CLIClient`.
+- **A gitlink at an artifact path is refused as not a file** (INIT-023 wave 4 follow-up; closed
+  for every reader built on `*git.CLIClient`). Until then a gitlink whose recorded id names a blob
+  in the repository was read as that blob — by artifact discovery, `artifact.Service` reads and
+  branch validation — while diffs and repository viewers showed a submodule pointer. `ReadFile`
+  now types the entry from its mode before reading anything: discovery records a `not_a_file`
+  refusal (and removes a governed row the gitlink replaces), branch validation fails the file, and
+  reads answer 404. Refusing gitlink entries in a governed repository at the push and merge
+  boundary would also keep them out of `main` (follow-up).
 - **A first full rebuild that was interrupted** (the process stopped while `sync_state` was
   `rebuilding` with no synced commit) is not retried automatically, because it cannot be told apart
   from a first rebuild still running on another instance; run `POST /api/v1/system/rebuild`. A first
@@ -738,9 +741,10 @@ The governed merge judges artifact-status changes against the declared lifecycle
 - **An unreadable Markdown file in a run's diff refuses the merge** (`unreadable_artifact`): a
   `.md` inside the artifact scope over the read limit (4 MiB), a non-blob entry at an artifact path,
   or a listed path that does not read. This is permanent by design — a retry could never succeed.
-- **A gitlink whose recorded id names a blob in the repository is read as that blob**, exactly as
-  the projection reads it (see "Projection Sync" above); replacing an artifact with such a gitlink
-  of the same content is therefore not a removal to either.
+- **A gitlink whose recorded id names a blob in the repository** was read as that blob, exactly
+  as the projection read it; since the INIT-023 wave 4 follow-up `ReadFile` refuses it as not a
+  file (`git.ErrNotBlob`), so it is an `unreadable_artifact` like any other non-blob entry at an
+  artifact path (see "Projection Sync" above).
 - **A run branch with more than one merge-base with `main`** (a criss-cross history: the branch
   merged a commit of another run's branch that `main` merged separately) is judged against git's
   newest merge-base. A status change the other merge-base carries is then attributed to the run and
@@ -1015,16 +1019,17 @@ The following limitations have been resolved:
 
 ### Git Read Bounds
 - **Bounds** (INIT-023 TASK-003; audit F4): the git CLI client (`adapters/git.CLIClient`) never
-  buffers more than its limits. `ReadFile` probes the blob's size (`git cat-file -s`) and refuses
-  one over the per-blob limit before reading it (`git.DefaultMaxBlobBytes`, 4 MiB — the worktree
+  buffers more than its limits. `ReadFile` probes the blob's size (`git ls-tree -l` of the exact
+  path since the wave 4 follow-up, `git cat-file -s` before) and refuses one over the per-blob
+  limit before reading it (`git.DefaultMaxBlobBytes`, 4 MiB — the worktree
   read limit too; `git.WithMaxBlobBytes`), with a permanent error matching `git.ErrBlobTooLarge`
   (API 413). Every other read command — listings, diff, log, rev-parse, merge-base — fails past
   16 MiB of output (`git.DefaultMaxOutputBytes`, `git.WithMaxOutputBytes`, never below 4 KiB;
   `git.ErrOutputTooLarge`).
   Read commands also run with `GIT_ALLOC_LIMIT` (4 x the per-blob limit, never below 1 MiB, which
   git's own fixed allocations need; `git.WithMaxGitAllocBytes`), so git refuses any single
-  allocation over it — it will not inflate a small blob stored as a delta on a huge base, or render
-  a gitlink `*.md` as a commit with its patch — and read and diff commands pin git's delta-base
+  allocation over it — it will not inflate a small blob stored as a delta on a huge base — and
+  read and diff commands pin git's delta-base
   cache to the per-blob limit (`core.deltaBaseCacheLimit`, passed in `GIT_CONFIG_PARAMETERS`
   after any inherited entries); they run in the C locale so git's refusal is recognised whatever
   the host's language. A command's output is held once: the parsed paths and messages share its
@@ -1049,19 +1054,21 @@ The following limitations have been resolved:
   pair, and a legitimate large rename on `main` must not fail `Diff`; so a large blob already on
   the diff base can still be inflated in the git child while its rename is detected (its
   delta-base cache is pinned like a read command's).
-- **Named-ref window.** The size probe and the read are two git processes. A ref given by *name*
-  can move between them; Spine's buffer stays capped (the read overruns into the same refusal, with
-  size -1) and git's memory stays within the per-read bound above. Projection reads use commit ids; the
-  window applies to reads by name (`?ref=<branch>`, and the merge-time status cascade with merge
-  binding off, which reads the run branch by name; with binding on — always in `spine serve` —
-  INIT-023 TASK-005 reads it at the bound commit).
+- **Named-ref window (closed by the wave 4 follow-up).** The size probe and the read are two git
+  processes, but the read is `git cat-file blob <oid>` of the object the probe typed and sized, so
+  a ref given by *name* that moves between them cannot change what is read. (Until then the read
+  was `git show <ref>:<path>` and a moved ref could overrun the probed size into the same refusal,
+  with size -1.)
 - **Deltas on a large base are refused.** A legitimate artifact stored as a delta on a base larger
   than `GIT_ALLOC_LIMIT` (16 MiB by default) cannot be read and is refused as oversized. The
   refusal says so (`git.BlobTooLargeError.GitAllocLimit`, `git_alloc_limit_bytes` on
   `projection_file_skipped`, and the 413 message names the git allocation limit), because the
   file itself may be well under the per-blob limit.
-- **What `git show` renders counts.** The limit applies to what is read for a path: a tree path's
-  listing, or a gitlink rendered as a commit with its patch, is refused like a large blob.
+- **`ReadFile` reads blobs only** (wave 4 follow-up). It used to return whatever `git show
+  <rev>:<path>` rendered: a tree path's listing, a gitlink as a commit with its patch (a diff queue
+  of millions of small allocations, which `GIT_ALLOC_LIMIT` does not bound: 272 MiB measured by
+  SMP), and a path holding `..` or a `^` suffix as a range or a revision. A gitlink or a directory
+  is now refused unread (`git.ErrNotBlob`), and the path never reaches a revision expression.
 - **The merge-binding plumbing** (INIT-023 TASK-005's `CommitBinder` methods: `rev-parse
   --verify`, `rev-list --parents`, `merge-base --is-ancestor`, `ls-tree`, the private-index
   `read-tree` / `hash-object` / `update-index` / `write-tree` / `commit-tree`, `update-ref`,

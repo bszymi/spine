@@ -486,8 +486,8 @@ payload:
   deleted: <integer>             # Artifacts deleted
   errors: <integer>              # Counted sync errors (state stays at from_commit when > 0)
   workflows_rejected: <integer>  # Workflow files refused for their content (never counted in errors)
-  read_skipped: <integer>        # Changed artifact files git could not read because the commit's tree holds no file at the path (a gitlink to an object not in the repository, a directory); skipped, logged at Warn
-  refused: <integer>             # Changed files not projected because they are oversized or at an unsafe path (one projection_file_skipped each; never counted in errors)
+  read_skipped: <integer>        # Changed artifact files whose read failed when the commit's tree proves there is no file at that exact path; skipped, logged at Warn (a gitlink is a refused not_a_file since the INIT-023 wave 4 follow-up, counted in refused)
+  refused: <integer>             # Changed files not projected because they are oversized, at an unsafe path, or a gitlink rather than a file (one projection_file_skipped each; never counted in errors)
 ```
 
 ### 4.14 `projection_workflow_rejected`
@@ -520,22 +520,23 @@ payload:
 
 ### 4.15 `projection_file_skipped`
 
-Emitted once per file the projection declined to project (INIT-023 TASK-003): a file over the git client's per-blob read limit (default 4 MiB, `git.WithMaxBlobBytes`), or a candidate at a path Spine refuses to store. A skip is never a sync error: `FullRebuild` and `IncrementalSync` advance past it. Each one is also logged at Warn (`projection skipped file`) and counted in `spine_projection_files_skipped_total`. It is reported as soon as discovery has decided it, before any later step can hold the sync: a sync held in `error` for another reason (an unreadable changed file, a failed store write or wipe) still reports it, and every retry reports it again under the same event id (the delivery queue de-duplicates; the counter counts each report). `artifact_path` on the envelope is the reported `path` (repository-relative, never stripped of `artifacts_dir`, since a skipped file has no projection key).
+Emitted once per file the projection declined to project (INIT-023 TASK-003): a file over the git client's per-blob read limit (default 4 MiB, `git.WithMaxBlobBytes`), a candidate at a path Spine refuses to store, or (wave 4 follow-up) an artifact candidate that is a gitlink, not a file. A skip is never a sync error: `FullRebuild` and `IncrementalSync` advance past it. Each one is also logged at Warn (`projection skipped file`) and counted in `spine_projection_files_skipped_total`. It is reported as soon as discovery has decided it, before any later step can hold the sync: a sync held in `error` for another reason (an unreadable changed file, a failed store write or wipe) still reports it, and every retry reports it again under the same event id (the delivery queue de-duplicates; the counter counts each report). `artifact_path` on the envelope is the reported `path` (repository-relative, never stripped of `artifacts_dir`, since a skipped file has no projection key).
 
 **Source:** Projection Service (`FullRebuild` and `IncrementalSync`)
 
 **When it fires:**
 
-- `oversized`: an artifact candidate (`*.md`) whose blob is over the read limit, or that git cannot produce within its allocation limit (`git_alloc_limit_bytes` set: a small file stored as a delta on a large base, or a gitlink rendered with its patch) — added, modified, renamed to, or present at the rebuild head. Its content is never read, so it is reported whether or not it is a governed artifact. A projected artifact modified past the limit also loses its row (as for a parse failure). An oversized *workflow* file is a `projection_workflow_rejected` with check `read_bounds` instead (§4.14); an oversized `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- `oversized`: an artifact candidate (`*.md`) whose blob is over the read limit, or that git cannot produce within its allocation limit (`git_alloc_limit_bytes` set: a small file stored as a delta on a large base) — added, modified, renamed to, or present at the rebuild head. Its content is never read, so it is reported whether or not it is a governed artifact. A projected artifact modified past the limit also loses its row (as for a parse failure). An oversized *workflow* file is a `projection_workflow_rejected` with check `read_bounds` instead (§4.14); an oversized `.spine/branch-protection.yaml` is a held sync error with the rules unchanged.
+- `not_a_file` (INIT-023 wave 4 follow-up): an artifact candidate (`*.md`) the commit's tree records as a gitlink (mode 160000), not a file — added, modified, renamed to, or present at the rebuild head. The git client refuses it without reading any object behind it (`git.ErrNotBlob`), so a gitlink whose recorded id names a blob in the repository is never projected as that blob. A projected artifact replaced by a gitlink loses its row. `size_bytes`, `limit_bytes` and `git_alloc_limit_bytes` are null. A gitlink at a workflow path is a `projection_workflow_rejected` with check `not_a_file` instead (§4.14).
 - `unsafe_path`: an artifact or workflow-definition candidate whose path is not valid UTF-8 or holds a control character (C0, DEL, C1), U+2028/U+2029, or a bidi embedding, override or isolate control (U+202A–U+202E, U+2066–U+2069). The file is never read, and no store call carries its path. A deleted or renamed-away unsafe path is ignored (no such row can exist).
 
 ```yaml
 payload:
   path: <string>          # Repository-relative path; for unsafe_path, Go-quoted (strconv.Quote: one line, valid UTF-8, every control and bidi character escaped)
-  reason: <string>        # oversized | unsafe_path
-  size_bytes: <integer>   # oversized: the blob's size, or -1 when the read overran the limit (git refused an allocation — see git_alloc_limit_bytes — or `git show` rendered more than the probed object); null for unsafe_path
-  limit_bytes: <integer>  # oversized: the limit it exceeded (-1 if the git client did not report it); null for unsafe_path
-  git_alloc_limit_bytes: <integer>  # oversized, when git itself refused an allocation over this GIT_ALLOC_LIMIT while producing the content (size_bytes is then -1): the file may be under limit_bytes, and what is too large is a delta base it is stored on or a gitlink's patch; null otherwise
+  reason: <string>        # oversized | not_a_file | unsafe_path
+  size_bytes: <integer>   # oversized: the blob's size, or -1 when the read overran the limit (git refused an allocation — see git_alloc_limit_bytes — or the probe under-reported); null for not_a_file and unsafe_path
+  limit_bytes: <integer>  # oversized: the limit it exceeded (-1 if the git client did not report it); null for not_a_file and unsafe_path
+  git_alloc_limit_bytes: <integer>  # oversized, when git itself refused an allocation over this GIT_ALLOC_LIMIT while producing the content (size_bytes is then -1): the file may be under limit_bytes, and what is too large is a delta base it is stored on; null otherwise
   commit: <string>        # The sync head the file was found at (full SHA)
 ```
 

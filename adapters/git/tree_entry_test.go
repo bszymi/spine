@@ -44,12 +44,20 @@ func TestTreeEntryType(t *testing.T) {
 	gitIn(t, repo, "commit", "-q", "-m", "fixture")
 	head := gitIn(t, repo, "rev-parse", "HEAD")
 
-	// Precondition: the gitlink read fails, and the stderr-substring
-	// classifier would call it transient.
+	// Precondition: `git show` of the gitlink fails, and the
+	// stderr-substring classifier would call it transient. (ReadFile no
+	// longer runs show since the wave 4 follow-up: it types the entry and
+	// refuses a gitlink as ErrNotBlob, Permanent, whatever its name.)
+	cmd := exec.CommandContext(ctx, "git", "show", "--end-of-options", head+":docs/blocked.md", "--")
+	cmd.Dir = repo
+	out, showErr := cmd.CombinedOutput()
+	if showErr == nil || git.ClassifyGitErrorForTest(strings.TrimSpace(string(out))).Kind != git.ErrKindTransient {
+		t.Fatalf("precondition: git show of a gitlink named blocked.md should be misclassified transient by stderr, got %v: %s", showErr, out)
+	}
 	_, err := client.ReadFile(ctx, head, "docs/blocked.md")
 	var gerr *git.GitError
-	if !errors.As(err, &gerr) || gerr.Kind != git.ErrKindTransient {
-		t.Fatalf("precondition: reading a gitlink named blocked.md should be misclassified transient by stderr, got %v", err)
+	if !errors.Is(err, git.ErrNotBlob) || !errors.As(err, &gerr) || gerr.Kind != git.ErrKindPermanent {
+		t.Fatalf("ReadFile of a gitlink named blocked.md = %v, want the Permanent ErrNotBlob refusal", err)
 	}
 
 	for _, tc := range []struct {

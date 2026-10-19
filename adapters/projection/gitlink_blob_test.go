@@ -41,9 +41,12 @@ func (r *scratchRepo) addGitlinkTo(path, id string) {
 	r.run("update-index", "--add", "--cacheinfo", "160000,"+id+","+path)
 }
 
-// assertHiddenBlobGitlink checks the attack's preconditions with the real
-// client: the tree records a gitlink, the diff shows a type change or an
-// addition, and yet `git show` prints the hidden body.
+// assertHiddenBlobGitlink checks the attack's preconditions: the tree
+// records a gitlink, the diff shows a type change or an addition, and yet
+// `git show` prints the hidden body. Since the INIT-023 wave 4 follow-up
+// the real client's ReadFile no longer does — it refuses the gitlink
+// unread (git.ErrNotBlob) — so the projection's typing before the read is
+// now the second of two guards; the tests below still pin it.
 func assertHiddenBlobGitlink(t *testing.T, repo *scratchRepo, from, to, path, id, body string) {
 	t.Helper()
 	if ls := repo.run("ls-tree", to, "--", path); !strings.HasPrefix(ls, "160000 commit "+id+"\t") {
@@ -52,9 +55,11 @@ func assertHiddenBlobGitlink(t *testing.T, repo *scratchRepo, from, to, path, id
 	if typ := repo.run("cat-file", "-t", id); typ != "blob" {
 		t.Fatalf("precondition: the recorded id must name a blob in this repository, got %q", typ)
 	}
-	got, err := repo.git.ReadFile(context.Background(), to, path)
-	if err != nil || string(got) != body {
-		t.Fatalf("precondition: git show %s:%s must print the hidden body, got %q, %v", to[:8], path, got, err)
+	if got := repo.run("show", "--end-of-options", to+":"+path, "--"); got != strings.TrimSpace(body) {
+		t.Fatalf("precondition: git show %s:%s must print the hidden body, got %q", to[:8], path, got)
+	}
+	if got, err := repo.git.ReadFile(context.Background(), to, path); !errors.Is(err, git.ErrNotBlob) || got != nil {
+		t.Fatalf("ReadFile(%s:%s) = %q, %v; want the not-a-file refusal (wave 4 follow-up)", to[:8], path, got, err)
 	}
 	if from != "" {
 		if d := repo.run("diff", "--name-status", from, to, "--", path); d == "" {
@@ -413,5 +418,67 @@ func TestProjectBranchProtection_TypesTheEntryBeforeReading(t *testing.T) {
 				t.Fatalf("nothing may be read or written: upserts=%d reads=%d", st.upsertCalls, g.reads)
 			}
 		})
+	}
+}
+
+// noTyperGit hides the TreeEntryTyper capability of the client it wraps,
+// as a GitClient decorator that does not forward it does.
+type noTyperGit struct{ git.GitClient }
+
+// INIT-023 wave 4 follow-up: the gap KNOWN-LIMITATIONS recorded for a git
+// client without TreeEntryTyper — readFileEntry trusts a successful read
+// there, and `git show` printed the blob a gitlink records — is closed
+// whenever *git.CLIClient is underneath: its ReadFile refuses the gitlink
+// itself (git.ErrNotBlob), and the projection describes that refusal as
+// the entry it is. A hidden review-less body behind a gitlink at a
+// workflow path is a not_a_file rejection (not read_bounds, never
+// projected) and a hidden `rules: []` behind the branch-protection config
+// holds the sync, even through a decorator that does not forward the
+// capability.
+func TestProjection_GitlinkToBlobThroughANonTypingDecorator(t *testing.T) {
+	ctx := context.Background()
+	repo, st, router, _, c1 := newIntegrityFixture(t, reviewedWorkflow)
+	var client git.GitClient = noTyperGit{repo.git}
+	if _, ok := client.(git.TreeEntryTyper); ok {
+		t.Fatal("precondition: the decorator must not expose TreeEntryType")
+	}
+	svc := NewService(client, st, router, 0)
+
+	hidden := repo.writeBlob(reviewlessWorkflow)
+	repo.remove(wfPath)
+	repo.addGitlinkTo(wfPath, hidden)
+	repo.write(BranchProtectionConfigPath, bpStrict)
+	c2 := repo.commitIndex("c2", BranchProtectionConfigPath)
+	assertHiddenBlobGitlink(t, repo, c1, c2, wfPath, hidden, reviewlessWorkflow)
+
+	if err := svc.IncrementalSync(ctx); err != nil {
+		t.Fatalf("IncrementalSync: %v", err)
+	}
+	if got := st.syncState(); got.Status != "idle" || got.LastSyncedCommit != c2 {
+		t.Fatalf("sync state: %+v", got)
+	}
+	if r := st.row(wfPath); r != nil && (r.SourceCommit == c2 || !hasStep(decodeDef(t, r.Definition), "review")) {
+		t.Fatalf("the hidden review-less body was projected through the decorator: %+v", r)
+	}
+	assertKeptQuarantined(t, st, c1)
+	assertRejections(t, router, map[string][2]string{wfPath: {"not_a_file", "kept"}})
+	if len(st.bpRules) != 2 || st.bpCommit != c2 {
+		t.Fatalf("the strict config at c2 must project: %d rules at %s", len(st.bpRules), st.bpCommit)
+	}
+
+	// The config becomes a gitlink to a `rules: []` blob: held, rules kept.
+	relaxed := repo.writeBlob(bpRelaxed)
+	repo.remove(BranchProtectionConfigPath)
+	repo.addGitlinkTo(BranchProtectionConfigPath, relaxed)
+	c3 := repo.commitIndex("c3")
+	assertHiddenBlobGitlink(t, repo, c2, c3, BranchProtectionConfigPath, relaxed, bpRelaxed)
+	if err := svc.IncrementalSync(ctx); err != nil {
+		t.Fatalf("counted errors are reported through sync_state, got %v", err)
+	}
+	if got := st.syncState(); got.Status != "error" || got.LastSyncedCommit != c2 {
+		t.Fatalf("a gitlinked config must hold the sync: %+v", got)
+	}
+	if len(st.bpRules) != 2 || st.bpCommit != c2 {
+		t.Fatalf("the strict rules must stay: %d rules at %s", len(st.bpRules), st.bpCommit)
 	}
 }

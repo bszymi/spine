@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,7 +67,8 @@ import (
 //	DeleteBranch        branch -D [eoo] <n>
 //	Diff                diff --name-status -z [eoo] <from'> <to'> --
 //	Log                 log --format=... [-nN] [eoo] [<since'>..HEAD] -- [<path>]
-//	ReadFile            cat-file -s [eoo] <ref'>:<path>, then show [eoo] <ref'>:<path> --
+//	ReadFile            --literal-pathspecs ls-tree -l -z --full-tree [eoo] <ref'> <path>, then cat-file blob <oid>
+//	                    (rev-parse --verify --quiet [eoo] <ref'>^{tree} only after a failed ls-tree)
 //	ListFiles           ls-tree -r --name-only -z [eoo] <ref'>
 //	TreeEntryType       --literal-pathspecs ls-tree -z --full-tree [eoo] <ref'> <path>   (no "--": after eoo it is a pathspec)
 //	RefSHA              rev-parse --verify [eoo] <ref'>   (no call at all for an existing branch)
@@ -74,7 +76,7 @@ import (
 //	Push, PushBranch    push [eoo] <remote> <oid>^{commit}:refs/heads/<n>
 //	DeleteRemoteBranch  push --delete [eoo] <remote> refs/heads/<n>
 //
-// The trailing "--" on diff, show and log stops a "rev" that is really a
+// The trailing "--" on diff and log stops a "rev" that is really a
 // path from being read as a pathspec. A push source "<oid>^{commit}" can
 // never match a ref name ("^" is illegal in refnames), so neither a
 // local refs/tags/refs/heads/<n> nor a refs/tags/<oid> can make the
@@ -96,8 +98,10 @@ import (
 //
 // No method buffers more than its limit (limits.go): ReadFile refuses a
 // blob over the per-blob limit before reading it (BlobTooLargeError,
-// ErrBlobTooLarge), every other read command fails past the per-command
-// stdout limit (OutputTooLargeError, ErrOutputTooLarge), and mutating
+// ErrBlobTooLarge) and reads blobs only, refusing a directory or a
+// gitlink unread (NotBlobError, ErrNotBlob; wave 4 follow-up); every
+// other read command fails past the per-command stdout limit
+// (OutputTooLargeError, ErrOutputTooLarge), and mutating
 // commands drain their stdout instead of failing on its size. git's own
 // memory on read commands is bounded per allocation (GIT_ALLOC_LIMIT)
 // and its delta-base cache is pinned, which leaves about three times the
@@ -130,10 +134,11 @@ type CLIClient struct {
 	maxBlobBytes     int64 // one ReadFile (WithMaxBlobBytes)
 	maxOutputBytes   int64 // stdout of every other command (WithMaxOutputBytes)
 	maxGitAllocBytes int64 // GIT_ALLOC_LIMIT on read commands (WithMaxGitAllocBytes)
-	// blobSize is ReadFile's size probe; nil means catFileSize. It is a
+	// blobSize, when set, replaces the size ReadFile's entry probe
+	// reported for a blob (it is given the blob's object id). It is a
 	// field only so a test can make the probe lie and exercise the read's
 	// own cap (the second line of defence).
-	blobSize func(ctx context.Context, spec string) (int64, error)
+	blobSize func(ctx context.Context, oid string) (int64, error)
 
 	// Shared working tree (INIT-023 TASK-012, treelock.go): the
 	// WithHomeBranch value (validated and registered for the tree by
@@ -1045,36 +1050,57 @@ func (c *CLIClient) Log(ctx context.Context, opts LogOpts) ([]CommitInfo, error)
 // is refused: `git show :<path>` would read the index, which no caller
 // means.
 //
-// The read is bounded (INIT-023 TASK-003, audit F4):
+// It reads blobs only (INIT-023 wave 4 follow-up). Before it, the
+// content came from `git show [eoo] <rev>:<path> --`, which renders
+// whatever the revision parser makes of the spec: a directory as a
+// listing; a gitlink whose commit is in the repository as that commit
+// with its whole patch — SMP measured 272 MiB in the git child at
+// ae513dca, which neither the output cap nor GIT_ALLOC_LIMIT stops (a
+// diff queue is millions of small allocations); and a path holding ".."
+// or "^" as a range or a revision with its parents, so a missing
+// "d..main" read as `git log` of `<rev>:d..main`, and even an existing
+// file of that name was rendered as the range. The path never reaches a
+// revision expression now:
 //
-//  1. `git cat-file -s [eoo] <rev>:<path>` probes the size. It reads only
-//     the object header (a delta's header for a deltified object), so
-//     git never inflates an oversized blob. A size over the per-blob
-//     limit is refused before any content is read: a *GitError
-//     {Permanent, "read_file", "blob exceeds read limit"} wrapping a
+//  1. `git --literal-pathspecs ls-tree -l -z --full-tree [eoo] <rev> <path>`
+//     types the entry at exactly that path (the record whose path is
+//     byte-equal to it; git normalises the pathspec) and reports its
+//     object id and, for a blob, its size. ls-tree reads only tree
+//     objects and the blob's header, so a gitlink whose commit is
+//     absent is still typed and an oversized blob is never inflated.
+//     The type comes from the entry's MODE, so a gitlink recording the
+//     id of a blob in this repository is still a gitlink.
+//  2. No entry: a miss (below). A directory or a gitlink: a
+//     *GitError{Permanent, "read_file", NotBlobMessage} wrapping a
+//     *NotBlobError, matching ErrNotBlob — refused before any object is
+//     read. A blob over the per-blob limit: a *GitError{Permanent,
+//     "read_file", "blob exceeds read limit"} wrapping a
 //     *BlobTooLargeError with the probed size, matching ErrBlobTooLarge.
-//  2. `git show [eoo] <rev>:<path> --` (unchanged argv, so blobs are
-//     byte-identical: no textconv or filter runs without --textconv, and
-//     a tree path keeps its listing) reads into one buffer pre-sized to
-//     the probed size and capped at the limit — no doubling, no string
-//     round trip. Overrunning the cap is the same refusal with Size -1:
-//     the object behind a named ref moved after the probe, or `git show`
-//     rendered more than the probed object (a gitlink to a commit in the
-//     repository prints that commit with its patch).
+//  3. `git cat-file blob <oid>` reads the probed object — by id, so a
+//     ref that moves after the probe cannot change what is read — into
+//     one buffer pre-sized to the probed size and capped at the limit.
+//     It is byte-identical to `git show` of a blob (no textconv or
+//     filter runs) and refuses an object that is not a blob at its
+//     header. Overrunning the cap is the size refusal with Size -1.
 //
-// Both commands run with GIT_ALLOC_LIMIT, so a small blob stored as a
-// delta on a huge base, or the patch of a gitlink, is refused by git
-// before it allocates the large object; that is also Size -1, with
-// GitAllocLimit set so the message names the real cause (the file itself
-// may be small).
+// Every command runs with GIT_ALLOC_LIMIT, so a small blob stored as a
+// delta on a huge base is refused by git before it allocates the large
+// object; that is also Size -1, with GitAllocLimit set so the message
+// names the real cause (the file itself may be small).
 //
-// Errors are those of the unbounded read (I2). When the probe fails for
-// any reason other than a size bound, the `git show` runs anyway and its
-// result is returned: cat-file words some misses differently ("invalid
-// object name" where `git show … --` says "bad revision"), and every miss
-// must keep the kind and text it has today (ErrKindNotFound since
-// INIT-023 TASK-002). That costs one extra git process on a miss; the
-// show is bounded exactly like a probed one.
+// A miss keeps the error it has had since INIT-023 TASK-002 — git's
+// "bad revision '<rev>:<path>'", ErrKindNotFound, Op "read_file" — now
+// built here instead of read from a `git show` that would first try the
+// spec as a range. It is the answer when the revision's tree has no
+// entry at exactly path; when the path can name no tree entry at all
+// ("", a leading or trailing "/", an empty, "." or ".." component, a NUL
+// byte — git would read "./x" relative to its working directory and
+// "dir/" as the directory: neither names a file at that path); and when
+// the revision names no tree, which `git rev-parse --verify --quiet
+// <rev>^{tree}` proves by its exit status (1, nothing on stderr) after
+// ls-tree failed — never git's stderr. Any other ls-tree or cat-file
+// failure is classified from git's stderr as before (a missing blob in
+// a corrupt repository is an error, not a miss).
 //
 // A 0-byte blob returns a non-nil, empty slice.
 func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, error) {
@@ -1085,27 +1111,38 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	spec := rev + ":" + path
 	limit := c.blobLimit()
 
-	probe := c.blobSize
-	if probe == nil {
-		probe = c.catFileSize
+	ent, err := c.readEntry(ctx, rev, path)
+	if err != nil {
+		if errors.Is(err, ErrOutputTooLarge) {
+			return nil, readOverrun(ref, path, limit, err)
+		}
+		return nil, err
+	}
+	switch ent.typ {
+	case "":
+		return nil, readMiss(rev + ":" + path)
+	case TreeEntryTree, TreeEntryCommit:
+		return nil, &GitError{Kind: ErrKindPermanent, Op: "read_file", Message: NotBlobMessage,
+			Err: &NotBlobError{Ref: ref, Path: path, Type: ent.typ}}
+	}
+
+	size := ent.size
+	if c.blobSize != nil {
+		if size, err = c.blobSize(ctx, ent.oid); err != nil {
+			return nil, err
+		}
 	}
 	var sizeHint int64
-	size, err := probe(ctx, spec)
 	switch {
-	case errors.Is(err, ErrOutputTooLarge):
-		return nil, readOverrun(ref, path, limit, err)
-	case err != nil:
-		// Not a size refusal: let `git show` produce today's error.
 	case size > limit:
 		return nil, blobTooLarge(ref, path, size, limit)
-	default:
+	case size > 0:
 		sizeHint = size
 	}
 
-	out, err := c.runBounded(ctx, "read_file", limit, sizeHint, "show", "--end-of-options", spec, "--")
+	out, err := c.runBounded(ctx, "read_file", limit, sizeHint, "cat-file", "blob", ent.oid)
 	if err != nil {
 		if errors.Is(err, ErrOutputTooLarge) {
 			return nil, readOverrun(ref, path, limit, err)
@@ -1118,21 +1155,110 @@ func (c *CLIClient) ReadFile(ctx context.Context, ref, path string) ([]byte, err
 	return out, nil
 }
 
-// catFileSize is ReadFile's default size probe: `git cat-file -s
-// [eoo] <spec>` (no trailing "--": cat-file takes exactly one object name,
-// which it never reads as a pathspec). It runs as a read command, so its
-// stdout is capped and it gets GIT_ALLOC_LIMIT.
-func (c *CLIClient) catFileSize(ctx context.Context, spec string) (int64, error) {
-	out, err := c.runBounded(ctx, "read_file", maxProbeBytes, 0, "cat-file", "-s", "--end-of-options", spec)
+// blobEntry is ReadFile's probe result: the tree entry at exactly the
+// requested path.
+type blobEntry struct {
+	typ  string // TreeEntryBlob, TreeEntryTree, TreeEntryCommit, or "" for no entry
+	oid  string // the entry's object id
+	size int64  // the blob's size; -1 when ls-tree reported none
+}
+
+// readEntry types the entry at exactly path in rev's tree (ReadFile step
+// 1). A path no tree entry can have, and a revision that names no tree,
+// are "no entry" (typ ""). The ls-tree output is one record for any path
+// readEntryPath accepts; its cap leaves room for a second and fails the
+// read past it (errors.Is ErrOutputTooLarge — a tree carrying duplicate
+// entries is refused, not guessed at).
+func (c *CLIClient) readEntry(ctx context.Context, rev, path string) (blobEntry, error) {
+	if !readEntryPath(path) {
+		return blobEntry{}, nil
+	}
+	limit := 2 * (int64(len(path)) + readEntryRecordBytes)
+	out, err := c.runBounded(ctx, "read_file", limit, 0,
+		"--literal-pathspecs", "ls-tree", "-l", "-z", "--full-tree", "--end-of-options", rev, path)
 	if err != nil {
-		return 0, err
+		if !errors.Is(err, ErrOutputTooLarge) && ctx.Err() == nil && c.revNamesNoTree(ctx, rev) {
+			return blobEntry{}, nil
+		}
+		return blobEntry{}, err
 	}
-	size, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if perr != nil || size < 0 {
-		return 0, &GitError{Kind: ErrKindPermanent, Op: "read_file",
-			Message: "unexpected git cat-file -s output", Err: perr}
+	return parseBlobEntry(string(out), path)
+}
+
+// readEntryRecordBytes bounds an `ls-tree -l -z` record apart from its
+// path: mode, type, a SHA-256 object id, the padded size and separators.
+const readEntryRecordBytes = 128
+
+// readEntryPath reports whether path can name a tree entry: non-empty, no
+// NUL, and every "/"-separated component non-empty and neither "." nor
+// "..". A tree entry's name can be none of those, and git reads such a
+// spec relative to its working directory ("./x") or as a directory's
+// listing ("dir/") rather than as the entry the caller named.
+func readEntryPath(path string) bool {
+	if path == "" || strings.IndexByte(path, 0) >= 0 {
+		return false
 	}
-	return size, nil
+	for _, comp := range strings.Split(path, "/") {
+		if comp == "" || comp == "." || comp == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// revNamesNoTree reports whether rev positively names no tree:
+// `git rev-parse --verify --quiet [eoo] <rev>^{tree}` exits with status 1,
+// its "not a valid object name" answer (a name that resolves to a blob
+// also prints why on stderr; the status is what decides, never the text).
+// rev passed checkRev, so it holds no "^" or ":" of its own. Any other
+// outcome — it resolves, git died (128), could not run or was signalled —
+// is false, and the caller keeps ls-tree's error.
+func (c *CLIClient) revNamesNoTree(ctx context.Context, rev string) bool {
+	_, err := c.runBounded(ctx, "read_file", maxProbeBytes+64, 0,
+		"rev-parse", "--verify", "--quiet", "--end-of-options", rev+"^{tree}")
+	var ee *exec.ExitError
+	return err != nil && errors.As(err, &ee) && ee.ExitCode() == 1
+}
+
+// parseBlobEntry reads `ls-tree -l -z` records ("<mode> SP <type> SP
+// <object> SP+ <size> TAB <path> NUL") and returns the entry whose path
+// equals want, or a zero blobEntry when there is none. A record that does
+// not have the documented shape is an error, never "no entry".
+func parseBlobEntry(output, want string) (blobEntry, error) {
+	for _, rec := range strings.Split(output, "\x00") {
+		if rec == "" {
+			continue
+		}
+		meta, p, ok := strings.Cut(rec, "\t")
+		fields := strings.Fields(meta)
+		if !ok || len(fields) != 4 || !IsFullObjectName(fields[2]) {
+			return blobEntry{}, &GitError{Kind: ErrKindPermanent, Op: "read_file",
+				Message: fmt.Sprintf("unexpected ls-tree record %q", truncateRecord(rec))}
+		}
+		switch fields[1] {
+		case TreeEntryBlob, TreeEntryTree, TreeEntryCommit:
+		default:
+			return blobEntry{}, &GitError{Kind: ErrKindPermanent, Op: "read_file",
+				Message: fmt.Sprintf("unexpected tree entry type %q", truncateRecord(fields[1]))}
+		}
+		if p != want {
+			continue
+		}
+		size := int64(-1)
+		if n, err := strconv.ParseInt(fields[3], 10, 64); err == nil && n >= 0 {
+			size = n
+		}
+		return blobEntry{typ: fields[1], oid: fields[2], size: size}, nil
+	}
+	return blobEntry{}, nil
+}
+
+// readMiss is ReadFile's answer for a miss: the *GitError the
+// `git show [eoo] <spec> --` read returned for every miss since INIT-023
+// TASK-002 — git's own text, classified ErrKindNotFound — built without
+// running a command that would parse spec as a revision expression.
+func readMiss(spec string) *GitError {
+	return &GitError{Kind: ErrKindNotFound, Op: "read_file", Message: "fatal: bad revision '" + spec + "'"}
 }
 
 // blobTooLarge builds ReadFile's size refusal.

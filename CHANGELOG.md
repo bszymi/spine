@@ -6,6 +6,62 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation: wave 4 follow-up
+
+Fixes found after the wave 4 integration (a TASK-003 residual SMP INIT-027/EPIC-004/TASK-008 measured
+at ae513dca, and two guards no test pinned). No runtime schema change.
+
+### Security
+
+- **`CLIClient.ReadFile` reads blobs only.** It read content with `git show <rev>:<path> --`,
+  which renders whatever git's revision parser makes of the spec: a gitlink whose commit is in the
+  repository came back as that commit with its whole patch (SMP measured 272 MiB in the git child
+  for a gitlink to a commit adding 10^6 paths through one shared subtree — every object tiny, so
+  neither the size probe, the output cap nor `GIT_ALLOC_LIMIT` stopped the diff queue), a gitlink
+  recording the id of a blob in the repository came back as that blob (content no diff shows), a
+  directory as its listing, and a path holding `..` or a `^` suffix as a range or a revision with
+  its parents — a missing `d..main` read as `git log`, `<gitlink>^!` as a commit, `<gitlink>^@` as
+  an empty file, and even an existing file named `d..main` was rendered as the range. ReadFile now
+  types the entry first (`git --literal-pathspecs ls-tree -l -z --full-tree`, which reads tree
+  objects and the blob header only and takes the type from the entry's mode) and reads the probed
+  blob by object id (`git cat-file blob <oid>`, byte-identical to `show` for a blob). The path
+  never reaches a revision expression.
+
+### Changed (embedders)
+
+- `CLIClient.ReadFile` of a **gitlink or a directory** returns
+  `*git.GitError{Kind: ErrKindPermanent, Op: "read_file", Message: git.NotBlobMessage}` wrapping a
+  new `*git.NotBlobError{Ref, Path, Type}` (`Type` is `git.TreeEntryCommit` or
+  `git.TreeEntryTree`; `Error()` never prints the path), matching the new `git.ErrNotBlob`. It used
+  to return the rendered listing or commit (a 0-byte success for some `^` forms), the blob a
+  gitlink records, or — for a gitlink whose commit is absent — `fatal: bad object …` with the same
+  Kind. Size refusals (`ErrBlobTooLarge`, `BlobTooLargeError`) and misses are unchanged: a miss is
+  still `ErrKindNotFound` with git's `fatal: bad revision '<rev>:<path>'` text, now built by the
+  client (Err is nil instead of the exit status). A path no tree entry can have — `""`, a leading or
+  trailing `/`, an empty, `.` or `..` component, a NUL — is a miss without a lookup (git read
+  `./x` relative to its working directory and `dir/` as the listing). A revision that names no
+  tree is a miss only when `git rev-parse --verify --quiet <rev>^{tree}` proves it by exit status;
+  any other ls-tree failure keeps git's classified error. Every ordinary file read costs the same
+  two git processes as before (plus the branch lookup), with different argv.
+- Callers treat the refusal like TASK-003's size refusal: discovery records it as
+  `artifact.RefusedNotAFile` (`"not_a_file"`, a new `RefusalReason`; `projection_file_skipped`
+  with `reason: not_a_file`, sizes null) and removes a governed row a gitlink replaces — a gitlink
+  `.md` was a `ChangeSet.ReadErrors` entry (`read_skipped`) when its commit was absent and was read
+  as rendered content otherwise; branch validation fails such a file ("not validated: the path
+  holds a gitlink or a directory, not a file") instead of skipping it; the projection's
+  `isContentReadError` includes it, and a not-a-file refusal is a `not_a_file` workflow rejection
+  (never `read_bounds`) even through a `GitClient` decorator that does not forward
+  `TreeEntryTyper`; `artifact.Service.Read` and `workflow.Service.Read` answer it `ErrNotFound`
+  (404, was a 500); `artifact.IsIDCollision` counts it as a collision. Every other caller already
+  failed closed on a non-NotFound error.
+- **SMP:** INIT-027/EPIC-004/TASK-008's tripwire `TestClient_SpineReadFileRendersTheGitlinksPatch`
+  fails on the next `.spine-revision` bump that includes this change — expected: Spine's ReadFile no
+  longer runs `show` on a gitlink, so SMP TASK-010 can delegate `gitread.Client.ReadFile` to it
+  (`git.NotBlobError` / `git.ErrNotBlob` / `git.NotBlobMessage` mirror SMP's `gitread` names and
+  envelope, so `gitread` can alias them).
+
+---
+
 ## INIT-023 — Security Audit Remediation: wave 4 cross-task review
 
 Fixes for the review of the four wave 4 tasks together. No runtime schema change; everything below

@@ -186,13 +186,19 @@ func TestReadFile_ReadCapIsTheSecondLineOfDefence(t *testing.T) {
 	}
 }
 
-// AC 5 (I2): every error is the one the unbounded read gives. The
-// expected Kind and Message come from running today's argv
-// (`git show [eoo] <spec> --`) and classifying its stderr, so the probe
-// can never change a miss's kind or text. Since INIT-023 TASK-002 every
-// miss is "bad revision" (ErrKindNotFound) — including an unknown ref and
-// a path that exists only in the working tree, which the design (written
-// on 61994fe, before that change) listed as Permanent.
+// AC 5 (I2): every miss is the error the unbounded read gives. The
+// expected Kind and Message come from running TASK-003's argv
+// (`git show [eoo] <spec> --`) and classifying its stderr, so the blob-only
+// read (wave 4 follow-up), which builds a miss's error itself, can never
+// change its kind or text. Since INIT-023 TASK-002 every miss is "bad
+// revision" (ErrKindNotFound) — including an unknown ref and a path that
+// exists only in the working tree, which the design (written on 61994fe,
+// before that change) listed as Permanent.
+//
+// The wave 4 follow-up changed two rows on purpose: a gitlink (here one
+// whose commit is absent, which show worded "bad object") and a directory
+// (which show listed) are the not-a-file refusal now — Permanent, as the
+// dangling gitlink always was.
 func TestReadFile_ErrorKindParity(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -207,14 +213,14 @@ func TestReadFile_ErrorKindParity(t *testing.T) {
 	}
 	t3git(t, dir, nil, "add", "-A")
 	t3git(t, dir, nil, "commit", "-q", "-m", "one")
-	// A gitlink whose commit is absent: cat-file -s and git show word it
-	// differently; the show's error wins.
+	// A gitlink whose commit is absent.
 	t3git(t, dir, nil, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("ab", 20)+",gl.md")
 	t3git(t, dir, nil, "commit", "-q", "-m", "gitlink")
 	if err := os.WriteFile(filepath.Join(dir, "disk-only.md"), []byte("untracked\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	head := t3git(t, dir, nil, "rev-parse", "HEAD")
+	topBlob := t3git(t, dir, nil, "rev-parse", head+":top.md")
 	c := git.NewCLIClient(dir)
 
 	unbounded := func(spec string) (string, *git.GitError) {
@@ -238,7 +244,7 @@ func TestReadFile_ErrorKindParity(t *testing.T) {
 		{"unknown ref", "badref", "top.md", git.ErrKindNotFound},
 		{"unknown ref at an object id", strings.Repeat("cd", 20), "top.md", git.ErrKindNotFound},
 		{"present on disk, not at the ref", head, "disk-only.md", git.ErrKindNotFound},
-		{"gitlink to an absent commit", head, "gl.md", git.ErrKindPermanent},
+		{"ref naming a blob", topBlob, "top.md", git.ErrKindNotFound},
 	} {
 		_, err := c.ReadFile(ctx, tc.ref, tc.path)
 		ge, ok := err.(*git.GitError)
@@ -261,18 +267,56 @@ func TestReadFile_ErrorKindParity(t *testing.T) {
 		}
 	}
 
-	// A tree path keeps today's `git show` listing, byte for byte.
-	got, err := c.ReadFile(ctx, head, "docs")
-	if err != nil {
-		t.Fatalf("ReadFile of a tree path: %v", err)
+	// A gitlink and a directory: show failed on the one ("bad object",
+	// Permanent) and listed the other; both are the not-a-file refusal.
+	if _, want := unbounded(head + ":gl.md"); want == nil || want.Kind != git.ErrKindPermanent {
+		t.Fatalf("fixture: show of the dangling gitlink = %v, want a Permanent failure", want)
 	}
-	want, gerr := unbounded(head + ":docs")
-	if gerr != nil {
-		t.Fatal(gerr)
+	if listing, want := unbounded(head + ":docs"); want != nil || !strings.Contains(listing, "a.md") {
+		t.Fatalf("fixture: show of the tree path = %q, %v, want its listing", listing, want)
 	}
-	if string(got) != want {
-		t.Fatalf("tree path output:\n got %q\nwant %q", got, want)
+	for _, tc := range []struct{ path, typ string }{{"gl.md", git.TreeEntryCommit}, {"docs", git.TreeEntryTree}} {
+		got, err := c.ReadFile(ctx, head, tc.path)
+		assertNotBlob(t, tc.path, got, err, head, tc.path, tc.typ)
 	}
+}
+
+// assertNotBlob checks ReadFile's not-a-file refusal (wave 4 follow-up):
+// no content, the direct *git.GitError{Permanent, "read_file",
+// NotBlobMessage} wrapping a *git.NotBlobError of the entry's type, and
+// never a size refusal or a miss.
+func assertNotBlob(t *testing.T, label string, got []byte, err error, ref, path, typ string) {
+	t.Helper()
+	if got != nil {
+		t.Errorf("%s: ReadFile returned %d bytes (%q), want none", label, len(got), truncateForTest(got))
+	}
+	ge, ok := err.(*git.GitError)
+	if !ok {
+		t.Fatalf("%s: err = %T %v, want a direct *git.GitError", label, err, err)
+	}
+	if ge.Kind != git.ErrKindPermanent || ge.IsRetryable() || ge.Op != "read_file" || ge.Message != git.NotBlobMessage {
+		t.Errorf("%s: %+v, want {Permanent read_file %q}", label, ge, git.NotBlobMessage)
+	}
+	var nb *git.NotBlobError
+	if !errors.Is(err, git.ErrNotBlob) || !errors.As(err, &nb) {
+		t.Fatalf("%s: %v does not match ErrNotBlob / *NotBlobError", label, err)
+	}
+	if nb.Ref != ref || nb.Path != path || nb.Type != typ {
+		t.Errorf("%s: NotBlobError = %+v, want {%q %q %q}", label, nb, ref, path, typ)
+	}
+	if errors.Is(err, git.ErrBlobTooLarge) || errors.Is(err, git.ErrOutputTooLarge) {
+		t.Errorf("%s: %v also matches a size refusal", label, err)
+	}
+	if len(path) > 4 && strings.Contains(nb.Error(), path) { // a short path is a substring of the fixed text
+		t.Errorf("%s: NotBlobError text %q prints the branch-controlled path", label, nb.Error())
+	}
+}
+
+func truncateForTest(b []byte) string {
+	if len(b) > 120 {
+		return string(b[:120]) + "…"
+	}
+	return string(b)
 }
 
 // AC 6: every other read command fails past the per-command ceiling;
@@ -974,7 +1018,7 @@ func TestCommands_RunUnderTheirClassEnvironment(t *testing.T) {
 	type env struct{ alloc, lcAll, language, params string }
 	readEnv := env{fmt.Sprint(alloc), "C", "", inherited + " " + cache}
 	want := map[string]env{
-		"cat-file": readEnv, "show": readEnv, "ls-tree": readEnv, "log": readEnv, "rev-parse": readEnv, "merge-base": readEnv,
+		"cat-file": readEnv, "ls-tree": readEnv, "log": readEnv, "rev-parse": readEnv, "merge-base": readEnv,
 		"diff":     {"unset", "C", "", inherited + " " + cache},
 		"show-ref": {"unset", "C", "", inherited}, // the exact branch lookup (refgrammar.go)
 		"branch":   {"unset", "POSIX", "t003", inherited}, "switch": {"unset", "POSIX", "t003", inherited},

@@ -353,6 +353,14 @@ func (s *Service) Read(ctx context.Context, id, ref string) (*ReadResult, error)
 			return nil, domain.NewErrorWithCause(domain.ErrPayloadTooLarge,
 				fmt.Sprintf("workflow %s at ref %s is refused by the read limits: %v", path, ref, err), err)
 		}
+		// A gitlink or a directory at the path (INIT-023 wave 4
+		// follow-up: the git client refuses it unread) holds no workflow
+		// definition: 404, as for a missing file.
+		var notBlob *git.NotBlobError
+		if errors.As(err, &notBlob) {
+			return nil, domain.NewErrorWithCause(domain.ErrNotFound,
+				fmt.Sprintf("workflow not found: %s at ref %s: %s", path, ref, notBlob.Error()), err)
+		}
 		return nil, domain.NewError(domain.ErrGit, err.Error())
 	}
 

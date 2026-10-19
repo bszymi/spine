@@ -38,10 +38,11 @@ func taskDoc(n int) string {
 }
 
 // TestList_ResolvesTheRefOnce is AC 18: List(ctx, <branch>) runs exactly
-// one exact branch lookup and N `show` reads — each after its size probe
-// (`cat-file -s`, INIT-023 TASK-003) — all against that one object id,
-// and returns the same artifacts as listing the branch checked out (the
-// pre-change behaviour).
+// one exact branch lookup and N blob reads — each after its entry probe
+// (`ls-tree -l` of the path at that one object id; INIT-023 wave 4
+// follow-up, which replaced TASK-003's `cat-file -s` probe and the `git
+// show` read) — and returns the same artifacts as listing the branch
+// checked out (the pre-change behaviour).
 func TestList_ResolvesTheRefOnce(t *testing.T) {
 	testutil.HermeticGit(t)
 	repo := testutil.NewTempRepo(t)
@@ -73,20 +74,21 @@ func TestList_ResolvesTheRefOnce(t *testing.T) {
 	lookups, shows, probes, other := 0, 0, 0, 0
 	for _, c := range calls {
 		switch c[0] {
-		case "cat-file":
+		case "--literal-pathspecs":
 			probes++
-			if len(c) != 4 || c[1] != "-s" || c[2] != "--end-of-options" || !strings.HasPrefix(c[3], tip+":") {
-				t.Errorf("probe argv %q, want cat-file -s --end-of-options %s:<path>", c, tip)
+			if want := []string{"--literal-pathspecs", "ls-tree", "-l", "-z", "--full-tree", "--end-of-options", tip}; len(c) != len(want)+1 ||
+				strings.Join(c[:len(want)], " ") != strings.Join(want, " ") || !strings.HasPrefix(c[len(want)], "tasks/") {
+				t.Errorf("probe argv %q, want %q <path>", c, want)
+			}
+		case "cat-file":
+			shows++
+			if len(c) != 3 || c[1] != "blob" || !git.IsFullObjectName(c[2]) {
+				t.Errorf("blob read argv %q, want cat-file blob <oid>", c)
 			}
 		case "show-ref":
 			lookups++
 			if want := []string{"show-ref", "--verify", "--hash", "refs/heads/" + branch}; strings.Join(c, " ") != strings.Join(want, " ") {
 				t.Errorf("lookup argv %q, want %q", c, want)
-			}
-		case "show":
-			shows++
-			if len(c) != 4 || c[1] != "--end-of-options" || !strings.HasPrefix(c[2], tip+":") || c[3] != "--" {
-				t.Errorf("show argv %q, want show --end-of-options %s:<path> --", c, tip)
 			}
 		case "ls-tree":
 			if c[len(c)-1] != tip {
@@ -98,7 +100,7 @@ func TestList_ResolvesTheRefOnce(t *testing.T) {
 		}
 	}
 	if lookups != 1 || shows != n || probes != n {
-		t.Fatalf("List ran %d lookups, %d probes and %d shows (calls %q), want 1, %d and %d", lookups, probes, shows, calls, n, n)
+		t.Fatalf("List ran %d lookups, %d probes and %d blob reads (calls %q), want 1, %d and %d", lookups, probes, shows, calls, n, n)
 	}
 
 	// Same answer as listing the checked-out branch through HEAD.

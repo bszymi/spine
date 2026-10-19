@@ -87,11 +87,17 @@ func (s *Service) WithStrictWorkflowValidation(strict bool) {
 // The git client's size refusal qualifies (INIT-023 TASK-003): a blob
 // over the per-blob read limit (git.ErrBlobTooLarge, which also covers
 // git refusing an allocation over GIT_ALLOC_LIMIT while producing it)
-// can never become readable at that commit. Artifact discovery handles
-// oversized changed files itself (ChangeSet.Refused), so in practice
-// this matters for workflow files and the branch-protection config.
+// can never become readable at that commit. So does its not-a-file
+// refusal (git.ErrNotBlob, INIT-023 wave 4 follow-up): the commit's tree
+// records a gitlink or a directory at the path, and ReadFile refuses it
+// without reading any object behind it. Artifact discovery handles both
+// for changed files itself (ChangeSet.Refused), so in practice this
+// matters for workflow files and the branch-protection config; and there
+// readFileEntry and classifyReadFailure ask notBlobEntry first, so a
+// not-a-file refusal is described as the entry it is (a not_a_file
+// rejection), never as refused content (read_bounds).
 func isContentReadError(err error) bool {
-	return errors.Is(err, git.ErrBlobTooLarge)
+	return errors.Is(err, git.ErrBlobTooLarge) || errors.Is(err, git.ErrNotBlob)
 }
 
 // buildWorkflowRow reads a workflow file at commit and turns it into a
