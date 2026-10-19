@@ -942,3 +942,89 @@ table (`core/workflow/commit_status_compat_test.go` is Spine's gate; SMP's `task
 Task `Pending → In Progress`). A planning run's additions are stamped with the outcome's status; a
 standard run's additions keep their authored status, which must be an initial status of their
 type.
+
+---
+
+## 12. Embedding: the Governance-Path Guard
+
+INIT-023 TASK-006 ([ADR-016](/architecture/adr/ADR-016-governance-path-guard.md)) holds a governed
+merge that changes governance paths until an operator approves the bound commit, and keeps the
+projection from installing an unprovenanced branch-protection removal. `spine serve` enables both;
+an embedder opts in. The library's zero value is the v1 behaviour.
+
+1. **Prerequisites.** Merge binding on (§9), and a `GitOperator` that implements the optional
+   `engine.MergeBaseLister` — `MergeBases(ctx, a, b)` returns every merge base (`git merge-base
+   --all`), full lowercase ids, and an **empty list with a nil error** for unrelated histories
+   (`git merge-base` exits 1 with no output): the guard refuses such a merge permanently, while
+   any error is treated as possibly transient and retried. A remote-backed operator fetches like
+   its `MergeBase` does. Its `Diff` must accept two local
+   object ids (the post-merge check diffs the unpushed merge commit against its base).
+2. **Enable the merge guard** after `EnableMergeBinding`:
+   ```go
+   err := orch.WithGovernanceGuard(engine.GovernanceGuard{
+       Enabled:      true,
+       WorkflowDirs: projectionSvc.WorkflowDirs(), // or projection.WorkflowDirs(artifactsDir)
+       // Paths: nil → .spine/, .spine.yaml, workflows/
+       // ExemptWorkflowLifecycleTaskPath: ADR-008 lifecycle runs (spine serve: true)
+       // ExemptOwnRunEvidence: .spine/runs/<run id>/evidence/ (spine serve: true)
+   })
+   ```
+   It errors, and leaves the guard off, without binding or `MergeBaseLister`, or for an invalid
+   path entry.
+3. **Handle holds.** `MergeRunBranch` returns a `precondition_failed` `*domain.SpineError`
+   wrapping `engine.ErrGovernanceApprovalRequired` and leaves the run `committing`; the publish
+   step (or the last completed step) carries `error_detail.classification =
+   governance_approval_required`, and `governance.merge_held` is emitted. A retry loop should
+   treat the hold as waiting, not failed. `orch.GovernanceMergeStatus(ctx, runID)` reports the
+   bound commit, the governed paths (capped) and any recorded approval.
+4. **Decide.** `orch.DecideGovernanceMerge(ctx, engine.GovernanceDecisionRequest{RunID, CommitSHA,
+   Decision: engine.GovernanceApprove|engine.GovernanceReject, Actor, Reason})`. Pass the
+   authenticated caller as `Actor` with its Spine role; the engine refuses below
+   `domain.RoleOperator` (`ErrForbidden`), a SHA other than the bound one (`ErrConflict`), a run
+   that is not committing (`ErrConflict`) and a merge with no governance change
+   (`ErrPrecondition`). Approve records the approval only while the run is still committing
+   (otherwise `ErrConflict`, nothing recorded) and merges at once (a merge failure is in
+   `MergeError`; approving the same commit again retries — also after the merge landed locally
+   and only its push failed, when nothing is left to evaluate); reject needs a reason, revokes the
+   approval, takes `merge_failed` and revokes again, and is `ErrConflict` once the approved merge
+   completed or reached the local `main`. A merge that can never be evaluated (no merge base, a
+   diff over the git output limit) is `ErrPrecondition`: `MergeRunBranch` refuses it permanently.
+   Within one process the engine serialises decisions with merge attempts per run (an in-process
+   stripe that `MergeRunBranch` also takes while the guard is on); **if you run several replicas
+   against one database**, also serialise `DecideGovernanceMerge` with `MergeRunBranch` per run
+   across them (for example a database advisory lock on the run id) — KNOWN-LIMITATIONS
+   "Governance-Path Guard" 9. Run decisions inside whatever serialises your other
+   merge-cascading calls.
+5. **Atomic writes (recommended).** If your `RunStore` can implement
+   `MergeCommitMeta(ctx, runID string, patch map[string]string) error` (`commit_meta || patch`)
+   and `MergeCommitMetaIfStatus(ctx, runID string, status domain.RunStatus, patch
+   map[string]string) (applied bool, err error)` (the same, `WHERE status = $status`; false for a
+   wrong status or an unknown run), the engine uses them — the second for the approval, so it can
+   never land after a reject routed the run away; otherwise it falls back to read-modify-write
+   plus a re-read (KNOWN-LIMITATIONS "Governance-Path Guard" 9). `*store.PostgresStore`
+   implements both.
+6. **Enable the projection guard:**
+   ```go
+   projectionSvc.WithProtectionRemovalGuard(projection.ProtectionRemovalGuard{
+       Enabled:    true,
+       Provenance: pgStore, // *store.PostgresStore: ListGovernanceAuthorizations
+       // Events: nil → the service's router; AuthoritativeBranch: "" → WithAuthoritativeBranch or "main"
+   })
+   ```
+   Provenance is a database record of an operator act that changed the config: an honoured
+   `branch_protection.override` git push in `runtime.event_log` (whole-`domain.Event` JSON with
+   `payload.pre_receive_ref.old_sha`), or an approved merge's consumption marker in
+   `runs.commit_meta` — the approved merge must also account for every kind being removed: its
+   own diff removed it (its base config applied it), or its base config is byte for byte the
+   result of an earlier valid record its base descends from, judged the same way (a chain of
+   custody through the records the reader returns, so keep `Lookback` above the number of
+   operator acts one sync window can see). The provenance reader needs `SELECT` on `runtime.event_log` and
+   `runtime.runs`; a read error holds the sync (retried), a missing reader refuses every removal.
+   It also lists runs still `committing` with an approval (pending, never authorisations): an
+   unmatched removal while such a run's approved commit is on the head without a reachable
+   consumption marker holds the sync for a retry instead of being refused.
+   Your engine's own pushes of `main` must never emit `branch_protection.override` — every merge
+   would become provenance and the guard would be void.
+7. **Reserved keys** `domain.CommitMetaGovernanceApproval*`, `engine.CommitMetaGovernanceBlockedTarget`
+   and `engine.CommitMetaGovernanceStartedBy` (the lifecycle run's starter, written only with the
+   lifecycle exemption on) are written only by the engine; read them for display.

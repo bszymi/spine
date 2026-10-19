@@ -115,7 +115,7 @@ func TestServeWiring_StatusLifecycle_Builders(t *testing.T) {
 
 	st := newTimeoutStore()
 	_, wfProvider := buildWorkflowResolver(st, gitClient)
-	orch := buildOrchestrator(st, wfProvider, gitClient, events, q, artifacts, nil, engine.StrictStepEntryPolicy(), observe.Logger(ctx))
+	orch := buildOrchestrator(st, wfProvider, gitClient, events, q, artifacts, nil, engine.StrictStepEntryPolicy(), nil, observe.Logger(ctx))
 	if orch == nil {
 		t.Fatal("buildOrchestrator returned nil")
 	}

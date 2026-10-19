@@ -146,7 +146,7 @@ func TestServeWiring_InstallsEnvSelectedStepEntryPolicy(t *testing.T) {
 			// Process-level orchestrator and scheduler (buildServerConfig path).
 			st := newTimeoutStore()
 			_, wfProvider := buildWorkflowResolver(st, gitClient)
-			orch := buildOrchestrator(st, wfProvider, gitClient, events, q, nil, nil, policy, log)
+			orch := buildOrchestrator(st, wfProvider, gitClient, events, q, nil, nil, policy, nil, log)
 			if orch == nil {
 				t.Fatal("buildOrchestrator returned nil")
 			}

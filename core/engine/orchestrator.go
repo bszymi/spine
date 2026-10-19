@@ -47,6 +47,9 @@ type Orchestrator struct {
 	// under and judges diff paths with (WithArtifactsDir; zero value = the
 	// repository root, today's behaviour). Only the lifecycle reads it.
 	artifactScope artifact.PathScope
+	// governance is the governance-path guard (INIT-023 TASK-006), set
+	// only by WithGovernanceGuard; nil merges governance changes as before.
+	governance *governanceGuard
 	// cloneURLBuilder constructs the runner-facing clone URL for a
 	// resolved repository ID per ADR-015 *Assignment payload shape*.
 	// Production wires this to the workspace's git HTTP endpoint

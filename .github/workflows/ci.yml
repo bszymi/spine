@@ -238,6 +238,32 @@ jobs:
             exit 1
           fi
 
+      # INIT-023 / EPIC-002 / TASK-006: the governance-path guard end to end
+      # (a held merge, the contributor's 403, the operator's approval
+      # through the API, the projection installing the approved workflow)
+      # and its provenance SQL (the override events and consumed approvals
+      # the projection's protection-removal guard trusts, the atomic and
+      # conditional commit_meta writes). Postgres-backed; must never skip.
+      - name: Governance-path guard scenario and store (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags scenario -count=1 -run '^TestGovernancePathGuard_' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-governance.log
+          go test -tags integration -count=1 -run '^TestGovernanceStore_Integration$' -v ./adapters/store/ 2>&1 | tee integration-governance-store.log
+          if grep -E '^[[:space:]]*--- SKIP: ' scenario-governance.log integration-governance-store.log; then
+            echo "::error::a governance-path guard test skipped — it must pass, never skip"
+            exit 1
+          fi
+          for t in TestGovernancePathGuard_HeldUntilOperatorApproves; do
+            if ! grep -qE "^--- PASS: ${t} " scenario-governance.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+          if ! grep -qE '^--- PASS: TestGovernanceStore_Integration ' integration-governance-store.log; then
+            echo "::error::TestGovernanceStore_Integration did not pass"
+            exit 1
+          fi
+
   # INIT-023 / EPIC-001 / TASK-002: the git client's ref grammar (exact
   # `show-ref --verify` lookups, `--end-of-options`, `git switch
   # --no-guess`, `<oid>^{commit}` push sources, `worktree add --detach`)

@@ -355,6 +355,9 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 			return nil, fmt.Errorf("projection authoritative branch: %w", err)
 		}
 		_ = projSync.ProbeAuthoritativeRef(ctx)
+		// Protection-removal guard (INIT-023 TASK-006), on unless
+		// SPINE_GOVERNANCE_GUARD=off.
+		enableProtectionRemovalGuard(projSync, deps.Store)
 	}
 
 	// In platform-binding mode the global projSync above is moot: every
@@ -421,7 +424,7 @@ func buildServerConfig(ctx context.Context, deps serveDeps) (*serveRuntime, erro
 	// same instance pool.PrimaryClient() returns — passing it here
 	// keeps semantics identical to a routed call without expanding
 	// the abstract interface.
-	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, deps.StepEntryPolicy, log)
+	orch := buildOrchestrator(deps.Store, wfProvider, deps.GitClient, deps.Events, deps.Queue, artifactSvc, validator, deps.StepEntryPolicy, workflowDirsFor(deps.SpineCfg), log)
 	// Run-start repository preconditions (INIT-014 EPIC-002 TASK-004).
 	// Reuses the registry built above so the pool and the orchestrator
 	// resolve through the same authoritative source.

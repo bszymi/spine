@@ -172,5 +172,8 @@ func allEventTypes() []domain.EventType {
 		domain.EventRunBranchCleanupFailed,
 		domain.EventRunRepositoryMergeResolved,
 		domain.EventRunRepositoryMergeRetryRequested,
+		domain.EventGovernanceMergeHeld,
+		domain.EventGovernanceMergeDecided,
+		domain.EventBranchProtectionRemovalRefused,
 	}
 }

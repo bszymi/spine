@@ -68,6 +68,10 @@ const (
 	// override let it through. Drives the mandatory audit event on the
 	// override path (ADR-009 §4).
 	ReasonOverrideHonoured ReasonCode = "override_honoured"
+	// ReasonGovernanceApproved is emitted with DecisionAllow when a
+	// governed merge changes governance paths and an operator approved
+	// exactly the commit it merges (ADR-016; INIT-023 TASK-006).
+	ReasonGovernanceApproved ReasonCode = "governance_approved"
 
 	// ReasonRuleDenies is emitted with DecisionDeny when a matching rule
 	// blocks the operation and no override was requested.
@@ -77,6 +81,15 @@ const (
 	// distinct code lets a UI say "you cannot override" separately from
 	// "this cannot be overridden."
 	ReasonOverrideNotAuthorised ReasonCode = "override_not_authorised"
+	// ReasonGovernanceApprovalRequired is emitted with DecisionDeny when a
+	// governed merge changes governance paths and no operator approval of
+	// its bound commit is recorded (ADR-016). The engine holds the merge
+	// until an operator approves or rejects it.
+	ReasonGovernanceApprovalRequired ReasonCode = "governance_approval_required"
+	// ReasonGovernanceUnevaluable is emitted with DecisionDeny when a
+	// governance check carries no valid bound commit. It is never a hold:
+	// the engine refuses the attempt as unavailable and records nothing.
+	ReasonGovernanceUnevaluable ReasonCode = "governance_unevaluable"
 )
 
 // Reason accompanies a Decision. Code is stable and machine-readable;
@@ -115,4 +128,9 @@ type Request struct {
 	// TraceID threads through to the audit event emitted on override so
 	// reviewers can correlate a push to a specific request trace.
 	TraceID string
+	// Governance carries the facts of a governed merge for the
+	// governance-path guard (ADR-016; INIT-023 TASK-006). It is consulted
+	// only for OpGovernedMerge; nil keeps the v1 decision (governed merges
+	// always pass). Only the engine's merge gate sets it.
+	Governance *GovernanceCheck
 }

@@ -675,6 +675,143 @@ paths:
                     items:
                       $ref: '#/components/schemas/Error'
 
+  /runs/{run_id}/governance-decision:
+    post:
+      operationId: run.governance.decide
+      summary: Approve or reject a governed merge held by the governance-path guard
+      description: |
+        ADR-016 (INIT-023 TASK-006). With the governance-path guard on (the
+        `spine serve` default; `SPINE_GOVERNANCE_GUARD=off` disables it), a
+        governed merge that changes `.spine/`, `.spine.yaml`, `workflows/`
+        or `<artifacts_dir>/workflows/` is held: the run stays `committing`
+        until an operator decides. `commit_sha` must be the run's bound
+        commit (`GET /runs/{run_id}/governance` shows it); an approval
+        binds to that commit only.
+
+        - `approve` records the approval (reserved `commit_meta` keys,
+          `governance.merge_decided` event) — only while the run is still
+          `committing` — and runs the merge at once. A merge that then
+          fails is reported in `merge_error`; the approval stands, and
+          approving the same commit again retries the merge.
+        - `reject` (a `reason` is required) revokes any approval and takes
+          the workflow's `merge_failed` route (back to `execute` in
+          task-default), or fails a run whose workflow has no publish step
+          (the branch is kept).
+
+        A decision waits for a merge attempt of the run already in flight
+        and then sees its result: a reject after the approved merge
+        completed or reached the local `main` is `409` (the merge won).
+
+        Operator or admin only; the engine checks the role again.
+      tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/XTraceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, commit_sha]
+              properties:
+                decision:
+                  type: string
+                  enum: [approve, reject]
+                commit_sha:
+                  type: string
+                  pattern: '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+                  description: The run's bound commit (full hex id).
+                reason:
+                  type: string
+                  maxLength: 2000
+                  description: Required for reject.
+      responses:
+        '200':
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id: { type: string }
+                  commit_sha: { type: string }
+                  decision: { type: string, enum: [approve, reject] }
+                  paths:
+                    type: array
+                    items: { type: string }
+                    description: Governance paths the merge changes (capped).
+                  path_count: { type: integer }
+                  merge_attempted: { type: boolean }
+                  merge_error:
+                    type: string
+                    description: Approve only — the merge after the approval did not complete.
+                  run_status: { type: string }
+        '400':
+          description: Malformed body, unknown decision, malformed commit_sha, a reason over 2000 bytes, or a reject without a reason
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The run is not committing (an approve that finds it left committing records nothing), commit_sha is not the run's bound commit (the message names the bound commit), or a reject after the approved merge already reached the local main
+        '412':
+          description: The run's merge changes no governance path, or can never be evaluated (no merge base, a diff over the git output limit — the guard refuses it on its next attempt); there is nothing to decide
+        '503':
+          description: The governance-path guard is off, the engine is not wired, the merge's changed paths could not be computed this time, or another decision or merge attempt on the run did not finish in time (retry)
+
+  /runs/{run_id}/governance:
+    get:
+      operationId: run.governance.status
+      summary: Read a run's governance-path guard state
+      description: |
+        Whether the run's merge changes governance paths, whether it is held
+        for an operator decision, the bound commit, the paths (capped,
+        `truncated` when cut) and exemptions, and the recorded approval.
+        `evaluated` is false (with `evaluation_error`) when the run has no
+        bound commit yet or its changed paths could not be computed.
+        Requires the `run.status` permission.
+      tags: [Workflow]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Governance state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id: { type: string }
+                  run_status: { type: string }
+                  evaluated: { type: boolean }
+                  evaluation_error: { type: string }
+                  bound_sha: { type: string }
+                  required: { type: boolean }
+                  held: { type: boolean }
+                  paths:
+                    type: array
+                    items: { type: string }
+                  path_count: { type: integer }
+                  truncated: { type: boolean }
+                  exempt_paths:
+                    type: array
+                    items: { type: string }
+                  approval:
+                    type: object
+                    nullable: true
+                    properties:
+                      sha: { type: string }
+                      actor_id: { type: string }
+                      actor_role: { type: string }
+                      approved_at: { type: string }
+                      merge_sha: { type: string }
+                      base_sha: { type: string }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: The governance-path guard is off or the engine is not wired
+
   /steps/{assignment_id}/submit:
     post:
       operationId: step.submit

@@ -53,7 +53,7 @@ func TestServeWiring_PrimaryClientHomeBranchAndRetryBudget(t *testing.T) {
 	events := event.NewQueueRouter(q)
 	st := newTimeoutStore()
 	_, wfProvider := buildWorkflowResolver(st, gitClient)
-	orch := buildOrchestrator(st, wfProvider, gitClient, events, q, nil, nil, engine.StrictStepEntryPolicy(), observe.Logger(ctx))
+	orch := buildOrchestrator(st, wfProvider, gitClient, events, q, nil, nil, engine.StrictStepEntryPolicy(), nil, observe.Logger(ctx))
 	if orch == nil {
 		t.Fatal("buildOrchestrator returned nil")
 	}

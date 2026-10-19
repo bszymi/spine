@@ -46,23 +46,46 @@ const AuthoritativeBranch = authoritativeBranch
 // binding (failing closed without one), applies the status cascade AT
 // the bound commit, and every later phase merges exactly that commit.
 // With binding off it returns the zero value and nothing changes.
+//
+// With the governance-path guard on (WithGovernanceGuard, INIT-023
+// TASK-006) governanceGate runs next: a merge that changes governance
+// paths without an operator approval of the bound commit is held (the
+// error wraps ErrGovernanceApprovalRequired), and mergePrimaryBound
+// asserts after the merge that it changed nothing else. The whole attempt
+// then runs under the run's governance stripe, so an operator decision on
+// the run waits for it (governanceRunStripes).
 func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	// An exhaustion abandonment of this run in progress (AbandonExhaustedMerge,
 	// INIT-023 TASK-012) is routing it: this attempt stands down, nothing
 	// is recorded. Never the case for an embedder that does not wire the
-	// scheduler's exhaustion handler.
+	// scheduler's exhaustion handler. Registered before the governance
+	// stripe below (INIT-023 wave 4 integration), so an attempt waiting
+	// for an operator decision on the run already counts as in flight and
+	// no abandonment routes the run while it waits.
 	end, ok := mergeAttemptGate.beginAttempt(runID)
 	if !ok {
 		observe.Logger(ctx).Info("merge retries of this run are being abandoned; this merge attempt stands down", "run_id", runID)
 		return nil
 	}
 	defer end()
+	ctx, unlock, err := o.lockGovernanceRunIfGuarded(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	run, done, err := o.preflightCheck(ctx, runID)
 	if err != nil || done {
 		return err
 	}
 	src, done, err := o.resolveMergeSource(ctx, run)
 	if err != nil || done {
+		return err
+	}
+	// Governance-path guard (ADR-016; INIT-023 TASK-006): after the
+	// binding is validated and the merge source built, before any code
+	// repository or the primary merges. A held merge returns here with
+	// the run still committing.
+	if done, err := o.governanceGate(ctx, run, &src); err != nil || done {
 		return err
 	}
 	if retried, err := o.mergeCodeRepos(ctx, run); err != nil || retried {

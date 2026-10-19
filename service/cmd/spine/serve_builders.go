@@ -179,8 +179,10 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 				return gateway.GitPushResources{}, noop, fmt.Errorf("git-push fallback branch-protect policy: %w", err)
 			}
 			return gateway.GitPushResources{
-				Policy:   policy,
-				Events:   fallbackEvents,
+				Policy: policy,
+				// Honoured overrides are recorded synchronously for the
+				// governance guard (INIT-023 TASK-006).
+				Events:   withOverrideProvenance(fallbackEvents, fallbackStore),
 				Runs:     runReaderOrNil(fallbackStore),
 				StepDefs: fallbackStepDefs,
 			}, noop, nil
@@ -212,7 +214,7 @@ func buildGitPushResolver(pool *workspace.ServicePool, fallbackStore store.Store
 		}
 		return gateway.GitPushResources{
 			Policy:   policy,
-			Events:   events,
+			Events:   withOverrideProvenance(events, ss.Store),
 			Runs:     runReaderOrNil(ss.Store),
 			StepDefs: stepDefLookupOrNil(ss.StepAssigner),
 		}, release, nil
@@ -308,6 +310,7 @@ func buildOrchestrator(
 	artifactSvc *artifact.Service,
 	validator *validation.Engine,
 	stepEntryPolicy engine.StepEntryPolicy,
+	workflowDirs []string,
 	log *slog.Logger,
 ) *engine.Orchestrator {
 	if st == nil || wfProvider == nil {
@@ -358,6 +361,13 @@ func buildOrchestrator(
 	// service's, the one StartRun resolved the TaskPath with.
 	orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())
 	orch.WithArtifactsDir(artifactSvc.ArtifactsDir())
+	// Governance-path guard (INIT-023 TASK-006): on unless
+	// SPINE_GOVERNANCE_GUARD=off; workflowDirs are the projection's
+	// workflow directories (<artifacts_dir>/workflows/ included).
+	if err := enableGovernanceGuard(orch, workflowDirs); err != nil {
+		log.Error("governance guard init failed", "error", err)
+		return nil
+	}
 	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
 	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
 	orch.WithStepEntryPolicy(stepEntryPolicy)
@@ -418,10 +428,14 @@ func buildScheduler(
 			// The retry budget is enforced (INIT-023 TASK-012, P3-27): after
 			// defaultCommitMaxRetries automatic retries of a transiently
 			// failing merge the run is handed to AbandonExhaustedMerge,
-			// which routes it like a permanent merge failure.
-			scheduler.WithCommitRetry(func(ctx context.Context, runID string) error {
+			// which routes it like a permanent merge failure. A merge held
+			// for an operator governance decision is not a failed retry
+			// (INIT-023 TASK-006): it records no outcome, so it never
+			// counts against the budget, and the wrapper keeps it out of
+			// the Error log.
+			scheduler.WithCommitRetry(governanceAwareCommitRetry(func(ctx context.Context, runID string) error {
 				return orch.MergeRunBranch(ctx, runID)
-			}, defaultCommitMaxRetries, 2*time.Minute),
+			}), defaultCommitMaxRetries, 2*time.Minute),
 			scheduler.WithCommitExhausted(orch.AbandonExhaustedMerge),
 		)
 	}

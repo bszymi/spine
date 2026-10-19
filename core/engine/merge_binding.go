@@ -419,6 +419,9 @@ type mergeSource struct {
 	// TASK-017), nil with the lifecycle off; mergePrimaryBound checks the
 	// merge result against it before any push (V1).
 	lifecycle *lifecyclePlan
+	// gov is the governance-path guard's decision for this attempt
+	// (INIT-023 TASK-006); nil when the guard is off.
+	gov *governancePass
 }
 
 // resolveMergeSource is the binding-on entry of every merge attempt. It
@@ -766,6 +769,7 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		mergeErr    error
 		verdict     error // verifyBoundMerge's or V1's (TASK-017) refusal
 		tb          takeBack
+		gov         governedCheck // TASK-006's post-merge check and marker
 		pushErr     error
 	)
 	blockErr := o.withTree(ctx, func(ctx context.Context) error {
@@ -795,6 +799,13 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		if verr != nil {
 			verdict = verr
 			tb = o.takeBackRefusedMerge(ctx, o.binder, domain.PrimaryRepositoryID, authoritativeBranch, mergeResult, verr)
+			return nil
+		}
+		// Governance-path guard (INIT-023 TASK-006): the post-merge
+		// assertion and, for an approved merge, the consumption marker —
+		// both before anything is pushed, and a refusal taken back before
+		// the tree is released (INIT-023 wave 4 integration).
+		if gov = o.checkGovernedMerge(ctx, run, src, mergeResult); gov.refused {
 			return nil
 		}
 		if pushOn {
@@ -857,6 +868,10 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 			"run_id", run.RunID, "bound_sha", src.bound, "merge_sha", mergeResult.SHA,
 			"base_sha", mergeResult.BaseSHA, "error", verdict)
 		return true, o.handlePermanentMergeFailure(ctx, run, violation)
+	}
+	if gov.refused {
+		// TASK-006's refusal; the take-back already ran, in the block.
+		return o.settleGovernedRefusal(ctx, run, src, mergeResult, gov)
 	}
 	if src.excludedTip != "" {
 		log.Warn("merge_binding: commits after the bound head were not merged",

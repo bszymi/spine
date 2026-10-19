@@ -12,16 +12,23 @@ package engine
 //	Sequence            Block (git only)                            After the block
 //	status cascade      re-check; applyCommitStatus                 log-and-proceed, as before
 //	primary merge       re-check; Merge|MergeBound → abort on       record the outcome, classify, retry /
-//	                    error → verify + take back a refused         route (handlePermanentMergeFailure)
-//	                    bound merge → Push|PushCommit
+//	                    error → verify (TASK-005), V1 (TASK-017),    route (handlePermanentMergeFailure,
+//	                    governance assertion + marker (TASK-006)     refuseStatusLifecycle,
+//	                    → take back a refused bound merge →          settleGovernedRefusal)
+//	                    Push|PushCommit
 //	run start           Head + CreateBranch(run, "HEAD")            PushBranch, code repositories
 //	recovery ledger     checkout run → commit → push → checkout     the callers' outcome writes and events
 //	code repository     merge → abort / verify + take back → push   the caller records the outcome
 //
-// No block emits an event, routes a step or writes the store:
-// MemoryQueue.Publish blocks while the queue is full, and a consumer that
-// needs the tree would deadlock with a holder that emits. The one store
-// access inside a block is the run-status re-check below, a read.
+// No block emits an event or routes a step: MemoryQueue.Publish blocks
+// while the queue is full, and a consumer that needs the tree would
+// deadlock with a holder that emits. The store is not written inside a
+// block either, with one exception: the governance guard's consumption
+// marker of an approved merge (INIT-023 TASK-006, checkGovernedMerge),
+// which names the merge commit and must land before the push the block
+// holds the tree across — a single-row write that neither emits nor
+// routes. The other store access inside a block is the run-status
+// re-check below, a read.
 //
 // An operator whose git is not a WorkingTreeGuard (SMP's RealGitOperator,
 // every test fake) runs each block's fn directly, so its sequence is

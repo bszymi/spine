@@ -60,6 +60,8 @@ The enforcement boundary that follows from branch-level protection is narrower t
 
 This ADR does not force the self-protection invariant at the schema level, because (a) path-scoped self-protection is explicitly out of scope (§6), (b) imposing a hard-coded "authoritative branch cannot be relaxed" rule would foreclose legitimate configurations (e.g. workspaces that use a different ref as authoritative, or air-gapped repos that vouch for protection out-of-band), and (c) the merge-time guard for the run-branch path is a decision a future ADR can add once there is evidence it is warranted. Closing either gap would be a deliberate expansion of scope, not a bug fix.
 
+> **Amended by [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) (2026-10, INIT-023 TASK-006, audit F3).** The evidence arrived: the second bullet above (governed merge of a run branch that carries the config) is no longer allowed unconditionally. A governed merge that changes `.spine/`, `.spine.yaml`, `workflows/` or `<artifacts_dir>/workflows/` is held until an operator approves the exact bound commit, and the projection refuses to install a config that removes protection from the authoritative branch unless a database record of an operator act that changed the config matches it. The ruleset stays flat: the guard is a merge-authorization rule configured by the deployment, not a rule kind. The embedded library's zero value keeps the v1 behaviour; `spine serve` turns both guards on (`SPINE_GOVERNANCE_GUARD=off` restores v1). The third bullet (no guard once `no-direct-write` is removed) still holds — the projection guard is inactive in that configuration.
+
 **Bootstrap.** A fresh repository without `branch-protection.yaml` evaluates as if the following defaults were present:
 
 ```yaml
@@ -139,6 +141,8 @@ The enforcement boundary around that path is exactly what §1 describes. Summari
 
 This ADR does not close the run-branch-slippage gap for the protection config specifically, because the same gap exists today for every other governance file (workflows, ADRs, `.spine.yaml`) that a contributor could slip onto a run branch. Addressing it uniformly would be a separate decision about path-scoped merge-time guards, not a decision about branch-protection specifically.
 
+> **Amended by [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) (2026-10, INIT-023 TASK-006).** That separate decision is ADR-016, and it is uniform: every governed merge that changes a guarded governance path (`.spine/`, `.spine.yaml`, `workflows/`, `<artifacts_dir>/workflows/`) is held for an operator approval of the bound commit. The operator direct commit below stays the intended edit path for this file. It is also the documented recovery when the projection refuses a relaxation (for example after a database rebuild): an override push that **edits** the file — see [Git Push Guide](/docs/git-push-guide.md).
+
 Why not a lifecycle workflow:
 
 - **Who edits the rules is already constrained.** Branch-protection policy is an operator/admin concern by design — the override-to-edit path is gated on `operator+` anyway. Adding a reviewer-authored flow on top produces a review step that only operators are qualified to land.
@@ -176,6 +180,8 @@ Out of scope (explicitly — each requires its own ADR):
 - Per-actor override allow-lists.
 - Protection rules on tags.
 
+> **Amended by [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) (2026-10, INIT-023 TASK-006).** Per-path rules within a branch are still out of scope for the ruleset. ADR-016's governance-path guard is not such a rule: it is a deployment-configured merge-authorization check on governed merges, whose path set is not authored in `/.spine/branch-protection.yaml`.
+
 ### Amendment — 2026-10 (INIT-023 TASK-016): ref-class push admission
 
 §3 and §6 still hold for branch-protection **rules**: rules are authored for user-facing branches, never name `spine/*`, and do not cover tags. They no longer describe the whole Git push gate. The 2026-10-06 security audit found that, because nothing else gated them, every authenticated pusher could write `spine/**` run, planning and divergence branches (F2) and push tags and other non-branch refs that shadow run branches and `main` in bare-name git calls (F10).
@@ -204,6 +210,7 @@ Admitted `spine/**` refs still never reach `Policy.Evaluate`, and ordinary branc
 - New dependency: the enforcement path adds a latency tax on every merge and every push. For the Git path this is unavoidable; for the API path the cost is an in-memory lookup against the projected ruleset.
 - Bootstrap story is slightly more complex — repos without a config file evaluate against implicit defaults, and implementers must remember to keep the defaults and the seed file in sync.
 - There is no API-level path for a non-operator to propose a rule change — non-operators must escalate out-of-band. This is the intended consequence of treating protection as operator-owned configuration (§5), and accepting it is what avoids the "lifecycle workflow reviewing an operator-only change" shape. Note: this bullet is about the intended edit path only. The branch-level enforcement boundary (§1) does not make "every edit requires an operator" a hard invariant — a run-branch governed merge can still carry a config change, and the governing workflow's review step is the control for that path.
+  > **Amended by [ADR-016](/architecture/adr/ADR-016-governance-path-guard.md) (2026-10, INIT-023 TASK-006).** With ADR-016's guards on (the `spine serve` default), a run-branch governed merge that carries a config change needs an operator approval of the bound commit, so "every edit requires an operator" holds on that path too. A non-operator can now propose a rule change as an ordinary run; an operator decides it.
 
 ### Neutral
 

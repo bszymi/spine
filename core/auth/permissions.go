@@ -34,6 +34,10 @@ var operationRoles = map[Operation]domain.ActorRole{
 	"step.assign":       domain.RoleOperator,
 	"step.submit":       domain.RoleContributor,
 
+	// Approve or reject a governed merge held by the governance-path
+	// guard (ADR-016; INIT-023 TASK-006). The engine checks the role again.
+	"run.governance.decide": domain.RoleOperator,
+
 	// Task governance
 	"task.accept":    domain.RoleReviewer,
 	"task.reject":    domain.RoleReviewer,

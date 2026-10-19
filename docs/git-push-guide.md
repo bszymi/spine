@@ -91,6 +91,23 @@ git -c http.extraHeader="Authorization: Bearer $SPINE_TOKEN" \
 4. The client-produced commit is pushed byte-identically — Spine does not rewrite the commit to add a trailer. The event is the sole audit record on this path.
 5. Pushing `-o spine.override=true` to a branch that does not need override (no matching rule) is allowed silently — no event is emitted.
 
+### Changing `.spine/branch-protection.yaml` (and re-affirming a relaxation)
+
+With the governance-path guards on (the `spine serve` default; ADR-016, INIT-023 TASK-006):
+
+- **A run cannot change the config on its own.** A governed merge that touches `.spine/branch-protection.yaml` (or anything else under `.spine/`, `.spine.yaml` or a workflows directory) is held until an operator approves the run's bound commit: `GET /api/v1/runs/{run_id}/governance` shows the commit and the paths, `POST /api/v1/runs/{run_id}/governance-decision` with `{"decision":"approve","commit_sha":"<bound commit>"}` merges it (`"reject"`, with a `reason`, sends the run back).
+- **The projection installs a relaxation only with an operator record.** A config that removes `no-direct-write` or `no-delete` from `main` is installed only when an honoured override push, or an approved governed merge, **changed** the file to exactly those bytes — and an approved merge only if its own diff removed the protection (the config before the merge applied it), or the config before the merge is exactly the result of an earlier operator act that accounts for it in the same way (two approved relaxations landing before one projection tick). An unauthorised edit of the file between two operator acts breaks that chain; re-affirm as below. Otherwise the previous rules stay and the server logs a Warn and emits `branch_protection.removal_refused`.
+- **Re-affirming.** If a relaxation was refused (it arrived another way, or the runtime database was rebuilt from git and has no record of the original authorisation), an operator re-affirms it with an override push that **edits** the file — a changed comment line is enough:
+
+  ```bash
+  echo "# re-affirmed $(date -u +%F) by $USER" >> .spine/branch-protection.yaml
+  git commit -am "Re-affirm branch protection"
+  git -c http.extraHeader="Authorization: Bearer $SPINE_TOKEN" \
+    push -o spine.override=true origin main
+  ```
+
+  An override push that does not change the file proves nothing about it and is ignored for this purpose. An override push that **does** change it vouches for the whole file it leaves: before you push an unrelated edit to the file (adding a rule, say), check that the installed rules match it — a `branch_protection.removal_refused` event names both — or your push also installs a relaxation someone else left there. The override event is the record: with the guards on, the push path writes it to `runtime.event_log` before git updates the ref, whether or not event delivery is enabled. Tightening the rules never needs a record.
+
 ### Deleting a protected branch
 
 ```bash

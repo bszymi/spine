@@ -23,6 +23,9 @@ type envConfig struct {
 	artifactsDir   string // empty means default "/"
 	runtimeOpts    []RuntimeOption
 	noHomeBranch   bool
+	// governanceGuard: WithRuntimeGovernanceGuard (applied with the
+	// final artifactsDir, whatever the option order).
+	governanceGuard bool
 }
 
 // WithoutHomeBranch builds the repository's client without
@@ -94,6 +97,15 @@ func WithStatusLifecycle() EnvOption {
 	}
 }
 
+// WithRuntimeGovernanceGuard turns on both governance-path guards in the
+// runtime (see WithGovernanceGuard), over this environment's
+// artifacts_dir.
+func WithRuntimeGovernanceGuard() EnvOption {
+	return func(c *envConfig) {
+		c.governanceGuard = true
+	}
+}
+
 // WithArtifactsDir configures the artifacts directory for the test environment.
 // Seeds and artifact service use this directory instead of the repo root.
 func WithArtifactsDir(dir string) EnvOption {
@@ -142,7 +154,11 @@ func NewTestEnvironment(t *testing.T, opts ...EnvOption) *TestEnvironment {
 	}
 
 	db := NewTestDB(t)
-	rt := NewTestRuntime(t, repo, db, cfg.runtimeOpts...)
+	runtimeOpts := cfg.runtimeOpts
+	if cfg.governanceGuard {
+		runtimeOpts = append(append([]RuntimeOption(nil), runtimeOpts...), WithGovernanceGuard(cfg.artifactsDir))
+	}
+	rt := NewTestRuntime(t, repo, db, runtimeOpts...)
 
 	// Configure artifacts directory if specified.
 	if cfg.artifactsDir != "" {

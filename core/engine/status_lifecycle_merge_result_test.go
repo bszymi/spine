@@ -53,7 +53,7 @@ func lcDate(h int) string {
 	return time.Now().Add(time.Duration(h) * time.Hour).UTC().Format(time.RFC3339)
 }
 
-// crissCross builds the history `git merge` resolves against a virtual base:
+// lcCrissCross builds the history `git merge` resolves against a virtual base:
 //
 //	main:  C0 ── C1 (unrelated) ── M1 = merge --no-ff b1
 //	other: C0 ── b1 (carry: another run's commit)
@@ -64,7 +64,7 @@ func lcDate(h int) string {
 // does not list what resolve undid of b1. b1Date sets b1's date: lcDate(1)
 // is the natural order (b1 made before C1), "2001-01-01T00:00:00Z" an
 // author-chosen one. It returns the repository and C1.
-func crissCross(t *testing.T, seed map[string]string, carry, resolve func(r *lcRepo), b1Date string) (*lcRepo, string) {
+func lcCrissCross(t *testing.T, seed map[string]string, carry, resolve func(r *lcRepo), b1Date string) (*lcRepo, string) {
 	t.Helper()
 	r := newLCRepo(t, seed)
 	r.git("branch", "other")
@@ -149,7 +149,7 @@ func TestStatusLifecycle_MergeResultCrissCross(t *testing.T) {
 			func(r *lcRepo) { r.write(lcTask, lcArt("TASK-001", "Task", "Pending")) }, lcTask, "Cancelled"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r, _ := crissCross(t, seed(), c.carry, c.resolve, c.b1Date)
+			r, _ := lcCrissCross(t, seed(), c.carry, c.resolve, c.b1Date)
 			if got := r.statusAt("main", c.path); got != c.want {
 				t.Fatalf("setup: main %s = %s, want %s", c.path, got, c.want)
 			}
@@ -166,7 +166,7 @@ func TestStatusLifecycle_MergeResultCrissCross(t *testing.T) {
 	// does is attributed to the run by the plan, which judges against the
 	// newer base only, and refused there: fail closed, KNOWN-LIMITATIONS.)
 	t.Run("control: a criss-cross whose result changes nothing unjudged merges", func(t *testing.T) {
-		r, _ := crissCross(t, seed(), func(r *lcRepo) { r.write("src/other.txt", "b1\n") }, func(*lcRepo) {}, lcDate(1))
+		r, _ := lcCrissCross(t, seed(), func(r *lcRepo) { r.write("src/other.txt", "b1\n") }, func(*lcRepo) {}, lcDate(1))
 		e := newLCEnv(t, r, lcOpts{meta: map[string]string{"status": "Completed"}})
 		e.requireMerged()
 		if got := r.statusAt("main", lcTask); got != "Completed" {
