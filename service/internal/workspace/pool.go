@@ -21,6 +21,7 @@ import (
 	bpprojection "github.com/bszymi/spine/core/branchprotect/projection"
 	spinecrypto "github.com/bszymi/spine/core/crypto"
 	"github.com/bszymi/spine/core/divergence"
+	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/core/engine"
 	"github.com/bszymi/spine/core/event"
 	"github.com/bszymi/spine/core/observe"
@@ -1033,6 +1034,8 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 	} else {
 		workflowSvc.WithPolicy(branchprotect.NewPermissive())
 	}
+	// Declared commit.status (INIT-023 TASK-017), as in cmd/spine.
+	workflowSvc.WithStatusLifecycle(domain.DefaultStatusLifecycle())
 
 	// Projection services.
 	var projQuery *projection.QueryService
@@ -1070,7 +1073,10 @@ func buildServiceSet(ctx context.Context, cfg Config, builder ServiceSetBuilder,
 			validation.WithCatalogSnapshot(validation.PrimaryOnlyCatalogSnapshot(repository.PrimarySpec{})),
 			// Validation policy registry wiring lands with TASK-004
 			// (EPIC-006); see cmd_serve.go for the matching seam.
-			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()))
+			validation.WithGovernedFileResolver(validation.NoopGovernedFileResolver()),
+			// Blocking SC-002 / SC-003 (INIT-023 TASK-017), as in
+			// cmd/spine.
+			validation.WithBlockingStatusConflicts(validation.DefaultBlockingStatusConflicts...))
 	}
 
 	// Divergence service (implements BranchCreator).

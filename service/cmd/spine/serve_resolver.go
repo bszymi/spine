@@ -100,6 +100,11 @@ func workspaceOrchestratorBuilder(ctx context.Context, ss *workspace.ServiceSet,
 	if err := orch.EnableMergeBinding(engine.MergeBindingConfig{}); err != nil {
 		return fmt.Errorf("workspace orchestrator merge binding: %w", err)
 	}
+	// Declared artifact-status lifecycle (INIT-023 TASK-017), as on the
+	// process-level orchestrator, under this workspace's artifacts_dir
+	// (the workspace artifact service's, which StartRun reads with).
+	orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())
+	orch.WithArtifactsDir(ss.Artifacts.ArtifactsDir())
 	// Engine step-entry policy (INIT-023 TASK-007), same selection as the
 	// process-level orchestrator.
 	orch.WithStepEntryPolicy(stepEntryPolicy)

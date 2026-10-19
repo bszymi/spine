@@ -207,6 +207,37 @@ jobs:
             fi
           done
 
+      # INIT-023 / EPIC-002 / TASK-017: the declared artifact-status
+      # lifecycle end to end on the scenario runtime (the planning package
+      # cascade, a refused non-owned status edit, artifacts_dir) and the
+      # pooled validator's blocking status conflicts — the one standalone
+      # wiring line only a database-backed test catches — are the
+      # Postgres-backed evidence for audit P3-21. All are green and must
+      # never skip.
+      - name: Status-lifecycle scenarios and pooled validator (must pass, never skip)
+        shell: bash
+        run: |
+          go test -tags scenario -count=1 -run 'StatusLifecycle' -v ./service/scenariotest/scenarios/ 2>&1 | tee scenario-status-lifecycle.log
+          if grep -E '^[[:space:]]*--- SKIP: ' scenario-status-lifecycle.log; then
+            echo "::error::a status-lifecycle scenario or step skipped — they must pass, never skip"
+            exit 1
+          fi
+          for t in TestPlanningRun_StatusCascadesToChildren_StatusLifecycle TestStandardRun_StatusLifecycleRefusesNonOwnedStatusEdit TestStandardRun_StatusLifecycleArtifactsDir; do
+            if ! grep -qE "^--- PASS: ${t} " scenario-status-lifecycle.log; then
+              echo "::error::${t} did not pass"
+              exit 1
+            fi
+          done
+          go test -tags integration -count=1 -run '^TestBuildServiceSet_ValidatorBlocksStatusConflicts$' -v ./service/internal/workspace/ 2>&1 | tee integration-status-lifecycle.log
+          if grep -E '^[[:space:]]*--- SKIP: ' integration-status-lifecycle.log; then
+            echo "::error::the pooled validator's blocking-status-conflicts test skipped — it must pass, never skip"
+            exit 1
+          fi
+          if ! grep -qE '^--- PASS: TestBuildServiceSet_ValidatorBlocksStatusConflicts ' integration-status-lifecycle.log; then
+            echo "::error::TestBuildServiceSet_ValidatorBlocksStatusConflicts did not pass"
+            exit 1
+          fi
+
   # INIT-023 / EPIC-001 / TASK-002: the git client's ref grammar (exact
   # `show-ref --verify` lookups, `--end-of-options`, `git switch
   # --no-guess`, `<oid>^{commit}` push sources, `worktree add --detach`)

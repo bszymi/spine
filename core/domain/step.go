@@ -55,6 +55,12 @@ const (
 	// failures (INIT-023 TASK-012, audit P3-27). Not retryable: the run
 	// took the permanent-failure route.
 	FailureMergeRetriesExhausted FailureClassification = "merge_retries_exhausted"
+	// FailureStatusLifecycle marks a governed merge the declared
+	// artifact-status lifecycle refused (INIT-023 TASK-017): the run
+	// branch changed a status the run does not govern, or its own status
+	// change is not a declared transition. Not retryable — the branch (or
+	// the workflow) must change first.
+	FailureStatusLifecycle FailureClassification = "status_lifecycle_violation"
 )
 
 // IsRetryable returns true if this failure classification allows retry.

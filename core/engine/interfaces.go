@@ -86,6 +86,17 @@ type CrossArtifactValidator interface {
 	Validate(ctx context.Context, artifactPath string) domain.ValidationResult
 }
 
+// StatusChangeValidator is implemented by *validation.Engine (INIT-023
+// TASK-017). It is optional and found by type assertion on the validator
+// installed with WithValidator, so no implementer of CrossArtifactValidator
+// has to change: when the orchestrator's validator implements it and the
+// status lifecycle is on, an owned status change the merge would land is
+// also checked against the blocking status-conflict (SC-*) rules. A
+// returned error is a transient failure (the run stays in committing).
+type StatusChangeValidator interface {
+	ValidateStatusChange(ctx context.Context, artifactPath string, newStatus domain.ArtifactStatus) (domain.ValidationResult, error)
+}
+
 // RepositoryResolver resolves a workspace repository ID to its merged
 // catalog/binding view at run-start time, returning the typed errors
 // from the repository package (ErrRepositoryNotFound,

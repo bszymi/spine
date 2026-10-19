@@ -74,6 +74,11 @@ func buildWorkflowService(gitClient git.GitClient, repoPath string, st store.Sto
 		return nil, fmt.Errorf("workflow service branch-protect policy: %w", err)
 	}
 	svc.WithPolicy(policy)
+	// Declared commit.status (INIT-023 TASK-017): a workflow whose
+	// outcomes commit a status its applies_to types do not declare is
+	// refused at create/update and fails validate. No switch (owner
+	// question 5).
+	svc.WithStatusLifecycle(domain.DefaultStatusLifecycle())
 	return svc, nil
 }
 
@@ -346,6 +351,13 @@ func buildOrchestrator(
 		log.Error("merge binding init failed", "error", err)
 		return nil
 	}
+	// Declared artifact-status lifecycle at the governed merge (INIT-023
+	// TASK-017): non-owned status edits are refused and the cascade
+	// touches only run-owned artifacts. It needs the binding above; no
+	// switch (owner question 5). The artifacts directory is the artifact
+	// service's, the one StartRun resolved the TaskPath with.
+	orch.WithStatusLifecycle(domain.DefaultStatusLifecycle())
+	orch.WithArtifactsDir(artifactSvc.ArtifactsDir())
 	// Engine step-entry policy (INIT-023 TASK-007): strict by default in
 	// `spine serve`, zero value under SPINE_STEP_ENTRY_POLICY=legacy.
 	orch.WithStepEntryPolicy(stepEntryPolicy)

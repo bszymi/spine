@@ -3,10 +3,11 @@ package validation
 import (
 	"context"
 	"encoding/json"
+	"sort"
 
-	"github.com/bszymi/spine/core/domain"
 	"github.com/bszymi/spine/adapters/repository"
 	"github.com/bszymi/spine/adapters/store"
+	"github.com/bszymi/spine/core/domain"
 )
 
 // Rule evaluates a validation check against an artifact.
@@ -164,6 +165,35 @@ func WithBranchTipResolver(resolver BranchTipResolver) Option {
 	}
 }
 
+// DefaultBlockingStatusConflicts is the status-conflict rule set `spine
+// serve` promotes to errors (INIT-023 TASK-017 owner question 4): a
+// Completed epic with open tasks (SC-002) and a Completed initiative with
+// open epics (SC-003). SC-001 (acceptance missing) stays a warning —
+// acceptance is recorded by a separate API after the merge — as do SC-004
+// (superseded link) and SC-005 (in-progress task with an open blocker).
+var DefaultBlockingStatusConflicts = []string{"SC-002", "SC-003"}
+
+// WithBlockingStatusConflicts promotes the named SC-* findings from
+// warning to error (INIT-023 TASK-017, audit P3-21). The promotion is
+// engine-level, so Validate, ValidateAll, EvaluatePreconditions'
+// cross_artifact_valid check and ValidateStatusChange all inherit it, and
+// the rules themselves are unchanged. Unknown IDs are ignored (a unit test
+// pins the default list to registered rules). No option (the default)
+// promotes nothing.
+func WithBlockingStatusConflicts(ids ...string) Option {
+	return func(e *Engine) {
+		if len(ids) == 0 {
+			return
+		}
+		if e.blocking == nil {
+			e.blocking = make(map[string]bool, len(ids))
+		}
+		for _, id := range ids {
+			e.blocking[id] = true
+		}
+	}
+}
+
 // NoopGovernedFileResolver returns the default GovernedFileResolver:
 // it never resolves any path, so LC-004 falls through to its
 // projection-only behavior. Use this as the explicit production
@@ -197,6 +227,10 @@ type Engine struct {
 	policyResolver       ValidationPolicyResolver
 	branchTipResolver    BranchTipResolver
 	rules                []Rule
+	// blocking holds the SC-* rule IDs promoted from warning to error
+	// (WithBlockingStatusConflicts, INIT-023 TASK-017). Empty = no
+	// promotion (the pre-TASK-017 behaviour).
+	blocking map[string]bool
 }
 
 // NewEngine creates a validation engine with all registered rules.
@@ -213,6 +247,27 @@ func NewEngine(st store.Store, opts ...Option) *Engine {
 	e.rules = append(e.rules, repositoryRules(e.catalogSnapshot)...)
 	e.rules = append(e.rules, evidenceRules(e.runResolver, e.evidenceResolver, e.policyResolver, e.branchTipResolver)...)
 	return e
+}
+
+// BlockingStatusConflicts returns the promoted rule IDs, sorted (for
+// wiring tests). A nil engine has none.
+func (e *Engine) BlockingStatusConflicts() []string {
+	if e == nil || len(e.blocking) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(e.blocking))
+	for id := range e.blocking {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// promote turns a warning of a blocking rule into an error.
+func (e *Engine) promote(r *domain.ValidationError) {
+	if r.Severity == "warning" && e.blocking[r.RuleID] {
+		r.Severity = "error"
+	}
 }
 
 // Validate runs all applicable rules against a single artifact.
@@ -235,6 +290,7 @@ func (e *Engine) Validate(ctx context.Context, artifactPath string) domain.Valid
 		for i := range results {
 			results[i].ArtifactPath = artifactPath
 			results[i].Classification = rule.Classification()
+			e.promote(&results[i])
 			if results[i].Severity == "warning" {
 				warnings = append(warnings, results[i])
 			} else {

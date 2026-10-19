@@ -250,6 +250,21 @@ Outcomes with `commit` effects produce durable artifact status changes. These mu
 - The workflow must not produce durable status transitions that skip required intermediate governed states defined for the artifact type; runtime-only execution states are not considered durable intermediate states for this rule
 - Terminal statuses (`Completed`, `Superseded`) should only appear on outcomes that route to `end`
 
+**Implementation (INIT-023 TASK-017).** Rule 1 is implemented by
+`workflow.ValidateCommitStatuses` against the declared lifecycle
+(`domain.DefaultStatusLifecycle()`, [Engine State Machine](/architecture/engine-state-machine.md)
+§5A): every outcome's `commit.status` must be a declared status of **every** `applies_to` type,
+and an `applies_to: [Workflow]` workflow may not set one (workflow definitions carry no status);
+the `merge` key is ignored. It is an `error` (`rule_id: commit_status`, field
+`steps[i].outcomes[j].commit.status`). It runs only where a workflow is written or previewed —
+`workflow.Service` Create, Update and ValidateBody, and the engine's workflow planning-run start —
+when the lifecycle is installed (`WithStatusLifecycle`; opt-in for embedders, on in `spine
+serve`). It is deliberately **not** part of `Validate`, the projection or the workflow loaders: a
+stricter projection-time check would drop a workflow that is already on the authoritative branch.
+The merge itself judges the transition a `commit.status` produces (§5A of the state-machine
+document). Rules 2 and 3 are not enforced; rule 3 conflicts with Spine's own `task-default`
+(`Completed` on `review.accepted`, which routes to `publish`).
+
 ### 5.6 Version Consistency
 
 - A workflow transitioning from `Deprecated` to `Active` should have a higher version than the previously active version
@@ -298,7 +313,7 @@ Cross-artifact validation checks that the workflow definition is consistent with
 ### 7.1 Artifact Type Alignment
 
 - Every `applies_to` type must be a recognized artifact type in the system (per [Artifact Schema](/governance/artifact-schema.md) §5)
-- Every `commit.status` value must be valid for the governed artifact type
+- Every `commit.status` value must be valid for the governed artifact type (implemented as §5.5 rule 1)
 
 ### 7.2 Task Lifecycle Alignment
 

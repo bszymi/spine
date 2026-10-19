@@ -83,6 +83,17 @@ func WithRuntimeWithoutMergeBinding() EnvOption {
 	}
 }
 
+// WithStatusLifecycle builds the runtime with the declared artifact-status
+// lifecycle on (INIT-023 TASK-017; see WithDeclaredStatusLifecycle): the
+// orchestrator, the workflow service and the validator, together with the
+// merge binding the lifecycle requires (on by default). Off by default, so
+// existing scenarios are unchanged.
+func WithStatusLifecycle() EnvOption {
+	return func(c *envConfig) {
+		c.runtimeOpts = append(c.runtimeOpts, WithDeclaredStatusLifecycle())
+	}
+}
+
 // WithArtifactsDir configures the artifacts directory for the test environment.
 // Seeds and artifact service use this directory instead of the repo root.
 func WithArtifactsDir(dir string) EnvOption {
@@ -136,6 +147,12 @@ func NewTestEnvironment(t *testing.T, opts ...EnvOption) *TestEnvironment {
 	// Configure artifacts directory if specified.
 	if cfg.artifactsDir != "" {
 		rt.Artifacts.WithArtifactsDir(cfg.artifactsDir)
+		// The governed merge's status lifecycle resolves run.TaskPath
+		// under the same directory (INIT-023 TASK-017); without a
+		// lifecycle the setting is inert.
+		if rt.Orchestrator != nil {
+			rt.Orchestrator.WithArtifactsDir(cfg.artifactsDir)
+		}
 	}
 
 	t.Cleanup(func() {

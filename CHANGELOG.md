@@ -6,6 +6,89 @@ release is cut — this file is a staging area.
 
 ---
 
+## INIT-023 — Security Audit Remediation (EPIC-002 TASK-017: declared artifact-status lifecycle)
+
+Audit P3-21, Spine half: artifact status transitions were not a state machine, the
+status-conflict rules only warned, and the merge-time cascade stamped the outcome's status onto
+whatever the branch added. Owner questions answered by their defaults, pending the owner.
+
+### Security
+
+- **A governed merge no longer publishes status edits the run does not govern.** With the declared
+  lifecycle on (`spine serve`), the merge judges the bound commit's diff: a run may change only the
+  status of artifacts it owns — its TaskPath, plus the artifacts a planning run adds — along a
+  declared transition from the merge-base status, and only when the workflow declares the effect.
+  Reopening a `Completed` task, completing a sibling task or an initiative, retiring an ADR,
+  retyping, deleting, renaming out of scope or breaking the front matter of an artifact the run
+  does not own is refused (`status_lifecycle_violation`), and nothing is merged. A run's own change
+  that is not a declared transition (for example `Completed → Pending`) is refused too.
+- **The cascade stamps only run-owned artifacts.** A standard run's additions keep their authored
+  status, which must be an initial status of their type (an execution run can no longer mint
+  `Completed` work, or an ADR "Completed"). Every rewrite is re-parsed: an owned artifact whose
+  status line the byte-preserving writer cannot rewrite (a quoted key, a continuation line, …) is
+  refused instead of landing the author's own value.
+- **What the merge result changes is judged against `main` before any push**
+  (`architecture/engine-state-machine.md` §5A.3): only the run's own artifacts may change status,
+  to the planned status and from the judged one; every other artifact keeps its type, status and
+  existence, and an added one carries an initial status. Anything else is refused
+  (`merge_result_mismatch`) and taken back off the local `main` — a `*.md merge=union` attribute
+  that keeps two status lines, a criss-cross history `git merge` resolves against a base the
+  judgement never saw, or a concurrent merge of commits the bound commit builds on (when `main`
+  gained such commits between the judgement and the merge, the attempt is retried and judged
+  again). A rename `main` made after the fork merges as it did before the lifecycle.
+- **`workflow.Service` refuses an impossible `commit.status`** at create and update, and
+  `POST /api/v1/workflows/{id}/validate` reports it (`rule_id: commit_status`): every outcome's
+  `commit.status` must be a declared status of every `applies_to` type
+  (`architecture/workflow-validation.md` §5.5 rule 1). A workflow planning run with such a body is
+  refused before its branch exists.
+- **A Completed epic with open tasks (SC-002) or initiative with open epics (SC-003) blocks**: an
+  owned transition to `Completed` that trips one is refused `status_conflict`. The check is made
+  under the name `main` gives the artifact (a rename `main` made after the fork is followed), and a
+  status `main` already holds is not re-asked (a resumed run whose merge already landed completes).
+
+### Changed (standalone)
+
+- `spine serve` turns the lifecycle on for the process and every pooled workspace, with no switch
+  (owner question 5; it requires the merge binding `serve` already enables). The rollback is the
+  previous build.
+- **Severity change:** with SC-002 and SC-003 blocking, `POST /api/v1/system/validate` and
+  `spine validate` report them as errors (status `failed`) where they reported warnings. No shipped
+  workflow declares a `cross_artifact_valid` precondition, so step activation is unaffected.
+- **`commit.status` is now applied under `artifacts_dir`** (`spine init-repo` defaults it to
+  `spine`): the cascade used to read the TaskPath without the directory, fail silently and merge
+  with the status unchanged.
+- A refused merge records the primary merge outcome as failed with class `precondition` and a
+  detail starting `status_lifecycle_violation:`, classifies the last completed step
+  `status_lifecycle_violation`, and routes like every refusal: `task-default` goes back to
+  `execute`; workflows without a publish step (`epic-lifecycle`, `artifact-creation`, `adr*`,
+  `document-creation`, `task-spike`) fail the run. A transient git error keeps the run in
+  `committing`. See KNOWN-LIMITATIONS "Artifact Status Lifecycle".
+
+### Changed (embedders)
+
+All opt-in; the zero value is today's behaviour, byte for byte. No method was added to any
+interface an embedder implements, and there is no schema change.
+
+- `domain.StatusLifecycle` / `DefaultStatusLifecycle()` (the declared table; `Types`, `States`,
+  `Initial`, `IsState`, `IsInitial`, `Allows`, `Transitions`, `WithoutTransition`) and
+  `domain.FailureStatusLifecycle` (`"status_lifecycle_violation"`, not retryable).
+- `Orchestrator.WithStatusLifecycle` / `StatusLifecycle()`, and `Orchestrator.WithArtifactsDir` /
+  `ArtifactsDir()` (where `run.TaskPath` lives; the root by default, only read by the lifecycle).
+  With the lifecycle on and merge binding off, `MergeRunBranch` refuses with `ErrUnavailable`.
+  New: `engine.StatusLifecycleError` / `StatusLifecycleViolation`, `ErrStatusLifecycleViolation`,
+  the `Lifecycle*` reason constants, and the optional `engine.StatusChangeValidator` interface
+  (found by type assertion on the validator; `*validation.Engine` implements it).
+- `workflow.Service.WithStatusLifecycle` and `workflow.ValidateCommitStatuses` (never called from
+  `workflow.Validate`, the projection or the loaders); `workflow.CommitStatusRuleID`.
+- `validation.WithBlockingStatusConflicts`, `DefaultBlockingStatusConflicts` (`SC-002`, `SC-003`),
+  `Engine.BlockingStatusConflicts()` and `Engine.ValidateStatusChange`.
+- `artifact.LifecycleFields`, `artifact.EqualExceptStatus`, `artifact.PathScope` (the projection's
+  artifact-path predicate, moved from `adapters/projection`, which now delegates to it — no
+  behaviour change) and `artifact.Service.ArtifactsDir()`.
+- Scenario harness: `harness.WithStatusLifecycle()` / `WithDeclaredStatusLifecycle()`; the harness
+  default is unchanged.
+---
+
 ## INIT-023 — Security Audit Remediation (EPIC-002 TASK-008: submit ownership, step-output evidence, compare-and-swap state writes)
 
 Audit P3-17 (Spine half), P3-19 and P3-24. Owner questions take their defaults, pending the owner:

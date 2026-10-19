@@ -153,6 +153,7 @@ Every `failed` StepExecution records a `failure_classification` to distinguish f
 | `git_conflict` | Git commit conflict during durable outcome | No (operator intervention) |
 | `timeout` | Step exceeded its configured timeout | Depends on `timeout_outcome` |
 | `run_terminated` | The step was live when its run was cancelled or failed; recorded on a `skipped` execution (the step status has no `cancelled` value) by the step-entry policy's `TerminateStepsOnCancel`. Under `EnforceRunStatus` a late result submission on such an execution answers 409. | No |
+| `status_lifecycle_violation` | The governed merge was refused by the declared artifact-status lifecycle (§5A): the run branch changed a status the run does not own, or the run's own change is not a declared transition. Recorded on the last completed step when the merge is refused; the merge outcome row carries class `precondition` with a `status_lifecycle_violation:` detail. | No — the branch or the workflow must change |
 
 The classification determines whether retry is attempted and informs operator diagnostics. It is stored in the `error_detail` JSONB field alongside the error message.
 
@@ -262,6 +263,106 @@ The `divergence_window` must be `closed` before transitioning to `converging` (e
 |-----------|------|---------|
 | Any transition | `completed` | Reject — completed branches are immutable |
 | Any transition | `failed` | Reject — failed branches are immutable |
+
+---
+
+## 5A. Artifact Status Lifecycle (Declared)
+
+Runs, steps, divergences and branches have the machines above. An artifact's `status` front
+matter gets one too (INIT-023 TASK-017, audit P3-21): `domain.StatusLifecycle`, declared in code
+(a table a run branch could edit would judge itself). `domain.DefaultStatusLifecycle()` is this
+table. Every terminal status (Completed, Cancelled, Rejected, Abandoned, Superseded, Deprecated)
+is final. Task `In Progress` is declared although `ValidStatusesForType(Task)` and
+`governance/task-lifecycle.md` §3.3 do not list it (SMP's `task-default` commits it). Identity
+(`S → S`) is allowed for every declared status; nothing is allowed for an undeclared status or an
+unknown type. `Workflow` definitions carry no status and are not in the table.
+
+<!-- status-lifecycle-table:begin (pinned by core/domain TestStatusLifecycleDocTable) -->
+| Type | Initial (may be created with) | Transitions |
+|---|---|---|
+| ADR | Proposed | Accepted → Deprecated, Accepted → Superseded, Proposed → Accepted, Proposed → Deprecated, Proposed → Superseded |
+| Architecture | Living Document, Stable | Living Document → Stable, Living Document → Superseded, Stable → Living Document, Stable → Superseded |
+| Epic | Draft, Pending | Draft → Pending, Draft → Superseded, In Progress → Completed, In Progress → Superseded, Pending → Completed, Pending → In Progress, Pending → Superseded |
+| Governance | Foundational, Living Document | Foundational → Living Document, Foundational → Superseded, Living Document → Foundational, Living Document → Superseded |
+| Initiative | Draft, Pending | Draft → Pending, Draft → Superseded, In Progress → Completed, In Progress → Superseded, Pending → Completed, Pending → In Progress, Pending → Superseded |
+| Product | Living Document, Stable | Living Document → Stable, Living Document → Superseded, Stable → Living Document, Stable → Superseded |
+| Task | Draft, Pending | Draft → Cancelled, Draft → Pending, In Progress → Abandoned, In Progress → Cancelled, In Progress → Completed, In Progress → Rejected, In Progress → Superseded, Pending → Abandoned, Pending → Cancelled, Pending → Completed, Pending → In Progress, Pending → Rejected, Pending → Superseded |
+<!-- status-lifecycle-table:end -->
+
+### 5A.1 Where it is enforced
+
+The lifecycle is enforced at the one point every change a run makes reaches `main`: the governed
+merge (`MergeRunBranch`), opt-in through `Orchestrator.WithStatusLifecycle` (the embedded zero
+value is no enforcement; `spine serve` turns it on with no switch). It judges the **bound commit**
+(merge binding, TASK-005) and therefore requires binding: with the lifecycle on and binding off
+the merge is refused as a configuration error (`ErrUnavailable`, the run stays `committing`).
+It judges exactly the paths the projection treats as artifacts (`artifact.PathScope`: under
+`artifacts_dir`, `.md`, not under `templates/`), with `run.TaskPath` resolved under
+`artifacts_dir` (`Orchestrator.WithArtifactsDir`). The "from" status is the merge-base's, never
+the branch's own value. `workflow.Service` refuses a workflow whose `commit.status` is not a
+declared status of its `applies_to` types at create/update time
+([Workflow Validation](/architecture/workflow-validation.md) §5.5).
+
+### 5A.2 Ownership and rules
+
+A run **owns** its TaskPath and, in a planning run, every artifact it adds. Renamed, modified and
+deleted paths are never owned (a rename *onto* the TaskPath is judged with the old path's
+status). `final` is the outcome's `commit.status` for an owned path, else the bound commit's own
+status.
+
+| Case | Rule | Refusal reason |
+|---|---|---|
+| Owned, exists at the merge-base, effect declared | same type; `Allows(type, base status, final)`; no blocking status-conflict finding | `type_changed`, `undeclared_status`, `illegal_transition`, `status_conflict` |
+| Owned, exists at the merge-base, no effect declared | same type; status unchanged | `type_changed`, `status_change_without_effect` |
+| Owned, new, effect declared | `final` is a status of the type (the package is normalised to it) | `status_not_in_type` |
+| Owned, new, no effect declared | the authored status is initial | `illegal_initial_status` |
+| TaskPath not an artifact at the bound commit (effect declared, or it was one at the merge-base) | — | `not_an_artifact` |
+| Not owned, exists at the merge-base | same type; status unchanged (raw comparison: an undeclared status already on `main` is kept) | `type_changed`, `non_owned_status_change` |
+| Not owned, exists at the merge-base, and deleted, renamed out of scope, no longer parsing, or replaced by a symlink or gitlink | — | `non_owned_removal` |
+| Not owned, new | the authored status is initial | `illegal_initial_status` |
+| A diff path C-quoted and ending `.md"` (either side of a rename) | — | `unparseable_path` |
+| A diff-listed path that cannot be read for a reason a retry cannot change (too large, not a blob, not found) | — | `unreadable_artifact` |
+| No merge-base with `main`, or a permanent merge-base / diff failure | — | `unreadable_diff` |
+| The cascade's rewrite of an owned path does not re-parse to exactly `final` with nothing else changed | — | `status_rewrite_failed` |
+| The merge result (before any push) changes, relative to `main` before the merge, something the rules above did not allow (§5A.3) | — | `merge_result_mismatch` |
+
+The cascade rewrites only owned paths whose status differs from `final`, in one commit onto the
+bound commit. A retryable git error (or a non-git store or transport error) keeps the run in
+`committing` for a retry; it never degrades to an unjudged merge. A refusal records the primary
+merge outcome as failed (class `precondition`), classifies the last completed step
+`status_lifecycle_violation` (§3.3.1) and takes the permanent route: a publish-step workflow sends
+the run back to its producer (`merge_failed`), any other workflow fails the run. The blocking
+status-conflict check reads the projection, so it can lag `main` by one sync (KNOWN-LIMITATIONS);
+it is asked under the name `main` gives the artifact (when `main` renamed it after the fork, the
+projection keys it there; a merge that would land it under yet another name is retried), and it is
+not asked about a change `main` already holds (the merge then lands no status change there), which
+covers a resumed run whose merge already landed.
+
+### 5A.3 The merge result
+
+The rules above judge the bound diff against one merge-base (`git merge-base main <bound>`), but
+`git merge` merges against the virtual base of every best common ancestor, and against `main` as it
+is when the merge runs. So after the local merge and before any push, the engine judges what the
+merge actually changes, `Diff(<main before the merge>, <merge result>)` with renames detected,
+relative to `main`:
+
+- The merge-base of `main` before the merge and the merged commit must still be the one the plan
+  judged against. When `main` gained commits of the bound history between the judgement and the
+  merge, it is not: the merge is taken back off the local `main` and the attempt retried (the run
+  stays `committing`), so the next attempt judges against the base git now merges with.
+- The run's own artifact whose status the plan sets must land at the planned type and status, from
+  the judged status on `main` (or `main` already holding the planned one); one the plan creates must
+  not overwrite an artifact `main` holds. A rename `main` made after the merge-base is followed for
+  the TaskPath (git merges the rename and the status change cleanly).
+- Every other artifact `main` holds keeps its type, its status and its existence (and, when it
+  parses for the projection on `main`, keeps parsing); an artifact the merge adds must carry an
+  initial status of its type. A rename `main` made after the fork is `main`'s state, not a change of
+  the merge.
+
+Anything else is refused `merge_result_mismatch` (a side that cannot be read, `unreadable_artifact`)
+and the refused merge is taken back off the local `main`; nothing is pushed. This covers a
+`*.md merge=union` attribute that keeps two status lines without a conflict, a criss-cross history
+whose virtual base the plan never saw, and a concurrent merge of commits the bound commit builds on.
 
 ---
 

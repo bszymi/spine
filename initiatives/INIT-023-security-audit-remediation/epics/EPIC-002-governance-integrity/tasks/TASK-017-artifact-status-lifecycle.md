@@ -2,12 +2,12 @@
 id: TASK-017
 type: Task
 title: "Declared artifact-status lifecycle and run-owned merge cascade (opt-in)"
-status: Pending
+status: In Progress
 epic: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
 initiative: /initiatives/INIT-023-security-audit-remediation/initiative.md
 work_type: security
 created: 2026-10-06
-last_updated: 2026-10-06
+last_updated: 2026-10-16
 links:
   - type: parent
     target: /initiatives/INIT-023-security-audit-remediation/epics/EPIC-002-governance-integrity/epic.md
@@ -1223,3 +1223,457 @@ same-run children (follow-ups 7, 12); V1's standalone caveat that the local `mai
 the merge when auto-push is off (TASK-005/TASK-012).
 
 ## Implementation Notes
+
+Implemented on branch `init/INIT-023-TASK-017-artifact-status-lifecycle`, from Spine local `main`
+`ae513dca` (origin `61994fe` + the INIT-023 scaffold + waves 1–3 + the codex 6.1 catch-up;
+TASK-005's merge binding and TASK-011's `artifacts_dir` handling are on it). Diff base:
+`git diff main...HEAD`. Status stays In Progress; the orchestrator closes it after merge.
+
+### Orchestrator rulings recorded (owner questions take their defaults, pending the owner)
+
+- **OQ1** refuse every status change on an artifact the run does not own (D5).
+- **OQ2** a standard run's cascade does not stamp its additions; only planning runs cascade theirs.
+- **OQ3** Task `In Progress` is declared in the table (SMP's `task-default` passes);
+  `ValidStatusesForType(Task)`, artifact-schema §6 and task-lifecycle §3.3 are unchanged.
+- **OQ4** blocking SC rules are SC-002 and SC-003 only.
+- **OQ5** no `SPINE_STATUS_LIFECYCLE` kill switch in `serve` (plan owner question 10: the lifecycle
+  is on in `spine serve`; the embedded zero value is today's behaviour).
+- **OQ6** refuse deleting governed artifacts the run does not own (`non_owned_removal`).
+- **OQ7** refuse an owned status change with no declared effect (`status_change_without_effect`).
+- **OQ8** the merge-result check V1 is included.
+- **OQ9** lifecycle without binding = refuse to merge (configuration error, `ErrUnavailable`); the
+  lifecycle evaluates TASK-005's bound commit.
+- **OQ10** violations route back like every refusal.
+- Needs TASK-011's `artifacts_dir` handling (on `main`). SMP TASK-011 adopts this later.
+
+### What was built
+
+- **`core/domain`** (`06f13acd`, `fb14106c`): `StatusLifecycle` (the §1 table, immutable, nil-safe;
+  `Types`, `States`, `Initial`, `IsState`, `IsInitial`, `Allows`, `Transitions`,
+  `WithoutTransition`), `DefaultStatusLifecycle()`, `FailureStatusLifecycle`
+  (`"status_lifecycle_violation"`, not retryable).
+- **`core/artifact`** (`06f13acd`): `LifecycleFields` (Parse's decoder: `splitFrontMatter` +
+  `yamlsafe.Decode` + the `frontMatter` struct; a duplicate key is not-ok), `EqualExceptStatus`
+  (R1's "nothing else changed" half), `PathScope` (`NewPathScope`, `ArtifactKey`,
+  `GovernedArtifactKey`, `RepoPath`) — TASK-011's projection predicate moved here;
+  `adapters/projection/scope.go` delegates to it. `Service.ArtifactsDir()` (`8c5d4391`).
+- **`core/workflow`** (`fb14106c`): `ValidateCommitStatuses` + `CommitStatusRuleID`;
+  `Service.WithStatusLifecycle`; `writeAndCommit` refuses after `Validate` and before the
+  branch-protection check and `enterBranch`; `ValidateBody` appends the same errors.
+- **`core/validation`** (`72a850a0`): `DefaultBlockingStatusConflicts`,
+  `WithBlockingStatusConflicts`, `BlockingStatusConflicts()`, engine-level promotion in `Validate`;
+  `ValidateStatusChange` (status-conflict rules only, on a copy of the projection row; store
+  errors of blocking rules are recorded through a wrapping store because the rules swallow them).
+- **`core/engine`** (`b2f45bce`, `68cbefd2`): `status_lifecycle.go` — `WithStatusLifecycle` /
+  `StatusLifecycle()` and `WithArtifactsDir` / `ArtifactsDir()` (orchestrator.go),
+  `StatusChangeValidator` (interfaces.go), `StatusLifecycleError` / `StatusLifecycleViolation` /
+  `ErrStatusLifecycleViolation` and the `Lifecycle*` reason constants, the planner
+  (`planStatusLifecycle`: rows O1, O1′, O2, O2′, O3, O3′, O4, N1, N2, N3, R1, U, Q, Q′),
+  `applyStatusLifecycleAt` / `lifecycleCascadeFrom` / `resolveLifecycleSource` /
+  `refuseStatusLifecycle`, V1 (`verifyLifecycleMerge`). Seams: `preflightCheck` refuses
+  lifecycle-without-binding before the binding-off cascade; `resolveMergeSource` step 3 branches
+  to the lifecycle; `mergePrimaryBound` runs V1 after `verifyBoundMerge` and handles a
+  `*StatusLifecycleError` refusal; `cascadeCommitFrom`'s commit is `commitCascadeOnto` (shared);
+  `thisRunsCascadeMerge` recomputes the lifecycle cascade when on; `cascadeBaseAt` wraps the new
+  `cascadeBase` (replay flag); the not-a-child-of-bound refusal is the helper
+  `refuseNotChildOfBound`; `recordGitConflictOnStep` and `classifyMergeFailure` classify the
+  refusal; `startWorkflowPlanningRun` checks `commit.status` before any branch.
+- **Standalone** (`8c5d4391`): `buildOrchestrator` and `workspaceOrchestratorBuilder` call
+  `WithStatusLifecycle` and `WithArtifactsDir(<artifact service>.ArtifactsDir())`;
+  `buildWorkflowService` and the pooled workflow service call `WithStatusLifecycle`; the process and
+  pooled validators get `WithBlockingStatusConflicts(Default…)`. Scenario harness:
+  `harness.WithStatusLifecycle()` (EnvOption) / `WithDeclaredStatusLifecycle()` (RuntimeOption),
+  implying validation and refusing `WithoutMergeBinding`; `WithArtifactsDir` also reaches the
+  orchestrator.
+- **Docs** (`af5ea46f`): `engine-state-machine.md` §5A (new top-level section after §5, nothing
+  renumbered; pinned to the code by `TestStatusLifecycleDocTable`) and the §3.3.1 row;
+  `workflow-validation.md` §5.5/§7.1; `git-integration.md` §5.3; `KNOWN-LIMITATIONS.md`
+  "Artifact Status Lifecycle: What INIT-023 TASK-017 Leaves Open"; `CHANGELOG.md` (Security,
+  Changed (standalone), Changed (embedders)); `docs/integration-guide.md` §10.
+
+### Per-AC evidence
+
+| AC | Status | Evidence |
+|---|---|---|
+| 1 | done | `core/domain/artifact_lifecycle_test.go`: `TestDefaultStatusLifecycle_Golden` (Initial + Transitions of every type equal the §1 table edge by edge), `TestDefaultStatusLifecycle_Invariants` (all Markdown types, no Workflow; States ⊇ ValidStatusesForType; reachability; final statuses have no outbound edge; identity only for declared; unknown types; nil lifecycle), `TestDefaultStatusLifecycle_Prohibited` (Task Completed→Pending, Cancelled→Pending, Draft→Completed, Draft→Superseded, ADR Accepted→Proposed, Epic Completed→In Progress, …). |
+| 2 | done | `core/workflow/commit_status_compat_test.go`: `TestCommitStatusCompat_SpineCorpus` parses every `workflows/*.yaml`, zero errors, asserts **11** outcomes and that each file matches its §7 row; `TestCommitStatusCompat_RowsPassTheMergeRules` (every Spine and pinned SMP row, **10** SMP outcomes, through O1/O2); `TestCommitStatusCompat_SMPTaskDefaultNeedsPendingToInProgress` (`WithoutTransition(Task, Pending, In Progress)` fails the SMP `task-default` row). |
+| 3 | done | `core/workflow/commit_status_test.go` (real temp repo): Create → `validation_failed`, exactly 2 `commit_status` errors on `steps[0].outcomes[0\|1].commit.status`, HEAD unchanged, file absent; Update refused, file and HEAD unchanged; ValidateBody `failed` with the same 2; `applies_to: [Workflow]` + status → 1 error, `merge` only passes; zero-value control Create succeeds; `workflow.Validate` passes the body. Mutations: removing the `writeAndCommit` call fails the Create case (W1), moving the check into `Validate` fails the control (W2), removing the ValidateBody append fails it (W3). |
+| 4 | done | `core/validation/status_change_test.go`: promotion (Completed epic + Pending child → `failed`, SC-002 in Errors), SC-001 stays a warning, no-option control, unknown ids ignored, default list pinned and registered (`status_change_internal_test.go`), `ValidateStatusChange` (promoted error / warning without promotion / terminal children pass / only SC rules / unknown path passed / store error / a failed child listing in a blocking rule is an error / nil engine), `EvaluatePreconditions` inherits. The existing `engine_test.go` SC tests are unchanged and green. |
+| 5 | done | `core/engine/status_lifecycle_test.go` `TestStatusLifecycle_P321StandardRunRefused` (real `CLIClient`, binding on: the PoC repo; `MergeRunBranch` nil; main and the run branch unchanged; run `failed`; outcome failed/precondition with the exact `status_lifecycle_violation:` detail; violations exactly task-002 Completed→Draft and INIT-001 Pending→Completed). Twin `TestStatusLifecycle_RequiresBinding` (binding off: `ErrUnavailable` naming merge binding, run committing, no Merge/MergeBound, no outcome, run branch not rewritten). Mutation M1 (no violations) fails it. Review round 1: the same refusal through a criss-cross history and a concurrent merge (`TestStatusLifecycle_MergeResultCrissCross`, `TestStatusLifecycle_MergeResultMainMoved`). |
+| 6 | done | `TestStatusLifecycle_RunOwnedCascade`: main has task-001 Completed, task-003 Draft, ADR-0099 Proposed; the cascade commit is `main^2`, its parent is the bound SHA, it touches exactly task-001; lifecycle-off control stamps task-003 and ADR-0099 Completed (today). Mutation M2 (planning condition dropped) fails it. |
+| 7 | done | `status_lifecycle_unit_test.go` `TestStatusLifecycle_RuleTable` (fake binder): `illegal_transition`, `illegal_initial_status`, `status_not_in_type`, `type_changed` (owned and non-owned), `not_an_artifact` (no front matter; non-.md TaskPath with an effect), `undeclared_status`; accepted: Task Pending→In Progress, Epic Pending→Completed and In Progress→Completed, ADR planning Proposed→Accepted/Deprecated, document-creation identity with no rewrite, workflow-lifecycle `.yaml` TaskPath skipped. The design-check codes are ACs 17–24. |
+| 8 | done | `TestStatusLifecycle_PlanningCascadeSequence` (Epic + 2 Draft Tasks + README.md edit, Pending): merges; `git show --name-only main^2` lists exactly the 3 artifacts; all Pending; README.md landed. The five `TestApplyCommitStatus_*` tests are unchanged and green. |
+| 9 | done | `TestStatusLifecycle_FailsClosed`: retryable Diff, MergeBase, bound-SHA ReadFile, merge-base ReadFile, a non-git error, and a `CommitFilesOnto` error → `MergeRunBranch` returns an error, run `committing`, no MergeBound, no outcome; lifecycle-off control: the same Diff error degrades and MergeBound runs. |
+| 10 | done | `TestStatusLifecycle_QuotedPaths`: added `"tasks/\303\251.md"` → `unparseable_path`; `"src/\303\251.go"` ignored. |
+| 11 | done | `TestStatusLifecycle_RefusalRouting` (real git, publish workflow): publish completed `merge_failed`, run `active`, a new waiting `execute`, last completed step classified `status_lifecycle_violation`, outcome class `precondition`, main unchanged. `TestStatusLifecycle_RefusalClassification` (fake): the same route plus `ValidMergeFailureClasses()` pinned unchanged. `git diff --stat main...HEAD -- migrations/` and `git diff --stat 61994fe HEAD -- migrations/` are empty. Mutation E7 fails it. |
+| 12 | done | `TestStatusLifecycle_SCGate`: SC-002 error → `status_conflict` with `Rules == [SC-002]`; warnings only → merges; validator error → committing; validator without the interface → skipped; identity transition not checked. Mutation E1 fails it. |
+| 13 | done | `service/cmd/spine/serve_status_lifecycle_test.go`: `buildServerConfig` with `artifacts_dir: spine` (process orchestrator: lifecycle, binding, `spine` resolving `initiatives/x.md` to `spine/initiatives/x.md`; validator blocking set = default; workflow ValidateBody `failed`), `buildOrchestrator`, `workspaceOrchestratorBuilder`, `buildWorkflowService`; `service/internal/workspace/pool_status_lifecycle_test.go` (pooled workflow service refuses; artifact service carries `.spine.yaml`'s `artifacts_dir`) and `pool_status_lifecycle_integration_test.go` (pooled validator blocking set, with a database). Deleting any one of the eight wiring lines fails a test (mutations S1–S8, all caught). Review round 1: CI now runs the database-backed one (S8), in the scenario-git-http job. |
+| 14 | done | `service/scenariotest/scenarios/status_lifecycle_test.go` (`-tags scenario`, PostgreSQL 18.6): `TestPlanningRun_StatusCascadesToChildren_StatusLifecycle` (the existing scenario's variant with `harness.WithStatusLifecycle()`), `TestStandardRun_StatusLifecycleRefusesNonOwnedStatusEdit` (run failed, main unchanged, step classification `status_lifecycle_violation`), `TestStandardRun_StatusLifecycleArtifactsDir` (`WithArtifactsDir("spine")`: completes, `spine/…/task-001.md` is Completed). The original `TestPlanningRun_StatusCascadesToChildren` still passes. Review round 1: CI runs the three (scenario-git-http job, must pass, never skip). |
+| 15 | done | SMP compatibility gate below (SMP `1ae9b0e3`, no SMP change); Spine gates below; no pre-existing test file was modified (`git diff --diff-filter=M main...HEAD -- '*_test.go'` is empty); `dev/lint-boundaries.sh` OK with no allowlist change. |
+| 16 | done | §10 edits and the design-check corrections (new top-level §5A, the added reason codes, KNOWN-LIMITATIONS and CHANGELOG items); `TestStatusLifecycleDocTable` pins the doc table to `DefaultStatusLifecycle()`. |
+| 17 | done | `TestStatusLifecycle_RewriteVerification`: `"status":`, `'status':`, `status :`, `? status`/`: X`, and the continuation line, each refused `status_rewrite_failed` with nothing merged; a planning addition authored `"status": Completed` with outcome Pending refused; an empty status value swallowing the next key refused (R1's second half); control lands `In Progress`. Mutations M3 (no re-parse — the quoted case lands Completed) and M3b (no everything-else check) fail it. |
+| 18 | done | `TestStatusLifecycle_RequiresBinding` (binding off); `TestStatusLifecycle_Binding` (a push after the bound SHA changes task-002 Completed→Draft: merges with no refusal, task-002 Completed on main, the pushed commit is not an ancestor of main; `CommitMeta` without `status` + a non-owned edit → `non_owned_status_change`). Mutation E6 fails it. |
+| 19 | done | `TestStatusLifecycle_RemovalGuard`: deleted, second `status:` key, `type: Taskx`, symlink, and delete + re-add with the same `id` at another path (git reports D + A, asserted) in a standard and a planning run → `non_owned_removal`, main unchanged and no recreated TASK-002 on main; controls merge (delete a non-artifact `.md`; delete an artifact added on the same branch; `git mv` with the status unchanged); a field edit that makes the projection drop the row is refused, a parseable retitle merges; O3′ (a run with no `commit.status` deleting its own TaskPath) → `not_an_artifact`. Mutations M4 (deleted → ignored) and M8 (no parse-drop removal) fail it. Review round 1: renames out of scope (to `.txt`, under `templates/`, out of `spine/` in `TestStatusLifecycle_ArtifactsDir`) refused (mutant MR8); a deletion through a criss-cross history refused by V1 (`TestStatusLifecycle_MergeResultCrissCross`). |
+| 20 | done | `TestStatusLifecycle_NoDeclaredEffect`: workflow-lifecycle shape (planning, `workflows/x.yaml`, `{merge: true}`) adding a Task authored Completed → `illegal_initial_status`, authored Draft → merges and lands Draft; a standard run moving its own TaskPath Pending→Completed with no effect → `status_change_without_effect`. Mutations E2 (no O1′) and E3 (no O2′) fail it. |
+| 21 | done | `TestStatusLifecycle_ArtifactsDir` (`WithArtifactsDir("spine")`): merges and `main:spine/…/t.md` is Completed; a non-owned edit under `spine/` refused; edits to a `.md` outside `spine/` and to `spine/templates/x.md` merge. Mutation M5 (raw TaskPath) fails the first case. |
+| 22 | done | `TestStatusLifecycle_FailsClosed` (retryable = committing); `TestStatusLifecycle_PermanentReadErrors`: `BlobTooLargeError` on a modified non-owned `.md`, a permanent read error, a not-found for a diff-listed path → `unreadable_artifact`, not committing, routed (publish) or failed (legacy); no merge-base → `unreadable_diff`. `TestStatusLifecycle_TransientClassification` pins the split (deviation 3). |
+| 23 | done | `TestStatusLifecycle_RenameOntoTaskPath` (git reports `R100 task-002 → TaskPath`, asserted): `illegal_transition` with `From == Completed` (plus `non_owned_removal` for task-002, deviation 5); `TestStatusLifecycle_QuotedPaths` covers a C-quoted `OldPath`. Mutation M7 fails it. |
+| 24 | done | `TestStatusLifecycle_MergeResultCheck` (`*.md merge=union` on main, owned TaskPath Pending at base, Cancelled on main after the fork, outcome Completed, auto-push on with a bare origin): `merge_result_mismatch`, origin `main` unchanged, local `main` taken back; control merges and pushes. `TestStatusLifecycle_MergeResultMismatchUnit` (owned / non-owned-follows-main / transient read retries / replay skipped). Mutation M6 (no V1) fails it. Review round 1 (V1 judges the merge result against `main`): `TestStatusLifecycle_MergeResultCrissCross` (five criss-cross shapes — a Completed sibling reopened with natural and with author-chosen dates, a non-owned Completed task deleted, a Completed task overwritten as a Draft "addition", the owned TaskPath completed over a Cancelled `main` — all refused `merge_result_mismatch` with the local `main` taken back; control: a criss-cross carrying no status change merges), `TestStatusLifecycle_MergeResultMainMoved` (R1 lands between the judgement and the merge: retried, then refused `non_owned_status_change`, R1 kept), `TestStatusLifecycle_MergeResultMainSideRename` (main-side renames merge; a rename plus a status change main made is refused), `TestStatusLifecycle_MergeResultRules` (fake: 24 rule cases); mutants MR1–MR11. |
+| 25 | done | `TestStatusLifecycle_UndeclaredBaseData`: a body edit of a non-owned `Architecture: Active` merges (Active kept); normalising it to `Living Document` → `non_owned_status_change`. |
+
+### Deviations and design choices (with reasons)
+
+1. **The path predicate moved to `core/artifact` as `PathScope`** (DC-5 left the choice to TASK-011
+   or this task; TASK-011 kept it in `adapters/projection`). The projection's `newPathScope` /
+   `artifactKey` now delegate to it; the projection's behaviour and tests are unchanged.
+   `GovernedArtifactKey` adds `domain.UnsafeRepositoryPath`, which discovery refuses without
+   reading (TASK-003), so an unsafe path is out of scope for the lifecycle, as for the projection.
+2. **The standalone artifacts directory comes from the artifact service** (`artifact.Service.
+   ArtifactsDir()`, new accessor), not a new `spineCfg` parameter on `buildOrchestrator`: it is the
+   value StartRun resolved `run.TaskPath` with (the same `spineCfg.ArtifactsDir` in both builders),
+   and it keeps both builder signatures unchanged for the wave's other tasks (TASK-006 also edits
+   them).
+3. **DC-6's transient/permanent split is infrastructure-aware.** `CLIClient` reports a cancelled
+   context, a git that could not start and a git killed by a signal as an `ErrKindPermanent`
+   `GitError` with empty stderr; a literal "every non-retryable error is permanent" would turn a
+   shutdown into a permanent refusal (a failed legacy run). `lifecycleTransient` treats those
+   (`ctx.Err()`, `*exec.Error`, `*fs.PathError`, a signalled `*exec.ExitError`) and non-git errors
+   as transient; every other git error — an oversized blob/output, a not-found for a diff-listed
+   path, a git that ran and refused the object — is permanent.
+4. **A new reason code `unreadable_diff`**: no merge-base with `main` (an orphan bound commit) or a
+   permanent merge-base/diff failure has no row in the design; retrying could never succeed, so it
+   is a permanent refusal (the merge itself would have failed "unrelated histories").
+5. **A rename onto the TaskPath also reports `non_owned_removal`** for the old path when it was a
+   non-owned artifact (DC-7: "the OldPath side is also checked by DC-3"); the TaskPath itself is
+   judged with the old path's status (`illegal_transition`, AC 23).
+6. **N3 includes "stops parsing for the projection"**: a non-owned artifact `artifact.Parse`
+   accepts at the merge-base and refuses at the bound commit (a required field removed) is
+   `non_owned_removal`, because `DiscoverChanges` deletes its row (it is "no longer
+   LifecycleFields-ok" in effect). A file that already failed `Parse` on `main` is unaffected.
+7. **R1 also requires "nothing else changed"** (`EqualExceptStatus`): the regex writer's `\s*`
+   runs over a line break, so an empty status value swallows the next key; the type/status
+   re-parse alone would accept that rewrite.
+8. **A replay of this run's own landed merge skips O4** (`cascadeBase` reports the replay; review
+   round 1 adds: and so does any change `main` already holds, see Review round 1 R1-2): the
+   projection may have moved after the judged merge landed on the local `main`, and every other
+   rule is a pure function of git objects. A plain retry (nothing merged yet) re-runs O4.
+9. *(Superseded by Review round 1 R1-1: V1 now judges the merge result against `main`.)*
+   **V1 is skipped when the merge adds nothing** (`M == BaseSHA`, a replay): nothing lands in that
+   attempt. V1 runs in `mergePrimaryBound` right after `verifyBoundMerge` (which is shared with code
+   repositories), with TASK-005's take-back and retry rules; its expectation for a renamed
+   non-owned artifact is the old path's status on `main`.
+10. **The workflow planning-run start checks `commit.status`** with the orchestrator's lifecycle,
+    before any branch or run record exists (`workflow.Service` would refuse it only inside the
+    branch write, leaving a pending run — the TASK-014 L1 shape).
+11. **O4 runs only when no other violation was found**, so a refusal never depends on a store read
+    and a transient store error cannot mask a permanent verdict.
+12. **`harness.WithStatusLifecycle()` implies validation** (so the blocking set has a validator to
+    sit on) and fails the test with `WithoutMergeBinding`; the RuntimeOption is named
+    `WithDeclaredStatusLifecycle` because the EnvOption took the design's name.
+13. **Error text is sanitised**: paths and statuses that are not short, printable, single-line text
+    are quoted (`strconv.QuoteToASCII`, cut) in `StatusLifecycleError.Error()`, which becomes the
+    outcome detail, the step message and log fields (a status may hold a line break or U+0000).
+
+### Mutations (overlays; the worktree untouched)
+
+`go test -overlay` with one mutated file each (`scratchpad/mut/mutate.py`); every mutant is
+caught by the named test: M1 plan returns no violations → AC 5; M2 planning condition dropped →
+AC 6; M3 no R1 re-parse, M3b no everything-else check → AC 17; M4 deleted → ignored, M8 no
+parse-drop removal → AC 19 (M8 first survived; `e503b63d` adds the missing case); M5 raw
+TaskPath → AC 21; M6 no V1 → AC 24; M7 no N3 on a rename onto the TaskPath → AC 23; W1/W2/W3 →
+AC 3; V1 no promotion, V2 child-query errors swallowed → AC 4; E1 no SC gate → AC 12; E2 no O1′,
+E3 no O2′ → AC 20; E4 a signal-killed git permanent → the classification test; E5 SC gate on a
+replay → the replay test; E6 no binding requirement → AC 18; E7 step classification → AC 11; E8
+no planning-run pre-check → its test; S1–S8 (each of the eight wiring lines; S8 with the database)
+→ AC 13.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh` | `lint-boundaries: OK` (no allowlist change) |
+| `make build`; `go build -o bin/embed-smoketest ./cmd/embed-smoketest && ./bin/embed-smoketest` | pass ("engine constructed and exercised; library surface is sound") |
+| `go test -p 4 -count=1 ./...` | pass on the final code `e503b63d` (40 packages ok, none failed) |
+| `go vet ./...`, `go vet -tags integration ./...`, `go vet -tags scenario ./...` | pass |
+| `go test -race -p 4` on `./core/engine/... ./core/workflow/... ./core/validation/... ./core/artifact/... ./core/domain/... ./adapters/projection/...` | pass; again `-race -run StatusLifecycle` on the final tree |
+| `SPINE_TEST_DATABASE_URL=…/s017_it go test -tags integration -race -count=1 -p 1` on `./core/{domain,artifact,workflow,validation,engine}/... ./adapters/projection/... ./service/cmd/spine/... ./service/internal/workspace/...` (PostgreSQL 18.6) | pass (`TestBuildServiceSet_ValidatorBlocksStatusConflicts` ran, not skipped) |
+| `go test -tags scenario -count=1 -p 1 ./service/scenariotest/...` on the branch (`s017_scen`, `s017_reg` migrated with `migrations/registry/*.sql`) vs the same on `git archive main` (`s017_scen_main`, `s017_reg_main`) | 31 top-level failures on both, the known pre-existing set (30 + `TestWorkspace_ScopedServices`); `diff` of the two sorted `--- FAIL` lists is empty |
+| scenario-git-http job: `-run '^TestGitHTTP_'`, `'^TestBootstrapInternalAdmin_'`, `'^TestWorkflowLifecycle_'` (`-v`) | 20, 2 and 4 pass, 0 fail, 0 skip; the four TASK-017 scenarios pass, 0 skip |
+| git-floor job in `golang:1.26-bookworm` (git 2.39.5), worktree mounted read-only: `go test -count=1 ./adapters/git/... ./core/engine/ -run 'RefShadow\|RefGrammar\|Checkout\|EnterBranch\|CurrentBranch'`; `go test -count=1 ./adapters/git/... ./core/artifact/ ./core/workflow/`; extra `go test -count=1 -v -run TestStatusLifecycle_ ./core/engine/` | pass; all 23 `TestStatusLifecycle_*` pass on git 2.39.5 (rename detection and the `merge=union` driver behave as on 2.54) |
+| `golangci-lint run --new-from-rev main` on the touched packages (plain, `--build-tags=integration`, `--build-tags=scenario`) | 0 issues (7 found and fixed in `68cbefd2`) |
+| `golangci-lint run --enable-only=gosec --new-from-rev main` (plain and `--build-tags=scenario,integration`) | 0 issues |
+| `gofmt -l` on every file this task changed | empty (`core/validation/engine.go`'s import block was unsorted on `main`; sorted here because its import block changed) |
+| Non-printing characters in changed files | none (a zero-width space in a comment removed) |
+| `codex review --base main` (plain, no model override) | round 1 on `68cbefd2`: review sub-session `01a13bd5-27e4-7951-95da-3ee3e622415d`, model `gpt-6.1-sol`: "No actionable defects were identified beyond explicitly documented, intentional limitations." Round 2 on `e503b63d` (the final code): review sub-session `01a13be9-895b-7b80-8636-a523a1f6130c`, model `gpt-6.1-sol`: "No actionable regressions were identified in the changes relative to the merge base." No finding to fix or reject. |
+
+Self-review findings fixed before codex (`68cbefd2`): the transient/permanent split (deviation 3)
+and the replay SC gate (deviation 8); found with tests, not by a reviewer.
+
+### SMP compatibility gate
+
+SMP checkout `/Users/bartoszszymichowski/42sid/i23/s-T017/smp`, detached at SMP `main`
+`1ae9b0e3` (`.spine-revision` `d23b897`), `../spine` → this worktree, `GOFLAGS=-mod=readonly`, no
+SMP edit:
+
+| Command | Result |
+|---|---|
+| `go build ./...`; `go vet ./...`; `go vet -tags integration ./...`; `-tags scenario`; `-tags faultinject` | pass |
+| `go test -race -count=1 -p 4` on every SMP package importing a changed Spine package (`internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`) | all ok (`projectionsvc` has no tests) |
+| `go run ./dev/apply-migrations -set platform -dir migrations` (`s017_smp_it`, PG 18.6 + pgvector) / `-set spine-runtime` (`s017_spine_runtime_it`) | 116 / 26 versions recorded |
+| `go run ./dev/testgate -allow-skip 'ru_maxrss in KiB is the Linux contract' -- -race -count=1 -p 4 -timeout 20m ./internal/customer/spinecore/ ./internal/customer/spineembedded/ ./internal/customer/runner/ ./internal/customer/executionreadiness/` (TEST_SPINE_DB, TEST_PLATFORM_DB, TEST_PROVISIONING_DSN as in SMP CI) | `4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)`, PASS |
+| `go run ./dev/testgate -allow-skip 'receive-time RSS is measured with Linux ru_maxrss' -- -race -count=1 -tags integration ./internal/customer/githttp/` | `301 tests passed, 0 failed, 1 skipped (1 allowed)`, PASS |
+| The three Linux-only skips, in `golang:1.26-bookworm` (git 2.39.5): `TestDiffChildMemory_MillionPaths`, `TestReceiveTimeMemory_RealGitReaderFetch` (`./internal/customer/spinecore/`), `TestIntegration_ReceiveTimeMemoryBounded` (`-tags integration ./internal/customer/githttp/`) | all pass |
+| `ws_` databases and roles before / after | 0 / 0 |
+
+### Not run
+
+- Spine's GitHub CI itself (runs after a push). Everything it runs was run locally above.
+- Databases: `s017_it`, `s017_scen`, `s017_reg`, `s017_scen_main`, `s017_reg_main`, `s017_smp_it`,
+  `s017_spine_runtime_it` on the shared `i23-pg` (PostgreSQL 18.6), dropped after the gates.
+
+### Handoffs
+
+- **SMP TASK-011 (adopts P3-21.smp):** §8 items 1–6 stand. The orchestrator's validator is a
+  `*spinecore.Validator` embedding `*validation.Engine`, so `StatusChangeValidator` and
+  `BlockingStatusConflicts()` are promoted; SMP sets no `ArtifactsDir`, so no `WithArtifactsDir`.
+  SMP's `embeddedWorkflowValidate` appends `workflow.ValidateCommitStatuses`. SMP's
+  `RealGitOperator` should classify a cancelled context, a git that could not start and a killed
+  git as retryable or wrap the `exec` error, so `lifecycleTransient` keeps such reads transient
+  (deviation 3). Re-run `core/workflow/commit_status_compat_test.go`'s rows against SMP's live
+  files; the `task-default` row needs Task `Pending → In Progress`.
+- **SMP TASK-011 (review round 1 additions):** V1 now calls `MergeBase(<BaseSHA>, <merged
+  commit>)`, `Diff(<BaseSHA>, <merge result>)` and, for a main-side rename of the TaskPath,
+  `Diff(<plan merge-base>, <BaseSHA>)`, all with full object ids, one of them the local merge
+  result before any push; O4 calls the binder's `ResolveBranchHead(main)` and reads/diffs at that
+  tip. SMP's `RealGitOperator` must answer them for a commit that exists only in its clone, and its
+  `MergeBase` (origin's `main`) and `MergeBound`'s `BaseSHA` should describe the same `main`:
+  where they differ, V1's merge-base check retries the attempt instead of judging it.
+- **TASK-006:** its guard runs in `preflightCheck`, before the lifecycle; the lifecycle's write set
+  is a subset of the diff plus the TaskPath.
+- **TASK-012:** lifecycle refusals are permanent and must not count as retries; transient lifecycle
+  errors return from `MergeRunBranch` (run stays `committing`).
+- **Follow-ups (KNOWN-LIMITATIONS):** direct-write lifecycle checks (re-parse the regex rewrite
+  there too), a YAML-node status writer, SC rules from the bound tree, `blocked_by` edits, `id`
+  uniqueness, Task `In Progress` reconciliation in `ValidStatusesForType`, removal of rule Q once
+  every `GitOperator` diff is NUL-delimited.
+
+### Review round 1 (2026-10-16)
+
+Three reviewers (correctness and compatibility, adversarial security, completeness and tests)
+examined `ee26995a`. Each finding was verified against the code first; every real one has a test
+that fails on the code it fixes. Commits: `21b0840a` (V1 against `main`, O4 skip), `64a0ac87` (N3
+rename tests), `664b35a7` (projection scope), `d401f740` (CI), `194bc6bd` (docs), `629f9b9d` (the
+two codex findings on the round-1 code, R1-7 and R1-8).
+
+| ID | Finding | Disposition |
+|---|---|---|
+| R1-1 | P1: V1 re-read only the paths the plan judged, with expectations from one `git merge-base`; `git merge` (ort) merges against the virtual base of every best common ancestor and against `main` at merge time, so a criss-cross bound commit or `main` moving between plan and merge lands unjudged status changes and deletions | **Fixed** |
+| R1-2 | P3: O4 asked again on a resume after the merge landed when the replay is not recognised (binding moved to a recovery-ledger commit; walk limit) | **Fixed** |
+| R1-3 | P2: V1 refused a rename `main` made after the fork (non-owned artifact the branch edits; the owned TaskPath) on every attempt | **Fixed** (with R1-1) |
+| R1-4 | P3: the projection's `artifactKey` re-normalised `artifacts_dir`; not idempotent, so another prefix than `isWorkflow` | **Fixed** |
+| R1-5 | P3: no test for N3 "renamed out of scope" (the guard narrowed to deletions passed every test) | **Fixed** (tests only; the code was right) |
+| R1-6 | P3: CI never ran the AC 14 scenarios or the database-backed AC 13 wiring test | **Fixed** |
+| R1-7 | codex P2 (on the round-1 code): O4 asked under the bound commit's name; after a main-side rename the projection has no row there and passes, while V1 now lets the rename land | **Fixed** |
+| R1-8 | codex P2: `PathScope.RepoPath` kept `./` / `//` at the repository root, which `StartRun` accepts; the run did not own its TaskPath and the cascade's `CommitFilesOnto` refused the path | **Fixed** |
+
+**R1-1 (P1).** Reproduced first, on real git through `MergeRunBranch` with binding and the
+lifecycle on: the new `TestStatusLifecycle_MergeResultCrissCross` shapes (a `Completed` sibling
+reopened, with natural and with author-chosen commit dates; a non-owned `Completed` task deleted;
+a `Completed` task overwritten as a `Draft` "addition"; the owned TaskPath completed over a
+`Cancelled` `main`) all merged on `ee26995a` with `main` moved, and
+`TestStatusLifecycle_MergeResultMainMoved` (R1's completion lands between the judgement and the
+merge; this run's branch builds on it and puts the task back to `Pending`) completed the run. Each
+shape asserts `git merge-base --all` lists two bases and the plain one is `C1`. Fix — the
+suggested steps 2 and 3:
+
+- `verifyLifecycleMerge` first checks that `MergeBase(<main before the merge>, <merged commit>)`
+  is still the plan's base. If not (`main` gained commits of the bound history), it returns a
+  retryable error: TASK-005's take-back restores the local `main` and the run stays `committing`,
+  so the next attempt judges against the base git now merges with (in the race test: refused
+  `non_owned_status_change` on the retry, R1's merge kept).
+- It then judges `Diff(<main before the merge>, M)` (renames detected), relative to `main`: an
+  owned change the plan made (`lifecyclePlan.owned`: the TaskPath's planned transition, a
+  planning run's stamped additions) must land at the planned type and status, from the judged
+  status on `main` or onto `main`'s already holding it, and a planned creation must not overwrite
+  a lifecycle artifact on `main`; every other artifact `main` holds keeps type, status, existence
+  and its projection parse; an addition carries an initial status; another path renamed onto an
+  owned one is a removal; an owned change the diff does not list must already be on `main`.
+  Out-of-scope paths are ignored, as in the plan; a C-quoted `.md` path is `unparseable_path`; an
+  unreadable side `unreadable_artifact`; an unreadable merge diff or merge-base `unreadable_diff`.
+- Not adopted: step 1 (`git merge-base --all` and a permanent `ambiguous_merge_base`). With step
+  3 what lands is judged against `main` whatever base git merged with, so a criss-cross can no
+  longer land anything unjudged; `GitOperator` has no `merge-base --all`, and adding a method
+  breaks SMP's `RealGitOperator` (invariant 8), while an optional interface would make the verdict
+  depend on the operator; and the plan already fails closed on a criss-cross whose other base
+  carries a status change (it attributes that change to the run — KNOWN-LIMITATIONS; the control
+  case shows a criss-cross carrying none merges).
+- **Deviation from DC-8's text** (it defined V1 "for every path the plan judged"): V1 judges every
+  path the merge changes relative to `main` — strictly more, and the only form that holds whatever
+  base git merges with. The plan keeps only the owned changes (`ownedChange`), not a judged-path
+  list. `merge_result_mismatch`'s `From`/`To` are "expected → found" (`""` = no lifecycle artifact,
+  or, as the expectation for an addition, an initial status), documented on the constant.
+
+**R1-2 (P3).** Verified: with the binding on a ledger commit `L` (parent `B`), `cascadeBase`
+returns `B` with `replay=false` (asserted in the test), the plan judges the TaskPath from `B`'s
+content and O4 is asked again. Fix: O4 is not asked about a change `main`'s tip already holds
+(`planner.mainHolds`: `ResolveBranchHead(main)`, then the path's type and status there; a
+transient read keeps the run `committing`, anything else asks the gate as before). The merge then
+lands no status change on that path, so it cannot be what trips a status-conflict rule; this covers
+the ledger resume, the walk-limit fallback and a status another run set meanwhile, and keeps the
+replay skip (deviation 8). `TestStatusLifecycle_ResumeAfterLanding` (ledger; 65 commits past the
+walk limit; control: the gate is asked and refuses) and `TestStatusLifecycle_SCGateMainHolds`
+(fake). Not adopted: `IsAncestor(<bound's first parent>, main)` — for an ordinary step binding the
+bound commit's first parent is usually on `main` (a one-commit run branch forks from it), so O4
+would be skipped on ordinary first merges; and "a `merge_recovery:` binding whose parent is on
+`main` is a replay" misses the walk-limit case.
+
+**R1-3 (P2).** Reproduced: `TestStatusLifecycle_MergeResultMainSideRename` failed on `ee26995a`
+with `merge_result_mismatch (Task "" -> "")` (non-owned) and `(Task Completed -> "")` (owned
+TaskPath). Fixed by R1-1's V1 — a rename `main` made is `main`'s state, not a change of the merge
+— plus, for the owned TaskPath, a lookup of `main`'s new name through `Diff(<plan base>, <main
+before the merge>)` when the old name is gone. A rename plus a status change `main` made
+(`merge=union`) is refused under `main`'s name. KNOWN-LIMITATIONS: `run.TaskPath` keeps the old
+name.
+
+**R1-4 (P3).** Reproduced: `TestPathScope_OnePrefixForEverySpelling` (new file
+`adapters/projection/scope_prefix_test.go`, so no pre-existing test file changes) failed for
+`foo//`, `././foo`, `foo /` and ` foo/ /`. Fix: the projection's `pathScope` keeps the
+`artifact.PathScope` `newPathScope` built and `artifactKey` uses it; its prefix equals `prefix`.
+The CHANGELOG's "no behaviour change" now holds. SMP sets no `ArtifactsDir`.
+
+**R1-5 (P3).** Verified a coverage gap, not a bypass: the finding's mutant (`if it.tip == ""`) is
+MR8 below. Added refused cases: renamed to `.txt` and under `templates/`
+(`TestStatusLifecycle_RemovalGuard`), and out of `spine/` (`TestStatusLifecycle_ArtifactsDir`,
+git's `R100` asserted); main unchanged in each.
+
+**R1-6 (P3).** Verified: `ci.yml` ran neither. The scenario-git-http job gains "Status-lifecycle
+scenarios and pooled validator (must pass, never skip)": `go test -tags scenario -run
+'StatusLifecycle'` (the three AC 14 scenarios, each required to `PASS`) and `go test -tags
+integration -run '^TestBuildServiceSet_ValidatorBlocksStatusConflicts$'`, with the `--- SKIP`
+grep of the TASK-013/014 steps. Both command lines were run locally against PostgreSQL 18.6.
+
+**R1-7 (codex P2).** Verified and reproduced on the fake (`TestStatusLifecycle_SCGateMainHolds`
+"main renamed the artifact": asked `epics/e.md`, not refused) — reachable only once R1-1/R1-3 let a
+main-side rename of the owned artifact land. Fix: O4 resolves the name `main`'s tip gives the
+artifact (`planner.onMain`: the bound name, or the merge-base..main rename) and asks the validator
+under that projection key; the name is recorded on the owned change (`ownedChange.scAt`), and V1
+retries a merge that would land the change under yet another name (main renamed it again between
+the check and the merge). Real git: the moved-epic case of
+`TestStatusLifecycle_MergeResultMainSideRename` (SC-002 only under the new key → refused
+`status_conflict`, main unchanged). Mutants MR13 (ask under the bound name) and MR15 (no retry).
+
+**R1-8 (codex P2).** Verified: `artifact.Service.Read` (`repoRelativePath`) trims only a leading
+`/` at the root, so `StartRun("./tasks/t.md")` reads the artifact, while diffs name `tasks/t.md`;
+reproduced on the fake (`not_an_artifact` / `non_owned_status_change`). Fix: `RepoPath` cleans the
+path (`path.Clean` at the root; `path.Join` already cleans under a subdirectory), `""` stays `""`.
+`TestStatusLifecycle_NonCanonicalTaskPath` (fake: `./`, `/`, `//`; and an authored completion of
+the TaskPath spelled `./`), `TestStatusLifecycle_NonCanonicalTaskPathOnGit` (real git: completes,
+`main` Completed), RepoPath spellings in `core/artifact/lifecycle_test.go`. Mutant MR14.
+
+**Acceptance-criteria gaps.** Invariant 9 / D13 / DC-8 and AC 24: R1-1 (criss-cross, `main`
+advancing, main-side renames, the fake rule table). AC 5 / OQ1 and AC 19 / OQ6 through a
+criss-cross: R1-1 (`TestStatusLifecycle_MergeResultCrissCross`). AC 13 (S8) and AC 14 in CI: R1-6.
+
+**Mutations (review round 1; `go test -overlay`, worktree untouched), all caught:** MR1 no
+merge-diff loop → `MergeResultCrissCross`/`Rules`; MR2 no merge-base check → `MainMoved`,
+`Rules`; MR3 `mainHolds` always false → `ResumeAfterLanding`, `SCGateMainHolds`; MR4 no
+main-side rename lookup → `MainSideRename`, `Rules`; MR5 owned from-status unchecked →
+`CrissCross` (owned shape), `Rules`; MR6 additions not held to an initial status → `Rules`; MR7 a
+rename onto an owned path not a removal → `Rules`; MR8 N3 narrowed to deletions (the reviewer's
+mutant) → `RemovalGuard`, `ArtifactsDir`; MR9 the owned post-check dropped →
+`MergeResultMismatchUnit`; MR10 an owned artifact moved away by the merge accepted → `Rules`;
+MR11 V1's parse-drop rule dropped → `Rules` (first survived; the "projection would drop" case was
+added); MR12 `artifactKey` re-normalising → `TestPathScope_OnePrefixForEverySpelling`; MR13 O4
+asks under the bound name → `SCGateMainHolds`, `MainSideRename`; MR14 `RepoPath` not cleaned →
+`NonCanonicalTaskPath`, `…OnGit`; MR15 no retry on a second main-side rename → `SCGateMainHolds`.
+
+**Gates (review round 1, on the final code).**
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `embed-smoketest` | OK; built; "engine constructed and exercised; library surface is sound" |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | pass |
+| `go test -p 4 -count=1 ./...` | pass (no package failed) |
+| `go test -race -p 4` on `./core/{engine,workflow,validation,artifact,domain}/... ./adapters/projection/... ./service/cmd/spine/... ./service/internal/workspace/...` | pass |
+| `SPINE_TEST_DATABASE_URL=…/s017_it go test -tags integration -race -p 1` on the same packages (PostgreSQL 18.6) | pass |
+| Full scenario suite (`-tags scenario -p 1 ./service/scenariotest/...`, `s017_scen` + `s017_reg` migrated with `migrations/registry/*.sql`) vs the same on `git archive main` (`s017_scen_main`, `s017_reg_main`) | 31 top-level failures on both (the known set, incl. `TestWorkspace_ScopedServices`); the sorted `--- FAIL` lists are identical |
+| scenario-git-http job: `^TestGitHTTP_`, `^TestBootstrapInternalAdmin_`, `^TestWorkflowLifecycle_`, the new `StatusLifecycle` step, `^TestBuildServiceSet_WorkflowServiceHasProjectionPolicy$`, `^TestBuildServiceSet_ValidatorBlocksStatusConflicts$` (`-v`) | 20 / 2 / 4 / 3 pass, 0 fail, 0 skip; both integration tests pass |
+| git-floor job in `golang:1.26-bookworm` (git 2.39.5): the ref-grammar filter; `./adapters/git/... ./core/artifact/ ./core/workflow/`; extra `-run TestStatusLifecycle_ ./core/engine/` and `./adapters/projection/` | pass; all 31 `TestStatusLifecycle_*` pass (criss-cross, rename detection, ort and `merge=union` as on 2.54) |
+| `golangci-lint run --new-from-rev main` on the touched packages (plain, `--build-tags=integration`, `--build-tags=scenario`); `--enable-only=gosec` (plain, `scenario,integration`) | 0 issues each |
+| `gofmt -l` on every Go file changed vs `main` | empty |
+| Mutants MR1–MR15 re-run on the final code | all caught |
+| `codex review --base main` (plain) | on `194bc6bd`: review sub-session `01a14475-b46b-7171-ba3b-361e4adf628c`, model `gpt-6.1-sol`: two P2 (R1-7, R1-8), both real and fixed in `629f9b9d`. On `629f9b9d`: sub-session `01a14481-bab9-7cf1-8c8d-34c9c0004485`, model `gpt-6.1-sol`: "No actionable defects were identified in the changes relative to the specified merge base." |
+
+**SMP compatibility gate (final code).** `/Users/bartoszszymichowski/42sid/i23/s-T017/smp` at SMP
+`main` `1ae9b0e3`, `../spine` → this worktree, `GOFLAGS=-mod=readonly`, no SMP edit: `go build
+./...`; `go vet ./...` plain, `-tags integration`, `-tags scenario`, `-tags faultinject` pass;
+`go test -race -count=1 -p 4` on the 12 SMP packages importing a changed Spine package
+(`internal/customer/{eventdelivery,executionreadiness,githttp,gitread,projectionsvc,projectionwriter,proposals,runner,spinecore,spineembedded,stepevents,workspace}`)
+all ok (`projectionsvc` has no tests); platform / spine-runtime migrations 116 / 26 versions
+(`s017_smp_it`, `s017_spine_runtime_it`); `dev/testgate` runtime step "4 packages, 1914 tests
+passed, 0 failed, 2 skipped (2 allowed)", githttp "301 tests passed, 0 failed, 1 skipped (1
+allowed)", both PASS; the three Linux-only tests in `golang:1.26-bookworm` pass;
+`ws_` databases and roles 0 before / 0 after. The SMP-visible surface changed in this round only
+inside the lifecycle (off in SMP) and `artifact.PathScope.RepoPath` (no SMP caller).
+
+**Databases.** `s017_it`, `s017_scen`, `s017_reg`, `s017_scen_main`, `s017_reg_main`,
+`s017_smp_it`, `s017_spine_runtime_it` on the shared `i23-pg`, dropped after the gates.
+
+### Review round 2 (2026-10-16)
+
+A second-round reviewer examined the branch after round 1 (`3e2a1af7`). It confirmed R1-1 to R1-8
+as fixed. It re-ran their evidence: mutants of `judgeFrozen` and the merge-base check, a git PoC of
+equal-dated criss-cross bases, and the AC 13/14 Postgres steps (0 SKIP). It reported one finding.
+Commit: `220d817a`.
+
+| ID | Finding | Disposition |
+|---|---|---|
+| R2-1 | P3: plain golangci-lint reports one issue that is new compared with `main`: gocritic `typeDefFirst` at `core/validation/engine.go` (`type Engine struct`). The branch had declared `BlockingStatusConflicts()` and `promote()` above the type. The reported line is unchanged since March, so `--new-from-rev main` filtered it out, and the round-1 gate rows recorded 0 | **Fixed** |
+
+**R2-1 (P3).** Reproduced on `3e2a1af7`: `golangci-lint run ./core/validation/...` reports
+`engine.go:242:1: typeDefFirst` (gocritic), and `main` does not. Fix: both methods now sit below
+`NewEngine`. `DefaultBlockingStatusConflicts` and `WithBlockingStatusConflicts` stay where they
+were because they are not methods. No behaviour change. This is a pure move, so there is no test
+that fails without it. The evidence is the lint comparison below. **Method change:** this round's
+lint gate compares plain output with `main` and does not rely on `--new-from-rev`. Both trees are
+linted with `--max-issues-per-linter=0 --max-same-issues=0`. Each issue is normalised to
+`file: message` (line and column dropped), and the multisets are compared with `comm`. `main` is
+a `git archive main`.
+
+**Gaps.** The reviewer reported no gap besides R2-1. It found the R1-3 sub-case where a rename
+falls under 50 % similarity once `main` edits the same file. That case fails closed and is already
+in KNOWN-LIMITATIONS ("pairs renames with git's rename detection"), so nothing changed.
+
+**Gates (review round 2, on `220d817a`).**
+
+| Gate | Result |
+|---|---|
+| `./dev/lint-boundaries.sh`; `make build`; `embed-smoketest` | OK; built; "engine constructed and exercised; library surface is sound" |
+| `go vet ./...`, `-tags integration`, `-tags scenario` | pass |
+| `go test -p 4 -count=1 ./...` | pass (40 packages ok, none failed) |
+| `go test -race -p 4 -count=1` on `./core/{engine,workflow,validation,artifact,domain}/... ./adapters/projection/... ./service/cmd/spine/... ./service/internal/workspace/... ./service/scenariotest/harness/...` | pass (9 packages ok) |
+| `SPINE_TEST_DATABASE_URL=…/s017_it go test -tags integration -race -count=1 -p 1` on `./core/{domain,artifact,workflow,validation,engine}/... ./adapters/projection/... ./service/cmd/spine/... ./service/internal/workspace/...` (PostgreSQL 18.6) | pass (8 packages ok; `TestBuildServiceSet_ValidatorBlocksStatusConflicts` PASS, not skipped) |
+| scenario-git-http job on a fresh `s017_job`: `^TestGitHTTP_`, `^TestBootstrapInternalAdmin_`, `^TestWorkflowLifecycle_`, `StatusLifecycle`, `^TestBuildServiceSet_WorkflowServiceHasProjectionPolicy$`, `^TestBuildServiceSet_ValidatorBlocksStatusConflicts$` (`-v`) | 20 / 2 / 4 / 3 pass, 0 fail, 0 skip; the three AC 14 scenarios and both integration tests PASS |
+| Full scenario suite (`-tags scenario -count=1 -p 1 -v ./service/scenariotest/...`; `s017_scen` + `s017_reg` migrated with `migrations/registry/*.sql`) vs the same on `git archive main` (`s017_scen_main`, `s017_reg_main`) | 31 top-level failures on both (the known set, incl. `TestWorkspace_ScopedServices`); the sorted `--- FAIL` lists are identical; the `--- PASS` lists differ only by the three TASK-017 scenarios |
+| git-floor job in `golang:1.26-bookworm` (git 2.39.5): the ref-grammar filter; `./adapters/git/... ./core/artifact/ ./core/workflow/`; extra `-v -run TestStatusLifecycle_ ./core/engine/`, `./adapters/projection/ ./core/validation/` | pass; all 31 `TestStatusLifecycle_*` pass |
+| Plain `golangci-lint run` on the touched packages (`./adapters/projection/... ./core/{artifact,domain,engine,validation,workflow}/... ./service/cmd/spine/... ./service/internal/workspace/...` plus `./service/scenariotest/harness/...`, or `./service/scenariotest/...` with build tags), branch vs `main`, normalised | plain: 103 vs 104, `--build-tags=integration`: 103 vs 104, `--build-tags=scenario`: 161 vs 162. 0 new on the branch in each run. The one fewer is `engine.go`'s gofmt import order, which the branch fixed |
+| `golangci-lint run --enable-only=gosec`, same comparison (plain and `--build-tags=scenario`) | 0 vs 0 |
+| `golangci-lint run --new-from-rev main ./...` | 0 issues |
+| `gofmt -l` on every Go file changed vs `main` (37 files) | empty |
+| No pre-existing test file modified (`git diff --diff-filter=MDR main...HEAD -- '*_test.go'`) | empty |
+| `codex review --base main` (plain, no model override) | on `220d817a`: review sub-session `01a144c9-75e8-7eb1-9894-4ca87cff048a`, model `gpt-6.1-sol` (every `model` field in the session): "No actionable regressions were identified. The lifecycle enforcement, merge-result verification, and production wiring are consistent with the documented scope and limitations." No finding to fix or reject |
+
+**SMP compatibility gate (review round 2, on `220d817a`).** `/Users/bartoszszymichowski/42sid/i23/s-T017/smp`
+at SMP `main` `1ae9b0e3` (`.spine-revision` `d23b897`), `../spine` → this worktree,
+`GOFLAGS=-mod=readonly`, no SMP edit:
+- `go build ./...` and `go vet ./...` (plain, `-tags integration`, `-tags scenario`, `-tags faultinject`) pass.
+- `go test -race -count=1 -p 4` passes on the 12 SMP packages importing a changed Spine package (11 ok; `projectionsvc` has no tests).
+- Platform / spine-runtime migrations record 116 / 26 versions (`s017_smp_it`, `s017_spine_runtime_it`).
+- The `dev/testgate` runtime step reports "4 packages, 1914 tests passed, 0 failed, 2 skipped (2 allowed)", PASS.
+- The `dev/testgate` githttp suite reports "301 tests passed, 0 failed, 1 skipped (1 allowed)", PASS.
+- The three Linux-only tests pass in `golang:1.26-bookworm`.
+- `ws_` databases and roles: 0 before, 0 after.
+
+**Databases.** `s017_it`, `s017_job`, `s017_scen`, `s017_reg`, `s017_scen_main`, `s017_reg_main`,
+`s017_smp_it` and `s017_spine_runtime_it` were created on the shared `i23-pg` and dropped after
+the gates; none remain. The containers ran with `--rm`; none remain.
