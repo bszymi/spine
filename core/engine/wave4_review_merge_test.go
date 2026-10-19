@@ -274,9 +274,9 @@ type lcLateErr struct {
 }
 
 func (c *lcLateErr) MergeBound(ctx context.Context, opts git.MergeOpts) (git.MergeResult, error) {
-	c.countingCLI.mu.Lock()
-	c.countingCLI.merges++
-	c.countingCLI.mu.Unlock()
+	c.mu.Lock()
+	c.merges++
+	c.mu.Unlock()
 	return c.late.MergeBound(ctx, opts)
 }
 

@@ -209,7 +209,7 @@ func (o *Orchestrator) settleUnverifiedMerge(ctx context.Context, run *domain.Ru
 		return refuse(fmt.Sprintf("the run's merge-in-flight record is malformed (%q)", truncateForLog(v)), nil)
 	}
 	var (
-		clear   bool
+		clean   bool
 		stuck   string // the unverified merge left on main
 		readErr error
 		reason  string
@@ -224,7 +224,7 @@ func (o *Orchestrator) settleUnverifiedMerge(ctx context.Context, run *domain.Ru
 			return nil
 		}
 		if tip == base {
-			clear = true
+			clean = true
 			return nil
 		}
 		if o.isMergeOf(ctx, tip, base, source) {
@@ -236,7 +236,7 @@ func (o *Orchestrator) settleUnverifiedMerge(ctx context.Context, run *domain.Ru
 			}
 			log.Warn("merge binding: a merge of the run that reached the local main without its checks was taken back; merging again",
 				"run_id", run.RunID, "merge_sha", tip, "restored_to", base)
-			clear = true
+			clean = true
 			return nil
 		}
 		m, found, err := o.findUnverifiedMerge(ctx, tip, base, source)
@@ -248,7 +248,7 @@ func (o *Orchestrator) settleUnverifiedMerge(ctx context.Context, run *domain.Ru
 				" (something was committed on top of it); reset the local "+authoritativeBranch+
 				" so it no longer contains it"
 		default:
-			clear = true
+			clean = true
 		}
 		return nil
 	})
@@ -264,7 +264,7 @@ func (o *Orchestrator) settleUnverifiedMerge(ctx context.Context, run *domain.Ru
 		return refuse(reason, nil)
 	case readErr != nil:
 		return refuse(reason, readErr)
-	case clear:
+	case clean:
 		o.clearMergeInFlight(ctx, run)
 	}
 	return nil
