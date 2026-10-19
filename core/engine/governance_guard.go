@@ -1032,9 +1032,33 @@ type governedCheck struct {
 	extra []string
 	// diffErr: the merge's changes could not be read.
 	diffErr error
-	// markerErr: the consumption marker could not be recorded.
+	// markerErr: the accepted merge could not be recorded — the
+	// consumption marker (consumes) or the end of the merge-in-flight
+	// record (INIT-023 wave 4 review) — so it was taken back.
 	markerErr error
+	consumes  bool
 	tb        takeBack
+	// marker is the consumption marker an accepted, approved merge must
+	// record before its push (nil otherwise); mergePrimaryBound writes it
+	// with the end of the merge-in-flight record (acceptedMergePatch).
+	marker map[string]string
+}
+
+// acceptedMergePatch is the one commit_meta write that records an
+// accepted merge before its push: the consumption marker, if any, and the
+// end of the attempt's merge-in-flight record when one was written.
+func acceptedMergePatch(marker map[string]string, inFlight bool) map[string]string {
+	if marker == nil && !inFlight {
+		return nil
+	}
+	patch := make(map[string]string, len(marker)+1)
+	for k, v := range marker {
+		patch[k] = v
+	}
+	if inFlight {
+		patch[CommitMetaMergeUnverified] = ""
+	}
+	return patch
 }
 
 // checkGovernedMerge is the post-merge assertion (§3.4a) and, for an
@@ -1060,11 +1084,15 @@ type governedCheck struct {
 // check). "Already up to date" (M == BaseSHA, a replay) changed nothing
 // and keeps the marker an earlier attempt wrote.
 //
-// The marker write is the one store write inside a merge block (besides
-// the run-status re-check, a read): it must name the merge commit, which
-// exists only after MergeBound, and land before the push (§3.8 note).
-// It writes one row of runtime.runs and neither emits nor routes, so it
-// cannot deadlock with a holder that needs the tree (worktree.go).
+// The marker is returned (governedCheck.marker), not written: the block
+// writes it before the push, together with the end of the attempt's
+// merge-in-flight record (acceptedMergePatch; INIT-023 wave 4 review). It
+// must name the merge commit, which exists only after MergeBound, and land
+// before the push (§3.8 note). That write and the merge-in-flight record
+// are the store writes inside a merge block (besides the run-status
+// re-check, a read): each writes one row of runtime.runs and neither emits
+// nor routes, so it cannot deadlock with a holder that needs the tree
+// (worktree.go).
 func (o *Orchestrator) checkGovernedMerge(ctx context.Context, run *domain.Run, src *mergeSource, res git.MergeResult) governedCheck {
 	pass := src.gov
 	if pass == nil || res.SHA == res.BaseSHA {
@@ -1107,13 +1135,10 @@ func (o *Orchestrator) checkGovernedMerge(ctx context.Context, run *domain.Run, 
 	}
 	if derr == nil && len(extra) == 0 {
 		if pass.consumes {
-			marker := map[string]string{
+			return governedCheck{marker: map[string]string{
 				domain.CommitMetaGovernanceApprovalMergeSHA: res.SHA,
 				domain.CommitMetaGovernanceApprovalBaseSHA:  res.BaseSHA,
-			}
-			if err := o.mergeRunCommitMeta(ctx, run.RunID, marker); err != nil {
-				return governedCheck{refused: true, markerErr: err, tb: o.takeBackGovernedMerge(ctx, res)}
-			}
+			}}
 		}
 		return governedCheck{}
 	}
@@ -1126,22 +1151,32 @@ func (o *Orchestrator) checkGovernedMerge(ctx context.Context, run *domain.Run, 
 // mergePrimaryBound returns.
 func (o *Orchestrator) settleGovernedRefusal(ctx context.Context, run *domain.Run, src *mergeSource, res git.MergeResult, gv governedCheck) (bool, error) {
 	log := observe.Logger(ctx)
-	pass := src.gov
-	gc := pass.check
 	tb, extra, derr := gv.tb, gv.extra, gv.diffErr
 	if gv.markerErr != nil {
+		// Also reached with the guard off (V1 alone): the write that
+		// records the accepted merge carries the end of the merge-in-flight
+		// record too (INIT-023 wave 4 review).
 		if !tb.clean {
 			// The merge is still on the local target without its
 			// marker (codex review round 3): a retry would find it
 			// up to date, skip the marker and push it, and the
 			// approved change would have no provenance. Block until
-			// the target is restored, like a refused merge.
-			o.recordGovernanceBlock(ctx, run, res.SHA, res.BaseSHA)
+			// the target is restored, like a refused merge. The
+			// merge-in-flight record, still on the run, makes the
+			// next attempt take it back first.
+			o.blockGovernedMergesOn(ctx, run, res.SHA, res.BaseSHA)
 		}
-		log.Error("governance guard: consumption marker not recorded; merge taken back, nothing pushed, the run stays committing",
+		if gv.consumes {
+			log.Error("governance guard: consumption marker not recorded; merge taken back, nothing pushed, the run stays committing",
+				"run_id", run.RunID, "merge_sha", res.SHA, "take_back", tb.detail, "error", gv.markerErr)
+			return false, fmt.Errorf("record governance consumption marker: %w", gv.markerErr)
+		}
+		log.Error("merge binding: the accepted merge could not be recorded; merge taken back, nothing pushed, the run stays committing",
 			"run_id", run.RunID, "merge_sha", res.SHA, "take_back", tb.detail, "error", gv.markerErr)
-		return false, fmt.Errorf("record governance consumption marker: %w", gv.markerErr)
+		return false, fmt.Errorf("record the accepted merge: %w", gv.markerErr)
 	}
+	pass := src.gov
+	gc := pass.check
 
 	if !tb.clean {
 		// The refused merge is still on the local target (codex review

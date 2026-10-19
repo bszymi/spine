@@ -776,10 +776,22 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		tb          takeBack
 		gov         governedCheck // TASK-006's post-merge check and marker
 		pushErr     error
+		// pre is the local main this attempt recorded as in flight
+		// (recordMergeInFlight; "" when nothing was recorded) and settled
+		// whether the attempt ended with main known clean of its merge, so
+		// the record is cleared after the block (INIT-023 wave 4 review).
+		pre     string
+		settled bool
+		failed  failedMerge
 	)
 	blockErr := o.withTree(ctx, func(ctx context.Context) error {
 		if err := o.requireStillCommitting(ctx, run.RunID); err != nil {
 			return err
+		}
+		var rerr error
+		if pre, rerr = o.recordMergeInFlight(ctx, run, src.sha); rerr != nil {
+			mergeErr = rerr
+			return nil
 		}
 		mergeResult, mergeErr = o.binder.MergeBound(ctx, git.MergeOpts{
 			Source:    run.BranchName,
@@ -791,11 +803,19 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 		})
 		if mergeErr != nil {
 			o.abortMerge(ctx)
+			// An error does not prove main is unchanged (INIT-023 wave 4
+			// review): git can move the ref and then fail. With V1 or the
+			// guard on, a merge it left is taken back here, unverified.
+			if pre != "" {
+				failed = o.takeBackFailedMerge(ctx, run, pre, src.sha, mergeErr)
+				settled = failed.clean
+			}
 			return nil
 		}
 		if verr := o.verifyBoundMerge(ctx, o.binder, run.BranchName, src, mergeResult); verr != nil {
 			verdict = verr
 			tb = o.takeBackRefusedMerge(ctx, o.binder, domain.PrimaryRepositoryID, authoritativeBranch, mergeResult, verr)
+			settled = tb.clean
 			return nil
 		}
 		if src.lifecycle != nil {
@@ -810,15 +830,28 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 			if verr := o.verifyLifecycleMerge(ctx, src.lifecycle, src.sha, mergeResult); verr != nil {
 				verdict = verr
 				tb = o.takeBackToBase(ctx, mergeResult, "status lifecycle")
+				settled = tb.clean
 				return nil
 			}
 		}
 		// Governance-path guard (INIT-023 TASK-006): the post-merge
-		// assertion and, for an approved merge, the consumption marker —
-		// both before anything is pushed, and a refusal taken back before
-		// the tree is released (INIT-023 wave 4 integration).
+		// assertion — before anything is pushed, and a refusal taken back
+		// before the tree is released (INIT-023 wave 4 integration).
 		if gov = o.checkGovernedMerge(ctx, run, src, mergeResult); gov.refused {
+			settled = gov.tb.clean
 			return nil
+		}
+		// The accepted merge is recorded before anything is pushed: an
+		// approved merge's consumption marker (TASK-006) and the end of
+		// this attempt's merge-in-flight record, in one write (INIT-023
+		// wave 4 review). A failure takes the merge back.
+		if patch := acceptedMergePatch(gov.marker, pre != ""); len(patch) > 0 {
+			if err := o.mergeRunCommitMeta(ctx, run.RunID, patch); err != nil {
+				gov = governedCheck{refused: true, markerErr: err, consumes: gov.marker != nil,
+					tb: o.takeBackToBase(ctx, mergeResult, "merge binding")}
+				settled = gov.tb.clean
+				return nil
+			}
 		}
 		if pushOn {
 			pushErr = o.binder.PushCommit(ctx, "origin", authoritativeBranch, mergeResult.SHA)
@@ -831,7 +864,21 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 	if blockErr != nil {
 		mergeErr = blockMergeError(blockErr)
 	}
+	if pre != "" && settled {
+		o.clearMergeInFlight(ctx, run)
+	}
 
+	if mergeErr != nil && failed.stuck != "" {
+		// The merge failed after git moved main and could not be taken
+		// back: the run stays committing (never the permanent route), so
+		// its next attempt retries the take-back first
+		// (settleUnverifiedMerge), and with the guard on governed merges
+		// are blocked on it meanwhile.
+		o.blockGovernedMergesOn(ctx, run, failed.stuck, pre)
+		mergeErr = &git.GitError{Kind: git.ErrKindTransient, Op: "merge_binding",
+			Message: "merge binding: the merge failed after the local " + authoritativeBranch +
+				" moved, and it could not be taken back (will retry): " + mergeErr.Error()}
+	}
 	if mergeErr != nil {
 		if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", mergeErr, ""); recErr != nil {
 			return false, recErr

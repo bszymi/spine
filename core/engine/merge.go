@@ -47,6 +47,10 @@ const AuthoritativeBranch = authoritativeBranch
 // the bound commit, and every later phase merges exactly that commit.
 // With binding off it returns the zero value and nothing changes.
 //
+// With the status lifecycle or the governance-path guard on, an attempt
+// first settles a merge an earlier attempt of the run may have left on the
+// local main unverified (settleUnverifiedMerge, INIT-023 wave 4 review).
+//
 // With the governance-path guard on (WithGovernanceGuard, INIT-023
 // TASK-006) governanceGate runs next: a merge that changes governance
 // paths without an operator approval of the bound commit is held (the
@@ -75,6 +79,13 @@ func (o *Orchestrator) MergeRunBranch(ctx context.Context, runID string) error {
 	defer unlock()
 	run, done, err := o.preflightCheck(ctx, runID)
 	if err != nil || done {
+		return err
+	}
+	// A merge an earlier attempt left on the local main without its
+	// post-merge checks (the process died in the block, or a take-back
+	// failed) is taken back before anything reads main (INIT-023 wave 4
+	// review; merge_inflight.go). Only with V1 or the guard on.
+	if err := o.settleUnverifiedMerge(ctx, run); err != nil {
 		return err
 	}
 	src, done, err := o.resolveMergeSource(ctx, run)

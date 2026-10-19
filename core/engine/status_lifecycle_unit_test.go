@@ -94,6 +94,9 @@ func lcFix(t *testing.T, legacy bool) (*bindFix, *lcGit) {
 	f.git.mergeRes = git.MergeResult{SHA: ulMerge, BaseSHA: ulMain}
 	f.git.parents[ulMerge] = []string{ulMain, ulCasc}
 	f.git.files[ulMerge+":"+ulTask] = ulDoc("Task", "Completed")
+	// The local main before the merge (the merge-in-flight record reads
+	// it; INIT-023 wave 4 review).
+	f.git.setHead("main", ulMain)
 	return f, g
 }
 

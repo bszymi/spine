@@ -106,6 +106,10 @@ func newGovFake(t *testing.T, wf *domain.WorkflowDefinition, guard *GovernanceGu
 	}
 	f.g = &govGit{fakeBinderGit: newFakeBinderGit(), bases: map[string][]string{}, diffErr: map[string]error{}}
 	f.g.setHead(run.BranchName, gBound)
+	// The local main before the merge: read by the merge-in-flight
+	// record (INIT-023 wave 4 review). The fake's IsAncestor answers yes,
+	// so the attempt counts as a replay and records nothing.
+	f.g.setHead("main", gBase)
 	var diffs []git.FileDiff
 	for _, p := range paths {
 		diffs = append(diffs, git.FileDiff{Path: p, Status: "modified"})
