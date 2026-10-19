@@ -27,6 +27,13 @@ type lateErrCLI struct {
 	armed    bool
 	failNext int  // ResetBranch fails transiently this many times
 	locked   bool // every MergeBound fails transiently, merging nothing
+	// permanent: the late error is classed permanent, as git.CLIClient
+	// classes a killed child's empty stderr.
+	permanent bool
+	// headFailsAfter: after the late error, the next ResolveBranchHead
+	// calls fail this many times (the local main cannot be checked).
+	headFailsAfter int
+	headFail       int
 }
 
 type simulatedCrash struct{}
@@ -43,7 +50,19 @@ func (c *lateErrCLI) MergeBound(ctx context.Context, opts git.MergeOpts) (git.Me
 	if c.mode == "panic" {
 		panic(simulatedCrash{})
 	}
+	c.headFail = c.headFailsAfter
+	if c.permanent {
+		return git.MergeResult{}, &git.GitError{Kind: git.ErrKindPermanent, Op: "merge", Message: "signal: terminated"}
+	}
 	return git.MergeResult{}, &git.GitError{Kind: git.ErrKindTransient, Op: "rev-parse", Message: "resource temporarily unavailable"}
+}
+
+func (c *lateErrCLI) ResolveBranchHead(ctx context.Context, branch string) (string, error) {
+	if c.headFail > 0 {
+		c.headFail--
+		return "", &git.GitError{Kind: git.ErrKindTransient, Op: "rev-parse", Message: "resource temporarily unavailable"}
+	}
+	return c.CLIClient.ResolveBranchHead(ctx, branch)
 }
 
 func (c *lateErrCLI) ResetBranch(ctx context.Context, branch, to, expected string) error {
@@ -233,6 +252,34 @@ func TestWave4Review_FailedLateTakeBackStaysCommitting(t *testing.T) {
 	}
 	if r.CommitMeta[CommitMetaGovernanceBlockedTarget] == "" {
 		t.Fatal("no governance block recorded for the merge that could not be taken back")
+	}
+	if err := g.orch.MergeRunBranch(context.Background(), govRunID); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	requireRenameRefused(t, g, base)
+}
+
+// TestWave4Review_UncheckedLateMergeStaysCommitting: MergeBound moves main
+// and then fails permanently (a killed git child: empty stderr), and the
+// local main cannot be read right after, so the block cannot tell whether
+// the merge is there. The run stays committing (transient) with the record
+// kept, instead of taking the permanent route with an unverified merge
+// possibly on main; the next attempt takes the merge back first and
+// refuses it.
+func TestWave4Review_UncheckedLateMergeStaysCommitting(t *testing.T) {
+	g, w := renameFollowing(t, "error")
+	w.permanent, w.headFailsAfter = true, 1
+	base := g.mainHead()
+	g.toMerge()
+	r := g.store.runs[govRunID]
+	if r.Status != domain.RunStatusCommitting || r.CommitMeta[CommitMetaMergeUnverified] == "" {
+		t.Fatalf("run %s record %q; want committing with the record kept", r.Status, r.CommitMeta[CommitMetaMergeUnverified])
+	}
+	if o := g.primaryOutcome(); o == nil || !o.FailureClass.IsTransient() {
+		t.Fatalf("outcome %+v, want a transient failure", o)
+	}
+	if g.mainHead() == base {
+		t.Fatal("setup: the unchecked merge should still be on main")
 	}
 	if err := g.orch.MergeRunBranch(context.Background(), govRunID); err != nil {
 		t.Fatalf("retry: %v", err)

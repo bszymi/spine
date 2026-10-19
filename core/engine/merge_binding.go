@@ -879,6 +879,16 @@ func (o *Orchestrator) mergePrimaryBound(ctx context.Context, run *domain.Run, s
 			Message: "merge binding: the merge failed after the local " + authoritativeBranch +
 				" moved, and it could not be taken back (will retry): " + mergeErr.Error()}
 	}
+	if mergeErr != nil && failed.unchecked {
+		// Whether the failed merge left this attempt's merge on main is not
+		// known (main unreadable, or moved by another writer): a permanent
+		// error must not route the run away with the record unsettled. The
+		// run stays committing and its next attempt settles the record
+		// first (settleUnverifiedMerge).
+		mergeErr = &git.GitError{Kind: git.ErrKindTransient, Op: "merge_binding",
+			Message: "merge binding: the merge failed and the local " + authoritativeBranch +
+				" could not be checked for it (will retry): " + mergeErr.Error()}
+	}
 	if mergeErr != nil {
 		if recErr := o.recordPrimaryMergeOutcome(ctx, run, "", mergeErr, ""); recErr != nil {
 			return false, recErr

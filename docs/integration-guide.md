@@ -944,7 +944,9 @@ off for embedders until they opt in; `spine serve` turns it on. Three independen
    governance guard, §12), a merge attempt that can move the local `main` records
    `engine.CommitMetaMergeUnverified` (`"<base sha> <source sha>"`) on the run before
    `MergeBound`, and clears it in the same write that records the accepted merge, before any push.
-   A `MergeBound` error after `main` moved is taken back at once. A run that still carries the
+   A `MergeBound` error after `main` moved is taken back at once; if `main` cannot be read after
+   the error, or moved to something other than this attempt's merge, the attempt is a transient
+   failure whatever the error's class, so the run stays committing. A run that still carries the
    record (the process died in the merge block, or a take-back failed) has that merge taken back
    at the start of its next attempt, which then merges and checks again; one that can no longer be
    taken back (something was committed on top of it) refuses the attempt as `ErrUnavailable`

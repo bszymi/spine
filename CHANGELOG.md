@@ -21,9 +21,10 @@ the retry budget's exhaustion handler).
   review-less workflow carried into `workflows/` by a rename on `main`; a criss-cross resolution
   that reopened a Completed task). Each attempt that can move `main` now records the reserved
   `spine.merge.unverified` key first and clears it in the write that records the accepted merge,
-  before the push; a late `MergeBound` error is taken back at once; and a run that still carries
-  the record has the merge taken back at the start of its next attempt, which merges and checks
-  again (KNOWN-LIMITATIONS "Governance-Path Guard" 16).
+  before the push; a late `MergeBound` error is taken back at once (and when the local `main`
+  cannot be checked after it, the run stays `committing`, even on a permanent error); and a run
+  that still carries the record has the merge taken back at the start of its next attempt, which
+  merges and checks again (KNOWN-LIMITATIONS "Governance-Path Guard" 16).
 
 ### Changed (standalone)
 

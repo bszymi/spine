@@ -604,7 +604,8 @@ refuses an unprovenanced branch-protection removal. What remains:
     `spine.merge.unverified` (`"<base> <source>"`) on its run, and the write that records the
     accepted merge clears it before the push. A `MergeBound` error after git moved `main` (the
     trailing `rev-parse` failed, the git child was killed after its ref update) is taken back in
-    the merge block; a run that still carries the record — the process died inside the block (on
+    the merge block (a `main` that cannot be checked after the error keeps the run `committing`,
+    even on a permanent error); a run that still carries the record — the process died inside the block (on
     `SIGTERM` the scheduler and the HTTP server do not wait for one), or the take-back failed — has
     the merge taken back at the start of its next attempt, which merges and checks again. Before,
     the next attempt found `main` up to date and published the unverified merge. What remains: the

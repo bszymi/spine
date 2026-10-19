@@ -118,6 +118,11 @@ type failedMerge struct {
 	clean bool
 	// stuck is the merge left on the local main when its take-back failed.
 	stuck string
+	// unchecked: the local main could not be read after the error, or it
+	// moved to something other than this attempt's merge, so whether it
+	// holds this attempt's merge is not known. The record is kept and the
+	// run stays committing, so its next attempt settles it.
+	unchecked bool
 }
 
 // takeBackFailedMerge runs in the merge block after MergeBound returned an
@@ -127,14 +132,16 @@ type failedMerge struct {
 // taken back to pre (takeBackToBase: a compare-and-swap; on the shared
 // tree a failure arms git.CLIClient's pending take-back). A main that moved
 // to anything else (another process wrote) or that cannot be read is left
-// alone and the record kept: the next attempt settles it.
+// alone and the record kept (unchecked): the run stays committing, even on
+// a permanent error, and its next attempt settles it — routing it away
+// could leave an unverified merge on main for other writers to build on.
 func (o *Orchestrator) takeBackFailedMerge(ctx context.Context, run *domain.Run, pre, source string, mergeErr error) failedMerge {
 	log := observe.Logger(ctx)
 	tip, err := o.binder.ResolveBranchHead(ctx, authoritativeBranch)
 	if err != nil || !isBoundObjectID(tip) {
 		log.Warn("merge binding: the local main could not be read after a failed merge; the next attempt checks it",
 			"run_id", run.RunID, "error", err)
-		return failedMerge{}
+		return failedMerge{unchecked: true}
 	}
 	if tip == pre {
 		return failedMerge{clean: true}
@@ -142,7 +149,7 @@ func (o *Orchestrator) takeBackFailedMerge(ctx context.Context, run *domain.Run,
 	if !o.isMergeOf(ctx, tip, pre, source) {
 		log.Warn("merge binding: the local main moved during a failed merge, not to this attempt's merge; the next attempt checks it",
 			"run_id", run.RunID, "main_sha", tip, "base_sha", pre)
-		return failedMerge{}
+		return failedMerge{unchecked: true}
 	}
 	tb := o.takeBackToBase(ctx, git.MergeResult{SHA: tip, BaseSHA: pre}, "merge binding")
 	if !tb.clean {
